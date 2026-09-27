@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 type ConfirmSubmitButtonProps = {
   children: ReactNode;
@@ -9,10 +9,17 @@ type ConfirmSubmitButtonProps = {
 };
 
 export function ConfirmSubmitButton({ children, className, message }: ConfirmSubmitButtonProps) {
+  const [isHydrated, setIsHydrated] = useState(false);
+
+  useEffect(() => {
+    setIsHydrated(true);
+  }, []);
+
   return (
     <button
       type="submit"
       className={className}
+      disabled={!isHydrated}
       onClick={(event) => {
         if (!window.confirm(message)) {
           event.preventDefault();

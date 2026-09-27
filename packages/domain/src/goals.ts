@@ -1263,6 +1263,7 @@ export async function addKeyResult(
     });
     invariant(goal && goal.workspaceId === params.workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
     await lockGoalForKeyResultMutation(tx, actor, membership, goal);
+    const previousKeyResults = await tx.keyResult.findMany({ where: { goalId: params.goalId }, orderBy: { id: "asc" } });
 
     const kr = await tx.keyResult.create({
       data: {
@@ -1275,7 +1276,7 @@ export async function addKeyResult(
       },
     });
 
-    await recomputeGoalProgress(params.goalId, actor, tx);
+    await recomputeGoalProgress(params.goalId, actor, tx, { forceVersion: true, changedFields: ["keyResults"], previousKeyResults });
 
     return kr;
   });
@@ -1290,6 +1291,7 @@ export async function updateKeyResult(
     targetValue?: number | null;
     currentValue?: number | null;
     unit?: string | null;
+    expectedVersion?: number;
     _membership?: MembershipSummary | null;
   }
 ) {
@@ -1307,17 +1309,31 @@ export async function updateKeyResult(
     });
     invariant(kr && kr.goal.workspaceId === params.workspaceId && !kr.goal.archivedAt, 404, "NOT_FOUND", "Key Result not found.");
     await acquireWorkItemAdvisoryLock(tx, "Goal", kr.goal.id);
-    await lockGoalForKeyResultMutation(tx, actor, membership, kr.goal);
 
     const data: any = {};
+    let hasRequestedChanges = false;
+    const numericValueChanged = (next: unknown, current: unknown) => {
+      if (next === null || current === null) return next !== current;
+      return Number(next) !== Number(current);
+    };
     if (params.title !== undefined) {
       const title = params.title.trim();
       invariant(title.length > 0, 400, "INVALID_INPUT", "Key Result title is required.");
       data.title = title;
+      hasRequestedChanges ||= title !== kr.title;
     }
-    if (params.targetValue !== undefined) data.targetValue = params.targetValue;
-    if (params.currentValue !== undefined) data.currentValue = params.currentValue;
-    if (params.unit !== undefined) data.unit = params.unit;
+    if (params.targetValue !== undefined) {
+      data.targetValue = params.targetValue;
+      hasRequestedChanges ||= numericValueChanged(params.targetValue, kr.targetValue);
+    }
+    if (params.currentValue !== undefined) {
+      data.currentValue = params.currentValue;
+      hasRequestedChanges ||= numericValueChanged(params.currentValue, kr.currentValue);
+    }
+    if (params.unit !== undefined) {
+      data.unit = params.unit;
+      hasRequestedChanges ||= params.unit !== kr.unit;
+    }
 
     const newTarget = params.targetValue !== undefined ? params.targetValue : kr.targetValue;
     const newCurrent = params.currentValue !== undefined ? params.currentValue : kr.currentValue;
@@ -1328,12 +1344,33 @@ export async function updateKeyResult(
       currentValue: newCurrent,
     });
 
+    const changed = hasRequestedChanges;
+    if (!changed) {
+      requireEditableGoalKeyResults(actor, membership, kr.goal);
+      if (params.expectedVersion !== undefined) {
+        invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
+        const currentGoal = await tx.goal.findUnique({ where: { id: kr.goal.id }, select: { version: true } });
+        invariant(currentGoal && params.expectedVersion === currentGoal.version, 409, "VERSION_CONFLICT", "The Goal changed before this Key Result update could be applied. Please refresh and try again.");
+      }
+      return kr;
+    }
+
+    requireEditableGoalKeyResults(actor, membership, kr.goal);
+    if (params.expectedVersion !== undefined) {
+      invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
+      const currentGoal = await tx.goal.findUnique({ where: { id: kr.goal.id }, select: { version: true } });
+      invariant(currentGoal && params.expectedVersion === currentGoal.version, 409, "VERSION_CONFLICT", "The Goal changed before this Key Result update could be applied. Please refresh and try again.");
+    }
+    await lockGoalForKeyResultMutation(tx, actor, membership, kr.goal);
+
+    const previousKeyResults = await tx.keyResult.findMany({ where: { goalId: kr.goalId }, orderBy: { id: "asc" } });
+
     const updated = await tx.keyResult.update({
       where: { id: params.krId },
       data,
     });
 
-    await recomputeGoalProgress(updated.goalId, actor, tx);
+    await recomputeGoalProgress(updated.goalId, actor, tx, { forceVersion: true, changedFields: ["keyResults"], previousKeyResults });
 
     return updated;
   });
@@ -1344,6 +1381,7 @@ export async function deleteKeyResult(
   params: {
     workspaceId: string;
     krId: string;
+    expectedVersion: number;
     _membership?: MembershipSummary | null;
   }
 ) {
@@ -1361,11 +1399,21 @@ export async function deleteKeyResult(
     });
     invariant(kr && kr.goal.workspaceId === params.workspaceId && !kr.goal.archivedAt, 404, "NOT_FOUND", "Key Result not found.");
     await acquireWorkItemAdvisoryLock(tx, "Goal", kr.goal.id);
+    requireEditableGoalKeyResults(actor, membership, kr.goal);
+    invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
+    const currentGoal = await tx.goal.findUnique({ where: { id: kr.goal.id }, select: { version: true } });
+    invariant(currentGoal && params.expectedVersion === currentGoal.version, 409, "VERSION_CONFLICT", "The Goal changed before this Key Result could be deleted. Please refresh and try again.");
     await lockGoalForKeyResultMutation(tx, actor, membership, kr.goal);
+    const previousKeyResults = await tx.keyResult.findMany({ where: { goalId: kr.goalId }, orderBy: { id: "asc" } });
 
     await tx.keyResult.delete({ where: { id: params.krId } });
 
-    await recomputeGoalProgress(kr.goalId, actor, tx);
+    await recomputeGoalProgress(kr.goalId, actor, tx, {
+      forceVersion: true,
+      changedFields: ["keyResults"],
+      previousKeyResults,
+      resetProgressWhenUndriven: true,
+    });
   });
 }
 
@@ -1655,6 +1703,12 @@ export async function recomputeGoalProgress(
   goalId: string,
   actor?: AppActor,
   txClient?: Prisma.TransactionClient,
+  options?: {
+    forceVersion?: boolean;
+    changedFields?: string[];
+    previousKeyResults?: unknown[];
+    resetProgressWhenUndriven?: boolean;
+  },
 ) {
   const execute = async (tx: Prisma.TransactionClient) => {
     await acquireWorkItemAdvisoryLock(tx, "Goal", goalId);
@@ -1685,11 +1739,11 @@ export async function recomputeGoalProgress(
       const total = goal.childGoals.reduce((acc, g) => acc + g.progressPercent, 0);
       computedProgress = Math.round(total / goal.childGoals.length);
     } else {
-      // leave as is if no drivers
-      computedProgress = goal.progressPercent;
+      // Preserve manual progress unless a driver-removal flow explicitly resets it.
+      computedProgress = options?.resetProgressWhenUndriven ? 0 : goal.progressPercent;
     }
 
-    if (computedProgress !== goal.progressPercent) {
+    if (computedProgress !== goal.progressPercent || options?.forceVersion) {
       const effectiveActor: AppActor = actor ?? {
         kind: "agent",
         authProvider: "bootstrap",
@@ -1702,8 +1756,11 @@ export async function recomputeGoalProgress(
         entityType: "Goal",
         entityId: goal.id,
         currentVersion: goal.version,
-        changedFields: ["progressPercent"],
-        previousState: pickJsonSnapshot(goal as unknown as Record<string, unknown>, [
+        changedFields: [
+          ...(options?.changedFields ?? []),
+          ...(computedProgress !== goal.progressPercent ? ["progressPercent"] : []),
+        ],
+        previousState: pickJsonSnapshot({ ...goal, ...(options?.previousKeyResults ? { keyResults: options.previousKeyResults } : {}) } as unknown as Record<string, unknown>, [
           "id",
           "workspaceId",
           "title",
@@ -1721,6 +1778,7 @@ export async function recomputeGoalProgress(
           "publishedAt",
           "status",
           "version",
+          "keyResults",
         ]),
       });
 
@@ -1728,7 +1786,7 @@ export async function recomputeGoalProgress(
         await tx.goal.update({
           where: { id: goalId, version: goal.version },
           data: {
-            progressPercent: computedProgress,
+            ...(computedProgress !== goal.progressPercent ? { progressPercent: computedProgress } : {}),
             version: newVersion,
           },
         });

@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { listWorkItemVersions, normalizeWorkItemEntityType } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { getTranslations } from "next-intl/server";
+import { snapshotText } from "./snapshot";
 
 export const dynamic = "force-dynamic";
 
@@ -11,17 +12,6 @@ function backHref(workspaceId: string, entityType: string, entityId: string) {
   if (entityType === "Action") return `/workspaces/${workspaceId}/actions/${entityId}`;
   if (entityType === "Goal") return `/workspaces/${workspaceId}/goals?goalId=${encodeURIComponent(entityId)}`;
   return `/workspaces/${workspaceId}`;
-}
-
-function snapshotText(snapshot: unknown) {
-  if (snapshot && typeof snapshot === "object") {
-    const record = snapshot as Record<string, unknown>;
-    const body = record.bodyMd ?? record.descriptionMd ?? record.description ?? null;
-    if (typeof body === "string" && body.trim()) {
-      return body;
-    }
-  }
-  return JSON.stringify(snapshot, null, 2);
 }
 
 function snapshotTitle(snapshot: unknown) {
