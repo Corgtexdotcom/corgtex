@@ -75,7 +75,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   }
   if (command === "preflight-provider") {
     const env = deps.env ?? process.env;
-    const targetId = args.targetId ?? env.FLEET_RELEASE_TARGET_ID;
+    const targetId = normalizeTargetId(args.targetId ?? env.FLEET_RELEASE_TARGET_ID);
     const selection = args.targets ?? env.FLEET_RELEASE_TARGETS ?? "default";
     const selectedGroups = normalizeTargets(selection);
     const protectedGroups = selectedGroups.filter((group) => ["ops", "backup-app"].includes(group));
@@ -111,7 +111,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   }
 
   const env = deps.env ?? process.env;
-  const targetId = args.targetId ?? env.FLEET_RELEASE_TARGET_ID;
+  const targetId = normalizeTargetId(args.targetId ?? env.FLEET_RELEASE_TARGET_ID);
   const targetSelection = args.targets ?? env.FLEET_RELEASE_TARGETS ?? "default";
   const selectedGroups = normalizeTargets(targetSelection);
   validateRuntimeObservabilityEnvironment(env);
@@ -228,7 +228,7 @@ async function resolveManifest(args, deps) {
 async function validateReleaseEnvironment(args, env, deps = {}) {
   const release = normalizeReleaseInput(args.release ?? env.FLEET_RELEASE_INPUT ?? "latest-stable");
   const selectedGroups = normalizeTargets(args.targets ?? env.FLEET_RELEASE_TARGETS);
-  const targetId = args.targetId ?? env.FLEET_RELEASE_TARGET_ID;
+  const targetId = normalizeTargetId(args.targetId ?? env.FLEET_RELEASE_TARGET_ID);
   const exactTarget = targetId
     ? filterTargetsByDeploymentId(filterTargetsByGroups(await discoverTargets({ ...deps, env }, selectedGroups, { exactDeploymentId: targetId }), selectedGroups), targetId)[0]
     : null;
@@ -511,7 +511,8 @@ function parseTargetJsonForDiscovery(raw, exactDeploymentId) {
 
 function assertNoConflictingDeploymentTargets(targets, exactDeploymentId) {
   if (!exactDeploymentId) return;
-  const matches = targets.filter((target) => String(target.deploymentId ?? "") === exactDeploymentId);
+  const requestedId = String(exactDeploymentId).trim();
+  const matches = targets.filter((target) => String(target.deploymentId ?? "").trim() === requestedId);
   const conflicts = (left, right, path) => {
     const leftValue = path.reduce((value, key) => value?.[key], left);
     const rightValue = path.reduce((value, key) => value?.[key], right);
@@ -532,6 +533,11 @@ function assertNoConflictingDeploymentTargets(targets, exactDeploymentId) {
       }
     }
   }
+}
+
+function normalizeTargetId(value) {
+  const normalized = String(value ?? "").trim();
+  return normalized || null;
 }
 
 function parseTargetJson(raw) {

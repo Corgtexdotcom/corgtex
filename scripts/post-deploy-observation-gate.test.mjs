@@ -690,7 +690,7 @@ describe("post-deploy observation gate", () => {
       deploymentId: "chirone-deployment",
       provider: "railway",
       workload: "managed-customers",
-      railway: { projectId: "project", environmentId: "environment", webServiceId: "web", workerServiceId: "worker", releaseWorkerDeploymentId: "worker-release" },
+      railway: { projectId: "project", environmentId: "environment", webServiceId: "web", workerServiceId: "worker", releaseWebDeploymentId: "web-release", releaseWorkerDeploymentId: "worker-release" },
     }]));
     const summary = await runObservationGate({
       manifest,
@@ -722,6 +722,7 @@ describe("post-deploy observation gate", () => {
         environmentId: "environment",
         webServiceId: "web",
         workerServiceId: "worker",
+        releaseWebDeploymentId: "web-release-deployment",
         releaseWorkerDeploymentId: "worker-release-deployment",
       },
     }]));
@@ -733,7 +734,7 @@ describe("post-deploy observation gate", () => {
           data: {
             deployments: {
               edges: [{ node: {
-                id: worker ? "worker-release-deployment" : "web-deployment",
+                id: worker ? "worker-release-deployment" : "web-release-deployment",
                 status: worker ? "CRASHED" : "SUCCESS",
                 createdAt: "2026-07-16T05:55:00.000Z",
               } }],
@@ -760,6 +761,52 @@ describe("post-deploy observation gate", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(3);
     expect(summary.status).toBe("blocked");
     expect(summary.blockingFailures).toMatchObject([{ event: "corgtex_worker_error", instance_id: "chirone-deployment", code: "RAILWAY_WORKER_CRASHED" }]);
+  });
+
+  it("blocks an exact release when its promoted Railway web deployment is superseded", async () => {
+    const targetFile = join(mkdtempSync(join(tmpdir(), "fleet-web-observation-")), "targets.json");
+    writeFileSync(targetFile, JSON.stringify([{
+      id: "chirone-alias",
+      deploymentId: "chirone-deployment",
+      provider: "railway",
+      workload: "managed-customers",
+      railway: {
+        projectId: "project",
+        environmentId: "environment",
+        webServiceId: "web",
+        workerServiceId: "worker",
+        releaseWebDeploymentId: "web-release-deployment",
+        releaseWorkerDeploymentId: "worker-release-deployment",
+      },
+    }]));
+    const fetchImpl = vi.fn(async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.query.includes("LatestDeployment")) {
+        const worker = body.variables.serviceId === "worker";
+        return new Response(JSON.stringify({ data: { deployments: { edges: [{ node: {
+          id: worker ? "worker-release-deployment" : "newer-web-deployment",
+          status: "SUCCESS",
+          createdAt: "2026-07-16T05:55:00.000Z",
+        } }] } } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ data: { httpLogs: [] } }), { status: 200 });
+    });
+
+    const summary = await runObservationGate({
+      manifest,
+      since: new Date("2026-07-16T05:52:00.000Z"),
+      targets: "railway-customers",
+      env: {
+        FLEET_RELEASE_TARGET_ID: "chirone-deployment",
+        FLEET_RELEASE_TARGETS_FILE: targetFile,
+        RAILWAY_API_TOKEN: "railway-token",
+        OBSERVATION_REQUIRE_SOURCE: "true",
+      },
+      deps: { fetchImpl },
+    });
+
+    expect(summary.status).toBe("blocked");
+    expect(summary.blockingFailures).toContainEqual(expect.objectContaining({ event: "corgtex_web_error", instance_id: "chirone-deployment", code: "RAILWAY_WEB_SUCCESS" }));
   });
 
   it("attributes Railway failures to the exact deployment when its configured alias differs", () => {

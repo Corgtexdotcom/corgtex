@@ -1705,6 +1705,10 @@ describe("fleet release runner", () => {
       env: { FLEET_RELEASE_TARGETS_JSON: JSON.stringify([chirone, conflicting]) },
       fetchImpl: vi.fn(),
     })).rejects.toThrow("Deployment ID chirone-deployment matched conflicting release targets.");
+    await expect(runFleetRelease(["preflight-provider", "--targets", "managed-customers,selfserve,ops", "--target-id", " chirone-deployment "], {
+      env: { FLEET_RELEASE_TARGETS_JSON: JSON.stringify([chirone, conflicting]) },
+      fetchImpl: vi.fn(),
+    })).rejects.toThrow("Deployment ID chirone-deployment matched conflicting release targets.");
   });
 
   it("rejects transition inventory that omits provider", async () => {
