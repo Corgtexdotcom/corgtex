@@ -13,6 +13,18 @@ match. Type/operator/function/attribute/collation bindings must match; locale
 versions must be current. Candidate identity comes from its actual catalog
 OID and qualified table/constraint identity, not an endpoint or name waiver.
 
+`PG18_ORDERED_AND_CURRENT_LIBC_V2` additionally admits different *current*
+libc collation version metadata for the single
+`public.ConstitutionSourceReference.ConstitutionSource_point_contract_check`
+candidate. The verifier recomputes the difference from the captured trees and
+catalog rows. Reference sets and every non-version binding must match. Each
+side must use UTF8 libc with the sole deterministic default collation, matching
+locale definitions, and its recorded database version equal to its actual
+version. The exact builtin operation whitelist, ordered SQL leaves, residual
+schema, manifest, server patch version and all other parity gates still apply.
+V1 remains strict. This proof concerns that CHECK's supported operations; it
+does not establish database-wide collation behavior or index compatibility.
+
 The exact declaration must occur once in the dump. Only that CHECK expression
 is replaced for residual comparison; all other executable tokens, including
 constraint flags, remain exact. Complete constraint identity/metadata sets

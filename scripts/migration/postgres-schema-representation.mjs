@@ -1,7 +1,8 @@
 import { schemaTokenDigest, tokenizeSchemaDump } from "./postgres-schema-tokens.mjs";
-import { verifyBoundOrderedAnd } from "./postgres-check-structure.mjs";
+import { KNOWN_CHECK_KEY, verifyBoundOrderedAnd } from "./postgres-check-structure.mjs";
 
 export const REPRESENTATION_VERSION = "PG18_ORDERED_AND_V1";
+export const VERSIONED_LIBC_REPRESENTATION = "PG18_ORDERED_AND_CURRENT_LIBC_V2";
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const keys = (v, expected) => v && same(Object.keys(v).sort(), [...expected].sort());
 const ddl = (token, value) => token?.domain === "DDL_TOKEN" && token.value === value;
@@ -112,7 +113,8 @@ const manifestMap = (rows) => {
 
 export function verifySchemaRepresentation(proof, sourceSchema, destinationSchema) {
   try {
-    if (!keys(proof, ["version", "source", "destination"]) || proof.version !== REPRESENTATION_VERSION
+    if (!keys(proof, ["version", "source", "destination"])
+      || ![REPRESENTATION_VERSION, VERSIONED_LIBC_REPRESENTATION].includes(proof.version)
       || Buffer.byteLength(JSON.stringify(proof)) > 24 * 1024 * 1024) return false;
     const a = proof.source, b = proof.destination;
     for (const side of [a, b]) {
@@ -124,7 +126,11 @@ export function verifySchemaRepresentation(proof, sourceSchema, destinationSchem
     if (a.serverVersion !== b.serverVersion || sourceSchema.algorithm !== "PG_DUMP_SQL_TOKENS_V1"
       || destinationSchema.algorithm !== sourceSchema.algorithm
       || schemaTokenDigest(a.tokens) !== sourceSchema.digest || schemaTokenDigest(b.tokens) !== destinationSchema.digest
-      || sourceSchema.digest === destinationSchema.digest || !verifyBoundOrderedAnd(a.check, b.check)) return false;
+      || sourceSchema.digest === destinationSchema.digest
+      || (proof.version === VERSIONED_LIBC_REPRESENTATION && JSON.stringify(a.check?.identity) !== KNOWN_CHECK_KEY)
+      || !verifyBoundOrderedAnd(a.check, b.check, {
+        allowCurrentLibcVersionDrift: proof.version === VERSIONED_LIBC_REPRESENTATION,
+      })) return false;
     const left = manifestMap(a.manifest), right = manifestMap(b.manifest);
     if (!same([...left.keys()].sort(), [...right.keys()].sort())) return false;
     const candidate = JSON.stringify(a.check.identity);
@@ -150,6 +156,9 @@ export function verifySchemaRepresentation(proof, sourceSchema, destinationSchem
 }
 
 export function buildSchemaRepresentation(source, destination, sourceSchema, destinationSchema) {
-  const proof = { version: REPRESENTATION_VERSION, source, destination };
-  return verifySchemaRepresentation(proof, sourceSchema, destinationSchema) ? proof : null;
+  for (const version of [REPRESENTATION_VERSION, VERSIONED_LIBC_REPRESENTATION]) {
+    const proof = { version, source, destination };
+    if (verifySchemaRepresentation(proof, sourceSchema, destinationSchema)) return proof;
+  }
+  return null;
 }
