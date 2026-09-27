@@ -83,6 +83,19 @@ test('ambiguous restore absence cannot be declared clean, while definitive rejec
     { cloneAbsent: true, firewallAbsent: true });
 });
 
+test('owned clone already Dropping settles to absence without another DELETE', async () => {
+  let reads = 0;
+  const dropping = clone(); dropping.properties.state = 'Dropping';
+  const arm = new CloneArm(api, { now: () => now, pause: async () => {},
+    request: async (_url, options) => {
+      assert.equal(options.method, 'GET');
+      reads++;
+      return reads < 3 ? reply(200, dropping) : reply(404);
+    } });
+  assert.deepEqual(await arm.remove(i, now + 60000), { cloneAbsent: true, firewallAbsent: true });
+  assert.equal(reads, 3);
+});
+
 test('template1 user data blocks synthetic-only restore before marker creation', async () => {
   const statements = [];
   const factory = config => ({

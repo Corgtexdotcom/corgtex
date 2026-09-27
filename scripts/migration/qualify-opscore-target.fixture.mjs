@@ -101,6 +101,15 @@ function setup() {
 }
 
 {
+  const { server, clock, api } = setup();
+  const intent = await prepare(api, inputs, clock, { managedPitr: true });
+  server.state = 'Starting';
+  await assert.rejects(cleanup(api, intent, clock, false, clock.now() + 10000),
+    /ABSOLUTE_DEADLINE_EXCEEDED/);
+  assert.equal(clock.now() - intent.createdAt, 10000);
+}
+
+{
   const { server, events, clock, api } = setup();
   server.sku = { name: 'Standard_B2s', tier: 'Burstable' };
   const intent = await prepare(api, inputs, clock);
