@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { RESOURCE, HOST } from './probe-ops-azure-target.mjs';
 import { target } from './ops-core-target-profile.mjs';
-import { CloneArm, cloneResource, cloneRuleName, cloneTags, createMarker, removeMarker, validateClone,
+import { CloneArm, assertNoUserContent, cloneResource, cloneRuleName, cloneTags, createMarker, removeMarker, validateClone,
   verifyNeverStarted } from './opscore-managed-pitr.mjs';
 import { firewallName, pitrServerName, pitrSchemaName } from './qualify-ops-azure-target.mjs';
 
@@ -128,6 +128,28 @@ test('template1 user data blocks synthetic-only restore before marker creation',
   await assert.rejects(createMarker({ database: 'postgres' }, i, factory), /PITR_TARGET_DATABASE_NOT_EMPTY/);
   assert.ok(statements.every(entry => entry.database === 'template1'));
   assert.ok(!statements.some(entry => entry.sql.startsWith('CREATE')));
+});
+
+test('only Azure-owned pg_catalog extensions are exempt on the postgres database', async () => {
+  const provider = [
+    { name: 'azure', schema: 'pg_catalog', owner: 'azuresu' },
+    { name: 'pgaadauth', schema: 'pg_catalog', owner: 'azuresu' },
+  ];
+  const client = rows => ({ async query(sql) {
+    return sql.includes('FROM pg_catalog.pg_extension')
+      ? { rowCount: rows.length, rows }
+      : { rowCount: 0, rows: [] };
+  } });
+  await assertNoUserContent(client(provider), { allowAzureManagedExtensions: true });
+  await assert.rejects(assertNoUserContent(client(provider)), /PITR_TARGET_DATABASE_NOT_EMPTY/);
+  for (const foreign of [
+    { name: 'vector', schema: 'public', owner: 'corgtexadmin' },
+    { name: 'azure', schema: 'public', owner: 'azuresu' },
+    { name: 'azure', schema: 'pg_catalog', owner: 'corgtexadmin' },
+  ]) {
+    await assert.rejects(assertNoUserContent(client([...provider.slice(1), foreign]),
+      { allowAzureManagedExtensions: true }), /PITR_TARGET_DATABASE_NOT_EMPTY/);
+  }
 });
 
 test('marker cleanup refuses foreign ownership and extra objects before DROP', async () => {

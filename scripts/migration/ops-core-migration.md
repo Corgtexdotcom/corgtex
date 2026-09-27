@@ -164,6 +164,8 @@ clone absent, without opening either server.
 The trial opens only the runner's
 IPv4, writes a before marker, records a PostgreSQL-clock restore timestamp,
 writes an after marker, and waits beyond Azure's documented WAL archive delay.
+Its empty-target check permits only Azure-owned `azure` and `pgaadauth`
+extensions in `pg_catalog` on `postgres`; other user content blocks marker creation.
 It then requests an Azure managed point-in-time restore with run ownership tags.
 The restored server must contain the before marker and omit the after marker.
 The receipt measures restore time; it does not set an RTO or RPO policy.
