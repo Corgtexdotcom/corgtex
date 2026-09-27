@@ -74,7 +74,7 @@ function fixture() {
   const blobs = new Map(); let writes = 0; let releases = 0;
   const pitr = { active: false };
   const containerFactory = url => ({ url,
-    async getAccessPolicy() { return {}; },
+    async getProperties() { return {}; },
     getBlockBlobClient(key) {
       return {
         getBlobLeaseClient() {

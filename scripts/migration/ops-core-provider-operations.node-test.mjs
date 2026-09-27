@@ -161,7 +161,7 @@ test("Azure adapter only treats BlobNotFound as absence and always uses create-o
   let error = { statusCode: 404, code: "BlobNotFound" };
   const calls = [];
   const store = azureProviderOperationStore({
-    async getAccessPolicy() { return {}; },
+    async getProperties() { return {}; },
     getBlockBlobClient(value) {
       assert.equal(value, key);
       return {

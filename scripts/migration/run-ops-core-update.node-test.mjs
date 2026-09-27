@@ -50,7 +50,7 @@ function fixture() {
   }
   function refreshProof() { plan.authority.compatibilitySha256 = hash(proof); put(`compatible-release-proofs/${hash(proof)}.json`, proof); }
   refreshMigration(); refreshProof();
-  const container = { async getAccessPolicy() { log.push("private"); return { blobPublicAccess: state.public ? "blob" : undefined }; },
+  const container = { async getProperties() { log.push("private"); return { blobPublicAccess: state.public ? "blob" : undefined }; },
     getBlockBlobClient(key) { return {
       async download() {
         log.push(`read:${key}`); const text = blobs.get(key);

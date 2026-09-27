@@ -250,7 +250,7 @@ export function azureArchiveStore(container) {
   return {
     identity: createHash("sha256").update(`${url.origin}${url.pathname.replace(/\/+$/, "")}`).digest("hex"),
     async assertPrivate() {
-      const policy = await container.getAccessPolicy();
+      const policy = await container.getProperties();
       if (policy.blobPublicAccess !== undefined) fail("ARCHIVE_CONTAINER_PUBLIC");
     },
     async createOnly(key, body, signal) {

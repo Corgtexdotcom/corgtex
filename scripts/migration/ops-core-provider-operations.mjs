@@ -177,7 +177,7 @@ export function azureProviderOperationStore(containerClient) {
       return names.sort();
     },
     async assertPrivate() {
-      const properties = await containerClient.getAccessPolicy();
+      const properties = await containerClient.getProperties();
       if (properties.blobPublicAccess) fail("PROVIDER_STORE_NOT_PRIVATE");
     },
     async readOptional(key, signal) {

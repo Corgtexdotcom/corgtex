@@ -21,7 +21,12 @@ const ownerComment = i => `opscore-managed-pitr:${i.runId}:${i.runAttempt}`;
 async function withPitrGuard(work) {
   const container = new ContainerClient(OPSCORE_CUSTODY_URL,
     new AzureCliCredential({ processTimeoutInMs: 10_000 }), { retryOptions: { maxTries: 1 } });
-  assert(!(await container.getAccessPolicy()).blobPublicAccess, 'PITR_CUSTODY_PUBLIC');
+  // Get Container Properties exposes public access with Contributor RBAC;
+  // Get Container ACL would require the broader Blob Data Owner role.
+  let properties;
+  try { properties = await container.getProperties(); }
+  catch { throw new ProbeError('PITR_CUSTODY_READ_UNAVAILABLE'); }
+  assert(!properties.blobPublicAccess, 'PITR_CUSTODY_PUBLIC');
   const guard = await openOpsCorePitrGuard(container);
   try { return await work(guard); } finally { await guard.close(); }
 }

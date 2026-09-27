@@ -142,7 +142,7 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
     const azureCredential = new AzureCliCredential({ processTimeoutInMs: 10_000 });
     const container = containerFactory ?? (url => new ContainerClient(url, azureCredential, { retryOptions: { maxTries: 1 } }));
     const custodyContainer = container(plan.operator.custodyContainerUrl);
-    need(!(await custodyContainer.getAccessPolicy()).blobPublicAccess, "MIGRATION_CUSTODY_PUBLIC");
+    need(!(await custodyContainer.getProperties()).blobPublicAccess, "MIGRATION_CUSTODY_PUBLIC");
     const retainedPlan = custodyContainer.getBlockBlobClient(`plans/${plan.domain}/${intentSha256}.json`);
     const journalBlob = custodyContainer.getBlockBlobClient(`cutovers/${plan.domain}.json`);
     const journal = azureBlobCustodyAdapter(journalBlob);
@@ -269,7 +269,7 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
         && binding.sourceFenceSha256 === state.history.find(x => x.phase === "SOURCE_FENCED")?.evidenceSha256,
         "MIGRATION_ACCEPTANCE_BINDING_MISMATCH");
       const evidenceStore = {
-        async assertPrivate() { need(!(await custodyContainer.getAccessPolicy()).blobPublicAccess, "MIGRATION_CUSTODY_PUBLIC"); },
+        async assertPrivate() { need(!(await custodyContainer.getProperties()).blobPublicAccess, "MIGRATION_CUSTODY_PUBLIC"); },
         async readOptional(key) { validKey(key); const value = await readOptionalBlobJson(custodyContainer.getBlockBlobClient(key));
           return value === null ? null : JSON.stringify(value); },
         async createOnly(key,text,signal) { validKey(key); signal.throwIfAborted();
