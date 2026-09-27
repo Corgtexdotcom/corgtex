@@ -14,6 +14,7 @@ on:
           - qualify-access
           - qualify-capture
           - qualify-opscore-capture
+          - qualify-opscore-shadow
           - qualify-synthetic
           - prepare-synthetic
       recovery_kind:
@@ -25,9 +26,10 @@ on:
           - restore
           - target-qualification
           - opscore-target-qualification
+          - opscore-shadow
           - synthetic-qualification
       domain:
-        description: "Exactly one Railway PostgreSQL data domain to restore and verify."
+        description: "Single-domain source; select ops for the Core+Ops shadow operation."
         required: true
         type: choice
         options:
@@ -295,6 +297,177 @@ jobs:
         with:
           name: azure-target-qualification-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.QUALIFICATION_DIR }}
+          if-no-files-found: error
+          retention-days: 7
+
+  qualify-opscore-shadow:
+    if: github.ref == 'refs/heads/main' && inputs.operation == 'qualify-opscore-shadow'
+    name: Shadow restore Core and Ops on pinned B2s without cutover
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    environment: azure-migration-foundation
+    env:
+      DOMAIN: ${{ inputs.domain }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TARGET_PROFILE: opscore
+      TARGET_POSTGRES_RESOURCE_ID: /subscriptions/227eb707-bc46-415e-a09b-7d2b69fb14b2/resourceGroups/rg-corgtex-opscore-hosting/providers/Microsoft.DBforPostgreSQL/flexibleServers/corgtex-opscore-pg18
+      TARGET_POSTGRES_HOST: corgtex-opscore-pg18.postgres.database.azure.com
+      TARGET_POSTGRES_ADMIN_USER: corgtexadmin
+      SHADOW_DIR: .artifacts/opscore-shadow/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+      - name: Prepare private runner path
+        run: |
+          set -euo pipefail
+          printf 'SHADOW_TEMP_DIR=%s/opscore-shadow-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+        timeout-minutes: 5
+      - name: Cache pinned PostgreSQL 18 client before Azure start
+        run: docker pull postgres:18.6@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+        timeout-minutes: 5
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - name: Prepare exact stopped B2s shadow intent
+        id: shadow_prepare
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          export QUALIFY_RUNNER_IPV4="$(curl --fail --silent --show-error --max-time 10 https://api.ipify.org)"
+          node scripts/migration/qualify-opscore-shadow.mjs prepare "$SHADOW_DIR"
+      - name: Persist shadow lifecycle intent before START
+        uses: actions/upload-artifact@v4
+        with:
+          name: opscore-shadow-intent-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SHADOW_DIR }}/qualification-intent.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+      - name: Restore both read-only Railway snapshots to protected scratch databases
+        id: shadow_run
+        timeout-minutes: 50
+        env:
+          RAILWAY_CORE_POSTGRES_READ_ONLY_URL: ${{ secrets.RAILWAY_CORE_POSTGRES_READ_ONLY_URL }}
+          RAILWAY_CORE_POSTGRES_TLS_ROOT_CERT: ${{ secrets.RAILWAY_CORE_POSTGRES_TLS_ROOT_CERT }}
+          RAILWAY_OPS_POSTGRES_READ_ONLY_URL: ${{ secrets.RAILWAY_OPS_POSTGRES_READ_ONLY_URL }}
+          RAILWAY_OPS_POSTGRES_TLS_ROOT_CERT: ${{ secrets.RAILWAY_OPS_POSTGRES_TLS_ROOT_CERT }}
+        run: node scripts/migration/qualify-opscore-shadow.mjs run "$SHADOW_DIR"
+      - name: Drop only owned scratch databases and close the public window
+        if: ${{ always() && steps.shadow_prepare.outcome == 'success' }}
+        timeout-minutes: 20
+        run: node scripts/migration/qualify-opscore-shadow.mjs cleanup "$SHADOW_DIR"
+      - name: Upload private shadow receipts without customer data
+        if: ${{ always() && steps.shadow_prepare.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: opscore-shadow-receipts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.SHADOW_DIR }}/qualification-intent.json
+            ${{ env.SHADOW_DIR }}/start-attempt.json
+            ${{ env.SHADOW_DIR }}/core-scratch-state.json
+            ${{ env.SHADOW_DIR }}/ops-scratch-state.json
+            ${{ env.SHADOW_DIR }}/capture-admission.json
+            ${{ env.SHADOW_DIR }}/shadow-summary.json
+            ${{ env.SHADOW_DIR }}/cleanup.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  recover-opscore-shadow:
+    if: github.ref == 'refs/heads/main' && inputs.operation == 'recover' && inputs.recovery_kind == 'opscore-shadow'
+    name: Recover one exact interrupted Ops/Core shadow run
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    environment: azure-migration-foundation
+    env:
+      DOMAIN: ${{ inputs.domain }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TARGET_PROFILE: opscore
+      TARGET_POSTGRES_RESOURCE_ID: /subscriptions/227eb707-bc46-415e-a09b-7d2b69fb14b2/resourceGroups/rg-corgtex-opscore-hosting/providers/Microsoft.DBforPostgreSQL/flexibleServers/corgtex-opscore-pg18
+      TARGET_POSTGRES_HOST: corgtex-opscore-pg18.postgres.database.azure.com
+      TARGET_POSTGRES_ADMIN_USER: corgtexadmin
+      RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+      RECOVERY_RUN_ATTEMPT: ${{ inputs.recovery_run_attempt }}
+      SHADOW_DIR: .artifacts/opscore-shadow-recovery/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+      - name: Validate original run identity
+        run: |
+          set -euo pipefail
+          [[ "$RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ && "$RECOVERY_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
+      - uses: actions/download-artifact@v5
+        with:
+          name: opscore-shadow-receipts-${{ inputs.recovery_run_id }}-${{ inputs.recovery_run_attempt }}
+          path: ${{ env.SHADOW_DIR }}
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.recovery_run_id }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+        timeout-minutes: 5
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - name: Close original window and prepare exact scratch recovery intent
+        id: shadow_recovery_prepare
+        timeout-minutes: 20
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          export QUALIFY_RUNNER_IPV4="$(curl --fail --silent --show-error --max-time 10 https://api.ipify.org)"
+          node scripts/migration/qualify-opscore-shadow.mjs recover-close "$SHADOW_DIR"
+      - name: Persist scratch recovery intent before second START
+        uses: actions/upload-artifact@v4
+        with:
+          name: opscore-shadow-recovery-intent-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.SHADOW_DIR }}/qualification-intent.json
+            ${{ env.SHADOW_DIR }}/recovery-intent.json
+            ${{ env.SHADOW_DIR }}/source-window-closure.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+      - name: Drop original run scratch only after OID and custody readback
+        timeout-minutes: 35
+        run: node scripts/migration/qualify-opscore-shadow.mjs recover-run "$SHADOW_DIR"
+      - name: Close recovery window and verify scratch absence
+        if: ${{ always() && steps.shadow_recovery_prepare.outcome == 'success' }}
+        timeout-minutes: 20
+        run: node scripts/migration/qualify-opscore-shadow.mjs recover-cleanup "$SHADOW_DIR"
+      - name: Upload private recovery receipts
+        if: ${{ always() && steps.shadow_recovery_prepare.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: opscore-shadow-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.SHADOW_DIR }}/qualification-intent.json
+            ${{ env.SHADOW_DIR }}/core-scratch-state.json
+            ${{ env.SHADOW_DIR }}/ops-scratch-state.json
+            ${{ env.SHADOW_DIR }}/source-window-closure.json
+            ${{ env.SHADOW_DIR }}/recovery-intent.json
+            ${{ env.SHADOW_DIR }}/recovery-start-attempt.json
+            ${{ env.SHADOW_DIR }}/recovery-scratch.json
+            ${{ env.SHADOW_DIR }}/recovery-cleanup.json
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
 
