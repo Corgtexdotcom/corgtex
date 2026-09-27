@@ -18,6 +18,7 @@ import {
   dismissInsight,
   updateInsight,
   applyInsight,
+  syncSlackMeetingActionReviewAfterWebApply,
   postDeliberationEntry,
   resolveDeliberationEntry,
   scheduleMeetingRecording,
@@ -687,6 +688,11 @@ export async function applyInsightAction(formData: FormData) {
   } catch (error) {
     if (isDuplicateGuardMatchError(error)) return duplicateGuardErrorPayload(error);
     throw error;
+  }
+  try {
+    await syncSlackMeetingActionReviewAfterWebApply(actor, { workspaceId, insightId });
+  } catch (error) {
+    console.error("Meeting follow-up Slack review refresh failed after insight application", error);
   }
   refresh(workspaceId);
   return null;

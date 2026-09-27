@@ -21,6 +21,7 @@ import {
   dismissSlackMeetingActionReviewProposal,
   isSlackMeetingActionReviewAction,
   parseSlackMeetingActionReviewActionValue,
+  refreshSlackMeetingActionReviewAfterWebApply,
   SLACK_MEETING_ACTION_REVIEW_EDIT_CALLBACK_ID,
   updateSlackMeetingActionReviewProposalFromModal,
 } from "./meeting-action-review";
@@ -2132,6 +2133,16 @@ export async function updateSlackMessage(installationId: string, target: {
     text,
     blocks: blocks as any,
   });
+}
+
+export async function syncSlackMeetingActionReviewAfterWebApply(actor: AppActor, params: { workspaceId: string; insightId: string }) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const refreshed = await refreshSlackMeetingActionReviewAfterWebApply(params);
+  if (!refreshed) return;
+  await updateSlackMessage(refreshed.installationId, {
+    channel: refreshed.update.channelId,
+    ts: refreshed.update.messageTs,
+  }, refreshed.update.blocks, refreshed.update.text);
 }
 
 async function openSlackModal(installationId: string, triggerId: string, view: unknown) {

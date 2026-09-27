@@ -4,6 +4,7 @@ const { db, archiveWorkspaceArtifact, requireWorkspaceMembership, acquireWorkIte
   const count = () => ({ count: vi.fn().mockResolvedValue(0) });
   const db = {
     $transaction: vi.fn(),
+    $queryRaw: vi.fn(),
     action: { findMany: vi.fn(), count: vi.fn().mockResolvedValue(0), update: vi.fn() },
     actionChecklistItem: count(),
     workItemEvidence: count(),
@@ -36,6 +37,7 @@ const actor = { kind: "user" as const, user: { id: "admin-1", email: "admin@exam
 const pair = { workspaceId: "ws-1", canonicalId: "action-1", duplicateId: "action-2" };
 const action = (id: string) => ({
   id, workspaceId: "ws-1", title: "Send summary", bodyMd: "The same work.", status: "OPEN", isPrivate: false,
+  authorUserId: "author-1",
   assigneeMemberId: null, circleId: null, dueAt: null, proposalId: null, priority: 1, completedVia: null,
   archivedAt: null, duplicateOfActionId: null, version: 1,
 });
@@ -119,5 +121,15 @@ describe("Action duplicate resolution", () => {
     db.action.findMany.mockResolvedValue([action("action-1")]);
     await expect(previewActionDuplicateResolution(actor, pair)).rejects.toMatchObject({ code: "NOT_FOUND" });
     expect(archiveWorkspaceArtifact).not.toHaveBeenCalled();
+  });
+
+  it("refuses to transfer a private draft's source claims to another author's draft", async () => {
+    db.action.findMany.mockResolvedValue([
+      { ...action("action-1"), isPrivate: true, status: "DRAFT" },
+      { ...action("action-2"), isPrivate: true, status: "DRAFT", authorUserId: "author-2" },
+    ]);
+    const preview = await previewActionDuplicateResolution(actor, pair);
+    expect(preview.eligible).toBe(false);
+    expect(preview.blockers).toContain("Private Actions from different authors cannot be merged.");
   });
 });

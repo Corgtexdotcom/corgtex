@@ -19,6 +19,7 @@ const redirect = vi.fn((url: string) => {
 const sendManualMeetingRecorder = vi.fn();
 const deleteMeeting = vi.fn();
 const applyInsight = vi.fn();
+const syncSlackMeetingActionReviewAfterWebApply = vi.fn();
 const intakeMeetingTranscript = vi.fn();
 const extractTextFromFileBuffer = vi.fn();
 const requireWorkspaceMembership = vi.fn();
@@ -73,6 +74,7 @@ vi.mock("@corgtex/domain", () => ({
   MAX_MEETING_DURATION_MINUTES: 480,
   MIN_MEETING_DURATION_MINUTES: 1,
   applyInsight,
+  syncSlackMeetingActionReviewAfterWebApply,
   duplicateGuardErrorPayload: (error: { candidate: unknown }) => ({
     status: "duplicate_confirmation_required", candidate: error.candidate,
     recommendedResolution: "use_existing", allowedResolutions: ["use_existing", "create_new"],
@@ -139,6 +141,15 @@ describe("meeting server actions", () => {
       workspaceId: "workspace-1", insightId: "insight-1",
       actionDuplicateGuard: { resolution: "use_existing", targetEntityId: "action-1" },
     });
+  });
+  it("keeps a successful insight application successful when Slack refresh fails", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    syncSlackMeetingActionReviewAfterWebApply.mockRejectedValueOnce(new Error("Slack unavailable"));
+    const { applyInsightAction } = await import("./actions");
+    await expect(applyInsightAction(formData({ workspaceId: "workspace-1", insightId: "insight-1" }))).resolves.toBeNull();
+    expect(applyInsight).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalled();
+    log.mockRestore();
   });
   it("emits baked release identity while preserving the configured telemetry instance", async () => {
     const actual = await vi.importActual<typeof import("@corgtex/shared/telemetry-node")>("@corgtex/shared/telemetry-node");

@@ -201,7 +201,6 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
     delegate: "action",
     findWhere: directWorkspace,
     label: titleOrName,
-    restoreData: (previousState) => ({ duplicateOfActionId: previousState?.duplicateOfActionId ?? null }),
   },
   AgentIdentity: {
     entityType: "AgentIdentity",

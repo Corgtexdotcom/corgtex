@@ -35,3 +35,87 @@ ALTER TABLE "ActionCreationSource" ADD CONSTRAINT "ActionCreationSource_workspac
 
 ALTER TABLE "ActionCreationSource" ADD CONSTRAINT "ActionCreationSource_actionId_workspaceId_fkey"
     FOREIGN KEY ("actionId", "workspaceId") REFERENCES "Action"("id", "workspaceId") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- Every writer that attaches work to an Action takes a row lock and checks the
+-- live duplicate marker. The resolver takes the same row lock before counting
+-- links, so an in-flight writer either commits first and blocks resolution or
+-- waits and refuses to attach to the resolved duplicate.
+CREATE FUNCTION "guardResolvedActionLink"() RETURNS TRIGGER AS $$
+DECLARE
+    action_id TEXT;
+    workspace_id TEXT;
+    scope_id TEXT;
+BEGIN
+    IF TG_ARGV[0] <> '' AND (to_jsonb(NEW)->>TG_ARGV[0]) IS DISTINCT FROM TG_ARGV[1] THEN
+        RETURN NEW;
+    END IF;
+
+    action_id := to_jsonb(NEW)->>TG_ARGV[2];
+    IF action_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    scope_id := CASE WHEN TG_ARGV[3] = 'goal'
+        THEN to_jsonb(NEW)->>'goalId'
+        ELSE to_jsonb(NEW)->>'workspaceId' END;
+    IF TG_OP = 'UPDATE' THEN
+        IF (to_jsonb(OLD)->>TG_ARGV[0]) IS NOT DISTINCT FROM (to_jsonb(NEW)->>TG_ARGV[0])
+            AND (to_jsonb(OLD)->>TG_ARGV[2]) IS NOT DISTINCT FROM action_id
+            AND (CASE WHEN TG_ARGV[3] = 'goal' THEN to_jsonb(OLD)->>'goalId' ELSE to_jsonb(OLD)->>'workspaceId' END) IS NOT DISTINCT FROM scope_id THEN
+            RETURN NEW;
+        END IF;
+    END IF;
+
+    IF TG_ARGV[3] = 'goal' THEN
+        SELECT "workspaceId" INTO workspace_id FROM "Goal" WHERE "id" = scope_id;
+    ELSE
+        workspace_id := scope_id;
+    END IF;
+
+    PERFORM 1 FROM "Action"
+        WHERE "id" = action_id AND "workspaceId" = workspace_id
+          AND "duplicateOfActionId" IS NULL
+        FOR SHARE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23503',
+            MESSAGE = 'Action link target is missing or resolved as a duplicate.',
+            CONSTRAINT = 'Action_link_unresolved_check';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "ActionChecklistItem_unresolved_action_check"
+    BEFORE INSERT OR UPDATE OF "workspaceId", "actionId" ON "ActionChecklistItem"
+    FOR EACH ROW EXECUTE FUNCTION "guardResolvedActionLink"('', '', 'actionId', 'workspace');
+CREATE TRIGGER "WorkItemEvidence_unresolved_action_check"
+    BEFORE INSERT OR UPDATE OF "workspaceId", "entityType", "entityId" ON "WorkItemEvidence"
+    FOR EACH ROW EXECUTE FUNCTION "guardResolvedActionLink"('entityType', 'Action', 'entityId', 'workspace');
+CREATE TRIGGER "WorkspaceExternalResourceAttachment_unresolved_action_check"
+    BEFORE INSERT OR UPDATE OF "workspaceId", "entityType", "entityId" ON "WorkspaceExternalResourceAttachment"
+    FOR EACH ROW EXECUTE FUNCTION "guardResolvedActionLink"('entityType', 'Action', 'entityId', 'workspace');
+CREATE TRIGGER "CommunicationEntityLink_unresolved_action_check"
+    BEFORE INSERT OR UPDATE OF "workspaceId", "entityType", "entityId" ON "CommunicationEntityLink"
+    FOR EACH ROW EXECUTE FUNCTION "guardResolvedActionLink"('entityType', 'Action', 'entityId', 'workspace');
+CREATE TRIGGER "DeliberationEntry_unresolved_action_check"
+    BEFORE INSERT OR UPDATE OF "workspaceId", "parentType", "parentId" ON "DeliberationEntry"
+    FOR EACH ROW EXECUTE FUNCTION "guardResolvedActionLink"('parentType', 'ACTION', 'parentId', 'workspace');
+CREATE TRIGGER "GoalLink_unresolved_action_check"
+    BEFORE INSERT OR UPDATE OF "goalId", "entityType", "entityId" ON "GoalLink"
+    FOR EACH ROW EXECUTE FUNCTION "guardResolvedActionLink"('entityType', 'Action', 'entityId', 'goal');
+CREATE TRIGGER "AdviceProcess_unresolved_action_check"
+    BEFORE INSERT OR UPDATE OF "workspaceId", "subjectType", "subjectId" ON "AdviceProcess"
+    FOR EACH ROW EXECUTE FUNCTION "guardResolvedActionLink"('subjectType', 'ACTION', 'subjectId', 'workspace');
+CREATE TRIGGER "ApprovalFlow_unresolved_action_check"
+    BEFORE INSERT OR UPDATE OF "workspaceId", "subjectType", "subjectId" ON "ApprovalFlow"
+    FOR EACH ROW EXECUTE FUNCTION "guardResolvedActionLink"('subjectType', 'ACTION', 'subjectId', 'workspace');
+CREATE TRIGGER "ActionCreationSource_unresolved_action_check"
+    BEFORE INSERT OR UPDATE OF "workspaceId", "actionId" ON "ActionCreationSource"
+    FOR EACH ROW EXECUTE FUNCTION "guardResolvedActionLink"('', '', 'actionId', 'workspace');
+CREATE TRIGGER "MeetingInsight_applied_unresolved_action_check"
+    BEFORE INSERT OR UPDATE OF "workspaceId", "appliedEntityType", "appliedEntityId" ON "MeetingInsight"
+    FOR EACH ROW EXECUTE FUNCTION "guardResolvedActionLink"('appliedEntityType', 'Action', 'appliedEntityId', 'workspace');
+CREATE TRIGGER "MeetingInsight_target_unresolved_action_check"
+    BEFORE INSERT OR UPDATE OF "workspaceId", "targetEntityType", "targetEntityId" ON "MeetingInsight"
+    FOR EACH ROW EXECUTE FUNCTION "guardResolvedActionLink"('targetEntityType', 'Action', 'targetEntityId', 'workspace');

@@ -17,7 +17,7 @@ vi.mock("@corgtex/shared", () => ({ prisma: db, env: { APP_URL: "https://example
 vi.mock("./actions", () => ({ createAction, publishAction }));
 vi.mock("./auth", () => ({ requireWorkspaceMembership }));
 
-import { confirmSlackMeetingActionReviewProposal } from "./meeting-action-review";
+import { confirmSlackMeetingActionReviewProposal, refreshSlackMeetingActionReviewAfterWebApply } from "./meeting-action-review";
 import { DuplicateGuardMatchError } from "./duplicate-guard";
 import { humanMemberIdentityWhere, isHumanMemberIdentity } from "./member-identity";
 
@@ -87,5 +87,32 @@ describe("Slack meeting action assignee eligibility", () => {
     expect(result.responseText).toContain("Review this follow-up in Corgtex");
     expect(db.meetingInsight.update).not.toHaveBeenCalled();
     expect(publishAction).not.toHaveBeenCalled();
+  });
+
+  it("closes and renders a Slack review after the insight is applied in Corgtex", async () => {
+    db.meetingInsight.findFirst.mockResolvedValueOnce({ meetingId: "meeting-1", status: "APPLIED" });
+    db.meetingFollowUpReview.findFirst.mockResolvedValueOnce({
+      id: "review-1", installationId: "installation-1", messageTs: "123.456",
+    });
+    const result = await refreshSlackMeetingActionReviewAfterWebApply({ workspaceId: "ws-1", insightId: "insight-1" });
+    expect(db.meetingFollowUpReview.update).toHaveBeenCalledWith({
+      where: { id: "review-1" }, data: { status: "CLOSED", closedAt: expect.any(Date) },
+    });
+    expect(result).toMatchObject({ installationId: "installation-1", update: { channelId: "channel-1", messageTs: "123.456" } });
+  });
+
+  it("refreshes a closed Slack message when an applied proposal is clicked again", async () => {
+    db.meetingFollowUpReview.findFirst.mockResolvedValue({
+      id: "review-1", workspaceId: "ws-1", meetingId: "meeting-1", status: "CLOSED",
+      expiresAt: new Date(Date.now() - 60_000), messageTs: "123.456", channelId: "channel-1",
+      meeting: { id: "meeting-1", workspaceId: "ws-1", title: "Weekly sync", recordedAt: new Date(), series: null },
+    });
+    db.meetingInsight.findFirst.mockResolvedValue({ id: "insight-1", status: "APPLIED" });
+    const result = await confirmSlackMeetingActionReviewProposal(actor, params);
+    expect(result.responseText).toContain("already confirmed");
+    expect(db.meetingFollowUpReview.update).toHaveBeenCalledWith({
+      where: { id: "review-1" }, data: { status: "CLOSED", closedAt: expect.any(Date) },
+    });
+    expect(createAction).not.toHaveBeenCalled();
   });
 });

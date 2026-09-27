@@ -691,6 +691,29 @@ async function maybeCloseReview(reviewId: string, workspaceId: string, meetingId
   }
 }
 
+export async function refreshSlackMeetingActionReviewAfterWebApply(params: { workspaceId: string; insightId: string }) {
+  const insight = await prisma.meetingInsight.findFirst({
+    where: { id: params.insightId, workspaceId: params.workspaceId, type: "ACTION_ITEM", operation: "CREATE", status: "APPLIED" },
+    select: { meetingId: true },
+  });
+  if (!insight) return null;
+  const review = await prisma.meetingFollowUpReview.findFirst({
+    where: { workspaceId: params.workspaceId, meetingId: insight.meetingId },
+    select: { id: true, installationId: true, messageTs: true },
+  });
+  if (!review) return null;
+  await maybeCloseReview(review.id, params.workspaceId, insight.meetingId);
+  if (!review.messageTs) return null;
+  return {
+    installationId: review.installationId,
+    update: await renderReviewUpdate({
+      workspaceId: params.workspaceId,
+      reviewId: review.id,
+      responseText: "Follow-up reviewed in Corgtex.",
+    }),
+  };
+}
+
 async function renderReviewUpdate(params: {
   workspaceId: string;
   reviewId: string;
@@ -725,7 +748,6 @@ async function renderReviewUpdate(params: {
 
 async function loadReviewInsight(workspaceId: string, reviewId: string, insightId: string) {
   const { review } = await loadReviewContext(workspaceId, reviewId);
-  await ensureReviewOpen(review);
   const insight = await prisma.meetingInsight.findFirst({
     where: {
       id: insightId,
@@ -737,6 +759,7 @@ async function loadReviewInsight(workspaceId: string, reviewId: string, insightI
     },
   });
   invariant(insight, 404, "NOT_FOUND", "Meeting follow-up proposal not found.");
+  if (insight.status !== "APPLIED") await ensureReviewOpen(review);
   return { review, insight };
 }
 
@@ -784,6 +807,7 @@ export async function confirmSlackMeetingActionReviewProposal(actor: AppActor, p
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const { review, insight } = await loadReviewInsight(params.workspaceId, params.reviewId, params.insightId);
   if (insight.status === "APPLIED") {
+    await maybeCloseReview(review.id, params.workspaceId, review.meetingId);
     return renderReviewUpdate({
       workspaceId: params.workspaceId,
       reviewId: review.id,

@@ -45,6 +45,9 @@ async function inspectPair(tx: Prisma.TransactionClient, pair: Pair) {
   if (canonical.duplicateOfActionId || duplicate.duplicateOfActionId || await tx.action.count({
     where: { workspaceId: pair.workspaceId, duplicateOfActionId: pair.duplicateId },
   }) > 0) blockers.push("An Action in this pair already has a duplicate resolution.");
+  if (canonical.isPrivate && canonical.authorUserId !== duplicate.authorUserId) {
+    blockers.push("Private Actions from different authors cannot be merged.");
+  }
 
   const canonicalMeetingId = meetingSourceId(canonical.bodyMd, pair.workspaceId);
   const duplicateMeetingId = meetingSourceId(duplicate.bodyMd, pair.workspaceId);
@@ -104,6 +107,7 @@ export async function resolveActionDuplicate(actor: AppActor, params: Pair & {
   return prisma.$transaction(async (tx) => {
     for (const id of [params.canonicalId, params.duplicateId].sort()) {
       await acquireWorkItemAdvisoryLock(tx, "Action", id);
+      await tx.$queryRaw`SELECT "id" FROM "Action" WHERE "workspaceId" = ${params.workspaceId} AND "id" = ${id} FOR UPDATE`;
     }
     const preview = await inspectPair(tx, params);
     invariant(preview.canonical.version === params.expectedCanonicalVersion && preview.duplicate.version === params.expectedDuplicateVersion,
