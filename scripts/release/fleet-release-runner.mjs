@@ -324,7 +324,7 @@ async function validateReleaseEnvironment(args, env, deps = {}) {
   };
 }
 
-function observationTargetsFor(targets) { const selected = new Set(targets.map((target) => target.provider === "azure" ? "azure-selfserve" : target.provider === "railway" ? (target.group === "selfserve" ? "railway-selfserve" : (["ops", "backup-app"].includes(target.group) ? target.group : "railway-customers")) : null).filter(Boolean)); return ["railway-customers", "railway-selfserve", "azure-selfserve", "ops", "backup-app"].filter((target) => selected.has(target)); } function emitTargetInventory(targets, env, deps) { const providers = new Set(targets.map((target) => target.provider)); emitGithubOutput("uses_azure", providers.has("azure"), deps); emitGithubOutput("uses_railway", providers.has("railway"), deps); emitGithubOutput("observation_targets", observationTargetsFor(targets).join(","), deps); if (env.FLEET_RELEASE_TARGETS_FILE) writeFileSync(env.FLEET_RELEASE_TARGETS_FILE, JSON.stringify(targets)); }
+function observationTargetsFor(targets) { const selected = new Set(targets.map((target) => target.provider === "azure" ? "azure-selfserve" : target.provider === "railway" ? (target.group === "selfserve" ? "railway-selfserve" : (["ops", "backup-app"].includes(target.group) ? target.group : "railway-customers")) : null).filter(Boolean)); return ["railway-customers", "railway-selfserve", "azure-selfserve", "ops", "backup-app"].filter((target) => selected.has(target)); } function emitTargetInventory(targets, env, deps) { const providers = new Set(targets.map((target) => target.provider)); emitGithubOutput("uses_azure", providers.has("azure"), deps); emitGithubOutput("uses_railway", providers.has("railway"), deps); emitGithubOutput("observation_targets", observationTargetsFor(targets).join(","), deps); emitGithubOutput("selected_target_ids", targets.map((target) => target.deploymentId ?? target.id ?? target.label).join(","), deps); if (env.FLEET_RELEASE_TARGETS_FILE) writeFileSync(env.FLEET_RELEASE_TARGETS_FILE, JSON.stringify(targets)); }
 
 function validateConfiguredTargetJson(name, raw, invalid) {
   if (!raw?.trim()) return;
@@ -656,7 +656,8 @@ export function inspectFleetRegistryImage(image, role, purpose, deps = {}) {
 
 export async function checkFleetRegistryImages(manifest, selection, deps = {}) {
   const groups = normalizeTargets(selection);
-  const snapshotPath = (deps.env ?? process.env).FLEET_RELEASE_TARGETS_FILE;
+  const env = deps.env ?? process.env;
+  const snapshotPath = env.FLEET_RELEASE_TARGETS_FILE;
   if (snapshotPath && !existsSync(snapshotPath)) throw new Error("Registry preflight requires the selected-target planning snapshot.");
   const images = [
     inspectFleetRegistryImage(manifest.ghcrWebImage, "web", "candidate", deps),
@@ -665,7 +666,8 @@ export async function checkFleetRegistryImages(manifest, selection, deps = {}) {
   const ops = [];
   if (groups.includes("ops")) {
     const targets = filterTargetsByGroups(await discoverTargets(deps, ["ops"]), ["ops"], { excludeIneligible: isBroadTargetSelection(selection) });
-    if (targets.length > 1 || (!targets.length && !isBroadTargetSelection(selection))) throw new Error("Ops registry preflight requires exactly one configured target.");
+    const exactSelectionExcludesOps = Boolean(env.FLEET_RELEASE_TARGET_ID && snapshotPath && targets.length === 0);
+    if (!exactSelectionExcludesOps && (targets.length > 1 || (!targets.length && !isBroadTargetSelection(selection)))) throw new Error("Ops registry preflight requires exactly one configured target.");
     for (const target of targets) {
       if (targetEligibilityErrors(target).length) throw new Error("Ops registry preflight target is not release-eligible.");
       if (target.provider !== "railway" || !target.railway?.webServiceId || !target.railway.workerServiceId) {

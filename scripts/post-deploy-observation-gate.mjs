@@ -47,6 +47,8 @@ const POSTHOG_CAPTURE_HOSTS = new Map([
 ]);
 
 export async function runObservationGate(options = {}) {
+  const observationEnv = options.env ?? process.env;
+  const targetDeploymentId = safeText(observationEnv.FLEET_RELEASE_TARGET_ID);
   const manifest = normalizeManifest(options.manifest ?? {});
   const now = options.now ? new Date(options.now) : new Date();
   const since = options.since ?? sinceFromWindow(options.windowMinutes ?? DEFAULT_WINDOW_MINUTES, now);
@@ -59,6 +61,7 @@ export async function runObservationGate(options = {}) {
       since,
       until,
       targets: options.targets ?? null,
+      targetDeploymentId,
       deps: options.deps ?? {},
     });
   const summary = buildObservationSummary({
@@ -68,6 +71,7 @@ export async function runObservationGate(options = {}) {
     sourceChecks: collected.sourceChecks,
     missingRequiredSources: collected.missingRequiredSources ?? [],
     targets: options.targets ?? null,
+    targetDeploymentId,
   });
   summary.advisoryPublish = {
     attempted: false,
@@ -97,10 +101,10 @@ export async function runObservationGate(options = {}) {
   return summary;
 }
 
-export function buildObservationSummary({ manifest, since, rows, sourceChecks = [], missingRequiredSources = [], targets = null }) {
+export function buildObservationSummary({ manifest, since, rows, sourceChecks = [], missingRequiredSources = [], targets = null, targetDeploymentId = null }) {
   const normalizedRows = rows.map(normalizeObservationRow).filter(Boolean);
   const failureRows = normalizedRows.filter(isBlockingClassFailure);
-  const releaseMatchers = observationReleaseMatchers(manifest, targets);
+  const releaseMatchers = observationReleaseMatchers(manifest, targets, targetDeploymentId);
   const blockingFailures = [];
   const advisoryFailures = [];
   const normalizedMissingRequiredSources = missingRequiredSources.map(safeText).filter(Boolean);
@@ -149,7 +153,7 @@ export async function collectObservationRows(options = {}) {
   return result.rows;
 }
 
-async function collectObservationData({ env = process.env, manifest = {}, since, until = new Date(), targets = null, deps = {} }) {
+async function collectObservationData({ env = process.env, manifest = {}, since, until = new Date(), targets = null, targetDeploymentId = null, deps = {} }) {
   const rows = [];
   const sourceNotes = [];
   const sourceChecks = [];
@@ -228,7 +232,7 @@ async function collectObservationData({ env = process.env, manifest = {}, since,
     });
   }
 
-  const missingSourceGroups = requiredObservationSourceGroupsForTargets(targets)
+  const missingSourceGroups = requiredObservationSourceGroupsForTargets(targets, targetDeploymentId)
     .filter((group) => !group.sources.some((source) => queriedSources.has(source)));
 
   for (const [source, error] of sourceErrors) {
@@ -377,7 +381,7 @@ export function parseRailwayHttpLogRows(payload, { target, deployment, manifest 
         source: "railway",
         source_url,
         event: "corgtex_route_error",
-        instance_id: safeText(target.id ?? target.label),
+        instance_id: safeText(target.deploymentId ?? target.id ?? target.label),
         provider: "railway",
         release_git_sha: release.gitSha,
         release_image_tag: release.imageTag,
@@ -402,6 +406,7 @@ export function normalizeObservationRow(input) {
     source_url: safeText(input.source_url),
     event: safeText(input.event ?? input.name) ?? "unknown",
     instance_id: safeText(input.instance_id),
+    deployment_id: safeText(input.deployment_id),
     provider: safeText(input.provider),
     release_git_sha: safeText(input.release_git_sha),
     release_image_tag: safeText(input.release_image_tag),
@@ -471,6 +476,11 @@ function releaseMetadataBelongsToGitSha(value, gitSha) {
 
 export function rowMatchesTargets(row, selectedTargets) {
   if (!selectedTargets || selectedTargets.size === 0) return true;
+  const exactTarget = [...selectedTargets].find((target) => target.startsWith("deployment:"));
+  if (exactTarget) {
+    const deploymentId = exactTarget.slice("deployment:".length);
+    return [row.instance_id, row.deployment_id].some((id) => safeText(id) === deploymentId);
+  }
   const rowTargets = observationTargetsForRow(row);
   if (rowTargets.length === 0) return rowMatchesUnknownTargetProvider(row, selectedTargets);
   return rowTargets.some((target) => selectedTargets.has(target));
@@ -528,14 +538,21 @@ export function normalizeObservationTargets(value) {
   return selected.length > 0 ? new Set(selected) : null;
 }
 
-function observationReleaseMatchers(manifest, targets) {
+function observationMatcherTargets(targets, targetDeploymentId) {
+  const selectedTargets = normalizeObservationTargets(targets) ?? new Set(TARGET_GROUPS);
+  if (targetDeploymentId) selectedTargets.add(`deployment:${targetDeploymentId}`);
+  return selectedTargets;
+}
+
+function observationReleaseMatchers(manifest, targets, targetDeploymentId = null) {
   const primaryIdentities = releaseIdentities(manifest);
   const hasPrimaryRelease = primaryIdentities.length > 0;
+  const selectedTargets = observationMatcherTargets(targets, targetDeploymentId);
   const rootMatcher = hasPrimaryRelease
     ? [{
       target: null,
       manifest,
-      selectedTargets: normalizeObservationTargets(targets),
+      selectedTargets,
       currentRelease: true,
     }]
     : [];
@@ -546,7 +563,7 @@ function observationReleaseMatchers(manifest, targets) {
       ...manifest.targetManifests.map((targetManifest) => ({
         target: targetManifest.target,
         manifest: targetManifest,
-        selectedTargets: normalizeObservationTargets(targetManifest.target ?? targets),
+        selectedTargets: observationMatcherTargets(targetManifest.target ?? targets, targetDeploymentId),
         currentRelease: !hasPrimaryRelease || releaseIdentitySetsIntersect(primaryIdentities, releaseIdentities(targetManifest)),
       })),
     ];
@@ -555,7 +572,7 @@ function observationReleaseMatchers(manifest, targets) {
   return rootMatcher.length > 0 ? rootMatcher : [{
     target: null,
     manifest,
-    selectedTargets: normalizeObservationTargets(targets),
+    selectedTargets,
     currentRelease: true,
   }];
 }
@@ -800,7 +817,7 @@ function requiresObservationSource(env) {
   return /^(1|true|yes)$/i.test(String(env.OBSERVATION_REQUIRE_SOURCE ?? ""));
 }
 
-function requiredObservationSourceGroupsForTargets(targets) {
+function requiredObservationSourceGroupsForTargets(targets, targetDeploymentId = null) {
   const selectedTargets = normalizeObservationTargets(targets);
   const targetList = selectedTargets ? [...selectedTargets] : TARGET_GROUPS;
   const groups = [];
@@ -808,7 +825,9 @@ function requiredObservationSourceGroupsForTargets(targets) {
     groups.push({ label: "azure_monitor", sources: ["azure_monitor"] });
   }
   for (const target of targetList.filter((target) => RAILWAY_TARGET_GROUPS.includes(target))) {
-    groups.push({ label: `${target}: railway or posthog`, sources: [`railway:${target}`, "posthog"] });
+    const sources = [`railway:${target}`];
+    if (!targetDeploymentId) sources.push("posthog");
+    groups.push({ label: targetDeploymentId ? `${target}: railway target` : `${target}: railway or posthog`, sources });
   }
   return groups;
 }
@@ -869,7 +888,7 @@ function railwayTargetsFromEnv(env, targets) {
         const environmentId = safeText(target?.railway?.environmentId), webServiceId = safeText(target?.railway?.webServiceId);
         if (!webServiceId || !environmentId) throw new Error(`FLEET_RELEASE_TARGETS_FILE has incomplete Railway metadata for ${safeText(target.id ?? target.label) ?? group}.`);
         entries.push({
-          id: safeText(target.id ?? target.deploymentId ?? target.label),
+          id: safeText(target.deploymentId ?? target.id ?? target.label),
           label: safeText(target.label ?? target.id),
           group,
           projectId: safeText(target.railway.projectId),
@@ -887,7 +906,7 @@ function railwayTargetsFromEnv(env, targets) {
     for (const target of parseJsonArray(env.FLEET_RELEASE_TARGETS_JSON)) {
       if (target?.provider === "railway" && target?.railway?.webServiceId && target?.railway?.environmentId) {
         entries.push({
-          id: safeText(target.id ?? target.deploymentId ?? target.label),
+          id: safeText(target.deploymentId ?? target.id ?? target.label),
           label: safeText(target.label ?? target.id),
           group: "railway-customers",
           projectId: safeText(target.railway.projectId),
@@ -902,7 +921,7 @@ function railwayTargetsFromEnv(env, targets) {
     for (const target of parseJsonArrayOrSingleObject(env.FLEET_RELEASE_AZURE_TARGET_JSON)) {
       if (target?.provider === "railway" && target?.railway?.webServiceId && target?.railway?.environmentId) {
         entries.push({
-          id: safeText(target.id ?? target.deploymentId ?? target.label),
+          id: safeText(target.deploymentId ?? target.id ?? target.label),
           label: safeText(target.label ?? target.id),
           group: "railway-selfserve",
           projectId: safeText(target.railway.projectId),

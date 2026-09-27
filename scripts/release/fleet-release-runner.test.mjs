@@ -344,6 +344,19 @@ describe("fleet release runner", () => {
     expect(saved).not.toMatch(/synthetic-private|token|password|username|releaseVariables|history/);
   });
 
+  it("does not require an Ops baseline when the exact planned target is a customer", async () => {
+    const deps = registryDeps();
+    const targetFile = join(mkdtempSync(join(tmpdir(), "fleet-customer-snapshot-")), "targets.json");
+    writeFileSync(targetFile, JSON.stringify([{ id: "chirone-deployment", deploymentId: "chirone-deployment", group: "managed-customers", provider: "railway" }]));
+    deps.env.FLEET_RELEASE_TARGETS_FILE = targetFile;
+    deps.env.FLEET_RELEASE_TARGET_ID = "chirone-deployment";
+
+    const result = await runFleetRelease(["check-images", "--release", SHA, "--targets", "managed-customers,ops"], deps);
+    expect(result.ops).toEqual([]);
+    expect(result.images.map((image) => `${image.purpose}:${image.role}`)).toEqual(["candidate:web", "candidate:worker"]);
+    expect(deps.calls).toEqual([]);
+  });
+
   it.each([0, 2, 3])("stops registry checks without provider effects or raw errors when inspection %s fails", async (failureIndex) => {
     const deps = registryDeps();
     let index = 0;
@@ -1622,6 +1635,8 @@ describe("fleet release runner", () => {
       expect(workflow).toContain("target_id:");
       expect(workflow).toContain("FLEET_RELEASE_TARGET_ID: ${{ inputs.target_id }}");
     }
+    const releaseWorkflow = readFileSync(new URL("../../.github/workflows/fleet-release.yml", import.meta.url), "utf8");
+    expect(releaseWorkflow).toContain("SELECTED_TARGETS_INPUT: ${{ steps.promotion.outputs.selected_target_ids || steps.preflight.outputs.selected_target_ids || steps.plan.outputs.selected_target_ids || inputs.target_id || inputs.targets }}");
   });
 
   it("resolves customer deployment IDs before the protected-provider-only preflight", async () => {
