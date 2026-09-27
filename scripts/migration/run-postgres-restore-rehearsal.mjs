@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { createHash, randomBytes, X509Certificate } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
 import {
   chmodSync,
   closeSync,
@@ -32,6 +33,7 @@ import { SCHEMA_RESTRICT_KEY, SchemaTokenError, isSchemaOperator, schemaTokenDig
 export { SCHEMA_RESTRICT_KEY, schemaTokenDigest, tokenizeSchemaDump } from "./postgres-schema-tokens.mjs";
 
 const { Client } = pg;
+const execFileAsync = promisify(execFile);
 
 export const POSTGRES_CLIENT_IMAGE = "postgres:18.6@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280";
 const MAX_STATE_BYTES = 64 * 1024;
@@ -551,6 +553,7 @@ const spawnFixed = (command, args, options = {}) => new Promise((resolvePromise,
     }
     rejectPromise(new RehearsalError(options.code ?? "COMMAND_FAILED"));
   });
+  options.onSpawn?.(child);
 });
 
 const decodeUrlPart = (value, code) => {
@@ -699,7 +702,10 @@ export const targetDatabaseConfigFromEnv = (environment, database, dockerHostOve
   };
 };
 
-export const nodeClientConfig = (config, applicationName, connectionTimeoutMillis = 30_000, queryTimeoutMillis = null) => ({
+export const nodeClientConfig = (config, applicationName, connectionTimeoutMillis = 30_000, queryTimeoutMillis = null) => {
+  if (config.statementTimeoutMillis !== undefined && (!Number.isSafeInteger(config.statementTimeoutMillis)
+    || config.statementTimeoutMillis < 1000 || config.statementTimeoutMillis > 120_000)) fail('INVALID_STATEMENT_TIMEOUT');
+  return ({
   host: config.host,
   port: config.port,
   user: config.user,
@@ -707,7 +713,9 @@ export const nodeClientConfig = (config, applicationName, connectionTimeoutMilli
   database: config.database,
   application_name: applicationName,
   connectionTimeoutMillis,
-  ...(queryTimeoutMillis === null ? {} : { query_timeout: queryTimeoutMillis }),
+  ...(queryTimeoutMillis === null && config.statementTimeoutMillis === undefined
+    ? {} : { query_timeout: queryTimeoutMillis ?? config.statementTimeoutMillis + 10_000 }),
+  ...(config.statementTimeoutMillis === undefined ? {} : { options: `-c statement_timeout=${config.statementTimeoutMillis}` }),
   keepAlive: true,
   ssl: config.sslmode === "disable"
     ? false
@@ -721,7 +729,22 @@ export const nodeClientConfig = (config, applicationName, connectionTimeoutMilli
           ca: config.targetTlsRootCert ?? fail("MISSING_TARGET_TLS_ROOT_CERT"),
           rejectUnauthorized: true,
         },
-});
+  });
+};
+
+export const newRestoreClient = (config, applicationName, connectionTimeoutMillis = 30_000, queryTimeoutMillis = null) => {
+  const client = new Client(nodeClientConfig(config, applicationName, connectionTimeoutMillis, queryTimeoutMillis));
+  if (config.shadowSignal === undefined && config.shadowDeadline === undefined) return client;
+  if (!(config.shadowSignal instanceof AbortSignal) || !Number.isSafeInteger(config.shadowDeadline)) {
+    fail('SHADOW_SQL_BOUNDARY_INVALID');
+  }
+  const query = client.query.bind(client);
+  client.query = (...args) => {
+    if (config.shadowSignal.aborted || Date.now() >= config.shadowDeadline) fail('RESTORE_ABORTED');
+    return query(...args);
+  };
+  return client;
+};
 
 const sleep = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
 
@@ -843,7 +866,23 @@ export const writeClientFiles = (tempDir, source, target, registerCleanup) => {
   return { serviceFile, passFile, sourceRootCertFile, targetRootCertFile };
 };
 
-const dockerClient = async ({
+const runOwnedDocker = async (args) => execFileAsync('docker', args, {
+  timeout: 10_000, maxBuffer: 1024 * 1024, env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
+});
+const dockerMissing = error => error?.code === 1 && /No such (?:object|container)/iu.test(error.stderr ?? '');
+const removeRunOwnedContainer = async name => {
+  try { await runOwnedDocker(['container', 'rm', '--force', name]); }
+  catch (error) { if (!dockerMissing(error)) throw new RehearsalError('SHADOW_DOCKER_TERMINATION_UNPROVEN'); }
+};
+const runOwnedContainerAbsent = async name => {
+  try { await runOwnedDocker(['container', 'inspect', '--format={{.Id}}', name]); return false; }
+  catch (error) {
+    if (dockerMissing(error)) return true;
+    throw new RehearsalError('SHADOW_DOCKER_TERMINATION_UNPROVEN');
+  }
+};
+
+export const dockerClient = async ({
   tempDir,
   serviceFile,
   passFile,
@@ -855,8 +894,19 @@ const dockerClient = async ({
   stderrClassifier = null,
   stdoutClassifier = null,
   onFailure = null,
+  signal = null,
+  commandDeadline = null,
 }) => {
   const dockerArgs = ["run", "--rm"];
+  const bounded = signal !== null || commandDeadline !== null;
+  if (bounded && (!(signal instanceof AbortSignal) || !Number.isSafeInteger(commandDeadline))) {
+    fail('SHADOW_DOCKER_BOUNDARY_INVALID');
+  }
+  if (signal?.aborted) fail('RESTORE_ABORTED');
+  const containerName = bounded ? `corgtex-shadow-${randomBytes(12).toString('hex')}` : null;
+  const commandSeconds = bounded ? Math.floor((commandDeadline - Date.now() - 90_000) / 1000) : null;
+  if (bounded && commandSeconds < 1) fail('SHADOW_COMMAND_DEADLINE');
+  if (bounded) dockerArgs.push('--name', containerName);
   if (network !== null) {
     assertNoControlCharacters(network, "INVALID_DOCKER_NETWORK");
     dockerArgs.push("--network", network);
@@ -874,16 +924,51 @@ const dockerClient = async ({
       ? "PGOPTIONS=-c default_transaction_read_only=on -c timezone=UTC -c lock_timeout=5s -c statement_timeout=0 -c transaction_timeout=0 -c idle_in_transaction_session_timeout=20min"
       : "PGOPTIONS=-c timezone=UTC -c lock_timeout=5s -c statement_timeout=0 -c transaction_timeout=0 -c idle_in_transaction_session_timeout=20min",
     POSTGRES_CLIENT_IMAGE,
+    ...(bounded ? ['timeout', '--signal=TERM', '--kill-after=10s', `${commandSeconds}s`] : []),
     ...args,
   );
   if (basename(serviceFile) !== "pg_service.conf" || basename(passFile) !== "pgpass") fail("INVALID_CLIENT_FILE_NAME");
   if (sourceRootCertFile !== null && basename(sourceRootCertFile) !== "source-root.crt") fail("INVALID_CLIENT_FILE_NAME");
-  await spawnFixed("docker", dockerArgs, {
-    code,
-    stderrClassifier: stderrClassifier ?? undefined,
-    stdoutClassifier: stdoutClassifier ?? undefined,
-    onFailure,
-  });
+  let childClosed = false;
+  let termination = null;
+  const terminate = () => {
+    if (termination !== null) return termination;
+    termination = (async () => {
+      // The name is fixed before docker run starts. Keep trying through the
+      // create race, then require terminal absence after the CLI exits.
+      while (!childClosed) {
+        await removeRunOwnedContainer(containerName).catch(() => {});
+        await new Promise(resolvePromise => setTimeout(resolvePromise, 200));
+      }
+      await removeRunOwnedContainer(containerName);
+      if (!(await runOwnedContainerAbsent(containerName))) fail('SHADOW_DOCKER_TERMINATION_UNPROVEN');
+    })();
+    termination.catch(() => {});
+    return termination;
+  };
+  const onAbort = () => { void terminate(); };
+  try {
+    await spawnFixed("docker", dockerArgs, {
+      code,
+      stderrClassifier: stderrClassifier ?? undefined,
+      stdoutClassifier: stdoutClassifier ?? undefined,
+      onFailure,
+      ...(bounded ? { onSpawn: () => {
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) onAbort();
+      } } : {}),
+    });
+  } finally {
+    childClosed = true;
+    if (bounded) {
+      signal.removeEventListener('abort', onAbort);
+      if (signal.aborted) await terminate();
+      else if (!(await runOwnedContainerAbsent(containerName))) {
+        await removeRunOwnedContainer(containerName);
+        fail('SHADOW_DOCKER_TERMINATION_UNPROVEN');
+      }
+    }
+  }
 };
 
 const targetConnectionProbeDiagnosticFromResults = ({
@@ -933,6 +1018,8 @@ export const probeTargetClientConnection = async ({
   clientFiles,
   network,
   artifactDir,
+  signal = null,
+  commandDeadline = null,
 }) => dockerClient({
   tempDir,
   ...clientFiles,
@@ -950,6 +1037,8 @@ export const probeTargetClientConnection = async ({
   ],
   code: "TARGET_CLIENT_CONNECTION_PROBE_FAILED",
   network,
+  signal,
+  commandDeadline,
   stderrClassifier: createSqlstateClassifier(),
   onFailure: ({ stderr, status, spawnError, signal }) => writePrivateJson(
     `${artifactDir}/connection-probe-diagnostic.json`,
@@ -984,6 +1073,8 @@ export const restoreArchiveSections = async ({
   network,
   artifactDir,
   assertCustody = async () => {},
+  signal = null,
+  commandDeadline = null,
 }) => {
   for (const section of RESTORE_SECTIONS) {
     await assertCustody(`RESTORE_${section.replaceAll("-", "_").toUpperCase()}`);
@@ -994,6 +1085,8 @@ export const restoreArchiveSections = async ({
       args: ["bash", "-c", RESTORE_SECTION_SCRIPT, "corgtex-restore-section", section],
       code: "DESTINATION_RESTORE_FAILED",
       network,
+      signal,
+      commandDeadline,
       stderrClassifier: createSqlstateClassifier(),
       stdoutClassifier: createRestoreStatusClassifier(),
       onFailure: ({ stderr, stdout, status, spawnError, signal }) => writePrivateJson(
@@ -1165,7 +1258,7 @@ export async function protectScratchDatabaseAccess({ client, scratchName, scratc
 
 export const createScratchDatabase = async ({ adminConfig, scratchName, settings, stateFile, targetRef, artifactDir, productionMode = false, assertCustody = async () => {} }) => {
   const createSql = buildCreateDatabaseSql(scratchName, settings, { allowConnections: !productionMode });
-  const client = new Client(nodeClientConfig(adminConfig, "corgtex_rehearsal_create"));
+  const client = newRestoreClient(adminConfig, "corgtex_rehearsal_create");
   await client.connect();
   let scratchOid, scratchOwner;
   try {
@@ -1184,7 +1277,7 @@ export const createScratchDatabase = async ({ adminConfig, scratchName, settings
   } finally {
     await client.end().catch(() => {});
   }
-  const readbackClient = new Client(nodeClientConfig({ ...adminConfig, database: scratchName }, "corgtex_rehearsal_locale_readback"));
+  const readbackClient = newRestoreClient({ ...adminConfig, database: scratchName }, "corgtex_rehearsal_locale_readback");
   await readbackClient.connect();
   try {
     const readback = await databaseSettings(readbackClient);
@@ -3801,7 +3894,7 @@ export async function observePostgresDatabase({ config, tempDir, dockerNetwork =
   if (!(signal instanceof AbortSignal) || typeof assertCustody !== "function") fail("PRODUCTION_CUSTODY_REQUIRED");
   const check = async () => { signal.throwIfAborted(); await assertCustody(); signal.throwIfAborted(); };
   await check();
-  const client = new Client(nodeClientConfig(config, "corgtex_copy_reconciliation", 30_000, 20 * 60_000));
+  const client = newRestoreClient(config, "corgtex_copy_reconciliation", 30_000, 20 * 60_000);
   const temporaryFiles = [];
   const abort = () => { void client.end().catch(() => {}); };
   signal.addEventListener("abort", abort, { once: true });
@@ -3886,7 +3979,7 @@ export function buildObservedPostgresParityEvidence({ domain, sourceRef, targetR
 export async function inspectPostgresScratch({ config, signal, assertCustody, requireEmpty = false, requireProtectedAccess = false, expectedScratchOid }) {
   signal.throwIfAborted(); await assertCustody();
   if (requireProtectedAccess) {
-    const maintenance = new Client(nodeClientConfig({ ...config, database: "postgres" }, "corgtex_copy_scratch_access", 30_000, 30_000));
+    const maintenance = newRestoreClient({ ...config, database: "postgres" }, "corgtex_copy_scratch_access", 30_000, 30_000);
     try {
       await maintenance.connect();
       await inspectProtectedScratchAccess({ client: maintenance, scratchName: config.database,
@@ -3894,7 +3987,7 @@ export async function inspectPostgresScratch({ config, signal, assertCustody, re
       signal.throwIfAborted(); await assertCustody();
     } finally { await maintenance.end().catch(() => {}); }
   }
-  const client = new Client(nodeClientConfig(config, "corgtex_copy_scratch_identity", 30_000, 30_000));
+  const client = newRestoreClient(config, "corgtex_copy_scratch_identity", 30_000, 30_000);
   try {
     await client.connect(); await client.query("BEGIN READ ONLY");
     const identity = await querySingle(client,
@@ -3977,6 +4070,11 @@ export async function runPostgresRestoreRehearsal(options) {
     beforeRestore = null,
     productionMode = false,
   } = options;
+  const boundedShadow = options.commandDeadline !== undefined;
+  const dockerBoundary = boundedShadow
+    ? { signal: options.signal, commandDeadline: options.commandDeadline }
+    : {};
+  if (boundedShadow && (!productionMode || !Number.isSafeInteger(options.commandDeadline))) fail('SHADOW_COMMAND_DEADLINE');
   if (!REQUIRED_DOMAINS.has(domain)) fail("INVALID_DOMAIN");
   const custody = createRestoreCustodyBoundary(options);
   const authority = rehearsalAuthorityForTarget(targetAdminConfig, { ...options.rehearsalAuthorityOptions, productionMode });
@@ -3986,7 +4084,7 @@ export async function runPostgresRestoreRehearsal(options) {
   mkdirSync(tempDir, { recursive: true, mode: 0o700 });
   const sourceRef = opaqueRef(`${sourceConfig.host}\0${sourceConfig.database}`);
   const targetRef = opaqueRef(`${targetAdminConfig.host}\0${scratchName}`);
-  const sourceClient = new Client(nodeClientConfig(sourceConfig, `corgtex_rehearsal_${domain}_snapshot`));
+  const sourceClient = newRestoreClient(sourceConfig, `corgtex_rehearsal_${domain}_snapshot`);
   const temporaryFiles = [];
   let transactionOpen = false;
   let credentialsShredded = false;
@@ -3996,7 +4094,7 @@ export async function runPostgresRestoreRehearsal(options) {
     await sourceClient.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     transactionOpen = true;
     await sourceClient.query("SET LOCAL lock_timeout = '5s'");
-    await sourceClient.query("SET LOCAL statement_timeout = '0'");
+    await sourceClient.query(boundedShadow ? "SET LOCAL statement_timeout = '2min'" : "SET LOCAL statement_timeout = '0'");
     await sourceClient.query("SET LOCAL transaction_timeout = '0'");
     await sourceClient.query("SET LOCAL idle_in_transaction_session_timeout = '0'");
     await sourceClient.query("SET LOCAL timezone = 'UTC'");
@@ -4008,7 +4106,8 @@ export async function runPostgresRestoreRehearsal(options) {
         current_setting('transaction_timeout') AS transaction_timeout,
         current_setting('idle_in_transaction_session_timeout') AS idle_timeout
     `, [], "SOURCE_TIMEOUT_BOUNDARY_UNPROVEN");
-    if (timeouts.statement_timeout !== "0" || timeouts.transaction_timeout !== "0" || timeouts.idle_timeout !== "0") {
+    if (timeouts.statement_timeout !== (boundedShadow ? "2min" : "0")
+      || timeouts.transaction_timeout !== "0" || timeouts.idle_timeout !== "0") {
       fail("SOURCE_TIMEOUT_BOUNDARY_UNPROVEN");
     }
     const readOnly = await querySingle(sourceClient, "SHOW transaction_read_only", [], "SOURCE_READ_ONLY_UNPROVEN");
@@ -4076,6 +4175,7 @@ export async function runPostgresRestoreRehearsal(options) {
       clientFiles,
       network: dockerNetwork,
       artifactDir,
+      ...dockerBoundary,
     });
     const dumpFile = assertSafePath(`${tempDir}/snapshot.dump`, tempDir, "INVALID_DUMP_PATH");
     const archiveTocFile = assertSafePath(`${tempDir}/snapshot.toc`, tempDir, "INVALID_TOC_PATH");
@@ -4087,6 +4187,7 @@ export async function runPostgresRestoreRehearsal(options) {
     await dockerClient({
       tempDir,
       ...clientFiles,
+      ...dockerBoundary,
       service: "source",
       args: ["pg_dump", "--format=custom", "--no-owner", "--no-acl", "--snapshot", snapshot, "--file", "/work/snapshot.dump"],
       code: "SOURCE_DUMP_FAILED",
@@ -4097,6 +4198,7 @@ export async function runPostgresRestoreRehearsal(options) {
     await dockerClient({
       tempDir,
       ...clientFiles,
+      ...dockerBoundary,
       service: "source",
       args: ["pg_restore", "--list", "--file", "/work/snapshot.toc", "/work/snapshot.dump"],
       code: "ARCHIVE_TOC_FAILED",
@@ -4109,6 +4211,7 @@ export async function runPostgresRestoreRehearsal(options) {
     await dockerClient({
       tempDir,
       ...clientFiles,
+      ...dockerBoundary,
       service: "source",
       args: [
         "pg_dump",
@@ -4148,10 +4251,12 @@ export async function runPostgresRestoreRehearsal(options) {
       network: dockerNetwork,
       artifactDir,
       assertCustody,
+      ...dockerBoundary,
     });
     await dockerClient({
       tempDir,
       ...clientFiles,
+      ...dockerBoundary,
       service: "target",
       args: [
         "pg_dump",
@@ -4172,7 +4277,7 @@ export async function runPostgresRestoreRehearsal(options) {
       : sourceSchema.legacyDigest !== destinationSchema.legacyDigest
         ? { classification: "NON_EXECUTABLE_DUMP_TEXT_ONLY" }
         : null;
-    const destinationClient = new Client(nodeClientConfig(targetConfig, `corgtex_rehearsal_${domain}_readback`));
+    const destinationClient = newRestoreClient(targetConfig, `corgtex_rehearsal_${domain}_readback`);
     await destinationClient.connect();
     let destinationEvidence;
     let destinationConstraintManifest;
@@ -4184,7 +4289,7 @@ export async function runPostgresRestoreRehearsal(options) {
     try {
       await destinationClient.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       await destinationClient.query("SET LOCAL lock_timeout = '5s'");
-      await destinationClient.query("SET LOCAL statement_timeout = '0'");
+      await destinationClient.query(boundedShadow ? "SET LOCAL statement_timeout = '2min'" : "SET LOCAL statement_timeout = '0'");
       await destinationClient.query("SET LOCAL transaction_timeout = '0'");
       await destinationClient.query("SET LOCAL idle_in_transaction_session_timeout = '20min'");
       await destinationClient.query("SET LOCAL timezone = 'UTC'");
@@ -4262,6 +4367,7 @@ export async function runPostgresRestoreRehearsal(options) {
         await dockerClient({
           tempDir,
           ...clientFiles,
+          ...dockerBoundary,
           service: "target",
           args: [
             "pg_restore",
@@ -4279,7 +4385,7 @@ export async function runPostgresRestoreRehearsal(options) {
 
       await destinationClient.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       await destinationClient.query("SET LOCAL lock_timeout = '5s'");
-      await destinationClient.query("SET LOCAL statement_timeout = '0'");
+      await destinationClient.query(boundedShadow ? "SET LOCAL statement_timeout = '2min'" : "SET LOCAL statement_timeout = '0'");
       await destinationClient.query("SET LOCAL transaction_timeout = '0'");
       await destinationClient.query("SET LOCAL idle_in_transaction_session_timeout = '20min'");
       await destinationClient.query("SET LOCAL timezone = 'UTC'");
@@ -4339,7 +4445,7 @@ export async function cleanupScratchDatabase({ targetAdminConfig, stateFile, art
   if (!SAFE_NAME.test(expectedScratchName) || !expectedScratchName.startsWith("corgtex_rehearsal_")) {
     fail("INVALID_SCRATCH_DATABASE_NAME");
   }
-  const client = new Client(nodeClientConfig(targetAdminConfig, "corgtex_rehearsal_cleanup"));
+  const client = newRestoreClient(targetAdminConfig, "corgtex_rehearsal_cleanup");
   await client.connect();
   try {
     if (!existsSync(stateFile)) {

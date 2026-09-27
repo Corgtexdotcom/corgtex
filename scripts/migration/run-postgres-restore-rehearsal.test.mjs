@@ -22,6 +22,7 @@ import {
   isCurrentCollationVersion,
   localeDefinitionMismatchFields,
   loadTargetTlsRootCertificate,
+  newRestoreClient,
   nodeClientConfig,
   parseSourceDatabaseUrl,
   POSTGRES_CLIENT_IMAGE,
@@ -2573,6 +2574,27 @@ describe("PostgreSQL restore rehearsal runner", () => {
       targetTlsRootCert,
     }, "target-test");
     expect(config.ssl).toEqual({ ca: targetTlsRootCert, rejectUnauthorized: true });
+  });
+
+  it("bounds shadow SQL on both the client and server without changing ordinary connections", () => {
+    const base = { host: "target.example.test", port: 5432, user: "admin", password: "secret",
+      database: "scratch", sslmode: "verify-full", targetTlsRootCert: loadTargetTlsRootCertificate() };
+    const ordinary = nodeClientConfig(base, "ordinary");
+    expect(ordinary.query_timeout).toBeUndefined();
+    expect(ordinary.options).toBeUndefined();
+    const bounded = nodeClientConfig({ ...base, statementTimeoutMillis: 120_000 }, "shadow");
+    expect(bounded.query_timeout).toBe(130_000);
+    expect(bounded.options).toBe("-c statement_timeout=120000");
+    expect(() => nodeClientConfig({ ...base, statementTimeoutMillis: "120000 -c log_statement=all" }, "invalid"))
+      .toThrow("INVALID_STATEMENT_TIMEOUT");
+    const abort = new AbortController();
+    const shadow = newRestoreClient({ ...base, statementTimeoutMillis: 120_000,
+      shadowSignal: abort.signal, shadowDeadline: Date.now() + 10_000 }, "shadow-query");
+    abort.abort();
+    expect(() => shadow.query("SELECT 1")).toThrow("RESTORE_ABORTED");
+    const expired = newRestoreClient({ ...base, statementTimeoutMillis: 120_000,
+      shadowSignal: new AbortController().signal, shadowDeadline: Date.now() - 1 }, "expired-query");
+    expect(() => expired.query("SELECT 1")).toThrow("RESTORE_ABORTED");
   });
 
   it("accepts only the exact fingerprint-pinned Azure PostgreSQL root bundle", () => {

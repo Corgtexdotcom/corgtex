@@ -118,6 +118,34 @@ This is a target-specific synthetic capture observation, not migration or
 production admission. A B2s trial also does not prove burst-credit, capacity,
 restore-time, or whole-Azure budget suitability; qualify these separately before
 any production Burstable exception. Do not reuse the rehearsal receipt as target proof.
+
+After the protected capture trial passes and the exact temporary workflow roles
+are authorized, dispatch `operation=qualify-opscore-shadow` on protected `main`
+with `domain=ops` (the shadow operation restores **both** domains). It requires
+the exact stopped B2s target, approved private endpoint, a fresh readback of
+disabled query capture with empty Query Store history, an exact system-only
+database inventory with no prior scratch or customer database, and the protected Core
+and Ops Railway read-only URLs and TLS roots. The one-hour intent is uploaded
+before START. The workflow opens only its runner's IPv4, holds the shared
+PostgreSQL maintenance lock, restores consistent Core and Ops snapshots into
+separate administrator-only scratch databases, checks frozen-sequence and
+database parity, and retains both scratch databases until cleanup. Shadow work
+stops before the one-hour intent expires; active Docker containers and SQL
+statements are bounded and drained while the maintenance lock remains held.
+Raw archives
+and catalog evidence stay on the private ephemeral runner; the artifact contains
+only bounded receipts and exact scratch OIDs. Cleanup verifies each database
+name, OID and owner before DROP, verifies the system-only database inventory,
+removes the firewall rule, disables public
+access and stops B2s. Do not dispatch another migration writer during the trial.
+If cleanup fails, use `operation=recover`, `recovery_kind=opscore-shadow` with the
+exact run ID and attempt; it verifies the completed source run and absence of
+intervening workflow runs, closes any original public window, then uses a new
+bounded intent to remove only the recorded scratch OIDs. Missing ownership
+receipts require manual reconciliation, never an inferred DROP. Shadow parity
+does not qualify combined workload, CPU credits, managed backup/PITR recovery,
+object state, application images or customer routing; preserve Railway serving
+until those independent gates pass.
 The profile checks Azure server parameters and effective PostgreSQL settings with no
 pending restart before credential SQL and around commit. Parameter changes
 are a separate controlled operation; any mismatch fails closed. After
