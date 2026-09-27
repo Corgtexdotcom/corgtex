@@ -8,7 +8,7 @@ import { parse } from 'yaml';
 import { readFileSync } from 'node:fs';
 import { target, targetResource } from './ops-core-target-profile.mjs';
 import { cleanupOwnedScratch, inspectShadowDatabaseInventory, restoreBothDomains, scratchName,
-  withScratchMaintenance,
+  withScratchMaintenance, projectShadowSchemaDiagnostic,
   validateOwnedScratchState, validateShadowDatabaseInventory, validateShadowEnvironment } from './qualify-opscore-shadow.mjs';
 import { validateRecoveryEvidence } from './qualify-ops-azure-target.mjs';
 
@@ -118,6 +118,40 @@ try {
   });
   assert.equal(restored.status, 'OPSCORE_SHADOW_PARITY_VERIFIED');
   assert.deepEqual(order, ['capture', 'core', 'lock', 'ops', 'lock', 'close']);
+  const classes = ['EXTENSION', 'TYPE', 'FUNCTION', 'TABLE', 'CONSTRAINT', 'INDEX',
+    'TRIGGER', 'POLICY', 'VIEW', 'COMMENT', 'OTHER'];
+  const tokens = ['DDL_TOKEN', 'STRING_LITERAL', 'DOLLAR_BODY', 'META_COMMAND'];
+  const side = () => ({ statementClasses: Object.fromEntries(classes.map(key => [key, key === 'INDEX' ? 1 : 0])),
+    tokenDomains: Object.fromEntries(tokens.map(key => [key, key === 'DDL_TOKEN' ? 3 : 0])) });
+  const diagnostic = { schemaVersion: '1.0.0', classification: 'EXECUTABLE_SCHEMA_DIFFERENCE',
+    sourceOnly: side(), destinationOnly: side(), truncated: false,
+    constraintSemantics: { schemaVersion: '1.0.0', mismatchCount: 0, mismatchFields: [], truncated: false },
+    customerPayload: 'CLIENT_PRIVATE_SENTINEL' };
+  assert.equal(projectShadowSchemaDiagnostic(diagnostic).sourceOnly.statementClasses.INDEX, 1);
+  assert.throws(() => projectShadowSchemaDiagnostic({ ...diagnostic, sourceOnly: {
+    ...side(), statementClasses: { ...side().statementClasses, INDEX: -1 } } }), /SHADOW_DIAGNOSTIC_INVALID/);
+  await assert.rejects(restoreBothDomains({ api: {}, intent, config, sources: { core: {}, ops: {} },
+    directory: temp, tempRoot: temp,
+    maintenanceFactory: async () => ({ signal: new AbortController().signal,
+      async assertHeld() {}, async close() {} }),
+    restore: async options => {
+      if (options.domain === 'ops') writeFileSync(join(options.artifactDir, 'schema-diagnostic.json'),
+        JSON.stringify(diagnostic), { mode: 0o600 });
+      return { evidence: { domain: options.domain } };
+    },
+    verifyParity: evidence => {
+      if (evidence.domain === 'ops') throw Error('SCHEMA_DIGEST_MISMATCH');
+      return { status: 'POSTGRES_DATABASE_PARITY_VERIFIED', tableCount: 1,
+        totalRowCount: 2, migrationCount: 3, evidenceSha256: 'a'.repeat(64) };
+    },
+    admitCapture: async () => ({ status: 'FRESH_DISABLED_CAPTURE_ADMITTED' }),
+  }), /SCHEMA_DIGEST_MISMATCH/);
+  const failureText = readFileSync(join(temp, 'shadow-failure.json'), 'utf8');
+  const failure = JSON.parse(failureText);
+  assert.deepEqual({ domain: failure.domain, code: failure.code, diagnosticStatus: failure.diagnosticStatus },
+    { domain: 'ops', code: 'SCHEMA_DIGEST_MISMATCH', diagnosticStatus: 'CATEGORIES_RETAINED' });
+  assert.equal(failure.schema.constraintMismatchCount, 0);
+  assert.ok(!failureText.includes('CLIENT_PRIVATE_SENTINEL'));
   const denied = [];
   await assert.rejects(restoreBothDomains({ api: {}, intent, config, sources: { core: {}, ops: {} },
     directory: temp, tempRoot: temp,
@@ -150,6 +184,8 @@ assert.ok(job.steps.some(step => step.name?.includes('Persist shadow lifecycle i
 assert.ok(job.steps.some(step => step.name?.includes('Drop only owned scratch databases')));
 assert.ok(job.steps.find(step => step.name?.includes('Upload private shadow receipts'))?.with?.path
   .includes('core-scratch-state.json'));
+assert.ok(job.steps.find(step => step.name?.includes('Upload private shadow receipts'))?.with?.path
+  .includes('shadow-failure.json'));
 assert.ok(!job.steps.find(step => step.name?.includes('Upload private shadow receipts'))?.with?.path
   .includes('core-evidence'));
 const recoveryJob = workflow.jobs['recover-opscore-shadow'];
