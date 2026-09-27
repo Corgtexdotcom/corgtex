@@ -378,6 +378,7 @@ jobs:
             ${{ env.SHADOW_DIR }}/ops-scratch-state.json
             ${{ env.SHADOW_DIR }}/capture-admission.json
             ${{ env.SHADOW_DIR }}/shadow-summary.json
+            ${{ env.SHADOW_DIR }}/shadow-failure.json
             ${{ env.SHADOW_DIR }}/cleanup.json
           include-hidden-files: true
           if-no-files-found: error

@@ -25,6 +25,38 @@ const exactKeys = (value, keys) => value && !Array.isArray(value)
   && Object.keys(value).sort().join() === [...keys].sort().join();
 const save = (path, value) => writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
 const SYSTEM_DATABASES = new Set(['azure_maintenance', 'azure_sys', 'postgres', 'template0', 'template1']);
+const SCHEMA_CLASSES = ['EXTENSION', 'TYPE', 'FUNCTION', 'TABLE', 'CONSTRAINT', 'INDEX',
+  'TRIGGER', 'POLICY', 'VIEW', 'COMMENT', 'OTHER'];
+const TOKEN_DOMAINS = ['DDL_TOKEN', 'STRING_LITERAL', 'DOLLAR_BODY', 'META_COMMAND'];
+const CONSTRAINT_FIELDS = new Set(['IDENTITY_SET', 'TYPE', 'VALIDATION', 'ENFORCEMENT',
+  'INHERITANCE', 'DEFERRABILITY', 'PERIOD', 'FK_ACTION', 'PARENTAGE', 'BINDING',
+  'DEFINITION', 'CHECK_EXPRESSION', 'EXTENSION_OWNERSHIP']);
+
+// The restore runner's full evidence stays ephemeral. This projection contains
+// only bounded category counts, so a failed parity check remains diagnosable.
+export function projectShadowSchemaDiagnostic(diagnostic) {
+  need(diagnostic?.schemaVersion === '1.0.0'
+    && diagnostic.classification === 'EXECUTABLE_SCHEMA_DIFFERENCE', 'SHADOW_DIAGNOSTIC_INVALID');
+  const counts = (value, keys) => {
+    need(exactKeys(value, keys), 'SHADOW_DIAGNOSTIC_INVALID');
+    for (const key of keys) need(Number.isSafeInteger(value[key]) && value[key] >= 0
+      && value[key] <= 1_000_000, 'SHADOW_DIAGNOSTIC_INVALID');
+    return Object.fromEntries(keys.map(key => [key, value[key]]));
+  };
+  const side = value => ({ statementClasses: counts(value?.statementClasses, SCHEMA_CLASSES),
+    tokenDomains: counts(value?.tokenDomains, TOKEN_DOMAINS) });
+  const semantics = diagnostic.constraintSemantics;
+  need(typeof diagnostic.truncated === 'boolean' && semantics?.schemaVersion === '1.0.0'
+    && typeof semantics.truncated === 'boolean'
+    && Number.isSafeInteger(semantics.mismatchCount) && semantics.mismatchCount >= 0
+    && semantics.mismatchCount <= 1_000_000 && Array.isArray(semantics.mismatchFields)
+    && semantics.mismatchFields.every(field => CONSTRAINT_FIELDS.has(field))
+    && new Set(semantics.mismatchFields).size === semantics.mismatchFields.length,
+  'SHADOW_DIAGNOSTIC_INVALID');
+  return { classification: diagnostic.classification, sourceOnly: side(diagnostic.sourceOnly),
+    destinationOnly: side(diagnostic.destinationOnly), constraintMismatchCount: semantics.mismatchCount,
+    constraintMismatchFields: semantics.mismatchFields, truncated: diagnostic.truncated || semantics.truncated };
+}
 
 export function validateShadowDatabaseInventory(databases) {
   need(Array.isArray(databases) && databases.length > 0 && databases.length <= 1000,
@@ -89,11 +121,11 @@ export function validateOwnedScratchState(state, expectedName, expectedRef) {
   return state;
 }
 
-function readState(path) {
+function readState(path, maxBytes = 4096) {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const stat = fstatSync(fd);
-    need(stat.isFile() && stat.size > 0 && stat.size <= 4096, 'SHADOW_SCRATCH_STATE_INVALID');
+    need(stat.isFile() && stat.size > 0 && stat.size <= maxBytes, 'SHADOW_SCRATCH_STATE_INVALID');
     return JSON.parse(readFileSync(fd, 'utf8'));
   } finally { closeSync(fd); }
 }
@@ -228,6 +260,18 @@ export async function restoreBothDomains({ api, intent, config, sources, directo
         summaries.push({ domain, status: parity.status, tableCount: parity.tableCount,
           totalRowCount: parity.totalRowCount, migrationCount: parity.migrationCount,
           evidenceSha256: parity.evidenceSha256 });
+      } catch (error) {
+        const code = /^[A-Z0-9_]+$/.test(error?.message ?? '') ? error.message : 'SHADOW_UNEXPECTED_FAILURE';
+        const receipt = { domain, code, diagnosticStatus: 'UNAVAILABLE' };
+        if (code === 'SCHEMA_DIGEST_MISMATCH' && existsSync(`${domainEvidence}/schema-diagnostic.json`)) {
+          try {
+            const diagnostic = projectShadowSchemaDiagnostic(readState(`${domainEvidence}/schema-diagnostic.json`, 65_536));
+            receipt.diagnosticStatus = 'CATEGORIES_RETAINED';
+            receipt.schema = diagnostic;
+          } catch { /* Keep the original parity failure and omit unsafe diagnostic data. */ }
+        }
+        try { save(`${directory}/shadow-failure.json`, receipt); } catch { /* Preserve the original failure. */ }
+        throw error;
       } finally {
         rmSync(domainEvidence, { recursive: true, force: true });
         rmSync(domainTemp, { recursive: true, force: true });
