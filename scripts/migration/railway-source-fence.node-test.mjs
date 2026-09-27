@@ -515,6 +515,28 @@ test("retained recovery baseline restores only owned trigger fields and exact pr
   assert.deepEqual(f.state.calls.filter(item => item.operation === "RecoverRestart").map(item => item.variables.id), [id(20), id(21)]);
 });
 
+test("empty Railway staging work is settled only when it matches the empty staged patch", async () => {
+  const pending = (stageId = id(10), kind = "EnvironmentPatch") => ({
+    id: `patch:${stageId}`, environmentId: binding.environmentId, kind, status: "staged", children: [] });
+  const admitted = await fixture();
+  admitted.state.deployments[id(4)][0].status = "SUCCESS";
+  admitted.state.pending = [pending()];
+  await admitted.adapter.captureRecoveryBaseline();
+
+  for (const change of [
+    state => { state.staged.patch = { services: { [id(3)]: { deploy: { cronSchedule: null } } } }; },
+    state => { state.pending = [pending(id(99))]; },
+    state => { state.pending = [pending(id(10), "Deployment")]; },
+    state => { state.pending = [{ ...pending(), status: "applied", children: [pending()] }]; },
+  ]) {
+    const rejected = await fixture();
+    rejected.state.deployments[id(4)][0].status = "SUCCESS";
+    rejected.state.pending = [pending()];
+    change(rejected.state);
+    await assert.rejects(rejected.adapter.captureRecoveryBaseline(), /RAILWAY_RECOVERY_WORK_UNSETTLED/);
+  }
+});
+
 test("recovery rejects effective runtime policy drift before any restart", async () => {
   const f = await fixture();
   f.state.deployments[id(4)][0].status = "SUCCESS";
