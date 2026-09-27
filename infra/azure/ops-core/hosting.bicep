@@ -68,10 +68,6 @@ module observability '../modules/observability.bicep' = {
   }
 }
 
-resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' existing = {
-  name: 'log-${namePrefix}'
-}
-
 resource vnet 'Microsoft.Network/virtualNetworks@2024-05-01' = {
   name: 'vnet-${namePrefix}'
   location: location
@@ -174,25 +170,14 @@ resource redisDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@202
   }
 }
 
-resource containerEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = {
-  name: 'cae-${namePrefix}'
-  location: location
-  tags: tags
-  properties: {
-    vnetConfiguration: {
-      infrastructureSubnetId: containerAppsSubnetId
-      internal: false
-    }
-    workloadProfiles: [
-      { name: 'Consumption', workloadProfileType: 'Consumption' }
-    ]
-    appLogsConfiguration: {
-      destination: 'log-analytics'
-      logAnalyticsConfiguration: {
-        customerId: logAnalytics.properties.customerId
-        sharedKey: logAnalytics.listKeys().primarySharedKey
-      }
-    }
+// Evaluate the workspace lookup only after its deployment has completed.
+module containerEnvironment './container-environment.bicep' = {
+  name: '${namePrefix}-container-environment'
+  params: {
+    location: location
+    namePrefix: namePrefix
+    tags: tags
+    containerAppsSubnetId: containerAppsSubnetId
   }
   dependsOn: [observability]
 }
@@ -238,8 +223,8 @@ module coreDomain './domain.bicep' = {
 }
 
 output platform object = {
-  containerAppsEnvironmentId: containerEnvironment.id
-  containerAppsEnvironmentName: containerEnvironment.name
+  containerAppsEnvironmentId: containerEnvironment.outputs.id
+  containerAppsEnvironmentName: containerEnvironment.outputs.name
   vnetId: vnet.id
   containerAppsSubnetId: containerAppsSubnetId
   privateEndpointsSubnetId: privateEndpointsSubnetId

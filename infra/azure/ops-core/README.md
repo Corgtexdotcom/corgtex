@@ -47,6 +47,10 @@ PG18 server with 32 GiB storage, 14-day local backup, no HA, and public network
 access disabled. It creates no database, firewall rule, endpoint, app, or role
 assignment. The backing deployment owns the single private endpoint; the migration
 operator owns the later restore and database isolation.
+Start an existing shared server before the backing deployment: Azure cannot create
+or repair its private endpoint while the server is stopped. Recheck its SKU and
+public-network setting after startup, then stop it after bounded provisioning if
+workload qualification has not admitted continuous operation.
 
 `Standard_D2ds_v5` is the General Purpose default. `Standard_B2s` is available
 only after its production support and CPU-credit tradeoff, workload capacity, and
