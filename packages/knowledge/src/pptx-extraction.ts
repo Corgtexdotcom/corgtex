@@ -632,7 +632,7 @@ async function extractPptxTextInChild(fileBuffer: Buffer, requested: PptxExtract
     extraction: {
       format: "PPTX",
       parser: "officeparser",
-      parserVersion: "7.6.2",
+      parserVersion: "8.0.0",
       slideCount: value.slideCount,
       notesIncluded: value.notesIncluded,
       supported: true,
