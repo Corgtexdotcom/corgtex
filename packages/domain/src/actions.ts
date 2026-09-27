@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
-import type { ActionStatus, Prisma } from "@prisma/client";
+import type { ActionStatus, MeetingInsight, Prisma } from "@prisma/client";
 import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
@@ -80,6 +80,17 @@ export function actionRequestSource(type: "WEB_REQUEST" | "API_REQUEST" | "GPT_R
   return {
     type,
     id: createHash("sha256").update(`${principalId}\0${normalizedKey}`).digest("hex"),
+  };
+}
+
+export function meetingInsightActionSourcePayload(insight: Pick<MeetingInsight, "type" | "operation" | "title" | "bodyMd" | "assigneeHint" | "dueAt">) {
+  return {
+    type: insight.type,
+    operation: insight.operation,
+    title: insight.title.trim(),
+    bodyMd: insight.bodyMd.trim(),
+    assigneeHint: insight.assigneeHint?.trim() || null,
+    dueAt: insight.dueAt?.toISOString() ?? null,
   };
 }
 
@@ -581,8 +592,13 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
   invariant(!source || (source.type.length > 0 && source.type.length <= 64 && source.id.length > 0 && source.id.length <= 191),
     400, "INVALID_INPUT", "Action source identity is invalid.");
   invariant(!source?.groupId || source.groupId.length <= 191, 400, "INVALID_INPUT", "Action source group is invalid.");
-  const payloadHash = source && ["WEB_REQUEST", "API_REQUEST", "GPT_REQUEST", "MCP_REQUEST", "AGENT_TOOL"].includes(source.type)
-    ? createHash("sha256").update(JSON.stringify({
+  invariant(source?.type !== "MEETING_INSIGHT" || params.sourcePayload != null,
+    400, "INVALID_INPUT", "Meeting insight Action source needs its original insight input.");
+  let payloadHash: string | null = null;
+  if (source?.type === "MEETING_INSIGHT") {
+    payloadHash = createHash("sha256").update(JSON.stringify(params.sourcePayload)).digest("hex");
+  } else if (source && ["WEB_REQUEST", "API_REQUEST", "GPT_REQUEST", "MCP_REQUEST", "AGENT_TOOL"].includes(source.type)) {
+    payloadHash = createHash("sha256").update(JSON.stringify({
       title,
       bodyMd: params.bodyMd?.trim() || null,
       circleId: params.circleId || null,
@@ -593,8 +609,8 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
       priority: params.priority ?? 0,
       isPrivate: params.isPrivate ?? true,
       sourcePayload: params.sourcePayload ?? null,
-    })).digest("hex")
-    : null;
+    })).digest("hex");
+  }
   const isPrivate = params.isPrivate ?? true;
   const publishedAt = isPrivate ? null : new Date();
 

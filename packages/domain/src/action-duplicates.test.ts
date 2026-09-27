@@ -16,6 +16,8 @@ const { db, archiveWorkspaceArtifact, requireWorkspaceMembership, acquireWorkIte
     goalLink: count(),
     adviceProcess: count(),
     approvalFlow: count(),
+    executionRequest: count(),
+    executionResult: count(),
     auditLog: { create: vi.fn() },
   };
   return {
@@ -49,7 +51,8 @@ describe("Action duplicate resolution", () => {
     db.action.findMany.mockResolvedValue([action("action-1"), action("action-2")]);
     db.action.count.mockResolvedValue(0);
     for (const delegate of [db.actionChecklistItem, db.workItemEvidence, db.workspaceExternalResourceAttachment,
-      db.communicationEntityLink, db.meetingInsight, db.deliberationEntry, db.goalLink, db.adviceProcess, db.approvalFlow]) {
+      db.communicationEntityLink, db.meetingInsight, db.deliberationEntry, db.goalLink, db.adviceProcess, db.approvalFlow,
+      db.executionRequest, db.executionResult]) {
       delegate.count.mockResolvedValue(0);
     }
   });
@@ -79,6 +82,19 @@ describe("Action duplicate resolution", () => {
       ...pair, expectedCanonicalVersion: 1, expectedDuplicateVersion: 1, confirmDuplicateId: "action-2",
     })).rejects.toMatchObject({ code: "ACTION_DUPLICATE_NOT_SAFE" });
     expect(archiveWorkspaceArtifact).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["execution request target", "executionRequest", 0],
+    ["execution result target", "executionResult", 0],
+    ["execution result writeback", "executionResult", 1],
+  ] as const)("blocks an %s from the duplicate", async (_label, delegate, callIndex) => {
+    db[delegate].count.mockResolvedValueOnce(callIndex === 0 ? 1 : 0);
+    if (callIndex === 1) db.executionResult.count.mockResolvedValueOnce(1);
+    const preview = await previewActionDuplicateResolution(actor, pair);
+    expect(preview.eligible).toBe(false);
+    expect(preview.blockers).toContain("The duplicate has checklist items or linked work; merge those explicitly before archiving it.");
+    expect(db[delegate].count).toHaveBeenCalledWith({ where: expect.objectContaining({ workspaceId: "ws-1" }) });
   });
 
   it("merges related notes from the same meeting and retains insight links", async () => {

@@ -116,7 +116,8 @@ describe("action domain lifecycle", () => {
     prismaMock.action.findFirst.mockResolvedValueOnce(created);
 
     const { createAction } = await import("./actions");
-    const params = { workspaceId: "workspace-1", title: "Follow up", isPrivate: false, source: { type: "MEETING_INSIGHT", id: "insight-1" } };
+    const params = { workspaceId: "workspace-1", title: "Follow up", isPrivate: false,
+      source: { type: "MEETING_INSIGHT", id: "insight-1" }, sourcePayload: { title: "Follow up" } };
     await expect(createAction(actor, params)).resolves.toMatchObject({ id: created.id });
     await expect(createAction(actor, params)).resolves.toMatchObject({ id: created.id });
 
@@ -166,6 +167,28 @@ describe("action domain lifecycle", () => {
     expect(prismaMock.action.create).toHaveBeenCalledTimes(1);
   });
 
+  it("rejects an edited meeting insight after an earlier attempt claimed its Action source", async () => {
+    prismaMock.action.create.mockResolvedValueOnce({ id: "action-1", workspaceId: "workspace-1", title: "Follow up" });
+    const { createAction, meetingInsightActionSourcePayload } = await import("./actions");
+    const source = { type: "MEETING_INSIGHT", id: "insight-1" };
+    const insight = {
+      type: "ACTION_ITEM" as const, operation: "CREATE" as const, title: "Follow up", bodyMd: "Initial context",
+      assigneeHint: null, dueAt: null,
+    };
+    await createAction(actor, {
+      workspaceId: "workspace-1", title: insight.title, source,
+      sourcePayload: meetingInsightActionSourcePayload(insight),
+    });
+    const claim = prismaMock.actionCreationSource.create.mock.calls[0][0].data;
+    prismaMock.actionCreationSource.findUnique.mockResolvedValueOnce({ actionId: "action-1", payloadHash: claim.payloadHash });
+
+    await expect(createAction(actor, {
+      workspaceId: "workspace-1", title: insight.title, source,
+      sourcePayload: meetingInsightActionSourcePayload({ ...insight, bodyMd: "Edited context" }),
+    })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT", status: 409 });
+    expect(prismaMock.action.create).toHaveBeenCalledTimes(1);
+  });
+
   it("returns the canonical Action for a retried source after an exact duplicate is archived", async () => {
     prismaMock.actionCreationSource.findUnique.mockResolvedValueOnce({ actionId: "duplicate-1", payloadHash: null });
     prismaMock.action.findFirst
@@ -174,7 +197,7 @@ describe("action domain lifecycle", () => {
 
     const { createAction } = await import("./actions");
     await expect(createAction(actor, {
-      workspaceId: "workspace-1", title: "Follow up", source: { type: "MEETING_INSIGHT", id: "insight-1" },
+      workspaceId: "workspace-1", title: "Follow up", source: { type: "MEETING_INSIGHT", id: "insight-1" }, sourcePayload: { title: "Follow up" },
     })).resolves.toMatchObject({ id: "canonical-1" });
     expect(prismaMock.action.create).not.toHaveBeenCalled();
   });
@@ -187,7 +210,7 @@ describe("action domain lifecycle", () => {
 
     const { createAction } = await import("./actions");
     await expect(createAction(actor, {
-      workspaceId: "workspace-1", title: "Follow up", source: { type: "MEETING_INSIGHT", id: "insight-archived" },
+      workspaceId: "workspace-1", title: "Follow up", source: { type: "MEETING_INSIGHT", id: "insight-archived" }, sourcePayload: { title: "Follow up" },
     })).rejects.toMatchObject({ code: "ACTION_SOURCE_UNAVAILABLE", status: 409 });
     expect(prismaMock.action.create).not.toHaveBeenCalled();
   });
@@ -210,7 +233,7 @@ describe("action domain lifecycle", () => {
     const { createAction } = await import("./actions");
     await createAction(actor, {
       workspaceId: "workspace-1", title: "Send Acme proposal", bodyMd: "Additional context.",
-      source: { type: "MEETING_INSIGHT", id: "insight-2" },
+      source: { type: "MEETING_INSIGHT", id: "insight-2" }, sourcePayload: { title: "Send Acme proposal" },
       duplicateGuard: { resolution: "update_existing", targetEntityId: "action-1" },
     });
 

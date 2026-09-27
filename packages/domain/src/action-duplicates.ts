@@ -74,6 +74,9 @@ async function inspectPair(tx: Prisma.TransactionClient, pair: Pair) {
     tx.goalLink.count({ where: { entityType: "Action", entityId: pair.duplicateId } }),
     tx.adviceProcess.count({ where: { workspaceId: pair.workspaceId, subjectType: "ACTION", subjectId: pair.duplicateId } }),
     tx.approvalFlow.count({ where: { workspaceId: pair.workspaceId, subjectType: "ACTION", subjectId: pair.duplicateId } }),
+    tx.executionRequest.count({ where: { workspaceId: pair.workspaceId, writebackTargetType: "ACTION", writebackTargetId: pair.duplicateId } }),
+    tx.executionResult.count({ where: { workspaceId: pair.workspaceId, targetType: "ACTION", targetId: pair.duplicateId } }),
+    tx.executionResult.count({ where: { workspaceId: pair.workspaceId, writebackEntityType: "Action", writebackEntityId: pair.duplicateId } }),
   ]);
   if (referenceCounts.some((count) => count > 0)) blockers.push("The duplicate has checklist items or linked work; merge those explicitly before archiving it.");
 

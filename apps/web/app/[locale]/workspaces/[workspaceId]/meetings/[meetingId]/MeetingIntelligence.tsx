@@ -215,6 +215,7 @@ export default function MeetingIntelligence({
   }
 
   function startEditing(insight: MeetingInsight) {
+    setDuplicateReview((current) => current?.insightId === insight.id ? null : current);
     setEditing((current) => ({
       ...current,
       [insight.id]: {
@@ -476,7 +477,7 @@ export default function MeetingIntelligence({
                             )}
                           </div>
                         )}
-                        {duplicateReview?.insightId === insight.id && (
+                        {!isEditing && duplicateReview?.insightId === insight.id && (
                           <section className="meeting-intelligence-alert" aria-label={t("possibleDuplicateAction")}>
                             <strong>{t("possibleDuplicateAction")}</strong>
                             <p>{t("possibleDuplicateActionDescription", { title: duplicateReview.result.candidate.title || t("insightType.action_item") })}</p>

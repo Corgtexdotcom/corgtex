@@ -101,6 +101,7 @@ vi.mock("./actions", () => ({
   createAction: createActionMock,
   publishAction: publishActionMock,
   updateAction: updateActionMock,
+  meetingInsightActionSourcePayload: (insight: unknown) => insight,
 }));
 
 vi.mock("./proposals", () => ({

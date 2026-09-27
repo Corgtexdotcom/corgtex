@@ -14,7 +14,7 @@ const { db, createAction, publishAction, requireWorkspaceMembership } = vi.hoist
   requireWorkspaceMembership: vi.fn(),
 }));
 vi.mock("@corgtex/shared", () => ({ prisma: db, env: { APP_URL: "https://example.test" }, toInputJson: (value: unknown) => value }));
-vi.mock("./actions", () => ({ createAction, publishAction }));
+vi.mock("./actions", () => ({ createAction, publishAction, meetingInsightActionSourcePayload: (insight: unknown) => insight }));
 vi.mock("./auth", () => ({ requireWorkspaceMembership }));
 
 import { confirmSlackMeetingActionReviewProposal, refreshSlackMeetingActionReviewAfterWebApply } from "./meeting-action-review";

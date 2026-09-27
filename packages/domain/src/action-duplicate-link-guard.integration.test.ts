@@ -64,6 +64,18 @@ it("serializes Action duplicate resolution against linked-work creation in both 
     await expect(writer.query(`INSERT INTO "ActionCreationSource" ("id", "workspaceId", "actionId", "sourceType", "sourceId")
       VALUES ($1, $2, $3, 'WEB_REQUEST', $4)`, [randomUUID(), workspaceId, resolverFirstId, randomUUID()]))
       .rejects.toMatchObject({ code: "23503", constraint: "Action_link_unresolved_check" });
+    await expect(writer.query(`INSERT INTO "ExecutionRequest" ("id", "workspaceId", "goal", "writebackTargetType", "writebackTargetId", "updatedAt")
+      VALUES ($1, $2, 'Follow up', 'ACTION', $3, now())`, [randomUUID(), workspaceId, resolverFirstId]))
+      .rejects.toMatchObject({ code: "23503", constraint: "Action_link_unresolved_check" });
+    const executionRequestId = randomUUID();
+    await writer.query(`INSERT INTO "ExecutionRequest" ("id", "workspaceId", "goal", "updatedAt")
+      VALUES ($1, $2, 'Follow up', now())`, [executionRequestId, workspaceId]);
+    await expect(writer.query(`INSERT INTO "ExecutionResult" ("id", "workspaceId", "executionRequestId", "idempotencyKey", "targetType", "targetId", "updatedAt")
+      VALUES ($1, $2, $3, $4, 'ACTION', $5, now())`, [randomUUID(), workspaceId, executionRequestId, randomUUID(), resolverFirstId]))
+      .rejects.toMatchObject({ code: "23503", constraint: "Action_link_unresolved_check" });
+    await expect(writer.query(`INSERT INTO "ExecutionResult" ("id", "workspaceId", "executionRequestId", "idempotencyKey", "writebackEntityType", "writebackEntityId", "updatedAt")
+      VALUES ($1, $2, $3, $4, 'Action', $5, now())`, [randomUUID(), workspaceId, executionRequestId, randomUUID(), resolverFirstId]))
+      .rejects.toMatchObject({ code: "23503", constraint: "Action_link_unresolved_check" });
   } finally {
     await Promise.allSettled([writer.query("ROLLBACK"), resolver.query("ROLLBACK")]);
     await Promise.all([writer.end(), resolver.end()]);

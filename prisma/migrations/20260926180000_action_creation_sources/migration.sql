@@ -146,3 +146,12 @@ CREATE TRIGGER "MeetingInsight_applied_unresolved_action_check"
 CREATE TRIGGER "MeetingInsight_target_unresolved_action_check"
     BEFORE INSERT OR UPDATE OF "workspaceId", "targetEntityType", "targetEntityId" ON "MeetingInsight"
     FOR EACH ROW EXECUTE FUNCTION "guardResolvedActionLink"('targetEntityType', 'Action', 'targetEntityId', 'workspace');
+CREATE TRIGGER "ExecutionRequest_unresolved_action_check"
+    BEFORE INSERT OR UPDATE OF "workspaceId", "writebackTargetType", "writebackTargetId" ON "ExecutionRequest"
+    FOR EACH ROW EXECUTE FUNCTION "guardResolvedActionLink"('writebackTargetType', 'ACTION', 'writebackTargetId', 'workspace');
+CREATE TRIGGER "ExecutionResult_target_unresolved_action_check"
+    BEFORE INSERT OR UPDATE OF "workspaceId", "targetType", "targetId" ON "ExecutionResult"
+    FOR EACH ROW EXECUTE FUNCTION "guardResolvedActionLink"('targetType', 'ACTION', 'targetId', 'workspace');
+CREATE TRIGGER "ExecutionResult_writeback_unresolved_action_check"
+    BEFORE INSERT OR UPDATE OF "workspaceId", "writebackEntityType", "writebackEntityId" ON "ExecutionResult"
+    FOR EACH ROW EXECUTE FUNCTION "guardResolvedActionLink"('writebackEntityType', 'Action', 'writebackEntityId', 'workspace');

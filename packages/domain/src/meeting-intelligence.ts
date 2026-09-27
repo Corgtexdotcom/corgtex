@@ -6,7 +6,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { AppError, invariant } from "./errors";
 import { defaultModelGateway } from "@corgtex/models";
-import { createAction, publishAction, updateAction } from "./actions";
+import { createAction, meetingInsightActionSourcePayload, publishAction, updateAction } from "./actions";
 import type { DuplicateGuardOptions } from "./duplicate-guard";
 import { createTension, updateTension } from "./tensions";
 import { createProposal, createProposalFromTension, resolveProposal } from "./proposals";
@@ -1214,6 +1214,7 @@ export async function applyInsight(
         isPrivate: false,
         duplicateGuard: { candidateLimit: 200, ...params.actionDuplicateGuard },
         source: { type: "MEETING_INSIGHT", id: insight.id, groupId: insight.meetingId },
+        sourcePayload: meetingInsightActionSourcePayload(insight),
       });
       const opened = action.status === "DRAFT"
         ? await publishAction(actor, { workspaceId: params.workspaceId, actionId: action.id })

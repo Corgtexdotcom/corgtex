@@ -1,5 +1,5 @@
 import { env, prisma, toInputJson, type AppActor } from "@corgtex/shared";
-import { createAction, publishAction } from "./actions";
+import { createAction, meetingInsightActionSourcePayload, publishAction } from "./actions";
 import { isDuplicateGuardMatchError } from "./duplicate-guard";
 import { requireWorkspaceMembership } from "./auth";
 import { humanMemberIdentityWhere } from "./member-identity";
@@ -835,6 +835,7 @@ export async function confirmSlackMeetingActionReviewProposal(actor: AppActor, p
       isPrivate: true,
       duplicateGuard: { candidateLimit: 200 },
       source: { type: "MEETING_INSIGHT", id: insight.id, groupId: review.meetingId },
+      sourcePayload: meetingInsightActionSourcePayload(insight),
     });
   } catch (error) {
     if (!isDuplicateGuardMatchError(error)) throw error;
