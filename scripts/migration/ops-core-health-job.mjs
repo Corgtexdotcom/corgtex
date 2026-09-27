@@ -92,7 +92,9 @@ function verifyJob(j,p){
     &&c.triggerType==="Manual"&&c.replicaTimeout===120&&c.replicaRetryLimit===0&&!c.scheduleTriggerConfig&&!c.eventTriggerConfig
     &&same(c.manualTriggerConfig,{parallelism:1,replicaCompletionCount:1})&&(!c.secrets||c.secrets.length===0)
     &&c.identitySettings?.length===1&&equalId(c.identitySettings[0].identity,p.identityResourceId)&&c.identitySettings[0].lifecycle==="None"
-    &&c.registries?.length===1&&same(clean(c.registries).map(r=>({...r,identity:r.identity?.toLowerCase()})),
+    &&c.registries?.length===1&&c.registries.every(r=>Object.keys(r).every(k=>["server","identity","username","passwordSecretRef"].includes(k))
+      &&(r.username===undefined||r.username==="")&&(r.passwordSecretRef===undefined||r.passwordSecretRef===""))
+    &&same(c.registries.map(r=>({server:r.server,identity:r.identity?.toLowerCase()})),
       [{server:p.image.split("/")[0],identity:p.identityResourceId.toLowerCase()}]),"HEALTH_JOB_CONFIG_CHANGED");
   verifyTemplate(j.properties.template,template(p));
 }
