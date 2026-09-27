@@ -8,6 +8,7 @@ import { parse } from 'yaml';
 import { readFileSync } from 'node:fs';
 import { target, targetResource } from './ops-core-target-profile.mjs';
 import { cleanupOwnedScratch, inspectShadowDatabaseInventory, restoreBothDomains, scratchName,
+  withScratchMaintenance,
   validateOwnedScratchState, validateShadowDatabaseInventory, validateShadowEnvironment } from './qualify-opscore-shadow.mjs';
 import { validateRecoveryEvidence } from './qualify-ops-azure-target.mjs';
 
@@ -24,13 +25,13 @@ for (const changed of [{ ...retained, scratchName: 'corgtex_core' }, { ...retain
   { ...retained, scratchOwner: 'other' }, { ...retained, phase: 'CREATED' }]) {
   assert.throws(() => validateOwnedScratchState(changed, name, expectedRef), /SHADOW_SCRATCH_STATE_INVALID/);
 }
-const env = { TARGET_PROFILE: 'opscore', GITHUB_REF: 'refs/heads/main',
+const env = { TARGET_PROFILE: 'opscore', DOMAIN: 'ops', GITHUB_REF: 'refs/heads/main',
   GITHUB_REPOSITORY: 'Corgtexdotcom/corgtex', AZURE_SUBSCRIPTION_ID: '227eb707-bc46-415e-a09b-7d2b69fb14b2',
   TARGET_POSTGRES_RESOURCE_ID: targetResource, TARGET_POSTGRES_HOST: target.host,
   TARGET_POSTGRES_ADMIN_USER: 'corgtexadmin', GITHUB_RUN_ID: '12345', GITHUB_RUN_ATTEMPT: '1' };
 validateShadowEnvironment(env);
 for (const change of [{ GITHUB_REF: 'refs/heads/feature' }, { TARGET_POSTGRES_RESOURCE_ID: 'other' },
-  { TARGET_PROFILE: 'rehearsal' }, { GITHUB_RUN_ID: '0' }]) {
+  { TARGET_PROFILE: 'rehearsal' }, { DOMAIN: 'core' }, { GITHUB_RUN_ID: '0' }]) {
   assert.throws(() => validateShadowEnvironment({ ...env, ...change }), /SHADOW_PROTECTED_INPUT_INVALID/);
 }
 
@@ -42,6 +43,22 @@ try {
     password: 'fixture', sslmode: 'verify-full', targetTlsRootCert: 'fixture' };
   const systemDatabases = ['azure_maintenance', 'azure_sys', 'postgres', 'template0', 'template1']
     .map(databaseName => ({ name: databaseName }));
+  const lockEvents = [];
+  const maintenanceDeadline = Date.now() + 40;
+  let lockSignal;
+  await withScratchMaintenance({ api: {}, intent: {}, config, deadline: maintenanceDeadline,
+    workAbortReserveMs: 20,
+    maintenanceFactory: async ({ signal }) => {
+      lockSignal = signal;
+      return { signal, async close() { lockEvents.push('close'); } };
+    },
+    work: async maintenance => {
+      await new Promise(resolve => setTimeout(resolve, 70));
+      assert.equal(maintenance.signal.aborted, true);
+      assert.equal(lockSignal.aborted, false);
+      lockEvents.push('work-complete');
+    } });
+  assert.deepEqual(lockEvents, ['work-complete', 'close']);
   assert.equal(validateShadowDatabaseInventory(systemDatabases).status, 'SHADOW_DATABASE_INVENTORY_EMPTY');
   for (const extra of [name, 'corgtex_core', 'unrecognized_database']) {
     assert.throws(() => validateShadowDatabaseInventory([...systemDatabases, { name: extra }]),
@@ -125,6 +142,8 @@ const workflow = parse(readFileSync('.github/workflows/azure-migration-postgres-
 assert.ok(workflow.on.workflow_dispatch.inputs.operation.options.includes('qualify-opscore-shadow'));
 const job = workflow.jobs['qualify-opscore-shadow'];
 assert.equal(job.environment, 'azure-migration-foundation');
+assert.equal(job['timeout-minutes'], 110);
+assert.equal(job.env.DOMAIN, '${{ inputs.domain }}');
 assert.equal(job.env.TARGET_PROFILE, 'opscore');
 assert.ok(job.if.includes("github.ref == 'refs/heads/main'"));
 assert.ok(job.steps.some(step => step.name?.includes('Persist shadow lifecycle intent before START')));
@@ -134,6 +153,8 @@ assert.ok(job.steps.find(step => step.name?.includes('Upload private shadow rece
 assert.ok(!job.steps.find(step => step.name?.includes('Upload private shadow receipts'))?.with?.path
   .includes('core-evidence'));
 const recoveryJob = workflow.jobs['recover-opscore-shadow'];
+assert.equal(recoveryJob['timeout-minutes'], 100);
+assert.equal(recoveryJob.env.DOMAIN, '${{ inputs.domain }}');
 assert.ok(recoveryJob.if.includes("inputs.recovery_kind == 'opscore-shadow'"));
 assert.ok(recoveryJob.steps.find(step => step.name?.includes('Persist scratch recovery intent')));
 assert.ok(recoveryJob.steps.find(step => step.name?.includes('Close recovery window'))?.if.includes('always()'));

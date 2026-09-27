@@ -39,7 +39,8 @@ export function validateShadowDatabaseInventory(databases) {
 export async function inspectShadowDatabaseInventory({ config, clientFactory = value => new pg.Client(value) }) {
   need(config.database === 'postgres' && config.user === 'corgtexadmin'
     && config.host === target.host && config.sslmode === 'verify-full', 'SHADOW_INVENTORY_TARGET_INVALID');
-  const client = clientFactory(nodeClientConfig(config, 'corgtex_shadow_inventory', 30_000, 30_000));
+  const client = clientFactory(nodeClientConfig({ ...config, statementTimeoutMillis: 25_000 },
+    'corgtex_shadow_inventory', 30_000, 30_000));
   await client.connect();
   try {
     const identity = await client.query('SELECT current_database() AS database, session_user AS login, current_user AS role');
@@ -59,7 +60,7 @@ export function scratchName(runId, attempt, domain) {
 }
 
 export function validateShadowEnvironment(env, recovery = false) {
-  need(TARGET_PROFILE === 'opscore' && env.TARGET_PROFILE === 'opscore'
+  need(TARGET_PROFILE === 'opscore' && env.TARGET_PROFILE === 'opscore' && env.DOMAIN === 'ops'
     && env.GITHUB_REF === 'refs/heads/main' && env.GITHUB_REPOSITORY === 'Corgtexdotcom/corgtex'
     && env.AZURE_SUBSCRIPTION_ID === SUBSCRIPTION
     && env.TARGET_POSTGRES_RESOURCE_ID === targetResource
@@ -72,8 +73,8 @@ export function validateShadowEnvironment(env, recovery = false) {
 
 const stateFor = (dir, domain) => `${dir}/${domain}-scratch-state.json`;
 const evidenceFor = (dir, domain) => `${dir}/${domain}-evidence`;
-const targetConfig = async (api, env) => targetDatabaseConfigFromEnv({ ...env,
-  TARGET_POSTGRES_ADMIN_PASSWORD: await api.readAdminSecret() }, 'postgres');
+const targetConfig = async (api, env) => ({ ...targetDatabaseConfigFromEnv({ ...env,
+  TARGET_POSTGRES_ADMIN_PASSWORD: await api.readAdminSecret() }, 'postgres'), statementTimeoutMillis: 120_000 });
 
 export function validateOwnedScratchState(state, expectedName, expectedRef) {
   need(state?.schemaVersion === '1.0.0' && state.scratchName === expectedName
@@ -105,7 +106,8 @@ export async function cleanupOwnedScratch({ config, stateFile, expectedName, set
   const expectedRef = `sha256:${createHash('sha256')
     .update(`${config.host}\0${expectedName}`).digest('hex').slice(0, 16)}`;
   const state = existsSync(stateFile) ? validateOwnedScratchState(readState(stateFile), expectedName, expectedRef) : null;
-  const client = clientFactory(nodeClientConfig(config, 'corgtex_shadow_cleanup', 30_000, 30_000));
+  const client = clientFactory(nodeClientConfig({ ...config, statementTimeoutMillis: 25_000 },
+    'corgtex_shadow_cleanup', 30_000, 30_000));
   await client.connect();
   try {
     const identity = await client.query('SELECT current_database() AS database, session_user AS login, current_user AS role');
@@ -134,10 +136,13 @@ export async function cleanupOwnedScratch({ config, stateFile, expectedName, set
   } finally { await client.end().catch(() => {}); }
 }
 
-export async function withScratchMaintenance({ api, intent, config, deadline, work,
+export async function withScratchMaintenance({ api, intent, config, deadline, work, workAbortReserveMs = 0,
   maintenanceFactory = openPostgresMaintenance }) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error('SHADOW_DEADLINE')), Math.max(1, deadline - Date.now() - 10000));
+  const workAbort = new AbortController();
+  const timer = workAbortReserveMs > 0
+    ? setTimeout(() => workAbort.abort(new Error('SHADOW_WORK_DEADLINE')),
+      Math.max(1, deadline - Date.now() - workAbortReserveMs)) : null;
   const assertOwned = async () => {
     controller.signal.throwIfAborted();
     need(Date.now() < deadline, 'SHADOW_DEADLINE');
@@ -150,10 +155,13 @@ export async function withScratchMaintenance({ api, intent, config, deadline, wo
   try {
     maintenance = await maintenanceFactory({ config, expected: { host: target.host, port: config.port,
       database: 'postgres', user: config.user }, signal: controller.signal, assertOwned });
-    return await work(maintenance);
+    return await work({ ...maintenance, signal: AbortSignal.any([maintenance.signal, workAbort.signal]) });
   } finally {
-    clearTimeout(timer); controller.abort();
+    if (timer !== null) clearTimeout(timer);
+    // The work deadline may cancel child work, but only settled work releases
+    // the maintenance session. Never abort its liveness signal first.
     await maintenance?.close().catch(() => {});
+    controller.abort();
   }
 }
 
@@ -162,7 +170,7 @@ export function sourceConfigs(env) {
     const sourceUrl = env[`RAILWAY_${domain.toUpperCase()}_POSTGRES_READ_ONLY_URL`];
     const sourceRoot = env[`RAILWAY_${domain.toUpperCase()}_POSTGRES_TLS_ROOT_CERT`];
     need(typeof sourceUrl === 'string' && typeof sourceRoot === 'string', 'SHADOW_SOURCE_CREDENTIAL_MISSING');
-    return [domain, { ...parseSourceDatabaseUrl(sourceUrl),
+    return [domain, { ...parseSourceDatabaseUrl(sourceUrl), statementTimeoutMillis: 120_000,
       sourceTlsRootCert: validateSourceTlsRootCertificate(sourceRoot) }];
   }));
 }
@@ -193,7 +201,8 @@ export async function restoreBothDomains({ api, intent, config, sources, directo
   restore = runPostgresRestoreRehearsal, maintenanceFactory = openPostgresMaintenance,
   verifyParity = validatePostgresDatabaseParity, admitCapture = admitPrivateCustomerSnapshot }) {
   need(intent.computeSku === 'Standard_B2s', 'SHADOW_B2S_REQUIRED');
-  return withScratchMaintenance({ api, intent, config, deadline: intent.workDeadline, maintenanceFactory,
+  return withScratchMaintenance({ api, intent, config, deadline: intent.workDeadline,
+    workAbortReserveMs: 120_000, maintenanceFactory,
     work: async maintenance => {
     const captureAdmission = await admitCapture({ api, config, directory });
     need(captureAdmission?.status === 'FRESH_DISABLED_CAPTURE_ADMITTED', 'SHADOW_CAPTURE_ADMISSION_UNPROVEN');
@@ -203,10 +212,15 @@ export async function restoreBothDomains({ api, intent, config, sources, directo
       mkdirSync(domainTemp, { recursive: true, mode: 0o700 });
       mkdirSync(domainEvidence, { recursive: true, mode: 0o700 });
       try {
-        const result = await restore({ domain, sourceConfig: sources[domain], targetAdminConfig: config,
+        const result = await restore({ domain,
+          sourceConfig: { ...sources[domain], shadowSignal: maintenance.signal,
+            shadowDeadline: intent.workDeadline - 120_000 },
+          targetAdminConfig: { ...config, shadowSignal: maintenance.signal,
+            shadowDeadline: intent.workDeadline - 120_000 },
           scratchName: scratchName(intent.runId, intent.runAttempt, domain),
           artifactDir: domainEvidence, tempDir: domainTemp, stateFile: stateFor(directory, domain),
           productionMode: true, signal: maintenance.signal,
+          commandDeadline: intent.workDeadline,
           assertCustody: async () => { await maintenance.assertHeld(); },
           beforeRestore: async () => { await maintenance.assertHeld(); },
         });

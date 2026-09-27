@@ -129,7 +129,10 @@ and Ops Railway read-only URLs and TLS roots. The one-hour intent is uploaded
 before START. The workflow opens only its runner's IPv4, holds the shared
 PostgreSQL maintenance lock, restores consistent Core and Ops snapshots into
 separate administrator-only scratch databases, checks frozen-sequence and
-database parity, and retains both scratch databases until cleanup. Raw archives
+database parity, and retains both scratch databases until cleanup. Shadow work
+stops before the one-hour intent expires; active Docker containers and SQL
+statements are bounded and drained while the maintenance lock remains held.
+Raw archives
 and catalog evidence stay on the private ephemeral runner; the artifact contains
 only bounded receipts and exact scratch OIDs. Cleanup verifies each database
 name, OID and owner before DROP, verifies the system-only database inventory,

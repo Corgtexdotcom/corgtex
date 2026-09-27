@@ -29,7 +29,7 @@ on:
           - opscore-shadow
           - synthetic-qualification
       domain:
-        description: "Exactly one Railway PostgreSQL data domain to restore and verify."
+        description: "Single-domain source; select ops for the Core+Ops shadow operation."
         required: true
         type: choice
         options:
@@ -304,9 +304,10 @@ jobs:
     if: github.ref == 'refs/heads/main' && inputs.operation == 'qualify-opscore-shadow'
     name: Shadow restore Core and Ops on pinned B2s without cutover
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 110
     environment: azure-migration-foundation
     env:
+      DOMAIN: ${{ inputs.domain }}
       AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
@@ -384,9 +385,10 @@ jobs:
     if: github.ref == 'refs/heads/main' && inputs.operation == 'recover' && inputs.recovery_kind == 'opscore-shadow'
     name: Recover one exact interrupted Ops/Core shadow run
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 100
     environment: azure-migration-foundation
     env:
+      DOMAIN: ${{ inputs.domain }}
       AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
