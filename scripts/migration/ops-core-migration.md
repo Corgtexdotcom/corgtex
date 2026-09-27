@@ -167,6 +167,12 @@ writes an after marker, and waits beyond Azure's documented WAL archive delay.
 Its empty-target check permits only Azure-owned `azure` and `pgaadauth`
 extensions in `pg_catalog` on `postgres`; other user content blocks marker creation.
 It then requests an Azure managed point-in-time restore with run ownership tags.
+Azure may initially give the restored server the source server's tags and public
+network setting despite the restore request. After an accepted restore receipt,
+the operator admits only the exact source tags on the run-derived clone, waits for
+provisioning, verifies no inherited firewall rule, and patches exact run ownership
+tags before opening its single-IP verification window. Cleanup applies the same
+bounded adoption before deleting the clone; foreign tags still stop deletion.
 The restored server must contain the before marker and omit the after marker.
 The receipt measures restore time; it does not set an RTO or RPO policy.
 

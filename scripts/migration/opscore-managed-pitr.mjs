@@ -8,6 +8,7 @@ import { AzureCliCredential } from '@azure/identity';
 import { ContainerClient } from '@azure/storage-blob';
 import { RESOURCE, HOST, ProbeError, connectionConfig, sanitize } from './probe-ops-azure-target.mjs';
 import { openOpsCorePitrGuard, OPSCORE_CUSTODY_URL } from './ops-core-pitr-guard.mjs';
+import { TARGETS } from './ops-core-target-profile.mjs';
 import { Azure, SUBSCRIPTION, GROUP, clock, prepare, qualify, cleanup as cleanupTarget,
   validateEnvironment, validateIntent, validateServer, validateRules, intentComputeSku,
   captureTrialClientConfig, recoveryEvidence, waitState } from './qualify-ops-azure-target.mjs';
@@ -36,6 +37,8 @@ export const cloneRuleName = i => `opscore-pitr-${i.runId}-${i.runAttempt}`;
 export const cloneTags = i => ({ application: 'corgtex', managedBy: 'migration-operator',
   purpose: 'opscore-managed-pitr-qualification', sourceServer: 'corgtex-opscore-pg18',
   sourceRunId: i.runId, sourceRunAttempt: i.runAttempt });
+const matchesTags = (actual, expected) => exactKeys(actual, Object.keys(expected))
+  && Object.entries(expected).every(([key, value]) => actual[key] === value);
 
 function save(path, value) {
   const bytes = JSON.stringify(value, null, 2) + '\n';
@@ -50,15 +53,15 @@ function read(path) {
     return JSON.parse(readFileSync(fd, 'utf8'));
   } finally { closeSync(fd); }
 }
-export function validateClone(value, i) {
+export function validateClone(value, i, { allowInheritedTags = false } = {}) {
   assert(i.qualificationKind === 'managed-pitr', 'PITR_INTENT_MISMATCH');
   assert(value?.id?.toLowerCase() === cloneResource(i).toLowerCase()
     && value.name === i.restoreServerName && value.location?.replaceAll(' ', '').toLowerCase() === 'westus3'
     && value.type?.toLowerCase() === 'microsoft.dbforpostgresql/flexibleservers'
-    && exactKeys(value.tags, Object.keys(cloneTags(i)))
-    && Object.entries(cloneTags(i)).every(([key, expected]) => value.tags[key] === expected), 'PITR_CLONE_OWNER_MISMATCH');
+    && (matchesTags(value.tags, cloneTags(i))
+      || (allowInheritedTags && matchesTags(value.tags, TARGETS.opscore.tags))), 'PITR_CLONE_OWNER_MISMATCH');
   const state = value.properties?.state;
-  assert(['Creating', 'Starting', 'Ready', 'Updating', 'Stopping', 'Stopped', 'Dropping'].includes(state), 'PITR_CLONE_DRIFT');
+  assert(['Creating', 'Provisioning', 'Starting', 'Ready', 'Updating', 'Stopping', 'Stopped', 'Dropping'].includes(state), 'PITR_CLONE_DRIFT');
   if (['Ready', 'Stopped'].includes(state)) {
     assert(value.sku?.name === 'Standard_D2ds_v5' && value.sku?.tier === 'GeneralPurpose'
       && value.properties?.version === '18' && value.properties?.storage?.storageSizeGB === 32
@@ -112,6 +115,27 @@ export class CloneArm {
   async clone(i, deadline = i.workDeadline) {
     const result = await this.call('GET', i, '', undefined, deadline);
     return result.status === 404 ? null : validateClone(result.value, i);
+  }
+  async adoptRestoredClone(i, accepted, deadline = i.workDeadline) {
+    const acceptedAt = Date.parse(accepted?.at);
+    assert(accepted?.status === 'ARM_RESTORE_ACCEPTED' && Number.isFinite(acceptedAt)
+      && acceptedAt >= i.createdAt && acceptedAt <= this.now(), 'PITR_RESTORE_ACCEPTANCE_UNPROVEN');
+    let patched = false;
+    while (this.now() < deadline) {
+      const result = await this.call('GET', i, '', undefined, deadline);
+      if (result.status !== 404) {
+        const observed = validateClone(result.value, i, { allowInheritedTags: true });
+        const owned = matchesTags(observed.tags, cloneTags(i));
+        if (owned && ['Ready', 'Stopped'].includes(observed.properties.state)) return observed;
+        if (!owned && ['Ready', 'Stopped'].includes(observed.properties.state) && !patched) {
+          assert((await this.rules(i, deadline)).length === 0, 'PITR_FOREIGN_FIREWALL_RULES');
+          await this.call('PATCH', i, '', { tags: cloneTags(i) }, deadline);
+          patched = true;
+        }
+      }
+      await this.pause(Math.min(10000, deadline - this.now()));
+    }
+    throw new ProbeError('PITR_CLONE_TAGS_UNPROVEN');
   }
   async waitClone(i, states, deadline = i.workDeadline) {
     while (this.now() < deadline) {
@@ -416,7 +440,9 @@ export async function main(args = process.argv.slice(2), env = process.env) {
           save(`${dir}/restore-rejected.json`, { runId: i.runId, runAttempt: i.runAttempt, restoreTime });
         throw error;
       }
-      save(`${dir}/restore-accepted.json`, { status: 'ARM_RESTORE_ACCEPTED', at: new Date().toISOString() });
+      const accepted = { status: 'ARM_RESTORE_ACCEPTED', at: new Date().toISOString() };
+      save(`${dir}/restore-accepted.json`, accepted);
+      await arm.adoptRestoredClone(i, accepted);
       await arm.enableRunnerAccess(i);
       const restored = await verifyMarker({ ...config, host: cloneHost(i) }, i);
       const result = { status: 'OPSCORE_MANAGED_PITR_VERIFIED', source: RESOURCE, clone: cloneResource(i),
@@ -499,6 +525,8 @@ export async function main(args = process.argv.slice(2), env = process.env) {
         && rejected.restoreTime === read(`${dir}/restore-attempt.json`).restoreTime,
       'PITR_RESTORE_REJECTION_INVALID');
       try {
+        if (!deleteAttempted && existsSync(`${dir}/restore-accepted.json`))
+          await arm.adoptRestoredClone(i, read(`${dir}/restore-accepted.json`), cloneDeadline);
         cloneResult = await arm.remove(i, cloneDeadline, { deleteAttempted: deleteAttempted && !deleteRejected,
           allowAbsent: Boolean(rejected),
           markDeleteAttempt: async () => {
