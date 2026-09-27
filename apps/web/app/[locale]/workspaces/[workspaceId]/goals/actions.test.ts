@@ -128,6 +128,43 @@ describe("goals server actions", () => {
     expect(updateKeyResult).not.toHaveBeenCalled();
   });
 
+  it.each(["VERSION_CONFLICT", "CONFLICT"])("redirects Key Result update conflict %s to the safe refresh state", async (code) => {
+    const redirectSignal = new Error("NEXT_REDIRECT");
+    updateKeyResult.mockRejectedValueOnce(new MockAppError(409, code, "internal detail"));
+    redirect.mockImplementationOnce(() => {
+      throw redirectSignal;
+    });
+    const { updateKeyResultFormAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("goalId", "goal-1");
+    formData.set("keyResultId", "kr-1");
+    formData.set("expectedVersion", "6");
+    formData.set("title", "Stale edit");
+
+    await expect(updateKeyResultFormAction(formData)).rejects.toBe(redirectSignal);
+    expect(redirect).toHaveBeenCalledWith("/workspaces/workspace-1/goals?goalId=goal-1&versionConflict=1");
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it.each(["VERSION_CONFLICT", "CONFLICT"])("redirects Key Result delete conflict %s to the safe refresh state", async (code) => {
+    const redirectSignal = new Error("NEXT_REDIRECT");
+    deleteKeyResult.mockRejectedValueOnce(new MockAppError(409, code, "internal detail"));
+    redirect.mockImplementationOnce(() => {
+      throw redirectSignal;
+    });
+    const { deleteKeyResultFormAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("goalId", "goal-1");
+    formData.set("keyResultId", "kr-1");
+    formData.set("expectedVersion", "6");
+
+    await expect(deleteKeyResultFormAction(formData)).rejects.toBe(redirectSignal);
+    expect(redirect).toHaveBeenCalledWith("/workspaces/workspace-1/goals?goalId=goal-1&versionConflict=1");
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
   it("passes the exact rendered version and reports Goal edit success only after revalidation", async () => {
     const { editGoalFormAction } = await import("./actions");
 

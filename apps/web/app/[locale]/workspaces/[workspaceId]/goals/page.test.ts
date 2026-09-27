@@ -40,4 +40,8 @@ describe("Goals page source", () => {
     expect(source).toContain('tWork("editConflictTitle")');
     expect(source).toContain('tWork("editConflictReload")');
   });
+
+  it("keeps nullable Key Result current values blank in the edit form", () => {
+    expect(source).toContain('name="currentValue" type="number" step="any" defaultValue={kr.currentValue ?? ""}');
+  });
 });

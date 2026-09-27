@@ -280,7 +280,7 @@ export async function updateKeyResultFormAction(formData: FormData) {
       unit: asOptional(formData, "unit"),
     });
   } catch (error) {
-    if (error instanceof AppError && error.code === "VERSION_CONFLICT") {
+    if (error instanceof AppError && (error.code === "VERSION_CONFLICT" || error.code === "CONFLICT")) {
       redirect(`/workspaces/${workspaceId}/goals?goalId=${encodeURIComponent(goalId)}&versionConflict=1`);
     }
     throw error;
@@ -302,7 +302,7 @@ export async function deleteKeyResultFormAction(formData: FormData) {
       expectedVersion: expectedVersionFromForm(formData),
     });
   } catch (error) {
-    if (error instanceof AppError && error.code === "VERSION_CONFLICT") {
+    if (error instanceof AppError && (error.code === "VERSION_CONFLICT" || error.code === "CONFLICT")) {
       redirect(`/workspaces/${workspaceId}/goals?goalId=${encodeURIComponent(goalId)}&versionConflict=1`);
     }
     throw error;

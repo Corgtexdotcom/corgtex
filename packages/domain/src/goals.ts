@@ -1382,7 +1382,12 @@ export async function deleteKeyResult(
 
     await tx.keyResult.delete({ where: { id: params.krId } });
 
-    await recomputeGoalProgress(kr.goalId, actor, tx, { forceVersion: true, changedFields: ["keyResults"], previousKeyResults });
+    await recomputeGoalProgress(kr.goalId, actor, tx, {
+      forceVersion: true,
+      changedFields: ["keyResults"],
+      previousKeyResults,
+      resetProgressWhenUndriven: true,
+    });
   });
 }
 
@@ -1672,7 +1677,12 @@ export async function recomputeGoalProgress(
   goalId: string,
   actor?: AppActor,
   txClient?: Prisma.TransactionClient,
-  options?: { forceVersion?: boolean; changedFields?: string[]; previousKeyResults?: unknown[] },
+  options?: {
+    forceVersion?: boolean;
+    changedFields?: string[];
+    previousKeyResults?: unknown[];
+    resetProgressWhenUndriven?: boolean;
+  },
 ) {
   const execute = async (tx: Prisma.TransactionClient) => {
     await acquireWorkItemAdvisoryLock(tx, "Goal", goalId);
@@ -1703,8 +1713,8 @@ export async function recomputeGoalProgress(
       const total = goal.childGoals.reduce((acc, g) => acc + g.progressPercent, 0);
       computedProgress = Math.round(total / goal.childGoals.length);
     } else {
-      // leave as is if no drivers
-      computedProgress = goal.progressPercent;
+      // Preserve manual progress unless a driver-removal flow explicitly resets it.
+      computedProgress = options?.resetProgressWhenUndriven ? 0 : goal.progressPercent;
     }
 
     if (computedProgress !== goal.progressPercent || options?.forceVersion) {

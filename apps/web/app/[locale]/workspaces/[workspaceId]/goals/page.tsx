@@ -539,7 +539,7 @@ function GoalNodeInner({
                       <div className="actions-inline">
                         <label style={{ flex: 1 }}>
                           {t("formKeyResultCurrent")}
-                          <input name="currentValue" type="number" step="any" defaultValue={kr.currentValue ?? 0} />
+                          <input name="currentValue" type="number" step="any" defaultValue={kr.currentValue ?? ""} />
                         </label>
                         <label style={{ flex: 1 }}>
                           {t("formKeyResultTarget")}

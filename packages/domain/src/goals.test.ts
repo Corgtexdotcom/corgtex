@@ -1799,6 +1799,9 @@ describe("Goals Domain", () => {
       });
 
       expect(prisma.keyResult.delete).toHaveBeenCalled();
+      expect(prisma.goal.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ progressPercent: 0 }),
+      }));
     });
 
     it("rejects stale Key Result deletes and avoids versioning unchanged edit submissions", async () => {
@@ -1822,6 +1825,21 @@ describe("Goals Domain", () => {
         targetValue: kr.targetValue,
         currentValue: kr.currentValue,
         unit: kr.unit,
+      });
+      expect(prisma.keyResult.update).not.toHaveBeenCalled();
+      expect(prisma.workItemVersion.create).not.toHaveBeenCalled();
+
+      const nullableKr = { ...kr, id: "kr-null", currentValue: null, progressPercent: 0 };
+      vi.mocked(prisma.keyResult.findUnique).mockResolvedValueOnce(nullableKr as any);
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({ ...goal, version: 4 } as any);
+      await updateKeyResult(actor, {
+        workspaceId: "ws-1",
+        krId: nullableKr.id,
+        expectedVersion: 4,
+        title: nullableKr.title,
+        targetValue: nullableKr.targetValue,
+        currentValue: null,
+        unit: nullableKr.unit,
       });
       expect(prisma.keyResult.update).not.toHaveBeenCalled();
       expect(prisma.workItemVersion.create).not.toHaveBeenCalled();
