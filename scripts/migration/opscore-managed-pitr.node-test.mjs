@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { RESOURCE, HOST } from './probe-ops-azure-target.mjs';
 import { target } from './ops-core-target-profile.mjs';
-import { CloneArm, cloneResource, cloneRuleName, cloneTags, createMarker, removeMarker, validateClone } from './opscore-managed-pitr.mjs';
+import { CloneArm, cloneResource, cloneRuleName, cloneTags, createMarker, removeMarker, validateClone,
+  verifyNeverStarted } from './opscore-managed-pitr.mjs';
 import { firewallName, pitrServerName, pitrSchemaName } from './qualify-ops-azure-target.mjs';
 
 assert.equal(process.env.TARGET_PROFILE, 'opscore');
@@ -23,6 +24,24 @@ const clone = () => ({ id: cloneResource(i), name: i.restoreServerName, type: 'M
 const token = 'x'.repeat(150);
 const api = { async identity() {}, async authority() {}, async call() { return { accessToken: token }; } };
 const reply = (status, value = null) => ({ status, async text() { return JSON.stringify(value); } });
+
+test('no-START recovery verifies a closed target and absent clone without opening either', async () => {
+  const events = [];
+  const server = { id: RESOURCE, name: target.server, fullyQualifiedDomainName: HOST, administratorLogin: 'corgtexadmin',
+    version: '18', location: 'westus3', sku: { name: 'Standard_D2ds_v5', tier: 'GeneralPurpose' },
+    storage: { storageSizeGb: 32, autoGrow: 'Enabled', tier: 'P4', iops: 120 },
+    highAvailability: { mode: 'Disabled' }, backup: { backupRetentionDays: 14, geoRedundantBackup: 'Disabled' },
+    authConfig: { activeDirectoryAuth: 'Disabled', passwordAuth: 'Enabled' },
+    network: { publicNetworkAccess: 'Disabled' }, tags: target.tags, state: 'Stopped' };
+  const read = { async identity() { events.push('identity'); }, async boundary() { events.push('boundary'); },
+    async server() { events.push('server'); return server; }, async rules() { events.push('rules'); return []; } };
+  const cloneRead = { async clone() { events.push('clone'); return null; } };
+  assert.deepEqual(await verifyNeverStarted(read, cloneRead, i, Date.now() + 1000),
+    { serverStopped: true, firewallAbsent: true, cloneAbsent: true });
+  assert.deepEqual(events, ['identity', 'boundary', 'server', 'rules', 'clone']);
+  server.state = 'Ready';
+  await assert.rejects(verifyNeverStarted(read, cloneRead, i, Date.now() + 1000), /PITR_NEVER_STARTED_BASELINE_UNPROVEN/);
+});
 
 test('a restored server with changed owner tags is never eligible for deletion', async () => {
   const foreign = clone(); foreign.tags.sourceRunAttempt = '2';

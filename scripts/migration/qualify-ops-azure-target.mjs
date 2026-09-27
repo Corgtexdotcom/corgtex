@@ -477,11 +477,17 @@ export function validateRecoveryEvidence(i, env, { source, current, runs, jobs, 
       : 'Remove synthetic scratch databases and stop target';
   const start = steps?.filter(s => s.name === startStepName);
   const clean = steps?.filter(s => s.name === cleanStepName);
-  assert(start?.length === 1 && start[0].status === "completed" && ["success", "failure", "cancelled", "timed_out"].includes(start[0].conclusion)
+  const claim = kind === 'pitr' ? steps?.filter(s => s.name === 'Fence both cutovers before PITR START') : null;
+  const startSkipped = kind === 'pitr' && start?.length === 1 && start[0].status === 'completed'
+    && start[0].conclusion === 'skipped' && claim?.length === 1 && claim[0].status === 'completed'
+    && ['success', 'failure', 'cancelled', 'timed_out'].includes(claim[0].conclusion);
+  assert(start?.length === 1 && start[0].status === "completed"
+    && (["success", "failure", "cancelled", "timed_out"].includes(start[0].conclusion) || startSkipped)
     && clean?.length === 1 && clean[0].conclusion !== "success", "RECOVERY_NOT_UNRESOLVED");
   assert(sameKeys(marker, ["runId", "runAttempt"]) && marker.runId === i.runId && marker.runAttempt === i.runAttempt, "RECOVERY_START_UNPROVEN");
   assert(!receipt || (kind === 'shadow' && receipt.status === 'OPSCORE_SHADOW_CLEANUP_UNPROVEN')
     || (kind === 'pitr' && receipt.status === 'PITR_CLEANUP_UNPROVEN'), "RECOVERY_ALREADY_CLEANED");
+  return { startSkipped };
 }
 
 // Read existing run/activity evidence only. No artifact or intent alone grants
@@ -506,7 +512,7 @@ export async function recoveryEvidence(i, env, directory, request = fetch, kind 
   const range = encodeURIComponent(`${source.created_at}..${current.created_at}`);
   const runs = await get(`workflows/${source.workflow_id}/runs?per_page=100&created=${range}`);
   const jobs = await get(`runs/${i.runId}/attempts/${i.runAttempt}/jobs?per_page=100`);
-  validateRecoveryEvidence(i, env, { source, current, runs, jobs,
+  return validateRecoveryEvidence(i, env, { source, current, runs, jobs,
     marker: existsSync(`${directory}/${kind === 'pitr' ? 'start-intent' : 'start-attempt'}.json`)
       ? readIntent(`${directory}/${kind === 'pitr' ? 'start-intent' : 'start-attempt'}.json`) : null,
     receipt: existsSync(`${directory}/cleanup.json`) ? readIntent(`${directory}/cleanup.json`) : null }, kind);

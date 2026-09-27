@@ -353,11 +353,14 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
+      - name: Fence both cutovers before PITR START
+        timeout-minutes: 3
+        run: node scripts/migration/opscore-managed-pitr.mjs claim "$PITR_DIR"
       - name: Restore one run-owned synthetic marker at the exact point in time
         timeout-minutes: 185
         run: node scripts/migration/opscore-managed-pitr.mjs run "$PITR_DIR"
       - name: Delete only owned PITR clone and close target access
-        if: ${{ always() && steps.pitr_prepare.outcome == 'success' }}
+        if: ${{ always() }}
         timeout-minutes: 70
         run: node scripts/migration/opscore-managed-pitr.mjs cleanup "$PITR_DIR"
       - name: Upload private managed PITR receipts

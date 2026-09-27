@@ -4,7 +4,10 @@
 import { constants, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { AzureCliCredential } from '@azure/identity';
+import { ContainerClient } from '@azure/storage-blob';
 import { RESOURCE, HOST, ProbeError, connectionConfig, sanitize } from './probe-ops-azure-target.mjs';
+import { openOpsCorePitrGuard, OPSCORE_CUSTODY_URL } from './ops-core-pitr-guard.mjs';
 import { Azure, SUBSCRIPTION, GROUP, clock, prepare, qualify, cleanup as cleanupTarget,
   validateEnvironment, validateIntent, validateServer, validateRules, intentComputeSku,
   captureTrialClientConfig, recoveryEvidence, waitState } from './qualify-ops-azure-target.mjs';
@@ -15,6 +18,13 @@ const sleep = ms => new Promise(done => setTimeout(done, ms));
 const exactKeys = (value, keys) => value && Object.keys(value).sort().join() === [...keys].sort().join();
 const schemaIdentifier = name => { assert(/^opscore_pitr_[1-9][0-9]*_[1-9][0-9]*$/u.test(name), 'PITR_SCHEMA_INVALID'); return `"${name}"`; };
 const ownerComment = i => `opscore-managed-pitr:${i.runId}:${i.runAttempt}`;
+async function withPitrGuard(work) {
+  const container = new ContainerClient(OPSCORE_CUSTODY_URL,
+    new AzureCliCredential({ processTimeoutInMs: 10_000 }), { retryOptions: { maxTries: 1 } });
+  assert(!(await container.getAccessPolicy()).blobPublicAccess, 'PITR_CUSTODY_PUBLIC');
+  const guard = await openOpsCorePitrGuard(container);
+  try { return await work(guard); } finally { await guard.close(); }
+}
 export const cloneResource = i => `/subscriptions/${SUBSCRIPTION}/resourceGroups/${GROUP}/providers/Microsoft.DBforPostgreSQL/flexibleServers/${i.restoreServerName}`;
 export const cloneHost = i => `${i.restoreServerName}.postgres.database.azure.com`;
 export const cloneRuleName = i => `opscore-pitr-${i.runId}-${i.runAttempt}`;
@@ -322,14 +332,24 @@ async function reopenForMarkerCleanup(api, i, deadline) {
   throw new ProbeError('PITR_MARKER_REOPEN_UNPROVEN');
 }
 
+export async function verifyNeverStarted(api, arm, i, deadline) {
+  await api.identity(); await api.boundary();
+  const server = validateServer(await api.server(), false, intentComputeSku(i));
+  const rules = validateRules(await api.rules(), i);
+  assert(server.state === 'Stopped' && server.network.publicNetworkAccess === 'Disabled'
+    && rules.length === 0 && !(await arm.clone(i, deadline)), 'PITR_NEVER_STARTED_BASELINE_UNPROVEN');
+  return { serverStopped: true, firewallAbsent: true, cloneAbsent: true };
+}
+
 export async function main(args = process.argv.slice(2), env = process.env) {
-  assert(args.length === 2 && ['prepare', 'run', 'cleanup', 'recover'].includes(args[0]), 'PITR_ARGS_INVALID');
+  assert(args.length === 2 && ['prepare', 'claim', 'run', 'cleanup', 'recover'].includes(args[0]), 'PITR_ARGS_INVALID');
   const [mode, path] = args, recovery = mode === 'recover';
   validateEnvironment(env, recovery);
   assert(env.OPSCORE_QUALIFICATION_KIND === 'managed-pitr', 'PITR_OPERATION_MISMATCH');
   const dir = resolve(path); mkdirSync(dir, { recursive: true, mode: 0o700 });
   const api = new Azure(env), arm = new CloneArm(api);
   const intentPath = `${dir}/qualification-intent.json`;
+  if (mode === 'cleanup' && !existsSync(intentPath)) return;
   if (mode === 'prepare') {
     await adminConfig(api, env); // Credential and CA must exist before any provider effect.
     const i = await prepare(api, { runId: env.GITHUB_RUN_ID, runAttempt: env.GITHUB_RUN_ATTEMPT,
@@ -344,9 +364,26 @@ export async function main(args = process.argv.slice(2), env = process.env) {
   const i = validateIntent(read(intentPath), recovery ? env.RECOVERY_RUN_ID : env.GITHUB_RUN_ID,
     recovery ? env.RECOVERY_RUN_ATTEMPT : env.GITHUB_RUN_ATTEMPT);
   assert(i.qualificationKind === 'managed-pitr', 'PITR_INTENT_MISMATCH');
+  let recoveryProof;
+  if (mode === 'claim') {
+    await withPitrGuard(guard => guard.create(i));
+    console.log(JSON.stringify({ status: 'PITR_GUARD_CLAIMED', runId: i.runId, runAttempt: i.runAttempt }));
+    return;
+  }
   if (recovery) {
-    await recoveryEvidence(i, env, dir, fetch, 'pitr');
+    recoveryProof = await recoveryEvidence(i, env, dir, fetch, 'pitr');
     api.verifyRecovery = async () => {}; // The activity proof above remains valid in this serialized run.
+  }
+  if (mode !== 'cleanup' || existsSync(`${dir}/start-attempt.json`))
+    await withPitrGuard(guard => guard.assertOwner(i));
+  if (recoveryProof?.startSkipped) {
+    assert(!existsSync(`${dir}/start-attempt.json`) && !existsSync(`${dir}/restore-attempt.json`)
+      && !existsSync(`${dir}/probe-created.json`), 'PITR_NEVER_STARTED_RECEIPT_CONFLICT');
+    const closed = await verifyNeverStarted(api, arm, i, Date.now() + 5 * 60 * 1000);
+    await withPitrGuard(guard => guard.clear(i));
+    save(`${dir}/recovery-cleanup.json`, { status: 'PITR_START_NOT_ATTEMPTED', providerEffects: 0,
+      ...closed, productionAccepted: false });
+    return;
   }
   if (mode === 'run') {
     const config = await adminConfig(api, env);
@@ -377,7 +414,8 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     return;
   }
   if (!recovery && !existsSync(`${dir}/start-attempt.json`)) {
-    save(`${dir}/${recovery ? 'recovery-cleanup' : 'cleanup'}.json`, { status: 'PITR_START_NOT_ATTEMPTED', providerEffects: 0 });
+    await withPitrGuard(guard => guard.clear(i, { allowAbsent: true }));
+    save(`${dir}/cleanup.json`, { status: 'PITR_START_NOT_ATTEMPTED', providerEffects: 0 });
     return;
   }
   // Leave the original target's public-window cleanup its own bounded time.
@@ -464,12 +502,17 @@ export async function main(args = process.argv.slice(2), env = process.env) {
   } catch (error) { firstError ??= error; }
   const cleaned = !firstError && targetResult?.serverStopped && targetResult?.firewallAbsent
     && markerResult?.schemaAbsent && (!existsSync(`${dir}/restore-attempt.json`) || cloneResult?.cloneAbsent);
-  save(`${dir}/${recovery ? 'recovery-cleanup' : 'cleanup'}.json`, { status: cleaned ? 'OPSCORE_MANAGED_PITR_CLEANED' : 'PITR_CLEANUP_UNPROVEN',
+  const cleanupReceipt = { status: cleaned ? 'OPSCORE_MANAGED_PITR_CLEANED' : 'PITR_CLEANUP_UNPROVEN',
     cloneAbsent: cloneResult?.cloneAbsent ?? null, schemaAbsent: markerResult?.schemaAbsent ?? null,
     serverStopped: targetResult?.serverStopped ?? null, firewallAbsent: targetResult?.firewallAbsent ?? null,
     withinWindow: Date.now() <= i.deadline, productionAccepted: false,
-    ...(firstError ? { failureCode: firstError instanceof ProbeError ? firstError.code : 'PITR_CLEANUP_FAILED' } : {}) });
-  if (!cleaned) throw firstError ?? new ProbeError('PITR_CLEANUP_UNPROVEN');
+    ...(firstError ? { failureCode: firstError instanceof ProbeError ? firstError.code : 'PITR_CLEANUP_FAILED' } : {}) };
+  if (!cleaned) {
+    save(`${dir}/${recovery ? 'recovery-cleanup' : 'cleanup'}.json`, cleanupReceipt);
+    throw firstError ?? new ProbeError('PITR_CLEANUP_UNPROVEN');
+  }
+  await withPitrGuard(guard => guard.clear(i));
+  save(`${dir}/${recovery ? 'recovery-cleanup' : 'cleanup'}.json`, cleanupReceipt);
   console.log(JSON.stringify({ status: 'OPSCORE_MANAGED_PITR_CLEANED' }));
 }
 

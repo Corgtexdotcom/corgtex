@@ -72,6 +72,7 @@ function fixture() {
   plan.transfer.postgres.archiveStoreId = createHash("sha256").update(plan.operator.archiveContainerUrl).digest("hex");
   plan.transfer.objects.targetStoreId = createHash("sha256").update(plan.operator.targetObjectContainerUrl).digest("hex");
   const blobs = new Map(); let writes = 0; let releases = 0;
+  const pitr = { active: false };
   const containerFactory = url => ({ url,
     async getAccessPolicy() { return {}; },
     getBlockBlobClient(key) {
@@ -98,7 +99,11 @@ function fixture() {
     },
   });
   return { plan, blobs, containerFactory, writes: () => writes, releases: () => releases,
-    options: { plan, containerFactory, identityCheck: async () => {} } };
+    pitr, options: { plan, containerFactory, identityCheck: async () => {},
+      pitrGuardFactory: async () => ({
+        async assertNoPitr() { if (pitr.active) throw new Error('OPSCORE_PITR_QUALIFICATION_ACTIVE'); },
+        async assertHeld() {}, async close() {},
+      }) } };
 }
 
 function postgresVariant(plan) {
@@ -152,6 +157,13 @@ function stage(f, phase) {
 }
 
 describe("Ops/Core executable operator", () => {
+  it("refuses to initialize a cutover while managed PITR owns the shared target", async () => {
+    const f = fixture(); f.pitr.active = true;
+    await expect(runOpsCoreMigration({ ...f.options, action: "initialize" }))
+      .rejects.toThrow("MIGRATION_RECONCILIATION_REQUIRED");
+    expect(f.blobs.has("cutovers/core.json")).toBe(false);
+    expect(f.writes()).toBe(0);
+  });
   it("retains exact plan and one stable domain journal, then reopens it without effects", async () => {
     const f = fixture(); const first = await runOpsCoreMigration({ ...f.options, action: "initialize" });
     expect(first.status).toBe("PREPARED"); expect(first.destinationMayHaveWritten).toBe(false);

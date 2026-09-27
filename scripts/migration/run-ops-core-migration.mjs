@@ -23,6 +23,7 @@ import { RailwayObjectSource } from "./railway-object-source.ts";
 import { AzureBlobObjectStore } from "./shared-tenant-objects.ts";
 import { createRuntimeSecretResolver, assertOpsCoreRuntimeAccessForActivation,
   monitorOpsCoreRuntimeAccessDrift } from "./ops-core-runtime-access-controller.mjs";
+import { openOpsCorePitrGuard, OPSCORE_CUSTODY_URL } from "./ops-core-pitr-guard.mjs";
 
 class OperatorError extends Error {}
 const need = (condition, code) => { if (!condition) throw new OperatorError(code); };
@@ -60,6 +61,8 @@ export function validateOperatorPlan(plan) {
   const storageIdentity = value => createHash("sha256").update(value).digest("hex");
   need(p.transfer.postgres.archiveStoreId === storageIdentity(o.archiveContainerUrl)
     && p.transfer.objects.targetStoreId === storageIdentity(o.targetObjectContainerUrl), "MIGRATION_STORAGE_BINDING_MISMATCH");
+  if (p.azure.postgres.host === "corgtex-opscore-pg18.postgres.database.azure.com")
+    need(o.custodyContainerUrl === OPSCORE_CUSTODY_URL, "MIGRATION_PITR_GUARD_BINDING_MISMATCH");
   const workerId = `/subscriptions/${p.azure.subscriptionId}/resourceGroups/${p.azure.resourceGroupName}/providers/Microsoft.App/containerApps/${p.azure.apps.worker}`;
   need(p.health?.worker?.appId === workerId && p.health.environmentResourceId === p.azure.environmentId
     && p.health.worker.image === p.activation.roles.worker.image
@@ -127,8 +130,9 @@ async function readOptionalBlobJson(blob) {
  * checked evidence; DNS changes and retirement remain separate operations.
  */
 export async function runOpsCoreMigration({ action, plan: input, credentials, artifactDir, healthProbe,
-  containerFactory, identityCheck = assertAzureIdentity, runtime = {}, acceptanceArtifact }) {
-  let custody;
+  containerFactory, identityCheck = assertAzureIdentity, runtime = {}, acceptanceArtifact,
+  pitrGuardFactory = openOpsCorePitrGuard }) {
+  let custody, pitrGuard;
   try {
     need(["initialize", "status", "preflight", "fence", "transfer", "activate", "reconcile-transfer", "resume-transfer",
       "reconcile-activate", "resume-activate", "recover-source", "reconcile-source-recovery", "record-routing", "accept", "retain-acceptance-evidence",
@@ -143,6 +147,8 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
     const journalBlob = custodyContainer.getBlockBlobClient(`cutovers/${plan.domain}.json`);
     const journal = azureBlobCustodyAdapter(journalBlob);
     if (action === "initialize") {
+      pitrGuard = await pitrGuardFactory(custodyContainer);
+      await pitrGuard.assertNoPitr();
       const text = JSON.stringify(plan);
       const existing = await readOptionalBlobJson(retainedPlan);
       if (existing === null) await retainedPlan.upload(text, Buffer.byteLength(text), { conditions: { ifNoneMatch: "*" },
@@ -150,9 +156,13 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
       else need(same(existing, plan), "MIGRATION_RETAINED_PLAN_MISMATCH");
       need(same(await readBlobJson(retainedPlan), plan), "MIGRATION_RETAINED_PLAN_MISMATCH");
       const existingJournal = await readOptionalBlobJson(journalBlob);
-      if (existingJournal === null) await journal.createOnly(createCutoverJournal({ domain: plan.domain, intentSha256,
-        evidenceSha256: archiveEvidenceHash({ schemaVersion: 1, type: "RETAINED_MIGRATION_PLAN", intentSha256 }) }));
+      if (existingJournal === null) {
+        await pitrGuard.assertHeld();
+        await journal.createOnly(createCutoverJournal({ domain: plan.domain, intentSha256,
+          evidenceSha256: archiveEvidenceHash({ schemaVersion: 1, type: "RETAINED_MIGRATION_PLAN", intentSha256 }) }));
+      }
       else validateCutoverJournal(existingJournal, intentSha256);
+      await pitrGuard.close(); pitrGuard = null;
     }
     need(same(await readBlobJson(retainedPlan), plan), "MIGRATION_RETAINED_PLAN_MISMATCH");
     custody = await openCutoverCustody(journal, intentSha256);
@@ -289,7 +299,7 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
     const method = action === "reconcile-activate" ? "reconcile" : action === "resume-activate" ? "resume" : "activate";
     return await activation()[method]();
   } catch (error) { throw error instanceof OperatorError ? error : new OperatorError("MIGRATION_RECONCILIATION_REQUIRED"); }
-  finally { await custody?.close(); }
+  finally { await custody?.close(); await pitrGuard?.close(); }
 }
 
 export async function runOpsCoreMigrationCli(argv = process.argv.slice(2)) {

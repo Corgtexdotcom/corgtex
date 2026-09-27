@@ -152,7 +152,16 @@ until those independent gates pass.
 After the target is back to Stopped with public access Disabled, dispatch
 `operation=qualify-opscore-pitr`, `domain=ops` on protected `main`. The separate
 four-hour intent pins the exact PG18 `Standard_D2ds_v5` target, a run-derived
-synthetic schema, and one run-derived restored server. It opens only the runner's
+synthetic schema, and one run-derived restored server.
+The protected job uploads its recovery intent, then claims the durable guard in
+the shared custody container before START. The guard refuses an existing Core or
+Ops cutover journal; cutover initialization refuses an active PITR guard. Cleanup
+releases the guard only after the marker, target access, and clone are closed.
+An interrupted run retains the guard until exact recovery; a run that never
+reached START is recovered by proving the target is stopped/private and the
+clone absent, without opening either server.
+
+The trial opens only the runner's
 IPv4, writes a before marker, records a PostgreSQL-clock restore timestamp,
 writes an after marker, and waits beyond Azure's documented WAL archive delay.
 It then requests an Azure managed point-in-time restore with run ownership tags.
