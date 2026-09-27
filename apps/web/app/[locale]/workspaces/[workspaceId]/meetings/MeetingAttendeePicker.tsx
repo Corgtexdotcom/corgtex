@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 
 type Attendee = { id: string; name: string; email: string };
 
@@ -27,14 +27,6 @@ export function MeetingAttendeePicker({
   const visibleMembers = members.filter((member) =>
     `${member.name} ${member.email}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
   );
-  const selectedEmails = members
-    .filter((member) => selected.has(member.id))
-    .map((member) => member.email);
-  const allEmails = [...selectedEmails, ...externalEmails.split(/[\n,;]+/)]
-    .map((email) => email.trim())
-    .filter(Boolean)
-    .filter((email, index, values) => values.findIndex((value) => value.toLowerCase() === email.toLowerCase()) === index);
-
   return (
     <fieldset style={{ border: 0, margin: 0, minWidth: 0, padding: 0 }}>
       <legend style={{ fontWeight: 600, marginBottom: 8 }}>{labels.members}</legend>
@@ -54,6 +46,7 @@ export function MeetingAttendeePicker({
                 ? [...new Set([...current, member.id])]
                 : current.filter((id) => id !== member.id))}
               type="checkbox"
+              name="participantIds"
               value={member.id}
               style={{ flex: "0 0 auto", marginTop: 3, width: "auto" }}
             />
@@ -65,11 +58,10 @@ export function MeetingAttendeePicker({
         ))}
         {visibleMembers.length === 0 && <p className="nr-meta">—</p>}
       </div>
-      <input type="hidden" name="participantIds" value={[...selected].join(",")} />
-      <input type="hidden" name="participantEmails" value={allEmails.join(",")} />
       <label style={{ display: "block", marginTop: 12 }}>
         {labels.externalEmails}
         <textarea
+          name="participantEmails"
           onChange={(event) => setExternalEmails(event.target.value)}
           placeholder={labels.externalEmailsPlaceholder}
           rows={2}

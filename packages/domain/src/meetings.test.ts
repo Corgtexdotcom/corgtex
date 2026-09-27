@@ -365,6 +365,7 @@ describe("meetings domain", () => {
   it("createMeetingSeries materializes recurring scheduled meetings", async () => {
     const startsAt = new Date("2026-04-30T17:00:00.000Z");
     const scheduledEndAt = new Date("2026-04-30T18:00:00.000Z");
+    prismaMock.member.findMany.mockResolvedValue([{ id: "member-1", userId: "user-1" }]);
     prismaMock.meetingSeries.create.mockResolvedValue({
       id: "series-1",
       workspaceId: "workspace-1",
@@ -396,6 +397,7 @@ describe("meetings domain", () => {
       startsAt,
       scheduledEndAt,
       recurrenceRule: "FREQ=WEEKLY;COUNT=2",
+      participantIds: ["member-1", "user-1"],
       participantEmails: [" Jan@Example.com "],
     })).resolves.toMatchObject({
       series: { id: "series-1" },
@@ -406,6 +408,31 @@ describe("meetings domain", () => {
 
     expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(2);
     expect(prismaMock.meeting.create).not.toHaveBeenCalled();
+    expect(prismaMock.member.findMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        isActive: true,
+        NOT: [{
+          OR: [
+            { kind: "SYSTEM" },
+            { user: { email: { startsWith: "system+", mode: "insensitive" } } },
+            { user: { email: { startsWith: "support+", mode: "insensitive" } } },
+            { user: { displayName: { equals: "Corgtex Support", mode: "insensitive" } } },
+          ],
+        }],
+        OR: [
+          { id: { in: ["member-1", "user-1"] } },
+          { userId: { in: ["member-1", "user-1"] } },
+        ],
+      },
+      select: { id: true, userId: true },
+    });
+    expect(prismaMock.meetingSeries.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        participantIds: ["user-1"],
+        participantEmails: ["jan@example.com"],
+      }),
+    }));
   });
 
   it("rejects scheduled meeting attendees outside the active human workspace membership", async () => {
@@ -426,7 +453,6 @@ describe("meetings domain", () => {
     expect(prismaMock.member.findMany).toHaveBeenCalledWith({
       where: {
         workspaceId: "workspace-1",
-        userId: { in: ["foreign-user"] },
         isActive: true,
         NOT: [{
           OR: [
@@ -436,10 +462,31 @@ describe("meetings domain", () => {
             { user: { displayName: { equals: "Corgtex Support", mode: "insensitive" } } },
           ],
         }],
+        OR: [
+          { id: { in: ["foreign-user"] } },
+          { userId: { in: ["foreign-user"] } },
+        ],
       },
-      select: { userId: true },
+      select: { id: true, userId: true },
     });
     expect(prismaMock.meetingSeries.create).not.toHaveBeenCalled();
+  });
+
+  it("resolves meeting participants from either legacy member ids or canonical user ids", async () => {
+    const { getMeetingParticipants } = await import("./meetings");
+    prismaMock.member.findMany.mockResolvedValue([]);
+
+    await expect(getMeetingParticipants("workspace-1", ["member-1", "user-1"])).resolves.toEqual([]);
+
+    expect(prismaMock.member.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId: "workspace-1",
+        OR: [
+          { id: { in: ["member-1", "user-1"] } },
+          { userId: { in: ["member-1", "user-1"] } },
+        ],
+      },
+    }));
   });
 
   it("createMeetingSeries stores a supported recorder URL for inherited occurrences", async () => {

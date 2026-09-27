@@ -786,7 +786,10 @@ export async function getMeetingParticipants(workspaceId: string, participantIds
   return prisma.member.findMany({
     where: {
       workspaceId,
-      userId: { in: participantIds },
+      OR: [
+        { id: { in: participantIds } },
+        { userId: { in: participantIds } },
+      ],
     },
     include: {
       user: { select: { displayName: true, email: true } },
@@ -815,23 +818,33 @@ export async function createMeetingSeries(actor: AppActor, params: {
     workspaceId: params.workspaceId,
   });
 
-  const participantIds = normalizeIds(params.participantIds);
-  if (participantIds.length > 0) {
+  const requestedParticipantIds = normalizeIds(params.participantIds);
+  let participantIds = requestedParticipantIds;
+  if (requestedParticipantIds.length > 0) {
     const members = await prisma.member.findMany({
       where: {
         workspaceId: params.workspaceId,
-        userId: { in: participantIds },
         isActive: true,
         ...humanMemberIdentityWhere(),
+        OR: [
+          { id: { in: requestedParticipantIds } },
+          { userId: { in: requestedParticipantIds } },
+        ],
       },
-      select: { userId: true },
+      select: { id: true, userId: true },
     });
+    const userIdByParticipantId = new Map<string, string>();
+    for (const member of members) {
+      userIdByParticipantId.set(member.id, member.userId);
+      userIdByParticipantId.set(member.userId, member.userId);
+    }
     invariant(
-      members.length === participantIds.length,
+      requestedParticipantIds.every((id) => userIdByParticipantId.has(id)),
       400,
       "INVALID_INPUT",
       "Every selected attendee must be an active member of this workspace.",
     );
+    participantIds = [...new Set(requestedParticipantIds.map((id) => userIdByParticipantId.get(id) as string))];
   }
 
   const title = params.title.trim();
