@@ -1,7 +1,10 @@
 # Ops and Core backing resources
 
 `main.bicep` is a subscription-scope deployment for new backing resources. It creates
-`rg-<prefix>-hosting` and a separate `rg-<prefix>-migration-custody`. It creates no
+`rg-<prefix>-hosting` unless an existing-shared server is already in that exact group;
+in that case it reuses the group without changing its ownership tags. A shared server
+in another group does not move the backing resources. Both modes create a separate
+`rg-<prefix>-migration-custody`. The template creates no
 Container Apps, app databases, app secrets, DNS cutover, ACR resources or AI services.
 The existing registry is an input/output reference only; later release setup owns AcrPull.
 
