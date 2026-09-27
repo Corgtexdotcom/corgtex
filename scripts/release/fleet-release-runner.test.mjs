@@ -1631,6 +1631,8 @@ describe("fleet release runner", () => {
 
     const result = await runFleetRelease(["preflight-provider", "--targets", "default", "--target-id", "chirone-deployment"], deps);
     expect(result).toMatchObject({ status: "READY", effects: 0, targets: [] });
+    await expect(runFleetRelease(["preflight-provider", "--targets", "managed-customers,ops", "--target-id", "chirone-deployment"], deps))
+      .resolves.toMatchObject({ status: "READY", effects: 0, targets: [] });
     await expect(runFleetRelease(["preflight-provider", "--targets", "managed-customers,selfserve", "--target-id", "missing-deployment"], deps))
       .rejects.toThrow("No release target matched deployment ID missing-deployment.");
   });

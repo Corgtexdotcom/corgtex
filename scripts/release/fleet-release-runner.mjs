@@ -92,7 +92,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
     const targets = selectedTargets.filter((target) => protectedGroups.includes(target.group));
     for (const group of protectedGroups) {
       const count = targets.filter((target) => target.group === group).length;
-      if (count !== 1 && !(count === 0 && isBroadTargetSelection(selection))) {
+      if (count !== 1 && !(count === 0 && (isBroadTargetSelection(selection) || targetId))) {
         throw new Error(`${group} provider preflight requires exactly one configured target.`);
       }
     }
