@@ -1607,6 +1607,32 @@ describe("fleet release runner", () => {
 
     await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "managed-customers", "--dry-run", "--fail-on-blockers", "--reason", "Validate explicit selection."], deps))
       .rejects.toThrow("Target lifecycle status RETIRED is not release-eligible");
+
+    const selected = await runFleetRelease(["deploy", "--release", SHA, "--targets", "managed-customers,selfserve,ops", "--target-id", "active", "--dry-run", "--reason", "Validate Chirone-only target selection."], {
+      ...deps,
+    });
+    expect(selected.targets.map((target) => target.id)).toEqual(["active"]);
+    await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "managed-customers", "--target-id", "missing", "--dry-run", "--reason", "Reject unknown deployment ID."], deps))
+      .rejects.toThrow("No release target matched deployment ID missing.");
+  });
+
+  it("passes the exact target ID through both workflow plans and promotion", () => {
+    for (const workflowName of ["fleet-release", "fleet-release-preflight"]) {
+      const workflow = readFileSync(new URL(`../../.github/workflows/${workflowName}.yml`, import.meta.url), "utf8");
+      expect(workflow).toContain("target_id:");
+      expect(workflow).toContain("FLEET_RELEASE_TARGET_ID: ${{ inputs.target_id }}");
+    }
+  });
+
+  it("resolves customer deployment IDs before the protected-provider-only preflight", async () => {
+    const chirone = { id: "chirone-deployment", environment: "production", cloudProvider: "RAILWAY", deploymentStatus: "ACTIVE", url: "https://chirone.corgtex.com" };
+    const fetchImpl = vi.fn(async () => controlPlaneResult([chirone]));
+    const deps = { env: { CONTROL_PLANE_AGENT_API_KEY: "control-plane-key" }, fetchImpl };
+
+    const result = await runFleetRelease(["preflight-provider", "--targets", "default", "--target-id", "chirone-deployment"], deps);
+    expect(result).toMatchObject({ status: "READY", effects: 0, targets: [] });
+    await expect(runFleetRelease(["preflight-provider", "--targets", "managed-customers,selfserve", "--target-id", "missing-deployment"], deps))
+      .rejects.toThrow("No release target matched deployment ID missing-deployment.");
   });
 
   it("rejects transition inventory that omits provider", async () => {

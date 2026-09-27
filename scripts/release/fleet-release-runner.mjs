@@ -12,6 +12,7 @@ import {
   azureRuntimeContractErrors,
   buildReleaseManifest,
   filterTargetsByGroups,
+  filterTargetsByDeploymentId,
   formatReleasePlan,
   groupTargetsByRing,
   normalizeGitSha,
@@ -74,15 +75,21 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   }
   if (command === "preflight-provider") {
     const env = deps.env ?? process.env;
+    const targetId = args.targetId ?? env.FLEET_RELEASE_TARGET_ID;
     const selection = args.targets ?? env.FLEET_RELEASE_TARGETS ?? "default";
     const selectedGroups = normalizeTargets(selection);
     const protectedGroups = selectedGroups.filter((group) => ["ops", "backup-app"].includes(group));
     if (!protectedGroups.length) {
+      if (targetId) {
+        const selectedTargets = filterTargetsByGroups(await discoverTargets(deps, selectedGroups), selectedGroups, { excludeIneligible: isBroadTargetSelection(selection) });
+        filterTargetsByDeploymentId(selectedTargets, targetId);
+      }
       const result = { status: "READY", effects: 0, targets: [] };
       console.log(JSON.stringify({ stage: "provider-preflight", ...result }, null, 2));
       return result;
     }
-    const targets = filterTargetsByGroups(await discoverTargets(deps, protectedGroups), protectedGroups, { excludeIneligible: isBroadTargetSelection(selection) });
+    const selectedTargets = filterTargetsByDeploymentId(filterTargetsByGroups(await discoverTargets(deps, selectedGroups), selectedGroups, { excludeIneligible: isBroadTargetSelection(selection) }), targetId);
+    const targets = selectedTargets.filter((target) => protectedGroups.includes(target.group));
     for (const group of protectedGroups) {
       const count = targets.filter((target) => target.group === group).length;
       if (count !== 1 && !(count === 0 && isBroadTargetSelection(selection))) {
@@ -103,6 +110,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   }
 
   const env = deps.env ?? process.env;
+  const targetId = args.targetId ?? env.FLEET_RELEASE_TARGET_ID;
   const targetSelection = args.targets ?? env.FLEET_RELEASE_TARGETS ?? "default";
   const selectedGroups = normalizeTargets(targetSelection);
   validateOptionalCanaryPreflightDeploymentId(selectedGroups, env);
@@ -119,7 +127,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
 
   const allTargets = await discoverTargets(deps, selectedGroups);
   const broadSelection = isBroadTargetSelection(targetSelection);
-  let targets = filterTargetsByGroups(allTargets, selectedGroups, { excludeIneligible: broadSelection }); if (env.FLEET_RELEASE_TARGETS_FILE && !existsSync(env.FLEET_RELEASE_TARGETS_FILE)) targets = await revalidateTargets(targets, deps);
+  let targets = filterTargetsByDeploymentId(filterTargetsByGroups(allTargets, selectedGroups, { excludeIneligible: broadSelection }), targetId); if (env.FLEET_RELEASE_TARGETS_FILE && !existsSync(env.FLEET_RELEASE_TARGETS_FILE)) targets = await revalidateTargets(targets, deps);
   if (targets.length === 0) {
     throw new Error(`No release targets matched: ${selectedGroups.join(", ")}`);
   }

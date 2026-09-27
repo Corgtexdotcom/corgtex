@@ -406,6 +406,18 @@ export function filterTargetsByGroups(targets, groups, options = {}) {
   return targets.filter((target) => selected.has(target.group) && (options.excludeIneligible !== true || targetEligibilityErrors(target).length === 0));
 }
 
+export function filterTargetsByDeploymentId(targets, deploymentId) {
+  const requestedId = String(deploymentId ?? "").trim();
+  if (!requestedId) return targets;
+  const matches = targets.filter((target) => String(target.deploymentId ?? "") === requestedId);
+  if (matches.length !== 1) {
+    throw new Error(matches.length === 0
+      ? `No release target matched deployment ID ${requestedId}.`
+      : `Deployment ID ${requestedId} matched multiple release targets.`);
+  }
+  return matches;
+}
+
 export function targetEligibilityErrors(target) {
   const statuses = [target.deploymentStatus, target.provisioningStatus, target.status].map((value) => String(value ?? "").trim().toUpperCase()).filter(Boolean);
   const errors = statuses.filter((status) => INELIGIBLE_STATUSES.has(status)).map((status) => `Target lifecycle status ${status} is not release-eligible`);
