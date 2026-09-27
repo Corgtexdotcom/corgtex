@@ -40,7 +40,7 @@ describe("Slack meeting action assignee eligibility", () => {
     db.meetingInsight.findMany.mockResolvedValue([]);
     db.meetingInsight.count.mockResolvedValue(0);
     db.communicationMessage.findUnique.mockResolvedValue(null);
-    createAction.mockResolvedValue({ id: "action-1", status: "DRAFT" });
+    createAction.mockResolvedValue({ id: "action-1", status: "OPEN" });
     publishAction.mockResolvedValue({ id: "action-1" });
   });
 
@@ -64,10 +64,22 @@ describe("Slack meeting action assignee eligibility", () => {
     expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor, workspaceId: "ws-1" });
     expect(db.member.findMany).toHaveBeenCalledWith({ where: { workspaceId: "ws-1", isActive: true, ...humanMemberIdentityWhere() }, include: { user: true } });
     expect(createAction).toHaveBeenCalledWith(actor, expect.objectContaining({
-      workspaceId: "ws-1", assigneeMemberId: "active", source: { type: "MEETING_INSIGHT", id: "insight-1", groupId: "meeting-1" },
+      workspaceId: "ws-1", assigneeMemberId: "active", isPrivate: false,
+      source: { type: "MEETING_INSIGHT", id: "insight-1", groupId: "meeting-1" },
     }));
-    expect(publishAction).toHaveBeenCalledWith(actor, { workspaceId: "ws-1", actionId: "action-1" });
+    expect(publishAction).not.toHaveBeenCalled();
     expect(db.meetingInsight.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "APPLIED", reviewedByUserId: "user-1" }) }));
+  });
+
+  it("opens a legacy claimed private draft before marking the Slack insight applied", async () => {
+    db.member.findMany.mockResolvedValue([]);
+    createAction.mockResolvedValueOnce({ id: "legacy-action", status: "DRAFT" });
+    publishAction.mockResolvedValueOnce({ id: "legacy-action", status: "OPEN" });
+    await confirmSlackMeetingActionReviewProposal(actor, params);
+    expect(publishAction).toHaveBeenCalledWith(actor, { workspaceId: "ws-1", actionId: "legacy-action" });
+    expect(db.meetingInsight.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "APPLIED", appliedEntityId: "legacy-action" }),
+    }));
   });
 
   it("leaves an inactive-only hint unassigned", async () => {

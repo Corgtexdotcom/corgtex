@@ -832,7 +832,7 @@ export async function confirmSlackMeetingActionReviewProposal(actor: AppActor, p
       bodyMd: fullBody,
       assigneeMemberId,
       dueAt: insight.dueAt,
-      isPrivate: true,
+      isPrivate: false,
       duplicateGuard: { candidateLimit: 200 },
       source: { type: "MEETING_INSIGHT", id: insight.id, groupId: review.meetingId },
       sourcePayload: meetingInsightActionSourcePayload(insight),

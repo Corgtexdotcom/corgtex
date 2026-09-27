@@ -609,6 +609,11 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
       priority: params.priority ?? 0,
       isPrivate: params.isPrivate ?? true,
       sourcePayload: params.sourcePayload ?? null,
+      duplicateResolution: params.duplicateGuard?.resolution ?? null,
+      duplicateOnExact: params.duplicateGuard?.onExact ?? null,
+      duplicateTargetId: params.duplicateGuard?.resolution === "use_existing" || params.duplicateGuard?.resolution === "update_existing"
+        ? params.duplicateGuard.targetEntityId?.trim() || null
+        : null,
     })).digest("hex");
   }
   const isPrivate = params.isPrivate ?? true;
@@ -737,6 +742,7 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
     if (claimed) {
         invariant(!payloadHash || !claimed.payloadHash || claimed.payloadHash === payloadHash,
           409, "IDEMPOTENCY_CONFLICT", "This Action idempotency key was already used with different content.");
+        await tx.$queryRaw`SELECT "id" FROM "Action" WHERE "workspaceId" = ${params.workspaceId} AND "id" = ${claimed.actionId} FOR SHARE`;
         const existing = await tx.action.findFirst({
           where: { id: claimed.actionId, workspaceId: params.workspaceId, ...privacyFilter(actor, membership) },
         });

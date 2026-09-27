@@ -5,6 +5,7 @@ const { prismaMock } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
     $executeRaw: vi.fn(),
+    $queryRaw: vi.fn(),
     action: {
       create: vi.fn(),
       findFirst: vi.fn(),
@@ -95,6 +96,7 @@ describe("action domain lifecycle", () => {
     recordAudit.mockResolvedValue(undefined);
     appendEvents.mockResolvedValue(undefined);
     prismaMock.$executeRaw.mockResolvedValue({});
+    prismaMock.$queryRaw.mockResolvedValue([]);
     prismaMock.workItemVersion.create.mockResolvedValue({});
     prismaMock.workItemVersion.findUnique.mockResolvedValue(null);
     prismaMock.workspacePermalink.upsert.mockResolvedValue({});
@@ -165,6 +167,30 @@ describe("action domain lifecycle", () => {
       workspaceId: "workspace-1", title: "Follow up", source, sourcePayload: { checklistItems: ["Changed"] },
     })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
     expect(prismaMock.action.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects reuse of a request key with a different selected duplicate target", async () => {
+    const existing = {
+      id: "action-1", workspaceId: "workspace-1", title: "Follow up", bodyMd: null,
+      status: "OPEN", isPrivate: false, archivedAt: null, duplicateOfActionId: null,
+      createdAt: new Date("2026-07-20T10:00:00.000Z"), updatedAt: new Date("2026-07-20T10:05:00.000Z"),
+    };
+    prismaMock.action.findMany.mockResolvedValueOnce([existing]);
+    prismaMock.action.findFirst.mockResolvedValueOnce(existing);
+    const { actionRequestSource, createAction } = await import("./actions");
+    const source = actionRequestSource("MCP_REQUEST", "agent-1", "selected-target");
+    await createAction(actor, {
+      workspaceId: "workspace-1", title: "Follow up", source,
+      duplicateGuard: { resolution: "use_existing", targetEntityId: "action-1" },
+    });
+    const claim = prismaMock.actionCreationSource.create.mock.calls[0][0].data;
+    prismaMock.actionCreationSource.findUnique.mockResolvedValueOnce({ actionId: "action-1", payloadHash: claim.payloadHash });
+
+    await expect(createAction(actor, {
+      workspaceId: "workspace-1", title: "Follow up", source,
+      duplicateGuard: { resolution: "use_existing", targetEntityId: "action-2" },
+    })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT", status: 409 });
+    expect(prismaMock.actionCreationSource.create).toHaveBeenCalledTimes(1);
   });
 
   it("rejects an edited meeting insight after an earlier attempt claimed its Action source", async () => {
