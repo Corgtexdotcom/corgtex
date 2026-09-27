@@ -69,3 +69,13 @@ test('an initialized journal for either domain prevents PITR even if no transfer
     } finally { await guard.close(); }
   }
 });
+
+test('no-START recovery can close an absent guard but never clears a foreign owner', async () => {
+  const f = fixture(), owner = { runId: '123', runAttempt: '1' };
+  const guard = await openOpsCorePitrGuard(f.container);
+  try {
+    await guard.clear(owner, { allowAbsent: true });
+    await guard.create({ runId: '124', runAttempt: '1' });
+    await assert.rejects(guard.clear(owner, { allowAbsent: true }), /OPSCORE_PITR_OWNER_MISMATCH/);
+  } finally { await guard.close(); }
+});
