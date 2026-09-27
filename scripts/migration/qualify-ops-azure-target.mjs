@@ -92,6 +92,24 @@ export function validateRules(rules, intent, requireAbsent = false) {
   return rules;
 }
 
+export function validatePrivateEndpointConnections(connections) {
+  assert(Array.isArray(connections), "PRIVATE_ENDPOINT_DRIFT");
+  if (TARGET_PROFILE !== 'opscore') {
+    assert(connections.length === 0, "PRIVATE_ENDPOINT_DRIFT");
+    return;
+  }
+  const expectedEndpoint = `/subscriptions/${SUBSCRIPTION}/resourceGroups/${GROUP}/providers/Microsoft.Network/privateEndpoints/pe-corgtex-opscore-shared-pg`;
+  const connection = connections[0];
+  assert(connections.length === 1
+    && /^pe-corgtex-opscore-shared-pg\.[0-9a-f-]{36}$/iu.test(connection?.name ?? '')
+    && connection.id?.toLowerCase() === `${RESOURCE}/privateEndpointConnections/${connection.name}`.toLowerCase()
+    && connection.properties?.privateEndpoint?.id?.toLowerCase() === expectedEndpoint.toLowerCase()
+    && connection.properties?.privateLinkServiceConnectionState?.status === 'Approved'
+    && connection.properties?.provisioningState === 'Succeeded'
+    && JSON.stringify(connection.properties?.groupIds) === '["postgresqlServer"]',
+  "PRIVATE_ENDPOINT_DRIFT");
+}
+
 export class Azure {
   constructor(env, { execute = execFile, sleep = ms => new Promise(r => setTimeout(r, ms)) } = {}) {
     this.env = env; this.execute = execute; this.sleep = sleep; this.subscriptionSelected = false;
@@ -184,7 +202,7 @@ export class Azure {
       && g.location?.replaceAll(" ", "").toLowerCase() === "westus3" && sameKeys(g.tags, Object.keys(tags))
       && Object.entries(tags).every(([k, v]) => g.tags?.[k] === v), "GROUP_AUTHORITY_DRIFT");
     const p = await this.call(["network", "private-endpoint-connection", "list", "--id", RESOURCE]);
-    assert(Array.isArray(p) && p.length === 0, "PRIVATE_ENDPOINT_DRIFT");
+    validatePrivateEndpointConnections(p);
   }
   async authority() { await createRehearsalAuthorityGuard({ read: args => this.call(args) })(); }
   async start() { await this.identity(); await this.authority(); return this.call(["postgres", "flexible-server", "start", "--resource-group", GROUP, "--name", SERVER, "--no-wait"]); }

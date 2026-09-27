@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { targetResource, target } from './ops-core-target-profile.mjs';
 import { Azure, SUBSCRIPTION, TENANT, prepare, qualify, cleanup, validateIntent, validateServer,
+  validatePrivateEndpointConnections,
   validateRecoveryEvidence } from './qualify-ops-azure-target.mjs';
 import { validateRehearsalPrincipal } from './validate-postgres-restore-rehearsal.mjs';
 
@@ -19,6 +20,24 @@ const original = () => ({
   tags: structuredClone(target.tags), state: 'Stopped',
 });
 const inputs = { runId: '12345', runAttempt: '1', ipv4: '203.0.113.7' };
+const connectionName = 'pe-corgtex-opscore-shared-pg.74560f43-a1c8-4955-adba-3f99111839dc';
+const privateConnection = () => ({
+  id: `${resource}/privateEndpointConnections/${connectionName}`,
+  name: connectionName,
+  properties: {
+    groupIds: ['postgresqlServer'], provisioningState: 'Succeeded',
+    privateEndpoint: { id: `/subscriptions/${SUBSCRIPTION}/resourceGroups/${target.group}/providers/Microsoft.Network/privateEndpoints/pe-corgtex-opscore-shared-pg` },
+    privateLinkServiceConnectionState: { status: 'Approved' },
+  },
+});
+assert.doesNotThrow(() => validatePrivateEndpointConnections([privateConnection()]));
+for (const changed of [[], [privateConnection(), privateConnection()],
+  [{ ...privateConnection(), properties: { ...privateConnection().properties,
+    privateLinkServiceConnectionState: { status: 'Rejected' } } }],
+  [{ ...privateConnection(), properties: { ...privateConnection().properties,
+    privateEndpoint: { id: '/subscriptions/other/resourceGroups/other/providers/Microsoft.Network/privateEndpoints/foreign' } } }]]) {
+  assert.throws(() => validatePrivateEndpointConnections(changed), /PRIVATE_ENDPOINT_DRIFT/);
+}
 function setup() {
   const server = original(), events = []; let rules = [];
   const clock = { time: 1700000000000, now() { return this.time; }, async sleep(ms) { this.time += ms; } };
@@ -207,7 +226,7 @@ function setup() {
       : command.startsWith('account get-access-token') ? { accessToken: token }
       : command === 'role assignment list' ? assignments
       : command.startsWith('group show') ? group
-      : command === 'network private-endpoint-connection list' ? []
+      : command === 'network private-endpoint-connection list' ? [privateConnection()]
       : command === 'postgres flexible-server show' ? original()
       : command.startsWith('rest --method') ? { value: [] }
       : command === 'keyvault secret show' ? { id: target.adminSecretId, attributes: { enabled: true }, value: 'x'.repeat(32) }
