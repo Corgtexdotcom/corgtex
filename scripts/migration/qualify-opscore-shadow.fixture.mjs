@@ -149,8 +149,39 @@ try {
       rawExpression: 'CLIENT_PRIVATE_SENTINEL' } } };
   const checkProjection = projectShadowSchemaDiagnostic(checkDiagnostic);
   assert.equal(checkProjection.checkExpression.tokenEdit.sourceOnly.PARENTHESIS, 2);
-  assert.equal(checkProjection.checkExpression.structureStatus, 'NOT_ELIGIBLE');
+  assert.equal(checkProjection.checkExpression.structure.status, 'NOT_ELIGIBLE');
   assert.ok(!JSON.stringify(checkProjection).includes('CLIENT_PRIVATE_SENTINEL'));
+  const bindingFields = {
+    TYPE: 'NAMESPACE NAME KIND LENGTH BY_VALUE CATEGORY COLLATION INPUT_NAMESPACE INPUT_NAME INPUT_SOURCE INPUT_BINARY INPUT_LANGUAGE OUTPUT_NAMESPACE OUTPUT_NAME OUTPUT_SOURCE OUTPUT_BINARY OUTPUT_LANGUAGE',
+    OPERATOR: 'NAMESPACE NAME KIND LEFT_TYPE RIGHT_TYPE RESULT_TYPE FUNCTION',
+    FUNCTION: 'NAMESPACE NAME ARGUMENT_TYPES RESULT_TYPE SOURCE BINARY LANGUAGE KIND VOLATILITY STRICT RETURNS_SET SECURITY_DEFINER CONFIG',
+    COLLATION: 'NAMESPACE NAME PROVIDER DETERMINISTIC ENCODING COLLATE CTYPE LOCALE ICU_RULES VERSION ACTUAL_VERSION',
+    ATTRIBUTE: 'NAMESPACE TABLE NAME TYPE TYPMOD COLLATION',
+    DATABASE_COLLATION: 'ENCODING PROVIDER COLLATE CTYPE LOCALE ICU_RULES VERSION ACTUAL_VERSION',
+  };
+  const bindingDifferences = Object.fromEntries(Object.entries(bindingFields).map(([kind, fields]) =>
+    [kind, { missing: 0, extra: 0, changed: kind === 'DATABASE_COLLATION' ? 1 : 0,
+      fields: Object.fromEntries(fields.split(' ').map(field =>
+        [field, kind === 'DATABASE_COLLATION' && field === 'VERSION' ? 1 : 0])) }]));
+  const structureDetail = { status: 'STRUCTURALLY_DIFFERENT', bindingsEqual: false,
+    canonicalEqual: true, originalEqual: false, referenceSetsEqual: true,
+    nonVersionBindingsEqual: true, collationVersionOnly: true, operationsSupported: true,
+    defaultCollationCurrentLibc: true, versionDriftAssessment: 'VERSION_DRIFT_IRRELEVANT_TO_SUPPORTED_CHECK',
+    bindingDifferences, sourceNodes: 22, destinationNodes: 21,
+    sourceFlattened: 1, destinationFlattened: 0, rawTree: 'CLIENT_PRIVATE_SENTINEL' };
+  const detailed = projectShadowSchemaDiagnostic({ ...checkDiagnostic, constraintSemantics: {
+    ...checkDiagnostic.constraintSemantics, checkExpressionDifference: {
+      ...checkDiagnostic.constraintSemantics.checkExpressionDifference,
+      associativeStructure: structureDetail } } });
+  assert.deepEqual(detailed.checkExpression.structure.bindingDifferences.DATABASE_COLLATION.changedFields,
+    ['VERSION']);
+  assert.equal(detailed.checkExpression.structure.canonicalEqual, true);
+  assert.ok(!JSON.stringify(detailed).includes('CLIENT_PRIVATE_SENTINEL'));
+  assert.throws(() => projectShadowSchemaDiagnostic({ ...checkDiagnostic, constraintSemantics: {
+    ...checkDiagnostic.constraintSemantics, checkExpressionDifference: {
+      ...checkDiagnostic.constraintSemantics.checkExpressionDifference,
+      associativeStructure: { ...structureDetail, canonicalEqual: 'CLIENT_PRIVATE_SENTINEL' } } } }),
+  /SHADOW_DIAGNOSTIC_INVALID/);
   assert.throws(() => projectShadowSchemaDiagnostic({ ...checkDiagnostic, constraintSemantics: {
     ...checkDiagnostic.constraintSemantics, checkExpressionDifference: {
       ...checkDiagnostic.constraintSemantics.checkExpressionDifference,
@@ -162,7 +193,10 @@ try {
       async assertHeld() {}, async close() {} }),
     restore: async options => {
       if (options.domain === 'ops') writeFileSync(join(options.artifactDir, 'schema-diagnostic.json'),
-        JSON.stringify(checkDiagnostic), { mode: 0o600 });
+        JSON.stringify({ ...checkDiagnostic, constraintSemantics: {
+          ...checkDiagnostic.constraintSemantics, checkExpressionDifference: {
+            ...checkDiagnostic.constraintSemantics.checkExpressionDifference,
+            associativeStructure: structureDetail } } }), { mode: 0o600 });
       return { evidence: { domain: options.domain } };
     },
     verifyParity: evidence => {
@@ -178,6 +212,7 @@ try {
     { domain: 'ops', code: 'SCHEMA_DIGEST_MISMATCH', diagnosticStatus: 'CATEGORIES_RETAINED' });
   assert.equal(failure.schema.constraintMismatchCount, 1);
   assert.equal(failure.schema.checkExpression.status, 'UNIQUE');
+  assert.equal(failure.schema.checkExpression.structure.canonicalEqual, true);
   assert.ok(!failureText.includes('CLIENT_PRIVATE_SENTINEL'));
   const denied = [];
   await assert.rejects(restoreBothDomains({ api: {}, intent, config, sources: { core: {}, ops: {} },
