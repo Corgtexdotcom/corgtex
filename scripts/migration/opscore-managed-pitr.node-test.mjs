@@ -74,6 +74,43 @@ test('PITR creation pins source and timestamp, and rejects an existing clone bef
   await assert.rejects(occupied.create(i, restoreTime), /PITR_CLONE_ALREADY_EXISTS/);
 });
 
+test('accepted restore adopts only the exact source-tagged clone after Azure finishes provisioning', async () => {
+  const observed = clone();
+  observed.tags = { ...target.tags };
+  observed.properties.state = 'Provisioning';
+  observed.properties.network.publicNetworkAccess = 'Enabled';
+  const writes = [];
+  const arm = new CloneArm(api, { now: () => now, pause: async () => { observed.properties.state = 'Ready'; },
+    request: async (url, options) => {
+      if (url.endsWith('/firewallRules?api-version=2025-08-01')) return reply(200, { value: [] });
+      if (options.method === 'PATCH') {
+        writes.push({ url, body: JSON.parse(options.body) });
+        observed.tags = cloneTags(i);
+        return reply(202);
+      }
+      return reply(200, structuredClone(observed));
+    } });
+  const accepted = { status: 'ARM_RESTORE_ACCEPTED', at: new Date(now - 1000).toISOString() };
+  assert.equal((await arm.adoptRestoredClone(i, accepted)).properties.network.publicNetworkAccess, 'Enabled');
+  assert.deepEqual(writes, [{ url: `https://management.azure.com${cloneResource(i)}?api-version=2025-08-01`,
+    body: { tags: cloneTags(i) } }]);
+  assert.deepEqual((await arm.clone(i)).tags, cloneTags(i));
+});
+
+test('inherited tags cannot authorize a clone patch without exact accepted restore evidence', async () => {
+  const inherited = clone(); inherited.tags = { ...target.tags };
+  const methods = [];
+  const arm = new CloneArm(api, { now: () => now,
+    request: async (_url, options) => { methods.push(options.method); return reply(200, inherited); } });
+  await assert.rejects(arm.adoptRestoredClone(i, { status: 'ARM_RESTORE_ACCEPTED', at: 'invalid' }),
+    /PITR_RESTORE_ACCEPTANCE_UNPROVEN/);
+  inherited.tags.purpose = 'foreign-target';
+  await assert.rejects(arm.adoptRestoredClone(i,
+    { status: 'ARM_RESTORE_ACCEPTED', at: new Date(now - 1000).toISOString() }),
+  /PITR_CLONE_OWNER_MISMATCH/);
+  assert.deepEqual(methods, ['GET']);
+});
+
 test('owned clone deletion requires final ARM absence and never changes the source server', async () => {
   const methods = [];
   let exists = true;
