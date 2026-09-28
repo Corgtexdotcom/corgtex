@@ -266,6 +266,37 @@ describe("agent runtime", () => {
     }));
   });
 
+  it("keeps uploaded transcript insights reviewable without auto-creating Actions or tensions", async () => {
+    prismaMock.meeting.findUnique.mockResolvedValue({
+      id: "meeting-upload",
+      workspaceId: "ws-1",
+      title: "Steering meeting",
+      transcript: "Andy: I will send the steering update.",
+      summaryMd: null,
+      insights: [{ id: "insight-1", type: "ACTION_ITEM", status: "SUGGESTED" }],
+    });
+
+    const { runActionExtractionAgent } = await import(".");
+    await runActionExtractionAgent({
+      workspaceId: "ws-1",
+      triggerRef: "job-upload",
+      meetingId: "meeting-upload",
+      reviewOnly: true,
+    });
+
+    expect(autoApplyMeetingInsightsMock).not.toHaveBeenCalled();
+    expect(prismaMock.agentRun.update).toHaveBeenLastCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        status: "COMPLETED",
+        resultJson: expect.objectContaining({
+          meetingId: "meeting-upload",
+          reviewRequired: true,
+          suggested: 1,
+        }),
+      }),
+    }));
+  });
+
   it("skips action extraction when the meeting has no transcript", async () => {
     prismaMock.meeting.findUnique.mockResolvedValue({
       id: "meeting-empty",

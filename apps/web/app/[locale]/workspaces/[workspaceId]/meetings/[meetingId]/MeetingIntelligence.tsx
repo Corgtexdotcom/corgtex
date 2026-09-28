@@ -342,7 +342,13 @@ export default function MeetingIntelligence({
                       <article className={`meeting-insight-item${isEditing ? " editing" : ""}`} key={insight.id} aria-busy={loading}>
                         <div className="meeting-insight-main">
                           <div className="meeting-insight-title-row">
-                            <span className="tag info">{insightTypeLabels[insight.type] ?? insight.type}</span>
+                            <span className="tag info">
+                              {isReviewable && insight.type === "ACTION_ITEM"
+                                ? t("actionDraftLabel")
+                                : isReviewable && insight.type === "FOLLOW_UP"
+                                  ? t("followUpDraftLabel")
+                                  : insightTypeLabels[insight.type] ?? insight.type}
+                            </span>
                             {blockContext.blockTitle && <span className="tag">{blockContext.blockTitle}</span>}
                             {confidence >= 0.8 && <span className="tag success">{t("highConfidence")}</span>}
                             {confidence < 0.5 && <span className="tag warning">{t("lowConfidence")}</span>}

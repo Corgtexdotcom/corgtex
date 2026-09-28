@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AppError, intakeMeetingTranscript } from "@corgtex/domain";
-import { extractTextFromFileBuffer } from "@corgtex/knowledge";
+import { AppError, intakeMeetingTranscript, requireWorkspaceMembership } from "@corgtex/domain";
+import { extractMeetingTranscriptFile } from "@/lib/meeting-transcript-file";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 import { parseOptionalMeetingDateTimeInput } from "@/lib/meeting-timezone";
@@ -21,6 +21,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId } = await params;
+    await requireWorkspaceMembership({ actor, workspaceId });
     const contentType = request.headers.get("content-type") ?? "";
 
     if (contentType.includes("multipart/form-data")) {
@@ -31,14 +32,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       let fileName: string | null = null;
 
       if (file instanceof File && file.size > 0) {
-        const fileBuffer = Buffer.from(await file.arrayBuffer());
         fileName = file.name;
-        const extracted = await extractTextFromFileBuffer({
-          fileBuffer,
-          fileName: file.name,
-          mimeType: file.type || "application/octet-stream",
-        });
-        transcript = extracted.textContent ?? transcript;
+        transcript = await extractMeetingTranscriptFile(file);
       }
 
       if (!transcript.trim()) {

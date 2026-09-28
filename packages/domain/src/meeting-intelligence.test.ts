@@ -1224,6 +1224,31 @@ describe("meeting-intelligence", () => {
       ));
     });
 
+    it("prefers an exact human name and leaves ambiguous partial names unassigned", async () => {
+      (prisma.member.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+        { id: "janet", user: { displayName: "Janet", email: "janet@example.com" } },
+        { id: "jan", user: { displayName: "Jan", email: "jan@example.com" } },
+      ] as never);
+      vi.mocked(prisma.meetingInsight.findUnique).mockResolvedValue({
+        id: "insight-jan", workspaceId: "ws-1", meetingId: "meeting-1", type: "ACTION_ITEM",
+        operation: "CREATE", status: "SUGGESTED", title: "Send update", bodyMd: "Jan will send the update.",
+        assigneeHint: "Jan", meeting: { id: "meeting-1", title: "Weekly sync" },
+      } as never);
+
+      await applyInsight(mockActor, { workspaceId: "ws-1", insightId: "insight-jan" });
+      expect(createActionMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({ assigneeMemberId: "jan" }));
+
+      createActionMock.mockClear();
+      vi.mocked(prisma.meetingInsight.findUnique).mockResolvedValue({
+        id: "insight-ja", workspaceId: "ws-1", meetingId: "meeting-1", type: "ACTION_ITEM",
+        operation: "CREATE", status: "SUGGESTED", title: "Send update", bodyMd: "Ja will send the update.",
+        assigneeHint: "Ja", meeting: { id: "meeting-1", title: "Weekly sync" },
+      } as never);
+      await applyInsight(mockActor, { workspaceId: "ws-1", insightId: "insight-ja" });
+      expect(createActionMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({ assigneeMemberId: null }));
+      expect(publishActionMock).not.toHaveBeenCalled();
+    });
+
     it("does not assign an inactive-only hint", async () => {
       (prisma.member.findMany as ReturnType<typeof vi.fn>).mockImplementation(async (args: Prisma.MemberFindManyArgs) =>
         args?.where?.isActive === true ? [] : [{ id: "historical", user: { displayName: "Milan", email: "old@example.com" } }] as never);

@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { uploadMeetingTranscript, intakeMeetingTranscript, extractTextFromFileBuffer, resolveRequestActor, handleRouteError } = vi.hoisted(() => ({
+const { uploadMeetingTranscript, intakeMeetingTranscript, extractTextFromFileBuffer, requireWorkspaceMembership, resolveRequestActor, handleRouteError } = vi.hoisted(() => ({
   uploadMeetingTranscript: vi.fn(),
   intakeMeetingTranscript: vi.fn(),
   extractTextFromFileBuffer: vi.fn(),
+  requireWorkspaceMembership: vi.fn(),
   resolveRequestActor: vi.fn(),
   handleRouteError: vi.fn(),
 }));
@@ -23,6 +24,7 @@ vi.mock("@corgtex/domain", () => ({
   AppError: MockAppError,
   intakeMeetingTranscript,
   uploadMeetingTranscript,
+  requireWorkspaceMembership,
 }));
 
 vi.mock("@corgtex/knowledge", () => ({

@@ -1215,42 +1215,8 @@ function candidateSemanticallyOverlapsDigestItem(candidate: WorkspaceBriefingCan
   return overlap >= 4 && itemCoverage >= 0.5 && candidateCoverage >= 0.35;
 }
 
-function digestItemNamesCandidateSource(rawItem: string, candidate: WorkspaceBriefingCandidate) {
-  const normalizedItem = normalizeMatchText(rawItem);
-  if (!normalizedItem) return false;
-  for (const ref of candidate.sourceRefs) {
-    const normalizedId = normalizeMatchText(ref.id);
-    if (normalizedId && normalizedItem.includes(normalizedId)) return true;
-    const normalizedLabel = normalizeMatchText(ref.label);
-    if (normalizedLabel.length >= 8 && normalizedItem.includes(normalizedLabel)) return true;
-  }
-  return false;
-}
-
-function shouldAttachSemanticSourceRefs(
-  sectionId: NewspaperEmailSectionId,
-  rawItem: string,
-  candidate: WorkspaceBriefingCandidate | null,
-) {
-  if (!candidate) return false;
-  return sectionId === "otherUpdates" || digestItemNamesCandidateSource(rawItem, candidate);
-}
-
 function candidateKey(candidate: Pick<WorkspaceBriefingCandidate, "sourceType" | "sourceId">) {
   return `${candidate.sourceType}:${candidate.sourceId}`;
-}
-
-function titleFromDigestItem(rawItem: string, sourceRefs: WorkspaceBriefingSourceRef[] = []) {
-  const compact = normalizeNarrativeText(rawItem, 160, sourceRefs);
-  if (!compact) return "Workspace update";
-  const colonIndex = compact.indexOf(":");
-  const firstSentence = compact.match(/^(.+?[.!?])(?:\s|$)/)?.[1];
-  const title = colonIndex > 8 && colonIndex < 90
-    ? compact.slice(0, colonIndex)
-    : firstSentence && firstSentence.length <= 90
-      ? firstSentence
-      : "Workspace update";
-  return cleanBriefingTitle(title, "Workspace update").replace(/[.!?]$/u, "");
 }
 
 function pickCandidateForSection(
@@ -1320,37 +1286,39 @@ export function buildWorkspaceBriefingFromDigest(params: {
   const rankedCandidates = rankWorkspaceBriefingCandidates(consolidatedCandidates, generatedAt);
   const used = new Set<string>();
   const digestEntries = params.digest.sections.flatMap((section, sectionIndex) => (
-    section.items.map((rawItem, itemIndex) => {
+    section.items.flatMap((rawItem, itemIndex) => {
       const expectedKind = sectionKind(section.id);
       const source = pickCandidateForSection(section.id, rawItem, rankedCandidates, used);
       const semanticSource = source ?? rankedCandidates.find((entry) => (
         !used.has(candidateKey(entry))
         && candidateSemanticallyOverlapsDigestItem(entry, rawItem)
       ));
-      if (!source && semanticSource) used.add(candidateKey(semanticSource));
       const scoreSource = source ?? semanticSource;
       const score = source
         ? scoreWorkspaceBriefingCandidate(source, generatedAt)
         : semanticSource
           ? Math.max(4, scoreWorkspaceBriefingCandidate(semanticSource, generatedAt) - 0.5)
           : Math.max(4, 8 - itemIndex);
-      const attachSemanticRefs = shouldAttachSemanticSourceRefs(section.id, rawItem, semanticSource ?? null);
-      const narrativeSource = source ?? (semanticSource?.sourceType === expectedKind ? semanticSource : null);
-      const sourceRefs = source?.sourceRefs ?? (attachSemanticRefs ? semanticSource?.sourceRefs ?? [] : []);
-      const readableRawItem = replaceRawSourceReferences(rawItem, sourceRefs);
-      return {
+      const narrativeSource = source ?? semanticSource;
+      // Generated prose can add a person to a meeting claim in any section.
+      // Use the model for selection, then render only matched source evidence.
+      if (!narrativeSource || (expectedKind === "MEETING" && narrativeSource.sourceType !== "MEETING")) return [];
+      if (!source) used.add(candidateKey(narrativeSource));
+      const sourceRefs = narrativeSource.sourceRefs;
+      const readableRawItem = [narrativeSource.title, narrativeSource.summaryMd].filter(Boolean).join(": ");
+      return [{
         digestIndex: sectionIndex * 100 + itemIndex,
-        kind: narrativeSource?.sourceType ?? expectedKind,
-        title: narrativeSource?.title ?? titleFromDigestItem(readableRawItem, sourceRefs),
+        kind: narrativeSource.sourceType,
+        title: narrativeSource.title,
         rawItem: readableRawItem,
-        whyItMattersMd: scoreSource ? whyCandidateMatters(scoreSource) : "This was selected because it helps explain the current workspace picture.",
+        whyItMattersMd: whyCandidateMatters(narrativeSource),
         sourceRefs,
-        href: narrativeSource?.href ?? (attachSemanticRefs ? semanticSource?.href ?? null : null),
-        occurredAt: scoreSource?.occurredAt ?? generatedAt,
-        status: scoreSource?.status ?? null,
-        confidence: scoreSource ? Math.max(0.62, Math.min(0.98, 0.6 + score / 25)) : 0.72,
+        href: narrativeSource.href,
+        occurredAt: narrativeSource.occurredAt,
+        status: narrativeSource.status ?? null,
+        confidence: Math.max(0.62, Math.min(0.98, 0.6 + score / 25)),
         score,
-      };
+      }];
     })
   ));
   const carryForwardEntries = rankedCandidates
@@ -1410,7 +1378,7 @@ export function buildWorkspaceBriefingFromDigest(params: {
     editorialMode: params.editorialMode,
     generatedAt,
     items: consolidatedItems,
-    fallbackIntro: params.digest.intro,
+    fallbackIntro: null,
   });
 
   return {

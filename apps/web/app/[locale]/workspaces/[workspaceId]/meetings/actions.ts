@@ -31,7 +31,7 @@ import {
   type DuplicateGuardResolution,
   type MeetingTranscriptIntakeResult,
 } from "@corgtex/domain";
-import { extractTextFromFileBuffer } from "@corgtex/knowledge";
+import { extractMeetingTranscriptFile } from "@/lib/meeting-transcript-file";
 import {
   deletePendingTranscriptPayload,
   readPendingTranscriptPayload,
@@ -255,12 +255,7 @@ async function buildTranscriptUploadPayload(formData: FormData): Promise<Transcr
   let retryRequiresTranscriptUpload = false;
 
   if (file instanceof File && file.size > 0) {
-    const extracted = await extractTextFromFileBuffer({
-      fileBuffer: Buffer.from(await file.arrayBuffer()),
-      fileName: file.name,
-      mimeType: file.type || "application/octet-stream",
-    });
-    transcript = extracted.textContent ?? transcript;
+    transcript = await extractMeetingTranscriptFile(file);
     fileName = file.name;
     retryRequiresTranscriptUpload = true;
   }

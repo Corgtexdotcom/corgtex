@@ -911,6 +911,8 @@ describe("runDailyDigest", () => {
     const digestCall = extractMock.mock.calls.find(([request]) => request.instruction.startsWith("Generate a structured"));
     expect(digestCall?.[0].input).toContain("Meeting summaries and decisions");
     expect(digestCall?.[0].input).toContain("Weekly tactical");
+    expect(digestCall?.[0].input).not.toContain("Participants:");
+    expect(digestCall?.[0].instruction).toContain("Meeting attendance does not prove who spoke");
     expect(result).toEqual(expect.objectContaining({
       cadence: "WEEKLY",
       sentEmails: 1,
@@ -929,7 +931,7 @@ describe("runDailyDigest", () => {
     }));
   });
 
-  it("batches recipient profile reads into a single findMany over all recipient slugs", async () => {
+  it("does not load recipient profiles or run model personalization for source-backed emails", async () => {
     prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
     prismaMock.member.findMany.mockResolvedValue([
       { id: "member-a", newspaperCadence: "DAILY", user: { id: "user-a", email: "a@example.com", displayName: "A" } },
@@ -943,19 +945,14 @@ describe("runDailyDigest", () => {
       cadence: "DAILY",
     });
 
-    expect(prismaMock.brainArticle.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          workspaceId: "workspace-1",
-          slug: { in: expect.arrayContaining(["person-user-a", "person-user-b"]) },
-        }),
-      }),
-    );
-    // The per-recipient profile read must not fall back to a findUnique per member.
+    expect(prismaMock.brainArticle.findMany.mock.calls.some(
+      ([arg]) => arg?.where?.slug?.in?.some((slug: string) => slug.startsWith("person-")),
+    )).toBe(false);
     const personFindUniqueCalls = prismaMock.brainArticle.findUnique.mock.calls.filter(
       ([arg]) => arg?.where?.workspaceId_slug?.slug?.startsWith("person-"),
     );
     expect(personFindUniqueCalls).toHaveLength(0);
+    expect(extractMock.mock.calls.some(([request]) => request.instruction.startsWith("Personalize this workspace"))).toBe(false);
     expect(sendEmailMock).toHaveBeenCalledTimes(2);
   });
 

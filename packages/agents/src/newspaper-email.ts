@@ -351,25 +351,21 @@ export function renderWorkspaceBriefingEmailHtml(params: {
   personalization?: NewspaperPersonalization;
 }) {
   const recipient = params.recipientName?.trim() || "there";
-  const greeting = params.personalization?.greeting ?? `Hello ${recipient},`;
+  const greeting = `Hello ${recipient},`;
   const briefing = normalizeWorkspaceBriefingPayload(params.briefing.briefingJson);
-  const intro = params.personalization?.intro ?? briefing.introMd;
   const articleHtml = renderNarrativeParagraphs([
-    intro,
+    briefing.introMd,
     briefing.leadMd,
     briefing.bodyMd,
     briefing.attentionMd,
     briefing.continuingContextMd,
     briefing.closingMd,
   ], params.workspaceUrl);
-  const memberPersonalNote = params.personalization?.memberNote
-    ? `<p style="font-size:15px;line-height:1.6;margin:18px 0 0;color:#5b5448;">${renderNarrativeMarkdown(params.personalization.memberNote, params.workspaceUrl)}</p>`
-    : "";
   const memberFallbackNote = renderRecipientFallbackNote({
     digest: params.digest,
     workspaceUrl: params.workspaceUrl,
   });
-  const memberNote = `${memberPersonalNote}${memberFallbackNote}`;
+  const memberNote = memberFallbackNote;
   const sourceLinks = briefing.sourceRefs.slice(0, 8).flatMap((ref) => {
     if (!ref.href) return [];
     return [`<a href="${escapeAttribute(absoluteEmailHref(ref.href, params.workspaceUrl))}" style="color:#6750a4;text-decoration:underline;">${escapeHtml(ref.label)}</a>`];

@@ -32,6 +32,12 @@ const redisClient = {
 };
 const getRedisClient = vi.fn();
 
+class MockAppError extends Error {
+  constructor(public status: number, public code: string, message: string) {
+    super(message);
+  }
+}
+
 vi.mock("@/lib/demo-guard", () => ({
   enforceDemoGuard,
 }));
@@ -71,6 +77,7 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 
 vi.mock("@corgtex/domain", () => ({
+  AppError: MockAppError,
   DEFAULT_MEETING_DURATION_MINUTES: 60,
   MAX_MEETING_DURATION_MINUTES: 480,
   MIN_MEETING_DURATION_MINUTES: 1,
@@ -521,6 +528,17 @@ describe("meeting server actions", () => {
       transcript: "Updated transcript from replacement file.",
       fileName: "updated.txt",
     }));
+  });
+
+  it("returns a clear size error without ingesting an oversized transcript", async () => {
+    const { uploadMeetingTranscriptStateAction } = await import("./actions");
+    const data = formData({ workspaceId: "workspace-1", recordedAt: "2026-07-15T09:00", timeZone: "UTC" });
+    data.set("file", new File([new Uint8Array(5 * 1024 * 1024 + 1)], "read-ai.txt", { type: "text/plain" }));
+
+    const state = await uploadMeetingTranscriptStateAction(initialTranscriptState, data);
+
+    expect(state).toMatchObject({ status: "error", message: "Transcript files must be 5 MB or smaller." });
+    expect(intakeMeetingTranscript).not.toHaveBeenCalled();
   });
 
   it("keeps the old stored token when a replacement cannot be stored and requests re-upload", async () => {
