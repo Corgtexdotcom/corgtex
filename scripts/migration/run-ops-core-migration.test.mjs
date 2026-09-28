@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, writeFile, rm, symlink, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CUTOVER_PHASES } from "./ops-core-custody.mjs";
+import { readFileSync } from "node:fs";
+import { CUTOVER_PHASES, azureBlobCustodyAdapter, openCutoverCustody } from "./ops-core-custody.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { azureProviderOperationStore } from "./ops-core-provider-operations.mjs";
 import { archiveEvidenceHash } from "./ops-core-archive.mjs";
@@ -156,7 +157,93 @@ function stage(f, phase) {
   row.text = JSON.stringify(journal); return journal;
 }
 
+async function retryFixture() {
+  const f = fixture();
+  f.plan.source.postgresService = { domain: "core", serviceId: randomUUID() };
+  f.plan.source.postgresTriggers = { binding: { projectId: f.plan.source.writers.binding.projectId,
+    environmentId: f.plan.source.writers.binding.environmentId,
+    serviceIds: [f.plan.source.postgresService.serviceId] } };
+  await runOpsCoreMigration({ ...f.options, action: "initialize" });
+  const intentSha256 = archiveEvidenceHash(f.plan);
+  const root = f.containerFactory(f.plan.operator.custodyContainerUrl).getBlockBlobClient("cutovers/core.json");
+  const custody = await openCutoverCustody(azureBlobCustodyAdapter(root), intentSha256);
+  try {
+    const fence = await custody.begin("SOURCE_FENCED", "a".repeat(64));
+    await custody.complete(fence.operationId, "b".repeat(64));
+    await custody.begin("CAPTURED", "c".repeat(64));
+    const recovery = await custody.beginSourceRecovery("d".repeat(64));
+    await custody.complete(recovery.operationId, "e".repeat(64));
+  } finally { await custody.close(); }
+  const rootText = f.blobs.get("cutovers/core.json").text;
+  const retryPlan = structuredClone(f.plan);
+  retryPlan.transfer.postgres.scratchName = "corgtex_rehearsal_10_2_core";
+  retryPlan.operator.retryOf = { intentSha256, journalSha256: archiveEvidenceHash(JSON.parse(rootText)) };
+  return { f, rootText, retryPlan };
+}
+
 describe("Ops/Core executable operator", () => {
+  it("opens one canonical retry after terminal recovery and preserves predecessor bytes", async () => {
+    const { f, rootText, retryPlan } = await retryFixture();
+    const options = { ...f.options, plan: retryPlan };
+    const first = await runOpsCoreMigration({ ...options, action: "initialize" });
+    expect(first).toMatchObject({ status: "PREPARED", destinationMayHaveWritten: false });
+    expect(f.blobs.get("cutovers/core.json").text).toBe(rootText);
+    expect(f.blobs.has("cutovers/core-retry.json")).toBe(true);
+    expect(await runOpsCoreMigration({ ...options, action: "initialize" })).toEqual(first);
+    expect(await runOpsCoreMigration({ ...options, action: "status" })).toEqual(first);
+    expect(f.blobs.get("cutovers/core.json").text).toBe(rootText);
+  });
+  it("rejects changed predecessor, scratch reuse and alternate retry plans before source effects", async () => {
+    const { f, rootText, retryPlan } = await retryFixture();
+    const options = { ...f.options, plan: retryPlan };
+    const reused = structuredClone(retryPlan); reused.transfer.postgres.scratchName = f.plan.transfer.postgres.scratchName;
+    await expect(runOpsCoreMigration({ ...options, plan: reused, action: "initialize" })).rejects.toThrow("MIGRATION_RETRY_PLAN_MISMATCH");
+    const wrongHash = structuredClone(retryPlan); wrongHash.operator.retryOf.journalSha256 = "f".repeat(64);
+    await expect(runOpsCoreMigration({ ...options, plan: wrongHash, action: "initialize" })).rejects.toThrow("MIGRATION_RETRY_PREDECESSOR_INVALID");
+    expect(f.blobs.has("cutovers/core-retry.json")).toBe(false);
+    const first = await runOpsCoreMigration({ ...options, action: "initialize" });
+    const alternate = structuredClone(retryPlan); alternate.transfer.postgres.scratchName = "corgtex_rehearsal_10_3_core";
+    await expect(runOpsCoreMigration({ ...options, plan: alternate, action: "initialize" })).rejects.toThrow(/CUTOVER_|MIGRATION_/);
+    expect((await runOpsCoreMigration({ ...options, action: "status" })).intentSha256).toBe(first.intentSha256);
+    expect(f.blobs.get("cutovers/core.json").text).toBe(rootText);
+  });
+  it.each(["missing", "not-recovered", "pending", "target-written"])(
+    "rejects a %s predecessor before retaining a retry plan", async state => {
+      const { f, retryPlan } = await retryFixture();
+      const row = f.blobs.get("cutovers/core.json");
+      if (state === "missing") f.blobs.delete("cutovers/core.json");
+      else {
+        const journal = state === "not-recovered" ? stage(f, "PREPARED")
+          : state === "pending" ? stage(f, "SOURCE_FENCED") : stage(f, "TARGET_ACTIVATING");
+        delete journal.recovery;
+        if (state === "pending") {
+          journal.pending = { from: "SOURCE_FENCED", to: "CAPTURED", operationId: randomUUID(), intentSha256: "a".repeat(64) };
+          journal.sequence++;
+        }
+        row.text = JSON.stringify(journal);
+        retryPlan.operator.retryOf.journalSha256 = archiveEvidenceHash(journal);
+      }
+      const writes = f.writes();
+      await expect(runOpsCoreMigration({ ...f.options, plan: retryPlan, action: "initialize" })).rejects.toThrow();
+      expect(f.blobs.has("cutovers/core-retry.json")).toBe(false);
+      expect(f.writes()).toBe(writes);
+    });
+  it("holds the predecessor lease throughout retry actions", async () => {
+    const { f, retryPlan } = await retryFixture();
+    const options = { ...f.options, plan: retryPlan };
+    await runOpsCoreMigration({ ...options, action: "initialize" });
+    const root = f.containerFactory(f.plan.operator.custodyContainerUrl).getBlockBlobClient("cutovers/core.json");
+    const owner = await openCutoverCustody(azureBlobCustodyAdapter(root), retryPlan.operator.retryOf.intentSha256);
+    try { await expect(runOpsCoreMigration({ ...options, action: "status" })).rejects.toThrow(); }
+    finally { await owner.close(); }
+    let fenced = false;
+    await expect(runOpsCoreMigration({ ...options, action: "fence", credentials: { sourceConfig: {}, readerConfig: {} },
+      runtime: { transferPreflight: async ({ custody }) => {
+        f.blobs.get("cutovers/core.json").lease = "lost";
+        await custody.assertOwned();
+      }, fence: async () => { fenced = true; } } })).rejects.toThrow();
+    expect(fenced).toBe(false);
+  });
   it("refuses to initialize a cutover while managed PITR owns the shared target", async () => {
     const f = fixture(); f.pitr.active = true;
     await expect(runOpsCoreMigration({ ...f.options, action: "initialize" }))
@@ -399,7 +486,8 @@ describe("live transfer dependency admission before source fencing", () => {
     const state = { phase: "PREPARED", pending: null, domain: "core", intentSha256: archiveEvidenceHash(f.plan), destinationMayHaveWritten: false };
     const custody = { signal: controller.signal, snapshot: () => structuredClone(state), assertOwned: async () => {} };
     const key = Buffer.alloc(32, 7);
-    const config = { ...f.plan.transfer.postgres.target, password: "ephemeral-fixture", sslmode: "verify-full", targetTlsRootCert: "fixture-root" };
+    const config = { ...f.plan.transfer.postgres.target, dockerHost: f.plan.transfer.postgres.target.host,
+      password: "ephemeral-fixture", sslmode: "verify-full", targetTlsRootCert: "fixture-root" };
     let pgResult = { database: config.database, role: config.user, version: 180006, recovering: false, can_create_database: true };
     const client = { async connect() { calls.push("postgres-connect"); }, async end() { calls.push("postgres-close"); },
       async query(sql) {
@@ -428,10 +516,13 @@ describe("live transfer dependency admission before source fencing", () => {
     // Use the production adapter so key-path and create-only restrictions apply.
     const operationStore = azureProviderOperationStore(f.containerFactory(f.plan.operator.custodyContainerUrl));
     const options = { plan: f.plan, custody, operationStore, targetAdminConfig: config, objectSource: source,
-      sourceCredentials: { readerConfig: { ...f.plan.transfer.postgres.source, sslmode: "require", sourceTlsRootCert: "fixture-root" } },
+      sourceCredentials: { readerConfig: { ...f.plan.transfer.postgres.source, dockerHost: f.plan.transfer.postgres.source.host,
+        sslmode: "require", sourceTlsRootCert: "fixture-root" } },
       archiveStore: { identity: f.plan.transfer.postgres.archiveStoreId, async assertPrivate() {} },
       objectTarget: { identity: f.plan.transfer.objects.targetStoreId, async assertPrivate() {} } };
-    const dependencies = { sourcePreflight: async () => {calls.push("source-admission");return {complete:true};}, clientFactory: settings => { expect(settings.ssl.rejectUnauthorized).toBe(true); return client; },
+    const dependencies = { dockerClientPreflight: async () => { calls.push("docker-source"); calls.push("docker-target");
+      return { complete: true, source: true, target: true, clientImage: "pinned-fixture" }; },
+      sourcePreflight: async () => {calls.push("source-admission");return {complete:true};}, clientFactory: settings => { expect(settings.ssl.rejectUnauthorized).toBe(true); return client; },
       resolveKey: async () => { calls.push("archive-key"); return key; },
       redisTransport: transport(f.plan.redis.job), healthTransport: transport(f.plan.health),
       contextFactory: () => ({ plan: f.plan, async check() { controller.signal.throwIfAborted(); await custody.assertOwned(); },
@@ -445,6 +536,8 @@ describe("live transfer dependency admission before source fencing", () => {
     const f = await setup(), before = structuredClone(f.state); const result = await f.run();
     expect(result.status).toBe("PREFLIGHT_READY"); expect(result.evidence.finalAcceptance).toBe(false);
     expect(result.evidence.objects.readObjects).toBe(1); expect(result.evidence.postgres.readOnly).toBe(true);
+    expect(result.evidence.dockerClients).toMatchObject({ complete: true, source: true, target: true });
+    expect(f.calls.slice(1, 3)).toEqual(["docker-source", "docker-target"]);
     expect(f.key.every(byte => byte === 0)).toBe(true); expect(f.state).toEqual(before);
     expect(f.calls.filter(value => typeof value === "object").every(call => call.method === "GET"
       || call.method === "POST" && call.path.endsWith("/query") && call.body.query === "print preflight = 1")).toBe(true);
@@ -468,6 +561,47 @@ describe("live transfer dependency admission before source fencing", () => {
     expect(f.calls.filter(call => typeof call === "object").some(call => call.path.includes("fixture-redis"))).toBe(false);
     expect(f.key.every(byte => byte === 0)).toBe(true);
     expect(f.state.phase).toBe("PREPARED");
+  });
+
+  it.each(["source", "target"])("rejects a missing %s Docker client host before fencing", async side => {
+    const f = await setup();
+    if (side === "source") delete f.options.sourceCredentials.readerConfig.dockerHost;
+    else delete f.options.targetAdminConfig.dockerHost;
+    await expect(f.run()).rejects.toThrow("PREFLIGHT_DOCKER_CLIENT_HOST_REQUIRED");
+    expect(f.calls).not.toContain("source-admission");
+    expect(f.state.phase).toBe("PREPARED");
+  });
+
+  it.each(["source", "target"])("rejects an unreachable %s Docker client before source admission", async side => {
+    const f = await setup();
+    f.dependencies.dockerClientPreflight = async () => { throw Error(`PREFLIGHT_${side.toUpperCase()}_DOCKER_CONNECTION_FAILED`); };
+    await expect(f.run()).rejects.toThrow("MIGRATION_DEPENDENCY_PREFLIGHT_FAILED");
+    expect(f.calls).not.toContain("source-admission");
+    expect(f.state.phase).toBe("PREPARED");
+  });
+
+  it("runs both Docker service profiles against the pinned client before source fencing", async () => {
+    const { preflightDockerPostgresClients } = await import("./ops-core-preflight.mjs");
+    const root = readFileSync(new URL("../../infra/azure/migration-foundation/azure-postgres-root-ca.pem", import.meta.url), "utf8");
+    const controller = new AbortController(), services = [];
+    const source = { dockerHost: "source.internal", port: 5432, user: "reader", database: "source_db",
+      password: "source-secret", sslmode: "disable" };
+    const target = { dockerHost: "target.internal", port: 5432, user: "admin", database: "postgres",
+      password: "target-secret", sslmode: "verify-full", targetTlsRootCert: root };
+    const input = { source, target, signal: controller.signal, assertOwned: async () => {},
+      runClient: async args => {
+        services.push(args.service);
+        expect(args.commandDeadline - Date.now()).toBeGreaterThan(175_000);
+        expect(args.args).toContain(`--dbname=service=${args.service}`);
+        expect(readFileSync(args.serviceFile, "utf8")).toContain("dbname=postgres");
+      } };
+    await expect(preflightDockerPostgresClients(input)).resolves.toMatchObject({ complete: true, source: true, target: true });
+    expect(services).toEqual(["source", "target"]);
+    services.length = 0;
+    await expect(preflightDockerPostgresClients({ ...input, runClient: async args => {
+      services.push(args.service); if (args.service === "target") throw Error("private transport failure");
+    } })).rejects.toThrow("PREFLIGHT_TARGET_DOCKER_CONNECTION_FAILED");
+    expect(services).toEqual(["source", "target"]);
   });
 
   it.each(["source", "postgres", "archive", "object-list", "object-read", "redis-job", "health-logs", "lease", "target-written"])(

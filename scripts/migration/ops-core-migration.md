@@ -394,6 +394,18 @@ never starts a new effect. Missing baseline or unknown provider ownership blocks
 recovery. The terminal cutover cannot later activate Azure; do not reset it or
 delete retained databases/archives to reuse the old migration identity.
 
+One fresh attempt can follow a proven terminal recovery. Add
+`operator.retryOf: { intentSha256, journalSha256 }` to a new plan, binding the
+original journal's intent and complete terminal JSON hash. Use a new scratch
+database name and retain the same source service/database and Azure target
+bindings. The operator checks the predecessor under its lease and creates the
+fixed `cutovers/<domain>-retry.json` journal; the original remains intact. The
+retry slot is create-only and accepts only one exact plan. Run fresh preflight,
+including a read-only connection check from the pinned Docker PostgreSQL client
+to both source and target using the supplied `dockerHost` values, before fencing
+again. Preflight rejects missing Docker client hosts. A second terminal retry
+requires a new reviewed operator path; never reuse either journal or scratch DB.
+
 After the recorded target-write boundary, recover forward on Azure; the retained
 source is no longer a safe automatic routing fallback. Do not reset journals or
 use a new operation identity to bypass an unresolved effect.

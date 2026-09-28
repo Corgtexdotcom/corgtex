@@ -1,4 +1,7 @@
 import pg from "pg";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { opsCorePlanSharedStateVariant } from "./ops-core-plan-variant.mjs";
 import { redisGateBindingSha256 } from "./ops-core-redis-gate.mjs";
 import { archiveEvidenceHash, readArchiveKeyVersion } from "./ops-core-archive.mjs";
@@ -6,12 +9,37 @@ import { createOpsCoreTransferContext } from "./ops-core-transfer-controller.mjs
 import { preflightRedisJob } from "./ops-core-redis-job.mjs";
 import { preflightHealthJob } from "./ops-core-health-job.mjs";
 import { preflightOpsCorePostgresSource } from "./ops-core-postgres-fence.mjs";
-import { nodeClientConfig } from "./run-postgres-restore-rehearsal.mjs";
+import { dockerClient, nodeClientConfig, POSTGRES_CLIENT_IMAGE, writeClientFiles } from "./run-postgres-restore-rehearsal.mjs";
 import { preflightOpsCoreRuntimeAccess } from "./ops-core-runtime-access-controller.mjs";
 
 class PreflightError extends Error {}
 const need = (value, code) => { if (!value) throw new PreflightError(code); };
 export const opsCorePreflightDiagnostic = error => error instanceof PreflightError ? error.message : null;
+
+/** Exercise the same pinned PostgreSQL client and service profiles used by transfer.
+ * Both commands are read-only and complete before source writers are stopped. */
+export async function preflightDockerPostgresClients({ source, target, network = null, signal, assertOwned,
+  runClient = dockerClient }) {
+  let tempDir;
+  const check = async () => { signal.throwIfAborted(); await assertOwned(); signal.throwIfAborted(); };
+  try {
+    await check();
+    tempDir = await mkdtemp(join(tmpdir(), "opscore-client-preflight-"));
+    const clientFiles = writeClientFiles(tempDir, source, target, () => {});
+    for (const service of ["source", "target"]) {
+      await check();
+      try {
+        await runClient({ tempDir, ...clientFiles, service, network, signal,
+          commandDeadline: Date.now() + 180_000,
+          args: ["psql", "-X", "--quiet", "--set=ON_ERROR_STOP=1", "--set=VERBOSITY=sqlstate",
+            "--set=SHOW_CONTEXT=never", "--set=ECHO=none", `--dbname=service=${service}`, "--command=SELECT 1"],
+          code: `PREFLIGHT_${service.toUpperCase()}_DOCKER_CONNECTION_FAILED` });
+      } catch { throw new PreflightError(`PREFLIGHT_${service.toUpperCase()}_DOCKER_CONNECTION_FAILED`); }
+      await check();
+    }
+    return { complete: true, source: true, target: true, clientImage: POSTGRES_CLIENT_IMAGE };
+  } finally { if (tempDir) await rm(tempDir, { recursive: true, force: true }); }
+}
 
 /** Actual TLS authentication and read-only SQL, without creating a database or
  * changing target settings. Later restore and promotion retain their own guards. */
@@ -81,6 +109,13 @@ export async function runOpsCoreTransferPreflight(options, dependencies = {}) {
       await check(); need(archiveEvidenceHash(options.custody.snapshot()) === archiveEvidenceHash(initial), "PREFLIGHT_CUSTODY_CHANGED");
     };
     await guard(); await assertTargetInactive();
+    need(options.sourceCredentials?.readerConfig?.dockerHost && options.targetAdminConfig?.dockerHost,
+      "PREFLIGHT_DOCKER_CLIENT_HOST_REQUIRED");
+    const dockerClients = await (dependencies.dockerClientPreflight ?? preflightDockerPostgresClients)({
+      source: options.sourceCredentials.readerConfig, target: options.targetAdminConfig,
+      network: options.dockerNetwork ?? null, signal: options.custody.signal, assertOwned: guard });
+    need(dockerClients?.complete === true && dockerClients.source === true && dockerClients.target === true,
+      "PREFLIGHT_DOCKER_CLIENT_CONNECTION_UNPROVEN");
     const sourceAdmission = initial.pending ? { fresh: false, reason: "INHERITED_FENCE_REQUIRES_OWN_RECONCILIATION" }
       : { fresh: true, proof: await (dependencies.sourcePreflight ?? preflightOpsCorePostgresSource)({
           ...plan.source.postgres, custody: options.custody, ...options.sourceCredentials }) };
@@ -112,7 +147,7 @@ export async function runOpsCoreTransferPreflight(options, dependencies = {}) {
       ...(dependencies.healthTransport ? { transport: dependencies.healthTransport } : {}) });
     await assertTargetInactive(); await guard();
     const evidence = { schemaVersion: 1, type: "MIGRATION_DEPENDENCY_PREFLIGHT", domain: plan.domain,
-      intentSha256: initial.intentSha256, observedAt: new Date().toISOString(), sourceAdmission, postgres, objects, health,
+      intentSha256: initial.intentSha256, observedAt: new Date().toISOString(), dockerClients, sourceAdmission, postgres, objects, health,
       ...(runtimeAccess ? { runtimeAccess } : {}),
       ...(postgresState ? { sharedState } : { redis }),
       archiveKeyVersion: pgPlan.keyVersion, archiveKeyReadable: true, finalAcceptance: false };
