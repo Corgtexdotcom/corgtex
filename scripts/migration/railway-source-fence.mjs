@@ -67,7 +67,7 @@ const nullableText = (value) => {
   return value;
 };
 const noOpPatch = (value) => isRecord(value) && Object.values(value).every((item) => noOpPatch(item));
-const stagedPatchMatches = (observed, requested, services) => {
+const stagedPatchMatches = (observed, requested, services, currentConfig = null) => {
   if (canonical(observed) === canonical(requested)) return true;
   // Railway omits a requested null cron override when that service already has
   // no configured cron. Compare only that provider-normalized form; every other
@@ -75,6 +75,17 @@ const stagedPatchMatches = (observed, requested, services) => {
   const normalized = structuredClone(requested);
   for (const service of services) {
     const patch = normalized.services?.[service.serviceId];
+    const updates = patch?.source?.autoUpdates;
+    const observedUpdates = observed.services?.[service.serviceId]?.source?.autoUpdates;
+    const currentUpdates = currentConfig?.[service.serviceId]?.source?.autoUpdates;
+    if (isRecord(updates) && isRecord(observedUpdates) && isRecord(currentUpdates)) {
+      // Railway leaves unchanged optional update settings out of a staged patch.
+      // Admit an omission only when the live config already has the exact value.
+      for (const key of ["tagMode", "remediationNotice"]) {
+        if (!Object.hasOwn(observedUpdates, key) && Object.hasOwn(updates, key)
+          && canonical(currentUpdates[key]) === canonical(updates[key])) delete updates[key];
+      }
+    }
     if (service.configuredCronSchedule !== null || service.cronSchedule !== null
       || service.nextCronRunAt !== null || patch?.deploy?.cronSchedule !== null) continue;
     delete patch.deploy.cronSchedule;
@@ -182,7 +193,7 @@ export class RailwaySourceFence {
   #recoveryStageMatches(policy, patchSha256, baseline) {
     const requested = this.#recoveryPatch(baseline);
     return digest(requested) === patchSha256 && policy.environment.staged.status === "STAGED"
-      && stagedPatchMatches(policy.environment.staged.patch, requested, policy.services);
+      && stagedPatchMatches(policy.environment.staged.patch, requested, policy.services, policy.environment.config.services);
   }
   async matchesStagedRecoveryTriggerPatch(patchSha256, baseline) {
     this.#requireExpectedLinks();
