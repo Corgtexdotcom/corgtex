@@ -15,6 +15,7 @@ import { WorkItemConversationSurface, WorkItemRequestList } from "@/lib/componen
 import { WorkItemLifecycleBadge } from "@/lib/components/WorkItemControls";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
+import { hasEligibleActionAssignee } from "../view-model";
 import { attachActionExternalResourceAction, createActionChecklistItemAction, deleteActionAction, deleteActionChecklistItemAction, postActionDeliberationAction, publishActionAction, requestActionInputAction, resolveActionDeliberationAction, returnActionToDraftAction, updateActionAction, updateActionChecklistItemAction, updateActionDeliberationAction } from "../../actions";
 import { getFormatter, getTranslations } from "next-intl/server";
 import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
@@ -85,6 +86,7 @@ export default async function ActionDetailPage({
       : Promise.resolve(null),
     isArchived ? Promise.resolve([]) : listHumanMembers(workspaceId),
   ]);
+  const hasEligibleAssignee = hasEligibleActionAssignee(action.assigneeMemberId, new Set(members.map((member) => member.id)));
   const completionEvidence = evidence.filter((row) => row.purpose === "completion_evidence");
   const feedbackContextEvidence = evidence.filter((row) => row.purpose === "feedback_context");
   const referenceFiles = evidence.filter((row) => row.purpose === "reference");
@@ -284,14 +286,19 @@ export default async function ActionDetailPage({
       {!isArchived && (canManage || canEditContent || action.status === "OPEN" || action.status === "IN_PROGRESS") && (
         <section className="ws-section" style={{ marginBottom: 24 }}>
           <div className="actions-inline">
-            {canManage && canOpenPrivateDraft(action) && (
+            {canManage && canOpenPrivateDraft(action) && hasEligibleAssignee && (
               <form action={publishActionAction}>
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <input type="hidden" name="actionId" value={action.id} />
                 <button type="submit" className="primary small">{t("btnOpen")}</button>
               </form>
             )}
-            {action.status === "OPEN" && (
+            {canManage && canOpenPrivateDraft(action) && !hasEligibleAssignee && (
+              <Link href={`/workspaces/${workspaceId}/actions/${action.id}/edit`} className="secondary small">
+                {t("assignBeforeOpen")}
+              </Link>
+            )}
+            {action.status === "OPEN" && hasEligibleAssignee && (
               <form action={updateActionAction}>
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <input type="hidden" name="actionId" value={action.id} />
@@ -299,7 +306,7 @@ export default async function ActionDetailPage({
                 <button type="submit" className="primary small">{t("btnStart")}</button>
               </form>
             )}
-            {(action.status === "OPEN" || action.status === "IN_PROGRESS") && (
+            {(action.status === "OPEN" || action.status === "IN_PROGRESS") && hasEligibleAssignee && (
               <WorkItemResolutionDialog
                 action={updateActionAction}
                 buttonLabel={t("btnComplete")}

@@ -1685,6 +1685,9 @@ export async function createWorkItemFromCommunicationSource(actor: AppActor, par
   const bodyMd = `${params.bodyMd?.trim() || title}${sourceNote}`;
   const dueAt = typeof params.dueAt === "string" ? new Date(params.dueAt) : params.dueAt ?? null;
   const normalizedDueAt = dueAt instanceof Date && Number.isFinite(dueAt.getTime()) ? dueAt : null;
+  if (params.kind === "ACTION" && params.open) {
+    invariant(params.assigneeMemberId, 400, "INVALID_INPUT", "Assign an active human member before opening this Action.");
+  }
 
   if (claimKey) {
     try {
@@ -1852,13 +1855,13 @@ function createdResponse(entityType: string, title: string, url: string, extraBl
 }
 
 function publishActionBlocks(entityType: string, entityId: string) {
-  if (entityType !== "Action" && entityType !== "Tension") return [];
+  if (entityType !== "Tension") return [];
   return [{
     type: "actions",
     elements: [{
       type: "button",
-      text: { type: "plain_text", text: entityType === "Action" ? "Open action" : "Open tension" },
-      action_id: entityType === "Action" ? "corgtex_publish_action" : "corgtex_publish_tension",
+      text: { type: "plain_text", text: "Open tension" },
+      action_id: "corgtex_publish_tension",
       value: JSON.stringify({ entityType, entityId }),
     }],
   }];
@@ -1926,7 +1929,10 @@ export async function handleSlackCommand(payload: URLSearchParams) {
     externalUserId,
   });
 
-  return createdResponse(item.entityType, text.slice(0, 120), item.webUrl, publishActionBlocks(item.entityType, item.entityId));
+  return createdResponse(item.entityType, text.slice(0, 120), item.webUrl,
+    item.entityType === "Action"
+      ? [{ type: "context", elements: [{ type: "mrkdwn", text: "Assign an active human owner in Corgtex before opening this Action." }] }]
+      : publishActionBlocks(item.entityType, item.entityId));
 }
 
 export async function handleSlackInteraction(payload: Record<string, unknown>) {

@@ -277,6 +277,7 @@ export function WorkItemFilterControls({
   memberId,
   memberIds,
   group,
+  hiddenFields,
   statusOptions,
   statusValues,
   circles,
@@ -303,6 +304,7 @@ export function WorkItemFilterControls({
   memberId?: string;
   memberIds?: readonly string[];
   group?: string;
+  hiddenFields?: Readonly<Record<string, string>>;
   statusOptions?: Option[];
   statusValues?: readonly string[];
   circles: Option[];
@@ -355,6 +357,9 @@ export function WorkItemFilterControls({
       {sort && sort !== "priority" && <input type="hidden" name="sort" value={sort} />}
       {columns && columns.length > 0 && <input type="hidden" name="columns" value={columns.join(",")} />}
       {group && <input type="hidden" name="group" value={group} />}
+      {Object.entries(hiddenFields ?? {}).map(([name, value]) => (
+        <input key={name} type="hidden" name={name} value={value} />
+      ))}
       {statusOptions && showStatusFilter && (
         <MultiSelectFilter
           name="status"

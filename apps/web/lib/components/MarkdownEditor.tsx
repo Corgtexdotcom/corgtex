@@ -54,6 +54,17 @@ export function MarkdownEditor({
     setPreview(false);
   }, [defaultValue, resetKey, value]);
 
+  useEffect(() => {
+    const form = internalRef.current?.form;
+    if (!form || value !== undefined) return;
+    const reset = () => {
+      setInternalValue(defaultValue ?? "");
+      setPreview(false);
+    };
+    form.addEventListener("reset", reset);
+    return () => form.removeEventListener("reset", reset);
+  }, [defaultValue, value]);
+
   const setTextareaRef = useCallback((node: HTMLTextAreaElement | null) => {
     internalRef.current = node;
     if (typeof textareaRef === "function") {

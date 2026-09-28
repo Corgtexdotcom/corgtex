@@ -1,5 +1,8 @@
 {
   "actions": {
+    "allWorkspaceActions": "All workspace actions",
+    "myActions": "My actions",
+    "assignBeforeOpen": "Assign a person before opening",
     "ageDaysAgo": "{count}d ago",
     "ageToday": "today",
     "ageYesterday": "yesterday",

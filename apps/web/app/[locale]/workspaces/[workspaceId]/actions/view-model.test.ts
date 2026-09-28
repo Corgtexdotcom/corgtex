@@ -1,14 +1,50 @@
 import { describe, expect, it } from "vitest";
 import {
   ACTION_STATUS_META,
+  actionStatusFormValues,
   actionMatchesStatusFilter,
   groupActionsByStatus,
+  hasEligibleActionAssignee,
   normalizeActionStatusFilter,
   normalizeActionStatusFilters,
+  resolveActionAssigneeScope,
   resolveActionStatusSearch,
 } from "./view-model";
 
 describe("actions view model", () => {
+  it("starts on the current member's Actions while keeping explicit workspace and owner filters", () => {
+    expect(resolveActionAssigneeScope([], "member-daniel", undefined)).toMatchObject({
+      assigneeMemberIds: ["member-daniel"], includeOwnDrafts: true, actionScope: "mine", assignedToMeActive: false,
+    });
+    expect(resolveActionAssigneeScope([], "member-daniel", "assigned")).toMatchObject({
+      assigneeMemberIds: ["member-daniel"], includeOwnDrafts: false, actionScope: "assigned", assignedToMeActive: true,
+    });
+    expect(resolveActionAssigneeScope([], "member-daniel", "workspace")).toMatchObject({
+      assigneeMemberIds: [], assignedToMeActive: false, actionScope: "workspace",
+    });
+    expect(resolveActionAssigneeScope(["member-andy"], "member-daniel", undefined)).toMatchObject({
+      assigneeMemberIds: ["member-andy"], includeOwnDrafts: false, assignedToMeActive: false,
+    });
+    expect(resolveActionAssigneeScope(["member-andy"], "member-daniel", "workspace")).toMatchObject({
+      actionScope: "filtered", baseScope: "workspace", assigneeMemberIds: ["member-andy"],
+    });
+    expect(resolveActionAssigneeScope(["member-andy"], "member-daniel", "assigned")).toMatchObject({
+      actionScope: "filtered", baseScope: "assigned", assigneeMemberIds: ["member-andy"],
+    });
+  });
+  it("allows draft opening only for an active human assignee", () => {
+    const activeHumans = new Set(["member-daniel"]);
+    expect(hasEligibleActionAssignee("member-daniel", activeHumans)).toBe(true);
+    expect(hasEligibleActionAssignee("inactive-member", activeHumans)).toBe(false);
+    expect(hasEligibleActionAssignee("system-member", activeHumans)).toBe(false);
+    expect(hasEligibleActionAssignee(null, activeHumans)).toBe(false);
+  });
+  it("keeps the explicit All lifecycle status in the advanced filter form", () => {
+    const all = resolveActionStatusSearch("ALL");
+    expect(actionStatusFormValues(all.statusQuery, all.statusFilters)).toEqual(["ALL"]);
+    const open = resolveActionStatusSearch("OPEN");
+    expect(actionStatusFormValues(open.statusQuery, open.statusFilters)).toEqual(["OPEN"]);
+  });
   it("normalizes status filters and falls back to open", () => {
     expect(normalizeActionStatusFilter("DRAFT")).toBe("DRAFT");
     expect(normalizeActionStatusFilter("IN_PROGRESS")).toBe("IN_PROGRESS");

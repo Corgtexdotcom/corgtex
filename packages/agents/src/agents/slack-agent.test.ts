@@ -126,6 +126,7 @@ vi.mock("@corgtex/domain", () => ({
     return { policyClass: "draft_or_clarify", autoRunAllowed: false, requiresSensitiveHandling: false, reason: "test" };
   }),
   fetchSlackThreadMessages: fetchSlackThreadMessagesMock,
+  isHumanMemberIdentity: (member: { kind?: string; user?: { email?: string; displayName?: string } }) => member.kind !== "SYSTEM" && !member.user?.email?.startsWith("system+") && !member.user?.displayName?.endsWith(" System"),
   listMembers: listMembersMock,
 }));
 
@@ -256,6 +257,38 @@ describe("runSlackAgent", () => {
     }));
     expect(deliverSlackAgentResponseMock).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
       text: expect.stringContaining("Done:"),
+    }));
+  });
+
+  it("keeps an Action private and asks for a human owner when Slack names none", async () => {
+    extractMock.mockResolvedValueOnce({ output: {
+      intent: "create_action", confidence: 0.94, title: "Send the renewal packet", bodyMd: "Send it by Friday.",
+      assigneeHint: null, dueDateISO: null, publish: true,
+    } });
+    createWorkItemMock.mockResolvedValueOnce({
+      entityType: "Action", entityId: "action-2", webUrl: "https://app.example.test/actions/action-2", opened: false,
+    });
+    const { runSlackAgent } = await import("./slack-agent");
+    await runSlackAgent(basePayload());
+    expect(createWorkItemMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "user" }), expect.objectContaining({
+      kind: "ACTION", assigneeMemberId: null, open: false,
+    }));
+    expect(deliverSlackAgentResponseMock).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      text: expect.stringContaining("Assign an active Corgtex member"),
+    }));
+  });
+
+  it("does not assign an Action to a system member matched in Slack", async () => {
+    listMembersMock.mockResolvedValueOnce([{ id: "system-member", userId: "system-user", kind: "SYSTEM", user: { email: "system+agent@example.test", displayName: "Workspace System" } }]);
+    extractMock.mockResolvedValueOnce({ output: {
+      intent: "create_action", confidence: 0.94, title: "Send the renewal packet", bodyMd: "Send it by Friday.",
+      assigneeHint: "Workspace System", dueDateISO: null, publish: true,
+    } });
+    createWorkItemMock.mockResolvedValueOnce({ entityType: "Action", entityId: "action-2", webUrl: "https://app.example.test/actions/action-2", opened: false });
+    const { runSlackAgent } = await import("./slack-agent");
+    await runSlackAgent(basePayload());
+    expect(createWorkItemMock).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      kind: "ACTION", assigneeMemberId: null, open: false,
     }));
   });
 

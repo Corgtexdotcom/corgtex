@@ -7,6 +7,7 @@ import {
   createWorkItemFromCommunicationSource,
   getAgentModelOverride,
   isAgentEnabled,
+  listHumanMembers,
   postDeliberationEntry,
   sendSlackMessage,
 } from "@corgtex/domain";
@@ -23,6 +24,7 @@ const MAX_PROACTIVE_ACTION_FOLLOWUPS = 3;
 const PROACTIVE_EXISTING_ACTION_UPDATE = "proactive_existing_action_update";
 const PROACTIVE_ACTION_WAITING_UPDATE = "proactive_action_waiting_update";
 const PROACTIVE_ACTION_PROCESSED_REPLY = "proactive_action_processed_reply";
+const PROACTIVE_ACTION_NEEDS_OWNER = "proactive_action_needs_owner";
 const PROACTIVE_NON_ACTION = "proactive_unanswered_non_action";
 const PROACTIVE_DISPOSITION_CLAIM_PREFIX = "slack-proactive-disposition";
 const PROACTIVE_CONFIRMATION_CLAIM_PREFIX = "slack-proactive-confirmation";
@@ -316,6 +318,49 @@ async function sendProactiveActionConfirmation(params: { workspaceId: string; in
     await sendSlackMessage(params.installationId, { channel: params.channel, threadTs: params.threadTs, text: `Created Corgtex action: ${params.title}` }, [{ type: "section", text: { type: "mrkdwn", text: `I created a Corgtex action for this concrete future deliverable: <${params.webUrl}|${params.title}>.` } }]);
     return true;
   } catch (error) { await prisma.communicationEntityLink.deleteMany({ where: { id: claim.id, workspaceId: params.workspaceId, claimKey } }); throw error; }
+}
+
+async function resolveProactiveAssigneeMemberId(params: { workspaceId: string; installationId: string; ownerEvidence: string }) {
+  const owner = params.ownerEvidence.trim();
+  if (!owner) return null;
+  const members = await listHumanMembers(params.workspaceId);
+  const externalUserId = owner.match(/<@([A-Z0-9]+)(?:\|[^>]+)?>/i)?.[1]
+    ?? (/^[A-Z][A-Z0-9]{1,}$/.test(owner) ? owner : null);
+  if (externalUserId) {
+    const externalUser = await prisma.communicationExternalUser.findUnique({
+      where: { installationId_externalUserId: { installationId: params.installationId, externalUserId } },
+      select: { memberId: true, userId: true },
+    });
+    return members.find((member) => member.id === externalUser?.memberId || member.userId === externalUser?.userId)?.id ?? null;
+  }
+  const normalizedOwner = owner.toLowerCase();
+  const matches = members.filter((member) => {
+    const name = member.user.displayName?.trim().toLowerCase() ?? "";
+    return name === normalizedOwner || name.split(" ")[0] === normalizedOwner || member.user.email.toLowerCase() === normalizedOwner;
+  });
+  return matches.length === 1 ? matches[0].id : null;
+}
+
+async function sendProactiveOwnerRequest(params: { workspaceId: string; installationId: string; sourceMessageId: string; latestMessageId: string; externalUserId: string | null; channel: string; threadTs: string }) {
+  const claimKey = `${PROACTIVE_ACTION_NEEDS_OWNER}:${params.installationId}:${params.sourceMessageId}:${params.latestMessageId}`;
+  let claim: { id: string };
+  try {
+    claim = await prisma.communicationEntityLink.create({
+      data: { installationId: params.installationId, workspaceId: params.workspaceId, provider: "SLACK", messageId: params.latestMessageId, externalUserId: params.externalUserId, entityType: "CommunicationMessage", entityId: params.sourceMessageId, action: PROACTIVE_ACTION_NEEDS_OWNER, claimKey },
+      select: { id: true },
+    });
+  } catch (error) { if (isUniqueConstraintError(error)) return false; throw error; }
+  try {
+    await sendSlackMessage(params.installationId, {
+      channel: params.channel,
+      threadTs: params.threadTs,
+      text: "An Action needs an owner before it can be opened.",
+    }, [{ type: "section", text: { type: "mrkdwn", text: "I found a possible follow-up. Please reply with a full ownership statement naming an active Corgtex member and the specific next step, for example: `Avery will send the renewal packet by Friday.` A name alone is not enough to create the Action." } }]);
+    return true;
+  } catch (error) {
+    await prisma.communicationEntityLink.deleteMany({ where: { id: claim.id, workspaceId: params.workspaceId, claimKey } });
+    throw error;
+  }
 }
 
 function hasConcreteOwnerEvidence(ownerEvidence: string, concreteNextStep: string, threadMessages: SlackCandidateMessage[]) {
@@ -755,6 +800,13 @@ export async function runSlackProactiveScan(params: {
         select: { id: true },
       });
       if (existingUpdate) continue;
+    } else {
+      const ownerPromptClaimKey = `${PROACTIVE_ACTION_NEEDS_OWNER}:${params.installationId}:${candidate.id}:${latestThreadMessage.id}`;
+      const existingOwnerPrompt = await prisma.communicationEntityLink.findUnique({
+        where: { workspaceId_claimKey: { workspaceId: params.workspaceId, claimKey: ownerPromptClaimKey } },
+        select: { id: true },
+      });
+      if (existingOwnerPrompt) continue;
     }
 
     if (semanticReviews >= MAX_PROACTIVE_REVIEWS) break;
@@ -825,12 +877,35 @@ export async function runSlackProactiveScan(params: {
       continue;
     }
 
+    const assigneeMemberId = await resolveProactiveAssigneeMemberId({
+      workspaceId: params.workspaceId,
+      installationId: params.installationId,
+      ownerEvidence: parsed.ownerEvidence,
+    });
+    if (!assigneeMemberId) {
+      try {
+        await sendProactiveOwnerRequest({
+          workspaceId: params.workspaceId,
+          installationId: params.installationId,
+          sourceMessageId: candidate.id,
+          latestMessageId: latestThreadMessage.id,
+          externalUserId: latestThreadMessage.externalUserId,
+          channel: candidate.externalChannelId,
+          threadTs: threadTsForMessage(candidate),
+        });
+      } catch (error) {
+        if (await markSlackInstallationReauthRequired({ ...params, error })) return { skipped: true, reason: "slack_reauth_required" };
+        throw error;
+      }
+      continue;
+    }
+
     const actionTitle = `${parsed.concreteNextStep.charAt(0).toUpperCase()}${parsed.concreteNextStep.slice(1, 120)}`;
     if (latestThreadMessage.id !== candidate.id) await recordProactiveMarker({ installationId: params.installationId, workspaceId: params.workspaceId, messageId: latestThreadMessage.id, externalUserId: latestThreadMessage.externalUserId, entityType: "CommunicationMessage", entityId: latestThreadMessage.id, action: PROACTIVE_ACTION_PROCESSED_REPLY, claimKey: processedReplyClaimKey });
     const item = await createWorkItemFromCommunicationSource(agentActor, {
       workspaceId: params.workspaceId, provider: "SLACK", installationId: params.installationId, kind: "ACTION", title: actionTitle,
       bodyMd: threadMessages.map((message) => message.text).filter(Boolean).join("\n\n"),
-      sourceMessageId: candidate.id, externalUserId: candidate.externalUserId, open: true, claimKey: dispositionClaimKey,
+      sourceMessageId: candidate.id, externalUserId: candidate.externalUserId, assigneeMemberId, open: true, claimKey: dispositionClaimKey,
     }).catch(async (error: unknown) => {
       if (!isUniqueConstraintError(error)) throw error;
       const terminal = await prisma.communicationEntityLink.findFirst({ where: { workspaceId: params.workspaceId, claimKey: dispositionClaimKey, action: PROACTIVE_NON_ACTION }, select: { id: true } });
