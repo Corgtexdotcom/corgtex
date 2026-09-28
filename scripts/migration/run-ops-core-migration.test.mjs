@@ -207,6 +207,19 @@ async function recoverRestoredJournal(f, plan, key) {
   return f.blobs.get(key).text;
 }
 
+async function recoverBeforeCapture(f, plan, key) {
+  const intent = archiveEvidenceHash(plan);
+  const blob = f.containerFactory(plan.operator.custodyContainerUrl).getBlockBlobClient(key);
+  const owner = await openCutoverCustody(azureBlobCustodyAdapter(blob), intent);
+  try {
+    const fence = await owner.begin("SOURCE_FENCED", "a".repeat(64));
+    await owner.complete(fence.operationId, "b".repeat(64));
+    const recovery = await owner.beginSourceRecovery("c".repeat(64));
+    await owner.complete(recovery.operationId, "d".repeat(64));
+  } finally { await owner.close(); }
+  return f.blobs.get(key).text;
+}
+
 describe("Ops/Core executable operator", () => {
   it("opens one canonical retry after terminal recovery and preserves predecessor bytes", async () => {
     const { f, rootText, retryPlan } = await retryFixture();
@@ -303,6 +316,74 @@ describe("Ops/Core executable operator", () => {
     reused.transfer.postgres.scratchName = retryPlan.transfer.postgres.scratchName;
     await expect(runOpsCoreMigration({ ...f.options, plan: reused, action: "initialize" }))
       .rejects.toThrow("MIGRATION_RETRY_CHAIN_INVALID");
+  });
+  it("opens the fifth attempt only from four terminal ancestors with distinct scratch and root-first leases", async () => {
+    const { f, rootText, retryPlan } = await retryFixture({ access: true, rootCapture: false });
+    const plans = [f.plan, retryPlan];
+    const keys = ["cutovers/core.json", "cutovers/core-retry.json", "cutovers/core-retry-2.json", "cutovers/core-retry-3.json"];
+    const snapshots = [rootText];
+    for (let index = 1; index < 4; index++) {
+      const current = plans[index];
+      await runOpsCoreMigration({ ...f.options, plan: current, action: "initialize" });
+      snapshots.push(await recoverBeforeCapture(f, current, keys[index]));
+      if (index < 3) {
+        const next = structuredClone(current);
+        next.transfer.postgres.scratchName = `corgtex_rehearsal_10_${index + 2}_core`;
+        next.operator.retryOf = { intentSha256: archiveEvidenceHash(current),
+          journalSha256: archiveEvidenceHash(JSON.parse(snapshots[index])), journal: index === 1 ? "retry" : "retry-2" };
+        plans.push(next);
+      }
+    }
+    const fifth = structuredClone(plans[3]);
+    fifth.transfer.postgres.scratchName = "corgtex_rehearsal_10_5_core";
+    fifth.operator.retryOf = { intentSha256: archiveEvidenceHash(plans[3]),
+      journalSha256: archiveEvidenceHash(JSON.parse(snapshots[3])), journal: "retry-3" };
+    const options = { ...f.options, plan: fifth };
+    expect((await runOpsCoreMigration({ ...options, action: "initialize" })).status).toBe("PREPARED");
+    expect((await runOpsCoreMigration({ ...options, action: "status" })).status).toBe("PREPARED");
+    for (let index = 0; index < 4; index++) expect(f.blobs.get(keys[index]).text).toBe(snapshots[index]);
+    expect(f.blobs.has("cutovers/core-retry-4.json")).toBe(true);
+    for (let index = 0; index < 4; index++) {
+      const blob = f.containerFactory(fifth.operator.custodyContainerUrl).getBlockBlobClient(keys[index]);
+      const owner = await openCutoverCustody(azureBlobCustodyAdapter(blob), archiveEvidenceHash(plans[index]));
+      try { await expect(runOpsCoreMigration({ ...options, action: "status" })).rejects.toThrow(); }
+      finally { await owner.close(); }
+    }
+    const reused = structuredClone(fifth);
+    reused.transfer.postgres.scratchName = plans[2].transfer.postgres.scratchName;
+    await expect(runOpsCoreMigration({ ...f.options, plan: reused, action: "initialize" }))
+      .rejects.toThrow("MIGRATION_RETRY_CHAIN_INVALID");
+    const sixth = structuredClone(fifth);
+    sixth.operator.retryOf.journal = "retry-4";
+    await expect(runOpsCoreMigration({ ...f.options, plan: sixth, action: "initialize" }))
+      .rejects.toThrow("MIGRATION_RETRY_BINDING_INVALID");
+    expect(f.blobs.has("cutovers/core-retry-5.json")).toBe(false);
+  });
+  it("requires the second retry's retained scratch admission before creating the fifth journal", async () => {
+    const { f, retryPlan } = await retryFixture({ access: true, rootCapture: false });
+    const plans = [f.plan, retryPlan];
+    for (let index = 1; index < 4; index++) {
+      const current = plans[index];
+      await runOpsCoreMigration({ ...f.options, plan: current, action: "initialize" });
+      const key = `cutovers/core${index === 1 ? "-retry" : `-retry-${index}`}.json`;
+      const snapshot = index === 2
+        ? await recoverRestoredJournal(f, current, key) : await recoverBeforeCapture(f, current, key);
+      if (index < 3) {
+        const next = structuredClone(current);
+        next.transfer.postgres.scratchName = `corgtex_rehearsal_10_${index + 2}_core`;
+        next.operator.retryOf = { intentSha256: archiveEvidenceHash(current),
+          journalSha256: archiveEvidenceHash(JSON.parse(snapshot)), journal: index === 1 ? "retry" : "retry-2" };
+        plans.push(next);
+      }
+    }
+    const fourth = plans[3];
+    const fifth = structuredClone(fourth);
+    fifth.transfer.postgres.scratchName = "corgtex_rehearsal_10_5_core";
+    fifth.operator.retryOf = { intentSha256: archiveEvidenceHash(fourth),
+      journalSha256: archiveEvidenceHash(JSON.parse(f.blobs.get("cutovers/core-retry-3.json").text)), journal: "retry-3" };
+    await expect(runOpsCoreMigration({ ...f.options, plan: fifth, action: "initialize" }))
+      .rejects.toThrow("MIGRATION_RETRY_THIRD_SCRATCH_RECEIPT_MISSING");
+    expect(f.blobs.has("cutovers/core-retry-4.json")).toBe(false);
   });
   it("skips preserved-scratch admission when the retry recovered before capture", async () => {
     const { f, retryPlan } = await retryFixture({ access: true, rootCapture: false });
