@@ -406,6 +406,15 @@ to both source and target using the supplied `dockerHost` values, before fencing
 again. Preflight rejects missing Docker client hosts. A second terminal retry
 requires a new reviewed operator path; never reuse either journal or scratch DB.
 
+If the recovered predecessor left an empty, protected scratch database, set
+`retryScratchEvidenceDir` in the private retry credentials to the predecessor's
+private copy-evidence directory. Before fencing, preflight reads its
+`copy-intent.json` and `scratch-state.json`, checks the live scratch OID, owner,
+emptiness and ACL, and admits only that database into the retry's effective
+runtime-access policy. It stores a create-only admission receipt under the retry
+intent. Other database drift still blocks preflight. Keep the predecessor
+scratch and evidence for recovery; the retry cannot silently reuse that scratch.
+
 After the recorded target-write boundary, recover forward on Azure; the retained
 source is no longer a safe automatic routing fallback. Do not reset journals or
 use a new operation identity to bypass an unresolved effect.

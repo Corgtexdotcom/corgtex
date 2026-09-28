@@ -153,7 +153,8 @@ export function azureProviderOperationStore(containerClient) {
   const PREFIX = /^operations\/(ops|core)\/[a-f0-9]{64}\/[a-f0-9-]{36}\/$/;
   const keyClient = (key) => {
     if (typeof key !== "string" || (!/^operations\/(ops|core)\/[a-f0-9]{64}\/[a-f0-9-]{36}\/(?:[a-f0-9]{64}\/(intent|receipt|descriptor)|phase-plan|phase-evidence-[a-f0-9]{64}|promotion-intent|promotion-receipt)\.json$/.test(key)
-      && !/^preflights\/(ops|core)\/[a-f0-9]{64}\/[a-f0-9]{64}\.json$/.test(key))) fail("PROVIDER_RECORD_KEY_INVALID");
+      && !/^preflights\/(ops|core)\/[a-f0-9]{64}\/[a-f0-9]{64}\.json$/.test(key)
+      && !/^retry-admissions\/(ops|core)\/[a-f0-9]{64}\/predecessor-scratch\.json$/.test(key))) fail("PROVIDER_RECORD_KEY_INVALID");
     return containerClient.getBlockBlobClient(key);
   };
   return {

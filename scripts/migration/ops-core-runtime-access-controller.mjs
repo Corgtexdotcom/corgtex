@@ -35,12 +35,12 @@ export function createRuntimeSecretResolver({ vaultUri, signal, secretClient }) 
   };
 }
 
-function accessPlan(plan, snapshot, phase, databaseOid) {
+function accessPlan(plan, snapshot, phase, databaseOid, admission) {
   return { schemaVersion: 1, domain: plan.domain, intentSha256: snapshot.intentSha256,
     operationId: phase.operationId, serverResourceId: plan.azure.postgres.resourceId,
     host: plan.transfer.postgres.target.host, port: plan.transfer.postgres.target.port,
     database: `corgtex_${plan.domain}`, databaseOid, administrator: plan.transfer.postgres.target.user,
-    runtimeVaultUri: plan.activation.runtimeVaultUri, policy: plan.transfer.postgres.runtimeAccess };
+    runtimeVaultUri: plan.activation.runtimeVaultUri, policy: admission?.policy ?? plan.transfer.postgres.runtimeAccess };
 }
 
 function azureParameterReader(plan, signal, options) {
@@ -159,7 +159,7 @@ export async function runOpsCoreRuntimeAccess(options) {
       && !current.destinationMayHaveWritten, "RUNTIME_ACCESS_CUSTODY_CHANGED");
   };
   await check();
-  const expected = accessPlan(plan, snapshot, phase, databaseOid);
+  const expected = accessPlan(plan, snapshot, phase, databaseOid, options.retryScratchAdmission);
   const prefix = `operations/${plan.domain}/${snapshot.intentSha256}/${phase.operationId}/`;
   const store = records({ operationStore, prefix, signal: custody.signal, check });
   return withAccessClient({ ...options, database: expected.database, assertOwned: check }, async guards => {
@@ -183,6 +183,7 @@ export async function runOpsCoreRuntimeAccess(options) {
     const record = { schemaVersion: 1, domain: plan.domain, globalIntentSha256: snapshot.intentSha256,
       phaseOperationId: phase.operationId, targetBindingSha256: opsCoreAzureTargetBindingSha256(plan.azure),
       policySha256: archiveEvidenceHash(expected.policy), databaseOid, accessIntentSha256: intent.sha256,
+      ...(options.retryScratchAdmission ? { retryScratchReceiptSha256: options.retryScratchAdmission.receiptSha256 } : {}),
       result };
     await store.retain("runtime-access-receipt", record);
     return { record, sha256: archiveEvidenceHash(record) };
@@ -191,7 +192,7 @@ export async function runOpsCoreRuntimeAccess(options) {
 
 export async function assertOpsCoreRuntimeAccessForActivation(options) {
   const { plan, custody, operationStore, assertSourceFenced, fresh } = options;
-  const policy = plan.transfer.postgres.runtimeAccess;
+  const policy = options.retryScratchAdmission?.policy ?? plan.transfer.postgres.runtimeAccess;
   need(policy, "RUNTIME_ACCESS_POLICY_REQUIRED");
   const snapshot = custody.snapshot(), entry = snapshot.history.filter(x => x.phase === "VERIFIED");
   need(entry.length === 1 && GUID.test(entry[0].operationId) && HASH.test(entry[0].evidenceSha256), "RUNTIME_ACCESS_VERIFICATION_MISSING");
@@ -213,12 +214,13 @@ export async function assertOpsCoreRuntimeAccessForActivation(options) {
     && record.globalIntentSha256 === snapshot.intentSha256 && record.phaseOperationId === phase.operationId
     && record.domain === plan.domain && record.targetBindingSha256 === opsCoreAzureTargetBindingSha256(plan.azure)
     && record.policySha256 === archiveEvidenceHash(policy) && record.result?.status === "APPLIED"
+    && record.retryScratchReceiptSha256 === options.retryScratchAdmission?.receiptSha256
     && retained.intent?.sha256 === record.accessIntentSha256 && retained.expectedAfter
     && retained.expectedAfter.intentSha256 === retained.intent.sha256
     && retained.expectedAfter.manifestSha256 === archiveEvidenceHash(retained.expectedAfter.manifest)
     && retained.expectedAfter.manifestSha256 === record.result.manifestSha256,
   "RUNTIME_ACCESS_RECEIPT_UNPROVEN");
-  const expected = accessPlan(plan, snapshot, phase, record.databaseOid);
+  const expected = accessPlan(plan, snapshot, phase, record.databaseOid, options.retryScratchAdmission);
   need(same(retained.intent.plan, expected), "RUNTIME_ACCESS_INTENT_CHANGED");
   if (fresh) {
     // After activation may have written, retained evidence is historical. Exact
@@ -234,7 +236,7 @@ export async function assertOpsCoreRuntimeAccessForActivation(options) {
     });
   }
   return { complete: true, domain: plan.domain, intentSha256: snapshot.intentSha256,
-    policySha256: record.policySha256, receiptSha256: archiveEvidenceHash(record), freshAcceptance: fresh };
+    policySha256: archiveEvidenceHash(plan.transfer.postgres.runtimeAccess), receiptSha256: archiveEvidenceHash(record), freshAcceptance: fresh };
 }
 
 export async function monitorOpsCoreRuntimeAccessDrift(options) {
@@ -251,7 +253,7 @@ export async function monitorOpsCoreRuntimeAccessDrift(options) {
   const prefix = `operations/${plan.domain}/${snapshot.intentSha256}/${phase.operationId}/`;
   const store = records({ operationStore, prefix, signal: custody.signal, check });
   const [record, retained] = await Promise.all([store.read("runtime-access-receipt"), store.readRecords()]);
-  const expected = accessPlan(plan, snapshot, phase, record.databaseOid);
+  const expected = accessPlan(plan, snapshot, phase, record.databaseOid, options.retryScratchAdmission);
   need(same(retained.intent.plan, expected), "RUNTIME_ACCESS_INTENT_CHANGED");
   return withAccessClient({ ...options, database: expected.database, assertOwned: check }, async guards =>
     monitorPostgresRuntimeAccessDrift({ ...guards, intent: retained.intent, expectedAfter: retained.expectedAfter,
@@ -266,7 +268,7 @@ export async function preflightOpsCoreRuntimeAccess(options) {
     const access = { schemaVersion: 1, domain: plan.domain, serverResourceId: plan.azure.postgres.resourceId,
         host: plan.transfer.postgres.target.host, port: plan.transfer.postgres.target.port,
         administrator: plan.transfer.postgres.target.user, runtimeVaultUri: plan.activation.runtimeVaultUri,
-        policy: plan.transfer.postgres.runtimeAccess };
+        policy: options.retryScratchAdmission?.policy ?? plan.transfer.postgres.runtimeAccess };
     return preparePostgresRuntimeAccessPreflight({ ...guards, resolveSecretVersion: options.resolveSecretVersion,
       plan: access, assertTargetInactive, readAzureParameters: azureParameterReader(access, guards.signal, options),
       inspectAzureQueryStore: azureQueryStoreInspector(access, guards.signal, options) });

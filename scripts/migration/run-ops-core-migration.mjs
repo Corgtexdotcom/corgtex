@@ -24,6 +24,7 @@ import { AzureBlobObjectStore } from "./shared-tenant-objects.ts";
 import { createRuntimeSecretResolver, assertOpsCoreRuntimeAccessForActivation,
   monitorOpsCoreRuntimeAccessDrift } from "./ops-core-runtime-access-controller.mjs";
 import { openOpsCorePitrGuard, OPSCORE_CUSTODY_URL } from "./ops-core-pitr-guard.mjs";
+import { resolveRetryScratchAdmission } from "./ops-core-retry-scratch.mjs";
 
 class OperatorError extends Error {}
 const need = (condition, code) => { if (!condition) throw new OperatorError(code); };
@@ -169,6 +170,7 @@ async function assertRetryPredecessor({ plan, custodyContainer, predecessor }) {
     && previous.transfer?.postgres?.scratchName !== plan.transfer?.postgres?.scratchName,
   "MIGRATION_RETRY_PLAN_MISMATCH");
   await predecessor.assertOwned();
+  return { journal, previous };
 }
 
 /** Actual operator dispatch. The one stable per-domain journal serializes all
@@ -180,7 +182,7 @@ async function assertRetryPredecessor({ plan, custodyContainer, predecessor }) {
 export async function runOpsCoreMigration({ action, plan: input, credentials, artifactDir, healthProbe,
   containerFactory, identityCheck = assertAzureIdentity, runtime = {}, acceptanceArtifact,
   pitrGuardFactory = openOpsCorePitrGuard }) {
-  let custody, predecessor, pitrGuard;
+  let custody, predecessor, predecessorInfo, pitrGuard;
   try {
     need(["initialize", "status", "preflight", "fence", "transfer", "activate", "reconcile-transfer", "resume-transfer",
       "reconcile-activate", "resume-activate", "recover-source", "reconcile-source-recovery", "record-routing", "accept", "retain-acceptance-evidence",
@@ -201,7 +203,7 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
     if (plan.operator.retryOf) {
       const root = custodyContainer.getBlockBlobClient(`cutovers/${plan.domain}.json`);
       predecessor = await openCutoverCustody(azureBlobCustodyAdapter(root), plan.operator.retryOf.intentSha256);
-      await assertRetryPredecessor({ plan, custodyContainer, predecessor });
+      predecessorInfo = await assertRetryPredecessor({ plan, custodyContainer, predecessor });
     }
     if (action === "initialize") {
       const text = JSON.stringify(plan);
@@ -228,6 +230,13 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
         destinationMayHaveWritten: state.destinationMayHaveWritten };
     }
     const operationStore = azureProviderOperationStore(custodyContainer);
+    const retryScratchAdmission = predecessorInfo && plan.transfer.postgres.runtimeAccess
+      ? await (runtime.resolveRetryScratchAdmission ?? resolveRetryScratchAdmission)({ plan,
+        predecessorPlan: predecessorInfo.previous, predecessorJournal: predecessorInfo.journal,
+        custody, operationStore, targetAdminConfig: credentials?.targetAdminConfig,
+        evidenceDirectory: credentials?.retryScratchEvidenceDir,
+        create: ["preflight", "fence"].includes(action) && Boolean(credentials?.retryScratchEvidenceDir) })
+      : null;
     const accessMonitor = async ({ acceptancePending = false } = {}) => {
       const state = custody.snapshot();
       need(plan.transfer.postgres.runtimeAccess?.schemaVersion === 2 && credentials?.targetAdminConfig
@@ -235,7 +244,7 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
         && (!state.pending || acceptancePending && state.phase === "ROUTED" && state.pending.to === "ACCEPTED")
         && ["TARGET_ACTIVE", "ROUTED", "ACCEPTED"].includes(state.phase), "MIGRATION_ACCESS_MONITOR_PHASE_INVALID");
       const result = await (runtime.monitorAccess ?? monitorOpsCoreRuntimeAccessDrift)({ plan, custody, operationStore,
-        targetAdminConfig: credentials.targetAdminConfig });
+        targetAdminConfig: credentials.targetAdminConfig, retryScratchAdmission });
       need(result?.complete === true && result.domain === plan.domain, "MIGRATION_ACCESS_MONITOR_UNPROVEN");
       return { status: "ACCESS_MONITORED", domain: plan.domain, observedAt: new Date().toISOString(),
         resultSha256: archiveEvidenceHash(result), ...result };
@@ -272,6 +281,7 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
     const transferOptions = () => ({ plan, custody, operationStore, artifactDir, railway,
       sourceCredentials: { sourceConfig: credentials.sourceConfig, readerConfig: credentials.readerConfig },
       targetAdminConfig: credentials.targetAdminConfig, redisSourceCredentials: credentials.redisSource,
+      retryScratchAdmission,
       ...(resolveRuntimeSecretVersion ? { resolveRuntimeSecretVersion } : {}),
       archiveStore: azureArchiveStore(container(plan.operator.archiveContainerUrl)),
       objectSource: new RailwayObjectSource({ ...plan.operator.sourceObjects,
@@ -311,6 +321,7 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
       operationStore, assertSourceFenced, healthProbe: actualHealthProbe,
       ...(plan.transfer.postgres.runtimeAccess ? { assertRuntimeAccess: ({ fresh }) => assertOpsCoreRuntimeAccessForActivation({
         plan, custody, operationStore, targetAdminConfig: credentials.targetAdminConfig,
+        retryScratchAdmission,
         resolveSecretVersion: resolveRuntimeSecretVersion, assertSourceFenced, fresh,
         assertTargetInactive: () => createOpsCoreAzureTarget({ binding: plan.azure, custody,
           ...(runtime.azureTransport ? { transport: runtime.azureTransport } : {}) }).assertInactive(),
