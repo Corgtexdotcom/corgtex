@@ -18,4 +18,11 @@ describe("review list navigation", () => {
     expect(reviewNeighbors(["a", "b", "c"], "b")).toEqual({ previousId: "a", nextId: "c" });
     expect(reviewNeighbors(["a", "b"], "absent")).toEqual({ previousId: null, nextId: null });
   });
+
+  it("keeps Kanban filters and columns for the back link", () => {
+    const query = reviewListQuery({ view: "kanban", circleId: "circle-1", columns: ["OPEN", "RESOLVED"] }, "tensions");
+    const encoded = new URL(reviewItemHref("/workspaces/w/tensions/t", query), "https://example.com").searchParams.get("review");
+    const parsed = parseReviewListQuery(encoded ?? undefined, "tensions");
+    expect(reviewListHref("/workspaces/w/tensions", parsed.query)).toBe(`/workspaces/w/tensions?${query}`);
+  });
 });

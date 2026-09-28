@@ -21,7 +21,7 @@ import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import { attachTensionExternalResourceAction, createProposalFromTensionAction, editTensionAction, postTensionDeliberationAction, publishTensionAction, requestTensionInputAction, returnTensionToDraftAction, resolveTensionDeliberationAction, updateTensionAction, updateTensionDeliberationAction } from "../../actions";
 import { getFormatter, getTranslations } from "next-intl/server";
 import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
-import { endOfUtcDate, normalizeVisibleWorkItemColumns, normalizeWorkItemView, resolveWorkItemFilters, startOfUtcDate } from "@/lib/work-item-view";
+import { endOfUtcDate, normalizeWorkItemView, resolveWorkItemFilters, startOfUtcDate } from "@/lib/work-item-view";
 import { parseReviewListQuery, reviewItemHref, reviewListHref, reviewNeighbors } from "@/lib/review-list-navigation";
 import { resolveTensionSearch, tensionMatchesStatusFilters } from "../view-model";
 
@@ -82,18 +82,14 @@ export default async function TensionDetailPage({
   const listView = normalizeWorkItemView(listSearch.view);
   const { statusFilters, dateFilters } = resolveTensionSearch(listSearch, listView === "kanban" ? null : "OPEN");
   const { circleIds, memberIds, sort } = resolveWorkItemFilters(listSearch);
-  const { items: contextItems } = hasReviewContext ? await listTensions(actor, workspaceId, {
+  const { items: contextItems } = hasReviewContext && listView !== "kanban" ? await listTensions(actor, workspaceId, {
     take: 200, circleIds, memberIds, sort,
     openedFrom: dateFilters.openedFrom ? startOfUtcDate(dateFilters.openedFrom) : undefined,
     openedTo: dateFilters.openedTo ? endOfUtcDate(dateFilters.openedTo) : undefined,
     closedFrom: dateFilters.closedFrom ? startOfUtcDate(dateFilters.closedFrom) : undefined,
     closedTo: dateFilters.closedTo ? endOfUtcDate(dateFilters.closedTo) : undefined,
   }) : { items: [] };
-  const visibleColumns = normalizeVisibleWorkItemColumns(listSearch.columns, ["DRAFT", "OPEN", "RESOLVED"] as const);
-  const contextIds = contextItems.filter((item) => listView === "kanban"
-    ? visibleColumns.includes(item.status as "DRAFT" | "OPEN" | "RESOLVED")
-      && (item.status === "DRAFT" || !item.isPrivate)
-    : tensionMatchesStatusFilters(item, statusFilters)).map((item) => item.id);
+  const contextIds = contextItems.filter((item) => tensionMatchesStatusFilters(item, statusFilters)).map((item) => item.id);
   const { previousId, nextId } = reviewNeighbors(contextIds, tensionId);
   const listHref = reviewListHref(`/workspaces/${workspaceId}/tensions`, listQuery);
   const membership = await requireWorkspaceMembership({ actor, workspaceId });

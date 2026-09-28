@@ -23,9 +23,9 @@ import { ProposalDraftFields } from "../ProposalDraftFields";
 import { resolveProposalDeliberationComposer } from "../proposal-deliberation";
 import { getFormatter, getTranslations } from "next-intl/server";
 import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
-import { normalizeVisibleWorkItemColumns, normalizeWorkItemView, resolveWorkItemFilters } from "@/lib/work-item-view";
+import { normalizeWorkItemView, resolveWorkItemFilters } from "@/lib/work-item-view";
 import { parseReviewListQuery, reviewItemHref, reviewListHref, reviewNeighbors } from "@/lib/review-list-navigation";
-import { PROPOSAL_COLUMN_STATUSES, resolveProposalStatusSearch } from "../view-model";
+import { resolveProposalStatusSearch } from "../view-model";
 import { ReviewerRoster } from "@/lib/components/ReviewerRoster";
 import { ProposalDecisionButton } from "@/lib/components/ProposalDecisionButton";
 
@@ -88,14 +88,12 @@ export default async function ProposalDetailPage({
   const listView = normalizeWorkItemView(listSearch.view);
   const { statusFilters } = resolveProposalStatusSearch(listSearch.status, listView === "kanban" ? null : "OPEN");
   const { circleIds, memberIds, sort } = resolveWorkItemFilters(listSearch);
-  const { items: contextItems } = hasReviewContext
+  const { items: contextItems } = hasReviewContext && listView !== "kanban"
     ? await listProposals(actor, workspaceId, { take: 200, circleIds, memberIds, sort })
     : { items: [] };
-  const visibleColumns = normalizeVisibleWorkItemColumns(listSearch.columns, PROPOSAL_COLUMN_STATUSES);
-  const sequenceStatuses = listView === "kanban" ? visibleColumns : statusFilters;
-  const contextIds = sequenceStatuses.length === 0
+  const contextIds = statusFilters.length === 0
     ? contextItems.map((item) => item.id)
-    : sequenceStatuses.flatMap((status) => contextItems
+    : statusFilters.flatMap((status) => contextItems
       .filter((item) => status === (item.archivedAt ? "ARCHIVED" : item.status)
         && (status === "DRAFT" || status === "ARCHIVED" || !item.isPrivate))
       .map((item) => item.id));

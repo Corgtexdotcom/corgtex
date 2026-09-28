@@ -85,7 +85,7 @@ export default async function TensionsPage({
     parentType: "TENSION",
     parentIds: tensions.map((tension) => tension.id),
   });
-  const contextQuery = view === "kanban" ? null : reviewListQuery(resolvedSearch, "tensions");
+  const contextQuery = reviewListQuery(resolvedSearch, "tensions");
 
   const groupedTensions = groupTensionsByStatus(tensions);
   const displayTensions = tensions.filter((tension) => tensionMatchesStatusFilters(tension, statusFilters));

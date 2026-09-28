@@ -85,7 +85,7 @@ export default async function ProposalsPage({
     parentType: "PROPOSAL",
     parentIds: proposals.map((proposal) => proposal.id),
   });
-  const contextQuery = view === "kanban" ? null : reviewListQuery(resolvedSearch, "proposals");
+  const contextQuery = reviewListQuery(resolvedSearch, "proposals");
   const isDemo = currentWorkspace?.slug === "jnj-demo";
   const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
   const memberOptions = members.map((member) => ({ id: member.id, label: memberName(member) }));
