@@ -76,6 +76,21 @@ function fixture() {
 }
 
 describe("retained runtime access integration", () => {
+  it("binds a retry admission to the effective SQL policy while preserving activation's global policy hash", async () => {
+    const f = fixture();
+    const admission = { receiptSha256: "b".repeat(64), policy: { ...f.policy,
+      isolation: { ...f.policy.isolation, inventorySha256: "d".repeat(64),
+        databases: [...f.policy.isolation.databases, { name: "corgtex_rehearsal_1_1_core", oid: "277613",
+          owner: "admin", action: "verify-only", beforeAclSha256: "e".repeat(64), preserveConnectRoles: [] }] } } };
+    const options = { ...f.options, retryScratchAdmission: admission };
+    const result = await runOpsCoreRuntimeAccess(options);
+    expect(result.record).toMatchObject({ retryScratchReceiptSha256: admission.receiptSha256,
+      policySha256: hash(admission.policy) });
+    f.verified(result);
+    expect((await assertOpsCoreRuntimeAccessForActivation({ ...options, fresh: true })).policySha256).toBe(hash(f.policy));
+    await expect(assertOpsCoreRuntimeAccessForActivation({ ...f.options, fresh: false }))
+      .rejects.toThrow("RUNTIME_ACCESS_RECEIPT_UNPROVEN");
+  });
   it("retains and freshly reconciles exact policy/credential bindings before activation", async () => {
     const f = fixture(); const result = await runOpsCoreRuntimeAccess(f.options);
     expect(result.record.policySha256).toBe(hash(f.policy)); expect(mock.calls).toContain("apply");

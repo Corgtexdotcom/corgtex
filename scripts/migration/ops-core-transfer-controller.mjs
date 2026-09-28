@@ -228,9 +228,11 @@ async function transfer(options, mode) {
       // local files or a new object inventory after an uncertain copy/promotion.
       prefix = `operations/${plan.domain}/${initial.intentSha256}/${initial.pending.operationId}/`;
       const retained = await read("phase-plan");
-      exact(retained, `schemaVersion,intentSha256,promotion,archiveManifestSha256,objectSnapshotSha256,objectSnapshotEvidenceSha256,azureTargetBindingSha256,postgresCopyEvidenceSha256${config.runtimeAccess ? ",runtimeAccessPolicySha256" : ""}`);
+      exact(retained, `schemaVersion,intentSha256,promotion,archiveManifestSha256,objectSnapshotSha256,objectSnapshotEvidenceSha256,azureTargetBindingSha256,postgresCopyEvidenceSha256${config.runtimeAccess ? ",runtimeAccessPolicySha256" : ""}${options.retryScratchAdmission ? ",retryScratchReceiptSha256,effectiveRuntimeAccessPolicySha256" : ""}`);
       if (retained.schemaVersion !== (config.runtimeAccess ? 3 : 2) || retained.intentSha256 !== initial.intentSha256
         || config.runtimeAccess && retained.runtimeAccessPolicySha256 !== archiveEvidenceHash(config.runtimeAccess)
+        || options.retryScratchAdmission && (retained.retryScratchReceiptSha256 !== options.retryScratchAdmission.receiptSha256
+          || retained.effectiveRuntimeAccessPolicySha256 !== archiveEvidenceHash(options.retryScratchAdmission.policy))
         || retained.azureTargetBindingSha256 !== opsCoreAzureTargetBindingSha256(plan.azure)) fail("TRANSFER_PHASE_PLAN_CHANGED");
       const copyEvidence = await read(`phase-evidence-${retained.postgresCopyEvidenceSha256}`);
       if (copyEvidence.type !== "POSTGRES_COPY_CONTEXT" || archiveEvidenceHash(copyEvidence) !== retained.postgresCopyEvidenceSha256) fail("TRANSFER_COPY_LINEAGE_CHANGED");
@@ -293,7 +295,9 @@ async function transfer(options, mode) {
         archiveManifestSha256: copied.archive.sha256, objectSnapshotSha256: snapshot.sha256,
         objectSnapshotEvidenceSha256: snapshotHash, azureTargetBindingSha256: opsCoreAzureTargetBindingSha256(plan.azure),
         postgresCopyEvidenceSha256: copyHash,
-        ...(config.runtimeAccess ? { runtimeAccessPolicySha256: archiveEvidenceHash(config.runtimeAccess) } : {}) };
+        ...(config.runtimeAccess ? { runtimeAccessPolicySha256: archiveEvidenceHash(config.runtimeAccess) } : {}),
+        ...(options.retryScratchAdmission ? { retryScratchReceiptSha256: options.retryScratchAdmission.receiptSha256,
+          effectiveRuntimeAccessPolicySha256: archiveEvidenceHash(options.retryScratchAdmission.policy) } : {}) };
       await retain(`phase-evidence-${copyHash}`, copyEvidence);
       await retain("phase-plan", phasePlan); await retain(`phase-evidence-${snapshotHash}`, snapshotEvidence);
     }
@@ -338,6 +342,7 @@ async function transfer(options, mode) {
       runtimeAccess = await runOpsCoreRuntimeAccess({ plan, custody, operationStore, phase,
         databaseOid: copied.scratchOid, targetAdminConfig: options.targetAdminConfig,
         resolveSecretVersion: options.resolveRuntimeSecretVersion, assertSourceFenced, assertTargetInactive, maintenance,
+        retryScratchAdmission: options.retryScratchAdmission,
         reconcile: mode === "reconcile" });
       if (runtimeAccess.complete === false) return runtimeAccess;
     }
