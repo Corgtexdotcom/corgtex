@@ -319,13 +319,15 @@ export class RailwaySourceFence {
       pendingWork: environment.pendingWork };
     return freeze(result);
   }
-  #quiet(snapshot) {
+  #quiet(snapshot, stagedPatchSha256 = null) {
     const work = (nodes, depth = 0) => nodes.every(node => {
-      const emptyStage = depth === 0 && snapshot.staged.status === "STAGED" && snapshot.staged.empty
+      const ownedStage = depth === 0 && snapshot.staged.status === "STAGED"
+        && (snapshot.staged.empty || stagedPatchSha256 !== null
+          && snapshot.staged.patchSha256 === stagedPatchSha256)
         && node.status === "staged" && node.children.length === 0
         && node.idRef === digest(`patch:${snapshot.staged.id}`)
         && node.kindRef === digest("EnvironmentPatch");
-      return emptyStage || node.status === "applied" && work(node.children, depth + 1);
+      return ownedStage || node.status === "applied" && work(node.children, depth + 1);
     });
     requireValue(!["APPLYING", "FAILED"].includes(snapshot.staged.status) && work(snapshot.pendingWork), "RAILWAY_RECOVERY_WORK_UNSETTLED");
     requireValue(snapshot.services.every(service => service.deployments.every(item => !UNFINISHED_STATUSES.has(item.status))), "RAILWAY_RECOVERY_DEPLOYMENT_UNSETTLED");
@@ -379,10 +381,10 @@ export class RailwaySourceFence {
       && Array.isArray(baseline.services) && baseline.services.length === this.#binding.serviceIds.length
       && new Set(baseline.services.map(item => item.serviceId)).size === baseline.services.length, "RAILWAY_RECOVERY_BASELINE_INVALID");
     const snapshot = await this.read();
-    this.#quiet(snapshot);
-    requireValue(snapshot.staged.empty || snapshot.staged.patchSha256 === stagedPatchSha256
-      || (stagedPatchSha256 !== null && await this.matchesStagedRecoveryTriggerPatch(stagedPatchSha256, baseline)),
-    "RAILWAY_RECOVERY_STAGING_CHANGED");
+    const stagedMatches = snapshot.staged.empty || snapshot.staged.patchSha256 === stagedPatchSha256
+      || (stagedPatchSha256 !== null && await this.matchesStagedRecoveryTriggerPatch(stagedPatchSha256, baseline));
+    requireValue(stagedMatches, "RAILWAY_RECOVERY_STAGING_CHANGED");
+    this.#quiet(snapshot, snapshot.staged.empty ? null : snapshot.staged.patchSha256);
     const environment = await this.#environment();
     for (const original of baseline.services) {
       const current = snapshot.services.find(item => item.serviceId === original.serviceId);

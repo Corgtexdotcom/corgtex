@@ -562,6 +562,43 @@ test("empty Railway staging work is settled only when it matches the empty stage
   }
 });
 
+test("reopened recovery baseline admits only its exact staged patch work", async () => {
+  const f = await fixture();
+  f.state.deployments[id(4)][0].status = "SUCCESS";
+  const baseline = await f.adapter.captureRecoveryBaseline();
+  f.state.staged.patch = { services: { [id(3)]: { source: { autoUpdates: { type: "disabled" } } } } };
+  f.state.pending = [{ id: `patch:${id(10)}`, environmentId: binding.environmentId,
+    kind: "EnvironmentPatch", status: "staged", children: [] }];
+  const patchSha256 = hash(f.state.staged.patch);
+  await f.adapter.assertRecoveryBaseline(baseline, { stagedPatchSha256: patchSha256 });
+  await assert.rejects(f.adapter.assertRecoveryBaseline(baseline, { stagedPatchSha256: hash({}) }),
+    /RAILWAY_RECOVERY_STAGING_CHANGED/);
+  f.state.pending[0].id = `patch:${id(99)}`;
+  await assert.rejects(f.adapter.assertRecoveryBaseline(baseline, { stagedPatchSha256: patchSha256 }),
+    /RAILWAY_RECOVERY_WORK_UNSETTLED/);
+  assert.equal(f.state.calls.filter(item => item.query.startsWith("mutation")).length, 0);
+});
+
+test("reopened recovery baseline admits normalized recovery staging with exact pending work", async () => {
+  const f = await fixture();
+  f.state.deployments[id(4)][0].status = "SUCCESS";
+  const baseline = await f.adapter.captureRecoveryBaseline();
+  makeFenced(f.state);
+  const requested = { services: {
+    [id(3)]: { source: { autoUpdates: { type: "patch" } }, deploy: { cronSchedule: "*/5 * * * *" } },
+    [id(4)]: { deploy: { cronSchedule: null } },
+  } };
+  f.state.staged.patch = { services: { [id(3)]: requested.services[id(3)] } };
+  f.state.pending = [{ id: `patch:${id(10)}`, environmentId: binding.environmentId,
+    kind: "EnvironmentPatch", status: "staged", children: [] }];
+  assert.notEqual(hash(requested), hash(f.state.staged.patch));
+  await f.adapter.assertRecoveryBaseline(baseline, { stagedPatchSha256: hash(requested) });
+  f.state.pending[0].kind = "Deployment";
+  await assert.rejects(f.adapter.assertRecoveryBaseline(baseline, { stagedPatchSha256: hash(requested) }),
+    /RAILWAY_RECOVERY_WORK_UNSETTLED/);
+  assert.equal(f.state.calls.filter(item => item.query.startsWith("mutation")).length, 0);
+});
+
 test("recovery rejects effective runtime policy drift before any restart", async () => {
   const f = await fixture();
   f.state.deployments[id(4)][0].status = "SUCCESS";
