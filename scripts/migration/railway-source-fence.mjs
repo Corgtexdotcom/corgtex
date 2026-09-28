@@ -105,7 +105,9 @@ export function createRailwayFenceTransport({ token, fetchImpl = globalThis.fetc
   requireValue(typeof token === "string" && token.length > 0 && !/[\r\n]/.test(token), "RAILWAY_AUTH_REQUIRED");
   requireValue(Number.isSafeInteger(maxResponseBytes) && maxResponseBytes > 0 && maxResponseBytes <= 32 * 1024 * 1024, "INVALID_RESPONSE_LIMIT");
   return async ({ query, variables, signal }) => {
-    const readOnly = /^\s*query(?:\s|\{)/.test(query);
+    // Deployment pages already own a three-attempt read budget in #deployments.
+    // Do not multiply that budget inside the transport.
+    const readOnly = /^\s*query(?:\s|\{)/.test(query) && !/^\s*query\s+FenceDeployments\b/.test(query);
     for (let attempt = 0; ; attempt++) {
       let retryable = false;
       try {

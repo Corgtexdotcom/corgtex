@@ -437,6 +437,14 @@ test("transport retries only bounded read failures and aborts read backoff", asy
   await assert.rejects(mutation({ ...request, query: "mutation FenceTest { update }" }),
     { code: "RAILWAY_TRANSPORT_FAILED" });
   assert.equal(mutations, 1);
+  let deploymentPages = 0;
+  const deploymentPage = createRailwayFenceTransport({ token, fetchImpl: async () => {
+    deploymentPages++;
+    return new Response("", { status: 429 });
+  } });
+  await assert.rejects(deploymentPage({ ...request, query: "query FenceDeployments($after:String) { deployments { edges { cursor } } }" }),
+    { code: "RAILWAY_TRANSPORT_FAILED" });
+  assert.equal(deploymentPages, 1, "deployment page retries belong to the page loop");
   let abortedReads = 0;
   const aborting = createRailwayFenceTransport({ token, fetchImpl: async () => {
     abortedReads++;

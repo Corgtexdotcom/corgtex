@@ -403,8 +403,21 @@ fixed `cutovers/<domain>-retry.json` journal; the original remains intact. The
 retry slot is create-only and accepts only one exact plan. Run fresh preflight,
 including a read-only connection check from the pinned Docker PostgreSQL client
 to both source and target using the supplied `dockerHost` values, before fencing
-again. Preflight rejects missing Docker client hosts. A second terminal retry
-requires a new reviewed operator path; never reuse either journal or scratch DB.
+again. Preflight rejects missing Docker client hosts.
+
+After that retry also reaches terminal `SOURCE_RECOVERED` with no target write,
+one more attempt may use `operator.retryOf: { intentSha256, journalSha256,
+journal: "retry" }`. Bind these hashes to the exact terminal
+`cutovers/<domain>-retry.json` journal and its retained plan. That plan must
+itself bind the original terminal journal. The operator leases the root journal,
+then the retry journal, then creates the fixed
+`cutovers/<domain>-retry-2.json` journal. Use a third distinct scratch name;
+neither predecessor journal nor scratch may be reused. This slot is also
+create-only and accepts only one exact plan. Keep the original preserved scratch
+as a `verify-only` row in both transfer and activation runtime-access policies.
+Leave the immediate predecessor's preserved scratch out of those base policies;
+its separate admission receipt verifies and adds that row after reading fresh
+target inventory. Run fresh preflight before fencing again.
 
 If the recovered predecessor left an empty, protected scratch database, set
 `retryScratchEvidenceDir` in the private retry credentials to the predecessor's
