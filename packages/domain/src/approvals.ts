@@ -13,6 +13,7 @@ import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
 import { acquireWorkItemAdvisoryLock } from "./work-item-versions";
 import { acquireConstitutionCorpusAdvisoryLock } from "./constitutions";
+import { humanMemberIdentityWhere } from "./member-identity";
 
 export type DecisionSummary = {
   approve: number;
@@ -32,6 +33,7 @@ export type ApprovalOutcome = {
 
 type LoadedFlow = ApprovalFlow & {
   decisions: Array<{
+    memberId: string;
     choice: ApprovalDecisionChoice;
   }>;
   objections: Array<{
@@ -60,6 +62,12 @@ export type ProposalDecisionState = {
   quorumPercent: number;
   minApproverCount: number;
   eligibleApprovers: number;
+  reviewers: Array<{
+    memberId: string;
+    name: string;
+    choice: ApprovalDecisionChoice | null;
+    hasOpenObjection: boolean;
+  }>;
   outcome: ApprovalOutcome;
   currentMemberDecision: {
     choice: ApprovalDecisionChoice;
@@ -179,18 +187,20 @@ function validateDecisionChoice(mode: ApprovalMode, choice: ApprovalDecisionChoi
   );
 }
 
-async function eligibleApproverIds(tx: Prisma.TransactionClient, workspaceId: string): Promise<string[]> {
+async function eligibleApproverIds(tx: Prisma.TransactionClient, workspaceId: string, excludedUserId?: string | null): Promise<string[]> {
   const members = await tx.member.findMany({
     where: {
       workspaceId,
       isActive: true,
+      ...humanMemberIdentityWhere(),
     },
     select: {
       id: true,
+      userId: true,
     },
   });
 
-  return members.map((member) => member.id);
+  return members.filter((member) => !excludedUserId || member.userId !== excludedUserId).map((member) => member.id);
 }
 
 async function loadFlow(tx: Prisma.TransactionClient, flowId: string) {
@@ -199,6 +209,7 @@ async function loadFlow(tx: Prisma.TransactionClient, flowId: string) {
     include: {
       decisions: {
         select: {
+          memberId: true,
           choice: true,
         },
       },
@@ -216,6 +227,12 @@ async function loadFlow(tx: Prisma.TransactionClient, flowId: string) {
       },
     },
   });
+}
+
+function eligibleFlowDecisions(flow: LoadedFlow, approverIds: string[]) {
+  return flow.subjectType === "PROPOSAL"
+    ? flow.decisions.filter((decision) => approverIds.includes(decision.memberId))
+    : flow.decisions;
 }
 
 async function proposalAuthorUserIdForFlow(tx: Prisma.TransactionClient, flow: { workspaceId: string; subjectType: string; subjectId: string }) {
@@ -536,8 +553,12 @@ export async function listProposalDecisionStates(
     return new Map<string, ProposalDecisionState>();
   }
 
-  const [eligibleIds, flows, proposals] = await Promise.all([
-    eligibleApproverIds(prisma, params.workspaceId),
+  const [eligibleMembers, flows, proposals] = await Promise.all([
+    prisma.member.findMany({
+      where: { workspaceId: params.workspaceId, isActive: true, ...humanMemberIdentityWhere() },
+      select: { id: true, userId: true, user: { select: { displayName: true, email: true } } },
+      orderBy: { joinedAt: "asc" },
+    }),
     prisma.approvalFlow.findMany({
       where: {
         workspaceId: params.workspaceId,
@@ -592,15 +613,25 @@ export async function listProposalDecisionStates(
   const actorUserId = actor.kind === "user" ? actor.user.id : null;
 
   for (const flow of flows) {
+    const authorUserId = proposalAuthorById.get(flow.subjectId);
+    const reviewers = eligibleMembers
+      .filter((member) => !authorUserId || member.userId !== authorUserId)
+      .map((member) => ({
+        memberId: member.id,
+        name: member.user?.displayName || member.user?.email || "Member",
+        choice: flow.decisions.find((decision) => decision.memberId === member.id)?.choice ?? null,
+        hasOpenObjection: flow.objections.some((objection) => objection.userId === member.userId),
+      }));
+    const eligibleIds = reviewers.map((reviewer) => reviewer.memberId);
     const outcome = calculateApprovalOutcome({
       mode: flow.mode,
       quorumPercent: flow.quorumPercent,
       minApproverCount: flow.minApproverCount,
-      decisions: flow.decisions,
+      decisions: flow.decisions.filter((decision) => eligibleIds.includes(decision.memberId)),
       eligibleApprovers: eligibleIds.length,
       openObjections: flow.objections.length,
     });
-    const isProposalAuthor = actorUserId !== null && proposalAuthorById.get(flow.subjectId) === actorUserId;
+    const isProposalAuthor = actorUserId !== null && authorUserId === actorUserId;
     const reviewMembership = membership && eligibleIds.includes(membership.id) && !isProposalAuthor ? membership : null;
     const currentMemberDecision = reviewMembership
       ? flow.decisions.find((decision) => decision.memberId === reviewMembership.id) ?? null
@@ -624,6 +655,7 @@ export async function listProposalDecisionStates(
       quorumPercent: flow.quorumPercent,
       minApproverCount: flow.minApproverCount,
       eligibleApprovers: eligibleIds.length,
+      reviewers,
       outcome,
       currentMemberDecision: currentMemberDecision
         ? {
@@ -731,6 +763,8 @@ export async function recordApprovalDecision(actor: AppActor, params: {
     await assertProposalAuthorCanReview(tx, current, actorUserId);
     assertConsentWindowOpen(current);
     validateDecisionChoice(current.mode, params.choice);
+    const approverIds = await eligibleApproverIds(tx, params.workspaceId, await proposalAuthorUserIdForFlow(tx, current));
+    invariant(approverIds.includes(membership.id), 403, "FORBIDDEN", "Only active reviewers can submit a decision.");
 
     await tx.approvalDecision.upsert({
       where: {
@@ -754,12 +788,11 @@ export async function recordApprovalDecision(actor: AppActor, params: {
     const flow = await loadFlow(tx, current.id);
     invariant(flow, 404, "NOT_FOUND", "Approval flow not found.");
 
-    const approverIds = await eligibleApproverIds(tx, params.workspaceId);
     const outcome = calculateApprovalOutcome({
       mode: flow.mode,
       quorumPercent: flow.quorumPercent,
       minApproverCount: flow.minApproverCount,
-      decisions: flow.decisions,
+      decisions: eligibleFlowDecisions(flow, approverIds),
       eligibleApprovers: approverIds.length,
       openObjections: flow.objections.length,
     });
@@ -875,6 +908,8 @@ export async function createObjection(actor: AppActor, params: {
     invariant(flow.mode === "CONSENT", 400, "INVALID_STATE", "Objections are only supported on consent flows.");
     await assertProposalAuthorCanReview(tx, flow, membership.userId);
     assertConsentWindowOpen(flow);
+    const approverIds = await eligibleApproverIds(tx, params.workspaceId, await proposalAuthorUserIdForFlow(tx, flow));
+    invariant(approverIds.includes(membership.id), 403, "FORBIDDEN", "Only active reviewers can object.");
 
     const existing = await tx.objection.findFirst({
       where: {
@@ -898,12 +933,11 @@ export async function createObjection(actor: AppActor, params: {
 
     const refreshed = await loadFlow(tx, flow.id);
     invariant(refreshed, 404, "NOT_FOUND", "Approval flow not found.");
-    const approverIds = await eligibleApproverIds(tx, params.workspaceId);
     const outcome = calculateApprovalOutcome({
       mode: refreshed.mode,
       quorumPercent: refreshed.quorumPercent,
       minApproverCount: refreshed.minApproverCount,
-      decisions: refreshed.decisions,
+      decisions: eligibleFlowDecisions(refreshed, approverIds),
       eligibleApprovers: approverIds.length,
       openObjections: refreshed.objections.length,
     });
@@ -1000,12 +1034,12 @@ export async function resolveObjection(actor: AppActor, params: {
 
     const refreshed = await loadFlow(tx, flow.id);
     invariant(refreshed, 404, "NOT_FOUND", "Approval flow not found.");
-    const approverIds = await eligibleApproverIds(tx, params.workspaceId);
+    const approverIds = await eligibleApproverIds(tx, params.workspaceId, await proposalAuthorUserIdForFlow(tx, refreshed));
     const outcome = calculateApprovalOutcome({
       mode: refreshed.mode,
       quorumPercent: refreshed.quorumPercent,
       minApproverCount: refreshed.minApproverCount,
-      decisions: refreshed.decisions,
+      decisions: eligibleFlowDecisions(refreshed, approverIds),
       eligibleApprovers: approverIds.length,
       openObjections: refreshed.objections.length,
     });

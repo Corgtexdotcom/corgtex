@@ -1,4 +1,4 @@
-import { listAdviceRequests, listCircles, listHumanMembers, listProposalDecisionStates, listProposals, requireWorkspaceMembership } from "@corgtex/domain";
+import { listAdviceRequests, listCircles, listDeliberationEntriesForParents, listHumanMembers, listProposalDecisionStates, listProposals, requireWorkspaceMembership } from "@corgtex/domain";
 import type { ProposalDecisionState } from "@corgtex/domain";
 import type { ReactNode } from "react";
 import { requirePageActor } from "@/lib/auth";
@@ -16,6 +16,7 @@ import { WorkItemEditForm } from "@/lib/components/WorkItemEditForm";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "@/lib/components/WorkItemTable";
 import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
+import { reviewItemHref, reviewListQuery } from "@/lib/review-list-navigation";
 import {
   buildWorkItemQuery,
   normalizeVisibleWorkItemColumns,
@@ -79,6 +80,12 @@ export default async function ProposalsPage({
     workspaceId,
     proposalIds: proposals.map((proposal) => proposal.id),
   });
+  const responses = await listDeliberationEntriesForParents(actor, {
+    workspaceId,
+    parentType: "PROPOSAL",
+    parentIds: proposals.map((proposal) => proposal.id),
+  });
+  const contextQuery = view === "kanban" ? null : reviewListQuery(resolvedSearch, "proposals");
   const isDemo = currentWorkspace?.slug === "jnj-demo";
   const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
   const memberOptions = members.map((member) => ({ id: member.id, label: memberName(member) }));
@@ -327,7 +334,7 @@ export default async function ProposalsPage({
   }
 
   function renderProposalCard(proposal: ProposalListItem, compact = false) {
-    const detailHref = `/workspaces/${workspaceId}/proposals/${proposal.id}`;
+    const detailHref = reviewItemHref(`/workspaces/${workspaceId}/proposals/${proposal.id}`, contextQuery);
     const { hiddenTransitions, moreItems, primaryAction } = proposalControls(proposal);
     const adviceRequestCount = activeAdviceRequestCounts.get(proposal.id) ?? 0;
     const decisionTags = proposalDecisionTags(decisionStates.get(proposal.id) ?? null);
@@ -356,6 +363,12 @@ export default async function ProposalsPage({
         body={(
           <>
             <MarkdownExcerpt markdown={proposal.summary ?? proposal.bodyMd} maxLength={compact ? 120 : 180} as="div" className="nr-excerpt" />
+            {responses.get(proposal.id)?.at(-1)?.bodyMd && (
+              <p className="nr-item-meta">{t("responsePreview", {
+                name: responses.get(proposal.id)!.at(-1)!.author?.displayName || responses.get(proposal.id)!.at(-1)!.author?.email || t("authorUnknown"),
+                count: responses.get(proposal.id)!.length,
+              })} <MarkdownExcerpt markdown={responses.get(proposal.id)!.at(-1)!.bodyMd} maxLength={100} as="span" /></p>
+            )}
             <div className="nr-item-meta mt-2">
               {ownerText(proposal)} · {new Date(proposal.createdAt).toLocaleDateString()} · {priorityText(proposal.priority)}
               {proposal.circle ? ` · ${proposal.circle.name}` : ""}
@@ -420,7 +433,7 @@ export default async function ProposalsPage({
   ];
 
   function proposalTableRow(proposal: ProposalListItem): WorkItemTableRow {
-    const detailHref = `/workspaces/${workspaceId}/proposals/${proposal.id}`;
+    const detailHref = reviewItemHref(`/workspaces/${workspaceId}/proposals/${proposal.id}`, contextQuery);
     const { hiddenTransitions, moreItems, primaryAction } = proposalControls(proposal);
     const adviceRequestCount = activeAdviceRequestCounts.get(proposal.id) ?? 0;
     const decisionTags = proposalDecisionTags(decisionStates.get(proposal.id) ?? null);
@@ -436,6 +449,10 @@ export default async function ProposalsPage({
               {proposal.title}
             </a>
             <MarkdownExcerpt markdown={proposal.summary ?? proposal.bodyMd} maxLength={140} as="div" className="nr-work-item-table-meta" />
+            {responses.get(proposal.id)?.at(-1)?.bodyMd && <div className="nr-work-item-table-meta">{t("responsePreview", {
+              name: responses.get(proposal.id)!.at(-1)!.author?.displayName || responses.get(proposal.id)!.at(-1)!.author?.email || t("authorUnknown"),
+              count: responses.get(proposal.id)!.length,
+            })} <MarkdownExcerpt markdown={responses.get(proposal.id)!.at(-1)!.bodyMd} maxLength={100} as="span" /></div>}
           </>
         ),
         status: <WorkItemLifecycleBadge status={proposalLifecycleStatus(proposal)} label={statusText} />,
