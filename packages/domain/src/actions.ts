@@ -876,8 +876,8 @@ export async function updateAction(actor: AppActor, params: {
     if (params.assigneeMemberId !== undefined) {
       data.assigneeMemberId = await resolveAssigneeMemberId(tx, params.workspaceId, params.assigneeMemberId);
     }
-    if ((params.status !== undefined && params.status !== "DRAFT")
-      || (params.assigneeMemberId !== undefined && action.status !== "DRAFT")) {
+    const effectiveStatus = params.status ?? action.status;
+    if (effectiveStatus !== "DRAFT" && (params.status !== undefined || params.assigneeMemberId !== undefined)) {
       const assigneeMemberId = data.assigneeMemberId !== undefined
         ? data.assigneeMemberId as string | null
         : await resolveAssigneeMemberId(tx, params.workspaceId, action.assigneeMemberId);

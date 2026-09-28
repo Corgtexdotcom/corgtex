@@ -883,15 +883,20 @@ export async function runSlackProactiveScan(params: {
       ownerEvidence: parsed.ownerEvidence,
     });
     if (!assigneeMemberId) {
-      await sendProactiveOwnerRequest({
-        workspaceId: params.workspaceId,
-        installationId: params.installationId,
-        sourceMessageId: candidate.id,
-        latestMessageId: latestThreadMessage.id,
-        externalUserId: latestThreadMessage.externalUserId,
-        channel: candidate.externalChannelId,
-        threadTs: threadTsForMessage(candidate),
-      });
+      try {
+        await sendProactiveOwnerRequest({
+          workspaceId: params.workspaceId,
+          installationId: params.installationId,
+          sourceMessageId: candidate.id,
+          latestMessageId: latestThreadMessage.id,
+          externalUserId: latestThreadMessage.externalUserId,
+          channel: candidate.externalChannelId,
+          threadTs: threadTsForMessage(candidate),
+        });
+      } catch (error) {
+        if (await markSlackInstallationReauthRequired({ ...params, error })) return { skipped: true, reason: "slack_reauth_required" };
+        throw error;
+      }
       continue;
     }
 

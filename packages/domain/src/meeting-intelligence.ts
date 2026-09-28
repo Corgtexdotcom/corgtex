@@ -1202,10 +1202,8 @@ export async function applyInsight(
     });
   } else {
     // Attempt fuzzy match for a member reference if a hint exists.
-    const hintedMemberId = await resolveHintedAssigneeMemberId(
-      insight.assigneeHint,
-      params.loadMemberDirectory ?? createWorkspaceMemberDirectoryLoader(params.workspaceId),
-    );
+    const loadMemberDirectory = params.loadMemberDirectory ?? createWorkspaceMemberDirectoryLoader(params.workspaceId);
+    const hintedMemberId = await resolveHintedAssigneeMemberId(insight.assigneeHint, loadMemberDirectory);
 
     if (insight.type === "ACTION_ITEM" || insight.type === "FOLLOW_UP") {
       const action = await createAction(actor, {
@@ -1221,7 +1219,7 @@ export async function applyInsight(
       });
       let opened = action;
       if (action.status === "DRAFT" && hintedMemberId) {
-        if (!action.assigneeMemberId) {
+        if (!action.assigneeMemberId || !(await loadMemberDirectory()).some((member) => member.id === action.assigneeMemberId)) {
           await updateAction(actor, { workspaceId: params.workspaceId, actionId: action.id, assigneeMemberId: hintedMemberId });
         }
         opened = await publishAction(actor, { workspaceId: params.workspaceId, actionId: action.id });

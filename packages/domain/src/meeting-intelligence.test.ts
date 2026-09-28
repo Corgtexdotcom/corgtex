@@ -1156,6 +1156,10 @@ describe("meeting-intelligence", () => {
     });
 
     it("preserves an existing human owner on a reused draft", async () => {
+      (prisma.member.findMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+        { id: "member-raised", user: { displayName: "Milan", email: "milan@example.com" } },
+        { id: "member-existing", user: { displayName: "Avery", email: "avery@example.com" } },
+      ]);
       vi.mocked(prisma.meetingInsight.findUnique).mockResolvedValue({
         id: "insight-owned-draft", workspaceId: "ws-1", meetingId: "meeting-1", type: "FOLLOW_UP",
         operation: "CREATE", status: "SUGGESTED", title: "Prepare the update", bodyMd: "Milan mentioned the update.",
@@ -1169,6 +1173,24 @@ describe("meeting-intelligence", () => {
 
       expect(updateActionMock).not.toHaveBeenCalled();
       expect(publishActionMock).toHaveBeenCalledWith(mockActor, { workspaceId: "ws-1", actionId: "action-owned-draft" });
+    });
+
+    it.each(["inactive-owner", "system-owner"])('repairs a reused meeting draft with an ineligible %s', async (ownerId) => {
+      vi.mocked(prisma.meetingInsight.findUnique).mockResolvedValue({
+        id: "insight-stale-draft", workspaceId: "ws-1", meetingId: "meeting-1", type: "FOLLOW_UP",
+        operation: "CREATE", status: "SUGGESTED", title: "Prepare the update", bodyMd: "Milan will prepare the update.",
+        assigneeHint: "Milan", meeting: { id: "meeting-1", title: "Weekly sync" },
+      } as never);
+      createActionMock.mockResolvedValue({ id: "action-stale-draft", status: "DRAFT", assigneeMemberId: ownerId });
+      publishActionMock.mockResolvedValue({ id: "action-stale-draft", status: "OPEN" });
+
+      await applyInsight(mockActor, { workspaceId: "ws-1", insightId: "insight-stale-draft",
+        actionDuplicateGuard: { resolution: "use_existing", targetEntityId: "action-stale-draft" } });
+
+      expect(updateActionMock).toHaveBeenCalledWith(mockActor, {
+        workspaceId: "ws-1", actionId: "action-stale-draft", assigneeMemberId: "member-raised",
+      });
+      expect(updateActionMock.mock.invocationCallOrder[0]).toBeLessThan(publishActionMock.mock.invocationCallOrder[0]);
     });
 
     it.each(["ACTION_ITEM", "FOLLOW_UP", "TENSION"])("uses only the active human match for %s despite earlier historical/system duplicates", async (type) => {

@@ -854,7 +854,11 @@ export async function confirmSlackMeetingActionReviewProposal(actor: AppActor, p
   }
   let opened = action;
   if (action.status === "DRAFT") {
-    if (!action.assigneeMemberId) {
+    const existingOwner = action.assigneeMemberId && await prisma.member.findFirst({
+      where: { id: action.assigneeMemberId, workspaceId: params.workspaceId, isActive: true, ...humanMemberIdentityWhere() },
+      select: { id: true },
+    });
+    if (!existingOwner) {
       await updateAction(actor, { workspaceId: params.workspaceId, actionId: action.id, assigneeMemberId });
     }
     opened = await publishAction(actor, { workspaceId: params.workspaceId, actionId: action.id });

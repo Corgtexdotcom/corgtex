@@ -793,6 +793,21 @@ describe("action domain lifecycle", () => {
     expect(prismaMock.action.update).not.toHaveBeenCalled();
   });
 
+  it("allows an open Action to return to draft while clearing its assignee atomically", async () => {
+    prismaMock.action.findUnique.mockResolvedValueOnce({
+      id: "open-1", workspaceId: "workspace-1", authorUserId: "user-1", status: "OPEN",
+      assigneeMemberId: "member-2", version: 1, isPrivate: false, archivedAt: null, duplicateOfActionId: null,
+    });
+    prismaMock.action.update.mockResolvedValueOnce({ id: "open-1", status: "DRAFT", assigneeMemberId: null, version: 2 });
+    const { updateAction } = await import("./actions");
+    await expect(updateAction(actor, {
+      workspaceId: "workspace-1", actionId: "open-1", status: "DRAFT", assigneeMemberId: null,
+    })).resolves.toMatchObject({ status: "DRAFT", assigneeMemberId: null });
+    expect(prismaMock.action.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "DRAFT", assigneeMemberId: null, isPrivate: true }),
+    }));
+  });
+
   it("treats a repeated publish of an active Action as a no-op", async () => {
     const opened = {
       id: "action-open", workspaceId: "workspace-1", authorUserId: "user-1",

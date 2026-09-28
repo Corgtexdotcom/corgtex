@@ -751,6 +751,21 @@ describe("Slack context jobs", () => {
     expect(sendSlackMessageMock).toHaveBeenCalledWith("install-1", expect.objectContaining({ text: "An Action needs an owner before it can be opened." }), expect.any(Array));
   });
 
+  it("marks the installation for reauthorization if an owner prompt gets invalid_auth", async () => {
+    const source = candidate({ text: "Test the integration by Friday. Create a Corgtex Action for this.", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    preparePendingEvaluation(source, actionableExtraction({ ownerEvidence: "", concreteNextStep: "Test the integration", explicitActionRequest: true }));
+    prismaMock.communicationEntityLink.findMany.mockReset().mockResolvedValue([]).mockResolvedValueOnce([nudgeLink({ message: source })]);
+    sendSlackMessageMock.mockRejectedValueOnce(new Error("An API error occurred: invalid_auth"));
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" }))
+      .resolves.toEqual({ skipped: true, reason: "slack_reauth_required" });
+    expect(prismaMock.communicationEntityLink.deleteMany).toHaveBeenCalledWith({ where: expect.objectContaining({ claimKey: "proactive_action_needs_owner:install-1:message-1:message-1" }) });
+    expect(prismaMock.communicationInstallation.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "ERROR", lastError: "invalid_auth" }),
+    }));
+  });
+
   it("skips an unchanged thread after asking for an owner and reviews a later reply", async () => {
     const source = candidate({ text: "Send the renewal packet by Friday. Create a Corgtex Action for this.", messageTs: new Date("2026-04-28T15:30:00.000Z") });
     preparePendingEvaluation(source, actionableExtraction({ ownerEvidence: "", concreteNextStep: "send the renewal packet", explicitActionRequest: true }));

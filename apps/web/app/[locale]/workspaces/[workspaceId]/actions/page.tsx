@@ -426,14 +426,14 @@ export default async function ActionsPage({
       : (action.status === "OPEN" || action.status === "IN_PROGRESS") && canCollaborateOnSubmittedAction;
     const primaryTarget: ActionColumnStatus | null = action.status === "DRAFT" && canManage && hasEligibleAssignee
       ? "OPEN"
-      : action.status === "OPEN"
+      : action.status === "OPEN" && hasEligibleAssignee
         ? "IN_PROGRESS"
-        : action.status === "IN_PROGRESS"
+        : action.status === "IN_PROGRESS" && hasEligibleAssignee
           ? "COMPLETED"
           : null;
     const canMoveToStatus = (targetStatus: ActionColumnStatus) => {
       if (targetStatus === action.status) return false;
-      if (action.status === "DRAFT" && targetStatus !== "DRAFT" && !hasEligibleAssignee) return false;
+      if (targetStatus !== "DRAFT" && !hasEligibleAssignee) return false;
       if (action.status === "DRAFT" || targetStatus === "DRAFT") return canManage;
       return true;
     };

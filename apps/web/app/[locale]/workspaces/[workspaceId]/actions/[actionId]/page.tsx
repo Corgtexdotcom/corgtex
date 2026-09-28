@@ -298,7 +298,7 @@ export default async function ActionDetailPage({
                 {t("assignBeforeOpen")}
               </Link>
             )}
-            {action.status === "OPEN" && (
+            {action.status === "OPEN" && hasEligibleAssignee && (
               <form action={updateActionAction}>
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <input type="hidden" name="actionId" value={action.id} />
@@ -306,7 +306,7 @@ export default async function ActionDetailPage({
                 <button type="submit" className="primary small">{t("btnStart")}</button>
               </form>
             )}
-            {(action.status === "OPEN" || action.status === "IN_PROGRESS") && (
+            {(action.status === "OPEN" || action.status === "IN_PROGRESS") && hasEligibleAssignee && (
               <WorkItemResolutionDialog
                 action={updateActionAction}
                 buttonLabel={t("btnComplete")}
