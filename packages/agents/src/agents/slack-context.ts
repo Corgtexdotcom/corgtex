@@ -355,7 +355,7 @@ async function sendProactiveOwnerRequest(params: { workspaceId: string; installa
       channel: params.channel,
       threadTs: params.threadTs,
       text: "An Action needs an owner before it can be opened.",
-    }, [{ type: "section", text: { type: "mrkdwn", text: "I found a possible follow-up. Please name an active Corgtex member who will own it before I create the Action." } }]);
+    }, [{ type: "section", text: { type: "mrkdwn", text: "I found a possible follow-up. Please reply with a full ownership statement naming an active Corgtex member and the specific next step, for example: `Avery will send the renewal packet by Friday.` A name alone is not enough to create the Action." } }]);
     return true;
   } catch (error) {
     await prisma.communicationEntityLink.deleteMany({ where: { id: claim.id, workspaceId: params.workspaceId, claimKey } });

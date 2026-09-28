@@ -737,6 +737,7 @@ describe("Slack context jobs", () => {
     const { runSlackProactiveScan } = await import("./slack-context"); await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
     expect(createWorkItemMock).not.toHaveBeenCalled();
     expect(sendSlackMessageMock).toHaveBeenCalledWith("install-1", expect.objectContaining({ text: "An Action needs an owner before it can be opened." }), expect.any(Array));
+    expect(sendSlackMessageMock.mock.calls[0]?.[2]?.[0]?.text?.text).toContain("A name alone is not enough");
   });
 
   it("asks for an active member when the named Slack owner cannot be resolved", async () => {
