@@ -9,6 +9,7 @@ const {
   isAgentEnabledMock,
   sendSlackMessageMock,
   getAgentModelOverrideMock,
+  listHumanMembersMock,
 } = vi.hoisted(() => ({
   prismaMock: {
     workspaceAgentConfig: {
@@ -18,6 +19,7 @@ const {
       findFirst: vi.fn(),
       updateMany: vi.fn(),
     },
+    communicationExternalUser: { findUnique: vi.fn() },
     communicationMessage: {
       findMany: vi.fn(),
       count: vi.fn(),
@@ -51,6 +53,7 @@ const {
   isAgentEnabledMock: vi.fn(),
   sendSlackMessageMock: vi.fn(),
   getAgentModelOverrideMock: vi.fn(),
+  listHumanMembersMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -75,6 +78,7 @@ vi.mock("@corgtex/domain", () => ({
   },
   createWorkItemFromCommunicationSource: createWorkItemMock,
   getAgentModelOverride: getAgentModelOverrideMock,
+  listHumanMembers: listHumanMembersMock,
   isAgentEnabled: isAgentEnabledMock,
   postDeliberationEntry: postDeliberationEntryMock,
   sendSlackMessage: sendSlackMessageMock,
@@ -206,6 +210,8 @@ describe("Slack context jobs", () => {
     isAgentEnabledMock.mockResolvedValue(true);
     sendSlackMessageMock.mockResolvedValue({ ok: true, ts: "1714320999.000100" });
     getAgentModelOverrideMock.mockResolvedValue(undefined);
+    listHumanMembersMock.mockResolvedValue([{ id: "member-jan", userId: "user-jan", user: { displayName: "Jan", email: "jan@example.test" } }]);
+    prismaMock.communicationExternalUser.findUnique.mockResolvedValue({ memberId: "member-jan", userId: "user-jan" });
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-29T21:00:00Z"));
   });
@@ -710,7 +716,7 @@ describe("Slack context jobs", () => {
     const source = candidate({ text: "Can someone own the renewal?", messageTs: new Date("2026-04-28T15:30:00.000Z") }), reply = candidate({ id: "message-2", externalMessageId: "1714323600.000100", threadExternalId: source.externalMessageId, text: "I submitted the renewal packet. Jan will review the renewal packet by Friday. Thanks.", messageTs: new Date("2026-04-28T22:00:00.000Z") });
     prismaMock.communicationMessage.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([source, reply]); prismaMock.communicationEntityLink.findMany.mockResolvedValueOnce([nudgeLink({ message: source })]).mockResolvedValueOnce([]); extractMock.mockResolvedValueOnce({ output: actionableExtraction({ concreteNextStep: "review the renewal packet", timingEvidence: "by Friday" }) }); prismaMock.action.findMany.mockResolvedValueOnce([{ id: "action-1", title: "Persisted winner title" }]);
     const { runSlackProactiveScan } = await import("./slack-context"); await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 1, followups: 0, drafts: 1 });
-    expect(createWorkItemMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), expect.objectContaining({ title: "Review the renewal packet", bodyMd: "Can someone own the renewal?\n\nI submitted the renewal packet. Jan will review the renewal packet by Friday. Thanks.", sourceMessageId: "message-1", open: true, claimKey: "slack-proactive-disposition:install-1:message-1" }));
+    expect(createWorkItemMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), expect.objectContaining({ title: "Review the renewal packet", bodyMd: "Can someone own the renewal?\n\nI submitted the renewal packet. Jan will review the renewal packet by Friday. Thanks.", sourceMessageId: "message-1", assigneeMemberId: "member-jan", open: true, claimKey: "slack-proactive-disposition:install-1:message-1" }));
     expect(prismaMock.communicationEntityLink.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ messageId: "message-2", entityType: "CommunicationMessage", entityId: "message-2", action: "proactive_action_processed_reply", claimKey: "slack-proactive-disposition:install-1:message-1:processed:message-2" }) })); expect(prismaMock.communicationEntityLink.upsert.mock.invocationCallOrder[0]).toBeLessThan(createWorkItemMock.mock.invocationCallOrder[0]); expect(sendSlackMessageMock).toHaveBeenCalledWith("install-1", expect.objectContaining({ text: "Created Corgtex action: Persisted winner title" }), expect.any(Array));
     prismaMock.communicationMessage.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([source, reply]); prismaMock.communicationEntityLink.findMany.mockResolvedValueOnce([nudgeLink({ message: source })]).mockResolvedValueOnce([]); prismaMock.communicationEntityLink.findFirst.mockResolvedValueOnce({ id: "action-link", entityId: "action-1", claimKey: "slack-proactive-disposition:install-1:message-1" }).mockResolvedValueOnce({ id: "processed-reply" }); prismaMock.action.findMany.mockResolvedValueOnce([{ id: "action-1", title: "Persisted winner title" }]); prismaMock.communicationEntityLink.create.mockRejectedValueOnce({ code: "P2002" });
     await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
@@ -724,10 +730,23 @@ describe("Slack context jobs", () => {
     expect(extractMock).toHaveBeenCalledTimes(2); expect(createWorkItemMock).toHaveBeenCalledTimes(2); expect(prismaMock.communicationEntityLink.upsert).toHaveBeenCalledTimes(2); expect(sendSlackMessageMock).toHaveBeenCalledTimes(1);
   });
 
-  it.each([["Test the integration", "Test the integration by Friday. Create a Corgtex action for this."], ["Smoke test the integration", "Smoke test the integration by Friday. Create a Corgtex Action for this."]])("allows imperative %s work through the explicit-create exception", async (concreteNextStep, text) => {
+  it.each([["Test the integration", "Test the integration by Friday. Create a Corgtex action for this."], ["Smoke test the integration", "Smoke test the integration by Friday. Create a Corgtex Action for this."]])("asks for an owner before publishing imperative %s work", async (concreteNextStep, text) => {
     const source = candidate({ text, messageTs: new Date("2026-04-28T15:30:00.000Z") }); preparePendingEvaluation(source, actionableExtraction({ ownerEvidence: "", concreteNextStep, explicitActionRequest: true }));
-    const { runSlackProactiveScan } = await import("./slack-context"); await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 1, followups: 0, drafts: 1 });
-    expect(createWorkItemMock).toHaveBeenCalledTimes(1); expect(createWorkItemMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ claimKey: "slack-proactive-disposition:install-1:message-1" }));
+    const { runSlackProactiveScan } = await import("./slack-context"); await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+    expect(createWorkItemMock).not.toHaveBeenCalled();
+    expect(sendSlackMessageMock).toHaveBeenCalledWith("install-1", expect.objectContaining({ text: "An Action needs an owner before it can be opened." }), expect.any(Array));
+  });
+
+  it("asks for an active member when the named Slack owner cannot be resolved", async () => {
+    const source = candidate({ text: "Jan will send the signed vendor agreement by Friday.", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    preparePendingEvaluation(source, actionableExtraction());
+    listHumanMembersMock.mockResolvedValueOnce([]);
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" });
+
+    expect(createWorkItemMock).not.toHaveBeenCalled();
+    expect(sendSlackMessageMock).toHaveBeenCalledWith("install-1", expect.objectContaining({ text: "An Action needs an owner before it can be opened." }), expect.any(Array));
   });
 
   it.each([["owner imperative", "Jan will send the signed vendor agreement by Friday. Do not create a Corgtex Action.", {}], ["owner no-need", "Jan will send the signed vendor agreement by Friday. No need for a Corgtex Action.", {}], ["owner article-is-not-needed", "Jan will send the signed vendor agreement by Friday. A Corgtex Action is not needed.", {}], ["owner direct-not-needed", "Jan will send the signed vendor agreement by Friday. Corgtex Action not needed.", {}], ["explicit no-needed", "Send the signed vendor agreement by Friday. Create a Corgtex Action for this. No Corgtex Action needed.", { ownerEvidence: "", explicitActionRequest: true }], ["explicit isn't-needed", "Send the signed vendor agreement by Friday. Create a Corgtex Action for this. Corgtex Action isn't needed.", { ownerEvidence: "", explicitActionRequest: true }], ["explicit is-not-needed", "Send the signed vendor agreement by Friday. Create a Corgtex Action for this. Corgtex Action is not needed.", { ownerEvidence: "", explicitActionRequest: true }]])("vetoes %s Action-creation negation even when model output is positive", async (_label, text, overrides) => {
@@ -740,6 +759,7 @@ describe("Slack context jobs", () => {
     const source = candidate({ externalUserId, text, messageTs: new Date("2026-04-28T15:30:00.000Z") }); preparePendingEvaluation(source, actionableExtraction({ ownerEvidence }));
     const { runSlackProactiveScan } = await import("./slack-context"); await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" });
     expect(createWorkItemMock).toHaveBeenCalledTimes(publishes ? 1 : 0);
+    if (publishes) expect(createWorkItemMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ assigneeMemberId: "member-jan" }));
   });
 
   it("grounds first-person ownership to the reply speaker ID", async () => {

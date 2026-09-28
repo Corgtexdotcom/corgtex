@@ -1,5 +1,5 @@
 import { env, prisma, toInputJson, type AppActor } from "@corgtex/shared";
-import { createAction, meetingInsightActionSourcePayload, publishAction } from "./actions";
+import { createAction, meetingInsightActionSourcePayload, publishAction, updateAction } from "./actions";
 import { isDuplicateGuardMatchError } from "./duplicate-guard";
 import { requireWorkspaceMembership } from "./auth";
 import { humanMemberIdentityWhere } from "./member-identity";
@@ -852,10 +852,13 @@ export async function confirmSlackMeetingActionReviewProposal(actor: AppActor, p
       responseText: `A similar Action exists. Review this follow-up in Corgtex before confirming it: ${insightUrl(params.workspaceId, review.meetingId, insight.id)}`,
     });
   }
-  const opened = action.status === "DRAFT" ? await publishAction(actor, {
-    workspaceId: params.workspaceId,
-    actionId: action.id,
-  }) : action;
+  let opened = action;
+  if (action.status === "DRAFT") {
+    if (!action.assigneeMemberId) {
+      await updateAction(actor, { workspaceId: params.workspaceId, actionId: action.id, assigneeMemberId });
+    }
+    opened = await publishAction(actor, { workspaceId: params.workspaceId, actionId: action.id });
+  }
 
   await prisma.meetingInsight.update({
     where: { id: insight.id },

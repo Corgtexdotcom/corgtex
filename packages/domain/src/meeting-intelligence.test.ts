@@ -1134,6 +1134,43 @@ describe("meeting-intelligence", () => {
       }));
     });
 
+    it("assigns a reused draft to the resolved human before publishing", async () => {
+      vi.mocked(prisma.meetingInsight.findUnique).mockResolvedValue({
+        id: "insight-reused-draft", workspaceId: "ws-1", meetingId: "meeting-1", type: "FOLLOW_UP",
+        operation: "CREATE", status: "SUGGESTED", title: "Prepare the update", bodyMd: "Milan will prepare the update.",
+        assigneeHint: "Milan", meeting: { id: "meeting-1", title: "Weekly sync" },
+      } as never);
+      createActionMock.mockResolvedValue({ id: "action-draft", status: "DRAFT", assigneeMemberId: null });
+      publishActionMock.mockResolvedValue({ id: "action-draft", status: "OPEN" });
+
+      await applyInsight(mockActor, { workspaceId: "ws-1", insightId: "insight-reused-draft",
+        actionDuplicateGuard: { resolution: "use_existing", targetEntityId: "action-draft" } });
+
+      expect(updateActionMock).toHaveBeenCalledWith(mockActor, {
+        workspaceId: "ws-1", actionId: "action-draft", assigneeMemberId: "member-raised",
+      });
+      expect(updateActionMock.mock.invocationCallOrder[0]).toBeLessThan(publishActionMock.mock.invocationCallOrder[0]);
+      expect(prisma.meetingInsight.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ status: "APPLIED", appliedEntityId: "action-draft" }),
+      }));
+    });
+
+    it("preserves an existing human owner on a reused draft", async () => {
+      vi.mocked(prisma.meetingInsight.findUnique).mockResolvedValue({
+        id: "insight-owned-draft", workspaceId: "ws-1", meetingId: "meeting-1", type: "FOLLOW_UP",
+        operation: "CREATE", status: "SUGGESTED", title: "Prepare the update", bodyMd: "Milan mentioned the update.",
+        assigneeHint: "Milan", meeting: { id: "meeting-1", title: "Weekly sync" },
+      } as never);
+      createActionMock.mockResolvedValue({ id: "action-owned-draft", status: "DRAFT", assigneeMemberId: "member-existing" });
+      publishActionMock.mockResolvedValue({ id: "action-owned-draft", status: "OPEN" });
+
+      await applyInsight(mockActor, { workspaceId: "ws-1", insightId: "insight-owned-draft",
+        actionDuplicateGuard: { resolution: "use_existing", targetEntityId: "action-owned-draft" } });
+
+      expect(updateActionMock).not.toHaveBeenCalled();
+      expect(publishActionMock).toHaveBeenCalledWith(mockActor, { workspaceId: "ws-1", actionId: "action-owned-draft" });
+    });
+
     it.each(["ACTION_ITEM", "FOLLOW_UP", "TENSION"])("uses only the active human match for %s despite earlier historical/system duplicates", async (type) => {
       const candidates = [
         { id: "historical", workspaceId: "ws-1", isActive: false, kind: "HUMAN" as const, user: { displayName: "Milan", email: "historical@example.com" } },

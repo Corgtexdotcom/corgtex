@@ -1219,9 +1219,13 @@ export async function applyInsight(
         source: { type: "MEETING_INSIGHT", id: insight.id, groupId: insight.meetingId },
         sourcePayload: meetingInsightActionSourcePayload(insight),
       });
-      const opened = action.status === "DRAFT" && hintedMemberId
-        ? await publishAction(actor, { workspaceId: params.workspaceId, actionId: action.id })
-        : action;
+      let opened = action;
+      if (action.status === "DRAFT" && hintedMemberId) {
+        if (!action.assigneeMemberId) {
+          await updateAction(actor, { workspaceId: params.workspaceId, actionId: action.id, assigneeMemberId: hintedMemberId });
+        }
+        opened = await publishAction(actor, { workspaceId: params.workspaceId, actionId: action.id });
+      }
       appliedEntityType = "Action";
       appliedEntityId = opened.id;
     } else if (insight.type === "TENSION") {

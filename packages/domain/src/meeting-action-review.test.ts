@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { db, createAction, publishAction, requireWorkspaceMembership } = vi.hoisted(() => ({
+const { db, createAction, publishAction, updateAction, requireWorkspaceMembership } = vi.hoisted(() => ({
   db: {
     member: { findMany: vi.fn() },
     meetingFollowUpReview: { findFirst: vi.fn(), update: vi.fn() },
@@ -11,10 +11,11 @@ const { db, createAction, publishAction, requireWorkspaceMembership } = vi.hoist
   },
   createAction: vi.fn(),
   publishAction: vi.fn(),
+  updateAction: vi.fn(),
   requireWorkspaceMembership: vi.fn(),
 }));
 vi.mock("@corgtex/shared", () => ({ prisma: db, env: { APP_URL: "https://example.test" }, toInputJson: (value: unknown) => value }));
-vi.mock("./actions", () => ({ createAction, publishAction, meetingInsightActionSourcePayload: (insight: unknown) => insight }));
+vi.mock("./actions", () => ({ createAction, publishAction, updateAction, meetingInsightActionSourcePayload: (insight: unknown) => insight }));
 vi.mock("./auth", () => ({ requireWorkspaceMembership }));
 
 import { confirmSlackMeetingActionReviewProposal, refreshSlackMeetingActionReviewAfterWebApply } from "./meeting-action-review";
@@ -73,13 +74,26 @@ describe("Slack meeting action assignee eligibility", () => {
 
   it("opens a legacy claimed private draft before marking the Slack insight applied", async () => {
     db.member.findMany.mockResolvedValue([{ id: "active", user: { displayName: "Milan", email: "milan@example.test" } }]);
-    createAction.mockResolvedValueOnce({ id: "legacy-action", status: "DRAFT" });
+    createAction.mockResolvedValueOnce({ id: "legacy-action", status: "DRAFT", assigneeMemberId: null });
     publishAction.mockResolvedValueOnce({ id: "legacy-action", status: "OPEN" });
     await confirmSlackMeetingActionReviewProposal(actor, params);
+    expect(updateAction).toHaveBeenCalledWith(actor, { workspaceId: "ws-1", actionId: "legacy-action", assigneeMemberId: "active" });
+    expect(updateAction.mock.invocationCallOrder[0]).toBeLessThan(publishAction.mock.invocationCallOrder[0]);
     expect(publishAction).toHaveBeenCalledWith(actor, { workspaceId: "ws-1", actionId: "legacy-action" });
     expect(db.meetingInsight.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ status: "APPLIED", appliedEntityId: "legacy-action" }),
     }));
+  });
+
+  it("preserves the owner of a reused Slack review draft", async () => {
+    db.member.findMany.mockResolvedValue([{ id: "active", user: { displayName: "Milan", email: "milan@example.test" } }]);
+    createAction.mockResolvedValueOnce({ id: "owned-action", status: "DRAFT", assigneeMemberId: "existing-owner" });
+    publishAction.mockResolvedValueOnce({ id: "owned-action", status: "OPEN" });
+
+    await confirmSlackMeetingActionReviewProposal(actor, params);
+
+    expect(updateAction).not.toHaveBeenCalled();
+    expect(publishAction).toHaveBeenCalledWith(actor, { workspaceId: "ws-1", actionId: "owned-action" });
   });
 
   it("leaves an inactive-only hint pending for human assignment", async () => {
