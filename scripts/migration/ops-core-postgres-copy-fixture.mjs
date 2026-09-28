@@ -105,7 +105,9 @@ export async function runRetainedPostgresCopyFixture({ root, sourceConfig, targe
         parityEvidenceSha256: copied.parity.evidenceSha256 });
       const promotion = await custody.begin("VERIFIED", intent.sha256);
       const promotionRecords = new Map();
-      const promotionCustody = await openPostgresPromotionCustody({ custody, intent, stateFile: reconciled.stateFile,
+      const originalMarker = JSON.parse(await readFile(copied.stateFile, "utf8"));
+      assert.equal(originalMarker.scratchOwner, intent.expectedConnection.user);
+      const promotionCustody = await openPostgresPromotionCustody({ custody, intent, stateFile: copied.stateFile,
         assertSourceFenced, assertTargetInactive, store: {
           async assertPrivate() {},
           async readOptional(key) { return promotionRecords.get(key) ?? null; },
