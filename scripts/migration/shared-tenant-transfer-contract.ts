@@ -115,6 +115,7 @@ const scalarReferenceFields: Record<string, readonly string[]> = {
   Action: ["archivedByUserId"],
   Tension: ["archivedByUserId"],
   Proposal: ["archivedByUserId"],
+  DecisionRecord: ["proposalId", "tensionId", "createdByUserId"],
   DeliberationEntry: ["parentId"],
   ApprovalFlow: ["subjectId", "createdByUserId"],
   MeetingSeries: ["externalId"],
