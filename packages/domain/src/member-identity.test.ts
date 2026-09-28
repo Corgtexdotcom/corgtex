@@ -20,7 +20,7 @@ describe("member identity classification", () => {
     expect(isSystemMemberIdentity({ user: { email: "system+workspace@corgtex.local" } })).toBe(true);
     expect(isSystemMemberIdentity({ user: { email: "support+workspace@corgtex.local" } })).toBe(true);
     expect(isSystemMemberIdentity({ user: { email: "support@example.com", displayName: "Corgtex Support" } })).toBe(true);
-    expect(isSystemMemberIdentity({ user: { email: "crina@example.test", displayName: "CRINA System" } })).toBe(true);
+    expect(isSystemMemberIdentity({ user: { email: "workspace@example.test", displayName: "Example System" } })).toBe(true);
     expect(isSystemMemberIdentity({ user: { email: "testing@example.test", displayName: "E2E UI Testing Agent" } })).toBe(true);
   });
 
@@ -30,7 +30,10 @@ describe("member identity classification", () => {
 
   it("exposes reusable Prisma filters for member queries", () => {
     expect(systemMemberIdentityWhere()).toMatchObject({
-      OR: expect.arrayContaining([{ kind: "SYSTEM" }]),
+      OR: expect.arrayContaining([
+        { kind: "SYSTEM" },
+        { user: { displayName: { endsWith: " System", mode: "insensitive" } } },
+      ]),
     });
     expect(humanMemberIdentityWhere()).toMatchObject({
       NOT: [systemMemberIdentityWhere()],
