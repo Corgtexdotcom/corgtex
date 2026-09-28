@@ -280,7 +280,17 @@ export class RailwaySourceFence {
     const ids = new Set();
     const deployments = [];
     for (let page = 0; page < this.#maxPages; page++) {
-      const data = await this.#request(QUERIES.deployments, { ...this.#binding, serviceId, after });
+      let data;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          data = await this.#request(QUERIES.deployments, { ...this.#binding, serviceId, after });
+          break;
+        } catch (error) {
+          if (attempt === 2 || !["RAILWAY_GRAPHQL_FAILED", "RAILWAY_TRANSPORT_FAILED"].includes(error.code)) throw error;
+          await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+          checkSignal(this.#signal);
+        }
+      }
       this.#environmentBinding(data);
       const connection = data.deployments;
       requireValue(Array.isArray(connection?.edges) && connection.edges.length <= 100
@@ -397,8 +407,10 @@ export class RailwaySourceFence {
       const originalCron = original.config.deploy?.cronSchedule ?? null;
       const updates = config.source?.autoUpdates ?? null;
       const originalUpdates = original.config.source?.autoUpdates ?? null;
+      const disabledUpdates = { ...(isRecord(originalUpdates) ? originalUpdates : {}), type: "disabled" };
       requireValue((cron === originalCron || (!restored && cron === null))
-        && (canonical(updates) === canonical(originalUpdates) || (!restored && canonical(updates) === canonical({ type: "disabled" })))
+        && (canonical(updates) === canonical(originalUpdates) || (!restored && original.sourceKind === "image" && (
+          canonical(updates) === canonical({ type: "disabled" }) || canonical(updates) === canonical(disabledUpdates))))
         && (current.autoDeployEnabled === original.autoDeployEnabled || (!restored && !current.autoDeployEnabled))
         && current.activeDeployments.every(item => original.activeDeploymentIds.includes(item.id)
           || (original.completedScheduledDeploymentIds.includes(item.id) && stopped(item))), "RAILWAY_RECOVERY_POLICY_CHANGED");

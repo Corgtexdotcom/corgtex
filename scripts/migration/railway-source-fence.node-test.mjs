@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import test from "node:test";
-import { createRailwayFenceTransport, RailwaySourceFence } from "./railway-source-fence.mjs";
+import { createRailwayFenceTransport, RailwaySourceFence, RailwaySourceFenceError } from "./railway-source-fence.mjs";
 import { createCutoverJournal, openCutoverCustody } from "./ops-core-custody.mjs";
 import { openProviderOperationRecorder } from "./ops-core-provider-operations.mjs";
 
@@ -28,7 +28,7 @@ async function fixture(options = {}) {
     auto: { [id(3)]: false, [id(4)]: true }, pending: [],
     deployments: { [id(3)]: [deployment(id(3), 20)], [id(4)]: [deployment(id(4), 21, "BUILDING")] },
     pages: null, foreignEnvironment: false, foreignService: false, unknownAck: false, mutateOnStop: null,
-    extraActive: [], fileCron: null, ackLossOperation: null,
+    extraActive: [], fileCron: null, ackLossOperation: null, deploymentReadFailures: 0,
   };
   const envBinding = () => ({ id: state.foreignEnvironment ? id(999) : binding.environmentId, projectId: binding.projectId });
   const transport = async ({ query, variables }) => {
@@ -52,6 +52,10 @@ async function fixture(options = {}) {
       }, serviceInstanceAutoDeployStatus: { enabled: state.auto[serviceId] } };
     }
     if (operation === "FenceDeployments") {
+      if (state.deploymentReadFailures > 0) {
+        state.deploymentReadFailures--;
+        throw new RailwaySourceFenceError("RAILWAY_GRAPHQL_FAILED");
+      }
       if (state.pages) data = { environment: envBinding(), deployments: state.pages(variables) };
       else data = { environment: envBinding(), deployments: { edges: state.deployments[variables.serviceId].map((node) => ({ cursor: node.id, node: structuredClone(node) })),
         pageInfo: { hasNextPage: false, endCursor: null } } };
@@ -162,6 +166,23 @@ test("fully paginates deployment histories with exact scoped variables", async (
   assert.equal(call.variables.projectId, binding.projectId);
   assert.equal(call.variables.environmentId, binding.environmentId);
   assert.match(call.query, /includeDeleted:true/);
+});
+
+test("retries only a transient read of the same deployment page and fails closed after three attempts", async () => {
+  const recovered = await fixture();
+  recovered.state.deploymentReadFailures = 2;
+  await recovered.adapter.read();
+  const reads = recovered.state.calls.filter(item => item.operation === "FenceDeployments");
+  assert.equal(reads.length, 4);
+  assert.deepEqual(reads.slice(0, 3).map(item => item.variables),
+    Array(3).fill({ ...binding, serviceId: id(3), after: null }));
+  assert.equal(recovered.state.calls.filter(item => item.query.startsWith("mutation")).length, 0);
+
+  const failed = await fixture();
+  failed.state.deploymentReadFailures = 3;
+  await assert.rejects(failed.adapter.read(), { code: "RAILWAY_GRAPHQL_FAILED" });
+  assert.equal(failed.state.calls.filter(item => item.operation === "FenceDeployments").length, 3);
+  assert.equal(failed.state.calls.filter(item => item.query.startsWith("mutation")).length, 0);
 });
 
 test("rejects incomplete pagination, duplicate histories and active deployments missing from pages", async () => {
@@ -596,6 +617,30 @@ test("reopened recovery baseline admits normalized recovery staging with exact p
   f.state.pending[0].kind = "Deployment";
   await assert.rejects(f.adapter.assertRecoveryBaseline(baseline, { stagedPatchSha256: hash(requested) }),
     /RAILWAY_RECOVERY_WORK_UNSETTLED/);
+  assert.equal(f.state.calls.filter(item => item.query.startsWith("mutation")).length, 0);
+});
+
+test("source fence accepts Railway preserving original auto-update fields when disabling its type", async () => {
+  const f = await fixture();
+  f.state.deployments[id(4)][0].status = "SUCCESS";
+  f.state.config.services[id(3)].source.autoUpdates = {
+    type: "vuln", tagMode: "sha", schedule: [{ day: 6, startHour: 10, endHour: 24 }], remediationNotice: null,
+  };
+  const baseline = await f.adapter.captureRecoveryBaseline();
+  f.state.config.services[id(3)].source.autoUpdates.type = "disabled";
+  await f.adapter.assertRecoveryBaseline(baseline);
+  f.state.config.services[id(3)].source.autoUpdates.schedule[0].day = 5;
+  await assert.rejects(f.adapter.assertRecoveryBaseline(baseline), /RAILWAY_RECOVERY_POLICY_CHANGED/);
+  assert.equal(f.state.calls.filter(item => item.query.startsWith("mutation")).length, 0);
+});
+
+test("source fence rejects disabled auto-update drift on a repo service", async () => {
+  const f = await fixture();
+  f.state.deployments[id(4)][0].status = "SUCCESS";
+  f.state.config.services[id(4)].source.autoUpdates = { type: "vuln", tagMode: "sha" };
+  const baseline = await f.adapter.captureRecoveryBaseline();
+  f.state.config.services[id(4)].source.autoUpdates.type = "disabled";
+  await assert.rejects(f.adapter.assertRecoveryBaseline(baseline), /RAILWAY_RECOVERY_POLICY_CHANGED/);
   assert.equal(f.state.calls.filter(item => item.query.startsWith("mutation")).length, 0);
 });
 
