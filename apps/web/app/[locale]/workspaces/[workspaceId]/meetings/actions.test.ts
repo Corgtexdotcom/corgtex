@@ -541,6 +541,21 @@ describe("meeting server actions", () => {
     expect(intakeMeetingTranscript).not.toHaveBeenCalled();
   });
 
+  it("rejects an oversized pasted transcript before intake", async () => {
+    const { uploadMeetingTranscriptStateAction } = await import("./actions");
+    const data = formData({
+      workspaceId: "workspace-1",
+      transcript: "A".repeat(1_000_001),
+      recordedAt: "2026-07-15T09:00",
+      timeZone: "UTC",
+    });
+
+    const state = await uploadMeetingTranscriptStateAction(initialTranscriptState, data);
+
+    expect(state).toMatchObject({ status: "error", message: "Transcript text is too long to process. Use a shorter transcript." });
+    expect(intakeMeetingTranscript).not.toHaveBeenCalled();
+  });
+
   it("keeps the old stored token when a replacement cannot be stored and requests re-upload", async () => {
     const { uploadMeetingTranscriptStateAction } = await import("./actions");
     redisClient.get.mockResolvedValueOnce(JSON.stringify({

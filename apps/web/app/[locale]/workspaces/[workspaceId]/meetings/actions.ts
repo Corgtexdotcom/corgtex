@@ -31,7 +31,7 @@ import {
   type DuplicateGuardResolution,
   type MeetingTranscriptIntakeResult,
 } from "@corgtex/domain";
-import { extractMeetingTranscriptFile } from "@/lib/meeting-transcript-file";
+import { extractMeetingTranscriptFile, validateMeetingTranscriptText } from "@/lib/meeting-transcript-file";
 import {
   deletePendingTranscriptPayload,
   readPendingTranscriptPayload,
@@ -276,6 +276,7 @@ async function buildTranscriptUploadPayload(formData: FormData): Promise<Transcr
       },
     };
   }
+  validateMeetingTranscriptText(transcript);
 
   const meetingChoice = optionalFormString(formData, "meetingId");
   const createNewMeeting = meetingChoice === CREATE_NEW_MEETING_CHOICE

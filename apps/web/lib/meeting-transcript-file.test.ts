@@ -3,6 +3,7 @@ import {
   extractMeetingTranscriptFile,
   MAX_MEETING_TRANSCRIPT_FILE_BYTES,
   MAX_MEETING_TRANSCRIPT_TEXT_CHARS,
+  validateMeetingTranscriptText,
 } from "./meeting-transcript-file";
 
 describe("meeting transcript file intake", () => {
@@ -24,6 +25,15 @@ describe("meeting transcript file intake", () => {
       status: 413,
       code: "TRANSCRIPT_TEXT_TOO_LONG",
     });
+  });
+
+  it("applies the same limit to pasted text", () => {
+    const atLimit = "A".repeat(MAX_MEETING_TRANSCRIPT_TEXT_CHARS);
+    expect(validateMeetingTranscriptText(atLimit)).toBe(atLimit);
+    expect(() => validateMeetingTranscriptText(`${atLimit}B`)).toThrowError(expect.objectContaining({
+      status: 413,
+      code: "TRANSCRIPT_TEXT_TOO_LONG",
+    }));
   });
 
   it("rejects oversized files before reading their content", async () => {

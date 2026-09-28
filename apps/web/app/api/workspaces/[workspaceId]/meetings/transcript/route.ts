@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { AppError, intakeMeetingTranscript, requireWorkspaceMembership } from "@corgtex/domain";
-import { extractMeetingTranscriptFile } from "@/lib/meeting-transcript-file";
+import { extractMeetingTranscriptFile, validateMeetingTranscriptText } from "@/lib/meeting-transcript-file";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 import { parseOptionalMeetingDateTimeInput } from "@/lib/meeting-timezone";
@@ -39,6 +39,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       if (!transcript.trim()) {
         throw new AppError(400, "INVALID_INPUT", "Transcript text or a readable transcript file is required.");
       }
+      validateMeetingTranscriptText(transcript);
 
       const result = await intakeMeetingTranscript(actor, {
         workspaceId,
@@ -86,6 +87,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       timeZone?: unknown;
     };
 
+    const transcript = validateMeetingTranscriptText(String(body.transcript ?? ""));
     const result = await intakeMeetingTranscript(actor, {
       workspaceId,
       meetingId: typeof body.meetingId === "string" ? body.meetingId : null,
@@ -102,7 +104,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         typeof body.timeZone === "string" ? body.timeZone : null,
         "Recorded at",
       ),
-      transcript: String(body.transcript ?? ""),
+      transcript,
       summaryMd: typeof body.summaryMd === "string" ? body.summaryMd : null,
       ingestionGuidanceMd: typeof body.ingestionGuidanceMd === "string" ? body.ingestionGuidanceMd : null,
       participantIds: Array.isArray(body.participantIds) ? body.participantIds.map((value) => String(value)) : [],
