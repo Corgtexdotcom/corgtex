@@ -253,7 +253,7 @@ describe("file-ingestion", () => {
         metadata: expect.objectContaining({
           extraction: expect.objectContaining({
             format: "PPTX",
-            parserVersion: "7.6.2",
+            parserVersion: "8.0.0",
             slideCount: 2,
             notesIncluded: true,
           }),
@@ -283,7 +283,7 @@ describe("file-ingestion", () => {
     });
 
     expect(valid.supported).toBe(true);
-    expect(valid.extraction).toMatchObject({ format: "PPTX", parserVersion: "7.6.2" });
+    expect(valid.extraction).toMatchObject({ format: "PPTX", parserVersion: "8.0.0" });
     expect(invalid).toMatchObject({ supported: false, textContent: null });
   });
 

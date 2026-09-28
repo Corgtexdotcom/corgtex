@@ -112,7 +112,7 @@
     "dagre": "^0.8.5",
     "driver.js": "^1.4.0",
     "jszip": "^3.10.1",
-    "next": "15.5.18",
+    "next": "15.5.26",
     "playwright": "^1.60.0",
     "zod": "^4.4.3"
   },
@@ -124,23 +124,24 @@
     "@types/react": "19.2.15",
     "@types/react-dom": "19.2.3",
     "autoprefixer": "10.4.21",
-    "concurrently": "^9.2.1",
+    "concurrently": "^9.2.4",
     "dotenv-cli": "^8.0.0",
     "eslint": "9.39.2",
     "eslint-config-next": "15.5.15",
     "knip": "^6.26.0",
     "pg": "8.21.0",
-    "postcss": "8.5.12",
+    "postcss": "8.5.23",
     "prisma": "6.19.3",
     "tailwindcss": "3.4.17",
     "tsx": "^4.22.3",
     "typescript": "5.9.3",
-    "vitest": "4.0.18"
+    "vite": "7.3.6",
+    "vitest": "4.1.0"
   },
   "overrides": {
     "next": {
-      "postcss": "8.5.12"
+      "postcss": "8.5.23"
     },
-    "postcss": "8.5.12"
+    "postcss": "8.5.23"
   }
 }

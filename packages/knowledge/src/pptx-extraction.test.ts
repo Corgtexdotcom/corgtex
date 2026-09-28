@@ -110,7 +110,7 @@ describe("PPTX extraction", () => {
     expect(result.extraction).toEqual({
       format: "PPTX",
       parser: "officeparser",
-      parserVersion: "7.6.2",
+      parserVersion: "8.0.0",
       slideCount: 2,
       notesIncluded: true,
       supported: true,
