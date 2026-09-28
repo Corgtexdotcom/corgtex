@@ -305,6 +305,20 @@ test("cancels pending builds and stops running writers while preserving deployme
   assert.ok(f.state.calls.every((entry) => !/deploymentRemove|serviceInstanceUpdate|serviceDelete/.test(entry.query)));
 });
 
+test("skips individually rereading settled historical deployments and still checks the final inventory", async () => {
+  const f = await fixture();
+  const historicalIds = Array.from({ length: 20 }, (_, index) => id(1000 + index));
+  f.state.deployments[id(3)].push(...historicalIds.map((_, index) => deployment(id(3), 1000 + index, "SUCCESS", true)));
+  await f.adapter.disableTriggers();
+  f.state.calls = [];
+  const result = await f.adapter.stopWriters();
+  assert.equal(result.complete, true);
+  assert.ok(f.state.calls.filter((call) => call.operation === "FenceDeployments").length >= 4);
+  assert.equal(f.state.calls.filter((call) => call.operation === "FenceDeployment"
+    && historicalIds.includes(call.variables.id)).length, 0);
+  assert.equal(f.state.records.filter((record) => record.kind === "RAILWAY_STOP_SOURCE_DEPLOYMENT").length, 1);
+});
+
 test("unknown stop acknowledgement requires readback and never retries the mutation", async () => {
   const f = await fixture(); await f.adapter.disableTriggers(); f.state.unknownAck = true;
   await assert.rejects(f.adapter.stopWriters(), { code: "RAILWAY_REQUEST_FAILED" });

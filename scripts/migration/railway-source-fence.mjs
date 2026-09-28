@@ -728,6 +728,7 @@ export class RailwaySourceFence {
     const initial = await this.read();
     requireValue(this.#triggersDisabled(initial) && initial.staged.empty, "RAILWAY_TRIGGERS_NOT_FENCED");
     for (const service of initial.services) for (const original of service.deployments) {
+      if (stopped(original)) continue;
       let current = await this.#readDeployment(original.id, service.serviceId);
       const operationInput = { binding: this.#binding, serviceId: service.serviceId, deploymentId: original.id,
         sourceLinkSha256: service.sourceLinkSha256 };
