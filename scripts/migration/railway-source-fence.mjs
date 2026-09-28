@@ -409,7 +409,7 @@ export class RailwaySourceFence {
       const originalUpdates = original.config.source?.autoUpdates ?? null;
       const disabledUpdates = { ...(isRecord(originalUpdates) ? originalUpdates : {}), type: "disabled" };
       requireValue((cron === originalCron || (!restored && cron === null))
-        && (canonical(updates) === canonical(originalUpdates) || (!restored && (
+        && (canonical(updates) === canonical(originalUpdates) || (!restored && original.sourceKind === "image" && (
           canonical(updates) === canonical({ type: "disabled" }) || canonical(updates) === canonical(disabledUpdates))))
         && (current.autoDeployEnabled === original.autoDeployEnabled || (!restored && !current.autoDeployEnabled))
         && current.activeDeployments.every(item => original.activeDeploymentIds.includes(item.id)

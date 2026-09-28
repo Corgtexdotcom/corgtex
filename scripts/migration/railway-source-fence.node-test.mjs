@@ -634,6 +634,16 @@ test("source fence accepts Railway preserving original auto-update fields when d
   assert.equal(f.state.calls.filter(item => item.query.startsWith("mutation")).length, 0);
 });
 
+test("source fence rejects disabled auto-update drift on a repo service", async () => {
+  const f = await fixture();
+  f.state.deployments[id(4)][0].status = "SUCCESS";
+  f.state.config.services[id(4)].source.autoUpdates = { type: "vuln", tagMode: "sha" };
+  const baseline = await f.adapter.captureRecoveryBaseline();
+  f.state.config.services[id(4)].source.autoUpdates.type = "disabled";
+  await assert.rejects(f.adapter.assertRecoveryBaseline(baseline), /RAILWAY_RECOVERY_POLICY_CHANGED/);
+  assert.equal(f.state.calls.filter(item => item.query.startsWith("mutation")).length, 0);
+});
+
 test("recovery rejects effective runtime policy drift before any restart", async () => {
   const f = await fixture();
   f.state.deployments[id(4)][0].status = "SUCCESS";
