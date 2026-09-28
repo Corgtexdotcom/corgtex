@@ -667,6 +667,12 @@ test("recovery staging admits omitted optional settings only when current config
   assert.equal(await f.adapter.matchesStagedRecoveryTriggerPatch(hash(requested), baseline), true);
   f.state.config.services[id(3)].source.autoUpdates.tagMode = "tag";
   assert.equal(await f.adapter.matchesStagedRecoveryTriggerPatch(hash(requested), baseline), false);
+  f.state.config.services[id(3)].source.autoUpdates.tagMode = "sha";
+  f.state.config.services[id(3)].source.autoUpdates.remediationNotice = "changed";
+  assert.equal(await f.adapter.matchesStagedRecoveryTriggerPatch(hash(requested), baseline), false);
+  f.state.config.services[id(3)].source.autoUpdates.remediationNotice = null;
+  f.state.staged.patch.services[id(3)].source.autoUpdates.unrelated = true;
+  assert.equal(await f.adapter.matchesStagedRecoveryTriggerPatch(hash(requested), baseline), false);
 });
 
 test("source fence accepts Railway preserving original auto-update fields when disabling its type", async () => {
