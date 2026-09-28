@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { db, createAction, publishAction, requireWorkspaceMembership } = vi.hoisted(() => ({
+const { db, createAction, publishAction, updateAction, requireWorkspaceMembership } = vi.hoisted(() => ({
   db: {
-    member: { findMany: vi.fn() },
+    member: { findMany: vi.fn(), findFirst: vi.fn() },
     meetingFollowUpReview: { findFirst: vi.fn(), update: vi.fn() },
     meetingInsight: { findFirst: vi.fn(), update: vi.fn(), count: vi.fn(), findMany: vi.fn() },
     workspaceFeatureFlag: { findUnique: vi.fn() },
@@ -11,10 +11,11 @@ const { db, createAction, publishAction, requireWorkspaceMembership } = vi.hoist
   },
   createAction: vi.fn(),
   publishAction: vi.fn(),
+  updateAction: vi.fn(),
   requireWorkspaceMembership: vi.fn(),
 }));
 vi.mock("@corgtex/shared", () => ({ prisma: db, env: { APP_URL: "https://example.test" }, toInputJson: (value: unknown) => value }));
-vi.mock("./actions", () => ({ createAction, publishAction, meetingInsightActionSourcePayload: (insight: unknown) => insight }));
+vi.mock("./actions", () => ({ createAction, publishAction, updateAction, meetingInsightActionSourcePayload: (insight: unknown) => insight }));
 vi.mock("./auth", () => ({ requireWorkspaceMembership }));
 
 import { confirmSlackMeetingActionReviewProposal, refreshSlackMeetingActionReviewAfterWebApply } from "./meeting-action-review";
@@ -72,24 +73,56 @@ describe("Slack meeting action assignee eligibility", () => {
   });
 
   it("opens a legacy claimed private draft before marking the Slack insight applied", async () => {
-    db.member.findMany.mockResolvedValue([]);
-    createAction.mockResolvedValueOnce({ id: "legacy-action", status: "DRAFT" });
+    db.member.findMany.mockResolvedValue([{ id: "active", user: { displayName: "Milan", email: "milan@example.test" } }]);
+    createAction.mockResolvedValueOnce({ id: "legacy-action", status: "DRAFT", assigneeMemberId: null });
     publishAction.mockResolvedValueOnce({ id: "legacy-action", status: "OPEN" });
     await confirmSlackMeetingActionReviewProposal(actor, params);
+    expect(updateAction).toHaveBeenCalledWith(actor, { workspaceId: "ws-1", actionId: "legacy-action", assigneeMemberId: "active" });
+    expect(updateAction.mock.invocationCallOrder[0]).toBeLessThan(publishAction.mock.invocationCallOrder[0]);
     expect(publishAction).toHaveBeenCalledWith(actor, { workspaceId: "ws-1", actionId: "legacy-action" });
     expect(db.meetingInsight.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ status: "APPLIED", appliedEntityId: "legacy-action" }),
     }));
   });
 
-  it("leaves an inactive-only hint unassigned", async () => {
-    db.member.findMany.mockImplementation(async ({ where }) => where.isActive === true ? [] : [{ id: "old", user: { displayName: "Milan", email: "old@example.test" } }]);
+  it("preserves the owner of a reused Slack review draft", async () => {
+    db.member.findMany.mockResolvedValue([{ id: "active", user: { displayName: "Milan", email: "milan@example.test" } }]);
+    db.member.findFirst.mockResolvedValue({ id: "existing-owner" });
+    createAction.mockResolvedValueOnce({ id: "owned-action", status: "DRAFT", assigneeMemberId: "existing-owner" });
+    publishAction.mockResolvedValueOnce({ id: "owned-action", status: "OPEN" });
+
     await confirmSlackMeetingActionReviewProposal(actor, params);
-    expect(createAction).toHaveBeenCalledWith(actor, expect.objectContaining({ assigneeMemberId: null }));
+
+    expect(updateAction).not.toHaveBeenCalled();
+    expect(publishAction).toHaveBeenCalledWith(actor, { workspaceId: "ws-1", actionId: "owned-action" });
+  });
+
+  it.each(["inactive-owner", "system-owner"])('repairs a reused Slack review draft with an ineligible %s', async (ownerId) => {
+    db.member.findMany.mockResolvedValue([{ id: "active", user: { displayName: "Milan", email: "milan@example.test" } }]);
+    db.member.findFirst.mockResolvedValue(null);
+    createAction.mockResolvedValueOnce({ id: "stale-draft", status: "DRAFT", assigneeMemberId: ownerId });
+    publishAction.mockResolvedValueOnce({ id: "stale-draft", status: "OPEN" });
+
+    await confirmSlackMeetingActionReviewProposal(actor, params);
+
+    expect(db.member.findFirst).toHaveBeenCalledWith({
+      where: { id: ownerId, workspaceId: "ws-1", isActive: true, ...humanMemberIdentityWhere() },
+      select: { id: true },
+    });
+    expect(updateAction).toHaveBeenCalledWith(actor, { workspaceId: "ws-1", actionId: "stale-draft", assigneeMemberId: "active" });
+    expect(updateAction.mock.invocationCallOrder[0]).toBeLessThan(publishAction.mock.invocationCallOrder[0]);
+  });
+
+  it("leaves an inactive-only hint pending for human assignment", async () => {
+    db.member.findMany.mockImplementation(async ({ where }) => where.isActive === true ? [] : [{ id: "old", user: { displayName: "Milan", email: "old@example.test" } }]);
+    const result = await confirmSlackMeetingActionReviewProposal(actor, params);
+    expect(result.responseText).toContain("Assign an active human owner");
+    expect(createAction).not.toHaveBeenCalled();
+    expect(db.meetingInsight.update).not.toHaveBeenCalled();
   });
 
   it("keeps a matching Slack proposal pending and directs review to Corgtex", async () => {
-    db.member.findMany.mockResolvedValue([]);
+    db.member.findMany.mockResolvedValue([{ id: "active", user: { displayName: "Milan", email: "milan@example.test" } }]);
     createAction.mockRejectedValueOnce(new DuplicateGuardMatchError({
       entityType: "Action", entityId: "action-existing", title: "Similar Action", excerpt: null,
       score: 0.88, matchKind: "likely", reasons: ["similar title"], status: "OPEN",

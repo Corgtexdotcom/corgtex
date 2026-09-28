@@ -321,6 +321,28 @@ describe("explicit interrupted transfer recovery", () => {
     expect((await resumeOpsCoreDataTransfer(f.options)).status).toBe("VERIFIED");
     expect(f.events).toEqual(["copy", "reconcile-copy", "object", "promote", "prepare-probe", "redis"]);
   });
+  it("resumes a dedicated plan interrupted during object copy before promotion", async () => {
+    const f = await fixture();
+    f.sourceValues.set("document-2", { data: Buffer.from("second"), etag: "two", metadata: {}, contentType: "text/plain" });
+    const createOnly = f.options.objectTarget.createOnly;
+    let interrupt = true;
+    f.options.objectTarget.createOnly = async (...args) => {
+      if (args[0] === "document-2" && interrupt) throw Error("interrupted object copy");
+      return createOnly(...args);
+    };
+    await expect(runOpsCoreDataTransfer(f.options)).rejects.toThrow();
+    expect(f.custody.snapshot()).toMatchObject({ phase: "RESTORED", pending: { to: "VERIFIED" } });
+    expect(f.databaseName).toBe(f.plan.transfer.postgres.scratchName);
+    expect(f.targetValues.size).toBe(1);
+    await f.reopen();
+    expect(await reconcileOpsCoreDataTransfer(f.options)).toMatchObject({
+      status: "INCOMPLETE", complete: false, code: "OBJECT_COPY_RESUME_REQUIRED", nextAction: "resume-transfer",
+    });
+    interrupt = false;
+    expect((await resumeOpsCoreDataTransfer(f.options)).status).toBe("VERIFIED");
+    expect(f.targetValues.size).toBe(2);
+    expect(f.events.filter(x => x === "promote")).toHaveLength(1);
+  });
   it("resume never accepts pending VERIFIED as permission to rerun writes", async () => {
     const f = await fixture(); f.redisFails = true; await expect(runOpsCoreDataTransfer(f.options)).rejects.toThrow();
     const before = [...f.events]; await expect(resumeOpsCoreDataTransfer(f.options)).rejects.toThrow("TRANSFER_RECONCILIATION_REQUIRED"); expect(f.events).toEqual(before);
@@ -413,6 +435,41 @@ describe("PostgreSQL shared state transfer variant", () => {
     expect(f.events.filter(x => x === "promote")).toHaveLength(1);
     expect(f.events.filter(x => x === "access-apply")).toHaveLength(1);
     expect(f.events).toContain("access-reconcile");
+  });
+  it("resumes a partly copied object snapshot before promotion with the retained intent", async () => {
+    const f = await fixture(sharedVariant);
+    f.sourceValues.set("document-2", { data: Buffer.from("second"), etag: "two", metadata: {}, contentType: "text/plain" });
+    const createOnly = f.options.objectTarget.createOnly;
+    let interrupt = true;
+    f.options.objectTarget.createOnly = async (...args) => {
+      if (args[0] === "document-2" && interrupt) throw Error("interrupted object copy");
+      return createOnly(...args);
+    };
+    await expect(runOpsCoreDataTransfer(f.options)).rejects.toThrow();
+    expect(f.custody.snapshot()).toMatchObject({ phase: "RESTORED", pending: { to: "VERIFIED" } });
+    expect(f.databaseName).toBe(f.plan.transfer.postgres.scratchName);
+    expect(f.targetValues.size).toBe(1);
+    const before = [...f.events];
+    await f.reopen();
+    expect(await reconcileOpsCoreDataTransfer(f.options)).toMatchObject({
+      status: "INCOMPLETE", complete: false, code: "OBJECT_COPY_RESUME_REQUIRED", nextAction: "resume-transfer",
+    });
+    expect(f.events).toEqual([...before, "maintenance-lock", "maintenance-close"]);
+    interrupt = false;
+    const result = await resumeOpsCoreDataTransfer(f.options);
+    expect(result.status).toBe("VERIFIED");
+    expect(f.targetValues.size).toBe(2);
+    expect(f.events.filter(x => x === "promote")).toHaveLength(1);
+    expect(f.custody.snapshot().phase).toBe("VERIFIED");
+  });
+  it("refuses to resume a missing promotion intent after the scratch was renamed", async () => {
+    const f = await fixture(sharedVariant); f.accessFails = true;
+    await expect(runOpsCoreDataTransfer(f.options)).rejects.toThrow();
+    for (const key of f.records.keys()) if (key.endsWith("/promotion-intent.json")) f.records.delete(key);
+    await f.reopen(); f.accessFails = false;
+    const before = [...f.events];
+    await expect(resumeOpsCoreDataTransfer(f.options)).rejects.toThrow("TRANSFER_PROMOTION_INTENT_MISSING");
+    expect(f.events).toEqual([...before, "maintenance-lock", "maintenance-close"]);
   });
   it("preserves transfer and promotion controls while recording PostgreSQL acceptance without Redis proof", async () => {
     const f = await fixture(postgresVariant);

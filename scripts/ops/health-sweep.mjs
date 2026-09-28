@@ -13,6 +13,7 @@ import {
 const args = parseArgs(process.argv.slice(2));
 const dryRun = Boolean(args["dry-run"]);
 const createIssues = Boolean(args["create-issues"] || process.env.OPS_CREATE_GITHUB_ISSUES === "true");
+const publishControlPlaneOnly = Boolean(args["publish-control-plane-only"]);
 
 async function main() {
   const targets = buildHealthTargets(process.env);
@@ -29,11 +30,15 @@ async function main() {
 
   const controlPlaneCustomers = dryRun ? [] : await fetchControlPlaneCustomers(process.env);
   const controlPlaneIncidents = buildControlPlaneIncidents(controlPlaneCustomers);
-  const syncDedupePrefixes = resolvedSyncDedupePrefixes(targets, controlPlaneCustomers);
+  const syncDedupePrefixes = resolvedSyncDedupePrefixes(
+    publishControlPlaneOnly ? [] : targets,
+    controlPlaneCustomers,
+  );
   const incidents = [
     ...results.filter((result) => result.incident).map((result) => result.incident),
     ...controlPlaneIncidents,
   ];
+  const publishedIncidents = publishControlPlaneOnly ? controlPlaneIncidents : incidents;
   const output = {
     dryRun,
     checkedAt: new Date().toISOString(),
@@ -57,6 +62,7 @@ async function main() {
       incidents: controlPlaneIncidents.length,
     },
     incidents,
+    publishedIncidents: publishedIncidents.length,
   };
 
   console.log(JSON.stringify(output, null, 2));
@@ -70,7 +76,7 @@ async function main() {
       process.execPath,
       incidentArgs,
       {
-        input: JSON.stringify(incidents),
+        input: JSON.stringify(publishedIncidents),
         encoding: "utf8",
         stdio: ["pipe", "inherit", "inherit"],
       },

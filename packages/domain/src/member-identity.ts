@@ -13,7 +13,7 @@ export type MemberIdentityInput = {
 } | null | undefined;
 
 const SYSTEM_EMAIL_PREFIXES = ["system+", "support+"];
-const SYSTEM_DISPLAY_NAMES = new Set(["corgtex support"]);
+const SYSTEM_DISPLAY_NAMES = new Set(["corgtex support", "e2e ui testing agent"]);
 
 function normalized(value?: string | null) {
   return value?.trim().toLowerCase() ?? "";
@@ -29,6 +29,7 @@ export function inferMemberKindFromUserIdentity(user: MemberIdentityUser): Membe
   const email = normalized(user.email);
   const displayName = normalized(user.displayName);
   if (SYSTEM_EMAIL_PREFIXES.some((prefix) => email.startsWith(prefix))) return "SYSTEM";
+  if (displayName.endsWith(" system")) return "SYSTEM";
   if (SYSTEM_DISPLAY_NAMES.has(displayName)) return "SYSTEM";
   return "HUMAN";
 }
@@ -54,7 +55,10 @@ export function systemMemberIdentityWhere(): Prisma.MemberWhereInput {
       { kind: "SYSTEM" },
       { user: { email: { startsWith: "system+", mode: "insensitive" } } },
       { user: { email: { startsWith: "support+", mode: "insensitive" } } },
-      { user: { displayName: { equals: "Corgtex Support", mode: "insensitive" } } },
+      { user: { displayName: { endsWith: " System", mode: "insensitive" } } },
+      ...["Corgtex Support", "E2E UI Testing Agent"].map((name) => ({
+        user: { displayName: { equals: name, mode: "insensitive" as const } },
+      })),
     ],
   };
 }

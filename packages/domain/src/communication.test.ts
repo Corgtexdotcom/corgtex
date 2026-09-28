@@ -1086,6 +1086,9 @@ describe("communication Slack integration", () => {
       isPrivate: true,
     }));
     expect(response.text).toContain("Action draft created");
+    if (!("blocks" in response)) throw new Error("Expected Slack draft response blocks.");
+    expect(JSON.stringify(response.blocks)).toContain("Assign an active human owner");
+    expect(JSON.stringify(response.blocks)).not.toContain("corgtex_publish_action");
   });
 
   it("atomically creates an open Action and final source link for a claim key", async () => {
@@ -1103,6 +1106,7 @@ describe("communication Slack integration", () => {
       sourceMessageId: "message-1",
       externalUserId: "U1",
       open: true,
+      assigneeMemberId: "member-1",
       claimKey: "slack:proactive-action:message-1",
     })).resolves.toMatchObject({
       entityType: "Action",
@@ -1151,6 +1155,7 @@ describe("communication Slack integration", () => {
       title: "Send the contract",
       sourceMessageId: "message-1",
       open: true,
+      assigneeMemberId: "member-1",
       claimKey: "slack:proactive-action:message-1",
     })).resolves.toMatchObject({
       entityType: "Action",
@@ -1175,6 +1180,7 @@ describe("communication Slack integration", () => {
       title: "Send the contract",
       sourceMessageId: "message-1",
       open: true,
+      assigneeMemberId: "member-1",
       claimKey: "slack:proactive-action:message-1",
     })).rejects.toBe(createError);
 
@@ -1199,6 +1205,7 @@ describe("communication Slack integration", () => {
       title: "Send the contract",
       sourceMessageId: "message-1",
       open: true,
+      assigneeMemberId: "member-1",
       claimKey: "slack:proactive-action:message-1",
     })).rejects.toBe(uniqueError);
 

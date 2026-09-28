@@ -17,8 +17,11 @@ import {
   ACTION_STATUS_META,
   type ActionStatusFilter,
   type ActionStatusQuery,
+  actionStatusFormValues,
   actionMatchesStatusFilters,
   groupActionsByStatus,
+  hasEligibleActionAssignee,
+  resolveActionAssigneeScope,
   resolveActionStatusSearch,
 } from "./view-model";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
@@ -73,6 +76,12 @@ function dateInputValue(value?: Date | string | null) {
   if (!value) return "";
   const date = value instanceof Date ? value : new Date(value);
   return Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : "";
+}
+
+function dueDateLabel(value?: Date | string | null) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toLocaleDateString(undefined, { timeZone: "UTC" }) : null;
 }
 
 function startOfUtcDay(value: Date) {
@@ -134,7 +143,16 @@ export default async function ActionsPage({
     resolvedSearch.status,
     view === "kanban" ? null : "OPEN",
   );
-  const { circleIds, assigneeMemberIds, sort } = resolveWorkItemFilters(resolvedSearch);
+  const { circleIds, assigneeMemberIds: selectedAssigneeIds, sort } = resolveWorkItemFilters(resolvedSearch);
+  const currentMemberId = membership?.id && membership.id !== "global-operator" ? membership.id : null;
+  const { actionScope, baseScope, assigneeMemberIds, includeOwnDrafts, assignedToMeActive } = resolveActionAssigneeScope(
+    selectedAssigneeIds, currentMemberId, resolvedSearch.scope,
+  );
+  const buildActionQuery = (params: Parameters<typeof buildWorkItemQuery>[0], scope = baseScope) => {
+    const query = new URLSearchParams(buildWorkItemQuery(params).slice(1));
+    if (scope === "workspace" || scope === "assigned") query.set("scope", scope);
+    return query.size > 0 ? `?${query}` : "?";
+  };
   // Actions use their assignee as the person filter. Ignore old "person involved"
   // query parameters so a hidden legacy filter cannot change the visible results.
   const memberIds: string[] = [];
@@ -143,6 +161,7 @@ export default async function ActionsPage({
       take: 200,
       circleIds,
       assigneeMemberIds,
+      includeOwnDrafts,
       memberIds,
       sort,
     }),
@@ -150,6 +169,7 @@ export default async function ActionsPage({
     listHumanMembers(workspaceId),
     listAdviceRequests(actor, { workspaceId, subjectType: "ACTION", status: "ACTIVE", take: 500 }),
   ]);
+  const activeHumanMemberIds = new Set(members.map((member) => member.id));
 
   const actionIds = actions.map((action) => action.id);
   const evidenceRows = actionIds.length > 0
@@ -190,11 +210,11 @@ export default async function ActionsPage({
   const actionColumnStatuses: ActionColumnStatus[] = ["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"];
   const visibleActionColumnIds = normalizeVisibleWorkItemColumns(resolvedSearch.columns, actionColumnStatuses);
   const allActionColumnsVisible = visibleActionColumnIds.length === actionColumnStatuses.length;
-  const buildActionColumnHref = (status: ActionColumnStatus, queryStatus: ActionStatusQuery = statusQuery) => buildWorkItemQuery({
+  const buildActionColumnHref = (status: ActionColumnStatus, queryStatus: ActionStatusQuery = statusQuery) => buildActionQuery({
     view: "kanban",
     status: queryStatus,
     circleIds,
-    assigneeMemberIds,
+    assigneeMemberIds: selectedAssigneeIds,
     memberIds,
     group: boardGroupQuery,
     columns: toggleWorkItemColumnVisibility(visibleActionColumnIds, status, actionColumnStatuses),
@@ -203,20 +223,20 @@ export default async function ActionsPage({
     actionColumnStatuses.map((status) => [status, buildActionColumnHref(status)]),
   );
   const actionFilterHref = (filter: ActionStatusFilter) => view === "kanban" && boardGroup === "status"
-    ? buildWorkItemQuery({
+    ? buildActionQuery({
       view: "kanban",
       status: filter === "ALL" ? "ALL" : statusQuery,
       circleIds,
-      assigneeMemberIds,
+      assigneeMemberIds: selectedAssigneeIds,
       memberIds,
       group: boardGroupQuery,
       columns: filter === "ALL" ? undefined : toggleWorkItemColumnVisibility(visibleActionColumnIds, filter, actionColumnStatuses),
     })
-    : buildWorkItemQuery({
+    : buildActionQuery({
       view,
       sort: view !== "kanban" ? sort : undefined,
       circleIds,
-      assigneeMemberIds,
+      assigneeMemberIds: selectedAssigneeIds,
       memberIds,
       status: filter,
       group: boardGroupQuery,
@@ -228,23 +248,21 @@ export default async function ActionsPage({
     : filter === "ALL"
       ? statusFilters.length === 0
       : statusFilters.includes(filter);
-  const currentMemberId = membership?.id && membership.id !== "global-operator" ? membership.id : null;
-  const assignedToMeActive = !!currentMemberId && assigneeMemberIds.includes(currentMemberId);
-  const assignedToMeHref = buildWorkItemQuery({
+  const assignedToMeHref = buildActionQuery({
     view,
     status: statusQuery,
     sort: view !== "kanban" ? sort : undefined,
     circleIds,
-    assigneeMemberIds: assignedToMeActive || !currentMemberId ? [] : [currentMemberId],
+    assigneeMemberIds: [],
     memberIds,
     group: boardGroupQuery,
     columns: view === "kanban" && !allActionColumnsVisible ? visibleActionColumnIds : undefined,
-  });
-  const boardGroupHref = (group: ActionBoardGroup) => buildWorkItemQuery({
+  }, "assigned");
+  const boardGroupHref = (group: ActionBoardGroup) => buildActionQuery({
     view: "kanban",
     status: statusQuery,
     circleIds,
-    assigneeMemberIds,
+    assigneeMemberIds: selectedAssigneeIds,
     memberIds,
     group: group === "status" ? undefined : group,
     columns: group === "status" && !allActionColumnsVisible ? visibleActionColumnIds : undefined,
@@ -401,19 +419,21 @@ export default async function ActionsPage({
 
   function actionControls(action: ActionListItem) {
     const canManage = canManageAction(action);
+    const hasEligibleAssignee = hasEligibleActionAssignee(action.assigneeMemberId, activeHumanMemberIds);
     const canCollaborateOnSubmittedAction = !action.isPrivate && (actor.kind === "agent" || Boolean(membership?.isActive));
     const canEditContent = action.status === "DRAFT"
       ? canManage
       : (action.status === "OPEN" || action.status === "IN_PROGRESS") && canCollaborateOnSubmittedAction;
-    const primaryTarget: ActionColumnStatus | null = action.status === "DRAFT" && canManage
+    const primaryTarget: ActionColumnStatus | null = action.status === "DRAFT" && canManage && hasEligibleAssignee
       ? "OPEN"
-      : action.status === "OPEN"
+      : action.status === "OPEN" && hasEligibleAssignee
         ? "IN_PROGRESS"
-        : action.status === "IN_PROGRESS"
+        : action.status === "IN_PROGRESS" && hasEligibleAssignee
           ? "COMPLETED"
           : null;
     const canMoveToStatus = (targetStatus: ActionColumnStatus) => {
       if (targetStatus === action.status) return false;
+      if (targetStatus !== "DRAFT" && !hasEligibleAssignee) return false;
       if (action.status === "DRAFT" || targetStatus === "DRAFT") return canManage;
       return true;
     };
@@ -537,11 +557,14 @@ export default async function ActionsPage({
     const authorName = action.author?.displayName || action.author?.email || "Unknown";
     const assigneeName = action.assigneeMember?.user?.displayName || action.assigneeMember?.user?.email;
     const createdAge = ageText(action.createdAt);
-    const dueDate = action.dueAt ? new Date(action.dueAt).toLocaleDateString() : null;
+    const dueDate = dueDateLabel(action.dueAt);
     const evidence = evidenceByActionId.get(action.id) ?? [];
     const activeRequestCount = activeRequestCountByActionId.get(action.id) ?? 0;
     const { canEditContent, hiddenTransitions, moreItems, primary } = actionControls(action);
     const cardBadges: ReactNode[] = [];
+    if (action.status === "DRAFT" && !hasEligibleActionAssignee(action.assigneeMemberId, activeHumanMemberIds)) {
+      cardBadges.push(<WorkItemAttentionBadge key="unassigned">{t("assignBeforeOpen")}</WorkItemAttentionBadge>);
+    }
     if (!compact) {
       cardBadges.push(
         <WorkItemLifecycleBadge key="lifecycle" status={action.status} label={t(statusMeta.labelKey)} />,
@@ -648,7 +671,7 @@ export default async function ActionsPage({
     const authorName = action.author?.displayName || action.author?.email || "Unknown";
     const assigneeName = action.assigneeMember?.user?.displayName || action.assigneeMember?.user?.email;
     const createdAge = ageText(action.createdAt);
-    const dueDate = action.dueAt ? new Date(action.dueAt).toLocaleDateString() : null;
+    const dueDate = dueDateLabel(action.dueAt);
     const evidence = evidenceByActionId.get(action.id) ?? [];
     const activeRequestCount = activeRequestCountByActionId.get(action.id) ?? 0;
     const { hiddenTransitions, moreItems, primary } = actionControls(action);
@@ -748,6 +771,7 @@ export default async function ActionsPage({
           action={createActionAction}
           workspaceId={workspaceId}
           priority={1}
+          assigneeMemberId={currentMemberId}
           members={actionMembers}
           labels={actionEditorLabels}
         >
@@ -856,23 +880,37 @@ export default async function ActionsPage({
             ))}
             {currentMemberId && (
               <a
+                href={buildActionQuery({ view, status: statusQuery, sort: view !== "kanban" ? sort : undefined, circleIds, group: boardGroupQuery }, "mine")}
+                className={`nr-filter-item ${actionScope === "mine" ? "nr-filter-active" : ""}`}
+              >
+                {t("myActions")}
+              </a>
+            )}
+            {currentMemberId && (
+              <a
                 href={assignedToMeHref}
                 className={`nr-filter-item ${assignedToMeActive ? "nr-filter-active" : ""}`}
               >
                 {tWork("assignedToMe")}
               </a>
             )}
+            <a
+              href={buildActionQuery({ view, status: statusQuery, sort: view !== "kanban" ? sort : undefined, circleIds, group: boardGroupQuery }, "workspace")}
+              className={`nr-filter-item ${actionScope === "workspace" ? "nr-filter-active" : ""}`}
+            >
+              {t("allWorkspaceActions")}
+            </a>
           </div>
           <WorkItemToolbar
             currentView={view}
             currentSort={sort}
-            listHref={buildWorkItemQuery({ sort, circleIds, assigneeMemberIds, memberIds, status: statusQuery, view: "list" })}
-            kanbanHref={buildWorkItemQuery({ circleIds, assigneeMemberIds, memberIds, view: "kanban", status: statusQuery, group: boardGroupQuery })}
-            tableHref={buildWorkItemQuery({ sort, circleIds, assigneeMemberIds, memberIds, status: statusQuery, view: "table" })}
+            listHref={buildActionQuery({ sort, circleIds, assigneeMemberIds: selectedAssigneeIds, memberIds, status: statusQuery, view: "list" })}
+            kanbanHref={buildActionQuery({ circleIds, assigneeMemberIds: selectedAssigneeIds, memberIds, view: "kanban", status: statusQuery, group: boardGroupQuery })}
+            tableHref={buildActionQuery({ sort, circleIds, assigneeMemberIds: selectedAssigneeIds, memberIds, status: statusQuery, view: "table" })}
             sortLinks={{
-              priority: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, assigneeMemberIds, memberIds, status: statusQuery, sort: "priority" }),
-              date: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, assigneeMemberIds, memberIds, status: statusQuery, sort: "date" }),
-              alpha: buildWorkItemQuery({ view: view === "table" ? "table" : "list", circleIds, assigneeMemberIds, memberIds, status: statusQuery, sort: "alpha" }),
+              priority: buildActionQuery({ view: view === "table" ? "table" : "list", circleIds, assigneeMemberIds: selectedAssigneeIds, memberIds, status: statusQuery, sort: "priority" }),
+              date: buildActionQuery({ view: view === "table" ? "table" : "list", circleIds, assigneeMemberIds: selectedAssigneeIds, memberIds, status: statusQuery, sort: "date" }),
+              alpha: buildActionQuery({ view: view === "table" ? "table" : "list", circleIds, assigneeMemberIds: selectedAssigneeIds, memberIds, status: statusQuery, sort: "alpha" }),
             }}
             listLabel={tWork("listView")}
             kanbanLabel={tWork("kanbanView")}
@@ -910,13 +948,15 @@ export default async function ActionsPage({
           sort={view !== "kanban" ? sort : undefined}
           columns={view === "kanban" && boardGroup === "status" && !allActionColumnsVisible ? visibleActionColumnIds : undefined}
           group={boardGroupQuery}
+          hiddenFields={baseScope === "assigned" || baseScope === "workspace" ? { scope: baseScope } : undefined}
+          clearHref={buildActionQuery({ view, status: statusQuery, group: boardGroupQuery })}
           statusOptions={ACTION_STATUS_FILTERS.map((filter) => ({ id: filter, label: ACTION_STATUS_META[filter].labelKey ? t(ACTION_STATUS_META[filter].labelKey) : filter }))}
-          statusValues={statusFilters}
+          statusValues={actionStatusFormValues(statusQuery, statusFilters)}
           showStatusFilter={false}
           summaryLabel={tWork("advancedFilters")}
           showMember={false}
           circleIds={circleIds}
-          assigneeMemberIds={assigneeMemberIds}
+          assigneeMemberIds={selectedAssigneeIds}
           memberIds={memberIds}
           circles={circles.map((circle) => ({ id: circle.id, label: circle.name }))}
           assigneeMembers={filterMembers}

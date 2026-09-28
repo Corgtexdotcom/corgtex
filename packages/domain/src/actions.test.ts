@@ -118,7 +118,7 @@ describe("action domain lifecycle", () => {
     prismaMock.action.findFirst.mockResolvedValueOnce(created);
 
     const { createAction } = await import("./actions");
-    const params = { workspaceId: "workspace-1", title: "Follow up", isPrivate: false,
+    const params = { workspaceId: "workspace-1", title: "Follow up", isPrivate: false, assigneeMemberId: "member-2",
       source: { type: "MEETING_INSIGHT", id: "insight-1" }, sourcePayload: { title: "Follow up" } };
     await expect(createAction(actor, params)).resolves.toMatchObject({ id: created.id });
     await expect(createAction(actor, params)).resolves.toMatchObject({ id: created.id });
@@ -332,6 +332,7 @@ describe("action domain lifecycle", () => {
       title: "Publish from Slack",
       isPrivate: false,
       _tx: prismaMock as never,
+      assigneeMemberId: "member-2",
     })).resolves.toMatchObject({ id: "action-composed", status: "OPEN" });
 
     expect(prismaMock.$transaction).not.toHaveBeenCalled();
@@ -630,6 +631,28 @@ describe("action domain lifecycle", () => {
     }));
   });
 
+  it("includes only the author's private drafts alongside their assigned Actions in the personal scope", async () => {
+    prismaMock.action.findMany.mockResolvedValueOnce([]);
+    prismaMock.action.count.mockResolvedValueOnce(0);
+    const { listActions } = await import("./actions");
+    await listActions(actor, "workspace-1", { assigneeMemberIds: ["member-1"], includeOwnDrafts: true });
+    expect(prismaMock.action.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        AND: [
+          { OR: [
+            { isPrivate: false },
+            { isPrivate: true, status: "DRAFT", authorUserId: "user-1" },
+          ] },
+          { OR: [
+            { assigneeMemberId: "member-1" },
+            { authorUserId: "user-1", isPrivate: true, status: "DRAFT" },
+          ] },
+        ],
+      }),
+    }));
+  });
+
   it("creates unchecked-private actions as open public records", async () => {
     prismaMock.action.create.mockResolvedValueOnce({
       id: "action-public",
@@ -646,6 +669,7 @@ describe("action domain lifecycle", () => {
       workspaceId: "workspace-1",
       title: "Follow up",
       isPrivate: false,
+      assigneeMemberId: "member-2",
     })).resolves.toMatchObject({
       id: "action-public",
       status: "OPEN",
@@ -684,6 +708,7 @@ describe("action domain lifecycle", () => {
       title: "Follow up",
       status: "DRAFT",
       isPrivate: false,
+      assigneeMemberId: "member-2",
       publishedAt: null,
     });
     prismaMock.action.update.mockResolvedValue({
@@ -713,6 +738,73 @@ describe("action domain lifecycle", () => {
         isPrivate: false,
         publishedAt: expect.any(Date),
       }),
+    }));
+  });
+
+  it("keeps unassigned drafts but rejects opening an Action without a human owner", async () => {
+    prismaMock.action.create.mockResolvedValueOnce({ id: "draft-1", workspaceId: "workspace-1", status: "DRAFT" });
+    const { createAction, publishAction } = await import("./actions");
+    await expect(createAction(actor, { workspaceId: "workspace-1", title: "Follow up" }))
+      .resolves.toMatchObject({ status: "DRAFT" });
+    await expect(createAction(actor, { workspaceId: "workspace-1", title: "Follow up", isPrivate: false }))
+      .rejects.toMatchObject({ code: "INVALID_INPUT", status: 400 });
+    expect(prismaMock.action.create).toHaveBeenCalledTimes(1);
+
+    prismaMock.action.findUnique.mockResolvedValueOnce({
+      id: "draft-1", workspaceId: "workspace-1", authorUserId: "user-1", status: "DRAFT",
+      assigneeMemberId: null, archivedAt: null, duplicateOfActionId: null,
+    });
+    await expect(publishAction(actor, { workspaceId: "workspace-1", actionId: "draft-1" }))
+      .rejects.toMatchObject({ code: "INVALID_INPUT", status: 400 });
+    expect(prismaMock.action.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects a system assignee on create and promotion", async () => {
+    prismaMock.member.findFirst.mockResolvedValue(null);
+    const { createAction, publishAction } = await import("./actions");
+    await expect(createAction(actor, {
+      workspaceId: "workspace-1", title: "Follow up", isPrivate: false, assigneeMemberId: "system-member",
+    })).rejects.toMatchObject({ code: "INVALID_INPUT", status: 400 });
+    prismaMock.action.findUnique.mockResolvedValueOnce({
+      id: "draft-1", workspaceId: "workspace-1", authorUserId: "user-1", status: "DRAFT",
+      assigneeMemberId: "system-member", archivedAt: null, duplicateOfActionId: null,
+    });
+    await expect(publishAction(actor, { workspaceId: "workspace-1", actionId: "draft-1" }))
+      .rejects.toMatchObject({ code: "INVALID_INPUT", status: 400 });
+    expect(prismaMock.action.update).not.toHaveBeenCalled();
+  });
+
+  it("does not clear the owner of an open Action or promote an unassigned draft through update", async () => {
+    const { updateAction } = await import("./actions");
+    prismaMock.action.findUnique.mockResolvedValueOnce({
+      id: "open-1", workspaceId: "workspace-1", authorUserId: "user-1", status: "OPEN",
+      assigneeMemberId: "member-2", version: 1, isPrivate: false, archivedAt: null, duplicateOfActionId: null,
+    });
+    await expect(updateAction(actor, {
+      workspaceId: "workspace-1", actionId: "open-1", assigneeMemberId: null,
+    })).rejects.toMatchObject({ code: "INVALID_INPUT", status: 400 });
+    prismaMock.action.findUnique.mockResolvedValueOnce({
+      id: "draft-1", workspaceId: "workspace-1", authorUserId: "user-1", status: "DRAFT",
+      assigneeMemberId: null, version: 1, isPrivate: true, archivedAt: null, duplicateOfActionId: null,
+    });
+    await expect(updateAction(actor, {
+      workspaceId: "workspace-1", actionId: "draft-1", status: "OPEN",
+    })).rejects.toMatchObject({ code: "INVALID_INPUT", status: 400 });
+    expect(prismaMock.action.update).not.toHaveBeenCalled();
+  });
+
+  it("allows an open Action to return to draft while clearing its assignee atomically", async () => {
+    prismaMock.action.findUnique.mockResolvedValueOnce({
+      id: "open-1", workspaceId: "workspace-1", authorUserId: "user-1", status: "OPEN",
+      assigneeMemberId: "member-2", version: 1, isPrivate: false, archivedAt: null, duplicateOfActionId: null,
+    });
+    prismaMock.action.update.mockResolvedValueOnce({ id: "open-1", status: "DRAFT", assigneeMemberId: null, version: 2 });
+    const { updateAction } = await import("./actions");
+    await expect(updateAction(actor, {
+      workspaceId: "workspace-1", actionId: "open-1", status: "DRAFT", assigneeMemberId: null,
+    })).resolves.toMatchObject({ status: "DRAFT", assigneeMemberId: null });
+    expect(prismaMock.action.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "DRAFT", assigneeMemberId: null, isPrivate: true }),
     }));
   });
 
@@ -1260,6 +1352,7 @@ describe("action domain lifecycle", () => {
       title: "Follow up",
       status: "IN_PROGRESS",
       version: 1,
+      assigneeMemberId: "member-2",
       completedVia: null,
       isPrivate: false,
       publishedAt: new Date("2026-06-01T00:00:00.000Z"),
@@ -1324,6 +1417,7 @@ describe("action domain lifecycle", () => {
       title: "Follow up",
       status: "DRAFT",
       version: 1,
+      assigneeMemberId: "member-2",
       completedVia: null,
       isPrivate: true,
       publishedAt: null,

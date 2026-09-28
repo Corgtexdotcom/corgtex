@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
+import { humanMemberIdentityWhere } from "./member-identity";
 
 const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => {
   const prisma = {
@@ -412,14 +413,7 @@ describe("meetings domain", () => {
       where: {
         workspaceId: "workspace-1",
         isActive: true,
-        NOT: [{
-          OR: [
-            { kind: "SYSTEM" },
-            { user: { email: { startsWith: "system+", mode: "insensitive" } } },
-            { user: { email: { startsWith: "support+", mode: "insensitive" } } },
-            { user: { displayName: { equals: "Corgtex Support", mode: "insensitive" } } },
-          ],
-        }],
+        ...humanMemberIdentityWhere(),
         OR: [
           { id: { in: ["member-1", "user-1"] } },
           { userId: { in: ["member-1", "user-1"] } },
@@ -454,14 +448,7 @@ describe("meetings domain", () => {
       where: {
         workspaceId: "workspace-1",
         isActive: true,
-        NOT: [{
-          OR: [
-            { kind: "SYSTEM" },
-            { user: { email: { startsWith: "system+", mode: "insensitive" } } },
-            { user: { email: { startsWith: "support+", mode: "insensitive" } } },
-            { user: { displayName: { equals: "Corgtex Support", mode: "insensitive" } } },
-          ],
-        }],
+        ...humanMemberIdentityWhere(),
         OR: [
           { id: { in: ["foreign-user"] } },
           { userId: { in: ["foreign-user"] } },

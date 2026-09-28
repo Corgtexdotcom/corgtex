@@ -403,17 +403,61 @@ fixed `cutovers/<domain>-retry.json` journal; the original remains intact. The
 retry slot is create-only and accepts only one exact plan. Run fresh preflight,
 including a read-only connection check from the pinned Docker PostgreSQL client
 to both source and target using the supplied `dockerHost` values, before fencing
-again. Preflight rejects missing Docker client hosts. A second terminal retry
-requires a new reviewed operator path; never reuse either journal or scratch DB.
+again. Preflight rejects missing Docker client hosts.
+
+After that retry also reaches terminal `SOURCE_RECOVERED` with no target write,
+one more attempt may use `operator.retryOf: { intentSha256, journalSha256,
+journal: "retry" }`. Bind these hashes to the exact terminal
+`cutovers/<domain>-retry.json` journal and its retained plan. That plan must
+itself bind the original terminal journal. The operator leases the root journal,
+then the retry journal, then creates the fixed
+`cutovers/<domain>-retry-2.json` journal. Use a third distinct scratch name;
+neither predecessor journal nor scratch may be reused. This slot is also
+create-only and accepts only one exact plan. If the original attempt preserved a
+scratch, keep it as a `verify-only` row in both transfer and activation
+runtime-access policies. Before creating the third journal, the operator checks
+the first retry's retained root-scratch receipt and requires both policies to
+match its exact effective policy.
+Leave the immediate predecessor's preserved scratch out of those base policies;
+its separate admission receipt verifies and adds that row after reading fresh
+target inventory. Run fresh preflight before fencing again.
+If the immediate predecessor recovered before capture and left no scratch,
+omit `retryScratchEvidenceDir`; preflight checks the complete base inventory.
+
+If the `-retry-2` attempt also reaches terminal `SOURCE_RECOVERED` before the
+target-write boundary, a final fourth attempt may use `operator.retryOf:
+{ intentSha256, journalSha256, journal: "retry-2" }`. Bind the hashes to the
+exact retained `-retry-2` plan and terminal journal, use a fourth distinct
+scratch name, and keep both transfer and activation runtime-access policies
+equal to the second retry's receipt-derived effective policy. That base policy
+includes every earlier preserved scratch as `verify-only`; leave the immediate
+predecessor scratch for separate admission. The operator checks and leases all
+three ancestor journals root-first, requires each applicable scratch admission
+receipt, and creates `cutovers/<domain>-retry-3.json` only for one exact plan.
+There is no further retry slot. Run fresh preflight before fencing.
 
 If the recovered predecessor left an empty, protected scratch database, set
 `retryScratchEvidenceDir` in the private retry credentials to the predecessor's
 private copy-evidence directory. Before fencing, preflight reads its
 `copy-intent.json` and `scratch-state.json`, checks the live scratch OID, owner,
 emptiness and ACL, and admits only that database into the retry's effective
-runtime-access policy. It stores a create-only admission receipt under the retry
+runtime-access policy. This also covers a completed capture followed by source
+recovery before any restore intent; the completed capture history binds the
+local evidence. It stores a create-only admission receipt under the retry
 intent. Other database drift still blocks preflight. Keep the predecessor
 scratch and evidence for recovery; the retry cannot silently reuse that scratch.
+
+If the immediate predecessor recovered from `RESTORED` with `VERIFIED` pending,
+point `retryScratchEvidenceDir` at its exact private PostgreSQL copy directory
+containing `scratch-state.json`. The preserved scratch may be populated.
+Admission checks the retained capture and restore proofs, abandoned verification
+phase plan, absence of `promotion-intent.json`, and live PostgreSQL promotion
+state `PREPARED` with the expected scratch OID and zero sessions. It also checks
+the protected ACL and complete database inventory before recording the
+create-only receipt. Preserve the populated scratch, archive, copied objects,
+and all predecessor journals; the next attempt takes a fresh source snapshot.
+If a copied object has changed at an occupied target key, the create-only copier
+blocks and requires governed resolution rather than overwrite or deletion.
 
 After the recorded target-write boundary, recover forward on Azure; the retained
 source is no longer a safe automatic routing fallback. Do not reset journals or
