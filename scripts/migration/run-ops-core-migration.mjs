@@ -46,8 +46,9 @@ export async function readPrivateMigrationJson(path) {
 
 export function validateOperatorPlan(plan) {
   const p = structuredClone(plan); const o = p?.operator;
+  const operatorKeys = ["archiveContainerUrl", "azureIdentity", "custodyContainerUrl", "sourceObjects", "targetObjectContainerUrl"];
   need([1, 2].includes(p?.schemaVersion) && ["core", "ops"].includes(p.domain) && o
-    && Object.keys(o).sort().join() === "archiveContainerUrl,azureIdentity,custodyContainerUrl,sourceObjects,targetObjectContainerUrl"
+    && [operatorKeys, [...operatorKeys, "retryOf"]].some(keys => Object.keys(o).sort().join() === keys.sort().join())
     && [o.custodyContainerUrl, o.archiveContainerUrl, o.targetObjectContainerUrl].every(containerUrl)
     && new Set([o.custodyContainerUrl, o.archiveContainerUrl, o.targetObjectContainerUrl]).size === 3
     && new URL(o.custodyContainerUrl).origin !== new URL(o.targetObjectContainerUrl).origin
@@ -58,6 +59,9 @@ export function validateOperatorPlan(plan) {
     && o.sourceObjects && Object.keys(o.sourceObjects).sort().join() === "bucket,endpoint,identity"
     && o.sourceObjects.endpoint === "https://t3.storageapi.dev"
     && o.sourceObjects.identity === p.transfer?.objects?.sourceStoreId, "MIGRATION_PLAN_INVALID");
+  if (o.retryOf !== undefined) need(o.retryOf && Object.keys(o.retryOf).sort().join() === "intentSha256,journalSha256"
+    && /^[a-f0-9]{64}$/.test(o.retryOf.intentSha256) && /^[a-f0-9]{64}$/.test(o.retryOf.journalSha256),
+  "MIGRATION_RETRY_BINDING_INVALID");
   const storageIdentity = value => createHash("sha256").update(value).digest("hex");
   need(p.transfer.postgres.archiveStoreId === storageIdentity(o.archiveContainerUrl)
     && p.transfer.objects.targetStoreId === storageIdentity(o.targetObjectContainerUrl), "MIGRATION_STORAGE_BINDING_MISMATCH");
@@ -123,6 +127,50 @@ async function readOptionalBlobJson(blob) {
   catch (error) { if (error?.statusCode === 404 && error?.code === "BlobNotFound") return null; throw error; }
 }
 
+function withPredecessorCustody(current, predecessor) {
+  const signal = AbortSignal.any([current.signal, predecessor.signal]);
+  const assertOwned = async () => {
+    signal.throwIfAborted();
+    await predecessor.assertOwned();
+    await current.assertOwned();
+    signal.throwIfAborted();
+  };
+  const guard = method => async (...args) => {
+    await assertOwned();
+    const result = await current[method](...args);
+    await assertOwned();
+    return result;
+  };
+  return { signal, assertOwned,
+    snapshot() { signal.throwIfAborted(); return current.snapshot(); },
+    begin: guard("begin"), beginSourceRecovery: guard("beginSourceRecovery"), complete: guard("complete"),
+    close: () => current.close() };
+}
+
+async function assertRetryPredecessor({ plan, custodyContainer, predecessor }) {
+  const retry = plan.operator.retryOf;
+  await predecessor.assertOwned();
+  const journal = predecessor.snapshot();
+  need(journal.domain === plan.domain && journal.intentSha256 === retry.intentSha256
+    && archiveEvidenceHash(journal) === retry.journalSha256 && journal.phase === "SOURCE_RECOVERED"
+    && journal.pending === null && journal.destinationMayHaveWritten === false,
+  "MIGRATION_RETRY_PREDECESSOR_INVALID");
+  const previous = await readBlobJson(custodyContainer.getBlockBlobClient(`plans/${plan.domain}/${retry.intentSha256}.json`));
+  need(archiveEvidenceHash(previous) === retry.intentSha256 && previous.domain === plan.domain
+    && previous.operator?.custodyContainerUrl === plan.operator.custodyContainerUrl
+    && previous.source?.postgresService && plan.source?.postgresService
+    && previous.source?.postgresTriggers?.binding && plan.source?.postgresTriggers?.binding
+    && same(previous.azure, plan.azure)
+    && same(previous.source?.postgresService, plan.source?.postgresService)
+    && same(previous.source?.postgres?.expected, plan.source?.postgres?.expected)
+    && same(previous.source?.writers?.binding, plan.source?.writers?.binding)
+    && same(previous.source?.postgresTriggers?.binding, plan.source?.postgresTriggers?.binding)
+    && same(previous.transfer?.postgres?.target, plan.transfer?.postgres?.target)
+    && previous.transfer?.postgres?.scratchName !== plan.transfer?.postgres?.scratchName,
+  "MIGRATION_RETRY_PLAN_MISMATCH");
+  await predecessor.assertOwned();
+}
+
 /** Actual operator dispatch. The one stable per-domain journal serializes all
  * steps outside Ops. Each invocation reopens its exact retained global plan.
  * initialize is create-only; subsequent actions never overwrite a plan or
@@ -132,7 +180,7 @@ async function readOptionalBlobJson(blob) {
 export async function runOpsCoreMigration({ action, plan: input, credentials, artifactDir, healthProbe,
   containerFactory, identityCheck = assertAzureIdentity, runtime = {}, acceptanceArtifact,
   pitrGuardFactory = openOpsCorePitrGuard }) {
-  let custody, pitrGuard;
+  let custody, predecessor, pitrGuard;
   try {
     need(["initialize", "status", "preflight", "fence", "transfer", "activate", "reconcile-transfer", "resume-transfer",
       "reconcile-activate", "resume-activate", "recover-source", "reconcile-source-recovery", "record-routing", "accept", "retain-acceptance-evidence",
@@ -144,11 +192,18 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
     const custodyContainer = container(plan.operator.custodyContainerUrl);
     need(!(await custodyContainer.getProperties()).blobPublicAccess, "MIGRATION_CUSTODY_PUBLIC");
     const retainedPlan = custodyContainer.getBlockBlobClient(`plans/${plan.domain}/${intentSha256}.json`);
-    const journalBlob = custodyContainer.getBlockBlobClient(`cutovers/${plan.domain}.json`);
+    const journalBlob = custodyContainer.getBlockBlobClient(`cutovers/${plan.domain}${plan.operator.retryOf ? "-retry" : ""}.json`);
     const journal = azureBlobCustodyAdapter(journalBlob);
     if (action === "initialize") {
       pitrGuard = await pitrGuardFactory(custodyContainer);
       await pitrGuard.assertNoPitr();
+    }
+    if (plan.operator.retryOf) {
+      const root = custodyContainer.getBlockBlobClient(`cutovers/${plan.domain}.json`);
+      predecessor = await openCutoverCustody(azureBlobCustodyAdapter(root), plan.operator.retryOf.intentSha256);
+      await assertRetryPredecessor({ plan, custodyContainer, predecessor });
+    }
+    if (action === "initialize") {
       const text = JSON.stringify(plan);
       const existing = await readOptionalBlobJson(retainedPlan);
       if (existing === null) await retainedPlan.upload(text, Buffer.byteLength(text), { conditions: { ifNoneMatch: "*" },
@@ -165,7 +220,8 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
       await pitrGuard.close(); pitrGuard = null;
     }
     need(same(await readBlobJson(retainedPlan), plan), "MIGRATION_RETAINED_PLAN_MISMATCH");
-    custody = await openCutoverCustody(journal, intentSha256);
+    const current = await openCutoverCustody(journal, intentSha256);
+    custody = predecessor ? withPredecessorCustody(current, predecessor) : current;
     if (["initialize", "status"].includes(action)) {
       const state = custody.snapshot();
       return { status: state.phase, domain: plan.domain, intentSha256, pending: state.pending,
@@ -299,7 +355,13 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
     const method = action === "reconcile-activate" ? "reconcile" : action === "resume-activate" ? "resume" : "activate";
     return await activation()[method]();
   } catch (error) { throw error instanceof OperatorError ? error : new OperatorError("MIGRATION_RECONCILIATION_REQUIRED"); }
-  finally { await custody?.close(); await pitrGuard?.close(); }
+  finally {
+    let closeError;
+    for (const resource of [custody, predecessor, pitrGuard]) {
+      try { await resource?.close(); } catch (error) { closeError ??= error; }
+    }
+    if (closeError) throw closeError;
+  }
 }
 
 export async function runOpsCoreMigrationCli(argv = process.argv.slice(2)) {

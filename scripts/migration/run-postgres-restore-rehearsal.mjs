@@ -797,6 +797,8 @@ const pgPassEscape = (value) => assertNoControlCharacters(String(value), "INVALI
   .replaceAll(":", "\\:");
 
 export const buildPgServiceContents = (source, target) => {
+  if (typeof source?.dockerHost !== "string" || source.dockerHost.length === 0
+    || typeof target?.dockerHost !== "string" || target.dockerHost.length === 0) fail("INVALID_DOCKER_CLIENT_HOST");
   if (!new Set(["disable", "require"]).has(source.sslmode)) fail("INVALID_SOURCE_TLS_MODE");
   if (!new Set(["disable", "verify-full"]).has(target.sslmode)) fail("INVALID_TARGET_TLS_MODE");
   const sourceServiceSslMode = source.sslmode === "disable" ? "disable" : "verify-ca";

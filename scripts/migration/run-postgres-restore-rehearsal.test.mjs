@@ -2650,6 +2650,13 @@ describe("PostgreSQL restore rehearsal runner", () => {
     expect(service).not.toContain("sslrootcert=system");
   });
 
+  it.each(["source", "target"])("rejects a missing %s Docker host before writing libpq files", side => {
+    const source = { dockerHost: "source.example.test", port: 5432, user: "reader", database: "core", sslmode: "require" };
+    const target = { dockerHost: "target.example.test", port: 5432, user: "admin", database: "scratch", sslmode: "verify-full" };
+    delete (side === "source" ? source : target).dockerHost;
+    expect(() => buildPgServiceContents(source, target)).toThrow("INVALID_DOCKER_CLIENT_HOST");
+  });
+
   it("never downgrades a stronger source URL claim to CA-only verification", () => {
     expect(() => buildPgServiceContents(
       { dockerHost: "source.example.test", port: 5432, user: "reader", database: "core", sslmode: "verify-full" },
