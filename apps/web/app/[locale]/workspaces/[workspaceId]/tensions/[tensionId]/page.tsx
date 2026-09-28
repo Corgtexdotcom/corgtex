@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { AppError, getTension, getWorkspaceArchiveRecord, listAdviceRequests, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, getTension, getWorkspaceArchiveRecord, listAdviceRequests, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listTensions, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
@@ -21,6 +21,9 @@ import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import { attachTensionExternalResourceAction, createProposalFromTensionAction, editTensionAction, postTensionDeliberationAction, publishTensionAction, requestTensionInputAction, returnTensionToDraftAction, resolveTensionDeliberationAction, updateTensionAction, updateTensionDeliberationAction } from "../../actions";
 import { getFormatter, getTranslations } from "next-intl/server";
 import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
+import { endOfUtcDate, normalizeWorkItemView, resolveWorkItemFilters, startOfUtcDate } from "@/lib/work-item-view";
+import { parseReviewListQuery, reviewItemHref, reviewListHref, reviewNeighbors } from "@/lib/review-list-navigation";
+import { resolveTensionSearch, tensionMatchesStatusFilters } from "../view-model";
 
 export const dynamic = "force-dynamic";
 
@@ -35,8 +38,10 @@ async function archivedSafeRead<T>(isArchived: boolean, read: Promise<T>, fallba
 
 export default async function TensionDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ workspaceId: string; tensionId: string }>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { workspaceId, tensionId } = await params;
   const actor = await requirePageActor();
@@ -71,6 +76,22 @@ export default async function TensionDetailPage({
     throw error;
   }
   const isArchived = Boolean(tension.archivedAt);
+  const reviewParam = (await searchParams)?.review;
+  const hasReviewContext = reviewParam !== undefined;
+  const { search: listSearch, query: listQuery } = parseReviewListQuery(reviewParam, "tensions");
+  const listView = normalizeWorkItemView(listSearch.view);
+  const { statusFilters, dateFilters } = resolveTensionSearch(listSearch, listView === "kanban" ? null : "OPEN");
+  const { circleIds, memberIds, sort } = resolveWorkItemFilters(listSearch);
+  const { items: contextItems } = hasReviewContext && listView !== "kanban" ? await listTensions(actor, workspaceId, {
+    take: 200, circleIds, memberIds, sort,
+    openedFrom: dateFilters.openedFrom ? startOfUtcDate(dateFilters.openedFrom) : undefined,
+    openedTo: dateFilters.openedTo ? endOfUtcDate(dateFilters.openedTo) : undefined,
+    closedFrom: dateFilters.closedFrom ? startOfUtcDate(dateFilters.closedFrom) : undefined,
+    closedTo: dateFilters.closedTo ? endOfUtcDate(dateFilters.closedTo) : undefined,
+  }) : { items: [] };
+  const contextIds = contextItems.filter((item) => tensionMatchesStatusFilters(item, statusFilters)).map((item) => item.id);
+  const { previousId, nextId } = reviewNeighbors(contextIds, tensionId);
+  const listHref = reviewListHref(`/workspaces/${workspaceId}/tensions`, listQuery);
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const [entries, versionHistory, evidence, externalResourceAttachments, inputRequests, archiveRecord, members] = await Promise.all([
     archivedSafeRead(isArchived, listDeliberationEntries(actor, { workspaceId, parentType: "TENSION", parentId: tensionId }), []),
@@ -252,10 +273,12 @@ export default async function TensionDetailPage({
   return (
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <div style={{ marginBottom: 16 }}>
-          <a href={`/workspaces/${workspaceId}/tensions`} style={{ textDecoration: "none", color: "var(--muted)" }}>
+        <div style={{ marginBottom: 16, display: "flex", alignItems: "center", flexWrap: "wrap", gap: 16 }}>
+          <a href={listHref} style={{ textDecoration: "none", color: "var(--muted)" }}>
             {t("backToTensions")}
           </a>
+          {previousId && <Link href={reviewItemHref(`/workspaces/${workspaceId}/tensions/${previousId}`, listQuery)}>{t("reviewPrevious")}</Link>}
+          {nextId && <Link href={reviewItemHref(`/workspaces/${workspaceId}/tensions/${nextId}`, listQuery)}>{t("reviewNext")}</Link>}
         </div>
         <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem" }}>
           {tension.isPrivate && <span title={t("privateInboxTooltip")} style={{ marginRight: 6 }}>◆</span>}

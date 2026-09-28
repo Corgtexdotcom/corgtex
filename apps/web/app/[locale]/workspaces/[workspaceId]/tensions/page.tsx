@@ -1,4 +1,4 @@
-import { listAdviceRequests, listCircles, listHumanMembers, listTensions, requireWorkspaceMembership } from "@corgtex/domain";
+import { listAdviceRequests, listCircles, listDeliberationEntriesForParents, listHumanMembers, listTensions, requireWorkspaceMembership } from "@corgtex/domain";
 import type { ReactNode } from "react";
 import { requirePageActor } from "@/lib/auth";
 import {
@@ -29,6 +29,7 @@ import { WorkItemPrioritySelect } from "@/lib/components/WorkItemPrioritySelect"
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "@/lib/components/WorkItemTable";
 import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
+import { reviewItemHref, reviewListQuery } from "@/lib/review-list-navigation";
 import {
   buildWorkItemQuery,
   normalizeVisibleWorkItemColumns,
@@ -79,6 +80,12 @@ export default async function TensionsPage({
     listHumanMembers(workspaceId),
     listAdviceRequests(actor, { workspaceId, subjectType: "TENSION", status: "ACTIVE", take: 500 }),
   ]);
+  const responses = await listDeliberationEntriesForParents(actor, {
+    workspaceId,
+    parentType: "TENSION",
+    parentIds: tensions.map((tension) => tension.id),
+  });
+  const contextQuery = reviewListQuery(resolvedSearch, "tensions");
 
   const groupedTensions = groupTensionsByStatus(tensions);
   const displayTensions = tensions.filter((tension) => tensionMatchesStatusFilters(tension, statusFilters));
@@ -320,7 +327,7 @@ export default async function TensionsPage({
   }
 
   function renderTensionCard(tension: TensionListItem, compact = false) {
-    const detailHref = `/workspaces/${workspaceId}/tensions/${tension.id}`;
+    const detailHref = reviewItemHref(`/workspaces/${workspaceId}/tensions/${tension.id}`, contextQuery);
     const authorName = tension.author.displayName || tension.author.email || t("authorUnknown");
     const raisedByName = tension.raisedByMember ? memberName(tension.raisedByMember) : null;
     const responsibleName = tension.assigneeMember ? memberName(tension.assigneeMember) : null;
@@ -352,6 +359,10 @@ export default async function TensionsPage({
         body={(
           <>
             {tension.bodyMd && <MarkdownExcerpt markdown={tension.bodyMd} maxLength={compact ? 120 : 220} as="div" className="nr-excerpt" />}
+            {responses.get(tension.id)?.at(-1)?.bodyMd && <p className="nr-item-meta">{t("responsePreview", {
+              name: responses.get(tension.id)!.at(-1)!.author?.displayName || responses.get(tension.id)!.at(-1)!.author?.email || t("authorUnknown"),
+              count: responses.get(tension.id)!.length,
+            })} <MarkdownExcerpt markdown={responses.get(tension.id)!.at(-1)!.bodyMd} maxLength={100} as="span" /></p>}
             <div className="nr-item-meta" style={{ marginTop: 8 }}>
               {t("createdByMeta", { name: authorName })}
               {raisedByName ? ` · ${t("raisedByMeta", { name: raisedByName })}` : ""}
@@ -414,7 +425,7 @@ export default async function TensionsPage({
   ];
 
   function tensionTableRow(tension: TensionListItem): WorkItemTableRow {
-    const detailHref = `/workspaces/${workspaceId}/tensions/${tension.id}`;
+    const detailHref = reviewItemHref(`/workspaces/${workspaceId}/tensions/${tension.id}`, contextQuery);
     const authorName = tension.author.displayName || tension.author.email || t("authorUnknown");
     const raisedByName = tension.raisedByMember ? memberName(tension.raisedByMember) : null;
     const responsibleName = tension.assigneeMember ? memberName(tension.assigneeMember) : null;
@@ -433,6 +444,10 @@ export default async function TensionsPage({
               {tension.title}
             </a>
             {tension.bodyMd && <MarkdownExcerpt markdown={tension.bodyMd} maxLength={140} as="div" className="nr-work-item-table-meta" />}
+            {responses.get(tension.id)?.at(-1)?.bodyMd && <div className="nr-work-item-table-meta">{t("responsePreview", {
+              name: responses.get(tension.id)!.at(-1)!.author?.displayName || responses.get(tension.id)!.at(-1)!.author?.email || t("authorUnknown"),
+              count: responses.get(tension.id)!.length,
+            })} <MarkdownExcerpt markdown={responses.get(tension.id)!.at(-1)!.bodyMd} maxLength={100} as="span" /></div>}
             <div className="nr-work-item-table-meta">{t("upvotes", { count: tension.upvotes.length })}</div>
           </>
         ),

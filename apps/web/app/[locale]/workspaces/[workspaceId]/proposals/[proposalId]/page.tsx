@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { AppError, getProposal, getWorkspaceArchiveRecord, listAdviceRequests, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listProposalDecisionStates, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, getProposal, getWorkspaceArchiveRecord, listAdviceRequests, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listProposalDecisionStates, listProposals, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import type { ProposalDecisionState } from "@corgtex/domain";
 import type { ApprovalDecisionChoice } from "@prisma/client";
 import { requirePageActor } from "@/lib/auth";
@@ -23,6 +23,11 @@ import { ProposalDraftFields } from "../ProposalDraftFields";
 import { resolveProposalDeliberationComposer } from "../proposal-deliberation";
 import { getFormatter, getTranslations } from "next-intl/server";
 import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
+import { normalizeWorkItemView, resolveWorkItemFilters } from "@/lib/work-item-view";
+import { parseReviewListQuery, reviewItemHref, reviewListHref, reviewNeighbors } from "@/lib/review-list-navigation";
+import { resolveProposalStatusSearch } from "../view-model";
+import { ReviewerRoster } from "@/lib/components/ReviewerRoster";
+import { ProposalDecisionButton } from "@/lib/components/ProposalDecisionButton";
 
 export const dynamic = "force-dynamic";
 
@@ -37,8 +42,10 @@ async function archivedSafeRead<T>(isArchived: boolean, read: Promise<T>, fallba
 
 export default async function ProposalDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ workspaceId: string; proposalId: string }>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { workspaceId, proposalId } = await params;
   const actor = await requirePageActor();
@@ -75,6 +82,23 @@ export default async function ProposalDetailPage({
   }
   if (!proposal) notFound();
   const isArchived = Boolean(proposal.archivedAt);
+  const reviewParam = (await searchParams)?.review;
+  const hasReviewContext = reviewParam !== undefined;
+  const { search: listSearch, query: listQuery } = parseReviewListQuery(reviewParam, "proposals");
+  const listView = normalizeWorkItemView(listSearch.view);
+  const { statusFilters } = resolveProposalStatusSearch(listSearch.status, listView === "kanban" ? null : "OPEN");
+  const { circleIds, memberIds, sort } = resolveWorkItemFilters(listSearch);
+  const { items: contextItems } = hasReviewContext && listView !== "kanban"
+    ? await listProposals(actor, workspaceId, { take: 200, circleIds, memberIds, sort })
+    : { items: [] };
+  const contextIds = statusFilters.length === 0
+    ? contextItems.map((item) => item.id)
+    : statusFilters.flatMap((status) => contextItems
+      .filter((item) => status === (item.archivedAt ? "ARCHIVED" : item.status)
+        && (status === "DRAFT" || status === "ARCHIVED" || !item.isPrivate))
+      .map((item) => item.id));
+  const { previousId, nextId } = reviewNeighbors(contextIds, proposalId);
+  const listHref = reviewListHref(`/workspaces/${workspaceId}/proposals`, listQuery);
 
   const [deliberationEntries, versionHistory, evidence, externalResourceAttachments, adviceRequests, archiveRecord, members, decisionStates] = await Promise.all([
     archivedSafeRead(isArchived, listDeliberationEntries(actor, {
@@ -226,14 +250,16 @@ export default async function ProposalDetailPage({
     if (!decisionState || !canSubmitDecision) return null;
     const selected = decisionState.currentMemberDecision?.choice === choice;
     return (
-      <form action={decideProposalApprovalAction}>
-        <input type="hidden" name="workspaceId" value={workspaceId} />
-        <input type="hidden" name="flowId" value={decisionState.flowId} />
-        <input type="hidden" name="choice" value={choice} />
-        <button type="submit" className={selected ? "primary small" : className}>
-          {selected ? t("decisionSelected", { label }) : label}
-        </button>
-      </form>
+      <ProposalDecisionButton
+        action={decideProposalApprovalAction}
+        workspaceId={workspaceId}
+        flowId={decisionState.flowId}
+        choice={choice}
+        label={selected ? t("decisionSelected", { label }) : label}
+        selected={selected}
+        className={className}
+        errorLabel={t("decisionSubmitError")}
+      />
     );
   };
   const canResolveDecisionObjection = (objection: ProposalDecisionState["openObjections"][number]) => actor.kind === "user" && Boolean(
@@ -334,7 +360,9 @@ export default async function ProposalDetailPage({
     <>
       <div className="nr-masthead nr-masthead-left mb-8">
         <p className="nr-meta nr-meta-flex mb-3">
-          <span><Link href={`/workspaces/${workspaceId}/proposals`} className="nr-link-inherit">{t("backToProposals")}</Link></span>
+          <span><Link href={listHref} className="nr-link-inherit">{t("backToProposals")}</Link></span>
+          {previousId && <span><Link href={reviewItemHref(`/workspaces/${workspaceId}/proposals/${previousId}`, listQuery)}>{t("reviewPrevious")}</Link></span>}
+          {nextId && <span><Link href={reviewItemHref(`/workspaces/${workspaceId}/proposals/${nextId}`, listQuery)}>{t("reviewNext")}</Link></span>}
           <span>·</span>
           <span>{authorName}</span>
           <span>·</span>
@@ -549,6 +577,20 @@ export default async function ProposalDetailPage({
                   <span>{t("decisionCurrentChoice", { choice: decisionChoiceLabel(decisionState.currentMemberDecision.choice) })}</span>
                 )}
               </div>
+              <ReviewerRoster
+                reviewers={decisionState.reviewers}
+                proposalPath={`/workspaces/${workspaceId}/proposals/${proposalId}`}
+                labels={{
+                  title: t("reviewerRoster"),
+                  tally: t("reviewerTally", { reviewed: decisionState.reviewers.filter((reviewer) => reviewer.choice || reviewer.hasOpenObjection).length, total: decisionState.reviewers.length }),
+                  pending: t("reviewerPending"),
+                  reviewed: t("decisionTagReviewed"),
+                  objected: t("decisionTagObjectionOpen", { count: 1 }),
+                  copyNudge: t("reviewerCopyNudge"),
+                  copied: t("reviewerCopied"),
+                  nudge: t("reviewerNudgeText"),
+                }}
+              />
 
               {canSubmitDecision && decisionState.mode === "CONSENT" && (
                 <div className="nr-decision-actions">

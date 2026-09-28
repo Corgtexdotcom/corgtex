@@ -151,7 +151,7 @@ describe("recordApprovalDecision", () => {
       .mockResolvedValueOnce(currentFlow)
       .mockResolvedValueOnce({
         ...currentFlow,
-        decisions: [{ choice: "APPROVE" }],
+        decisions: [{ memberId: "member-1", choice: "APPROVE" }],
       });
 
     await expect(recordApprovalDecision(
@@ -255,6 +255,38 @@ describe("listActionableApprovalFlows", () => {
 });
 
 describe("listProposalDecisionStates", () => {
+  it("excludes the author from the roster and shows who still owes a review", async () => {
+    requireWorkspaceMembershipMock.mockResolvedValueOnce({
+      id: "reviewer-1", workspaceId: "ws-1", userId: "u-1", role: "MEMBER", isActive: true,
+    });
+    prismaMock.member.findMany.mockResolvedValue([
+      { id: "author-member", userId: "author", user: { displayName: "Author", email: "author@example.com" } },
+      { id: "reviewer-1", userId: "u-1", user: { displayName: "Reviewer One", email: "one@example.com" } },
+      { id: "reviewer-2", userId: "u-2", user: { displayName: "Reviewer Two", email: "two@example.com" } },
+    ]);
+    prismaMock.proposal.findMany.mockResolvedValue([{ id: "p-1", authorUserId: "author" }]);
+    prismaMock.approvalFlow.findMany.mockResolvedValue([{
+      id: "flow-1", subjectId: "p-1", mode: "CONSENT", openedAt: new Date(), closesAt: null,
+      quorumPercent: 0, minApproverCount: 1,
+      decisions: [{ memberId: "reviewer-1", choice: "AGREE", rationale: null, updatedAt: new Date() }],
+      objections: [],
+    }]);
+
+    const states = await listProposalDecisionStates(
+      { kind: "user", user: { id: "u-1" } } as any,
+      { workspaceId: "ws-1", proposalIds: ["p-1"] },
+    );
+    expect(states.get("p-1")).toMatchObject({
+      eligibleApprovers: 2,
+      canReview: true,
+      needsReview: false,
+      reviewers: [
+        { name: "Reviewer One", choice: "AGREE" },
+        { name: "Reviewer Two", choice: null },
+      ],
+    });
+  });
+
   it("summarizes majority decisions and current member review state", async () => {
     const updatedAt = new Date("2026-05-26T12:15:00.000Z");
     prismaMock.member.findMany.mockResolvedValue([{ id: "member-1" }, { id: "member-2" }, { id: "member-3" }]);
