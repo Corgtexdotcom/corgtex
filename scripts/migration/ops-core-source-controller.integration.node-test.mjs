@@ -86,6 +86,8 @@ function simulatedRailway(scenario) {
     deployments: { [WRITER_SERVICE]: [deployment(WRITER_SERVICE, 20)], [PG_SERVICE]: [deployment(PG_SERVICE, 21)] },
     pending: [], effects: new Map(), stageLost: false, records: null,
   };
+  if (["LOST_POSTGRES_STAGE_NORMALIZED", "RECOVERY_LOST_NORMALIZED_STAGE"].includes(scenario))
+    state.config.services[PG_SERVICE].deploy.cronSchedule = null;
   const environment = () => ({ id: scope.environmentId, projectId: scope.projectId });
   const service = serviceId => {
     const config = state.config.services[serviceId];
@@ -128,6 +130,17 @@ function simulatedRailway(scenario) {
     }
     if (operation === "FenceStage") {
       state.staged.patch = structuredClone(variables.input);
+      if (scenario === "RECOVERY_LOST_NORMALIZED_STAGE" && !state.recoveryLost
+        && variables.input.services[PG_SERVICE]?.source?.autoUpdates?.type === "patch") {
+        delete state.staged.patch.services[PG_SERVICE].deploy;
+        state.recoveryLost = true;
+        throw new Error("SYNTHETIC_RECOVERY_ACK_LOSS");
+      }
+      if (scenario === "LOST_POSTGRES_STAGE_NORMALIZED" && !state.stageLost && variables.input.services[PG_SERVICE]) {
+        delete state.staged.patch.services[PG_SERVICE].deploy;
+        state.stageLost = true;
+        throw new Error("SYNTHETIC_STAGE_ACKNOWLEDGEMENT_LOSS");
+      }
       if (["LOST_WRITER_STAGE", "RECOVERY_PARTIAL_STAGE"].includes(scenario) && !state.stageLost && variables.input.services[WRITER_SERVICE]) {
         state.stageLost = true; throw new Error("SYNTHETIC_STAGE_ACKNOWLEDGEMENT_LOSS");
       }
@@ -140,9 +153,9 @@ function simulatedRailway(scenario) {
     if (operation === "FenceCommit") {
       for (const [serviceId, patch] of Object.entries(state.staged.patch.services)) {
         state.config.services[serviceId].source.autoUpdates = patch.source.autoUpdates;
-        state.config.services[serviceId].deploy.cronSchedule = patch.deploy.cronSchedule;
+        if (patch.deploy && "cronSchedule" in patch.deploy) state.config.services[serviceId].deploy.cronSchedule = patch.deploy.cronSchedule;
       }
-      const recovering = Object.values(state.staged.patch.services).some(item => item.deploy.cronSchedule);
+      const recovering = Object.values(state.staged.patch.services).some(item => item.deploy?.cronSchedule);
       state.staged.patch = {}; data = { environmentPatchCommitStaged: id(10) };
       if (scenario === "RECOVERY_LOST_COMMIT_ACK" && !state.recoveryLost && recovering) {
         state.recoveryLost = true; throw Error("SYNTHETIC_RECOVERY_ACK_LOSS");
@@ -171,9 +184,9 @@ function simulatedRailway(scenario) {
 
 // All provider identities and startup file hashes below are explicitly synthetic.
 // Only PostgreSQL and Docker are real, bounded to each test's own local container.
-for (const scenario of ["COMPLETE", "COMPLETE_POSTGRES", "LOST_WRITER_STAGE", "LOST_WRITER_STAGE_RECEIPT", "LOST_POSTGRES_STAGE_RECEIPT",
+for (const scenario of ["COMPLETE", "COMPLETE_POSTGRES", "LOST_WRITER_STAGE", "LOST_POSTGRES_STAGE_NORMALIZED", "LOST_WRITER_STAGE_RECEIPT", "LOST_POSTGRES_STAGE_RECEIPT",
   "LOST_ROTATION_RECEIPT", "PROVIDER_INCOMPLETE", "RECOVERY_LOST_PASSWORD_RECEIPT", "RECOVERY_LOST_RESTART_ACK",
-  "RECOVERY_LOST_STAGE_ACK", "RECOVERY_LOST_COMMIT_ACK", "RECOVERY_DRIFT", "RECOVERY_TARGET_DRIFT", "PREFLIGHT_BAD_ORIGINAL", "PREFLIGHT_BAD_READER", "PREFLIGHT_BAD_READER_GRANTS", "RECOVERY_LOST_COMPLETE_ACK", "RECOVERY_PARTIAL_STAGE", "PREFLIGHT_BAD_HEALTH", "RECOVERY_BAD_HEALTH"]) {
+  "RECOVERY_LOST_STAGE_ACK", "RECOVERY_LOST_NORMALIZED_STAGE", "RECOVERY_LOST_COMMIT_ACK", "RECOVERY_DRIFT", "RECOVERY_TARGET_DRIFT", "PREFLIGHT_BAD_ORIGINAL", "PREFLIGHT_BAD_READER", "PREFLIGHT_BAD_READER_GRANTS", "RECOVERY_LOST_COMPLETE_ACK", "RECOVERY_PARTIAL_STAGE", "PREFLIGHT_BAD_HEALTH", "RECOVERY_BAD_HEALTH"]) {
   test(`integrated source controller ${scenario}`, { timeout: 180_000 }, async () => {
     let stage = "SETUP";
     let directory;

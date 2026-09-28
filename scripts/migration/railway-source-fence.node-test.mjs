@@ -63,7 +63,7 @@ async function fixture(options = {}) {
     if (operation === "FenceCommit") {
       for (const [serviceId, patch] of Object.entries(state.staged.patch.services)) {
         if (patch.source?.autoUpdates) state.config.services[serviceId].source.autoUpdates = patch.source.autoUpdates;
-        state.config.services[serviceId].deploy.cronSchedule = patch.deploy.cronSchedule;
+        if (patch.deploy && "cronSchedule" in patch.deploy) state.config.services[serviceId].deploy.cronSchedule = patch.deploy.cronSchedule;
       }
       state.staged.patch = {};
       data = { environmentPatchCommitStaged: id(10) };
@@ -225,6 +225,31 @@ test("resumes an exact staged patch only with caller-provided durable ownership 
   await f.adapter.disableTriggers({ resumeStagedPatch: { environmentId: binding.environmentId, patchSha256: durable.input.patchSha256 }, readIntent: f.readIntent });
   assert.equal(f.state.calls.filter((entry) => entry.operation === "FenceStage").length, 1);
   assert.equal(f.state.calls.filter((entry) => entry.operation === "FenceCommit").length, 1);
+});
+
+test("reconciles Railway omission of an already-null cron without replaying the retained stage", async () => {
+  const f = await fixture();
+  f.state.config.services[id(3)].deploy.cronSchedule = null;
+  f.state.ackLossOperation = "FenceStage";
+  await assert.rejects(f.adapter.disableTriggers(), { code: "RAILWAY_REQUEST_FAILED" });
+  const durable = f.state.records.find((record) => record.kind === "RAILWAY_STAGE_SOURCE_TRIGGERS");
+  assert.ok(durable);
+  for (const [serviceId, patch] of Object.entries(f.state.staged.patch.services)) {
+    if ((f.state.config.services[serviceId].deploy.cronSchedule ?? null) === null) delete patch.deploy;
+    if (Object.keys(patch).length === 0) delete f.state.staged.patch.services[serviceId];
+  }
+  assert.equal(await f.adapter.matchesStagedSourceTriggerPatch(durable.input.patchSha256), true);
+  f.state.staged.patch.variables = { UNRELATED: "not-ours" };
+  assert.equal(await f.adapter.matchesStagedSourceTriggerPatch(durable.input.patchSha256), false);
+  delete f.state.staged.patch.variables;
+  f.state.config.services[id(3)].deploy.cronSchedule = "*/5 * * * *";
+  assert.equal(await f.adapter.matchesStagedSourceTriggerPatch(durable.input.patchSha256), false);
+  f.state.config.services[id(3)].deploy.cronSchedule = null;
+  f.state.ackLossOperation = null;
+  await f.adapter.disableTriggers({ resumeStagedPatch: {
+    environmentId: binding.environmentId, patchSha256: durable.input.patchSha256 }, readIntent: f.readIntent });
+  assert.equal(f.state.calls.filter((call) => call.operation === "FenceStage").length, 1);
+  assert.equal(f.state.calls.filter((call) => call.operation === "FenceCommit").length, 1);
 });
 
 test("an applying staged operation is not provider-fence acceptance even with an empty patch", async () => {

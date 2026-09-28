@@ -164,8 +164,11 @@ export async function runOpsCoreSourceFence(options) {
     // ones, before deciding which service group may use shared staging next.
     const staged = (await ctx.controls.postgres.read()).staged;
     if (!staged.empty) {
-      const matches = recorded.filter(item => item.kind === "RAILWAY_STAGE_SOURCE_TRIGGERS"
-        && item.input.patchSha256 === staged.patchSha256);
+      const matches = [];
+      for (const item of recorded.filter(record => record.kind === "RAILWAY_STAGE_SOURCE_TRIGGERS")) {
+        const name = controlFor(ctx, item);
+        if (await ctx.controls[name].matchesStagedSourceTriggerPatch(item.input.patchSha256)) matches.push(item);
+      }
       if (matches.length !== 1) fail("SOURCE_CONTROLLER_STAGING_OWNERSHIP_UNPROVEN");
       stagedOwner = controlFor(ctx, matches[0]);
       resume[stagedOwner].resumeStagedPatch = { environmentId: matches[0].input.binding.environmentId,
@@ -314,7 +317,11 @@ export async function recoverOpsCoreSource(options) {
     // On reentry, the only permissible staged patch is one retained by this
     // recovery. PostgreSQL and writer groups share the environment staging slot.
     const staged = (await ctx.controls.postgres.read()).staged;
-    const stages = recorded.filter(item => item.kind === "RAILWAY_STAGE_RECOVERY_TRIGGERS" && item.input.patchSha256 === staged.patchSha256);
+    const stages = [];
+    if (!staged.empty) for (const item of recorded.filter(record => record.kind === "RAILWAY_STAGE_RECOVERY_TRIGGERS")) {
+      const name = controlFor(ctx, item);
+      if (await ctx.controls[name].matchesStagedRecoveryTriggerPatch(item.input.patchSha256, baseline[name])) stages.push(item);
+    }
     if (!staged.empty && stages.length !== 1) fail("SOURCE_RECOVERY_STAGING_UNPROVEN");
     const stagedHash = staged.empty ? null : staged.patchSha256;
     const baselineGuard = async () => {

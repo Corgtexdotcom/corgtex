@@ -67,6 +67,23 @@ const nullableText = (value) => {
   return value;
 };
 const noOpPatch = (value) => isRecord(value) && Object.values(value).every((item) => noOpPatch(item));
+const stagedPatchMatches = (observed, requested, services) => {
+  if (canonical(observed) === canonical(requested)) return true;
+  // Railway omits a requested null cron override when that service already has
+  // no configured cron. Compare only that provider-normalized form; every other
+  // requested field and service must still match exactly.
+  const normalized = structuredClone(requested);
+  for (const service of services) {
+    const patch = normalized.services?.[service.serviceId];
+    if (service.configuredCronSchedule !== null || service.cronSchedule !== null
+      || service.nextCronRunAt !== null || patch?.deploy?.cronSchedule !== null) continue;
+    delete patch.deploy.cronSchedule;
+    if (Object.keys(patch.deploy).length === 0) delete patch.deploy;
+    if (Object.keys(patch).length === 0) delete normalized.services[service.serviceId];
+  }
+  if (normalized.services && Object.keys(normalized.services).length === 0) delete normalized.services;
+  return canonical(observed) === canonical(normalized);
+};
 const stopped = (deployment) => deployment.deploymentStopped && !UNFINISHED_STATUSES.has(deployment.status)
   && deployment.instances.every((instance) => INACTIVE_INSTANCES.has(instance.status));
 
@@ -144,6 +161,33 @@ export class RailwaySourceFence {
       ...(service.sourceKind === "image" ? { source: { autoUpdates: { type: "disabled" } } } : {}),
       deploy: { cronSchedule: null },
     }])) };
+  }
+  #sourceStageMatches(policy, patchSha256) {
+    const requested = this.#triggerPatch(policy.services);
+    return digest(requested) === patchSha256 && policy.environment.staged.status === "STAGED"
+      && stagedPatchMatches(policy.environment.staged.patch, requested, policy.services);
+  }
+  async matchesStagedSourceTriggerPatch(patchSha256) {
+    this.#requireExpectedLinks();
+    requireValue(HASH.test(patchSha256), "INVALID_STAGE_RECOVERY_BINDING");
+    return this.#sourceStageMatches(await this.#policyRead(), patchSha256);
+  }
+  #recoveryPatch(baseline) {
+    return { services: Object.fromEntries(baseline.services.map(service => [service.serviceId, {
+      ...(service.sourceKind === "image" || service.config.source?.autoUpdates !== undefined
+        ? { source: { autoUpdates: service.config.source?.autoUpdates ?? null } } : {}),
+      deploy: { cronSchedule: service.config.deploy?.cronSchedule ?? null },
+    }])) };
+  }
+  #recoveryStageMatches(policy, patchSha256, baseline) {
+    const requested = this.#recoveryPatch(baseline);
+    return digest(requested) === patchSha256 && policy.environment.staged.status === "STAGED"
+      && stagedPatchMatches(policy.environment.staged.patch, requested, policy.services);
+  }
+  async matchesStagedRecoveryTriggerPatch(patchSha256, baseline) {
+    this.#requireExpectedLinks();
+    requireValue(HASH.test(patchSha256), "INVALID_STAGE_RECOVERY_BINDING");
+    return this.#recoveryStageMatches(await this.#policyRead(), patchSha256, baseline);
   }
   async #request(query, variables) {
     checkSignal(this.#signal);
@@ -336,7 +380,9 @@ export class RailwaySourceFence {
       && new Set(baseline.services.map(item => item.serviceId)).size === baseline.services.length, "RAILWAY_RECOVERY_BASELINE_INVALID");
     const snapshot = await this.read();
     this.#quiet(snapshot);
-    requireValue(snapshot.staged.empty || snapshot.staged.patchSha256 === stagedPatchSha256, "RAILWAY_RECOVERY_STAGING_CHANGED");
+    requireValue(snapshot.staged.empty || snapshot.staged.patchSha256 === stagedPatchSha256
+      || (stagedPatchSha256 !== null && await this.matchesStagedRecoveryTriggerPatch(stagedPatchSha256, baseline)),
+    "RAILWAY_RECOVERY_STAGING_CHANGED");
     const environment = await this.#environment();
     for (const original of baseline.services) {
       const current = snapshot.services.find(item => item.serviceId === original.serviceId);
@@ -389,11 +435,7 @@ export class RailwaySourceFence {
     return this.assertRecoveryBaseline(baseline, { running: true, stagedPatchSha256 });
   }
   async restoreBaselineTriggers(baseline, { readIntent, recorded = [] } = {}) {
-    const patch = { services: Object.fromEntries(baseline.services.map(service => [service.serviceId, {
-      ...(service.sourceKind === "image" || service.config.source?.autoUpdates !== undefined
-        ? { source: { autoUpdates: service.config.source?.autoUpdates ?? null } } : {}),
-      deploy: { cronSchedule: service.config.deploy?.cronSchedule ?? null },
-    }])) };
+    const patch = this.#recoveryPatch(baseline);
     const patchSha256 = digest(patch);
     const links = this.#links();
     const assertBaseline = () => this.assertRecoveryBaseline(baseline, { running: true, stagedPatchSha256: patchSha256 });
@@ -422,9 +464,10 @@ export class RailwaySourceFence {
     } else if (!await configMatches() || !(await this.read()).staged.empty || stageRecord) {
       const verifyStage = async () => {
         await assertBaseline();
-        const staged = (await this.#environment()).staged;
-        return { complete: staged.status === "STAGED" && digest(staged.patch) === patchSha256,
-          evidence: { stagedPatchId: staged.id, patchSha256 } };
+        const readback = await this.#policyRead();
+        const staged = readback.environment.staged;
+        return { complete: this.#recoveryStageMatches(readback, patchSha256, baseline),
+          evidence: { stagedPatchId: staged.id, patchSha256, providerPatchSha256: digest(staged.patch) } };
       };
       if (stageRecord) requireValue(await readIntent(stageRecord.kind, stageRecord.input), "RAILWAY_DURABLE_INTENT_REQUIRED");
       await this.#operation("RAILWAY_STAGE_RECOVERY_TRIGGERS", stageInput, async () => {
@@ -436,8 +479,9 @@ export class RailwaySourceFence {
       const input = { binding: this.#binding, patchSha256, links, stagedPatchId, skipDeploys: true };
       await this.#operation("RAILWAY_COMMIT_RECOVERY_TRIGGERS", input, async () => {
         await assertBaseline();
-        const staged = (await this.#environment()).staged;
-        requireValue(staged.id === stagedPatchId && staged.status === "STAGED" && digest(staged.patch) === patchSha256, "RAILWAY_STAGED_PATCH_CHANGED");
+        const readback = await this.#policyRead();
+        const staged = readback.environment.staged;
+        requireValue(staged.id === stagedPatchId && this.#recoveryStageMatches(readback, patchSha256, baseline), "RAILWAY_STAGED_PATCH_CHANGED");
         await this.#request(MUTATIONS.commit, { environmentId: this.#binding.environmentId });
       }, verifyCommit);
     }
@@ -510,7 +554,7 @@ export class RailwaySourceFence {
         && resumeCommit.patchSha256 === patchSha256 && ID.test(resumeCommit.stagedPatchId), "INVALID_COMMIT_RECOVERY_BINDING");
     }
     if (!initial.staged.empty) {
-      requireValue(initial.staged.patchSha256 === patchSha256 && (
+      requireValue(await this.matchesStagedSourceTriggerPatch(patchSha256) && (
         (resumeStagedPatch?.environmentId === this.#binding.environmentId && resumeStagedPatch.patchSha256 === patchSha256)
         || (resumeCommit !== null && resumeCommit.stagedPatchId === initial.staged.id)),
       "PREEXISTING_RAILWAY_STAGING");
@@ -556,10 +600,10 @@ export class RailwaySourceFence {
       };
       await this.#operation("RAILWAY_COMMIT_SOURCE_TRIGGERS", { binding: this.#binding, patchSha256,
         stagedPatchId, skipDeploys: true, links }, async () => {
-        await this.#policyRead();
-        const staged = (await this.#environment()).staged;
+        const readback = await this.#policyRead();
+        const staged = readback.environment.staged;
         requireValue(staged.id === stagedPatchId && staged.status === "STAGED"
-          && digest(staged.patch) === patchSha256, "RAILWAY_STAGED_PATCH_CHANGED");
+          && this.#sourceStageMatches(readback, patchSha256), "RAILWAY_STAGED_PATCH_CHANGED");
         await this.#request(MUTATIONS.commit, { environmentId: this.#binding.environmentId });
       }, verifyCommit);
     };
@@ -567,8 +611,9 @@ export class RailwaySourceFence {
       const verifyStage = async () => {
         const readback = await this.#policyRead();
         const staged = readback.environment.staged;
-        return { complete: staged.status === "STAGED" && digest(staged.patch) === patchSha256,
-          evidence: { binding: this.#binding, stagedPatchId: staged.id, patchSha256: digest(staged.patch), links } };
+        return { complete: this.#sourceStageMatches(readback, patchSha256),
+          evidence: { binding: this.#binding, stagedPatchId: staged.id, patchSha256,
+            providerPatchSha256: digest(staged.patch), links } };
       };
       const stageInput = { binding: this.#binding, patchSha256, links };
       if (resumeStagedPatch === null) {
@@ -642,8 +687,9 @@ export class RailwaySourceFence {
       verify = async () => {
         const readback = await this.#policyRead();
         const staged = readback.environment.staged;
-        if (stage) return { complete: staged.status === "STAGED" && digest(staged.patch) === patchSha256,
-          evidence: { binding: this.#binding, stagedPatchId: staged.id, patchSha256: digest(staged.patch), links } };
+        if (stage) return { complete: this.#sourceStageMatches(readback, patchSha256),
+          evidence: { binding: this.#binding, stagedPatchId: staged.id, patchSha256,
+            providerPatchSha256: digest(staged.patch), links } };
         const stagingEmpty = noOpPatch(staged.patch);
         const triggersDisabled = this.#triggersDisabled({ services: readback.services });
         return { complete: stagingEmpty && triggersDisabled && !["APPLYING", "FAILED"].includes(staged.status),
