@@ -179,3 +179,24 @@ test("Azure adapter only treats BlobNotFound as absence and always uses create-o
   assert.deepEqual(calls[0][2].conditions, { ifNoneMatch: "*" });
   await assert.rejects(store.readOptional("../elsewhere", signal), /PROVIDER_STORE_READ_FAILED/);
 });
+
+test("Azure adapter retains a large source phase plan while provider records stay bounded", async () => {
+  const prefix = `operations/core/${"a".repeat(64)}/11111111-1111-4111-8111-111111111111/`;
+  const phaseKey = `${prefix}phase-plan.json`;
+  const descriptorKey = `${prefix}${"b".repeat(64)}/descriptor.json`;
+  const payload = JSON.stringify({ recoveryBaseline: "x".repeat(90 * 1024) });
+  const writes = new Map();
+  const store = azureProviderOperationStore({
+    getBlockBlobClient(key) { return {
+      async download() { const value = writes.get(key); return {
+        contentLength: Buffer.byteLength(value), readableStreamBody: Readable.from([value]),
+      }; },
+      async upload(value) { writes.set(key, value); },
+    }; },
+  });
+  const signal = new AbortController().signal;
+  await store.createOnly(phaseKey, payload, signal);
+  assert.equal(await store.readOptional(phaseKey, signal), payload);
+  await assert.rejects(store.createOnly(descriptorKey, payload, signal), /PROVIDER_RECORD_INVALID/);
+  assert.equal(writes.has(descriptorKey), false);
+});
