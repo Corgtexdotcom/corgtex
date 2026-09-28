@@ -34,6 +34,7 @@ const {
     },
     communicationEntityLink: {
       findFirst: vi.fn(),
+      findUnique: vi.fn(),
       findMany: vi.fn(),
       create: vi.fn(),
       deleteMany: vi.fn(),
@@ -185,6 +186,7 @@ describe("Slack context jobs", () => {
     prismaMock.communicationContextSummary.upsert.mockResolvedValue({ id: "summary-1" });
     prismaMock.communicationContextSummary.deleteMany.mockResolvedValue({ count: 0 });
     prismaMock.communicationEntityLink.findFirst.mockResolvedValue(null);
+    prismaMock.communicationEntityLink.findUnique.mockResolvedValue(null);
     prismaMock.communicationEntityLink.findMany.mockResolvedValue([]);
     prismaMock.communicationEntityLink.create.mockResolvedValue({ id: "link-1" });
     prismaMock.communicationEntityLink.deleteMany.mockResolvedValue({ count: 1 });
@@ -747,6 +749,34 @@ describe("Slack context jobs", () => {
 
     expect(createWorkItemMock).not.toHaveBeenCalled();
     expect(sendSlackMessageMock).toHaveBeenCalledWith("install-1", expect.objectContaining({ text: "An Action needs an owner before it can be opened." }), expect.any(Array));
+  });
+
+  it("skips an unchanged thread after asking for an owner and reviews a later reply", async () => {
+    const source = candidate({ text: "Send the renewal packet by Friday. Create a Corgtex Action for this.", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    preparePendingEvaluation(source, actionableExtraction({ ownerEvidence: "", concreteNextStep: "send the renewal packet", explicitActionRequest: true }));
+    const { runSlackProactiveScan } = await import("./slack-context");
+    const params = { workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" };
+    await runSlackProactiveScan(params);
+    expect(extractMock).toHaveBeenCalledTimes(1);
+    expect(sendSlackMessageMock).toHaveBeenCalledTimes(1);
+
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([source]);
+    prismaMock.communicationEntityLink.findMany.mockResolvedValueOnce([nudgeLink({ message: source })]).mockResolvedValueOnce([]);
+    prismaMock.communicationEntityLink.findUnique.mockResolvedValueOnce({ id: "owner-prompt-1" });
+    await runSlackProactiveScan(params);
+    expect(extractMock).toHaveBeenCalledTimes(1);
+    expect(sendSlackMessageMock).toHaveBeenCalledTimes(1);
+    expect(prismaMock.communicationEntityLink.findUnique).toHaveBeenCalledWith(expect.objectContaining({
+      where: { workspaceId_claimKey: { workspaceId: "workspace-1", claimKey: "proactive_action_needs_owner:install-1:message-1:message-1" } },
+    }));
+
+    const reply = candidate({ id: "message-2", externalMessageId: "1714323600.000100", threadExternalId: source.externalMessageId, text: "Jan will send the renewal packet by Friday.", messageTs: new Date("2026-04-28T22:00:00.000Z") });
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([source, reply]);
+    prismaMock.communicationEntityLink.findMany.mockResolvedValueOnce([nudgeLink({ message: source })]).mockResolvedValueOnce([]);
+    extractMock.mockResolvedValueOnce({ output: actionableExtraction({ ownerEvidence: "Jan", concreteNextStep: "send the renewal packet", explicitActionRequest: true }) });
+    await runSlackProactiveScan(params);
+    expect(extractMock).toHaveBeenCalledTimes(2);
+    expect(createWorkItemMock).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({ kind: "ACTION", assigneeMemberId: "member-jan", open: true }));
   });
 
   it.each([["owner imperative", "Jan will send the signed vendor agreement by Friday. Do not create a Corgtex Action.", {}], ["owner no-need", "Jan will send the signed vendor agreement by Friday. No need for a Corgtex Action.", {}], ["owner article-is-not-needed", "Jan will send the signed vendor agreement by Friday. A Corgtex Action is not needed.", {}], ["owner direct-not-needed", "Jan will send the signed vendor agreement by Friday. Corgtex Action not needed.", {}], ["explicit no-needed", "Send the signed vendor agreement by Friday. Create a Corgtex Action for this. No Corgtex Action needed.", { ownerEvidence: "", explicitActionRequest: true }], ["explicit isn't-needed", "Send the signed vendor agreement by Friday. Create a Corgtex Action for this. Corgtex Action isn't needed.", { ownerEvidence: "", explicitActionRequest: true }], ["explicit is-not-needed", "Send the signed vendor agreement by Friday. Create a Corgtex Action for this. Corgtex Action is not needed.", { ownerEvidence: "", explicitActionRequest: true }]])("vetoes %s Action-creation negation even when model output is positive", async (_label, text, overrides) => {

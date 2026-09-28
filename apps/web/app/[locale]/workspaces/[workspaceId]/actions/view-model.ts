@@ -10,6 +10,10 @@ export type ActionStatusSearch = {
   statusQuery: ActionStatusQuery;
 };
 
+export function actionStatusFormValues(statusQuery: ActionStatusQuery, statusFilters: readonly ActionVisibleStatusFilter[]) {
+  return statusQuery === "ALL" ? ["ALL"] : statusFilters;
+}
+
 export type ActionListItem = {
   status: string;
   isPrivate?: boolean | null;
@@ -21,19 +25,25 @@ export function resolveActionAssigneeScope(
   scope: string | string[] | undefined,
 ) {
   const requestedScope = Array.isArray(scope) ? scope[0] : scope;
+  const baseScope = !currentMemberId || requestedScope === "workspace"
+    ? "workspace"
+    : requestedScope === "assigned" ? "assigned" : "mine";
   const actionScope = selectedAssigneeIds.length > 0
     ? "filtered"
-    : !currentMemberId || requestedScope === "workspace"
-      ? "workspace"
-      : requestedScope === "assigned" ? "assigned" : "mine";
+    : baseScope;
   return {
     actionScope,
+    baseScope,
     assigneeMemberIds: actionScope === "workspace" ? []
       : actionScope === "filtered" ? selectedAssigneeIds : [currentMemberId!],
     includeOwnDrafts: actionScope === "mine",
     assignedToMeActive: Boolean(currentMemberId)
       && (actionScope === "assigned" || (actionScope === "filtered" && selectedAssigneeIds.length === 1 && selectedAssigneeIds[0] === currentMemberId)),
   };
+}
+
+export function hasEligibleActionAssignee(assigneeMemberId: string | null | undefined, humanMemberIds: ReadonlySet<string>) {
+  return Boolean(assigneeMemberId && humanMemberIds.has(assigneeMemberId));
 }
 
 export const ACTION_STATUS_META: Record<ActionStatusFilter, {

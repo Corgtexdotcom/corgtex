@@ -10,6 +10,7 @@ import {
   deliverSlackAgentResponse,
   evaluateDelegatedActionPolicy,
   fetchSlackThreadMessages,
+  isHumanMemberIdentity,
   listMembers,
   type SlackAgentDelivery,
   type SlackAgentJobPayload,
@@ -415,7 +416,10 @@ function matchMemberId(params: {
   const slackMention = hint.match(/^<@([A-Z0-9]+)(?:\|[^>]+)?>$/i);
   if (slackMention) {
     const external = params.externalUsers.find((user) => user.externalUserId === slackMention[1]);
-    if (external?.memberId) return { memberId: external.memberId, error: null };
+    if (external?.memberId) {
+      const member = params.members.find((entry) => entry.id === external.memberId);
+      if (member) return { memberId: member.id, error: null };
+    }
     if (external?.userId) {
       const member = params.members.find((entry) => entry.userId === external.userId);
       if (member) return { memberId: member.id, error: null };
@@ -972,7 +976,7 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
         const members = context.members as Awaited<ReturnType<typeof listMembers>>;
         const assignee = matchMemberId({
           assigneeHint: parsed.assigneeHint,
-          members,
+          members: parsed.intent === "create_action" ? members.filter(isHumanMemberIdentity) : members,
           externalUsers: context.externalUsers as Array<{
             externalUserId: string;
             userId: string | null;
@@ -989,7 +993,6 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
           confidence: parsed.confidence,
           explicitUserIntent: false,
         });
-        const open = actionPolicy.policyClass === "normal_write";
         const dueAt = parseDueDate(parsed.dueDateISO);
         const kind = parsed.intent === "create_action"
           ? "ACTION"
@@ -1000,6 +1003,10 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
               : parsed.intent === "capture_note"
                 ? "BRAIN_NOTE"
                 : null;
+        const open = actionPolicy.policyClass === "normal_write" && (kind !== "ACTION" || Boolean(assignee.memberId));
+        if (kind === "ACTION" && !assignee.memberId) {
+          next = "Assign an active Corgtex member to the private draft in Corgtex before opening it.";
+        }
 
         if (!kind) {
           couldNot.push("I could not map that request to a supported Slack-agent v1 action.");

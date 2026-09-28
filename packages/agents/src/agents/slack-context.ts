@@ -800,6 +800,13 @@ export async function runSlackProactiveScan(params: {
         select: { id: true },
       });
       if (existingUpdate) continue;
+    } else {
+      const ownerPromptClaimKey = `${PROACTIVE_ACTION_NEEDS_OWNER}:${params.installationId}:${candidate.id}:${latestThreadMessage.id}`;
+      const existingOwnerPrompt = await prisma.communicationEntityLink.findUnique({
+        where: { workspaceId_claimKey: { workspaceId: params.workspaceId, claimKey: ownerPromptClaimKey } },
+        select: { id: true },
+      });
+      if (existingOwnerPrompt) continue;
     }
 
     if (semanticReviews >= MAX_PROACTIVE_REVIEWS) break;
