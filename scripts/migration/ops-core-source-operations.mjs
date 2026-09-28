@@ -1,5 +1,5 @@
 import { archiveEvidenceHash } from "./ops-core-archive.mjs";
-import { openProviderOperationRecorder } from "./ops-core-provider-operations.mjs";
+import { openProviderOperationRecorder, SOURCE_PHASE_ARTIFACT_LIMIT } from "./ops-core-provider-operations.mjs";
 
 const ID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -110,7 +110,8 @@ export async function openSourceOperations({ custody, store }) {
     const value = await store.readOptional(key, custody.signal);
     await check();
     if (value === null) return null;
-    const limit = /\/phase-evidence-[a-f0-9]{64}\.json$/.test(key) ? 32 * 1024 * 1024 : LIMIT;
+    const limit = /\/(?:phase-plan|phase-evidence-[a-f0-9]{64})\.json$/.test(key)
+      ? SOURCE_PHASE_ARTIFACT_LIMIT : LIMIT;
     if (typeof value !== "string" || Buffer.byteLength(value) > limit) fail("SOURCE_RECORD_INVALID");
     const record = JSON.parse(value);
     if (record === null || typeof record !== "object" || Array.isArray(record)) fail("SOURCE_RECORD_INVALID");
@@ -202,9 +203,9 @@ export async function openSourceOperations({ custody, store }) {
       return guarded(async () => {
         const digest = archiveEvidenceHash(value);
         const filename = name === "phase-evidence" ? `${name}-${digest}` : name;
-        // Provider deployment history can exceed the descriptor-size bound.
-        // Content-addressed evidence preserves each fresh recovery observation.
-        await retain(`${prefix}${filename}.json`, value, name === "phase-evidence" ? 32 * 1024 * 1024 : LIMIT);
+        // Provider deployment history can exceed the descriptor-size bound in
+        // both the recovery baseline and later evidence.
+        await retain(`${prefix}${filename}.json`, value, SOURCE_PHASE_ARTIFACT_LIMIT);
         return digest;
       });
     },

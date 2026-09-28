@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 
 const HASH = /^[a-f0-9]{64}$/;
 const LIMIT = 64 * 1024;
+export const SOURCE_PHASE_ARTIFACT_LIMIT = 32 * 1024 * 1024;
+const sourcePhaseArtifact = key => /\/(?:phase-plan|phase-evidence-[a-f0-9]{64})\.json$/.test(key);
 class OperationError extends Error {}
 const fail = (code) => { throw new OperationError(code); };
 export const providerOperationDiagnostic = (error) => error instanceof OperationError ? error.message : null;
@@ -181,7 +183,7 @@ export function azureProviderOperationStore(containerClient) {
       if (properties.blobPublicAccess) fail("PROVIDER_STORE_NOT_PRIVATE");
     },
     async readOptional(key, signal) {
-      const limit = /\/phase-evidence-[a-f0-9]{64}\.json$/.test(key) ? 32 * 1024 * 1024 : LIMIT;
+      const limit = sourcePhaseArtifact(key) ? SOURCE_PHASE_ARTIFACT_LIMIT : LIMIT;
       let result;
       try { result = await keyClient(key).download(0, undefined, { abortSignal: signal }); }
       catch (error) {
@@ -200,7 +202,7 @@ export function azureProviderOperationStore(containerClient) {
       return Buffer.concat(chunks).toString("utf8");
     },
     async createOnly(key, text, signal) {
-      const limit = /\/phase-evidence-[a-f0-9]{64}\.json$/.test(key) ? 32 * 1024 * 1024 : LIMIT;
+      const limit = sourcePhaseArtifact(key) ? SOURCE_PHASE_ARTIFACT_LIMIT : LIMIT;
       if (typeof text !== "string" || Buffer.byteLength(text) > limit) fail("PROVIDER_RECORD_INVALID");
       await keyClient(key).upload(text, Buffer.byteLength(text), { abortSignal: signal,
         conditions: { ifNoneMatch: "*" }, blobHTTPHeaders: { blobContentType: "application/json" } });

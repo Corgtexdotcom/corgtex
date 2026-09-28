@@ -136,6 +136,20 @@ test("phase artifacts are create-only and concurrent same-owner effects cannot r
   } finally { await f.close(); }
 });
 
+test("a recovery phase plan larger than a descriptor survives fresh owner readback", async () => {
+  const f = await setup();
+  const value = { schemaVersion: 1, recoveryBaseline: { deploymentHistory: "x".repeat(90 * 1024) } };
+  try {
+    const hash = await f.operations.retainPhaseArtifact("phase-plan", value);
+    assert.equal(hash.length, 64);
+    assert.equal(f.records.size, 1);
+    await f.close();
+    await f.open();
+    assert.deepEqual(await f.operations.readPhaseArtifact("phase-plan"), value);
+    assert.equal(await f.operations.retainPhaseArtifact("phase-plan", value), hash);
+  } finally { await f.close(); }
+});
+
 test("JSON null or scalar records never turn an already-applied effect into an orphan", async () => {
   for (const target of ["intent", "receipt"]) for (const invalid of [null, false, 0, []]) {
     const f = await setup();
