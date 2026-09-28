@@ -413,9 +413,11 @@ test("default transport uses exact endpoint, rejects redirects/errors and bounds
     return new Response(JSON.stringify({ errors: [{ message: `private ${token}` }] }), { status: 200 });
   } });
   await assert.rejects(transport(request), (error) => error.code === "RAILWAY_GRAPHQL_FAILED" && !error.message.includes(token) && !error.cause);
+  let oversizedCalls = 0;
   const bounded = createRailwayFenceTransport({ token, maxResponseBytes: 8,
-    fetchImpl: async () => new Response(JSON.stringify({ data: { privateValue: "oversized" } })) });
+    fetchImpl: async () => { oversizedCalls++; return new Response(JSON.stringify({ data: { privateValue: "oversized" } })); } });
   await assert.rejects(bounded(request), { code: "RAILWAY_RESPONSE_LIMIT" });
+  assert.equal(oversizedCalls, 1);
 });
 
 test("transport retries only bounded read failures and aborts read backoff", async () => {
@@ -429,6 +431,15 @@ test("transport retries only bounded read failures and aborts read backoff", asy
   } });
   assert.deepEqual(await transport(request), { __typename: "Query" });
   assert.equal(reads, 2);
+  let streams = 0;
+  const streamRetry = createRailwayFenceTransport({ token, fetchImpl: async () => {
+    streams++;
+    return streams === 1
+      ? new Response(new ReadableStream({ start(controller) { controller.error(new Error("private stream reset")); } }))
+      : new Response(JSON.stringify({ data: { __typename: "Query" } }));
+  } });
+  assert.deepEqual(await streamRetry(request), { __typename: "Query" });
+  assert.equal(streams, 2);
   let mutations = 0;
   const mutation = createRailwayFenceTransport({ token, fetchImpl: async () => {
     mutations++;

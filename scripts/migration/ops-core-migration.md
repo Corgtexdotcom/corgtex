@@ -413,11 +413,14 @@ itself bind the original terminal journal. The operator leases the root journal,
 then the retry journal, then creates the fixed
 `cutovers/<domain>-retry-2.json` journal. Use a third distinct scratch name;
 neither predecessor journal nor scratch may be reused. This slot is also
-create-only and accepts only one exact plan. Keep the original preserved scratch
-as a `verify-only` row in both transfer and activation runtime-access policies.
+create-only and accepts only one exact plan. If the original attempt preserved a
+scratch, keep it as a `verify-only` row in both transfer and activation
+runtime-access policies.
 Leave the immediate predecessor's preserved scratch out of those base policies;
 its separate admission receipt verifies and adds that row after reading fresh
 target inventory. Run fresh preflight before fencing again.
+If the immediate predecessor recovered before capture and left no scratch,
+omit `retryScratchEvidenceDir`; preflight checks the complete base inventory.
 
 If the recovered predecessor left an empty, protected scratch database, set
 `retryScratchEvidenceDir` in the private retry credentials to the predecessor's

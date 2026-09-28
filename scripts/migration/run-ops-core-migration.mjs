@@ -158,6 +158,9 @@ async function assertRetryPredecessor({ plan, custodyContainer, predecessor }) {
     && archiveEvidenceHash(journal) === retry.journalSha256 && journal.phase === "SOURCE_RECOVERED"
     && journal.pending === null && journal.destinationMayHaveWritten === false,
   "MIGRATION_RETRY_PREDECESSOR_INVALID");
+  if (plan.transfer.postgres.runtimeAccess) need(journal.recovery?.abandonedPending?.to === "CAPTURED"
+    || (journal.recovery?.from === "SOURCE_FENCED" && journal.recovery.abandonedPending === null),
+  "MIGRATION_RETRY_SCRATCH_LINEAGE_INVALID");
   const previous = await readBlobJson(custodyContainer.getBlockBlobClient(`plans/${plan.domain}/${retry.intentSha256}.json`));
   need(archiveEvidenceHash(previous) === retry.intentSha256 && previous.domain === plan.domain
     && previous.operator?.custodyContainerUrl === plan.operator.custodyContainerUrl
@@ -211,6 +214,11 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
           && previous.operator?.retryOf && previous.operator.retryOf.journal === undefined,
         "MIGRATION_RETRY_CHAIN_INVALID");
         rootLink = previous.operator.retryOf;
+        const rootPlan = await readBlobJson(custodyContainer.getBlockBlobClient(`plans/${plan.domain}/${rootLink.intentSha256}.json`));
+        need(archiveEvidenceHash(rootPlan) === rootLink.intentSha256 && rootPlan.domain === plan.domain
+          && rootPlan.operator?.retryOf === undefined
+          && rootPlan.transfer?.postgres?.scratchName !== plan.transfer.postgres.scratchName,
+        "MIGRATION_RETRY_CHAIN_INVALID");
         const root = custodyContainer.getBlockBlobClient(`cutovers/${plan.domain}.json`);
         rootPredecessor = await openCutoverCustody(azureBlobCustodyAdapter(root), rootLink.intentSha256);
         const rootState = rootPredecessor.snapshot();
@@ -251,6 +259,7 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
     }
     const operationStore = azureProviderOperationStore(custodyContainer);
     const retryScratchAdmission = predecessorInfo && plan.transfer.postgres.runtimeAccess
+      && predecessorInfo.journal.recovery.abandonedPending?.to === "CAPTURED"
       ? await (runtime.resolveRetryScratchAdmission ?? resolveRetryScratchAdmission)({ plan,
         predecessorPlan: predecessorInfo.previous, predecessorJournal: predecessorInfo.journal,
         custody, operationStore, targetAdminConfig: credentials?.targetAdminConfig,

@@ -124,7 +124,10 @@ export function createRailwayFenceTransport({ token, fetchImpl = globalThis.fetc
         let size = 0;
         try {
           while (true) {
-            const { done, value } = await reader.read();
+            let chunk;
+            try { chunk = await reader.read(); }
+            catch (error) { retryable = true; throw error; }
+            const { done, value } = chunk;
             if (done) break;
             size += value.byteLength;
             requireValue(size <= maxResponseBytes, "RAILWAY_RESPONSE_LIMIT");

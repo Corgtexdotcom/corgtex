@@ -157,12 +157,13 @@ function stage(f, phase) {
   row.text = JSON.stringify(journal); return journal;
 }
 
-async function retryFixture() {
+async function retryFixture({ access = false } = {}) {
   const f = fixture();
   f.plan.source.postgresService = { domain: "core", serviceId: randomUUID() };
   f.plan.source.postgresTriggers = { binding: { projectId: f.plan.source.writers.binding.projectId,
     environmentId: f.plan.source.writers.binding.environmentId,
     serviceIds: [f.plan.source.postgresService.serviceId] } };
+  if (access) azureAccessVariant(f.plan);
   await runOpsCoreMigration({ ...f.options, action: "initialize" });
   const intentSha256 = archiveEvidenceHash(f.plan);
   const root = f.containerFactory(f.plan.operator.custodyContainerUrl).getBlockBlobClient("cutovers/core.json");
@@ -211,6 +212,11 @@ describe("Ops/Core executable operator", () => {
     second.transfer.postgres.scratchName = "corgtex_rehearsal_10_3_core";
     second.operator.retryOf = { intentSha256: retryIntent, journalSha256: archiveEvidenceHash(JSON.parse(retryText)), journal: "retry" };
     const options = { ...f.options, plan: second };
+    const rootReuse = structuredClone(second);
+    rootReuse.transfer.postgres.scratchName = f.plan.transfer.postgres.scratchName;
+    await expect(runOpsCoreMigration({ ...f.options, plan: rootReuse, action: "initialize" }))
+      .rejects.toThrow("MIGRATION_RETRY_CHAIN_INVALID");
+    expect(f.blobs.has("cutovers/core-retry-2.json")).toBe(false);
     expect((await runOpsCoreMigration({ ...options, action: "initialize" })).status).toBe("PREPARED");
     expect((await runOpsCoreMigration({ ...options, action: "status" })).status).toBe("PREPARED");
     expect(f.blobs.get("cutovers/core.json").text).toBe(rootText);
@@ -226,6 +232,33 @@ describe("Ops/Core executable operator", () => {
     const retryOwner = await openCutoverCustody(azureBlobCustodyAdapter(retryBlob), retryIntent);
     try { await expect(runOpsCoreMigration({ ...options, action: "status" })).rejects.toThrow(); }
     finally { await retryOwner.close(); }
+  });
+  it("skips preserved-scratch admission when the retry recovered before capture", async () => {
+    const { f, retryPlan } = await retryFixture({ access: true });
+    await runOpsCoreMigration({ ...f.options, plan: retryPlan, action: "initialize" });
+    const retryIntent = archiveEvidenceHash(retryPlan);
+    const retryBlob = f.containerFactory(retryPlan.operator.custodyContainerUrl).getBlockBlobClient("cutovers/core-retry.json");
+    const owner = await openCutoverCustody(azureBlobCustodyAdapter(retryBlob), retryIntent);
+    try {
+      const fence = await owner.begin("SOURCE_FENCED", "a".repeat(64));
+      await owner.complete(fence.operationId, "b".repeat(64));
+      const recovery = await owner.beginSourceRecovery("c".repeat(64));
+      await owner.complete(recovery.operationId, "d".repeat(64));
+    } finally { await owner.close(); }
+    const second = structuredClone(retryPlan);
+    second.transfer.postgres.scratchName = "corgtex_rehearsal_10_3_core";
+    second.operator.retryOf = { intentSha256: retryIntent,
+      journalSha256: archiveEvidenceHash(JSON.parse(f.blobs.get("cutovers/core-retry.json").text)), journal: "retry" };
+    await runOpsCoreMigration({ ...f.options, plan: second, action: "initialize" });
+    let admissionCalled = false;
+    const result = await runOpsCoreMigration({ ...f.options, plan: second, action: "preflight",
+      credentials: { sourceConfig: {}, readerConfig: {}, objectSource: { accessKeyId: "id", secretAccessKey: "secret" } },
+      runtime: { resolveRetryScratchAdmission: async () => { admissionCalled = true; throw Error("unexpected scratch"); },
+        transferPreflight: async ({ retryScratchAdmission }) => {
+          expect(retryScratchAdmission).toBeNull(); return { status: "PREFLIGHT_READY" };
+        } } });
+    expect(result.status).toBe("PREFLIGHT_READY");
+    expect(admissionCalled).toBe(false);
   });
   it("rejects changed predecessor, scratch reuse and alternate retry plans before source effects", async () => {
     const { f, rootText, retryPlan } = await retryFixture();
