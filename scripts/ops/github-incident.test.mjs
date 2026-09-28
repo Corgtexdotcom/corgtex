@@ -487,6 +487,100 @@ describe("github-incident resolved issue sync", () => {
     }
   });
 
+  it("keeps local health findings visible without racing the Railway issue publisher", async () => {
+    const server = await startHealthServer(503);
+    try {
+      const result = await runWithFakeGh(healthSweepPath, ["--publish-control-plane-only"], null, {
+        env: {
+          OPS_CREATE_GITHUB_ISSUES: "true",
+          OPS_HEALTH_TARGETS_JSON: JSON.stringify([{
+            name: "site",
+            service: "site",
+            url: `${server.url}/api/health`,
+            timeoutMs: 1000,
+            attempts: 1,
+            expectedStatuses: [200],
+          }]),
+          CONTROL_PLANE_AGENT_API_KEY: "",
+          CONTROL_PLANE_URL: "",
+          APP_URL: "",
+          NEXT_PUBLIC_APP_URL: "",
+          NEXT_PUBLIC_SITE_URL: "",
+          OPS_PRIMARY_CLIENT_URL: "",
+        },
+      });
+
+      expect(result.code, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout).incidents).toHaveLength(1);
+      expect(JSON.parse(result.stdout).publishedIncidents).toBe(0);
+      expect(result.state.issues).toHaveLength(0);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("still publishes local control-plane findings in control-plane-only mode", async () => {
+    const server = await startHealthServer();
+    try {
+      const result = await runWithFakeGh(healthSweepPath, ["--publish-control-plane-only"], null, {
+        env: {
+          OPS_CREATE_GITHUB_ISSUES: "true",
+          OPS_HEALTH_TARGETS_JSON: JSON.stringify([{
+            name: "site",
+            service: "site",
+            url: `${server.url}/api/health`,
+            expectJson: { status: "ok" },
+          }]),
+          OPS_CONTROL_PLANE_CUSTOMERS_JSON: JSON.stringify([{
+            id: "deployment-1",
+            label: "Pilot",
+            supportConnectorStatus: "not_configured",
+            hasSupportCredential: false,
+          }]),
+        },
+      });
+
+      expect(result.code, result.stderr).toBe(0);
+      const output = JSON.parse(result.stdout.split("\nhttps://github.test")[0]);
+      expect(output.publishedIncidents).toBe(1);
+      expect(result.state.issues).toHaveLength(1);
+      expect(result.state.issues[0].title).toContain(opsToken("control-plane:deployment-1:missingSupportConnector"));
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("does not advance Railway-owned health issue recovery from a local-only sweep", async () => {
+    const server = await startHealthServer();
+    try {
+      const staleDedupe = `site:${server.url}/api/health:down`;
+      const result = await runWithFakeGh(healthSweepPath, ["--publish-control-plane-only"], null, {
+        issues: [issue(18, `[${opsToken(staleDedupe)}] P2 site: stale`, ["ops-auto-fix", "ops-recovery-2"], staleDedupe)],
+        env: {
+          OPS_CREATE_GITHUB_ISSUES: "true",
+          OPS_HEALTH_TARGETS_JSON: JSON.stringify([{
+            name: "site",
+            service: "site",
+            url: `${server.url}/api/health`,
+            expectJson: { status: "ok" },
+          }]),
+          CONTROL_PLANE_AGENT_API_KEY: "",
+          CONTROL_PLANE_URL: "",
+          APP_URL: "",
+          NEXT_PUBLIC_APP_URL: "",
+          NEXT_PUBLIC_SITE_URL: "",
+          OPS_PRIMARY_CLIENT_URL: "",
+        },
+      });
+
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.state.issues[0].closed).toBeFalsy();
+      expect(result.state.issues[0].labels.map((label) => label.name)).toContain("ops-recovery-2");
+    } finally {
+      await server.close();
+    }
+  });
+
   it("normalizes health target prefixes before resolved sync", async () => {
     const server = await startHealthServer();
     try {
