@@ -305,6 +305,20 @@ test("cancels pending builds and stops running writers while preserving deployme
   assert.ok(f.state.calls.every((entry) => !/deploymentRemove|serviceInstanceUpdate|serviceDelete/.test(entry.query)));
 });
 
+test("skips individually rereading settled historical deployments and still checks the final inventory", async () => {
+  const f = await fixture();
+  const historicalIds = Array.from({ length: 20 }, (_, index) => id(1000 + index));
+  f.state.deployments[id(3)].push(...historicalIds.map((_, index) => deployment(id(3), 1000 + index, "SUCCESS", true)));
+  await f.adapter.disableTriggers();
+  f.state.calls = [];
+  const result = await f.adapter.stopWriters();
+  assert.equal(result.complete, true);
+  assert.ok(f.state.calls.filter((call) => call.operation === "FenceDeployments").length >= 4);
+  assert.equal(f.state.calls.filter((call) => call.operation === "FenceDeployment"
+    && historicalIds.includes(call.variables.id)).length, 0);
+  assert.equal(f.state.records.filter((record) => record.kind === "RAILWAY_STOP_SOURCE_DEPLOYMENT").length, 1);
+});
+
 test("unknown stop acknowledgement requires readback and never retries the mutation", async () => {
   const f = await fixture(); await f.adapter.disableTriggers(); f.state.unknownAck = true;
   await assert.rejects(f.adapter.stopWriters(), { code: "RAILWAY_REQUEST_FAILED" });
@@ -339,6 +353,20 @@ test("fresh final inventory detects a deployment added during stop", async () =>
   const result = await f.adapter.stopWriters();
   assert.equal(result.complete, false);
   assert.ok(result.evidence.blockers.includes("ACTIVE_DEPLOYMENTS_PRESENT"));
+});
+
+test("accepts stopped deployments retained in Railways active collection but rejects a live instance", async () => {
+  const f = await fixture(); makeFenced(f.state);
+  f.state.includeCompletedScheduled = true;
+  f.state.deployments[id(4)][0].status = "CRASHED";
+  f.state.deployments[id(4)][0].instances = [{ id: id(121), status: "CRASHED" }];
+  const settled = await f.adapter.assertFenced();
+  assert.equal(settled.complete, true);
+  assert.equal(settled.evidence.services[0].activeDeployments.length, 1);
+  f.state.deployments[id(3)][0].instances = [{ id: id(120), status: "RUNNING" }];
+  const live = await f.adapter.assertFenced();
+  assert.equal(live.complete, false);
+  assert.ok(live.evidence.blockers.includes("ACTIVE_DEPLOYMENTS_PRESENT"));
 });
 
 test("provider acceptance requires stopped flag, no live instances, no pending queue and no environment work", async () => {

@@ -728,6 +728,7 @@ export class RailwaySourceFence {
     const initial = await this.read();
     requireValue(this.#triggersDisabled(initial) && initial.staged.empty, "RAILWAY_TRIGGERS_NOT_FENCED");
     for (const service of initial.services) for (const original of service.deployments) {
+      if (stopped(original)) continue;
       let current = await this.#readDeployment(original.id, service.serviceId);
       const operationInput = { binding: this.#binding, serviceId: service.serviceId, deploymentId: original.id,
         sourceLinkSha256: service.sourceLinkSha256 };
@@ -767,7 +768,7 @@ export class RailwaySourceFence {
     if (!snapshot.staged.empty) blockers.push("STAGED_CHANGES_PRESENT");
     if (["APPLYING", "FAILED"].includes(snapshot.staged.status)) blockers.push("STAGING_NOT_IDLE");
     if (snapshot.pendingWork.length !== 0) blockers.push("PENDING_ENVIRONMENT_WORK");
-    if (snapshot.services.some((service) => service.activeDeployments.length > 0)) blockers.push("ACTIVE_DEPLOYMENTS_PRESENT");
+    if (snapshot.services.some((service) => service.activeDeployments.some((deployment) => !stopped(deployment)))) blockers.push("ACTIVE_DEPLOYMENTS_PRESENT");
     if (snapshot.services.some((service) => service.deployments.some((deployment) => !stopped(deployment)))) blockers.push("DEPLOYMENTS_NOT_STOPPED");
     return freeze({ complete: blockers.length === 0, evidence: { ...snapshot, providerFence: blockers.length === 0 ? "VERIFIED" : "UNPROVEN",
       databaseFence: "UNPROVEN", manualDeployPrevention: "UNPROVEN", blockers } });
