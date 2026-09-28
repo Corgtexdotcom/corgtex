@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 
 const ENDPOINT = "https://backboard.railway.com/graphql/v2";
 const ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
@@ -98,34 +99,53 @@ const stagedPatchMatches = (observed, requested, services, currentConfig = null)
 const stopped = (deployment) => deployment.deploymentStopped && !UNFINISHED_STATUSES.has(deployment.status)
   && deployment.instances.every((instance) => INACTIVE_INSTANCES.has(instance.status));
 
-/** No redirects/retries; token and provider error bodies never enter evidence. */
+/** Read-only provider calls may retry transient failures. Mutations never replay;
+ * token and provider error bodies never enter evidence. */
 export function createRailwayFenceTransport({ token, fetchImpl = globalThis.fetch, maxResponseBytes = 32 * 1024 * 1024 }) {
   requireValue(typeof token === "string" && token.length > 0 && !/[\r\n]/.test(token), "RAILWAY_AUTH_REQUIRED");
   requireValue(Number.isSafeInteger(maxResponseBytes) && maxResponseBytes > 0 && maxResponseBytes <= 32 * 1024 * 1024, "INVALID_RESPONSE_LIMIT");
   return async ({ query, variables, signal }) => {
-    try {
-      const response = await fetchImpl(ENDPOINT, { method: "POST", redirect: "error",
-        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-        body: JSON.stringify({ query, variables }), signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]) });
-      requireValue(response.ok, "RAILWAY_TRANSPORT_FAILED");
-      const reader = response.body.getReader();
-      const chunks = [];
-      let size = 0;
+    // Deployment pages already own a three-attempt read budget in #deployments.
+    // Do not multiply that budget inside the transport.
+    const readOnly = /^\s*query(?:\s|\{)/.test(query) && !/^\s*query\s+FenceDeployments\b/.test(query);
+    for (let attempt = 0; ; attempt++) {
+      let retryable = false;
       try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          size += value.byteLength;
-          requireValue(size <= maxResponseBytes, "RAILWAY_RESPONSE_LIMIT");
-          chunks.push(Buffer.from(value));
-        }
-      } finally { await reader.cancel().catch(() => {}); }
-      const result = JSON.parse(Buffer.concat(chunks, size).toString("utf8"));
-      requireValue(!result.errors?.length && isRecord(result.data), "RAILWAY_GRAPHQL_FAILED");
-      return result.data;
-    } catch (error) {
-      if (error instanceof RailwaySourceFenceError) throw error;
-      throw new RailwaySourceFenceError("RAILWAY_TRANSPORT_FAILED");
+        checkSignal(signal);
+        let response;
+        try { response = await fetchImpl(ENDPOINT, { method: "POST", redirect: "error",
+          headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+          body: JSON.stringify({ query, variables }), signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]) }); }
+        catch (error) { retryable = true; throw error; }
+        retryable = [429, 500, 502, 503, 504].includes(response.status);
+        requireValue(response.ok, "RAILWAY_TRANSPORT_FAILED");
+        const reader = response.body.getReader();
+        const chunks = [];
+        let size = 0;
+        try {
+          while (true) {
+            let chunk;
+            try { chunk = await reader.read(); }
+            catch (error) { retryable = true; throw error; }
+            const { done, value } = chunk;
+            if (done) break;
+            size += value.byteLength;
+            requireValue(size <= maxResponseBytes, "RAILWAY_RESPONSE_LIMIT");
+            chunks.push(Buffer.from(value));
+          }
+        } finally { await reader.cancel().catch(() => {}); }
+        const result = JSON.parse(Buffer.concat(chunks, size).toString("utf8"));
+        retryable = result.errors?.length && !result.errors.some(error =>
+          ["UNAUTHENTICATED", "UNAUTHORIZED", "FORBIDDEN"].includes(error?.extensions?.code));
+        requireValue(!result.errors?.length && isRecord(result.data), "RAILWAY_GRAPHQL_FAILED");
+        return result.data;
+      } catch (error) {
+        const failure = error instanceof RailwaySourceFenceError ? error : new RailwaySourceFenceError("RAILWAY_TRANSPORT_FAILED");
+        if (signal.aborted) throw new RailwaySourceFenceError("RAILWAY_FENCE_ABORTED");
+        if (!readOnly || !retryable || attempt >= 2) throw failure;
+        try { await delay(250 * 2 ** attempt, undefined, { signal }); }
+        catch { throw new RailwaySourceFenceError("RAILWAY_FENCE_ABORTED"); }
+      }
     }
   };
 }

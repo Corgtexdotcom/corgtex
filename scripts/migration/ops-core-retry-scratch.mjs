@@ -16,6 +16,16 @@ const opaqueRef = value => `sha256:${createHash("sha256").update(value).digest("
 const keyFor = (domain, intentSha256) => `retry-admissions/${domain}/${intentSha256}/predecessor-scratch.json`;
 export const retryScratchDiagnostic = error => error instanceof RetryScratchError ? error.message : null;
 
+export function retryCaptureLineage(journal) {
+  const pending = journal?.recovery?.abandonedPending;
+  if (pending?.to === "CAPTURED") return pending;
+  if (journal?.recovery?.from === "CAPTURED" && pending === null) {
+    const captured = journal.history?.find(entry => entry.phase === "CAPTURED");
+    if (captured?.operationId && captured.intentSha256) return { ...captured, to: "CAPTURED" };
+  }
+  return null;
+}
+
 function privateEvidence(directory, name) {
   need(typeof directory === "string" && directory.startsWith("/") && realpathSync(directory) === resolve(directory)
     && statSync(directory).isDirectory() && (statSync(directory).mode & 0o077) === 0,
@@ -45,7 +55,8 @@ export function effectiveRetryScratchPolicy(plan, predecessorPlan, receipt) {
     && /^[a-f0-9]{64}$/.test(receipt.inventorySha256)
     && /^[a-f0-9]{64}$/.test(receipt.copyIntentSha256)
     && /^[a-f0-9]{64}$/.test(receipt.scratchStateSha256)
-    && receipt.captureOperationId === receipt.predecessorAbandonedOperationId,
+    && receipt.captureOperationId === (receipt.predecessorCaptureOperationId ?? receipt.predecessorAbandonedOperationId)
+    && !(receipt.predecessorCaptureOperationId && receipt.predecessorAbandonedOperationId),
   "RETRY_SCRATCH_RECEIPT_INVALID");
   const added = { name: scratch.name, oid: scratch.oid, owner: scratch.owner,
     action: "verify-only", beforeAclSha256: scratch.aclSha256, preserveConnectRoles: [] };
@@ -57,15 +68,16 @@ export function effectiveRetryScratchPolicy(plan, predecessorPlan, receipt) {
 }
 
 /** One recovered attempt may retain its empty, protected scratch database.
- * This receipt reconciles an abandoned capture; it never claims a completed
- * capture or changes the immutable global plan. All other database drift fails. */
+ * Admission covers an interrupted or completed capture before restore intent.
+ * It never changes the immutable global plan. All other database drift fails. */
 export async function resolveRetryScratchAdmission({ plan, predecessorPlan, predecessorJournal, custody,
   operationStore, targetAdminConfig, evidenceDirectory, create = false, inspect = inspectPostgresScratch,
   openMaintenance = openPostgresMaintenance, clientFactory = value => new pg.Client(value),
   targetFactory = createOpsCoreAzureTarget }) {
+  const capture = retryCaptureLineage(predecessorJournal);
   need(plan.operator.retryOf && predecessorJournal?.phase === "SOURCE_RECOVERED"
     && archiveEvidenceHash(predecessorJournal) === plan.operator.retryOf.journalSha256
-    && predecessorJournal.recovery?.abandonedPending?.to === "CAPTURED"
+    && capture
     && predecessorJournal.destinationMayHaveWritten === false,
   "RETRY_SCRATCH_PREDECESSOR_INVALID");
   const key = keyFor(plan.domain, archiveEvidenceHash(plan));
@@ -82,8 +94,8 @@ export async function resolveRetryScratchAdmission({ plan, predecessorPlan, pred
   "RETRY_SCRATCH_ADMISSION_PHASE_INVALID");
   const prior = retained === null ? null : JSON.parse(retained);
   if (prior) {
-    need(prior.predecessorAbandonedOperationId === predecessorJournal.recovery.abandonedPending.operationId
-      && prior.captureOperationId === predecessorJournal.recovery.abandonedPending.operationId,
+    need((prior.predecessorCaptureOperationId ?? prior.predecessorAbandonedOperationId) === capture.operationId
+      && prior.captureOperationId === capture.operationId,
     "RETRY_SCRATCH_RECEIPT_LINEAGE_CHANGED");
     const resolved = effectiveRetryScratchPolicy(plan, predecessorPlan, prior);
     // Transfer and activation check the complete effective access policy against
@@ -104,12 +116,11 @@ export async function resolveRetryScratchAdmission({ plan, predecessorPlan, pred
       copy: privateEvidence(evidenceDirectory, "copy-intent.json"),
       state: privateEvidence(evidenceDirectory, "scratch-state.json"),
     } : null;
-    const abandoned = predecessorJournal.recovery.abandonedPending;
     if (evidence) {
-      need(evidence.copy.value.capture?.operationId === abandoned.operationId
-        && evidence.copy.value.capture?.intentSha256 === abandoned.intentSha256
+      need(evidence.copy.value.capture?.operationId === capture.operationId
+        && evidence.copy.value.capture?.intentSha256 === capture.intentSha256
         && evidence.copy.value.capture?.to === "CAPTURED"
-        && archiveEvidenceHash(evidence.copy.value.intent) === abandoned.intentSha256
+        && archiveEvidenceHash(evidence.copy.value.intent) === capture.intentSha256
         && evidence.copy.value.intent?.domain === plan.domain
         && evidence.copy.value.intent?.scratchName === scratchName
         && same(evidence.copy.value.intent.source, predecessorPlan.transfer.postgres.source)
@@ -150,7 +161,7 @@ export async function resolveRetryScratchAdmission({ plan, predecessorPlan, pred
     const receipt = prior ?? { schemaVersion: 1, type: "PRESERVED_RETRY_SCRATCH", domain: plan.domain,
       intentSha256: archiveEvidenceHash(plan), predecessorIntentSha256: plan.operator.retryOf.intentSha256,
       predecessorJournalSha256: plan.operator.retryOf.journalSha256,
-      predecessorAbandonedOperationId: abandoned.operationId, captureOperationId: abandoned.operationId,
+      predecessorCaptureOperationId: capture.operationId, captureOperationId: capture.operationId,
       copyIntentSha256: evidence.copy.sha256, scratchStateSha256: evidence.state.sha256,
       basePolicySha256: postgresRuntimeAccessPolicySha256(plan.transfer.postgres.runtimeAccess),
       inventorySha256: complete.inventorySha256,
