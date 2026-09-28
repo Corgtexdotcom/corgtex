@@ -138,8 +138,8 @@ export function effectiveRetryScratchPolicy(plan, predecessorPlan, receipt) {
   return { policy, receiptSha256: archiveEvidenceHash(receipt), scratch };
 }
 
-/** One recovered attempt may retain its empty, protected scratch database.
- * Admission covers an interrupted or completed capture before restore intent.
+/** One recovered attempt may retain its protected scratch database.
+ * Admission covers capture before restore intent or an unpromoted restored scratch.
  * It never changes the immutable global plan. All other database drift fails. */
 export async function resolveRetryScratchAdmission({ plan, predecessorPlan, predecessorJournal, custody,
   operationStore, targetAdminConfig, evidenceDirectory, create = false, inspect = inspectPostgresScratch,
@@ -278,6 +278,12 @@ export async function resolveRetryScratchAdmission({ plan, predecessorPlan, pred
     const resolved = effectiveRetryScratchPolicy(plan, predecessorPlan, receipt);
     need(receipt.inventorySha256 === complete.inventorySha256 && receipt.scratch.aclSha256 === observed.aclSha256
       && receipt.scratch.oid === oid, "RETRY_SCRATCH_RECEIPT_DRIFT");
+    if (restored) {
+      await guarded();
+      const state = await reconcilePostgresPromotion({ client, intent: restoredEvidence.phasePlan.promotion });
+      need(state.status === "PREPARED" && state.connectionCount === 0
+        && state.scratchOid === oid, "RETRY_RESTORED_PROMOTION_STATE_INVALID");
+    }
     if (retained === null) {
       const text = JSON.stringify(receipt);
       await guarded();

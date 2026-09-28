@@ -212,6 +212,24 @@ describe("recovered restored scratch admission", () => {
     target.f.options.targetFactory = () => ({ assertInactive: async () => ({ complete: false }) });
     await expect(resolveRetryScratchAdmission(target.f.options)).rejects.toThrow("RETRY_SCRATCH_TARGET_ACTIVE");
   });
+  it("rejects a scratch session opened after the first restored catalog check", async () => {
+    const { f } = await restoredFixture();
+    const clientFactory = f.options.clientFactory;
+    let promotionReads = 0;
+    f.options.clientFactory = config => {
+      const client = clientFactory(config), query = client.query;
+      client.query = async sql => {
+        if (sql.includes("WHERE d.datname = ANY") && ++promotionReads === 2)
+          return { rows: [{ name: f.oldRow.name, oid: f.oldRow.oid,
+            owner: "admin", is_template: false, connection_count: 1 }] };
+        return query(sql);
+      };
+      return client;
+    };
+    await expect(resolveRetryScratchAdmission(f.options)).rejects.toThrow("RETRY_RESTORED_PROMOTION_STATE_INVALID");
+    expect(promotionReads).toBe(2);
+    expect([...f.saved.keys()].some(key => key.startsWith("retry-admissions/"))).toBe(false);
+  });
   it("rejects a changed scratch OID before retaining the restored receipt", async () => {
     const { f } = await restoredFixture();
     f.options.inspect = async () => ({ databaseOid: "277999", databaseOwner: "admin",

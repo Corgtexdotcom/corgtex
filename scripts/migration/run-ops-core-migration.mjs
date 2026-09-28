@@ -253,7 +253,8 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
           const firstRetryPlan = middlePlan ?? predecessorInfo.previous;
           const key = `retry-admissions/${plan.domain}/${archiveEvidenceHash(firstRetryPlan)}/predecessor-scratch.json`;
           const retained = await store.readOptional(key, rootPredecessor.signal);
-          if (retryCaptureLineage(rootState)) need(retained !== null, "MIGRATION_RETRY_ROOT_SCRATCH_RECEIPT_MISSING");
+          if (retryCaptureLineage(rootState) || retryRestoredLineage(rootState))
+            need(retained !== null, "MIGRATION_RETRY_ROOT_SCRATCH_RECEIPT_MISSING");
           const rootPolicy = retained === null ? firstRetryPlan.transfer.postgres.runtimeAccess
             : effectiveRetryScratchPolicy(firstRetryPlan, rootPlan, JSON.parse(retained)).policy;
           if (middlePlan) {
@@ -261,7 +262,8 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
               "MIGRATION_RETRY_ROOT_SCRATCH_POLICY_MISMATCH");
             const middleKey = `retry-admissions/${plan.domain}/${archiveEvidenceHash(predecessorInfo.previous)}/predecessor-scratch.json`;
             const middleReceipt = await store.readOptional(middleKey, middlePredecessor.signal);
-            if (retryCaptureLineage(middleState)) need(middleReceipt !== null, "MIGRATION_RETRY_MIDDLE_SCRATCH_RECEIPT_MISSING");
+            if (retryCaptureLineage(middleState) || retryRestoredLineage(middleState))
+              need(middleReceipt !== null, "MIGRATION_RETRY_MIDDLE_SCRATCH_RECEIPT_MISSING");
             const middlePolicy = middleReceipt === null ? predecessorInfo.previous.transfer.postgres.runtimeAccess
               : effectiveRetryScratchPolicy(predecessorInfo.previous, middlePlan, JSON.parse(middleReceipt)).policy;
             need(same(plan.transfer.postgres.runtimeAccess, middlePolicy)
