@@ -648,6 +648,27 @@ test("reopened recovery baseline admits normalized recovery staging with exact p
   assert.equal(f.state.calls.filter(item => item.query.startsWith("mutation")).length, 0);
 });
 
+test("recovery staging admits omitted optional settings only when current config preserves them", async () => {
+  const f = await fixture();
+  f.state.deployments[id(4)][0].status = "SUCCESS";
+  f.state.config.services[id(3)].source.autoUpdates = {
+    type: "vuln", tagMode: "sha", schedule: [{ day: 6, startHour: 10, endHour: 24 }], remediationNotice: null,
+  };
+  const baseline = await f.adapter.captureRecoveryBaseline();
+  makeFenced(f.state);
+  const requested = { services: {
+    [id(3)]: { source: { autoUpdates: baseline.services[0].config.source.autoUpdates },
+      deploy: { cronSchedule: "*/5 * * * *" } },
+    [id(4)]: { deploy: { cronSchedule: null } },
+  } };
+  f.state.staged.patch = { services: { [id(3)]: { source: { autoUpdates: {
+    type: "vuln", schedule: [{ day: 6, startHour: 10, endHour: 24 }],
+  } }, deploy: { cronSchedule: "*/5 * * * *" } } } };
+  assert.equal(await f.adapter.matchesStagedRecoveryTriggerPatch(hash(requested), baseline), true);
+  f.state.config.services[id(3)].source.autoUpdates.tagMode = "tag";
+  assert.equal(await f.adapter.matchesStagedRecoveryTriggerPatch(hash(requested), baseline), false);
+});
+
 test("source fence accepts Railway preserving original auto-update fields when disabling its type", async () => {
   const f = await fixture();
   f.state.deployments[id(4)][0].status = "SUCCESS";
