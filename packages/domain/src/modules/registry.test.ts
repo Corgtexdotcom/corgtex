@@ -38,6 +38,7 @@ const EXPECTED_NAV: Array<{
   { href: "/leads", labelKey: "relationships", icon: "relationships", group: "operations", featureFlag: "RELATIONSHIPS" },
   { href: "/maps", labelKey: "contextMaps", icon: "contextMaps", group: "operations", featureFlag: "CONTEXT_MAPS" },
   { href: "/agreements", labelKey: "agreements", icon: "agreements", group: "governance" },
+  { href: "/decisions", labelKey: "decisions", icon: "decisions", group: "governance" },
   { href: "/proposals", labelKey: "proposals", icon: "proposals", group: "governance", mobilePrimaryOrder: 50 },
   { href: "/circles", labelKey: "circles", icon: "circles", group: "governance" },
   { href: "/roles", labelKey: "roles", icon: "roles", group: "governance" },

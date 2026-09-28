@@ -222,6 +222,14 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     nav: { href: "/agreements", labelKey: "agreements", icon: "agreements", group: "governance" },
   },
   {
+    key: "decisions",
+    tier: "core",
+    title: "Decision Register",
+    description: "Key workspace decisions and their related work.",
+    dataOwnership: "corgtex_postgres",
+    nav: { href: "/decisions", labelKey: "decisions", icon: "decisions", group: "governance" },
+  },
+  {
     key: "proposals",
     tier: "core",
     title: "Proposals",

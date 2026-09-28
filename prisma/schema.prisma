@@ -756,6 +756,7 @@ model Workspace {
   actionChecklistItems            ActionChecklistItem[]
   tensions                       Tension[]
   proposals                      Proposal[]
+  decisions                      DecisionRecord[]
   approvalFlows                  ApprovalFlow[]
   approvalPolicy                 ApprovalPolicy[]
   meetings                       Meeting[]
@@ -2505,6 +2506,28 @@ model Tension {
   @@index([workspaceId, publishedAt])
   @@index([workspaceId, resolvedAt])
   @@index([raisedByMemberId])
+}
+
+model DecisionRecord {
+  id              String    @id @default(uuid())
+  workspaceId     String
+  title           String
+  bodyMd          String    @db.Text
+  tags            String[]  @default([])
+  decidedAt       DateTime  @default(now())
+  proposalId      String?
+  tensionId       String?
+  createdByUserId String
+  version         Int       @default(1)
+  archivedAt      DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, archivedAt, decidedAt])
+  @@index([workspaceId, proposalId])
+  @@index([workspaceId, tensionId])
 }
 
 model Proposal {

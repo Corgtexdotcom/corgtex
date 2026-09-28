@@ -34,6 +34,7 @@ const EXPECTED_NAV_GROUPS: NavGroup[] = [
     labelKey: "governance",
     items: [
       { moduleKey: "agreements", href: "/agreements", labelKey: "agreements", icon: "agreements" },
+      { moduleKey: "decisions", href: "/decisions", labelKey: "decisions", icon: "decisions" },
       { moduleKey: "proposals", href: "/proposals", labelKey: "proposals", icon: "proposals", mobilePrimaryOrder: 50 },
       { moduleKey: "circles", href: "/circles", labelKey: "circles", icon: "circles" },
       { moduleKey: "roles", href: "/roles", labelKey: "roles", icon: "roles" },
