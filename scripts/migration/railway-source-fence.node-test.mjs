@@ -418,6 +418,35 @@ test("default transport uses exact endpoint, rejects redirects/errors and bounds
   await assert.rejects(bounded(request), { code: "RAILWAY_RESPONSE_LIMIT" });
 });
 
+test("transport retries only bounded read failures and aborts read backoff", async () => {
+  const token = randomBytes(24).toString("hex"), controller = new AbortController();
+  const request = { query: "query FenceTest { __typename }", variables: {}, signal: controller.signal };
+  let reads = 0;
+  const transport = createRailwayFenceTransport({ token, fetchImpl: async () => {
+    reads++;
+    return reads === 1 ? new Response("", { status: 429 })
+      : new Response(JSON.stringify({ data: { __typename: "Query" } }));
+  } });
+  assert.deepEqual(await transport(request), { __typename: "Query" });
+  assert.equal(reads, 2);
+  let mutations = 0;
+  const mutation = createRailwayFenceTransport({ token, fetchImpl: async () => {
+    mutations++;
+    return new Response("", { status: 429 });
+  } });
+  await assert.rejects(mutation({ ...request, query: "mutation FenceTest { update }" }),
+    { code: "RAILWAY_TRANSPORT_FAILED" });
+  assert.equal(mutations, 1);
+  let abortedReads = 0;
+  const aborting = createRailwayFenceTransport({ token, fetchImpl: async () => {
+    abortedReads++;
+    controller.abort();
+    return new Response("", { status: 429 });
+  } });
+  await assert.rejects(aborting(request), { code: "RAILWAY_FENCE_ABORTED" });
+  assert.equal(abortedReads, 1);
+});
+
 test("inventory can collect a baseline but mutations and acceptance require durable expected source links", async () => {
   const f = await fixture({ expectedSourceLinks: null });
   assert.equal((await f.adapter.read()).services.length, 2);

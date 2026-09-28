@@ -218,7 +218,14 @@ export async function assertOpsCoreSourceFenced(options) {
   try {
     const ctx = context(options, async () => fail("SOURCE_CONTROLLER_READ_ONLY"));
     await ctx.check();
-    const postgres = await assertPostgresSourceFenced(ctx.postgresOptions(undefined));
+    // Bracket the PostgreSQL credential and writer census with fresh, complete
+    // provider proofs. Its inner custody checks still verify the journal lease;
+    // repeating the full paginated deployment inventory at every SQL probe can
+    // outlive the restore boundary without adding a distinct source observation.
+    await ctx.assertProviderFenced();
+    await ctx.assertDatabaseServiceCustody();
+    const postgres = await assertPostgresSourceFenced({ ...ctx.postgresOptions(undefined),
+      assertProviderFenced: () => ctx.check(), assertDatabaseServiceCustody: () => ctx.check() });
     const result = await evidence(ctx, postgres);
     await ctx.check();
     return result;

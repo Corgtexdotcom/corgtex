@@ -193,6 +193,40 @@ describe("Ops/Core executable operator", () => {
     expect(await runOpsCoreMigration({ ...options, action: "status" })).toEqual(first);
     expect(f.blobs.get("cutovers/core.json").text).toBe(rootText);
   });
+  it("opens a second retry only after the first retry recovers, holding both predecessor journals", async () => {
+    const { f, rootText, retryPlan } = await retryFixture();
+    await runOpsCoreMigration({ ...f.options, plan: retryPlan, action: "initialize" });
+    const retryIntent = archiveEvidenceHash(retryPlan);
+    const retryBlob = f.containerFactory(retryPlan.operator.custodyContainerUrl).getBlockBlobClient("cutovers/core-retry.json");
+    const retryCustody = await openCutoverCustody(azureBlobCustodyAdapter(retryBlob), retryIntent);
+    try {
+      const fence = await retryCustody.begin("SOURCE_FENCED", "a".repeat(64));
+      await retryCustody.complete(fence.operationId, "b".repeat(64));
+      await retryCustody.begin("CAPTURED", "c".repeat(64));
+      const recovery = await retryCustody.beginSourceRecovery("d".repeat(64));
+      await retryCustody.complete(recovery.operationId, "e".repeat(64));
+    } finally { await retryCustody.close(); }
+    const retryText = f.blobs.get("cutovers/core-retry.json").text;
+    const second = structuredClone(retryPlan);
+    second.transfer.postgres.scratchName = "corgtex_rehearsal_10_3_core";
+    second.operator.retryOf = { intentSha256: retryIntent, journalSha256: archiveEvidenceHash(JSON.parse(retryText)), journal: "retry" };
+    const options = { ...f.options, plan: second };
+    expect((await runOpsCoreMigration({ ...options, action: "initialize" })).status).toBe("PREPARED");
+    expect((await runOpsCoreMigration({ ...options, action: "status" })).status).toBe("PREPARED");
+    expect(f.blobs.get("cutovers/core.json").text).toBe(rootText);
+    expect(f.blobs.get("cutovers/core-retry.json").text).toBe(retryText);
+    expect(f.blobs.has("cutovers/core-retry-2.json")).toBe(true);
+    const alternate = structuredClone(second);
+    alternate.transfer.postgres.scratchName = "corgtex_rehearsal_10_4_core";
+    await expect(runOpsCoreMigration({ ...f.options, plan: alternate, action: "initialize" })).rejects.toThrow();
+    const root = f.containerFactory(second.operator.custodyContainerUrl).getBlockBlobClient("cutovers/core.json");
+    const rootOwner = await openCutoverCustody(azureBlobCustodyAdapter(root), retryPlan.operator.retryOf.intentSha256);
+    try { await expect(runOpsCoreMigration({ ...options, action: "status" })).rejects.toThrow(); }
+    finally { await rootOwner.close(); }
+    const retryOwner = await openCutoverCustody(azureBlobCustodyAdapter(retryBlob), retryIntent);
+    try { await expect(runOpsCoreMigration({ ...options, action: "status" })).rejects.toThrow(); }
+    finally { await retryOwner.close(); }
+  });
   it("rejects changed predecessor, scratch reuse and alternate retry plans before source effects", async () => {
     const { f, rootText, retryPlan } = await retryFixture();
     const options = { ...f.options, plan: retryPlan };
