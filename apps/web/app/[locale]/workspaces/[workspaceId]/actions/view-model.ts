@@ -15,6 +15,27 @@ export type ActionListItem = {
   isPrivate?: boolean | null;
 };
 
+export function resolveActionAssigneeScope(
+  selectedAssigneeIds: string[],
+  currentMemberId: string | null,
+  scope: string | string[] | undefined,
+) {
+  const requestedScope = Array.isArray(scope) ? scope[0] : scope;
+  const actionScope = selectedAssigneeIds.length > 0
+    ? "filtered"
+    : !currentMemberId || requestedScope === "workspace"
+      ? "workspace"
+      : requestedScope === "assigned" ? "assigned" : "mine";
+  return {
+    actionScope,
+    assigneeMemberIds: actionScope === "workspace" ? []
+      : actionScope === "filtered" ? selectedAssigneeIds : [currentMemberId!],
+    includeOwnDrafts: actionScope === "mine",
+    assignedToMeActive: Boolean(currentMemberId)
+      && (actionScope === "assigned" || (actionScope === "filtered" && selectedAssigneeIds.length === 1 && selectedAssigneeIds[0] === currentMemberId)),
+  };
+}
+
 export const ACTION_STATUS_META: Record<ActionStatusFilter, {
   labelKey: "statusDraft" | "statusOpen" | "statusInProgress" | "statusCompleted" | "statusAll";
   tagClass: "info" | "neutral" | "success" | "";

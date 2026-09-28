@@ -1115,7 +1115,7 @@ describe("meeting-intelligence", () => {
       }));
     });
 
-    it("opens a reused draft before marking a meeting follow-up applied", async () => {
+    it("keeps a reused unassigned meeting follow-up as a draft", async () => {
       vi.mocked(prisma.meetingInsight.findUnique).mockResolvedValue({
         id: "insight-draft", workspaceId: "ws-1", meetingId: "meeting-1", type: "FOLLOW_UP",
         operation: "CREATE", status: "SUGGESTED", title: "Prepare the update", bodyMd: "Prepare the weekly update.",
@@ -1127,7 +1127,8 @@ describe("meeting-intelligence", () => {
       await applyInsight(mockActor, { workspaceId: "ws-1", insightId: "insight-draft",
         actionDuplicateGuard: { resolution: "use_existing", targetEntityId: "action-draft" } });
 
-      expect(publishActionMock).toHaveBeenCalledWith(mockActor, { workspaceId: "ws-1", actionId: "action-draft" });
+      expect(createActionMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({ isPrivate: true }));
+      expect(publishActionMock).not.toHaveBeenCalled();
       expect(prisma.meetingInsight.update).toHaveBeenCalledWith(expect.objectContaining({
         data: expect.objectContaining({ status: "APPLIED", appliedEntityId: "action-draft" }),
       }));
@@ -1915,6 +1916,7 @@ describe("meeting-intelligence", () => {
           targetEntityId: null,
           confidence: 0.9,
           sourceQuote: "I will follow up.",
+          assigneeHint: "Milan",
         },
       ]);
       (prisma.meetingInsight.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -2000,6 +2002,7 @@ describe("meeting-intelligence", () => {
           targetEntityId: null,
           confidence: 0.95,
           sourceQuote: "Milan will follow up on A.",
+          assigneeHint: "Milan",
         },
         {
           id: "insight-b",
@@ -2009,6 +2012,7 @@ describe("meeting-intelligence", () => {
           targetEntityId: null,
           confidence: 0.95,
           sourceQuote: "Milan will follow up on B.",
+          assigneeHint: "Milan",
         },
       ]);
       const insightsById: Record<string, unknown> = {
@@ -2076,6 +2080,25 @@ describe("meeting-intelligence", () => {
 
       expect(prisma.meetingInsight.findUnique).not.toHaveBeenCalled();
       expect(createActionMock).not.toHaveBeenCalled();
+    });
+
+    it("keeps an action insight pending when no active human assignee matches", async () => {
+      (prisma.meetingInsight.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([{
+        id: "insight-unassigned",
+        type: "ACTION_ITEM",
+        operation: "CREATE",
+        confidence: 0.95,
+        sourceQuote: "An unknown person will follow up.",
+        assigneeHint: "Unknown person",
+      }]);
+
+      await expect(autoApplyMeetingInsights(mockActor, {
+        workspaceId: "ws-1",
+        meetingId: "meeting-1",
+      })).resolves.toMatchObject({ applied: 0, failed: 0, skipped: 1 });
+
+      expect(createActionMock).not.toHaveBeenCalled();
+      expect(prisma.meetingInsight.update).not.toHaveBeenCalled();
     });
 
     it("uses stricter automatic thresholds for deliberation and proposal resolutions", async () => {

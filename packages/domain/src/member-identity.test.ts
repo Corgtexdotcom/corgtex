@@ -20,6 +20,8 @@ describe("member identity classification", () => {
     expect(isSystemMemberIdentity({ user: { email: "system+workspace@corgtex.local" } })).toBe(true);
     expect(isSystemMemberIdentity({ user: { email: "support+workspace@corgtex.local" } })).toBe(true);
     expect(isSystemMemberIdentity({ user: { email: "support@example.com", displayName: "Corgtex Support" } })).toBe(true);
+    expect(isSystemMemberIdentity({ user: { email: "crina@example.test", displayName: "CRINA System" } })).toBe(true);
+    expect(isSystemMemberIdentity({ user: { email: "testing@example.test", displayName: "E2E UI Testing Agent" } })).toBe(true);
   });
 
   it("does not classify people as system identities just because agent appears in their name or email", () => {

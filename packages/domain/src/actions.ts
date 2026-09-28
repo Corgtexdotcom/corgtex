@@ -41,6 +41,7 @@ export type ListActionsOptions = {
   circleIds?: string[] | null;
   assigneeMemberId?: string | null;
   assigneeMemberIds?: string[] | null;
+  includeOwnDrafts?: boolean;
   memberId?: string | null;
   memberIds?: string[] | null;
   createdFrom?: Date;
@@ -253,7 +254,17 @@ export async function listActions(actor: AppActor, workspaceId: string, opts?: L
   if (circleIds.length > 0) where.circleId = { in: circleIds };
   else if (opts?.circleId) where.circleId = opts.circleId;
   const assigneeMemberIds = listFilterValues([...(opts?.assigneeMemberIds ?? []), opts?.assigneeMemberId]);
-  if (assigneeMemberIds.length > 0) where.assigneeMemberId = { in: assigneeMemberIds };
+  if (opts?.includeOwnDrafts && actor.kind === "user" && membership?.id
+    && assigneeMemberIds.length === 1 && assigneeMemberIds[0] === membership.id) {
+    appendActionWhereAnd(where, {
+      OR: [
+        { assigneeMemberId: membership.id },
+        { authorUserId: actor.user.id, isPrivate: true, status: "DRAFT" },
+      ],
+    });
+  } else if (assigneeMemberIds.length > 0) {
+    where.assigneeMemberId = { in: assigneeMemberIds };
+  }
   const createdAt = dateRangeWhere(opts?.createdFrom, opts?.createdTo);
   const dueAt = nullableDateRangeWhere(opts?.dueFrom, opts?.dueTo);
   if (createdAt) where.createdAt = createdAt;
@@ -636,6 +647,7 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
 
   const create = async (tx: Prisma.TransactionClient, duplicateDecision: Awaited<ReturnType<typeof duplicateDecisionForCreate>>) => {
     const assigneeMemberId = await resolveAssigneeMemberId(tx, params.workspaceId, params.assigneeMemberId);
+    invariant(isPrivate || assigneeMemberId, 400, "INVALID_INPUT", "Assign an active human member before opening this Action.");
     const proposalId = await resolveWorkspaceProposalLink(tx, actor, membership, params.workspaceId, params.proposalId);
     let authorUserId = actor.kind === "user"
       ? actor.user.id
@@ -864,6 +876,13 @@ export async function updateAction(actor: AppActor, params: {
     if (params.assigneeMemberId !== undefined) {
       data.assigneeMemberId = await resolveAssigneeMemberId(tx, params.workspaceId, params.assigneeMemberId);
     }
+    if ((params.status !== undefined && params.status !== "DRAFT")
+      || (params.assigneeMemberId !== undefined && action.status !== "DRAFT")) {
+      const assigneeMemberId = data.assigneeMemberId !== undefined
+        ? data.assigneeMemberId as string | null
+        : await resolveAssigneeMemberId(tx, params.workspaceId, action.assigneeMemberId);
+      invariant(assigneeMemberId, 400, "INVALID_INPUT", "Assign an active human member before opening this Action.");
+    }
     if (params.dueAt !== undefined) data.dueAt = params.dueAt;
     if (params.proposalId !== undefined) {
       data.proposalId = await resolveWorkspaceProposalLink(tx, actor, membership, params.workspaceId, params.proposalId);
@@ -1052,6 +1071,9 @@ export async function publishAction(actor: AppActor, params: {
         400, "INVALID_STATE", "Only draft actions can be opened.");
       return action;
     }
+
+    const assigneeMemberId = await resolveAssigneeMemberId(tx, params.workspaceId, action.assigneeMemberId);
+    invariant(assigneeMemberId, 400, "INVALID_INPUT", "Assign an active human member before opening this Action.");
 
     const updated = await tx.action.update({
       where: { id: params.actionId, workspaceId: params.workspaceId, archivedAt: null, duplicateOfActionId: null, status: "DRAFT" },

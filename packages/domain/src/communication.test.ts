@@ -1103,6 +1103,7 @@ describe("communication Slack integration", () => {
       sourceMessageId: "message-1",
       externalUserId: "U1",
       open: true,
+      assigneeMemberId: "member-1",
       claimKey: "slack:proactive-action:message-1",
     })).resolves.toMatchObject({
       entityType: "Action",
@@ -1151,6 +1152,7 @@ describe("communication Slack integration", () => {
       title: "Send the contract",
       sourceMessageId: "message-1",
       open: true,
+      assigneeMemberId: "member-1",
       claimKey: "slack:proactive-action:message-1",
     })).resolves.toMatchObject({
       entityType: "Action",
@@ -1175,6 +1177,7 @@ describe("communication Slack integration", () => {
       title: "Send the contract",
       sourceMessageId: "message-1",
       open: true,
+      assigneeMemberId: "member-1",
       claimKey: "slack:proactive-action:message-1",
     })).rejects.toBe(createError);
 
@@ -1199,6 +1202,7 @@ describe("communication Slack integration", () => {
       title: "Send the contract",
       sourceMessageId: "message-1",
       open: true,
+      assigneeMemberId: "member-1",
       claimKey: "slack:proactive-action:message-1",
     })).rejects.toBe(uniqueError);
 

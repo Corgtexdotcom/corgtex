@@ -1277,6 +1277,7 @@ export default async function WorkspaceAddPage({
             members={actionMembers}
             labels={actionEditorLabels}
             priority={1}
+            assigneeMemberId={actionMembers.some((member) => member.id === membership?.id) ? membership?.id : null}
             cancelHref={returnTo}
             footer={<CreateWorkItemFooter draftLabel="Save draft" openLabel="Create action" returnTo={returnTo} />}
           >

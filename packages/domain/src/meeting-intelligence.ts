@@ -196,6 +196,16 @@ function createWorkspaceMemberDirectoryLoader(workspaceId: string): MemberDirect
   };
 }
 
+async function resolveHintedAssigneeMemberId(hint: string | null | undefined, loadMembers: MemberDirectoryLoader) {
+  if (!hint || isCollectiveAssigneeHint(hint)) return null;
+  const lowHint = hint.toLowerCase();
+  const members = await loadMembers();
+  return members.find((member) =>
+    member.user.displayName?.toLowerCase().includes(lowHint)
+    || member.user.email.toLowerCase().includes(lowHint)
+  )?.id ?? null;
+}
+
 function normalizeInsightType(value: unknown, targetEntityType: string | null): MeetingInsightType | null {
   if (typeof value !== "string") return null;
 
@@ -1192,17 +1202,10 @@ export async function applyInsight(
     });
   } else {
     // Attempt fuzzy match for a member reference if a hint exists.
-    let hintedMemberId: string | null = null;
-    if (insight.assigneeHint && !isCollectiveAssigneeHint(insight.assigneeHint)) {
-      const loadMemberDirectory = params.loadMemberDirectory ?? createWorkspaceMemberDirectoryLoader(params.workspaceId);
-      const mems = await loadMemberDirectory();
-      const lowHint = insight.assigneeHint.toLowerCase();
-      const match = mems.find((m: { id: string; user: { displayName?: string | null; email: string } }) =>
-        m.user.displayName?.toLowerCase().includes(lowHint) ||
-        m.user.email.toLowerCase().includes(lowHint)
-      );
-      if (match) hintedMemberId = match.id;
-    }
+    const hintedMemberId = await resolveHintedAssigneeMemberId(
+      insight.assigneeHint,
+      params.loadMemberDirectory ?? createWorkspaceMemberDirectoryLoader(params.workspaceId),
+    );
 
     if (insight.type === "ACTION_ITEM" || insight.type === "FOLLOW_UP") {
       const action = await createAction(actor, {
@@ -1211,12 +1214,12 @@ export async function applyInsight(
         bodyMd: fullBody,
         assigneeMemberId: hintedMemberId,
         dueAt: insight.dueAt ?? null,
-        isPrivate: false,
+        isPrivate: !hintedMemberId,
         duplicateGuard: { candidateLimit: 200, ...params.actionDuplicateGuard },
         source: { type: "MEETING_INSIGHT", id: insight.id, groupId: insight.meetingId },
         sourcePayload: meetingInsightActionSourcePayload(insight),
       });
-      const opened = action.status === "DRAFT"
+      const opened = action.status === "DRAFT" && hintedMemberId
         ? await publishAction(actor, { workspaceId: params.workspaceId, actionId: action.id })
         : action;
       appliedEntityType = "Action";
@@ -1348,6 +1351,12 @@ export async function autoApplyMeetingInsights(
     }
 
     try {
+      if ((insight.type === "ACTION_ITEM" || insight.type === "FOLLOW_UP")
+        && insight.operation === "CREATE"
+        && !await resolveHintedAssigneeMemberId(insight.assigneeHint, loadMemberDirectory)) {
+        skipped++;
+        continue;
+      }
       await applyInsight(actor, {
         workspaceId: params.workspaceId,
         insightId: insight.id,

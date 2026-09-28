@@ -817,6 +817,13 @@ export async function confirmSlackMeetingActionReviewProposal(actor: AppActor, p
   invariant(insight.status === "SUGGESTED" || insight.status === "CONFIRMED", 400, "INVALID_STATE", "Only pending follow-up proposals can be confirmed.");
 
   const assigneeMemberId = await resolveAssigneeMemberId(params.workspaceId, insight.assigneeHint);
+  if (!assigneeMemberId) {
+    return renderReviewUpdate({
+      workspaceId: params.workspaceId,
+      reviewId: review.id,
+      responseText: `Assign an active human owner in Corgtex before confirming this follow-up: ${insightUrl(params.workspaceId, review.meetingId, insight.id)}`,
+    });
+  }
   const sourceMessageId = await reviewSourceMessageId(review);
   const fullBody = [
     insight.bodyMd,

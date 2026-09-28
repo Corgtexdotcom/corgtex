@@ -284,12 +284,17 @@ export default async function ActionDetailPage({
       {!isArchived && (canManage || canEditContent || action.status === "OPEN" || action.status === "IN_PROGRESS") && (
         <section className="ws-section" style={{ marginBottom: 24 }}>
           <div className="actions-inline">
-            {canManage && canOpenPrivateDraft(action) && (
+            {canManage && canOpenPrivateDraft(action) && action.assigneeMemberId && (
               <form action={publishActionAction}>
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <input type="hidden" name="actionId" value={action.id} />
                 <button type="submit" className="primary small">{t("btnOpen")}</button>
               </form>
+            )}
+            {canManage && canOpenPrivateDraft(action) && !action.assigneeMemberId && (
+              <Link href={`/workspaces/${workspaceId}/actions/${action.id}/edit`} className="secondary small">
+                {t("assignBeforeOpen")}
+              </Link>
             )}
             {action.status === "OPEN" && (
               <form action={updateActionAction}>

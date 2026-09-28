@@ -23,6 +23,20 @@ const labels = {
 };
 
 describe("WorkItemFilterControls", () => {
+  it.each(["workspace", "assigned"])("preserves the %s Actions scope when applying filters", (scope) => {
+    const html = renderToStaticMarkup(createElement(WorkItemFilterControls, {
+      action: "/workspaces/workspace-1/actions",
+      circles: [{ id: "circle-1", label: "Operations" }, { id: "circle-2", label: "Finance" }],
+      circleIds: ["circle-1"],
+      members: [],
+      hiddenFields: { scope },
+      labels,
+    }));
+
+    expect(html).toContain(`name="scope" value="${scope}"`);
+    expect(html).toContain("name=\"circleId\"");
+  });
+
   it("preserves exact assignee selections even when every assignee is selected", () => {
     const html = renderToStaticMarkup(createElement(WorkItemFilterControls, {
       action: "/workspaces/workspace-1/actions",

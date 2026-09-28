@@ -5,10 +5,25 @@ import {
   groupActionsByStatus,
   normalizeActionStatusFilter,
   normalizeActionStatusFilters,
+  resolveActionAssigneeScope,
   resolveActionStatusSearch,
 } from "./view-model";
 
 describe("actions view model", () => {
+  it("starts on the current member's Actions while keeping explicit workspace and owner filters", () => {
+    expect(resolveActionAssigneeScope([], "member-daniel", undefined)).toMatchObject({
+      assigneeMemberIds: ["member-daniel"], includeOwnDrafts: true, actionScope: "mine", assignedToMeActive: false,
+    });
+    expect(resolveActionAssigneeScope([], "member-daniel", "assigned")).toMatchObject({
+      assigneeMemberIds: ["member-daniel"], includeOwnDrafts: false, actionScope: "assigned", assignedToMeActive: true,
+    });
+    expect(resolveActionAssigneeScope([], "member-daniel", "workspace")).toMatchObject({
+      assigneeMemberIds: [], assignedToMeActive: false, actionScope: "workspace",
+    });
+    expect(resolveActionAssigneeScope(["member-andy"], "member-daniel", undefined)).toMatchObject({
+      assigneeMemberIds: ["member-andy"], includeOwnDrafts: false, assignedToMeActive: false,
+    });
+  });
   it("normalizes status filters and falls back to open", () => {
     expect(normalizeActionStatusFilter("DRAFT")).toBe("DRAFT");
     expect(normalizeActionStatusFilter("IN_PROGRESS")).toBe("IN_PROGRESS");

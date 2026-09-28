@@ -72,7 +72,7 @@ describe("Slack meeting action assignee eligibility", () => {
   });
 
   it("opens a legacy claimed private draft before marking the Slack insight applied", async () => {
-    db.member.findMany.mockResolvedValue([]);
+    db.member.findMany.mockResolvedValue([{ id: "active", user: { displayName: "Milan", email: "milan@example.test" } }]);
     createAction.mockResolvedValueOnce({ id: "legacy-action", status: "DRAFT" });
     publishAction.mockResolvedValueOnce({ id: "legacy-action", status: "OPEN" });
     await confirmSlackMeetingActionReviewProposal(actor, params);
@@ -82,14 +82,16 @@ describe("Slack meeting action assignee eligibility", () => {
     }));
   });
 
-  it("leaves an inactive-only hint unassigned", async () => {
+  it("leaves an inactive-only hint pending for human assignment", async () => {
     db.member.findMany.mockImplementation(async ({ where }) => where.isActive === true ? [] : [{ id: "old", user: { displayName: "Milan", email: "old@example.test" } }]);
-    await confirmSlackMeetingActionReviewProposal(actor, params);
-    expect(createAction).toHaveBeenCalledWith(actor, expect.objectContaining({ assigneeMemberId: null }));
+    const result = await confirmSlackMeetingActionReviewProposal(actor, params);
+    expect(result.responseText).toContain("Assign an active human owner");
+    expect(createAction).not.toHaveBeenCalled();
+    expect(db.meetingInsight.update).not.toHaveBeenCalled();
   });
 
   it("keeps a matching Slack proposal pending and directs review to Corgtex", async () => {
-    db.member.findMany.mockResolvedValue([]);
+    db.member.findMany.mockResolvedValue([{ id: "active", user: { displayName: "Milan", email: "milan@example.test" } }]);
     createAction.mockRejectedValueOnce(new DuplicateGuardMatchError({
       entityType: "Action", entityId: "action-existing", title: "Similar Action", excerpt: null,
       score: 0.88, matchKind: "likely", reasons: ["similar title"], status: "OPEN",

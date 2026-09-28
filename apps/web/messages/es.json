@@ -1,5 +1,8 @@
 {
   "actions": {
+    "allWorkspaceActions": "Todas las acciones del espacio",
+    "myActions": "Mis acciones",
+    "assignBeforeOpen": "Asigna a una persona antes de abrir",
     "ageDaysAgo": "hace {count} d",
     "ageToday": "hoy",
     "ageYesterday": "ayer",

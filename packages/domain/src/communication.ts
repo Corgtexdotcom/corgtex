@@ -1685,6 +1685,9 @@ export async function createWorkItemFromCommunicationSource(actor: AppActor, par
   const bodyMd = `${params.bodyMd?.trim() || title}${sourceNote}`;
   const dueAt = typeof params.dueAt === "string" ? new Date(params.dueAt) : params.dueAt ?? null;
   const normalizedDueAt = dueAt instanceof Date && Number.isFinite(dueAt.getTime()) ? dueAt : null;
+  if (params.kind === "ACTION" && params.open) {
+    invariant(params.assigneeMemberId, 400, "INVALID_INPUT", "Assign an active human member before opening this Action.");
+  }
 
   if (claimKey) {
     try {

@@ -13,7 +13,7 @@ export type MemberIdentityInput = {
 } | null | undefined;
 
 const SYSTEM_EMAIL_PREFIXES = ["system+", "support+"];
-const SYSTEM_DISPLAY_NAMES = new Set(["corgtex support"]);
+const SYSTEM_DISPLAY_NAMES = new Set(["corgtex support", "crina system", "e2e ui testing agent"]);
 
 function normalized(value?: string | null) {
   return value?.trim().toLowerCase() ?? "";
@@ -54,7 +54,9 @@ export function systemMemberIdentityWhere(): Prisma.MemberWhereInput {
       { kind: "SYSTEM" },
       { user: { email: { startsWith: "system+", mode: "insensitive" } } },
       { user: { email: { startsWith: "support+", mode: "insensitive" } } },
-      { user: { displayName: { equals: "Corgtex Support", mode: "insensitive" } } },
+      ...["Corgtex Support", "CRINA System", "E2E UI Testing Agent"].map((name) => ({
+        user: { displayName: { equals: name, mode: "insensitive" as const } },
+      })),
     ],
   };
 }
