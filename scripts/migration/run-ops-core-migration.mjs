@@ -24,7 +24,7 @@ import { AzureBlobObjectStore } from "./shared-tenant-objects.ts";
 import { createRuntimeSecretResolver, assertOpsCoreRuntimeAccessForActivation,
   monitorOpsCoreRuntimeAccessDrift } from "./ops-core-runtime-access-controller.mjs";
 import { openOpsCorePitrGuard, OPSCORE_CUSTODY_URL } from "./ops-core-pitr-guard.mjs";
-import { resolveRetryScratchAdmission } from "./ops-core-retry-scratch.mjs";
+import { effectiveRetryScratchPolicy, resolveRetryScratchAdmission, retryCaptureLineage } from "./ops-core-retry-scratch.mjs";
 
 class OperatorError extends Error {}
 const need = (condition, code) => { if (!condition) throw new OperatorError(code); };
@@ -158,7 +158,7 @@ async function assertRetryPredecessor({ plan, custodyContainer, predecessor }) {
     && archiveEvidenceHash(journal) === retry.journalSha256 && journal.phase === "SOURCE_RECOVERED"
     && journal.pending === null && journal.destinationMayHaveWritten === false,
   "MIGRATION_RETRY_PREDECESSOR_INVALID");
-  if (plan.transfer.postgres.runtimeAccess) need(journal.recovery?.abandonedPending?.to === "CAPTURED"
+  if (plan.transfer.postgres.runtimeAccess) need(retryCaptureLineage(journal)
     || (journal.recovery?.from === "SOURCE_FENCED" && journal.recovery.abandonedPending === null),
   "MIGRATION_RETRY_SCRATCH_LINEAGE_INVALID");
   const previous = await readBlobJson(custodyContainer.getBlockBlobClient(`plans/${plan.domain}/${retry.intentSha256}.json`));
@@ -207,21 +207,21 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
       await pitrGuard.assertNoPitr();
     }
     if (plan.operator.retryOf) {
-      let rootLink;
+      let rootLink, rootPlan, rootState;
       if (retryLevel === "retry") {
         const previous = await readBlobJson(custodyContainer.getBlockBlobClient(`plans/${plan.domain}/${plan.operator.retryOf.intentSha256}.json`));
         need(archiveEvidenceHash(previous) === plan.operator.retryOf.intentSha256
           && previous.operator?.retryOf && previous.operator.retryOf.journal === undefined,
         "MIGRATION_RETRY_CHAIN_INVALID");
         rootLink = previous.operator.retryOf;
-        const rootPlan = await readBlobJson(custodyContainer.getBlockBlobClient(`plans/${plan.domain}/${rootLink.intentSha256}.json`));
+        rootPlan = await readBlobJson(custodyContainer.getBlockBlobClient(`plans/${plan.domain}/${rootLink.intentSha256}.json`));
         need(archiveEvidenceHash(rootPlan) === rootLink.intentSha256 && rootPlan.domain === plan.domain
           && rootPlan.operator?.retryOf === undefined
           && rootPlan.transfer?.postgres?.scratchName !== plan.transfer.postgres.scratchName,
         "MIGRATION_RETRY_CHAIN_INVALID");
         const root = custodyContainer.getBlockBlobClient(`cutovers/${plan.domain}.json`);
         rootPredecessor = await openCutoverCustody(azureBlobCustodyAdapter(root), rootLink.intentSha256);
-        const rootState = rootPredecessor.snapshot();
+        rootState = rootPredecessor.snapshot();
         need(archiveEvidenceHash(rootState) === rootLink.journalSha256
           && rootState.phase === "SOURCE_RECOVERED" && rootState.pending === null
           && rootState.destinationMayHaveWritten === false, "MIGRATION_RETRY_CHAIN_INVALID");
@@ -229,8 +229,21 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
       const prior = custodyContainer.getBlockBlobClient(`cutovers/${plan.domain}${retryLevel === "retry" ? "-retry" : ""}.json`);
       predecessor = await openCutoverCustody(azureBlobCustodyAdapter(prior), plan.operator.retryOf.intentSha256);
       predecessorInfo = await assertRetryPredecessor({ plan, custodyContainer, predecessor });
-      if (rootPredecessor) need(same(predecessorInfo.previous.operator.retryOf, rootLink),
-      "MIGRATION_RETRY_CHAIN_INVALID");
+      if (rootPredecessor) {
+        need(same(predecessorInfo.previous.operator.retryOf, rootLink), "MIGRATION_RETRY_CHAIN_INVALID");
+        if (plan.transfer.postgres.runtimeAccess) {
+          const store = azureProviderOperationStore(custodyContainer);
+          await store.assertPrivate();
+          const key = `retry-admissions/${plan.domain}/${plan.operator.retryOf.intentSha256}/predecessor-scratch.json`;
+          const retained = await store.readOptional(key, rootPredecessor.signal);
+          if (retryCaptureLineage(rootState)) need(retained !== null, "MIGRATION_RETRY_ROOT_SCRATCH_RECEIPT_MISSING");
+          const rootPolicy = retained === null ? predecessorInfo.previous.transfer.postgres.runtimeAccess
+            : effectiveRetryScratchPolicy(predecessorInfo.previous, rootPlan, JSON.parse(retained)).policy;
+          need(same(plan.transfer.postgres.runtimeAccess, rootPolicy)
+            && same(plan.activation.runtimeAccess, rootPolicy), "MIGRATION_RETRY_ROOT_SCRATCH_POLICY_MISMATCH");
+          await rootPredecessor.assertOwned(); await predecessor.assertOwned();
+        }
+      }
     }
     if (action === "initialize") {
       const text = JSON.stringify(plan);
@@ -259,7 +272,7 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
     }
     const operationStore = azureProviderOperationStore(custodyContainer);
     const retryScratchAdmission = predecessorInfo && plan.transfer.postgres.runtimeAccess
-      && predecessorInfo.journal.recovery.abandonedPending?.to === "CAPTURED"
+      && retryCaptureLineage(predecessorInfo.journal)
       ? await (runtime.resolveRetryScratchAdmission ?? resolveRetryScratchAdmission)({ plan,
         predecessorPlan: predecessorInfo.previous, predecessorJournal: predecessorInfo.journal,
         custody, operationStore, targetAdminConfig: credentials?.targetAdminConfig,

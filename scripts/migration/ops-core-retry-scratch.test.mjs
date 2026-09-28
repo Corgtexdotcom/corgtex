@@ -67,6 +67,17 @@ describe("preserved retry scratch admission", () => {
       targetFactory: () => { throw Error("SHOULD_NOT_READ_BASELINE_AFTER_FENCE"); } });
     expect(continued).toEqual(first);
   });
+  it("admits a completed capture recovered before restore intent", async () => {
+    const f = await fixture();
+    const capture = f.options.predecessorJournal.recovery.abandonedPending;
+    f.options.predecessorJournal.recovery = { from: "CAPTURED", abandonedPending: null };
+    f.options.predecessorJournal.history = [{ phase: "CAPTURED", operationId: capture.operationId,
+      intentSha256: capture.intentSha256, evidenceSha256: "a".repeat(64) }];
+    f.options.plan.operator.retryOf.journalSha256 = hash(f.options.predecessorJournal);
+    const admitted = await resolveRetryScratchAdmission(f.options);
+    expect(admitted.scratch.name).toBe(f.oldRow.name);
+    expect(JSON.parse([...f.saved.values()][0]).predecessorCaptureOperationId).toBe(capture.operationId);
+  });
   it("rejects every unrelated database inventory change before writing a receipt", async () => {
     const f = await fixture();
     const changed = { ...f.baseRow, oid: "6" };

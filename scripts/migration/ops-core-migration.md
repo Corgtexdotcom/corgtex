@@ -415,7 +415,9 @@ then the retry journal, then creates the fixed
 neither predecessor journal nor scratch may be reused. This slot is also
 create-only and accepts only one exact plan. If the original attempt preserved a
 scratch, keep it as a `verify-only` row in both transfer and activation
-runtime-access policies.
+runtime-access policies. Before creating the third journal, the operator checks
+the first retry's retained root-scratch receipt and requires both policies to
+match its exact effective policy.
 Leave the immediate predecessor's preserved scratch out of those base policies;
 its separate admission receipt verifies and adds that row after reading fresh
 target inventory. Run fresh preflight before fencing again.
@@ -427,7 +429,9 @@ If the recovered predecessor left an empty, protected scratch database, set
 private copy-evidence directory. Before fencing, preflight reads its
 `copy-intent.json` and `scratch-state.json`, checks the live scratch OID, owner,
 emptiness and ACL, and admits only that database into the retry's effective
-runtime-access policy. It stores a create-only admission receipt under the retry
+runtime-access policy. This also covers a completed capture followed by source
+recovery before any restore intent; the completed capture history binds the
+local evidence. It stores a create-only admission receipt under the retry
 intent. Other database drift still blocks preflight. Keep the predecessor
 scratch and evidence for recovery; the retry cannot silently reuse that scratch.
 
