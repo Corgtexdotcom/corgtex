@@ -326,6 +326,16 @@ describe("production validation context", () => {
     })).toThrow("client_readiness_routes contains unsupported route name(s): relationships, cycles");
   });
 
+  it("accepts the Decision Register for a named selfserve readiness sweep", () => {
+    expect(resolve({
+      eventName: "workflow_dispatch",
+      event: { inputs: {} },
+      githubRef: "refs/heads/main",
+      clientReadinessRoutesInput: "decisions",
+      changedFiles: [],
+    }).client_readiness_routes).toBe("decisions");
+  });
+
   it("keeps scheduled runs release-agnostic unless an explicit SHA is supplied", () => {
     expect(resolve({
       eventName: "schedule",
