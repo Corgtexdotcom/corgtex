@@ -162,12 +162,12 @@ async function transfer(options, mode) {
     const check = async () => { await originalCheck(); if (maintenance) await maintenance.assertHeld(); };
     let { assertSourceFenced, assertTargetInactive } = context;
     const initial = custody.snapshot(), config = plan.transfer.postgres;
-    const continuingRuntimeAccess = mode === "resume" && config.runtimeAccess
+    const continuingPendingVerification = mode === "resume"
       && initial.phase === "RESTORED" && initial.pending?.to === "VERIFIED";
-    const reconcilingVerification = (mode === "reconcile" || continuingRuntimeAccess)
+    const reconcilingVerification = (mode === "reconcile" || continuingPendingVerification)
       && initial.phase === "RESTORED" && initial.pending?.to === "VERIFIED";
     if (mode === "start" && (initial.phase !== "SOURCE_FENCED" || initial.pending)
-      || mode === "resume" && !continuingRuntimeAccess
+      || mode === "resume" && !continuingPendingVerification
         && (initial.pending || !["CAPTURED", "RESTORED"].includes(initial.phase))) fail("TRANSFER_RECONCILIATION_REQUIRED");
     await check();
     if (mode === "reconcile" && initial.phase === "VERIFIED" && !initial.pending) {
@@ -204,7 +204,7 @@ async function transfer(options, mode) {
     }
     const objectOptions = { limits: plan.transfer.objects.limits,
       assertSourceFenced: async () => { await assertSourceFenced(); await assertTargetInactive(); } };
-    let copied, snapshot, intent, phase, prefix;
+    let copied, snapshot, intent, phase, prefix, prePromotionResume = false;
     const guard = async () => {
       await check();
       if (phase && (custody.snapshot().pending?.operationId !== phase.operationId
@@ -264,7 +264,12 @@ async function transfer(options, mode) {
         || proof.restoreIntentSha256 !== restore.intentSha256 || proof.scratchOid !== copied.scratchOid
         || proof.archiveManifestSha256 !== copied.archive.sha256 || !same(proof.evidence, copied.evidence)
         || !same(proof.parity, copied.parity)) fail("TRANSFER_RESTORE_LINEAGE_CHANGED");
-      if (!same(await read("promotion-intent"), postgresPromotionDurableRecord(intent))) fail("TRANSFER_PROMOTION_INTENT_MISSING");
+      await guard();
+      const promotionText = await operationStore.readOptional(`${prefix}promotion-intent.json`, custody.signal);
+      await guard();
+      if (promotionText === null) prePromotionResume = true;
+      else if (!same(JSON.parse(promotionText), postgresPromotionDurableRecord(intent))) fail("TRANSFER_PROMOTION_INTENT_MISSING");
+      if (mode === "resume" && !prePromotionResume && !config.runtimeAccess) fail("TRANSFER_RECONCILIATION_REQUIRED");
     } else {
       copied = mode === "start" ? await runOpsCorePostgresCopy(copyOptions(options, context))
         : initial.phase === "CAPTURED" ? await resumeOpsCorePostgresCopy(copyOptions(options, context))
@@ -280,6 +285,15 @@ async function transfer(options, mode) {
     }
     client = new pg.Client(nodeClientConfig(options.targetAdminConfig, `corgtex_${plan.domain}_promotion`));
     await client.connect(); await guard();
+    if (prePromotionResume) {
+      // The retained plan precedes object writes. No promotion SQL is allowed
+      // until the original scratch OID is still present and the destination
+      // name is absent. Reconciliation only reports the required continuation.
+      const prepared = await reconcilePostgresPromotion({ client, intent });
+      if (prepared.status !== "PREPARED" || prepared.connectionCount !== 0) fail("TRANSFER_PROMOTION_INTENT_MISSING");
+      if (mode === "reconcile") return { status: "INCOMPLETE", complete: false,
+        code: "OBJECT_COPY_RESUME_REQUIRED", nextAction: "resume-transfer" };
+    }
     if (!reconcilingVerification) {
       const found = await client.query("SELECT oid::text AS oid FROM pg_database WHERE datname=$1", [copied.scratchName]);
       if (found.rows.length !== 1 || found.rows[0].oid !== copied.scratchOid) fail("TRANSFER_SCRATCH_IDENTITY_UNPROVEN");
@@ -302,12 +316,20 @@ async function transfer(options, mode) {
       await retain("phase-plan", phasePlan); await retain(`phase-evidence-${snapshotHash}`, snapshotEvidence);
     }
     const objects = reconcilingVerification
-      ? await verifyOpsCoreObjects(options.objectSource, options.objectTarget, snapshot, objectOptions)
+      ? prePromotionResume
+        ? await copyOpsCoreObjects(options.objectSource, options.objectTarget, snapshot,
+          `ops-core-${plan.domain}-${initial.intentSha256.slice(0, 32)}`, objectOptions)
+        : await verifyOpsCoreObjects(options.objectSource, options.objectTarget, snapshot, objectOptions)
       : await copyOpsCoreObjects(options.objectSource, options.objectTarget, snapshot,
         `ops-core-${plan.domain}-${initial.intentSha256.slice(0, 32)}`, objectOptions);
     let promotion, parity = copied.parity, parityEvidence = copied.evidence;
     if (reconcilingVerification) {
       await assertSourceFenced(); await assertTargetInactive();
+      if (prePromotionResume) {
+        const promotionCustody = await openPostgresPromotionCustody({ custody, store: operationStore,
+          stateFile: copied.stateFile, intent, assertSourceFenced, assertTargetInactive });
+        await promotionCustody.recordResult(await applyPostgresPromotion({ client, intent, ...promotionCustody }));
+      }
       const promoted = await reconcilePostgresPromotion({ client, intent });
       if (promoted.status !== "PROMOTED" || promoted.connectionCount !== 0) fail("TRANSFER_PROMOTION_UNPROVEN");
       // These read-only observations export snapshots and compare full rows,
