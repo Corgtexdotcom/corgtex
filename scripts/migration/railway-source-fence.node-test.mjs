@@ -355,6 +355,20 @@ test("fresh final inventory detects a deployment added during stop", async () =>
   assert.ok(result.evidence.blockers.includes("ACTIVE_DEPLOYMENTS_PRESENT"));
 });
 
+test("accepts stopped deployments retained in Railways active collection but rejects a live instance", async () => {
+  const f = await fixture(); makeFenced(f.state);
+  f.state.includeCompletedScheduled = true;
+  f.state.deployments[id(4)][0].status = "CRASHED";
+  f.state.deployments[id(4)][0].instances = [{ id: id(121), status: "CRASHED" }];
+  const settled = await f.adapter.assertFenced();
+  assert.equal(settled.complete, true);
+  assert.equal(settled.evidence.services[0].activeDeployments.length, 1);
+  f.state.deployments[id(3)][0].instances = [{ id: id(120), status: "RUNNING" }];
+  const live = await f.adapter.assertFenced();
+  assert.equal(live.complete, false);
+  assert.ok(live.evidence.blockers.includes("ACTIVE_DEPLOYMENTS_PRESENT"));
+});
+
 test("provider acceptance requires stopped flag, no live instances, no pending queue and no environment work", async () => {
   const f = await fixture(); makeFenced(f.state);
   for (const mutate of [
