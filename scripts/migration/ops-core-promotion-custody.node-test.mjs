@@ -80,7 +80,9 @@ test("independent intent precedes marker, survives reopening and retains stable 
 
 test("ownerless reconciliation marker remains promotable, but a different owner does not", async t => {
   const f = await fixture(t);
-  const { scratchOwner, ...reconciledMarker } = f.original;
+  assert.equal(f.original.scratchOwner, f.intent.expectedConnection.user);
+  const reconciledMarker = { ...f.original };
+  delete reconciledMarker.scratchOwner;
   await writeFile(f.stateFile, JSON.stringify(reconciledMarker), { mode: 0o600 });
   const adapter = await f.openAdapter();
   assert.equal(await adapter.readOperationIntent(), null);
