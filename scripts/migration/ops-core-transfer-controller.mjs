@@ -162,12 +162,12 @@ async function transfer(options, mode) {
     const check = async () => { await originalCheck(); if (maintenance) await maintenance.assertHeld(); };
     let { assertSourceFenced, assertTargetInactive } = context;
     const initial = custody.snapshot(), config = plan.transfer.postgres;
-    const continuingRuntimeAccess = mode === "resume" && config.runtimeAccess
+    const continuingPendingVerification = mode === "resume"
       && initial.phase === "RESTORED" && initial.pending?.to === "VERIFIED";
-    const reconcilingVerification = (mode === "reconcile" || continuingRuntimeAccess)
+    const reconcilingVerification = (mode === "reconcile" || continuingPendingVerification)
       && initial.phase === "RESTORED" && initial.pending?.to === "VERIFIED";
     if (mode === "start" && (initial.phase !== "SOURCE_FENCED" || initial.pending)
-      || mode === "resume" && !continuingRuntimeAccess
+      || mode === "resume" && !continuingPendingVerification
         && (initial.pending || !["CAPTURED", "RESTORED"].includes(initial.phase))) fail("TRANSFER_RECONCILIATION_REQUIRED");
     await check();
     if (mode === "reconcile" && initial.phase === "VERIFIED" && !initial.pending) {
@@ -269,6 +269,7 @@ async function transfer(options, mode) {
       await guard();
       if (promotionText === null) prePromotionResume = true;
       else if (!same(JSON.parse(promotionText), postgresPromotionDurableRecord(intent))) fail("TRANSFER_PROMOTION_INTENT_MISSING");
+      if (mode === "resume" && !prePromotionResume && !config.runtimeAccess) fail("TRANSFER_RECONCILIATION_REQUIRED");
     } else {
       copied = mode === "start" ? await runOpsCorePostgresCopy(copyOptions(options, context))
         : initial.phase === "CAPTURED" ? await resumeOpsCorePostgresCopy(copyOptions(options, context))
