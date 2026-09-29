@@ -963,11 +963,11 @@ describe("communication Slack integration", () => {
     }));
   });
 
-  it("persists an unmatched human STOP reply against its Slack thread", async () => {
+  it.each(["Stop. Do nothing", "ack"])("persists an unmatched human '%s' reply against its Slack thread", async (text) => {
     const { processSlackInboundEvent } = await import("./communication");
     prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
       id: "inbound-stop", provider: "SLACK",
-      payload: { event: { type: "message", channel: "C1", channel_type: "channel", user: "U-unmatched", ts: "1788896184.791699", thread_ts: "1788205758.060039", text: "Stop. Do nothing" } },
+      payload: { event: { type: "message", channel: "C1", channel_type: "channel", user: "U-unmatched", ts: "1788896184.791699", thread_ts: "1788205758.060039", text } },
       installation: { id: "install-1", workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE", settings: {} },
     });
     prismaMock.communicationChannel.upsert.mockResolvedValueOnce({ id: "channel-1", kind: "PUBLIC", isIngestEnabled: true });

@@ -19,11 +19,11 @@ describe("Slack follow-up suppression", () => {
     prismaMock.communicationMessage.findMany.mockResolvedValue([]);
   });
 
-  it.each(["Stop. Do nothing", "STOP ALL FOLLOW UP", "Ignore", "ignore this Corgtex", "solved", "delete it", "working on it <@UBOT>", "it's already being tracked on our action item list. please stop the reminders"])("recognizes a thread-level human stop: %s", (text) => {
+  it.each(["Stop. Do nothing", "STOP ALL FOLLOW UP", "Ignore", "ignore this Corgtex", "solved", "delete it", "working on it <@UBOT>", "it's already being tracked on our action item list. please stop the reminders", "ack", "acknowledged", "got it!", "thanks <@UBOT>", "thank you."])("recognizes a thread-level human stop: %s", (text) => {
     expect(slackFollowupStopIntent(text)).toBe(true);
   });
 
-  it.each(["FYI, should we discuss this?", "Please review this proposal", "Do not stop the migration", "Ignore the spelling mistake in this draft"])("does not treat ordinary discussion as a stop: %s", (text) => {
+  it.each(["FYI, should we discuss this?", "Please review this proposal", "Do not stop the migration", "Ignore the spelling mistake in this draft", "Thanks, can you send the file?", "Got it, but keep reminding me"])("does not treat ordinary discussion as a stop: %s", (text) => {
     expect(slackFollowupStopIntent(text)).toBe(false);
   });
 
@@ -41,5 +41,20 @@ describe("Slack follow-up suppression", () => {
     await expect(isSlackThreadFollowupSuppressed(scope)).resolves.toBe(true);
     expect(prismaMock.communicationMessage.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ workspaceId: "workspace-1", installationId: "install-1", externalChannelId: "C1", OR: [{ externalMessageId: scope.threadTs }, { threadExternalId: scope.threadTs }] }) }));
     expect(prismaMock.communicationEntityLink.upsert).toHaveBeenCalledTimes(1);
+  });
+
+  it("finds a historical stop beyond the newest 100 replies", async () => {
+    const newest = Array.from({ length: 100 }, (_, index) => ({ id: `reply-${index}`, externalUserId: "U-member", text: "An ordinary update" }));
+    prismaMock.communicationMessage.findMany
+      .mockResolvedValueOnce(newest)
+      .mockResolvedValueOnce([{ id: "older-stop", externalUserId: "U-unmatched", text: "ack" }]);
+    await expect(isSlackThreadFollowupSuppressed(scope)).resolves.toBe(true);
+    expect(prismaMock.communicationMessage.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      cursor: { id: "reply-99" },
+      skip: 1,
+    }));
+    expect(prismaMock.communicationEntityLink.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ messageId: "older-stop", externalUserId: "U-unmatched" }),
+    }));
   });
 });

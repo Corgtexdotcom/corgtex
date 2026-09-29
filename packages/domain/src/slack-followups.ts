@@ -13,6 +13,7 @@ export function slackSourceUrl(channelId: string, threadTs: string) {
 export function slackFollowupStopIntent(text: string) {
   const normalized = text.replace(/<@[^>]+>/g, " ").trim();
   if (normalized.length > 240) return false;
+  if (/^(?:ack|acknowledged|got it|thanks|thank you)\s*[.!?]*$/i.test(normalized)) return true;
   return /\b(?:stop\s+(?:all\s+)?(?:the\s+)?(?:follow[ -]?ups?|reminders?|nudges?)|please\s+stop\s+(?:the\s+)?reminders?|stop[.!\s]+do\s+nothing|ignore\s+(?:this\s+)?corgtex|(?:^|[.!?]\s*)ignore\s*[.!?]*$|(?:^|[.!?]\s*)solved\s*[.!?]*$|(?:^|[.!?]\s*)delete\s+it\s*[.!?]*$|(?:^|[.!?]\s*)working\s+on\s+it\b|already\s+being\s+tracked\b)/i.test(normalized);
 }
 
@@ -64,25 +65,32 @@ export async function isSlackThreadFollowupSuppressed(params: {
 
   // Reconcile commands sent before this marker was introduced, including users
   // whose Slack identity was never matched to a Corgtex member.
-  const messages = await prisma.communicationMessage.findMany({
-    where: {
-      workspaceId: params.workspaceId,
-      installationId: params.installationId,
-      provider: "SLACK",
-      externalChannelId: params.channelId,
-      text: { not: null },
-      textRedactedAt: null,
-      isBot: false,
-      isHidden: false,
-      isDeleted: false,
-      OR: [{ externalMessageId: params.threadTs }, { threadExternalId: params.threadTs }],
-    },
-    orderBy: { messageTs: "desc" },
-    take: 100,
-    select: { id: true, externalUserId: true, text: true },
-  });
-  const stop = messages.find((message) => slackFollowupStopIntent(message.text ?? ""));
-  if (!stop) return false;
-  await suppressSlackThreadFollowups({ ...params, messageId: stop.id, externalUserId: stop.externalUserId });
-  return true;
+  let cursor: string | undefined;
+  while (true) {
+    const messages = await prisma.communicationMessage.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        installationId: params.installationId,
+        provider: "SLACK",
+        externalChannelId: params.channelId,
+        text: { not: null },
+        textRedactedAt: null,
+        isBot: false,
+        isHidden: false,
+        isDeleted: false,
+        OR: [{ externalMessageId: params.threadTs }, { threadExternalId: params.threadTs }],
+      },
+      orderBy: [{ messageTs: "desc" }, { id: "desc" }],
+      take: 100,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      select: { id: true, externalUserId: true, text: true },
+    });
+    const stop = messages.find((message) => slackFollowupStopIntent(message.text ?? ""));
+    if (stop) {
+      await suppressSlackThreadFollowups({ ...params, messageId: stop.id, externalUserId: stop.externalUserId });
+      return true;
+    }
+    if (messages.length < 100) return false;
+    cursor = messages[messages.length - 1].id;
+  }
 }
