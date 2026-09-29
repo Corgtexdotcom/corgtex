@@ -244,7 +244,7 @@ export async function runSlackContextSummary(params: {
 }
 
 function looksUnanswered(text: string) {
-  if (/^\s*(?:fyi|for your information|heads[ -]?up)\b/i.test(text) || slackFollowupStopIntent(text)) return false;
+  if (/^\s*(?:(?:quick|just)\s+)?(?:fyi|for your information|heads[ -]?up)\b/i.test(text) || slackFollowupStopIntent(text)) return false;
   return /\?/.test(text) || /\b(can someone|anyone|please|could someone|does anyone|who can|need help)\b/i.test(text);
 }
 
@@ -637,16 +637,19 @@ export async function runSlackProactiveScan(params: {
   for (const candidate of candidates.filter((message) => looksUnanswered(message.text ?? "") && !isAddressedToSlackBot(message.text ?? "", installation.botUserId)).slice(0, 10)) {
     const threadTs = threadTsForMessage(candidate);
     if (await isSlackThreadFollowupSuppressed({ workspaceId: params.workspaceId, installationId: params.installationId, channelId: candidate.externalChannelId, threadTs })) continue;
-    const alreadyNudged = await prisma.communicationEntityLink.findFirst({
+    const alreadyHandled = await prisma.communicationEntityLink.findFirst({
       where: {
         workspaceId: params.workspaceId,
         installationId: params.installationId,
         messageId: candidate.id,
-        action: "proactive_unanswered_nudge",
+        OR: [
+          { action: { in: ["proactive_unanswered_nudge", "proactive_unanswered_resolved", PROACTIVE_NON_ACTION] } },
+          { entityType: "Action" },
+        ],
       },
       select: { id: true },
     });
-    if (alreadyNudged) continue;
+    if (alreadyHandled) continue;
 
     const replies = await prisma.communicationMessage.count({
       where: {

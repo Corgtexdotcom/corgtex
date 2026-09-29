@@ -382,9 +382,26 @@ describe("Slack context jobs", () => {
   });
 
   it("does not treat an FYI with a question as unanswered work", async () => {
-    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([candidate({ text: "FYI, should we share these public slides?" })]);
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([candidate({ text: "Quick FYI: should we share these public slides?", messageTs: new Date("2026-04-28T15:30:00.000Z") })]);
     const { runSlackProactiveScan } = await import("./slack-context");
     await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("does not nudge a thread already linked to an action or resolved disposition", async () => {
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([candidate({ text: "Can someone own this?", messageTs: new Date("2026-04-28T15:30:00.000Z") })]);
+    prismaMock.communicationEntityLink.findFirst.mockResolvedValueOnce({ id: "completed-action-link" });
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+    expect(prismaMock.communicationEntityLink.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        messageId: "message-1",
+        OR: expect.arrayContaining([
+          { entityType: "Action" },
+          { action: { in: ["proactive_unanswered_nudge", "proactive_unanswered_resolved", "proactive_unanswered_non_action"] } },
+        ]),
+      }),
+    }));
     expect(sendSlackMessageMock).not.toHaveBeenCalled();
   });
 
