@@ -234,6 +234,32 @@ export default async function WorkspaceDashboard({
       },
     ],
   } satisfies Prisma.TensionWhereInput;
+  const memberCircleAssignments = currentMember?.id
+    ? await prisma.roleAssignment.findMany({
+      where: {
+        memberId: currentMember.id,
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+        role: {
+          archivedAt: null,
+          circle: { workspaceId, archivedAt: null },
+        },
+      },
+      select: { role: { select: { circleId: true } } },
+    })
+    : [];
+  const memberCircleIds = memberCircleAssignments.map((assignment) => assignment.role.circleId);
+  const personalAdviceRequestWhere = currentMember?.id
+    ? {
+      workspaceId,
+      status: "ACTIVE" as const,
+      OR: [
+        { audienceType: "MEMBERS" as const, recipients: { some: { memberId: currentMember.id } } },
+        ...(memberCircleIds.length > 0
+          ? [{ audienceType: "CIRCLE" as const, targetCircleId: { in: memberCircleIds } }]
+          : []),
+      ],
+    } satisfies Prisma.AdviceRequestWhereInput
+    : null;
   const personalProposalConditions: Prisma.ProposalWhereInput[] = currentMember?.id
     ? [
       { ownerMemberId: currentMember.id },
@@ -242,11 +268,7 @@ export default async function WorkspaceDashboard({
           is: {
             requests: {
               some: {
-                workspaceId,
-                status: "ACTIVE",
-                recipients: {
-                  some: { memberId: currentMember.id },
-                },
+                ...personalAdviceRequestWhere,
               },
             },
           },
@@ -426,7 +448,22 @@ export default async function WorkspaceDashboard({
     }),
     prisma.proposal.findMany({
       where: visiblePersonalOpenProposalWhere ?? { id: "__no_current_member__" },
-      select: { id: true, title: true, status: true, priority: true, ownerMemberId: true, updatedAt: true },
+      select: {
+        id: true,
+        title: true,
+        status: true,
+        priority: true,
+        ownerMemberId: true,
+        updatedAt: true,
+        adviceProcess: {
+          select: {
+            requests: {
+              where: personalAdviceRequestWhere ?? { id: "__no_current_member__" },
+              select: { deadlineAt: true },
+            },
+          },
+        },
+      },
       orderBy: [{ priority: "desc" }, { updatedAt: "desc" }],
     }),
     prisma.tension.findMany({
@@ -456,13 +493,17 @@ export default async function WorkspaceDashboard({
       reason: "assigned" as const,
       href: `/workspaces/${workspaceId}/actions/${action.id}`,
     })),
-    ...personalProposals.map((proposal) => ({
-      ...proposal,
-      kind: "PROPOSAL" as const,
-      reason: proposal.ownerMemberId === currentMember?.id ? "owner" as const : "advice" as const,
-      dueAt: null,
-      href: `/workspaces/${workspaceId}/proposals/${proposal.id}`,
-    })),
+    ...personalProposals.map((proposal) => {
+      const adviceDeadlines = proposal.adviceProcess?.requests
+        .flatMap((request) => request.deadlineAt ? [request.deadlineAt] : []) ?? [];
+      return {
+        ...proposal,
+        kind: "PROPOSAL" as const,
+        reason: proposal.ownerMemberId === currentMember?.id ? "owner" as const : "advice" as const,
+        dueAt: adviceDeadlines.sort((left, right) => left.getTime() - right.getTime())[0] ?? null,
+        href: `/workspaces/${workspaceId}/proposals/${proposal.id}`,
+      };
+    }),
     ...personalTensions.map((tension) => ({
       ...tension,
       kind: "TENSION" as const,
@@ -624,7 +665,7 @@ export default async function WorkspaceDashboard({
               <h2 id="personal-newspaper-title">{t("personalNewspaperTitle")}</h2>
               <p>{t("personalNewspaperSourceNote")}</p>
             </div>
-            <Link href={`/workspaces/${workspaceId}/actions?scope=assigned`}>
+            <Link href={`/workspaces/${workspaceId}/actions?scope=assigned&status=OPEN&status=IN_PROGRESS`}>
               {t("viewAllActions")}
             </Link>
           </div>
@@ -639,7 +680,7 @@ export default async function WorkspaceDashboard({
                     {item.reason === "advice" ? t("personalReasonAdvice") : item.reason === "owner" ? t("personalReasonOwner") : t("personalReasonAssigned")}
                     {" · "}
                     {item.status === "IN_PROGRESS" ? t("personalStatusInProgress") : t("personalStatusOpen")}
-                    {item.dueAt ? ` · ${t("dueDate", { date: format.dateTime(item.dueAt, { month: "short", day: "numeric" }) })}` : ""}
+                    {item.dueAt ? ` · ${t("dueDate", { date: format.dateTime(item.dueAt, { timeZone: "UTC", month: "short", day: "numeric" }) })}` : ""}
                   </span>
                 </li>
               ))}

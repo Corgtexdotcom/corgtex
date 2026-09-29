@@ -42,4 +42,15 @@ describe("personal newspaper priority", () => {
       "high", "a", "z",
     ]);
   });
+
+  it("treats a date-only action due today as due today rather than overdue", () => {
+    const items = [
+      item("today-high-priority", { dueAt: new Date("2026-09-29T00:00:00.000Z"), priority: 3 }),
+      item("yesterday", { dueAt: new Date("2026-09-28T00:00:00.000Z"), priority: 0 }),
+    ];
+
+    expect(rankPersonalNewspaperItems(items, now).map((entry) => entry.id)).toEqual([
+      "yesterday", "today-high-priority",
+    ]);
+  });
 });

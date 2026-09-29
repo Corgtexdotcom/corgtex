@@ -12,9 +12,11 @@ export type PersonalNewspaperItem = {
 
 export function rankPersonalNewspaperItems<T extends PersonalNewspaperItem>(items: T[], now: Date): T[] {
   const urgency = (item: T) => {
-    const daysUntilDue = item.dueAt
-      ? (item.dueAt.getTime() - now.getTime()) / 86_400_000
+    const dueDay = item.dueAt
+      ? Date.UTC(item.dueAt.getUTCFullYear(), item.dueAt.getUTCMonth(), item.dueAt.getUTCDate())
       : null;
+    const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+    const daysUntilDue = dueDay === null ? null : (dueDay - today) / 86_400_000;
     if (daysUntilDue !== null && daysUntilDue < 0) return 3;
     if (daysUntilDue !== null && daysUntilDue <= 2) return 2;
     if (daysUntilDue !== null && daysUntilDue <= 7) return 1;
