@@ -26,6 +26,17 @@ const buildReleaseSha = releaseGitSha();
 const nextConfig: NextConfig = {
   outputFileTracingRoot: path.join(process.cwd(), "../.."),
   experimental: { serverActions: { bodySizeLimit: "6mb" } },
+  webpack(config, { isServer }) {
+    if (!isServer) {
+      if (!config.module?.rules) throw new Error("Next client webpack rules are unavailable.");
+      config.module.rules.push({
+        enforce: "pre",
+        test: /[/\\]next[/\\]dist[/\\](?:esm[/\\])?client[/\\]app-index\.js$/,
+        use: [path.join(process.cwd(), "../..", "scripts/webpack/next-hydration-barrier-loader.cjs")],
+      });
+    }
+    return config;
+  },
   ...(buildReleaseSha ? {
     deploymentId: buildReleaseSha,
     generateBuildId: () => buildReleaseSha,
