@@ -53,4 +53,15 @@ describe("personal newspaper priority", () => {
       "yesterday", "today-high-priority",
     ]);
   });
+
+  it("treats a timed advice deadline earlier today as overdue", () => {
+    const items = [
+      item("due-later", { kind: "ADVICE", priority: 3, dueAt: new Date("2026-09-29T18:00:00.000Z") }),
+      item("timed-overdue", { kind: "ADVICE", dueAt: new Date("2026-09-29T08:00:00.000Z") }),
+    ];
+
+    expect(rankPersonalNewspaperItems(items, now).map((entry) => entry.id)).toEqual([
+      "timed-overdue", "due-later",
+    ]);
+  });
 });

@@ -25,6 +25,10 @@ function isExternalHref(href: string) {
   return href.startsWith("http://") || href.startsWith("https://");
 }
 
+function utcDueDay(date: Date) {
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+}
+
 function compactNarrativeText(markdown: string | null | undefined, maxLength = 520) {
   if (!markdown?.trim()) return null;
   const text = markdownToPlainText(markdown, 2000)
@@ -248,32 +252,52 @@ export default async function WorkspaceDashboard({
     })
     : [];
   const memberCircleIds = memberCircleAssignments.map((assignment) => assignment.role.circleId);
-  const personalAdviceRequestWhere = currentMember?.id
+  const personalAdviceRequests = actor.kind === "user" && currentMember?.id
+    ? await prisma.adviceRequest.findMany({
+      where: {
+        workspaceId,
+        status: "ACTIVE",
+        requestedByUserId: { not: actor.user.id },
+        OR: [
+          { audienceType: "MEMBERS", recipients: { some: { memberId: currentMember.id } } },
+          { audienceType: "WORKSPACE" },
+          ...(memberCircleIds.length > 0
+            ? [{ audienceType: "CIRCLE" as const, targetCircleId: { in: memberCircleIds } }]
+            : []),
+        ],
+      },
+      select: {
+        deadlineAt: true,
+        process: { select: { subjectType: true, subjectId: true } },
+      },
+    })
+    : [];
+  const adviceDeadlinesByKind = {
+    ACTION: new Map<string, Date | null>(),
+    PROPOSAL: new Map<string, Date | null>(),
+    TENSION: new Map<string, Date | null>(),
+  };
+  for (const request of personalAdviceRequests) {
+    const kind = request.process.subjectType;
+    if (kind !== "ACTION" && kind !== "PROPOSAL" && kind !== "TENSION") continue;
+    const deadlines = adviceDeadlinesByKind[kind];
+    const previous = deadlines.get(request.process.subjectId);
+    if (previous === undefined || (request.deadlineAt && (!previous || request.deadlineAt < previous))) {
+      deadlines.set(request.process.subjectId, request.deadlineAt);
+    }
+  }
+  const visiblePersonalOpenActionWhere = currentMember?.id
     ? {
-      workspaceId,
-      status: "ACTIVE" as const,
-      OR: [
-        { audienceType: "MEMBERS" as const, recipients: { some: { memberId: currentMember.id } } },
-        ...(memberCircleIds.length > 0
-          ? [{ audienceType: "CIRCLE" as const, targetCircleId: { in: memberCircleIds } }]
-          : []),
+      AND: [
+        visibleOpenActionWhere,
+        { OR: [{ assigneeMemberId: currentMember.id }, { id: { in: [...adviceDeadlinesByKind.ACTION.keys()] } }] },
       ],
-    } satisfies Prisma.AdviceRequestWhereInput
+    } satisfies Prisma.ActionWhereInput
     : null;
   const personalProposalConditions: Prisma.ProposalWhereInput[] = currentMember?.id
     ? [
       { ownerMemberId: currentMember.id },
-      {
-        adviceProcess: {
-          is: {
-            requests: {
-              some: {
-                ...personalAdviceRequestWhere,
-              },
-            },
-          },
-        },
-      },
+      { id: { in: [...adviceDeadlinesByKind.PROPOSAL.keys()] } },
     ]
     : [];
   const visiblePersonalOpenProposalWhere = currentMember?.id
@@ -283,6 +307,14 @@ export default async function WorkspaceDashboard({
         { OR: personalProposalConditions },
       ],
     } satisfies Prisma.ProposalWhereInput
+    : null;
+  const visiblePersonalOpenTensionWhere = currentMember?.id
+    ? {
+      AND: [
+        visibleOpenTensionWhere,
+        { OR: [{ assigneeMemberId: currentMember.id }, { id: { in: [...adviceDeadlinesByKind.TENSION.keys()] } }] },
+      ],
+    } satisfies Prisma.TensionWhereInput
     : null;
   const [
     unreadNotificationsCount,
@@ -428,22 +460,20 @@ export default async function WorkspaceDashboard({
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true, name: true } }),
     prisma.member.count({ where: { workspaceId, isActive: true } }),
     prisma.action.count({ where: visibleOpenActionWhere }),
-    currentMember?.id
-      ? prisma.action.count({ where: { AND: [visibleOpenActionWhere, { assigneeMemberId: currentMember.id }] } })
+    visiblePersonalOpenActionWhere
+      ? prisma.action.count({ where: visiblePersonalOpenActionWhere })
       : prisma.action.count({ where: { id: "__no_current_member__" } }),
     prisma.proposal.count({ where: visibleOpenProposalWhere }),
     visiblePersonalOpenProposalWhere
       ? prisma.proposal.count({ where: visiblePersonalOpenProposalWhere })
       : prisma.proposal.count({ where: { id: "__no_current_member__" } }),
     prisma.tension.count({ where: visibleOpenTensionWhere }),
-    currentMember?.id
-      ? prisma.tension.count({ where: { AND: [visibleOpenTensionWhere, { assigneeMemberId: currentMember.id }] } })
+    visiblePersonalOpenTensionWhere
+      ? prisma.tension.count({ where: visiblePersonalOpenTensionWhere })
       : prisma.tension.count({ where: { id: "__no_current_member__" } }),
     prisma.action.findMany({
-      where: currentMember?.id
-        ? { AND: [visibleOpenActionWhere, { assigneeMemberId: currentMember.id }] }
-        : { id: "__no_current_member__" },
-      select: { id: true, title: true, status: true, priority: true, dueAt: true, updatedAt: true },
+      where: visiblePersonalOpenActionWhere ?? { id: "__no_current_member__" },
+      select: { id: true, title: true, status: true, priority: true, assigneeMemberId: true, dueAt: true, updatedAt: true },
       orderBy: [{ priority: "desc" }, { dueAt: "asc" }, { updatedAt: "desc" }],
     }),
     prisma.proposal.findMany({
@@ -455,22 +485,12 @@ export default async function WorkspaceDashboard({
         priority: true,
         ownerMemberId: true,
         updatedAt: true,
-        adviceProcess: {
-          select: {
-            requests: {
-              where: personalAdviceRequestWhere ?? { id: "__no_current_member__" },
-              select: { deadlineAt: true },
-            },
-          },
-        },
       },
       orderBy: [{ priority: "desc" }, { updatedAt: "desc" }],
     }),
     prisma.tension.findMany({
-      where: currentMember?.id
-        ? { AND: [visibleOpenTensionWhere, { assigneeMemberId: currentMember.id }] }
-        : { id: "__no_current_member__" },
-      select: { id: true, title: true, status: true, priority: true, updatedAt: true },
+      where: visiblePersonalOpenTensionWhere ?? { id: "__no_current_member__" },
+      select: { id: true, title: true, status: true, priority: true, assigneeMemberId: true, updatedAt: true },
       orderBy: [{ priority: "desc" }, { updatedAt: "desc" }],
     }),
   ]);
@@ -487,28 +507,33 @@ export default async function WorkspaceDashboard({
     tensionTotalCount,
   });
   const personalItems: PersonalNewspaperItem[] = rankPersonalNewspaperItems([
-    ...personalActions.map((action) => ({
-      ...action,
-      kind: "ACTION" as const,
-      reason: "assigned" as const,
-      href: `/workspaces/${workspaceId}/actions/${action.id}`,
-    })),
-    ...personalProposals.map((proposal) => {
-      const adviceDeadlines = proposal.adviceProcess?.requests
-        .flatMap((request) => request.deadlineAt ? [request.deadlineAt] : []) ?? [];
+    ...personalActions.map((action) => {
+      const adviceDeadline = adviceDeadlinesByKind.ACTION.get(action.id) ?? null;
+      const useAdviceDeadline = adviceDeadline
+        && (!action.dueAt || utcDueDay(adviceDeadline) <= utcDueDay(action.dueAt));
       return {
-        ...proposal,
-        kind: "PROPOSAL" as const,
-        reason: proposal.ownerMemberId === currentMember?.id ? "owner" as const : "advice" as const,
-        dueAt: adviceDeadlines.sort((left, right) => left.getTime() - right.getTime())[0] ?? null,
-        href: `/workspaces/${workspaceId}/proposals/${proposal.id}`,
+        ...action,
+        kind: "ACTION" as const,
+        reason: action.assigneeMemberId === currentMember?.id ? "assigned" as const : "advice" as const,
+        dueAt: useAdviceDeadline ? adviceDeadline : action.dueAt,
+        dueAtKind: useAdviceDeadline ? "DATETIME" as const : "DATE" as const,
+        href: `/workspaces/${workspaceId}/actions/${action.id}`,
       };
     }),
+    ...personalProposals.map((proposal) => ({
+      ...proposal,
+      kind: "PROPOSAL" as const,
+      reason: proposal.ownerMemberId === currentMember?.id ? "owner" as const : "advice" as const,
+      dueAt: adviceDeadlinesByKind.PROPOSAL.get(proposal.id) ?? null,
+      dueAtKind: "DATETIME" as const,
+      href: `/workspaces/${workspaceId}/proposals/${proposal.id}`,
+    })),
     ...personalTensions.map((tension) => ({
       ...tension,
       kind: "TENSION" as const,
-      reason: "assigned" as const,
-      dueAt: null,
+      reason: tension.assigneeMemberId === currentMember?.id ? "assigned" as const : "advice" as const,
+      dueAt: adviceDeadlinesByKind.TENSION.get(tension.id) ?? null,
+      dueAtKind: "DATETIME" as const,
       href: `/workspaces/${workspaceId}/tensions/${tension.id}`,
     })),
   ], new Date());
@@ -665,7 +690,7 @@ export default async function WorkspaceDashboard({
               <h2 id="personal-newspaper-title">{t("personalNewspaperTitle")}</h2>
               <p>{t("personalNewspaperSourceNote")}</p>
             </div>
-            <Link href={`/workspaces/${workspaceId}/actions?scope=assigned&status=OPEN&status=IN_PROGRESS`}>
+            <Link href={`/workspaces/${workspaceId}/actions?status=OPEN&status=IN_PROGRESS`}>
               {t("viewAllActions")}
             </Link>
           </div>
@@ -680,7 +705,9 @@ export default async function WorkspaceDashboard({
                     {item.reason === "advice" ? t("personalReasonAdvice") : item.reason === "owner" ? t("personalReasonOwner") : t("personalReasonAssigned")}
                     {" · "}
                     {item.status === "IN_PROGRESS" ? t("personalStatusInProgress") : t("personalStatusOpen")}
-                    {item.dueAt ? ` · ${t("dueDate", { date: format.dateTime(item.dueAt, { timeZone: "UTC", month: "short", day: "numeric" }) })}` : ""}
+                    {item.dueAt ? ` · ${t("dueDate", { date: format.dateTime(item.dueAt, item.dueAtKind === "DATE"
+                      ? { timeZone: "UTC", month: "short", day: "numeric" }
+                      : { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) })}` : ""}
                   </span>
                 </li>
               ))}

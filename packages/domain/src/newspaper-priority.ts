@@ -7,11 +7,21 @@ export type PersonalNewspaperItem = {
   reason?: "assigned" | "owner" | "advice";
   priority: number;
   dueAt: Date | null;
+  dueAtKind?: "DATE" | "DATETIME";
   updatedAt: Date;
 };
 
 export function rankPersonalNewspaperItems<T extends PersonalNewspaperItem>(items: T[], now: Date): T[] {
   const urgency = (item: T) => {
+    if (!item.dueAt) return 0;
+    const dateOnly = item.dueAtKind === "DATE" || (!item.dueAtKind && item.kind === "ACTION");
+    if (!dateOnly) {
+      const daysUntilDue = (item.dueAt.getTime() - now.getTime()) / 86_400_000;
+      if (daysUntilDue < 0) return 3;
+      if (daysUntilDue <= 2) return 2;
+      if (daysUntilDue <= 7) return 1;
+      return 0;
+    }
     const dueDay = item.dueAt
       ? Date.UTC(item.dueAt.getUTCFullYear(), item.dueAt.getUTCMonth(), item.dueAt.getUTCDate())
       : null;
