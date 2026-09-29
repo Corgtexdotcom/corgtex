@@ -92,6 +92,18 @@ describe("newspaper email rendering", () => {
     })).toContain("Requests Awaiting Your Input");
   });
 
+  it("keeps ranked recipient items ahead of model requests when the section is capped", () => {
+    const digest = normalizeNewspaperDigestPayload({
+      adviceRequests: Array.from({ length: 6 }, (_, index) => `General request ${index}`),
+    });
+    const personalizedDigest = withNewspaperAdviceRequests(digest, [
+      "Assigned action: Resolve urgent blocker\nDue: 2026-04-29",
+    ]);
+
+    expect(personalizedDigest.sections[0]?.items[0]).toContain("Resolve urgent blocker");
+    expect(personalizedDigest.sections[0]?.items).toContain("General request 0");
+  });
+
   it("normalizes advice request aliases from structured payloads", () => {
     const digest = normalizeNewspaperDigestPayload({
       requestsAwaitingInput: ["Advice request: Proposal - Approve pricing."],
