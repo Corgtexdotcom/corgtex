@@ -86,7 +86,7 @@ vi.mock("@corgtex/domain", () => ({
   isAgentEnabled: isAgentEnabledMock,
   isSlackThreadFollowupSuppressed: isSlackThreadFollowupSuppressedMock,
   slackFollowupStopIntent: (text: string) => /^(?:ignore|solved|fyi)|stop.*(?:reminder|follow)/i.test(text.trim()),
-  slackSourceUrl: (channelId: string, threadTs: string) => `https://app.slack.com/archives/${channelId}/p${threadTs.replace(".", "")}`,
+  slackSourceLink: (_installationId: string, channelId: string, threadTs: string) => Promise.resolve({ url: `https://customer.slack.com/archives/${channelId}/p${threadTs.replace(".", "")}`, label: "Slack source" }),
   postDeliberationEntry: postDeliberationEntryMock,
   sendSlackMessage: sendSlackMessageMock,
 }));
@@ -761,7 +761,7 @@ describe("Slack context jobs", () => {
     const source = candidate({ text: "Can someone own the renewal?", messageTs: new Date("2026-04-28T15:30:00.000Z") }), reply = candidate({ id: "message-2", externalMessageId: "1714323600.000100", threadExternalId: source.externalMessageId, text: "I submitted the renewal packet. Jan will review the renewal packet by Friday. Thanks.", messageTs: new Date("2026-04-28T22:00:00.000Z") });
     prismaMock.communicationMessage.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([source, reply]); prismaMock.communicationEntityLink.findMany.mockResolvedValueOnce([nudgeLink({ message: source })]).mockResolvedValueOnce([]); extractMock.mockResolvedValueOnce({ output: actionableExtraction({ concreteNextStep: "review the renewal packet", timingEvidence: "by Friday" }) }); prismaMock.action.findMany.mockResolvedValueOnce([{ id: "action-1", title: "Persisted winner title" }]);
     const { runSlackProactiveScan } = await import("./slack-context"); await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 1, followups: 0, drafts: 1 });
-    expect(createWorkItemMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), expect.objectContaining({ title: "Review the renewal packet", bodyMd: "Can someone own the renewal?\n\nI submitted the renewal packet. Jan will review the renewal packet by Friday. Thanks.\n\nSlack source: https://app.slack.com/archives/C1/p1714320000000100", sourceMessageId: "message-1", assigneeMemberId: "member-jan", open: true, claimKey: "slack-proactive-disposition:install-1:message-1" }));
+    expect(createWorkItemMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), expect.objectContaining({ title: "Review the renewal packet", bodyMd: "Can someone own the renewal?\n\nI submitted the renewal packet. Jan will review the renewal packet by Friday. Thanks.\n\nSlack source: https://customer.slack.com/archives/C1/p1714320000000100", sourceMessageId: "message-1", assigneeMemberId: "member-jan", open: true, claimKey: "slack-proactive-disposition:install-1:message-1" }));
     expect(prismaMock.communicationEntityLink.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ messageId: "message-2", entityType: "CommunicationMessage", entityId: "message-2", action: "proactive_action_processed_reply", claimKey: "slack-proactive-disposition:install-1:message-1:processed:message-2" }) })); expect(prismaMock.communicationEntityLink.upsert.mock.invocationCallOrder[0]).toBeLessThan(createWorkItemMock.mock.invocationCallOrder[0]); expect(sendSlackMessageMock).toHaveBeenCalledWith("install-1", expect.objectContaining({ text: "Created Corgtex action: Persisted winner title" }), expect.any(Array));
     prismaMock.communicationMessage.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([source, reply]); prismaMock.communicationEntityLink.findMany.mockResolvedValueOnce([nudgeLink({ message: source })]).mockResolvedValueOnce([]); prismaMock.communicationEntityLink.findFirst.mockResolvedValueOnce({ id: "action-link", entityId: "action-1", claimKey: "slack-proactive-disposition:install-1:message-1" }).mockResolvedValueOnce({ id: "processed-reply" }); prismaMock.action.findMany.mockResolvedValueOnce([{ id: "action-1", title: "Persisted winner title" }]); prismaMock.communicationEntityLink.create.mockRejectedValueOnce({ code: "P2002" });
     await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
@@ -1224,7 +1224,7 @@ describe("Slack context jobs", () => {
     expect(blocks).toContain("Status: in progress");
     expect(blocks).toContain("Assignee: Jan");
     expect(blocks).toContain("https://app.example.test/workspaces/workspace-1/actions/action-1");
-    expect(blocks).toContain("https://app.slack.com/archives/C1/p1714320000000100");
+    expect(blocks).toContain("https://customer.slack.com/archives/C1/p1714320000000100");
   });
 
   it("does not follow up actions with a recent waiting update inside the doubled window", async () => {

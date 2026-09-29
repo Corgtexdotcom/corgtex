@@ -27,7 +27,7 @@ import {
 } from "./meeting-action-review";
 import { createProposal, submitProposal } from "./proposals";
 import { getSlackWorkspaceBinding } from "./slack-workspace-bindings";
-import { slackFollowupStopIntent, suppressSlackThreadFollowups } from "./slack-followups";
+import { reconcileSlackThreadFollowupsAfterMessageChange, slackFollowupStopIntent, suppressSlackThreadFollowups } from "./slack-followups";
 import { createTension, publishTension } from "./tensions";
 
 export type CommunicationWorkItemKind = "ACTION" | "TENSION" | "PROPOSAL" | "BRAIN_NOTE";
@@ -1041,6 +1041,13 @@ async function ingestSlackMessage(installation: { id: string; workspaceId: strin
     });
 
     if (existing) {
+      await reconcileSlackThreadFollowupsAfterMessageChange({
+        workspaceId: installation.workspaceId,
+        installationId: installation.id,
+        channelId: externalChannelId,
+        threadTs: existing.threadExternalId || existing.externalMessageId,
+        messageId: existing.id,
+      });
       await deleteSlackMessageKnowledge(existing.id);
       await enqueueSlackMessageContextJobs({
         installation,
@@ -1114,6 +1121,14 @@ async function ingestSlackMessage(installation: { id: string; workspaceId: strin
       threadTs: normalized.threadTs || ts,
       messageId: message.id,
       externalUserId: normalized.externalUserId,
+    });
+  } else if (asString(event.subtype) === "message_changed") {
+    await reconcileSlackThreadFollowupsAfterMessageChange({
+      workspaceId: installation.workspaceId,
+      installationId: installation.id,
+      channelId: externalChannelId,
+      threadTs: normalized.threadTs || ts,
+      messageId: message.id,
     });
   }
 
@@ -2159,6 +2174,24 @@ export async function sendSlackMessage(installationId: string, target: {
     unfurl_links: false,
     unfurl_media: false,
   });
+}
+
+export async function slackSourceLink(installationId: string, channelId: string, messageTs: string) {
+  const installation = await prisma.communicationInstallation.findUnique({
+    where: { id: installationId },
+    select: { botTokenEnc: true, externalWorkspaceId: true },
+  });
+  invariant(installation, 404, "NOT_FOUND", "Slack installation not found.");
+  const channelLink = {
+    url: `https://app.slack.com/client/${encodeURIComponent(installation.externalWorkspaceId)}/${encodeURIComponent(channelId)}`,
+    label: "Slack channel",
+  };
+  try {
+    const response = await slackClient(encryptedBotToken(installation)).chat.getPermalink({ channel: channelId, message_ts: messageTs });
+    return response.ok && response.permalink ? { url: response.permalink, label: "Slack source" } : channelLink;
+  } catch {
+    return channelLink;
+  }
 }
 
 export async function updateSlackMessage(installationId: string, target: {

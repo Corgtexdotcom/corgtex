@@ -40,6 +40,7 @@ const {
       postMessage: vi.fn(),
       postEphemeral: vi.fn(),
       update: vi.fn(),
+      getPermalink: vi.fn(),
     },
     users: {
       lookupByEmail: vi.fn(),
@@ -93,6 +94,9 @@ const {
         create: vi.fn(),
         upsert: vi.fn(),
         findUnique: vi.fn(),
+        findFirst: vi.fn(),
+        updateMany: vi.fn(),
+        deleteMany: vi.fn(),
       },
       user: {
         findUnique: vi.fn(),
@@ -200,6 +204,9 @@ describe("communication Slack integration", () => {
     prismaMock.communicationEntityLink.create.mockResolvedValue({});
     prismaMock.communicationEntityLink.upsert.mockResolvedValue({ id: "stop-marker" });
     prismaMock.communicationEntityLink.findUnique.mockReset().mockResolvedValue(null);
+    prismaMock.communicationEntityLink.findFirst.mockReset().mockResolvedValue(null);
+    prismaMock.communicationEntityLink.updateMany.mockReset().mockResolvedValue({ count: 1 });
+    prismaMock.communicationEntityLink.deleteMany.mockReset().mockResolvedValue({ count: 1 });
     prismaMock.communicationMessage.updateMany.mockResolvedValue({ count: 2 });
     prismaMock.communicationMessage.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.communicationMessage.findMany.mockReset().mockResolvedValue([]);
@@ -228,6 +235,7 @@ describe("communication Slack integration", () => {
     slackWebClientMock.conversations.history.mockReset();
     slackWebClientMock.conversations.info.mockReset();
     slackWebClientMock.chat.update.mockReset();
+    slackWebClientMock.chat.getPermalink.mockReset();
     slackWebClientMock.users.lookupByEmail.mockReset();
     slackWebClientMock.users.info.mockReset();
     slackWebClientMock.views.open.mockReset();
@@ -254,6 +262,23 @@ describe("communication Slack integration", () => {
       text: "Corgtex meeting follow-up review",
       responseText: "Updated.",
     });
+  });
+
+  it("uses Slack's canonical workspace permalink for a source message", async () => {
+    const { slackSourceLink } = await import("./communication");
+    prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce({ botTokenEnc: "enc:bot-token", externalWorkspaceId: "T1" });
+    slackWebClientMock.chat.getPermalink.mockResolvedValueOnce({ ok: true, permalink: "https://customer.slack.com/archives/C1/p1714320000000100" });
+
+    await expect(slackSourceLink("install-1", "C1", "1714320000.000100")).resolves.toEqual({ url: "https://customer.slack.com/archives/C1/p1714320000000100", label: "Slack source" });
+    expect(slackWebClientMock.chat.getPermalink).toHaveBeenCalledWith({ channel: "C1", message_ts: "1714320000.000100" });
+  });
+
+  it("falls back to the installation-qualified channel when Slack cannot return a permalink", async () => {
+    const { slackSourceLink } = await import("./communication");
+    prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce({ botTokenEnc: "enc:bot-token", externalWorkspaceId: "T1" });
+    slackWebClientMock.chat.getPermalink.mockRejectedValueOnce(new Error("temporary Slack error"));
+
+    await expect(slackSourceLink("install-1", "C1", "1714320000.000100")).resolves.toEqual({ url: "https://app.slack.com/client/T1/C1", label: "Slack channel" });
   });
 
   it("verifies Slack request signatures", async () => {
@@ -979,6 +1004,21 @@ describe("communication Slack integration", () => {
     }));
   });
 
+  it("removes thread suppression when the originating Slack reply is edited to non-stop text", async () => {
+    const { processSlackInboundEvent } = await import("./communication");
+    prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
+      id: "inbound-corrected-stop", provider: "SLACK",
+      payload: { event: { type: "message", subtype: "message_changed", channel: "C1", message: { type: "message", user: "U1", ts: "1788896184.791699", thread_ts: "1788205758.060039", text: "Got it, but keep reminding me" } } },
+      installation: { id: "install-1", workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE", settings: {} },
+    });
+    prismaMock.communicationChannel.upsert.mockResolvedValueOnce({ id: "channel-1", kind: "PUBLIC", isIngestEnabled: true });
+    prismaMock.communicationMessage.upsert.mockResolvedValueOnce(slackMessageRow({ id: "stop-message" }));
+    prismaMock.communicationEntityLink.findFirst.mockResolvedValueOnce({ id: "marker-1", messageId: "stop-message" });
+
+    await processSlackInboundEvent("inbound-corrected-stop");
+    expect(prismaMock.communicationEntityLink.deleteMany).toHaveBeenCalledWith({ where: { id: "marker-1", messageId: "stop-message" } });
+  });
+
   it.each([
     { rawRetentionDays: 3650 },
     { publicIngestionEnabled: false, channelAdmissionMode: "selected" },
@@ -1014,6 +1054,7 @@ describe("communication Slack integration", () => {
     });
     prismaMock.communicationChannel.upsert.mockResolvedValueOnce({ id: "channel-1", kind: "PUBLIC", isIngestEnabled: false });
     prismaMock.communicationMessage.findUnique.mockResolvedValueOnce(slackMessageRow());
+    prismaMock.communicationEntityLink.findFirst.mockResolvedValueOnce({ id: "marker-1", messageId: "message-1" });
 
     await processSlackInboundEvent("inbound-delete");
 
@@ -1032,6 +1073,7 @@ describe("communication Slack integration", () => {
         textRedactedAt: expect.any(Date),
       }),
     }));
+    expect(prismaMock.communicationEntityLink.deleteMany).toHaveBeenCalledWith({ where: { id: "marker-1", messageId: "message-1" } });
     expect(prismaMock.knowledgeChunk.deleteMany).toHaveBeenCalledWith({
       where: {
         sourceType: "SLACK",

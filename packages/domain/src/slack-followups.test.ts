@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const prismaMock = vi.hoisted(() => ({
-  communicationEntityLink: { findFirst: vi.fn(), upsert: vi.fn() },
+  communicationEntityLink: { findFirst: vi.fn(), upsert: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
   communicationMessage: { findMany: vi.fn() },
 }));
 
@@ -16,6 +16,8 @@ describe("Slack follow-up suppression", () => {
     vi.clearAllMocks();
     prismaMock.communicationEntityLink.findFirst.mockResolvedValue(null);
     prismaMock.communicationEntityLink.upsert.mockResolvedValue({ id: "marker-1" });
+    prismaMock.communicationEntityLink.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.communicationEntityLink.deleteMany.mockResolvedValue({ count: 1 });
     prismaMock.communicationMessage.findMany.mockResolvedValue([]);
   });
 
@@ -23,7 +25,7 @@ describe("Slack follow-up suppression", () => {
     expect(slackFollowupStopIntent(text)).toBe(true);
   });
 
-  it.each(["FYI, should we discuss this?", "Please review this proposal", "Do not stop the migration", "Ignore the spelling mistake in this draft", "Stop the migration now", "Thanks, can you send the file?", "Got it, but keep reminding me"])("does not treat ordinary discussion as a stop: %s", (text) => {
+  it.each(["FYI, should we discuss this?", "Please review this proposal", "Do not stop the migration", "Ignore the spelling mistake in this draft", "Stop the migration now", "Thanks, can you send the file?", "Got it, but keep reminding me", "Is this already being tracked?", "Working on it?", "<@UBOT> ack?"])("does not treat ordinary discussion as a stop: %s", (text) => {
     expect(slackFollowupStopIntent(text)).toBe(false);
   });
 
@@ -56,5 +58,24 @@ describe("Slack follow-up suppression", () => {
     expect(prismaMock.communicationEntityLink.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({ messageId: "older-stop", externalUserId: "U-unmatched" }),
     }));
+  });
+
+  it("removes a stop marker when its originating message is corrected", async () => {
+    prismaMock.communicationEntityLink.findFirst.mockResolvedValueOnce({ id: "marker-1", messageId: "reply-1" });
+    const { reconcileSlackThreadFollowupsAfterMessageChange } = await import("./slack-followups");
+    await reconcileSlackThreadFollowupsAfterMessageChange({ ...scope, messageId: "reply-1" });
+    expect(prismaMock.communicationEntityLink.deleteMany).toHaveBeenCalledWith({ where: { id: "marker-1", messageId: "reply-1" } });
+  });
+
+  it("keeps suppression when another stop remains after a correction", async () => {
+    prismaMock.communicationEntityLink.findFirst.mockResolvedValueOnce({ id: "marker-1", messageId: "reply-1" });
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([{ id: "reply-2", externalUserId: "U-other", text: "STOP" }]);
+    const { reconcileSlackThreadFollowupsAfterMessageChange } = await import("./slack-followups");
+    await reconcileSlackThreadFollowupsAfterMessageChange({ ...scope, messageId: "reply-1" });
+    expect(prismaMock.communicationEntityLink.updateMany).toHaveBeenCalledWith({
+      where: { id: "marker-1", messageId: "reply-1" },
+      data: { messageId: "reply-2", externalUserId: "U-other" },
+    });
+    expect(prismaMock.communicationEntityLink.deleteMany).not.toHaveBeenCalled();
   });
 });
