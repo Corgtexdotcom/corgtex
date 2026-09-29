@@ -973,7 +973,7 @@
     "newspaperWaiting": "The homepage is waiting on the first generated workspace briefing. Notifications and source records are still available from the workspace navigation.",
     "personalNewspaperKicker": "Your front page",
     "personalNewspaperTitle": "Your priorities",
-    "personalNewspaperSourceNote": "Live workspace Actions, Proposals, and Tensions assigned to you or awaiting your input. Unconnected sources are not scanned.",
+    "personalNewspaperSourceNote": "Your assigned work and requests appear here. The stories below draw on information already in Corgtex, including processed Brain and connected sources.",
     "personalNewspaperEmpty": "Nothing is assigned to you right now. The workspace story continues below.",
     "personalSourceAction": "Action",
     "personalSourceProposal": "Proposal",
