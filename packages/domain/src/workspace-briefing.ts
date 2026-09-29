@@ -84,8 +84,15 @@ export type NormalizedWorkspaceBriefing = {
   dateKey: string;
   generatedAt: string;
   items: WorkspaceBriefingItem[];
+  candidateItems?: WorkspaceBriefingItem[];
   sourceRefs: WorkspaceBriefingSourceRef[];
   sourceCounts: Record<string, number>;
+};
+
+export type MemberBriefingContext = {
+  roleNames: string[];
+  circleNames: string[];
+  personalSources: Array<{ type: WorkspaceBriefingSourceType; id: string; title: string }>;
 };
 
 const FRESH_WINDOW_DAYS: Record<WorkspaceBriefingPeriod, number> = {
@@ -1080,6 +1087,7 @@ export function buildWorkspaceBriefingFromCandidates(params: {
     dateKey: params.dateKey,
     generatedAt: generatedAt.toISOString(),
     items,
+    candidateItems: ranked.map((entry, index) => itemFromCandidate(entry, index, generatedAt)),
     sourceRefs: narratedSourceRefs,
     sourceCounts: counts,
   };
@@ -1388,6 +1396,7 @@ export function buildWorkspaceBriefingFromDigest(params: {
     dateKey: params.dateKey,
     generatedAt: generatedAt.toISOString(),
     items: consolidatedItems,
+    candidateItems: rankedCandidates.map((entry, index) => itemFromCandidate(entry, index, generatedAt)),
     sourceRefs: narratedSourceRefs,
     sourceCounts: countSources(params.candidates),
   };
@@ -1397,8 +1406,8 @@ export function normalizeWorkspaceBriefingPayload(input: unknown): NormalizedWor
   const record = typeof input === "object" && input !== null && !Array.isArray(input)
     ? input as Record<string, unknown>
     : {};
-  const items = Array.isArray(record.items)
-    ? record.items.flatMap((item): WorkspaceBriefingItem[] => {
+  const normalizeItems = (value: unknown): WorkspaceBriefingItem[] => Array.isArray(value)
+    ? value.flatMap((item): WorkspaceBriefingItem[] => {
       if (typeof item !== "object" || item === null || Array.isArray(item)) return [];
       const entry = item as Record<string, unknown>;
       const sourceRefs = normalizeSourceRefs(entry.sourceRefs);
@@ -1429,6 +1438,8 @@ export function normalizeWorkspaceBriefingPayload(input: unknown): NormalizedWor
       }];
     })
     : [];
+  const items = normalizeItems(record.items);
+  const candidateItems = normalizeItems(record.candidateItems);
   const period = record.period === "WEEKLY" ? "WEEKLY" : "DAILY";
   const fallbackTitle = period === "WEEKLY" ? "Weekly Workspace Briefing" : "Daily Workspace Briefing";
   const generatedAt = typeof record.generatedAt === "string" ? record.generatedAt : new Date().toISOString();
@@ -1476,6 +1487,7 @@ export function normalizeWorkspaceBriefingPayload(input: unknown): NormalizedWor
     dateKey: typeof record.dateKey === "string" && record.dateKey.trim() ? record.dateKey.trim() : dateKeyFromISO(new Date().toISOString()),
     generatedAt,
     items: normalizedItems,
+    candidateItems,
     sourceRefs: hasRecordSourceRefs ? recordSourceRefs : fallbackNarrative.narratedSourceRefs,
     sourceCounts: typeof record.sourceCounts === "object" && record.sourceCounts !== null && !Array.isArray(record.sourceCounts)
       ? Object.fromEntries(Object.entries(record.sourceCounts as Record<string, unknown>).flatMap(([key, value]) => (
@@ -1483,6 +1495,76 @@ export function normalizeWorkspaceBriefingPayload(input: unknown): NormalizedWor
       )))
       : {},
   };
+}
+
+export function scoreMemberBriefingItem(
+  item: Pick<WorkspaceBriefingItem, "kind" | "title" | "summaryMd" | "sourceRefs">,
+  context: MemberBriefingContext,
+) {
+  if (item.kind === "QUIET") return 0;
+  const ownSources = new Set(context.personalSources.map((source) => `${source.type}:${source.id}`));
+  const directMatch = item.sourceRefs.some((ref) => ownSources.has(`${ref.type}:${ref.id}`));
+  const text = normalizeMatchText(`${item.title} ${item.summaryMd}`);
+  const topicScore = [...context.roleNames, ...context.circleNames].reduce((score, phrase) => {
+    const normalized = normalizeMatchText(phrase);
+    return normalized.length >= 4 && normalizedPhraseIncludes(text, normalized) ? score + 5 : score;
+  }, 0);
+  const itemTokens = digestMatchTokens(item.title);
+  const workScore = context.personalSources.reduce((score, source) => {
+    const overlap = tokenOverlapScore(itemTokens, digestMatchTokens(source.title));
+    return Math.max(score, overlap >= 0.5 ? 4 : overlap >= 0.3 ? 2 : 0);
+  }, 0);
+  return (directMatch ? 20 : 0) + topicScore + workScore;
+}
+
+export function filterWorkspaceBriefingSources(
+  briefing: NormalizedWorkspaceBriefing,
+  allowedSourceKeys: ReadonlySet<string>,
+): NormalizedWorkspaceBriefing {
+  const revalidatedTypes = new Set<WorkspaceBriefingSourceType>([
+    "BRAIN_ARTICLE", "DOCUMENT", "MEETING", "ACTION", "PROPOSAL", "TENSION", "GOAL", "RECOGNITION", "ADVICE_REQUEST",
+  ]);
+  const visible = (item: WorkspaceBriefingItem) => (
+    (item.kind === "QUIET" || !revalidatedTypes.has(item.kind) || item.sourceRefs.length > 0)
+    && item.sourceRefs.every((ref) => !revalidatedTypes.has(ref.type) || allowedSourceKeys.has(`${ref.type}:${ref.id}`))
+  );
+  const items = briefing.items.filter(visible);
+  const candidateItems = briefing.candidateItems?.filter(visible);
+  if (items.length === briefing.items.length && candidateItems?.length === briefing.candidateItems?.length) return briefing;
+  const safeItems = items.length > 0 ? items : [quietBriefingItem(new Date(briefing.generatedAt))];
+  const { narratedSourceRefs, ...narrative } = composeWorkspaceBriefingNarrative({
+    period: briefing.period,
+    editorialMode: briefing.editorialMode,
+    generatedAt: new Date(briefing.generatedAt),
+    items: safeItems,
+  });
+  return { ...briefing, ...narrative, items: safeItems, candidateItems, sourceRefs: narratedSourceRefs };
+}
+
+export function personalizeWorkspaceBriefing(
+  briefing: NormalizedWorkspaceBriefing,
+  context: MemberBriefingContext,
+): NormalizedWorkspaceBriefing {
+  if (!context.roleNames.length && !context.circleNames.length && !context.personalSources.length) return briefing;
+  const selectedKeys = new Set(briefing.items.map(itemKey));
+  const candidateMatches = (briefing.candidateItems ?? [])
+    .filter((item) => !selectedKeys.has(itemKey(item)))
+    .filter((item) => scoreMemberBriefingItem(item, context) > 0);
+  const scored = [...briefing.items, ...candidateMatches].map((item, index) => ({
+    item,
+    index,
+    score: scoreMemberBriefingItem(item, context),
+  }));
+  if (!scored.some(({ score }) => score > 0)) return briefing;
+  const items = scored.sort((left, right) => right.score - left.score || left.index - right.index)
+    .map(({ item }, index) => ({ ...item, prominence: index === 0 ? "lead" as const : item.prominence === "lead" ? "standard" as const : item.prominence }));
+  const { narratedSourceRefs, ...narrative } = composeWorkspaceBriefingNarrative({
+    period: briefing.period,
+    editorialMode: briefing.editorialMode,
+    generatedAt: new Date(briefing.generatedAt),
+    items,
+  });
+  return { ...briefing, ...narrative, items, sourceRefs: narratedSourceRefs };
 }
 
 export function workspaceBriefingToNewspaperDigest(input: { briefingJson: unknown } | NormalizedWorkspaceBriefing): NormalizedNewspaperDigest {
@@ -1660,6 +1742,7 @@ export async function collectWorkspaceBriefingCandidates(params: {
       where: {
         workspaceId: params.workspaceId,
         archivedAt: null,
+        isPrivate: false,
         createdAt: beforeCutoff,
         updatedAt: beforeCutoff,
         status: { notIn: ["DRAFT", "ABANDONED"] },
@@ -1669,7 +1752,7 @@ export async function collectWorkspaceBriefingCandidates(params: {
       select: { id: true, title: true, descriptionMd: true, status: true, progressPercent: true, targetDate: true, updatedAt: true, level: true },
     }),
     prisma.recognition.findMany({
-      where: { workspaceId: params.workspaceId, createdAt: windowRange },
+      where: { workspaceId: params.workspaceId, visibility: "WORKSPACE", createdAt: windowRange },
       orderBy: { createdAt: "desc" },
       take: 10,
       select: { id: true, title: true, storyMd: true, createdAt: true },
@@ -1679,7 +1762,7 @@ export async function collectWorkspaceBriefingCandidates(params: {
         workspaceId: params.workspaceId,
         archivedAt: null,
         isPrivate: false,
-        type: { not: "DIGEST" },
+        type: { notIn: ["DIGEST", "PERSON"] },
         createdAt: beforeCutoff,
         updatedAt: beforeCutoff,
         OR: [
@@ -1696,6 +1779,7 @@ export async function collectWorkspaceBriefingCandidates(params: {
     prisma.document.findMany({
       where: {
         workspaceId: params.workspaceId,
+        accessDomain: "WORKSPACE",
         archivedAt: null,
         createdAt: beforeCutoff,
         updatedAt: beforeCutoff,

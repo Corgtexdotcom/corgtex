@@ -8,6 +8,8 @@ import {
   instrumentNewspaperHtmlLinks,
   isHumanNewspaperRecipientIdentity,
   normalizeNewspaperCadence,
+  normalizeWorkspaceBriefingPayload,
+  personalizeWorkspaceBriefing,
   rankPersonalNewspaperItems,
   recordNewspaperDelivery,
   recordDemoWelcomeCrmActivity,
@@ -158,11 +160,14 @@ type DigestRecipientMember = {
   };
   newspaperCadence?: NewspaperCadence | null;
   roleAssignments?: Array<{
+    expiresAt?: Date | null;
     role?: {
       circleId: string;
+      name?: string;
       archivedAt: Date | null;
       circle?: {
         workspaceId: string;
+        name?: string;
         archivedAt: Date | null;
       } | null;
     } | null;
@@ -985,7 +990,7 @@ async function loadOperatingDigestInputs(params: {
         workspaceId: params.workspaceId,
         archivedAt: null,
         isPrivate: false,
-        type: { not: "DIGEST" },
+        type: { notIn: ["DIGEST", "PERSON"] },
         createdAt: beforeCutoff,
         updatedAt: beforeCutoff,
         OR: [
@@ -1008,6 +1013,7 @@ async function loadOperatingDigestInputs(params: {
     prisma.document.findMany({
       where: {
         workspaceId: params.workspaceId,
+        accessDomain: "WORKSPACE",
         archivedAt: null,
         createdAt: beforeCutoff,
         updatedAt: beforeCutoff,
@@ -1224,7 +1230,7 @@ function buildPersonalActionItemsByMember(params: {
   }
   return new Map([...itemsByMemberId.entries()].map(([memberId, items]) => [
     memberId,
-    rankPersonalNewspaperItems(items, params.now).map((item) => item.text),
+    rankPersonalNewspaperItems(items, params.now),
   ]));
 }
 
@@ -1265,19 +1271,23 @@ export async function runDailyDigest(params: {
   }
 
   const workspaceCadence = await getWorkspaceNewspaperCadence(params.workspaceId);
+  const generationDate = new Date(params.dateISO);
   const activeMembers = await prisma.member.findMany({
     where: { workspaceId: params.workspaceId, isActive: true },
     include: {
       user: { select: { email: true, displayName: true, id: true } },
       roleAssignments: {
         select: {
+          expiresAt: true,
           role: {
             select: {
               circleId: true,
+              name: true,
               archivedAt: true,
               circle: {
                 select: {
                   workspaceId: true,
+                  name: true,
                   archivedAt: true,
                 },
               },
@@ -1309,7 +1319,6 @@ export async function runDailyDigest(params: {
 
   const lookbackDays = LOOKBACK_DAYS_BY_CADENCE[cadence];
   const briefingPeriod = workspaceBriefingPeriodFromCadence(cadence);
-  const generationDate = new Date(params.dateISO);
   const since = new Date(generationDate.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
   const windowRange = { gte: since, lte: generationDate };
   const briefingSince = workspaceBriefingContextSince(briefingPeriod, generationDate);
@@ -1414,6 +1423,26 @@ export async function runDailyDigest(params: {
       orderBy: [{ priority: "desc" }, { dueAt: "asc" }, { updatedAt: "desc" }],
     })
     : [];
+  const [ownedOpenProposals, assignedOpenTensions] = recipientMembers.length > 0
+    ? await Promise.all([
+      prisma.proposal.findMany({
+        where: {
+          workspaceId: params.workspaceId, archivedAt: null, isPrivate: false, status: "OPEN",
+          ownerMemberId: { in: recipientMembers.map((member) => member.id) },
+          createdAt: { lte: generationDate }, updatedAt: { lte: generationDate },
+        },
+        select: { id: true, title: true, ownerMemberId: true },
+      }),
+      prisma.tension.findMany({
+        where: {
+          workspaceId: params.workspaceId, archivedAt: null, isPrivate: false, status: "OPEN",
+          assigneeMemberId: { in: recipientMembers.map((member) => member.id) },
+          createdAt: { lte: generationDate }, updatedAt: { lte: generationDate },
+        },
+        select: { id: true, title: true, assigneeMemberId: true },
+      }),
+    ])
+    : [[], []];
   const briefingCandidates = await collectWorkspaceBriefingCandidates({
     workspaceId: params.workspaceId,
     since: briefingSince,
@@ -1721,9 +1750,34 @@ Rules:
   // Pre-load recipient PERSON profiles in one query (after the profile-rebuild
   // writes above, so freshly-updated profiles are reflected) instead of a
   const emailDigest = editionDigest;
+  const sharedBriefing = normalizeWorkspaceBriefingPayload(storedBriefing.briefingJson);
 
   for (const member of recipientMembers) {
-    const recipientDigest = withNewspaperAdviceRequests(emailDigest, personalItemsByMemberId.get(member.id) ?? []);
+    const personalItems = personalItemsByMemberId.get(member.id) ?? [];
+    const activeRoles = (member.roleAssignments ?? []).filter((assignment) => (
+      assignment.role?.archivedAt === null
+      && assignment.role.circle?.archivedAt === null
+      && assignment.role.circle.workspaceId === params.workspaceId
+      && (!assignment.expiresAt || assignment.expiresAt > generationDate)
+    ));
+    const recipientBriefing = personalizeWorkspaceBriefing(sharedBriefing, {
+      roleNames: activeRoles.flatMap((assignment) => assignment.role?.name ? [assignment.role.name] : []),
+      circleNames: activeRoles.flatMap((assignment) => assignment.role?.circle?.name ? [assignment.role.circle.name] : []),
+      personalSources: personalItems.map((item) => ({
+        type: item.kind === "ADVICE" ? "ADVICE_REQUEST" as const : item.kind,
+        id: item.id,
+        title: item.title,
+      })).concat(
+        ownedOpenProposals.filter((proposal) => proposal.ownerMemberId === member.id)
+          .map((proposal) => ({ type: "PROPOSAL" as const, id: proposal.id, title: proposal.title })),
+        assignedOpenTensions.filter((tension) => tension.assigneeMemberId === member.id)
+          .map((tension) => ({ type: "TENSION" as const, id: tension.id, title: tension.title })),
+      ),
+    });
+    const recipientDigest = withNewspaperAdviceRequests(
+      recipientBriefing === sharedBriefing ? emailDigest : workspaceBriefingToNewspaperDigest({ briefingJson: recipientBriefing }),
+      personalItems.map((item) => item.text),
+    );
     const subject = `${storedBriefing.title} - Your Personal Briefing`;
 
     if (recipientDigest.sections.length === 0) {
@@ -1751,7 +1805,7 @@ Rules:
       html: renderWorkspaceBriefingEmailHtml({
         briefing: {
           title: storedBriefing.title,
-          briefingJson: storedBriefing.briefingJson,
+          briefingJson: recipientBriefing,
         },
         workspaceName,
         recipientName: member.user.displayName || member.user.email,

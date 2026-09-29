@@ -121,6 +121,7 @@ vi.mock("@corgtex/models", () => ({
 
 vi.mock("@corgtex/domain", async () => ({
   rankPersonalNewspaperItems: (await import("../../domain/src/newspaper-priority")).rankPersonalNewspaperItems,
+  personalizeWorkspaceBriefing: (await import("../../domain/src/workspace-briefing")).personalizeWorkspaceBriefing,
   AGENT_REGISTRY: {
     "daily-digest": {
       defaultModelTier: "excellent",
@@ -1155,6 +1156,76 @@ describe("runDailyDigest", () => {
     expect(htmlByRecipient.get("a@example.com")).not.toContain("Confirm another team task");
     expect(htmlByRecipient.get("b@example.com")).toContain("Confirm another team task");
     expect(htmlByRecipient.get("b@example.com")).not.toContain("Review the customer plan");
+  });
+
+  it("sends different lead stories from the same imported Brain updates to different roles", async () => {
+    prismaMock.member.findMany.mockResolvedValue([
+      {
+        id: "member-operations", newspaperCadence: "DAILY",
+        roleAssignments: [{ expiresAt: null, role: { name: "Operations", circleId: "circle-operations", archivedAt: null, circle: { name: "Operations", workspaceId: "workspace-1", archivedAt: null } } }],
+        user: { id: "user-operations", email: "operations@example.com", displayName: "Operations Member" },
+      },
+      {
+        id: "member-learning", newspaperCadence: "DAILY",
+        roleAssignments: [{ expiresAt: null, role: { name: "Learning", circleId: "circle-learning", archivedAt: null, circle: { name: "Learning", workspaceId: "workspace-1", archivedAt: null } } }],
+        user: { id: "user-learning", email: "learning@example.com", displayName: "Learning Member" },
+      },
+    ]);
+    prismaMock.brainArticle.findMany.mockResolvedValue([
+      { id: "brain-operations", title: "Operations handoff", type: "REFERENCE", authority: "REFERENCE", updatedAt: new Date("2026-04-30T10:00:00.000Z"), publishedAt: null },
+      { id: "brain-learning", title: "Learning roadmap", type: "REFERENCE", authority: "REFERENCE", updatedAt: new Date("2026-04-30T10:00:00.000Z"), publishedAt: null },
+    ]);
+    extractMock.mockImplementation(async ({ instruction, input }: { instruction: string; input?: string }) => {
+      if (instruction.startsWith("Generate a structured")) {
+        expect(input).toContain("Operations handoff");
+        expect(input).toContain("Learning roadmap");
+        return { output: { otherUpdates: ["Operations handoff changed today.", "Learning roadmap changed today."] } };
+      }
+      return { output: {} };
+    });
+
+    const { runDailyDigest } = await import("./daily-digest");
+    await runDailyDigest({ workspaceId: "workspace-1", dateISO: "2026-04-30T12:00:00.000Z", cadence: "DAILY" });
+
+    const htmlByRecipient = new Map(sendEmailMock.mock.calls.map(([request]) => [request.to, request.html]));
+    const operationsHtml = htmlByRecipient.get("operations@example.com") as string;
+    const learningHtml = htmlByRecipient.get("learning@example.com") as string;
+    expect(operationsHtml.indexOf("Operations handoff")).toBeLessThan(operationsHtml.indexOf("Learning roadmap"));
+    expect(learningHtml.indexOf("Learning roadmap")).toBeLessThan(learningHtml.indexOf("Operations handoff"));
+  });
+
+  it("uses owned proposals and assigned tensions when ordering recipient stories", async () => {
+    prismaMock.member.findMany.mockResolvedValue([
+      { id: "member-proposal", newspaperCadence: "DAILY", roleAssignments: [], user: { id: "user-proposal", email: "proposal@example.com", displayName: "Proposal Owner" } },
+      { id: "member-tension", newspaperCadence: "DAILY", roleAssignments: [], user: { id: "user-tension", email: "tension@example.com", displayName: "Tension Assignee" } },
+    ]);
+    prismaMock.proposal.findMany.mockImplementation(async (query: any) => query.select?.ownerMemberId
+      ? [{ id: "proposal-1", title: "Approve roadmap", ownerMemberId: "member-proposal" }] : []);
+    prismaMock.tension.findMany.mockImplementation(async (query: any) => query.select?.assigneeMemberId
+      ? [{ id: "tension-1", title: "Resolve handoff", assigneeMemberId: "member-tension" }] : []);
+    upsertWorkspaceBriefingMock.mockImplementation(async (params: any) => {
+      const items = [
+        { kind: "PROPOSAL", id: "proposal-1", title: "Approve roadmap", summaryMd: "Approve roadmap this week." },
+        { kind: "TENSION", id: "tension-1", title: "Resolve handoff", summaryMd: "Resolve handoff this week." },
+      ].map((item, index) => ({
+        kind: item.kind, title: item.title, summaryMd: item.summaryMd,
+        whyItMattersMd: "Current work needs attention.", prominence: index === 0 ? "lead" : "standard",
+        sourceRefs: [{ type: item.kind, id: item.id, label: item.title }],
+        href: null, occurredAt: "2026-04-30T10:00:00.000Z", status: "OPEN", confidence: 0.9,
+      }));
+      return { id: "briefing-1", title: params.title, briefingJson: {
+        ...params.briefing, items, leadMd: items[0].summaryMd, bodyMd: items[1].summaryMd,
+      } };
+    });
+
+    const { runDailyDigest } = await import("./daily-digest");
+    await runDailyDigest({ workspaceId: "workspace-1", dateISO: "2026-04-30T12:00:00.000Z", cadence: "DAILY" });
+
+    const htmlByRecipient = new Map(sendEmailMock.mock.calls.map(([request]) => [request.to, request.html]));
+    const proposalHtml = htmlByRecipient.get("proposal@example.com") as string;
+    const tensionHtml = htmlByRecipient.get("tension@example.com") as string;
+    expect(proposalHtml.indexOf("Approve roadmap")).toBeLessThan(proposalHtml.indexOf("Resolve handoff"));
+    expect(tensionHtml.indexOf("Resolve handoff")).toBeLessThan(tensionHtml.indexOf("Approve roadmap"));
   });
 
   it("keeps an overdue assigned action ahead of advice when the email list is capped", async () => {
