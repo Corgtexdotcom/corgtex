@@ -10,6 +10,7 @@ const {
   sendSlackMessageMock,
   getAgentModelOverrideMock,
   listHumanMembersMock,
+  isSlackThreadFollowupSuppressedMock,
 } = vi.hoisted(() => ({
   prismaMock: {
     workspaceAgentConfig: {
@@ -33,6 +34,7 @@ const {
       deleteMany: vi.fn(),
     },
     communicationEntityLink: {
+      count: vi.fn(),
       findFirst: vi.fn(),
       findUnique: vi.fn(),
       findMany: vi.fn(),
@@ -55,6 +57,7 @@ const {
   sendSlackMessageMock: vi.fn(),
   getAgentModelOverrideMock: vi.fn(),
   listHumanMembersMock: vi.fn(),
+  isSlackThreadFollowupSuppressedMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -81,6 +84,9 @@ vi.mock("@corgtex/domain", () => ({
   getAgentModelOverride: getAgentModelOverrideMock,
   listHumanMembers: listHumanMembersMock,
   isAgentEnabled: isAgentEnabledMock,
+  isSlackThreadFollowupSuppressed: isSlackThreadFollowupSuppressedMock,
+  slackFollowupStopIntent: (text: string) => /^(?:ignore|solved|fyi)|stop.*(?:reminder|follow)/i.test(text.trim()),
+  slackSourceUrl: (channelId: string, threadTs: string) => `https://app.slack.com/archives/${channelId}/p${threadTs.replace(".", "")}`,
   postDeliberationEntry: postDeliberationEntryMock,
   sendSlackMessage: sendSlackMessageMock,
 }));
@@ -188,6 +194,8 @@ describe("Slack context jobs", () => {
     prismaMock.communicationEntityLink.findFirst.mockResolvedValue(null);
     prismaMock.communicationEntityLink.findUnique.mockResolvedValue(null);
     prismaMock.communicationEntityLink.findMany.mockResolvedValue([]);
+    prismaMock.communicationEntityLink.count.mockResolvedValue(0);
+    isSlackThreadFollowupSuppressedMock.mockResolvedValue(false);
     prismaMock.communicationEntityLink.create.mockResolvedValue({ id: "link-1" });
     prismaMock.communicationEntityLink.deleteMany.mockResolvedValue({ count: 1 });
     prismaMock.communicationEntityLink.upsert.mockResolvedValue({ id: "link-1" });
@@ -371,6 +379,24 @@ describe("Slack context jobs", () => {
     }));
     expect(sendSlackMessageMock).not.toHaveBeenCalled();
     expect(prismaMock.communicationEntityLink.create).not.toHaveBeenCalled();
+  });
+
+  it("does not treat an FYI with a question as unanswered work", async () => {
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([candidate({ text: "FYI, should we share these public slides?" })]);
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("does not create an action from an already stopped nudge thread", async () => {
+    const source = candidate({ text: "Can someone own the renewal?", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([]);
+    prismaMock.communicationEntityLink.findMany.mockResolvedValueOnce([nudgeLink({ message: source })]).mockResolvedValueOnce([]);
+    isSlackThreadFollowupSuppressedMock.mockResolvedValueOnce(true);
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+    expect(createWorkItemMock).not.toHaveBeenCalled();
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
   });
 
   it("does not duplicate unanswered nudges on later hourly scans", async () => {
@@ -718,7 +744,7 @@ describe("Slack context jobs", () => {
     const source = candidate({ text: "Can someone own the renewal?", messageTs: new Date("2026-04-28T15:30:00.000Z") }), reply = candidate({ id: "message-2", externalMessageId: "1714323600.000100", threadExternalId: source.externalMessageId, text: "I submitted the renewal packet. Jan will review the renewal packet by Friday. Thanks.", messageTs: new Date("2026-04-28T22:00:00.000Z") });
     prismaMock.communicationMessage.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([source, reply]); prismaMock.communicationEntityLink.findMany.mockResolvedValueOnce([nudgeLink({ message: source })]).mockResolvedValueOnce([]); extractMock.mockResolvedValueOnce({ output: actionableExtraction({ concreteNextStep: "review the renewal packet", timingEvidence: "by Friday" }) }); prismaMock.action.findMany.mockResolvedValueOnce([{ id: "action-1", title: "Persisted winner title" }]);
     const { runSlackProactiveScan } = await import("./slack-context"); await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 1, followups: 0, drafts: 1 });
-    expect(createWorkItemMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), expect.objectContaining({ title: "Review the renewal packet", bodyMd: "Can someone own the renewal?\n\nI submitted the renewal packet. Jan will review the renewal packet by Friday. Thanks.", sourceMessageId: "message-1", assigneeMemberId: "member-jan", open: true, claimKey: "slack-proactive-disposition:install-1:message-1" }));
+    expect(createWorkItemMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), expect.objectContaining({ title: "Review the renewal packet", bodyMd: "Can someone own the renewal?\n\nI submitted the renewal packet. Jan will review the renewal packet by Friday. Thanks.\n\nSlack source: https://app.slack.com/archives/C1/p1714320000000100", sourceMessageId: "message-1", assigneeMemberId: "member-jan", open: true, claimKey: "slack-proactive-disposition:install-1:message-1" }));
     expect(prismaMock.communicationEntityLink.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ messageId: "message-2", entityType: "CommunicationMessage", entityId: "message-2", action: "proactive_action_processed_reply", claimKey: "slack-proactive-disposition:install-1:message-1:processed:message-2" }) })); expect(prismaMock.communicationEntityLink.upsert.mock.invocationCallOrder[0]).toBeLessThan(createWorkItemMock.mock.invocationCallOrder[0]); expect(sendSlackMessageMock).toHaveBeenCalledWith("install-1", expect.objectContaining({ text: "Created Corgtex action: Persisted winner title" }), expect.any(Array));
     prismaMock.communicationMessage.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([source, reply]); prismaMock.communicationEntityLink.findMany.mockResolvedValueOnce([nudgeLink({ message: source })]).mockResolvedValueOnce([]); prismaMock.communicationEntityLink.findFirst.mockResolvedValueOnce({ id: "action-link", entityId: "action-1", claimKey: "slack-proactive-disposition:install-1:message-1" }).mockResolvedValueOnce({ id: "processed-reply" }); prismaMock.action.findMany.mockResolvedValueOnce([{ id: "action-1", title: "Persisted winner title" }]); prismaMock.communicationEntityLink.create.mockRejectedValueOnce({ code: "P2002" });
     await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
@@ -1127,6 +1153,40 @@ describe("Slack context jobs", () => {
     }));
     expect(sendSlackMessageMock).not.toHaveBeenCalled();
     expect(prismaMock.communicationEntityLink.create).not.toHaveBeenCalled();
+  });
+
+  it("honors a stop marker before a 72-hour action reminder", async () => {
+    prismaMock.communicationEntityLink.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([actionCreatedLink()]);
+    prismaMock.action.findMany.mockResolvedValueOnce([{ id: "action-1", title: "Confirm availability", status: "OPEN" }]);
+    isSlackThreadFollowupSuppressedMock.mockResolvedValueOnce(true);
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+    expect(isSlackThreadFollowupSuppressedMock).toHaveBeenCalledWith({ workspaceId: "workspace-1", installationId: "install-1", channelId: "C1", threadTs: "1714320000.000100" });
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("ends the recurring reminder loop after two follow-ups", async () => {
+    prismaMock.communicationEntityLink.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([actionCreatedLink()]);
+    prismaMock.action.findMany.mockResolvedValueOnce([{ id: "action-1", title: "Confirm availability", status: "OPEN" }]);
+    prismaMock.communicationEntityLink.count.mockResolvedValueOnce(2);
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("shows action status, assignee and both links in a reminder", async () => {
+    prismaMock.communicationEntityLink.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([actionCreatedLink()]);
+    prismaMock.action.findMany.mockResolvedValueOnce([{ id: "action-1", title: "Confirm availability", status: "IN_PROGRESS", assigneeMember: { user: { displayName: "Jan", email: "jan@example.test" } } }]);
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
+    const blocks = JSON.stringify(sendSlackMessageMock.mock.calls[0]?.[2]);
+    expect(blocks).toContain("Status: in progress");
+    expect(blocks).toContain("Assignee: Jan");
+    expect(blocks).toContain("https://app.example.test/workspaces/workspace-1/actions/action-1");
+    expect(blocks).toContain("https://app.slack.com/archives/C1/p1714320000000100");
   });
 
   it("does not follow up actions with a recent waiting update inside the doubled window", async () => {

@@ -7,9 +7,12 @@ import {
   createWorkItemFromCommunicationSource,
   getAgentModelOverride,
   isAgentEnabled,
+  isSlackThreadFollowupSuppressed,
   listHumanMembers,
   postDeliberationEntry,
   sendSlackMessage,
+  slackFollowupStopIntent,
+  slackSourceUrl,
 } from "@corgtex/domain";
 
 const DEFAULT_PROACTIVE_CONFIDENCE = 0.9;
@@ -21,6 +24,7 @@ const MAX_PROACTIVE_NUDGES = 3;
 const MAX_PROACTIVE_ACTIONS = 3;
 const MAX_PROACTIVE_REVIEWS = 50;
 const MAX_PROACTIVE_ACTION_FOLLOWUPS = 3;
+const MAX_FOLLOWUPS_PER_ACTION = 2;
 const PROACTIVE_EXISTING_ACTION_UPDATE = "proactive_existing_action_update";
 const PROACTIVE_ACTION_WAITING_UPDATE = "proactive_action_waiting_update";
 const PROACTIVE_ACTION_PROCESSED_REPLY = "proactive_action_processed_reply";
@@ -240,6 +244,7 @@ export async function runSlackContextSummary(params: {
 }
 
 function looksUnanswered(text: string) {
+  if (/^\s*(?:fyi|for your information|heads[ -]?up)\b/i.test(text) || slackFollowupStopIntent(text)) return false;
   return /\?/.test(text) || /\b(can someone|anyone|please|could someone|does anyone|who can|need help)\b/i.test(text);
 }
 
@@ -308,14 +313,20 @@ function evidenceIsGrounded(evidence: string, threadMessages: SlackCandidateMess
 
 function isUniqueConstraintError(error: unknown) { return isRecord(error) && error.code === "P2002"; }
 
-async function sendProactiveActionConfirmation(params: { workspaceId: string; installationId: string; messageId: string; externalUserId: string | null; entityId: string; channel: string; threadTs: string; title: string; webUrl: string }) {
+function actionTrackingText(params: { workspaceId: string; actionId: string; status?: string; assignee?: string | null; channel: string; threadTs: string }) {
+  const actionUrl = `${env.APP_URL.replace(/\/$/, "")}/workspaces/${params.workspaceId}/actions/${params.actionId}`;
+  const status = (params.status || "OPEN").replaceAll("_", " ").toLowerCase();
+  return `Status: ${status} · Assignee: ${params.assignee || "unassigned"} · <${actionUrl}|Open action> · <${slackSourceUrl(params.channel, params.threadTs)}|Slack source>`;
+}
+
+async function sendProactiveActionConfirmation(params: { workspaceId: string; installationId: string; messageId: string; externalUserId: string | null; entityId: string; channel: string; threadTs: string; title: string; webUrl: string; status?: string; assignee?: string | null }) {
   const claimKey = `${PROACTIVE_CONFIRMATION_CLAIM_PREFIX}:${params.installationId}:${params.messageId}`;
   let claim: { id: string };
   try {
     claim = await prisma.communicationEntityLink.create({ data: { installationId: params.installationId, workspaceId: params.workspaceId, provider: "SLACK", messageId: params.messageId, externalUserId: params.externalUserId, entityType: "Action", entityId: params.entityId, action: "proactive_unanswered_action_confirmation", claimKey }, select: { id: true } });
   } catch (error) { if (isUniqueConstraintError(error)) return false; throw error; }
   try {
-    await sendSlackMessage(params.installationId, { channel: params.channel, threadTs: params.threadTs, text: `Created Corgtex action: ${params.title}` }, [{ type: "section", text: { type: "mrkdwn", text: `I created a Corgtex action for this concrete future deliverable: <${params.webUrl}|${params.title}>.` } }]);
+    await sendSlackMessage(params.installationId, { channel: params.channel, threadTs: params.threadTs, text: `Created Corgtex action: ${params.title}` }, [{ type: "section", text: { type: "mrkdwn", text: `I created a Corgtex action for this concrete future deliverable: <${params.webUrl}|${params.title}>.\n${actionTrackingText({ workspaceId: params.workspaceId, actionId: params.entityId, status: params.status, assignee: params.assignee, channel: params.channel, threadTs: params.threadTs })}` } }]);
     return true;
   } catch (error) { await prisma.communicationEntityLink.deleteMany({ where: { id: claim.id, workspaceId: params.workspaceId, claimKey } }); throw error; }
 }
@@ -625,6 +636,7 @@ export async function runSlackProactiveScan(params: {
   let nudges = 0;
   for (const candidate of candidates.filter((message) => looksUnanswered(message.text ?? "") && !isAddressedToSlackBot(message.text ?? "", installation.botUserId)).slice(0, 10)) {
     const threadTs = threadTsForMessage(candidate);
+    if (await isSlackThreadFollowupSuppressed({ workspaceId: params.workspaceId, installationId: params.installationId, channelId: candidate.externalChannelId, threadTs })) continue;
     const alreadyNudged = await prisma.communicationEntityLink.findFirst({
       where: {
         workspaceId: params.workspaceId,
@@ -734,6 +746,7 @@ export async function runSlackProactiveScan(params: {
     if (actions >= MAX_PROACTIVE_ACTIONS) break;
     const candidate = nudge.message as SlackCandidateMessage | null;
     if (!candidate || !candidate.text || !channelIds.includes(candidate.externalChannelId)) continue;
+    if (await isSlackThreadFollowupSuppressed({ workspaceId: params.workspaceId, installationId: params.installationId, channelId: candidate.externalChannelId, threadTs: threadTsForMessage(candidate) })) continue;
     const dispositionClaimKey = `${PROACTIVE_DISPOSITION_CLAIM_PREFIX}:${params.installationId}:${candidate.id}`;
     const linkedAction = await prisma.communicationEntityLink.findFirst({
       where: {
@@ -779,9 +792,9 @@ export async function runSlackProactiveScan(params: {
     const processedReplyClaimKey = `${dispositionClaimKey}:processed:${latestThreadMessage.id}`;
     const scannerCreatedAction = linkedAction?.claimKey === dispositionClaimKey;
     if (scannerCreatedAction) {
-      const [action] = await prisma.action.findMany({ where: { workspaceId: params.workspaceId, id: linkedAction.entityId }, select: { id: true, title: true }, take: 1 });
+      const [action] = await prisma.action.findMany({ where: { workspaceId: params.workspaceId, id: linkedAction.entityId }, select: { id: true, title: true, status: true, assigneeMember: { select: { user: { select: { displayName: true, email: true } } } } }, take: 1 });
       if (action) try {
-        await sendProactiveActionConfirmation({ workspaceId: params.workspaceId, installationId: params.installationId, messageId: candidate.id, externalUserId: candidate.externalUserId, entityId: action.id, channel: candidate.externalChannelId, threadTs: threadTsForMessage(candidate), title: action.title, webUrl: `${env.APP_URL.replace(/\/$/, "")}/workspaces/${params.workspaceId}/actions/${action.id}` });
+        await sendProactiveActionConfirmation({ workspaceId: params.workspaceId, installationId: params.installationId, messageId: candidate.id, externalUserId: candidate.externalUserId, entityId: action.id, channel: candidate.externalChannelId, threadTs: threadTsForMessage(candidate), title: action.title, webUrl: `${env.APP_URL.replace(/\/$/, "")}/workspaces/${params.workspaceId}/actions/${action.id}`, status: action.status, assignee: action.assigneeMember?.user.displayName || action.assigneeMember?.user.email });
       } catch (error) {
         if (await markSlackInstallationReauthRequired({ ...params, error })) return { skipped: true, reason: "slack_reauth_required" };
         throw error;
@@ -904,7 +917,7 @@ export async function runSlackProactiveScan(params: {
     if (latestThreadMessage.id !== candidate.id) await recordProactiveMarker({ installationId: params.installationId, workspaceId: params.workspaceId, messageId: latestThreadMessage.id, externalUserId: latestThreadMessage.externalUserId, entityType: "CommunicationMessage", entityId: latestThreadMessage.id, action: PROACTIVE_ACTION_PROCESSED_REPLY, claimKey: processedReplyClaimKey });
     const item = await createWorkItemFromCommunicationSource(agentActor, {
       workspaceId: params.workspaceId, provider: "SLACK", installationId: params.installationId, kind: "ACTION", title: actionTitle,
-      bodyMd: threadMessages.map((message) => message.text).filter(Boolean).join("\n\n"),
+      bodyMd: `${threadMessages.map((message) => message.text).filter(Boolean).join("\n\n")}\n\nSlack source: ${slackSourceUrl(candidate.externalChannelId, threadTsForMessage(candidate))}`,
       sourceMessageId: candidate.id, externalUserId: candidate.externalUserId, assigneeMemberId, open: true, claimKey: dispositionClaimKey,
     }).catch(async (error: unknown) => {
       if (!isUniqueConstraintError(error)) throw error;
@@ -913,11 +926,11 @@ export async function runSlackProactiveScan(params: {
     });
     if (!item) continue;
     actions += 1;
-    const [persistedAction] = await prisma.action.findMany({ where: { workspaceId: params.workspaceId, id: item.entityId }, select: { id: true, title: true }, take: 1 });
+    const [persistedAction] = await prisma.action.findMany({ where: { workspaceId: params.workspaceId, id: item.entityId }, select: { id: true, title: true, status: true, assigneeMember: { select: { user: { select: { displayName: true, email: true } } } } }, take: 1 });
     if (!persistedAction) continue;
 
     try {
-      await sendProactiveActionConfirmation({ workspaceId: params.workspaceId, installationId: params.installationId, messageId: candidate.id, externalUserId: candidate.externalUserId, entityId: item.entityId, channel: candidate.externalChannelId, threadTs: threadTsForMessage(candidate), title: persistedAction.title, webUrl: item.webUrl });
+      await sendProactiveActionConfirmation({ workspaceId: params.workspaceId, installationId: params.installationId, messageId: candidate.id, externalUserId: candidate.externalUserId, entityId: item.entityId, channel: candidate.externalChannelId, threadTs: threadTsForMessage(candidate), title: persistedAction.title, webUrl: item.webUrl, status: persistedAction.status, assignee: persistedAction.assigneeMember?.user.displayName || persistedAction.assigneeMember?.user.email });
     } catch (error) {
       if (await markSlackInstallationReauthRequired({ ...params, error })) {
         return { skipped: true, reason: "slack_reauth_required" };
@@ -975,7 +988,7 @@ export async function runSlackProactiveScan(params: {
           archivedAt: null,
           status: { not: "COMPLETED" },
         },
-        select: { id: true, title: true },
+        select: { id: true, title: true, status: true, assigneeMember: { select: { user: { select: { displayName: true, email: true } } } } },
       })
     : [];
   const openActionById = new Map(openActions.map((action) => [action.id, action]));
@@ -985,6 +998,12 @@ export async function runSlackProactiveScan(params: {
     const action = openActionById.get(link.entityId);
     const source = link.message as SlackCandidateMessage | null;
     if (!action || !source || !channelIds.includes(source.externalChannelId)) continue;
+    if (await isSlackThreadFollowupSuppressed({ workspaceId: params.workspaceId, installationId: params.installationId, channelId: source.externalChannelId, threadTs: threadTsForMessage(source) })) continue;
+
+    const priorFollowups = await prisma.communicationEntityLink.count({
+      where: { workspaceId: params.workspaceId, installationId: params.installationId, provider: "SLACK", entityType: "Action", entityId: action.id, action: "proactive_action_followup" },
+    });
+    if (priorFollowups >= MAX_FOLLOWUPS_PER_ACTION) continue;
 
     const waitingUpdate = await prisma.communicationEntityLink.findFirst({
       where: {
@@ -1021,7 +1040,7 @@ export async function runSlackProactiveScan(params: {
         text: `Corgtex action still not completed: ${action.title}`,
       }, [{
         type: "section",
-        text: { type: "mrkdwn", text: `This Corgtex action still is not completed after 72 hours: *${action.title}*.` },
+        text: { type: "mrkdwn", text: `This Corgtex action still is not completed after 72 hours: *${action.title}*.\n${actionTrackingText({ workspaceId: params.workspaceId, actionId: action.id, status: action.status, assignee: action.assigneeMember?.user.displayName || action.assigneeMember?.user.email, channel: source.externalChannelId, threadTs: threadTsForMessage(source) })}` },
       }]);
     } catch (error) {
       if (await markSlackInstallationReauthRequired({ ...params, error })) {

@@ -91,6 +91,7 @@ const {
       },
       communicationEntityLink: {
         create: vi.fn(),
+        upsert: vi.fn(),
         findUnique: vi.fn(),
       },
       user: {
@@ -197,6 +198,7 @@ describe("communication Slack integration", () => {
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof txMock) => Promise<unknown>) => callback(txMock));
     createActionMock.mockResolvedValue({ id: "action-1" });
     prismaMock.communicationEntityLink.create.mockResolvedValue({});
+    prismaMock.communicationEntityLink.upsert.mockResolvedValue({ id: "stop-marker" });
     prismaMock.communicationEntityLink.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.communicationMessage.updateMany.mockResolvedValue({ count: 2 });
     prismaMock.communicationMessage.findUnique.mockReset().mockResolvedValue(null);
@@ -961,6 +963,22 @@ describe("communication Slack integration", () => {
     }));
   });
 
+  it("persists an unmatched human STOP reply against its Slack thread", async () => {
+    const { processSlackInboundEvent } = await import("./communication");
+    prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
+      id: "inbound-stop", provider: "SLACK",
+      payload: { event: { type: "message", channel: "C1", channel_type: "channel", user: "U-unmatched", ts: "1788896184.791699", thread_ts: "1788205758.060039", text: "Stop. Do nothing" } },
+      installation: { id: "install-1", workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE", settings: {} },
+    });
+    prismaMock.communicationChannel.upsert.mockResolvedValueOnce({ id: "channel-1", kind: "PUBLIC", isIngestEnabled: true });
+    prismaMock.communicationMessage.upsert.mockResolvedValueOnce(slackMessageRow({ id: "stop-message" }));
+
+    await processSlackInboundEvent("inbound-stop");
+    expect(prismaMock.communicationEntityLink.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ workspaceId: "workspace-1", installationId: "install-1", messageId: "stop-message", externalUserId: "U-unmatched", entityId: "C1:1788205758.060039", action: "slack_followup_suppressed" }),
+    }));
+  });
+
   it.each([
     { rawRetentionDays: 3650 },
     { publicIngestionEnabled: false, channelAdmissionMode: "selected" },
@@ -1329,6 +1347,28 @@ describe("communication Slack integration", () => {
         }),
       }),
     }));
+  });
+
+  it("honors a STOP mention from an unmatched Slack identity without running the agent", async () => {
+    const { processSlackInboundEvent } = await import("./communication");
+    prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
+      id: "inbound-unmatched-stop", provider: "SLACK",
+      payload: { event: { type: "app_mention", channel: "C1", user: "U-unmatched", ts: "1788896184.791699", thread_ts: "1788205758.060039", text: "<@UBOT> STOP ALL FOLLOW UP" } },
+      installation: { id: "install-1", workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE", botUserId: "UBOT", botTokenEnc: "enc:bot-token", settings: {} },
+    });
+    prismaMock.communicationExternalUser.findUnique.mockResolvedValueOnce(null);
+    prismaMock.communicationChannel.upsert.mockResolvedValueOnce({ id: "channel-1", kind: "PUBLIC", isIngestEnabled: true });
+    prismaMock.communicationMessage.upsert.mockResolvedValueOnce(slackMessageRow({ id: "stop-message" }));
+    prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce({ id: "install-1", botTokenEnc: "enc:bot-token" });
+    slackWebClientMock.chat.postMessage.mockResolvedValueOnce({ ok: true, ts: "1788896185.000001" });
+
+    await processSlackInboundEvent("inbound-unmatched-stop");
+    expect(prismaMock.communicationEntityLink.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ externalUserId: "U-unmatched", entityId: "C1:1788205758.060039", action: "slack_followup_suppressed" }),
+    }));
+    expect(prismaMock.communicationExternalUser.findUnique).not.toHaveBeenCalled();
+    expect(slackWebClientMock.chat.postMessage).toHaveBeenCalledWith(expect.objectContaining({ channel: "C1", thread_ts: "1788205758.060039", text: "I will stop Corgtex follow-ups in this thread." }));
+    expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ type: "communication.slack.agent" }) }));
   });
 
   it("routes app mentions in agenda threads to agenda editing", async () => {

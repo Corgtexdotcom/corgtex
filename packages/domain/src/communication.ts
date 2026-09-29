@@ -27,6 +27,7 @@ import {
 } from "./meeting-action-review";
 import { createProposal, submitProposal } from "./proposals";
 import { getSlackWorkspaceBinding } from "./slack-workspace-bindings";
+import { slackFollowupStopIntent, suppressSlackThreadFollowups } from "./slack-followups";
 import { createTension, publishTension } from "./tensions";
 
 export type CommunicationWorkItemKind = "ACTION" | "TENSION" | "PROPOSAL" | "BRAIN_NOTE";
@@ -1105,6 +1106,17 @@ async function ingestSlackMessage(installation: { id: string; workspaceId: strin
     },
   });
 
+  if (text && slackFollowupStopIntent(text)) {
+    await suppressSlackThreadFollowups({
+      workspaceId: installation.workspaceId,
+      installationId: installation.id,
+      channelId: externalChannelId,
+      threadTs: normalized.threadTs || ts,
+      messageId: message.id,
+      externalUserId: normalized.externalUserId,
+    });
+  }
+
   if (text) {
     await enqueueSlackMessageContextJobs({ installation, message });
   }
@@ -1586,11 +1598,37 @@ export async function processSlackInboundEvent(inboundEventId: string) {
     } else if (event.type === "app_mention") {
       const token = encryptedBotToken(inbound.installation);
       const externalUserId = asString(event.user);
-      const actor = externalUserId ? await resolveHumanActorForSlackUser(inbound.installation, externalUserId) : null;
       const channelId = asString(event.channel);
       const messageTs = asString(event.ts) || asString(event.event_ts);
       const threadTs = asString(event.thread_ts) || messageTs;
-      if (!actor) {
+      const text = asString(event.text);
+      const stopRequest = slackFollowupStopIntent(text);
+      const actor = !stopRequest && externalUserId ? await resolveHumanActorForSlackUser(inbound.installation, externalUserId) : null;
+      if (channelId && messageTs && stopRequest) {
+        const sourceMessage = await persistSlackSourceMessage(inbound.installation, {
+          channelId,
+          messageTs,
+          threadTs,
+          externalUserId,
+          text,
+          raw: event,
+        });
+        if (sourceMessage) {
+          await suppressSlackThreadFollowups({
+            workspaceId: inbound.installation.workspaceId,
+            installationId: inbound.installation.id,
+            channelId,
+            threadTs,
+            messageId: sourceMessage.id,
+            externalUserId,
+          });
+        }
+        await sendSlackMessage(inbound.installation.id, {
+          channel: channelId,
+          threadTs,
+          text: "I will stop Corgtex follow-ups in this thread.",
+        }, [], token);
+      } else if (!actor) {
         const accountResponse = slackAccountLinkResponse(inbound.installation.workspaceId);
         if (channelId) {
           await sendSlackMessage(inbound.installation.id, {
@@ -1599,7 +1637,6 @@ export async function processSlackInboundEvent(inboundEventId: string) {
           }, accountResponse.blocks, token);
         }
       } else if (channelId && messageTs) {
-        const text = asString(event.text);
         const prompt = stripSlackBotMention(text, inbound.installation.botUserId) || "brief";
         const sourceMessage = await persistSlackSourceMessage(inbound.installation, {
           channelId,
