@@ -8,6 +8,7 @@ import {
   instrumentNewspaperHtmlLinks,
   isHumanNewspaperRecipientIdentity,
   normalizeNewspaperCadence,
+  rankPersonalNewspaperItems,
   recordNewspaperDelivery,
   recordDemoWelcomeCrmActivity,
   buildWorkspaceBriefingFromCandidates,
@@ -20,6 +21,7 @@ import {
   workspaceBriefingPeriodFromCadence,
   workspaceBriefingToNewspaperDigest,
 } from "@corgtex/domain";
+import type { PersonalNewspaperItem } from "@corgtex/domain";
 import { 
   batchIngestDailyConversations, 
   createArticle, 
@@ -195,6 +197,8 @@ type AdviceSubjectPreview = {
   id: string;
   title: string;
 };
+
+type PersonalDigestItem = PersonalNewspaperItem & { text: string };
 
 type OperatingDigestInputs = {
   meetings: Array<{
@@ -651,7 +655,7 @@ async function loadPendingAdviceRequestsByMember(params: {
   recipientMembers: DigestRecipientMember[];
 }) {
   const recipientMemberIds = params.recipientMembers.map((member) => member.id);
-  if (recipientMemberIds.length === 0) return new Map<string, string[]>();
+  if (recipientMemberIds.length === 0) return new Map<string, PersonalDigestItem[]>();
 
   const recipientCircleIds = Array.from(new Set(params.recipientMembers.flatMap((member) => (
     [...memberCircleIds(member, params.workspaceId)]
@@ -709,10 +713,10 @@ async function loadPendingAdviceRequestsByMember(params: {
     take: 100,
   }) as PendingAdviceDigestRequest[];
 
-  if (requests.length === 0) return new Map<string, string[]>();
+  if (requests.length === 0) return new Map<string, PersonalDigestItem[]>();
 
   const subjectPreviews = await loadAdviceSubjectPreviews(params.workspaceId, requests);
-  const itemsByMemberId = new Map<string, string[]>();
+  const itemsByMemberId = new Map<string, PersonalDigestItem[]>();
   const circleIdsByMemberId = new Map(params.recipientMembers.map((member) => [
     member.id,
     memberCircleIds(member, params.workspaceId),
@@ -731,11 +735,21 @@ async function loadPendingAdviceRequestsByMember(params: {
       if (!isRecipient) continue;
 
       const existing = itemsByMemberId.get(member.id) ?? [];
-      existing.push(formatPendingAdviceRequestDigestItem({
-        workspaceId: params.workspaceId,
-        request,
-        subject,
-      }));
+      existing.push({
+        id: request.id,
+        kind: "ADVICE",
+        title: subject.title,
+        href: adviceSubjectUrl(params.workspaceId, subject),
+        status: "ACTIVE",
+        priority: 0,
+        dueAt: request.deadlineAt,
+        updatedAt: request.createdAt,
+        text: formatPendingAdviceRequestDigestItem({
+          workspaceId: params.workspaceId,
+          request,
+          subject,
+        }),
+      });
       itemsByMemberId.set(member.id, existing);
     }
   }
@@ -1100,11 +1114,11 @@ function buildDigestSourceCounts(params: {
   sessions: unknown[];
   slackMessages: unknown[];
   buildArtifacts: unknown[];
-  pendingAdviceByMemberId: Map<string, string[]>;
+  pendingAdviceByMemberId: Map<string, PersonalDigestItem[]>;
 }): DigestSourceCounts {
   const adviceRequestIds = new Set<string>();
   for (const items of params.pendingAdviceByMemberId.values()) {
-    for (const item of items) adviceRequestIds.add(item);
+    for (const item of items) adviceRequestIds.add(item.id);
   }
   for (const request of params.operatingInputs.workspaceAdviceRequests) {
     adviceRequestIds.add(request.id);
@@ -1172,6 +1186,7 @@ function formatAssignedActionDigestItem(params: {
   const due = formatDigestDate(params.action.dueAt);
   return [
     `Assigned action: ${params.action.title}`,
+    `Status: ${params.action.status === "IN_PROGRESS" ? "In progress" : "Open"}`,
     compactDigestLine(params.action.bodyMd, 300) ? `Detail: ${compactDigestLine(params.action.bodyMd, 300)}` : null,
     due ? `Due: ${due}` : null,
     params.action.priority > 0 ? `Priority: ${params.action.priority}` : null,
@@ -1181,22 +1196,36 @@ function formatAssignedActionDigestItem(params: {
 
 function buildPersonalActionItemsByMember(params: {
   workspaceId: string;
-  pendingAdviceByMemberId: Map<string, string[]>;
+  pendingAdviceByMemberId: Map<string, PersonalDigestItem[]>;
   openActions: OperatingDigestInputs["openActions"];
+  now: Date;
 }) {
-  const itemsByMemberId = new Map<string, string[]>(
+  const itemsByMemberId = new Map<string, PersonalDigestItem[]>(
     [...params.pendingAdviceByMemberId.entries()].map(([memberId, items]) => [memberId, [...items]]),
   );
   for (const action of params.openActions) {
     if (!action.assigneeMemberId) continue;
     const existing = itemsByMemberId.get(action.assigneeMemberId) ?? [];
-    existing.push(formatAssignedActionDigestItem({
-      workspaceId: params.workspaceId,
-      action,
-    }));
+    existing.push({
+      id: action.id,
+      kind: "ACTION",
+      title: action.title,
+      href: `${workspaceUrl(params.workspaceId)}/actions/${action.id}`,
+      status: action.status,
+      priority: action.priority,
+      dueAt: action.dueAt,
+      updatedAt: action.updatedAt,
+      text: formatAssignedActionDigestItem({
+        workspaceId: params.workspaceId,
+        action,
+      }),
+    });
     itemsByMemberId.set(action.assigneeMemberId, existing);
   }
-  return itemsByMemberId;
+  return new Map([...itemsByMemberId.entries()].map(([memberId, items]) => [
+    memberId,
+    rankPersonalNewspaperItems(items, params.now).map((item) => item.text),
+  ]));
 }
 
 export async function runDailyDigest(params: {
@@ -1361,6 +1390,30 @@ export async function runDailyDigest(params: {
     since,
     until: generationDate,
   });
+  const assignedOpenActions = recipientMembers.length > 0
+    ? await prisma.action.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        archivedAt: null,
+        isPrivate: false,
+        status: { in: ["OPEN", "IN_PROGRESS"] },
+        assigneeMemberId: { in: recipientMembers.map((member) => member.id) },
+        createdAt: { lte: generationDate },
+        updatedAt: { lte: generationDate },
+      },
+      select: {
+        id: true,
+        title: true,
+        bodyMd: true,
+        status: true,
+        assigneeMemberId: true,
+        dueAt: true,
+        priority: true,
+        updatedAt: true,
+      },
+      orderBy: [{ priority: "desc" }, { dueAt: "asc" }, { updatedAt: "desc" }],
+    })
+    : [];
   const briefingCandidates = await collectWorkspaceBriefingCandidates({
     workspaceId: params.workspaceId,
     since: briefingSince,
@@ -1370,7 +1423,8 @@ export async function runDailyDigest(params: {
   const personalItemsByMemberId = buildPersonalActionItemsByMember({
     workspaceId: params.workspaceId,
     pendingAdviceByMemberId,
-    openActions: operatingInputs.openActions,
+    openActions: assignedOpenActions,
+    now: generationDate,
   });
   const sourceCounts = buildDigestSourceCounts({
     operatingInputs,

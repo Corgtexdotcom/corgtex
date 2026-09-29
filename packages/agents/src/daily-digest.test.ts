@@ -119,7 +119,8 @@ vi.mock("@corgtex/models", () => ({
   resolveModel: vi.fn().mockReturnValue("fake-model"),
 }));
 
-vi.mock("@corgtex/domain", () => ({
+vi.mock("@corgtex/domain", async () => ({
+  rankPersonalNewspaperItems: (await import("../../domain/src/newspaper-priority")).rankPersonalNewspaperItems,
   AGENT_REGISTRY: {
     "daily-digest": {
       defaultModelTier: "excellent",
@@ -1129,6 +1130,67 @@ describe("runDailyDigest", () => {
     expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
       memberId: "member-human",
       status: "SENT",
+    }));
+  });
+
+  it("loads each recipient's assigned actions beyond the workspace digest sample", async () => {
+    prismaMock.member.findMany.mockResolvedValue([
+      { id: "member-a", newspaperCadence: "DAILY", roleAssignments: [], user: { id: "user-a", email: "a@example.com", displayName: "A" } },
+      { id: "member-b", newspaperCadence: "DAILY", roleAssignments: [], user: { id: "user-b", email: "b@example.com", displayName: "B" } },
+    ]);
+    prismaMock.action.findMany.mockImplementation(async (query: any) => {
+      if (!query.where?.assigneeMemberId) return [];
+      return [
+        { id: "action-a", title: "Review the customer plan", bodyMd: null, status: "IN_PROGRESS", assigneeMemberId: "member-a", dueAt: new Date("2026-05-01T12:00:00.000Z"), priority: 2, updatedAt: new Date("2026-04-30T09:00:00.000Z") },
+        { id: "action-b", title: "Confirm another team task", bodyMd: null, status: "OPEN", assigneeMemberId: "member-b", dueAt: null, priority: 1, updatedAt: new Date("2026-04-30T09:00:00.000Z") },
+      ];
+    });
+
+    const { runDailyDigest } = await import("./daily-digest");
+    await runDailyDigest({ workspaceId: "workspace-1", dateISO: "2026-04-30T12:00:00.000Z", cadence: "DAILY" });
+
+    const htmlByRecipient = new Map(sendEmailMock.mock.calls.map(([request]) => [request.to, request.html]));
+    expect(htmlByRecipient.get("a@example.com")).toContain("Review the customer plan");
+    expect(htmlByRecipient.get("a@example.com")).toContain("In progress");
+    expect(htmlByRecipient.get("a@example.com")).not.toContain("Confirm another team task");
+    expect(htmlByRecipient.get("b@example.com")).toContain("Confirm another team task");
+    expect(htmlByRecipient.get("b@example.com")).not.toContain("Review the customer plan");
+  });
+
+  it("keeps an overdue assigned action ahead of advice when the email list is capped", async () => {
+    prismaMock.member.findMany.mockResolvedValue([
+      { id: "member-a", newspaperCadence: "DAILY", roleAssignments: [], user: { id: "user-a", email: "a@example.com", displayName: "A" } },
+    ]);
+    prismaMock.adviceRequest.findMany.mockResolvedValue(Array.from({ length: 6 }, (_, index) => ({
+      id: `request-${index}`,
+      audienceType: "MEMBERS",
+      targetCircleId: null,
+      messageMd: `Advice request ${index}`,
+      deadlineAt: null,
+      reminderAt: null,
+      preferredChannel: "IN_APP",
+      createdAt: new Date("2026-04-30T08:00:00.000Z"),
+      requestedBy: { email: "requester@example.com", displayName: "Requester" },
+      targetCircle: null,
+      recipients: [{ memberId: "member-a" }],
+      process: { subjectType: "PROPOSAL", subjectId: `proposal-${index}` },
+    })));
+    prismaMock.proposal.findMany.mockResolvedValue(Array.from({ length: 6 }, (_, index) => ({
+      id: `proposal-${index}`,
+      title: `Proposal ${index}`,
+    })));
+    prismaMock.action.findMany.mockImplementation(async (query: any) => (
+      query.where?.assigneeMemberId
+        ? [{ id: "overdue-action", title: "Resolve urgent blocker", bodyMd: null, status: "OPEN", assigneeMemberId: "member-a", dueAt: new Date("2026-04-29T12:00:00.000Z"), priority: 0, updatedAt: new Date("2026-04-30T09:00:00.000Z") }]
+        : []
+    ));
+
+    const { runDailyDigest } = await import("./daily-digest");
+    await runDailyDigest({ workspaceId: "workspace-1", dateISO: "2026-04-30T12:00:00.000Z", cadence: "DAILY" });
+
+    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+      to: "a@example.com",
+      html: expect.stringContaining("Resolve urgent blocker"),
     }));
   });
 

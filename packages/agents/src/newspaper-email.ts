@@ -47,7 +47,7 @@ export function withNewspaperAdviceRequests(
   const adviceSection: NewspaperDigestSection = {
     id: "adviceRequests",
     title: "Requests Awaiting Your Input",
-    items: [...(existingAdviceSection?.items ?? []), ...normalizedItems],
+    items: [...normalizedItems, ...(existingAdviceSection?.items ?? [])],
   };
 
   return {

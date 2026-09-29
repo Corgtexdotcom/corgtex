@@ -3,8 +3,10 @@ import {
   normalizeNewspaperEditionDigest,
   normalizeWorkspaceBriefingPayload,
   privacyFilter,
+  rankPersonalNewspaperItems,
   requireWorkspaceMembership,
 } from "@corgtex/domain";
+import type { PersonalNewspaperItem } from "@corgtex/domain";
 import { prisma, workspaceBranding } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import Link from "next/link";
@@ -21,6 +23,10 @@ export const dynamic = "force-dynamic";
 
 function isExternalHref(href: string) {
   return href.startsWith("http://") || href.startsWith("https://");
+}
+
+function utcDueDay(date: Date) {
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
 }
 
 function compactNarrativeText(markdown: string | null | undefined, maxLength = 520) {
@@ -232,24 +238,66 @@ export default async function WorkspaceDashboard({
       },
     ],
   } satisfies Prisma.TensionWhereInput;
+  const memberCircleAssignments = currentMember?.id
+    ? await prisma.roleAssignment.findMany({
+      where: {
+        memberId: currentMember.id,
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+        role: {
+          archivedAt: null,
+          circle: { workspaceId, archivedAt: null },
+        },
+      },
+      select: { role: { select: { circleId: true } } },
+    })
+    : [];
+  const memberCircleIds = memberCircleAssignments.map((assignment) => assignment.role.circleId);
+  const personalAdviceRequests = actor.kind === "user" && currentMember?.id
+    ? await prisma.adviceRequest.findMany({
+      where: {
+        workspaceId,
+        status: "ACTIVE",
+        requestedByUserId: { not: actor.user.id },
+        OR: [
+          { audienceType: "MEMBERS", recipients: { some: { memberId: currentMember.id } } },
+          { audienceType: "WORKSPACE" },
+          ...(memberCircleIds.length > 0
+            ? [{ audienceType: "CIRCLE" as const, targetCircleId: { in: memberCircleIds } }]
+            : []),
+        ],
+      },
+      select: {
+        deadlineAt: true,
+        process: { select: { subjectType: true, subjectId: true } },
+      },
+    })
+    : [];
+  const adviceDeadlinesByKind = {
+    ACTION: new Map<string, Date | null>(),
+    PROPOSAL: new Map<string, Date | null>(),
+    TENSION: new Map<string, Date | null>(),
+  };
+  for (const request of personalAdviceRequests) {
+    const kind = request.process.subjectType;
+    if (kind !== "ACTION" && kind !== "PROPOSAL" && kind !== "TENSION") continue;
+    const deadlines = adviceDeadlinesByKind[kind];
+    const previous = deadlines.get(request.process.subjectId);
+    if (previous === undefined || (request.deadlineAt && (!previous || request.deadlineAt < previous))) {
+      deadlines.set(request.process.subjectId, request.deadlineAt);
+    }
+  }
+  const visiblePersonalOpenActionWhere = currentMember?.id
+    ? {
+      AND: [
+        visibleOpenActionWhere,
+        { OR: [{ assigneeMemberId: currentMember.id }, { id: { in: [...adviceDeadlinesByKind.ACTION.keys()] } }] },
+      ],
+    } satisfies Prisma.ActionWhereInput
+    : null;
   const personalProposalConditions: Prisma.ProposalWhereInput[] = currentMember?.id
     ? [
       { ownerMemberId: currentMember.id },
-      {
-        adviceProcess: {
-          is: {
-            requests: {
-              some: {
-                workspaceId,
-                status: "ACTIVE",
-                recipients: {
-                  some: { memberId: currentMember.id },
-                },
-              },
-            },
-          },
-        },
-      },
+      { id: { in: [...adviceDeadlinesByKind.PROPOSAL.keys()] } },
     ]
     : [];
   const visiblePersonalOpenProposalWhere = currentMember?.id
@@ -259,6 +307,14 @@ export default async function WorkspaceDashboard({
         { OR: personalProposalConditions },
       ],
     } satisfies Prisma.ProposalWhereInput
+    : null;
+  const visiblePersonalOpenTensionWhere = currentMember?.id
+    ? {
+      AND: [
+        visibleOpenTensionWhere,
+        { OR: [{ assigneeMemberId: currentMember.id }, { id: { in: [...adviceDeadlinesByKind.TENSION.keys()] } }] },
+      ],
+    } satisfies Prisma.TensionWhereInput
     : null;
   const [
     unreadNotificationsCount,
@@ -277,6 +333,9 @@ export default async function WorkspaceDashboard({
     proposalPersonalCount,
     tensionTotalCount,
     tensionPersonalCount,
+    personalActions,
+    personalProposals,
+    personalTensions,
   ] = await prisma.$transaction([
     prisma.notification.count({
       where: {
@@ -401,17 +460,39 @@ export default async function WorkspaceDashboard({
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true, name: true } }),
     prisma.member.count({ where: { workspaceId, isActive: true } }),
     prisma.action.count({ where: visibleOpenActionWhere }),
-    currentMember?.id
-      ? prisma.action.count({ where: { AND: [visibleOpenActionWhere, { assigneeMemberId: currentMember.id }] } })
+    visiblePersonalOpenActionWhere
+      ? prisma.action.count({ where: visiblePersonalOpenActionWhere })
       : prisma.action.count({ where: { id: "__no_current_member__" } }),
     prisma.proposal.count({ where: visibleOpenProposalWhere }),
     visiblePersonalOpenProposalWhere
       ? prisma.proposal.count({ where: visiblePersonalOpenProposalWhere })
       : prisma.proposal.count({ where: { id: "__no_current_member__" } }),
     prisma.tension.count({ where: visibleOpenTensionWhere }),
-    currentMember?.id
-      ? prisma.tension.count({ where: { AND: [visibleOpenTensionWhere, { assigneeMemberId: currentMember.id }] } })
+    visiblePersonalOpenTensionWhere
+      ? prisma.tension.count({ where: visiblePersonalOpenTensionWhere })
       : prisma.tension.count({ where: { id: "__no_current_member__" } }),
+    prisma.action.findMany({
+      where: visiblePersonalOpenActionWhere ?? { id: "__no_current_member__" },
+      select: { id: true, title: true, status: true, priority: true, assigneeMemberId: true, dueAt: true, updatedAt: true },
+      orderBy: [{ priority: "desc" }, { dueAt: "asc" }, { updatedAt: "desc" }],
+    }),
+    prisma.proposal.findMany({
+      where: visiblePersonalOpenProposalWhere ?? { id: "__no_current_member__" },
+      select: {
+        id: true,
+        title: true,
+        status: true,
+        priority: true,
+        ownerMemberId: true,
+        updatedAt: true,
+      },
+      orderBy: [{ priority: "desc" }, { updatedAt: "desc" }],
+    }),
+    prisma.tension.findMany({
+      where: visiblePersonalOpenTensionWhere ?? { id: "__no_current_member__" },
+      select: { id: true, title: true, status: true, priority: true, assigneeMemberId: true, updatedAt: true },
+      orderBy: [{ priority: "desc" }, { updatedAt: "desc" }],
+    }),
   ]);
   const branding = workspaceData
     ? workspaceBranding(workspaceData)
@@ -425,6 +506,37 @@ export default async function WorkspaceDashboard({
     tensionPersonalCount,
     tensionTotalCount,
   });
+  const personalItems: PersonalNewspaperItem[] = rankPersonalNewspaperItems([
+    ...personalActions.map((action) => {
+      const adviceDeadline = adviceDeadlinesByKind.ACTION.get(action.id) ?? null;
+      const useAdviceDeadline = adviceDeadline
+        && (!action.dueAt || utcDueDay(adviceDeadline) <= utcDueDay(action.dueAt));
+      return {
+        ...action,
+        kind: "ACTION" as const,
+        reason: action.assigneeMemberId === currentMember?.id ? "assigned" as const : "advice" as const,
+        dueAt: useAdviceDeadline ? adviceDeadline : action.dueAt,
+        dueAtKind: useAdviceDeadline ? "DATETIME" as const : "DATE" as const,
+        href: `/workspaces/${workspaceId}/actions/${action.id}`,
+      };
+    }),
+    ...personalProposals.map((proposal) => ({
+      ...proposal,
+      kind: "PROPOSAL" as const,
+      reason: proposal.ownerMemberId === currentMember?.id ? "owner" as const : "advice" as const,
+      dueAt: adviceDeadlinesByKind.PROPOSAL.get(proposal.id) ?? null,
+      dueAtKind: "DATETIME" as const,
+      href: `/workspaces/${workspaceId}/proposals/${proposal.id}`,
+    })),
+    ...personalTensions.map((tension) => ({
+      ...tension,
+      kind: "TENSION" as const,
+      reason: tension.assigneeMemberId === currentMember?.id ? "assigned" as const : "advice" as const,
+      dueAt: adviceDeadlinesByKind.TENSION.get(tension.id) ?? null,
+      dueAtKind: "DATETIME" as const,
+      href: `/workspaces/${workspaceId}/tensions/${tension.id}`,
+    })),
+  ], new Date());
   const latestWorkspaceBriefing = [latestDailyWorkspaceBriefing, latestWeeklyWorkspaceBriefing]
     .filter((briefing): briefing is NonNullable<typeof latestDailyWorkspaceBriefing> => Boolean(briefing))
     .sort((left, right) => right.generatedAt.getTime() - left.generatedAt.getTime())[0] ?? null;
@@ -569,6 +681,40 @@ export default async function WorkspaceDashboard({
           );
         })}
       </section>
+
+      {currentMember && (
+        <section className="nr-personal-newspaper" aria-labelledby="personal-newspaper-title">
+          <div className="nr-personal-newspaper-heading">
+            <div>
+              <p className="nr-newspaper-kicker">{t("personalNewspaperKicker")}</p>
+              <h2 id="personal-newspaper-title">{t("personalNewspaperTitle")}</h2>
+              <p>{t("personalNewspaperSourceNote")}</p>
+            </div>
+            <Link href={`/workspaces/${workspaceId}/actions?scope=workspace&status=OPEN&status=IN_PROGRESS`}>
+              {t("viewAllActions")}
+            </Link>
+          </div>
+          {personalItems.length > 0 ? (
+            <ol className="nr-personal-newspaper-list">
+              {personalItems.slice(0, 8).map((item) => (
+                <li key={`${item.kind}-${item.id}`}>
+                  <Link href={item.href}>{item.title}</Link>
+                  <span>
+                    {item.kind === "ACTION" ? t("personalSourceAction") : item.kind === "PROPOSAL" ? t("personalSourceProposal") : t("personalSourceTension")}
+                    {" · "}
+                    {item.reason === "advice" ? t("personalReasonAdvice") : item.reason === "owner" ? t("personalReasonOwner") : t("personalReasonAssigned")}
+                    {" · "}
+                    {item.status === "IN_PROGRESS" ? t("personalStatusInProgress") : t("personalStatusOpen")}
+                    {item.dueAt ? ` · ${t("dueDate", { date: format.dateTime(item.dueAt, item.dueAtKind === "DATE"
+                      ? { timeZone: "UTC", month: "short", day: "numeric" }
+                      : { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) })}` : ""}
+                  </span>
+                </li>
+              ))}
+            </ol>
+          ) : <p className="nr-personal-newspaper-empty">{t("personalNewspaperEmpty")}</p>}
+        </section>
+      )}
 
       <article className="nr-newspaper-page">
         <header className="nr-newspaper-header">
