@@ -29,7 +29,6 @@ export async function DecisionFields({
       <input type="hidden" name="workspaceId" value={workspaceId} />
       {decision && <>
         <input type="hidden" name="decisionId" value={decision.id} />
-        <input type="hidden" name="expectedVersion" value={decision.version} />
       </>}
       <label>
         {t("decisionTitle")}
@@ -52,15 +51,17 @@ export async function DecisionFields({
       <div className="actions-inline">
         <label style={{ flex: 1 }}>
           {t("proposal")}
-          <select name="proposalId" defaultValue={proposals.some((option) => option.id === decision?.proposalId) ? decision?.proposalId ?? "" : ""}>
+          <select name="proposalId" defaultValue={decision?.proposalId ?? ""}>
             <option value="">{t("noLink")}</option>
+            {decision?.proposalId && !proposals.some((option) => option.id === decision.proposalId) && <option value={decision.proposalId}>{t("unavailableLink")}</option>}
             {proposals.map((option) => <option key={option.id} value={option.id}>{option.title}</option>)}
           </select>
         </label>
         <label style={{ flex: 1 }}>
           {t("tension")}
-          <select name="tensionId" defaultValue={tensions.some((option) => option.id === decision?.tensionId) ? decision?.tensionId ?? "" : ""}>
+          <select name="tensionId" defaultValue={decision?.tensionId ?? ""}>
             <option value="">{t("noLink")}</option>
+            {decision?.tensionId && !tensions.some((option) => option.id === decision.tensionId) && <option value={decision.tensionId}>{t("unavailableLink")}</option>}
             {tensions.map((option) => <option key={option.id} value={option.id}>{option.title}</option>)}
           </select>
         </label>

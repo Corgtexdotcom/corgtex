@@ -1117,6 +1117,7 @@
     "proposal": "Related proposal",
     "tension": "Related tension",
     "noLink": "None",
+    "unavailableLink": "Existing link (unavailable)",
     "save": "Save decision",
     "update": "Save changes",
     "search": "Search decisions",

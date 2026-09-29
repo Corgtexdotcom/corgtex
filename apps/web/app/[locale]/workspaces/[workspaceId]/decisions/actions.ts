@@ -1,7 +1,8 @@
 "use server";
 
 import { redirect } from "next/navigation";
-import { archiveDecisionRecord, createDecisionRecord, restoreDecisionRecord, updateDecisionRecord } from "@corgtex/domain";
+import { AppError, archiveDecisionRecord, createDecisionRecord, restoreDecisionRecord, updateDecisionRecord } from "@corgtex/domain";
+import type { WorkItemEditActionState } from "@/lib/components/WorkItemEditForm";
 import { requirePageActor } from "@/lib/auth";
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { asOptional, asString, refresh } from "../action-utils";
@@ -32,14 +33,19 @@ export async function createDecisionAction(formData: FormData) {
   redirect(`/workspaces/${input.workspaceId}/decisions/${decision.id}`);
 }
 
-export async function updateDecisionAction(formData: FormData) {
+export async function updateDecisionAction(_state: WorkItemEditActionState, formData: FormData): Promise<WorkItemEditActionState> {
   const input = decisionInput(formData);
   await enforceDemoGuard(input.workspaceId);
   const actor = await requirePageActor();
   const decisionId = asString(formData, "decisionId");
-  await updateDecisionRecord(actor, { ...input, decisionId, expectedVersion: expectedVersion(formData) });
+  try {
+    await updateDecisionRecord(actor, { ...input, decisionId, expectedVersion: expectedVersion(formData) });
+  } catch (error) {
+    if (error instanceof AppError && error.code === "VERSION_CONFLICT") return { status: "conflict" };
+    throw error;
+  }
   refresh(input.workspaceId);
-  redirect(`/workspaces/${input.workspaceId}/decisions/${decisionId}`);
+  return { status: "success" };
 }
 
 export async function archiveDecisionAction(formData: FormData) {

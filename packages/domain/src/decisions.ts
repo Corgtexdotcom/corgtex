@@ -3,6 +3,7 @@ import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
+import { archiveWorkspaceArtifact, restoreWorkspaceArtifact } from "./archive";
 
 export type DecisionInput = {
   workspaceId: string;
@@ -37,15 +38,15 @@ function cleanInput(input: DecisionInput) {
   };
 }
 
-async function validateLinks(db: Prisma.TransactionClient, workspaceId: string, input: ReturnType<typeof cleanInput>) {
-  if (input.proposalId) {
+async function validateLinks(db: Prisma.TransactionClient, workspaceId: string, input: ReturnType<typeof cleanInput>, previous?: { proposalId: string | null; tensionId: string | null }) {
+  if (input.proposalId && input.proposalId !== previous?.proposalId) {
     const proposal = await db.proposal.findFirst({
       where: { id: input.proposalId, workspaceId, archivedAt: null, isPrivate: false, status: { not: "DRAFT" } },
       select: { id: true },
     });
     invariant(proposal, 400, "INVALID_LINK", "Choose a visible proposal from this workspace.");
   }
-  if (input.tensionId) {
+  if (input.tensionId && input.tensionId !== previous?.tensionId) {
     const tension = await db.tension.findFirst({
       where: { id: input.tensionId, workspaceId, archivedAt: null, isPrivate: false, status: { not: "DRAFT" } },
       select: { id: true },
@@ -151,7 +152,7 @@ export async function updateDecisionRecord(actor: AppActor, input: DecisionInput
     invariant(current, 404, "NOT_FOUND", "Decision not found.");
     invariant(actor.kind === "agent" || membership?.role === "ADMIN" || current.createdByUserId === actor.user.id,
       403, "FORBIDDEN", "Only the decision author or a workspace admin can edit it.");
-    await validateLinks(tx, input.workspaceId, data);
+    await validateLinks(tx, input.workspaceId, data, current);
     const updated = await tx.decisionRecord.updateMany({
       where: { id: input.decisionId, workspaceId: input.workspaceId, archivedAt: null, version: input.expectedVersion },
       data: { ...data, version: { increment: 1 } },
@@ -162,29 +163,19 @@ export async function updateDecisionRecord(actor: AppActor, input: DecisionInput
 }
 
 export async function archiveDecisionRecord(actor: AppActor, params: { workspaceId: string; decisionId: string; expectedVersion: number }) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  invariant(Number.isSafeInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "Expected version is invalid.");
-  const current = await prisma.decisionRecord.findFirst({ where: { id: params.decisionId, workspaceId: params.workspaceId, archivedAt: null } });
-  invariant(current, 404, "NOT_FOUND", "Decision not found.");
-  invariant(actor.kind === "agent" || membership?.role === "ADMIN" || current.createdByUserId === actor.user.id,
-    403, "FORBIDDEN", "Only the decision author or a workspace admin can archive it.");
-  const updated = await prisma.decisionRecord.updateMany({
-    where: { id: params.decisionId, workspaceId: params.workspaceId, archivedAt: null, version: params.expectedVersion },
-    data: { archivedAt: new Date(), version: { increment: 1 } },
+  return archiveWorkspaceArtifact(actor, {
+    workspaceId: params.workspaceId,
+    entityType: "DecisionRecord",
+    entityId: params.decisionId,
+    expectedVersion: params.expectedVersion,
   });
-  if (updated.count === 0) throw new AppError(409, "VERSION_CONFLICT", "Decision changed or was archived. Reload and try again.");
 }
 
 export async function restoreDecisionRecord(actor: AppActor, params: { workspaceId: string; decisionId: string; expectedVersion: number }) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  invariant(Number.isSafeInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "Expected version is invalid.");
-  const current = await prisma.decisionRecord.findFirst({ where: { id: params.decisionId, workspaceId: params.workspaceId, archivedAt: { not: null } } });
-  invariant(current, 404, "NOT_FOUND", "Decision not found.");
-  invariant(actor.kind === "agent" || membership?.role === "ADMIN" || current.createdByUserId === actor.user.id,
-    403, "FORBIDDEN", "Only the decision author or a workspace admin can restore it.");
-  const updated = await prisma.decisionRecord.updateMany({
-    where: { id: params.decisionId, workspaceId: params.workspaceId, archivedAt: { not: null }, version: params.expectedVersion },
-    data: { archivedAt: null, version: { increment: 1 } },
+  return restoreWorkspaceArtifact(actor, {
+    workspaceId: params.workspaceId,
+    entityType: "DecisionRecord",
+    entityId: params.decisionId,
+    expectedVersion: params.expectedVersion,
   });
-  if (updated.count === 0) throw new AppError(409, "VERSION_CONFLICT", "Decision changed. Reload and try again.");
 }

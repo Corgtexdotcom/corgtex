@@ -105,12 +105,44 @@ it("records, searches, links, edits, archives, and restores decisions within a w
   const updated = await updateDecisionRecord(author, { ...input, title: "Approve annual budget", decisionId: decision.id, expectedVersion: 1 });
   expect(updated.version).toBe(2);
   await expect(updateDecisionRecord(author, { ...input, decisionId: decision.id, expectedVersion: 1 })).rejects.toMatchObject({ code: "VERSION_CONFLICT" });
+  await expect(archiveDecisionRecord(colleague, { workspaceId, decisionId: decision.id, expectedVersion: 2 }))
+    .rejects.toMatchObject({ status: 403 });
   await archiveDecisionRecord(author, { workspaceId, decisionId: decision.id, expectedVersion: 2 });
+  const archiveEntry = await prisma.workspaceArchiveRecord.findFirst({
+    where: { workspaceId, entityType: "DecisionRecord", entityId: decision.id, restoredAt: null },
+  });
+  expect(archiveEntry).not.toBeNull();
+  expect((await prisma.decisionRecord.findUniqueOrThrow({ where: { id: decision.id } })).version).toBe(3);
+  await expect(archiveDecisionRecord(author, { workspaceId, decisionId: decision.id, expectedVersion: 2 }))
+    .rejects.toMatchObject({ code: "VERSION_CONFLICT" });
   expect((await listDecisionRecords(author, { workspaceId })).total).toBe(0);
   const archived = await listDecisionRecords(author, { workspaceId, includeArchived: true, tag: "budget" });
   expect(archived.total).toBe(1);
   expect(archived.items[0].archivedAt).not.toBeNull();
+  await expect(restoreDecisionRecord(colleague, { workspaceId, decisionId: decision.id, expectedVersion: 3 }))
+    .rejects.toMatchObject({ status: 403 });
   await restoreDecisionRecord(author, { workspaceId, decisionId: decision.id, expectedVersion: 3 });
+  expect((await prisma.workspaceArchiveRecord.findUniqueOrThrow({ where: { id: archiveEntry!.id } })).restoredAt).not.toBeNull();
+  expect((await prisma.decisionRecord.findUniqueOrThrow({ where: { id: decision.id } })).version).toBe(4);
   expect((await listDecisionRecords(author, { workspaceId })).total).toBe(1);
   expect((await listDecisionRecords(author, { workspaceId, includeArchived: true })).total).toBe(0);
+});
+
+it("preserves a linked record that becomes hidden, and clears a purged link", async () => {
+  const proposal = await prisma.proposal.create({ data: {
+    workspaceId, authorUserId: author.kind === "user" ? author.user.id : "",
+    title: "Hidden proposal", bodyMd: "Details", status: "OPEN", isPrivate: false,
+  } });
+  const decision = await createDecisionRecord(author, {
+    workspaceId, title: "Keep context", bodyMd: "Decision", decidedAt: new Date("2026-09-28T12:00:00.000Z"), proposalId: proposal.id,
+  });
+  await prisma.proposal.update({ where: { id: proposal.id }, data: { isPrivate: true } });
+  expect((await getDecisionRecord(colleague, { workspaceId, decisionId: decision.id })).proposal).toBeNull();
+  const edited = await updateDecisionRecord(author, {
+    workspaceId, decisionId: decision.id, expectedVersion: 1,
+    title: "Keep context updated", bodyMd: "Decision", decidedAt: decision.decidedAt, proposalId: proposal.id,
+  });
+  expect(edited.proposalId).toBe(proposal.id);
+  await prisma.proposal.delete({ where: { id: proposal.id } });
+  expect((await prisma.decisionRecord.findUniqueOrThrow({ where: { id: decision.id } })).proposalId).toBeNull();
 });

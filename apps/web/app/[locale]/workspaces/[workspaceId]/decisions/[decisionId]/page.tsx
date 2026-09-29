@@ -1,8 +1,10 @@
 import Link from "next/link";
-import { getTranslations } from "next-intl/server";
-import { getDecisionRecord, listDecisionLinkOptions, requireWorkspaceMembership } from "@corgtex/domain";
+import { notFound } from "next/navigation";
+import { getFormatter, getTranslations } from "next-intl/server";
+import { AppError, getDecisionRecord, listDecisionLinkOptions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
+import { WorkItemEditForm } from "@/lib/components/WorkItemEditForm";
 import { ConfirmSubmitButton } from "../../circles/ConfirmSubmitButton";
 import { archiveDecisionAction, restoreDecisionAction, updateDecisionAction } from "../actions";
 import { DecisionFields } from "../DecisionFields";
@@ -13,8 +15,15 @@ export default async function DecisionPage({ params }: { params: Promise<{ works
   const { workspaceId, decisionId } = await params;
   const actor = await requirePageActor();
   const t = await getTranslations("decisions");
-  const [decision, membership, options] = await Promise.all([
-    getDecisionRecord(actor, { workspaceId, decisionId }),
+  const format = await getFormatter();
+  let decision;
+  try {
+    decision = await getDecisionRecord(actor, { workspaceId, decisionId });
+  } catch (error) {
+    if (error instanceof AppError && error.code === "NOT_FOUND") notFound();
+    throw error;
+  }
+  const [membership, options] = await Promise.all([
     requireWorkspaceMembership({ actor, workspaceId }),
     listDecisionLinkOptions(actor, workspaceId),
   ]);
@@ -26,7 +35,7 @@ export default async function DecisionPage({ params }: { params: Promise<{ works
       <header className="nr-masthead nr-masthead-left">
         <h1 className="nr-masthead-title">{decision.title}</h1>
         <div className="nr-masthead-meta">
-          {new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeZone: "UTC" }).format(decision.decidedAt)}
+          {format.dateTime(decision.decidedAt, { dateStyle: "medium", timeZone: "UTC" })}
           {decision.archivedAt && ` · ${t("archived")}`}
         </div>
       </header>
@@ -43,10 +52,10 @@ export default async function DecisionPage({ params }: { params: Promise<{ works
       </section>
       {canEdit && !decision.archivedAt && <section className="panel stack">
         <h2>{t("edit")}</h2>
-        <form action={updateDecisionAction} className="stack">
+        <WorkItemEditForm action={updateDecisionAction} expectedVersion={decision.version}
+          currentHref={`/workspaces/${workspaceId}/decisions/${decision.id}`} submitLabel={t("update")} className="stack">
           <DecisionFields workspaceId={workspaceId} proposals={options.proposals} tensions={options.tensions} decision={decision} />
-          <div><button type="submit">{t("update")}</button></div>
-        </form>
+        </WorkItemEditForm>
         <form action={archiveDecisionAction}>
           <input type="hidden" name="workspaceId" value={workspaceId} />
           <input type="hidden" name="decisionId" value={decision.id} />

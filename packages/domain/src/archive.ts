@@ -40,6 +40,7 @@ type ArchiveEntityType =
   | "CrmActivity"
   | "CrmContact"
   | "CrmDeal"
+  | "DecisionRecord"
   | "Document"
   | "ExpertiseTag"
   | "ExternalDataSource"
@@ -61,6 +62,7 @@ type ArchiveConfig = {
   archiveData?: (record: any) => Record<string, unknown>;
   restoreData?: (previousState: Record<string, unknown> | null) => Record<string, unknown>;
   archiveAllowedRoles?: MemberRole[];
+  restoreAllowedRoles?: MemberRole[] | null;
   canArchive?: (params: {
     tx: Prisma.TransactionClient;
     record: any;
@@ -68,6 +70,7 @@ type ArchiveConfig = {
     membership: MembershipSummary | null;
   }) => Promise<void>;
   canRestore?: (tx: Prisma.TransactionClient, record: any) => Promise<void>;
+  canRestoreActor?: (params: { record: any; actor: AppActor; membership: MembershipSummary | null }) => Promise<void>;
   canPurge?: (tx: Prisma.TransactionClient, record: any) => Promise<void>;
   beforePurge?: (tx: Prisma.TransactionClient, record: any) => Promise<void>;
   afterPurge?: (record: any) => Promise<void>;
@@ -281,6 +284,23 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
     ]),
     canPurge: (tx, record) => requireNoActivityOrphan(tx, record, "CrmDeal"),
   },
+  DecisionRecord: {
+    entityType: "DecisionRecord",
+    delegate: "decisionRecord",
+    findWhere: directWorkspace,
+    label: titleOrName,
+    archiveData: () => ({ version: { increment: 1 } }),
+    restoreData: () => ({ version: { increment: 1 } }),
+    restoreAllowedRoles: null,
+    canArchive: async ({ record, actor, membership }) => {
+      invariant(actor.kind === "agent" || membership?.role === "ADMIN" || record.createdByUserId === actor.user.id,
+        403, "FORBIDDEN", "Only the decision author or a workspace admin can archive it.");
+    },
+    canRestoreActor: async ({ record, actor, membership }) => {
+      invariant(actor.kind === "agent" || membership?.role === "ADMIN" || record.createdByUserId === actor.user.id,
+        403, "FORBIDDEN", "Only the decision author or a workspace admin can restore it.");
+    },
+  },
   Document: {
     entityType: "Document",
     delegate: "document",
@@ -437,7 +457,7 @@ export async function lockWorkspaceArchiveArtifact(
   entityType: ArchiveEntityType,
   entityId: string,
 ) {
-  if (entityType === "BrainSource" || CRM_ARCHIVE_ENTITY_TYPES.has(entityType)) {
+  if (entityType === "BrainSource" || entityType === "DecisionRecord" || CRM_ARCHIVE_ENTITY_TYPES.has(entityType)) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`workspace_archive:${entityType}:${entityId}`}, 0))`;
   }
   if (WORK_ITEM_ARCHIVE_ENTITY_TYPES.has(entityType)) {
@@ -580,8 +600,12 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
   entityType: string;
   entityId: string;
   reason?: string | null;
+  expectedVersion?: number;
   _tx?: Prisma.TransactionClient;
 }) {
+  if (params.expectedVersion !== undefined) {
+    invariant(Number.isSafeInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "Expected version is invalid.");
+  }
   const config = configFor(params.entityType);
   const membership = await requireWorkspaceMembership({
     actor,
@@ -594,21 +618,32 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
     await lockWorkspaceArchiveArtifact(tx, config.entityType, params.entityId);
     const record = await findRecord(tx, config, params.workspaceId, params.entityId);
     await config.canArchive?.({ tx, record, actor, membership });
+    if (params.expectedVersion !== undefined) {
+      invariant(record.version === params.expectedVersion, 409, "VERSION_CONFLICT", "The record changed. Reload and try again.");
+    }
     if (record.archivedAt) {
       return record;
     }
 
     const previousState = jsonSnapshot(record);
     const archivedAt = new Date();
-    const updated = await delegate(tx, config).update({
-      where: { id: record.id },
-      data: {
-        archivedAt,
-        archivedByUserId: actorUserId(actor),
-        archiveReason: reason,
-        ...(config.archiveData ? config.archiveData(record) : {}),
-      },
-    });
+    let updated;
+    try {
+      updated = await delegate(tx, config).update({
+        where: { id: record.id, ...(params.expectedVersion !== undefined ? { version: params.expectedVersion } : {}) },
+        data: {
+          archivedAt,
+          archivedByUserId: actorUserId(actor),
+          archiveReason: reason,
+          ...(config.archiveData ? config.archiveData(record) : {}),
+        },
+      });
+    } catch (error) {
+      if (params.expectedVersion !== undefined && isPrismaNotFoundError(error)) {
+        invariant(false, 409, "VERSION_CONFLICT", "The record changed. Reload and try again.");
+      }
+      throw error;
+    }
     if (config.entityType === "Goal") {
       await recomputeGoalParentProgressForArchiveTransition(tx, actor, record);
     }
@@ -670,14 +705,26 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
   workspaceId: string;
   entityType: string;
   entityId: string;
+  expectedVersion?: number;
 }) {
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"] });
   const config = configFor(params.entityType);
+  if (params.expectedVersion !== undefined) {
+    invariant(Number.isSafeInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "Expected version is invalid.");
+  }
+  const membership = await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+    allowedRoles: config.restoreAllowedRoles === null ? undefined : config.restoreAllowedRoles ?? ["ADMIN"],
+  });
 
   return prisma.$transaction(async (tx) => {
     await lockWorkspaceArchiveArtifact(tx, config.entityType, params.entityId);
     const record = await findRecord(tx, config, params.workspaceId, params.entityId);
     invariant(record.archivedAt, 400, "INVALID_STATE", `${config.entityType} is not archived.`);
+    await config.canRestoreActor?.({ record, actor, membership });
+    if (params.expectedVersion !== undefined) {
+      invariant(record.version === params.expectedVersion, 409, "VERSION_CONFLICT", "The record changed. Reload and try again.");
+    }
     await config.canRestore?.(tx, record);
     const archiveRecord = await activeArchiveRecord(tx, params.workspaceId, config.entityType, record.id);
     const previousState = archiveRecord?.previousState && typeof archiveRecord.previousState === "object"
@@ -685,15 +732,23 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
       : null;
     const restoredAt = new Date();
 
-    const updated = await delegate(tx, config).update({
-      where: { id: record.id },
-      data: {
-        archivedAt: null,
-        archivedByUserId: null,
-        archiveReason: null,
-        ...(config.restoreData ? config.restoreData(previousState) : {}),
-      },
-    });
+    let updated;
+    try {
+      updated = await delegate(tx, config).update({
+        where: { id: record.id, ...(params.expectedVersion !== undefined ? { version: params.expectedVersion } : {}) },
+        data: {
+          archivedAt: null,
+          archivedByUserId: null,
+          archiveReason: null,
+          ...(config.restoreData ? config.restoreData(previousState) : {}),
+        },
+      });
+    } catch (error) {
+      if (params.expectedVersion !== undefined && isPrismaNotFoundError(error)) {
+        invariant(false, 409, "VERSION_CONFLICT", "The record changed. Reload and try again.");
+      }
+      throw error;
+    }
     if (config.entityType === "Goal") {
       await recomputeGoalParentProgressForArchiveTransition(tx, actor, updated);
     }

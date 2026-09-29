@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { getTranslations } from "next-intl/server";
+import { getFormatter, getTranslations } from "next-intl/server";
 import { listDecisionLinkOptions, listDecisionRecords } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
@@ -31,6 +31,7 @@ export default async function DecisionsPage({
   const { workspaceId } = await params;
   const actor = await requirePageActor();
   const t = await getTranslations("decisions");
+  const format = await getFormatter();
   const search = searchParams ? await searchParams : {};
   const q = (first(search.q) ?? "").trim().slice(0, 120);
   const tag = (first(search.tag) ?? "").trim().slice(0, 40);
@@ -76,7 +77,7 @@ export default async function DecisionsPage({
         </form>
         <div className="actions-inline">
           <strong>{results.total === 1 ? t("countOne") : t("countMany", { count: results.total })}</strong>
-          <Link href={decisionListHref(workspaceId, { q, tag, page: 1, archived: !archived })}>
+          <Link href={decisionListHref(workspaceId, { q, tag: "", page: 1, archived: !archived })}>
             {archived ? t("activeFilter") : t("archivedFilter")}
           </Link>
         </div>
@@ -88,7 +89,7 @@ export default async function DecisionsPage({
                   <Link href={`${base}/${decision.id}`} className="nr-item-title">{decision.title}</Link>
                   {decision.archivedAt && <span className="tag">{t("archived")}</span>}
                 </div>
-                <div className="nr-item-meta">{new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeZone: "UTC" }).format(decision.decidedAt)}</div>
+                <div className="nr-item-meta">{format.dateTime(decision.decidedAt, { dateStyle: "medium", timeZone: "UTC" })}</div>
                 <MarkdownExcerpt markdown={decision.bodyMd} maxLength={220} as="p" className="nr-excerpt" />
                 <div className="actions-inline">
                   {decision.tags.map((item) => <span key={item} className="tag">{item}</span>)}

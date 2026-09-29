@@ -1117,6 +1117,7 @@
     "proposal": "Propuesta relacionada",
     "tension": "Tensión relacionada",
     "noLink": "Ninguna",
+    "unavailableLink": "Vínculo existente (no disponible)",
     "save": "Guardar decisión",
     "update": "Guardar cambios",
     "search": "Buscar decisiones",
