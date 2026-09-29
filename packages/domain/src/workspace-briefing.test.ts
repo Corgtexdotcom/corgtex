@@ -659,7 +659,7 @@ describe("workspace briefing", () => {
     }));
   });
 
-  it("does not carry forward a paraphrased active item from a different digest section", async () => {
+  it("grounds a paraphrased digest item in the matching active source", async () => {
     const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
     const briefing = buildWorkspaceBriefingFromDigest({
       workspaceId: "ws-1",
@@ -696,13 +696,13 @@ describe("workspace briefing", () => {
 
     expect(briefing.items).toHaveLength(1);
     expect(briefing.items[0]).toEqual(expect.objectContaining({
-      kind: "COMMUNICATION",
-      sourceRefs: [],
+      kind: "ACTION",
+      sourceRefs: [expect.objectContaining({ id: "action-owner" })],
     }));
-    expect(briefing.sourceRefs).toEqual([]);
+    expect(briefing.sourceRefs).toContainEqual(expect.objectContaining({ id: "action-owner" }));
   });
 
-  it("preserves stale evidence time for unmatched digest prose", async () => {
+  it("preserves stale evidence time when replacing digest prose with source text", async () => {
     const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
     const briefing = buildWorkspaceBriefingFromDigest({
       workspaceId: "ws-1",
@@ -739,7 +739,8 @@ describe("workspace briefing", () => {
 
     expect(briefing.items[0]?.occurredAt).toBe("2026-04-01T10:00:00.000Z");
     expect(briefing.leadMd).toContain("No major new operating signal");
-    expect(briefing.attentionMd).toContain("Customer rollout still has unresolved ownership");
+    expect(briefing.attentionMd).toContain("Confirm launch owner");
+    expect(briefing.attentionMd).not.toContain("Customer rollout still has unresolved ownership");
   });
 
   it("uses weekly timing language for weekly attention items", async () => {
@@ -1106,7 +1107,7 @@ describe("workspace briefing", () => {
     }));
   });
 
-  it("keeps digest introduction in the intro slot and only promises source trail when refs exist", async () => {
+  it("discards an unsupported meeting recap and its generated introduction", async () => {
     const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
     const briefing = buildWorkspaceBriefingFromDigest({
       workspaceId: "ws-1",
@@ -1125,7 +1126,7 @@ describe("workspace briefing", () => {
       candidates: [],
     });
 
-    expect(briefing.introMd).toBe("The generated intro explains the day in one sentence.");
+    expect(briefing.introMd).not.toBe("The generated intro explains the day in one sentence.");
     expect(briefing.continuingContextMd ?? "").not.toContain("The generated intro");
     expect(briefing.sourceRefs).toEqual([]);
     expect(briefing.closingMd).not.toContain("source trail below");
@@ -1670,15 +1671,101 @@ describe("workspace briefing", () => {
       ],
     });
 
-    expect(briefing.items[0]).toEqual(expect.objectContaining({
-      kind: "MEETING",
-      title: "The meeting surfaced a customer-readiness decision",
-      href: null,
-      sourceRefs: [],
-    }));
+    expect(JSON.stringify(briefing)).not.toContain("The meeting surfaced a customer-readiness decision");
   });
 
-  it("does not attach same-kind source refs unless the digest item matches the source", async () => {
+  it("keeps an active Action when unsupported meeting prose overlaps its wording", async () => {
+    const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromDigest({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      digest: {
+        intro: null,
+        sections: [{
+          id: "meetingBriefs",
+          title: "Meeting Briefs",
+          items: ["Launch owner action remains open before customer rollout."],
+        }],
+      },
+      candidates: [baseCandidate({
+        sourceType: "ACTION",
+        sourceId: "action-owner",
+        title: "Confirm launch owner",
+        summaryMd: "Launch owner action remains open before customer rollout.",
+        status: "OPEN",
+        strategicScore: 4,
+        actionabilityScore: 4,
+        sourceRefs: [{ type: "ACTION", id: "action-owner", label: "Confirm launch owner", href: "/workspaces/ws-1/actions/action-owner" }],
+      })],
+    });
+
+    expect(briefing.items).toContainEqual(expect.objectContaining({ kind: "ACTION", title: "Confirm launch owner" }));
+    expect(JSON.stringify(briefing)).not.toContain("Meeting Briefs");
+  });
+
+  it("uses the matched meeting summary instead of an invented newspaper attribution", async () => {
+    const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
+    const meetingHref = "/workspaces/ws-1/meetings/meeting-1";
+    const briefing = buildWorkspaceBriefingFromDigest({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      digest: {
+        intro: null,
+        sections: [{ id: "meetingBriefs", title: "Meeting Briefs", items: ["Weekly review: Alice committed to ship the launch."] }],
+      },
+      candidates: [baseCandidate({
+        sourceType: "MEETING",
+        sourceId: "meeting-1",
+        title: "Weekly review",
+        summaryMd: "The team discussed launch readiness. Ownership remains open.",
+        href: meetingHref,
+        sourceRefs: [{ type: "MEETING", id: "meeting-1", label: "Weekly review", href: meetingHref }],
+      })],
+    });
+
+    expect(briefing.items[0]).toMatchObject({ kind: "MEETING", href: meetingHref });
+    expect(briefing.items[0].summaryMd).toContain("Ownership remains open");
+    expect(JSON.stringify(briefing)).not.toContain("Alice committed");
+  });
+
+  it("keeps invented meeting attribution out of the intro and other digest sections", async () => {
+    const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
+    const briefing = buildWorkspaceBriefingFromDigest({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Workspace Briefing - 2026-04-30",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      digest: {
+        intro: "Alice decided the launch plan in the weekly review.",
+        sections: [{
+          id: "otherUpdates",
+          title: "Other Updates",
+          items: ["Weekly review: Alice took ownership of the launch."],
+        }],
+      },
+      candidates: [baseCandidate({
+        sourceType: "MEETING",
+        sourceId: "meeting-1",
+        title: "Weekly review",
+        summaryMd: "The team discussed launch readiness. Ownership remains open.",
+        href: "/workspaces/ws-1/meetings/meeting-1",
+        sourceRefs: [{ type: "MEETING", id: "meeting-1", label: "Weekly review", href: "/workspaces/ws-1/meetings/meeting-1" }],
+      })],
+    });
+
+    expect(briefing.items[0]).toMatchObject({ kind: "MEETING", title: "Weekly review" });
+    expect(JSON.stringify(briefing)).toContain("Ownership remains open");
+    expect(JSON.stringify(briefing)).not.toContain("Alice");
+  });
+
+  it("drops an unmatched digest claim and uses the independent source candidate", async () => {
     const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
 
     const briefing = buildWorkspaceBriefingFromDigest({
@@ -1709,13 +1796,14 @@ describe("workspace briefing", () => {
 
     expect(briefing.items[0]).toEqual(expect.objectContaining({
       kind: "ACTION",
-      title: "Confirm the customer rollout owner before launch",
-      href: null,
-      sourceRefs: [],
+      title: "Prepare vendor contract",
+      href: "/workspaces/ws-1/actions/action-1",
+      sourceRefs: [expect.objectContaining({ id: "action-1" })],
     }));
+    expect(JSON.stringify(briefing)).not.toContain("Confirm the customer rollout owner before launch");
   });
 
-  it("does not bind short digest items to merely similar source titles", async () => {
+  it("does not publish a short unsupported digest claim", async () => {
     const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
 
     const briefing = buildWorkspaceBriefingFromDigest({
@@ -1746,14 +1834,14 @@ describe("workspace briefing", () => {
 
     expect(briefing.items[0]).toEqual(expect.objectContaining({
       kind: "ACTION",
-      summaryMd: "Review customer launch owner",
-      href: null,
-      sourceRefs: [],
+      title: "Review customer launch checklist",
+      href: "/workspaces/ws-1/actions/action-checklist",
+      sourceRefs: [expect.objectContaining({ id: "action-checklist" })],
     }));
-    expect(briefing.sourceRefs).toEqual([]);
+    expect(JSON.stringify(briefing)).not.toContain("Review customer launch owner");
   });
 
-  it("does not bind prefix titles to unrelated digest prose", async () => {
+  it("does not publish unmatched prose from a prefix title", async () => {
     const { buildWorkspaceBriefingFromDigest } = await import("./workspace-briefing");
 
     const briefing = buildWorkspaceBriefingFromDigest({
@@ -1784,11 +1872,11 @@ describe("workspace briefing", () => {
 
     expect(briefing.items[0]).toEqual(expect.objectContaining({
       kind: "ACTION",
-      summaryMd: "Planning customer rollout will continue after the weekly review.",
-      href: null,
-      sourceRefs: [],
+      title: "Plan",
+      href: "/workspaces/ws-1/actions/action-plan",
+      sourceRefs: [expect.objectContaining({ id: "action-plan" })],
     }));
-    expect(briefing.sourceRefs).toEqual([]);
+    expect(JSON.stringify(briefing)).not.toContain("Planning customer rollout will continue after the weekly review.");
   });
 
   it("links workspace advice requests to their actual subject", async () => {

@@ -25,6 +25,7 @@ const buildReleaseSha = releaseGitSha();
 
 const nextConfig: NextConfig = {
   outputFileTracingRoot: path.join(process.cwd(), "../.."),
+  experimental: { serverActions: { bodySizeLimit: "6mb" } },
   ...(buildReleaseSha ? {
     deploymentId: buildReleaseSha,
     generateBuildId: () => buildReleaseSha,

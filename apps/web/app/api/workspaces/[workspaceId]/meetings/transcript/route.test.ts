@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { uploadMeetingTranscript, intakeMeetingTranscript, extractTextFromFileBuffer, resolveRequestActor, handleRouteError } = vi.hoisted(() => ({
+const { uploadMeetingTranscript, intakeMeetingTranscript, extractTextFromFileBuffer, requireWorkspaceMembership, resolveRequestActor, handleRouteError } = vi.hoisted(() => ({
   uploadMeetingTranscript: vi.fn(),
   intakeMeetingTranscript: vi.fn(),
   extractTextFromFileBuffer: vi.fn(),
+  requireWorkspaceMembership: vi.fn(),
   resolveRequestActor: vi.fn(),
   handleRouteError: vi.fn(),
 }));
@@ -23,6 +24,7 @@ vi.mock("@corgtex/domain", () => ({
   AppError: MockAppError,
   intakeMeetingTranscript,
   uploadMeetingTranscript,
+  requireWorkspaceMembership,
 }));
 
 vi.mock("@corgtex/knowledge", () => ({
@@ -127,5 +129,29 @@ describe("POST /api/workspaces/[workspaceId]/meetings/transcript", () => {
       }),
     );
     expect(uploadMeetingTranscript).not.toHaveBeenCalled();
+  });
+
+  it("rejects oversized pasted and JSON transcripts before intake", async () => {
+    resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
+    const { POST } = await import("./route");
+    const oversized = "A".repeat(1_000_001);
+    const formData = new FormData();
+    formData.set("transcript", oversized);
+
+    for (const request of [
+      new Request("http://localhost/api/workspaces/ws-1/meetings/transcript", { method: "POST", body: formData }),
+      new Request("http://localhost/api/workspaces/ws-1/meetings/transcript", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ transcript: oversized }),
+      }),
+    ]) {
+      await POST(request as never, { params: Promise.resolve({ workspaceId: "ws-1" }) });
+      expect(handleRouteError).toHaveBeenLastCalledWith(expect.objectContaining({
+        status: 413,
+        code: "TRANSCRIPT_TEXT_TOO_LONG",
+      }));
+    }
+    expect(intakeMeetingTranscript).not.toHaveBeenCalled();
   });
 });

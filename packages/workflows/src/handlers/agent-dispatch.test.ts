@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { runCompanyUnderstandingAgentMock, recoveryGuard, execute, absorb } = vi.hoisted(() => ({
+const { runCompanyUnderstandingAgentMock, runActionExtractionAgentMock, recoveryGuard, execute, absorb } = vi.hoisted(() => ({
   runCompanyUnderstandingAgentMock: vi.fn(),
+  runActionExtractionAgentMock: vi.fn(),
   recoveryGuard: vi.fn(), execute: vi.fn(), absorb: vi.fn(),
 }));
 
@@ -14,7 +15,7 @@ vi.mock("@corgtex/agents", () => ({
   runInboxTriageAgent: vi.fn(),
   runDailyCheckInAgent: vi.fn(),
   runMeetingSummaryAgent: vi.fn(),
-  runActionExtractionAgent: vi.fn(),
+  runActionExtractionAgent: runActionExtractionAgentMock,
   runProposalDraftingAgent: vi.fn(),
   runConstitutionUpdateTriggerAgent: vi.fn(),
   runConstitutionSynthesisAgent: vi.fn(),
@@ -124,6 +125,23 @@ describe("runAgentWorkflowJob", () => {
       triggerRef: "job-1",
       sourceId: "source-1",
       triggerType: "EVENT",
+    });
+  });
+
+  it.each([undefined, false])("does not pass a legacy reviewOnly=%s bypass on manual extraction", async (reviewOnly) => {
+    const { runAgentWorkflowJob } = await import("./agent-dispatch");
+    await runAgentWorkflowJob({
+      id: "manual-job",
+      workspaceId: "ws-1",
+      type: "agent.action-extraction",
+      payload: { meetingId: "meeting-1", triggerType: "MANUAL", reviewOnly },
+    });
+
+    expect(runActionExtractionAgentMock).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      triggerRef: "manual-job",
+      meetingId: "meeting-1",
+      triggerType: "MANUAL",
     });
   });
 });

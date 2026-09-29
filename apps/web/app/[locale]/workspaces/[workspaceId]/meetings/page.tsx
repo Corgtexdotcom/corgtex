@@ -1,4 +1,4 @@
-import { deriveMeetingEvidenceState, getMeetingRecorderConfig, listHumanMembers, listMeetingRecordings, listMeetings } from "@corgtex/domain";
+import { deriveMeetingEvidenceState, getMeetingRecorderConfig, listHumanMembers, listMeetingRecordings, listMeetings, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import {
   archiveMeetingAction,
@@ -47,6 +47,8 @@ export default async function MeetingsPage({
 }) {
   const { workspaceId } = await params;
   const actor = await requirePageActor();
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const canArchiveMeeting = actor.kind === "agent" || membership?.role === "ADMIN";
   const resolvedSearch = searchParams ? await searchParams : {};
   const statusFilters = normalizeMeetingStatusFilters(resolvedSearch.status);
   const { memberIds } = resolveWorkItemFilters(resolvedSearch);
@@ -214,6 +216,13 @@ export default async function MeetingsPage({
         </div>
       </header>
 
+      <section className="panel" aria-label={t("meetingGuideTitle")} style={{ marginBottom: 24 }}>
+        <h2 style={{ marginTop: 0 }}>{t("meetingGuideTitle")}</h2>
+        <p>{t("meetingGuideWorkflow")}</p>
+        <p>{recorderEnabled ? t("meetingGuideRecorderReady") : t("meetingGuideRecorderUnavailable")}</p>
+        <p style={{ marginBottom: 0 }}>{t("meetingGuideArchive")}</p>
+      </section>
+
       {recorderSentMeeting ? (
         <div className="form-message form-message-success" role="status" style={{ marginBottom: 24 }}>
           <strong>{t("recorderSentTitle")}</strong>{" "}
@@ -303,7 +312,7 @@ export default async function MeetingsPage({
                       <Link href={`/workspaces/${workspaceId}/meetings/${meeting.id}`}>
                         {tCommon("btnView")}
                       </Link>
-                      {renderArchiveDialog(meeting.id)}
+                      {canArchiveMeeting && renderArchiveDialog(meeting.id)}
                     </>
                   }
                 />
@@ -326,7 +335,7 @@ export default async function MeetingsPage({
                     </Link>
                   }
                   more={
-                    renderArchiveDialog(completedMeetings[0].id)
+                    canArchiveMeeting ? renderArchiveDialog(completedMeetings[0].id) : null
                   }
                 />
               </div>
@@ -352,7 +361,7 @@ export default async function MeetingsPage({
                     </Link>
                   }
                   more={
-                    renderArchiveDialog(meeting.id)
+                    canArchiveMeeting ? renderArchiveDialog(meeting.id) : null
                   }
                 />
               </div>

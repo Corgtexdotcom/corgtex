@@ -7,6 +7,7 @@ import { createArticleAction, publishArticleAction, returnArticleToDraftAction }
 import { getTranslations } from "next-intl/server";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
+import Link from "next/link";
 import { KnowledgeFileUploader } from "../KnowledgeFileUploader";
 import {
   BRAIN_ARTICLE_TYPES,
@@ -98,6 +99,11 @@ export default async function BrainPage({
           </span>
         </div>
       </div>
+
+      <p className="nr-item-meta">
+        {t("meetingUploadGuidance")}{" "}
+        <Link href={`/workspaces/${workspaceId}/meetings`}>{t("openMeetings")}</Link>
+      </p>
 
       <KnowledgeFileUploader workspaceId={workspaceId} defaultSource="brain-upload" />
 

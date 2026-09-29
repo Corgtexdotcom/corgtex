@@ -429,6 +429,8 @@
     "workEmailLabel": "Correo laboral"
   },
   "brain": {
+    "meetingUploadGuidance": "Sube las transcripciones de reuniones en Reuniones para obtener un resumen y seguimientos revisables. Usa Brain para artículos, búsquedas y otros documentos.",
+    "openMeetings": "Abrir Reuniones",
     "agentSynthesis": "Síntesis del Agente",
     "all": "Todo",
     "articleTitle": "Título del artículo",
@@ -1480,6 +1482,13 @@
     "viewSuggestions": "Ver sugerencias"
   },
   "meetings": {
+    "actionDraftLabel": "Borrador de Acción",
+    "followUpDraftLabel": "Borrador de seguimiento",
+    "meetingGuideTitle": "Reuniones y Brain",
+    "meetingGuideWorkflow": "Usa Reuniones para programar una grabación o subir una transcripción. Revisa aquí los borradores de Acciones extraídos antes de aprobarlos. El contenido de la reunión se puede buscar en Brain después del procesamiento; usa Brain para otros documentos y artículos.",
+    "meetingGuideRecorderReady": "La grabación automática está habilitada. Añade un enlace válido y comprueba el estado de la grabadora antes de cada reunión.",
+    "meetingGuideRecorderUnavailable": "La grabación automática no está configurada para este espacio. Pide a un administrador que conecte una grabadora o sube aquí la transcripción después de la reunión.",
+    "meetingGuideArchive": "Un administrador del espacio puede archivar reuniones vacías que ya no necesitan transcripción.",
     "actionTag": "Acción: {title}",
     "backToBoardMeetings": "← Volver a reuniones de junta",
     "backToMeetings": "← Volver a reuniones",
@@ -1611,7 +1620,7 @@
     "transcriptEvidenceDescription": "Transcripción de referencia oculta para comprobar la formulación exacta.",
     "aiIntelligenceTitle": "Cola de revisión de IA",
     "aiIntelligenceProcessing": "El procesamiento de la transcripción es automático. El resumen y los elementos extraídos aparecerán aquí cuando terminen los agentes.",
-    "aiIntelligenceReviewHint": "Revisa los elementos extraídos antes de que se conviertan en registros del espacio de trabajo. Los de alta confianza pueden estar ya aplicados.",
+    "aiIntelligenceReviewHint": "Revisa los elementos extraídos antes de que se conviertan en registros del espacio de trabajo. Aprueba, edita o descarta cada sugerencia.",
     "noInsightsDescription": "Aún no se han extraído hallazgos. Puedes ejecutar la extracción con IA para encontrar decisiones, tensiones, acciones y propuestas en la transcripción.",
     "noInsightsAutomaticDescription": "Aún no hay elementos extraídos listos. Si la extracción automática omitió algo, regenera con una guía específica abajo.",
     "extracting": "Extrayendo...",

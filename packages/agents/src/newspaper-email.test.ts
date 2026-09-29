@@ -265,7 +265,7 @@ describe("newspaper email rendering", () => {
     expect(html).not.toContain('href="/workspaces/ws-1/proposals/proposal-1"');
   });
 
-  it("folds member personalization into prose for workspace briefing email", () => {
+  it("ignores model personalization in a source-backed workspace briefing email", () => {
     const html = renderWorkspaceBriefingEmailHtml({
       briefing: {
         title: "Weekly Workspace Briefing - 2026-07-11",
@@ -292,14 +292,15 @@ describe("newspaper email rendering", () => {
       recipientName: "Pat",
       workspaceUrl: "https://app.example.com/workspaces/ws-1",
       personalization: {
-        greeting: "Hi Pat,",
-        intro: null,
-        memberNote: "For you, the pricing review is the one item to check today.",
+        greeting: "Hi Alice,",
+        intro: "Alice led the weekly meeting.",
+        memberNote: "Alice approved the launch in the weekly meeting.",
         emphasizedSectionIds: ["adviceRequests"],
       },
     });
 
-    expect(html).toContain("For you, the pricing review is the one item to check today.");
+    expect(html).toContain("Hello Pat,");
+    expect(html).not.toContain("Alice");
     expect(html).not.toContain("Requests Awaiting Your Input");
     expect(html).not.toContain("<ul");
   });
@@ -556,7 +557,7 @@ describe("newspaper email rendering", () => {
     expect(html).not.toContain("<ul");
   });
 
-  it("keeps recipient-specific items visible alongside partial model personalization", () => {
+  it("keeps recipient-specific items visible without model personalization", () => {
     const recipientDigest = withNewspaperAdviceRequests(normalizeNewspaperDigestPayload({}), [
       "Assigned action: Review the pricing memo\nOpen: https://app.example.com/workspaces/ws-1/actions/action-1",
       "Assigned action: Confirm the launch owner\nOpen: https://app.example.com/workspaces/ws-1/actions/action-2",
@@ -595,7 +596,7 @@ describe("newspaper email rendering", () => {
       },
     });
 
-    expect(html).toContain("For you, the pricing review is the one item to check today.");
+    expect(html).not.toContain("For you, the pricing review is the one item to check today.");
     expect(html).toContain("Assigned action: Review the pricing memo");
     expect(html).toContain("Assigned action: Confirm the launch owner");
     expect(html).not.toContain("Requests Awaiting Your Input");

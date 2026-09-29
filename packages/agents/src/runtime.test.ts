@@ -201,11 +201,10 @@ describe("agent runtime", () => {
     expect(prismaMock.agentRun.create).not.toHaveBeenCalled();
   });
 
-  it("auto-applies high-confidence meeting insights", async () => {
+  it("keeps replayed meeting insights reviewable by default", async () => {
     const fixture = operationsTacticalReplayFixture;
     const meetingRecord = meetingRecordFromReplayFixture(fixture);
     prismaMock.meeting.findUnique.mockResolvedValue(meetingRecord);
-    autoApplyMeetingInsightsMock.mockResolvedValueOnce(fixture.expectedAutoApply);
 
     expect(meetingRecord.insights).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -239,7 +238,7 @@ describe("agent runtime", () => {
     expect(prismaMock.agentRun.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         agentKey: "action-extraction",
-        goal: expect.stringContaining("Auto-apply high-confidence"),
+        goal: expect.stringContaining("reviewable drafts"),
       }),
     }));
     expect(prismaMock.agentToolCall.createMany).toHaveBeenCalled();
@@ -249,18 +248,43 @@ describe("agent runtime", () => {
         approvalRequired: false,
       }),
     }));
-    expect(autoApplyMeetingInsightsMock).toHaveBeenCalledWith(expect.objectContaining({
-      kind: "agent",
-      label: "action-extraction",
-    }), {
-      workspaceId: fixture.workspaceId,
-      meetingId: fixture.meetingId,
-    });
+    expect(autoApplyMeetingInsightsMock).not.toHaveBeenCalled();
     expect(prismaMock.agentRun.update).toHaveBeenLastCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         resultJson: expect.objectContaining({
           meetingId: fixture.meetingId,
-          ...fixture.expectedAutoApply,
+          reviewRequired: true,
+          suggested: meetingRecord.insights.length,
+        }),
+      }),
+    }));
+  });
+
+  it("keeps uploaded transcript insights reviewable without auto-creating Actions or tensions", async () => {
+    prismaMock.meeting.findUnique.mockResolvedValue({
+      id: "meeting-upload",
+      workspaceId: "ws-1",
+      title: "Steering meeting",
+      transcript: "Andy: I will send the steering update.",
+      summaryMd: null,
+      insights: [{ id: "insight-1", type: "ACTION_ITEM", status: "SUGGESTED" }],
+    });
+
+    const { runActionExtractionAgent } = await import(".");
+    await runActionExtractionAgent({
+      workspaceId: "ws-1",
+      triggerRef: "job-upload",
+      meetingId: "meeting-upload",
+    });
+
+    expect(autoApplyMeetingInsightsMock).not.toHaveBeenCalled();
+    expect(prismaMock.agentRun.update).toHaveBeenLastCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        status: "COMPLETED",
+        resultJson: expect.objectContaining({
+          meetingId: "meeting-upload",
+          reviewRequired: true,
+          suggested: 1,
         }),
       }),
     }));

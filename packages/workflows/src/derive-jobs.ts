@@ -228,6 +228,7 @@ export function deriveJobsForEvent(event: {
         type: "agent.action-extraction",
         payload: {
           meetingId: payload.meetingId,
+          reviewOnly: true,
         },
         dependsOnDedupeKey: `${event.id}:meeting-insights-extract`,
         dedupeKey: `${event.id}:action-extraction`,

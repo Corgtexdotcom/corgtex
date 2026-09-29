@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AppError, intakeMeetingTranscript } from "@corgtex/domain";
-import { extractTextFromFileBuffer } from "@corgtex/knowledge";
+import { AppError, intakeMeetingTranscript, requireWorkspaceMembership } from "@corgtex/domain";
+import { extractMeetingTranscriptFile, validateMeetingTranscriptText } from "@/lib/meeting-transcript-file";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 import { parseOptionalMeetingDateTimeInput } from "@/lib/meeting-timezone";
@@ -21,6 +21,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId } = await params;
+    await requireWorkspaceMembership({ actor, workspaceId });
     const contentType = request.headers.get("content-type") ?? "";
 
     if (contentType.includes("multipart/form-data")) {
@@ -31,19 +32,14 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       let fileName: string | null = null;
 
       if (file instanceof File && file.size > 0) {
-        const fileBuffer = Buffer.from(await file.arrayBuffer());
         fileName = file.name;
-        const extracted = await extractTextFromFileBuffer({
-          fileBuffer,
-          fileName: file.name,
-          mimeType: file.type || "application/octet-stream",
-        });
-        transcript = extracted.textContent ?? transcript;
+        transcript = await extractMeetingTranscriptFile(file);
       }
 
       if (!transcript.trim()) {
         throw new AppError(400, "INVALID_INPUT", "Transcript text or a readable transcript file is required.");
       }
+      validateMeetingTranscriptText(transcript);
 
       const result = await intakeMeetingTranscript(actor, {
         workspaceId,
@@ -91,6 +87,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       timeZone?: unknown;
     };
 
+    const transcript = validateMeetingTranscriptText(String(body.transcript ?? ""));
     const result = await intakeMeetingTranscript(actor, {
       workspaceId,
       meetingId: typeof body.meetingId === "string" ? body.meetingId : null,
@@ -107,7 +104,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         typeof body.timeZone === "string" ? body.timeZone : null,
         "Recorded at",
       ),
-      transcript: String(body.transcript ?? ""),
+      transcript,
       summaryMd: typeof body.summaryMd === "string" ? body.summaryMd : null,
       ingestionGuidanceMd: typeof body.ingestionGuidanceMd === "string" ? body.ingestionGuidanceMd : null,
       participantIds: Array.isArray(body.participantIds) ? body.participantIds.map((value) => String(value)) : [],

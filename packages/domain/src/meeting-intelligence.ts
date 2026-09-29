@@ -198,12 +198,19 @@ function createWorkspaceMemberDirectoryLoader(workspaceId: string): MemberDirect
 
 async function resolveHintedAssigneeMemberId(hint: string | null | undefined, loadMembers: MemberDirectoryLoader) {
   if (!hint || isCollectiveAssigneeHint(hint)) return null;
-  const lowHint = hint.toLowerCase();
+  const lowHint = hint.trim().toLowerCase();
   const members = await loadMembers();
-  return members.find((member) =>
+  const exact = members.filter((member) =>
+    member.user.displayName?.trim().toLowerCase() === lowHint
+    || member.user.email.trim().toLowerCase() === lowHint
+  );
+  if (exact.length > 0) return exact.length === 1 ? exact[0].id : null;
+
+  const partial = members.filter((member) =>
     member.user.displayName?.toLowerCase().includes(lowHint)
     || member.user.email.toLowerCase().includes(lowHint)
-  )?.id ?? null;
+  );
+  return partial.length === 1 ? partial[0].id : null;
 }
 
 function normalizeInsightType(value: unknown, targetEntityType: string | null): MeetingInsightType | null {

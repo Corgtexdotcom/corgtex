@@ -30,7 +30,6 @@ import {
 import type { BrainArticleType, NewspaperCadence } from "@prisma/client";
 import {
   normalizeNewspaperDigestPayload,
-  normalizeNewspaperPersonalizationPayload,
   renderNewspaperDigestMarkdown,
   renderWorkspaceBriefingEmailHtml,
   withNewspaperAdviceRequests,
@@ -204,7 +203,6 @@ type OperatingDigestInputs = {
     recordedAt: Date;
     summaryMd: string | null;
     decisionsJson: unknown;
-    participantEmails: string[];
     insights: Array<{
       type: string;
       operation: string;
@@ -437,7 +435,6 @@ function formatMeetingDigestInput(meetings: OperatingDigestInputs["meetings"]) {
       compactDigestLine(meeting.summaryMd, 1200) ? `  Summary: ${compactDigestLine(meeting.summaryMd, 1200)}` : null,
       decisions ? `  Decisions: ${decisions}` : null,
       insights ? `  Suggested/linked operating items: ${insights}` : null,
-      meeting.participantEmails.length > 0 ? `  Participants: ${meeting.participantEmails.slice(0, 8).join(", ")}` : null,
     ].filter(Boolean).join("\n");
   }).join("\n\n");
 }
@@ -787,7 +784,6 @@ async function loadOperatingDigestInputs(params: {
         recordedAt: true,
         summaryMd: true,
         decisionsJson: true,
-        participantEmails: true,
         insights: {
           where: {
             status: { in: ["SUGGESTED", "CONFIRMED", "APPLIED"] },
@@ -1542,7 +1538,7 @@ Rules:
         workspaceId: params.workspaceId,
         workflowJobId: params.workflowJobId,
         agentRunId: params.agentRunId,
-        instruction: `Generate a structured ${cadenceLabel(cadence)} Newspaper evidence summary for the workspace based on the last ${lookbackDays} day(s) of Corgtex operating data. Prioritize what helps the reader understand the workspace: what changed, what decisions or blockers matter, what needs attention, and what evidence supports it. Return one topic per array item so the formatter can render separate paragraphs or list rows. Return complete, readable item sentences with no ellipses, truncated titles, raw URLs, or pasted source links. Use the arrays only as internal evidence buckets; do not write category headings inside the item text. Return concise, non-empty arrays only when the source material supports them.`,
+        instruction: `Generate a structured ${cadenceLabel(cadence)} Newspaper evidence summary for the workspace based on the last ${lookbackDays} day(s) of Corgtex operating data. Prioritize what helps the reader understand the workspace: what changed, what decisions or blockers matter, what needs attention, and what evidence supports it. Meeting attendance does not prove who spoke, decided, or owns a task. Name a person in a meeting claim only when the summary or insight explicitly supports that claim. Return one topic per array item so the formatter can render separate paragraphs or list rows. Return complete, readable item sentences with no ellipses, truncated titles, raw URLs, or pasted source links. Use the arrays only as internal evidence buckets; do not write category headings inside the item text. Return concise, non-empty arrays only when the source material supports them.`,
         schemaHint: `{
           intro: string | null,
           meetingBriefs: string[],
@@ -1670,19 +1666,9 @@ Rules:
 
   // Pre-load recipient PERSON profiles in one query (after the profile-rebuild
   // writes above, so freshly-updated profiles are reflected) instead of a
-  // per-recipient findUnique inside the loop below.
-  const recipientPersonSlugs = recipientMembers.map((member) => `person-${member.user.id}`);
-  const recipientPersonArticles = recipientPersonSlugs.length
-    ? await prisma.brainArticle.findMany({
-        where: { workspaceId: params.workspaceId, slug: { in: recipientPersonSlugs } },
-        select: { slug: true, bodyMd: true },
-      })
-    : [];
-  const recipientPersonArticleBySlug = new Map(recipientPersonArticles.map((article) => [article.slug, article]));
   const emailDigest = editionDigest;
 
   for (const member of recipientMembers) {
-    const personArticle = recipientPersonArticleBySlug.get(`person-${member.user.id}`) ?? null;
     const recipientDigest = withNewspaperAdviceRequests(emailDigest, personalItemsByMemberId.get(member.id) ?? []);
     const subject = `${storedBriefing.title} - Your Personal Briefing`;
 
@@ -1704,26 +1690,6 @@ Rules:
       continue;
     }
 
-    const personalizationExtraction = await defaultModelGateway.extract({
-      model,
-      workspaceId: params.workspaceId,
-      workflowJobId: params.workflowJobId,
-      agentRunId: params.agentRunId,
-      instruction: `Personalize this workspace newspaper for a specific member. Fold any member-specific advice requests or assigned work into one short prose memberNote. Do not create section headings, category labels, bullet lists, or HTML.`,
-      schemaHint: `{
-        greeting: string | null,
-        intro: string | null,
-        memberNote: string | null,
-        emphasizedSectionIds: string[]
-      }`,
-      input: JSON.stringify({
-        recipient: member.user.displayName || member.user.email,
-        profile: personArticle?.bodyMd || "No profile available.",
-        digest: recipientDigest,
-      }),
-    });
-    const personalization = normalizeNewspaperPersonalizationPayload(personalizationExtraction.output);
-
     const html = await instrumentNewspaperHtmlLinks({
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId ?? null,
@@ -1737,7 +1703,6 @@ Rules:
         recipientName: member.user.displayName || member.user.email,
         workspaceUrl: workspaceUrl(params.workspaceId),
         digest: recipientDigest,
-        personalization,
       }),
     });
 

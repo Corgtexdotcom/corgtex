@@ -127,6 +127,19 @@ describe("deriveJobsForEvent edge cases", () => {
     expect(knowledgeJob?.dependsOnDedupeKey).toBe(postJob?.dedupeKey);
   });
 
+  it("routes uploaded transcripts to human review before workspace records are created", () => {
+    for (const event of [
+      { type: "meeting.created", payload: { meetingId: "meeting-1", source: "user-supplied-source", hasTranscript: true } },
+      { type: "meeting.transcript-uploaded", payload: { meetingId: "meeting-1", source: "calendar", hasTranscript: true } },
+    ]) {
+      const jobs = deriveJobsForEvent({ id: `evt-${event.type}`, workspaceId: "ws-1", ...event });
+      expect(jobs.find((job) => job.type === "agent.action-extraction")?.payload).toMatchObject({
+        meetingId: "meeting-1",
+        reviewOnly: true,
+      });
+    }
+  });
+
   it("creates replay triage jobs with their own dedupe key", () => {
     const jobs = deriveJobsForEvent({
       id: "evt-9",
