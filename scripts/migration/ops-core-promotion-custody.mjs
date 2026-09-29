@@ -71,6 +71,11 @@ export async function openPostgresPromotionCustody({ custody, store, stateFile, 
   const prefix = `operations/${initial.domain}/${initial.intentSha256}/${initial.pending.operationId}/`;
   const original = { schemaVersion: "1.0.0", scratchName: intent.scratchName,
     targetRef: expected.cleanupState.targetRef, phase: "MIGRATION_RETAINED", scratchOid: intent.scratchOid };
+  // The initial restore records the verified database owner. An explicit
+  // reconciliation from an older attempt may have retained the same marker
+  // without that field. Both shapes bind to the exact scratch and target.
+  const originalWithOwner = { ...original, scratchOwner: intent.expectedConnection.user };
+  const ownsOriginal = current => same(current, original) || same(current, originalWithOwner);
   async function local(action) {
     const file = await open(stateFile, constants.O_RDWR | constants.O_NOFOLLOW);
     try {
@@ -107,7 +112,7 @@ export async function openPostgresPromotionCustody({ custody, store, stateFile, 
     const record = await readRemote("promotion-intent");
     return local(async (_file, current) => {
       if (record === null) {
-        if (!same(current, original)) fail("PROMOTION_CLEANUP_MARKER_UNOWNED");
+        if (!ownsOriginal(current)) fail("PROMOTION_CLEANUP_MARKER_UNOWNED");
         return null;
       }
       if (!same(record, expected) || !same(current, expected.cleanupState)) fail("PROMOTION_CUSTODY_PARTIAL_PERSISTENCE");
@@ -124,11 +129,11 @@ export async function openPostgresPromotionCustody({ custody, store, stateFile, 
       // Check the bound original before retaining intent, then inspect the same
       // opened inode again before replacing the cleanup authorization marker.
       await local(async (_file, current) => {
-        if (!same(current, original)) fail("PROMOTION_CLEANUP_MARKER_UNOWNED");
+        if (!ownsOriginal(current)) fail("PROMOTION_CLEANUP_MARKER_UNOWNED");
       });
       await retain("promotion-intent", expected);
       await local(async (file, current) => {
-        if (!same(current, original)) fail("PROMOTION_CLEANUP_MARKER_UNOWNED");
+        if (!ownsOriginal(current)) fail("PROMOTION_CLEANUP_MARKER_UNOWNED");
         await check();
         const text = `${JSON.stringify(expected.cleanupState)}\n`;
         await file.truncate(0);

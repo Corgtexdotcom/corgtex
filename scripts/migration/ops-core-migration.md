@@ -425,7 +425,7 @@ If the immediate predecessor recovered before capture and left no scratch,
 omit `retryScratchEvidenceDir`; preflight checks the complete base inventory.
 
 If the `-retry-2` attempt also reaches terminal `SOURCE_RECOVERED` before the
-target-write boundary, a final fourth attempt may use `operator.retryOf:
+target-write boundary, a fourth attempt may use `operator.retryOf:
 { intentSha256, journalSha256, journal: "retry-2" }`. Bind the hashes to the
 exact retained `-retry-2` plan and terminal journal, use a fourth distinct
 scratch name, and keep both transfer and activation runtime-access policies
@@ -434,7 +434,17 @@ includes every earlier preserved scratch as `verify-only`; leave the immediate
 predecessor scratch for separate admission. The operator checks and leases all
 three ancestor journals root-first, requires each applicable scratch admission
 receipt, and creates `cutovers/<domain>-retry-3.json` only for one exact plan.
-There is no further retry slot. Run fresh preflight before fencing.
+
+If the fourth attempt also reaches terminal `SOURCE_RECOVERED` before any
+target write, a final fifth attempt may use `operator.retryOf:
+{ intentSha256, journalSha256, journal: "retry-3" }` bound to that retained
+plan and exact terminal journal. Use a fifth distinct scratch name. Carry all
+earlier admitted scratches as `verify-only` rows in both base runtime-access
+policies, and leave the fourth scratch for its separate admission receipt.
+The operator checks and leases all four ancestor journals root-first, checks
+each applicable historical admission receipt and effective policy, then creates
+`cutovers/<domain>-retry-4.json` for one exact plan. There is no sixth slot.
+Run fresh preflight before fencing again.
 
 If the recovered predecessor left an empty, protected scratch database, set
 `retryScratchEvidenceDir` in the private retry credentials to the predecessor's

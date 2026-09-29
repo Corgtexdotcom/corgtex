@@ -19,7 +19,8 @@ async function fixture(t) {
     targetIdentity: "target-fixture", parityEvidenceSha256: "a".repeat(64) };
   const intent = { ...body, sha256: archiveEvidenceHash(body) };
   const record = postgresPromotionDurableRecord(intent);
-  const original = { schemaVersion: "1.0.0", scratchName: intent.scratchName, targetRef: record.cleanupState.targetRef, phase: "MIGRATION_RETAINED", scratchOid: intent.scratchOid };
+  const original = { schemaVersion: "1.0.0", scratchName: intent.scratchName, targetRef: record.cleanupState.targetRef,
+    phase: "MIGRATION_RETAINED", scratchOid: intent.scratchOid, scratchOwner: intent.expectedConnection.user };
   await writeFile(stateFile, JSON.stringify(original), { mode: 0o600 });
   let journal = JSON.stringify(createCutoverJournal({ domain: "core", intentSha256: "b".repeat(64), evidenceSha256: "c".repeat(64) }));
   let etag = 0;
@@ -75,6 +76,23 @@ test("independent intent precedes marker, survives reopening and retains stable 
   assert.deepEqual(await reopened.recordResult({ ...f.result, renameAttempted: false }), first);
   assert.equal(f.values.size, 2);
   assert.equal(f.custody.snapshot().phase, "RESTORED", "promotion alone cannot complete all target verification");
+});
+
+test("ownerless reconciliation marker remains promotable, but a different owner does not", async t => {
+  const f = await fixture(t);
+  assert.equal(f.original.scratchOwner, f.intent.expectedConnection.user);
+  const reconciledMarker = { ...f.original };
+  delete reconciledMarker.scratchOwner;
+  await writeFile(f.stateFile, JSON.stringify(reconciledMarker), { mode: 0o600 });
+  const adapter = await f.openAdapter();
+  assert.equal(await adapter.readOperationIntent(), null);
+  await adapter.persistOperationIntent(f.record);
+  assert.deepEqual(JSON.parse(await readFile(f.stateFile, "utf8")), f.record.cleanupState);
+
+  const other = await fixture(t);
+  await writeFile(other.stateFile, JSON.stringify({ ...other.original, scratchOwner: "foreign_owner" }), { mode: 0o600 });
+  const unowned = await other.openAdapter();
+  await assert.rejects(unowned.readOperationIntent(), /PROMOTION_CLEANUP_MARKER_UNOWNED/);
 });
 
 test("lost independent intent acknowledgement leaves original marker and requires reconciliation", async t => {
