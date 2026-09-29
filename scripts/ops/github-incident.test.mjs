@@ -604,7 +604,12 @@ describe("github-incident resolved issue sync", () => {
     expect(shared.code, shared.stderr).toBe(0);
     expect(shared.state.issues[0].closed).toBeFalsy();
 
-    let issues = shared.state.issues;
+    const olderSnapshot = await run({ ...verified, lastReleaseCheck: "2026-09-29T16:00:02.000Z" }, shared.state.issues);
+    expect(olderSnapshot.code, olderSnapshot.stderr).toBe(0);
+    expect(olderSnapshot.state.issues[0].closed).toBeFalsy();
+    expect(labelNames(olderSnapshot.state.issues[0]).some((label) => label.startsWith("ops-recovery-"))).toBe(false);
+
+    let issues = olderSnapshot.state.issues;
     for (const expected of ["ops-recovery-1", "ops-recovery-2"]) {
       const result = await run({ ...verified, supportConnectorStatus: "not_configured", hasSupportCredential: false }, issues);
       expect(result.code, result.stderr).toBe(0);

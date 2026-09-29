@@ -136,7 +136,7 @@ function verifiedReleaseRecovery(customer) {
   const imageTag = optionalText(observed?.imageTag);
   const gitSha = optionalText(observed?.gitSha);
   return snapshot?.status === "ok" && !optionalText(snapshot?.error)
-    && Number.isFinite(snapshotAt) && snapshotAt >= healthAt
+    && Number.isFinite(snapshotAt) && snapshotAt >= healthAt && snapshotAt >= releaseAt
     && (baseline === imageTag || (gitSha && (baseline === gitSha || baseline === `sha-${gitSha}`)));
 }
 
