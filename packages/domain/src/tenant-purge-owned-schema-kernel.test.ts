@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { AppError } from "./errors";
 import * as kernel from "./tenant-purge-owned-schema-kernel";
-import { captureTenantPurgeOwnedVector, createTenantPurgeOwnedVector, pushTenantPurgeOwnedVector } from "./tenant-purge-owned-vector-kernel";
+import { createTenantPurgeOwnedVector, pushTenantPurgeOwnedVector } from "./tenant-purge-owned-vector-kernel";
 
 const { captureTenantPurgeOwnedSchema: capture, createTenantPurgeOwnedField: field, createTenantPurgeOwnedSchema: create } = kernel;
 const call = create as (...values: unknown[]) => kernel.TenantPurgeOwnedSchema;

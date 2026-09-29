@@ -1301,7 +1301,6 @@ export function buildWorkspaceBriefingFromDigest(params: {
         !used.has(candidateKey(entry))
         && candidateSemanticallyOverlapsDigestItem(entry, rawItem)
       ));
-      const scoreSource = source ?? semanticSource;
       const score = source
         ? scoreWorkspaceBriefingCandidate(source, generatedAt)
         : semanticSource

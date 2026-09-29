@@ -18,7 +18,6 @@ import {
   requireWorkspaceMembership,
 } from "@corgtex/domain";
 import { getModuleManifests } from "@corgtex/domain/modules";
-import { env } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { headers } from "next/headers";
 import { getFormatter, getTranslations } from "next-intl/server";

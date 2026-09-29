@@ -2,7 +2,6 @@
 
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
-import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { asString, asOptional, refresh } from "../action-utils";
 import { CRM_CREATABLE_DEAL_STAGES } from "./view-model";
 import { redirect } from "next/navigation";

@@ -16,7 +16,7 @@ import {
   listWorkspaceEnterpriseServiceStates,
   requireWorkspaceMembership,
 } from "@corgtex/domain";
-import { env, prisma } from "@corgtex/shared";
+import { prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";

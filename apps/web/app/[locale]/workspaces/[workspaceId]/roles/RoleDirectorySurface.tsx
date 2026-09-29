@@ -26,7 +26,6 @@ import {
   roleMemberName,
   roleOnboardingKey,
   sortRoleDirectoryRoles,
-  type RoleDirectoryCircle,
   type RoleDirectoryData,
   type RoleDirectoryMember,
   type RoleDirectoryRole,

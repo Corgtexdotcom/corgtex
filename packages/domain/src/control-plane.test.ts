@@ -7901,7 +7901,6 @@ describe("control plane domain", () => {
 
   it("records sanitized post-deploy probe evidence for customer-read surfaces", async () => {
     const { runControlPlanePostDeployProbe } = await import("./control-plane");
-    const recentProofAt = new Date(Date.now() - 5 * 60 * 1000);
     const deployment = {
       id: "inst-1",
       label: "Acme Production",

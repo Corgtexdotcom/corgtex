@@ -28,7 +28,6 @@ import {
   crmPageMetrics,
 } from "../chat-page-context";
 import {
-  accountHref,
   accountNavigationState,
   labelFromCrmCode,
   relationshipDashboardHref,
