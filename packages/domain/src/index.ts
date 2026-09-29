@@ -31,6 +31,7 @@ export * from "./circles";
 export * from "./constitutions";
 export * from "./conversations";
 export * from "./communication";
+export * from "./slack-followups";
 export * from "./slack-workspace-bindings";
 export * from "./control-plane";
 export * from "./control-plane-workspaces";

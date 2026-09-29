@@ -27,6 +27,7 @@ import {
 } from "./meeting-action-review";
 import { createProposal, submitProposal } from "./proposals";
 import { getSlackWorkspaceBinding } from "./slack-workspace-bindings";
+import { reconcileSlackThreadFollowupsAfterMessageChange, slackFollowupStopIntent, suppressSlackThreadFollowups } from "./slack-followups";
 import { createTension, publishTension } from "./tensions";
 
 export type CommunicationWorkItemKind = "ACTION" | "TENSION" | "PROPOSAL" | "BRAIN_NOTE";
@@ -1040,6 +1041,13 @@ async function ingestSlackMessage(installation: { id: string; workspaceId: strin
     });
 
     if (existing) {
+      await reconcileSlackThreadFollowupsAfterMessageChange({
+        workspaceId: installation.workspaceId,
+        installationId: installation.id,
+        channelId: externalChannelId,
+        threadTs: existing.threadExternalId || existing.externalMessageId,
+        messageId: existing.id,
+      });
       await deleteSlackMessageKnowledge(existing.id);
       await enqueueSlackMessageContextJobs({
         installation,
@@ -1050,7 +1058,49 @@ async function ingestSlackMessage(installation: { id: string; workspaceId: strin
     return { skipped: true, reason: "message_deleted" };
   }
 
+  // Edits to an already stored message must still correct its stop marker while
+  // public ingestion or its channel is paused. Never admit a new message here.
+  const reconcileHeldEdit = async () => {
+    if (normalized.subtype !== "message_changed" || normalized.hidden || normalized.isBot) return;
+    const existing = await prisma.communicationMessage.findUnique({
+      where: {
+        installationId_externalChannelId_externalMessageId: {
+          installationId: installation.id,
+          externalChannelId,
+          externalMessageId: ts,
+        },
+      },
+      select: { id: true, threadExternalId: true },
+    });
+    if (!existing) return;
+    await prisma.communicationMessage.updateMany({
+      where: { id: existing.id, installationId: installation.id },
+      data: { text: null, raw: Prisma.DbNull, textRedactedAt: new Date() },
+    });
+    await deleteSlackMessageKnowledge(existing.id);
+    const threadTs = existing.threadExternalId || ts;
+    if (normalized.text && slackFollowupStopIntent(normalized.text)) {
+      await suppressSlackThreadFollowups({
+        workspaceId: installation.workspaceId,
+        installationId: installation.id,
+        channelId: externalChannelId,
+        threadTs,
+        messageId: existing.id,
+        externalUserId: normalized.externalUserId,
+      });
+    } else {
+      await reconcileSlackThreadFollowupsAfterMessageChange({
+        workspaceId: installation.workspaceId,
+        installationId: installation.id,
+        channelId: externalChannelId,
+        threadTs,
+        messageId: existing.id,
+      });
+    }
+  };
+
   if (isRecord(installation.settings) && installation.settings.publicIngestionEnabled === false) {
+    await reconcileHeldEdit();
     return { skipped: true, reason: "public_ingestion_disabled" };
   }
   const channel = await ensureSlackChannel(installation, {
@@ -1058,6 +1108,7 @@ async function ingestSlackMessage(installation: { id: string; workspaceId: strin
     channel: externalChannelId,
   });
   if (!channel || channel.kind !== "PUBLIC" || !channel.isIngestEnabled) {
+    await reconcileHeldEdit();
     return { skipped: true, reason: "channel_not_ingested" };
   }
 
@@ -1104,6 +1155,25 @@ async function ingestSlackMessage(installation: { id: string; workspaceId: strin
       isDeleted: false,
     },
   });
+
+  if (text && slackFollowupStopIntent(text)) {
+    await suppressSlackThreadFollowups({
+      workspaceId: installation.workspaceId,
+      installationId: installation.id,
+      channelId: externalChannelId,
+      threadTs: normalized.threadTs || ts,
+      messageId: message.id,
+      externalUserId: normalized.externalUserId,
+    });
+  } else if (asString(event.subtype) === "message_changed") {
+    await reconcileSlackThreadFollowupsAfterMessageChange({
+      workspaceId: installation.workspaceId,
+      installationId: installation.id,
+      channelId: externalChannelId,
+      threadTs: normalized.threadTs || ts,
+      messageId: message.id,
+    });
+  }
 
   if (text) {
     await enqueueSlackMessageContextJobs({ installation, message });
@@ -1586,11 +1656,37 @@ export async function processSlackInboundEvent(inboundEventId: string) {
     } else if (event.type === "app_mention") {
       const token = encryptedBotToken(inbound.installation);
       const externalUserId = asString(event.user);
-      const actor = externalUserId ? await resolveHumanActorForSlackUser(inbound.installation, externalUserId) : null;
       const channelId = asString(event.channel);
       const messageTs = asString(event.ts) || asString(event.event_ts);
       const threadTs = asString(event.thread_ts) || messageTs;
-      if (!actor) {
+      const text = asString(event.text);
+      const stopRequest = slackFollowupStopIntent(text);
+      const actor = !stopRequest && externalUserId ? await resolveHumanActorForSlackUser(inbound.installation, externalUserId) : null;
+      if (channelId && messageTs && stopRequest) {
+        const sourceMessage = await persistSlackSourceMessage(inbound.installation, {
+          channelId,
+          messageTs,
+          threadTs,
+          externalUserId,
+          text,
+          raw: event,
+        });
+        if (sourceMessage) {
+          await suppressSlackThreadFollowups({
+            workspaceId: inbound.installation.workspaceId,
+            installationId: inbound.installation.id,
+            channelId,
+            threadTs,
+            messageId: sourceMessage.id,
+            externalUserId,
+          });
+        }
+        await sendSlackMessage(inbound.installation.id, {
+          channel: channelId,
+          threadTs,
+          text: "I will stop Corgtex follow-ups in this thread.",
+        }, [], token);
+      } else if (!actor) {
         const accountResponse = slackAccountLinkResponse(inbound.installation.workspaceId);
         if (channelId) {
           await sendSlackMessage(inbound.installation.id, {
@@ -1599,7 +1695,6 @@ export async function processSlackInboundEvent(inboundEventId: string) {
           }, accountResponse.blocks, token);
         }
       } else if (channelId && messageTs) {
-        const text = asString(event.text);
         const prompt = stripSlackBotMention(text, inbound.installation.botUserId) || "brief";
         const sourceMessage = await persistSlackSourceMessage(inbound.installation, {
           channelId,
@@ -2122,6 +2217,24 @@ export async function sendSlackMessage(installationId: string, target: {
     unfurl_links: false,
     unfurl_media: false,
   });
+}
+
+export async function slackSourceLink(installationId: string, channelId: string, messageTs: string) {
+  const installation = await prisma.communicationInstallation.findUnique({
+    where: { id: installationId },
+    select: { botTokenEnc: true, externalWorkspaceId: true },
+  });
+  invariant(installation, 404, "NOT_FOUND", "Slack installation not found.");
+  const channelLink = {
+    url: `https://app.slack.com/client/${encodeURIComponent(installation.externalWorkspaceId)}/${encodeURIComponent(channelId)}`,
+    label: "Slack channel",
+  };
+  try {
+    const response = await slackClient(encryptedBotToken(installation)).chat.getPermalink({ channel: channelId, message_ts: messageTs });
+    return response.ok && response.permalink ? { url: response.permalink, label: "Slack source" } : channelLink;
+  } catch {
+    return channelLink;
+  }
 }
 
 export async function updateSlackMessage(installationId: string, target: {
