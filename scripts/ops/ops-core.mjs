@@ -300,7 +300,57 @@ export async function fetchControlPlaneCustomers(env = process.env, fetchImpl = 
   if (!Array.isArray(parsed)) {
     throw new Error("Control Plane list_customers response must be an array.");
   }
-  return enrichControlPlaneSupportOperations(parsed, baseUrl, token, fetchImpl);
+  const withOperations = await enrichControlPlaneSupportOperations(parsed, baseUrl, token, fetchImpl);
+  return enrichControlPlaneReleaseSnapshots(withOperations, baseUrl, token, fetchImpl);
+}
+
+async function enrichControlPlaneReleaseSnapshots(customers, baseUrl, token, fetchImpl) {
+  return Promise.all(customers.map(async (customer) => {
+    if (!optionalText(customer?.id) || !optionalText(customer?.releaseImageTag)
+      || customer?.lastHealthStatus !== "ok" || optionalText(customer?.lastHealthError)
+      || customer?.deploymentKind === "SHARED_WORKSPACE" || customer?.managedWorkspaceId) return customer;
+
+    const snapshots = await fetchControlPlaneReleaseSnapshots(baseUrl, token, customer.id, fetchImpl);
+    return snapshots ? { ...customer, fleetSnapshots: snapshots } : customer;
+  }));
+}
+
+async function fetchControlPlaneReleaseSnapshots(baseUrl, token, deploymentId, fetchImpl) {
+  try {
+    const response = await fetchImpl(`${baseUrl}/api/control-plane/mcp`, {
+      method: "POST",
+      headers: {
+        "authorization": `Bearer cp-${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: `ops-release-${Date.now()}`,
+        method: "tools/call",
+        params: { name: "get_customer_deployment_status", arguments: { deploymentId } },
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const body = await response.json();
+    if (!response.ok || body?.error) return null;
+    const text = body?.result?.content?.find((item) => typeof item?.text === "string")?.text;
+    if (!text) return null;
+    const deployment = JSON.parse(text);
+    if (deployment?.id !== deploymentId || !Array.isArray(deployment?.fleetSnapshots)) return null;
+    return deployment.fleetSnapshots
+      .filter((snapshot) => snapshot?.snapshotKind === "HEALTH")
+      .map((snapshot) => ({
+        snapshotKind: snapshot.snapshotKind,
+        observedAt: snapshot.observedAt,
+        createdAt: snapshot.createdAt,
+        status: snapshot.status,
+        error: snapshot.error,
+        summary: { health: { release: snapshot.summary?.health?.release ?? null } },
+      }));
+  } catch {
+    // Missing evidence must never advance drift recovery.
+    return null;
+  }
 }
 
 async function enrichControlPlaneSupportOperations(customers, baseUrl, token, fetchImpl) {

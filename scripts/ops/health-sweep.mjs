@@ -34,6 +34,7 @@ async function main() {
     publishControlPlaneOnly ? [] : targets,
     controlPlaneCustomers,
   );
+  const unhealthyDedupePrefixes = unverifiedReleaseDedupePrefixes(controlPlaneCustomers);
   const incidents = [
     ...results.filter((result) => result.incident).map((result) => result.incident),
     ...controlPlaneIncidents,
@@ -71,6 +72,9 @@ async function main() {
     const incidentArgs = [fileURLToPath(new URL("./github-incident.mjs", import.meta.url))];
     if (syncDedupePrefixes.length > 0) {
       incidentArgs.push("--sync-resolved", "--sync-dedupe-prefixes", JSON.stringify(syncDedupePrefixes));
+      if (unhealthyDedupePrefixes.length > 0) {
+        incidentArgs.push("--unhealthy-dedupe-prefixes", JSON.stringify(unhealthyDedupePrefixes));
+      }
     }
     const issueResult = spawnSync(
       process.execPath,
@@ -100,10 +104,40 @@ function resolvedSyncDedupePrefixes(targets, controlPlaneCustomers) {
   const prefixes = targets.map((target) => normalizeDedupePrefix(`${target.name}:${target.url}:`));
   // A configured but empty control-plane response does not prove that any
   // previously reported deployment has recovered.
-  prefixes.push(...controlPlaneCustomers
-    .filter((customer) => optionalText(customer?.id))
-    .map((customer) => normalizeDedupePrefix(`control-plane:${customer.id}:`)));
+  for (const customer of controlPlaneCustomers) {
+    if (!optionalText(customer?.id)) continue;
+    prefixes.push(normalizeDedupePrefix(`control-plane:${customer.id}:`));
+    // Drift recovery is independent of unrelated control-plane findings.
+    prefixes.push(normalizeDedupePrefix(`control-plane:${customer.id}:releaseMetadataDrift`));
+  }
   return prefixes;
+}
+
+function unverifiedReleaseDedupePrefixes(controlPlaneCustomers) {
+  return controlPlaneCustomers
+    .filter((customer) => optionalText(customer?.id) && !verifiedReleaseRecovery(customer))
+    .map((customer) => normalizeDedupePrefix(`control-plane:${customer.id}:releaseMetadataDrift`));
+}
+
+function verifiedReleaseRecovery(customer) {
+  // A different error or an ok response without release metadata can replace
+  // drift without proving the live release matches the recorded baseline.
+  if (customer?.deploymentKind === "SHARED_WORKSPACE" || customer?.managedWorkspaceId
+    || customer?.lastHealthStatus !== "ok" || optionalText(customer?.lastHealthError)) return false;
+  const baseline = optionalText(customer?.releaseImageTag);
+  const healthAt = Date.parse(customer?.lastHealthCheck ?? "");
+  const releaseAt = Date.parse(customer?.lastReleaseCheck ?? "");
+  if (!baseline || !Number.isFinite(healthAt) || !Number.isFinite(releaseAt)) return false;
+  const snapshot = (Array.isArray(customer?.fleetSnapshots) ? customer.fleetSnapshots : [])
+    .filter((item) => item?.snapshotKind === "HEALTH")
+    .sort((a, b) => Date.parse(b.observedAt ?? b.createdAt ?? 0) - Date.parse(a.observedAt ?? a.createdAt ?? 0))[0];
+  const snapshotAt = Date.parse(snapshot?.observedAt ?? snapshot?.createdAt ?? "");
+  const observed = snapshot?.summary?.health?.release;
+  const imageTag = optionalText(observed?.imageTag);
+  const gitSha = optionalText(observed?.gitSha);
+  return snapshot?.status === "ok" && !optionalText(snapshot?.error)
+    && Number.isFinite(snapshotAt) && snapshotAt >= healthAt && snapshotAt >= releaseAt
+    && (baseline === imageTag || (gitSha && (baseline === gitSha || baseline === `sha-${gitSha}`)));
 }
 
 function normalizeDedupePrefix(value) {

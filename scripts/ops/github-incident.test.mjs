@@ -550,6 +550,80 @@ describe("github-incident resolved issue sync", () => {
     }
   });
 
+  it("waits for a verified control-plane release before resolving drift", async () => {
+    const dedupeKey = "control-plane:deployment-1:releaseMetadataDrift";
+    const incident = issue(22, `[${opsToken(dedupeKey)}] P2 control-plane-release: stale`,
+      ["ops-auto-fix", "ops-incident", "ops-recovery-2"], dedupeKey);
+    const base = {
+      id: "deployment-1",
+      deploymentKind: "REMOTE_MANAGED",
+      managedWorkspaceId: null,
+      releaseImageTag: "sha-new-release",
+      supportConnectorStatus: "connected",
+      hasSupportCredential: true,
+      lastHealthCheck: "2026-09-29T16:00:00.000Z",
+      lastReleaseCheck: "2026-09-29T16:00:00.000Z",
+    };
+    const run = (customer, issues) => runWithFakeGh(healthSweepPath,
+      ["--publish-control-plane-only"], null, {
+        issues,
+        env: {
+          OPS_CREATE_GITHUB_ISSUES: "true",
+          OPS_HEALTH_TARGETS_JSON: "[]",
+          OPS_CONTROL_PLANE_CUSTOMERS_JSON: JSON.stringify([customer]),
+        },
+      });
+    const healthSnapshot = (release) => ({
+      snapshotKind: "HEALTH",
+      status: "ok",
+      observedAt: "2026-09-29T16:00:01.000Z",
+      summary: { health: { release } },
+    });
+    const verified = {
+      ...base,
+      lastHealthStatus: "ok",
+      lastHealthError: null,
+      fleetSnapshots: [healthSnapshot({ imageTag: "sha-new-release", gitSha: "new-release" })],
+    };
+
+    const active = await run({ ...base, lastHealthStatus: "degraded",
+      lastHealthError: "Release drift: expected sha-new-release, got sha-old-release" }, [incident]);
+    expect(active.code, active.stderr).toBe(0);
+    expect(labelNames(active.state.issues[0]).some((label) => label.startsWith("ops-recovery-"))).toBe(false);
+
+    const timeout = await run({ ...base, lastHealthStatus: "down", lastHealthError: "Health probe timed out" }, active.state.issues);
+    expect(timeout.code, timeout.stderr).toBe(0);
+    expect(timeout.state.issues[0].closed).toBeFalsy();
+    expect(labelNames(timeout.state.issues[0]).some((label) => label.startsWith("ops-recovery-"))).toBe(false);
+
+    const missingRelease = await run({ ...verified, fleetSnapshots: [healthSnapshot(null)] }, timeout.state.issues);
+    expect(missingRelease.code, missingRelease.stderr).toBe(0);
+    expect(missingRelease.state.issues[0].closed).toBeFalsy();
+
+    const shared = await run({ ...verified, deploymentKind: "SHARED_WORKSPACE" }, missingRelease.state.issues);
+    expect(shared.code, shared.stderr).toBe(0);
+    expect(shared.state.issues[0].closed).toBeFalsy();
+
+    const olderSnapshot = await run({ ...verified, lastReleaseCheck: "2026-09-29T16:00:02.000Z" }, shared.state.issues);
+    expect(olderSnapshot.code, olderSnapshot.stderr).toBe(0);
+    expect(olderSnapshot.state.issues[0].closed).toBeFalsy();
+    expect(labelNames(olderSnapshot.state.issues[0]).some((label) => label.startsWith("ops-recovery-"))).toBe(false);
+
+    let issues = olderSnapshot.state.issues;
+    for (const expected of ["ops-recovery-1", "ops-recovery-2"]) {
+      const result = await run({ ...verified, supportConnectorStatus: "not_configured", hasSupportCredential: false }, issues);
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.state.issues[0].closed).toBeFalsy();
+      expect(labelNames(result.state.issues[0])).toContain(expected);
+      expect(result.state.issues.some((item) => item.title.includes(opsToken("control-plane:deployment-1:missingSupportConnector")))).toBe(true);
+      issues = result.state.issues;
+    }
+    const resolved = await run({ ...verified, supportConnectorStatus: "not_configured", hasSupportCredential: false }, issues);
+    expect(resolved.code, resolved.stderr).toBe(0);
+    expect(resolved.state.issues[0].closed).toBe(true);
+    expect(resolved.state.issues[0].closeComment).toContain("3 consecutive healthy ops checks");
+  });
+
   it("does not advance Railway-owned health issue recovery from a local-only sweep", async () => {
     const server = await startHealthServer();
     try {

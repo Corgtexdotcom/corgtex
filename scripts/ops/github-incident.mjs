@@ -455,7 +455,7 @@ function scopeHasFailure(issue, plans, options) {
     .sort((a, b) => b.length - a.length)[0];
   if (!prefix) return false;
   return options.unhealthyDedupePrefixes.some((candidate) => key.startsWith(candidate))
-    || plans.some((plan) => plan.incident.dedupeKey.startsWith(prefix));
+    || plans.some((plan) => normalizeDedupeText(plan.incident.dedupeKey).startsWith(prefix));
 }
 
 function shouldCloseIssue(issue, activeTokens, dedupePrefixes = []) {
