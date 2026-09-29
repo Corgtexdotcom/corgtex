@@ -194,6 +194,50 @@ describe("ops-core control-plane incidents", () => {
     ]);
   });
 
+  it("fetches observed release evidence for a healthy control-plane baseline", async () => {
+    const customer = {
+      id: "deployment-1",
+      deploymentKind: "REMOTE_MANAGED",
+      releaseImageTag: "sha-release-1",
+      lastHealthStatus: "ok",
+      lastHealthError: null,
+    };
+    const tools = [];
+    const result = await fetchControlPlaneCustomers({
+      CONTROL_PLANE_URL: "https://ops.example",
+      CONTROL_PLANE_AGENT_API_KEY: "test-token",
+    }, async (url, init) => {
+      if (url.endsWith("/operations")) return response({ operations: [] });
+      const name = JSON.parse(init.body).params.name;
+      tools.push(name);
+      return response({ result: { content: [{ text: JSON.stringify(name === "list_customers"
+        ? [customer]
+        : {
+          id: "deployment-1",
+          fleetSnapshots: [
+            {
+              snapshotKind: "HEALTH",
+              status: "ok",
+              observedAt: "2026-09-29T16:00:01.000Z",
+              summary: { health: { release: { imageTag: "sha-release-1", gitSha: "release-1" }, privateDetail: "omit" } },
+            },
+            { snapshotKind: "SUPPORT_READY", status: "ok" },
+          ],
+        }) }] } });
+    });
+
+    expect(tools).toEqual(["list_customers", "get_customer_deployment_status"]);
+    expect(result).toEqual([{
+      ...customer,
+      fleetSnapshots: [{
+        snapshotKind: "HEALTH",
+        status: "ok",
+        observedAt: "2026-09-29T16:00:01.000Z",
+        summary: { health: { release: { imageTag: "sha-release-1", gitSha: "release-1" } } },
+      }],
+    }]);
+  });
+
   it("enriches fetched customers with a wider support-operation window", async () => {
     const result = await fetchControlPlaneCustomers({
       CONTROL_PLANE_URL: "https://ops.example",
