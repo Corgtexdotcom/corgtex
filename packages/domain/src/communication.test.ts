@@ -963,7 +963,7 @@ describe("communication Slack integration", () => {
     }));
   });
 
-  it.each(["Stop. Do nothing", "ack"])("persists an unmatched human '%s' reply against its Slack thread", async (text) => {
+  it.each(["STOP", "Stop. Do nothing", "ack"])("persists an unmatched human '%s' reply against its Slack thread", async (text) => {
     const { processSlackInboundEvent } = await import("./communication");
     prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
       id: "inbound-stop", provider: "SLACK",
@@ -1349,11 +1349,11 @@ describe("communication Slack integration", () => {
     }));
   });
 
-  it("honors a STOP mention from an unmatched Slack identity without running the agent", async () => {
+  it.each(["<@UBOT> STOP", "<@UBOT> STOP ALL FOLLOW UP"])("honors an unmatched Slack mention '%s' without running the agent", async (text) => {
     const { processSlackInboundEvent } = await import("./communication");
     prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
       id: "inbound-unmatched-stop", provider: "SLACK",
-      payload: { event: { type: "app_mention", channel: "C1", user: "U-unmatched", ts: "1788896184.791699", thread_ts: "1788205758.060039", text: "<@UBOT> STOP ALL FOLLOW UP" } },
+      payload: { event: { type: "app_mention", channel: "C1", user: "U-unmatched", ts: "1788896184.791699", thread_ts: "1788205758.060039", text } },
       installation: { id: "install-1", workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE", botUserId: "UBOT", botTokenEnc: "enc:bot-token", settings: {} },
     });
     prismaMock.communicationExternalUser.findUnique.mockResolvedValueOnce(null);

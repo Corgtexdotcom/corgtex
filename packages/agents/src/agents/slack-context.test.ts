@@ -1193,6 +1193,27 @@ describe("Slack context jobs", () => {
     expect(sendSlackMessageMock).not.toHaveBeenCalled();
   });
 
+  it("pages past 50 capped actions to remind a newer eligible action", async () => {
+    const cappedLinks = Array.from({ length: 50 }, (_, index) => actionCreatedLink({ id: `capped-link-${index}`, entityId: `capped-action-${index}` }));
+    const eligibleLink = actionCreatedLink({ id: "eligible-link", entityId: "eligible-action" });
+    prismaMock.communicationEntityLink.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(cappedLinks)
+      .mockResolvedValueOnce([eligibleLink]);
+    prismaMock.action.findMany
+      .mockResolvedValueOnce(cappedLinks.map((_, index) => ({ id: `capped-action-${index}`, title: `Capped action ${index}`, status: "OPEN" })))
+      .mockResolvedValueOnce([{ id: "eligible-action", title: "Eligible action", status: "OPEN" }]);
+    prismaMock.communicationEntityLink.count.mockImplementation(async ({ where }: { where: { entityId: string } }) => where.entityId === "eligible-action" ? 0 : 2);
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 1, drafts: 0 });
+    expect(prismaMock.communicationEntityLink.findMany).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      cursor: { id: "capped-link-49" },
+      skip: 1,
+    }));
+    expect(sendSlackMessageMock).toHaveBeenCalledWith("install-1", expect.objectContaining({ text: "Corgtex action still not completed: Eligible action" }), expect.any(Array));
+  });
+
   it("shows action status, assignee and both links in a reminder", async () => {
     prismaMock.communicationEntityLink.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([actionCreatedLink()]);
     prismaMock.action.findMany.mockResolvedValueOnce([{ id: "action-1", title: "Confirm availability", status: "IN_PROGRESS", assigneeMember: { user: { displayName: "Jan", email: "jan@example.test" } } }]);

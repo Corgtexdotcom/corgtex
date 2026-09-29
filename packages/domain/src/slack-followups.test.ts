@@ -19,11 +19,11 @@ describe("Slack follow-up suppression", () => {
     prismaMock.communicationMessage.findMany.mockResolvedValue([]);
   });
 
-  it.each(["Stop. Do nothing", "STOP ALL FOLLOW UP", "Ignore", "ignore this Corgtex", "solved", "delete it", "working on it <@UBOT>", "it's already being tracked on our action item list. please stop the reminders", "ack", "acknowledged", "got it!", "thanks <@UBOT>", "thank you."])("recognizes a thread-level human stop: %s", (text) => {
+  it.each(["STOP", "<@UBOT> STOP!", "Stop. Do nothing", "STOP ALL FOLLOW UP", "Ignore", "ignore this Corgtex", "solved", "delete it", "working on it <@UBOT>", "it's already being tracked on our action item list. please stop the reminders", "ack", "acknowledged", "got it!", "thanks <@UBOT>", "thank you."])("recognizes a thread-level human stop: %s", (text) => {
     expect(slackFollowupStopIntent(text)).toBe(true);
   });
 
-  it.each(["FYI, should we discuss this?", "Please review this proposal", "Do not stop the migration", "Ignore the spelling mistake in this draft", "Thanks, can you send the file?", "Got it, but keep reminding me"])("does not treat ordinary discussion as a stop: %s", (text) => {
+  it.each(["FYI, should we discuss this?", "Please review this proposal", "Do not stop the migration", "Ignore the spelling mistake in this draft", "Stop the migration now", "Thanks, can you send the file?", "Got it, but keep reminding me"])("does not treat ordinary discussion as a stop: %s", (text) => {
     expect(slackFollowupStopIntent(text)).toBe(false);
   });
 

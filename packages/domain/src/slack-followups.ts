@@ -13,6 +13,7 @@ export function slackSourceUrl(channelId: string, threadTs: string) {
 export function slackFollowupStopIntent(text: string) {
   const normalized = text.replace(/<@[^>]+>/g, " ").trim();
   if (normalized.length > 240) return false;
+  if (/^stop\s*[.!?]*$/i.test(normalized)) return true;
   if (/^(?:ack|acknowledged|got it|thanks|thank you)\s*[.!?]*$/i.test(normalized)) return true;
   return /\b(?:stop\s+(?:all\s+)?(?:the\s+)?(?:follow[ -]?ups?|reminders?|nudges?)|please\s+stop\s+(?:the\s+)?reminders?|stop[.!\s]+do\s+nothing|ignore\s+(?:this\s+)?corgtex|(?:^|[.!?]\s*)ignore\s*[.!?]*$|(?:^|[.!?]\s*)solved\s*[.!?]*$|(?:^|[.!?]\s*)delete\s+it\s*[.!?]*$|(?:^|[.!?]\s*)working\s+on\s+it\b|already\s+being\s+tracked\b)/i.test(normalized);
 }

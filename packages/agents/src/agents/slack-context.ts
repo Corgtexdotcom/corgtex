@@ -946,122 +946,128 @@ export async function runSlackProactiveScan(params: {
   let followups = 0;
   const actionFollowupCutoff = new Date(now.getTime() - config.staleActionFollowupDelayMinutes * 60 * 1000);
   const waitingUpdateCutoff = new Date(now.getTime() - config.staleActionFollowupDelayMinutes * 2 * 60 * 1000);
-  const actionLinks = await prisma.communicationEntityLink.findMany({
-    where: {
-      workspaceId: params.workspaceId,
-      installationId: params.installationId,
-      provider: "SLACK",
-      entityType: "Action",
-      createdAt: { lte: actionFollowupCutoff },
-      OR: [
-        { action: "proactive_unanswered_action_created" },
-        {
-          action: "create_action",
-          claimKey: { startsWith: `${PROACTIVE_DISPOSITION_CLAIM_PREFIX}:${params.installationId}:` },
-        },
-      ],
-    },
-    orderBy: { createdAt: "asc" },
-    take: 50,
-    select: {
-      id: true,
-      entityId: true,
-      createdAt: true,
-      messageId: true,
-      externalUserId: true,
-      message: {
-        select: {
-          id: true,
-          externalChannelId: true,
-          externalMessageId: true,
-          externalUserId: true,
-          threadExternalId: true,
-          text: true,
-          messageTs: true,
-        },
-      },
-    },
-  });
-  const actionIds = [...new Set(actionLinks.map((link) => link.entityId).filter(Boolean))];
-  const openActions = actionIds.length > 0
-    ? await prisma.action.findMany({
-        where: {
-          workspaceId: params.workspaceId,
-          id: { in: actionIds },
-          archivedAt: null,
-          status: { not: "COMPLETED" },
-        },
-        select: { id: true, title: true, status: true, assigneeMember: { select: { user: { select: { displayName: true, email: true } } } } },
-      })
-    : [];
-  const openActionById = new Map(openActions.map((action) => [action.id, action]));
-
-  for (const link of actionLinks) {
-    if (followups >= MAX_PROACTIVE_ACTION_FOLLOWUPS) break;
-    const action = openActionById.get(link.entityId);
-    const source = link.message as SlackCandidateMessage | null;
-    if (!action || !source || !channelIds.includes(source.externalChannelId)) continue;
-    if (await isSlackThreadFollowupSuppressed({ workspaceId: params.workspaceId, installationId: params.installationId, channelId: source.externalChannelId, threadTs: threadTsForMessage(source) })) continue;
-
-    const priorFollowups = await prisma.communicationEntityLink.count({
-      where: { workspaceId: params.workspaceId, installationId: params.installationId, provider: "SLACK", entityType: "Action", entityId: action.id, action: "proactive_action_followup" },
-    });
-    if (priorFollowups >= MAX_FOLLOWUPS_PER_ACTION) continue;
-
-    const waitingUpdate = await prisma.communicationEntityLink.findFirst({
+  let actionCursor: string | undefined;
+  while (followups < MAX_PROACTIVE_ACTION_FOLLOWUPS) {
+    const actionLinks = await prisma.communicationEntityLink.findMany({
       where: {
         workspaceId: params.workspaceId,
         installationId: params.installationId,
         provider: "SLACK",
         entityType: "Action",
-        entityId: action.id,
-        action: PROACTIVE_ACTION_WAITING_UPDATE,
-        createdAt: { gte: waitingUpdateCutoff },
+        createdAt: { lte: actionFollowupCutoff },
+        OR: [
+          { action: "proactive_unanswered_action_created" },
+          {
+            action: "create_action",
+            claimKey: { startsWith: `${PROACTIVE_DISPOSITION_CLAIM_PREFIX}:${params.installationId}:` },
+          },
+        ],
       },
-      select: { id: true },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: 50,
+      ...(actionCursor ? { cursor: { id: actionCursor }, skip: 1 } : {}),
+      select: {
+        id: true,
+        entityId: true,
+        createdAt: true,
+        messageId: true,
+        externalUserId: true,
+        message: {
+          select: {
+            id: true,
+            externalChannelId: true,
+            externalMessageId: true,
+            externalUserId: true,
+            threadExternalId: true,
+            text: true,
+            messageTs: true,
+          },
+        },
+      },
     });
-    if (waitingUpdate) continue;
+    const actionIds = [...new Set(actionLinks.map((link) => link.entityId).filter(Boolean))];
+    const openActions = actionIds.length > 0
+      ? await prisma.action.findMany({
+          where: {
+            workspaceId: params.workspaceId,
+            id: { in: actionIds },
+            archivedAt: null,
+            status: { not: "COMPLETED" },
+          },
+          select: { id: true, title: true, status: true, assigneeMember: { select: { user: { select: { displayName: true, email: true } } } } },
+        })
+      : [];
+    const openActionById = new Map(openActions.map((action) => [action.id, action]));
 
-    const recentFollowup = await prisma.communicationEntityLink.findFirst({
-      where: {
-        workspaceId: params.workspaceId,
+    for (const link of actionLinks) {
+      if (followups >= MAX_PROACTIVE_ACTION_FOLLOWUPS) break;
+      const action = openActionById.get(link.entityId);
+      const source = link.message as SlackCandidateMessage | null;
+      if (!action || !source || !channelIds.includes(source.externalChannelId)) continue;
+      if (await isSlackThreadFollowupSuppressed({ workspaceId: params.workspaceId, installationId: params.installationId, channelId: source.externalChannelId, threadTs: threadTsForMessage(source) })) continue;
+
+      const priorFollowups = await prisma.communicationEntityLink.count({
+        where: { workspaceId: params.workspaceId, installationId: params.installationId, provider: "SLACK", entityType: "Action", entityId: action.id, action: "proactive_action_followup" },
+      });
+      if (priorFollowups >= MAX_FOLLOWUPS_PER_ACTION) continue;
+
+      const waitingUpdate = await prisma.communicationEntityLink.findFirst({
+        where: {
+          workspaceId: params.workspaceId,
+          installationId: params.installationId,
+          provider: "SLACK",
+          entityType: "Action",
+          entityId: action.id,
+          action: PROACTIVE_ACTION_WAITING_UPDATE,
+          createdAt: { gte: waitingUpdateCutoff },
+        },
+        select: { id: true },
+      });
+      if (waitingUpdate) continue;
+
+      const recentFollowup = await prisma.communicationEntityLink.findFirst({
+        where: {
+          workspaceId: params.workspaceId,
+          installationId: params.installationId,
+          provider: "SLACK",
+          entityType: "Action",
+          entityId: action.id,
+          action: "proactive_action_followup",
+          createdAt: { gte: actionFollowupCutoff },
+        },
+        select: { id: true },
+      });
+      if (recentFollowup) continue;
+
+      try {
+        await sendSlackMessage(params.installationId, {
+          channel: source.externalChannelId,
+          threadTs: threadTsForMessage(source),
+          text: `Corgtex action still not completed: ${action.title}`,
+        }, [{
+          type: "section",
+          text: { type: "mrkdwn", text: `This Corgtex action still is not completed after 72 hours: *${action.title}*.\n${actionTrackingText({ workspaceId: params.workspaceId, actionId: action.id, status: action.status, assignee: action.assigneeMember?.user.displayName || action.assigneeMember?.user.email, channel: source.externalChannelId, threadTs: threadTsForMessage(source) })}` },
+        }]);
+      } catch (error) {
+        if (await markSlackInstallationReauthRequired({ ...params, error })) {
+          return { skipped: true, reason: "slack_reauth_required" };
+        }
+        throw error;
+      }
+
+      await recordProactiveMarker({
         installationId: params.installationId,
-        provider: "SLACK",
+        workspaceId: params.workspaceId,
+        messageId: source.id,
+        externalUserId: source.externalUserId,
         entityType: "Action",
         entityId: action.id,
         action: "proactive_action_followup",
-        createdAt: { gte: actionFollowupCutoff },
-      },
-      select: { id: true },
-    });
-    if (recentFollowup) continue;
-
-    try {
-      await sendSlackMessage(params.installationId, {
-        channel: source.externalChannelId,
-        threadTs: threadTsForMessage(source),
-        text: `Corgtex action still not completed: ${action.title}`,
-      }, [{
-        type: "section",
-        text: { type: "mrkdwn", text: `This Corgtex action still is not completed after 72 hours: *${action.title}*.\n${actionTrackingText({ workspaceId: params.workspaceId, actionId: action.id, status: action.status, assignee: action.assigneeMember?.user.displayName || action.assigneeMember?.user.email, channel: source.externalChannelId, threadTs: threadTsForMessage(source) })}` },
-      }]);
-    } catch (error) {
-      if (await markSlackInstallationReauthRequired({ ...params, error })) {
-        return { skipped: true, reason: "slack_reauth_required" };
-      }
-      throw error;
+      });
+      followups += 1;
     }
-
-    await recordProactiveMarker({
-      installationId: params.installationId,
-      workspaceId: params.workspaceId,
-      messageId: source.id,
-      externalUserId: source.externalUserId,
-      entityType: "Action",
-      entityId: action.id,
-      action: "proactive_action_followup",
-    });
-    followups += 1;
+    if (actionLinks.length < 50) break;
+    actionCursor = actionLinks[actionLinks.length - 1].id;
   }
 
   return { agendaJobs, nudges, actions, followups, drafts: actions };
