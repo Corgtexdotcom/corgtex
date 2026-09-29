@@ -21,11 +21,11 @@ describe("Slack follow-up suppression", () => {
     prismaMock.communicationMessage.findMany.mockResolvedValue([]);
   });
 
-  it.each(["STOP", "<@UBOT> STOP!", "Stop. Do nothing", "STOP ALL FOLLOW UP", "Ignore", "ignore this Corgtex", "solved", "delete it", "working on it <@UBOT>", "it's already being tracked on our action item list. please stop the reminders", "ack", "acknowledged", "got it!", "thanks <@UBOT>", "thank you."])("recognizes a thread-level human stop: %s", (text) => {
+  it.each(["STOP", "<@UBOT> STOP!", "Stop. Do nothing", "STOP ALL FOLLOW UP", "Can you stop the reminders?", "Please stop follow-ups?", "Ignore", "ignore this Corgtex", "solved", "delete it", "working on it <@UBOT>", "it's already being tracked on our action item list. please stop the reminders", "ack", "acknowledged", "got it!", "thanks <@UBOT>", "thank you."])("recognizes a thread-level human stop: %s", (text) => {
     expect(slackFollowupStopIntent(text)).toBe(true);
   });
 
-  it.each(["FYI, should we discuss this?", "Please review this proposal", "Do not stop the migration", "Do not stop the reminders", "Never stop the nudges", "Don't ignore Corgtex", "Ignore the spelling mistake in this draft", "Stop the migration now", "Thanks, can you send the file?", "Got it, but keep reminding me", "Is this already being tracked?", "Working on it?", "<@UBOT> ack?"])("does not treat ordinary discussion as a stop: %s", (text) => {
+  it.each(["FYI, should we discuss this?", "Please review this proposal", "Do not stop the migration", "Do not stop the reminders", "Never stop the nudges", "Don't ignore Corgtex", "Ignore the spelling mistake in this draft", "Stop the migration now", "Thanks, can you send the file?", "Got it, but keep reminding me", "Is this already being tracked?", "This is not already being tracked", "Nobody is working on it", "Working on it?", "<@UBOT> ack?"])("does not treat ordinary discussion as a stop: %s", (text) => {
     expect(slackFollowupStopIntent(text)).toBe(false);
   });
 
