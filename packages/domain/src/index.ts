@@ -105,6 +105,7 @@ export * from "./build-artifacts";
 export * from "./newspaper-delivery";
 export * from "./newspaper-edition-rendering";
 export * from "./newspaper-layout";
+export * from "./newspaper-priority";
 export * from "./workspace-briefing";
 
 export * from "./check-ins";

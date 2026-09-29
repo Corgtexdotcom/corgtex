@@ -2217,6 +2217,66 @@ a.meeting-agenda-item:hover {
     width: fit-content;
   }
 
+  .nr-personal-newspaper {
+    max-width: 820px;
+    margin: 0 auto 32px;
+    padding: 22px 24px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+  }
+
+  .nr-personal-newspaper-heading {
+    display: flex;
+    justify-content: space-between;
+    align-items: start;
+    gap: 16px;
+  }
+
+  .nr-personal-newspaper-heading h2 {
+    margin: 0 0 8px;
+    font-family: var(--font-playfair);
+    font-size: 1.65rem;
+    line-height: 1.15;
+  }
+
+  .nr-personal-newspaper-heading p:last-child,
+  .nr-personal-newspaper-empty {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.85rem;
+    line-height: 1.45;
+  }
+
+  .nr-personal-newspaper-heading > a {
+    flex: none;
+    font-size: 0.85rem;
+  }
+
+  .nr-personal-newspaper-list {
+    margin: 18px 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .nr-personal-newspaper-list li {
+    display: grid;
+    gap: 4px;
+    padding: 12px 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .nr-personal-newspaper-list li a {
+    color: var(--text);
+    font-weight: 700;
+    line-height: 1.35;
+  }
+
+  .nr-personal-newspaper-list li span {
+    color: var(--muted);
+    font-size: 0.8rem;
+  }
+
   .nr-newspaper-page {
     max-width: 820px;
     margin: 0 auto 48px;
@@ -4890,6 +4950,14 @@ a.meeting-agenda-item:hover {
     grid-template-columns: minmax(0, 1fr);
     gap: 8px;
     margin-bottom: 22px;
+  }
+
+  .nr-personal-newspaper {
+    padding: 18px;
+  }
+
+  .nr-personal-newspaper-heading {
+    flex-direction: column;
   }
 
   .nr-home-attention-tile {

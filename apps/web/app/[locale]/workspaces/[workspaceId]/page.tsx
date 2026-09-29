@@ -3,8 +3,10 @@ import {
   normalizeNewspaperEditionDigest,
   normalizeWorkspaceBriefingPayload,
   privacyFilter,
+  rankPersonalNewspaperItems,
   requireWorkspaceMembership,
 } from "@corgtex/domain";
+import type { PersonalNewspaperItem } from "@corgtex/domain";
 import { prisma, workspaceBranding } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import Link from "next/link";
@@ -277,6 +279,9 @@ export default async function WorkspaceDashboard({
     proposalPersonalCount,
     tensionTotalCount,
     tensionPersonalCount,
+    personalActions,
+    personalProposals,
+    personalTensions,
   ] = await prisma.$transaction([
     prisma.notification.count({
       where: {
@@ -412,6 +417,25 @@ export default async function WorkspaceDashboard({
     currentMember?.id
       ? prisma.tension.count({ where: { AND: [visibleOpenTensionWhere, { assigneeMemberId: currentMember.id }] } })
       : prisma.tension.count({ where: { id: "__no_current_member__" } }),
+    prisma.action.findMany({
+      where: currentMember?.id
+        ? { AND: [visibleOpenActionWhere, { assigneeMemberId: currentMember.id }] }
+        : { id: "__no_current_member__" },
+      select: { id: true, title: true, status: true, priority: true, dueAt: true, updatedAt: true },
+      orderBy: [{ priority: "desc" }, { dueAt: "asc" }, { updatedAt: "desc" }],
+    }),
+    prisma.proposal.findMany({
+      where: visiblePersonalOpenProposalWhere ?? { id: "__no_current_member__" },
+      select: { id: true, title: true, status: true, priority: true, ownerMemberId: true, updatedAt: true },
+      orderBy: [{ priority: "desc" }, { updatedAt: "desc" }],
+    }),
+    prisma.tension.findMany({
+      where: currentMember?.id
+        ? { AND: [visibleOpenTensionWhere, { assigneeMemberId: currentMember.id }] }
+        : { id: "__no_current_member__" },
+      select: { id: true, title: true, status: true, priority: true, updatedAt: true },
+      orderBy: [{ priority: "desc" }, { updatedAt: "desc" }],
+    }),
   ]);
   const branding = workspaceData
     ? workspaceBranding(workspaceData)
@@ -425,6 +449,28 @@ export default async function WorkspaceDashboard({
     tensionPersonalCount,
     tensionTotalCount,
   });
+  const personalItems: PersonalNewspaperItem[] = rankPersonalNewspaperItems([
+    ...personalActions.map((action) => ({
+      ...action,
+      kind: "ACTION" as const,
+      reason: "assigned" as const,
+      href: `/workspaces/${workspaceId}/actions/${action.id}`,
+    })),
+    ...personalProposals.map((proposal) => ({
+      ...proposal,
+      kind: "PROPOSAL" as const,
+      reason: proposal.ownerMemberId === currentMember?.id ? "owner" as const : "advice" as const,
+      dueAt: null,
+      href: `/workspaces/${workspaceId}/proposals/${proposal.id}`,
+    })),
+    ...personalTensions.map((tension) => ({
+      ...tension,
+      kind: "TENSION" as const,
+      reason: "assigned" as const,
+      dueAt: null,
+      href: `/workspaces/${workspaceId}/tensions/${tension.id}`,
+    })),
+  ], new Date());
   const latestWorkspaceBriefing = [latestDailyWorkspaceBriefing, latestWeeklyWorkspaceBriefing]
     .filter((briefing): briefing is NonNullable<typeof latestDailyWorkspaceBriefing> => Boolean(briefing))
     .sort((left, right) => right.generatedAt.getTime() - left.generatedAt.getTime())[0] ?? null;
@@ -569,6 +615,38 @@ export default async function WorkspaceDashboard({
           );
         })}
       </section>
+
+      {currentMember && (
+        <section className="nr-personal-newspaper" aria-labelledby="personal-newspaper-title">
+          <div className="nr-personal-newspaper-heading">
+            <div>
+              <p className="nr-newspaper-kicker">{t("personalNewspaperKicker")}</p>
+              <h2 id="personal-newspaper-title">{t("personalNewspaperTitle")}</h2>
+              <p>{t("personalNewspaperSourceNote")}</p>
+            </div>
+            <Link href={`/workspaces/${workspaceId}/actions?scope=assigned`}>
+              {t("viewAllActions")}
+            </Link>
+          </div>
+          {personalItems.length > 0 ? (
+            <ol className="nr-personal-newspaper-list">
+              {personalItems.slice(0, 8).map((item) => (
+                <li key={`${item.kind}-${item.id}`}>
+                  <Link href={item.href}>{item.title}</Link>
+                  <span>
+                    {item.kind === "ACTION" ? t("personalSourceAction") : item.kind === "PROPOSAL" ? t("personalSourceProposal") : t("personalSourceTension")}
+                    {" · "}
+                    {item.reason === "advice" ? t("personalReasonAdvice") : item.reason === "owner" ? t("personalReasonOwner") : t("personalReasonAssigned")}
+                    {" · "}
+                    {item.status === "IN_PROGRESS" ? t("personalStatusInProgress") : t("personalStatusOpen")}
+                    {item.dueAt ? ` · ${t("dueDate", { date: format.dateTime(item.dueAt, { month: "short", day: "numeric" }) })}` : ""}
+                  </span>
+                </li>
+              ))}
+            </ol>
+          ) : <p className="nr-personal-newspaper-empty">{t("personalNewspaperEmpty")}</p>}
+        </section>
+      )}
 
       <article className="nr-newspaper-page">
         <header className="nr-newspaper-header">
