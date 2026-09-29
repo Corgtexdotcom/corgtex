@@ -474,7 +474,7 @@ export async function ingestFile(actor: AppActor, params: {
   }
 
   // 1. Extract text before writing the blob so duplicate stops do not create orphaned storage.
-  const { textContent, supported, truncated, extraction, contentHash: authoritativeContentHash } = await extractTextFromFileBuffer({
+  const { textContent, supported, extraction, contentHash: authoritativeContentHash } = await extractTextFromFileBuffer({
     fileBuffer: params.fileBuffer,
     fileName,
     mimeType: params.mimeType,

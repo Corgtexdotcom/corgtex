@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createAction, createGoal, createProposal, createProposalFromTension, createTension, updateAction, updateTension } from "@corgtex/domain";
+import { createAction, createGoal, createProposal, createProposalFromTension, updateAction, updateTension } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import { createActionItemAction, createActionTool, createGoalAction, createGoalTool, createProposalAction, createProposalTool, updateActionItemAction, updateActionTool, updateTensionAction, updateTensionTool } from "./mutations";
 

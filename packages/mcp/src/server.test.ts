@@ -1871,7 +1871,6 @@ describe("createCorgtexMcpServer", () => {
 
   it("returns versioned Finance report-import updates and conflicts", async () => {
     const { createCorgtexMcpServer } = await import("./server");
-    const { prisma } = await import("@corgtex/shared");
     compareAndSetFinanceConfigMock
       .mockResolvedValueOnce({
         status: "updated",

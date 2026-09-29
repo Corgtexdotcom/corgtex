@@ -59,7 +59,7 @@ export default async function AccountDetailPage({
   const { locale, workspaceId, accountId } = await params;
   await requireWorkspaceFeature(workspaceId, "RELATIONSHIPS");
   const actor = await requirePageActor();
-  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  await requireWorkspaceMembership({ actor, workspaceId });
   const workspace = await prisma.workspace.findUnique({
     where: { id: workspaceId },
     select: { slug: true, name: true },
