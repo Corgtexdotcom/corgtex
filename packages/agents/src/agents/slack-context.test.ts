@@ -11,6 +11,7 @@ const {
   getAgentModelOverrideMock,
   listHumanMembersMock,
   isSlackThreadFollowupSuppressedMock,
+  slackSourceLinkMock,
 } = vi.hoisted(() => ({
   prismaMock: {
     workspaceAgentConfig: {
@@ -58,6 +59,7 @@ const {
   getAgentModelOverrideMock: vi.fn(),
   listHumanMembersMock: vi.fn(),
   isSlackThreadFollowupSuppressedMock: vi.fn(),
+  slackSourceLinkMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -86,7 +88,7 @@ vi.mock("@corgtex/domain", () => ({
   isAgentEnabled: isAgentEnabledMock,
   isSlackThreadFollowupSuppressed: isSlackThreadFollowupSuppressedMock,
   slackFollowupStopIntent: (text: string) => /^(?:ignore|solved|fyi)|stop.*(?:reminder|follow)/i.test(text.trim()),
-  slackSourceLink: (_installationId: string, channelId: string, threadTs: string) => Promise.resolve({ url: `https://customer.slack.com/archives/${channelId}/p${threadTs.replace(".", "")}`, label: "Slack source" }),
+  slackSourceLink: slackSourceLinkMock,
   postDeliberationEntry: postDeliberationEntryMock,
   sendSlackMessage: sendSlackMessageMock,
 }));
@@ -196,6 +198,7 @@ describe("Slack context jobs", () => {
     prismaMock.communicationEntityLink.findMany.mockResolvedValue([]);
     prismaMock.communicationEntityLink.count.mockResolvedValue(0);
     isSlackThreadFollowupSuppressedMock.mockResolvedValue(false);
+    slackSourceLinkMock.mockImplementation(async (_installationId: string, channelId: string, messageTs: string) => ({ url: `https://customer.slack.com/archives/${channelId}/p${messageTs.replace(".", "")}`, label: "Slack source" }));
     prismaMock.communicationEntityLink.create.mockResolvedValue({ id: "link-1" });
     prismaMock.communicationEntityLink.deleteMany.mockResolvedValue({ count: 1 });
     prismaMock.communicationEntityLink.upsert.mockResolvedValue({ id: "link-1" });
@@ -1215,16 +1218,19 @@ describe("Slack context jobs", () => {
   });
 
   it("shows action status, assignee and both links in a reminder", async () => {
-    prismaMock.communicationEntityLink.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([actionCreatedLink()]);
+    const sourceReply = candidate({ externalMessageId: "1714323600.000200", threadExternalId: "1714320000.000100" });
+    prismaMock.communicationEntityLink.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([actionCreatedLink({ message: sourceReply })]);
     prismaMock.action.findMany.mockResolvedValueOnce([{ id: "action-1", title: "Confirm availability", status: "IN_PROGRESS", assigneeMember: { user: { displayName: "Jan", email: "jan@example.test" } } }]);
 
     const { runSlackProactiveScan } = await import("./slack-context");
     await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
     const blocks = JSON.stringify(sendSlackMessageMock.mock.calls[0]?.[2]);
+    expect(slackSourceLinkMock).toHaveBeenCalledWith("install-1", "C1", "1714323600.000200");
+    expect(sendSlackMessageMock).toHaveBeenCalledWith("install-1", expect.objectContaining({ threadTs: "1714320000.000100" }), expect.any(Array));
     expect(blocks).toContain("Status: in progress");
     expect(blocks).toContain("Assignee: Jan");
     expect(blocks).toContain("https://app.example.test/workspaces/workspace-1/actions/action-1");
-    expect(blocks).toContain("https://customer.slack.com/archives/C1/p1714320000000100");
+    expect(blocks).toContain("https://customer.slack.com/archives/C1/p1714323600000200");
   });
 
   it("does not follow up actions with a recent waiting update inside the doubled window", async () => {

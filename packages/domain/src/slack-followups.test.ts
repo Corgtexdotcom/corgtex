@@ -25,7 +25,7 @@ describe("Slack follow-up suppression", () => {
     expect(slackFollowupStopIntent(text)).toBe(true);
   });
 
-  it.each(["FYI, should we discuss this?", "Please review this proposal", "Do not stop the migration", "Ignore the spelling mistake in this draft", "Stop the migration now", "Thanks, can you send the file?", "Got it, but keep reminding me", "Is this already being tracked?", "Working on it?", "<@UBOT> ack?"])("does not treat ordinary discussion as a stop: %s", (text) => {
+  it.each(["FYI, should we discuss this?", "Please review this proposal", "Do not stop the migration", "Do not stop the reminders", "Never stop the nudges", "Don't ignore Corgtex", "Ignore the spelling mistake in this draft", "Stop the migration now", "Thanks, can you send the file?", "Got it, but keep reminding me", "Is this already being tracked?", "Working on it?", "<@UBOT> ack?"])("does not treat ordinary discussion as a stop: %s", (text) => {
     expect(slackFollowupStopIntent(text)).toBe(false);
   });
 
