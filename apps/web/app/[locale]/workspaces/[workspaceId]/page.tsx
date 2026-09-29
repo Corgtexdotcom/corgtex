@@ -1,12 +1,15 @@
 import type { Prisma } from "@prisma/client";
 import {
+  filterWorkspaceBriefingSources,
   normalizeNewspaperEditionDigest,
   normalizeWorkspaceBriefingPayload,
+  personalizeWorkspaceBriefing,
   privacyFilter,
   rankPersonalNewspaperItems,
   requireWorkspaceMembership,
+  scoreMemberBriefingItem,
 } from "@corgtex/domain";
-import type { PersonalNewspaperItem } from "@corgtex/domain";
+import type { MemberBriefingContext, PersonalNewspaperItem } from "@corgtex/domain";
 import { prisma, workspaceBranding } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import Link from "next/link";
@@ -111,6 +114,7 @@ function legacyEditionNarrative(
 
 function liveWorkspaceNarrative(params: {
   workspaceId: string;
+  memberContext: MemberBriefingContext | null;
   articles: Array<{
     id: string;
     slug: string;
@@ -137,10 +141,13 @@ function liveWorkspaceNarrative(params: {
     ...params.meetings.map((meeting) => {
       const title = meeting.title || "Meeting recap";
       return {
+        kind: "MEETING" as const,
+        title,
+        summaryMd: meeting.summaryMd ?? "",
         occurredAt: latestActivityTimeBefore(now, meeting.updatedAt, meeting.recordedAt, meeting.createdAt),
         line: narrativeLine(title, compactNarrativeText(meeting.summaryMd, 620)),
         sourceRef: {
-          type: "MEETING",
+          type: "MEETING" as const,
           id: meeting.id,
           label: title,
           href: `/workspaces/${params.workspaceId}/meetings/${meeting.id}`,
@@ -148,12 +155,15 @@ function liveWorkspaceNarrative(params: {
       };
     }),
     ...params.articles
-      .filter((article) => article.type !== "DIGEST" && !article.isPrivate)
+      .filter((article) => article.type !== "DIGEST" && article.type !== "PERSON" && !article.isPrivate)
       .map((article) => ({
+        kind: "BRAIN_ARTICLE" as const,
+        title: article.title,
+        summaryMd: article.bodyMd ?? "",
         occurredAt: latestActivityTimeBefore(now, article.updatedAt, article.publishedAt, article.createdAt),
         line: narrativeLine(article.title, compactNarrativeText(article.bodyMd, 560)),
         sourceRef: {
-          type: "BRAIN_ARTICLE",
+          type: "BRAIN_ARTICLE" as const,
           id: article.id,
           label: article.title,
           href: `/workspaces/${params.workspaceId}/brain/${article.slug}`,
@@ -162,16 +172,25 @@ function liveWorkspaceNarrative(params: {
   ]
     .filter((entry) => entry.occurredAt > 0 && entry.line.trim())
     .sort((left, right) => right.occurredAt - left.occurredAt)
-    .slice(0, 5);
+    .slice(0, 20);
 
   if (entries.length === 0) return null;
+  const latestActivityAt = entries[0].occurredAt;
+  if (params.memberContext) {
+    entries.sort((left, right) => (
+      scoreMemberBriefingItem({ ...right, sourceRefs: [right.sourceRef] }, params.memberContext!)
+      - scoreMemberBriefingItem({ ...left, sourceRefs: [left.sourceRef] }, params.memberContext!)
+      || right.occurredAt - left.occurredAt
+    ));
+  }
+  const selected = entries.slice(0, 5);
   return {
     introMd: params.labels.intro,
-    leadMd: entries[0]?.line ?? null,
-    bodyMd: entries.slice(1).map((entry) => entry.line).join("\n\n") || null,
+    leadMd: selected[0]?.line ?? null,
+    bodyMd: selected.slice(1).map((entry) => entry.line).join("\n\n") || null,
     closingMd: params.labels.closing,
-    sourceRefs: entries.map((entry) => entry.sourceRef),
-    latestActivityAt: entries[0]?.occurredAt ?? 0,
+    sourceRefs: selected.map((entry) => entry.sourceRef),
+    latestActivityAt,
   };
 }
 
@@ -248,7 +267,7 @@ export default async function WorkspaceDashboard({
           circle: { workspaceId, archivedAt: null },
         },
       },
-      select: { role: { select: { circleId: true } } },
+      select: { role: { select: { circleId: true, name: true, circle: { select: { name: true } } } } },
     })
     : [];
   const memberCircleIds = memberCircleAssignments.map((assignment) => assignment.role.circleId);
@@ -349,7 +368,7 @@ export default async function WorkspaceDashboard({
         workspaceId,
         archivedAt: null,
         isPrivate: false,
-        type: { not: "DIGEST" },
+        type: { notIn: ["DIGEST", "PERSON"] },
       },
       select: {
         id: true,
@@ -537,6 +556,15 @@ export default async function WorkspaceDashboard({
       href: `/workspaces/${workspaceId}/tensions/${tension.id}`,
     })),
   ], new Date());
+  const memberContext: MemberBriefingContext | null = currentMember ? {
+    roleNames: memberCircleAssignments.map((assignment) => assignment.role.name),
+    circleNames: memberCircleAssignments.map((assignment) => assignment.role.circle.name),
+    personalSources: personalItems.map((item) => ({
+      type: item.kind === "ADVICE" ? "ADVICE_REQUEST" as const : item.kind,
+      id: item.id,
+      title: item.title,
+    })),
+  } : null;
   const latestWorkspaceBriefing = [latestDailyWorkspaceBriefing, latestWeeklyWorkspaceBriefing]
     .filter((briefing): briefing is NonNullable<typeof latestDailyWorkspaceBriefing> => Boolean(briefing))
     .sort((left, right) => right.generatedAt.getTime() - left.generatedAt.getTime())[0] ?? null;
@@ -544,9 +572,41 @@ export default async function WorkspaceDashboard({
   const latestEditionDigest = latestNewspaperEdition
     ? normalizeNewspaperEditionDigest(latestNewspaperEdition)
     : null;
-  const latestBriefing = latestWorkspaceBriefing
+  const storedBriefing = latestWorkspaceBriefing
     ? normalizeWorkspaceBriefingPayload(latestWorkspaceBriefing.briefingJson)
     : null;
+  const briefingRefs = storedBriefing
+    ? [...storedBriefing.items, ...(storedBriefing.candidateItems ?? [])].flatMap((item) => item.sourceRefs)
+    : [];
+  const idsFor = (type: string) => [...new Set(briefingRefs.filter((ref) => ref.type === type).map((ref) => ref.id))];
+  const visibleBriefingSources = briefingRefs.length > 0
+    ? await Promise.all([
+      prisma.brainArticle.findMany({ where: { workspaceId, id: { in: idsFor("BRAIN_ARTICLE") }, archivedAt: null, isPrivate: false, type: { notIn: ["DIGEST", "PERSON"] } }, select: { id: true } })
+        .then((items) => items.map((item) => `BRAIN_ARTICLE:${item.id}`)),
+      prisma.document.findMany({ where: { workspaceId, id: { in: idsFor("DOCUMENT") }, archivedAt: null, accessDomain: "WORKSPACE" }, select: { id: true } })
+        .then((items) => items.map((item) => `DOCUMENT:${item.id}`)),
+      prisma.meeting.findMany({ where: { workspaceId, id: { in: idsFor("MEETING") }, archivedAt: null }, select: { id: true } })
+        .then((items) => items.map((item) => `MEETING:${item.id}`)),
+      prisma.action.findMany({ where: { workspaceId, id: { in: idsFor("ACTION") }, archivedAt: null, isPrivate: false }, select: { id: true } })
+        .then((items) => items.map((item) => `ACTION:${item.id}`)),
+      prisma.proposal.findMany({ where: { workspaceId, id: { in: idsFor("PROPOSAL") }, archivedAt: null, isPrivate: false }, select: { id: true } })
+        .then((items) => items.map((item) => `PROPOSAL:${item.id}`)),
+      prisma.tension.findMany({ where: { workspaceId, id: { in: idsFor("TENSION") }, archivedAt: null, isPrivate: false }, select: { id: true } })
+        .then((items) => items.map((item) => `TENSION:${item.id}`)),
+      prisma.goal.findMany({ where: { workspaceId, id: { in: idsFor("GOAL") }, archivedAt: null, isPrivate: false, status: { notIn: ["DRAFT", "ABANDONED"] } }, select: { id: true } })
+        .then((items) => items.map((item) => `GOAL:${item.id}`)),
+      prisma.recognition.findMany({ where: { workspaceId, id: { in: idsFor("RECOGNITION") }, visibility: "WORKSPACE" }, select: { id: true } })
+        .then((items) => items.map((item) => `RECOGNITION:${item.id}`)),
+      prisma.adviceRequest.findMany({ where: { workspaceId, id: { in: idsFor("ADVICE_REQUEST") }, audienceType: "WORKSPACE" }, select: { id: true } })
+        .then((items) => items.map((item) => `ADVICE_REQUEST:${item.id}`)),
+    ])
+    : [];
+  const workspaceBriefing = storedBriefing
+    ? filterWorkspaceBriefingSources(storedBriefing, new Set(visibleBriefingSources.flat()))
+    : null;
+  const latestBriefing = workspaceBriefing && memberContext
+    ? personalizeWorkspaceBriefing(workspaceBriefing, memberContext)
+    : workspaceBriefing;
   const storedGeneratedAt = latestWorkspaceBriefing?.generatedAt ?? latestNewspaperEdition?.generatedAt ?? null;
   const legacyNarrative = latestBriefing ? null : legacyEditionNarrative(latestEditionDigest, {
     intro: t("newspaperLegacyIntro"),
@@ -554,6 +614,7 @@ export default async function WorkspaceDashboard({
   });
   const liveNarrativeCandidate = liveWorkspaceNarrative({
     workspaceId,
+    memberContext,
     articles,
     meetings,
     labels: {

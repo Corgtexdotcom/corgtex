@@ -113,6 +113,117 @@ describe("workspace briefing", () => {
     expect(briefing.sourceRefs).toContainEqual(expect.objectContaining({ type: "ACTION", id: "action-1" }));
   });
 
+  it("gives members different lead stories from the same Brain evidence", async () => {
+    const { buildWorkspaceBriefingFromCandidates, personalizeWorkspaceBriefing } = await import("./workspace-briefing");
+    const freshTime = new Date("2026-04-30T10:00:00.000Z");
+    const briefing = buildWorkspaceBriefingFromCandidates({
+      workspaceId: "ws-1",
+      period: "DAILY",
+      dateKey: "2026-04-30",
+      title: "Daily Newspaper",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"),
+      candidates: [
+        baseCandidate({ sourceId: "operations", title: "Operations handoff", summaryMd: "Operations handoff changed today.", occurredAt: freshTime, updatedAt: freshTime, sourceRefs: [{ type: "BRAIN_ARTICLE", id: "operations", label: "Operations handoff" }] }),
+        baseCandidate({ sourceId: "learning", title: "Learning roadmap", summaryMd: "Learning roadmap changed today.", occurredAt: freshTime, updatedAt: freshTime, sourceRefs: [{ type: "BRAIN_ARTICLE", id: "learning", label: "Learning roadmap" }] }),
+      ],
+    });
+    const sharedOrder = briefing.items.map((item) => item.title);
+    const operations = personalizeWorkspaceBriefing(briefing, { roleNames: ["Operations"], circleNames: [], personalSources: [] });
+    const learning = personalizeWorkspaceBriefing(briefing, { roleNames: ["Learning"], circleNames: [], personalSources: [] });
+
+    expect(operations.items[0].title).toBe("Operations handoff");
+    expect(learning.items[0].title).toBe("Learning roadmap");
+    expect(operations.leadMd).toContain("Operations handoff");
+    expect(learning.leadMd).toContain("Learning roadmap");
+    expect(briefing.items.map((item) => item.title)).toEqual(sharedOrder);
+  });
+
+  it("surfaces a relevant Brain story beyond the shared ten-story shortlist", async () => {
+    const { buildWorkspaceBriefingFromCandidates, normalizeWorkspaceBriefingPayload, personalizeWorkspaceBriefing } = await import("./workspace-briefing");
+    const freshTime = new Date("2026-04-30T10:00:00.000Z");
+    const candidates = Array.from({ length: 12 }, (_, index) => baseCandidate({
+      sourceId: `general-${index}`,
+      title: `General update ${index}`,
+      summaryMd: `General update ${index} changed today.`,
+      occurredAt: freshTime,
+      updatedAt: freshTime,
+      sourceRefs: [{ type: "BRAIN_ARTICLE", id: `general-${index}`, label: `General update ${index}` }],
+    }));
+    candidates.push(baseCandidate({
+      sourceId: "learning-deep-dive",
+      title: "Learning roadmap deep dive",
+      summaryMd: "Learning roadmap deep dive changed today.",
+      strategicScore: 0,
+      evidenceScore: 0,
+      occurredAt: freshTime,
+      updatedAt: freshTime,
+      sourceRefs: [{ type: "BRAIN_ARTICLE", id: "learning-deep-dive", label: "Learning roadmap deep dive" }],
+    }));
+    const shared = buildWorkspaceBriefingFromCandidates({
+      workspaceId: "ws-1", period: "DAILY", dateKey: "2026-04-30", title: "Daily Newspaper",
+      generatedAt: new Date("2026-04-30T12:00:00.000Z"), candidates,
+    });
+    expect(shared.items).toHaveLength(10);
+    expect(shared.items.some((item) => item.title === "Learning roadmap deep dive")).toBe(false);
+
+    const stored = normalizeWorkspaceBriefingPayload(JSON.parse(JSON.stringify(shared)));
+    const personal = personalizeWorkspaceBriefing(stored, {
+      roleNames: ["Learning"], circleNames: [], personalSources: [],
+    });
+    expect(personal.leadMd).toContain("Learning roadmap deep dive");
+    expect(personal.sourceRefs).toContainEqual(expect.objectContaining({ type: "BRAIN_ARTICLE", id: "learning-deep-dive" }));
+  });
+
+  it("selects only workspace-visible Brain articles and documents for a shared briefing", async () => {
+    const { collectWorkspaceBriefingCandidates } = await import("./workspace-briefing");
+    await collectWorkspaceBriefingCandidates({
+      workspaceId: "ws-1",
+      since: new Date("2026-04-29T00:00:00.000Z"),
+      now: new Date("2026-04-30T12:00:00.000Z"),
+    });
+
+    expect(prismaMock.brainArticle.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ isPrivate: false, type: { notIn: ["DIGEST", "PERSON"] } }),
+    }));
+    expect(prismaMock.document.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ accessDomain: "WORKSPACE" }),
+    }));
+  });
+
+  it("removes restricted sources and their prose from an older stored briefing", async () => {
+    const { buildWorkspaceBriefingFromCandidates, filterWorkspaceBriefingSources } = await import("./workspace-briefing");
+    const generatedAt = new Date("2026-04-30T12:00:00.000Z");
+    const candidates = [
+      baseCandidate({ sourceType: "DOCUMENT", sourceId: "finance-doc", title: "Finance forecast", summaryMd: "Restricted finance detail.", sourceRefs: [{ type: "DOCUMENT", id: "finance-doc", label: "Finance forecast" }], occurredAt: generatedAt, updatedAt: generatedAt }),
+      baseCandidate({ sourceType: "BRAIN_ARTICLE", sourceId: "public-brain", title: "Team roadmap", summaryMd: "Public team roadmap.", sourceRefs: [{ type: "BRAIN_ARTICLE", id: "public-brain", label: "Team roadmap" }], occurredAt: generatedAt, updatedAt: generatedAt }),
+    ];
+    const briefing = buildWorkspaceBriefingFromCandidates({
+      workspaceId: "ws-1", period: "DAILY", dateKey: "2026-04-30", title: "Daily Newspaper", generatedAt, candidates,
+    });
+    const safe = filterWorkspaceBriefingSources(briefing, new Set(["BRAIN_ARTICLE:public-brain"]));
+    expect(safe.items).toHaveLength(1);
+    expect(safe.leadMd).toContain("Team roadmap");
+    expect(JSON.stringify(safe)).not.toContain("Restricted finance detail");
+  });
+
+  it("does not promote a work item made private after the edition was stored", async () => {
+    const { buildWorkspaceBriefingFromCandidates, filterWorkspaceBriefingSources, personalizeWorkspaceBriefing } = await import("./workspace-briefing");
+    const generatedAt = new Date("2026-04-30T12:00:00.000Z");
+    const candidates = [
+      baseCandidate({ sourceId: "public-brain", title: "General update", summaryMd: "General update changed today.", sourceRefs: [{ type: "BRAIN_ARTICLE", id: "public-brain", label: "General update" }], occurredAt: generatedAt, updatedAt: generatedAt }),
+      baseCandidate({ sourceType: "PROPOSAL", sourceId: "private-proposal", title: "Learning private proposal", summaryMd: "Private proposal detail.", sourceRefs: [{ type: "PROPOSAL", id: "private-proposal", label: "Learning private proposal" }], occurredAt: generatedAt, updatedAt: generatedAt }),
+    ];
+    const stored = buildWorkspaceBriefingFromCandidates({
+      workspaceId: "ws-1", period: "DAILY", dateKey: "2026-04-30", title: "Daily Newspaper", generatedAt, candidates,
+    });
+    const safe = filterWorkspaceBriefingSources(stored, new Set(["BRAIN_ARTICLE:public-brain"]));
+    const personal = personalizeWorkspaceBriefing(safe, {
+      roleNames: ["Learning"], circleNames: [], personalSources: [{ type: "PROPOSAL", id: "private-proposal", title: "Learning private proposal" }],
+    });
+    expect(JSON.stringify(personal)).not.toContain("Private proposal detail");
+    expect(personal.leadMd).toContain("General update");
+  });
+
   it("keeps stale open proposals from outranking newer active tensions", async () => {
     const { buildWorkspaceBriefingFromCandidates } = await import("./workspace-briefing");
     const briefing = buildWorkspaceBriefingFromCandidates({
