@@ -47,6 +47,7 @@ const ICONS: Record<WorkspaceNavIconName, LucideIcon> = {
   relationships: UserPlus,
   contextMaps: Network,
   agreements: ScrollText,
+  decisions: Clipboard,
   proposals: FileText,
   circles: CircleDot,
   roles: BadgeCheck,

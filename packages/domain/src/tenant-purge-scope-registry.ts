@@ -19,7 +19,7 @@ export const TENANT_PURGE_MODEL_DISPOSITIONS = {
     "CommunicationEntityLink", "CommunicationExternalUser", "CommunicationInstallation", "CommunicationMessage", "Constitution", "ConstitutionSourceReference", "ContextGraphEvidenceRef",
     "ContextGraphObject", "ContextGraphProposedDiff", "ContextGraphRelationship", "ContextMapLayoutItem", "ContextMapView", "ConversationPendingOperation", "ConversationSession", "ConversationTurn",
     "CrmAccount", "CrmActivity", "CrmCommunicationSuggestion", "CrmContact", "CrmConversation", "CrmConversationMessage", "CrmDeal", "CrmDealStageTransition", "CrmProspectWorkspace",
-    "CrmQualification", "CustomerDeploymentAccess", "CustomerReleaseTarget", "DeliberationEntry", "DemoLead", "Document", "ExecutionRequest", "ExecutionResult", "ExpertiseTag",
+    "CrmQualification", "CustomerDeploymentAccess", "CustomerReleaseTarget", "DecisionRecord", "DeliberationEntry", "DemoLead", "Document", "ExecutionRequest", "ExecutionResult", "ExpertiseTag",
     "ExternalContentSource", "ExternalContentSyncLog", "ExternalDataSource", "ExternalDataSyncLog", "ExternalMcpConnection", "FinanceClient", "FinanceConsultant", "FinanceContributionEntry",
     "FinanceExpense", "FinanceImportApplication", "FinanceImportBatch", "FinanceImportProfile", "FinanceProject", "FinanceReport", "FinanceTimeEntry", "Goal", "GoalLink", "GoalUpdate",
     "GovernanceScore", "ImpactFootprint", "InboundWebhook", "KeyResult", "KnowledgeChunk", "McpOAuthAccessToken", "McpOAuthAuthorizationCode", "Meeting", "MeetingAudioAsset",
@@ -111,6 +111,7 @@ WorkspaceSupportGrant|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
 WorkspaceSupportAccessRequest|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
 PendingTranscriptUpload|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
 ActionCreationSource|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
+DecisionRecord|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
 `;
 
 export function decodeDirectRelations(dsl: string, sourceBits: string): TenantPurgeDirectRelation[] {
@@ -128,7 +129,7 @@ export function decodeDirectRelations(dsl: string, sourceBits: string): TenantPu
 }
 
 // Each row has delete/update source bits: 1 is explicit, 0 is the verified PostgreSQL default.
-const DIRECT_RELATION_SOURCE_BITS = `${"10".repeat(154)}${"11".repeat(3)}10101010`;
+const DIRECT_RELATION_SOURCE_BITS = `${"10".repeat(154)}${"11".repeat(3)}1010101010`;
 export const TENANT_PURGE_DIRECT_RELATIONS = decodeDirectRelations(DIRECT_RELATION_DSL, DIRECT_RELATION_SOURCE_BITS);
 
 function stripPrismaComments(schema: string) {

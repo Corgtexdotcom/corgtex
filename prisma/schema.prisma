@@ -756,6 +756,7 @@ model Workspace {
   actionChecklistItems            ActionChecklistItem[]
   tensions                       Tension[]
   proposals                      Proposal[]
+  decisions                      DecisionRecord[]
   approvalFlows                  ApprovalFlow[]
   approvalPolicy                 ApprovalPolicy[]
   meetings                       Meeting[]
@@ -2500,11 +2501,38 @@ model Tension {
   raisedByMember Member?         @relation("TensionRaisedBy", fields: [raisedByMemberId], references: [id], onDelete: SetNull)
   meeting        Meeting?        @relation(fields: [meetingId], references: [id], onDelete: SetNull)
   upvotes        TensionUpvote[]
+  decisionRecords DecisionRecord[]
   @@index([workspaceId, status])
   @@index([workspaceId, archivedAt])
   @@index([workspaceId, publishedAt])
   @@index([workspaceId, resolvedAt])
   @@index([raisedByMemberId])
+}
+
+model DecisionRecord {
+  id              String    @id @default(uuid())
+  workspaceId     String
+  title           String
+  bodyMd          String    @db.Text
+  tags            String[]  @default([])
+  decidedAt       DateTime  @default(now())
+  proposalId      String?
+  tensionId       String?
+  createdByUserId String
+  version         Int       @default(1)
+  archivedAt      DateTime?
+  archivedByUserId String?
+  archiveReason   String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  proposal  Proposal? @relation(fields: [proposalId], references: [id], onDelete: SetNull)
+  tension   Tension?  @relation(fields: [tensionId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, archivedAt, decidedAt])
+  @@index([workspaceId, proposalId])
+  @@index([workspaceId, tensionId])
 }
 
 model Proposal {
@@ -2540,6 +2568,7 @@ model Proposal {
   policyCorpus  PolicyCorpus?
   actions       Action[]
   tensions      Tension[]
+  decisionRecords DecisionRecord[]
   adviceProcess AdviceProcess?
   @@index([workspaceId, status])
   @@index([workspaceId, archivedAt])

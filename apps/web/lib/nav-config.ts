@@ -41,6 +41,7 @@ export type WorkspaceNavIconName =
   | "relationships"
   | "contextMaps"
   | "agreements"
+  | "decisions"
   | "proposals"
   | "circles"
   | "roles"

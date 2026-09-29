@@ -200,6 +200,10 @@ describe("client readiness smoke login handling", () => {
     expect(optionalRouteCatalog).not.toContainEqual(["finance-clients", "/finance/clients"]);
   });
 
+  it("includes the Decision Register in explicit readiness sweeps", () => {
+    expect(optionalRouteCatalog).toContainEqual(["decisions", "/decisions"]);
+  });
+
   it("installs the exact validation telemetry mock before the read-only network guard", async () => {
     const registrations = [];
     const context = {

@@ -143,6 +143,12 @@ describe("workspace archive domain", () => {
     appendEventsMock.mockResolvedValue(undefined);
   });
 
+  it("serializes decision archive transitions with one entity advisory lock", async () => {
+    const { lockWorkspaceArchiveArtifact } = await import("./archive");
+    await lockWorkspaceArchiveArtifact(prismaMock as never, "DecisionRecord", "decision-1");
+    expect(prismaMock.$executeRaw).toHaveBeenCalledWith(expect.anything(), "workspace_archive:DecisionRecord:decision-1");
+  });
+
   it("archives artifacts with metadata and an audit record", async () => {
     const action = {
       id: "action-1",

@@ -17,6 +17,7 @@ export * from "./agent-registry";
 export * from "./agent-config";
 export * from "./agent-authority-summary";
 export * from "./agreements";
+export * from "./decisions";
 export * from "./brain";
 export * from "./brain-access";
 export * from "./brain-source-recovery";
