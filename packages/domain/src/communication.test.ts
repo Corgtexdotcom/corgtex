@@ -1020,6 +1020,32 @@ describe("communication Slack integration", () => {
   });
 
   it.each([
+    { settings: { publicIngestionEnabled: false }, channelEnabled: true },
+    { settings: { publicIngestionEnabled: true, channelAdmissionMode: "selected" }, channelEnabled: false },
+  ])("reconciles a stored stop edit while ingestion is held: %j", async ({ settings, channelEnabled }) => {
+    const { processSlackInboundEvent } = await import("./communication");
+    prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
+      id: "inbound-held-edit", provider: "SLACK",
+      payload: { event: { type: "message", subtype: "message_changed", channel: "C1", message: { type: "message", user: "U1", ts: "1788896184.791699", thread_ts: "1788205758.060039", text: "Please keep reminding me" } } },
+      installation: { id: "install-1", workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE", settings },
+    });
+    prismaMock.communicationChannel.upsert.mockResolvedValueOnce({ id: "channel-1", kind: "PUBLIC", isIngestEnabled: channelEnabled });
+    prismaMock.communicationMessage.findUnique.mockResolvedValueOnce(slackMessageRow({ id: "stop-message", threadExternalId: "1788205758.060039" }));
+    prismaMock.communicationEntityLink.findFirst.mockResolvedValueOnce({ id: "marker-1", messageId: "stop-message" });
+
+    await processSlackInboundEvent("inbound-held-edit");
+
+    expect(prismaMock.communicationMessage.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "stop-message", installationId: "install-1" },
+      data: expect.objectContaining({ text: null, raw: expect.anything(), textRedactedAt: expect.any(Date) }),
+    }));
+    expect(prismaMock.knowledgeChunk.deleteMany).toHaveBeenCalledWith({ where: { sourceType: "SLACK", sourceId: "stop-message" } });
+    expect(prismaMock.communicationEntityLink.deleteMany).toHaveBeenCalledWith({ where: { id: "marker-1", messageId: "stop-message" } });
+    expect(prismaMock.communicationMessage.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalled();
+  });
+
+  it.each([
     { rawRetentionDays: 3650 },
     { publicIngestionEnabled: false, channelAdmissionMode: "selected" },
     { publicIngestionEnabled: true, channelAdmissionMode: "selected" },

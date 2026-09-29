@@ -1058,7 +1058,49 @@ async function ingestSlackMessage(installation: { id: string; workspaceId: strin
     return { skipped: true, reason: "message_deleted" };
   }
 
+  // Edits to an already stored message must still correct its stop marker while
+  // public ingestion or its channel is paused. Never admit a new message here.
+  const reconcileHeldEdit = async () => {
+    if (normalized.subtype !== "message_changed" || normalized.hidden || normalized.isBot) return;
+    const existing = await prisma.communicationMessage.findUnique({
+      where: {
+        installationId_externalChannelId_externalMessageId: {
+          installationId: installation.id,
+          externalChannelId,
+          externalMessageId: ts,
+        },
+      },
+      select: { id: true, threadExternalId: true },
+    });
+    if (!existing) return;
+    await prisma.communicationMessage.updateMany({
+      where: { id: existing.id, installationId: installation.id },
+      data: { text: null, raw: Prisma.DbNull, textRedactedAt: new Date() },
+    });
+    await deleteSlackMessageKnowledge(existing.id);
+    const threadTs = existing.threadExternalId || ts;
+    if (normalized.text && slackFollowupStopIntent(normalized.text)) {
+      await suppressSlackThreadFollowups({
+        workspaceId: installation.workspaceId,
+        installationId: installation.id,
+        channelId: externalChannelId,
+        threadTs,
+        messageId: existing.id,
+        externalUserId: normalized.externalUserId,
+      });
+    } else {
+      await reconcileSlackThreadFollowupsAfterMessageChange({
+        workspaceId: installation.workspaceId,
+        installationId: installation.id,
+        channelId: externalChannelId,
+        threadTs,
+        messageId: existing.id,
+      });
+    }
+  };
+
   if (isRecord(installation.settings) && installation.settings.publicIngestionEnabled === false) {
+    await reconcileHeldEdit();
     return { skipped: true, reason: "public_ingestion_disabled" };
   }
   const channel = await ensureSlackChannel(installation, {
@@ -1066,6 +1108,7 @@ async function ingestSlackMessage(installation: { id: string; workspaceId: strin
     channel: externalChannelId,
   });
   if (!channel || channel.kind !== "PUBLIC" || !channel.isIngestEnabled) {
+    await reconcileHeldEdit();
     return { skipped: true, reason: "channel_not_ingested" };
   }
 
