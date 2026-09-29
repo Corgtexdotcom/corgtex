@@ -690,7 +690,7 @@ export default async function WorkspaceDashboard({
               <h2 id="personal-newspaper-title">{t("personalNewspaperTitle")}</h2>
               <p>{t("personalNewspaperSourceNote")}</p>
             </div>
-            <Link href={`/workspaces/${workspaceId}/actions?status=OPEN&status=IN_PROGRESS`}>
+            <Link href={`/workspaces/${workspaceId}/actions?scope=workspace&status=OPEN&status=IN_PROGRESS`}>
               {t("viewAllActions")}
             </Link>
           </div>
