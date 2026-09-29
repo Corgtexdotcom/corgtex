@@ -52,7 +52,6 @@ export async function runAgentWorkflowJob(job: {
       workspaceId: job.workspaceId,
       triggerRef: job.id,
       meetingId: asString(payload.meetingId),
-      reviewOnly: payload.reviewOnly === true,
       triggerType: payload.triggerType === "MANUAL" ? "MANUAL" : "EVENT",
     });
   }

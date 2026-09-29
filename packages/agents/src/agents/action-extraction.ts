@@ -1,14 +1,11 @@
 import type { AgentTriggerType } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
-import { autoApplyMeetingInsights } from "@corgtex/domain";
-import type { AppActor } from "@corgtex/shared";
 import { executeAgentRun } from "../runtime";
 
 export async function runActionExtractionAgent(params: {
   workspaceId: string;
   triggerRef: string;
   meetingId: string;
-  reviewOnly?: boolean;
   triggerType?: AgentTriggerType;
 }) {
   return executeAgentRun({
@@ -16,13 +13,11 @@ export async function runActionExtractionAgent(params: {
     workspaceId: params.workspaceId,
     triggerType: params.triggerType ?? "EVENT",
     triggerRef: params.triggerRef,
-    goal: params.reviewOnly
-      ? "Keep transcript insights as reviewable drafts until a person approves them."
-      : "Auto-apply high-confidence actions, tensions, proposals, decisions, and resolutions extracted from meeting content.",
+    goal: "Keep transcript insights as reviewable drafts until a person approves them.",
     payload: {
       meetingId: params.meetingId,
     },
-    plan: params.reviewOnly ? ["load-context", "load-insights", "queue-human-review"] : ["load-context", "load-insights", "auto-apply-high-confidence"],
+    plan: ["load-context", "load-insights", "queue-human-review"],
     buildContext: (helpers) => helpers.tool("meeting.load", { meetingId: params.meetingId }, async () => prisma.meeting.findUnique({
       where: { id: params.meetingId },
       select: {
@@ -38,7 +33,7 @@ export async function runActionExtractionAgent(params: {
     }).then((meeting) => ({
       meeting,
     }))),
-    execute: async (context, helpers, _runId, _model) => {
+    execute: async (context) => {
       const meeting = context.meeting as {
         id: string;
         workspaceId: string;
@@ -67,33 +62,11 @@ export async function runActionExtractionAgent(params: {
         };
       }
 
-      if (params.reviewOnly) {
-        return {
-          resultJson: {
-            meetingId: meeting.id,
-            reviewRequired: true,
-            suggested: meeting.insights?.length ?? 0,
-          },
-        };
-      }
-
-      const actor: AppActor = {
-        kind: "agent",
-        authProvider: "bootstrap",
-        label: "action-extraction",
-        workspaceIds: [params.workspaceId],
-        scopes: ["meetings:write", "actions:write", "tensions:write", "proposals:write"],
-      };
-
-      const result = await helpers.tool("meeting-insights.auto-apply", { meetingId: meeting.id }, () => autoApplyMeetingInsights(actor, {
-        workspaceId: params.workspaceId,
-        meetingId: meeting.id,
-      }));
-
       return {
         resultJson: {
           meetingId: meeting.id,
-          ...result,
+          reviewRequired: true,
+          suggested: meeting.insights?.length ?? 0,
         },
       };
     },
