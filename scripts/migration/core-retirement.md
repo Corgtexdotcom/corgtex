@@ -94,6 +94,24 @@ restoring Core traffic. A DNS reversal alone is not a data rollback.
 The scoped lead operation does not evacuate the internal dogfood tenant, its
 Slack installation, support MCP credentials, other retained tenants or pending
 work. Inventory and assign each required writer to selfserve, Ops or retirement.
+Preserve Core's internal workspace as a separate destination workspace rather
+than merging its membership or content into selfserve's existing `corgtex` public
+CRM workspace. The shared tenant importer accepts a reviewed `Workspace.slug`
+`map-values` transform (for example `corgtex` to `corgtex-core`); its collision
+checks and verification-only retries bind that destination slug while the source
+snapshot hash, workspace ID and entity IDs stay unchanged. Existing destination
+workspace rows and linked user credentials remain untouched. Resolve identity
+links using verified provider subjects or reviewed ownership evidence, preserve
+original roles and attribution, and keep imported membership inactive until the
+chosen operational or historical disposition is accepted.
+
+Compose the two transfers explicitly: lead and delivery IDs copied into public
+CRM must remain in the internal transfer's private staging with exact source rows
+and disposition provenance. Do not import those IDs a second time or borrow
+cross-workspace references. Stage source credentials and executable work, verify
+object storage and relational closure, and accept representative article,
+proposal, action, meeting and CRM access with an intended source identity and an
+unrelated target identity. An inactive import is not a universal read-only archive.
 Use managed reconnect for legacy MCP clients, preserve exact workspace consent
 and scopes, and exercise actual tools before changing the legacy hostname.
 Selfserve and legacy MCP issuers/resources must not be treated as interchangeable.

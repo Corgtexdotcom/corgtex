@@ -65,6 +65,24 @@ function primaryWhere(table: TransferTableData, row: (string | null)[]) {
   };
 }
 
+function destinationWorkspaceSlug(snapshot: TenantTransferSnapshot, options: TenantImportOptions) {
+  const table = snapshot.tables.find((entry) => entry.name === "Workspace");
+  if (!table || table.rows.length !== 1) fail("TRANSFER_WORKSPACE_IDENTITY_MISMATCH");
+  const original = rowObject(table, table.rows[0]);
+  if (original.id !== snapshot.manifest.workspaceId || original.slug !== snapshot.manifest.workspaceSlug) {
+    fail("TRANSFER_WORKSPACE_IDENTITY_MISMATCH");
+  }
+  const transform = options.transforms?.Workspace?.slug;
+  if (!transform) return snapshot.manifest.workspaceSlug;
+  if (transform.kind !== "map-values" || !transform.reason.trim()) fail("TRANSFER_WORKSPACE_SLUG_TRANSFORM_INVALID");
+  if (!Object.hasOwn(transform.values, original.slug)) fail("TRANSFER_VALUE_MAPPING_MISSING");
+  const slug = transform.values[original.slug];
+  if (typeof slug !== "string" || !slug.trim() || slug !== slug.trim() || slug.includes("\0")) {
+    fail("TRANSFER_WORKSPACE_SLUG_TRANSFORM_INVALID");
+  }
+  return slug;
+}
+
 function validateSnapshot(snapshot: TenantTransferSnapshot, options: TenantImportOptions) {
   const { sha256, ...body } = snapshot;
   if (snapshot.formatVersion !== 1 || hashCanonical(body) !== sha256
@@ -207,6 +225,9 @@ async function transformedRows(client: TransferSqlClient, snapshot: TenantTransf
 /** Single publication transaction with inactive membership/agents and scheduler marker. Never upserts shared rows or disables constraints. */
 export async function importTenantSnapshot(client: TransferSqlClient, snapshot: TenantTransferSnapshot, options: TenantImportOptions) {
   validateSnapshot(snapshot, options);
+  // The immutable manifest describes the source. Collision checks must use the
+  // reviewed destination slug while retaining the original workspace/entity IDs.
+  const destinationSlug = destinationWorkspaceSlug(snapshot, options);
   if ((options.pg18ToPg16NotNull !== undefined || snapshot.pg18ToPg16NotNullEvidence !== undefined)
     && options.targetSchemaSha256 !== undefined) fail("TRANSFER_PG18_PG16_NOTNULL_OVERRIDE_FORBIDDEN");
   if (options.pg18ToPg16NotNull !== undefined) {
@@ -224,13 +245,14 @@ export async function importTenantSnapshot(client: TransferSqlClient, snapshot: 
       : verifyPg18ToPg16NotNullComparison(snapshot, await readPgNotNullEvidence(client), options.pg18ToPg16NotNull);
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`tenant-transfer:${snapshot.manifest.workspaceId}`]);
     const existing = await client.query('SELECT id, slug FROM public."Workspace" WHERE id = $1 OR slug = $2 FOR UPDATE',
-      [snapshot.manifest.workspaceId, snapshot.manifest.workspaceSlug]);
+      [snapshot.manifest.workspaceId, destinationSlug]);
     if (existing.rows.length) {
       const marker = (await client.query('SELECT enabled, config FROM public."WorkspaceFeatureFlag" WHERE "workspaceId"=$1 AND flag=$2 FOR UPDATE', [snapshot.manifest.workspaceId, inactiveFlag])).rows[0];
       const receipt = (marker?.config as { transferReceipt?: Record<string, unknown> } | undefined)?.transferReceipt ?? null;
       if ((compatibility !== undefined || receipt?.pg18ToPg16NotNull !== undefined)
         && hashCanonical(compatibility ?? null) !== hashCanonical(receipt?.pg18ToPg16NotNull ?? null)) fail("TRANSFER_PG18_PG16_NOTNULL_COMPARISON_MISMATCH");
       if (existing.rows.length !== 1 || existing.rows[0].id !== snapshot.manifest.workspaceId
+        || existing.rows[0].slug !== destinationSlug
         || receipt?.sourceSnapshotSha256 !== snapshot.sha256 || receipt?.transferId !== snapshot.manifest.transferId
         || receipt?.identityLinksSha256 !== hashCanonical(options.identityLinks)
         || receipt?.transformsSha256 !== hashCanonical(options.transforms ?? {})
@@ -249,6 +271,8 @@ export async function importTenantSnapshot(client: TransferSqlClient, snapshot: 
     if (catalog.schemaSha256 !== (compatibility?.targetRawSchemaSha256 ?? options.targetSchemaSha256 ?? snapshot.schemaSha256)) fail("TRANSFER_TARGET_SCHEMA_MISMATCH");
     validateTableCatalog(snapshot, catalog.schema);
     const tables = await transformedRows(client, snapshot, options);
+    const workspace = tables.find((table) => table.name === "Workspace")!;
+    if (rowObject(workspace, workspace.rows[0]).slug !== destinationSlug) fail("TRANSFER_WORKSPACE_SLUG_TRANSFORM_INVALID");
     assertRelationalClosure(tables, options);
     const linkedUsers = new Set(options.identityLinks.map((link) => link.targetUserId));
     for (const link of options.identityLinks) {
