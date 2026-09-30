@@ -378,6 +378,11 @@ describe("Ops/Core executable operator", () => {
     changedHash.operator.retryOf.journalSha256 = "f".repeat(64);
     await expect(runOpsCoreMigration({ ...f.options, plan: changedHash, action: "status" }))
       .rejects.toThrow("MIGRATION_RETRY_PREDECESSOR_INVALID");
+    const seventh = structuredClone(sixth);
+    seventh.operator.retryOf.journal = "retry-5";
+    await expect(runOpsCoreMigration({ ...f.options, plan: seventh, action: "initialize" }))
+      .rejects.toThrow("MIGRATION_RETRY_BINDING_INVALID");
+    expect(f.blobs.has("cutovers/core-retry-6.json")).toBe(false);
   });
   it("requires the second retry's retained scratch admission before creating the fifth journal", async () => {
     const { f, retryPlan } = await retryFixture({ access: true, rootCapture: false });
