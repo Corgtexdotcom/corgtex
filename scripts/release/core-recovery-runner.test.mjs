@@ -1,7 +1,52 @@
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { reserveGithubDeployment, trustedRecoveryContext, recoveryTls, assertRecoveryControlPlane, waitForRecoveredWeb, DEPLOY_STEP } from "./core-recovery-runner.mjs";
+import { inspectAcceptedRecoveryImage, reserveGithubDeployment, trustedRecoveryContext, recoveryTls, assertRecoveryControlPlane, waitForRecoveredWeb, DEPLOY_STEP } from "./core-recovery-runner.mjs";
+
+describe("accepted recovery registry identity", () => {
+  const root = `sha256:${"a".repeat(64)}`;
+  const child = `sha256:${"b".repeat(64)}`;
+  const descriptor = digest => ({ digest, platform: { os: "linux", architecture: "amd64" } });
+  function fixture(index = true) {
+    const manifest = { ...(index ? { schemaVersion: 2 } : {}), digest: root, size: 900,
+      mediaType: index ? "application/vnd.oci.image.index.v1+json" : "application/vnd.oci.image.manifest.v1+json",
+      ...(index ? { manifests: [descriptor(child)] } : {}) };
+    const platforms = [{ Descriptor: descriptor(index ? child : root) }];
+    return { manifest, platforms, execute: vi.fn(args => JSON.stringify(args[0] === "buildx" ? manifest : platforms)) };
+  }
+  it("keeps an accepted image index distinct from its amd64 platform digest", () => {
+    const x = fixture();
+    expect(inspectAcceptedRecoveryImage("web", root, x.execute)).toMatchObject({
+      image: `ghcr.io/corgtexdotcom/corgtex/web@${root}`, acceptedDigest: root, platformManifestDigest: child,
+    });
+    expect(x.execute.mock.calls.every(([args]) => args.at(-1) === `ghcr.io/corgtexdotcom/corgtex/web@${root}`)).toBe(true);
+  });
+  it("accepts a single amd64 manifest only when root and platform digests agree", () => {
+    const x = fixture(false);
+    expect(inspectAcceptedRecoveryImage("worker", root, x.execute).platformManifestDigest).toBe(root);
+    x.platforms[0].Descriptor.digest = child;
+    expect(() => inspectAcceptedRecoveryImage("worker", root, x.execute)).toThrow("MANIFEST_PLATFORM");
+  });
+  it("rejects a wrong root even if its platform is correct", () => {
+    const x = fixture(); x.manifest.digest = child;
+    expect(() => inspectAcceptedRecoveryImage("web", root, x.execute)).toThrow("BASELINE_REGISTRY_DIGEST");
+  });
+  it("rejects an ambiguous or mismatched index child", () => {
+    const x = fixture(); x.manifest.manifests.push(descriptor(child));
+    expect(() => inspectAcceptedRecoveryImage("web", root, x.execute)).toThrow("INDEX_PLATFORM");
+    x.manifest.manifests = [descriptor(root)];
+    expect(() => inspectAcceptedRecoveryImage("web", root, x.execute)).toThrow("INDEX_PLATFORM");
+    x.platforms[0].Descriptor.platform.architecture = "arm64";
+    expect(() => inspectAcceptedRecoveryImage("web", root, x.execute)).toThrow("REGISTRY_PLATFORM");
+  });
+  it("does not expose registry errors or accept arbitrary roles and references", () => {
+    const execute = vi.fn(() => { throw new Error("private registry credential detail"); });
+    expect(() => inspectAcceptedRecoveryImage("web", root, execute)).toThrow("CORE_RECOVERY_REGISTRY_READ_UNVERIFIED");
+    expect(() => inspectAcceptedRecoveryImage("other", root, execute)).toThrow("REGISTRY_BINDING");
+    expect(() => inspectAcceptedRecoveryImage("web", "tag", execute)).toThrow("REGISTRY_BINDING");
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+});
 
 const REPO = "Corgtexdotcom/corgtex";
 const env = { GITHUB_REPOSITORY: REPO, GITHUB_REF: "refs/heads/main", GITHUB_EVENT_NAME: "workflow_dispatch",

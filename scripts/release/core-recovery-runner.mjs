@@ -9,7 +9,6 @@ import { pathToFileURL } from "node:url";
 import { readPin, resolveBaseline, migrationManifest, verifyLedger, databaseIdentity,
   identityHash, verifiedSmokeChecks } from "../accepted-core-baseline.mjs";
 import { readSharedTenantSchema } from "../migration/shared-tenant-inventory.mjs";
-import { inspectFleetRegistryImage } from "./fleet-release-runner.mjs";
 import { recoverCore, recoveryStage, RECOVERY_STATE_QUERY } from "./core-recovery.mjs";
 
 const REPO = "Corgtexdotcom/corgtex";
@@ -19,6 +18,42 @@ const ROOT = ".artifacts/core-recovery";
 const check = (ok, code) => { if (!ok) throw new Error(`CORE_RECOVERY_${code}`); };
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
 const same = (a, b) => identityHash(a) === identityHash(b);
+
+export function inspectAcceptedRecoveryImage(role, digest, execute = (args) => execFileSync("docker", args, {
+  encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30000, maxBuffer: 1024 * 1024,
+})) {
+  check(["web", "worker"].includes(role) && /^sha256:[a-f0-9]{64}$/.test(digest), "REGISTRY_BINDING");
+  const image = `ghcr.io/corgtexdotcom/corgtex/${role}@${digest}`;
+  let manifest; let entries;
+  try {
+    const root = execute(["buildx", "imagetools", "inspect", "--format", "{{json .Manifest}}", image]);
+    const platforms = execute(["manifest", "inspect", "--verbose", image]);
+    check(typeof root === "string" && typeof platforms === "string"
+      && Buffer.byteLength(root) <= 1024 * 1024 && Buffer.byteLength(platforms) <= 1024 * 1024, "REGISTRY_OUTPUT");
+    manifest = JSON.parse(root);
+    const parsed = JSON.parse(platforms);
+    entries = Array.isArray(parsed) ? parsed : [parsed];
+  } catch { throw new Error("CORE_RECOVERY_REGISTRY_READ_UNVERIFIED"); }
+  // Provider metadata can identify an image index. Its platform descriptor is
+  // a different digest; preserve the accepted root and prove its amd64 child.
+  check(manifest?.digest === digest
+    && Number.isSafeInteger(manifest.size) && manifest.size > 0, "BASELINE_REGISTRY_DIGEST");
+  const index = ["application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json"].includes(manifest.mediaType);
+  check(index || ["application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json"].includes(manifest.mediaType), "REGISTRY_MEDIA_TYPE");
+  const amd64 = entries.filter(entry => entry?.Descriptor?.platform?.os === "linux"
+    && entry.Descriptor.platform.architecture === "amd64");
+  check(amd64.length === 1 && /^sha256:[a-f0-9]{64}$/.test(amd64[0].Descriptor.digest), "REGISTRY_PLATFORM");
+  const platformDigest = amd64[0].Descriptor.digest;
+  if (index) {
+    check(manifest.schemaVersion === 2 && Array.isArray(manifest.manifests), "REGISTRY_INDEX");
+    const children = manifest.manifests.filter(child => child?.platform?.os === "linux" && child.platform.architecture === "amd64");
+    check(children.length === 1 && children[0].digest === platformDigest, "REGISTRY_INDEX_PLATFORM");
+  } else check(platformDigest === digest, "REGISTRY_MANIFEST_PLATFORM");
+  return { role, image, acceptedDigest: digest, mediaType: manifest.mediaType,
+    platform: "linux/amd64", platformManifestDigest: platformDigest };
+}
 
 export function trustedRecoveryContext(env) {
   check(env.GITHUB_REPOSITORY === REPO && env.GITHUB_REF === "refs/heads/main"
@@ -223,6 +258,7 @@ export async function runRecovery({ env = process.env, mode = process.argv[2] } 
     } });
     verifiedSmokeChecks(stdout.toString());
   };
+  let registryProofs;
   const result = await recoverCore({ request, receipt, receiptBytes, pin, dryRun: mode === "plan" }, {
     graphql: query,
     assertContext: async (_request, target) => {
@@ -242,23 +278,25 @@ export async function runRecovery({ env = process.env, mode = process.argv[2] } 
     },
     verifyDatabase: (evidence, schema) => verifyRecoveryDatabase(evidence, schema, request, { env, sourceDir, Client: pg.Client }),
     verifyRegistry: async evidence => {
-      for (const role of ["web", "worker"]) {
-        const proof = inspectFleetRegistryImage(`ghcr.io/corgtexdotcom/corgtex/${role}:sha-${evidence.sourceSha}`, role, "rollback");
-        check(proof.manifestDigest === evidence.images[role].digest, "BASELINE_REGISTRY_DIGEST");
-      }
+      registryProofs = ["web", "worker"].map(role => inspectAcceptedRecoveryImage(role, evidence.images[role].digest));
     },
     reserveDeployment: intent => reserveGithubDeployment(intent, { env, api }),
     verifyRuntime,
   });
-  await writeFile(`${ROOT}/${mode}.json`, JSON.stringify({ ...result, workflowSha: env.GITHUB_SHA,
+  await writeFile(`${ROOT}/${mode}.json`, JSON.stringify({ ...result, registryProofs, workflowSha: env.GITHUB_SHA,
     runId: Number(env.GITHUB_RUN_ID), runAttempt: Number(env.GITHUB_RUN_ATTEMPT), verifiedAt: new Date().toISOString() }, null, 2) + "\n", { mode: 0o600 });
   console.log(mode === "plan" ? "Read-only incident recovery plan verified." : "Recovered Core runtime verified; baseline adoption is still required.");
   return result;
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  runRecovery().catch(error => {
-    console.error(/^CORE_(RECOVERY|BASELINE)_[A-Z_]+$/.test(error.message) ? error.message : "CORE_RECOVERY_UNVERIFIED");
+  runRecovery().catch(async error => {
+    const code = /^CORE_(RECOVERY|BASELINE)_[A-Z_]+$/.test(error.message) ? error.message : "CORE_RECOVERY_UNVERIFIED";
+    const mode = ["prepare", "plan", "recover"].includes(process.argv[2]) ? process.argv[2] : "unknown";
+    await mkdir(ROOT, { recursive: true });
+    await writeFile(`${ROOT}/${mode}-failed.json`, JSON.stringify({ status: "unverified", mode, code,
+      providerWrites: mode === "plan" || mode === "prepare" ? false : "unknown; reconcile before resubmission" }) + "\n", { mode: 0o600 });
+    console.error(code);
     process.exitCode = 1;
   });
 }
