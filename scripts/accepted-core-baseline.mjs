@@ -201,8 +201,9 @@ export async function resolveBaseline(pin, { api = githubJson, download = downlo
   const bytes = await download(pin);
   requireThat(bytes.length <= 64_000 && sha256(bytes) === pin.receiptSha256, "RECEIPT_HASH_MISMATCH");
   const receipt = validateReceipt(JSON.parse(bytes.toString("utf8")), pin);
+  const artifactPrecisionMs = /:\d{2}Z$/.test(artifact.created_at) ? 1000 : 1;
   requireThat(Date.parse(receipt.acceptance.acceptedAt) >= Date.parse(attempt.run_started_at)
-    && Date.parse(receipt.acceptance.acceptedAt) <= Date.parse(artifact.created_at), "ACCEPTANCE_TIME_INVALID");
+    && Date.parse(receipt.acceptance.acceptedAt) < Date.parse(artifact.created_at) + artifactPrecisionMs, "ACCEPTANCE_TIME_INVALID");
   if (persist) await persist(bytes);
   return receipt;
 }
