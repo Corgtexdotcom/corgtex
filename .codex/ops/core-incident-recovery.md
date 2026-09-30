@@ -6,8 +6,10 @@ admission remains unchanged. It does not authorize direct Railway rollback.
 
 Run **Recover Existing Core** on main with its default read-only plan first.
 The existing `fleet-release-production` environment and `fleet-release`
-concurrency govern execution. Both source images must resolve to the accepted
-platform digests through the existing durable package reader. Database reads
+concurrency govern execution. Both source images are read directly by their
+accepted digests through the existing durable package reader. Verify the root
+image/index digest and its unique linux/amd64 platform manifest separately;
+an image index and its platform image have different digests. Database reads
 require the reviewed public CA, independent leaf pin, localhost certificate
 identity, actual database binding, unchanged catalog fingerprint and accepted
 migration ledger. No migration, seed or database restore runs.
