@@ -322,7 +322,11 @@ npx tsx scripts/migration/run-ops-core-migration.mjs activate /private/plan.json
 
 `initialize` retains the exact plan and creates a stable per-domain journal. An
 interrupted initialization reuses only matching retained content. Each subsequent
-command acquires that journal's lease and rereads the plan.
+command acquires that journal's lease and rereads the plan. `status` prints the
+durable `pending` transition and `destinationMayHaveWritten` flag. A `PREPARED`
+phase with `pending.to: "SOURCE_FENCED"` means fencing began, even though the
+phase has not completed. Treat it as a live partial fence and check source
+health before deciding whether to recover.
 
 `preflight` checks actual source admin/reader access, target PostgreSQL TLS login,
 identity and restore authority, versioned archive-key access, bounded source
@@ -336,6 +340,21 @@ guards rather than demanding that the already-rotated original password work.
 baselines before stopping source writers. It leaves source PostgreSQL running,
 rotates the runtime credential to its retained recovery version, terminates old
 runtime sessions and verifies reader/recovery access.
+
+If `fence` exits with a reconciliation error, its stderr JSON identifies the
+operator stage and, when available, a static source-controller cause code. It
+contains no provider response body. Check `status`, then inspect a pending
+source fence without dispatching or settling an effect:
+
+```sh
+npx tsx scripts/migration/run-ops-core-migration.mjs inspect-source-fence /private/plan.json /private/railway-credentials.json
+```
+
+Inspection requires the Railway token, the retained phase plan and exact
+operation intents. It reports receipt and current Railway verification counts
+by operation kind. It does not write receipts or mark PostgreSQL intents
+verified. Missing baselines, unresolved operations, or source health changes
+require an operator decision; inspection never resumes the fence.
 
 `transfer` captures PostgreSQL, encrypts and retains the archive, downloads and
 restores that retained archive, verifies schema/table/job/sequence parity, copies
@@ -393,6 +412,10 @@ effects; inherited ambiguous intents only reconcile. `reconcile-source-recovery`
 never starts a new effect. Missing baseline or unknown provider ownership blocks
 recovery. The terminal cutover cannot later activate Azure; do not reset it or
 delete retained databases/archives to reuse the old migration identity.
+When `SOURCE_FENCED` is pending, `recover-source` first settles remaining fence
+effects before it restores the source. That can extend customer downtime; do not
+infer immediate restoration from the command name. Check the inspected operation
+state and source health before issuing it.
 
 One fresh attempt can follow a proven terminal recovery. Add
 `operator.retryOf: { intentSha256, journalSha256 }` to a new plan, binding the

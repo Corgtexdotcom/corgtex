@@ -1,15 +1,21 @@
 import { opsCorePlanSharedStateVariant } from "./ops-core-plan-variant.mjs";
 import { archiveEvidenceHash } from "./ops-core-archive.mjs";
-import { openSourceOperations } from "./ops-core-source-operations.mjs";
-import { assertPostgresSourceFenced, runPostgresSourceFence, preflightOpsCorePostgresSource, recoverPostgresSourcePassword } from "./ops-core-postgres-fence.mjs";
+import { openSourceOperations, sourceOperationDiagnostic } from "./ops-core-source-operations.mjs";
+import { assertPostgresSourceFenced, runPostgresSourceFence, preflightOpsCorePostgresSource, recoverPostgresSourcePassword, postgresSourceFenceDiagnostic } from "./ops-core-postgres-fence.mjs";
 import { opsCoreAzureTargetBindingSha256 } from "./ops-core-azure-target.mjs";
 import { sourceRecoveryAllowed } from "./ops-core-custody.mjs";
-import { RailwaySourceFence } from "./railway-source-fence.mjs";
+import { RailwaySourceFence, RailwaySourceFenceError } from "./railway-source-fence.mjs";
 import { createRailwayPostgresCustody } from "./railway-postgres-custody.mjs";
 
 class ControllerError extends Error {
-  constructor(code) { super(code); Object.freeze(this); }
+  constructor(code, stage = null, causeCode = null) {
+    super(code); this.stage = stage; this.causeCode = causeCode; Object.freeze(this);
+  }
 }
+export const sourceControllerDiagnostic = error => error instanceof ControllerError
+  ? { code: error.message, stage: error.stage, causeCode: error.causeCode } : null;
+const safeCauseCode = error => error instanceof RailwaySourceFenceError ? error.code
+  : sourceOperationDiagnostic(error) ?? postgresSourceFenceDiagnostic(error);
 const fail = code => { throw new ControllerError(code); };
 const exact = (value, fields) => {
   if (!value || typeof value !== "object" || Array.isArray(value)
@@ -114,6 +120,54 @@ async function evidence(ctx, postgres) {
     postgresService: await ctx.assertDatabaseServiceCustody(), postgres };
 }
 
+/** Inspect retained source-fence intents and current Railway state. This never
+ * dispatches a provider effect, writes an operation receipt, or settles the
+ * pending journal phase. PostgreSQL intents remain explicitly unverified. */
+export async function inspectOpsCoreSourceFence(options) {
+  let stage = "SOURCE_CUSTODY";
+  try {
+    const ctx = context(options, async () => fail("SOURCE_CONTROLLER_READ_ONLY"));
+    await ctx.check();
+    const state = options.custody.snapshot();
+    const sourceIntent = archiveEvidenceHash(ctx.plan.source);
+    if (state.phase !== "PREPARED" || state.pending?.to !== "SOURCE_FENCED"
+      || state.pending.intentSha256 !== sourceIntent || state.destinationMayHaveWritten) {
+      fail("SOURCE_CONTROLLER_INSPECTION_PHASE_INVALID");
+    }
+    stage = "RECORDED_OPERATIONS";
+    const operations = await openSourceOperations({ custody: options.custody, store: options.operationStore });
+    const phasePlan = await operations.readPhaseArtifact("phase-plan");
+    if (phasePlan !== null && (phasePlan.domain !== ctx.plan.domain
+      || phasePlan.intentSha256 !== archiveEvidenceHash(ctx.plan)
+      || archiveEvidenceHash(phasePlan.source) !== sourceIntent)) fail("SOURCE_CONTROLLER_BASELINE_MISMATCH");
+    const descriptors = await operations.recordedDescriptors();
+    stage = "RAILWAY_OBSERVATION";
+    const byKind = new Map();
+    for (const descriptor of descriptors) {
+      const row = byKind.get(descriptor.kind) ?? { kind: descriptor.kind, recorded: 0, receipts: 0,
+        observedComplete: 0, unresolved: 0 };
+      row.recorded++;
+      if (descriptor.completed) row.receipts++;
+      else if (descriptor.kind.startsWith("RAILWAY_")) {
+        const name = controlFor(ctx, descriptor);
+        const observed = await ctx.controls[name].inspectRecordedOperation({ ...descriptor,
+          readIntent: operations.readIntent });
+        if (observed.complete) row.observedComplete++;
+        else row.unresolved++;
+      } else row.unresolved++;
+      byKind.set(descriptor.kind, row);
+    }
+    await ctx.check();
+    return { status: "SOURCE_FENCE_INSPECTED", domain: ctx.plan.domain, complete: false,
+      pending: state.pending, destinationMayHaveWritten: false, baselineRetained: phasePlan !== null,
+      operations: [...byKind.values()].sort((a, b) => a.kind.localeCompare(b.kind)),
+      nextAction: "operator-decision" };
+  } catch (error) {
+    throw new ControllerError(error instanceof ControllerError ? error.message : "SOURCE_CONTROLLER_RECONCILIATION_REQUIRED",
+      stage, error instanceof ControllerError ? error.causeCode : safeCauseCode(error));
+  }
+}
+
 /** Drives the actual source phase using Railway adapters, remote PostgreSQL and
  * independent create-only operation records. Credentials are supplied separately
  * from the retained plan. A stopped application is never mistaken for a stopped
@@ -121,6 +175,7 @@ async function evidence(ctx, postgres) {
  */
 export async function runOpsCoreSourceFence(options) {
   let operations;
+  let stage = "SOURCE_CUSTODY";
   try {
     let ctx;
     ctx = context(options, operation => {
@@ -140,6 +195,7 @@ export async function runOpsCoreSourceFence(options) {
     await ctx.check();
     const pendingPhase = current.pending ?? await custody.begin("SOURCE_FENCED", sourceIntent);
     operations = await openSourceOperations({ custody, store: operationStore });
+    stage = "SOURCE_BASELINE";
     let phasePlan = await operations.readPhaseArtifact("phase-plan");
     if (phasePlan === null) {
       if ((await operations.recordedDescriptors()).length) fail("SOURCE_CONTROLLER_BASELINE_MISSING");
@@ -154,6 +210,7 @@ export async function runOpsCoreSourceFence(options) {
     }
     if (!phasePlan.recoveryBaseline || archiveEvidenceHash(phasePlan.source) !== sourceIntent
       || phasePlan.intentSha256 !== archiveEvidenceHash(ctx.plan) || phasePlan.domain !== ctx.plan.domain) fail("SOURCE_CONTROLLER_BASELINE_MISSING");
+    stage = "RECORDED_OPERATIONS";
     const recorded = await operations.recordedDescriptors();
     const pending = recorded.filter(item => !item.completed);
     const railwayPending = pending.filter(item => item.kind.startsWith("RAILWAY_"));
@@ -162,6 +219,7 @@ export async function runOpsCoreSourceFence(options) {
     // A stage receipt can be durable even when the caller never received it.
     // Recover the current patch from all retained stages, including completed
     // ones, before deciding which service group may use shared staging next.
+    stage = "RAILWAY_RECONCILE";
     const staged = (await ctx.controls.postgres.read()).staged;
     if (!staged.empty) {
       const matches = [];
@@ -188,6 +246,7 @@ export async function runOpsCoreSourceFence(options) {
       }
     }
     // An owned staged patch must finish before the other service group's patch.
+    stage = "RAILWAY_TRIGGER_FENCE";
     const order = stagedOwner === "writers" ? ["writers", "postgres"] : ["postgres", "writers"];
     for (const name of order) {
       await ctx.check();
@@ -196,20 +255,25 @@ export async function runOpsCoreSourceFence(options) {
       await ctx.controls[name].disableTriggers({ ...resume[name], readIntent: operations.readIntent });
     }
     await ctx.controls.writers.assertRecoveryBaseline(phasePlan.recoveryBaseline.writers);
+    stage = "RAILWAY_WRITER_STOP";
     await ctx.controls.writers.stopWriters();
     await ctx.assertProviderFenced();
     await ctx.assertDatabaseServiceCustody();
+    stage = "POSTGRES_SOURCE_FENCE";
     const postgres = await runPostgresSourceFence({ ...ctx.postgresOptions(operations),
       resumeSessionOperations: pending.filter(item => item.kind === "POSTGRES_TERMINATE_OLD_RUNTIME_SESSION") });
+    stage = "SOURCE_EVIDENCE";
     const settled = await operations.assertSettled();
     const result = { ...await evidence(ctx, postgres), operations: settled,
       ...(ctx.plan.schemaVersion === 2 ? { sourceRuntimeRedisBaselineSha256: archiveEvidenceHash(phasePlan.recoveryBaseline.health) } : {}) };
     const evidenceSha256 = await operations.retainPhaseArtifact("phase-evidence", result);
     await ctx.check();
+    stage = "SOURCE_JOURNAL_COMPLETE";
     await custody.complete(pendingPhase.operationId, evidenceSha256);
     return { status: "SOURCE_FENCED", evidenceSha256, evidence: result };
   } catch (error) {
-    throw error instanceof ControllerError ? error : new ControllerError("SOURCE_CONTROLLER_RECONCILIATION_REQUIRED");
+    throw new ControllerError(error instanceof ControllerError ? error.message : "SOURCE_CONTROLLER_RECONCILIATION_REQUIRED",
+      stage, error instanceof ControllerError ? error.causeCode : safeCauseCode(error));
   }
 }
 

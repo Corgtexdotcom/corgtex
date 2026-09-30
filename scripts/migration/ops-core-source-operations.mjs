@@ -5,6 +5,7 @@ const ID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const LIMIT = 64 * 1024;
 class SourceOperationError extends Error {}
+export const sourceOperationDiagnostic = error => error instanceof SourceOperationError ? error.message : null;
 const fail = code => { throw new SourceOperationError(code); };
 const keys = (value, expected) => value !== null && typeof value === "object" && !Array.isArray(value)
   && Object.keys(value).sort().join(",") === expected.split(",").sort().join(",");
