@@ -24,6 +24,9 @@ function releaseGitSha() {
 const buildReleaseSha = releaseGitSha();
 
 const nextConfig: NextConfig = {
+  // OAuth callback URIs and opaque query values must survive without NextURL's
+  // loopback-host normalization, including through locale middleware.
+  skipMiddlewareUrlNormalize: true,
   outputFileTracingRoot: path.join(process.cwd(), "../.."),
   experimental: { serverActions: { bodySizeLimit: "6mb" } },
   webpack(config, { isServer }) {
