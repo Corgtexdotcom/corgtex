@@ -129,7 +129,7 @@ test("bounded lead transfer preserves tokens, precise history and delivery prove
         await target.query(`CREATE FUNCTION public.synthetic_lead_reply_fail() RETURNS trigger LANGUAGE plpgsql AS
           $$BEGIN RAISE EXCEPTION 'synthetic-private-reply'; END$$`);
         await target.query('CREATE TRIGGER synthetic_lead_reply_fail BEFORE INSERT ON "CrmConversationMessage" FOR EACH ROW EXECUTE FUNCTION public.synthetic_lead_reply_fail()');
-        const reply = { fromEmail: "legacy@example.invalid", subject: "Synthetic", bodyText: "Synthetic reply" };
+        const reply = { fromEmail: "legacy@example.invalid", subject: "Synthetic", bodyText: "Synthetic reply", providerEmailId: "synthetic-received-email" };
         try { await assert.rejects(recordInboundEmailReply(reply)); }
         finally {
           await target.query('DROP TRIGGER synthetic_lead_reply_fail ON "CrmConversationMessage"');
@@ -138,7 +138,15 @@ test("bounded lead transfer preserves tokens, precise history and delivery prove
         assert.equal((await target.query('SELECT count(*) FROM "CrmQualification"')).rows[0].count, "1");
         assert.equal((await target.query('SELECT count(*) FROM "CrmConversationMessage"')).rows[0].count, "0");
         assert.equal((await target.query('SELECT count(*) FROM "Event"')).rows[0].count, "1");
+        assert.equal((await target.query('SELECT count(*) FROM "InboundWebhook"')).rows[0].count, "0");
+        await target.query(`INSERT INTO "Workspace" (id,slug,name,"updatedAt") VALUES ('synthetic-other-crm','synthetic-other-crm','Other',now())`);
+        await target.query(`INSERT INTO "DemoLead" (id,"workspaceId",email,"createdAt","lastSeenAt")
+          VALUES ('synthetic-other-lead','synthetic-other-crm','legacy@example.invalid',now()+interval '1 day',now())`);
+        await Promise.all([recordInboundEmailReply(reply), recordInboundEmailReply(reply)]);
         await recordInboundEmailReply(reply);
+        assert.equal((await target.query('SELECT count(*) FROM "InboundWebhook"')).rows[0].count, "1");
+        assert.equal((await target.query('SELECT "workspaceId" FROM "InboundWebhook"')).rows[0].workspaceId, targetId);
+        assert.equal((await target.query('SELECT count(*) FROM "CrmQualification" WHERE "workspaceId"=\'synthetic-other-crm\'')).rows[0].count, "0");
         assert.equal((await target.query('SELECT count(*) FROM "CrmQualification"')).rows[0].count, "2");
         assert.equal((await target.query('SELECT count(*) FROM "CrmConversationMessage"')).rows[0].count, "1");
         assert.equal(await dispatchPendingEvents("synthetic-retirement-held"), 0);

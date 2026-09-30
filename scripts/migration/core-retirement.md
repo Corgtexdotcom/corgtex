@@ -88,7 +88,12 @@ Google/Microsoft OAuth, Stripe, Resend, recorder/transcript and CRM integrations
 Keep customer callbacks distinct from operational alerts, which belong to Ops.
 Exercise configured external MCP servers under the connecting user's workspace;
 an empty inventory means no configured server, not successful tool execution.
-Connector or provider access failures remain acceptance blockers.
+Connector or provider access failures remain acceptance blockers. The public CRM
+Resend callback consumes only the configured `EMAIL_REPLY_TO` recipient into the
+internal `corgtex` workspace. Its receiving API key must read email bodies; a
+sending-only key is insufficient. Validate the provider mailbox/forwarding and
+metadata-only event before enabling a disabled webhook. Provider email IDs retain
+an atomic receipt, so retries do not duplicate qualification or conversation data.
 
 Once replacements are accepted, remove obsolete Core defaults, CI/smoke/rollback
 dependencies, registrations and configuration. Preserve recovery code and source

@@ -2709,11 +2709,12 @@ export async function receiveEmailReply(params: {
   fromEmail: string;
   subject: string;
   bodyText: string;
+  workspaceSlug?: string;
 }, transaction?: Prisma.TransactionClient) {
   const email = params.fromEmail.trim().toLowerCase();
   
   const lead = await (transaction ?? prisma).demoLead.findFirst({
-    where: { email },
+    where: { email, ...(params.workspaceSlug ? { workspace: { slug: params.workspaceSlug } } : {}) },
     orderBy: { createdAt: 'desc' },
   });
   
@@ -2914,10 +2915,11 @@ export async function syncEmailReplyToConversation(params: {
   fromEmail: string;
   subject: string;
   bodyText: string;
+  workspaceSlug?: string;
 }, transaction?: Prisma.TransactionClient) {
   const email = params.fromEmail.trim().toLowerCase();
   const operation = async (tx: Prisma.TransactionClient) => {
-    const lead = await tx.demoLead.findFirst({ where: { email }, orderBy: { createdAt: "desc" } });
+    const lead = await tx.demoLead.findFirst({ where: { email, ...(params.workspaceSlug ? { workspace: { slug: params.workspaceSlug } } : {}) }, orderBy: { createdAt: "desc" } });
     if (!lead) return null;
     await requirePublicCrmWrites(tx, lead.workspaceId);
     const existing = await tx.crmConversation.findFirst({ where: { workspaceId: lead.workspaceId, demoLeadId: lead.id } });
@@ -2945,12 +2947,27 @@ export async function recordInboundEmailReply(params: {
   fromEmail: string;
   subject: string;
   bodyText: string;
+  providerEmailId?: string;
 }) {
   // Retain the public-intake share lock across both effects. A cutover hold
   // cannot split a successful qualification from a retryable conversation.
   return prisma.$transaction(async (tx) => {
-    const qualification = await receiveEmailReply(params, tx);
-    const message = await syncEmailReplyToConversation(params, tx);
+    const receiptId = params.providerEmailId ? `resend-inbound:${params.providerEmailId}` : null;
+    if (receiptId) {
+      // One provider email can produce one atomic result, including concurrent retries.
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${receiptId}, 0))::text`;
+      if (await tx.inboundWebhook.findUnique({ where: { id: receiptId } })) return { duplicate: true };
+    }
+    // This shared callback belongs to public demo intake, never a latest sender
+    // match in an unrelated customer workspace.
+    const scoped = { ...params, workspaceSlug: DEFAULT_DEMO_WORKSPACE.slug };
+    const qualification = await receiveEmailReply(scoped, tx);
+    const message = await syncEmailReplyToConversation(scoped, tx);
+    if (receiptId) await tx.inboundWebhook.create({ data: {
+      id: receiptId, workspaceId: qualification.workspaceId, source: "resend.public-crm",
+      externalId: params.providerEmailId, processedAt: new Date(),
+      payload: { qualificationId: qualification.id, messageId: message?.id ?? null },
+    } });
     return { qualification, message };
   });
 }
