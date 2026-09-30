@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
+type DemoStage = "capture" | "qualify" | "qualify-link";
+
 function reportFailure(
-  stage: "capture" | "qualify",
+  stage: DemoStage,
   failureClass: "invalid_payload" | "invalid_configuration" | "upstream_status" | "upstream_redirect" | "invalid_upstream_response" | "transport",
   status: number,
 ) {
@@ -18,7 +20,8 @@ function demoBackendOrigin() {
   const localHttp = process.env.NODE_ENV !== "production" && url.protocol === "http:"
     && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
   if ((url.protocol !== "https:" && !localHttp) || url.username || url.password
-    || url.pathname !== "/" || url.search || url.hash) {
+    || url.pathname !== "/" || url.search || url.hash
+    || (process.env.NODE_ENV === "production" && url.origin !== "https://selfserve.corgtex.com")) {
     throw new Error("Invalid demo backend origin");
   }
   return url.origin;
@@ -49,7 +52,7 @@ function publicError(data: Record<string, unknown>) {
 }
 
 // Both stages must use the backend that owns the lead and its qualification token.
-export async function forwardDemoRequest(request: NextRequest, stage: "capture" | "qualify") {
+export async function forwardDemoRequest(request: NextRequest, stage: DemoStage) {
   let body: unknown;
   try {
     body = await request.json();
@@ -65,7 +68,8 @@ export async function forwardDemoRequest(request: NextRequest, stage: "capture" 
     return unavailable(503);
   }
   try {
-    const response = await fetch(`${origin}/api/demo-leads${stage === "qualify" ? "/qualify" : ""}`, {
+    const path = stage === "capture" ? "" : stage === "qualify" ? "/qualify" : "/qualify/link";
+    const response = await fetch(`${origin}/api/demo-leads${path}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

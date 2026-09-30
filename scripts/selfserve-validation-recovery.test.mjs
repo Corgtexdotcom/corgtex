@@ -93,7 +93,7 @@ describe("failed-run routing, not current repository mode", () => {
   const event = () => ({ workflow_run: run("CI") });
   const job = () => ({ name: "Production Smoke Test", status: "completed", conclusion: "failure", run_id: 123, run_attempt: 2, head_sha: SHA });
   it.each(["core", "selfserve-validation", ""])("preserves the failed Core attempt after mode changes to %s", (mode) => {
-    expect(workflow("auto-revert").jobs.revert.if).not.toContain("vars.PRODUCTION_VALIDATION_TARGET");
+    expect(workflow("auto-revert").jobs.revert).toBeUndefined();
     expect(failedCoreSmokeJob({ event: event(), repository, jobs: [job()], currentRepositoryMode: mode })).toBe(true);
   });
   it.each([
@@ -103,13 +103,9 @@ describe("failed-run routing, not current repository mode", () => {
   ].map((jobs) => [jobs]))("never selects absent, selfserve, ambiguous or differently bound jobs (%#)", (jobs) => {
     expect(failedCoreSmokeJob({ event: event(), repository, jobs })).toBe(false);
   });
-  it("requires the exact triggering attempt API, not latest jobs or a fuzzy smoke name", () => {
-    const step = workflow("auto-revert").jobs.revert.steps.find((s) => s.id === "check");
-    expect(step.env.RUN_ATTEMPT).toBe("${{ github.event.workflow_run.run_attempt }}");
-    expect(step.run).toContain("/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs?per_page=100");
-    expect(step.run).toContain("--paginate --slurp");
-    expect(step.run).toContain("--core-smoke-failure");
-    expect(step.run).not.toContain("grep -qi");
+  it("does not schedule source reverts on CI completion", () => {
+    expect(workflow("auto-revert").on.workflow_run.workflows).toEqual(["Production Validation"]);
+    expect(workflow("auto-revert").permissions).toEqual({ actions: "read", contents: "read" });
   });
   it("runs the real CLI on paginated immutable jobs after the repository mode switches", () => {
     const directory = mkdtempSync(join(tmpdir(), "selfserve-core-recovery-test-"));
@@ -141,12 +137,12 @@ describe("target-aware manual URL default", () => {
     const input = workflow("production-validation").on.workflow_dispatch.inputs.base_url;
     expect(input.default).toBe("");
     expect(input.required).toBe(false);
-    expect(context("core", input.default).base_url).toBe("https://app.corgtex.com");
+    expect(() => context("core", input.default)).toThrow("UNKNOWN");
     expect(context("selfserve-validation", input.default).base_url).toBe(target.origin);
   });
   it("keeps explicit wrong origins fail-closed", () => {
     expect(() => context("selfserve-validation", "https://app.corgtex.com")).toThrow("ORIGIN_MISMATCH");
-    expect(() => context("core", target.origin)).toThrow("must be exactly");
+    expect(() => context("core", target.origin)).toThrow("UNKNOWN");
   });
   it("keeps these review tests classified as runner-only", () => {
     expect(requiresProductionAppRelease(["scripts/selfserve-validation-recovery.test.mjs"])).toBe(false);

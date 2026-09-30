@@ -76,6 +76,16 @@ afterEach(() => {
 });
 
 describe("signupAction", () => {
+  it("uses the configured selfserve origin when forwarded host headers are absent", async () => {
+    vi.stubEnv("NEXT_PUBLIC_APP_URL", "https://selfserve.corgtex.com");
+    headersMock.mockResolvedValue(new Headers());
+    checkRateLimitMock.mockResolvedValue({ allowed: true, remaining: 9, resetAtMs: Date.now() + 60_000 });
+    createProcurementTrialMock.mockResolvedValue({ statusCode: 201, body: { trialId: "synthetic-trial" } });
+    const { signupAction } = await import("./actions");
+    await signupAction(state(), form());
+    expect(createProcurementTrialMock).toHaveBeenCalledWith(expect.objectContaining({ origin: "https://selfserve.corgtex.com" }));
+  });
+
   it("creates a procurement trial without returning connector secrets to the client state", async () => {
     headersMock.mockResolvedValue(new Headers({
       host: "app.test",

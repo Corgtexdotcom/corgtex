@@ -53,8 +53,8 @@
     "exploreTheory": "Explorar la teoría"
   },
   "qualify": {
-    "invalidTitle": "Enlace no válido",
-    "invalidBody": "El enlace de calificación parece faltar o no ser válido. Revisa el correo que recibiste.",
+    "invalidTitle": "Este enlace ya no está disponible",
+    "invalidBody": "El enlace de solicitud puede faltar o haber caducado. Inicia una nueva solicitud de prueba para continuar.",
     "successTitle": "Gracias",
     "successBody": "Recibimos tu información. Nuestro equipo revisará tu solicitud y te responderá en un plazo de 24 horas.",
     "title": "Configura tu prueba de Corgtex",
@@ -71,6 +71,10 @@
     "submitting": "Enviando...",
     "loading": "Cargando...",
     "genericError": "Algo salió mal. Inténtalo de nuevo.",
-    "networkError": "No se pudo enviar el formulario. Revisa tu conexión e inténtalo de nuevo."
+    "networkError": "No se pudo enviar el formulario. Revisa tu conexión e inténtalo de nuevo.",
+    "startAgain": "Iniciar una nueva solicitud de prueba",
+    "checkErrorTitle": "No pudimos comprobar este enlace",
+    "checkErrorBody": "Inténtalo de nuevo en un momento. Tu solicitud no se ha enviado.",
+    "tryAgain": "Intentar de nuevo"
   }
 }

@@ -61,7 +61,7 @@ Required environment variables for the core application (usually set in `.env` o
 | Variable | Description |
 |---|---|
 | `DATABASE_URL` | PostgreSQL connection string |
-| `APP_URL` | Base URL of the deployed web application (e.g. `https://app.corgtex.com`) |
+| `APP_URL` | Base URL of the deployed web application (e.g. `https://selfserve.corgtex.com`) |
 | `SESSION_COOKIE_SECRET` | 32+ character random string for signing secure cookies |
 | `ADMIN_EMAIL` | Email for the initial bootstrap admin user |
 | `ADMIN_PASSWORD` | Password for the initial bootstrap admin user |

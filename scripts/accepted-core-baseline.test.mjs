@@ -554,21 +554,8 @@ describe("explicit Core historical ledger disposition", () => {
 });
 
 describe("source CI versus explicit rollout", () => {
-  const context = (overrides = {}) => resolveProductionValidationContext({ eventName: "workflow_run", githubRef: "refs/heads/main",
-    githubSha: CANDIDATE, githubRepository: REPOSITORY,
-    event: { workflow_run: { head_sha: CANDIDATE, conclusion: "success", event: "push", head_branch: "main", head_repository: { full_name: REPOSITORY } } },
-    changedFiles: ["packages/domain/src/runtime.ts", "prisma/migrations/new/migration.sql"], ...overrides });
-  it("retains exact candidate release policy when no baseline is configured", () => {
-    expect(context()).toMatchObject({ enabled: "true", expected_git_sha: CANDIDATE });
-  });
-  it.each(["workflow_run", "schedule"])("does not import candidate fixtures into accepted Core on %s", (eventName) => {
-    expect(context({ eventName, acceptedBaseline: fixture().receipt })).toMatchObject({ enabled: "false", expected_git_sha: "",
-      validation_mode: "accepted-baseline-ci-only", crm_smoke: "false", source_intake_smoke: "false", briefing_fixture_smoke: "false" });
-  });
-  it("does not change explicit Production Validation SHA or gates", () => {
-    const input = { eventName: "workflow_dispatch", expectedGitShaInput: CANDIDATE };
-    expect(context({ ...input, acceptedBaseline: fixture().receipt })).toEqual(context(input));
-    expect(context(input)).toMatchObject({ enabled: "true", expected_git_sha: CANDIDATE, telemetry_release_smoke: "true" });
+  it.each(["push", "schedule", "workflow_dispatch"])("rejects Core selection in ordinary validation on %s", (eventName) => {
+    expect(() => resolveProductionValidationContext({ eventName, targetInput: "core" })).toThrow("VALIDATION_TARGET_UNKNOWN");
   });
 
   it.each([null, "{}", JSON.stringify(fixture().pin)])("attributes recovery using the failed source commit, config=%s", async (config) => {
@@ -592,29 +579,17 @@ describe("source CI versus explicit rollout", () => {
       expect(await readFile(outputPath, "utf8")).toBe(`automatic_revert_allowed=${config === null ? "true" : "false"}\n`);
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
-  it("wires main-only protected consumption, accepted-source preparation, and unchanged rollout workflows", async () => {
+  it("retains protected baseline and recovery tooling outside ordinary validation", async () => {
     const ci = await readFile(".github/workflows/ci.yml", "utf8");
     const bootstrap = await readFile(BASELINE_WORKFLOW, "utf8");
     const recovery = await readFile(".github/workflows/auto-revert.yml", "utf8");
-    const smoke = ci.slice(ci.indexOf("  smoke-prod:"), ci.indexOf("  observe-prod:"));
-    expect(smoke).toContain("github.event_name == 'push' && github.repository == 'Corgtexdotcom/corgtex'");
-    expect(smoke).toContain("environment: fleet-release-production");
-    expect(smoke).toContain("ref: ${{ steps.baseline.outputs.verifier_sha }}");
-    expect(smoke).toContain("ref: ${{ steps.baseline.outputs.source_sha }}");
-    expect(smoke).toContain("node .baseline/verifier/scripts/accepted-core-baseline.mjs check");
-    expect(smoke).toContain(`name: ${BASELINE_SMOKE_STEP}`);
-    expect(smoke).toContain("name: core-baseline-smoke-${{ github.run_id }}-${{ github.run_attempt }}");
-    expect(smoke).toContain("path: .artifacts/core-baseline/auth-smoke.json");
-    expect(smoke.indexOf("migrate diff --from-schema-datamodel")).toBeLessThan(smoke.indexOf("Verify accepted Core provider"));
+    expect(ci).not.toMatch(/smoke-prod:|accepted-core-baseline|ACCEPTED_CORE/);
     expect(bootstrap).toContain("--from-schema-datamodel prisma/schema.prisma --to-schema-datamodel prisma/schema.prisma --exit-code");
     expect(bootstrap).not.toMatch(/ADMIN_PASSWORD|runtime:write|deploymentId:|release-fleet\.mjs|migrate deploy/);
     expect(bootstrap).toContain("accepted-core-baseline-${{ github.run_id }}-${{ github.run_attempt }}");
-    expect(recovery).toContain("steps.baseline-policy.outputs.automatic_revert_allowed == 'true'");
-    expect(recovery.indexOf("recovery-policy")).toBeLessThan(recovery.indexOf("git revert"));
-    expect(ci).toContain("test \"$app_git_sha\" = \"$ACCEPTED_CORE_SOURCE_SHA\"");
-    expect(ci).toContain(".baseline/verifier/scripts/post-deploy-observation-gate.mjs");
+    expect(recovery).not.toContain("git revert");
     const validation = await readFile(".github/workflows/production-validation.yml", "utf8");
-    expect(validation).toContain("must run from the same revision expected in production");
+    expect(validation).not.toContain("telemetry-release-production-smoke:");
     const fleet = await readFile(".github/workflows/fleet-release.yml", "utf8");
     expect(fleet).not.toContain("accepted-core-baseline");
   });

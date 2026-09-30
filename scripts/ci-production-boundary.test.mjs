@@ -22,10 +22,10 @@ describe("automatic production CI boundary", () => {
     }
   });
 
-  it("observes exactly the three live release targets collected by main CI", () => {
+  it("observes only selfserve and Ops releases collected by main CI", () => {
     const observe = job("observe-prod");
     const manifests = [...observe.matchAll(/\{ target: "([^"]+)"/g)].map((match) => match[1]);
-    expect(manifests).toEqual(["backup-app", "azure-selfserve", "ops"]);
+    expect(manifests).toEqual(["azure-selfserve", "ops"]);
     expect([...normalizeObservationTargets(observationTargets)]).toEqual(manifests);
     expect(observe).toContain('OBSERVATION_REQUIRE_SOURCE: "true"');
     expect(observe).toContain("environment: fleet-release-production");
@@ -40,9 +40,9 @@ describe("automatic production CI boundary", () => {
     } }));
   }
 
-  it("keeps Core observation rooted in the source SHA", () => {
-    expect(workflowManifest("core").gitSha).toBe("a".repeat(40));
-    expect(workflowManifest("").gitSha).toBe("a".repeat(40));
+  it("keeps observation rooted in the accepted selfserve SHA regardless of old configuration", () => {
+    expect(workflowManifest("core").gitSha).toBe("b".repeat(40));
+    expect(workflowManifest("").gitSha).toBe("b".repeat(40));
   });
 
   it("runs sequence ACL regression on the existing isolated CI database", () => {
@@ -66,8 +66,8 @@ describe("automatic production CI boundary", () => {
   });
 
   it.each([
-    [observationTargets, ["backup-app", "ops"]],
-    ["azure-selfserve,ops", ["ops"]],
+    [observationTargets, ["ops"]],
+    ["backup-app,azure-selfserve,ops", ["backup-app", "ops"]],
   ])("observes only selected providers for %s but retains full-fleet failure", async (targets, expectedServices) => {
     const queriedServices = [];
     const target = (id) => ({ id, label: id, provider: "railway",
@@ -113,7 +113,7 @@ describe("automatic production CI boundary", () => {
     });
     expect(summary.status).toBe("blocked");
     expect(summary.missingRequiredSources).toEqual(expect.arrayContaining([
-      "azure_monitor", "backup-app: railway or posthog", "ops: railway or posthog",
+      "azure_monitor", "ops: railway or posthog",
     ]));
   });
 
@@ -130,70 +130,18 @@ describe("automatic production CI boundary", () => {
     });
     expect(summary.status).toBe("blocked");
     expect(summary.blockingFailures.map((row) => row.instance_id))
-      .toEqual(["unclassified-runtime", "ops", "backup-app"]);
+      .toEqual(["unclassified-runtime", "ops"]);
     expect(summary.advisoryFailures.map((row) => row.instance_id))
-      .toEqual(["railway-customers/example"]);
+      .toEqual(["railway-customers/example", "backup-app"]);
   });
 
-  it("verifies bundled migrations after the exact-release wait without bootstrap or ingestion writes", () => {
-    const smoke = job("smoke-prod");
-    expect(smoke).toContain('import { verifyMigrations } from "./scripts/start-web.mjs"; await verifyMigrations();');
-    const releaseWait = smoke.indexOf("node scripts/railway-smoke.mjs");
-    for (const check of ["await verifyMigrations()", "node scripts/check-migration-health.mjs"]) {
-      expect(smoke.indexOf(check)).toBeGreaterThan(releaseWait);
-      expect(smoke.indexOf(check)).toBeLessThan(smoke.indexOf("id: smoke-proof"));
-    }
-    expect(smoke).toContain("DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}");
-    expect(smoke).not.toMatch(/release:db|release-db\.mjs|prisma\s+migrate\s+deploy|prisma\s+db\s+seed|npm run seed|migrate-and-seed|ingestion-guidance-smoke\.mjs|check:(?:migration|seed)-fixtures/);
-    expect(smoke).not.toMatch(/run:.*(?:node scripts\/start-web\.mjs|\.main\(\))/);
-  });
-
-  it("retains authenticated smoke, exact-release proof and observation", () => {
-    const smoke = job("smoke-prod");
-    expect(smoke).toContain("- check\n      - db-sync\n      - build");
-    expect(smoke).toContain("node scripts/check-migration-health.mjs");
-    expect(smoke).toContain("node scripts/self-serve-production-readiness.mjs");
-    expect(smoke).toContain("node scripts/railway-smoke.mjs https://app.corgtex.com ${{ secrets.ADMIN_EMAIL }} ${{ secrets.ADMIN_PASSWORD }}");
-    expect(smoke).toContain("CORGTEX_SKIP_RELEASE_MATCH: ${{ steps.app-release.outputs.skip_release_match }}");
-    expect(smoke).toContain('node scripts/production-validation-context.mjs --classify-app-release --output="$GITHUB_OUTPUT"');
-    expect(smoke).toContain("id: smoke-proof");
-    expect(job("observe-prod")).toContain("- smoke-prod");
+  it("keeps legacy Core writers, baseline consumption and source reverts out of automatic delivery", () => {
+    expect(workflow).not.toMatch(/smoke-prod:|accepted-core-baseline|https:\/\/app\.corgtex\.com|secrets\.PRODUCTION_DATABASE_URL/);
+    expect(recovery).not.toMatch(/git revert|contents: write|Open revert PR/);
+    expect(job("smoke-selfserve")).toContain("uses: ./.github/workflows/production-validation.yml");
     expect(job("observe-prod")).toContain("post-deploy-observation-gate.mjs");
-  });
-
-  it("shares the classifier and full push-range evidence across CI, recovery and production validation", () => {
-    const smoke = job("smoke-prod");
-    const classify = 'node scripts/production-validation-context.mjs --classify-app-release --output="$GITHUB_OUTPUT"';
-    expect(smoke).toContain(classify);
-    expect(smoke).toContain("RELEASE_CONTEXT_BEFORE: ${{ github.event.before }}");
-    expect(smoke).toContain("RELEASE_CONTEXT_AFTER: ${{ github.sha }}");
-    expect(smoke).toContain("name: production-app-release-context");
-    expect(recovery).toContain(classify);
-    expect(recovery).toContain("run-id: ${{ github.event.workflow_run.id }}");
-    expect(recovery).toContain("PRODUCTION_VALIDATION_CI_RELEASE_CONTEXT_PATH: .artifacts/ci-release-context/release-context.json");
-    expect(recovery).toContain("RELEASE_CONTEXT_AFTER: ${{ steps.merge.outputs.sha }}");
-    for (const consumer of [smoke, recovery]) {
-      expect(consumer).not.toContain('case "$path"');
-      expect(consumer).not.toContain("git diff --name-only");
-      expect(consumer).not.toContain("git rev-parse \"${SHA}^1\"");
-    }
-    const validation = readFileSync(new URL("../.github/workflows/production-validation.yml", import.meta.url), "utf8");
-    expect(validation).toContain("PRODUCTION_VALIDATION_CI_RELEASE_CONTEXT_PATH: .artifacts/ci-release-context/release-context.json");
-    expect(validation).toContain('node scripts/production-validation-context.mjs --output="$GITHUB_OUTPUT"');
-  });
-
-  it("keeps recovery health, authentication, database, schema and exact-version conditions", () => {
-    expect(recovery).toContain("REQUIRES_APP_RELEASE: ${{ steps.app-release.outputs.requires_app_release }}");
-    expect(recovery).toContain('const requiresAppRelease = process.argv[3] !== "false";');
-    expect(recovery).toContain("!requiresAppRelease || releaseGitSha === sha || releaseImageTag === sha");
-    for (const condition of ['json?.status === "ok"', 'json?.service === "web"', 'json?.database === "up"',
-      'json?.schema === "ready"', 'json?.app === "corgtex"', 'json?.auth === "password-session"']) {
-      expect(recovery).toContain(condition);
-    }
-    expect(recovery).toContain("process.exit(healthOk && releaseMatches ? 0 : 1)");
+    expect(job("observe-prod")).toContain("SELFSERVE_VALIDATION_EXPECTED_SHA");
     expect(job("check")).toContain("npx vitest run --project unit --project integration");
-    const config = readFileSync(new URL("../vitest.config.mts", import.meta.url), "utf8");
-    expect(config).toContain('"scripts/**/*.test.mjs"');
   });
 
   it("retains isolated PostgreSQL migration, integration and seed-fixture checks", () => {

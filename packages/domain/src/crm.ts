@@ -2661,6 +2661,15 @@ export async function failCommunicationSuggestion(actor: AppActor, params: {
 
 // --- QUALIFICATIONS ---
 
+export async function checkQualificationLink(token: string) {
+  const lead = await prisma.demoLead.findUnique({
+    where: { qualifyToken: token },
+    select: { id: true },
+  });
+  invariant(lead, 410, "QUALIFICATION_LINK_UNAVAILABLE", "This qualification link is no longer available. Please start a new request.");
+  return { available: true };
+}
+
 export async function submitQualification(params: {
   token: string;
   companyName: string;
@@ -2673,7 +2682,7 @@ export async function submitQualification(params: {
     where: { qualifyToken: params.token },
     include: { workspace: true },
   });
-  invariant(lead, 400, "INVALID_INPUT", "Invalid qualification token.");
+  invariant(lead, 410, "QUALIFICATION_LINK_UNAVAILABLE", "This qualification link is no longer available. Please start a new request.");
 
   return prisma.$transaction(async (tx) => {
     await requirePublicCrmWrites(tx, lead.workspaceId);

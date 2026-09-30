@@ -17,11 +17,11 @@ export function getSiteConfig(): SiteConfig {
       (process.env.NODE_ENV === "production" ? "https://corgtex.com" : "http://localhost:3008"),
   );
   const appUrl = trimTrailingSlash(
-    process.env.NEXT_PUBLIC_APP_URL?.trim() ||
-      (process.env.NODE_ENV === "production" ? "https://selfserve.corgtex.com" : "http://localhost:3000"),
+    process.env.NODE_ENV === "production" ? "https://selfserve.corgtex.com"
+      : process.env.NEXT_PUBLIC_APP_URL?.trim() || "http://localhost:3000",
   );
-  const demoUrl = trimTrailingSlash(process.env.NEXT_PUBLIC_DEMO_URL?.trim() ||
-    `${appUrl}/demo`);
+  const demoUrl = trimTrailingSlash(process.env.NODE_ENV === "production" ? `${appUrl}/demo`
+    : process.env.NEXT_PUBLIC_DEMO_URL?.trim() || `${appUrl}/demo`);
   const bookDemoUrl = process.env.NEXT_PUBLIC_BOOK_DEMO_URL?.trim() || "https://calendar.app.google/jJd5yeSuDStVZm896";
 
   return {
