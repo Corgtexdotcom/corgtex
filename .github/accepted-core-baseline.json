@@ -3,17 +3,17 @@
   "target": "backup-app",
   "targetSha256": "0a8d44d089ad7b3b4ce3878a84d9b3755c9fdc5b4b124d786cfb1654a417b74b",
   "sourceSha": "d0a3896ef917b50f2fec2d797908f29aa026a058",
-  "verifierSha": "424b65801ffd783fa3cad7e7068d77523467fd78",
-  "receiptSha256": "2d1075566d08221970e4c5ca8411dc1d5846094c78a19acac089d2782b9a8909",
+  "verifierSha": "dd38c833afcdce2f5a5ee7efbb6200495823aabc",
+  "receiptSha256": "f5affcd52df4953d2e7406aeed1852e43ffed4bf063d0bac2f39172940e3ee71",
   "run": {
-    "id": 34931209548,
+    "id": 36785108664,
     "attempt": 1,
     "workflowId": 357276730,
-    "workflowSha": "424b65801ffd783fa3cad7e7068d77523467fd78"
+    "workflowSha": "dd38c833afcdce2f5a5ee7efbb6200495823aabc"
   },
   "artifact": {
-    "id": 10380924284,
-    "name": "accepted-core-baseline-34931209548-1",
-    "sha256": "2aee9088f60aa4b64a7db4dd901e083f6cb2beb6f4b4ce45c02e9da25d1f8830"
+    "id": 11128933798,
+    "name": "accepted-core-baseline-36785108664-1",
+    "sha256": "7a7811b5db9eaf9c9ee4794325fa6d349bff21399603303868a888293a6f205b"
   }
 }
