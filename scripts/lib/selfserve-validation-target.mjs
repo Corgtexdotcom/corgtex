@@ -13,8 +13,8 @@ export function requireValidation(condition, code) {
 }
 
 export function validationTarget(value = "") {
-  const mode = String(value || "core");
-  requireValidation(["core", SELFSERVE_VALIDATION_TARGET.name].includes(mode), "VALIDATION_TARGET_UNKNOWN");
+  const mode = String(value || SELFSERVE_VALIDATION_TARGET.name);
+  requireValidation(mode === SELFSERVE_VALIDATION_TARGET.name, "VALIDATION_TARGET_UNKNOWN");
   return mode;
 }
 

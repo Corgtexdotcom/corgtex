@@ -24,33 +24,34 @@ describe("one pinned target through the entire automatic validation chain", () =
     expect(ci.jobs["smoke-mode-gate"].outputs.selected_target).toBe("${{ steps.mode.outputs.selected_target }}");
     expect(validationRunTarget({ eventName: "push", pinnedTarget: target.name, configuredTarget: "core" })).toBe(target.name);
     expect(() => validationRunTarget({ eventName: "push", configuredTarget: target.name })).toThrow("PINNED_TARGET_REQUIRED");
-    expect(validationRunTarget({ eventName: "workflow_dispatch", configuredTarget: "core" })).toBe("core");
+    expect(() => validationRunTarget({ eventName: "workflow_dispatch", configuredTarget: "core" })).toThrow("UNKNOWN");
+    expect(validationRunTarget({ eventName: "schedule" })).toBe(target.name);
   });
   it.each([
-    ["core", "success", "skipped", "", "", 0],
-    [target.name, "skipped", "success", "true", target.name, 0],
-    [target.name, "success", "success", "true", target.name, 1],
-    [target.name, "skipped", "success", "true", "core", 1],
-    [target.name, "skipped", "success", "true", "", 1],
-    ["", "success", "skipped", "", "", 1],
-    ["core", "skipped", "success", "true", target.name, 1],
-  ])("executes the gate for %s/%s/%s (bound result %s/%s)", (mode, core, selfserve, proof, returned, status) => {
+    ["core", "skipped", "", "", 1],
+    [target.name, "success", "true", target.name, 0],
+    [target.name, "failure", "true", target.name, 1],
+    [target.name, "success", "false", target.name, 1],
+    [target.name, "success", "true", "core", 1],
+    [target.name, "success", "true", "", 1],
+    ["", "skipped", "", "", 1],
+    ["core", "success", "true", target.name, 1],
+  ])("executes the gate for %s/%s (bound result %s/%s)", (mode, selfserve, proof, returned, status) => {
     const directory = mkdtempSync(join(tmpdir(), "validation-mode-"));
     try {
       const output = join(directory, "output");
       const result = spawnSync("bash", ["-c", ci.jobs["smoke-mode-gate"].steps[0].run], { encoding: "utf8", env: {
-        PATH: process.env.PATH, TARGET: mode, CORE_RESULT: core, SELFSERVE_RESULT: selfserve,
+        PATH: process.env.PATH, TARGET: mode, SELFSERVE_RESULT: selfserve,
         SELFSERVE_PROOF: proof, SELFSERVE_TARGET: returned, GITHUB_OUTPUT: output,
       } });
       expect(result.status).toBe(status);
       if (status === 0) expect(readFileSync(output, "utf8")).toBe(`selected_target=${mode}\n`);
     } finally { rmSync(directory, { recursive: true, force: true }); }
   });
-  it("shares the exact non-cancelling parity lock with Core", () => {
-    const core = Object.values(validation.jobs).find((job) => job.concurrency?.group === "production-validation-work-item-parity-corgtex-validation" && job !== validation.jobs["selfserve-parity"]);
-    expect(core).toBeTruthy();
-    expect(validation.jobs["selfserve-parity"].concurrency).toEqual(core.concurrency);
-    expect(core.concurrency["cancel-in-progress"]).toBe(false);
+  it("preserves the non-cancelling internal parity lock", () => {
+    expect(validation.jobs["selfserve-parity"].concurrency).toEqual({
+      group: "production-validation-work-item-parity-corgtex-validation", "cancel-in-progress": false,
+    });
   });
 });
 
@@ -66,7 +67,7 @@ describe("executed observation shell requires fresh baked health before manifest
         else command node "$@"; fi
       }
       ${script}`], { encoding: "utf8", env: { PATH: process.env.PATH, HEALTH: JSON.stringify(payload),
-      PRODUCTION_VALIDATION_TARGET: mode, SELFSERVE_VALIDATION_EXPECTED_SHA: SHA, ACCEPTED_CORE_BASELINE: "false",
+      PRODUCTION_VALIDATION_TARGET: mode, SELFSERVE_VALIDATION_EXPECTED_SHA: SHA,
       GITHUB_SHA: SOURCE, OBSERVATION_SINCE: "2026-09-16T00:00:00Z" } });
   }
   it("observes accepted baked runtime, not undeployed source, after the fresh health read", () => {
@@ -94,12 +95,12 @@ describe("executed observation shell requires fresh baked health before manifest
     expect(result.status).not.toBe(0);
     expect(result.stdout).not.toContain("--manifest-json");
   });
-  it("fails transport before observation and preserves Core legacy health semantics", () => {
+  it("fails transport or a legacy target before observation", () => {
     expect(observe(health(), target.name, true).status).not.toBe(0);
     const payload = health(); delete payload.release.runtime;
     const core = observe(payload, "core");
-    expect(core.status, core.stderr).toBe(0);
-    expect(core.stdout).toContain(`"gitSha":"${SOURCE}"`);
+    expect(core.status).not.toBe(0);
+    expect(core.stdout).not.toContain("--manifest-json");
   });
 });
 

@@ -2406,6 +2406,25 @@ describe("CRM domain", () => {
   });
 
   // --- submitQualification ---
+  describe("checkQualificationLink", () => {
+    it("checks a valid token without exposing lead data or creating a qualification", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { checkQualificationLink } = await import("./crm");
+      vi.mocked(prisma.demoLead.findUnique).mockResolvedValue({ id: "lead-1" } as any);
+      await expect(checkQualificationLink("synthetic-token")).resolves.toEqual({ available: true });
+      expect(prisma.demoLead.findUnique).toHaveBeenCalledWith({ where: { qualifyToken: "synthetic-token" }, select: { id: true } });
+      expect(prisma.crmQualification.create).not.toHaveBeenCalled();
+    });
+
+    it("returns the stable unavailable state for an unknown legacy token", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { checkQualificationLink } = await import("./crm");
+      vi.mocked(prisma.demoLead.findUnique).mockResolvedValue(null);
+      await expect(checkQualificationLink("retired-token")).rejects.toMatchObject({ status: 410, code: "QUALIFICATION_LINK_UNAVAILABLE" });
+      expect(prisma.crmQualification.create).not.toHaveBeenCalled();
+    });
+  });
+
   describe("submitQualification", () => {
     it("creates a qualification record from a valid token", async () => {
       const { prisma } = await import("@corgtex/shared");
@@ -2449,7 +2468,7 @@ describe("CRM domain", () => {
           aiExperience: "none",
           helpNeeded: "everything",
         })
-      ).rejects.toThrow();
+      ).rejects.toMatchObject({ status: 410, code: "QUALIFICATION_LINK_UNAVAILABLE" });
     });
   });
 

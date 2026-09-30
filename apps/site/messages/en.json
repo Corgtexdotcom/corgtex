@@ -53,8 +53,8 @@
     "exploreTheory": "Explore the Theory"
   },
   "qualify": {
-    "invalidTitle": "Invalid Link",
-    "invalidBody": "The qualification link appears to be missing or invalid. Please check the email you received.",
+    "invalidTitle": "This link is no longer available",
+    "invalidBody": "This request link may be missing or expired. Start a new trial request to continue.",
     "successTitle": "Thank You!",
     "successBody": "We've received your information. Our team will review your request and get back to you within 24 hours.",
     "title": "Set up your Corgtex trial",
@@ -71,6 +71,10 @@
     "submitting": "Submitting...",
     "loading": "Loading...",
     "genericError": "Something went wrong. Please try again.",
-    "networkError": "Failed to submit form. Please check your connection and try again."
+    "networkError": "Failed to submit form. Please check your connection and try again.",
+    "startAgain": "Start a new trial request",
+    "checkErrorTitle": "We could not check this link",
+    "checkErrorBody": "Please try again in a moment. Your request has not been submitted.",
+    "tryAgain": "Try again"
   }
 }

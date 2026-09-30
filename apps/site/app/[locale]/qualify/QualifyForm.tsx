@@ -1,13 +1,15 @@
 "use client";
 
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
+import { signupUrlForLocale } from "../../../lib/site";
 
 function QualifyFormInner() {
   const searchParams = useSearchParams();
   const token = searchParams?.get("token");
   const t = useTranslations("qualify");
+  const locale = useLocale();
 
   const [companyName, setCompanyName] = useState("");
   const [website, setWebsite] = useState("");
@@ -17,12 +19,50 @@ function QualifyFormInner() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const [linkStatus, setLinkStatus] = useState<"checking" | "available" | "unavailable" | "error">("checking");
+  const [checkAttempt, setCheckAttempt] = useState(0);
 
-  if (!token) {
+  useEffect(() => {
+    let current = true;
+    if (!token) {
+      setLinkStatus("unavailable");
+      return;
+    }
+    setLinkStatus("checking");
+    void fetch("/api/demo-leads/qualify/link", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token }),
+      cache: "no-store",
+    }).then(async (response) => {
+      const data = await response.json();
+      if (!current) return;
+      setLinkStatus(response.ok && data.available === true ? "available"
+        : data.error?.code === "QUALIFICATION_LINK_UNAVAILABLE" ? "unavailable" : "error");
+    }).catch(() => { if (current) setLinkStatus("error"); });
+    return () => { current = false; };
+  }, [token, checkAttempt]);
+
+  if (!token || linkStatus === "unavailable") {
     return (
       <div className="container qualify-state">
         <h1>{t("invalidTitle")}</h1>
         <p>{t("invalidBody")}</p>
+        <a href={signupUrlForLocale(locale)} className="btn btn-primary">{t("startAgain")}</a>
+      </div>
+    );
+  }
+
+  if (linkStatus === "checking") {
+    return <div className="container qualify-state" role="status">{t("loading")}</div>;
+  }
+
+  if (linkStatus === "error") {
+    return (
+      <div className="container qualify-state">
+        <h1>{t("checkErrorTitle")}</h1>
+        <p>{t("checkErrorBody")}</p>
+        <button type="button" className="btn btn-primary" onClick={() => setCheckAttempt((attempt) => attempt + 1)}>{t("tryAgain")}</button>
       </div>
     );
   }
@@ -60,6 +100,10 @@ function QualifyFormInner() {
         setSuccess(true);
       } else {
         const data = await res.json();
+        if (data.error?.code === "QUALIFICATION_LINK_UNAVAILABLE") {
+          setLinkStatus("unavailable");
+          return;
+        }
         const message = typeof data.error === "string" ? data.error : data.error?.message;
         setError(typeof message === "string" ? message : t("genericError"));
       }

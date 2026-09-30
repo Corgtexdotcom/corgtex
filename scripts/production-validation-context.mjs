@@ -6,11 +6,8 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 
 import { collectProductionValidationPrNumbers } from "./production-validation-pr-numbers.mjs";
-import { readPin, resolveBaseline } from "./accepted-core-baseline.mjs";
 import { validationTarget, validationRunTarget, SELFSERVE_VALIDATION_TARGET, selfserveExpectedRelease, assertSelfserveOrigin } from "./lib/selfserve-validation-target.mjs";
 
-const DEFAULT_BASE_URL = "https://app.corgtex.com";
-const DEFAULT_RECORDER_DEPLOYMENTS = "";
 const DEFAULT_CLIENT_READINESS_ROUTES = "leads";
 const CLIENT_READINESS_ROUTE_NAMES = new Set([
   "home",
@@ -112,20 +109,6 @@ function validateGitSha(value, label) {
   return normalized;
 }
 
-function validateBaseUrl(value) {
-  const raw = normalizeOptionalText(value) || DEFAULT_BASE_URL;
-  let parsed;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    throw new Error("base_url must be a valid URL.");
-  }
-  if (parsed.origin !== DEFAULT_BASE_URL || !["", "/"].includes(parsed.pathname) || parsed.search || parsed.hash) {
-    throw new Error(`base_url must be exactly ${DEFAULT_BASE_URL}.`);
-  }
-  return parsed.origin;
-}
-
 function normalizeClientReadinessRoutes(value) {
   const raw = normalizeOptionalText(value) || DEFAULT_CLIENT_READINESS_ROUTES;
   const routeNames = [...new Set(raw.split(",").map((item) => item.trim()).filter(Boolean))];
@@ -216,27 +199,8 @@ function workflowRunIsTrusted(event, githubRepository) {
   );
 }
 
-function dispatchSmokeEnabled(value, eventName) {
-  if (eventName !== "workflow_dispatch") return true;
-  return normalizeOptionalText(value).toLowerCase() !== "false";
-}
-
 function booleanWorkflowInput(value) {
   return normalizeOptionalText(value).toLowerCase() === "true";
-}
-
-function expectedGitShaForRun({ eventName, event, githubSha, expectedInput, changedFiles }) {
-  const explicit = validateGitSha(expectedInput, "expected_git_sha");
-  if (explicit) return explicit;
-
-  if (eventName === "schedule") return "";
-
-  if (eventName === "workflow_run") {
-    if (!requiresProductionAppRelease(changedFiles)) return "";
-    return validateGitSha(event?.workflow_run?.head_sha, "workflow_run.head_sha");
-  }
-
-  return validateGitSha(githubSha, "GITHUB_SHA");
 }
 
 async function changedFilesFromCiReleaseContext({ releaseContextPath, event }) {
@@ -276,18 +240,11 @@ export function resolveProductionValidationContext({
   eventName,
   event,
   githubRef,
-  githubSha,
   githubRepository,
   baseUrlInput,
   expectedGitShaInput,
   prNumbersInput,
-  baselinePrNumbers,
-  recorderDeploymentsInput,
-  recorderTempMeetingsInput,
   clientReadinessRoutesInput,
-  smokeInputs = {},
-  changedFiles = [],
-  acceptedBaseline = null,
   targetInput,
   acceptedSelfserveSha,
   selfserveParityInput,
@@ -297,68 +254,21 @@ export function resolveProductionValidationContext({
   const allowed = eventName === "workflow_run"
     ? workflowRunIsTrusted(event, githubRepository)
     : true;
-
-  if (target === SELFSERVE_VALIDATION_TARGET.name) {
-    const trusted = githubRepository === "Corgtexdotcom/corgtex"
-      && (githubRef === "refs/heads/main" || (eventName === "workflow_run" && allowed));
-    if (!trusted || !allowed) throw new Error("SELFSERVE_VALIDATION_TRUSTED_MAIN_REQUIRED");
-    const origin = assertSelfserveOrigin(baseUrlInput || SELFSERVE_VALIDATION_TARGET.origin);
-    if (booleanWorkflowInput(selfserveCrmInput)) {
-      throw new Error("SELFSERVE_CRM_BLOCKED: real-model CRM requires a fixed synthetic account and a separately approved model lane; the no-egress fixture cannot provide this proof.");
-    }
-    return {
-      enabled: boolOutput(eventName !== "workflow_run"), target,
-      validation_mode: eventName === "workflow_dispatch" ? "explicit-release" : "accepted-serving",
-      trusted_ref: "true", base_url: origin,
-      expected_git_sha: selfserveExpectedRelease({ eventName, expectedSha: expectedGitShaInput, acceptedSha: acceptedSelfserveSha }),
-      pr_numbers: collectProductionValidationPrNumbers({ baseline: baselinePrNumbers, explicit: prNumbersInput, event }).join(","),
-      // None of the legacy production-writer helpers may inherit this target.
-      crm_smoke: "false", telemetry_release_smoke: "false", client_readiness_smoke: "false",
-      client_readiness_routes: normalizeClientReadinessRoutes(clientReadinessRoutesInput),
-      source_intake_smoke: "false", work_item_parity_smoke: "false", briefing_fixture_smoke: "false",
-      recorder_readiness_smoke: "false", recorder_readiness_deployments: "", recorder_readiness_temp_meetings: "false",
-      selfserve_parity_smoke: boolOutput(eventName === "workflow_dispatch" && booleanWorkflowInput(selfserveParityInput)),
-    };
+  const trusted = githubRepository === "Corgtexdotcom/corgtex"
+    && (githubRef === "refs/heads/main" || (eventName === "workflow_run" && allowed));
+  if (!trusted || !allowed) throw new Error("SELFSERVE_VALIDATION_TRUSTED_MAIN_REQUIRED");
+  const origin = assertSelfserveOrigin(baseUrlInput || SELFSERVE_VALIDATION_TARGET.origin);
+  if (booleanWorkflowInput(selfserveCrmInput)) {
+    throw new Error("SELFSERVE_CRM_BLOCKED: real-model CRM requires a fixed synthetic account and a separately approved model lane; the no-egress fixture cannot provide this proof.");
   }
-
-  // Source CI already validates the accepted Core baseline. Its completion (or
-  // a schedule) is not authority to import new-main fixtures into that runtime.
-  // Explicit dispatch remains an exact incoming release validation.
-  const baselineOnly = Boolean(acceptedBaseline) && eventName !== "workflow_dispatch";
-  const enabled = allowed && !baselineOnly;
-  const prNumbers = collectProductionValidationPrNumbers({
-    baseline: baselinePrNumbers,
-    explicit: prNumbersInput,
-    event,
-  }).join(",");
-
-  const expectedGitSha = enabled
-    ? expectedGitShaForRun({
-      eventName,
-      event,
-      githubSha,
-      expectedInput: expectedGitShaInput,
-      changedFiles,
-    })
-    : "";
-
   return {
-    enabled: boolOutput(enabled),
-    validation_mode: baselineOnly ? "accepted-baseline-ci-only" : "legacy-or-explicit-release",
-    trusted_ref: boolOutput(githubRef === "refs/heads/main" || (eventName === "workflow_run" && allowed)),
-    base_url: validateBaseUrl(baseUrlInput),
-    expected_git_sha: expectedGitSha,
-    pr_numbers: prNumbers,
-    crm_smoke: boolOutput(enabled && dispatchSmokeEnabled(smokeInputs.crm, eventName)),
-    telemetry_release_smoke: boolOutput(enabled && dispatchSmokeEnabled(smokeInputs.telemetryRelease, eventName)),
-    client_readiness_smoke: boolOutput(enabled && dispatchSmokeEnabled(smokeInputs.clientReadiness, eventName)),
+    enabled: boolOutput(eventName !== "workflow_run"), target,
+    validation_mode: eventName === "workflow_dispatch" ? "explicit-release" : "accepted-serving",
+    trusted_ref: "true", base_url: origin,
+    expected_git_sha: selfserveExpectedRelease({ eventName, expectedSha: expectedGitShaInput, acceptedSha: acceptedSelfserveSha }),
+    pr_numbers: collectProductionValidationPrNumbers({ explicit: prNumbersInput, event }).join(","),
     client_readiness_routes: normalizeClientReadinessRoutes(clientReadinessRoutesInput),
-    source_intake_smoke: boolOutput(enabled && dispatchSmokeEnabled(smokeInputs.sourceIntake, eventName)),
-    work_item_parity_smoke: boolOutput(enabled && dispatchSmokeEnabled(smokeInputs.workItemParity, eventName)),
-    briefing_fixture_smoke: boolOutput(enabled && dispatchSmokeEnabled(smokeInputs.briefingFixture, eventName)),
-    recorder_readiness_smoke: boolOutput(enabled && dispatchSmokeEnabled(smokeInputs.recorderReadiness, eventName)),
-    recorder_readiness_deployments: normalizeOptionalText(recorderDeploymentsInput) || DEFAULT_RECORDER_DEPLOYMENTS,
-    recorder_readiness_temp_meetings: boolOutput(enabled && eventName === "workflow_dispatch" && booleanWorkflowInput(recorderTempMeetingsInput)),
+    selfserve_parity_smoke: boolOutput(eventName === "workflow_dispatch" && booleanWorkflowInput(selfserveParityInput)),
   };
 }
 
@@ -407,11 +317,6 @@ async function main() {
     const requiresAppRelease = requiresProductionAppRelease(changedFiles);
     const context = { source: "ci-push-range", before, after, changedFiles,
       skipReleaseMatch: !requiresAppRelease, requiresProductionAppRelease: requiresAppRelease };
-    if (process.env.ACCEPTED_CORE_BASELINE === "true") {
-      context.validationMode = "accepted-core-baseline";
-      context.acceptedSourceSha = validateGitSha(process.env.ACCEPTED_CORE_SOURCE_SHA, "accepted baseline source");
-      if (!context.acceptedSourceSha) throw new Error("Accepted baseline source is missing.");
-    }
     if (process.env.RELEASE_CONTEXT_PATH) await writeFile(process.env.RELEASE_CONTEXT_PATH, `${JSON.stringify(context, null, 2)}\n`);
     if (args.output) await writeFile(args.output, `${formatGithubOutput({
       skip_release_match: boolOutput(!requiresAppRelease), requires_app_release: boolOutput(requiresAppRelease),
@@ -421,48 +326,23 @@ async function main() {
   }
   const event = await readEvent(process.env.GITHUB_EVENT_PATH);
   const eventName = process.env.GITHUB_EVENT_NAME;
-  const automaticTrusted = process.env.GITHUB_REPOSITORY === "Corgtexdotcom/corgtex" && process.env.GITHUB_REF === "refs/heads/main"
-    && (eventName === "schedule" || (eventName === "workflow_run" && workflowRunIsTrusted(event, process.env.GITHUB_REPOSITORY)));
   const target = validationRunTarget({ eventName, pinnedTarget: process.env.PRODUCTION_VALIDATION_PINNED_TARGET,
     configuredTarget: process.env.PRODUCTION_VALIDATION_TARGET });
-  const acceptedBaseline = automaticTrusted && target === "core" ? await resolveBaseline(await readPin()) : null;
-  const changedFiles = await changedFilesForEvent({
-    eventName,
-    event,
-    releaseContextPath: process.env.PRODUCTION_VALIDATION_CI_RELEASE_CONTEXT_PATH,
-  });
   const context = resolveProductionValidationContext({
     eventName,
     event,
     githubRef: process.env.GITHUB_REF,
-    githubSha: process.env.GITHUB_SHA,
     githubRepository: process.env.GITHUB_REPOSITORY,
     baseUrlInput: process.env.PRODUCTION_VALIDATION_BASE_URL_INPUT,
     expectedGitShaInput: process.env.PRODUCTION_VALIDATION_EXPECTED_GIT_SHA_INPUT,
     prNumbersInput: process.env.PRODUCTION_VALIDATION_PR_NUMBERS_INPUT,
-    baselinePrNumbers: process.env.PRODUCTION_VALIDATION_BASELINE_PR_NUMBERS,
-    recorderDeploymentsInput: process.env.PRODUCTION_VALIDATION_RECORDER_DEPLOYMENTS_INPUT,
-    recorderTempMeetingsInput: process.env.PRODUCTION_VALIDATION_RECORDER_TEMP_MEETINGS_INPUT,
     clientReadinessRoutesInput: process.env.PRODUCTION_VALIDATION_CLIENT_READINESS_ROUTES_INPUT,
-    smokeInputs: {
-      crm: process.env.PRODUCTION_VALIDATION_CRM_SMOKE_INPUT,
-      telemetryRelease: process.env.PRODUCTION_VALIDATION_TELEMETRY_RELEASE_SMOKE_INPUT,
-      clientReadiness: process.env.PRODUCTION_VALIDATION_CLIENT_READINESS_SMOKE_INPUT,
-      sourceIntake: process.env.PRODUCTION_VALIDATION_SOURCE_INTAKE_SMOKE_INPUT,
-      workItemParity: process.env.PRODUCTION_VALIDATION_WORK_ITEM_PARITY_SMOKE_INPUT,
-      briefingFixture: process.env.PRODUCTION_VALIDATION_BRIEFING_FIXTURE_SMOKE_INPUT,
-      recorderReadiness: process.env.PRODUCTION_VALIDATION_RECORDER_READINESS_SMOKE_INPUT,
-    },
-    changedFiles,
-    acceptedBaseline,
     targetInput: target,
     acceptedSelfserveSha: process.env.SELFSERVE_VALIDATION_ACCEPTED_SHA,
     selfserveParityInput: process.env.SELFSERVE_PARITY_INPUT,
     selfserveCrmInput: process.env.SELFSERVE_CRM_INPUT,
   });
-  if (target === SELFSERVE_VALIDATION_TARGET.name) {
-    context.verifier_sha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-  }
+  context.verifier_sha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 
   if (args.output) {
     await writeFile(args.output, `${formatGithubOutput(context)}\n`, { flag: "a" });

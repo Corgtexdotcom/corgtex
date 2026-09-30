@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { POST as capture } from "./route";
 import { POST as qualify } from "./qualify/route";
+import { POST as checkLink } from "./qualify/link/route";
 import { signupUrlForLocale } from "../../../lib/site";
 
 const fetchMock = vi.fn();
@@ -45,7 +46,7 @@ describe("site demo backend continuity", () => {
     const input = () => request({ token: secret, email: secret }, { Cookie: secret, Authorization: secret, "x-real-ip": secret });
     vi.stubEnv("DEMO_BACKEND_URL", `https://user:${secret}@private.invalid`);
     await handler(input());
-    vi.stubEnv("DEMO_BACKEND_URL", `https://${secret}.invalid`);
+    vi.stubEnv("DEMO_BACKEND_URL", "https://selfserve.corgtex.com");
     fetchMock.mockRejectedValueOnce(new Error(secret))
       .mockResolvedValueOnce(Response.json({ error: secret }, { status: 503 }))
       .mockResolvedValueOnce(new Response(secret, { status: 307, headers: { Location: `https://${secret}.invalid` } }))
@@ -76,20 +77,33 @@ describe("site demo backend continuity", () => {
     expect(signupUrlForLocale("en")).toBe("https://selfserve.corgtex.com/signup");
   });
 
+  it("checks link availability on the same selfserve backend without qualification fields", async () => {
+    fetchMock.mockResolvedValue(Response.json({ available: true }));
+    expect(await (await checkLink(request({ token: "synthetic-token" }))).json()).toEqual({ available: true });
+    expect(fetchMock.mock.calls[0][0]).toBe("https://selfserve.corgtex.com/api/demo-leads/qualify/link");
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ token: "synthetic-token" });
+  });
+
+  it("rejects a retired Core override without a second backend or write", async () => {
+    vi.stubEnv("DEMO_BACKEND_URL", "https://app.corgtex.com");
+    for (const handler of [capture, qualify, checkLink]) expect((await handler(request())).status).toBe(503);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("uses one configured origin for capture and qualification token continuity", async () => {
-    vi.stubEnv("DEMO_BACKEND_URL", " https://core.example.invalid/ ");
+    vi.stubEnv("DEMO_BACKEND_URL", " https://selfserve.corgtex.com/ ");
     const tokens = new Set<string>();
     fetchMock.mockImplementation(async (url, init) => {
-      expect(new URL(url).origin).toBe("https://core.example.invalid");
+      expect(new URL(url).origin).toBe("https://selfserve.corgtex.com");
       const body = JSON.parse(init.body);
       if (url.endsWith("/qualify")) return tokens.has(body.token)
         ? Response.json({ ok: true, qualificationId: "synthetic-qualification" })
         : Response.json({ error: { code: "INVALID_TOKEN", message: "Invalid or expired token" } }, { status: 404 });
-      tokens.add("issued-by-core");
+      tokens.add("issued-by-selfserve");
       return Response.json({ ok: true }, { status: 201 });
     });
     expect((await capture(request())).status).toBe(201);
-    expect(await (await qualify(request({ token: "issued-by-core" }))).json()).toEqual({ ok: true, qualificationId: "synthetic-qualification" });
+    expect(await (await qualify(request({ token: "issued-by-selfserve" }))).json()).toEqual({ ok: true, qualificationId: "synthetic-qualification" });
     const invalid = await qualify(request({ token: "other-backend-token" }));
     expect(invalid.status).toBe(404);
     expect(await invalid.json()).toEqual({ error: { code: "INVALID_TOKEN", message: "Invalid or expired token" } });

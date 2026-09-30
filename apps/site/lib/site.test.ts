@@ -48,4 +48,13 @@ describe("site URL helpers", () => {
     expect(demoUrlForLocale("en")).toBe("https://selfserve.corgtex.com/demo");
     expect(demoUrlForLocale("es")).toBe("https://selfserve.corgtex.com/es/demo");
   });
+
+  it("keeps production entry points on selfserve despite retired Core build overrides", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("NEXT_PUBLIC_APP_URL", "https://app.corgtex.com");
+    vi.stubEnv("NEXT_PUBLIC_DEMO_URL", "https://app.corgtex.com/demo");
+    expect(signupUrlForLocale("es")).toBe("https://selfserve.corgtex.com/es/signup");
+    expect(loginUrlForLocale("en")).toBe("https://selfserve.corgtex.com/login");
+    expect(demoUrlForLocale("es")).toBe("https://selfserve.corgtex.com/es/demo");
+  });
 });

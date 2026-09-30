@@ -1,9 +1,12 @@
 # Accepted Core Baseline
 
-This feature ships disabled: `.github/accepted-core-baseline.json` is absent.
-Absence preserves the existing source-CI release policy. A supplied but invalid,
-expired, inaccessible or drifted baseline fails closed; it never falls back to
-health-derived SHA, a latest artifact or the legacy release-match exemption.
+This is temporary Core incident and recovery tooling, outside ordinary selfserve
+CI and production validation. The delivery owner removes it once replacement
+acceptance passes and no required Core traffic or writer remains. Retain minimal
+immutable incident receipts under the governed recovery policy.
+
+A supplied invalid, expired, inaccessible or drifted baseline fails closed. It
+never follows a latest artifact or infers deployment identity from health alone.
 
 ## Authority and Activation
 
@@ -26,10 +29,11 @@ health-derived SHA, a latest artifact or the legacy release-match exemption.
    small protected config PR** using the exact artifact ID/archive digest and
    receipt digest. This separation prevents unreviewed producer code from adopting
    its own claims. Workflow run completion is not itself adoption.
-5. After config merge, main CI validates that baseline. PR/merge-queue source and
-   schema checks remain isolated and cannot choose a baseline or receive production
-   credentials. Explicit Fleet Release and explicitly dispatched Production
-   Validation retain their incoming exact SHA, matching checkout and recovery gates.
+5. Config adoption authenticates the exact protected receipt for temporary Core
+   recovery. Ordinary CI and Production Validation use the closed selfserve lane;
+   they do not depend on Core. Candidate tests/schema/build remain isolated and
+   cannot choose a baseline or receive production credentials.
+
 
 No additional credential, database model, access scope or repository variable is
 needed. Parent delivery owns dispatch, artifact retention and config adoption.
@@ -145,8 +149,8 @@ or deploy anything, certify customer-data history, or establish retirement.
 
 ## Protected Reacceptance
 
-Successful baseline-mode CI retains `auth-smoke.json` in the private artifact
-`core-baseline-smoke-RUN_ID-ATTEMPT` for 90 days. It is written only after the
+Before retirement, successful baseline-mode CI retained `auth-smoke.json` in the private artifact
+`core-baseline-smoke-RUN_ID-ATTEMPT` for 90 days. It was written only after the
 accepted-source smoke exits successfully, all six fixed success messages are
 verified, and the final provider readback passes. Raw child output is suppressed;
 the file contains only the six check flags, observation time, run/attempt/source
@@ -207,17 +211,12 @@ the ledger, replay SQL, accept arbitrary drift, or activate the baseline. Fresh
 proof, protected bootstrap, schema comparison and separate adoption still apply.
 Failed bootstrap can publish a nonaccepted diagnostic code, never an accepted receipt.
 
-Source CI retains Core health/authentication checks and post-deploy observation,
-with the Core observation SHA pinned rather than selected from live health. Live
-provider readback brackets checks and observation. Other existing observation
-targets remain unchanged. Automatic Production Validation fixture runs (CI
-completion and schedule) are disabled only when a valid accepted pin is verified;
-baseline validation is owned by source CI. Explicit manual validation is unchanged.
-
-When the failed source commit contains a baseline config, automatic source revert
-is withheld with an actionable reconciliation message, including for invalid
-config. An unhealthy baseline does not attribute failure to an undeployed source
-commit. Absence retains legacy recovery. Explicit rollout recovery is untouched.
+Ordinary CI validates the accepted serving selfserve release through its closed
+internal workspace, read-only live/schema checks and isolated fixture lanes. A
+source CI failure does not authorize a production source revert. Explicit failed
+selfserve releases require exact accepted-release attribution and the existing
+protected fleet recovery path. Core baseline failure is no longer a selfserve
+application delivery gate.
 
 ## Local Checks and Limits
 

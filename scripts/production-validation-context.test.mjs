@@ -80,7 +80,8 @@ function resolve(overrides = {}) {
     githubRef: "refs/heads/main",
     githubSha: NEXT_SHA,
     githubRepository: "Corgtexdotcom/corgtex",
-    baseUrlInput: "https://app.corgtex.com",
+    baseUrlInput: "https://selfserve.corgtex.com",
+    acceptedSelfserveSha: MAIN_SHA,
     expectedGitShaInput: "",
     prNumbersInput: "",
     baselinePrNumbers: "",
@@ -112,7 +113,7 @@ describe("production validation context", () => {
 
   it.each([SITE_RELEASE_FILES, HOSTING_FILES].map((files) => [files]))("does not require an unrelated app release for the verified hosting change set", (changedFiles) => {
     expect(requiresProductionAppRelease(changedFiles)).toBe(false);
-    expect(resolve({ changedFiles })).toMatchObject({ expected_git_sha: "", enabled: "true", crm_smoke: "true", client_readiness_smoke: "true" });
+    expect(resolve({ changedFiles })).toMatchObject({ expected_git_sha: MAIN_SHA, enabled: "false" });
   });
 
   it("does not demand Core promotion for the integrated disabled baseline feature, but retains mixed/unknown requirements", async () => {
@@ -124,7 +125,7 @@ describe("production validation context", () => {
     const changedFiles = productionAppChangedFilesFromGit({ before, after, cwd: repo.cwd });
     expect(new Set(changedFiles)).toEqual(new Set(BASELINE_FEATURE_FILES));
     expect(requiresProductionAppRelease(changedFiles)).toBe(false);
-    expect(resolve({ changedFiles })).toMatchObject({ enabled: "true", expected_git_sha: "", crm_smoke: "true" });
+    expect(resolve({ changedFiles })).toMatchObject({ enabled: "false", expected_git_sha: MAIN_SHA });
     for (const path of ["apps/web/app/page.tsx", "apps/worker/src/main.ts", "prisma/schema.prisma",
       "scripts/accepted-core-baseline-extra.mjs", "scripts/unknown.mjs"]) {
       expect(requiresProductionAppRelease([...changedFiles, path])).toBe(true);
@@ -234,121 +235,39 @@ describe("production validation context", () => {
     expect((await readFile(output, "utf8")).trim().endsWith("skip_release_match=false\nrequires_app_release=true")).toBe(true);
   });
 
-  it("enables the full matrix after a trusted main CI workflow run", () => {
-    expect(resolve()).toMatchObject({
-      enabled: "true",
-      trusted_ref: "true",
-      base_url: "https://app.corgtex.com",
-      expected_git_sha: MAIN_SHA,
-      pr_numbers: "725",
-      crm_smoke: "true",
-      telemetry_release_smoke: "true",
-      client_readiness_smoke: "true",
-      client_readiness_routes: "leads",
-      source_intake_smoke: "true",
-      work_item_parity_smoke: "true",
-      briefing_fixture_smoke: "true",
-      recorder_readiness_smoke: "true",
-      recorder_readiness_deployments: "",
-      recorder_readiness_temp_meetings: "false",
+  it("does not repeat reusable CI validation on workflow completion", () => {
+    expect(resolve()).toMatchObject({ enabled: "false", target: "selfserve-validation", expected_git_sha: MAIN_SHA });
+  });
+
+  it.each(["push", "schedule"])("validates only the accepted serving SHA on %s", (eventName) => {
+    expect(resolve({ eventName, expectedGitShaInput: NEXT_SHA })).toMatchObject({
+      enabled: "true", expected_git_sha: MAIN_SHA, validation_mode: "accepted-serving", selfserve_parity_smoke: "false",
     });
+    expect(() => resolve({ eventName, acceptedSelfserveSha: "" })).toThrow("SHA_REQUIRED");
   });
 
-  it("does not require a production release for docs-only workflow runs", () => {
-    expect(resolve({ changedFiles: ["docs/a.mdx", ".github/workflows/ci.yml"] })).toMatchObject({
-      enabled: "true",
-      expected_git_sha: "",
-      pr_numbers: "725",
-    });
+  it("requires explicit release attribution and explicit parity consent", () => {
+    expect(() => resolve({ eventName: "workflow_dispatch" })).toThrow("SHA_REQUIRED");
+    const context = resolve({ eventName: "workflow_dispatch", expectedGitShaInput: NEXT_SHA,
+      prNumbersInput: "725,726", clientReadinessRoutesInput: "decisions,leads", selfserveParityInput: "true" });
+    expect(context).toMatchObject({ enabled: "true", target: "selfserve-validation", expected_git_sha: NEXT_SHA,
+      pr_numbers: "725,726", client_readiness_routes: "decisions,leads", selfserve_parity_smoke: "true" });
+    for (const field of ["crm_smoke", "source_intake_smoke", "work_item_parity_smoke", "briefing_fixture_smoke", "recorder_readiness_smoke"]) {
+      expect(context).not.toHaveProperty(field);
+    }
   });
 
-  it("skips untrusted or failed workflow runs without producing write jobs", () => {
-    expect(resolve({
-      event: workflowRunEvent({ conclusion: "failure" }),
-    })).toMatchObject({
-      enabled: "false",
-      crm_smoke: "false",
-      telemetry_release_smoke: "false",
-      client_readiness_smoke: "false",
-      source_intake_smoke: "false",
-      work_item_parity_smoke: "false",
-      briefing_fixture_smoke: "false",
-      recorder_readiness_smoke: "false",
-    });
+  it("rejects legacy targets, wrong origins, untrusted refs and failed completion events", () => {
+    for (const overrides of [{ targetInput: "core" }, { baseUrlInput: "https://app.corgtex.com" },
+      { eventName: "workflow_dispatch", githubRef: "refs/heads/feature" }, { githubRepository: "fork/repo" },
+      { event: workflowRunEvent({ conclusion: "failure" }) }]) {
+      expect(() => resolve(overrides)).toThrow();
+    }
   });
 
-  it("honors workflow dispatch smoke toggles and explicit inputs", () => {
-    expect(resolve({
-      eventName: "workflow_dispatch",
-      event: { inputs: {} },
-      githubRef: "refs/heads/main",
-      githubSha: MAIN_SHA,
-      expectedGitShaInput: NEXT_SHA,
-      prNumbersInput: "725,726",
-      baselinePrNumbers: "724",
-      recorderDeploymentsInput: "managed-recorder-validation,example",
-      recorderTempMeetingsInput: "true",
-      clientReadinessRoutesInput: "leads,governance,finance-clients",
-      smokeInputs: {
-        crm: "false",
-        telemetryRelease: "false",
-        clientReadiness: "true",
-        sourceIntake: "true",
-        workItemParity: "false",
-        briefingFixture: "true",
-        recorderReadiness: "false",
-      },
-      changedFiles: [],
-    })).toMatchObject({
-      enabled: "true",
-      expected_git_sha: NEXT_SHA,
-      pr_numbers: "724,725,726",
-      crm_smoke: "false",
-      telemetry_release_smoke: "false",
-      client_readiness_smoke: "true",
-      client_readiness_routes: "leads,governance,finance-clients",
-      source_intake_smoke: "true",
-      work_item_parity_smoke: "false",
-      briefing_fixture_smoke: "true",
-      recorder_readiness_smoke: "false",
-      recorder_readiness_deployments: "managed-recorder-validation,example",
-      recorder_readiness_temp_meetings: "true",
-    });
-  });
-
-  it("rejects unknown client-readiness route names", () => {
-    expect(() => resolve({
-      eventName: "workflow_dispatch",
-      event: { inputs: {} },
-      githubRef: "refs/heads/main",
-      clientReadinessRoutesInput: "relationships,cycles",
-      changedFiles: [],
-    })).toThrow("client_readiness_routes contains unsupported route name(s): relationships, cycles");
-  });
-
-  it("accepts the Decision Register for a named selfserve readiness sweep", () => {
-    expect(resolve({
-      eventName: "workflow_dispatch",
-      event: { inputs: {} },
-      githubRef: "refs/heads/main",
-      clientReadinessRoutesInput: "decisions",
-      changedFiles: [],
-    }).client_readiness_routes).toBe("decisions");
-  });
-
-  it("keeps scheduled runs release-agnostic unless an explicit SHA is supplied", () => {
-    expect(resolve({
-      eventName: "schedule",
-      event: {},
-      githubRef: "refs/heads/main",
-      expectedGitShaInput: "",
-      baselinePrNumbers: "725",
-      changedFiles: ["scripts/smoke.mjs"],
-    })).toMatchObject({
-      enabled: "true",
-      expected_git_sha: "",
-      pr_numbers: "725",
-    });
+  it("rejects unknown readiness routes and preserves named Decision Register coverage", () => {
+    expect(() => resolve({ clientReadinessRoutesInput: "relationships,cycles" })).toThrow("unsupported route name(s)");
+    expect(resolve({ clientReadinessRoutesInput: "decisions" }).client_readiness_routes).toBe("decisions");
   });
 
   it("rejects multiline values before writing GitHub step outputs", () => {

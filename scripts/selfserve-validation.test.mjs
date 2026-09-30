@@ -124,8 +124,9 @@ describe("closed selfserve target HTTP integration (in-memory transport, no live
 describe("mode, accepted release and required artifacts", () => {
   const context = (overrides = {}) => resolveProductionValidationContext({ eventName: "push", event: {}, githubRef: "refs/heads/main",
     githubRepository: "Corgtexdotcom/corgtex", githubSha: MAIN, targetInput: target.name, acceptedSelfserveSha: SHA, ...overrides });
-  it("leaves absent configuration on Core and rejects unknown targets", () => {
-    expect(validationTarget()).toBe("core");
+  it("defaults to the closed selfserve target and rejects legacy targets", () => {
+    expect(validationTarget()).toBe(target.name);
+    expect(() => validationTarget("core")).toThrow("UNKNOWN");
     expect(() => validationTarget("selfserve")).toThrow("UNKNOWN");
   });
   it("does not demand unrelated Core promotion for runner-only validation changes", () => {
@@ -138,8 +139,7 @@ describe("mode, accepted release and required artifacts", () => {
     expect(requiresProductionAppRelease([...files, "apps/web/app/api/health/route.ts"])).toBe(true);
   });
   it("main pushes prove accepted serving, never undeployed main", () => {
-    expect(context()).toMatchObject({ expected_git_sha: SHA, base_url: target.origin, validation_mode: "accepted-serving",
-      crm_smoke: "false", source_intake_smoke: "false", briefing_fixture_smoke: "false", work_item_parity_smoke: "false", recorder_readiness_smoke: "false" });
+    expect(context()).toMatchObject({ expected_git_sha: SHA, base_url: target.origin, validation_mode: "accepted-serving" });
     expect(() => context({ acceptedSelfserveSha: "" })).toThrow("SHA_REQUIRED");
   });
   it("requires an explicit exact version on manual release validation", () => {
@@ -156,7 +156,7 @@ describe("mode, accepted release and required artifacts", () => {
     expect(context({ selfserveParityInput: "true" }).selfserve_parity_smoke).toBe("false");
     expect(context({ eventName: "workflow_dispatch", expectedGitShaInput: SHA, selfserveParityInput: "true" }).selfserve_parity_smoke).toBe("true");
     expect(() => context({ selfserveCrmInput: "true" })).toThrow("fixed synthetic account");
-    expect(context().recorder_readiness_smoke).toBe("false");
+    expect(context()).not.toHaveProperty("recorder_readiness_smoke");
   });
   const receipts = () => SELFSERVE_REQUIRED_EVIDENCE.map((lane) => ({ schemaVersion: 1, lane, target: target.name,
     gitSha: SHA, runId: "123", runAttempt: "2", scope: lane.endsWith("-isolated") ? "isolated-synthetic" : "live-read-only",
@@ -262,11 +262,12 @@ describe("outcome attribution binding", () => {
 describe("workflow and fixture secret isolation", () => {
   const workflow = (name) => parse(readFileSync(new URL(`../.github/workflows/${name}.yml`, import.meta.url), "utf8"));
   const ci = workflow("ci"), validation = workflow("production-validation"), recovery = workflow("auto-revert");
-  it("preserves Core job identity/defaults and keeps new mode opt-in", () => {
-    expect(ci.jobs["smoke-prod"].name).toBe("Production Smoke Test");
-    expect(ci.jobs["smoke-prod"].if).toContain("needs.smoke-target.outputs.target == 'core'");
+  it("retires Core CI and automatic source reverts", () => {
+    expect(ci.jobs["smoke-prod"]).toBeUndefined();
+    expect(ci.jobs["smoke-target"].steps[0].env.TARGET).toBe(target.name);
     expect(ci.jobs["smoke-selfserve"].if).toContain("needs.smoke-target.outputs.target == 'selfserve-validation'");
-    expect(recovery.jobs.revert.if).not.toContain("vars.PRODUCTION_VALIDATION_TARGET");
+    expect(recovery.jobs.revert).toBeUndefined();
+    expect(Object.keys(validation.jobs)).toEqual(["validation-context", "selfserve-live", "selfserve-isolated", "selfserve-parity", "selfserve-outcome"]);
   });
   it("exposes only dedicated credentials to reusable selfserve validation, no broad DB/ADMIN fallback", () => {
     expect(Object.keys(ci.jobs["smoke-selfserve"].secrets).sort()).toEqual(["SELFSERVE_SCHEMA_AUDITOR_URL", "SELFSERVE_VALIDATION_EMAIL", "SELFSERVE_VALIDATION_PASSWORD"]);
@@ -314,7 +315,7 @@ describe("workflow and fixture secret isolation", () => {
     expect(ci.jobs["smoke-mode-gate"].steps[0].run).toContain('test "$SELFSERVE_PROOF" = true');
     const observation = JSON.stringify(ci.jobs["observe-prod"]);
     expect(observation).toContain("observation_targets=azure-selfserve,ops");
-    expect(observation).toContain("observation_targets=backup-app,azure-selfserve,ops");
+    expect(observation).not.toContain("backup-app");
   });
   it("uses existing protected fleet workflow, not a source revert or direct provider update", () => {
     const job = JSON.stringify(recovery.jobs["selfserve-fleet-recovery"]);

@@ -23,7 +23,8 @@ function publicOrigin(requestHeaders: HeaderReader) {
     if (value) originHeaders.set(name, value);
   }
 
-  return getPublicOrigin(new Request("https://app.corgtex.com/signup", {
+  const origin = process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || "https://selfserve.corgtex.com";
+  return getPublicOrigin(new Request(new URL("/signup", origin), {
     headers: originHeaders,
   }));
 }
