@@ -1,12 +1,16 @@
 #!/usr/bin/env node
 
-import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFile, writeFile, mkdir, mkdtemp, rm, readdir, access } from "node:fs/promises";
 import { constants } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
+
+import { CORE_HISTORICAL_LEDGER, sha256, identityHash, migrationManifest, historicalSource, verifyLedger, databaseIdentity, canonical } from "./core-baseline-common.mjs";
+export { CORE_HISTORICAL_LEDGER, sha256, identityHash, migrationManifest, verifyLedger, databaseIdentity } from "./core-baseline-common.mjs";
+
+import { validateRecoveryDatabaseWitness, verifyInheritedRecoveryDatabase } from "./core-readonly-database.mjs";
 
 export const BASELINE_CONFIG = ".github/accepted-core-baseline.json";
 export const BASELINE_WORKFLOW = ".github/workflows/accepted-core-baseline.yml";
@@ -18,22 +22,8 @@ const HASH = /^[a-f0-9]{64}$/;
 const UUID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i;
 const ROLES = ["web", "worker"];
 const ARTIFACT_DIR = ".artifacts/core-baseline";
-// Explicit historical disposition, not an input-controlled checksum allowlist.
-export const CORE_HISTORICAL_LEDGER = Object.freeze({
-  sourceSha: "d0a3896ef917b50f2fec2d797908f29aa026a058",
-  manifestSha256: "a5d5fa95e7569cf05113b57d8917135fff171633e144ea453924202771b00fed",
-  datamodelSha256: "af7ad71cad045dcb2c41358fbf5e13160e2e77b220208b70420fadbd7e21ac03",
-  migration: "20260617120000_drop_legacy_proposal_reactions",
-  sourceChecksum: "614cdf040b15f381255592683128686d90904182721ca117ba43975dd1927e26",
-  appliedChecksum: "570ac368fa8994eb9c6ff751eb40172bfb03aeabc511d7d063de0fe93925caa1",
-  historicalRowCorrectnessCertified: false,
-});
 const fail = (code) => { throw new Error(`CORE_BASELINE_${code}`); };
 const requireThat = (condition, code) => { if (!condition) fail(code); };
-export const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
-const canonical = (value) => JSON.stringify(value, (_, item) => item && typeof item === "object" && !Array.isArray(item)
-  ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
-export const identityHash = (value) => sha256(canonical(value));
 const integer = (value) => Number.isSafeInteger(value) && value > 0;
 const date = (value) => typeof value === "string" && Number.isFinite(Date.parse(value));
 
@@ -70,13 +60,14 @@ export function validateTarget(target) {
 }
 
 export function validateEvidence(input) {
-  keys(input, ["target", "sourceSha", "images", "buildProof", "authProof"]);
+  keys(input, ["target", "sourceSha", "images", "buildProof", "authProof", ...(Object.hasOwn(input, "databaseVerification") ? ["databaseVerification"] : [])]);
   validateTarget(input.target);
   requireThat(SHA.test(input.sourceSha), "SOURCE_INVALID");
   keys(input.images, ROLES);
   keys(input.buildProof, ["kind", "evidenceSha256", "observedAt", "roles"]);
   keys(input.buildProof.roles, ROLES);
-  requireThat(input.buildProof.kind === "direct-container-build-readback" && HASH.test(input.buildProof.evidenceSha256)
+  const recoveryAuth = input.authProof?.kind === "protected-review-retained-recovery-auth";
+  requireThat((input.buildProof.kind === "direct-container-build-readback" || (recoveryAuth && input.buildProof.kind === "recovered-accepted-image-inheritance")) && HASH.test(input.buildProof.evidenceSha256)
     && date(input.buildProof.observedAt), "BUILD_PROOF_INVALID");
   for (const role of ROLES) {
     keys(input.images[role], ["deploymentId", "digest"]);
@@ -87,9 +78,9 @@ export function validateEvidence(input) {
   }
   const baselineAuth = input.authProof?.kind === "protected-review-retained-baseline-auth";
   keys(input.authProof, ["kind", "runId", "runAttempt", "jobId", "stepNumber", "workflowSha", "evidenceSha256", "observedAt", "origin", "checks",
-    ...(baselineAuth ? ["baseline"] : [])]);
+    ...(baselineAuth ? ["baseline"] : []), ...(recoveryAuth ? ["recovery"] : [])]);
   requireThat([input.authProof.runId, input.authProof.runAttempt, input.authProof.jobId].every(integer)
-    && (baselineAuth || input.authProof.kind === "protected-review-retained-core-auth") && integer(input.authProof.stepNumber)
+    && (baselineAuth || recoveryAuth || input.authProof.kind === "protected-review-retained-core-auth") && integer(input.authProof.stepNumber)
     && SHA.test(input.authProof.workflowSha)
     && HASH.test(input.authProof.evidenceSha256) && date(input.authProof.observedAt)
     && input.authProof.origin === input.target.origin, "AUTH_PROOF_INVALID");
@@ -97,10 +88,26 @@ export function validateEvidence(input) {
   requireThat(Object.values(input.authProof.checks).every((value) => value === true), "AUTH_PROOF_INCOMPLETE");
   if (baselineAuth) {
     const baseline = input.authProof.baseline;
-    keys(baseline, ["sourceSha", "targetSha256", "imagesSha256", "verifierSha", "receiptSha256"]);
+    keys(baseline, ["sourceSha", "targetSha256", "imagesSha256", "verifierSha", "receiptSha256",
+      ...(input.databaseVerification ? ["databaseVerificationSha256"] : [])]);
+    if (input.databaseVerification) requireThat(baseline.databaseVerificationSha256 === identityHash(input.databaseVerification), "AUTH_DATABASE_WITNESS_INVALID");
     requireThat(baseline.sourceSha === input.sourceSha && baseline.targetSha256 === identityHash(input.target)
       && baseline.imagesSha256 === identityHash(input.images) && SHA.test(baseline.verifierSha)
       && HASH.test(baseline.receiptSha256), "AUTH_BASELINE_BINDING_INVALID");
+  }
+  if (input.databaseVerification) {
+    requireThat(recoveryAuth || baselineAuth, "DATABASE_WITNESS_PROOF_REQUIRED");
+    validateRecoveryDatabaseWitness(input.databaseVerification, input);
+  }
+  if (recoveryAuth) {
+    keys(input.authProof.recovery, ["artifact", "originalReceiptSha256"]);
+    keys(input.authProof.recovery.artifact, ["id", "name", "sha256"]);
+    requireThat(input.databaseVerification && integer(input.authProof.recovery.artifact.id)
+      && input.authProof.recovery.artifact.name === `core-recovery-${input.authProof.runId}-${input.authProof.runAttempt}`
+      && HASH.test(input.authProof.recovery.artifact.sha256) && HASH.test(input.authProof.recovery.originalReceiptSha256)
+      && input.buildProof.kind === "recovered-accepted-image-inheritance"
+      && input.buildProof.evidenceSha256 === input.authProof.evidenceSha256
+      && input.buildProof.observedAt === input.authProof.observedAt, "AUTH_RECOVERY_INVALID");
   }
   return input;
 }
@@ -152,7 +159,8 @@ async function githubJson(path, env = process.env, fetchImpl = fetch) {
   return response.json();
 }
 
-async function downloadReceipt(pin, env = process.env) {
+async function downloadReceipt(pin, env = process.env, member = "receipt.json") {
+  requireThat(["receipt.json", "recover.json"].includes(member), "ARTIFACT_MEMBER_INVALID");
   const response = await fetch(`https://api.github.com/repos/${REPOSITORY}/actions/artifacts/${pin.artifact.id}/zip`, {
     headers: { Authorization: `Bearer ${env.GITHUB_TOKEN}` }, redirect: "manual", signal: AbortSignal.timeout(30_000),
   });
@@ -176,8 +184,8 @@ async function downloadReceipt(pin, env = process.env) {
     const path = join(directory, "receipt.zip");
     await writeFile(path, bytes, { mode: 0o600 });
     const names = execFileSync("unzip", ["-Z1", path], { encoding: "utf8", maxBuffer: 4096 }).trim();
-    requireThat(names === "receipt.json", "ARTIFACT_CONTENTS_INVALID");
-    return execFileSync("unzip", ["-p", path, "receipt.json"], { maxBuffer: 64_000 });
+    requireThat(names === member, "ARTIFACT_CONTENTS_INVALID");
+    return execFileSync("unzip", ["-p", path, member], { maxBuffer: 64_000 });
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
 
@@ -199,21 +207,6 @@ export async function resolveBaseline(pin, { api = githubJson, download = downlo
   return receipt;
 }
 
-export function migrationManifest(sourceDir) {
-  const git = (args) => execFileSync("git", args, { cwd: sourceDir, maxBuffer: 8_000_000 });
-  const paths = git(["ls-tree", "-r", "--name-only", "HEAD", "--", "prisma/migrations"]).toString().trim().split("\n")
-    .filter((path) => /^prisma\/migrations\/[^/]+\/migration\.sql$/.test(path)).sort();
-  requireThat(paths.length > 0 && paths.length <= 10000, "SOURCE_MIGRATIONS_INVALID");
-  const migrations = paths.map((path) => ({ name: path.split("/")[2], checksum: sha256(git(["show", `HEAD:${path}`])) }));
-  return { migrations, manifestSha256: identityHash(migrations), datamodelSha256: sha256(git(["show", "HEAD:prisma/schema.prisma"])) };
-}
-
-function historicalSource(manifest, sourceSha) {
-  return sourceSha === CORE_HISTORICAL_LEDGER.sourceSha
-    && manifest.manifestSha256 === CORE_HISTORICAL_LEDGER.manifestSha256
-    && manifest.datamodelSha256 === CORE_HISTORICAL_LEDGER.datamodelSha256;
-}
-
 function validateSchemaAcceptance(schema, sourceSha) {
   keys(schema, ["manifestSha256", "datamodelSha256", "exactLedgerMatch", "supportedSchemaMatch",
     ...(Object.hasOwn(schema, "historicalLedgerException") ? ["historicalLedgerException"] : [])]);
@@ -222,30 +215,6 @@ function validateSchemaAcceptance(schema, sourceSha) {
   requireThat(HASH.test(schema.manifestSha256) && HASH.test(schema.datamodelSha256)
     && schema.supportedSchemaMatch === true
     && (historical || (schema.exactLedgerMatch === true && !Object.hasOwn(schema, "historicalLedgerException"))), "SCHEMA_NOT_ACCEPTED");
-}
-
-export function verifyLedger(manifest, rows, sourceSha) {
-  requireThat(Array.isArray(rows) && rows.length <= 10000, "LEDGER_UNBOUNDED");
-  const applied = rows.filter((row) => row.finished_at != null && row.rolled_back_at == null);
-  requireThat(rows.every((row) => row.finished_at != null || row.rolled_back_at != null)
-    && applied.length === manifest.migrations.length && new Set(applied.map((row) => row.migration_name)).size === applied.length,
-  "LEDGER_NOT_EXACT");
-  const checksums = new Map(applied.map((row) => [row.migration_name, row.checksum]));
-  const mismatches = manifest.migrations.filter((item) => checksums.get(item.name) !== item.checksum);
-  if (mismatches.length === 0) return { exactLedgerMatch: true };
-  const exception = CORE_HISTORICAL_LEDGER;
-  requireThat(historicalSource(manifest, sourceSha) && identityHash(manifest.migrations) === exception.manifestSha256
-    && rows.length === applied.length && mismatches.length === 1
-    && mismatches[0].name === exception.migration && mismatches[0].checksum === exception.sourceChecksum
-    && checksums.get(exception.migration) === exception.appliedChecksum, "LEDGER_NOT_EXACT");
-  return { exactLedgerMatch: false, historicalLedgerException: { ...exception } };
-}
-
-export function databaseIdentity(url) {
-  const parsed = new URL(url);
-  requireThat(["postgres:", "postgresql:"].includes(parsed.protocol) && parsed.pathname.length > 1, "DATABASE_URL_INVALID");
-  requireThat((parsed.searchParams.get("schema") || "public") === "public", "DATABASE_SCHEMA_UNSUPPORTED");
-  return identityHash({ host: parsed.hostname, port: parsed.port || "5432", database: parsed.pathname.slice(1), schema: "public" });
 }
 
 function verifySource(sourceDir, expectedSha) {
@@ -317,8 +286,14 @@ export function validateAuthProvenance(evidence, authRun, job, baselinePin = nul
     && Date.parse(proof.observedAt) < Date.parse(step.completed_at) + endPrecisionMs, "AUTH_PROVENANCE_INVALID");
 }
 
-async function verifyRetainedAuth(evidence, env = process.env) {
+export async function verifyRetainedAuth(evidence, env = process.env) {
   const proof = evidence.authProof;
+  if (proof.kind === "protected-review-retained-recovery-auth") {
+    const { resolveRetainedCoreRecovery } = await import("./core-recovery-proof.mjs");
+    await resolveRetainedCoreRecovery(evidence, { api: path => githubJson(path, env),
+      download: (pin, member) => downloadReceipt(pin, env, member) });
+    return;
+  }
   const run = await githubJson(`actions/runs/${proof.runId}/attempts/${proof.runAttempt}`, env);
   const job = await githubJson(`actions/jobs/${proof.jobId}`, env);
   let pin = null;
@@ -326,6 +301,11 @@ async function verifyRetainedAuth(evidence, env = process.env) {
     const file = await githubJson(`contents/${BASELINE_CONFIG}?ref=${proof.workflowSha}`, env);
     requireThat(file.encoding === "base64" && file.size <= 8192 && file.path === BASELINE_CONFIG, "AUTH_BASELINE_CONFIG_INVALID");
     pin = JSON.parse(Buffer.from(file.content, "base64").toString("utf8"));
+    // A retained baseline-auth renewal preserves the accepted database witness.
+    // It cannot silently switch transport or select a new inheritance policy.
+    const retained = await resolveBaseline(pin, { api: path => githubJson(path, env),
+      download: p => downloadReceipt(p, env) });
+    requireThat(canonical(retained.evidence.databaseVerification ?? null) === canonical(evidence.databaseVerification ?? null), "AUTH_DATABASE_WITNESS_INVALID");
   }
   validateAuthProvenance(evidence, run, job, pin);
   for (const observedAt of [proof.observedAt, evidence.buildProof.observedAt]) {
@@ -346,6 +326,10 @@ export async function checkBaseline(evidence, { sourceDir, expectedSchema, boots
 }
 
 async function verifyDatabase(evidence, sourceDir, expectedSchema, env = process.env) {
+  if (evidence.databaseVerification) {
+    const { default: pg } = await import("pg");
+    return verifyInheritedRecoveryDatabase(evidence, evidence.databaseVerification, { env, sourceDir, Client: pg.Client });
+  }
   verifySource(sourceDir, evidence.sourceSha);
   const schemaEngine = await preparedSchemaEngine(sourceDir);
   const manifest = migrationManifest(sourceDir);
@@ -432,7 +416,8 @@ export function baselineSmokeEvidence(evidence, pin, env = process.env, observed
     runId: Number(env.GITHUB_RUN_ID), runAttempt: Number(env.GITHUB_RUN_ATTEMPT), workflowSha: env.GITHUB_SHA,
     job: "smoke-prod", stepName: BASELINE_SMOKE_STEP, origin: evidence.target.origin, observedAt,
     baseline: { sourceSha: evidence.sourceSha, targetSha256: identityHash(evidence.target), imagesSha256: identityHash(evidence.images),
-      verifierSha: pin.verifierSha, receiptSha256: pin.receiptSha256 },
+      verifierSha: pin.verifierSha, receiptSha256: pin.receiptSha256,
+      ...(evidence.databaseVerification ? { databaseVerificationSha256: identityHash(evidence.databaseVerification) } : {}) },
     checks: { health: true, releaseMetadata: true, loginPage: true, login: true, session: true, rootFlow: true } };
 }
 
