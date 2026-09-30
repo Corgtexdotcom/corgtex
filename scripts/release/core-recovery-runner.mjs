@@ -36,7 +36,7 @@ export function inspectAcceptedRecoveryImage(role, digest, execute = (args) => e
   } catch { throw new Error("CORE_RECOVERY_REGISTRY_READ_UNVERIFIED"); }
   // Provider metadata can identify an image index. Its platform descriptor is
   // a different digest; preserve the accepted root and prove its amd64 child.
-  check(manifest?.schemaVersion === 2 && manifest.digest === digest
+  check(manifest?.digest === digest
     && Number.isSafeInteger(manifest.size) && manifest.size > 0, "BASELINE_REGISTRY_DIGEST");
   const index = ["application/vnd.oci.image.index.v1+json",
     "application/vnd.docker.distribution.manifest.list.v2+json"].includes(manifest.mediaType);
@@ -47,7 +47,7 @@ export function inspectAcceptedRecoveryImage(role, digest, execute = (args) => e
   check(amd64.length === 1 && /^sha256:[a-f0-9]{64}$/.test(amd64[0].Descriptor.digest), "REGISTRY_PLATFORM");
   const platformDigest = amd64[0].Descriptor.digest;
   if (index) {
-    check(Array.isArray(manifest.manifests), "REGISTRY_INDEX");
+    check(manifest.schemaVersion === 2 && Array.isArray(manifest.manifests), "REGISTRY_INDEX");
     const children = manifest.manifests.filter(child => child?.platform?.os === "linux" && child.platform.architecture === "amd64");
     check(children.length === 1 && children[0].digest === platformDigest, "REGISTRY_INDEX_PLATFORM");
   } else check(platformDigest === digest, "REGISTRY_MANIFEST_PLATFORM");

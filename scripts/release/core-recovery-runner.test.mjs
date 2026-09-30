@@ -8,7 +8,7 @@ describe("accepted recovery registry identity", () => {
   const child = `sha256:${"b".repeat(64)}`;
   const descriptor = digest => ({ digest, platform: { os: "linux", architecture: "amd64" } });
   function fixture(index = true) {
-    const manifest = { schemaVersion: 2, digest: root, size: 900,
+    const manifest = { ...(index ? { schemaVersion: 2 } : {}), digest: root, size: 900,
       mediaType: index ? "application/vnd.oci.image.index.v1+json" : "application/vnd.oci.image.manifest.v1+json",
       ...(index ? { manifests: [descriptor(child)] } : {}) };
     const platforms = [{ Descriptor: descriptor(index ? child : root) }];
