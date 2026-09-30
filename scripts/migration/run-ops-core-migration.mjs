@@ -62,7 +62,7 @@ export function validateOperatorPlan(plan) {
     && o.sourceObjects.identity === p.transfer?.objects?.sourceStoreId, "MIGRATION_PLAN_INVALID");
   if (o.retryOf !== undefined) need(o.retryOf && ["intentSha256,journalSha256", "intentSha256,journal,journalSha256"]
     .includes(Object.keys(o.retryOf).sort().join())
-    && (o.retryOf.journal === undefined || ["retry", "retry-2", "retry-3"].includes(o.retryOf.journal))
+    && (o.retryOf.journal === undefined || ["retry", "retry-2", "retry-3", "retry-4"].includes(o.retryOf.journal))
     && /^[a-f0-9]{64}$/.test(o.retryOf.intentSha256) && /^[a-f0-9]{64}$/.test(o.retryOf.journalSha256),
   "MIGRATION_RETRY_BINDING_INVALID");
   const storageIdentity = value => createHash("sha256").update(value).digest("hex");
@@ -200,8 +200,8 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
     const custodyContainer = container(plan.operator.custodyContainerUrl);
     need(!(await custodyContainer.getProperties()).blobPublicAccess, "MIGRATION_CUSTODY_PUBLIC");
     const retainedPlan = custodyContainer.getBlockBlobClient(`plans/${plan.domain}/${intentSha256}.json`);
-    const predecessorLevels = [undefined, "retry", "retry-2", "retry-3"];
-    const slotSuffixes = ["", "-retry", "-retry-2", "-retry-3", "-retry-4"];
+    const predecessorLevels = [undefined, "retry", "retry-2", "retry-3", "retry-4"];
+    const slotSuffixes = ["", "-retry", "-retry-2", "-retry-3", "-retry-4", "-retry-5"];
     const slot = plan.operator.retryOf ? predecessorLevels.indexOf(plan.operator.retryOf.journal) + 1 : 0;
     const journalBlob = custodyContainer.getBlockBlobClient(`cutovers/${plan.domain}${slotSuffixes[slot]}.json`);
     const journal = azureBlobCustodyAdapter(journalBlob);
@@ -239,7 +239,7 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
         for (let index = 1; index < slot; index++) {
           const earlier = chain[index - 1], retry = chain[index], next = chain[index + 1];
           const earlierState = ancestors[index - 1].snapshot();
-          const label = index === 1 ? "ROOT" : index === 2 ? "MIDDLE" : "THIRD";
+          const label = index === 1 ? "ROOT" : index === 2 ? "MIDDLE" : index === 3 ? "THIRD" : "FOURTH";
           const key = `retry-admissions/${plan.domain}/${archiveEvidenceHash(retry)}/predecessor-scratch.json`;
           const retained = await store.readOptional(key, ancestors[index - 1].signal);
           if (retryCaptureLineage(earlierState) || retryRestoredLineage(earlierState))
