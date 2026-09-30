@@ -59,6 +59,10 @@ test("bounded lead transfer preserves tokens, precise history and delivery prove
     await target.query('UPDATE "Member" SET id=\'synthetic-changed-recipient\'');
     await assert.rejects(run(), /TARGET_RECIPIENTS_CHANGED/);
     await target.query('UPDATE "Member" SET id=\'synthetic-lead-recipient\'');
+    await source.query(`INSERT INTO "Event" (id,"workspaceId",type,"aggregateType","aggregateId",payload,"lockedAt","lockedBy")
+      VALUES ('synthetic-claimed-event',$1,'synthetic.held','Synthetic','synthetic','{}',now(),'synthetic-worker')`, [sourceId]);
+    await assert.rejects(run(), /CLAIMED_WORK_REQUIRES_DRAIN/);
+    await source.query('DELETE FROM "Event" WHERE id=\'synthetic-claimed-event\'');
   });
   await t.test("refuses changed live source and newly created qualification closure", async () => {
     await source.query('UPDATE "DemoLead" SET "visitCount"=10');

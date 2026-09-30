@@ -61,6 +61,9 @@ async function workspaceHold(client: pg.Client, binding: LeadDatabaseBinding, lo
   const claimed = (await client.query(`SELECT count(*)::int AS count FROM public."WorkflowJob"
     WHERE "workspaceId"=$1 AND (status='RUNNING' OR "lockedAt" IS NOT NULL OR "lockedBy" IS NOT NULL)`, [binding.workspaceId])).rows[0];
   if (claimed.count !== 0) fail("CLAIMED_WORK_REQUIRES_DRAIN");
+  const claimedEvents = (await client.query(`SELECT count(*)::int AS count FROM public."Event"
+    WHERE "workspaceId"=$1 AND ("lockedAt" IS NOT NULL OR "lockedBy" IS NOT NULL)`, [binding.workspaceId])).rows[0];
+  if (claimedEvents.count !== 0) fail("CLAIMED_WORK_REQUIRES_DRAIN");
   return markers.find((marker) => marker.flag === "crm_public_writes_paused").config;
 }
 async function schema(client: pg.Client) {

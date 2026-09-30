@@ -22,12 +22,18 @@ tenant importer continues to reject an existing-workspace collision.
 1. Refresh the production owner handoff, release lease/concurrency, active Ops
    workspace mappings, exact web/worker releases and rollback destinations.
    Review the destination's exact member IDs as the intended CRM recipients.
-2. Release the reviewed intake-fence code to both runtimes. Install disabled
-   `crm_public_writes_paused` markers before enabling them: existing requests
-   lock the marker for their transaction, so enabling it waits for those writes.
-   Hold consumers with `operator_import_inactive`; drain already-claimed work.
-   Fence other CRM/admin writers and provider callbacks under the same owner.
-   These two markers alone do not fence arbitrary administrative mutations.
+2. Release the reviewed intake-fence code to every active writer replica in both
+   runtimes. Install disabled `crm_public_writes_paused` markers, then drain
+   HTTP/database transactions that could have passed the check before marker
+   installation. Subsequent requests lock the marker for their transaction;
+   enabling it waits for those writes. Hold consumers with
+   `operator_import_inactive`. Drain consumer/scheduler iterations and claim
+   transactions spanning hold activation, as well as already-claimed work.
+   Verify no event or job retains a claim lock and no job is running; a zero job
+   count alone does not prove quiescence. Fence other CRM/admin writers and
+   provider callbacks under the same owner. Record this drain evidence before
+   snapshot/import and keep both holds enabled throughout. These markers alone
+   do not fence arbitrary administrative mutations or preselected scheduling.
 3. Keep both source and target public intake and consumers held during the
    snapshot/import. Do not enable destination drip campaigns during transfer.
    Preserve the markers' prior state in the private cutover journal.
