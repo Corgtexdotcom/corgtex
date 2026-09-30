@@ -195,6 +195,52 @@ test("workspace, inactive membership and marker receipt become visible together 
   assert.equal((await observer.query('SELECT count(*) FROM "Member" WHERE "workspaceId"=$1 AND NOT "isActive"', [workspaceId])).rows[0].count, "2");
 }));
 
+test("a reviewed destination slug preserves a separate source workspace beside an existing source slug", async () => withTarget(async (target) => {
+  await target.query('UPDATE "Workspace" SET slug=$2 WHERE id=$1', [otherWorkspace, snapshot.manifest.workspaceSlug]);
+  const before = (await target.query('SELECT row_to_json(w)::text AS row FROM "Workspace" w WHERE id=$1', [otherWorkspace])).rows[0].row;
+  const sourceHash = snapshot.sha256;
+  const input = options();
+  input.transforms = { Workspace: { slug: { kind: "map-values", values: { [snapshot.manifest.workspaceSlug]: "corgtex-core" }, reason: "Keep source permissions separate from existing public CRM workspace" } } };
+  const result = await importTenantSnapshot(target, snapshot, input);
+  assert.equal(result.alreadyImported, false);
+  assert.equal(snapshot.sha256, sourceHash);
+  assert.equal(result.receipt.sourceSnapshotSha256, sourceHash);
+  assert.equal((await target.query('SELECT slug FROM "Workspace" WHERE id=$1', [workspaceId])).rows[0].slug, "corgtex-core");
+  assert.equal((await target.query('SELECT row_to_json(w)::text AS row FROM "Workspace" w WHERE id=$1', [otherWorkspace])).rows[0].row, before);
+  assert.deepEqual((await target.query('SELECT "passwordHash","globalRole","displayName" FROM "User" WHERE id=$1', [targetLinkedUser])).rows[0],
+    { passwordHash: targetPassword, globalRole: "OPERATOR", displayName: "Target profile" });
+  assert.equal((await importTenantSnapshot(target, snapshot, input)).alreadyImported, true);
+  await assert.rejects(importTenantSnapshot(target, snapshot, options()), /TRANSFER_WORKSPACE_COLLISION/);
+  const changed = structuredClone(input);
+  (changed.transforms!.Workspace.slug as { values: Record<string, string> }).values[snapshot.manifest.workspaceSlug] = "different-destination";
+  await assert.rejects(importTenantSnapshot(target, snapshot, changed), /TRANSFER_WORKSPACE_COLLISION/);
+  await target.query('UPDATE "Workspace" SET slug=\'unreviewed-destination\' WHERE id=$1', [workspaceId]);
+  await assert.rejects(importTenantSnapshot(target, snapshot, input), /TRANSFER_WORKSPACE_COLLISION/);
+}));
+
+test("destination slug collisions and unresolved identities roll back without borrowing target permissions", async () => withTarget(async (target) => {
+  const input = options();
+  input.transforms = { Workspace: { slug: { kind: "map-values", values: { [snapshot.manifest.workspaceSlug]: otherWorkspace }, reason: "Synthetic destination collision" } } };
+  await assert.rejects(importTenantSnapshot(target, snapshot, input), /TRANSFER_WORKSPACE_COLLISION/);
+  await assertAbsent(target);
+  (input.transforms.Workspace.slug as { values: Record<string, string> }).values[snapshot.manifest.workspaceSlug] = "corgtex-core";
+  input.identityLinks = [];
+  await assert.rejects(importTenantSnapshot(target, snapshot, input), /TRANSFER_USER_EMAIL_OWNERSHIP_UNRESOLVED/);
+  await assertAbsent(target);
+}));
+
+test("invalid destination slug transforms fail before a database query", async () => {
+  for (const transform of [{ kind: "null", reason: "Cannot remove workspace routing identity" },
+    { kind: "map-values", values: { [snapshot.manifest.workspaceSlug]: "" }, reason: "Cannot publish an empty slug" },
+    { kind: "map-values", values: { [snapshot.manifest.workspaceSlug]: "corgtex-core" }, reason: "" }]) {
+    const input = options();
+    input.transforms = { Workspace: { slug: transform as NonNullable<TenantImportOptions["transforms"]>[string][string] } };
+    let queries = 0;
+    await assert.rejects(importTenantSnapshot({ query: async () => { queries++; throw new Error("Unexpected database query"); } }, snapshot, input), /TRANSFER_WORKSPACE_SLUG_TRANSFORM_INVALID/);
+    assert.equal(queries, 0);
+  }
+});
+
 test("unresolved email ownership and missing ownership evidence fail atomically", async () => withTarget(async (target) => {
   await assert.rejects(importTenantSnapshot(target, snapshot, { ...options(), identityLinks: [] }), /TRANSFER_USER_EMAIL_OWNERSHIP_UNRESOLVED/);
   await assertAbsent(target);

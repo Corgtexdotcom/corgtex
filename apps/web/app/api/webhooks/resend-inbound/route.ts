@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { receiveEmailReply, syncEmailReplyToConversation } from "@corgtex/domain";
+import { recordInboundEmailReply } from "@corgtex/domain";
 import { createHmac, timingSafeEqual } from "crypto";
+import sanitizeHtml from "sanitize-html";
 
 export const dynamic = "force-dynamic";
 
@@ -9,9 +10,6 @@ export const dynamic = "force-dynamic";
  * Resend sends three headers: svix-id, svix-timestamp, svix-signature.
  * The signature is HMAC-SHA256 over "msgId.timestamp.body" using the
  * webhook signing secret (base64-encoded, prefixed with "whsec_").
- *
- * Falls back to a simple shared-secret bearer token if RESEND_WEBHOOK_SECRET
- * is not set but WEBHOOK_SIGNING_SECRET is configured.
  */
 function verifyWebhookSignature(
   rawBody: string,
@@ -94,35 +92,52 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ ok: true }); // Ignore non-inbound events
     }
 
-    const { from, subject, text } = payload.data;
-
-    if (!from || !text) {
-      return NextResponse.json({ error: "Missing from or text" }, { status: 400 });
+    // Resend sends metadata only; retrieve content after authenticating origin.
+    const emailId = payload.data.email_id;
+    if (typeof emailId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(emailId)) {
+      return NextResponse.json({ error: "Invalid email identifier" }, { status: 400 });
     }
-
-    // Extract email from "Name <email@domain.com>" or "email@domain.com"
-    const emailMatch = from.match(/<([^>]+)>/);
-    const fromEmail = emailMatch ? emailMatch[1] : from;
-
-    // Run both domain functions concurrently
-    await Promise.all([
-      receiveEmailReply({
-        fromEmail,
-        subject: subject || "No Subject",
-        bodyText: text,
-      }).catch(err => console.error("Error receiving email reply:", err)),
-
-      syncEmailReplyToConversation({
-        fromEmail,
-        subject: subject || "No Subject",
-        bodyText: text,
-      }).catch(err => console.error("Error syncing conversation:", err)),
-    ]);
+    const recipient = process.env.EMAIL_REPLY_TO?.trim().toLowerCase();
+    if (!recipient || !/^[^\s@]+@[^\s@]+$/.test(recipient)) {
+      return NextResponse.json({ error: "Reply recipient unavailable" }, { status: 503 });
+    }
+    const addressedToRecipient = (values: unknown) => Array.isArray(values)
+      && values.some(value => typeof value === "string" && value.trim().toLowerCase() === recipient);
+    if (!addressedToRecipient(payload.data.to)) return NextResponse.json({ ok: true, ignored: "unrelated_recipient" });
+    const apiKey = process.env.RESEND_API_KEY;
+    if (!apiKey) return NextResponse.json({ error: "Email content unavailable" }, { status: 503 });
+    let email: { id?: string; from?: string; subject?: string; text?: string | null; html?: string | null; to?: string[]; received_for?: string[] };
+    try {
+      const response = await fetch(`https://api.resend.com/emails/receiving/${emailId}`, {
+        headers: { Authorization: `Bearer ${apiKey}` }, redirect: "error", cache: "no-store",
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) throw new Error("RECEIVED_EMAIL_UNAVAILABLE");
+      email = await response.json();
+      if (email.id !== emailId || typeof email.from !== "string") throw new Error("RECEIVED_EMAIL_INVALID");
+    } catch {
+      // Retry retrieval failures instead of acknowledging and losing the reply.
+      return NextResponse.json({ error: "Email content unavailable" }, { status: 503 });
+    }
+    if (!addressedToRecipient(email.to) && !addressedToRecipient(email.received_for)) {
+      return NextResponse.json({ ok: true, ignored: "unrelated_recipient" });
+    }
+    const text = typeof email.text === "string" && email.text.trim() ? email.text
+      : typeof email.html === "string" ? sanitizeHtml(email.html, { allowedTags: [], allowedAttributes: {} }) : "";
+    if (!text.trim()) return NextResponse.json({ ok: true, ignored: "empty_body" });
+    const emailMatch = email.from!.match(/<([^>]+)>/);
+    const fromEmail = (emailMatch ? emailMatch[1] : email.from!).trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+$/.test(fromEmail)) return NextResponse.json({ error: "Invalid sender" }, { status: 400 });
+    await recordInboundEmailReply({ fromEmail, subject: email.subject || "No Subject", bodyText: text, providerEmailId: emailId });
 
     return NextResponse.json({ ok: true });
   } catch (error) {
-    console.error("[resend-inbound] Error processing webhook:", error);
-    // Return 200 anyway so Resend doesn't retry infinitely on domain logic failures
-    return NextResponse.json({ ok: true, error: "Internal processing error" });
+    // The combined transaction rolls back both effects before a retry.
+    if ((error as { code?: string })?.code === "CRM_PUBLIC_WRITES_PAUSED") {
+      return NextResponse.json({ error: "Lead intake is temporarily paused." }, { status: 503 });
+    }
+    console.error("[resend-inbound] CRM reply processing failed");
+    if ((error as { code?: string })?.code === "NOT_FOUND") return NextResponse.json({ ok: true, ignored: "unmatched_sender" });
+    return NextResponse.json({ error: "Reply processing unavailable" }, { status: 503 });
   }
 }

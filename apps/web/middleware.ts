@@ -7,6 +7,9 @@ import { controlPlaneUiRedirect } from "./lib/control-plane-middleware";
 const intlMiddleware = createMiddleware(routing);
 
 export default function middleware(request: NextRequest) {
+  // NextRequest retains the raw URL with skipMiddlewareUrlNormalize, but its
+  // nextUrl still normalizes loopback text within queries. Restore it for intl.
+  request.nextUrl.search = new URL(request.url).search;
   // Overwrite caller-supplied values before forwarding them to server components.
   request.headers.set("x-corgtex-pathname", request.nextUrl.pathname);
   if (request.nextUrl.pathname.startsWith("/api/") || request.nextUrl.pathname.startsWith("/support/sessions/")) {

@@ -75,7 +75,7 @@ export function DemoGateForm() {
 
   return (
     <div className="demo-gate-shell">
-      <form onSubmit={handleSubmit} className="demo-gate-form">
+      <form onSubmit={handleSubmit} className="demo-gate-form" data-demo-url={demoUrlForLocale(locale)}>
         <input
           type="email"
           placeholder={t("emailPlaceholder")}

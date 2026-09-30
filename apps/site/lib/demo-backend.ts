@@ -12,7 +12,7 @@ function reportFailure(
 function demoBackendOrigin() {
   const configured = process.env.DEMO_BACKEND_URL;
   const value = configured === undefined
-    ? (process.env.NODE_ENV === "production" ? "https://app.corgtex.com" : "http://localhost:3000")
+    ? (process.env.NODE_ENV === "production" ? "https://selfserve.corgtex.com" : "http://localhost:3000")
     : configured.trim();
   const url = new URL(value);
   const localHttp = process.env.NODE_ENV !== "production" && url.protocol === "http:"

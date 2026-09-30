@@ -14,7 +14,7 @@
     },
     {
       "name": "Try the Demo",
-      "url": "https://app.corgtex.com/demo"
+      "url": "https://selfserve.corgtex.com/demo"
     }
   ],
   "topbarCtaButton": {
@@ -25,7 +25,7 @@
     {
       "name": "API Reference",
       "icon": "code",
-      "url": "https://app.corgtex.com/api/docs"
+      "url": "https://selfserve.corgtex.com/api/docs"
     }
   ],
   "navigation": {

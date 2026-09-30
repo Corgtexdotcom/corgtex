@@ -21,7 +21,7 @@ export function getSiteConfig(): SiteConfig {
       (process.env.NODE_ENV === "production" ? "https://selfserve.corgtex.com" : "http://localhost:3000"),
   );
   const demoUrl = trimTrailingSlash(process.env.NEXT_PUBLIC_DEMO_URL?.trim() ||
-    (process.env.NODE_ENV === "production" ? "https://app.corgtex.com/demo" : `${appUrl}/demo`));
+    `${appUrl}/demo`);
   const bookDemoUrl = process.env.NEXT_PUBLIC_BOOK_DEMO_URL?.trim() || "https://calendar.app.google/jJd5yeSuDStVZm896";
 
   return {

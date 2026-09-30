@@ -38,13 +38,14 @@ describe("site URL helpers", () => {
     expect(demoUrlForLocale("es")).toBe("https://app.corgtex.com/es/demo");
   });
 
-  it("defaults production login to selfserve and demo to the backup app", () => {
+  it("defaults production login and demo to selfserve", () => {
     vi.stubEnv("NODE_ENV", "production");
     delete process.env.NEXT_PUBLIC_APP_URL;
     delete process.env.NEXT_PUBLIC_DEMO_URL;
 
     expect(loginUrlForLocale("en")).toBe("https://selfserve.corgtex.com/login");
     expect(signupUrlForLocale("en")).toBe("https://selfserve.corgtex.com/signup");
-    expect(demoUrlForLocale("en")).toBe("https://app.corgtex.com/demo");
+    expect(demoUrlForLocale("en")).toBe("https://selfserve.corgtex.com/demo");
+    expect(demoUrlForLocale("es")).toBe("https://selfserve.corgtex.com/es/demo");
   });
 });

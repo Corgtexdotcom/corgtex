@@ -50,6 +50,8 @@ jobs:
       CORE_CONTINUITY_SOURCE_URL: postgresql://postgres:postgres@127.0.0.1:5432/continuity_source_test
       CORE_CONTINUITY_TARGET_URL: postgresql://postgres:postgres@127.0.0.1:5432/continuity_target_test
       CORE_CONTINUITY_CLONE_URL: postgresql://postgres:postgres@localhost:5433/continuity_target_test
+      CORE_LEAD_SOURCE_URL: postgresql://postgres:postgres@127.0.0.1:5432/lead_transfer_source_test
+      CORE_LEAD_TARGET_URL: postgresql://postgres:postgres@127.0.0.1:5432/lead_transfer_target_test
 
     steps:
       - uses: actions/checkout@v5
@@ -79,10 +81,12 @@ jobs:
         run: |
           set -euo pipefail
           docker exec "${{ job.services.postgres.id }}" createdb -U postgres continuity_target_test
+          docker exec "${{ job.services.postgres.id }}" createdb -U postgres lead_transfer_source_test
+          docker exec "${{ job.services.postgres.id }}" createdb -U postgres lead_transfer_target_test
           env -i PATH="$PATH" HOME="$RUNNER_TEMP" NODE_ENV=test \
             DATABASE_URL="$CORE_CONTINUITY_TARGET_URL" \
             node node_modules/prisma/build/index.js generate
-          for database_url in "$CORE_CONTINUITY_SOURCE_URL" "$CORE_CONTINUITY_TARGET_URL" "$CORE_CONTINUITY_CLONE_URL"; do
+          for database_url in "$CORE_CONTINUITY_SOURCE_URL" "$CORE_CONTINUITY_TARGET_URL" "$CORE_CONTINUITY_CLONE_URL" "$CORE_LEAD_SOURCE_URL" "$CORE_LEAD_TARGET_URL"; do
             env -i PATH="$PATH" HOME="$RUNNER_TEMP" NODE_ENV=test DATABASE_URL="$database_url" \
               node node_modules/prisma/build/index.js migrate deploy
           done
@@ -102,6 +106,13 @@ jobs:
             CORE_CONTINUITY_TLS_CA="$RUNNER_TEMP/core-continuity-tls/ca.crt" \
             CORE_CONTINUITY_CONSUMER_HOLD_READY=true \
             npm run test:migration:core-continuity
+      - name: Test scoped Core lead transfer without external credentials
+        shell: bash
+        run: |
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP" NODE_ENV=test \
+            CORE_LEAD_SOURCE_URL="$CORE_LEAD_SOURCE_URL" CORE_LEAD_TARGET_URL="$CORE_LEAD_TARGET_URL" \
+            CORE_CONTINUITY_TLS_CA="$RUNNER_TEMP/core-continuity-tls/ca.crt" \
+            node --import tsx --test scripts/migration/core-lead-transfer.integration.test.ts
       - name: Remove ephemeral TLS keys
         if: always()
         shell: bash

@@ -7,12 +7,13 @@ function fixture(url) {
   if (path === "/api/health") return Response.json({ status: "ok", app: "corgtex-site" });
   if (path === "/") return new Response('<a href="https://signup.example/signup">Signup</a><a href="https://signup.example/login">Desktop login</a><a href="https://signup.example/login">Mobile login</a>');
   if (path === "/es") return new Response('<a href="https://signup.example/es/signup">Signup</a><a href="https://signup.example/es/login">Desktop login</a><a href="https://signup.example/es/login">Mobile login</a>');
+  if (path === "/demo" || path === "/es/demo") return new Response(`<a href="https://signup.example${path}">Explore demo</a>`);
   if (path === "/sitemap.xml") return new Response("<loc>https://www.example/es/about</loc>");
   return new Response("Corgtex");
 }
 
 describe("Azure site candidate smoke", () => {
-  it("checks only site GET routes without exercising demo or lead writers", async () => {
+  it("checks site GET routes and demo destinations without exercising app or lead writers", async () => {
     const paths = [];
     const result = await checkSiteCandidate({ ...config, fetchImpl: async (url, init) => {
       expect(init.redirect).toBe("manual");
@@ -22,7 +23,7 @@ describe("Azure site candidate smoke", () => {
       return fixture(url);
     } });
     expect(result.checked).toEqual(paths);
-    expect(paths).not.toContain("/demo");
+    expect(paths).toContain("/demo");
     expect(paths).not.toContain("/api/demo-leads");
   });
   it("rejects an image built with the wrong signup target", async () => {
@@ -34,6 +35,11 @@ describe("Azure site candidate smoke", () => {
     await expect(checkSiteCandidate({ ...config, fetchImpl: async (url) =>
       url.pathname === "/" ? new Response('<a href="https://signup.example/signup">Signup</a><a href="https://old.example/find-account">Login</a>') : fixture(url),
     })).rejects.toThrow("missing built login URL");
+  });
+  it.each(["/demo", "/es/demo"])("rejects %s built with the old demo destination", async (path) => {
+    await expect(checkSiteCandidate({ ...config, fetchImpl: async (url) =>
+      url.pathname === path ? new Response(`<form data-demo-url="https://app.corgtex.com${path}"></form>`) : fixture(url),
+    })).rejects.toThrow("missing built demo URL");
   });
   it("rejects mixed desktop and mobile login targets", async () => {
     await expect(checkSiteCandidate({ ...config, fetchImpl: async (url) =>

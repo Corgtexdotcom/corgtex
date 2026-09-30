@@ -67,11 +67,11 @@ describe("site demo backend continuity", () => {
     expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toContain(secret);
   });
 
-  it("keeps both stages on Core while signup goes to selfserve", async () => {
+  it("keeps capture, qualification and signup on selfserve", async () => {
     expect((await capture(request())).status).toBe(200);
     expect((await qualify(request({ token: "synthetic-token" }))).status).toBe(200);
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
-      "https://app.corgtex.com/api/demo-leads", "https://app.corgtex.com/api/demo-leads/qualify",
+      "https://selfserve.corgtex.com/api/demo-leads", "https://selfserve.corgtex.com/api/demo-leads/qualify",
     ]);
     expect(signupUrlForLocale("en")).toBe("https://selfserve.corgtex.com/signup");
   });
@@ -113,7 +113,7 @@ describe("site demo backend continuity", () => {
     await qualify(request({ token: "synthetic" }, { Cookie: "session=private", Authorization: "Bearer private", "x-api-key": "private", "x-forwarded-host": "untrusted.invalid", "x-forwarded-for": "192.0.2.1", "x-real-ip": "192.0.2.1" }));
     expect(fetchMock.mock.calls[0][1]).toMatchObject({ headers: { "Content-Type": "application/json", "x-forwarded-for": "192.0.2.1", "x-real-ip": "192.0.2.1" }, redirect: "error", cache: "no-store" });
     expect(Object.keys(fetchMock.mock.calls[0][1].headers)).toHaveLength(3);
-    expect(fetchMock.mock.calls[0][0]).toBe("https://app.corgtex.com/api/demo-leads/qualify");
+    expect(fetchMock.mock.calls[0][0]).toBe("https://selfserve.corgtex.com/api/demo-leads/qualify");
   });
 
   it.each([400, 404, 409, 429])("preserves useful JSON error status %s and strips extra fields", async status => {
