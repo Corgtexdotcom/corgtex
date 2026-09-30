@@ -1,14 +1,12 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { createHash, X509Certificate } from "node:crypto";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
-import { checkServerIdentity } from "node:tls";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import { readPin, resolveBaseline, migrationManifest, verifyLedger, databaseIdentity,
-  identityHash, verifiedSmokeChecks } from "../accepted-core-baseline.mjs";
-import { readSharedTenantSchema } from "../migration/shared-tenant-inventory.mjs";
+import { readPin, resolveBaseline, identityHash, verifiedSmokeChecks } from "../accepted-core-baseline.mjs";
+import { verifyRecoveryDatabase } from "../core-readonly-database.mjs";
+export { recoveryTls, verifyRecoveryDatabase } from "../core-readonly-database.mjs";
 import { recoverCore, recoveryStage, RECOVERY_STATE_QUERY } from "./core-recovery.mjs";
 
 const REPO = "Corgtexdotcom/corgtex";
@@ -16,7 +14,6 @@ const WORKFLOW = ".github/workflows/core-recovery.yml";
 export const DEPLOY_STEP = "Restore and verify incident-bound Core runtime";
 const ROOT = ".artifacts/core-recovery";
 const check = (ok, code) => { if (!ok) throw new Error(`CORE_RECOVERY_${code}`); };
-const hash = bytes => createHash("sha256").update(bytes).digest("hex");
 const same = (a, b) => identityHash(a) === identityHash(b);
 
 export function inspectAcceptedRecoveryImage(role, digest, execute = (args) => execFileSync("docker", args, {
@@ -60,19 +57,6 @@ export function trustedRecoveryContext(env) {
     && env.GITHUB_EVENT_NAME === "workflow_dispatch"
     && env.GITHUB_WORKFLOW_REF === `${REPO}/${WORKFLOW}@refs/heads/main`
     && /^[a-f0-9]{40}$/.test(env.GITHUB_SHA), "PROTECTED_MAIN_REQUIRED");
-}
-
-export function recoveryTls(request) {
-  const binding = request.sourceTls;
-  check(binding?.certificateName === "localhost" && /^[a-f0-9]{64}$/.test(binding.leafSha256)
-    && /^[a-f0-9]{64}$/.test(binding.caSha256) && typeof binding.caCertificate === "string"
-    && binding.caCertificate.length < 10000 && !binding.caCertificate.includes("PRIVATE KEY"), "TLS_BINDING");
-  const certificate = new X509Certificate(binding.caCertificate);
-  check(certificate.ca && hash(certificate.raw) === binding.caSha256, "CA_BINDING");
-  return { rejectUnauthorized: true, ca: binding.caCertificate, checkServerIdentity: (_host, cert) => {
-    if (!cert.raw || hash(cert.raw) !== binding.leafSha256) return new Error("CORE_RECOVERY_LEAF_BINDING");
-    return checkServerIdentity(binding.certificateName, cert);
-  } };
 }
 
 export function assertRecoveryControlPlane(body, request, target, configured) {
@@ -148,38 +132,6 @@ async function graphql(query, variables, env) {
   const body = await response.json();
   check(!body.errors && body.data, "PROVIDER_REQUEST_REJECTED");
   return body.data;
-}
-
-export async function verifyRecoveryDatabase(evidence, expectedSchema, request, { env, sourceDir, Client }) {
-  check(databaseIdentity(env.DATABASE_URL) === evidence.target.databaseIdentitySha256, "DATABASE_IDENTITY");
-  const actual = execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8", stdio: "pipe" }).trim();
-  check(actual === evidence.sourceSha && execFileSync("git", ["diff", "--name-only", "HEAD"],
-    { cwd: sourceDir, encoding: "utf8", stdio: "pipe" }).trim() === "", "ACCEPTED_SOURCE_CHECKOUT");
-  const manifest = migrationManifest(sourceDir);
-  check(manifest.manifestSha256 === expectedSchema.manifestSha256
-    && manifest.datamodelSha256 === expectedSchema.datamodelSha256, "ACCEPTED_SOURCE_SCHEMA");
-  const url = new URL(env.DATABASE_URL);
-  // URL SSL parameters can silently replace pg's explicit TLS options.
-  for (const key of [...url.searchParams.keys()]) if (key.startsWith("ssl") || key === "uselibpqcompat" || key === "options") url.searchParams.delete(key);
-  const client = new Client({ connectionString: url.href, connectionTimeoutMillis: 10000,
-    options: "-c default_transaction_read_only=on -c statement_timeout=60000 -c lock_timeout=1000", ssl: recoveryTls(request) });
-  try {
-    await client.connect();
-    check(client.connection?.stream?.authorized === true && client.connection.stream.encrypted === true, "AUTHORIZED_TLS_REQUIRED");
-    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-    const { rows: [binding] } = await client.query(`SELECT current_database() AS database,
-      current_setting('server_version') AS version, current_setting('transaction_read_only') AS read_only,
-      current_setting('default_transaction_read_only') AS default_read_only`);
-    check(binding.database === decodeURIComponent(url.pathname.slice(1)) && binding.version.startsWith(`${request.sourceVersion} `)
-      && binding.read_only === "on" && binding.default_read_only === "on", "DATABASE_READ_BINDING");
-    const { schemaSha256 } = await readSharedTenantSchema(client);
-    check(schemaSha256 === request.sourceSchemaSha256, "SOURCE_CATALOG_CHANGED");
-    const rows = await client.query("SELECT migration_name, checksum, finished_at, rolled_back_at FROM public._prisma_migrations ORDER BY migration_name LIMIT 10001");
-    const ledger = verifyLedger(manifest, rows.rows, evidence.sourceSha);
-    const result = { manifestSha256: manifest.manifestSha256, datamodelSha256: manifest.datamodelSha256, ...ledger, supportedSchemaMatch: true };
-    check(same(result, expectedSchema), "ACCEPTED_LEDGER_CHANGED");
-    return result;
-  } finally { await client.query("ROLLBACK").catch(() => {}); await client.end().catch(() => {}); }
 }
 
 export async function waitForRecoveredWeb(runtime, restoredSettings, {

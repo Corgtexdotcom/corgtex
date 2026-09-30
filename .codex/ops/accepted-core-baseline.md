@@ -99,6 +99,50 @@ Artifact expiry is a baseline-unverified failure; arrange protected reacceptance
 before the configured 90-day retention ends. An archive alone does not refresh
 acceptance or authorize changing the pin.
 
+## Incident-bound recovery adoption
+
+The recovery of incident `36757068293` uses the distinct
+`recovered-accepted-image-inheritance` build proof and
+`protected-review-retained-recovery-auth` proof. These are limited to successful
+recovery run `36779845461`, attempt 1, reviewed producer SHA
+`a63b40d6e9407914c9652fb410bd6b90d870e9d7`. They do not describe the newly deployed
+web container as a fresh direct build readback. The worker remains the originally
+accepted deployment, and both roles inherit only their original accepted image
+index digests.
+
+Bootstrap authenticates the exact recovery artifact ZIP and `recover.json` byte
+hashes, successful named mutation/verification step, run/attempt, main dispatch,
+repository, observation time and expiry. It rejects plans, failed or skipped
+steps, reruns, another producer, duplicate artifacts and proof older than 24 hours.
+It resolves the original pin and incident configuration at the recovery producer
+SHA and authenticates the original accepted receipt before accepting the new
+web deployment ID. It verifies the bounded writes, unchanged worker, original
+target/source/images/schema and retained registry proof. The protected recovery
+step completed all six authenticated smoke checks; `verifiedAt` is the combined
+verification completion time, not a separately timed login observation.
+
+The new evidence retains an incident-bound `databaseVerification` witness under
+the new receipt's hash. Its database identity, accepted source/datamodel/manifest,
+original/recovery receipt hashes, incident hash, catalog fingerprint, version,
+public CA/certificate-name/leaf binding and enum fingerprint are derived from
+this fixed reviewed incident, never selected by an input override.
+
+Each inherited database check uses strict TLS and a bounded read-only transaction.
+It compares the existing catalog fingerprint and migration ledger, then compares
+live enum names and label sets with the accepted datamodel and ordered labels
+with deterministic replay of the accepted source's enum migrations. The fixed
+historical checksum disposition is unchanged. This inherits the original
+supported-schema acceptance for the same source/images; it is not a replacement
+for Prisma comparison on a source-changing release. Other bootstrap families
+retain their existing database verification path.
+
+Ordinary baseline-auth reacceptance must preserve the authenticated witness and
+its hash; it cannot silently return to generic transport or choose a new witness.
+Fresh retained build/auth proof is still required. Adoption follows the existing
+protected main bootstrap and separate config PR. Recovery must not be dispatched
+again to obtain acceptance evidence. This implementation does not itself adopt
+or deploy anything, certify customer-data history, or establish retirement.
+
 ## Protected Reacceptance
 
 Successful baseline-mode CI retains `auth-smoke.json` in the private artifact
