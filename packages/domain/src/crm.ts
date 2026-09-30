@@ -518,6 +518,17 @@ async function syncCrmAccountLinksForContact(tx: any, params: {
   };
 }
 
+// Internal cutover fence. Lock an existing marker so enabling it waits for
+// in-flight intake to finish; install the disabled marker before fencing.
+async function requirePublicCrmWrites(tx: Prisma.TransactionClient, workspaceId: string) {
+  const rows = await tx.$queryRaw<{ enabled: boolean }[]>`
+    SELECT enabled FROM "WorkspaceFeatureFlag"
+    WHERE "workspaceId" = ${workspaceId} AND flag = 'crm_public_writes_paused'
+    FOR SHARE
+  `;
+  invariant(!rows.some((row) => row.enabled), 503, "CRM_PUBLIC_WRITES_PAUSED", "Lead intake is temporarily paused.");
+}
+
 export async function captureDemoLead(params: {
   email: string;
   source?: string;
@@ -545,6 +556,8 @@ export async function captureDemoLead(params: {
         description: workspaceDescription,
       },
     });
+
+    await requirePublicCrmWrites(tx, workspace.id);
 
     const demoLead = await tx.demoLead.upsert({
       where: {
@@ -2663,6 +2676,7 @@ export async function submitQualification(params: {
   invariant(lead, 400, "INVALID_INPUT", "Invalid qualification token.");
 
   return prisma.$transaction(async (tx) => {
+    await requirePublicCrmWrites(tx, lead.workspaceId);
     const qualification = await tx.crmQualification.create({
       data: {
         workspaceId: lead.workspaceId,
@@ -2695,17 +2709,18 @@ export async function receiveEmailReply(params: {
   fromEmail: string;
   subject: string;
   bodyText: string;
-}) {
+}, transaction?: Prisma.TransactionClient) {
   const email = params.fromEmail.trim().toLowerCase();
   
-  const lead = await prisma.demoLead.findFirst({
+  const lead = await (transaction ?? prisma).demoLead.findFirst({
     where: { email },
     orderBy: { createdAt: 'desc' },
   });
   
   invariant(lead, 404, "NOT_FOUND", "No matching DemoLead found for inbound reply.");
 
-  return prisma.$transaction(async (tx) => {
+  const operation = async (tx: Prisma.TransactionClient) => {
+    await requirePublicCrmWrites(tx, lead.workspaceId);
     const qualification = await tx.crmQualification.create({
       data: {
         workspaceId: lead.workspaceId,
@@ -2728,7 +2743,8 @@ export async function receiveEmailReply(params: {
     ]);
 
     return qualification;
-  });
+  };
+  return transaction ? operation(transaction) : prisma.$transaction(operation);
 }
 
 export async function listQualifications(actor: AppActor, workspaceId: string, opts?: { status?: string; take?: number; skip?: number }) {
@@ -2898,11 +2914,12 @@ export async function syncEmailReplyToConversation(params: {
   fromEmail: string;
   subject: string;
   bodyText: string;
-}) {
+}, transaction?: Prisma.TransactionClient) {
   const email = params.fromEmail.trim().toLowerCase();
-  return prisma.$transaction(async (tx) => {
+  const operation = async (tx: Prisma.TransactionClient) => {
     const lead = await tx.demoLead.findFirst({ where: { email }, orderBy: { createdAt: "desc" } });
     if (!lead) return null;
+    await requirePublicCrmWrites(tx, lead.workspaceId);
     const existing = await tx.crmConversation.findFirst({ where: { workspaceId: lead.workspaceId, demoLeadId: lead.id } });
     let conversation = existing ? await lockAndFindActiveCrmConversation(tx, lead.workspaceId, existing) : null;
     if (existing && !conversation) return null;
@@ -2920,6 +2937,21 @@ export async function syncEmailReplyToConversation(params: {
       senderEmail: email, bodyMd: params.bodyText.trim() } });
     await tx.crmConversation.update({ where: { id: conversation.id }, data: { updatedAt: new Date() } });
     return message;
+  };
+  return transaction ? operation(transaction) : prisma.$transaction(operation);
+}
+
+export async function recordInboundEmailReply(params: {
+  fromEmail: string;
+  subject: string;
+  bodyText: string;
+}) {
+  // Retain the public-intake share lock across both effects. A cutover hold
+  // cannot split a successful qualification from a retryable conversation.
+  return prisma.$transaction(async (tx) => {
+    const qualification = await receiveEmailReply(params, tx);
+    const message = await syncEmailReplyToConversation(params, tx);
+    return { qualification, message };
   });
 }
 

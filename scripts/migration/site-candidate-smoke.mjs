@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 export async function checkSiteCandidate({ origin, signupOrigin, fetchImpl = fetch }) {
   const candidate = new URL(origin);
   const signup = new URL(signupOrigin);
-  const paths = ["/api/health", "/", "/es", "/about", "/es/about", "/sitemap.xml", "/llms.txt"];
+  const paths = ["/api/health", "/", "/es", "/about", "/es/about", "/demo", "/es/demo", "/sitemap.xml", "/llms.txt"];
   const checked = [];
   for (const path of paths) {
     // Follow only canonical trailing-slash redirects for this requested route.
@@ -40,6 +40,9 @@ export async function checkSiteCandidate({ origin, signupOrigin, fetchImpl = fet
       const loginAnchors = [...text.matchAll(/<a\b[^>]*\bhref="([^"]+)"/g)]
         .filter((match) => match[1] === expectedLogin);
       if (loginAnchors.length !== 2) throw new Error(`${path}: expected desktop and mobile login URLs ${expectedLogin}`);
+    } else if (path === "/demo" || path === "/es/demo") {
+      const demo = `${signup.origin}${path === "/es/demo" ? "/es" : ""}/demo`;
+      if (!text.includes(`href="${demo}"`) && !text.includes(`data-demo-url="${demo}"`)) throw new Error(`${path}: missing built demo URL ${demo}`);
     } else if (path === "/sitemap.xml" && !text.includes("/es/about")) {
       throw new Error("Sitemap is missing localized routes");
     } else if (!text.trim()) {

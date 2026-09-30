@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { receiveEmailReply, syncEmailReplyToConversation } from "@corgtex/domain";
+import { recordInboundEmailReply } from "@corgtex/domain";
 import { createHmac, timingSafeEqual } from "crypto";
 
 export const dynamic = "force-dynamic";
@@ -104,24 +104,15 @@ export async function POST(request: NextRequest) {
     const emailMatch = from.match(/<([^>]+)>/);
     const fromEmail = emailMatch ? emailMatch[1] : from;
 
-    // Run both domain functions concurrently
-    await Promise.all([
-      receiveEmailReply({
-        fromEmail,
-        subject: subject || "No Subject",
-        bodyText: text,
-      }).catch(err => console.error("Error receiving email reply:", err)),
-
-      syncEmailReplyToConversation({
-        fromEmail,
-        subject: subject || "No Subject",
-        bodyText: text,
-      }).catch(err => console.error("Error syncing conversation:", err)),
-    ]);
+    await recordInboundEmailReply({ fromEmail, subject: subject || "No Subject", bodyText: text });
 
     return NextResponse.json({ ok: true });
   } catch (error) {
-    console.error("[resend-inbound] Error processing webhook:", error);
+    // The combined transaction rolls back both effects before a retry.
+    if ((error as { code?: string })?.code === "CRM_PUBLIC_WRITES_PAUSED") {
+      return NextResponse.json({ error: "Lead intake is temporarily paused." }, { status: 503 });
+    }
+    console.error("[resend-inbound] CRM reply processing failed");
     // Return 200 anyway so Resend doesn't retry infinitely on domain logic failures
     return NextResponse.json({ ok: true, error: "Internal processing error" });
   }

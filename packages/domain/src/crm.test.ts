@@ -108,6 +108,7 @@ vi.mock("@corgtex/shared", () => {
       $transaction: vi.fn((fn: any) =>
         fn({
           $executeRaw: vi.fn().mockResolvedValue(0),
+          $queryRaw: vi.fn().mockResolvedValue([]),
           crmQualification: {
             create: vi.fn().mockResolvedValue({ id: "qual-1", workspaceId: "ws-1", status: "PENDING_REVIEW" }),
             update: vi.fn().mockResolvedValue({ id: "qual-1", status: "APPROVED" }),
@@ -343,6 +344,7 @@ describe("CRM domain", () => {
 
       vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) =>
         fn({
+          $queryRaw: vi.fn().mockResolvedValue([]),
           workspace: {
             upsert: vi.fn().mockResolvedValue({ id: "ws-1", slug: "corgtex", name: "Corgtex" }),
           },
@@ -374,6 +376,7 @@ describe("CRM domain", () => {
       const { appendEvents } = await import("./events");
       const { captureDemoLead } = await import("./crm");
       const txFor = (beforeAccountId: string, afterAccountId: string) => ({
+        $queryRaw: vi.fn().mockResolvedValue([]),
         workspace: { upsert: vi.fn().mockResolvedValue({ id: "ws-1" }) },
         demoLead: { upsert: vi.fn().mockResolvedValue({ id: "lead-1", welcomeEmailSentAt: null }) },
         crmAccount: { findFirst: vi.fn().mockResolvedValue(null), create: vi.fn(), update: vi.fn() },
@@ -1408,6 +1411,7 @@ describe("CRM domain", () => {
       const { prisma } = await import("@corgtex/shared"), { recordDemoWelcomeCrmActivity } = await import("./crm");
       const upsert = vi.fn().mockResolvedValue({ id: "activity-1" });
       const tx = {
+        $queryRaw: vi.fn().mockResolvedValue([]),
         demoLead: { findFirst: vi.fn(({ select }) => select?.email
           ? { email: "lead@example.com", convertedContactId: null } : { id: "lead-1" }) },
         crmContact: { findUnique: vi.fn().mockResolvedValue({ id: "contact-1", workspaceId: "ws-1", accountId: null }),
@@ -2612,6 +2616,7 @@ describe("CRM domain", () => {
       const create = vi.fn();
       const rawConversation = { id: "conv-1", workspaceId: "ws-1", accountId: "account-1", contactId: null, dealId: null };
       const tx = {
+        $queryRaw: vi.fn().mockResolvedValue([]),
         demoLead: { findFirst: vi.fn().mockResolvedValue({ id: "lead-1", workspaceId: "ws-1" }) },
         crmConversation: { findFirst: vi.fn().mockResolvedValueOnce(rawConversation).mockResolvedValueOnce(null), create: vi.fn(), update: vi.fn() },
         crmContact: { findUnique: vi.fn().mockResolvedValue(null), findFirst: vi.fn().mockResolvedValue(null) },
@@ -2992,6 +2997,7 @@ describe("CRM domain", () => {
       };
       const contact = { id: "contact-1", workspaceId: "ws-1", accountId: null, archivedAt: null };
       const tx = {
+        $queryRaw: vi.fn().mockResolvedValue([]),
         demoLead: { findFirst: vi.fn().mockResolvedValue(lead), update: vi.fn() },
         crmContact: { findUnique: vi.fn().mockResolvedValue(contact), findMany: vi.fn().mockResolvedValue([{ accountId: null }]),
           findFirst: vi.fn().mockResolvedValue(contact) },
@@ -3014,6 +3020,7 @@ describe("CRM domain", () => {
       const { recordDripFollowUp } = await import("./crm-drip");
       const update = vi.fn(); const create = vi.fn();
       const tx = {
+        $queryRaw: vi.fn().mockResolvedValue([]),
         demoLead: { findFirst: vi.fn().mockResolvedValue({ id: "lead-1", workspaceId: "ws-1", convertedContactId: "contact-1" }), update },
         crmContact: { findUnique: vi.fn().mockResolvedValue({ id: "contact-1", workspaceId: "ws-1", accountId: "account-1", archivedAt: null }),
           findMany: vi.fn().mockResolvedValue([{ accountId: "account-1" }]), findFirst: vi.fn().mockResolvedValue(null) },

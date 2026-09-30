@@ -1,5 +1,11 @@
 # Ops and Core migration operator
 
+For current Core retirement into the existing selfserve application, use
+[core-retirement.md](core-retirement.md). The full Core-to-Azure path below is
+retained for governed recovery; do not dispatch a new Core activation as part of
+the retirement. Ops remains separate and its hosting migration is a separate
+release decision.
+
 Migrate Core first, then Ops after Core acceptance. The operator keeps the full
 database, durable job state and bucket contents, with an independent Azure Blob
 lease and journal. Retain source services, archives and recovery evidence.
