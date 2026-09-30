@@ -3865,12 +3865,32 @@ export const createRestoreCustodyBoundary = ({ productionMode = false, assertCus
   if (productionMode && (assertCustody === null || beforeRestore === null || signal === null)) {
     fail("PRODUCTION_CUSTODY_REQUIRED");
   }
+  const custodyFailure = (effect, detail) => {
+    const component = ["JOURNAL", "SOURCE", "TARGET", "MAINTENANCE"].includes(detail?.component)
+      ? detail.component : "UNKNOWN";
+    const reason = ["CHECK_FAILED", "SESSION_LOST", "SESSION_ERROR", "SESSION_END", "IDENTITY_OR_CUSTODY",
+      "LOCK_QUERY", "LOCK_NOT_HELD", "SIGNAL_ABORTED"].includes(detail?.reason)
+      ? detail.reason : "CHECK_FAILED";
+    const failure = new RehearsalError("RESTORE_CUSTODY_LOST");
+    failure.custodyDiagnostic = { effect: /^[A-Z][A-Z0-9_]{0,63}$/.test(effect) ? effect : "UNKNOWN",
+      component, reason };
+    throw failure;
+  };
+  const assertNotAborted = effect => {
+    if (!signal?.aborted) return;
+    if (signal.reason?.code === "PG_MAINTENANCE_LOST") custodyFailure(effect,
+      { component: "MAINTENANCE", reason: signal.reason.reason });
+    fail("RESTORE_ABORTED");
+  };
   return async (effect) => {
-    if (signal?.aborted) fail("RESTORE_ABORTED");
+    assertNotAborted(effect);
     if (assertCustody !== null) {
-      try { await assertCustody({ effect }); } catch { fail("RESTORE_CUSTODY_LOST"); }
+      try { await assertCustody({ effect }); } catch (error) {
+        custodyFailure(effect, error?.code === "PG_MAINTENANCE_LOST"
+          ? { component: "MAINTENANCE", reason: error.reason } : error?.custodyDiagnostic);
+      }
     }
-    if (signal?.aborted) fail("RESTORE_ABORTED");
+    assertNotAborted(effect);
   };
 };
 

@@ -38,7 +38,8 @@ test("loss of server lock or source custody aborts the operation", async () => {
     if (type === "lock") f.lose();
     if (type === "connection") f.client.emit("error", new Error("private connection details"));
     if (type === "source") f.controller.abort();
-    await assert.rejects(lease.assertHeld(), /PG_MAINTENANCE_LOST/);
+    await assert.rejects(lease.assertHeld(), { code: "PG_MAINTENANCE_LOST",
+      reason: { lock: "LOCK_NOT_HELD", connection: "SESSION_ERROR", source: "SIGNAL_ABORTED" }[type] });
     assert.equal(lease.signal.aborted, true); await lease.close();
   }
 });

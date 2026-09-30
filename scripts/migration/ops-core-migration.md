@@ -436,15 +436,26 @@ three ancestor journals root-first, requires each applicable scratch admission
 receipt, and creates `cutovers/<domain>-retry-3.json` only for one exact plan.
 
 If the fourth attempt also reaches terminal `SOURCE_RECOVERED` before any
-target write, a final fifth attempt may use `operator.retryOf:
+target write, a fifth attempt may use `operator.retryOf:
 { intentSha256, journalSha256, journal: "retry-3" }` bound to that retained
 plan and exact terminal journal. Use a fifth distinct scratch name. Carry all
 earlier admitted scratches as `verify-only` rows in both base runtime-access
 policies, and leave the fourth scratch for its separate admission receipt.
 The operator checks and leases all four ancestor journals root-first, checks
 each applicable historical admission receipt and effective policy, then creates
-`cutovers/<domain>-retry-4.json` for one exact plan. There is no sixth slot.
+`cutovers/<domain>-retry-4.json` for one exact plan.
 Run fresh preflight before fencing again.
+
+If the fifth attempt also reaches terminal `SOURCE_RECOVERED` before any target
+write, one sixth attempt may use `operator.retryOf: { intentSha256, journalSha256,
+journal: "retry-4" }` bound to its exact retained plan and terminal journal. Use
+a sixth distinct scratch name and retain the first five journals unchanged.
+Carry the earlier admitted scratches as `verify-only` in both base policies;
+admit the fifth scratch separately from its private evidence and live OID,
+owner, emptiness, and protected-access proof. The operator leases all five
+ancestors root-first and creates `cutovers/<domain>-retry-5.json` for one exact
+plan. Never resume the fifth capture after source recovery. Run fresh preflight
+before any new fence. There is no seventh slot.
 
 If the recovered predecessor left an empty, protected scratch database, set
 `retryScratchEvidenceDir` in the private retry credentials to the predecessor's

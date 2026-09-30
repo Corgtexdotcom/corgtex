@@ -9,6 +9,13 @@ import { postgresCopyCaptureIntent, postgresCopyRestoreIntent, postgresCopyRecor
 class PostgresCopyError extends Error {
   constructor(code) { super(code); this.code = code; Object.freeze(this); }
 }
+class PostgresCopyCustodyError extends Error {
+  constructor(custodyDiagnostic) {
+    super("RESTORE_CUSTODY_LOST");
+    this.code = "RESTORE_CUSTODY_LOST";
+    this.custodyDiagnostic = custodyDiagnostic;
+  }
+}
 const fail = (code) => { throw new PostgresCopyError(code); };
 const connectionBinding = (config) => ({ host: config.host, port: config.port, database: config.database, user: config.user });
 const sameBinding = (config, expected) => archiveEvidenceHash(connectionBinding(config)) === archiveEvidenceHash(expected);
@@ -16,9 +23,31 @@ const writeEvidence = (path, evidence) => writeFile(path, `${JSON.stringify(evid
 export function postgresCopyDiagnostic(error, stage) {
   const knownStage = ["CAPTURE", "RETAIN_ARCHIVE", "RECOVER_ARCHIVE", "RESTORE", "VALIDATE_PARITY"].includes(stage) ? stage : "UNKNOWN";
   return { stage: knownStage, ...(postgresArchiveDiagnostic(error) ?? {
-    code: error instanceof PostgresCopyError ? error.code : postgresRestoreErrorCode(error) ?? "UNCLASSIFIED_FAILURE",
+    code: error instanceof PostgresCopyError || error instanceof PostgresCopyCustodyError
+      ? error.code : postgresRestoreErrorCode(error) ?? "UNCLASSIFIED_FAILURE",
     operationStage: null, reason: null,
-  }) };
+  }), ...(error instanceof PostgresCopyCustodyError || postgresRestoreErrorCode(error) === "RESTORE_CUSTODY_LOST"
+    ? error.custodyDiagnostic : {}) };
+}
+
+export function createPostgresCopyCustodyGuard({ custody, assertSourceFenced, assertTargetInactive }) {
+  const signal = custody.signal;
+  return async () => {
+    signal.throwIfAborted();
+    const check = async (component, verify) => {
+      try { await verify(); } catch (error) {
+        const maintenance = error?.code === "PG_MAINTENANCE_LOST" || error?.message === "PG_MAINTENANCE_LOST";
+        throw new PostgresCopyCustodyError({ component: maintenance ? "MAINTENANCE" : component,
+          reason: maintenance && ["SESSION_LOST", "SESSION_ERROR", "SESSION_END", "IDENTITY_OR_CUSTODY",
+            "LOCK_QUERY", "LOCK_NOT_HELD", "SIGNAL_ABORTED"].includes(error?.reason)
+            ? error.reason : maintenance ? "SESSION_LOST" : "CHECK_FAILED" });
+      }
+    };
+    await check("JOURNAL", () => custody.assertOwned());
+    await check("SOURCE", assertSourceFenced);
+    await check("TARGET", assertTargetInactive);
+    signal.throwIfAborted();
+  };
 }
 
 /** Full retained database copy. Caller supplies verified source fencing and
@@ -43,13 +72,7 @@ export async function runOpsCorePostgresCopy({ domain, sourceConfig: suppliedSou
   }
   validateArchiveKeyVersion(keyVersion, vaultName);
   const signal = custody.signal;
-  const assertCustody = async () => {
-    signal.throwIfAborted();
-    await custody.assertOwned();
-    await assertSourceFenced();
-    await assertTargetInactive();
-    signal.throwIfAborted();
-  };
+  const assertCustody = createPostgresCopyCustodyGuard({ custody, assertSourceFenced, assertTargetInactive });
   await assertCustody();
   const copyOptions = { domain, expectedSource, expectedTarget, scratchName, archiveStore, keyVersion, maxArchiveBytes, operationStore, custody };
   const captureIntent = postgresCopyCaptureIntent(copyOptions);
