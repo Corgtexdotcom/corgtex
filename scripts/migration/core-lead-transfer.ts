@@ -1,10 +1,14 @@
-import { createHash } from "node:crypto";
+import { createHash, X509Certificate } from "node:crypto";
 import { checkServerIdentity, TLSSocket } from "node:tls";
+import type { PeerCertificate, ConnectionOptions } from "node:tls";
 import pg from "pg";
 
 type Row = Record<string, string | number | boolean | null>;
 export type LeadDatabaseBinding = {
   host: string; port: number; database: string; user: string; workspaceId: string;
+  // Source-only certificate alias, independently verified against the pinned
+  // Railway instance. The transport remains bound to its actual proxy endpoint.
+  certificateIdentity?: { name: "localhost"; leafSha256: string; caSha256: string };
 };
 export type CoreLeadTransferBinding = {
   source: LeadDatabaseBinding; target: LeadDatabaseBinding; targetMemberIds: string[];
@@ -24,6 +28,27 @@ export function leadTransferHash(value: unknown): string {
       ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item)).digest("hex");
 }
 
+export function verifyLeadCertificate(binding: LeadDatabaseBinding, certificate: PeerCertificate): Error | undefined {
+  const identity = binding.certificateIdentity;
+  if (identity && (identity.name !== "localhost" || !/^[a-f0-9]{64}$/.test(identity.leafSha256)
+    || !/^[a-f0-9]{64}$/.test(identity.caSha256) || !certificate.raw
+    || createHash("sha256").update(certificate.raw).digest("hex") !== identity.leafSha256)) {
+    return new Error("CORE_LEAD_TRANSFER_CERTIFICATE_PIN_MISMATCH");
+  }
+  return checkServerIdentity(identity?.name ?? binding.host, certificate);
+}
+
+export function leadTlsOptions(binding: LeadDatabaseBinding, ca?: Buffer | string): ConnectionOptions {
+  if (binding.certificateIdentity) {
+    let fingerprint;
+    try { fingerprint = ca && createHash("sha256").update(new X509Certificate(ca).raw).digest("hex"); }
+    catch { fail("SOURCE_CA_PIN_MISMATCH"); }
+    if (!fingerprint || fingerprint !== binding.certificateIdentity.caSha256) fail("SOURCE_CA_PIN_MISMATCH");
+  }
+  return { rejectUnauthorized: true, ...(ca ? { ca } : {}),
+    ...(binding.certificateIdentity ? { checkServerIdentity: (_host, certificate) => verifyLeadCertificate(binding, certificate) } : {}) };
+}
+
 // Bind to a real connected TLS socket before any SQL. A matching database name
 // or receipt on a clone is insufficient authority to write.
 function boundClient(client: pg.Client, binding: LeadDatabaseBinding, same?: TLSSocket) {
@@ -34,14 +59,21 @@ function boundClient(client: pg.Client, binding: LeadDatabaseBinding, same?: TLS
     connection: { stream: TLSSocket & { _rejectUnauthorized?: boolean } };
   };
   const socket = live.connection?.stream;
+  if (binding.certificateIdentity) {
+    const ssl = (client as unknown as { ssl: ConnectionOptions | boolean }).ssl;
+    const ca = typeof ssl === "object" && ssl !== null ? ssl.ca : undefined;
+    if (typeof ca !== "string" && !Buffer.isBuffer(ca)) fail("SOURCE_CA_PIN_MISMATCH");
+    leadTlsOptions(binding, ca);
+  }
   if (!live._connected || live._ending || live._ended || client.host !== binding.host || client.port !== binding.port
     || client.database !== binding.database || client.user !== binding.user) fail("TARGET_MISMATCH");
   if (!(socket instanceof TLSSocket) || socket.encrypted !== true || socket.authorized !== true
     || socket._rejectUnauthorized !== true || socket.destroyed || socket.remotePort !== binding.port
-    || (same && same !== socket) || checkServerIdentity(binding.host, socket.getPeerCertificate())) fail("TLS_REQUIRED");
+    || (same && same !== socket) || verifyLeadCertificate(binding, socket.getPeerCertificate())) fail("TLS_REQUIRED");
   return socket;
 }
 function validateBinding(binding: CoreLeadTransferBinding) {
+  if (binding?.target?.certificateIdentity) fail("TARGET_CERTIFICATE_ALIAS_FORBIDDEN");
   if (!binding || !Array.isArray(binding.targetMemberIds) || !binding.targetMemberIds.length
     || binding.targetMemberIds.some((id) => typeof id !== "string" || !id)
     || new Set(binding.targetMemberIds).size !== binding.targetMemberIds.length

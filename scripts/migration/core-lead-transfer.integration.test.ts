@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { after, before, test } from "node:test";
 import pg from "pg";
-import { importCoreLeadTransfer, prepareCoreLeadTransfer, type CoreLeadTransferBinding } from "./core-lead-transfer";
+import { X509Certificate, createHash } from "node:crypto";
+import { importCoreLeadTransfer, prepareCoreLeadTransfer, leadTlsOptions, verifyLeadCertificate, type CoreLeadTransferBinding } from "./core-lead-transfer";
 
 function url(side: string) {
   const input = process.env[`CORE_LEAD_${side.toUpperCase()}_URL`];
@@ -45,6 +46,31 @@ before(async () => {
     'legacy@example.invalid','Synthetic original welcome','SENT','synthetic-provider-receipt','2026-06-16 01:03:35.937321')`, [sourceId]);
 });
 after(async () => { await Promise.allSettled([source.end(), target.end()]); });
+
+test("source certificate alias requires its exact trusted root, name and leaf while target aliases fail", async () => {
+  const certificate = (source as pg.Client & { connection: { stream: import("node:tls").TLSSocket } }).connection.stream.getPeerCertificate();
+  const ca = readFileSync(process.env.CORE_CONTINUITY_TLS_CA!);
+  const identity = { name: "localhost" as const, leafSha256: createHash("sha256").update(certificate.raw).digest("hex"),
+    caSha256: createHash("sha256").update(new X509Certificate(ca).raw).digest("hex") };
+  const pinned = { ...binding, source: { ...binding.source, certificateIdentity: identity } };
+  assert.equal(verifyLeadCertificate(pinned.source, certificate), undefined);
+  assert.ok(verifyLeadCertificate({ ...pinned.source, certificateIdentity: { ...identity, leafSha256: "0".repeat(64) } }, certificate));
+  assert.ok(verifyLeadCertificate({ ...pinned.source, certificateIdentity: { ...identity, name: "wrong.invalid" as "localhost" } }, certificate));
+  assert.throws(() => leadTlsOptions(pinned.source), /SOURCE_CA_PIN_MISMATCH/);
+  assert.throws(() => leadTlsOptions({ ...pinned.source, certificateIdentity: { ...identity, caSha256: "0".repeat(64) } }, ca), /SOURCE_CA_PIN_MISMATCH/);
+  assert.ok(verifyLeadCertificate({ ...binding.target, host: "wrong.invalid" }, certificate));
+  const wrongPin = new pg.Client({ connectionString: url("source"), ssl: leadTlsOptions({ ...pinned.source,
+    certificateIdentity: { ...identity, leafSha256: "0".repeat(64) } }, ca) });
+  try { await assert.rejects(wrongPin.connect(), /CERTIFICATE_PIN_MISMATCH/); }
+  finally { await wrongPin.end().catch(() => {}); }
+  const aliasClient = new pg.Client({ connectionString: url("source"), ssl: leadTlsOptions(pinned.source, ca) });
+  try {
+    await aliasClient.connect();
+    assert.equal((await prepareCoreLeadTransfer(aliasClient, target, pinned)).leads.length, 1);
+    await assert.rejects(prepareCoreLeadTransfer(aliasClient, target, { ...pinned, source: { ...pinned.source, port: pinned.source.port + 1 } }), /TARGET_MISMATCH/);
+    await assert.rejects(prepareCoreLeadTransfer(aliasClient, target, { ...pinned, target: { ...binding.target, certificateIdentity: identity } }), /TARGET_CERTIFICATE_ALIAS_FORBIDDEN/);
+  } finally { await aliasClient.end(); }
+});
 
 test("bounded lead transfer preserves tokens, precise history and delivery provenance without replay", async (t) => {
   const bundle = await prepareCoreLeadTransfer(source, target, binding);

@@ -2,7 +2,7 @@ import { readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
-import { importCoreLeadTransfer, prepareCoreLeadTransfer, type CoreLeadBundle, type CoreLeadTransferBinding } from "./core-lead-transfer";
+import { importCoreLeadTransfer, prepareCoreLeadTransfer, leadTlsOptions, type CoreLeadBundle, type CoreLeadTransferBinding } from "./core-lead-transfer";
 
 const repo = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), "../.."));
 function privatePath(path: string, exists = true) {
@@ -45,16 +45,20 @@ async function main() {
   privatePath(bundlePath, command === "import");
   const sourceUrl = process.env.TRANSFER_SOURCE_DATABASE_URL, targetUrl = process.env.TRANSFER_TARGET_DATABASE_URL;
   if (!sourceUrl || !targetUrl) throw new Error("EXPLICIT_DATABASE_ENV_REQUIRED");
+  await runtimeEvidence(config);
   // Do not permit URL SSL settings to override certificate verification.
-  const clients = [sourceUrl, targetUrl].map((input) => {
+  const clients = [sourceUrl, targetUrl].map((input, index) => {
     const url = new URL(input);
     if ([...url.searchParams.keys()].some((key) => key.startsWith("ssl") || key === "uselibpqcompat")) throw new Error("USE_TLS_CA_ENV_NOT_URL_OVERRIDE");
+    const binding = index === 0 ? config.binding.source : config.binding.target;
+    if (index === 1 && binding.certificateIdentity) throw new Error("CORE_LEAD_TRANSFER_TARGET_CERTIFICATE_ALIAS_FORBIDDEN");
+    const caPath = process.env[index === 0 ? "TRANSFER_SOURCE_TLS_CA_FILE" : "TRANSFER_TARGET_TLS_CA_FILE"] ?? process.env.TRANSFER_TLS_CA_FILE;
+    const ca = caPath ? readFileSync(caPath) : undefined;
     return new pg.Client({ connectionString: url.href, connectionTimeoutMillis: 15_000,
-      ssl: { rejectUnauthorized: true, ...(process.env.TRANSFER_TLS_CA_FILE ? { ca: readFileSync(process.env.TRANSFER_TLS_CA_FILE) } : {}) } });
+      ssl: leadTlsOptions(binding, ca) });
   });
   const [source, target] = clients;
   try {
-    await runtimeEvidence(config);
     await Promise.all(clients.map((client) => client.connect()));
     if (command === "prepare") {
       const bundle = await prepareCoreLeadTransfer(source, target, config.binding);

@@ -46,7 +46,22 @@ tenant importer continues to reject an existing-workspace collision.
 5. Use a directory outside the repository with mode 0700 and files mode 0600.
    Supply database URLs through `TRANSFER_SOURCE_DATABASE_URL` and
    `TRANSFER_TARGET_DATABASE_URL`; use `TRANSFER_TLS_CA_FILE` if needed. Remove
-   URL SSL overrides and require certificate/hostname verification. Never log
+   URL SSL overrides and require certificate/hostname verification. Railway's
+   public proxy can serve a certificate named `localhost`. For this source only,
+   `binding.source.certificateIdentity` may bind `name: "localhost"`,
+   `leafSha256` and `caSha256` (SHA256 of DER certificates). Obtain these public
+   certificate facts through independently pinned Railway project, environment,
+   PostgreSQL service, deployment and running instance; recheck its proxy and
+   database identity. Never obtain the expected pin from the connection being
+   verified. Retain that provider evidence in the private cutover journal.
+   Set `TRANSFER_SOURCE_TLS_CA_FILE` to that verified root. Target CA settings
+   remain separate (`TRANSFER_TARGET_TLS_CA_FILE` or system trust); target
+   certificate aliases are rejected. Both the TLS handshake and live socket
+   checks verify the certificate name and exact leaf. A certificate rotation
+   aborts the transfer until source evidence is refreshed. Execute both clients
+   from a pinned, healthy selfserve web replica when local Azure access is
+   unavailable; verify its source-proxy egress read-only before enabling holds.
+   Never copy a server private key or widen a firewall for this path. Never log
    database credentials, lead payloads or qualification tokens.
 
    ```sh
