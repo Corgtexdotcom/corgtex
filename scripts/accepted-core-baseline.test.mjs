@@ -74,6 +74,26 @@ describe("accepted Core baseline trust", () => {
   });
 
   it.each([
+    ["11:06:00Z", "11:06:00.000Z", true],
+    ["11:06:00Z", "11:06:00.117Z", true],
+    ["11:06:00Z", "11:06:00.999Z", true],
+    ["11:06:00Z", "11:06:01.000Z", false],
+    ["11:06:00Z", "10:59:59.999Z", false],
+    ["11:06:00.117Z", "11:06:00.117Z", true],
+    ["11:06:00.117Z", "11:06:00.118Z", false],
+  ])("bounds receipt acceptance by artifact timestamp precision (%s, %s)", async (createdAt, acceptedAt, accepted) => {
+    const f = fixture();
+    f.provenance.artifact.created_at = `2026-01-01T${createdAt}`;
+    f.receipt.acceptance.acceptedAt = `2026-01-01T${acceptedAt}`;
+    const bytes = Buffer.from(JSON.stringify(f.receipt));
+    f.pin.receiptSha256 = sha256(bytes);
+    const responses = [f.provenance.run, f.provenance.attempt, f.provenance.workflow, f.provenance.artifact, f.provenance.artifacts];
+    const result = resolveBaseline(f.pin, { api: async () => responses.shift(), download: async () => bytes, now });
+    if (accepted) await expect(result).resolves.toEqual(f.receipt);
+    else await expect(result).rejects.toThrow("ACCEPTANCE_TIME_INVALID");
+  });
+
+  it.each([
     ["fork", (p) => { p.run.head_repository.full_name = "other/fork"; }],
     ["repository", (p) => { p.run.repository.full_name = "other/repo"; }],
     ["branch", (p) => { p.run.head_branch = "candidate"; }],
