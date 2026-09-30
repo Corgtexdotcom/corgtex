@@ -9,7 +9,8 @@ import { test } from "node:test";
 import pg from "pg";
 import { archiveEvidenceHash } from "./ops-core-archive.mjs";
 import { createCutoverJournal, openCutoverCustody } from "./ops-core-custody.mjs";
-import { runOpsCoreSourceFence, assertOpsCoreSourceFenced, recoverOpsCoreSource } from "./ops-core-source-controller.mjs";
+import { runOpsCoreSourceFence, assertOpsCoreSourceFenced, recoverOpsCoreSource,
+  inspectOpsCoreSourceFence } from "./ops-core-source-controller.mjs";
 import { createRailwayPostgresCustody } from "./railway-postgres-custody.mjs";
 import { RailwaySourceFence } from "./railway-source-fence.mjs";
 
@@ -369,6 +370,18 @@ for (const scenario of ["COMPLETE", "COMPLETE_POSTGRES", "LOST_WRITER_STAGE", "L
         await owner.close();
         owner = await openCutoverCustody(stores.blob, stores.intentSha256);
         stage = "REOPEN";
+        if (scenario === "LOST_WRITER_STAGE") {
+          const recordsBefore = [...stores.records.entries()];
+          const effectsBefore = [...rail.state.effects.entries()];
+          const inspection = await inspectOpsCoreSourceFence(options(recoveredPlan));
+          assert.equal(inspection.status, "SOURCE_FENCE_INSPECTED");
+          assert.equal(inspection.pending.to, "SOURCE_FENCED");
+          assert.equal(inspection.baselineRetained, true);
+          assert.ok(inspection.operations.some(item => item.kind === "RAILWAY_STAGE_SOURCE_TRIGGERS"
+            && item.observedComplete === 1));
+          assert.deepEqual([...stores.records.entries()], recordsBefore, "inspection cannot seal receipts");
+          assert.deepEqual([...rail.state.effects.entries()], effectsBefore, "inspection cannot replay effects");
+        }
         if (scenario === "RECOVERY_PARTIAL_STAGE") {
           const recovered = await recoverOpsCoreSource({ ...options(recoveredPlan), action: "apply",
             assertTargetInactive: async () => ({ complete: true, domain: "core", intentSha256: stores.intentSha256,

@@ -690,7 +690,13 @@ export class RailwaySourceFence {
    * input binding. Every supported kind has a read-only recovery path; a matching
    * provider state alone cannot establish ownership or create a new operation.
    */
-  async reconcileRecordedOperation({ kind, input, readIntent }) {
+  async inspectRecordedOperation(descriptor) {
+    return this.#recordedOperation(descriptor, true);
+  }
+  async reconcileRecordedOperation(descriptor) {
+    return this.#recordedOperation(descriptor, false);
+  }
+  async #recordedOperation({ kind, input, readIntent }, inspectOnly) {
     this.#requireExpectedLinks();
     requireValue(typeof readIntent === "function" && isRecord(input), "RAILWAY_DURABLE_INTENT_REQUIRED");
     input = freeze(structuredClone(input));
@@ -750,6 +756,16 @@ export class RailwaySourceFence {
     checkSignal(this.#signal);
     requireValue(intent?.schemaVersion === 1 && intent.type === "intent" && intent.kind === kind
       && intent.inputSha256 === digest(expectedInput), "RAILWAY_DURABLE_INTENT_UNPROVEN");
+    if (inspectOnly) {
+      try {
+        const observed = await verify();
+        checkSignal(this.#signal);
+        return { kind, complete: observed.complete === true };
+      } catch (error) {
+        if (error instanceof RailwaySourceFenceError) throw error;
+        throw new RailwaySourceFenceError("RAILWAY_OPERATION_REQUIRES_RECONCILIATION");
+      }
+    }
     return this.#operation(kind, expectedInput, async () => {
       throw new RailwaySourceFenceError("RAILWAY_RECOVERY_APPLY_FORBIDDEN");
     }, verify);

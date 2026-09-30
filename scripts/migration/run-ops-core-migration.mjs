@@ -11,7 +11,8 @@ import { ContainerClient } from "@azure/storage-blob";
 import { archiveEvidenceHash, azureArchiveStore, validateArchiveKeyVersion } from "./ops-core-archive.mjs";
 import { createCutoverJournal, validateCutoverJournal, azureBlobCustodyAdapter, openCutoverCustody } from "./ops-core-custody.mjs";
 import { azureProviderOperationStore } from "./ops-core-provider-operations.mjs";
-import { runOpsCoreSourceFence, assertOpsCoreSourceFenced, recoverOpsCoreSource } from "./ops-core-source-controller.mjs";
+import { runOpsCoreSourceFence, assertOpsCoreSourceFenced, recoverOpsCoreSource,
+  inspectOpsCoreSourceFence, sourceControllerDiagnostic } from "./ops-core-source-controller.mjs";
 import { runOpsCoreDataTransfer, resumeOpsCoreDataTransfer, reconcileOpsCoreDataTransfer, validateOpsCoreTransferPlan } from "./ops-core-transfer-controller.mjs";
 import { createOpsCoreActivation, validateOpsCoreActivationPlan } from "./ops-core-activation.mjs";
 import { buildHealthProbeJobDefinition, createHealthJobDispatcher } from "./ops-core-health-job.mjs";
@@ -26,7 +27,11 @@ import { createRuntimeSecretResolver, assertOpsCoreRuntimeAccessForActivation,
 import { openOpsCorePitrGuard, OPSCORE_CUSTODY_URL } from "./ops-core-pitr-guard.mjs";
 import { effectiveRetryScratchPolicy, resolveRetryScratchAdmission, retryCaptureLineage, retryRestoredLineage } from "./ops-core-retry-scratch.mjs";
 
-class OperatorError extends Error {}
+class OperatorError extends Error {
+  constructor(code, diagnostic = null) { super(code); this.diagnostic = diagnostic; }
+}
+export const migrationOperatorDiagnostic = error => error instanceof OperatorError
+  ? { code: error.message, ...error.diagnostic } : { code: "MIGRATION_RECONCILIATION_REQUIRED" };
 const need = (condition, code) => { if (!condition) throw new OperatorError(code); };
 const same = (left, right) => archiveEvidenceHash(left) === archiveEvidenceHash(right);
 const containerUrl = value => typeof value === "string"
@@ -187,10 +192,11 @@ async function assertRetryPredecessor({ plan, custodyContainer, predecessor }) {
 export async function runOpsCoreMigration({ action, plan: input, credentials, artifactDir, healthProbe,
   containerFactory, identityCheck = assertAzureIdentity, runtime = {}, acceptanceArtifact,
   pitrGuardFactory = openOpsCorePitrGuard }) {
-  let custody, predecessorInfo, pitrGuard;
+  let custody, predecessorInfo, pitrGuard, primaryError;
+  let stage = "ADMISSION";
   const ancestors = [];
   try {
-    need(["initialize", "status", "preflight", "fence", "transfer", "activate", "reconcile-transfer", "resume-transfer",
+    need(["initialize", "status", "preflight", "fence", "inspect-source-fence", "transfer", "activate", "reconcile-transfer", "resume-transfer",
       "reconcile-activate", "resume-activate", "recover-source", "reconcile-source-recovery", "record-routing", "accept", "retain-acceptance-evidence",
       "monitor-access"].includes(action), "MIGRATION_ACTION_INVALID");
     const plan = validateOperatorPlan(input); const intentSha256 = archiveEvidenceHash(plan);
@@ -280,7 +286,7 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
         destinationMayHaveWritten: state.destinationMayHaveWritten };
     }
     const operationStore = azureProviderOperationStore(custodyContainer);
-    const retryScratchAdmission = predecessorInfo && plan.transfer.postgres.runtimeAccess
+    const retryScratchAdmission = action !== "inspect-source-fence" && predecessorInfo && plan.transfer.postgres.runtimeAccess
       && (retryCaptureLineage(predecessorInfo.journal) || retryRestoredLineage(predecessorInfo.journal))
       ? await (runtime.resolveRetryScratchAdmission ?? resolveRetryScratchAdmission)({ plan,
         predecessorPlan: predecessorInfo.previous, predecessorJournal: predecessorInfo.journal,
@@ -301,6 +307,12 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
         resultSha256: archiveEvidenceHash(result), ...result };
     };
     if (action === "monitor-access") return await accessMonitor();
+    if (action === "inspect-source-fence") {
+      stage = "SOURCE_FENCE_INSPECTION";
+      need(credentials?.railwayToken || runtime.inspectSourceFence, "MIGRATION_RAILWAY_CREDENTIAL_REQUIRED");
+      return await (runtime.inspectSourceFence ?? inspectOpsCoreSourceFence)({ plan, custody, operationStore,
+        railway: credentials?.railwayToken ? { token: credentials.railwayToken } : {} });
+    }
     need(credentials && credentials.sourceConfig && credentials.readerConfig, "MIGRATION_CREDENTIALS_REQUIRED");
     const railway = credentials.railwayToken ? { token: credentials.railwayToken } : {};
     let sourceHealth;
@@ -315,6 +327,7 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
       ? runtime.resolveRuntimeSecretVersion ?? createRuntimeSecretResolver({ vaultUri: plan.activation.runtimeVaultUri, signal: custody.signal })
       : undefined;
     if (["recover-source", "reconcile-source-recovery"].includes(action)) {
+      stage = "SOURCE_RECOVERY";
       need(!custody.snapshot().destinationMayHaveWritten, "MIGRATION_SOURCE_RECOVERY_FORBIDDEN");
       const target = createOpsCoreAzureTarget({ binding: plan.azure, custody,
         ...(runtime.azureTransport ? { transport: runtime.azureTransport } : {}) });
@@ -339,8 +352,10 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
         verifiedBinding: plan.operator.sourceObjects, credentials: credentials.objectSource }),
       objectTarget: new AzureBlobObjectStore(container(plan.operator.targetObjectContainerUrl)) });
     if (["preflight", "fence"].includes(action)) {
+      stage = "TRANSFER_PREFLIGHT";
       const preflight = await (runtime.transferPreflight ?? runOpsCoreTransferPreflight)(transferOptions(), runtime.preflightDependencies);
       if (action === "preflight") return preflight;
+      stage = "SOURCE_FENCE";
       return await (runtime.fence ?? runOpsCoreSourceFence)(sourceOptions);
     }
     if (["transfer", "reconcile-transfer", "resume-transfer"].includes(action)) {
@@ -416,13 +431,23 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
     }
     const method = action === "reconcile-activate" ? "reconcile" : action === "resume-activate" ? "resume" : "activate";
     return await activation()[method]();
-  } catch (error) { throw error instanceof OperatorError ? error : new OperatorError("MIGRATION_RECONCILIATION_REQUIRED"); }
+  } catch (error) {
+    const source = sourceControllerDiagnostic(error);
+    primaryError = error instanceof OperatorError ? error : new OperatorError("MIGRATION_RECONCILIATION_REQUIRED",
+      { action: typeof action === "string" && /^[a-z-]{1,40}$/.test(action) ? action : null,
+        stage: source?.stage ?? stage, component: source ? "source-controller" : "operator",
+        causeCode: source?.causeCode ?? source?.code ?? null });
+    throw primaryError;
+  }
   finally {
     let closeError;
     for (const resource of [custody, ...ancestors.reverse(), pitrGuard]) {
       try { await resource?.close(); } catch (error) { closeError ??= error; }
     }
-    if (closeError) throw closeError;
+    if (closeError && primaryError?.diagnostic) primaryError.diagnostic.custodyCloseFailed = true;
+    if (closeError && !primaryError) throw new OperatorError("MIGRATION_RECONCILIATION_REQUIRED",
+      { action: typeof action === "string" && /^[a-z-]{1,40}$/.test(action) ? action : null,
+        stage: "CUSTODY_CLOSE", component: "operator", causeCode: null });
   }
 }
 
@@ -434,12 +459,23 @@ export async function runOpsCoreMigrationCli(argv = process.argv.slice(2)) {
   const result = await runOpsCoreMigration({ action, plan, credentials, artifactDir: artifacts && resolve(artifacts),
     acceptanceArtifact: acceptancePath ? await readPrivateMigrationJson(acceptancePath) : undefined });
   // Keep customer/provider evidence in the private stores, not CI stdout.
-  process.stdout.write(`${JSON.stringify({ status: result.status ?? result.phase, domain: plan.domain,
+  process.stdout.write(`${JSON.stringify(migrationCliResult(action, plan, result))}\n`);
+}
+
+export function migrationCliResult(action, plan, result) {
+  return { status: result.status ?? result.phase, domain: plan.domain,
     intentSha256: archiveEvidenceHash(plan), evidenceSha256: result.evidenceSha256 ?? null, complete: result.complete ?? null,
     code: result.code ?? null, nextAction: result.nextAction ?? null, historical: result.historical ?? false,
-    observedAt: result.observedAt ?? null, resultSha256: result.resultSha256 ?? null })}\n`);
+    observedAt: result.observedAt ?? null, resultSha256: result.resultSha256 ?? null,
+    ...(["status", "inspect-source-fence"].includes(action) ? { pending: result.pending ?? null,
+      destinationMayHaveWritten: result.destinationMayHaveWritten } : {}),
+    ...(action === "inspect-source-fence" ? { baselineRetained: result.baselineRetained,
+      operations: result.operations } : {}) };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  runOpsCoreMigrationCli().catch(() => { process.stderr.write("MIGRATION_RECONCILIATION_REQUIRED\n"); process.exitCode = 1; });
+  runOpsCoreMigrationCli().catch(error => {
+    process.stderr.write(`${JSON.stringify(migrationOperatorDiagnostic(error))}\n`);
+    process.exitCode = 1;
+  });
 }

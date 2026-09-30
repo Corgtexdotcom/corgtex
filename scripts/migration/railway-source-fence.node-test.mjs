@@ -620,6 +620,22 @@ test("recovery refuses provider-state matches without an actual durable intent o
   assert.equal(f.state.calls.filter((call) => call.query.startsWith("mutation")).length, before);
 });
 
+test("source-fence inspection verifies a retained intent without recording or mutating", async () => {
+  const f = await fixture();
+  await f.adapter.disableTriggers();
+  const descriptor = f.state.records.find(record => record.kind === "RAILWAY_DISABLE_AUTODEPLOY");
+  assert.ok(descriptor);
+  const recordCount = f.state.records.length;
+  const mutationCount = f.state.calls.filter(call => call.query.startsWith("mutation")).length;
+  assert.deepEqual(await f.adapter.inspectRecordedOperation({ ...descriptor, readIntent: f.readIntent }),
+    { kind: descriptor.kind, complete: true });
+  assert.equal(f.state.records.length, recordCount);
+  assert.equal(f.state.calls.filter(call => call.query.startsWith("mutation")).length, mutationCount);
+  await assert.rejects(f.adapter.inspectRecordedOperation({ ...descriptor, readIntent: async () => null }),
+    { code: "RAILWAY_DURABLE_INTENT_UNPROVEN" });
+  assert.equal(f.state.records.length, recordCount);
+});
+
 
 test("retained recovery baseline restores only owned trigger fields and exact prior deployment IDs", async () => {
   const f = await fixture();

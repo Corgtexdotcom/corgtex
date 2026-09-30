@@ -8,7 +8,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { azureProviderOperationStore } from "./ops-core-provider-operations.mjs";
 import { archiveEvidenceHash } from "./ops-core-archive.mjs";
 import { postgresRuntimeAccessPolicySha256 } from "./ops-core-postgres-runtime-access.mjs";
-import { readPrivateMigrationJson, runOpsCoreMigration, fetchWebActivationHealth } from "./run-ops-core-migration.mjs";
+import { readPrivateMigrationJson, runOpsCoreMigration, fetchWebActivationHealth,
+  migrationCliResult, migrationOperatorDiagnostic } from "./run-ops-core-migration.mjs";
 
 const directories = [];
 afterEach(async () => { for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true }); });
@@ -594,6 +595,51 @@ describe("Ops/Core executable operator", () => {
     expect(f.blobs.has(`plans/core/${archiveEvidenceHash(f.plan)}.json`)).toBe(true);
     const writes = f.writes(); const current = await runOpsCoreMigration({ ...f.options, action: "status" });
     expect(current).toEqual(first); expect(f.writes()).toBe(writes); expect(f.releases()).toBe(2);
+  });
+  it("prints a pending source fence and inspects it without starting another effect", async () => {
+    const f = fixture();
+    await runOpsCoreMigration({ ...f.options, action: "initialize" });
+    const blob = f.containerFactory(f.plan.operator.custodyContainerUrl).getBlockBlobClient("cutovers/core.json");
+    const owner = await openCutoverCustody(azureBlobCustodyAdapter(blob), archiveEvidenceHash(f.plan));
+    const pending = await owner.begin("SOURCE_FENCED", archiveEvidenceHash(f.plan.source));
+    await owner.close();
+    const writes = f.writes();
+    const status = await runOpsCoreMigration({ ...f.options, action: "status" });
+    expect(status).toMatchObject({ status: "PREPARED", pending: { to: "SOURCE_FENCED",
+      operationId: pending.operationId }, destinationMayHaveWritten: false });
+    expect(migrationCliResult("status", f.plan, status)).toMatchObject({ pending: { to: "SOURCE_FENCED",
+      operationId: pending.operationId }, destinationMayHaveWritten: false });
+    let inspected = false;
+    const result = await runOpsCoreMigration({ ...f.options, action: "inspect-source-fence", runtime: {
+      inspectSourceFence: async ({ custody, operationStore }) => {
+        inspected = true;
+        expect(custody.snapshot().pending.operationId).toBe(pending.operationId);
+        expect(operationStore).toBeTruthy();
+        return { status: "SOURCE_FENCE_INSPECTED", pending: custody.snapshot().pending,
+          destinationMayHaveWritten: false, baselineRetained: false, operations: [], complete: false };
+      },
+    } });
+    expect(inspected).toBe(true);
+    expect(migrationCliResult("inspect-source-fence", f.plan, result)).toMatchObject({
+      pending: { to: "SOURCE_FENCED" }, baselineRetained: false, operations: [] });
+    expect(f.writes()).toBe(writes);
+  });
+  it("classifies a source-fence failure without exposing provider text", async () => {
+    const f = fixture();
+    await runOpsCoreMigration({ ...f.options, action: "initialize" });
+    let thrown;
+    try {
+      await runOpsCoreMigration({ ...f.options, action: "fence",
+        credentials: { sourceConfig: {}, readerConfig: {}, objectSource: { accessKeyId: "id", secretAccessKey: "secret" } }, runtime: {
+          transferPreflight: async () => ({ status: "PREFLIGHT_READY" }),
+          fence: async () => { throw new Error("private provider response and secret"); },
+        } });
+    } catch (error) { thrown = error; }
+    expect(thrown?.message).toBe("MIGRATION_RECONCILIATION_REQUIRED");
+    expect(migrationOperatorDiagnostic(thrown)).toMatchObject({
+      code: "MIGRATION_RECONCILIATION_REQUIRED", action: "fence", stage: "SOURCE_FENCE",
+      component: "operator", causeCode: null });
+    expect(JSON.stringify(migrationOperatorDiagnostic(thrown))).not.toContain("private provider");
   });
   it.each(["missing", "mutable", "wrong-vault", "same-version"])("rejects %s original recovery-secret binding before initialization", async kind => {
     const f=fixture(), pg=f.plan.source.postgres;
