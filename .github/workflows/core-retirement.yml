@@ -31,6 +31,11 @@ on:
         type: string
         required: false
 
+      finalize_failed_run_id:
+        description: Exact failed web completion 36919896238; verify both landed utilities without any provider mutations
+        type: string
+        required: false
+
 permissions:
   actions: read
   contents: read
@@ -53,11 +58,13 @@ jobs:
           RECONCILE_RUN: ${{ inputs.reconcile_failed_run_id }}
           HEALTHCHECK_RUN: ${{ inputs.healthcheck_failed_run_id }}
           WEB_COMPLETION_RUN: ${{ inputs.web_completion_failed_run_id }}
+          FINALIZE_RUN: ${{ inputs.finalize_failed_run_id }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           node --input-type=module -e '
-            const { RECONCILE_RUN: r, HEALTHCHECK_RUN: h, WEB_COMPLETION_RUN: w } = process.env;
-            if ([r,h,w].filter(Boolean).length > 1 || (r && r !== "36883501899")
-              || (h && h !== "36892304659") || (w && w !== "36909978237")) process.exit(1);
+            const { RECONCILE_RUN: r, HEALTHCHECK_RUN: h, WEB_COMPLETION_RUN: w, FINALIZE_RUN: f, DRY_RUN: d } = process.env;
+            if ([r,h,w,f].filter(Boolean).length > 1 || (r && r !== "36883501899")
+              || (h && h !== "36892304659") || (w && w !== "36909978237") || (f && (f !== "36919896238" || d !== "true"))) process.exit(1);
           '
       - uses: actions/checkout@v5
         with:
@@ -75,7 +82,7 @@ jobs:
           username: ${{ vars.GHCR_IMPORT_USERNAME }}
           password: ${{ secrets.GHCR_IMPORT_TOKEN }}
       - name: Verify retirement plan without mutations
-        if: ${{ inputs.dry_run && inputs.healthcheck_failed_run_id == '' && inputs.web_completion_failed_run_id == '' }}
+        if: ${{ inputs.dry_run && inputs.healthcheck_failed_run_id == '' && inputs.web_completion_failed_run_id == '' && inputs.finalize_failed_run_id == '' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
@@ -84,7 +91,7 @@ jobs:
         run: node scripts/release/core-retirement-runner.mjs plan
       # Persisted GitHub step state is the no-replay journal before any mutation.
       - name: Retire reviewed Core application execution
-        if: ${{ !inputs.dry_run && inputs.reconcile_failed_run_id == '' && inputs.healthcheck_failed_run_id == '' && inputs.web_completion_failed_run_id == '' }}
+        if: ${{ !inputs.dry_run && inputs.reconcile_failed_run_id == '' && inputs.healthcheck_failed_run_id == '' && inputs.web_completion_failed_run_id == '' && inputs.finalize_failed_run_id == '' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
@@ -94,7 +101,7 @@ jobs:
           CORE_RETIREMENT_APPROVAL_SHA256: ${{ inputs.approval_sha256 }}
         run: node scripts/release/core-retirement-runner.mjs execute
       - name: Reconcile unchanged Core retirement incident
-        if: ${{ !inputs.dry_run && inputs.reconcile_failed_run_id != '' && inputs.healthcheck_failed_run_id == '' && inputs.web_completion_failed_run_id == '' }}
+        if: ${{ !inputs.dry_run && inputs.reconcile_failed_run_id != '' && inputs.healthcheck_failed_run_id == '' && inputs.web_completion_failed_run_id == '' && inputs.finalize_failed_run_id == '' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
@@ -105,7 +112,7 @@ jobs:
           CORE_RETIREMENT_RECONCILE_FAILED_RUN_ID: ${{ inputs.reconcile_failed_run_id }}
         run: node scripts/release/core-retirement-runner.mjs reconcile
       - name: Verify healthcheck recovery plan without mutations
-        if: ${{ inputs.dry_run && inputs.healthcheck_failed_run_id != '' && inputs.reconcile_failed_run_id == '' && inputs.web_completion_failed_run_id == '' }}
+        if: ${{ inputs.dry_run && inputs.healthcheck_failed_run_id != '' && inputs.reconcile_failed_run_id == '' && inputs.web_completion_failed_run_id == '' && inputs.finalize_failed_run_id == '' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
@@ -114,7 +121,7 @@ jobs:
           CORE_RETIREMENT_HEALTHCHECK_FAILED_RUN_ID: ${{ inputs.healthcheck_failed_run_id }}
         run: node scripts/release/core-retirement-runner.mjs healthcheck-plan
       - name: Recover Core worker healthcheck retirement
-        if: ${{ !inputs.dry_run && inputs.healthcheck_failed_run_id != '' && inputs.reconcile_failed_run_id == '' && inputs.web_completion_failed_run_id == '' }}
+        if: ${{ !inputs.dry_run && inputs.healthcheck_failed_run_id != '' && inputs.reconcile_failed_run_id == '' && inputs.web_completion_failed_run_id == '' && inputs.finalize_failed_run_id == '' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
@@ -125,7 +132,7 @@ jobs:
           CORE_RETIREMENT_HEALTHCHECK_FAILED_RUN_ID: ${{ inputs.healthcheck_failed_run_id }}
         run: node scripts/release/core-retirement-runner.mjs healthcheck-recover
       - name: Verify remaining Core web retirement without mutations
-        if: ${{ inputs.dry_run && inputs.web_completion_failed_run_id != '' && inputs.reconcile_failed_run_id == '' && inputs.healthcheck_failed_run_id == '' }}
+        if: ${{ inputs.dry_run && inputs.web_completion_failed_run_id != '' && inputs.reconcile_failed_run_id == '' && inputs.healthcheck_failed_run_id == '' && inputs.finalize_failed_run_id == '' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
@@ -134,7 +141,7 @@ jobs:
           CORE_RETIREMENT_WEB_COMPLETION_FAILED_RUN_ID: ${{ inputs.web_completion_failed_run_id }}
         run: node scripts/release/core-retirement-runner.mjs web-completion-plan
       - name: Complete remaining Core web retirement
-        if: ${{ !inputs.dry_run && inputs.web_completion_failed_run_id != '' && inputs.reconcile_failed_run_id == '' && inputs.healthcheck_failed_run_id == '' }}
+        if: ${{ !inputs.dry_run && inputs.web_completion_failed_run_id != '' && inputs.reconcile_failed_run_id == '' && inputs.healthcheck_failed_run_id == '' && inputs.finalize_failed_run_id == '' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
@@ -144,6 +151,15 @@ jobs:
           CORE_RETIREMENT_APPROVAL_JSON: ${{ inputs.approval_json }}
           CORE_RETIREMENT_APPROVAL_SHA256: ${{ inputs.approval_sha256 }}
         run: node scripts/release/core-retirement-runner.mjs web-complete
+      - name: Finalize landed Core utilities without mutations
+        if: ${{ inputs.dry_run && inputs.finalize_failed_run_id != '' && inputs.reconcile_failed_run_id == '' && inputs.healthcheck_failed_run_id == '' && inputs.web_completion_failed_run_id == '' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
+          FLEET_RELEASE_BACKUP_APP_TARGET_JSON: ${{ vars.FLEET_RELEASE_BACKUP_APP_TARGET_JSON }}
+          CORE_RETIREMENT_FINALIZE_FAILED_RUN_ID: ${{ inputs.finalize_failed_run_id }}
+        run: node scripts/release/core-retirement-runner.mjs finalize
       - name: Retain retirement and uncertain-outcome evidence
         if: always()
         uses: actions/upload-artifact@v4

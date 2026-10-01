@@ -170,3 +170,23 @@ four mutating step names. A failure consumes this completion opportunity; there
 is no rerun or automatic business restoration. Baseline expiry, configuration
 equality, Ops mappings/no leases, physical retention and database preservation
 remain unchanged. Final monitor closure and observation follow verified freeze.
+
+
+### Read-only finalization after the landed web completion
+
+Run `36919896238` is permanently consumed. Its immutable archive records
+`FINAL_PROVIDER_DRIFT` after runtime, history, retained-worker and public denial
+verification. It did not retain the two compared final snapshots; its failure
+cause remains unestablished. Later read-only evidence shows both utilities active,
+both original business processes stopped, worker unchanged and configuration
+unchanged. No further command or deployment recovery is indicated.
+
+The protected `finalize_failed_run_id=36919896238` path requires `dry_run=true`.
+It authenticates all four failed archives and the complete approval chain, binds
+the committed settled state, original baseline deadline, Ops context, original
+images and separate role proofs, and performs exact-ID continuity reads. It then
+checks public health/handoff/fences using GET only and requires a second identical
+provider read and fresh matching Ops context. The adapter rejects every mutation
+callback. A successful read-only receipt is distinct from the failed mutating run;
+it does not rewrite that run, replay execution, extend the baseline, remove
+resources or establish recording/customer activity acceptance.

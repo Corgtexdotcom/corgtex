@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
 import { identityHash } from "../accepted-core-baseline.mjs";
-import { reserveRetirementIntent, trustedRetirementContext, assertNodeEntrypoint, opsRetirementSnapshot, createRetirementStateReader, configurationDriftDiagnostic, waitForRetiredRuntime, waitForRetirementPublic, retirementApprovalProof, EXECUTE_STEP } from "./core-retirement-runner.mjs";
+import { reserveRetirementIntent, trustedRetirementContext, assertNodeEntrypoint, opsRetirementSnapshot, createRetirementStateReader, configurationDriftDiagnostic, waitForRetiredRuntime, waitForRetirementPublic, retirementApprovalProof, verifyRetirementPublicReadOnly, EXECUTE_STEP } from "./core-retirement-runner.mjs";
 import { HEALTHCHECK_CASE, HEALTHCHECK_STEP } from "./core-retirement-healthcheck-recovery.mjs";
 import { WEB_COMPLETION_CASE, WEB_COMPLETION_STEP } from "./core-retirement-web-completion.mjs";
 import { RECONCILE_STEP, RECONCILIATION_CASE } from "./core-retirement-reconciliation.mjs";
@@ -383,6 +383,7 @@ describe("readonly recovery approval assembly", () => {
   it("does not hash absent approval in a healthcheck preflight", () => {
     expect(retirementApprovalProof("healthcheck-plan", undefined, undefined)).toBeUndefined();
     expect(retirementApprovalProof("plan", undefined, undefined)).toBeUndefined();
+    expect(retirementApprovalProof("finalize", undefined, undefined)).toBeUndefined();
     expect(retirementApprovalProof("web-completion-plan", undefined, undefined)).toBeUndefined();
   });
   it("binds execution utilities to the nested retirement proof, not the envelope", () => {
@@ -427,12 +428,58 @@ describe("three-predecessor web-only completion barrier", () => {
     const actions = workflow.jobs.retire.steps.filter(row => row.run?.startsWith("node scripts/release/core-retirement-runner.mjs "));
     for (const [key, value, mode] of [["", "", ""], ["reconcile_failed_run_id", "36883501899", "reconcile"],
       ["healthcheck_failed_run_id", "36892304659", "healthcheck"], ["web_completion_failed_run_id", "36909978237", "web"]]) {
-      const inputs = { dry_run, reconcile_failed_run_id: "", healthcheck_failed_run_id: "", web_completion_failed_run_id: "", [key]: value };
+      const inputs = { dry_run, reconcile_failed_run_id: "", healthcheck_failed_run_id: "", web_completion_failed_run_id: "", finalize_failed_run_id: "", [key]: value };
       const selected = actions.filter(row => Function("inputs", `return (${row.if.slice(3, -3)})`)(inputs));
       expect(selected).toHaveLength(1);
       const expected = dry_run ? mode === "web" ? "web-completion-plan" : mode === "healthcheck" ? "healthcheck-plan" : "plan"
         : mode === "web" ? "web-complete" : mode === "healthcheck" ? "healthcheck-recover" : mode === "reconcile" ? "reconcile" : "execute";
       expect(selected[0].run).toBe(`node scripts/release/core-retirement-runner.mjs ${expected}`);
     }
+  });
+});
+
+
+describe("protected read-only finalization routing", () => {
+  const workflow = parse(readFileSync(new URL("../../.github/workflows/core-retirement.yml", import.meta.url), "utf8"));
+  const actions = workflow.jobs.retire.steps.filter(row => row.run?.startsWith("node scripts/release/core-retirement-runner.mjs "));
+  it.each([true, false])("never selects a mutating step with finalization input (dry_run=%s)", dry_run => {
+    const inputs = { dry_run, reconcile_failed_run_id: "", healthcheck_failed_run_id: "", web_completion_failed_run_id: "", finalize_failed_run_id: "36919896238" };
+    const selected = actions.filter(row => Function("inputs", `return (${row.if.slice(3, -3)})`)(inputs));
+    expect(selected.map(row => row.run)).toEqual(dry_run ? ["node scripts/release/core-retirement-runner.mjs finalize"] : []);
+  });
+  it.each(["false-mode", "wrong-case", "mixed-case"])("rejects %s before checkout", kind => {
+    const validation = workflow.jobs.retire.steps.find(row => row.name === "Validate incident mode");
+    const code = validation.run.match(/node --input-type=module -e '\n([\s\S]*)\n\s*'/)[1];
+    const env = { RECONCILE_RUN: "", HEALTHCHECK_RUN: "", WEB_COMPLETION_RUN: "", FINALIZE_RUN: "36919896238", DRY_RUN: "true" };
+    if (kind === "false-mode") env.DRY_RUN = "false";
+    if (kind === "wrong-case") env.FINALIZE_RUN = "123";
+    if (kind === "mixed-case") env.WEB_COMPLETION_RUN = "36909978237";
+    expect(() => Function("process", code)({ env, exit: () => { throw Error("REJECTED"); } })).toThrow("REJECTED");
+  });
+});
+
+describe("finalization public probes are GET-only", () => {
+  const proof = "a".repeat(64);
+  const setup = mutation => {
+    const fetchImpl = vi.fn(async (url, options) => {
+      expect(options.method).toBe("GET"); expect(options.redirect).toBe("manual");
+      const path = new URL(url).pathname;
+      if (path === "/api/health") return Response.json({ status: "ok", mode: "source-freeze-utility", role: "web", proofSha256: proof, applicationWrites: false, businessWorker: false, ...mutation });
+      if (path === "/") return new Response('<a href="https://selfserve.corgtex.com">Continue</a>');
+      return new Response('{}', { status: 503, headers: { "Retry-After": "3600" } });
+    });
+    return fetchImpl;
+  };
+  it("verifies current proof, handoff and fences using five GETs", async () => {
+    const fetchImpl = setup(); await verifyRetirementPublicReadOnly(proof, { fetchImpl }); expect(fetchImpl).toHaveBeenCalledTimes(5);
+  });
+  it.each([{ proofSha256: "b".repeat(64) }, { applicationWrites: true }, { businessWorker: true }, { role: "worker" }, { mode: "business" }])("rejects contradictory utility identity %j", async mutation => {
+    const fetchImpl = setup(mutation); await expect(verifyRetirementPublicReadOnly(proof, { fetchImpl })).rejects.toThrow(); expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+  it("rejects a redirected fence without a fallback write", async () => {
+    const base = setup(), fetchImpl = vi.fn(async (url, options) => new URL(url).pathname === "/api/mcp"
+      ? new Response(null, { status: 302, headers: { location: "https://selfserve.corgtex.com" } }) : base(url, options));
+    await expect(verifyRetirementPublicReadOnly(proof, { fetchImpl })).rejects.toThrow("FINALIZATION_FENCE_CHANGED");
+    expect(fetchImpl.mock.calls.every(([, options]) => options.method === "GET")).toBe(true);
   });
 });
