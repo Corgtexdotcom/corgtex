@@ -61,7 +61,7 @@ function getDisplayName(user?: CircleGraphUser | null) {
   return user?.displayName?.trim() || user?.email?.trim() || "Unknown";
 }
 
-export function isVisibleRoleAssignment(assignment: { expiresAt?: Date | string | number | null }, now: Date = new Date()) {
+function isVisibleRoleAssignment(assignment: { expiresAt?: Date | string | number | null }, now: Date = new Date()) {
   if (!assignment.expiresAt) return true;
   const expiresAt = assignment.expiresAt instanceof Date
     ? assignment.expiresAt
