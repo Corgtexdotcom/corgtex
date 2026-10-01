@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
 import { reserveRetirementIntent, trustedRetirementContext, assertNodeEntrypoint, opsRetirementSnapshot, createRetirementStateReader, configurationDriftDiagnostic, waitForRetiredRuntime, waitForRetirementPublic, EXECUTE_STEP } from "./core-retirement-runner.mjs";
+import { HEALTHCHECK_CASE, HEALTHCHECK_STEP } from "./core-retirement-healthcheck-recovery.mjs";
 import { RECONCILE_STEP, RECONCILIATION_CASE } from "./core-retirement-reconciliation.mjs";
 import { CORE_RETIREMENT_TARGET as target, CORE_DEPLOYMENT_ID, CORE_BEFORE, CORE_SOURCE_SHA, retirementCommand } from "./core-retirement.mjs";
 import { RailwaySourceFence } from "../migration/railway-source-fence.mjs";
@@ -324,5 +325,43 @@ describe("bounded public routing convergence", () => {
     };
     await expect(waitForRetirementPublic(proof, { fetchImpl, sleep })).rejects.toThrow();
     expect(sleep).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("two-predecessor healthcheck recovery barrier", () => {
+  const original = incident => ({ ...run(), id: incident.runId, head_sha: incident.workflowSha, status: "completed", conclusion: "failure" });
+  const failedJob = incident => ({ ...job(), id: incident.jobId, run_id: incident.runId, status: "completed", conclusion: "failure",
+    steps: [{ name: incident.stepName || EXECUTE_STEP, status: "completed", conclusion: "failure", started_at: "2026-10-01T16:30:00Z" }] });
+  const setup = () => {
+    const runs = [original(RECONCILIATION_CASE), original(HEALTHCHECK_CASE), run()];
+    const jobs = new Map([[RECONCILIATION_CASE.runId, failedJob(RECONCILIATION_CASE)], [HEALTHCHECK_CASE.runId, failedJob(HEALTHCHECK_CASE)],
+      [10, { ...job(), steps: [{ ...job().steps[0], name: HEALTHCHECK_STEP }] }]]);
+    const api = async path => path.includes("/jobs?") ? { total_count: 1, jobs: [jobs.get(Number(path.split("/")[2]))] }
+      : { total_count: runs.length, workflow_runs: runs };
+    return { runs, jobs, api };
+  };
+  it("admits only the two fixed failed predecessors and the current first recovery", async () => {
+    const f = setup(); expect(await reserveRetirementIntent({ env, api: f.api, healthcheckRecovery: true })).toBe(true);
+    await expect(reserveRetirementIntent({ env, api: f.api, reconciliation: true })).rejects.toThrow();
+    await expect(reserveRetirementIntent({ env, api: f.api })).rejects.toThrow();
+  });
+  it.each(["missing", "rerun", "success", "wrong-step", "third-attempt", "duplicate"])("blocks %s history", async kind => {
+    const f = setup();
+    if (kind === "missing") f.runs.shift();
+    if (kind === "rerun") f.runs[1].run_attempt = 2;
+    if (kind === "success") f.jobs.get(HEALTHCHECK_CASE.runId).steps[0].conclusion = "success";
+    if (kind === "wrong-step") f.jobs.get(HEALTHCHECK_CASE.runId).steps[0].name = EXECUTE_STEP;
+    if (kind === "duplicate") f.jobs.get(10).steps.push({ ...f.jobs.get(10).steps[0] });
+    if (kind === "third-attempt") { f.runs.push({ ...run(), id: 11 }); f.jobs.set(11, { ...f.jobs.get(10), run_id: 11 }); }
+    await expect(reserveRetirementIntent({ env, api: f.api, healthcheckRecovery: true })).rejects.toThrow();
+  });
+  it("routes recovery plans and execution through the existing protection", () => {
+    const workflow = parse(readFileSync(new URL("../../.github/workflows/core-retirement.yml", import.meta.url), "utf8"));
+    const recover = workflow.jobs.retire.steps.find(step => step.name === HEALTHCHECK_STEP);
+    expect(recover.run).toBe("node scripts/release/core-retirement-runner.mjs healthcheck-recover");
+    expect(recover.env.CORE_RETIREMENT_HEALTHCHECK_FAILED_RUN_ID).toBe("${{ inputs.healthcheck_failed_run_id }}");
+    expect(recover.if).toContain("!inputs.dry_run");
+    expect(recover.if).toContain("inputs.reconcile_failed_run_id == ''");
   });
 });

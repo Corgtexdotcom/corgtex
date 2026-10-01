@@ -3,7 +3,7 @@
 `Retire Existing Core` replaces only the known Core web and worker start commands
 with a same-image Node HTTP utility. Web health identifies `source-freeze-utility`
 and `applicationWrites:false`; legacy pages link to selfserve. API/OAuth reads and
-all writes return 503 with Retry-After. The worker runs only the inert utility.
+all writes return 503 with Retry-After. The worker runs only the inert utility and serves its configured `/healthz` on GET/HEAD.
 The commands bypass application startup, Prisma and business queues. Services,
 images, variables, database, credentials, domains, and recovery evidence remain.
 
@@ -83,3 +83,38 @@ with run-keyed HMAC fingerprints and no values; its random key is not retained.
 Existing services, images, variables and database remain under the same retention
 owner and physical-removal gate. This incident case exists only for governed
 recovery and can be removed after retirement evidence is retained and accepted.
+
+
+## Healthcheck recovery for run 36892304659
+
+The first reconciliation staged the approved worker command and created one
+failed utility deployment: its existing `/healthz` healthcheck received 503.
+The failed utility is stopped; the original worker and web remain active.
+Both consumed executions remain permanently recorded and must never be replayed.
+
+The committed `.github/core-retirement-healthcheck-recovery.json` binds both
+failed archives and their approval chain, the exact original command bytes,
+failed deployment, and the complete unmodified partial provider/config state.
+Run a new protected dry-run with `healthcheck_failed_run_id=36892304659`.
+This dedicated plan authenticates both predecessors; it does not reinterpret
+the failed latest deployment as the original baseline. The original baseline's
+24-hour deadline remains unchanged. Unsupported healthcheck paths block.
+
+A reviewed schemaVersion 1 `core-logical-retirement-healthcheck-recovery`
+envelope binds `caseSha256`, `failedRunId`, `originalApprovalHash`,
+`reconciliationApprovalHash`, `expectedProviderSha256`,
+`expectedPrivateConfigSha256`, fresh `reviewedAt` and a fresh normal
+`retirementApproval` using the new plan's partial provider hash. Review retained
+acceptance and disposition evidence before approving the native environment.
+Dispatch once with that envelope/hash, `dry_run=false` and the same failed-run
+input. All three mutating step names across all attempts count toward the
+barrier; only the two fixed failures and this first recovery are admitted.
+
+Before any provider write, both original pinned images run the exact candidate
+utility command in network-isolated, read-only containers. Tests exercise health
+GET/HEAD and write rejection; the worker includes `/healthz`, and web includes
+the selfserve handoff. Execution repeats this with its actual approval proof.
+Only after this passes does the same worker-first completion change commands
+and deploy each service once, proving original processes stop and configuration
+remains unchanged. The failed utility remains in history. Any recovery failure
+requires another explicit incident design; no retry or business restoration runs.

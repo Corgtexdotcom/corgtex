@@ -23,7 +23,7 @@ export function validateReconciliationEvidence({ run, artifact, artifacts, jobs,
     && artifact.workflow_run.head_branch === "main" && artifacts.total_count === 1
     && artifacts.artifacts?.length === 1 && artifacts.artifacts[0].id === artifact.id, "RECONCILIATION_ARTIFACT_INVALID");
   need(jobs.total_count === 1 && jobs.jobs?.length === 1, "RECONCILIATION_JOBS_INVALID");
-  const job = jobs.jobs[0], execute = job.steps?.filter(step => step.name === "Retire reviewed Core application execution");
+  const job = jobs.jobs[0], execute = job.steps?.filter(step => step.name === (incident.stepName || "Retire reviewed Core application execution"));
   need(job.id === incident.jobId && job.run_id === run.id && job.run_attempt === 1 && job.name === "Retire existing Core"
     && job.status === "completed" && job.conclusion === "failure" && execute?.length === 1
     && execute[0].status === "completed" && execute[0].conclusion === "failure" && Number.isFinite(Date.parse(execute[0].started_at))
@@ -31,8 +31,8 @@ export function validateReconciliationEvidence({ run, artifact, artifacts, jobs,
   need(sha256(members["intent.json"]) === incident.intentSha256 && sha256(members["failed.json"]) === incident.failedSha256,
     "RECONCILIATION_MEMBER_INVALID");
   const intent = JSON.parse(members["intent.json"]), failure = JSON.parse(members["failed.json"]);
-  need(intent.runId === String(run.id) && intent.workflowSha === incident.workflowSha && intent.approvalHash === incident.originalApprovalHash
-    && identityHash(intent.approval) === incident.originalApprovalHash && intent.providerBeforeSha256 === incident.providerBeforeSha256
+  need(intent.runId === String(run.id) && intent.workflowSha === incident.workflowSha && intent.approvalHash === (incident.retirementApprovalHash || incident.originalApprovalHash)
+    && identityHash(intent.approval) === (incident.retirementApprovalHash || incident.originalApprovalHash) && intent.providerBeforeSha256 === incident.providerBeforeSha256
     && same(intent.target, CORE_RETIREMENT_TARGET) && same(intent.before, CORE_BEFORE)
     && failure.status === "unverified" && failure.code === incident.failureCode
     && failure.providerWrites === "unknown; reconcile before another execution", "RECONCILIATION_INTENT_INVALID");
@@ -56,8 +56,7 @@ export function validateReconciliationApproval(approval, hash, intent, now = Dat
   return current;
 }
 
-export async function downloadReconciliationMembers(env, fetchImpl = fetch) {
-  const incident = RECONCILIATION_CASE;
+export async function downloadReconciliationMembers(env, fetchImpl = fetch, incident = RECONCILIATION_CASE) {
   const response = await fetchImpl(`https://api.github.com/repos/${REPO}/actions/artifacts/${incident.artifactId}/zip`, {
     headers: { Authorization: `Bearer ${env.GITHUB_TOKEN}` }, redirect: "manual", signal: AbortSignal.timeout(30000),
   });
