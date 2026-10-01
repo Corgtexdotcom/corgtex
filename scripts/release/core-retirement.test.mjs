@@ -38,7 +38,7 @@ function fixture() {
     cronSchedule: null, configuredCronSchedule: null, nextCronRunAt: null, fileConfig: null, deployments: [{ status: "SUCCESS" }],
   })) } };
   const writes = [];
-  const deps = { now: () => now, assertContext: vi.fn(async () => H), verifyImages: vi.fn(async () => H),
+  const deps = { now: () => now, assertContext: vi.fn(async () => H), verifyImages: vi.fn(async () => H), verifyCommands: vi.fn(async () => ({ verified: true })),
     readState: vi.fn(async () => structuredClone(state)), reserveIntent: vi.fn(async () => true),
     setCommand: vi.fn(async (role, command) => { writes.push(`command:${role}`); state.stages[role].startCommand = command; }),
     deploy: vi.fn(async role => { writes.push(`deploy:${role}`); return id(role === "worker" ? 10 : 11); }),
@@ -96,6 +96,12 @@ describe("bounded Core retirement", () => {
     await expect(retireCore(input, f.deps)).rejects.toThrow("uncertain");
     expect(f.deps.deploy).toHaveBeenCalledOnce(); expect(f.writes).toEqual(["command:worker"]);
   });
+  it("proves the actual utility command before durable intent or provider writes", async () => {
+    const f = fixture(), input = await f.approve();
+    f.deps.verifyCommands.mockRejectedValue(new Error("healthcheck failed"));
+    await expect(retireCore(input, f.deps)).rejects.toThrow("healthcheck failed");
+    expect(f.writes).toEqual([]); expect(f.deps.reserveIntent).not.toHaveBeenCalled();
+  });
   it("requires fresh exclusion immediately before deployment", async () => {
     const f = fixture(), input = await f.approve(); let calls = 0;
     f.deps.assertContext.mockImplementation(async () => ++calls === 3 ? "b".repeat(64) : H);
@@ -117,6 +123,18 @@ describe("actual source-freeze utility", () => {
         try { response = await fetch(`http://127.0.0.1:${port}/api/health`); break; } catch { await new Promise(resolve => setTimeout(resolve, 20)); }
       }
       expect(await response.json()).toMatchObject({ mode: "source-freeze-utility", applicationWrites: false, businessWorker: false, proofSha256: H });
+      if (role === "worker") {
+        const configuredHealth = await fetch(`http://127.0.0.1:${port}/healthz`);
+        expect(configuredHealth.status).toBe(200);
+        expect(await configuredHealth.json()).toMatchObject({ role: "worker", proofSha256: H, applicationWrites: false, businessWorker: false });
+        const head = await fetch(`http://127.0.0.1:${port}/healthz`, { method: "HEAD" });
+        expect(head.status).toBe(200);
+        expect(await head.text()).toBe("");
+        const deniedHealthWrite = await fetch(`http://127.0.0.1:${port}/healthz`, { method: "POST" });
+        expect(deniedHealthWrite.status).toBe(503);
+        expect(deniedHealthWrite.headers.get("retry-after")).toBe("3600");
+        expect((await fetch(`http://127.0.0.1:${port}/healthz/other`)).status).toBe(503);
+      }
       for (const method of ["POST", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
         const denied = await fetch(`http://127.0.0.1:${port}/api/mcp`, { method });
         expect(denied.status).toBe(503); expect(denied.headers.get("retry-after")).toBe("3600"); expect(denied.headers.get("location")).toBe(null);

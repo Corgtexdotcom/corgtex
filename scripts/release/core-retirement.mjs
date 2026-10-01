@@ -1,4 +1,5 @@
 import { identityHash, sha256, validatePin, validateReceipt } from "../accepted-core-baseline.mjs";
+import { assertHealthcheckRecoveryStart } from "./core-retirement-healthcheck-recovery.mjs";
 import { recoveryStage } from "./core-recovery.mjs";
 
 export const CORE_RETIREMENT_TARGET = Object.freeze({
@@ -28,7 +29,7 @@ export function sourceFreezeServer(role, proofSha256) {
     response.setHeader("Cache-Control", "no-store");
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
-    if (read && path === "/api/health") {
+    if (read && (path === "/api/health" || (role === "worker" && path === "/healthz"))) {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(request.method === "HEAD" ? "" : status); return;
     }
@@ -108,18 +109,30 @@ export function validateRetirementApproval(approval, plan, expectedHash, now = D
   need(age >= 0 && age <= 3600000, "REVIEWED_APPROVAL_STALE");
 }
 
-export async function retireCore({ pin, receipt, receiptBytes, approval, approvalHash, dryRun = true }, deps) {
+export async function retireCore(input, deps) {
+  return completeRetirement(input, deps, false);
+}
+
+export async function recoverCoreHealthcheck(input, deps) {
+  return completeRetirement(input, deps, true);
+}
+
+async function completeRetirement({ pin, receipt, receiptBytes, approval, approvalHash, dryRun = true }, deps, healthcheckRecovery) {
   validateRetirementBaseline({ pin, receipt, receiptBytes, now: deps.now?.() });
   const opsSnapshotSha256 = await deps.assertContext();
   const imageStartupProofSha256 = await deps.verifyImages(receipt.evidence);
   const initial = await deps.readState();
-  assertQuietTriggers(initial.fence); assertBefore(initial.stages, receipt);
+  assertQuietTriggers(initial.fence);
+  if (healthcheckRecovery) assertHealthcheckRecoveryStart(initial, receipt);
+  else assertBefore(initial.stages, receipt);
+  const commandExercise = await deps.verifyCommands(receipt.evidence, initial, dryRun ? "0".repeat(64) : approvalHash);
   const plan = { kind: "core-logical-retirement-plan", baselineReceiptSha256: pin.receiptSha256,
     providerBeforeSha256: identityHash(initial), opsSnapshotSha256, imageStartupProofSha256,
     target: CORE_RETIREMENT_TARGET, before: CORE_BEFORE, databaseChanges: false, physicalServices: "retain",
     exclusion: "fleet-release-concurrency-and-fresh-ops-no-active-leases" };
-  if (dryRun) return { ...plan, dryRun: true, mutations: 0 };
+  if (dryRun) return { ...plan, commandExercise, dryRun: true, mutations: 0 };
   validateRetirementApproval(approval, plan, approvalHash, deps.now?.());
+  validateRetirementBaseline({ pin, receipt, receiptBytes, now: deps.now?.() });
   const reservation = await deps.reserveIntent({ approvalHash, ...plan });
   need(reservation === true, "DURABLE_INTENT_REQUIRED");
   let expected = initial;
@@ -145,5 +158,5 @@ export async function retireCore({ pin, receipt, receiptBytes, approval, approva
   need(await deps.assertContext() === opsSnapshotSha256, "OPS_SNAPSHOT_CHANGED");
   need(same(await deps.readState(), expected), "FINAL_PROVIDER_DRIFT");
   return { ...plan, kind: "core-logical-retirement-verified", approvalHash, writes,
-    afterSha256: identityHash(expected), applicationWrites: false, businessWorker: false };
+    afterSha256: identityHash(expected), commandExercise, applicationWrites: false, businessWorker: false };
 }
