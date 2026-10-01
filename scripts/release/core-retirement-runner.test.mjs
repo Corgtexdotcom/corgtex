@@ -4,6 +4,7 @@ import { parse } from "yaml";
 import { identityHash } from "../accepted-core-baseline.mjs";
 import { reserveRetirementIntent, trustedRetirementContext, assertNodeEntrypoint, opsRetirementSnapshot, createRetirementStateReader, configurationDriftDiagnostic, waitForRetiredRuntime, waitForRetirementPublic, retirementApprovalProof, EXECUTE_STEP } from "./core-retirement-runner.mjs";
 import { HEALTHCHECK_CASE, HEALTHCHECK_STEP } from "./core-retirement-healthcheck-recovery.mjs";
+import { WEB_COMPLETION_CASE, WEB_COMPLETION_STEP } from "./core-retirement-web-completion.mjs";
 import { RECONCILE_STEP, RECONCILIATION_CASE } from "./core-retirement-reconciliation.mjs";
 import { CORE_RETIREMENT_TARGET as target, CORE_DEPLOYMENT_ID, CORE_BEFORE, CORE_SOURCE_SHA, retirementCommand } from "./core-retirement.mjs";
 import { RailwaySourceFence } from "../migration/railway-source-fence.mjs";
@@ -382,11 +383,56 @@ describe("readonly recovery approval assembly", () => {
   it("does not hash absent approval in a healthcheck preflight", () => {
     expect(retirementApprovalProof("healthcheck-plan", undefined, undefined)).toBeUndefined();
     expect(retirementApprovalProof("plan", undefined, undefined)).toBeUndefined();
+    expect(retirementApprovalProof("web-completion-plan", undefined, undefined)).toBeUndefined();
   });
   it("binds execution utilities to the nested retirement proof, not the envelope", () => {
     const nested = { reviewedAt: "2026-10-01T18:00:00Z", evidence: "retained" }, envelopeHash = "a".repeat(64);
     expect(retirementApprovalProof("healthcheck-recover", nested, envelopeHash)).toBe(identityHash(nested));
     expect(retirementApprovalProof("reconcile", nested, envelopeHash)).toBe(identityHash(nested));
+    expect(retirementApprovalProof("web-complete", nested, envelopeHash)).toBe(identityHash(nested));
     expect(retirementApprovalProof("execute", nested, envelopeHash)).toBe(envelopeHash);
+  });
+});
+
+describe("three-predecessor web-only completion barrier", () => {
+  const setup = () => {
+    const incidents = [RECONCILIATION_CASE, HEALTHCHECK_CASE, WEB_COMPLETION_CASE];
+    const runs = [...incidents.map(c => ({ ...run(), id: c.runId, head_sha: c.workflowSha, status: "completed", conclusion: "failure" })), run()];
+    const jobs = new Map(incidents.map(c => [c.runId, { ...job(), id: c.jobId, run_id: c.runId, status: "completed", conclusion: "failure",
+      steps: [{ name: c.stepName || EXECUTE_STEP, status: "completed", conclusion: "failure", started_at: "2026-10-01T18:55:00Z" }] }]));
+    jobs.set(10, { ...job(), steps: [{ ...job().steps[0], name: WEB_COMPLETION_STEP }] });
+    const api = async path => path.includes("/jobs?") ? { total_count: 1, jobs: [jobs.get(Number(path.split("/")[2]))] }
+      : { total_count: runs.length, workflow_runs: runs };
+    return { runs, jobs, api };
+  };
+  it("admits only the exact three failures and current first web completion", async () => {
+    const f = setup();
+    expect(await reserveRetirementIntent({ env, api: f.api, webCompletion: true })).toBe(true);
+    await expect(reserveRetirementIntent({ env, api: f.api, healthcheckRecovery: true })).rejects.toThrow();
+    await expect(reserveRetirementIntent({ env, api: f.api })).rejects.toThrow();
+  });
+  it.each(["missing", "rerun", "success", "wrong-step", "prior-completion", "duplicate", "wrong-sha"])("blocks %s", async kind => {
+    const f = setup();
+    if (kind === "missing") f.runs.splice(2, 1);
+    if (kind === "rerun") f.runs[2].run_attempt = 2;
+    if (kind === "success") f.jobs.get(WEB_COMPLETION_CASE.runId).steps[0].conclusion = "success";
+    if (kind === "wrong-step") f.jobs.get(WEB_COMPLETION_CASE.runId).steps[0].name = EXECUTE_STEP;
+    if (kind === "wrong-sha") f.runs[2].head_sha = "b".repeat(40);
+    if (kind === "duplicate") f.jobs.get(10).steps.push({ ...f.jobs.get(10).steps[0] });
+    if (kind === "prior-completion") { f.runs.push({ ...run(), id: 11 }); f.jobs.set(11, { ...f.jobs.get(10), run_id: 11 }); }
+    await expect(reserveRetirementIntent({ env, api: f.api, webCompletion: true })).rejects.toThrow();
+  });
+  it.each([true, false])("routes each valid input to exactly its intended step (dry_run=%s)", dry_run => {
+    const workflow = parse(readFileSync(new URL("../../.github/workflows/core-retirement.yml", import.meta.url), "utf8"));
+    const actions = workflow.jobs.retire.steps.filter(row => row.run?.startsWith("node scripts/release/core-retirement-runner.mjs "));
+    for (const [key, value, mode] of [["", "", ""], ["reconcile_failed_run_id", "36883501899", "reconcile"],
+      ["healthcheck_failed_run_id", "36892304659", "healthcheck"], ["web_completion_failed_run_id", "36909978237", "web"]]) {
+      const inputs = { dry_run, reconcile_failed_run_id: "", healthcheck_failed_run_id: "", web_completion_failed_run_id: "", [key]: value };
+      const selected = actions.filter(row => Function("inputs", `return (${row.if.slice(3, -3)})`)(inputs));
+      expect(selected).toHaveLength(1);
+      const expected = dry_run ? mode === "web" ? "web-completion-plan" : mode === "healthcheck" ? "healthcheck-plan" : "plan"
+        : mode === "web" ? "web-complete" : mode === "healthcheck" ? "healthcheck-recover" : mode === "reconcile" ? "reconcile" : "execute";
+      expect(selected[0].run).toBe(`node scripts/release/core-retirement-runner.mjs ${expected}`);
+    }
   });
 });

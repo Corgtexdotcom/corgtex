@@ -73,7 +73,7 @@ export async function downloadReconciliationMembers(env, fetchImpl = fetch, inci
   try {
     const path = join(directory, "incident.zip"); await writeFile(path, bytes, { mode: 0o600 });
     const names = execFileSync("unzip", ["-Z1", path], { encoding: "utf8", maxBuffer: 4096 }).trim().split("\n").sort();
-    need(same(names, ["failed.json", "image-startup.json", "intent.json"]), "RECONCILIATION_ARCHIVE_CONTENTS");
+    need(same(names, incident.artifactMembers || ["failed.json", "image-startup.json", "intent.json"]), "RECONCILIATION_ARCHIVE_CONTENTS");
     return Object.fromEntries(["intent.json", "failed.json"].map(name => [name, execFileSync("unzip", ["-p", path, name], { maxBuffer: 64000 })]));
   } finally { await rm(directory, { recursive: true, force: true }); }
 }

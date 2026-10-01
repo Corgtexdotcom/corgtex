@@ -141,3 +141,32 @@ by itself. Diagnostic failure still throws the original configuration mismatch.
 No extra provider reads, retries, normalization or mutating recovery opportunity
 are introduced. Both failed executions and the failed read-only preflight remain
 retained, and the original baseline deadline stays unchanged.
+
+## Complete only the remaining web transition
+
+Run 36909978237 deployed worker utility 89d1208c and then failed its history
+check. A later settled capture, direct metadata read and read-only `/healthz`
+request prove that utility is healthy, its original image and approved command
+are retained, and the original business worker is stopped. Web remains original.
+This later evidence does not replace the failed run's retained archive.
+
+The recovery query returns the first 100 deployments with another page present.
+Adding a deployment displaced a prior history row. The full fence and an exact-ID
+read retain that row with its original digest. During convergence, missing prior
+first-page entries now require unchanged full-fence lifecycle evidence and an
+exact-ID target/status/digest verification. Supplements are retained separately;
+the actual state projection and its hash are never rewritten.
+
+The committed web-completion case authenticates all three failed archives and
+the exact settled partial state. A fresh protected read-only plan and reviewed
+approval precede one new `Complete remaining Core web retirement` step. Only
+web command update and web deployment are permitted; worker mutation is rejected
+at the provider adapter as well as omitted from the completion engine.
+
+Worker retains its existing b2217e36 proof. Web receives the fresh completion
+proof. Command exercises and the final receipt bind each role's distinct proof,
+deployment, command and original image. The same all-attempt barrier counts all
+four mutating step names. A failure consumes this completion opportunity; there
+is no rerun or automatic business restoration. Baseline expiry, configuration
+equality, Ops mappings/no leases, physical retention and database preservation
+remain unchanged. Final monitor closure and observation follow verified freeze.
