@@ -283,6 +283,11 @@ export async function waitForRetirementPublic(proofSha256, {
   need(false, "PUBLIC_TIMEOUT_RECONCILE");
 }
 
+export function retirementApprovalProof(mode, approval, manifestHash) {
+  if (["plan", "healthcheck-plan"].includes(mode)) return undefined;
+  return ["reconcile", "healthcheck-recover"].includes(mode) ? identityHash(approval) : manifestHash;
+}
+
 // Exercise the exact generated command, including the configured worker health
 // route, inside each original pinned image. No provider or database access.
 export async function exerciseRetirementCommands(evidence, proofSha256, { outputRoot = ROOT } = {}) {
@@ -422,7 +427,7 @@ export async function runRetirement({ env = process.env, mode = process.argv[2],
   }, { query, readState, signal });
   await mkdir(ROOT, { recursive: true });
   const result = await (healthcheckRecovery ? recoverCoreHealthcheck : retireCore)({ pin, receipt, receiptBytes, approval,
-    approvalHash: reconciliation || healthcheckRecovery ? identityHash(approval) : env.CORE_RETIREMENT_APPROVAL_SHA256, dryRun }, {
+    approvalHash: retirementApprovalProof(mode, approval, env.CORE_RETIREMENT_APPROVAL_SHA256), dryRun }, {
     assertContext, verifyImages, readState,
     verifyCommands: (evidence, state, proof) => exerciseRetirementCommands(evidence, proof),
     reserveIntent: async intent => {

@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
-import { reserveRetirementIntent, trustedRetirementContext, assertNodeEntrypoint, opsRetirementSnapshot, createRetirementStateReader, configurationDriftDiagnostic, waitForRetiredRuntime, waitForRetirementPublic, EXECUTE_STEP } from "./core-retirement-runner.mjs";
+import { identityHash } from "../accepted-core-baseline.mjs";
+import { reserveRetirementIntent, trustedRetirementContext, assertNodeEntrypoint, opsRetirementSnapshot, createRetirementStateReader, configurationDriftDiagnostic, waitForRetiredRuntime, waitForRetirementPublic, retirementApprovalProof, EXECUTE_STEP } from "./core-retirement-runner.mjs";
 import { HEALTHCHECK_CASE, HEALTHCHECK_STEP } from "./core-retirement-healthcheck-recovery.mjs";
 import { RECONCILE_STEP, RECONCILIATION_CASE } from "./core-retirement-reconciliation.mjs";
 import { CORE_RETIREMENT_TARGET as target, CORE_DEPLOYMENT_ID, CORE_BEFORE, CORE_SOURCE_SHA, retirementCommand } from "./core-retirement.mjs";
@@ -363,5 +364,19 @@ describe("two-predecessor healthcheck recovery barrier", () => {
     expect(recover.env.CORE_RETIREMENT_HEALTHCHECK_FAILED_RUN_ID).toBe("${{ inputs.healthcheck_failed_run_id }}");
     expect(recover.if).toContain("!inputs.dry_run");
     expect(recover.if).toContain("inputs.reconcile_failed_run_id == ''");
+  });
+});
+
+
+describe("readonly recovery approval assembly", () => {
+  it("does not hash absent approval in a healthcheck preflight", () => {
+    expect(retirementApprovalProof("healthcheck-plan", undefined, undefined)).toBeUndefined();
+    expect(retirementApprovalProof("plan", undefined, undefined)).toBeUndefined();
+  });
+  it("binds execution utilities to the nested retirement proof, not the envelope", () => {
+    const nested = { reviewedAt: "2026-10-01T18:00:00Z", evidence: "retained" }, envelopeHash = "a".repeat(64);
+    expect(retirementApprovalProof("healthcheck-recover", nested, envelopeHash)).toBe(identityHash(nested));
+    expect(retirementApprovalProof("reconcile", nested, envelopeHash)).toBe(identityHash(nested));
+    expect(retirementApprovalProof("execute", nested, envelopeHash)).toBe(envelopeHash);
   });
 });
