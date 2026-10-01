@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
 import { createHmac, randomBytes } from "node:crypto";
-import { writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { readPin, resolveBaseline, identityHash, sha256 } from "../accepted-core-baseline.mjs";
@@ -15,6 +15,9 @@ import { RECONCILE_STEP, RECONCILIATION_CASE, validateReconciliationEvidence,
 
 import { HEALTHCHECK_CASE, HEALTHCHECK_STEP, validateHealthcheckPredecessors, validateHealthcheckRecoveryApproval } from "./core-retirement-healthcheck-recovery.mjs";
 
+import { privateConfigurationFingerprints, sealConfigurationDiagnostic } from "./core-retirement-config-diagnostic.mjs";
+
+const DIAGNOSTIC_RECIPIENT_SHA256 = "7fa67952a19d19d64e73d7174eee2b7a38bdf94c59c1071c8e30a9f9d1d9f907";
 const REPO = "Corgtexdotcom/corgtex";
 const WORKFLOW = ".github/workflows/core-retirement.yml";
 export const EXECUTE_STEP = "Retire reviewed Core application execution";
@@ -139,7 +142,7 @@ export function configurationDriftDiagnostic(before, after, key = randomBytes(32
   return { kind: "redacted-preserved-configuration-drift", totalChanges: total, truncated: total > changes.length, changes };
 }
 
-export function createRetirementStateReader({ query, fence, evidence, commands, expectedConfigIdentity, onConfigDrift = async () => {} }) {
+export function createRetirementStateReader({ query, fence, evidence, commands, expectedConfigIdentity, onConfigDrift = async () => {}, onInitialConfigMismatch = async () => {} }) {
   let configIdentity, firstConfig;
   const diagnosticKey = randomBytes(32);
   return async ({ draining = null } = {}) => {
@@ -167,7 +170,11 @@ export function createRetirementStateReader({ query, fence, evidence, commands, 
       catch { /* Diagnostic failures must not mask or relax the drift gate. */ }
       need(false, "PRESERVED_CONFIG_CHANGED");
     } else if (!configIdentity) {
-      need(!expectedConfigIdentity || hash === expectedConfigIdentity, "RECONCILIATION_PRIVATE_CONFIG_CHANGED");
+      if (expectedConfigIdentity && hash !== expectedConfigIdentity) {
+        try { await onInitialConfigMismatch({ expectedConfigIdentity, observedConfigIdentity: hash, privateConfig }); }
+        catch { /* Diagnostic failures cannot mask or relax the unchanged gate. */ }
+        need(false, "RECONCILIATION_PRIVATE_CONFIG_CHANGED");
+      }
       configIdentity = hash; firstConfig = structuredClone(privateConfig);
     }
     return { stages, fence: stableRetirementFence(await fence.read(), draining), configIdentity: hash };
@@ -391,6 +398,19 @@ export async function runRetirement({ env = process.env, mode = process.argv[2],
   }
   const readState = createRetirementStateReader({ query, fence, evidence: receipt.evidence, commands,
     expectedConfigIdentity: healthcheckRecovery ? HEALTHCHECK_CASE.privateConfigSha256 : reconciliation?.expectedPrivateConfigSha256,
+    onInitialConfigMismatch: async ({ expectedConfigIdentity, observedConfigIdentity, privateConfig }) => {
+      if (mode !== "healthcheck-plan") return;
+      const publicKey = await readFile(new URL("../../.github/core-retirement-config-diagnostic-recipient.pem", import.meta.url), "utf8");
+      need(sha256(publicKey) === DIAGNOSTIC_RECIPIENT_SHA256, "DIAGNOSTIC_RECIPIENT_CHANGED");
+      const report = { binding: { caseSha256: identityHash(HEALTHCHECK_CASE), workflowSha: env.GITHUB_SHA,
+        runId: env.GITHUB_RUN_ID, runAttempt: env.GITHUB_RUN_ATTEMPT, target,
+        querySha256: sha256(RECOVERY_STATE_QUERY), expectedConfigSha256: expectedConfigIdentity,
+        observedConfigSha256: observedConfigIdentity, capturedAt: new Date().toISOString() },
+      fingerprints: privateConfigurationFingerprints(privateConfig) };
+      const envelope = sealConfigurationDiagnostic(report, publicKey);
+      await mkdir(ROOT, { recursive: true });
+      await writeFile(`${ROOT}/initial-config-mismatch-encrypted.json`, JSON.stringify(envelope, null, 2) + "\n", { mode: 0o600, flag: "wx" });
+    },
     onConfigDrift: async diagnostic => { await mkdir(ROOT, { recursive: true });
       await writeFile(`${ROOT}/preserved-config-drift.json`, JSON.stringify(diagnostic, null, 2) + "\n"); },
   });
