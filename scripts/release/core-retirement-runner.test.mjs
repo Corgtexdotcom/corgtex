@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
-import { reserveRetirementIntent, trustedRetirementContext, assertNodeEntrypoint, opsRetirementSnapshot, createRetirementStateReader, waitForRetiredRuntime, waitForRetirementPublic, EXECUTE_STEP } from "./core-retirement-runner.mjs";
+import { reserveRetirementIntent, trustedRetirementContext, assertNodeEntrypoint, opsRetirementSnapshot, createRetirementStateReader, configurationDriftDiagnostic, waitForRetiredRuntime, waitForRetirementPublic, EXECUTE_STEP } from "./core-retirement-runner.mjs";
+import { RECONCILE_STEP, RECONCILIATION_CASE } from "./core-retirement-reconciliation.mjs";
 import { CORE_RETIREMENT_TARGET as target, CORE_DEPLOYMENT_ID, CORE_BEFORE, CORE_SOURCE_SHA, retirementCommand } from "./core-retirement.mjs";
 import { RailwaySourceFence } from "../migration/railway-source-fence.mjs";
 const REPO = "Corgtexdotcom/corgtex", path = ".github/workflows/core-retirement.yml", sha = "a".repeat(40);
@@ -114,7 +115,7 @@ function adapterFixture() {
     runRecordedOperation: () => { throw new Error("Read-only fixture"); } });
   const read = createRetirementStateReader({ query: (query, variables) => transport({ query, variables }), fence,
     evidence: { target }, commands });
-  return { read, fence, rows, config, commands, advanceMetadata() {
+  return { read, fence, rows, config, commands, query: (query, variables) => transport({ query, variables }), advanceMetadata() {
     stagingId = "00000000-0000-0000-0000-000000000001";
     for (const row of Object.values(rows)) {
       row.deployment.updatedAt = "2026-09-30T20:01:00Z";
@@ -124,6 +125,20 @@ function adapterFixture() {
 }
 
 describe("real Railway fence and retirement reader integration", () => {
+  it("rejects a reconciliation whose first private configuration differs", async () => {
+    const f = adapterFixture();
+    const read = createRetirementStateReader({ query: f.query, fence: f.fence, evidence: { target }, commands: {},
+      expectedConfigIdentity: "0".repeat(64) });
+    await expect(read()).rejects.toThrow("RECONCILIATION_PRIVATE_CONFIG_CHANGED");
+  });
+  it("retains the configuration mismatch if redacted diagnostic storage fails", async () => {
+    const f = adapterFixture(), onConfigDrift = vi.fn(async () => { throw new Error("unavailable artifact store"); });
+    const read = createRetirementStateReader({ query: f.query, fence: f.fence, evidence: { target }, commands: {}, onConfigDrift });
+    await read(); f.rows.worker.variables.DATABASE_URL = "a-real-secret-change";
+    await expect(read()).rejects.toThrow("PRESERVED_CONFIG_CHANGED");
+    expect(onConfigDrift).toHaveBeenCalledOnce();
+    expect(JSON.stringify(onConfigDrift.mock.calls)).not.toContain("a-real-secret-change");
+  });
   it("admits exactly the reviewed command diff and discards only volatile read metadata", async () => {
     const f = adapterFixture(), before = await f.read(), rawBefore = await f.fence.read();
     const command = retirementCommand("worker", "a".repeat(64));
@@ -161,6 +176,47 @@ describe("real Railway fence and retirement reader integration", () => {
     expect(step.env.CORE_RETIREMENT_APPROVAL_JSON).toBe("${{ inputs.approval_json }}");
     expect(step.env.CORE_RETIREMENT_APPROVAL_SHA256).toBe("${{ inputs.approval_sha256 }}");
     expect(workflow.jobs.retire.environment).toBe("fleet-release-production");
+  });
+});
+
+describe("incident-bound no-replay reservation", () => {
+  const oldRun = () => ({ ...run(), id: RECONCILIATION_CASE.runId, head_sha: RECONCILIATION_CASE.workflowSha,
+    status: "completed", conclusion: "failure" });
+  const oldJob = () => ({ ...job(), id: RECONCILIATION_CASE.jobId, run_id: RECONCILIATION_CASE.runId,
+    status: "completed", conclusion: "failure", steps: [{ name: EXECUTE_STEP, status: "completed", conclusion: "failure", started_at: "2026-10-01T15:23:12Z" }] });
+  const currentJob = () => ({ ...job(), steps: [{ ...job().steps[0], name: RECONCILE_STEP }] });
+  const reader = (runs = [oldRun(), run()], original = oldJob(), current = currentJob()) => async path => path.includes("/jobs?")
+    ? { total_count: 1, jobs: [path.includes(`runs/${RECONCILIATION_CASE.runId}/`) ? original : current] }
+    : { total_count: runs.length, workflow_runs: runs };
+  it("admits exactly the authenticated failed predecessor plus this visible first reconciliation", async () => {
+    expect(await reserveRetirementIntent({ env, api: reader(), reconciliation: true })).toBe(true);
+    await expect(reserveRetirementIntent({ env, api: reader() })).rejects.toThrow("RECONCILIATION");
+  });
+  it.each(["missing-predecessor", "changed-predecessor", "prior-reconciliation", "rerun", "duplicate"])("blocks %s", async kind => {
+    let runs = [oldRun(), run()], original = oldJob(), current = currentJob();
+    if (kind === "missing-predecessor") runs = [run()];
+    if (kind === "changed-predecessor") original.steps[0].conclusion = "success";
+    if (kind === "prior-reconciliation") runs.push({ ...run(), id: 11 });
+    if (kind === "rerun") runs[0].run_attempt = 2;
+    if (kind === "duplicate") current.steps.push({ ...current.steps[0] });
+    await expect(reserveRetirementIntent({ env, api: reader(runs, original, current), reconciliation: true })).rejects.toThrow();
+  });
+  it("ordinary execution also refuses a started reconciliation regardless of its outcome", async () => {
+    const current = currentJob(); current.steps[0].status = "completed"; current.steps[0].conclusion = "failure";
+    await expect(reserveRetirementIntent({ env, api: reader([run()], oldJob(), current) })).rejects.toThrow();
+  });
+});
+
+describe("redacted configuration drift", () => {
+  it("reports structural changes without values or dynamic secret keys", () => {
+    const before = { worker: { variables: { DATABASE_URL: "postgres://private:old@host/db", "secret-dynamic-key": "token-old" }, config: { source: { checkSuites: false } } } };
+    const after = { worker: { variables: { DATABASE_URL: "postgres://private:new@host/db", "secret-dynamic-key": "token-new" }, config: { source: {} } } };
+    const one = configurationDriftDiagnostic(before, after), two = configurationDriftDiagnostic(before, after);
+    expect(one.totalChanges).toBe(3);
+    expect(one.changes).toContainEqual(expect.objectContaining({ path: "worker.config.source.checkSuites", beforePresent: true, afterPresent: false }));
+    expect(JSON.stringify(one)).not.toMatch(/postgres|private:|token-old|token-new|secret-dynamic-key|DATABASE_URL/);
+    expect(one.changes[0].beforeFingerprint).not.toBe(two.changes[0].beforeFingerprint);
+    expect(configurationDriftDiagnostic(before, before).changes).toEqual([]);
   });
 });
 

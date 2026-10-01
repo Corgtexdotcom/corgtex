@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "runId": 36883501899,
+  "attempt": 1,
+  "workflowId": 371671639,
+  "workflowSha": "834ef55278e330fa8d173f909f4eefc335621125",
+  "jobId": 110440896141,
+  "artifactId": 11172747036,
+  "artifactName": "core-retirement-36883501899-1",
+  "artifactSha256": "b03bbffa384339e2cdd099bd7ea6e40aab0abca6f7abd656b963a557ebc18cab",
+  "intentSha256": "f83b7de30d298ccf1af7b7c90d6e3fd66a4091c8001ff584506fa8c809d238aa",
+  "failedSha256": "80aa441f9f7ad7e3d30250773a94d52afbe1c1f0d685d97e1e29df588f48bc7c",
+  "originalApprovalHash": "cd40863de872a9e0acd633adfaa74044c972682ad08c375b57878feae94490f3",
+  "providerBeforeSha256": "fceab3aae2ad42c8a89cae244c56aadc1a00a640925484abef6a6f488eaed08c",
+  "privateConfigSha256": "f18b77a205fd4bd144ad19bae99e6d3e84a96c0d54288dcb4dbba94bdf0c32b0",
+  "failureCode": "CORE_RETIREMENT_PRESERVED_CONFIG_CHANGED"
+}

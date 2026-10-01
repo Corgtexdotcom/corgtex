@@ -16,6 +16,10 @@ on:
         description: Canonical SHA256 of approval_json; execute only
         type: string
         required: false
+      reconcile_failed_run_id:
+        description: Incident-bound reconciliation only for reviewed failed run 36883501899; never rerun an execution
+        type: string
+        required: false
 
 permissions:
   actions: read
@@ -59,7 +63,7 @@ jobs:
         run: node scripts/release/core-retirement-runner.mjs plan
       # Persisted GitHub step state is the no-replay journal before any mutation.
       - name: Retire reviewed Core application execution
-        if: ${{ !inputs.dry_run }}
+        if: ${{ !inputs.dry_run && inputs.reconcile_failed_run_id == '' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
@@ -68,6 +72,17 @@ jobs:
           CORE_RETIREMENT_APPROVAL_JSON: ${{ inputs.approval_json }}
           CORE_RETIREMENT_APPROVAL_SHA256: ${{ inputs.approval_sha256 }}
         run: node scripts/release/core-retirement-runner.mjs execute
+      - name: Reconcile unchanged Core retirement incident
+        if: ${{ !inputs.dry_run && inputs.reconcile_failed_run_id != '' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
+          FLEET_RELEASE_BACKUP_APP_TARGET_JSON: ${{ vars.FLEET_RELEASE_BACKUP_APP_TARGET_JSON }}
+          CORE_RETIREMENT_APPROVAL_JSON: ${{ inputs.approval_json }}
+          CORE_RETIREMENT_APPROVAL_SHA256: ${{ inputs.approval_sha256 }}
+          CORE_RETIREMENT_RECONCILE_FAILED_RUN_ID: ${{ inputs.reconcile_failed_run_id }}
+        run: node scripts/release/core-retirement-runner.mjs reconcile
       - name: Retain retirement and uncertain-outcome evidence
         if: always()
         uses: actions/upload-artifact@v4

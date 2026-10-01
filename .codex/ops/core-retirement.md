@@ -50,3 +50,36 @@ IDs, digests, active instances and serving utility proof under the same exclusio
 then create a separately reviewed recovery/reconciliation change. Do not rerun,
 clear history, create an alternate workflow, or restore business execution merely
 to bypass the barrier. Physical shutdown or deletion remains a separate decision.
+
+## Unchanged-state reconciliation for run 36883501899
+
+That run failed with `CORE_RETIREMENT_PRESERVED_CONFIG_CHANGED`. Authenticated
+failure artifacts retain an unknown write outcome. Independent read-only
+reconciliation found the complete original state unchanged; six fresh config
+reads agreed, but the transient field was not established. Equality stays strict.
+
+The same protected workflow admits one incident-bound reconciliation using
+`reconcile_failed_run_id=36883501899`, `dry_run=false` and a newly reviewed
+approval envelope. The committed `.github/core-retirement-reconciliation.json`
+pins the failed run, artifact ZIP/member hashes, original approval and accepted
+unchanged provider/config hashes. The runner authenticates all predecessor
+evidence and requires the complete original starting state; partial utility
+progress cannot use this path. Normal execution remains blocked.
+
+The envelope uses `schemaVersion:1`, kind
+`core-logical-retirement-reconciliation`, fresh `reviewedAt`, `caseSha256`
+(canonical committed case hash), `failedRunId`, `originalApprovalHash`,
+`expectedProviderSha256`, `expectedPrivateConfigSha256`, and a freshly reviewed
+`retirementApproval` with the normal fields above. Its canonical identity hash
+is `approval_sha256`. Never rewrite the old review time or extend the baseline's
+24-hour deadline. Independent review may update public/disposition evidence.
+
+Both normal and reconciliation started-step histories count toward the durable
+barrier. Only the named failed predecessor and the current first reconciliation
+are allowed; any additional started attempt consumes the exception permanently.
+If this reconciliation fails, stop for a new specific recovery design rather
+than repeating it. A configuration mismatch saves bounded structural diagnostics
+with run-keyed HMAC fingerprints and no values; its random key is not retained.
+Existing services, images, variables and database remain under the same retention
+owner and physical-removal gate. This incident case exists only for governed
+recovery and can be removed after retirement evidence is retained and accepted.
