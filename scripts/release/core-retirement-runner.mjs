@@ -16,6 +16,9 @@ import { RECONCILE_STEP, RECONCILIATION_CASE, validateReconciliationEvidence,
 import { HEALTHCHECK_CASE, HEALTHCHECK_STEP, validateHealthcheckPredecessors, validateHealthcheckRecoveryApproval } from "./core-retirement-healthcheck-recovery.mjs";
 
 import { privateConfigurationFingerprints, sealConfigurationDiagnostic } from "./core-retirement-config-diagnostic.mjs";
+import { verifyRetirementHistoryContinuity } from "./core-retirement-history-continuity.mjs";
+import { WEB_COMPLETION_CASE, WEB_COMPLETION_STEP, completeCoreWebRetirement, validateWebCompletionPredecessors,
+  validateWebCompletionApproval, verifyWebCompletionContinuity } from "./core-retirement-web-completion.mjs";
 
 const DIAGNOSTIC_RECIPIENT_SHA256 = "7fa67952a19d19d64e73d7174eee2b7a38bdf94c59c1071c8e30a9f9d1d9f907";
 const REPO = "Corgtexdotcom/corgtex";
@@ -29,14 +32,15 @@ export function trustedRetirementContext(env) {
     && /^[a-f0-9]{40}$/.test(env.GITHUB_SHA), "PROTECTED_MAIN_REQUIRED");
 }
 
-export async function reserveRetirementIntent({ env, api, reconciliation = false, healthcheckRecovery = false }) {
+export async function reserveRetirementIntent({ env, api, reconciliation = false, healthcheckRecovery = false, webCompletion = false }) {
   trustedRetirementContext(env);
   need(env.GITHUB_RUN_ATTEMPT === "1" && /^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID), "RECONCILIATION_REQUIRED");
   const listing = await api("actions/workflows/core-retirement.yml/runs?event=workflow_dispatch&branch=main&per_page=100");
   need(Number.isInteger(listing.total_count) && listing.total_count <= 100
     && listing.workflow_runs?.length === listing.total_count, "HISTORY_UNBOUNDED");
   let current = false;
-  const expectedPredecessors = healthcheckRecovery ? [RECONCILIATION_CASE, HEALTHCHECK_CASE] : reconciliation ? [RECONCILIATION_CASE] : [];
+  const expectedPredecessors = webCompletion ? [RECONCILIATION_CASE, HEALTHCHECK_CASE, WEB_COMPLETION_CASE]
+    : healthcheckRecovery ? [RECONCILIATION_CASE, HEALTHCHECK_CASE] : reconciliation ? [RECONCILIATION_CASE] : [];
   const predecessors = new Set();
   for (const run of listing.workflow_runs) {
     need(run.repository?.full_name === REPO && run.head_repository?.full_name === REPO
@@ -47,7 +51,7 @@ export async function reserveRetirementIntent({ env, api, reconciliation = false
       need(Number.isInteger(listing.total_count) && listing.total_count <= 100
         && listing.jobs?.length === listing.total_count, "JOBS_UNBOUNDED");
       for (const job of listing.jobs) for (const step of job.steps || []) {
-        if (![EXECUTE_STEP, RECONCILE_STEP, HEALTHCHECK_STEP].includes(step.name) || step.conclusion === "skipped" || !step.started_at) continue;
+        if (![EXECUTE_STEP, RECONCILE_STEP, HEALTHCHECK_STEP, WEB_COMPLETION_STEP].includes(step.name) || step.conclusion === "skipped" || !step.started_at) continue;
         const incident = expectedPredecessors.find(incident => run.id === incident.runId);
         if (incident) {
           need(!predecessors.has(run.id) && attempt === 1 && run.run_attempt === 1 && run.head_sha === incident.workflowSha
@@ -60,7 +64,7 @@ export async function reserveRetirementIntent({ env, api, reconciliation = false
         need(!current && run.id === Number(env.GITHUB_RUN_ID) && attempt === 1
           && run.head_sha === env.GITHUB_SHA && job.name === "Retire existing Core"
           && job.run_id === run.id && job.run_attempt === 1 && step.status === "in_progress"
-          && step.name === (healthcheckRecovery ? HEALTHCHECK_STEP : reconciliation ? RECONCILE_STEP : EXECUTE_STEP)
+          && step.name === (webCompletion ? WEB_COMPLETION_STEP : healthcheckRecovery ? HEALTHCHECK_STEP : reconciliation ? RECONCILE_STEP : EXECUTE_STEP)
           && Number.isFinite(Date.parse(step.started_at)), "PRIOR_EXECUTION_RECONCILIATION_REQUIRED");
         current = true;
       }
@@ -182,7 +186,7 @@ export function createRetirementStateReader({ query, fence, evidence, commands, 
 }
 
 export async function waitForRetiredRuntime({ role, deploymentId, command, previous, digest }, {
-  query, readState, now = Date.now, sleep = delay, timeoutMs = 300000, signal,
+  query, readState, now = Date.now, sleep = delay, timeoutMs = 300000, signal, onHistorySupplement = async () => {},
 }) {
   const deadline = now() + timeoutMs;
   const previousIds = previous.stages[role].activeDeployments.map(row => row.id);
@@ -206,11 +210,8 @@ export async function waitForRetiredRuntime({ role, deploymentId, command, previ
         && stage.activeDeployments.every(row => (row.id === deploymentId && row.status === "SUCCESS")
           || (previousIds.includes(row.id) && ["SUCCESS", "REMOVING", "REMOVED"].includes(row.status))), "UTILITY_PROVIDER_READBACK");
       const service = state.fence.services.find(row => row.serviceId === target[`${role}ServiceId`]);
-      const priorService = previous.fence.services.find(row => row.serviceId === target[`${role}ServiceId`]);
-      need(previous.stages[role].history.every(old => stage.history.some(row => row.id === old.id && row.digest === old.digest
-        && (previousIds.includes(old.id) || same(row, old))))
-        && priorService.deployments.filter(row => !previousIds.includes(row.id)).every(old =>
-          service?.deployments.some(row => same(row, old))), "HISTORY_EVIDENCE_CHANGED");
+      await verifyRetirementHistoryContinuity({ role, previous, current: state, previousIds, target, query,
+        onSupplement: rows => onHistorySupplement({ role, rows }) });
       const predecessors = previousIds.map(id => service?.deployments.find(row => row.id === id));
       need(predecessors.every(Boolean), "PREDECESSOR_EVIDENCE_MISSING");
       const inactive = ["CRASHED", "EXITED", "REMOVED", "SKIPPED", "STOPPED"];
@@ -291,18 +292,19 @@ export async function waitForRetirementPublic(proofSha256, {
 }
 
 export function retirementApprovalProof(mode, approval, manifestHash) {
-  if (["plan", "healthcheck-plan"].includes(mode)) return undefined;
-  return ["reconcile", "healthcheck-recover"].includes(mode) ? identityHash(approval) : manifestHash;
+  if (["plan", "healthcheck-plan", "web-completion-plan"].includes(mode)) return undefined;
+  return ["reconcile", "healthcheck-recover", "web-complete"].includes(mode) ? identityHash(approval) : manifestHash;
 }
 
 // Exercise the exact generated command, including the configured worker health
 // route, inside each original pinned image. No provider or database access.
-export async function exerciseRetirementCommands(evidence, proofSha256, { outputRoot = ROOT } = {}) {
+export async function exerciseRetirementCommands(evidence, proofSha256, { outputRoot = ROOT, proofsByRole = null } = {}) {
   const proofs = [];
   const docker = args => execFileSync("docker", args, { encoding: "utf8", timeout: 120000, maxBuffer: 1024 * 1024, stdio: "pipe" });
   for (const role of ROLES) {
+    const roleProof = proofsByRole?.[role] ?? proofSha256;
     const image = `ghcr.io/corgtexdotcom/corgtex/${role}@${evidence.images[role].digest}`;
-    const command = retirementCommand(role, proofSha256);
+    const command = retirementCommand(role, roleProof);
     let container;
     try {
       container = docker(["run", "--detach", "--platform=linux/amd64", "--network=none", "--read-only", "--cpus=1", "--memory=128m",
@@ -311,7 +313,7 @@ export async function exerciseRetirementCommands(evidence, proofSha256, { output
       const probe = `
         const assert = require("node:assert/strict");
         (async () => {
-          const role = ${JSON.stringify(role)}, proof = ${JSON.stringify(proofSha256)};
+          const role = ${JSON.stringify(role)}, proof = ${JSON.stringify(roleProof)};
           const request = (path, method = "GET") => fetch("http://127.0.0.1:3000" + path, { method, redirect: "manual" });
           let ready;
           for (let n = 0; n < 100; n++) {
@@ -336,7 +338,7 @@ export async function exerciseRetirementCommands(evidence, proofSha256, { output
         })().catch(error => { console.error(error.message); process.exitCode = 1; });`;
       const marker = docker(["exec", container, "/usr/bin/env", "-u", "NODE_OPTIONS", "-u", "NODE_PATH", "/usr/local/bin/node", "-e", probe]);
       need(marker === "CORE_UTILITY_COMMAND_VERIFIED", "UTILITY_COMMAND_UNPROVEN");
-      proofs.push({ role, image, commandSha256: sha256(command), proofSha256,
+      proofs.push({ role, image, commandSha256: sha256(command), proofSha256: roleProof,
         healthPaths: role === "worker" ? ["/api/health", "/healthz"] : ["/api/health"], verified: true });
     } finally { if (container && /^[a-f0-9]{64}$/.test(container)) docker(["rm", "--force", container]); }
   }
@@ -347,7 +349,7 @@ export async function exerciseRetirementCommands(evidence, proofSha256, { output
 
 export async function runRetirement({ env = process.env, mode = process.argv[2], fetchImpl = fetch } = {}) {
   trustedRetirementContext(env);
-  need(["plan", "execute", "reconcile", "healthcheck-plan", "healthcheck-recover"].includes(mode), "MODE_REQUIRED");
+  need(["plan", "execute", "reconcile", "healthcheck-plan", "healthcheck-recover", "web-completion-plan", "web-complete"].includes(mode), "MODE_REQUIRED");
   const pin = await readPin(); need(pin, "ACCEPTED_PIN_REQUIRED");
   let receiptBytes;
   const receipt = await resolveBaseline(pin, { persist: bytes => { receiptBytes = bytes; } });
@@ -365,9 +367,11 @@ export async function runRetirement({ env = process.env, mode = process.argv[2],
     serviceIds: [target.webServiceId, target.workerServiceId] }, transport, signal,
     runRecordedOperation: () => { throw new Error("CORE_RETIREMENT_GENERAL_FENCE_FORBIDDEN"); } });
   const healthcheckRecovery = mode.startsWith("healthcheck-");
-  const dryRun = ["plan", "healthcheck-plan"].includes(mode);
-  const commands = healthcheckRecovery ? { worker: HEALTHCHECK_CASE.predecessorWorkerStartCommand } : {};
-  let reconciliation, healthcheckApproval, predecessorIntent, approval;
+  const webCompletion = mode.startsWith("web-complet");
+  const dryRun = ["plan", "healthcheck-plan", "web-completion-plan"].includes(mode);
+  const commands = webCompletion ? { worker: WEB_COMPLETION_CASE.workerStartCommand }
+    : healthcheckRecovery ? { worker: HEALTHCHECK_CASE.predecessorWorkerStartCommand } : {};
+  let reconciliation, healthcheckApproval, webCompletionApproval, predecessorIntent, approval;
   const authenticate = async incident => {
     const [run, artifact, artifacts, jobs, members] = await Promise.all([
       api(`actions/runs/${incident.runId}`), api(`actions/artifacts/${incident.artifactId}`),
@@ -376,11 +380,17 @@ export async function runRetirement({ env = process.env, mode = process.argv[2],
     ]);
     return validateReconciliationEvidence({ run, artifact, artifacts, jobs, members }, incident);
   };
-  if (healthcheckRecovery) {
-    need(env.CORE_RETIREMENT_HEALTHCHECK_FAILED_RUN_ID === String(HEALTHCHECK_CASE.runId), "HEALTHCHECK_CASE_REQUIRED");
+  if (healthcheckRecovery || webCompletion) {
+    need(webCompletion ? env.CORE_RETIREMENT_WEB_COMPLETION_FAILED_RUN_ID === String(WEB_COMPLETION_CASE.runId)
+      : env.CORE_RETIREMENT_HEALTHCHECK_FAILED_RUN_ID === String(HEALTHCHECK_CASE.runId), "HEALTHCHECK_CASE_REQUIRED");
     const first = await authenticate(RECONCILIATION_CASE);
     predecessorIntent = await authenticate(HEALTHCHECK_CASE);
     validateHealthcheckPredecessors(first, predecessorIntent);
+    if (webCompletion) {
+      const third = await authenticate(WEB_COMPLETION_CASE);
+      validateWebCompletionPredecessors(first, predecessorIntent, third);
+      predecessorIntent = third;
+    }
   }
   if (!dryRun) {
     need(typeof env.CORE_RETIREMENT_APPROVAL_JSON === "string"
@@ -391,18 +401,22 @@ export async function runRetirement({ env = process.env, mode = process.argv[2],
       predecessorIntent = await authenticate(RECONCILIATION_CASE);
       approval = validateReconciliationApproval(input, env.CORE_RETIREMENT_APPROVAL_SHA256, predecessorIntent);
       reconciliation = input;
+    } else if (webCompletion) {
+      approval = validateWebCompletionApproval(input, env.CORE_RETIREMENT_APPROVAL_SHA256, predecessorIntent);
+      webCompletionApproval = input;
     } else if (healthcheckRecovery) {
       approval = validateHealthcheckRecoveryApproval(input, env.CORE_RETIREMENT_APPROVAL_SHA256, predecessorIntent);
       healthcheckApproval = input;
     } else approval = input;
   }
   const readState = createRetirementStateReader({ query, fence, evidence: receipt.evidence, commands,
-    expectedConfigIdentity: healthcheckRecovery ? HEALTHCHECK_CASE.privateConfigSha256 : reconciliation?.expectedPrivateConfigSha256,
+    expectedConfigIdentity: webCompletion ? WEB_COMPLETION_CASE.privateConfigSha256
+      : healthcheckRecovery ? HEALTHCHECK_CASE.privateConfigSha256 : reconciliation?.expectedPrivateConfigSha256,
     onInitialConfigMismatch: async ({ expectedConfigIdentity, observedConfigIdentity, privateConfig }) => {
-      if (mode !== "healthcheck-plan") return;
+      if (!["healthcheck-plan", "web-completion-plan"].includes(mode)) return;
       const publicKey = await readFile(new URL("../../.github/core-retirement-config-diagnostic-recipient.pem", import.meta.url), "utf8");
       need(sha256(publicKey) === DIAGNOSTIC_RECIPIENT_SHA256, "DIAGNOSTIC_RECIPIENT_CHANGED");
-      const report = { binding: { caseSha256: identityHash(HEALTHCHECK_CASE), workflowSha: env.GITHUB_SHA,
+      const report = { binding: { caseSha256: identityHash(webCompletion ? WEB_COMPLETION_CASE : HEALTHCHECK_CASE), workflowSha: env.GITHUB_SHA,
         runId: env.GITHUB_RUN_ID, runAttempt: env.GITHUB_RUN_ATTEMPT, target,
         querySha256: sha256(RECOVERY_STATE_QUERY), expectedConfigSha256: expectedConfigIdentity,
         observedConfigSha256: observedConfigIdentity, capturedAt: new Date().toISOString() },
@@ -442,31 +456,45 @@ export async function runRetirement({ env = process.env, mode = process.argv[2],
     need(response.ok, "OPS_READ_FAILED");
     return opsRetirementSnapshot(await response.json(), JSON.parse(env.FLEET_RELEASE_BACKUP_APP_TARGET_JSON || "null"));
   };
+  const historySupplements = [];
+  const retainSupplement = async row => {
+    historySupplements.push({ ...row, observedAt: new Date().toISOString() });
+    await writeFile(`${ROOT}/history-continuity.json`, JSON.stringify(historySupplements, null, 2) + "\n", { mode: 0o600 });
+  };
   const verifyRuntime = (role, deploymentId, command, previous) => waitForRetiredRuntime({
     role, deploymentId, command, previous, digest: receipt.evidence.images[role].digest,
-  }, { query, readState, signal });
+  }, { query, readState, signal, onHistorySupplement: retainSupplement });
   await mkdir(ROOT, { recursive: true });
-  const result = await (healthcheckRecovery ? recoverCoreHealthcheck : retireCore)({ pin, receipt, receiptBytes, approval,
+  const result = await (webCompletion ? completeCoreWebRetirement : healthcheckRecovery ? recoverCoreHealthcheck : retireCore)({ pin, receipt, receiptBytes, approval,
     approvalHash: retirementApprovalProof(mode, approval, env.CORE_RETIREMENT_APPROVAL_SHA256), dryRun }, {
     assertContext, verifyImages, readState,
-    verifyCommands: (evidence, state, proof) => exerciseRetirementCommands(evidence, proof),
+    verifyCommands: (evidence, state, proof) => exerciseRetirementCommands(evidence, proof,
+      webCompletion ? { proofsByRole: { worker: WEB_COMPLETION_CASE.workerProofSha256, web: proof } } : {}),
+    verifyContinuity: async state => {
+      const rows = await verifyWebCompletionContinuity(state, query);
+      await retainSupplement({ role: "worker", rows }); return rows;
+    },
     reserveIntent: async intent => {
       need(!reconciliation || intent.providerBeforeSha256 === reconciliation.expectedProviderSha256, "RECONCILIATION_PROVIDER_CHANGED");
-      await reserveRetirementIntent({ env, api, reconciliation: Boolean(reconciliation), healthcheckRecovery });
-      await writeFile(`${ROOT}/intent.json`, JSON.stringify({ ...intent, approval, reconciliation, healthcheckApproval,
-        predecessor: healthcheckRecovery ? HEALTHCHECK_CASE : reconciliation ? RECONCILIATION_CASE : null,
+      await reserveRetirementIntent({ env, api, reconciliation: Boolean(reconciliation), healthcheckRecovery, webCompletion });
+      await writeFile(`${ROOT}/intent.json`, JSON.stringify({ ...intent, approval, reconciliation, healthcheckApproval, webCompletionApproval,
+        predecessor: webCompletion ? WEB_COMPLETION_CASE : healthcheckRecovery ? HEALTHCHECK_CASE : reconciliation ? RECONCILIATION_CASE : null,
         workflowSha: env.GITHUB_SHA, runId: env.GITHUB_RUN_ID }, null, 2) + "\n");
       return true;
     },
     setCommand: async (role, command) => {
+      need(!webCompletion || role === "web", "WORKER_MUTATION_FORBIDDEN");
       const result = await query("mutation RetirementCommand($environmentId:String!,$serviceId:String!,$input:ServiceInstanceUpdateInput!) { serviceInstanceUpdate(environmentId:$environmentId,serviceId:$serviceId,input:$input) }", {
         environmentId: target.environmentId, serviceId: target[`${role}ServiceId`], input: { startCommand: command },
       });
       need(result.serviceInstanceUpdate === true, "COMMAND_OUTCOME_UNCERTAIN"); commands[role] = command;
     },
-    deploy: async role => (await query("mutation RetirementDeploy($environmentId:String!,$serviceId:String!) { deploymentId:serviceInstanceDeployV2(environmentId:$environmentId,serviceId:$serviceId) }", {
-      environmentId: target.environmentId, serviceId: target[`${role}ServiceId`],
-    })).deploymentId,
+    deploy: async role => {
+      need(!webCompletion || role === "web", "WORKER_MUTATION_FORBIDDEN");
+      return (await query("mutation RetirementDeploy($environmentId:String!,$serviceId:String!) { deploymentId:serviceInstanceDeployV2(environmentId:$environmentId,serviceId:$serviceId) }", {
+        environmentId: target.environmentId, serviceId: target[`${role}ServiceId`],
+      })).deploymentId;
+    },
     verifyRuntime,
     verifyPublic: proofSha256 => waitForRetirementPublic(proofSha256, { fetchImpl, signal }),
   });
@@ -480,7 +508,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
     const code = /^CORE_(?:RETIREMENT|BASELINE|RECOVERY)_[A-Z_]+$/.test(error.message) ? error.message : "CORE_RETIREMENT_UNVERIFIED";
     await mkdir(ROOT, { recursive: true });
     await writeFile(`${ROOT}/failed.json`, JSON.stringify({ status: "unverified", code,
-      providerWrites: ["plan", "healthcheck-plan"].includes(process.argv[2]) ? false : "unknown; reconcile before another execution" }) + "\n");
+      providerWrites: ["plan", "healthcheck-plan", "web-completion-plan"].includes(process.argv[2]) ? false : "unknown; reconcile before another execution" }) + "\n");
     console.error(code); process.exitCode = 1;
   });
 }
