@@ -118,3 +118,26 @@ Only after this passes does the same worker-first completion change commands
 and deploy each service once, proving original processes stop and configuration
 remains unchanged. The failed utility remains in history. Any recovery failure
 requires another explicit incident design; no retry or business restoration runs.
+
+
+## Read-only first-configuration-mismatch diagnosis
+
+Preflight 36901899495 rejected the first private configuration identity before
+writes. A fresh local capture matched the reviewed state byte-for-byte; the
+protected runner's differing field remains unknown. Equality remains strict.
+
+Only `healthcheck-plan` may retain an encrypted fingerprint report on this first
+mismatch. The report contains typed JSON-pointer field fingerprints, aggregate
+expected/observed identities, query/target/case and run bindings. It includes no
+leaf values. AES-256-GCM encrypts the report, with its fresh key wrapped using
+RSA-OAEP-SHA256 to the committed recipient public key. The owner retains the
+private key locally with restricted permissions. Dispatch cannot choose a
+recipient. Only ciphertext is written to the existing artifact archive.
+
+The owner decrypts locally and compares the typed fingerprint map against the
+retained private baseline after verifying its aggregate identity. This identifies
+differing fields without exporting their values; it does not establish the cause
+by itself. Diagnostic failure still throws the original configuration mismatch.
+No extra provider reads, retries, normalization or mutating recovery opportunity
+are introduced. Both failed executions and the failed read-only preflight remain
+retained, and the original baseline deadline stays unchanged.

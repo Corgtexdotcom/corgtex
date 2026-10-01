@@ -127,6 +127,16 @@ function adapterFixture() {
 }
 
 describe("real Railway fence and retirement reader integration", () => {
+  it.each([false, true])("captures first mismatched fingerprints without relaxing the gate (diagnostic failure=%s)", async fails => {
+    const f = adapterFixture(), diagnostic = vi.fn(async () => { if (fails) throw new Error("cannot persist ciphertext"); });
+    const read = createRetirementStateReader({ query: f.query, fence: f.fence, evidence: { target }, commands: {},
+      expectedConfigIdentity: "f".repeat(64), onInitialConfigMismatch: diagnostic });
+    await expect(read()).rejects.toThrow("RECONCILIATION_PRIVATE_CONFIG_CHANGED");
+    expect(diagnostic).toHaveBeenCalledOnce();
+    expect(diagnostic.mock.calls[0][0]).toMatchObject({ expectedConfigIdentity: "f".repeat(64) });
+    expect(diagnostic.mock.calls[0][0].privateConfig.worker.config.deploy.startCommand).toBeUndefined();
+  });
+
   it("rejects a reconciliation whose first private configuration differs", async () => {
     const f = adapterFixture();
     const read = createRetirementStateReader({ query: f.query, fence: f.fence, evidence: { target }, commands: {},
