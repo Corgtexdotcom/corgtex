@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
+import { createHmac, randomBytes } from "node:crypto";
 import { writeFile, mkdir } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
@@ -9,6 +10,8 @@ import { inspectAcceptedRecoveryImage, assertRecoveryControlPlane } from "./core
 import { RailwaySourceFence, createRailwayFenceTransport } from "../migration/railway-source-fence.mjs";
 import { CORE_RETIREMENT_TARGET as target, CORE_DEPLOYMENT_ID, CORE_SOURCE_SHA, ROLES, need,
   retirementStage, assertQuietTriggers, retireCore } from "./core-retirement.mjs";
+import { RECONCILE_STEP, RECONCILIATION_CASE, validateReconciliationEvidence,
+  validateReconciliationApproval, downloadReconciliationMembers } from "./core-retirement-reconciliation.mjs";
 
 const REPO = "Corgtexdotcom/corgtex";
 const WORKFLOW = ".github/workflows/core-retirement.yml";
@@ -21,13 +24,13 @@ export function trustedRetirementContext(env) {
     && /^[a-f0-9]{40}$/.test(env.GITHUB_SHA), "PROTECTED_MAIN_REQUIRED");
 }
 
-export async function reserveRetirementIntent({ env, api }) {
+export async function reserveRetirementIntent({ env, api, reconciliation = false }) {
   trustedRetirementContext(env);
   need(env.GITHUB_RUN_ATTEMPT === "1" && /^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID), "RECONCILIATION_REQUIRED");
   const listing = await api("actions/workflows/core-retirement.yml/runs?event=workflow_dispatch&branch=main&per_page=100");
   need(Number.isInteger(listing.total_count) && listing.total_count <= 100
     && listing.workflow_runs?.length === listing.total_count, "HISTORY_UNBOUNDED");
-  let current = false;
+  let current = false, predecessor = false;
   for (const run of listing.workflow_runs) {
     need(run.repository?.full_name === REPO && run.head_repository?.full_name === REPO
       && run.path === WORKFLOW && run.head_branch === "main" && run.event === "workflow_dispatch"
@@ -37,16 +40,26 @@ export async function reserveRetirementIntent({ env, api }) {
       need(Number.isInteger(listing.total_count) && listing.total_count <= 100
         && listing.jobs?.length === listing.total_count, "JOBS_UNBOUNDED");
       for (const job of listing.jobs) for (const step of job.steps || []) {
-        if (step.name !== EXECUTE_STEP || step.conclusion === "skipped" || !step.started_at) continue;
+        if (![EXECUTE_STEP, RECONCILE_STEP].includes(step.name) || step.conclusion === "skipped" || !step.started_at) continue;
+        if (reconciliation && run.id === RECONCILIATION_CASE.runId) {
+          need(!predecessor && attempt === 1 && run.run_attempt === 1 && run.head_sha === RECONCILIATION_CASE.workflowSha
+            && run.status === "completed" && run.conclusion === "failure" && job.id === RECONCILIATION_CASE.jobId
+            && job.name === "Retire existing Core" && job.run_id === run.id && job.run_attempt === 1
+            && step.name === EXECUTE_STEP && step.status === "completed" && step.conclusion === "failure"
+            && Number.isFinite(Date.parse(step.started_at)), "RECONCILIATION_PREDECESSOR_INVALID");
+          predecessor = true; continue;
+        }
         need(!current && run.id === Number(env.GITHUB_RUN_ID) && attempt === 1
           && run.head_sha === env.GITHUB_SHA && job.name === "Retire existing Core"
           && job.run_id === run.id && job.run_attempt === 1 && step.status === "in_progress"
+          && step.name === (reconciliation ? RECONCILE_STEP : EXECUTE_STEP)
           && Number.isFinite(Date.parse(step.started_at)), "PRIOR_EXECUTION_RECONCILIATION_REQUIRED");
         current = true;
       }
     }
   }
   need(current, "DURABLE_INTENT_NOT_VISIBLE");
+  need(!reconciliation || predecessor, "RECONCILIATION_PREDECESSOR_MISSING");
   return true;
 }
 
@@ -97,8 +110,33 @@ export function stableRetirementFence(snapshot, draining = null) {
   }).sort((a, b) => a.serviceId.localeCompare(b.serviceId)) };
 }
 
-export function createRetirementStateReader({ query, fence, evidence, commands }) {
-  let configIdentity;
+export function configurationDriftDiagnostic(before, after, key = randomBytes(32)) {
+  const fingerprint = value => createHmac("sha256", key).update(JSON.stringify(value) ?? "undefined").digest("hex");
+  const fields = new Set(["web", "worker", "config", "variables", "source", "deploy", "build", "image", "repo", "checkSuites",
+    "startCommand", "registryCredentials", "username", "password", "restartPolicyType", "restartPolicyMaxRetries", "drainingSeconds",
+    "overlapSeconds", "healthcheckPath", "healthcheckTimeout", "cronSchedule", "builder", "buildCommand", "watchPatterns"]);
+  const changes = []; let total = 0;
+  const visit = (left, right, path) => {
+    if (same(left ?? null, right ?? null) && (left === undefined) === (right === undefined)) return;
+    if (left && right && typeof left === "object" && typeof right === "object" && !Array.isArray(left) && !Array.isArray(right)) {
+      for (const name of [...new Set([...Object.keys(left), ...Object.keys(right)])].sort()) {
+        const safe = fields.has(name) ? name : `field-${fingerprint(name).slice(0, 16)}`;
+        visit(left[name], right[name], [...path, safe]);
+      }
+      return;
+    }
+    total++;
+    if (changes.length < 64) changes.push({ path: path.join("."), beforePresent: left !== undefined, afterPresent: right !== undefined,
+      beforeType: left === null ? "null" : typeof left, afterType: right === null ? "null" : typeof right,
+      beforeFingerprint: fingerprint(left), afterFingerprint: fingerprint(right) });
+  };
+  visit(before, after, []);
+  return { kind: "redacted-preserved-configuration-drift", totalChanges: total, truncated: total > changes.length, changes };
+}
+
+export function createRetirementStateReader({ query, fence, evidence, commands, expectedConfigIdentity, onConfigDrift = async () => {} }) {
+  let configIdentity, firstConfig;
+  const diagnosticKey = randomBytes(32);
   return async ({ draining = null } = {}) => {
     const stages = {};
     const privateConfig = {};
@@ -118,8 +156,14 @@ export function createRetirementStateReader({ query, fence, evidence, commands }
       privateConfig[role] = { config, variables: data.variables };
     }
     const hash = identityHash(privateConfig);
-    if (configIdentity) need(hash === configIdentity, "PRESERVED_CONFIG_CHANGED");
-    else configIdentity = hash;
+    if (configIdentity && hash !== configIdentity) {
+      try { await onConfigDrift(configurationDriftDiagnostic(firstConfig, privateConfig, diagnosticKey)); }
+      catch { /* Diagnostic failures must not mask or relax the drift gate. */ }
+      need(false, "PRESERVED_CONFIG_CHANGED");
+    } else if (!configIdentity) {
+      need(!expectedConfigIdentity || hash === expectedConfigIdentity, "RECONCILIATION_PRIVATE_CONFIG_CHANGED");
+      configIdentity = hash; firstConfig = structuredClone(privateConfig);
+    }
     return { stages, fence: stableRetirementFence(await fence.read(), draining), configIdentity: hash };
   };
 }
@@ -230,7 +274,7 @@ export async function waitForRetirementPublic(proofSha256, {
 
 export async function runRetirement({ env = process.env, mode = process.argv[2], fetchImpl = fetch } = {}) {
   trustedRetirementContext(env);
-  need(["plan", "execute"].includes(mode), "MODE_REQUIRED");
+  need(["plan", "execute", "reconcile"].includes(mode), "MODE_REQUIRED");
   const pin = await readPin(); need(pin, "ACCEPTED_PIN_REQUIRED");
   let receiptBytes;
   const receipt = await resolveBaseline(pin, { persist: bytes => { receiptBytes = bytes; } });
@@ -248,7 +292,29 @@ export async function runRetirement({ env = process.env, mode = process.argv[2],
     serviceIds: [target.webServiceId, target.workerServiceId] }, transport, signal,
     runRecordedOperation: () => { throw new Error("CORE_RETIREMENT_GENERAL_FENCE_FORBIDDEN"); } });
   const commands = {};
-  const readState = createRetirementStateReader({ query, fence, evidence: receipt.evidence, commands });
+  let reconciliation, predecessorIntent, approval;
+  if (mode !== "plan") {
+    need(typeof env.CORE_RETIREMENT_APPROVAL_JSON === "string"
+      && Buffer.byteLength(env.CORE_RETIREMENT_APPROVAL_JSON) <= 32768, "APPROVAL_INPUT_REQUIRED");
+    const input = JSON.parse(env.CORE_RETIREMENT_APPROVAL_JSON);
+    if (mode === "reconcile") {
+      need(env.CORE_RETIREMENT_RECONCILE_FAILED_RUN_ID === String(RECONCILIATION_CASE.runId), "RECONCILIATION_CASE_REQUIRED");
+      const incident = RECONCILIATION_CASE;
+      const [run, artifact, artifacts, jobs, members] = await Promise.all([
+        api(`actions/runs/${incident.runId}`), api(`actions/artifacts/${incident.artifactId}`),
+        api(`actions/runs/${incident.runId}/artifacts?per_page=100`),
+        api(`actions/runs/${incident.runId}/attempts/1/jobs?per_page=100`), downloadReconciliationMembers(env, fetchImpl),
+      ]);
+      predecessorIntent = validateReconciliationEvidence({ run, artifact, artifacts, jobs, members });
+      approval = validateReconciliationApproval(input, env.CORE_RETIREMENT_APPROVAL_SHA256, predecessorIntent);
+      reconciliation = input;
+    } else approval = input;
+  }
+  const readState = createRetirementStateReader({ query, fence, evidence: receipt.evidence, commands,
+    expectedConfigIdentity: reconciliation?.expectedPrivateConfigSha256,
+    onConfigDrift: async diagnostic => { await mkdir(ROOT, { recursive: true });
+      await writeFile(`${ROOT}/preserved-config-drift.json`, JSON.stringify(diagnostic, null, 2) + "\n"); },
+  });
   const verifyImages = async evidence => {
     const proofs = [];
     for (const role of ROLES) {
@@ -280,18 +346,16 @@ export async function runRetirement({ env = process.env, mode = process.argv[2],
   const verifyRuntime = (role, deploymentId, command, previous) => waitForRetiredRuntime({
     role, deploymentId, command, previous, digest: receipt.evidence.images[role].digest,
   }, { query, readState, signal });
-  let approval;
-  if (mode === "execute") {
-    need(typeof env.CORE_RETIREMENT_APPROVAL_JSON === "string"
-      && Buffer.byteLength(env.CORE_RETIREMENT_APPROVAL_JSON) <= 32768, "APPROVAL_INPUT_REQUIRED");
-    approval = JSON.parse(env.CORE_RETIREMENT_APPROVAL_JSON);
-  }
   await mkdir(ROOT, { recursive: true });
-  const result = await retireCore({ pin, receipt, receiptBytes, approval, approvalHash: env.CORE_RETIREMENT_APPROVAL_SHA256, dryRun: mode === "plan" }, {
+  const result = await retireCore({ pin, receipt, receiptBytes, approval,
+    approvalHash: reconciliation ? identityHash(approval) : env.CORE_RETIREMENT_APPROVAL_SHA256, dryRun: mode === "plan" }, {
     assertContext, verifyImages, readState,
     reserveIntent: async intent => {
-      await reserveRetirementIntent({ env, api });
-      await writeFile(`${ROOT}/intent.json`, JSON.stringify({ ...intent, approval, workflowSha: env.GITHUB_SHA, runId: env.GITHUB_RUN_ID }, null, 2) + "\n");
+      need(!reconciliation || intent.providerBeforeSha256 === reconciliation.expectedProviderSha256, "RECONCILIATION_PROVIDER_CHANGED");
+      await reserveRetirementIntent({ env, api, reconciliation: Boolean(reconciliation) });
+      await writeFile(`${ROOT}/intent.json`, JSON.stringify({ ...intent, approval, reconciliation,
+        predecessor: reconciliation ? RECONCILIATION_CASE : null,
+        workflowSha: env.GITHUB_SHA, runId: env.GITHUB_RUN_ID }, null, 2) + "\n");
       return true;
     },
     setCommand: async (role, command) => {
