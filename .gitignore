@@ -30,6 +30,9 @@
 .mintlify/
 docs/assets/
 docs/pr-assets/
+
+# PR proof artifacts (must not be committed; use branch URLs or CI artifacts)
+/pr-assets/
 docs/plans/
 docs/partner-analysis/
 docs/*handover*.md

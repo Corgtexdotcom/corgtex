@@ -107,7 +107,6 @@
     "@slack/web-api": "^7.16.0",
     "@types/dagre": "^0.7.54",
     "@xyflow/react": "^12.10.2",
-    "bcrypt": "^6.0.0",
     "dagre": "^0.8.5",
     "driver.js": "^1.4.0",
     "jszip": "^3.10.1",

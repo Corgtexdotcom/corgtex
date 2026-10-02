@@ -29,6 +29,10 @@ const forbiddenPathRules = [
     name: "public docs artifact",
     test: (file) => /^docs\/(assets|pr-assets|plans|partner-analysis)\//.test(file),
   },
+  {
+    name: "root PR proof artifact",
+    test: (file) => file.startsWith("pr-assets/"),
+  },
 ];
 
 function gitLsFiles(args) {
