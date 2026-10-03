@@ -245,7 +245,8 @@ export async function runSlackContextSummary(params: {
 
 function looksUnanswered(text: string) {
   if (/^\s*(?:(?:quick|just)\s+)?(?:fyi|for your information|heads[ -]?up)\b/i.test(text) || slackFollowupStopIntent(text)) return false;
-  return /\?/.test(text) || /\b(can someone|anyone|please|could someone|does anyone|who can|need help)\b/i.test(text);
+  const prose = text.replace(/<https?:\/\/[^>|]+(?:\|([^>]*))?>/gi, "$1").replace(/https?:\/\/\S+/gi, "");
+  return /\?/.test(prose) || /\b(can someone|anyone|please|could someone|does anyone|who can|need help)\b/i.test(prose);
 }
 
 function escapeRegExp(value: string) { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
@@ -634,6 +635,8 @@ export async function runSlackProactiveScan(params: {
     take: 100,
   });
 
+  const model = await getAgentModelOverride(params.workspaceId, "slack-agent")
+    ?? resolveModel(AGENT_REGISTRY["slack-agent"].defaultModelTier);
   let nudges = 0;
   for (const candidate of candidates.filter((message) => looksUnanswered(message.text ?? "") && !isAddressedToSlackBot(message.text ?? "", installation.botUserId)).slice(0, 10)) {
     const threadTs = threadTsForMessage(candidate);
@@ -669,6 +672,34 @@ export async function runSlackProactiveScan(params: {
     });
     if (replies > 0) continue;
 
+    // Silence and punctuation are only candidate signals, not permission to interrupt.
+    const review = await defaultModelGateway.extract({
+      model,
+      workspaceId: params.workspaceId,
+      workflowJobId: params.workflowJobId,
+      instruction: "Decide whether this Slack message contains an explicit unanswered request for a human response. Return JSON with explicitAsk, resolutionState (open/answered/unknown), workDisposition (request/information/awareness/test/ignore), confidence, and couldNot (string array). Informational shares, FYIs, rhetorical questions, quoted questions, product updates, website feedback relays, and URL punctuation do not qualify. A legitimate explicit question or request for help can qualify without an action owner or deliverable. Do not infer a request from silence. Missing or uncertain evidence must use unknown and explain it in couldNot.",
+      schemaHint: "{ explicitAsk: boolean, resolutionState: string, workDisposition: string, confidence: number, couldNot: string[] }",
+      input: JSON.stringify({ text: candidate.text }),
+    });
+    const output = review.output;
+    if (output.explicitAsk !== true || output.resolutionState !== "open" || output.workDisposition !== "request"
+      || typeof output.confidence !== "number" || !Number.isFinite(output.confidence)
+      || output.confidence < config.proactiveConfidenceThreshold
+      || !Array.isArray(output.couldNot) || output.couldNot.length > 0) continue;
+
+    // Recheck after model latency: a human may have replied or stopped the thread.
+    if (await isSlackThreadFollowupSuppressed({ workspaceId: params.workspaceId, installationId: params.installationId, channelId: candidate.externalChannelId, threadTs })) continue;
+    const latestReplies = await prisma.communicationMessage.count({
+      where: {
+        workspaceId: params.workspaceId, installationId: params.installationId, provider: "SLACK",
+        externalChannelId: candidate.externalChannelId,
+        messageTs: candidate.messageTs ? { gt: candidate.messageTs } : undefined,
+        text: { not: null }, textRedactedAt: null, isBot: false, isHidden: false, isDeleted: false,
+        OR: [{ externalMessageId: threadTs }, { threadExternalId: threadTs }],
+      },
+    });
+    if (latestReplies > 0) continue;
+
     try {
       await sendSlackMessage(params.installationId, {
         channel: candidate.externalChannelId,
@@ -698,8 +729,6 @@ export async function runSlackProactiveScan(params: {
     if (nudges >= MAX_PROACTIVE_NUDGES) break;
   }
 
-  const model = await getAgentModelOverride(params.workspaceId, "slack-agent")
-    ?? resolveModel(AGENT_REGISTRY["slack-agent"].defaultModelTier);
   const agentActor: AppActor = {
     kind: "agent",
     authProvider: "bootstrap",
