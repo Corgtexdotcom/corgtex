@@ -1,5 +1,7 @@
 import { getContextMapData, requireWorkspaceMembership } from "@corgtex/domain";
 
+import { prisma } from "@corgtex/shared";
+
 import { requirePageActor } from "@/lib/auth";
 import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import ContextMapClient, { type ContextMapClientData } from "./ContextMapClient";
@@ -23,13 +25,14 @@ export default async function ContextMapsPage({
   const actor = await requirePageActor();
   await requireWorkspaceMembership({ actor, workspaceId });
 
-  const [data, mapAiEnabled] = await Promise.all([
+  const [data, mapAiEnabled, workspace] = await Promise.all([
     getContextMapData(actor, {
       workspaceId,
       mapViewId: query.view ?? null,
       includeStale: query.stale === "1",
     }),
     isWorkspaceFeatureEnabled(workspaceId, "CONTEXT_MAP_AI"),
+    prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
   ]);
 
   return (
@@ -45,6 +48,7 @@ export default async function ContextMapsPage({
         data={serialize(data) as unknown as ContextMapClientData}
         includeStale={query.stale === "1"}
         mapAiEnabled={mapAiEnabled}
+        readOnly={workspace?.slug === "jnj-demo" || (actor.kind === "user" && actor.user.email === "demo@jnj-demo.corgtex.app")}
       />
     </div>
   );

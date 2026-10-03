@@ -505,6 +505,28 @@ describe("context graph domain", () => {
     expect(context.permissions.canApprove).toBe(true);
   });
 
+  it("rejects unauthorized selected-region reads before querying graph data", async () => {
+    requireWorkspaceMembershipMock.mockRejectedValueOnce({ status: 403, code: "FORBIDDEN" });
+    await expect(buildSelectedRegionContext(actor, {
+      workspaceId: "other-workspace", objectIds: ["private-object"],
+    })).rejects.toMatchObject({ status: 403 });
+    expect(requireWorkspaceMembershipMock).toHaveBeenCalledWith({ actor, workspaceId: "other-workspace" });
+    expect(prismaMock.contextGraphObject.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.contextGraphEvidenceRef.findMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects selected objects outside the authorized workspace", async () => {
+    prismaMock.contextGraphObject.findMany.mockResolvedValueOnce([]);
+    await expect(buildSelectedRegionContext(actor, {
+      workspaceId: "ws-1", objectIds: ["foreign-object"],
+    })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(prismaMock.contextGraphObject.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ workspaceId: "ws-1", id: { in: ["foreign-object"] } }),
+    }));
+    expect(prismaMock.contextGraphRelationship.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.contextGraphEvidenceRef.findMany).not.toHaveBeenCalled();
+  });
+
   it("does not return archived graph objects when selected directly", async () => {
     prismaMock.contextGraphObject.findMany.mockResolvedValueOnce([{
       id: "goal-graph-1",
