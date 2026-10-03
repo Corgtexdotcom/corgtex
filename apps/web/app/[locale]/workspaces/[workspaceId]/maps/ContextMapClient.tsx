@@ -37,7 +37,6 @@ import {
 import { MultiSelectFilter } from "@/lib/components/MultiSelectFilter";
 import {
   applyContextGraphProposedDiffAction,
-  buildSelectedRegionContextAction,
   createContextMapManualEditProposalAction,
   createPersonalContextMapViewAction,
   reviewContextGraphProposedDiffAction,
@@ -205,7 +204,7 @@ export type ContextMapClientData = {
   };
 };
 
-type RegionContext = Awaited<ReturnType<typeof buildSelectedRegionContextAction>>;
+type RegionContext = Awaited<ReturnType<typeof import("@corgtex/domain").buildSelectedRegionContext>>;
 type InspectorDock = "right" | "bottom";
 type StatusFilter = "active" | "approved" | "needs-review" | "all";
 const CONTEXT_MAP_STATUS_FILTERS: Array<{ value: StatusFilter; label: string }> = [
@@ -1053,16 +1052,27 @@ function diffHumanPreview(diffJson: unknown, objects: Map<string, ContextGraphOb
   };
 }
 
+async function fetchRegionContext(params: { workspaceId: string; mapViewId: string; objectIds: string[] }) {
+  const url = new URL(`${window.location.pathname.replace(/\/$/, "")}/context`, window.location.origin);
+  url.searchParams.set("view", params.mapViewId);
+  params.objectIds.forEach((id) => url.searchParams.append("object", id));
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) throw new Error("Could not load selected-region context.");
+  return response.json() as Promise<RegionContext>;
+}
+
 export default function ContextMapClient({
   workspaceId,
   data,
   includeStale = false,
   mapAiEnabled = false,
+  readOnly = false,
 }: {
   workspaceId: string;
   data: ContextMapClientData;
   includeStale?: boolean;
   mapAiEnabled?: boolean;
+  readOnly?: boolean;
 }) {
   const initialSelectedObjectId = data.objects.find((object) => isCanvasObject(object, data.mapView))?.id ?? null;
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -1381,7 +1391,7 @@ export default function ContextMapClient({
     let cancelled = false;
     setRegionContextStatus("loading");
     const timeoutId = window.setTimeout(() => {
-      buildSelectedRegionContextAction({
+      fetchRegionContext({
         workspaceId,
         mapViewId: data.mapView.id,
         objectIds: selectedRegionIds,
@@ -1456,7 +1466,7 @@ export default function ContextMapClient({
       setMessage(null);
       setRegionContextStatus("loading");
       try {
-        const context = await buildSelectedRegionContextAction({
+        const context = await fetchRegionContext({
           workspaceId,
           mapViewId: data.mapView.id,
           objectIds: ids,
@@ -1472,7 +1482,7 @@ export default function ContextMapClient({
 
   function saveLayout() {
     const items = currentLayoutItems();
-    if (items.length === 0) return;
+    if (readOnly || items.length === 0) return;
     startTransition(async () => {
       setMessage(null);
       try {
@@ -1493,6 +1503,7 @@ export default function ContextMapClient({
   }
 
   function savePersonalView() {
+    if (readOnly) return;
     const defaultName = data.mapView.createdByUserId ? data.mapView.name : `${data.mapView.name} - personal`;
     const name = window.prompt("Name this personal map view", defaultName);
     if (name === null) return;
@@ -1513,6 +1524,7 @@ export default function ContextMapClient({
   }
 
   function applyDiff(proposedDiffId: string) {
+    if (readOnly) return;
     startTransition(async () => {
       try {
         await applyContextGraphProposedDiffAction({ workspaceId, proposedDiffId });
@@ -1525,6 +1537,7 @@ export default function ContextMapClient({
   }
 
   function reviewDiff(proposedDiffId: string, status: "approved" | "rejected") {
+    if (readOnly) return;
     startTransition(async () => {
       try {
         const result = await reviewContextGraphProposedDiffAction({ workspaceId, proposedDiffId, status });
@@ -1546,6 +1559,7 @@ export default function ContextMapClient({
   }
 
   function saveEditedDiff(diff: ContextGraphProposedDiff) {
+    if (readOnly) return;
     let parsedDiff: unknown;
     try {
       parsedDiff = JSON.parse(editDiffJson);
@@ -1651,6 +1665,7 @@ export default function ContextMapClient({
   }
 
   function submitCardDraft() {
+    if (readOnly) return;
     if (!cardDraft) return;
     const title = cardDraft.title.trim();
     if (!title) {
@@ -1692,6 +1707,7 @@ export default function ContextMapClient({
   }
 
   function submitConnectionDraft(intent: ContextMapManualRelationIntent) {
+    if (readOnly) return;
     if (!connectionDraft) return;
     startTransition(async () => {
       setMessage(null);
@@ -1719,6 +1735,7 @@ export default function ContextMapClient({
   }
 
   function submitEdgeUpdate(intent: ContextMapManualRelationIntent) {
+    if (readOnly) return;
     if (!edgeDraft) return;
     startTransition(async () => {
       setMessage(null);
@@ -1745,6 +1762,7 @@ export default function ContextMapClient({
   }
 
   function archiveConnection(relationshipId: string) {
+    if (readOnly) return;
     closeMapMenus();
     startTransition(async () => {
       setMessage(null);
@@ -1766,6 +1784,7 @@ export default function ContextMapClient({
   }
 
   function archiveCard(objectId: string) {
+    if (readOnly) return;
     closeMapMenus();
     startTransition(async () => {
       setMessage(null);
@@ -1787,6 +1806,7 @@ export default function ContextMapClient({
   }
 
   function handleConnect(connection: Connection) {
+    if (readOnly) return;
     if (!connection.source || !connection.target) return;
     openConnectionDraft(connection.source, connection.target);
   }
@@ -1846,7 +1866,7 @@ export default function ContextMapClient({
         </div>
 
         <div className="context-map-toolbar-actions">
-          <div className="context-map-add-wrapper">
+          {!readOnly && <div className="context-map-add-wrapper">
             <button
               className="secondary small"
               type="button"
@@ -1868,7 +1888,7 @@ export default function ContextMapClient({
                 </button>
               </div>
             )}
-          </div>
+          </div>}
           <button className="secondary small" type="button" onClick={() => setShowFilters((value) => !value)} title="Filter visible facts">
             <SlidersHorizontal size={14} aria-hidden="true" /> Filters
           </button>
@@ -1887,17 +1907,17 @@ export default function ContextMapClient({
           >
             <FileSearch size={14} aria-hidden="true" /> {regionContextStatus === "loading" ? "Loading" : "Context"}
           </button>
-          {mapAiEnabled && (
+          {mapAiEnabled && !readOnly && (
             <button className="secondary small" type="button" onClick={() => openMapChat()} title="Open chat with this map context">
               <MessageSquare size={14} aria-hidden="true" /> Open chat
             </button>
           )}
-          {data.permissions.canSavePersonalView && (
+          {!readOnly && data.permissions.canSavePersonalView && (
             <button className="secondary small" type="button" onClick={savePersonalView} disabled={isPending} title="Save as a personal map view">
               <Copy size={14} aria-hidden="true" /> Save copy
             </button>
           )}
-          <button
+          {!readOnly && <button
             className={`secondary small ${layoutDirty ? "context-map-dirty-action" : ""}`}
             type="button"
             onClick={saveLayout}
@@ -1905,7 +1925,7 @@ export default function ContextMapClient({
             title={currentViewIsEditable ? "Save this layout" : "Request a master layout update"}
           >
             <Save size={14} aria-hidden="true" /> {layoutSaveLabel}
-          </button>
+          </button>}
           <button className="secondary small" type="button" onClick={() => setIsFullscreen((value) => !value)} title={isFullscreen ? "Exit full screen" : "Full screen"}>
             {isFullscreen ? <Minimize2 size={14} aria-hidden="true" /> : <Maximize2 size={14} aria-hidden="true" />}
             {isFullscreen ? "Exit" : "Full screen"}
@@ -1943,6 +1963,7 @@ export default function ContextMapClient({
           className="context-map-canvas"
           ref={canvasRef}
           onContextMenu={(event) => {
+            if (readOnly) return;
             event.preventDefault();
             const target = event.target instanceof Element ? event.target : null;
             const nodeElement = target?.closest(".react-flow__node");
@@ -2002,6 +2023,7 @@ export default function ContextMapClient({
                 }
               }}
               onPaneContextMenu={(event) => {
+                if (readOnly) return;
                 event.preventDefault();
                 setAddPaletteOpen(false);
                 setContextMenu({
@@ -2012,12 +2034,14 @@ export default function ContextMapClient({
                 });
               }}
               onNodeContextMenu={(event, node) => {
+                if (readOnly) return;
                 event.preventDefault();
                 if (isPreviewId(node.id)) return;
                 setAddPaletteOpen(false);
                 setContextMenu({ kind: "node", x: event.clientX, y: event.clientY, nodeId: node.id });
               }}
               onEdgeContextMenu={(event, edge) => {
+                if (readOnly) return;
                 event.preventDefault();
                 if (isPreviewId(edge.id)) return;
                 setAddPaletteOpen(false);
@@ -2071,7 +2095,7 @@ export default function ContextMapClient({
                 setIsDraggingNodes(false);
                 setLayoutDirty(true);
               }}
-              nodesConnectable
+              nodesConnectable={!readOnly}
               connectionMode={ConnectionMode.Loose}
               connectionRadius={28}
               fitView
@@ -2281,7 +2305,7 @@ export default function ContextMapClient({
                   )}
                 </section>
 
-                {mapAiEnabled && (
+                {mapAiEnabled && !readOnly && (
                   <section className="context-map-inspector-section">
                     <h2>Changes</h2>
                     <button className="secondary small" type="button" onClick={() => openMapChat(selectedRegionIds)} disabled={selectedRegionIds.length === 0}>
@@ -2472,7 +2496,7 @@ export default function ContextMapClient({
                   </>
                 )}
 
-                {mapAiEnabled && (
+                {mapAiEnabled && !readOnly && (
                   <section className="context-map-inspector-section">
                     <h2>Changes</h2>
                     <button className="secondary small" type="button" onClick={() => openMapChat(selectedRegionIds)} disabled={selectedRegionIds.length === 0}>
@@ -2657,7 +2681,7 @@ export default function ContextMapClient({
                           </div>
                         )}
                         <div className="context-map-diff-actions">
-                          {data.permissions.canUpdateMasterView ? (
+                          {!readOnly && data.permissions.canUpdateMasterView ? (
                             <>
                               {diff.status === "pending" && (
                                 <button className="secondary small" type="button" onClick={() => reviewDiff(diff.id, "approved")} disabled={isPending}>
