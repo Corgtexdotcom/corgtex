@@ -65,7 +65,6 @@
             "group": "See (Visibility & Costs)",
             "pages": [
               "see/finance-overview",
-              "see/spend-requests",
               "see/budgets",
               "see/agents",
               "see/webhooks"
