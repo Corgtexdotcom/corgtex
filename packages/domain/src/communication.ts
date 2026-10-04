@@ -2443,7 +2443,7 @@ export async function checkSlackThreadNudge(installationId: string, params: {
 }): Promise<"found" | "absent" | "unknown"> {
   try {
     const installation = await prisma.communicationInstallation.findUnique({ where: { id: installationId } });
-    if (!installation?.botUserId) return "unknown";
+    if (!installation) return "unknown";
     const client = slackClient(encryptedBotToken(installation));
     let cursor: string | undefined;
     for (let page = 0; page < 20; page += 1) {
@@ -2451,9 +2451,10 @@ export async function checkSlackThreadNudge(installationId: string, params: {
         channel: params.channelId, ts: params.threadTs, limit: 200, cursor,
       });
       if (response.ok === false || !response.messages?.length) return "unknown";
+      // Exact text in this thread is sufficient: a false positive with the same
+      // text only withholds a nudge, while missing a bot post could duplicate it.
       if (response.messages.some((message) =>
-        message.user === installation.botUserId
-        && message.text === params.text
+        message.text === params.text
         && Number(message.ts) * 1000 >= params.createdAt.getTime() - 2 * 60 * 1000
       )) return "found";
       if (!response.has_more) return "absent";

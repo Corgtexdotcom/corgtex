@@ -640,7 +640,7 @@ describe("Slack context jobs", () => {
     await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
     expect(prismaMock.communicationEntityLink.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ id: "old-claim", action: "proactive_unanswered_nudge_pending", createdAt: new Date("2026-04-29T20:00:00Z") }),
-      data: { createdAt: expect.any(Date) },
+      data: { action: "proactive_unanswered_nudge_pending", createdAt: expect.any(Date) },
     }));
     expect(prismaMock.communicationEntityLink.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ id: "old-claim", action: "proactive_unanswered_nudge_sending" }),
@@ -701,6 +701,39 @@ describe("Slack context jobs", () => {
     await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
     expect(sendSlackMessageMock).not.toHaveBeenCalled();
     expect(prismaMock.communicationEntityLink.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("retries a rejected auth claim after reauthorization only when Slack history is complete and absent", async () => {
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([candidate({ text: "Can someone confirm the launch date?" })]);
+    prismaMock.communicationEntityLink.create.mockRejectedValueOnce({ code: "P2002" });
+    prismaMock.communicationEntityLink.findUnique.mockResolvedValueOnce({
+      id: "rejected-claim", action: "proactive_unanswered_nudge_rejected", createdAt: new Date("2026-04-29T20:55:00Z"),
+    });
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
+    expect(checkSlackThreadNudgeMock).toHaveBeenCalledTimes(1);
+    expect(prismaMock.communicationEntityLink.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "rejected-claim", action: "proactive_unanswered_nudge_rejected" }),
+      data: { action: "proactive_unanswered_nudge_pending", createdAt: expect.any(Date) },
+    }));
+    expect(sendSlackMessageMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["found", "unknown"])("does not retry a rejected auth claim when Slack history is %s", async (history) => {
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([candidate({ text: "Can someone confirm the launch date?" })]);
+    prismaMock.communicationEntityLink.create.mockRejectedValueOnce({ code: "P2002" });
+    prismaMock.communicationEntityLink.findUnique.mockResolvedValueOnce({
+      id: "rejected-claim", action: "proactive_unanswered_nudge_rejected", createdAt: new Date("2026-04-29T20:55:00Z"),
+    });
+    checkSlackThreadNudgeMock.mockResolvedValueOnce(history);
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+    if (history === "found") expect(prismaMock.communicationEntityLink.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ action: "proactive_unanswered_nudge_rejected" }),
+      data: { action: "proactive_unanswered_nudge" },
+    }));
+    else expect(prismaMock.communicationEntityLink.updateMany).not.toHaveBeenCalled();
   });
 
   it("does not send after losing the pending-to-sending compare-and-set", async () => {
@@ -816,6 +849,10 @@ describe("Slack context jobs", () => {
     expect(prismaMock.communicationEntityLink.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ claimKey: "slack-proactive-first-nudge:install-1:message-1", action: "proactive_unanswered_nudge_pending" }),
       data: { action: "proactive_unanswered_nudge_sending" },
+    }));
+    expect(prismaMock.communicationEntityLink.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ claimKey: "slack-proactive-first-nudge:install-1:message-1", action: "proactive_unanswered_nudge_sending" }),
+      data: { action: "proactive_unanswered_nudge_rejected" },
     }));
   });
 

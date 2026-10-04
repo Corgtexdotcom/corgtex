@@ -1754,7 +1754,7 @@ describe("communication Slack integration", () => {
     prismaMock.communicationInstallation.findUnique.mockResolvedValue({ botUserId: "UBOT", botTokenEnc: "enc:bot-token" });
     slackWebClientMock.conversations.replies
       .mockResolvedValueOnce({ ok: true, messages: [{ user: "U1", text: "Question?", ts: "1777492800.000100" }], has_more: true, response_metadata: { next_cursor: "next" } })
-      .mockResolvedValueOnce({ ok: true, messages: [{ user: "UBOT", text: "Bringing this back into view.", ts: "1777493100.000100" }], has_more: false });
+      .mockResolvedValueOnce({ ok: true, messages: [{ text: "Bringing this back into view.", ts: "1777493100.000100" }], has_more: false });
     await expect(checkSlackThreadNudge("install-1", {
       channelId: "C1", threadTs: "1777492800.000100", createdAt: new Date("2026-04-29T20:00:00Z"), text: "Bringing this back into view.",
     })).resolves.toBe("found");

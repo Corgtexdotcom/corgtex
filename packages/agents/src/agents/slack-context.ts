@@ -37,6 +37,7 @@ const PROACTIVE_ACTION_NEEDS_OWNER = "proactive_action_needs_owner";
 const PROACTIVE_NON_ACTION = "proactive_unanswered_non_action";
 const PROACTIVE_NUDGE_PENDING = "proactive_unanswered_nudge_pending";
 const PROACTIVE_NUDGE_SENDING = "proactive_unanswered_nudge_sending";
+const PROACTIVE_NUDGE_REJECTED = "proactive_unanswered_nudge_rejected";
 const PROACTIVE_REVIEW_DEFERRED = "proactive_unanswered_review_deferred";
 const PROACTIVE_FIRST_NUDGE_CLAIM_PREFIX = "slack-proactive-first-nudge";
 const PROACTIVE_DISPOSITION_CLAIM_PREFIX = "slack-proactive-disposition";
@@ -779,7 +780,23 @@ export async function runSlackProactiveScan(params: {
         where: { workspaceId_claimKey: { workspaceId: params.workspaceId, claimKey } },
         select: { id: true, action: true, createdAt: true },
       });
-      if (!existingClaim || existingClaim.createdAt > new Date(Date.now() - STALE_PROACTIVE_NUDGE_CLAIM_MINUTES * 60 * 1000)) continue;
+      if (!existingClaim) continue;
+      if (existingClaim.action === PROACTIVE_NUDGE_REJECTED) {
+        // The failed call has ended, but an earlier Slack retry may have posted.
+        // After reauthorization, only a complete negative thread read permits retry.
+        const postedNudge = await checkSlackThreadNudge(params.installationId, {
+          channelId: candidate.externalChannelId, threadTs,
+          createdAt: existingClaim.createdAt, text: "Bringing this back into view.",
+        });
+        if (postedNudge === "found") {
+          await prisma.communicationEntityLink.updateMany({
+            where: { id: existingClaim.id, workspaceId: params.workspaceId, claimKey, action: PROACTIVE_NUDGE_REJECTED },
+            data: { action: "proactive_unanswered_nudge" },
+          });
+          continue;
+        }
+        if (postedNudge !== "absent") continue;
+      } else if (existingClaim.createdAt > new Date(Date.now() - STALE_PROACTIVE_NUDGE_CLAIM_MINUTES * 60 * 1000)) continue;
       if (existingClaim.action === PROACTIVE_NUDGE_SENDING) {
         const postedNudge = await checkSlackThreadNudge(params.installationId, {
           channelId: candidate.externalChannelId, threadTs,
@@ -795,14 +812,14 @@ export async function runSlackProactiveScan(params: {
         // stopped: Slack may still retry its in-flight call. Never resend here.
         continue;
       }
-      if (existingClaim.action !== PROACTIVE_NUDGE_PENDING) continue;
+      if (existingClaim.action !== PROACTIVE_NUDGE_PENDING && existingClaim.action !== PROACTIVE_NUDGE_REJECTED) continue;
       const reclaimedAt = new Date();
       const reclaimed = await prisma.communicationEntityLink.updateMany({
         where: {
           id: existingClaim.id, workspaceId: params.workspaceId, claimKey,
-          action: PROACTIVE_NUDGE_PENDING, createdAt: existingClaim.createdAt,
+          action: existingClaim.action, createdAt: existingClaim.createdAt,
         },
-        data: { createdAt: reclaimedAt },
+        data: { action: PROACTIVE_NUDGE_PENDING, createdAt: reclaimedAt },
       });
       if (reclaimed.count !== 1) continue;
       claim = { id: existingClaim.id, createdAt: reclaimedAt };
@@ -835,6 +852,12 @@ export async function runSlackProactiveScan(params: {
     } catch (error) {
       // A timed-out Slack call may still be retried by the SDK or have succeeded.
       // Keep the sending claim until Slack history can prove its outcome.
+      if (isSlackInvalidAuthError(error)) {
+        await prisma.communicationEntityLink.updateMany({
+          where: { id: claim.id, workspaceId: params.workspaceId, claimKey, action: PROACTIVE_NUDGE_SENDING },
+          data: { action: PROACTIVE_NUDGE_REJECTED },
+        });
+      }
       if (await markSlackInstallationReauthRequired({ ...params, error })) {
         return { skipped: true, reason: "slack_reauth_required" };
       }
