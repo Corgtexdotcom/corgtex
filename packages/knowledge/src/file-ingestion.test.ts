@@ -8,6 +8,7 @@ import { prisma } from "@corgtex/shared";
 import {
   assertTrialStorageCapacity,
   checkWorkspaceDuplicateGuard,
+  duplicateGuardMergeText,
   isGlobalOperator,
   lockAndAssertTrialStorageCapacity,
   requireWorkspaceMembership,
@@ -533,6 +534,9 @@ describe("file-ingestion", () => {
 
   it("stores and links the replacement blob when a duplicate file upload updates an existing document source", async () => {
     const { defaultStorage } = await import("@corgtex/storage");
+    vi.mocked(duplicateGuardMergeText).mockReturnValueOnce(
+      "Old text\n\n---\nAdditional duplicate upload context:\nNew replacement text",
+    );
     vi.mocked(checkWorkspaceDuplicateGuard).mockResolvedValueOnce({
       resolution: "update_existing",
       match: {
@@ -604,6 +608,8 @@ describe("file-ingestion", () => {
       data: expect.objectContaining({
         storageKey: replacementStorageKey,
         mimeType: "text/plain",
+        textContent: "New replacement text",
+        metadata: expect.objectContaining({ contentHash: "hash:New replacement text" }),
       }),
     }));
     expect(txObj.brainSource.update).toHaveBeenCalledWith(expect.objectContaining({
@@ -613,8 +619,10 @@ describe("file-ingestion", () => {
         fileName: "test.txt",
         fileMimeType: "text/plain",
         absorbedAt: null,
+        content: expect.not.stringContaining("Old text"),
       }),
     }));
+    expect(txObj.brainSource.update.mock.calls[0]?.[0]?.data.content).toContain("New replacement text");
     expect(txObj.brainSource.create).not.toHaveBeenCalled();
     expect(res.document.storageKey).toBe(replacementStorageKey);
     expect(assertTrialStorageCapacity).toHaveBeenCalledWith(

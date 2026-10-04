@@ -9,7 +9,6 @@ import {
   checkWorkspaceDuplicateGuard,
   duplicateGuardAuditMeta,
   duplicateGuardContentHash,
-  duplicateGuardMergeText,
   assertTrialStorageCapacity,
   lockAndAssertTrialStorageCapacity,
   requireWorkspaceMembership,
@@ -188,7 +187,6 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
   textContent: string | null;
   brainSourceContent: string;
   contentHash: string | null;
-  authoritativeContentHash?: string;
   ingestionGuidanceMd?: string;
   authorMemberId?: string;
   metadata: Record<string, unknown>;
@@ -204,17 +202,18 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
     await lockAndAssertTrialStorageCapacity(tx, params.workspaceId, params.size, {
       replacingDocumentId: existing.id,
     });
-    const mergedText = duplicateGuardMergeText(existing.textContent, params.textContent);
-    const mergedSourceContent = mergedText ? [params.documentTitle, mergedText].join("\n\n") : params.brainSourceContent;
-    const contentHash = params.authoritativeContentHash
-      ?? (mergedText ? duplicateGuardContentHash(mergedText) : params.contentHash);
+    // Updating a file replaces its extracted snapshot as well as its blob.
+    // Merging old text would keep superseded content searchable under the new file.
+    const replacementText = params.textContent;
+    const replacementSourceContent = params.brainSourceContent;
+    const contentHash = params.contentHash;
     const document = await tx.document.update({
       where: { id: existing.id },
       data: {
         title: existing.title || params.documentTitle,
         storageKey: params.storageKey,
         mimeType: params.mimeType,
-        textContent: mergedText,
+        textContent: replacementText,
         metadata: {
           ...(typeof existing.metadata === "object" && existing.metadata !== null && !Array.isArray(existing.metadata)
             ? existing.metadata as Record<string, unknown>
@@ -242,7 +241,7 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
       ? await tx.brainSource.update({
         where: { id: existingSource.id },
         data: {
-          content: mergedSourceContent,
+          content: replacementSourceContent,
           title: existingSource.title || params.documentTitle,
           channel: existingSource.channel || params.source,
           ingestionGuidanceMd: params.ingestionGuidanceMd ?? existingSource.ingestionGuidanceMd,
@@ -271,7 +270,7 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
           workspaceId: params.workspaceId,
           sourceType: "FILE_UPLOAD",
           tier: 2,
-          content: mergedSourceContent,
+          content: replacementSourceContent,
           title: params.documentTitle,
           authorMemberId: params.authorMemberId ?? null,
           channel: params.source,
@@ -533,7 +532,6 @@ export async function ingestFile(actor: AppActor, params: {
         textContent,
         brainSourceContent,
         contentHash,
-        authoritativeContentHash,
         ingestionGuidanceMd,
         authorMemberId,
         metadata: {
