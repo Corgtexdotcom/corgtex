@@ -352,9 +352,14 @@ describe("MCP connector registry", () => {
       code: "INVALID_INPUT",
     });
     for (const redirectUri of [
+      "cursor://",
+      "cursor://user@anysphere.cursor-mcp/oauth/callback",
+      "cursor://anysphere.cursor-mcp:123/oauth/callback",
+      "cursor://anysphere.cursor-mcp/other/callback",
       "cursor://anysphere.cursor-mcp/oauth/../oauth/callback",
       "cursor://anysphere.cursor-mcp/oauth/callback?",
       "cursor://anysphere.cursor-mcp/oauth/callback#",
+      "cursor://anysphere.cursor-mcp/oauth/callback#fragment",
     ]) {
       await expect(registerMcpOAuthClient({
         name: "Cursor",
