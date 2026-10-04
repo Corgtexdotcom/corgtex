@@ -1,6 +1,7 @@
 import {
   buildInstallerPath,
   buildInstallerShareUrl,
+  mcpConnectionName,
 } from "@/lib/install-helpers";
 
 export type AiWorkspaceProviderView = {
@@ -341,8 +342,8 @@ export function buildAiWorkspaceSetupCards(
         ],
         steps: [
           "Open the guided installer.",
-          "Copy the Corgtex MCP URL and open ChatGPT connector settings from the installer.",
-          "Create the Corgtex app in ChatGPT, scan tools, and let ChatGPT open Corgtex.",
+          "Copy the Corgtex MCP URL and open ChatGPT web from the installer.",
+          "Create the Corgtex app in Settings → Apps, scan tools, and let ChatGPT open Corgtex.",
           "Authorize as your current Corgtex user for this workspace, then use Developer Mode and choose Corgtex in chat.",
         ],
         notes: ["Business, Enterprise, or Edu workspaces may require an admin to approve or publish the app before normal users can use it. Corgtex never matches ChatGPT email to Corgtex email."],
@@ -412,11 +413,11 @@ export function buildAiWorkspaceSetupCards(
         ],
         steps: [
           "Open the guided installer.",
-          "Use Add to Cursor or the manual mcp.json fallback from the installer.",
+          "Copy the mcp.json entry from the installer into Cursor MCP settings.",
           "When Cursor opens Corgtex, authorize as your current Corgtex user for this workspace.",
           "Return here and verify the connection.",
         ],
-        notes: ["If the install prompt does not open, use the copied mcp.json fallback in Cursor MCP settings."],
+        notes: ["Cursor may require an organization admin to approve the server before teammates can use it."],
       };
     }
 
@@ -431,7 +432,7 @@ export function buildAiWorkspaceSetupCards(
           "Open the guided installer.",
           "Copy the Gemini CLI command or settings JSON from the installer.",
           "Open Gemini CLI and run /mcp.",
-          "Run /mcp auth corgtex if Gemini asks for authentication, then authorize in Corgtex as your current Corgtex user for this workspace.",
+          `Run /mcp auth ${mcpConnectionName(connectorUrl)} if Gemini asks for authentication, then authorize in Corgtex as your current Corgtex user for this workspace.`,
         ],
         notes: ["Consumer Gemini web support is not assumed; this path is for technical CLI users."],
       };

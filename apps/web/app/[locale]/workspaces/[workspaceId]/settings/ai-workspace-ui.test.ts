@@ -222,6 +222,16 @@ describe("AI workspace UI helpers", () => {
     });
   });
 
+  it("names the scoped Gemini server in the authentication step", () => {
+    const cards = buildAiWorkspaceSetupCards(
+      [provider({ key: "gemini", label: "Gemini CLI", category: "ADVANCED" })],
+      "https://app.corgtex.com/mcp/workspaces/workspace-A",
+      "https://app.corgtex.com",
+      "workspace-A",
+    );
+    expect(cards[0].steps.join(" ")).toContain("/mcp auth corgtex-workspace-A");
+  });
+
   it("can point Claude setup back to onboarding without exposing Settings links", () => {
     const cards = buildAiWorkspaceSetupCards(
       [

@@ -2,26 +2,26 @@
 
 import { useMemo, useState } from "react";
 import {
-  CHATGPT_CONNECTORS_ADVANCED_URL,
-  CHATGPT_CONNECTORS_URL,
+  CHATGPT_APPS_GUIDE_URL,
+  CHATGPT_CHAT_URL,
+  CODEX_MCP_DOCS_URL,
   COPILOT_DOCS_URL,
   COPILOT_VSCODE_MCP_DOCS_URL,
   CURSOR_MCP_DOCS_URL,
   GEMINI_MCP_DOCS_URL,
   OPENWORK_DOWNLOAD_URL,
+  buildCodexMcpCommand,
   buildCopilotCliCommand,
-  buildCursorInstallLinks,
   buildCursorMcpJsonConfig,
   buildGeminiMcpCommand,
   buildGeminiMcpConfig,
   buildVsCodeMcpConfig,
+  mcpConnectionName,
   type InstallerProviderKey,
 } from "@/lib/install-helpers";
 
-const OPENAI_APPS_SDK_QUICKSTART_URL = "https://developers.openai.com/apps-sdk/quickstart#add-your-app-to-chatgpt";
-
 type ProviderConfig = {
-  apiProviderKey: string;
+  apiProviderKey: string | null;
   productName: string;
   title: string;
   intro: string;
@@ -117,9 +117,7 @@ function copyMcpUrlAction(connectorUrl: string, productName: string): InstallerA
   };
 }
 
-function buildProviderConfig(providerKey: InstallerProviderKey, connectorUrl: string): ProviderConfig {
-  const cursorLinks = buildCursorInstallLinks(connectorUrl);
-
+export function buildProviderConfig(providerKey: InstallerProviderKey, connectorUrl: string): ProviderConfig {
   if (providerKey === "openwork") {
     return {
       apiProviderKey: "openwork",
@@ -153,29 +151,59 @@ function buildProviderConfig(providerKey: InstallerProviderKey, connectorUrl: st
       apiProviderKey: "chatgpt",
       productName: "ChatGPT",
       title: "Connect Corgtex to ChatGPT",
-      intro: "ChatGPT requires connector setup inside ChatGPT settings. This page gets the Corgtex URL ready and points you to the documented setup flow.",
+      intro: "Set up Corgtex as a custom app in ChatGPT web. Copying the URL and opening ChatGPT starts setup; ChatGPT still asks you to create the app and authorize it.",
       primaryAction: {
         kind: "copyAndOpen",
-        label: "Copy URL and open ChatGPT Connectors",
+        label: "Copy URL and open ChatGPT",
         value: connectorUrl,
-        href: CHATGPT_CONNECTORS_URL,
-        productName: "ChatGPT connector settings",
+        href: CHATGPT_CHAT_URL,
+        productName: "ChatGPT",
         variant: "primary",
       },
       secondaryActions: [
-        { kind: "open", label: "Open advanced settings", href: CHATGPT_CONNECTORS_ADVANCED_URL, variant: "secondary" },
-        { kind: "open", label: "OpenAI setup guide", href: OPENAI_APPS_SDK_QUICKSTART_URL, variant: "secondary" },
+        { kind: "open", label: "ChatGPT app setup guide", href: CHATGPT_APPS_GUIDE_URL, variant: "secondary" },
         copyMcpUrlAction(connectorUrl, "ChatGPT"),
       ],
       steps: [
-        "In ChatGPT, open Settings, then Connectors, then Advanced settings.",
-        "Turn on Developer Mode if it is not already enabled.",
-        "Create an app named Corgtex, paste the HTTPS Corgtex MCP URL, scan tools, and save it.",
+        "In ChatGPT web, open Settings → Apps → Advanced Settings and enable Developer mode if your plan and role allow it.",
+        "Open Settings → Apps → Create, or Workspace settings → Apps → Create if you are a workspace admin.",
+        "Create an app named Corgtex, paste the HTTPS Corgtex MCP URL, choose OAuth, scan tools, and save it.",
         "When ChatGPT opens Corgtex, authorize as your current Corgtex user for this workspace.",
       ],
       notes: [
-        "Business, Enterprise, or Edu workspaces may require an admin to approve or publish the app before members can use it.",
-        "Corgtex can streamline the handoff, but ChatGPT still requires setup through its own settings UI.",
+        "Business, Enterprise, and Edu workspaces require admin controls for developer access and publishing before other members can use the app. Pro custom apps have read/fetch limits.",
+        "This is the ChatGPT web app setup. Codex uses separate local MCP settings; choose Codex on the installer index for that guide.",
+      ],
+    };
+  }
+
+  if (providerKey === "codex") {
+    const serverName = mcpConnectionName(connectorUrl);
+    return {
+      apiProviderKey: null,
+      productName: "Codex",
+      title: "Connect Corgtex to Codex",
+      intro: "Add the Corgtex workspace as a Streamable HTTP MCP server in Codex. Codex and ChatGPT web have separate setup paths.",
+      primaryAction: {
+        kind: "copy",
+        label: "Copy Codex CLI command",
+        value: buildCodexMcpCommand(connectorUrl),
+        copiedMessage: "Copied the Codex MCP command.",
+        fallbackMessage: "Clipboard access was blocked. Select and copy the Codex MCP command.",
+        variant: "primary",
+      },
+      secondaryActions: [
+        { kind: "open", label: "Codex MCP docs", href: CODEX_MCP_DOCS_URL, variant: "secondary" },
+        copyMcpUrlAction(connectorUrl, "Codex"),
+      ],
+      steps: [
+        "Run the copied command in Terminal, or add a Streamable HTTP server in Codex MCP settings using the URL above.",
+        `Run codex mcp login ${serverName} to authorize in your browser, then approve Corgtex access for this workspace.`,
+        `Run codex mcp list or open Codex MCP settings to check ${serverName} is available.`,
+      ],
+      notes: [
+        "Codex uses local MCP configuration shared by its CLI and IDE extension. This does not create a ChatGPT web custom app.",
+        "Check the completed OAuth grant under Your workspace connections in Corgtex settings.",
       ],
     };
   }
@@ -185,30 +213,22 @@ function buildProviderConfig(providerKey: InstallerProviderKey, connectorUrl: st
       apiProviderKey: "cursor",
       productName: "Cursor",
       title: "Connect Corgtex to Cursor",
-      intro: "Install the Corgtex MCP server in Cursor, then finish browser authorization in Corgtex.",
+      intro: "Copy a workspace-specific mcp.json entry into Cursor, then finish browser authorization in Corgtex.",
       primaryAction: {
-        kind: "cursorInstall",
-        label: "Add to Cursor",
-        appHref: cursorLinks.app,
-        browserHref: cursorLinks.browser,
+        kind: "copy",
+        label: "Copy Cursor mcp.json",
+        value: JSON.stringify(buildCursorMcpJsonConfig(connectorUrl), null, 2),
+        copiedMessage: "Copied the Cursor MCP configuration.",
+        fallbackMessage: "Clipboard access was blocked. Select and copy the Cursor MCP configuration.",
         variant: "primary",
       },
       secondaryActions: [
-        {
-          kind: "copy",
-          label: "Copy manual mcp.json",
-          value: JSON.stringify(buildCursorMcpJsonConfig(connectorUrl), null, 2),
-          copiedMessage: "Copied the Cursor MCP configuration.",
-          fallbackMessage: "Clipboard access was blocked. Select and copy the Cursor MCP configuration.",
-          variant: "secondary",
-        },
         { kind: "open", label: "Cursor MCP docs", href: CURSOR_MCP_DOCS_URL, variant: "secondary" },
       ],
       steps: [
-        "Click Add to Cursor.",
-        "Approve the Corgtex MCP install prompt in Cursor.",
+        "Open Cursor MCP settings or your user/workspace mcp.json file and add the copied server entry.",
+        "Save the configuration and enable the Corgtex HTTP server in Cursor.",
         "When Cursor opens Corgtex, authorize as your current Corgtex user for this workspace.",
-        "If the app prompt does not open, use the browser fallback or paste the manual mcp.json.",
       ],
       notes: ["Ask Cursor for a no-change Corgtex readiness report before editing files."],
     };
@@ -277,7 +297,7 @@ function buildProviderConfig(providerKey: InstallerProviderKey, connectorUrl: st
       steps: [
         "Paste the command in Terminal, or use the settings JSON fallback with httpUrl.",
         "Open Gemini CLI and run /mcp.",
-        "Run /mcp auth corgtex if Gemini asks for authentication.",
+        `Run /mcp auth ${mcpConnectionName(connectorUrl)} if Gemini asks for authentication.`,
         "When Gemini opens Corgtex, authorize as your current Corgtex user for this workspace.",
       ],
       notes: ["Consumer Gemini web support is not assumed; this path is for technical CLI users."],
@@ -359,6 +379,7 @@ export function GuidedProviderInstaller({ providerKey, connectorUrl, workspaceId
   };
 
   const verifyConnection = async () => {
+    if (!config.apiProviderKey) return;
     if (!workspaceId) {
       setCompletionTone("warning");
       setCompletionMessage("Open this installer from your Corgtex workspace to save connection status.");
@@ -502,17 +523,21 @@ export function GuidedProviderInstaller({ providerKey, connectorUrl, workspaceId
       <section className="rounded-[var(--radius-lg)] border border-[var(--line-subtle)] bg-[var(--surface-sunken)] p-5">
         <h2 className="text-sm font-medium text-[var(--text-strong)]">Finish in Corgtex</h2>
         <p className="mt-1 text-xs text-[var(--text-muted)]">
-          After the AI tool opens Corgtex and you approve access, verify that Corgtex saw the completed OAuth sign-in.
+          {config.apiProviderKey
+            ? "After the AI tool opens Corgtex and you approve access, verify that Corgtex saw the completed OAuth sign-in."
+            : "After approving access, check Your workspace connections in Corgtex settings for the new OAuth grant."}
         </p>
         <div className="mt-3 flex flex-wrap gap-2">
-          <button
-            type="button"
-            className="button secondary text-sm"
-            disabled={completionPending !== null}
-            onClick={() => void verifyConnection()}
-          >
-            {completionPending === "verify" ? "Checking" : "Verify connection"}
-          </button>
+          {config.apiProviderKey ? (
+            <button
+              type="button"
+              className="button secondary text-sm"
+              disabled={completionPending !== null}
+              onClick={() => void verifyConnection()}
+            >
+              {completionPending === "verify" ? "Checking" : "Verify connection"}
+            </button>
+          ) : null}
           {returnTo ? (
             <a href={returnTo} className="button secondary text-sm">
               Back to Corgtex

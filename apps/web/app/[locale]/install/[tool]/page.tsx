@@ -11,6 +11,7 @@ const PAGE_TITLES: Record<InstallerProviderKey, string> = {
   openwork: "Connect Corgtex to OpenWork",
   claude: "Connect Corgtex to Claude",
   chatgpt: "Connect Corgtex to ChatGPT",
+  codex: "Connect Corgtex to Codex",
   cursor: "Connect Corgtex to Cursor",
   copilot: "Connect Corgtex to GitHub Copilot",
   gemini: "Connect Corgtex to Gemini CLI",

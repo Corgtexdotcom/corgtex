@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   title: "Connect Corgtex to your AI tool",
-  description: "Add Corgtex as a connector to Claude, ChatGPT, Cursor, Claude Code, or any MCP client.",
+  description: "Add Corgtex as a connector to Claude, ChatGPT, Codex, Cursor, or another MCP client.",
 };
 
 const TILES = [
@@ -22,21 +22,28 @@ const TILES = [
   {
     id: "claude",
     title: "Claude (web, desktop, Cowork)",
-    body: "The smoothest path. Three clicks, no terminal — works for non-technical teammates.",
+    body: "Copy the workspace URL, add a custom connector in Claude, then approve Corgtex access.",
     href: buildInstallerPath("claude"),
     primary: false,
   },
   {
     id: "chatgpt",
-    title: "ChatGPT",
-    body: "Copy the MCP URL, open ChatGPT connector settings, then finish the required ChatGPT setup steps.",
+    title: "ChatGPT web",
+    body: "Create a custom app in ChatGPT Apps settings, scan tools, then approve Corgtex access.",
     href: buildInstallerPath("chatgpt"),
+    primary: false,
+  },
+  {
+    id: "codex",
+    title: "Codex CLI and IDE",
+    body: "Copy a workspace-specific MCP command for Codex, then sign in through OAuth.",
+    href: buildInstallerPath("codex"),
     primary: false,
   },
   {
     id: "cursor",
     title: "Cursor",
-    body: "Use Cursor's MCP install prompt, with browser and manual mcp.json fallbacks.",
+    body: "Copy a workspace-specific mcp.json entry, then authorize in Corgtex.",
     href: buildInstallerPath("cursor"),
     primary: false,
   },
@@ -84,7 +91,7 @@ export default async function InstallIndexPage({ searchParams }: { searchParams:
           </div>
           <h1 className="text-2xl font-bold text-[var(--text-strong)]">Connect Corgtex to your AI tool</h1>
           <p className="mt-2 text-sm text-[var(--text-muted)]">
-            Pick the AI tool you use. Each path opens a guided installer.
+            Pick the AI tool you use. Each guide prepares the workspace URL or config; finish setup and OAuth in that tool.
           </p>
         </header>
 
