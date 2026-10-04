@@ -30,6 +30,7 @@ const PROACTIVE_ACTION_WAITING_UPDATE = "proactive_action_waiting_update";
 const PROACTIVE_ACTION_PROCESSED_REPLY = "proactive_action_processed_reply";
 const PROACTIVE_ACTION_NEEDS_OWNER = "proactive_action_needs_owner";
 const PROACTIVE_NON_ACTION = "proactive_unanswered_non_action";
+const PROACTIVE_FIRST_NUDGE_CLAIM_PREFIX = "slack-proactive-first-nudge";
 const PROACTIVE_DISPOSITION_CLAIM_PREFIX = "slack-proactive-disposition";
 const PROACTIVE_CONFIRMATION_CLAIM_PREFIX = "slack-proactive-confirmation";
 
@@ -245,7 +246,7 @@ export async function runSlackContextSummary(params: {
 
 function looksUnanswered(text: string) {
   if (/^\s*(?:(?:quick|just)\s+)?(?:fyi|for your information|heads[ -]?up)\b/i.test(text) || slackFollowupStopIntent(text)) return false;
-  const prose = text.replace(/<https?:\/\/[^>|]+(?:\|([^>]*))?>/gi, "$1").replace(/https?:\/\/\S+/gi, "");
+  const prose = text.replace(/<https?:\/\/[^>|]+(?:\|([^>]*))?>/gi, "$1").replace(/https?:\/\/\S+/gi, (url) => url.match(/[.!?]+$/)?.[0] ?? "");
   return /\?/.test(prose) || /\b(can someone|anyone|please|could someone|does anyone|who can|need help)\b/i.test(prose);
 }
 
@@ -641,18 +642,16 @@ export async function runSlackProactiveScan(params: {
   for (const candidate of candidates.filter((message) => looksUnanswered(message.text ?? "") && !isAddressedToSlackBot(message.text ?? "", installation.botUserId)).slice(0, 10)) {
     const threadTs = threadTsForMessage(candidate);
     if (await isSlackThreadFollowupSuppressed({ workspaceId: params.workspaceId, installationId: params.installationId, channelId: candidate.externalChannelId, threadTs })) continue;
-    const alreadyHandled = await prisma.communicationEntityLink.findFirst({
-      where: {
-        workspaceId: params.workspaceId,
-        installationId: params.installationId,
-        messageId: candidate.id,
-        OR: [
-          { action: { in: ["proactive_unanswered_nudge", "proactive_unanswered_resolved", PROACTIVE_NON_ACTION] } },
-          { entityType: "Action" },
-        ],
-      },
-      select: { id: true },
-    });
+    const handledQuery = {
+      workspaceId: params.workspaceId,
+      installationId: params.installationId,
+      messageId: candidate.id,
+      OR: [
+        { action: { in: ["proactive_unanswered_nudge", "proactive_unanswered_resolved", PROACTIVE_NON_ACTION] } },
+        { entityType: "Action" },
+      ],
+    };
+    const alreadyHandled = await prisma.communicationEntityLink.findFirst({ where: handledQuery, select: { id: true } });
     if (alreadyHandled) continue;
 
     const replies = await prisma.communicationMessage.count({
@@ -682,13 +681,26 @@ export async function runSlackProactiveScan(params: {
       input: JSON.stringify({ text: candidate.text }),
     });
     const output = review.output;
-    if (output.explicitAsk !== true || output.resolutionState !== "open" || output.workDisposition !== "request"
-      || typeof output.confidence !== "number" || !Number.isFinite(output.confidence)
-      || output.confidence < config.proactiveConfidenceThreshold
-      || !Array.isArray(output.couldNot) || output.couldNot.length > 0) continue;
+    const confidentReview = typeof output.explicitAsk === "boolean"
+      && ["open", "answered"].includes(String(output.resolutionState))
+      && ["request", "information", "awareness", "test", "ignore"].includes(String(output.workDisposition))
+      && typeof output.confidence === "number" && Number.isFinite(output.confidence)
+      && output.confidence >= config.proactiveConfidenceThreshold
+      && Array.isArray(output.couldNot) && output.couldNot.length === 0;
+    if (!confidentReview) continue;
+    if (output.explicitAsk !== true || output.resolutionState !== "open" || output.workDisposition !== "request") {
+      await recordProactiveMarker({
+        installationId: params.installationId, workspaceId: params.workspaceId,
+        messageId: candidate.id, externalUserId: candidate.externalUserId,
+        entityType: "CommunicationMessage", entityId: candidate.id, action: PROACTIVE_NON_ACTION,
+        claimKey: `${PROACTIVE_FIRST_NUDGE_CLAIM_PREFIX}:${params.installationId}:${candidate.id}`,
+      });
+      continue;
+    }
 
     // Recheck after model latency: a human may have replied or stopped the thread.
     if (await isSlackThreadFollowupSuppressed({ workspaceId: params.workspaceId, installationId: params.installationId, channelId: candidate.externalChannelId, threadTs })) continue;
+    if (await prisma.communicationEntityLink.findFirst({ where: handledQuery, select: { id: true } })) continue;
     const latestReplies = await prisma.communicationMessage.count({
       where: {
         workspaceId: params.workspaceId, installationId: params.installationId, provider: "SLACK",
@@ -700,6 +712,22 @@ export async function runSlackProactiveScan(params: {
     });
     if (latestReplies > 0) continue;
 
+    const claimKey = `${PROACTIVE_FIRST_NUDGE_CLAIM_PREFIX}:${params.installationId}:${candidate.id}`;
+    let claim: { id: string };
+    try {
+      claim = await prisma.communicationEntityLink.create({
+        data: {
+          installationId: params.installationId, workspaceId: params.workspaceId, provider: "SLACK",
+          messageId: candidate.id, externalUserId: candidate.externalUserId,
+          entityType: "CommunicationMessage", entityId: candidate.id,
+          action: "proactive_unanswered_nudge", claimKey,
+        },
+        select: { id: true },
+      });
+    } catch (error) {
+      if (isUniqueConstraintError(error)) continue;
+      throw error;
+    }
     try {
       await sendSlackMessage(params.installationId, {
         channel: candidate.externalChannelId,
@@ -710,21 +738,13 @@ export async function runSlackProactiveScan(params: {
         text: { type: "mrkdwn", text: "Bringing this back into view in case it still needs attention." },
       }]);
     } catch (error) {
+      await prisma.communicationEntityLink.deleteMany({ where: { id: claim.id, workspaceId: params.workspaceId, claimKey } });
       if (await markSlackInstallationReauthRequired({ ...params, error })) {
         return { skipped: true, reason: "slack_reauth_required" };
       }
       throw error;
     }
 
-    await recordProactiveMarker({
-      installationId: params.installationId,
-      workspaceId: params.workspaceId,
-      messageId: candidate.id,
-      externalUserId: candidate.externalUserId,
-      entityType: "CommunicationMessage",
-      entityId: candidate.id,
-      action: "proactive_unanswered_nudge",
-    });
     nudges += 1;
     if (nudges >= MAX_PROACTIVE_NUDGES) break;
   }
