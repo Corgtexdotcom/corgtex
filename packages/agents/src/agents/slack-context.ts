@@ -258,6 +258,23 @@ function isAddressedToSlackBot(text: string, botUserId: string | null | undefine
   return Boolean(normalizedBotUserId) && new RegExp(`<@${escapeRegExp(normalizedBotUserId ?? "")}(?:\\|[^>]+)?>`).test(text);
 }
 
+function terminalProactiveDispositionWhere(workspaceId: string, installationId: string) {
+  return {
+    workspaceId,
+    installationId,
+    OR: [
+      { action: "proactive_unanswered_resolved" },
+      {
+        action: PROACTIVE_NON_ACTION,
+        OR: [
+          { claimKey: null },
+          { claimKey: { not: { startsWith: `${PROACTIVE_FIRST_NUDGE_CLAIM_PREFIX}:${installationId}:` } } },
+        ],
+      },
+    ],
+  };
+}
+
 function normalizeResolutionState(value: unknown): ProactiveResolutionState {
   return value === "answered" || value === "open" ? value : "unknown";
 }
@@ -735,6 +752,17 @@ export async function runSlackProactiveScan(params: {
       throw error;
     }
     try {
+      const currentSource = await prisma.communicationMessage.findFirst({
+        where: {
+          id: candidate.id, workspaceId: params.workspaceId, installationId: params.installationId,
+          provider: "SLACK", text: candidate.text, textRedactedAt: null, isHidden: false, isDeleted: false,
+        },
+        select: { id: true },
+      });
+      if (!currentSource) {
+        await prisma.communicationEntityLink.deleteMany({ where: { id: claim.id, workspaceId: params.workspaceId, claimKey } });
+        continue;
+      }
       await sendSlackMessage(params.installationId, {
         channel: candidate.externalChannelId,
         threadTs,
@@ -764,6 +792,7 @@ export async function runSlackProactiveScan(params: {
   let actions = 0;
   let semanticReviews = 0;
   const actionCreationCutoff = new Date(now.getTime() - config.unansweredActionCreationDelayMinutes * 60 * 1000);
+  const terminalDispositionWhere = terminalProactiveDispositionWhere(params.workspaceId, params.installationId);
   let pendingNudgeCursor: string | undefined;
   while (actions < MAX_PROACTIVE_ACTIONS && semanticReviews < MAX_PROACTIVE_REVIEWS) {
     const pendingNudges = await prisma.communicationEntityLink.findMany({
@@ -773,7 +802,7 @@ export async function runSlackProactiveScan(params: {
       provider: "SLACK",
       action: "proactive_unanswered_nudge",
       messageId: { not: null },
-      message: { is: { OR: [{ entityLinks: { none: { workspaceId: params.workspaceId, action: { in: ["proactive_unanswered_resolved", PROACTIVE_NON_ACTION] } } } }, { entityLinks: { some: { workspaceId: params.workspaceId, entityType: "Action" } } }] } },
+      message: { is: { OR: [{ entityLinks: { none: terminalDispositionWhere } }, { entityLinks: { some: { workspaceId: params.workspaceId, entityType: "Action" } } }] } },
       createdAt: { lte: actionCreationCutoff },
     },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
@@ -819,10 +848,8 @@ export async function runSlackProactiveScan(params: {
     });
     const terminalMarker = linkedAction ? null : await prisma.communicationEntityLink.findFirst({
       where: {
-        workspaceId: params.workspaceId,
-        installationId: params.installationId,
+        ...terminalDispositionWhere,
         messageId: candidate.id,
-        action: { in: ["proactive_unanswered_resolved", PROACTIVE_NON_ACTION] },
       },
       select: { id: true },
     });
