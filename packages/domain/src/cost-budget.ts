@@ -1,5 +1,5 @@
 import { prisma } from "@corgtex/shared";
-import { getWorkspaceMonthlyUsage } from "./agent-run-usage";
+import { currentUsagePeriodStart, getWorkspaceMonthlyUsage } from "./agent-run-usage";
 import { AppError } from "./errors";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
@@ -145,11 +145,7 @@ export async function checkBudget(workspaceId: string): Promise<{
 
   // Check alert threshold
   if (usedPct >= budget.alertThresholdPct) {
-    const startOfCurrentPeriod = new Date();
-    startOfCurrentPeriod.setDate(budget.periodStartDay);
-    if (startOfCurrentPeriod.getTime() > Date.now()) {
-      startOfCurrentPeriod.setMonth(startOfCurrentPeriod.getMonth() - 1);
-    }
+    const startOfCurrentPeriod = currentUsagePeriodStart(new Date(), budget.periodStartDay);
 
     // Only alert once per period
     if (!budget.alertSentAt || budget.alertSentAt < startOfCurrentPeriod) {
@@ -170,6 +166,7 @@ export async function checkBudget(workspaceId: string): Promise<{
             title: "Budget Alert",
             bodyMd: `Workspace agent usage has reached ${usedPct.toFixed(1)}% of your monthly budget. ($${usedUsd.toFixed(2)} of $${capUsd})`,
             priority: "HIGH",
+            dedupeKey: `budget.threshold:${budget.id}:${startOfCurrentPeriod.toISOString()}`,
           });
 
           await tx.modelUsageBudget.update({
