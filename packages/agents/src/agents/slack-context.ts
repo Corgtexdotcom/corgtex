@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { env, prisma, toInputJson } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { defaultModelGateway, resolveModel } from "@corgtex/models";
 import {
   AGENT_REGISTRY,
+  checkSlackThreadNudge,
   createWorkItemFromCommunicationSource,
   getAgentModelOverride,
   isAgentEnabled,
@@ -20,16 +22,24 @@ const DEFAULT_UNANSWERED_DELAY_MINUTES = 24 * 60;
 const DEFAULT_UNANSWERED_ACTION_DELAY_MINUTES = 24 * 60;
 const DEFAULT_STALE_ACTION_FOLLOWUP_DELAY_MINUTES = 72 * 60;
 const PROACTIVE_LOOKBACK_MINUTES = 7 * 24 * 60;
+const MAX_FIRST_NUDGE_REVIEWS = 10;
+const UNCERTAIN_FIRST_NUDGE_RETRY_HOURS = 6;
 const MAX_PROACTIVE_NUDGES = 3;
 const MAX_PROACTIVE_ACTIONS = 3;
 const MAX_PROACTIVE_REVIEWS = 50;
 const MAX_PROACTIVE_ACTION_FOLLOWUPS = 3;
 const MAX_FOLLOWUPS_PER_ACTION = 2;
+const STALE_PROACTIVE_NUDGE_CLAIM_MINUTES = 15;
 const PROACTIVE_EXISTING_ACTION_UPDATE = "proactive_existing_action_update";
 const PROACTIVE_ACTION_WAITING_UPDATE = "proactive_action_waiting_update";
 const PROACTIVE_ACTION_PROCESSED_REPLY = "proactive_action_processed_reply";
 const PROACTIVE_ACTION_NEEDS_OWNER = "proactive_action_needs_owner";
 const PROACTIVE_NON_ACTION = "proactive_unanswered_non_action";
+const PROACTIVE_NUDGE_PENDING = "proactive_unanswered_nudge_pending";
+const PROACTIVE_NUDGE_SENDING = "proactive_unanswered_nudge_sending";
+const PROACTIVE_NUDGE_REJECTED = "proactive_unanswered_nudge_rejected";
+const PROACTIVE_REVIEW_DEFERRED = "proactive_unanswered_review_deferred";
+const PROACTIVE_FIRST_NUDGE_CLAIM_PREFIX = "slack-proactive-first-nudge";
 const PROACTIVE_DISPOSITION_CLAIM_PREFIX = "slack-proactive-disposition";
 const PROACTIVE_CONFIRMATION_CLAIM_PREFIX = "slack-proactive-confirmation";
 
@@ -245,7 +255,7 @@ export async function runSlackContextSummary(params: {
 
 function looksUnanswered(text: string) {
   if (/^\s*(?:(?:quick|just)\s+)?(?:fyi|for your information|heads[ -]?up)\b/i.test(text) || slackFollowupStopIntent(text)) return false;
-  return /\?/.test(text) || /\b(can someone|anyone|please|could someone|does anyone|who can|need help)\b/i.test(text);
+  return /\?/.test(text) || /\b(can someone|anyone|please|could someone|does anyone|who can|need help|(?:can|could|would|will) you)\b/i.test(text);
 }
 
 function escapeRegExp(value: string) { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
@@ -253,6 +263,23 @@ function escapeRegExp(value: string) { return value.replace(/[.*+?^${}()|[\]\\]/
 function isAddressedToSlackBot(text: string, botUserId: string | null | undefined) {
   const normalizedBotUserId = botUserId?.trim();
   return Boolean(normalizedBotUserId) && new RegExp(`<@${escapeRegExp(normalizedBotUserId ?? "")}(?:\\|[^>]+)?>`).test(text);
+}
+
+function terminalProactiveDispositionWhere(workspaceId: string, installationId: string) {
+  return {
+    workspaceId,
+    installationId,
+    OR: [
+      { action: "proactive_unanswered_resolved" },
+      {
+        action: PROACTIVE_NON_ACTION,
+        OR: [
+          { claimKey: null },
+          { claimKey: { not: { startsWith: `${PROACTIVE_FIRST_NUDGE_CLAIM_PREFIX}:${installationId}:` } } },
+        ],
+      },
+    ],
+  };
 }
 
 function normalizeResolutionState(value: unknown): ProactiveResolutionState {
@@ -634,22 +661,31 @@ export async function runSlackProactiveScan(params: {
     take: 100,
   });
 
+  const model = await getAgentModelOverride(params.workspaceId, "slack-agent")
+    ?? resolveModel(AGENT_REGISTRY["slack-agent"].defaultModelTier);
   let nudges = 0;
-  for (const candidate of candidates.filter((message) => looksUnanswered(message.text ?? "") && !isAddressedToSlackBot(message.text ?? "", installation.botUserId)).slice(0, 10)) {
+  let firstNudgeReviews = 0;
+  for (const candidate of candidates.filter((message) => looksUnanswered(message.text ?? "") && !isAddressedToSlackBot(message.text ?? "", installation.botUserId))) {
     const threadTs = threadTsForMessage(candidate);
+    const cachePrefix = `${PROACTIVE_FIRST_NUDGE_CLAIM_PREFIX}:${params.installationId}:${candidate.id}:`;
+    const textHash = createHash("sha256").update(candidate.text ?? "").digest("hex").slice(0, 16);
+    const nonActionClaimKey = `${cachePrefix}${textHash}`;
+    const deferredClaimKey = `${cachePrefix}deferred:${textHash}`;
     if (await isSlackThreadFollowupSuppressed({ workspaceId: params.workspaceId, installationId: params.installationId, channelId: candidate.externalChannelId, threadTs })) continue;
-    const alreadyHandled = await prisma.communicationEntityLink.findFirst({
-      where: {
-        workspaceId: params.workspaceId,
-        installationId: params.installationId,
-        messageId: candidate.id,
-        OR: [
-          { action: { in: ["proactive_unanswered_nudge", "proactive_unanswered_resolved", PROACTIVE_NON_ACTION] } },
-          { entityType: "Action" },
-        ],
-      },
-      select: { id: true },
-    });
+    const handledQuery = {
+      workspaceId: params.workspaceId,
+      installationId: params.installationId,
+      messageId: candidate.id,
+      OR: [
+        { action: { in: ["proactive_unanswered_nudge", "proactive_unanswered_resolved"] } },
+        { action: PROACTIVE_NON_ACTION, claimKey: nonActionClaimKey },
+        { action: PROACTIVE_NON_ACTION, claimKey: null },
+        { action: PROACTIVE_NON_ACTION, claimKey: { not: { startsWith: cachePrefix } } },
+        { action: PROACTIVE_REVIEW_DEFERRED, claimKey: deferredClaimKey, createdAt: { gte: new Date(now.getTime() - UNCERTAIN_FIRST_NUDGE_RETRY_HOURS * 60 * 60 * 1000) } },
+        { entityType: "Action" },
+      ],
+    };
+    const alreadyHandled = await prisma.communicationEntityLink.findFirst({ where: handledQuery, select: { id: true } });
     if (alreadyHandled) continue;
 
     const replies = await prisma.communicationMessage.count({
@@ -669,7 +705,144 @@ export async function runSlackProactiveScan(params: {
     });
     if (replies > 0) continue;
 
+    if (firstNudgeReviews >= MAX_FIRST_NUDGE_REVIEWS) break;
+    firstNudgeReviews += 1;
+    // Silence and punctuation are only candidate signals, not permission to interrupt.
+    const review = await defaultModelGateway.extract({
+      model,
+      workspaceId: params.workspaceId,
+      workflowJobId: params.workflowJobId,
+      instruction: "Decide whether this Slack message contains an explicit unanswered request for a human response. Return JSON with explicitAsk, resolutionState (open/answered/unknown), workDisposition (request/information/awareness/test/ignore), confidence, and couldNot (string array). Informational shares, FYIs, rhetorical questions, quoted questions, product updates, website feedback relays, and URL punctuation do not qualify. A legitimate explicit question or request for help can qualify without an action owner or deliverable. Do not infer a request from silence. Missing or uncertain evidence must use unknown and explain it in couldNot.",
+      schemaHint: "{ explicitAsk: boolean, resolutionState: string, workDisposition: string, confidence: number, couldNot: string[] }",
+      input: JSON.stringify({ text: candidate.text }),
+    });
+    const output = review.output;
+    const confidentReview = typeof output.explicitAsk === "boolean"
+      && ["open", "answered"].includes(String(output.resolutionState))
+      && ["request", "information", "awareness", "test", "ignore"].includes(String(output.workDisposition))
+      && output.explicitAsk === (output.workDisposition === "request")
+      && typeof output.confidence === "number" && Number.isFinite(output.confidence)
+      && output.confidence >= 0 && output.confidence <= 1
+      && output.confidence >= config.proactiveConfidenceThreshold
+      && Array.isArray(output.couldNot) && output.couldNot.length === 0;
+    if (!confidentReview) {
+      // Retry uncertain verdicts later without letting the same ten messages
+      // consume every review slot on every hourly scan.
+      await prisma.communicationEntityLink.upsert({
+        where: { workspaceId_claimKey: { workspaceId: params.workspaceId, claimKey: deferredClaimKey } },
+        update: { createdAt: new Date() },
+        create: {
+          installationId: params.installationId, workspaceId: params.workspaceId, provider: "SLACK",
+          messageId: candidate.id, externalUserId: candidate.externalUserId,
+          entityType: "CommunicationMessage", entityId: candidate.id,
+          action: PROACTIVE_REVIEW_DEFERRED, claimKey: deferredClaimKey,
+        },
+      });
+      continue;
+    }
+    if (output.explicitAsk !== true || output.resolutionState !== "open" || output.workDisposition !== "request") {
+      await recordProactiveMarker({
+        installationId: params.installationId, workspaceId: params.workspaceId,
+        messageId: candidate.id, externalUserId: candidate.externalUserId,
+        entityType: "CommunicationMessage", entityId: candidate.id, action: PROACTIVE_NON_ACTION,
+        claimKey: nonActionClaimKey,
+      });
+      continue;
+    }
+
+    // Recheck after model latency: a human may have replied or stopped the thread.
+    if (await isSlackThreadFollowupSuppressed({ workspaceId: params.workspaceId, installationId: params.installationId, channelId: candidate.externalChannelId, threadTs })) continue;
+    if (await prisma.communicationEntityLink.findFirst({ where: handledQuery, select: { id: true } })) continue;
+    const latestReplies = await prisma.communicationMessage.count({
+      where: {
+        workspaceId: params.workspaceId, installationId: params.installationId, provider: "SLACK",
+        externalChannelId: candidate.externalChannelId,
+        messageTs: candidate.messageTs ? { gt: candidate.messageTs } : undefined,
+        text: { not: null }, textRedactedAt: null, isBot: false, isHidden: false, isDeleted: false,
+        OR: [{ externalMessageId: threadTs }, { threadExternalId: threadTs }],
+      },
+    });
+    if (latestReplies > 0) continue;
+
+    const claimKey = `${PROACTIVE_FIRST_NUDGE_CLAIM_PREFIX}:${params.installationId}:${candidate.id}`;
+    let claim: { id: string; createdAt: Date };
     try {
+      claim = await prisma.communicationEntityLink.create({
+        data: {
+          installationId: params.installationId, workspaceId: params.workspaceId, provider: "SLACK",
+          messageId: candidate.id, externalUserId: candidate.externalUserId,
+          entityType: "CommunicationMessage", entityId: candidate.id,
+          action: PROACTIVE_NUDGE_PENDING, claimKey,
+        },
+        select: { id: true, createdAt: true },
+      });
+    } catch (error) {
+      if (!isUniqueConstraintError(error)) throw error;
+      const existingClaim = await prisma.communicationEntityLink.findUnique({
+        where: { workspaceId_claimKey: { workspaceId: params.workspaceId, claimKey } },
+        select: { id: true, action: true, createdAt: true },
+      });
+      if (!existingClaim) continue;
+      if (existingClaim.action === PROACTIVE_NUDGE_REJECTED) {
+        // The failed call has ended, but an earlier Slack retry may have posted.
+        // After reauthorization, only a complete negative thread read permits retry.
+        const postedNudge = await checkSlackThreadNudge(params.installationId, {
+          channelId: candidate.externalChannelId, threadTs,
+          createdAt: existingClaim.createdAt, text: "Bringing this back into view.",
+        });
+        if (postedNudge === "found") {
+          await prisma.communicationEntityLink.updateMany({
+            where: { id: existingClaim.id, workspaceId: params.workspaceId, claimKey, action: PROACTIVE_NUDGE_REJECTED },
+            data: { action: "proactive_unanswered_nudge" },
+          });
+          continue;
+        }
+        if (postedNudge !== "absent") continue;
+      } else if (existingClaim.createdAt > new Date(Date.now() - STALE_PROACTIVE_NUDGE_CLAIM_MINUTES * 60 * 1000)) continue;
+      if (existingClaim.action === PROACTIVE_NUDGE_SENDING) {
+        const postedNudge = await checkSlackThreadNudge(params.installationId, {
+          channelId: candidate.externalChannelId, threadTs,
+          createdAt: existingClaim.createdAt, text: "Bringing this back into view.",
+        });
+        if (postedNudge === "found") {
+          await prisma.communicationEntityLink.updateMany({
+            where: { id: existingClaim.id, workspaceId: params.workspaceId, claimKey, action: PROACTIVE_NUDGE_SENDING },
+            data: { action: "proactive_unanswered_nudge" },
+          });
+        }
+        // Even a complete read with no post cannot prove the original worker
+        // stopped: Slack may still retry its in-flight call. Never resend here.
+        continue;
+      }
+      if (existingClaim.action !== PROACTIVE_NUDGE_PENDING && existingClaim.action !== PROACTIVE_NUDGE_REJECTED) continue;
+      const reclaimedAt = new Date();
+      const reclaimed = await prisma.communicationEntityLink.updateMany({
+        where: {
+          id: existingClaim.id, workspaceId: params.workspaceId, claimKey,
+          action: existingClaim.action, createdAt: existingClaim.createdAt,
+        },
+        data: { action: PROACTIVE_NUDGE_PENDING, createdAt: reclaimedAt },
+      });
+      if (reclaimed.count !== 1) continue;
+      claim = { id: existingClaim.id, createdAt: reclaimedAt };
+    }
+    try {
+      const currentSource = await prisma.communicationMessage.findFirst({
+        where: {
+          id: candidate.id, workspaceId: params.workspaceId, installationId: params.installationId,
+          provider: "SLACK", text: candidate.text, textRedactedAt: null, isHidden: false, isDeleted: false,
+        },
+        select: { id: true },
+      });
+      if (!currentSource) {
+        await prisma.communicationEntityLink.deleteMany({ where: { id: claim.id, workspaceId: params.workspaceId, claimKey, action: PROACTIVE_NUDGE_PENDING, createdAt: claim.createdAt } });
+        continue;
+      }
+      const sendClaim = await prisma.communicationEntityLink.updateMany({
+        where: { id: claim.id, workspaceId: params.workspaceId, claimKey, action: PROACTIVE_NUDGE_PENDING, createdAt: claim.createdAt },
+        data: { action: PROACTIVE_NUDGE_SENDING },
+      });
+      if (sendClaim.count !== 1) continue;
       await sendSlackMessage(params.installationId, {
         channel: candidate.externalChannelId,
         threadTs,
@@ -679,27 +852,29 @@ export async function runSlackProactiveScan(params: {
         text: { type: "mrkdwn", text: "Bringing this back into view in case it still needs attention." },
       }]);
     } catch (error) {
+      // A timed-out Slack call may still be retried by the SDK or have succeeded.
+      // Keep the sending claim until Slack history can prove its outcome.
+      if (isSlackInvalidAuthError(error)) {
+        await prisma.communicationEntityLink.updateMany({
+          where: { id: claim.id, workspaceId: params.workspaceId, claimKey, action: PROACTIVE_NUDGE_SENDING },
+          data: { action: PROACTIVE_NUDGE_REJECTED },
+        });
+      }
       if (await markSlackInstallationReauthRequired({ ...params, error })) {
         return { skipped: true, reason: "slack_reauth_required" };
       }
       throw error;
     }
 
-    await recordProactiveMarker({
-      installationId: params.installationId,
-      workspaceId: params.workspaceId,
-      messageId: candidate.id,
-      externalUserId: candidate.externalUserId,
-      entityType: "CommunicationMessage",
-      entityId: candidate.id,
-      action: "proactive_unanswered_nudge",
+    await prisma.communicationEntityLink.updateMany({
+      where: { id: claim.id, workspaceId: params.workspaceId, claimKey, action: PROACTIVE_NUDGE_SENDING },
+      data: { action: "proactive_unanswered_nudge" },
     });
+
     nudges += 1;
     if (nudges >= MAX_PROACTIVE_NUDGES) break;
   }
 
-  const model = await getAgentModelOverride(params.workspaceId, "slack-agent")
-    ?? resolveModel(AGENT_REGISTRY["slack-agent"].defaultModelTier);
   const agentActor: AppActor = {
     kind: "agent",
     authProvider: "bootstrap",
@@ -709,6 +884,7 @@ export async function runSlackProactiveScan(params: {
   let actions = 0;
   let semanticReviews = 0;
   const actionCreationCutoff = new Date(now.getTime() - config.unansweredActionCreationDelayMinutes * 60 * 1000);
+  const terminalDispositionWhere = terminalProactiveDispositionWhere(params.workspaceId, params.installationId);
   let pendingNudgeCursor: string | undefined;
   while (actions < MAX_PROACTIVE_ACTIONS && semanticReviews < MAX_PROACTIVE_REVIEWS) {
     const pendingNudges = await prisma.communicationEntityLink.findMany({
@@ -718,7 +894,7 @@ export async function runSlackProactiveScan(params: {
       provider: "SLACK",
       action: "proactive_unanswered_nudge",
       messageId: { not: null },
-      message: { is: { OR: [{ entityLinks: { none: { workspaceId: params.workspaceId, action: { in: ["proactive_unanswered_resolved", PROACTIVE_NON_ACTION] } } } }, { entityLinks: { some: { workspaceId: params.workspaceId, entityType: "Action" } } }] } },
+      message: { is: { OR: [{ entityLinks: { none: terminalDispositionWhere } }, { entityLinks: { some: { workspaceId: params.workspaceId, entityType: "Action" } } }] } },
       createdAt: { lte: actionCreationCutoff },
     },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
@@ -764,10 +940,8 @@ export async function runSlackProactiveScan(params: {
     });
     const terminalMarker = linkedAction ? null : await prisma.communicationEntityLink.findFirst({
       where: {
-        workspaceId: params.workspaceId,
-        installationId: params.installationId,
+        ...terminalDispositionWhere,
         messageId: candidate.id,
-        action: { in: ["proactive_unanswered_resolved", PROACTIVE_NON_ACTION] },
       },
       select: { id: true },
     });

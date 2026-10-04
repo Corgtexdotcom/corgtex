@@ -2433,6 +2433,44 @@ export async function fetchSlackThreadMessages(installationId: string, params: {
   }
 }
 
+// A nudge claim can outlive its worker. Reconcile it from the complete Slack
+// thread; an incomplete or failed read cannot prove that a post was delivered.
+export async function checkSlackThreadNudge(installationId: string, params: {
+  channelId: string;
+  threadTs: string;
+  createdAt: Date;
+  text: string;
+}): Promise<"found" | "absent" | "unknown"> {
+  try {
+    const installation = await prisma.communicationInstallation.findUnique({ where: { id: installationId } });
+    if (!installation) return "unknown";
+    const client = slackClient(encryptedBotToken(installation));
+    let cursor: string | undefined;
+    let ambiguousTextMatch = false;
+    for (let page = 0; page < 20; page += 1) {
+      const response = await client.conversations.replies({
+        channel: params.channelId, ts: params.threadTs, limit: 200, cursor,
+      });
+      if (response.ok === false || !response.messages?.length) return "unknown";
+      for (const message of response.messages) {
+        if (message.text !== params.text
+          || Number(message.ts) * 1000 < params.createdAt.getTime() - 2 * 60 * 1000) continue;
+        if ((installation.botUserId && message.user === installation.botUserId)
+          || (installation.appId && message.app_id === installation.appId)) return "found";
+        // A matching post with another or missing author cannot be counted as
+        // our delivery or used to authorize a retry.
+        ambiguousTextMatch = true;
+      }
+      if (!response.has_more) return ambiguousTextMatch ? "unknown" : "absent";
+      cursor = response.response_metadata?.next_cursor || undefined;
+      if (!cursor) return "unknown";
+    }
+  } catch {
+    return "unknown";
+  }
+  return "unknown";
+}
+
 export async function publishSlackHome(installationId: string, externalUserId: string) {
   const installation = await prisma.communicationInstallation.findUnique({
     where: { id: installationId },
