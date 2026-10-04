@@ -301,6 +301,58 @@ describe("MCP connector registry", () => {
     expect(prismaMock.mcpOAuthClient.create).not.toHaveBeenCalled();
   });
 
+  it("accepts Cursor's desktop MCP callback and rejects other custom-scheme redirects", async () => {
+    const prismaMock = {
+      mcpOAuthClient: {
+        create: vi.fn().mockResolvedValue({
+          clientId: "mcp_client_cursor",
+          name: "Cursor",
+          redirectUris: ["cursor://anysphere.cursor-mcp/oauth/callback"],
+          scopes: ["workspace:read"],
+          tokenEndpointAuthMethod: "none",
+        }),
+      },
+    };
+    installSharedMock(prismaMock);
+
+    const { registerMcpOAuthClient } = await import("./mcp-connector");
+    await registerMcpOAuthClient({
+      name: "Cursor",
+      redirectUris: [
+        "cursor://anysphere.cursor-mcp/oauth/callback",
+        "https://www.cursor.com/agents/mcp/oauth/callback",
+        "http://127.0.0.1:8787/callback",
+      ],
+      scopes: ["workspace:read"],
+    });
+    expect(prismaMock.mcpOAuthClient.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        redirectUris: [
+          "cursor://anysphere.cursor-mcp/oauth/callback",
+          "https://www.cursor.com/agents/mcp/oauth/callback",
+          "http://127.0.0.1:8787/callback",
+        ],
+      }),
+    });
+
+    await expect(registerMcpOAuthClient({
+      name: "Cursor",
+      redirectUris: ["cursor://evil.example/oauth/callback"],
+      scopes: ["workspace:read"],
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+    await expect(registerMcpOAuthClient({
+      name: "Cursor",
+      redirectUris: ["cursor://anysphere.cursor-mcp/oauth/callback?next=https://evil.example"],
+      scopes: ["workspace:read"],
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+  });
+
   it("rejects sensitive scopes for user OAuth connector registration", async () => {
     const prismaMock = {
       mcpOAuthClient: {
