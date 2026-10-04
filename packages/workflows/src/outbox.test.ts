@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import type { Prisma } from "@prisma/client";
+import { describe, expect, it, vi } from "vitest";
 import { calculateRetryDelayMs, deriveAdviceNotificationContent } from "./outbox";
 import { deriveJobsForEvent, triageBucketStart } from "./derive-jobs";
-import { deriveNotificationsForEvent } from "./derive-notifications";
+import { deriveDispatchNotifications, deriveNotificationsForEvent } from "./derive-notifications";
 
 describe("deriveJobsForEvent", () => {
   it("creates a knowledge sync job for approved proposals", () => {
@@ -354,9 +355,20 @@ describe("deriveNotificationsForEvent", () => {
     ]);
   });
 
-  it("uses payload titles for created actions", () => {
+  it("does not notify the workspace about private draft creation", () => {
+    for (const type of ["action.created", "tension.created"]) {
+      expect(deriveNotificationsForEvent({
+        type,
+        workspaceId: "workspace-1",
+        aggregateId: "private-draft",
+        payload: { title: "Confidential draft" },
+      })).toEqual([]);
+    }
+  });
+
+  it("notifies the workspace when an action is published", () => {
     const notifications = deriveNotificationsForEvent({
-      type: "action.created",
+      type: "action.published",
       workspaceId: "workspace-1",
       aggregateType: "Action",
       aggregateId: "action-1",
@@ -375,6 +387,51 @@ describe("deriveNotificationsForEvent", () => {
         bodyMd: "An action item was added to the workspace.",
       },
     ]);
+  });
+
+  it("checks current workspace visibility before notifying about a publication", async () => {
+    const actionFindFirst = vi.fn().mockResolvedValue({ title: "Visible action" });
+    const tensionFindFirst = vi.fn().mockResolvedValue(null);
+    const tx = {
+      action: { findFirst: actionFindFirst },
+      tension: { findFirst: tensionFindFirst },
+    } as unknown as Prisma.TransactionClient;
+
+    expect(await deriveDispatchNotifications(tx, {
+      type: "action.published", workspaceId: "workspace-1", aggregateId: "action-1",
+      aggregateType: "Action", payload: {},
+    })).toEqual([{
+      type: "action.created", entityType: "Action", entityId: "action-1",
+      title: "New action: Visible action", bodyMd: "An action item was added to the workspace.",
+    }]);
+    expect(actionFindFirst).toHaveBeenCalledWith({
+      where: {
+        id: "action-1", workspaceId: "workspace-1", isPrivate: false,
+        status: { not: "DRAFT" }, archivedAt: null, duplicateOfActionId: null,
+      },
+      select: { title: true },
+    });
+
+    expect(await deriveDispatchNotifications(tx, {
+      type: "tension.published", workspaceId: "workspace-1", aggregateId: "tension-1",
+      aggregateType: "Tension", payload: {},
+    })).toEqual([]);
+    expect(tensionFindFirst).toHaveBeenCalledWith({
+      where: {
+        id: "tension-1", workspaceId: "workspace-1", isPrivate: false,
+        status: { not: "DRAFT" }, archivedAt: null,
+      },
+      select: { title: true },
+    });
+    expect(await deriveDispatchNotifications(tx, {
+      type: "action.published", workspaceId: "workspace-1", aggregateId: null,
+      aggregateType: "Action", payload: {},
+    })).toEqual([]);
+    expect(await deriveDispatchNotifications(tx, {
+      type: "action.published", workspaceId: "workspace-1", aggregateId: "action-1",
+      aggregateType: "Action", payload: { runtimeMeta: { replayOfEventId: "original" } },
+    })).toEqual([]);
+    expect(actionFindFirst).toHaveBeenCalledTimes(1);
   });
 });
 

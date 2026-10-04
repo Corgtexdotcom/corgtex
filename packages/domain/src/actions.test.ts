@@ -793,6 +793,29 @@ describe("action domain lifecycle", () => {
     expect(prismaMock.action.update).not.toHaveBeenCalled();
   });
 
+  it("emits one publication event when an assigned draft opens through update", async () => {
+    prismaMock.action.findUnique.mockResolvedValueOnce({
+      id: "draft-1", workspaceId: "workspace-1", authorUserId: "user-1",
+      title: "Visible action", status: "DRAFT", isPrivate: true, assigneeMemberId: "member-2",
+      version: 1, archivedAt: null, duplicateOfActionId: null, publishedAt: null,
+    });
+    prismaMock.action.update.mockResolvedValueOnce({
+      id: "draft-1", workspaceId: "workspace-1", title: "Visible action",
+      status: "OPEN", isPrivate: false, version: 1,
+    });
+    const { updateAction } = await import("./actions");
+
+    await updateAction(actor, { workspaceId: "workspace-1", actionId: "draft-1", status: "OPEN" });
+
+    expect(recordAudit).toHaveBeenCalledWith(expect.anything(), actor, expect.objectContaining({
+      action: "action.published", entityId: "draft-1",
+    }));
+    expect(appendEvents).toHaveBeenCalledWith(expect.anything(), [expect.objectContaining({
+      type: "action.published", aggregateId: "draft-1",
+    })]);
+    expect(appendEvents).toHaveBeenCalledTimes(2);
+  });
+
   it("allows an open Action to return to draft while clearing its assignee atomically", async () => {
     prismaMock.action.findUnique.mockResolvedValueOnce({
       id: "open-1", workspaceId: "workspace-1", authorUserId: "user-1", status: "OPEN",

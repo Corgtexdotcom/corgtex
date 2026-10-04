@@ -3,7 +3,7 @@ import { logger, prisma } from "@corgtex/shared";
 import { withWorkspaceSupportExecution, withMcpConnectionExecution } from "@corgtex/domain";
 import { deriveJobsForEvent } from "./derive-jobs";
 import { handleReleaseDiagnostic } from "./release-diagnostic-handler";
-import { deriveNotificationsForEvent } from "./derive-notifications";
+import { deriveDispatchNotifications } from "./derive-notifications";
 import { recordWorkflowJobProcessedMetric } from "./job-metrics";
 import { handleKnowledgeSync, handleMeetingKnowledgeSync, handleDocumentKnowledgeSync, handleExternalResourceKnowledgeSync, handleExternalContentKnowledgeSync, handleEventKnowledgeSync, handleTensionKnowledgeSync, handleActionKnowledgeSync, handleCircleKnowledgeSync, handleRoleKnowledgeSync, handleSlackMessageKnowledgeSync, handleCalendarSync, handleOAuthDocumentsSync, handleOAuthEmailSync, handleContextGraphSync, handleContextGraphStalenessSweep, handleContextGraphReconcile } from "./handlers";
 import { FINANCE_REPORT_IMPORT_EXTRACTION_JOB_TYPE, FINANCE_REPORT_IMPORT_PROPOSAL_JOB_TYPE, handleGovernanceScoring,
@@ -424,7 +424,7 @@ async function createNotificationsForEvent(tx: Prisma.TransactionClient, event: 
     return;
   }
 
-  const notifications = deriveNotificationsForEvent(event);
+  const notifications = await deriveDispatchNotifications(tx, event);
   if (notifications.length === 0) {
     return;
   }

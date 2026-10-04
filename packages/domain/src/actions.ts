@@ -976,6 +976,23 @@ export async function updateAction(actor: AppActor, params: {
       },
     ]);
 
+    if (action.status === "DRAFT" && updated.status !== "DRAFT" && !updated.isPrivate) {
+      await recordAudit(tx, actor, {
+        workspaceId: params.workspaceId,
+        action: "action.published",
+        entityType: "Action",
+        entityId: updated.id,
+        meta: { title: updated.title },
+      });
+      await appendEvents(tx, [{
+        workspaceId: params.workspaceId,
+        type: "action.published",
+        aggregateType: "Action",
+        aggregateId: updated.id,
+        payload: { actionId: updated.id },
+      }]);
+    }
+
     return updated;
   };
   return params._tx ? run(params._tx) : prisma.$transaction(run);

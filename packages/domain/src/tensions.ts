@@ -549,6 +549,26 @@ export async function updateTension(actor: AppActor, params: {
 	      },
     ]);
 
+    if (tension.status === "DRAFT" && updated.status !== "DRAFT" && !updated.isPrivate) {
+      await tx.auditLog.create({
+        data: {
+          workspaceId: params.workspaceId,
+          actorUserId: actor.kind === "user" ? actor.user.id : null,
+          action: "tension.published",
+          entityType: "Tension",
+          entityId: updated.id,
+          meta: { title: updated.title },
+        },
+      });
+      await appendEvents(tx, [{
+        workspaceId: params.workspaceId,
+        type: "tension.published",
+        aggregateType: "Tension",
+        aggregateId: updated.id,
+        payload: { tensionId: updated.id },
+      }]);
+    }
+
     return updated;
   });
 }
