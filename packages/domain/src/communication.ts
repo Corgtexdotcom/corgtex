@@ -2446,18 +2446,22 @@ export async function checkSlackThreadNudge(installationId: string, params: {
     if (!installation) return "unknown";
     const client = slackClient(encryptedBotToken(installation));
     let cursor: string | undefined;
+    let ambiguousTextMatch = false;
     for (let page = 0; page < 20; page += 1) {
       const response = await client.conversations.replies({
         channel: params.channelId, ts: params.threadTs, limit: 200, cursor,
       });
       if (response.ok === false || !response.messages?.length) return "unknown";
-      // Exact text in this thread is sufficient: a false positive with the same
-      // text only withholds a nudge, while missing a bot post could duplicate it.
-      if (response.messages.some((message) =>
-        message.text === params.text
-        && Number(message.ts) * 1000 >= params.createdAt.getTime() - 2 * 60 * 1000
-      )) return "found";
-      if (!response.has_more) return "absent";
+      for (const message of response.messages) {
+        if (message.text !== params.text
+          || Number(message.ts) * 1000 < params.createdAt.getTime() - 2 * 60 * 1000) continue;
+        if ((installation.botUserId && message.user === installation.botUserId)
+          || (installation.appId && message.app_id === installation.appId)) return "found";
+        // A matching post with another or missing author cannot be counted as
+        // our delivery or used to authorize a retry.
+        ambiguousTextMatch = true;
+      }
+      if (!response.has_more) return ambiguousTextMatch ? "unknown" : "absent";
       cursor = response.response_metadata?.next_cursor || undefined;
       if (!cursor) return "unknown";
     }

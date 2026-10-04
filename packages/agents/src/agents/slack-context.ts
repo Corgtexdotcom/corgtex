@@ -721,6 +721,7 @@ export async function runSlackProactiveScan(params: {
       && ["open", "answered"].includes(String(output.resolutionState))
       && ["request", "information", "awareness", "test", "ignore"].includes(String(output.workDisposition))
       && typeof output.confidence === "number" && Number.isFinite(output.confidence)
+      && output.confidence >= 0 && output.confidence <= 1
       && output.confidence >= config.proactiveConfidenceThreshold
       && Array.isArray(output.couldNot) && output.couldNot.length === 0;
     if (!confidentReview) {
