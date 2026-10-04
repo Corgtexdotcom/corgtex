@@ -41,11 +41,14 @@ describe("selected-region GET", () => {
     else mocks.context.mockRejectedValue(error);
     const response = await GET(request("?object=foreign-object"), params);
     expect(response.status).toBe(status);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(await response.json()).toEqual({ code: "RESTRICTED" });
     if (status === 401) expect(mocks.context).not.toHaveBeenCalled();
   });
   it.each(["", "?" + new URLSearchParams(Array.from({ length: 201 }, () => ["object", "id"])).toString()])("rejects invalid selection bounds", async (query) => {
-    expect((await GET(request(query), params)).status).toBe(400);
+    const response = await GET(request(query), params);
+    expect(response.status).toBe(400);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(mocks.context).not.toHaveBeenCalled();
   });
 });

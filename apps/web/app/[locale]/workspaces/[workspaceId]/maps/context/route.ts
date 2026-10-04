@@ -22,6 +22,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     });
     return Response.json(context, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) {
-    return handleRouteError(error);
+    const response = handleRouteError(error);
+    response.headers.set("Cache-Control", "private, no-store");
+    return response;
   }
 }
