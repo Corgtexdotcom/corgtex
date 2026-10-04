@@ -124,7 +124,7 @@ export function ClaudeInstaller({ connectorUrl, workspaceId, returnTo }: Props) 
         </div>
         <h1 className="text-2xl font-bold text-[var(--text-strong)]">Connect Corgtex to Claude</h1>
         <p className="mt-2 text-sm text-[var(--text-muted)]">
-          Three clicks. No terminal, no install. Works with Claude.ai (web and desktop) and Claude Cowork.
+          Copy your workspace URL, add a remote connector in Claude, then approve access in Corgtex. No terminal is needed.
         </p>
       </header>
 
@@ -189,12 +189,15 @@ export function ClaudeInstaller({ connectorUrl, workspaceId, returnTo }: Props) 
           done={connected}
           title="Add Corgtex as a custom connector"
           body={
-            <ul className="list-disc space-y-1 pl-4 text-sm text-[var(--text-muted)]">
-              <li>Click <span className="font-medium text-[var(--text-strong)]">Add custom connector</span>.</li>
-              <li>Paste the connector URL you copied.</li>
-              <li>Click <span className="font-medium text-[var(--text-strong)]">Add</span>, then <span className="font-medium text-[var(--text-strong)]">Connect</span>.</li>
-              <li>When Claude opens Corgtex, authorize as your current Corgtex user and choose this workspace if asked.</li>
-            </ul>
+            <div className="space-y-3 text-sm text-[var(--text-muted)]">
+              <p>For an individual Claude account, choose <span className="font-medium text-[var(--text-strong)]">+ Add → Add custom connector</span> in Customize → Connectors.</p>
+              <p>For Team or Enterprise, an owner first adds Corgtex at <span className="font-medium text-[var(--text-strong)]">Organization settings → Connectors → Add → Custom → Web</span>. Members then select Connect from their connector list.</p>
+              <ul className="list-disc space-y-1 pl-4">
+                <li>Name the connector Corgtex and paste the URL above.</li>
+                <li>Review the detected authentication settings, use Claude&apos;s published identity when offered, and choose when to sign in.</li>
+                <li>When Claude opens Corgtex, authorize as your current Corgtex user for this workspace.</li>
+              </ul>
+            </div>
           }
         />
 

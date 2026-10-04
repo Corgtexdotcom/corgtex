@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   title: "Connect Corgtex to Claude",
-  description: "Add Corgtex as a custom connector in Claude or Claude Cowork. No terminal, no install — three clicks.",
+  description: "Add Corgtex as a custom connector in Claude or Claude Cowork, then approve Corgtex access.",
 };
 
 function safeReturnTo(value: string | string[] | undefined) {
