@@ -351,6 +351,17 @@ describe("MCP connector registry", () => {
       status: 400,
       code: "INVALID_INPUT",
     });
+    for (const redirectUri of [
+      "cursor://anysphere.cursor-mcp/oauth/../oauth/callback",
+      "cursor://anysphere.cursor-mcp/oauth/callback?",
+      "cursor://anysphere.cursor-mcp/oauth/callback#",
+    ]) {
+      await expect(registerMcpOAuthClient({
+        name: "Cursor",
+        redirectUris: [redirectUri],
+        scopes: ["workspace:read"],
+      })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+    }
   });
 
   it("rejects sensitive scopes for user OAuth connector registration", async () => {
