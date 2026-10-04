@@ -233,6 +233,7 @@ describe("communication Slack integration", () => {
     slackWebClientMock.conversations.list.mockReset();
     slackWebClientMock.conversations.join.mockReset();
     slackWebClientMock.conversations.history.mockReset();
+    slackWebClientMock.conversations.replies.mockReset();
     slackWebClientMock.conversations.info.mockReset();
     slackWebClientMock.chat.update.mockReset();
     slackWebClientMock.chat.getPermalink.mockReset();
@@ -1746,5 +1747,36 @@ describe("communication Slack integration", () => {
         sourceId: { in: ["message-1", "message-2"] },
       },
     });
+  });
+
+  it("reconciles a pending nudge across Slack thread pages", async () => {
+    const { checkSlackThreadNudge } = await import("./communication");
+    prismaMock.communicationInstallation.findUnique.mockResolvedValue({ botUserId: "UBOT", botTokenEnc: "enc:bot-token" });
+    slackWebClientMock.conversations.replies
+      .mockResolvedValueOnce({ ok: true, messages: [{ user: "U1", text: "Question?", ts: "1777492800.000100" }], has_more: true, response_metadata: { next_cursor: "next" } })
+      .mockResolvedValueOnce({ ok: true, messages: [{ user: "UBOT", text: "Bringing this back into view.", ts: "1777493100.000100" }], has_more: false });
+    await expect(checkSlackThreadNudge("install-1", {
+      channelId: "C1", threadTs: "1777492800.000100", createdAt: new Date("2026-04-29T20:00:00Z"), text: "Bringing this back into view.",
+    })).resolves.toBe("found");
+    expect(slackWebClientMock.conversations.replies).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: "next" }));
+  });
+
+  it("keeps a pending nudge when Slack history is incomplete", async () => {
+    const { checkSlackThreadNudge } = await import("./communication");
+    prismaMock.communicationInstallation.findUnique.mockResolvedValue({ botUserId: "UBOT", botTokenEnc: "enc:bot-token" });
+    slackWebClientMock.conversations.replies.mockResolvedValueOnce({ ok: true, messages: [{ user: "U1", text: "Question?", ts: "1777492800.000100" }], has_more: true });
+    await expect(checkSlackThreadNudge("install-1", {
+      channelId: "C1", threadTs: "1777492800.000100", createdAt: new Date("2026-04-29T20:00:00Z"), text: "Bringing this back into view.",
+    })).resolves.toBe("unknown");
+  });
+
+  it("reports a complete thread without a matching bot nudge, and fails closed on Slack errors", async () => {
+    const { checkSlackThreadNudge } = await import("./communication");
+    prismaMock.communicationInstallation.findUnique.mockResolvedValue({ botUserId: "UBOT", botTokenEnc: "enc:bot-token" });
+    const query = { channelId: "C1", threadTs: "1777492800.000100", createdAt: new Date("2026-04-29T20:00:00Z"), text: "Bringing this back into view." };
+    slackWebClientMock.conversations.replies.mockResolvedValueOnce({ ok: true, messages: [{ user: "U1", text: "Question?", ts: "1777492800.000100" }], has_more: false });
+    await expect(checkSlackThreadNudge("install-1", query)).resolves.toBe("absent");
+    slackWebClientMock.conversations.replies.mockRejectedValueOnce(new Error("rate_limited"));
+    await expect(checkSlackThreadNudge("install-1", query)).resolves.toBe("unknown");
   });
 });
