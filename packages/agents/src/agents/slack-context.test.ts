@@ -409,6 +409,14 @@ describe("Slack context jobs", () => {
     expect(sendSlackMessageMock).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["Can you", "Could you", "Would you"])("reviews a %s request with a queried URL", async (phrase) => {
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([candidate({ text: `${phrase} review https://example.test/doc?version=2` })]);
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
+    expect(extractMock).toHaveBeenCalledTimes(1);
+    expect(sendSlackMessageMock).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     "Claude is available in the model selector: https://example.test/update?model=new",
     "Sharing <https://example.test/feedback?version=2|website feedback>",
@@ -434,6 +442,28 @@ describe("Slack context jobs", () => {
       create: expect.objectContaining({ action: "proactive_unanswered_non_action", messageId: "message-1" }),
     }));
     expect(sendSlackMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("revisits a cached informational verdict after the Slack text is edited", async () => {
+    const before = candidate({ text: "Website feedback: should we use clearer wording?" });
+    const after = candidate({ text: "Can you review https://example.test/doc?version=2" });
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([before]).mockResolvedValueOnce([after]);
+    extractMock.mockResolvedValueOnce({ output: { explicitAsk: false, resolutionState: "open", workDisposition: "information", confidence: 0.99, couldNot: [] } });
+    let cachedKey: string | undefined;
+    prismaMock.communicationEntityLink.upsert.mockImplementation(async ({ create }) => {
+      cachedKey = create.claimKey;
+      return { id: "non-action" };
+    });
+    prismaMock.communicationEntityLink.findFirst.mockImplementation(async ({ where }) =>
+      cachedKey && where.OR.some((entry: { action: string; claimKey?: string }) => entry.action === "proactive_unanswered_non_action" && entry.claimKey === cachedKey)
+        ? { id: "non-action" }
+        : null);
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
+    await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
+    expect(cachedKey).toMatch(/^slack-proactive-first-nudge:install-1:message-1:[a-f0-9]{16}$/);
+    expect(extractMock).toHaveBeenCalledTimes(2);
+    expect(sendSlackMessageMock).toHaveBeenCalledTimes(1);
   });
 
   it.each([{}, { explicitAsk: true, resolutionState: "open", workDisposition: "request", confidence: 0.2, couldNot: [] }, { explicitAsk: false, resolutionState: "unknown", workDisposition: "information", confidence: 0.99, couldNot: [] }])("fails closed and can retry uncertain first-nudge reviews", async (output) => {
@@ -498,7 +528,7 @@ describe("Slack context jobs", () => {
         messageId: "message-1",
         OR: expect.arrayContaining([
           { entityType: "Action" },
-          { action: { in: ["proactive_unanswered_nudge", "proactive_unanswered_resolved", "proactive_unanswered_non_action"] } },
+          { action: { in: ["proactive_unanswered_nudge", "proactive_unanswered_resolved"] } },
         ]),
       }),
     }));

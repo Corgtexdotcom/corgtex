@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { env, prisma, toInputJson } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
@@ -247,7 +248,7 @@ export async function runSlackContextSummary(params: {
 function looksUnanswered(text: string) {
   if (/^\s*(?:(?:quick|just)\s+)?(?:fyi|for your information|heads[ -]?up)\b/i.test(text) || slackFollowupStopIntent(text)) return false;
   const prose = text.replace(/<https?:\/\/[^>|]+(?:\|([^>]*))?>/gi, "$1").replace(/https?:\/\/\S+/gi, (url) => url.match(/[.!?]+$/)?.[0] ?? "");
-  return /\?/.test(prose) || /\b(can someone|anyone|please|could someone|does anyone|who can|need help)\b/i.test(prose);
+  return /\?/.test(prose) || /\b(can someone|anyone|please|could someone|does anyone|who can|need help|(?:can|could|would|will) you)\b/i.test(prose);
 }
 
 function escapeRegExp(value: string) { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
@@ -641,13 +642,18 @@ export async function runSlackProactiveScan(params: {
   let nudges = 0;
   for (const candidate of candidates.filter((message) => looksUnanswered(message.text ?? "") && !isAddressedToSlackBot(message.text ?? "", installation.botUserId)).slice(0, 10)) {
     const threadTs = threadTsForMessage(candidate);
+    const cachePrefix = `${PROACTIVE_FIRST_NUDGE_CLAIM_PREFIX}:${params.installationId}:${candidate.id}:`;
+    const nonActionClaimKey = `${cachePrefix}${createHash("sha256").update(candidate.text ?? "").digest("hex").slice(0, 16)}`;
     if (await isSlackThreadFollowupSuppressed({ workspaceId: params.workspaceId, installationId: params.installationId, channelId: candidate.externalChannelId, threadTs })) continue;
     const handledQuery = {
       workspaceId: params.workspaceId,
       installationId: params.installationId,
       messageId: candidate.id,
       OR: [
-        { action: { in: ["proactive_unanswered_nudge", "proactive_unanswered_resolved", PROACTIVE_NON_ACTION] } },
+        { action: { in: ["proactive_unanswered_nudge", "proactive_unanswered_resolved"] } },
+        { action: PROACTIVE_NON_ACTION, claimKey: nonActionClaimKey },
+        { action: PROACTIVE_NON_ACTION, claimKey: null },
+        { action: PROACTIVE_NON_ACTION, claimKey: { not: { startsWith: cachePrefix } } },
         { entityType: "Action" },
       ],
     };
@@ -693,7 +699,7 @@ export async function runSlackProactiveScan(params: {
         installationId: params.installationId, workspaceId: params.workspaceId,
         messageId: candidate.id, externalUserId: candidate.externalUserId,
         entityType: "CommunicationMessage", entityId: candidate.id, action: PROACTIVE_NON_ACTION,
-        claimKey: `${PROACTIVE_FIRST_NUDGE_CLAIM_PREFIX}:${params.installationId}:${candidate.id}`,
+        claimKey: nonActionClaimKey,
       });
       continue;
     }
