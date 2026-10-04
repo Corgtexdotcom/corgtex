@@ -505,7 +505,7 @@ describe("Slack context jobs", () => {
     expect(sendSlackMessageMock).toHaveBeenCalledTimes(1);
   });
 
-  it.each([{}, { explicitAsk: true, resolutionState: "open", workDisposition: "request", confidence: 0.2, couldNot: [] }, { explicitAsk: true, resolutionState: "open", workDisposition: "request", confidence: 95, couldNot: [] }, { explicitAsk: true, resolutionState: "open", workDisposition: "request", confidence: -1, couldNot: [] }, { explicitAsk: false, resolutionState: "unknown", workDisposition: "information", confidence: 0.99, couldNot: [] }])("fails closed and can retry uncertain first-nudge reviews", async (output) => {
+  it.each([{}, { explicitAsk: true, resolutionState: "open", workDisposition: "request", confidence: 0.2, couldNot: [] }, { explicitAsk: true, resolutionState: "open", workDisposition: "request", confidence: 95, couldNot: [] }, { explicitAsk: true, resolutionState: "open", workDisposition: "request", confidence: -1, couldNot: [] }, { explicitAsk: false, resolutionState: "open", workDisposition: "request", confidence: 0.99, couldNot: [] }, { explicitAsk: true, resolutionState: "open", workDisposition: "information", confidence: 0.99, couldNot: [] }, { explicitAsk: false, resolutionState: "unknown", workDisposition: "information", confidence: 0.99, couldNot: [] }])("fails closed and can retry uncertain first-nudge reviews", async (output) => {
     prismaMock.communicationMessage.findMany.mockResolvedValue([candidate({ text: "Can someone confirm the launch date?" })]);
     extractMock.mockResolvedValue({ output });
     let deferredAt: Date | undefined;
