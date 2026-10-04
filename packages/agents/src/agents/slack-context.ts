@@ -23,6 +23,7 @@ const DEFAULT_UNANSWERED_ACTION_DELAY_MINUTES = 24 * 60;
 const DEFAULT_STALE_ACTION_FOLLOWUP_DELAY_MINUTES = 72 * 60;
 const PROACTIVE_LOOKBACK_MINUTES = 7 * 24 * 60;
 const MAX_FIRST_NUDGE_REVIEWS = 10;
+const UNCERTAIN_FIRST_NUDGE_RETRY_HOURS = 6;
 const MAX_PROACTIVE_NUDGES = 3;
 const MAX_PROACTIVE_ACTIONS = 3;
 const MAX_PROACTIVE_REVIEWS = 50;
@@ -36,6 +37,7 @@ const PROACTIVE_ACTION_NEEDS_OWNER = "proactive_action_needs_owner";
 const PROACTIVE_NON_ACTION = "proactive_unanswered_non_action";
 const PROACTIVE_NUDGE_PENDING = "proactive_unanswered_nudge_pending";
 const PROACTIVE_NUDGE_SENDING = "proactive_unanswered_nudge_sending";
+const PROACTIVE_REVIEW_DEFERRED = "proactive_unanswered_review_deferred";
 const PROACTIVE_FIRST_NUDGE_CLAIM_PREFIX = "slack-proactive-first-nudge";
 const PROACTIVE_DISPOSITION_CLAIM_PREFIX = "slack-proactive-disposition";
 const PROACTIVE_CONFIRMATION_CLAIM_PREFIX = "slack-proactive-confirmation";
@@ -665,7 +667,9 @@ export async function runSlackProactiveScan(params: {
   for (const candidate of candidates.filter((message) => looksUnanswered(message.text ?? "") && !isAddressedToSlackBot(message.text ?? "", installation.botUserId))) {
     const threadTs = threadTsForMessage(candidate);
     const cachePrefix = `${PROACTIVE_FIRST_NUDGE_CLAIM_PREFIX}:${params.installationId}:${candidate.id}:`;
-    const nonActionClaimKey = `${cachePrefix}${createHash("sha256").update(candidate.text ?? "").digest("hex").slice(0, 16)}`;
+    const textHash = createHash("sha256").update(candidate.text ?? "").digest("hex").slice(0, 16);
+    const nonActionClaimKey = `${cachePrefix}${textHash}`;
+    const deferredClaimKey = `${cachePrefix}deferred:${textHash}`;
     if (await isSlackThreadFollowupSuppressed({ workspaceId: params.workspaceId, installationId: params.installationId, channelId: candidate.externalChannelId, threadTs })) continue;
     const handledQuery = {
       workspaceId: params.workspaceId,
@@ -676,6 +680,7 @@ export async function runSlackProactiveScan(params: {
         { action: PROACTIVE_NON_ACTION, claimKey: nonActionClaimKey },
         { action: PROACTIVE_NON_ACTION, claimKey: null },
         { action: PROACTIVE_NON_ACTION, claimKey: { not: { startsWith: cachePrefix } } },
+        { action: PROACTIVE_REVIEW_DEFERRED, claimKey: deferredClaimKey, createdAt: { gte: new Date(now.getTime() - UNCERTAIN_FIRST_NUDGE_RETRY_HOURS * 60 * 60 * 1000) } },
         { entityType: "Action" },
       ],
     };
@@ -717,7 +722,21 @@ export async function runSlackProactiveScan(params: {
       && typeof output.confidence === "number" && Number.isFinite(output.confidence)
       && output.confidence >= config.proactiveConfidenceThreshold
       && Array.isArray(output.couldNot) && output.couldNot.length === 0;
-    if (!confidentReview) continue;
+    if (!confidentReview) {
+      // Retry uncertain verdicts later without letting the same ten messages
+      // consume every review slot on every hourly scan.
+      await prisma.communicationEntityLink.upsert({
+        where: { workspaceId_claimKey: { workspaceId: params.workspaceId, claimKey: deferredClaimKey } },
+        update: { createdAt: new Date() },
+        create: {
+          installationId: params.installationId, workspaceId: params.workspaceId, provider: "SLACK",
+          messageId: candidate.id, externalUserId: candidate.externalUserId,
+          entityType: "CommunicationMessage", entityId: candidate.id,
+          action: PROACTIVE_REVIEW_DEFERRED, claimKey: deferredClaimKey,
+        },
+      });
+      continue;
+    }
     if (output.explicitAsk !== true || output.resolutionState !== "open" || output.workDisposition !== "request") {
       await recordProactiveMarker({
         installationId: params.installationId, workspaceId: params.workspaceId,
@@ -772,6 +791,8 @@ export async function runSlackProactiveScan(params: {
             data: { action: "proactive_unanswered_nudge" },
           });
         }
+        // Even a complete read with no post cannot prove the original worker
+        // stopped: Slack may still retry its in-flight call. Never resend here.
         continue;
       }
       if (existingClaim.action !== PROACTIVE_NUDGE_PENDING) continue;

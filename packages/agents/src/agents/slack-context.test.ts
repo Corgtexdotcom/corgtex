@@ -508,11 +508,55 @@ describe("Slack context jobs", () => {
   it.each([{}, { explicitAsk: true, resolutionState: "open", workDisposition: "request", confidence: 0.2, couldNot: [] }, { explicitAsk: false, resolutionState: "unknown", workDisposition: "information", confidence: 0.99, couldNot: [] }])("fails closed and can retry uncertain first-nudge reviews", async (output) => {
     prismaMock.communicationMessage.findMany.mockResolvedValue([candidate({ text: "Can someone confirm the launch date?" })]);
     extractMock.mockResolvedValue({ output });
+    let deferredAt: Date | undefined;
+    prismaMock.communicationEntityLink.upsert.mockImplementation(async ({ create, update }) => {
+      if (create.action === "proactive_unanswered_review_deferred") deferredAt = update.createdAt;
+      return { id: "deferred" };
+    });
+    prismaMock.communicationEntityLink.findFirst.mockImplementation(async ({ where }) => {
+      const marker = where?.OR?.find((entry: { action?: string }) => entry.action === "proactive_unanswered_review_deferred");
+      return deferredAt && marker?.createdAt?.gte <= deferredAt ? { id: "deferred" } : null;
+    });
     const { runSlackProactiveScan } = await import("./slack-context");
-    for (let scan = 0; scan < 2; scan += 1) await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
+    await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
+    await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
+    expect(extractMock).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(6 * 60 * 60 * 1000 + 1000);
+    await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
     expect(extractMock).toHaveBeenCalledTimes(2);
     expect(sendSlackMessageMock).not.toHaveBeenCalled();
     expect(prismaMock.communicationEntityLink.create).not.toHaveBeenCalled();
+  });
+
+  it("rotates past ten uncertain reviews to reach an older explicit ask", async () => {
+    const shares = Array.from({ length: 10 }, (_, index) => candidate({
+      id: `uncertain-${index}`, externalMessageId: `1714320000.${String(index).padStart(6, "0")}`,
+      text: `Shared update https://example.test/doc?version=${index}`,
+    }));
+    prismaMock.communicationMessage.findMany.mockResolvedValue([
+      ...shares, candidate({ id: "ask-11", text: "Can someone confirm the launch date?" }),
+    ]);
+    const deferred = new Map<string, Date>();
+    prismaMock.communicationEntityLink.upsert.mockImplementation(async ({ create, update }) => {
+      if (create.action === "proactive_unanswered_review_deferred") deferred.set(create.claimKey, update.createdAt);
+      return { id: "deferred" };
+    });
+    prismaMock.communicationEntityLink.findFirst.mockImplementation(async ({ where }) => {
+      const marker = where?.OR?.find((entry: { action?: string }) => entry.action === "proactive_unanswered_review_deferred");
+      const deferredAt = marker ? deferred.get(marker.claimKey) : undefined;
+      return deferredAt && marker.createdAt.gte <= deferredAt ? { id: "deferred" } : null;
+    });
+    extractMock.mockImplementation(async ({ input }) => ({ output: JSON.parse(input).text.startsWith("Can someone")
+      ? { explicitAsk: true, resolutionState: "open", workDisposition: "request", confidence: 0.99, couldNot: [] }
+      : { explicitAsk: false, resolutionState: "unknown", workDisposition: "information", confidence: 0.2, couldNot: ["intent unclear"] },
+    }));
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
+    expect(extractMock).toHaveBeenCalledTimes(10);
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+    await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
+    expect(extractMock).toHaveBeenCalledTimes(11);
+    expect(sendSlackMessageMock).toHaveBeenCalledTimes(1);
   });
 
   it.each(["reply", "stop"])("honors a %s arriving during first-nudge review", async (change) => {
