@@ -3,7 +3,7 @@ import { logger, prisma } from "@corgtex/shared";
 import { withWorkspaceSupportExecution, withMcpConnectionExecution } from "@corgtex/domain";
 import { deriveJobsForEvent } from "./derive-jobs";
 import { handleReleaseDiagnostic } from "./release-diagnostic-handler";
-import { deriveNotificationsForEvent } from "./derive-notifications";
+import { deriveDispatchNotifications } from "./derive-notifications";
 import { recordWorkflowJobProcessedMetric } from "./job-metrics";
 import { handleKnowledgeSync, handleMeetingKnowledgeSync, handleDocumentKnowledgeSync, handleExternalResourceKnowledgeSync, handleExternalContentKnowledgeSync, handleEventKnowledgeSync, handleTensionKnowledgeSync, handleActionKnowledgeSync, handleCircleKnowledgeSync, handleRoleKnowledgeSync, handleSlackMessageKnowledgeSync, handleCalendarSync, handleOAuthDocumentsSync, handleOAuthEmailSync, handleContextGraphSync, handleContextGraphStalenessSweep, handleContextGraphReconcile } from "./handlers";
 import { FINANCE_REPORT_IMPORT_EXTRACTION_JOB_TYPE, FINANCE_REPORT_IMPORT_PROPOSAL_JOB_TYPE, handleGovernanceScoring,
@@ -415,21 +415,22 @@ async function createAdviceNotificationsForEvent(tx: Prisma.TransactionClient, e
   return true;
 }
 
-async function createNotificationsForEvent(tx: Prisma.TransactionClient, event: ClaimedEvent) {
-  if (!event.workspaceId) {
-    return;
+export async function notificationActorUserIdForEvent(
+  tx: Prisma.TransactionClient,
+  event: Pick<ClaimedEvent, "type" | "workspaceId" | "aggregateType" | "aggregateId" | "payload">,
+): Promise<string | null> {
+  if (event.type === "action.published" || event.type === "tension.published") {
+    const payload = event.payload;
+    if (payload && typeof payload === "object" && !Array.isArray(payload) && "actorUserId" in payload) {
+      const actorUserId = payload.actorUserId;
+      if (actorUserId === null || (typeof actorUserId === "string" && actorUserId.length > 0)) {
+        return actorUserId;
+      }
+    }
   }
 
-  if (await createAdviceNotificationsForEvent(tx, event)) {
-    return;
-  }
-
-  const notifications = deriveNotificationsForEvent(event);
-  if (notifications.length === 0) {
-    return;
-  }
-
-  const actorAudit = event.aggregateType && event.aggregateId
+  // Events created before publication actor attribution retain the old audit fallback.
+  const actorAudit = event.workspaceId && event.aggregateType && event.aggregateId
     ? await tx.auditLog.findFirst({
       where: {
         workspaceId: event.workspaceId,
@@ -441,12 +442,30 @@ async function createNotificationsForEvent(tx: Prisma.TransactionClient, event: 
       select: { actorUserId: true },
     })
     : null;
+  return actorAudit?.actorUserId ?? null;
+}
+
+async function createNotificationsForEvent(tx: Prisma.TransactionClient, event: ClaimedEvent) {
+  if (!event.workspaceId) {
+    return;
+  }
+
+  if (await createAdviceNotificationsForEvent(tx, event)) {
+    return;
+  }
+
+  const notifications = await deriveDispatchNotifications(tx, event);
+  if (notifications.length === 0) {
+    return;
+  }
+
+  const actorUserId = await notificationActorUserIdForEvent(tx, event);
 
   const members = await tx.member.findMany({
     where: {
       workspaceId: event.workspaceId,
       isActive: true,
-      ...(actorAudit?.actorUserId ? { userId: { not: actorAudit.actorUserId } } : {}),
+      ...(actorUserId ? { userId: { not: actorUserId } } : {}),
     },
     select: { userId: true },
   });
@@ -460,7 +479,7 @@ async function createNotificationsForEvent(tx: Prisma.TransactionClient, event: 
       workspaceId: event.workspaceId,
       type: notification.type,
       recipientUserIds: members.map((member) => member.userId),
-      actorUserId: actorAudit?.actorUserId ?? null,
+      actorUserId,
       entityType: notification.entityType,
       entityId: notification.entityId,
       title: notification.title,

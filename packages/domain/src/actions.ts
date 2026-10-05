@@ -716,7 +716,7 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
           type: "action.published",
           aggregateType: "Action",
           aggregateId: action.id,
-          payload: { actionId: action.id },
+          payload: { actionId: action.id, actorUserId: actor.kind === "user" ? actor.user.id : null },
         },
       ]);
     }
@@ -976,6 +976,23 @@ export async function updateAction(actor: AppActor, params: {
       },
     ]);
 
+    if (action.status === "DRAFT" && updated.status !== "DRAFT" && !updated.isPrivate) {
+      await recordAudit(tx, actor, {
+        workspaceId: params.workspaceId,
+        action: "action.published",
+        entityType: "Action",
+        entityId: updated.id,
+        meta: { title: updated.title },
+      });
+      await appendEvents(tx, [{
+        workspaceId: params.workspaceId,
+        type: "action.published",
+        aggregateType: "Action",
+        aggregateId: updated.id,
+        payload: { actionId: updated.id, actorUserId: actor.kind === "user" ? actor.user.id : null },
+      }]);
+    }
+
     return updated;
   };
   return params._tx ? run(params._tx) : prisma.$transaction(run);
@@ -1094,7 +1111,7 @@ export async function publishAction(actor: AppActor, params: {
         type: "action.published",
         aggregateType: "Action",
         aggregateId: updated.id,
-        payload: { actionId: updated.id },
+        payload: { actionId: updated.id, actorUserId: actor.kind === "user" ? actor.user.id : null },
       },
     ]);
 
