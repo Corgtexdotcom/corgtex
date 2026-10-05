@@ -6,6 +6,7 @@ import { invariant } from "./errors";
 import { appendEvents } from "./events";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { createNotificationIntent } from "./notifications";
+import { resolveAdviceRequestRequesterUsers } from "./advice-requests";
 import { activeRoleAssignmentWhere } from "./role-assignment-activity";
 import { acquireWorkItemAdvisoryLock, getParentWorkItemVersion } from "./work-item-versions";
 
@@ -577,7 +578,17 @@ export async function postDeliberationEntry(actor: AppActor, params: {
       explicitTargetUserIds,
       skipManualMentions: skipManualMentionParsing,
     });
-    const replyParent = linkedAdviceRequest ? null : await publicReplyParent(tx, params);
+    const publicParent = await publicReplyParent(tx, params);
+    const adviceReplyRecipients = linkedAdviceRequest && publicParent
+      ? await resolveAdviceRequestRequesterUsers(tx, {
+        workspaceId: params.workspaceId,
+        adviceRequestId: linkedAdviceRequest.id,
+        excludeUserIds: [authorUserId],
+      })
+      : [];
+    const replyParent = publicParent && !adviceReplyRecipients.some((recipient) => recipient.userId === publicParent.authorUserId)
+      ? publicParent
+      : null;
     let parentAuthorMentionNotified = false;
     if (mentionedUserIds.length > 0) {
       const context = await parentNotificationContext(tx, {
