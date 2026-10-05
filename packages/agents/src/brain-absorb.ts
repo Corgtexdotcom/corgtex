@@ -8,6 +8,7 @@ import {
   rebuildBacklinks,
   lockWorkspaceArchiveArtifact,
   brainSourceRecoveryIdentity,
+  brainSourceContentFingerprint,
 } from "@corgtex/domain";
 import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
 import type { AppActor } from "@corgtex/shared";
@@ -511,6 +512,11 @@ Rules:
         authority: plan.authority,
         bodyMd: plan.bodyMd,
         sourceIds: plan.sourceIds,
+        derivation: {
+          sourceId: source.id,
+          sourceFingerprint: brainSourceContentFingerprint(source),
+          agentRunId: params.agentRunId,
+        },
         tx,
       });
       touchedArticleIds.push(article.id);
