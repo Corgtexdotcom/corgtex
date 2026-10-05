@@ -132,6 +132,25 @@ async function knowledgeCacheVersion(workspaceId: string) {
   return `${globalVersion}:${workspaceVersion}`;
 }
 
+/** Archived or private source rows are authoritative even if SQL/Azure or a response cache lags. */
+async function activeKnowledgeResults<T extends KnowledgeCitation>(workspaceId: string, results: T[]): Promise<T[]> {
+  const articleIds = [...new Set(results.filter((item) => item.sourceType === "BRAIN_ARTICLE").map((item) => item.sourceId))];
+  const documentIds = [...new Set(results.filter((item) => item.sourceType === "DOCUMENT").map((item) => item.sourceId))];
+  if (articleIds.length === 0 && documentIds.length === 0) return results;
+  const [articles, documents] = await Promise.all([
+    articleIds.length ? prisma.brainArticle.findMany({ where: {
+      id: { in: articleIds }, workspaceId, archivedAt: null, isPrivate: false,
+    }, select: { id: true } }) : [],
+    documentIds.length ? prisma.document.findMany({ where: {
+      id: { in: documentIds }, workspaceId, archivedAt: null,
+    }, select: { id: true } }) : [],
+  ]);
+  const activeArticles = new Set(articles.map((item) => item.id));
+  const activeDocuments = new Set(documents.map((item) => item.id));
+  return results.filter((item) => item.sourceType === "BRAIN_ARTICLE" ? activeArticles.has(item.sourceId)
+    : item.sourceType === "DOCUMENT" ? activeDocuments.has(item.sourceId) : true);
+}
+
 export async function invalidateKnowledgeCache(workspaceId?: string, transaction?: Prisma.TransactionClient) {
   if (!workspaceId) {
     await incrementCacheVersion("knowledge:all", transaction);
@@ -180,16 +199,16 @@ export async function searchIndexedKnowledge(params: {
   });
   const cached = await getCacheJson<KnowledgeSearchResult[]>(cacheKey);
   if (cached) {
-    return cached;
+    return activeKnowledgeResults(params.workspaceId, cached);
   }
 
-  const results = await executeKnowledgeSearch({
+  const results = await activeKnowledgeResults(params.workspaceId, await executeKnowledgeSearch({
     ...params,
     query,
     accessDomains,
     provider: effectiveProvider,
     configuredProvider,
-  });
+  }));
 
   await setCacheJson(cacheKey, results, SEARCH_CACHE_TTL_MS);
   return results;
@@ -443,7 +462,7 @@ export async function answerKnowledgeQuestion(params: {
     citations: KnowledgeCitation[];
   }>(cacheKey);
   if (cached) {
-    return cached;
+    if ((await activeKnowledgeResults(params.workspaceId, cached.citations)).length === cached.citations.length) return cached;
   }
 
   const citations = await searchIndexedKnowledge({
@@ -487,6 +506,10 @@ export async function answerKnowledgeQuestion(params: {
       },
     ],
   });
+
+  if ((await activeKnowledgeResults(params.workspaceId, citations)).length !== citations.length) {
+    return { answer: "I could not find relevant indexed knowledge for that question.", citations: [] as KnowledgeCitation[] };
+  }
 
   const answer = {
     answer: response.content,

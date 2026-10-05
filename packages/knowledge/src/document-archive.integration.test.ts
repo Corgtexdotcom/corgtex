@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { beforeEach, expect, it, vi } from "vitest";
-import { prisma, type AppActor } from "@corgtex/shared";
+import { getCacheVersion, prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { archiveWorkspaceArtifact } from "../../domain/src/archive";
 import { syncDocumentKnowledge } from "./chunks";
@@ -33,6 +33,7 @@ it("does not let an in-flight document sync restore chunks after archive", async
     const oldSync = syncDocumentKnowledge({ workspaceId: workspace.id, documentId: document.id });
     await entered;
     let archiveSettled = false;
+    const cacheVersionBefore = await getCacheVersion(`knowledge:${workspace.id}`);
     const archive = archiveWorkspaceArtifact(actor, {
       workspaceId: workspace.id, entityType: "Document", entityId: document.id,
     }).finally(() => { archiveSettled = true; });
@@ -41,6 +42,7 @@ it("does not let an in-flight document sync restore chunks after archive", async
     releaseEmbed();
     await oldSync;
     await archive;
+    expect(await getCacheVersion(`knowledge:${workspace.id}`)).toBeGreaterThan(cacheVersionBefore);
     await syncDocumentKnowledge({ workspaceId: workspace.id, documentId: document.id });
     expect(await prisma.knowledgeChunk.count({ where: {
       workspaceId: workspace.id, sourceType: "DOCUMENT", sourceId: document.id,

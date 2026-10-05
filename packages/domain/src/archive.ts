@@ -1,6 +1,6 @@
 import type { MemberRole } from "@prisma/client";
 import { Prisma } from "@prisma/client";
-import { prisma } from "@corgtex/shared";
+import { incrementCacheVersion, prisma } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
@@ -635,13 +635,14 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
     }
 
     if (config.entityType === "BrainSource" || config.entityType === "Document") {
-      const sourceIds = config.entityType === "BrainSource" ? [record.id] : (await tx.brainSource.findMany({
+      const documentSources = config.entityType === "Document" ? await tx.brainSource.findMany({
         where: {
           workspaceId: params.workspaceId,
           metadata: { path: ["documentId"], equals: record.id },
         },
-        select: { id: true },
-      })).map((source) => source.id);
+        select: { id: true, archivedAt: true },
+      }) : [];
+      const sourceIds = config.entityType === "BrainSource" ? [record.id] : documentSources.map((source) => source.id);
       if (config.entityType === "Document") {
         for (const sourceId of sourceIds.sort()) await lockBrainSourceLink(tx, sourceId);
       }
@@ -652,6 +653,10 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
         "SOURCE_ARTICLE_IMPACT_REVIEW_REQUIRED",
         "Linked Brain articles must be resolved before this source can be archived.",
       );
+      if (config.entityType === "Document") {
+        invariant(documentSources.every((source) => source.archivedAt), 409, "DOCUMENT_SOURCE_REMOVAL_REQUIRED",
+          "Remove this document's Brain source entries through source review, then retry document deletion.");
+      }
     }
 
     const previousState = jsonSnapshot(record);
@@ -686,6 +691,9 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
       } });
       await appendEvents(tx, [{ workspaceId: params.workspaceId, type: "document.updated",
         aggregateType: "Document", aggregateId: record.id, payload: { documentId: record.id } }]);
+    }
+    if (config.entityType === "BrainArticle" || config.entityType === "Document") {
+      await incrementCacheVersion(`knowledge:${params.workspaceId}`, tx);
     }
     if (config.entityType === "Goal") {
       await recomputeGoalParentProgressForArchiveTransition(tx, actor, record);
@@ -807,6 +815,9 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`document_index:${params.workspaceId}:${record.id}`}, 0))`;
       await appendEvents(tx, [{ workspaceId: params.workspaceId, type: "document.updated",
         aggregateType: "Document", aggregateId: record.id, payload: { documentId: record.id } }]);
+    }
+    if (config.entityType === "BrainArticle" || config.entityType === "Document") {
+      await incrementCacheVersion(`knowledge:${params.workspaceId}`, tx);
     }
     if (config.entityType === "Goal") {
       await recomputeGoalParentProgressForArchiveTransition(tx, actor, updated);

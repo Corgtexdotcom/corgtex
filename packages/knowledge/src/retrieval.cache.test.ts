@@ -10,6 +10,8 @@ const { prismaMock, modelGatewayMock } = vi.hoisted(() => {
     prismaMock: {
       $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({ knowledgeChunk: knowledgeChunkMock })),
       knowledgeChunk: knowledgeChunkMock,
+      brainArticle: { findMany: vi.fn() },
+      document: { findMany: vi.fn() },
     },
     modelGatewayMock: {
       embed: vi.fn(async ({ input }: { input: string | string[] }) => {
@@ -74,6 +76,10 @@ describe("knowledge retrieval cache", () => {
     prismaMock.knowledgeChunk.findMany.mockReset();
     prismaMock.knowledgeChunk.deleteMany.mockReset();
     prismaMock.knowledgeChunk.createMany.mockReset();
+    prismaMock.brainArticle.findMany.mockReset().mockImplementation(async (query) =>
+      query.where.id.in.map((id: string) => ({ id })));
+    prismaMock.document.findMany.mockReset().mockImplementation(async (query) =>
+      query.where.id.in.map((id: string) => ({ id })));
     modelGatewayMock.embed.mockClear();
     modelGatewayMock.rerank.mockClear();
     modelGatewayMock.chat.mockClear();
@@ -115,6 +121,39 @@ describe("knowledge retrieval cache", () => {
     });
     expect(modelGatewayMock.embed).toHaveBeenCalledTimes(1);
     expect(modelGatewayMock.rerank).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops cached document snippets and answers as soon as the source is archived", async () => {
+    const chunk = { id: "cached-document", sourceType: "DOCUMENT", sourceId: "doc-1", sourceTitle: "Synthetic policy",
+      chunkIndex: 0, content: "Withdrawn reimbursement policy.", embedding: [1, 0], createdAt: new Date() };
+    prismaMock.knowledgeChunk.findMany.mockResolvedValue([chunk]);
+    const question = "What is the reimbursement policy?";
+    expect((await answerKnowledgeQuestion({ workspaceId: "ws-1", question })).citations).toHaveLength(1);
+    prismaMock.document.findMany.mockResolvedValue([]);
+    expect(await searchIndexedKnowledge({ workspaceId: "ws-1", query: question, limit: 8 })).toEqual([]);
+    expect(await answerKnowledgeQuestion({ workspaceId: "ws-1", question })).toEqual({
+      answer: "I could not find relevant indexed knowledge for that question.", citations: [],
+    });
+    expect(modelGatewayMock.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it("filters Azure hits against active article rows even if index cleanup has failed", async () => {
+    process.env.KNOWLEDGE_SEARCH_PROVIDER = "azure";
+    process.env.AZURE_SEARCH_ENDPOINT = "https://corgtex-search.search.windows.net";
+    process.env.AZURE_SEARCH_INDEX_NAME = "client-knowledge";
+    process.env.AZURE_SEARCH_QUERY_KEY = "query-key";
+    process.env.AZURE_SEARCH_VECTOR_DIMENSIONS = "2";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ value: [{
+      id: "stale-azure-chunk", sourceType: "BRAIN_ARTICLE", sourceId: "archived-article",
+      sourceTitle: "Archived article", chunkIndex: 0, content: "Withdrawn claim", "@search.score": 2,
+    }] }), { status: 200 })));
+    prismaMock.brainArticle.findMany.mockResolvedValue([]);
+
+    expect(await searchIndexedKnowledge({ workspaceId: "ws-1", query: "Withdrawn claim" })).toEqual([]);
+    expect(prismaMock.brainArticle.findMany).toHaveBeenCalledWith({ where: {
+      id: { in: ["archived-article"] }, workspaceId: "ws-1", archivedAt: null, isPrivate: false,
+    }, select: { id: true } });
+    expect(prismaMock.knowledgeChunk.findMany).not.toHaveBeenCalled();
   });
 
   it("returns authorized positive lexical matches when query embedding is rate limited", async () => {

@@ -150,6 +150,8 @@ describe("Brain article draft lifecycle", () => {
       isPrivate: true,
       ownerMemberId: "mem-1",
       archivedAt: null,
+      sourceIds: [],
+      updatedAt: new Date("2026-04-01T00:00:00.000Z"),
     });
 
     await expect(updateArticle({
@@ -181,6 +183,8 @@ describe("Brain article draft lifecycle", () => {
       isPrivate: true,
       ownerMemberId: null,
       archivedAt: null,
+      sourceIds: [],
+      updatedAt: new Date("2026-04-01T00:00:00.000Z"),
     });
     prismaMock.brainArticle.update.mockResolvedValue({
       id: "article-1",
@@ -352,6 +356,7 @@ describe("Brain article draft lifecycle", () => {
       id: "article-1", workspaceId: "ws-1", slug: "notes", title: "Notes",
       bodyMd: "Generated notes", authority: "DRAFT", isPrivate: true,
       ownerMemberId: "mem-1", archivedAt: null,
+      sourceIds: [], updatedAt: new Date("2026-04-01T00:00:00.000Z"),
       derivationJson: { version: 1, origin: "brain-absorb", agentRunId: "run-1", sources: [] },
       humanEditedAt: null,
     };
@@ -370,6 +375,29 @@ describe("Brain article draft lifecycle", () => {
       where: { id: "article-1" },
       data: { bodyMd: "Human notes", humanEditedAt: expect.any(Date) },
     });
+  });
+
+  it.each(["archive", "reviewed regeneration"])("rejects an in-flight draft update after %s wins the article row", async (change) => {
+    const { updateArticle } = await import("./brain");
+    const old = { id: "article-1", workspaceId: "ws-1", slug: "notes", title: "Notes",
+      bodyMd: "Before review", authority: "DRAFT", isPrivate: true, ownerMemberId: "mem-1",
+      sourceIds: [], derivationJson: null, archivedAt: null, updatedAt: new Date("2026-04-01T00:00:00.000Z") };
+    const current = { ...old, bodyMd: "Reviewed replacement",
+      archivedAt: change === "archive" ? new Date("2026-04-02T00:00:00.000Z") : null,
+      updatedAt: new Date("2026-04-02T00:00:00.000Z") };
+    prismaMock.brainArticle.findUnique.mockResolvedValueOnce(old).mockResolvedValueOnce(current);
+    await expect(updateArticle(ownerActor, { workspaceId: "ws-1", slug: "notes", bodyMd: "Stale human edit" }))
+      .rejects.toMatchObject({ status: 409, code: "ARTICLE_CHANGED" });
+    expect(prismaMock.brainArticle.update).not.toHaveBeenCalled();
+  });
+
+  it("does not publish an archived draft", async () => {
+    const { publishArticle } = await import("./brain");
+    prismaMock.brainArticle.findUnique.mockResolvedValue({ id: "article-1", workspaceId: "ws-1", slug: "notes",
+      authority: "DRAFT", isPrivate: true, archivedAt: new Date() });
+    await expect(publishArticle(ownerActor, { workspaceId: "ws-1", slug: "notes" }))
+      .rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+    expect(prismaMock.brainArticle.update).not.toHaveBeenCalled();
   });
 });
 

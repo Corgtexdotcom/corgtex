@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { beforeEach, expect, it, vi } from "vitest";
-import { prisma, type AppActor } from "@corgtex/shared";
+import { getCacheVersion, prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { archiveWorkspaceArtifact } from "../../domain/src/archive";
 import { syncBrainArticleKnowledge } from "./chunks";
@@ -32,6 +32,7 @@ it("does not let an in-flight Brain index job restore archived chunks", async ()
     const staleSync = syncBrainArticleKnowledge({ workspaceId: workspace.id, articleId: article.id });
     await entered;
     let archiveSettled = false;
+    const cacheVersionBefore = await getCacheVersion(`knowledge:${workspace.id}`);
     const archive = archiveWorkspaceArtifact(actor, {
       workspaceId: workspace.id, entityType: "BrainArticle", entityId: article.id,
     }).finally(() => { archiveSettled = true; });
@@ -40,6 +41,7 @@ it("does not let an in-flight Brain index job restore archived chunks", async ()
     releaseEmbed();
     await staleSync;
     await archive;
+    expect(await getCacheVersion(`knowledge:${workspace.id}`)).toBeGreaterThan(cacheVersionBefore);
     expect(await prisma.knowledgeChunk.count({ where: {
       workspaceId: workspace.id, sourceType: "BRAIN_ARTICLE", sourceId: article.id,
     } })).toBe(0);

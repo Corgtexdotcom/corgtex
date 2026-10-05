@@ -3,9 +3,10 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { archiveWorkspaceArtifact, restoreWorkspaceArtifact } from "./archive";
-import { createArticle, updateArticle } from "./brain";
+import { createArticle, publishArticle, updateArticle } from "./brain";
 import { brainSourceContentFingerprint } from "./brain-derivation";
 import { listBrainSourceArchiveImpacts } from "./brain-source-impact";
+import { deleteDocument } from "./documents";
 
 describe("Brain source archive impact", () => {
   beforeEach(truncateAllTables);
@@ -73,7 +74,7 @@ describe("Brain source archive impact", () => {
     })).rejects.toMatchObject({ code: "SOURCE_CHANGED", status: 409 });
   });
 
-  it("serializes article links with source and document archives", async () => {
+  it("serializes article links with source archive before document archive", async () => {
     const workspace = await prisma.workspace.create({ data: { name: "Archive race", slug: `impact-race-${randomUUID()}` } });
     const user = await prisma.user.create({ data: { email: `impact-race-${randomUUID()}@example.test`, passwordHash: "fixture" } });
     await prisma.member.create({ data: { workspaceId: workspace.id, userId: user.id, role: "ADMIN" } });
@@ -90,7 +91,7 @@ describe("Brain source archive impact", () => {
     const archiveHeld = new Promise<void>((resolve) => { releaseArchive = resolve; });
     const archiveEntered = new Promise<void>((resolve) => { archiveReady = resolve; });
     const archiveTransaction = prisma.$transaction(async (tx) => {
-      await archiveWorkspaceArtifact(editor, { workspaceId: workspace.id, entityType: "Document", entityId: document.id, _tx: tx });
+      await archiveWorkspaceArtifact(editor, { workspaceId: workspace.id, entityType: "BrainSource", entityId: source.id, _tx: tx });
       archiveReady();
       await archiveHeld;
     });
@@ -106,6 +107,56 @@ describe("Brain source archive impact", () => {
     await archiveTransaction;
     expect(await articleOutcome).toMatchObject({ code: "SOURCE_CHANGED", status: 409 });
     expect(await prisma.brainArticle.count({ where: { workspaceId: workspace.id } })).toBe(0);
+    await archiveWorkspaceArtifact(editor, { workspaceId: workspace.id, entityType: "Document", entityId: document.id });
+  });
+
+  it("does not commit an in-flight edit or publication after article archive commits", async () => {
+    const workspace = await prisma.workspace.create({ data: { name: "Draft archive race", slug: `draft-race-${randomUUID()}` } });
+    const user = await prisma.user.create({ data: { email: `draft-race-${randomUUID()}@example.test`, passwordHash: "fixture" } });
+    await prisma.member.create({ data: { workspaceId: workspace.id, userId: user.id, role: "ADMIN" } });
+    const actor: AppActor = { kind: "user", user: { id: user.id, email: user.email, displayName: "Admin" } };
+    const article = await createArticle(actor, { workspaceId: workspace.id, title: "Draft", type: "PROJECT",
+      bodyMd: "Original", authority: "DRAFT" });
+    let releaseArchive!: () => void;
+    let archiveReady!: () => void;
+    const held = new Promise<void>((resolve) => { releaseArchive = resolve; });
+    const ready = new Promise<void>((resolve) => { archiveReady = resolve; });
+    const archiving = prisma.$transaction(async (tx) => {
+      await archiveWorkspaceArtifact(actor, { workspaceId: workspace.id, entityType: "BrainArticle", entityId: article.id, _tx: tx });
+      archiveReady();
+      await held;
+    });
+    await ready;
+    const editing = updateArticle(actor, { workspaceId: workspace.id, slug: article.slug, bodyMd: "Stale edit" })
+      .then(() => null, (error: unknown) => error);
+    const publishing = publishArticle(actor, { workspaceId: workspace.id, slug: article.slug })
+      .then(() => null, (error: unknown) => error);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    releaseArchive();
+    await archiving;
+    expect(await editing).toMatchObject({ status: 409, code: "ARTICLE_CHANGED" });
+    expect(await publishing).toMatchObject({ status: 404, code: "NOT_FOUND" });
+    const final = await prisma.brainArticle.findUniqueOrThrow({ where: { id: article.id } });
+    expect(final.bodyMd).toBe("Original");
+    expect(final.isPrivate).toBe(true);
+    expect(final.archivedAt).toBeInstanceOf(Date);
+  });
+
+  it("routes direct document deletion through linked source removal first", async () => {
+    const workspace = await prisma.workspace.create({ data: { name: "Document source entry", slug: `doc-entry-${randomUUID()}` } });
+    const user = await prisma.user.create({ data: { email: `doc-entry-${randomUUID()}@example.test`, passwordHash: "fixture" } });
+    await prisma.member.create({ data: { workspaceId: workspace.id, userId: user.id, role: "ADMIN" } });
+    const actor: AppActor = { kind: "user", user: { id: user.id, email: user.email, displayName: "Admin" } };
+    const document = await prisma.document.create({ data: { workspaceId: workspace.id, title: "Document", source: "upload",
+      storageKey: `synthetic/${randomUUID()}` } });
+    const source = await prisma.brainSource.create({ data: { workspaceId: workspace.id, sourceType: "DOC", tier: 1,
+      content: "Source text", metadata: { documentId: document.id } } });
+    await expect(deleteDocument(actor, { workspaceId: workspace.id, documentId: document.id }))
+      .rejects.toMatchObject({ status: 409, code: "DOCUMENT_SOURCE_REMOVAL_REQUIRED" });
+    expect((await prisma.document.findUniqueOrThrow({ where: { id: document.id } })).archivedAt).toBeNull();
+    await archiveWorkspaceArtifact(actor, { workspaceId: workspace.id, entityType: "BrainSource", entityId: source.id });
+    await deleteDocument(actor, { workspaceId: workspace.id, documentId: document.id });
+    expect((await prisma.document.findUniqueOrThrow({ where: { id: document.id } })).archivedAt).toBeInstanceOf(Date);
   });
 
   it("requires source recovery before restoring an article that links to it", async () => {

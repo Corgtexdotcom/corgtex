@@ -32,6 +32,17 @@ describe("Brain article derivation provenance", () => {
     });
     expect(authored.derivationJson).toBeNull();
 
+    const secondSource = await prisma.brainSource.create({ data: {
+      workspaceId: workspace.id, sourceType: "DOC", tier: 1, title: "Second notes", content: "Second source facts",
+    } });
+    const authoredUpdate = await updateArticle(agent, { workspaceId: workspace.id, slug: authored.slug,
+      bodyMd: "Human notes with second source facts", absorbedSource: {
+        sourceId: secondSource.id, sourceFingerprint: brainSourceContentFingerprint(secondSource), agentRunId: "second-run",
+      },
+    });
+    expect(authoredUpdate.sourceIds).toEqual([source.id, secondSource.id]);
+    expect(authoredUpdate.derivationJson).toBeNull();
+
     await updateArticle(editor, { workspaceId: workspace.id, slug: generated.slug, bodyMd: "Human revision" });
     const revised = await prisma.brainArticle.findUniqueOrThrow({ where: { id: generated.id }, include: { versions: true } });
     expect(revised.bodyMd).toBe("Human revision");

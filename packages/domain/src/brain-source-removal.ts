@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
-import { prisma, type AppActor } from "@corgtex/shared";
+import { incrementCacheVersion, prisma, type AppActor } from "@corgtex/shared";
 import { archiveWorkspaceArtifact } from "./archive";
 import { requireWorkspaceMembership } from "./auth";
 import { brainSourceContentFingerprint } from "./brain-derivation";
@@ -52,11 +52,11 @@ async function archiveLinkedDocumentIfResolved(tx: Prisma.TransactionClient, act
 }
 
 function hashArticle(article: {
-  updatedAt: Date; title: string; type: string; authority: string; bodyMd: string;
+  updatedAt: Date; title: string; type: string; authority: string; isPrivate: boolean; publishedAt: Date | null; bodyMd: string;
   sourceIds: string[]; derivationJson: Prisma.JsonValue | null; humanEditedAt: Date | null; archivedAt: Date | null;
 }) {
   return createHash("sha256").update(JSON.stringify([
-    article.updatedAt, article.title, article.type, article.authority, article.bodyMd,
+    article.updatedAt, article.title, article.type, article.authority, article.isPrivate, article.publishedAt, article.bodyMd,
     article.sourceIds, article.derivationJson, article.humanEditedAt, article.archivedAt,
   ])).digest("hex");
 }
@@ -428,6 +428,7 @@ export async function resolveBrainSourceRemoval(actor: AppActor, params: {
       } });
       await appendEvents(tx, [{ workspaceId: params.workspaceId, type: "brain-article.updated",
         aggregateType: "BrainArticle", aggregateId: record.id, payload: { articleId: record.id } }]);
+      await incrementCacheVersion(`knowledge:${params.workspaceId}`, tx);
     }
     await archiveWorkspaceArtifact(actor, { workspaceId: params.workspaceId, entityType: "BrainSource", entityId: payload.sourceId,
       reason: "Removed after reviewed article regeneration.", _tx: tx });

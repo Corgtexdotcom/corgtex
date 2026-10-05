@@ -88,6 +88,7 @@ vi.mock("./auth", async (importOriginal) => {
 
 vi.mock("@corgtex/shared", () => ({
   setSupportAuthorizationActor: vi.fn(),
+  incrementCacheVersion: vi.fn(async () => 1),
   getMcpOrigin: () => undefined,
   prisma: prismaMock,
   parseAllowedWorkspaceIds: vi.fn(() => new Set<string>()),
@@ -713,7 +714,7 @@ describe("workspace archive domain", () => {
       .rejects.toMatchObject({ status: 409, code: "SOURCE_ARTICLE_IMPACT_REVIEW_REQUIRED" });
     expect(prismaMock.brainSource.findMany).toHaveBeenCalledWith({ where: {
       workspaceId: "workspace-1", metadata: { path: ["documentId"], equals: "document-1" },
-    }, select: { id: true } });
+    }, select: { id: true, archivedAt: true } });
     expect(prismaMock.document.update).not.toHaveBeenCalled();
   });
 
