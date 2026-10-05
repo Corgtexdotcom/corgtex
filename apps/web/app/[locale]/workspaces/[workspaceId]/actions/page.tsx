@@ -135,6 +135,7 @@ export default async function ActionsPage({
   const tCommon = await getTranslations("common");
   const tWork = await getTranslations("workItems");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const isDemo = (await prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }))?.slug === "jnj-demo";
   const resolvedSearch = searchParams ? await searchParams : {};
   const view = normalizeWorkItemView(resolvedSearch.view);
   const boardGroup = normalizeActionBoardGroup(resolvedSearch.group);
@@ -418,6 +419,7 @@ export default async function ActionsPage({
   }
 
   function actionControls(action: ActionListItem) {
+    if (isDemo) return { canEditContent: false, hiddenTransitions: [], moreItems: [], primary: null };
     const canManage = canManageAction(action);
     const hasEligibleAssignee = hasEligibleActionAssignee(action.assigneeMemberId, activeHumanMemberIds);
     const canCollaborateOnSubmittedAction = !action.isPrivate && (actor.kind === "agent" || Boolean(membership?.isActive));
@@ -639,13 +641,13 @@ export default async function ActionsPage({
             )}
           </>
         )}
-        actions={(
+        actions={!isDemo ? (
           <ItemActions
             moreLabel={tCommon("moreActions")}
             primary={primary}
             more={moreItems.length > 0 ? moreItems : null}
           />
-        )}
+        ) : null}
         hiddenTransitions={hiddenTransitions.length > 0 ? (
           <div className="nr-transition-controls">
             {hiddenTransitions}
@@ -662,7 +664,7 @@ export default async function ActionsPage({
     { id: "dates", label: tWork("tableDates") },
     { id: "priority", label: t("formPriority"), align: "right" },
     { id: "links", label: tWork("tableLinks") },
-    { id: "actions", label: tWork("tableActions"), cellClassName: "nr-work-item-table-actions" },
+    ...(!isDemo ? [{ id: "actions", label: tWork("tableActions"), cellClassName: "nr-work-item-table-actions" }] : []),
   ];
 
   function actionTableRow(action: ActionListItem): WorkItemTableRow {
@@ -743,7 +745,7 @@ export default async function ActionsPage({
             ) : null}
           </div>
         ),
-        actions: (
+        actions: !isDemo ? (
           <>
             <ItemActions
               moreLabel={tCommon("moreActions")}
@@ -756,7 +758,7 @@ export default async function ActionsPage({
               </div>
             )}
           </>
-        ),
+        ) : null,
       },
     };
   }
@@ -786,7 +788,7 @@ export default async function ActionsPage({
     label: t(ACTION_STATUS_META[status].labelKey),
     count: groupedActions[status].length,
     empty: <p className="muted">{t("noActionsFound")}</p>,
-    addCard: status === "DRAFT" ? renderCompactCreateActionForm() : null,
+    addCard: status === "DRAFT" && !isDemo ? renderCompactCreateActionForm() : null,
     items: groupedActions[status].map((action) => ({
       id: action.id,
       status,
@@ -981,6 +983,7 @@ export default async function ActionsPage({
         {view === "kanban" ? (
           <WorkItemKanbanBoard
             columns={actionColumns}
+            readOnly={isDemo}
             storageKey={`work-items:${workspaceId}:actions`}
             visibleColumnIds={boardGroup === "status" ? visibleActionColumnIds : undefined}
             hideColumnHrefs={boardGroup === "status" ? actionColumnHideHrefs : undefined}
