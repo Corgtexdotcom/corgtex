@@ -14,10 +14,11 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
     ...actual,
     prisma: {
       $transaction: vi.fn(async (cb) => cb(prisma)),
+      $queryRaw: vi.fn(),
       $executeRaw: vi.fn(),
-      brainArticle: { findMany: vi.fn(), findUnique: vi.fn() },
+      brainArticle: { findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn() },
       brainSource: { count: vi.fn() },
-      document: { count: vi.fn(), findMany: vi.fn(), findUnique: vi.fn() },
+      document: { count: vi.fn(), findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn() },
       knowledgeChunk: { count: vi.fn(), findMany: vi.fn(), deleteMany: vi.fn(), createMany: vi.fn() },
       workflowJob: { findMany: vi.fn() },
     },
@@ -118,6 +119,8 @@ describe("syncKnowledgeForSource", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(defaultModelGateway.embed).mockResolvedValue({ embeddings: [[1, 0]], usage: { provider: "test", model: "fake-embed" } });
+    vi.mocked(prisma.brainArticle.findFirst).mockResolvedValue({ id: "active" } as any);
+    vi.mocked(prisma.document.findFirst).mockResolvedValue({ id: "active" } as any);
   });
 
   it("does not delete prior chunks when embedding fails", async () => {
@@ -160,14 +163,129 @@ describe("syncKnowledgeForSource", () => {
       chunks: [expect.objectContaining({ sourceId: "report-1", accessDomain: "FINANCE" })],
     }));
   });
+
+  it("does not let an old document sync restore superseded chunks", async () => {
+    vi.mocked(prisma.document.findFirst).mockResolvedValueOnce(null);
+    expect(await syncKnowledgeForSource({
+      workspaceId: "ws_1", sourceType: "DOCUMENT", accessDomain: "WORKSPACE",
+      sourceId: "doc-1", content: "Old uploaded text", metadata: { storageKey: "old-blob" },
+    })).toBe(0);
+    expect(prisma.document.findFirst).toHaveBeenCalledWith({
+      where: { id: "doc-1", workspaceId: "ws_1", archivedAt: null, storageKey: "old-blob" },
+      select: { id: true },
+    });
+    expect(prisma.knowledgeChunk.deleteMany).not.toHaveBeenCalled();
+    expect(syncAzureKnowledgeSourceMock).not.toHaveBeenCalled();
+  });
+
+  it("does not let an old empty document sync remove newer chunks", async () => {
+    vi.mocked(prisma.document.findFirst).mockResolvedValueOnce(null);
+    expect(await syncKnowledgeForSource({
+      workspaceId: "ws_1", sourceType: "DOCUMENT", accessDomain: "WORKSPACE",
+      sourceId: "doc-1", content: "", metadata: { storageKey: "old-blob" },
+    })).toBe(0);
+    expect(prisma.knowledgeChunk.deleteMany).not.toHaveBeenCalled();
+    expect(syncAzureKnowledgeSourceMock).not.toHaveBeenCalled();
+  });
+
+  it("does not let an old article sync restore chunks after quarantine", async () => {
+    vi.mocked(prisma.brainArticle.findFirst).mockResolvedValueOnce(null);
+    expect(await syncKnowledgeForSource({
+      workspaceId: "ws_1", sourceType: "BRAIN_ARTICLE", accessDomain: "WORKSPACE",
+      sourceId: "article-old", content: "Old generated terms",
+    })).toBe(0);
+    expect(prisma.knowledgeChunk.deleteMany).not.toHaveBeenCalled();
+    expect(syncAzureKnowledgeSourceMock).not.toHaveBeenCalled();
+  });
+
+  it("does not reindex an archived article and retires its old search entries", async () => {
+    vi.mocked(prisma.brainArticle.findUnique).mockResolvedValueOnce({
+      id: "article-old", workspaceId: "ws_1", bodyMd: "Old terms", isPrivate: false, archivedAt: new Date(),
+    } as any);
+    vi.mocked(prisma.brainArticle.findFirst).mockResolvedValueOnce(null);
+
+    expect(await syncBrainArticleKnowledge({ workspaceId: "ws_1", articleId: "article-old" })).toBe(0);
+    expect(prisma.knowledgeChunk.deleteMany).toHaveBeenCalledWith({
+      where: { workspaceId: "ws_1", sourceType: "BRAIN_ARTICLE", sourceId: "article-old" },
+    });
+    expect(syncAzureKnowledgeSourceMock).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: "ws_1", sourceType: "BRAIN_ARTICLE", sourceId: "article-old", chunks: [],
+    }));
+  });
+
+  it.each(["DOCUMENT", "BRAIN_ARTICLE"] as const)("rejects stale empty %s cleanup after restoration", async (sourceType) => {
+    const updatedAt = new Date("2026-10-05T00:00:00Z");
+    const delegate = sourceType === "DOCUMENT" ? prisma.document : prisma.brainArticle;
+    vi.mocked(delegate.findFirst).mockResolvedValueOnce(null);
+    await syncKnowledgeForSource({ workspaceId: "ws_1", sourceType, accessDomain: "WORKSPACE",
+      sourceId: "restored-source", content: "", sourceUpdatedAt: updatedAt, metadata: { storageKey: "fixture" } });
+    expect(prisma.knowledgeChunk.deleteMany).not.toHaveBeenCalled();
+    expect(syncAzureKnowledgeSourceMock).not.toHaveBeenCalled();
+    expect(delegate.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ updatedAt }),
+    }));
+  });
+
+  it.each(["DOCUMENT", "BRAIN_ARTICLE"] as const)("publishes current empty %s cleanup after archive", async (sourceType) => {
+    const updatedAt = new Date("2026-10-05T00:00:00Z");
+    const delegate = sourceType === "DOCUMENT" ? prisma.document : prisma.brainArticle;
+    vi.mocked(delegate.findFirst).mockResolvedValueOnce({ id: "archived-source" } as any);
+    await syncKnowledgeForSource({ workspaceId: "ws_1", sourceType, accessDomain: "WORKSPACE",
+      sourceId: "archived-source", content: "", sourceUpdatedAt: updatedAt, metadata: { storageKey: "fixture" } });
+    expect(prisma.knowledgeChunk.deleteMany).toHaveBeenCalled();
+    expect(syncAzureKnowledgeSourceMock).toHaveBeenCalledWith(expect.objectContaining({ chunks: [] }));
+    expect(vi.mocked(prisma.$queryRaw).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[0]);
+  });
+
+  it("repairs an older Azure write from current SQL chunks before its worker completes", async () => {
+    process.env.KNOWLEDGE_SEARCH_PROVIDER = "azure";
+    process.env.AZURE_SEARCH_ENDPOINT = "https://corgtex-search.search.windows.net";
+    process.env.AZURE_SEARCH_INDEX_NAME = "client-knowledge";
+    process.env.AZURE_SEARCH_ADMIN_KEY = "admin-key";
+    let signalOldStarted!: () => void;
+    let releaseOld!: () => void;
+    const oldStarted = new Promise<void>((resolve) => { signalOldStarted = resolve; });
+    const oldRelease = new Promise<void>((resolve) => { releaseOld = resolve; });
+    let current: any[] = [];
+    vi.mocked(prisma.knowledgeChunk.findMany).mockImplementation((async () => current) as any);
+    syncAzureKnowledgeSourceMock.mockImplementation(async (input) => {
+      if (input.chunks[0]?.content === "Old policy") {
+        signalOldStarted();
+        await oldRelease;
+      } else if (current.length === 0) {
+        current = (vi.mocked(prisma.knowledgeChunk.createMany).mock.calls.at(-1)?.[0]?.data ?? []) as any[];
+      }
+      return { skipped: false, deleted: 1, uploaded: 1 };
+    });
+
+    const oldWorker = syncKnowledgeForSource({
+      workspaceId: "ws_1", sourceType: "DOCUMENT", accessDomain: "WORKSPACE",
+      sourceId: "doc-1", content: "Old policy", metadata: { storageKey: "old-blob" },
+    });
+    await oldStarted;
+    await syncKnowledgeForSource({
+      workspaceId: "ws_1", sourceType: "DOCUMENT", accessDomain: "WORKSPACE",
+      sourceId: "doc-1", content: "Current policy", metadata: { storageKey: "new-blob" },
+    });
+    releaseOld();
+    await oldWorker;
+
+    expect(syncAzureKnowledgeSourceMock).toHaveBeenCalledTimes(3);
+    expect(syncAzureKnowledgeSourceMock.mock.calls[0]?.[0].chunks[0].content).toBe("Old policy");
+    expect(syncAzureKnowledgeSourceMock.mock.calls[1]?.[0].chunks[0].content).toBe("Current policy");
+    expect(syncAzureKnowledgeSourceMock.mock.calls[2]?.[0].chunks).toEqual([expect.objectContaining({
+      id: current[0].id, content: "Current policy", metadata: expect.objectContaining({ storageKey: "new-blob" }),
+    })]);
+  });
 });
 
 describe("Brain article archive indexing", () => {
   it("removes stale chunks when a queued sync sees an archived article", async () => {
     vi.clearAllMocks();
     vi.mocked(prisma.brainArticle.findUnique).mockResolvedValue({
-      id: "article-1", workspaceId: "ws-1", isPrivate: false, archivedAt: new Date(),
+      id: "article-1", workspaceId: "ws-1", isPrivate: false, archivedAt: new Date(), updatedAt: new Date("2026-10-05T00:00:00Z"),
     } as any);
+    vi.mocked(prisma.brainArticle.findFirst).mockResolvedValue({ id: "current" } as any);
     await expect(syncBrainArticleKnowledge({ workspaceId: "ws-1", articleId: "article-1" })).resolves.toBe(0);
     expect(prisma.knowledgeChunk.deleteMany).toHaveBeenCalledWith({ where: {
       workspaceId: "ws-1", sourceType: "BRAIN_ARTICLE", sourceId: "article-1",
@@ -237,11 +355,12 @@ describe("Workspace Reindex", () => {
     vi.mocked(prisma.brainArticle.findMany).mockResolvedValue([{ id: "a1" } as any]);
     vi.mocked(prisma.brainArticle.findUnique).mockResolvedValue({
       id: "a1", workspaceId: "ws_1", title: "Archived", bodyMd: "Old body", slug: "archived",
-      type: "PROJECT", authority: "REFERENCE", isPrivate: false, archivedAt: new Date(),
+      type: "PROJECT", authority: "REFERENCE", isPrivate: false, archivedAt: new Date(), updatedAt: new Date("2026-10-05T00:00:00Z"),
     } as any);
     vi.mocked(prisma.document.findMany).mockResolvedValue([]);
     vi.mocked(prisma.knowledgeChunk.findMany).mockResolvedValue([]);
 
+    vi.mocked(prisma.brainArticle.findFirst).mockResolvedValue({ id: "current" } as any);
     const result = await reindexWorkspace("ws_1");
     expect(result.errors).toEqual([]);
     expect(defaultModelGateway.embed).not.toHaveBeenCalled();
@@ -256,10 +375,11 @@ describe("Workspace Reindex", () => {
     vi.mocked(prisma.document.findMany).mockResolvedValue([{ id: "d1" } as any]);
     vi.mocked(prisma.document.findUnique).mockResolvedValue({
       id: "d1", workspaceId: "ws_1", title: "Old document", textContent: "Old text", source: "API",
-      mimeType: "text/plain", storageKey: "d1.txt", accessDomain: "WORKSPACE", archivedAt: new Date(),
+      mimeType: "text/plain", storageKey: "d1.txt", accessDomain: "WORKSPACE", archivedAt: new Date(), updatedAt: new Date("2026-10-05T00:00:00Z"),
     } as any);
     vi.mocked(prisma.knowledgeChunk.findMany).mockResolvedValue([]);
 
+    vi.mocked(prisma.document.findFirst).mockResolvedValue({ id: "current" } as any);
     const result = await reindexWorkspace("ws_1");
     expect(result.reindexedDocuments).toBe(0);
     expect(defaultModelGateway.embed).not.toHaveBeenCalled();

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Prisma } from "@prisma/client";
-import { prisma } from "@corgtex/shared";
+import { getSharedStateBackend, logger, prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { PDFParse } from "pdf-parse";
 import { defaultStorage } from "@corgtex/storage";
@@ -9,15 +9,17 @@ import {
   checkWorkspaceDuplicateGuard,
   duplicateGuardAuditMeta,
   duplicateGuardContentHash,
-  duplicateGuardMergeText,
   assertTrialStorageCapacity,
   lockAndAssertTrialStorageCapacity,
+  lockWorkspaceArchiveArtifact,
   requireWorkspaceMembership,
   AppError,
   getStorageUsageSummary,
+  findSourceArticleImpacts,
   isGlobalOperator,
   type DuplicateGuardOptions,
 } from "@corgtex/domain";
+import { invalidateKnowledgeCache } from "./retrieval";
 import mammoth from "mammoth";
 import {
   extractPptxText,
@@ -52,9 +54,9 @@ function formatFileSize(bytes: number) {
 }
 
 function uploadedContentHash(fileBuffer: Buffer, textContent: string | null, authoritativeContentHash?: string) {
-  return authoritativeContentHash ?? (textContent?.trim()
-    ? duplicateGuardContentHash(textContent)
-    : createHash("sha256").update(fileBuffer).digest("hex"));
+  return authoritativeContentHash
+    ?? (textContent?.trim() ? duplicateGuardContentHash(textContent) : null)
+    ?? createHash("sha256").update(fileBuffer).digest("hex");
 }
 
 type PptxExtractionResult = Awaited<ReturnType<typeof extractPptxText>>;
@@ -188,33 +190,59 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
   textContent: string | null;
   brainSourceContent: string;
   contentHash: string | null;
-  authoritativeContentHash?: string;
   ingestionGuidanceMd?: string;
   authorMemberId?: string;
   metadata: Record<string, unknown>;
 }) {
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
+    await lockAndAssertTrialStorageCapacity(tx, params.workspaceId, params.size, {
+      replacingDocumentId: params.documentId,
+    });
+    // Match confirmed removal's source -> document lock order. Discover the
+    // source set before locking, then reject changed linkage after both locks.
+    const sourceQuery: Prisma.BrainSourceWhereInput = {
+      workspaceId: params.workspaceId,
+      sourceType: { in: ["DOC", "FILE_UPLOAD"] },
+      metadata: { path: ["documentId"], equals: params.documentId },
+    };
+    const discoveredSources = await tx.brainSource.findMany({ where: sourceQuery, select: { id: true } });
+    const sourceBeforeLock = await tx.brainSource.findFirst({ where: { ...sourceQuery, archivedAt: null } });
+    const lockedSourceIds = [...new Set([
+      ...discoveredSources.map((source) => source.id), ...(sourceBeforeLock ? [sourceBeforeLock.id] : []),
+    ])].sort();
+    for (const sourceId of lockedSourceIds) {
+      await lockWorkspaceArchiveArtifact(tx, "BrainSource", sourceId);
+      await tx.$queryRaw`SELECT "id" FROM "BrainSource" WHERE "id" = ${sourceId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    }
+    await tx.$queryRaw`SELECT "id" FROM "Document" WHERE "id" = ${params.documentId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const existing = await tx.document.findFirst({
       where: { id: params.documentId, workspaceId: params.workspaceId, archivedAt: null },
     });
-    if (!existing) {
-      throw new AppError(404, "NOT_FOUND", "Document not found.");
+    if (!existing) throw new AppError(404, "NOT_FOUND", "Document not found.");
+    const currentSources = await tx.brainSource.findMany({ where: sourceQuery, select: { id: true } });
+    if (currentSources.some((source) => !lockedSourceIds.includes(source.id))) {
+      throw new AppError(409, "SOURCE_CHANGED", "Document source links changed. Reload before replacing the file.");
     }
-
-    await lockAndAssertTrialStorageCapacity(tx, params.workspaceId, params.size, {
-      replacingDocumentId: existing.id,
-    });
-    const mergedText = duplicateGuardMergeText(existing.textContent, params.textContent);
-    const mergedSourceContent = mergedText ? [params.documentTitle, mergedText].join("\n\n") : params.brainSourceContent;
-    const contentHash = params.authoritativeContentHash
-      ?? (mergedText ? duplicateGuardContentHash(mergedText) : params.contentHash);
+    const existingSource = sourceBeforeLock
+      ? await tx.brainSource.findFirst({ where: { id: sourceBeforeLock.id, workspaceId: params.workspaceId, archivedAt: null } })
+      : null;
+    const articleImpacts = await findSourceArticleImpacts(tx, params.workspaceId, lockedSourceIds);
+    if ([...articleImpacts.values()].some((impact) => impact.articles.length > 0)) {
+      throw new AppError(409, "DOCUMENT_REPLACEMENT_REVIEW_REQUIRED",
+        "Review or archive this document's linked Brain articles before replacing the file.");
+    }
+    // Updating a file replaces its extracted snapshot as well as its blob.
+    // Merging old text would keep superseded content searchable under the new file.
+    const replacementText = params.textContent;
+    const replacementSourceContent = params.brainSourceContent;
+    const contentHash = params.contentHash;
     const document = await tx.document.update({
       where: { id: existing.id },
       data: {
         title: existing.title || params.documentTitle,
         storageKey: params.storageKey,
         mimeType: params.mimeType,
-        textContent: mergedText,
+        textContent: replacementText,
         metadata: {
           ...(typeof existing.metadata === "object" && existing.metadata !== null && !Array.isArray(existing.metadata)
             ? existing.metadata as Record<string, unknown>
@@ -230,19 +258,11 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
       },
     });
 
-    const existingSource = await tx.brainSource.findFirst({
-      where: {
-        workspaceId: params.workspaceId,
-        sourceType: { in: ["DOC", "FILE_UPLOAD"] },
-        archivedAt: null,
-        metadata: { path: ["documentId"], equals: document.id },
-      },
-    });
     const source = existingSource
       ? await tx.brainSource.update({
         where: { id: existingSource.id },
         data: {
-          content: mergedSourceContent,
+          content: replacementSourceContent,
           title: existingSource.title || params.documentTitle,
           channel: existingSource.channel || params.source,
           ingestionGuidanceMd: params.ingestionGuidanceMd ?? existingSource.ingestionGuidanceMd,
@@ -271,7 +291,7 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
           workspaceId: params.workspaceId,
           sourceType: "FILE_UPLOAD",
           tier: 2,
-          content: mergedSourceContent,
+          content: replacementSourceContent,
           title: params.documentTitle,
           authorMemberId: params.authorMemberId ?? null,
           channel: params.source,
@@ -288,6 +308,14 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
           } as Prisma.InputJsonValue,
         },
       });
+
+    await tx.knowledgeChunk.deleteMany({
+      where: {
+        workspaceId: params.workspaceId,
+        sourceType: "DOCUMENT", sourceId: document.id,
+      },
+    });
+    if (getSharedStateBackend() === "postgres") await invalidateKnowledgeCache(params.workspaceId, tx);
 
     await tx.auditLog.create({
       data: {
@@ -315,10 +343,22 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
         aggregateId: source.id,
         payload: { sourceId: source.id },
       },
+
     ]);
 
     return { document, source };
-  });
+  }, { maxWait: 5_000, timeout: 60_000 });
+  // Redis/local cache invalidation cannot share the database transaction. A
+  // live chunk check at retrieval still rejects any old cached search result.
+  try {
+    await invalidateKnowledgeCache(params.workspaceId);
+  } catch (error) {
+    logger.warn("Knowledge cache invalidation failed after file replacement", {
+      workspaceId: params.workspaceId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return result;
 }
 
 async function extractPdfText(fileBuffer: Buffer) {
@@ -533,7 +573,6 @@ export async function ingestFile(actor: AppActor, params: {
         textContent,
         brainSourceContent,
         contentHash,
-        authoritativeContentHash,
         ingestionGuidanceMd,
         authorMemberId,
         metadata: {

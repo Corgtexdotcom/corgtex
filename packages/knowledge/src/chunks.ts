@@ -83,10 +83,32 @@ export async function syncKnowledgeForSource(params: {
   metadata?: Record<string, unknown>;
   workflowJobId?: string;
   agentRunId?: string;
+  sourceUpdatedAt?: Date;
 }) {
   const chunks = chunkText(params.content);
   if (chunks.length === 0) {
-    await prisma.$transaction(async (tx) => {
+    const retired = await prisma.$transaction(async (tx) => {
+      if (params.sourceType === "BRAIN_ARTICLE") {
+        await tx.$queryRaw`SELECT "id" FROM "BrainArticle" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brain_article_index:${params.workspaceId}:${params.sourceId}`}, 0))`;
+        const current = await tx.brainArticle.findFirst({
+          where: { id: params.sourceId, workspaceId: params.workspaceId,
+            ...(params.sourceUpdatedAt ? { updatedAt: params.sourceUpdatedAt } : { archivedAt: null, isPrivate: false }) },
+          select: { id: true },
+        });
+        if (params.sourceUpdatedAt ? !current : current) return false;
+      }
+      const storageKey = params.sourceType === "DOCUMENT" ? params.metadata?.storageKey : null;
+      if (typeof storageKey === "string") {
+        await tx.$queryRaw`SELECT "id" FROM "Document" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`document_index:${params.workspaceId}:${params.sourceId}`}, 0))`;
+        const document = await tx.document.findFirst({
+          where: { id: params.sourceId, workspaceId: params.workspaceId, storageKey,
+            ...(params.sourceUpdatedAt ? { updatedAt: params.sourceUpdatedAt } : { archivedAt: null }) },
+          select: { id: true },
+        });
+        if (!document) return false;
+      }
       await tx.knowledgeChunk.deleteMany({
         where: {
           workspaceId: params.workspaceId,
@@ -95,7 +117,9 @@ export async function syncKnowledgeForSource(params: {
         },
       });
       if (getSharedStateBackend() === "postgres") await invalidateKnowledgeCache(params.workspaceId, tx);
+      return true;
     });
+    if (!retired) return 0;
     await syncAzureSourceBestEffort({
       workspaceId: params.workspaceId,
       sourceType: params.sourceType,
@@ -137,7 +161,28 @@ export async function syncKnowledgeForSource(params: {
     };
   });
 
-  await prisma.$transaction(async (tx) => {
+  const persisted = await prisma.$transaction(async (tx) => {
+    if (params.sourceType === "BRAIN_ARTICLE") {
+      await tx.$queryRaw`SELECT "id" FROM "BrainArticle" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brain_article_index:${params.workspaceId}:${params.sourceId}`}, 0))`;
+      const article = await tx.brainArticle.findFirst({
+        where: { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null, isPrivate: false, bodyMd: params.content,
+          ...(params.sourceUpdatedAt ? { updatedAt: params.sourceUpdatedAt } : {}) },
+        select: { id: true },
+      });
+      if (!article) return false;
+    }
+    const storageKey = params.sourceType === "DOCUMENT" ? params.metadata?.storageKey : null;
+    if (typeof storageKey === "string") {
+      await tx.$queryRaw`SELECT "id" FROM "Document" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`document_index:${params.workspaceId}:${params.sourceId}`}, 0))`;
+      const document = await tx.document.findFirst({
+        where: { id: params.sourceId, workspaceId: params.workspaceId, storageKey,
+            ...(params.sourceUpdatedAt ? { updatedAt: params.sourceUpdatedAt } : { archivedAt: null }) },
+        select: { id: true },
+      });
+      if (!document) return false;
+    }
     await tx.knowledgeChunk.deleteMany({
       where: {
         workspaceId: params.workspaceId,
@@ -149,7 +194,9 @@ export async function syncKnowledgeForSource(params: {
     // PostgreSQL cache invalidation commits with its source rows. A failure must
     // roll both back instead of leaving cached results after a committed change.
     if (getSharedStateBackend() === "postgres") await invalidateKnowledgeCache(params.workspaceId, tx);
+    return true;
   });
+  if (!persisted) return 0;
 
   await syncAzureSourceBestEffort({
     workspaceId: params.workspaceId,
@@ -179,7 +226,39 @@ async function syncAzureSourceBestEffort(params: Parameters<typeof syncAzureKnow
     throw new Error("Azure Search indexing is enabled but not configured for writes.");
   }
   try {
-    await syncAzureKnowledgeSource(params);
+    let desired = params;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const result = await syncAzureKnowledgeSource(desired);
+      if (result.skipped) return;
+
+      // Another worker may commit a newer SQL revision while this Azure call
+      // is in flight. Repair from SQL before declaring the older job complete.
+      const current = await prisma.knowledgeChunk.findMany({
+        where: { workspaceId: params.workspaceId, sourceType: params.sourceType, sourceId: params.sourceId },
+        orderBy: { chunkIndex: "asc" },
+      });
+      const currentIds = current.map((chunk) => chunk.id).sort();
+      const attemptedIds = desired.chunks.map((chunk) => chunk.id).sort();
+      if (currentIds.length === attemptedIds.length && currentIds.every((id, index) => id === attemptedIds[index])) return;
+      desired = {
+        ...params,
+        chunks: current.map((chunk) => ({
+          id: chunk.id,
+          workspaceId: chunk.workspaceId,
+          sourceType: chunk.sourceType,
+          accessDomain: chunk.accessDomain,
+          sourceId: chunk.sourceId,
+          sourceTitle: chunk.sourceTitle,
+          chunkIndex: chunk.chunkIndex,
+          content: chunk.content,
+          embedding: Array.isArray(chunk.embedding) ? chunk.embedding.filter((value): value is number => typeof value === "number") : [],
+          metadata: chunk.metadata,
+          sensitivity: chunk.sensitivity,
+          createdAt: chunk.createdAt,
+        })),
+      };
+    }
+    throw new Error("Knowledge source changed during Azure indexing; retry to reconcile the latest SQL revision.");
   } catch (error) {
     if (getKnowledgeSearchProvider() === "azure") {
       throw error;
@@ -196,72 +275,36 @@ export async function syncBrainArticleKnowledge(params: {
   workspaceId: string;
   articleId: string;
 }) {
-  // Hold this article's index lock through embedding and Azure publication.
-  // Archive/update takes the same lock before commit, then emits a fresh sync.
-  return prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brain_article_index:${params.workspaceId}:${params.articleId}`}, 0))`;
-    const article = await tx.brainArticle.findUnique({
-      where: { id: params.articleId },
-      select: {
-        id: true,
-        workspaceId: true,
-        title: true,
-        slug: true,
-        type: true,
-        authority: true,
-        bodyMd: true,
-        isPrivate: true,
-        archivedAt: true,
-      },
-    });
-
-    if (!article || article.workspaceId !== params.workspaceId) {
-      return 0;
-    }
-
-    if (article.archivedAt || article.isPrivate) {
-      return syncKnowledgeForSource({
-        workspaceId: params.workspaceId,
-        sourceType: "BRAIN_ARTICLE",
-        accessDomain: "WORKSPACE",
-        sourceId: article.id,
-        content: "",
-      });
-    }
-
-    return syncKnowledgeForSource({
-      workspaceId: params.workspaceId,
-      sourceType: "BRAIN_ARTICLE",
-      accessDomain: "WORKSPACE",
-      sourceId: article.id,
-      sourceTitle: article.title,
-      content: article.bodyMd,
-      metadata: {
-        type: article.type,
-        authority: article.authority,
-        slug: article.slug,
-      },
-    });
-  }, { maxWait: 5_000, timeout: 180_000 });
+  const article = await prisma.brainArticle.findUnique({
+    where: { id: params.articleId },
+    select: { id: true, workspaceId: true, title: true, slug: true, type: true,
+      authority: true, bodyMd: true, isPrivate: true, archivedAt: true, updatedAt: true },
+  });
+  if (!article || article.workspaceId !== params.workspaceId) return 0;
+  return syncKnowledgeForSource({
+    workspaceId: params.workspaceId, sourceType: "BRAIN_ARTICLE", accessDomain: "WORKSPACE",
+    sourceId: article.id, sourceTitle: article.title,
+    content: article.archivedAt || article.isPrivate ? "" : article.bodyMd,
+    sourceUpdatedAt: article.updatedAt,
+    metadata: { type: article.type, authority: article.authority, slug: article.slug },
+  });
 }
 
 export async function syncDocumentKnowledge(params: { workspaceId: string; documentId: string; workflowJobId?: string }) {
-  return prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`document_index:${params.workspaceId}:${params.documentId}`}, 0))`;
-    const document = await tx.document.findUnique({ where: { id: params.documentId }, select: {
-      id: true, workspaceId: true, title: true, source: true, mimeType: true, storageKey: true,
-      textContent: true, accessDomain: true, archivedAt: true,
-    } });
-    if (!document || document.workspaceId !== params.workspaceId) return 0;
-    return syncKnowledgeForSource({
-      workspaceId: params.workspaceId, sourceType: "DOCUMENT", accessDomain: document.accessDomain,
-      sourceId: document.id, sourceTitle: document.title,
-      content: document.archivedAt ? "" : [document.title, document.textContent].filter(Boolean).join("\n\n"),
-      metadata: { source: document.source, mimeType: document.mimeType, storageKey: document.storageKey,
-        ...(params.workflowJobId ? { workflowJobId: params.workflowJobId } : {}) },
-      workflowJobId: params.workflowJobId,
-    });
-  }, { maxWait: 5_000, timeout: 180_000 });
+  const document = await prisma.document.findUnique({ where: { id: params.documentId }, select: {
+    id: true, workspaceId: true, title: true, source: true, mimeType: true, storageKey: true,
+    textContent: true, accessDomain: true, archivedAt: true, updatedAt: true,
+  } });
+  if (!document || document.workspaceId !== params.workspaceId) return 0;
+  return syncKnowledgeForSource({
+    workspaceId: params.workspaceId, sourceType: "DOCUMENT", accessDomain: document.accessDomain,
+    sourceId: document.id, sourceTitle: document.title,
+    content: document.archivedAt ? "" : [document.title, document.textContent].filter(Boolean).join("\n\n"),
+    sourceUpdatedAt: document.updatedAt,
+    metadata: { source: document.source, mimeType: document.mimeType, storageKey: document.storageKey,
+      ...(params.workflowJobId ? { workflowJobId: params.workflowJobId } : {}) },
+    workflowJobId: params.workflowJobId,
+  });
 }
 
 export type WorkspaceIndexingHealth = {

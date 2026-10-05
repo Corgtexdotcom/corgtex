@@ -37,8 +37,8 @@ it("does not let an in-flight document sync restore chunks after archive", async
     const archive = archiveWorkspaceArtifact(actor, {
       workspaceId: workspace.id, entityType: "Document", entityId: document.id,
     }).finally(() => { archiveSettled = true; });
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(archiveSettled).toBe(false);
+    await archive;
+    expect(archiveSettled).toBe(true);
     releaseEmbed();
     await oldSync;
     await archive;

@@ -63,7 +63,7 @@ const { prismaMock, storageDeleteMock, appendEventsMock } = vi.hoisted(() => {
       update: vi.fn(),
       delete: vi.fn(),
     },
-    brainArticle: { findMany: vi.fn() },
+    brainArticle: { findFirst: vi.fn(), findMany: vi.fn(), update: vi.fn() },
     financeImportBatch: {
       findFirst: vi.fn(),
     },
@@ -192,6 +192,23 @@ describe("workspace archive domain", () => {
     expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ action: "workspace-artifact.archived" }),
     }));
+  });
+
+  it("reindexes a restored Brain article after its source is reviewed", async () => {
+    const archived = {
+      id: "article-1", workspaceId: "workspace-1", slug: "reviewed-article",
+      title: "Reviewed article", sourceIds: [], archivedAt: new Date("2026-10-05T00:00:00Z"),
+    };
+    prismaMock.brainArticle.findFirst.mockResolvedValue(archived);
+    prismaMock.brainArticle.update.mockResolvedValue({ ...archived, archivedAt: null });
+    prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValue({ id: "archive-1", previousState: {} });
+
+    const { restoreWorkspaceArtifact } = await import("./archive");
+    await restoreWorkspaceArtifact(actor, { workspaceId: "workspace-1", entityType: "BrainArticle", entityId: "article-1" });
+
+    expect(appendEventsMock).toHaveBeenCalledWith(prismaMock, [expect.objectContaining({
+      type: "brain-article.updated", aggregateId: "article-1", payload: { articleId: "article-1" },
+    })]);
   });
 
   it("archives and restores CRM activities through one reversible ledger", async () => {
