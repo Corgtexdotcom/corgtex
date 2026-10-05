@@ -9,6 +9,7 @@ import { CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS } from "./control-plane";
  */
 const EXPECTED = [
   { flag: "GOALS", label: "Goals", description: "Goal trees, recognition, and progress tracking.", defaultEnabled: true },
+  { flag: "BRAIN_SOURCE_REMOVAL", label: "Brain source removal", description: "Reviewed removal of sources linked to Brain articles. Enable only after compatible workers are deployed.", defaultEnabled: false },
   { flag: "TOOL_LINKS", label: "Tools catalog", description: "Shared tool links, catalog approvals, and credentials.", defaultEnabled: false },
   { flag: "FINANCE", label: "Finance", description: "Clean Finance workspace shell.", defaultEnabled: true },
   { flag: "FINANCE_PROJECTS", label: "Finance projects", description: "Native Finance project records and project-level financial tracking.", defaultEnabled: false },
