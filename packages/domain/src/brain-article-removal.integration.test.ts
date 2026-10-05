@@ -60,6 +60,24 @@ describe("confirmed Brain article removal", () => {
     expect((await prisma.document.findUniqueOrThrow({ where: { id: document.id } })).archivedAt).toBeNull();
   });
 
+  it("rejects restricted source previews for a brain-only credential", async () => {
+    const { workspace } = await fixture();
+    const { document, source } = await sourceWithDocument(workspace.id, "Finance confidential");
+    await prisma.brainSource.update({ where: { id: source.id }, data: { accessDomain: "FINANCE" } });
+    const article = await prisma.brainArticle.create({ data: {
+      workspaceId: workspace.id, slug: "restricted-preview", title: "Article", type: "PROJECT", bodyMd: "Body", sourceIds: [source.id],
+    } });
+    const credential: AppActor = { kind: "agent", authProvider: "credential", label: "Brain reader",
+      workspaceIds: [workspace.id], scopes: ["brain:read"] };
+    await expect(previewBrainArticleRemoval(credential, { workspaceId: workspace.id, slug: article.slug }))
+      .rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+    await prisma.brainSource.update({ where: { id: source.id }, data: { accessDomain: "WORKSPACE" } });
+    await prisma.document.update({ where: { id: document.id }, data: { accessDomain: "FINANCE" } });
+    await expect(previewBrainArticleRemoval(credential, { workspaceId: workspace.id, slug: article.slug }))
+      .rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+    expect(await prisma.workspaceArchiveRecord.count()).toBe(0);
+  });
+
   it("keeps sources for an owner, leaves preview/cancel read-only, and rejects stale or repeated confirmation", async () => {
     const { workspace, admin, owner, outsider, ownerMember } = await fixture();
     const { document, source } = await sourceWithDocument(workspace.id, "Keep");
@@ -160,6 +178,15 @@ describe("confirmed Brain article removal", () => {
     })).resolves.toMatchObject({ phase: "READY" });
     expect(input).toEqual(["Remaining verified facts"]);
     await prisma.workflowJob.update({ where: { id: retried.jobId }, data: { status: "COMPLETED" } });
+    const otherDocument = await prisma.document.create({ data: { workspaceId: workspace.id, title: "New source document",
+      source: "upload", storageKey: `synthetic/${randomUUID()}`, textContent: "Different document" } });
+    await prisma.brainSource.update({ where: { id: removed.id }, data: { metadata: { documentId: otherDocument.id } } });
+    await expect(resolveBrainSourceRemoval(admin, { workspaceId: workspace.id, jobId: retried.jobId, decision: "accept" }))
+      .rejects.toMatchObject({ status: 409, code: "SOURCE_CHANGED" });
+    expect((await prisma.document.findUniqueOrThrow({ where: { id: document.id } })).archivedAt).toBeNull();
+    expect((await prisma.brainSource.findUniqueOrThrow({ where: { id: removed.id } })).archivedAt).toBeNull();
+    expect((await prisma.brainArticle.findUniqueOrThrow({ where: { id: shared.id } })).bodyMd).toBe("Human edited old claims");
+    await prisma.brainSource.update({ where: { id: removed.id }, data: { metadata: { documentId: document.id } } });
     await resolveBrainSourceRemoval(admin, { workspaceId: workspace.id, jobId: retried.jobId, decision: "accept" });
     expect((await prisma.brainArticle.findUniqueOrThrow({ where: { id: shared.id } })).bodyMd).toBe("Verified replacement");
     expect((await prisma.brainArticleVersion.findFirstOrThrow({ where: { articleId: shared.id } })).bodyMd).toBe("Human edited old claims");

@@ -23,6 +23,7 @@ type RemovalRequest = {
   version: 1;
   sourceId: string;
   sourceFingerprint: string;
+  sourceDocumentId: string | null;
   articles: RemovalArticle[];
 };
 
@@ -72,7 +73,7 @@ function readPayload(value: Prisma.JsonValue): RemovalPayload {
 
 function requestMatches(left: RemovalRequest, right: RemovalRequest) {
   const signature = (request: RemovalRequest) => JSON.stringify([
-    request.sourceId, request.sourceFingerprint,
+    request.sourceId, request.sourceFingerprint, request.sourceDocumentId,
     request.articles.map((article) => [
       article.id, article.slug, article.title, article.hash, article.action,
       article.remaining.map((source) => [source.sourceId, source.fingerprint]),
@@ -143,7 +144,8 @@ async function currentPlan(tx: Prisma.TransactionClient, workspaceId: string, so
     article.remaining = article.remaining.map((item) => ({ sourceId: item.sourceId, fingerprint: fingerprints.get(item.sourceId)! }));
   }
   const plan: RemovalRequest = {
-    version: 1, sourceId, sourceFingerprint: brainSourceContentFingerprint(source), articles: plans,
+    version: 1, sourceId, sourceFingerprint: brainSourceContentFingerprint(source),
+    sourceDocumentId: linkedDocumentId(source.metadata), articles: plans,
   };
   if (expected) invariant(requestMatches(plan, expected), 409, "SOURCE_CHANGED", "Sources or articles changed; prepare a new candidate.");
   return plan;
@@ -179,6 +181,8 @@ export async function requestBrainSourceRemoval(actor: AppActor, params: {
         409, "SOURCE_CHANGED", "The linked document is unavailable.");
     }
     const plan = await currentPlan(tx, params.workspaceId, params.sourceId);
+    invariant(!archiveDocumentId || plan.sourceDocumentId === archiveDocumentId,
+      409, "SOURCE_CHANGED", "The source document changed; review it again.");
     if (plan.articles.length > 0) await requireRemovalManager(actor, params.workspaceId);
     if (plan.articles.length > 0) await requireBrainSourceRemovalEnabled(tx, params.workspaceId);
     if (plan.articles.every((article) => article.action === "archive")) {

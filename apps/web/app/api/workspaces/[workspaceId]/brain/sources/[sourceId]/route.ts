@@ -9,8 +9,11 @@ export async function DELETE(request: NextRequest, { params }: Params) {
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId, sourceId } = await params;
-    await deleteSource(actor, { workspaceId, sourceId });
-    return NextResponse.json({ ok: true });
+    const result = await deleteSource(actor, { workspaceId, sourceId });
+    if (result.status === "pending") return NextResponse.json({ ok: false, ...result,
+      reviewUrl: `/workspaces/${workspaceId}/brain/sources?review=${encodeURIComponent(sourceId)}`,
+    }, { status: 202 });
+    return NextResponse.json({ ok: true, ...result });
   } catch (error) {
     return handleRouteError(error);
   }
