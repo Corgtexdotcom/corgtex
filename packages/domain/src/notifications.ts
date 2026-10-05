@@ -14,6 +14,7 @@ const RETRY_MAX_DELAY_MS = 5 * 60 * 1_000;
 
 export const OUTBOUND_ELIGIBLE_NOTIFICATION_TYPES = new Set([
   "deliberation.mention",
+  "deliberation.reply",
   "advice.requested",
   "advice.reminder_due",
   "advice.reply_posted",

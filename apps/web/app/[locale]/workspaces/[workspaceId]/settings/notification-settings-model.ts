@@ -14,6 +14,7 @@ export type NotificationChannelOption = {
 
 export const urgentNotificationRows: NotificationPreferenceRow[] = [
   { type: "deliberation.mention", label: "Mentions", section: "urgent" },
+  { type: "deliberation.reply", label: "Replies to your proposals and tensions", section: "urgent" },
   { type: "advice.requested", label: "Advice/input requests", section: "urgent" },
   { type: "advice.reminder_due", label: "Advice reminders", section: "urgent" },
   { type: "advice.reply_posted", label: "Advice/input replies", section: "urgent" },

@@ -263,6 +263,22 @@ async function parentNotificationContext(tx: Prisma.TransactionClient, params: {
   return { title: null, includeBody: true };
 }
 
+async function publicReplyParent(tx: Prisma.TransactionClient, params: {
+  workspaceId: string;
+  parentType: string;
+  parentId: string;
+}) {
+  const where = { id: params.parentId, workspaceId: params.workspaceId };
+  const select = { authorUserId: true, title: true, status: true, isPrivate: true, archivedAt: true } as const;
+  const parent = params.parentType === "PROPOSAL"
+    ? await tx.proposal.findFirst({ where, select })
+    : params.parentType === "TENSION"
+      ? await tx.tension.findFirst({ where, select })
+      : null;
+  if (!parent || parent.isPrivate || parent.archivedAt || parent.status === "DRAFT") return null;
+  return parent;
+}
+
 function notificationExcerpt(bodyMd: string) {
   const normalized = bodyMd.replace(/\s+/g, " ").trim();
   if (normalized.length <= NOTIFICATION_EXCERPT_LIMIT) return normalized;
@@ -561,22 +577,54 @@ export async function postDeliberationEntry(actor: AppActor, params: {
       explicitTargetUserIds,
       skipManualMentions: skipManualMentionParsing,
     });
+    const replyParent = linkedAdviceRequest ? null : await publicReplyParent(tx, params);
+    let parentAuthorMentionNotified = false;
     if (mentionedUserIds.length > 0) {
       const context = await parentNotificationContext(tx, {
         workspaceId: params.workspaceId,
         parentType: params.parentType,
         parentId: params.parentId,
       });
-      await createNotificationIntent(tx, {
+      const mentionNotification = {
         workspaceId: params.workspaceId,
         type: "deliberation.mention",
-        recipientUserIds: mentionedUserIds,
         actorUserId: authorUserId,
         entityType: parentEntityType(params.parentType),
         entityId: params.parentId,
         title: `${actorLabel(actor)} mentioned you in a ${parentLabel(params.parentType)}${context.title ? `: ${context.title}` : ""}`,
         bodyMd: context.includeBody ? notificationExcerpt(bodyMd) : null,
-        priority: "HIGH",
+        priority: "HIGH" as const,
+      };
+      const parentAuthorWasMentioned = replyParent && mentionedUserIds.includes(replyParent.authorUserId);
+      if (parentAuthorWasMentioned) {
+        const result = await createNotificationIntent(tx, {
+          ...mentionNotification,
+          recipientUserIds: [replyParent.authorUserId],
+        });
+        parentAuthorMentionNotified = result.count > 0;
+      }
+      const remainingRecipients = parentAuthorWasMentioned
+        ? mentionedUserIds.filter((userId) => userId !== replyParent.authorUserId)
+        : mentionedUserIds;
+      if (remainingRecipients.length > 0) {
+        await createNotificationIntent(tx, { ...mentionNotification, recipientUserIds: remainingRecipients });
+      }
+    }
+
+    if (replyParent
+      && replyParent.authorUserId !== authorUserId
+      && !parentAuthorMentionNotified) {
+      await createNotificationIntent(tx, {
+        workspaceId: params.workspaceId,
+        type: "deliberation.reply",
+        recipientUserIds: [replyParent.authorUserId],
+        actorUserId: authorUserId,
+        entityType: parentEntityType(params.parentType),
+        entityId: params.parentId,
+        title: `${actorLabel(actor)} replied to your ${parentLabel(params.parentType)}: ${replyParent.title}`,
+        bodyMd: notificationExcerpt(bodyMd),
+        priority: "NORMAL",
+        dedupeKey: `deliberation-reply:${entry.id}`,
       });
     }
 

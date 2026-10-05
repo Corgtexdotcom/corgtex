@@ -12,6 +12,7 @@ describe("notification settings model", () => {
   it("groups high-signal alert and activity notification types", () => {
     expect(urgentNotificationRows.map((row) => row.type)).toEqual([
       "deliberation.mention",
+      "deliberation.reply",
       "advice.requested",
       "advice.reminder_due",
       "advice.reply_posted",
