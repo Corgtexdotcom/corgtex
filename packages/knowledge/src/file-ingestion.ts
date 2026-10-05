@@ -15,6 +15,7 @@ import {
   requireWorkspaceMembership,
   AppError,
   getStorageUsageSummary,
+  findSourceArticleImpacts,
   isGlobalOperator,
   type DuplicateGuardOptions,
 } from "@corgtex/domain";
@@ -225,11 +226,8 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
     const existingSource = sourceBeforeLock
       ? await tx.brainSource.findFirst({ where: { id: sourceBeforeLock.id, workspaceId: params.workspaceId, archivedAt: null } })
       : null;
-    const linkedArticle = lockedSourceIds.length > 0 ? await tx.brainArticle.findFirst({
-      where: { workspaceId: params.workspaceId, archivedAt: null, sourceIds: { hasSome: lockedSourceIds } },
-      select: { id: true },
-    }) : null;
-    if (linkedArticle) {
+    const articleImpacts = await findSourceArticleImpacts(tx, params.workspaceId, lockedSourceIds);
+    if ([...articleImpacts.values()].some((impact) => impact.articles.length > 0)) {
       throw new AppError(409, "DOCUMENT_REPLACEMENT_REVIEW_REQUIRED",
         "Review or archive this document's linked Brain articles before replacing the file.");
     }

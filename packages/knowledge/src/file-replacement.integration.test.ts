@@ -79,14 +79,16 @@ it("waits for source coordination before acquiring the replacement document row"
   } finally { await replacement?.catch(() => undefined); put.mockRestore(); remove.mockRestore(); }
 });
 
-it.each(["human-authored", "multi-source"])("preserves %s linked articles and the original file pending review", async (kind) => {
+it.each(["human-authored", "multi-source", "derivation-only"])("preserves %s linked articles and the original file pending review", async (kind) => {
   const { workspace, document, source, replace } = await fixture();
   const other = kind === "multi-source" ? await prisma.brainSource.create({ data: {
     workspaceId: workspace.id, sourceType: "FILE_UPLOAD", tier: 2, content: "Other source terms",
   } }) : null;
   const article = await prisma.brainArticle.create({ data: {
     workspaceId: workspace.id, slug: "retained-article", title: "Retained synthesis", type: "PROJECT",
-    bodyMd: "Human-reviewed policy synthesis", sourceIds: [source.id, ...(other ? [other.id] : [])],
+    bodyMd: "Human-reviewed policy synthesis", sourceIds: kind === "derivation-only" ? [] : [source.id, ...(other ? [other.id] : [])],
+    ...(kind === "derivation-only" ? { derivationJson: { version: 1, origin: "brain-absorb", agentRunId: "fixture-run",
+      sources: [{ sourceId: source.id, fingerprint: "fixture-fingerprint" }] } } : {}),
   } });
   const put = vi.spyOn(defaultStorage, "put").mockImplementation(async (key, data) => ({ key, size: data.length }));
   const remove = vi.spyOn(defaultStorage, "delete").mockResolvedValue(undefined);

@@ -55,6 +55,10 @@ vi.mock("@corgtex/domain", () => ({
   lockWorkspaceArchiveArtifact: vi.fn().mockResolvedValue(undefined),
   requireWorkspaceMembership: vi.fn().mockResolvedValue({ id: "mem1" }),
   isGlobalOperator: vi.fn().mockReturnValue(false),
+  findSourceArticleImpacts: vi.fn(async (tx, workspaceId, sourceIds) => {
+    const { findSourceArticleImpacts } = await import("../../domain/src/brain-source-impact");
+    return findSourceArticleImpacts(tx, workspaceId, sourceIds);
+  }),
   getStorageUsageSummary: vi.fn().mockResolvedValue({ usageBytes: 0, limitBytes: Infinity }),
   AppError: class extends Error {
     constructor(public readonly status: number, public readonly code: string, msg: string) {
@@ -596,7 +600,7 @@ describe("file-ingestion", () => {
         create: vi.fn(),
       },
       brainArticle: {
-        findMany: vi.fn().mockResolvedValue([{ id: "article-old", workspaceId: "ws_1", sourceIds: ["source-archived"], archivedAt: null }]),
+        findMany: vi.fn().mockResolvedValue([]),
         findFirst: vi.fn().mockResolvedValue(null),
       },
       knowledgeChunk: { deleteMany: vi.fn() },
@@ -643,8 +647,10 @@ describe("file-ingestion", () => {
     expect(txObj.brainSource.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ metadata: { path: ["documentId"], equals: "doc-existing" } }),
     }));
-    expect(txObj.brainArticle.findFirst).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ sourceIds: { hasSome: ["source-archived", "source-existing"] } }),
+    expect(txObj.brainArticle.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ OR: expect.arrayContaining([
+        { sourceIds: { hasSome: ["source-archived", "source-existing"] } },
+      ]) }),
     }));
     expect(archiveWorkspaceArtifact).not.toHaveBeenCalled();
     expect(txObj.knowledgeChunk.deleteMany).toHaveBeenCalledWith({
@@ -734,7 +740,7 @@ describe("file-ingestion", () => {
         update: vi.fn().mockResolvedValue({ id: "source-existing" }),
       },
       brainArticle: {
-        findMany: vi.fn().mockResolvedValue([{ id: "article-old" }]),
+        findMany: vi.fn().mockResolvedValue([{ id: "article-old", sourceIds: ["source-existing"], derivationJson: null }]),
         findFirst: vi.fn().mockResolvedValue({ id: "article-old" }),
       },
       knowledgeChunk: { deleteMany: vi.fn() },
@@ -745,7 +751,7 @@ describe("file-ingestion", () => {
     vi.mocked(prisma.$transaction)
       .mockImplementationOnce(async (callback: any) => callback(firstTx))
       .mockImplementationOnce(async (callback: any) => callback(retryTx));
-    retryTx.brainArticle.findFirst.mockResolvedValue(null);
+    retryTx.brainArticle.findMany.mockResolvedValue([]);
     const input = {
       workspaceId: "ws_1", fileName: "replacement.txt", mimeType: "text/plain",
       fileBuffer: Buffer.from("Replacement"), uploadSource: "FILE_UPLOAD",
