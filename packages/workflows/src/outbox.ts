@@ -4,6 +4,7 @@ import { withWorkspaceSupportExecution, withMcpConnectionExecution } from "@corg
 import { deriveJobsForEvent } from "./derive-jobs";
 import { handleReleaseDiagnostic } from "./release-diagnostic-handler";
 import { deriveDispatchNotifications } from "./derive-notifications";
+import { createActionAssignmentNotification } from "./action-assignment-notifications";
 import { recordWorkflowJobProcessedMetric } from "./job-metrics";
 import { handleKnowledgeSync, handleMeetingKnowledgeSync, handleDocumentKnowledgeSync, handleExternalResourceKnowledgeSync, handleExternalContentKnowledgeSync, handleEventKnowledgeSync, handleTensionKnowledgeSync, handleActionKnowledgeSync, handleCircleKnowledgeSync, handleRoleKnowledgeSync, handleSlackMessageKnowledgeSync, handleCalendarSync, handleOAuthDocumentsSync, handleOAuthEmailSync, handleContextGraphSync, handleContextGraphStalenessSweep, handleContextGraphReconcile } from "./handlers";
 import { FINANCE_REPORT_IMPORT_EXTRACTION_JOB_TYPE, FINANCE_REPORT_IMPORT_PROPOSAL_JOB_TYPE, handleGovernanceScoring,
@@ -419,7 +420,7 @@ export async function notificationActorUserIdForEvent(
   tx: Prisma.TransactionClient,
   event: Pick<ClaimedEvent, "type" | "workspaceId" | "aggregateType" | "aggregateId" | "payload">,
 ): Promise<string | null> {
-  if (event.type === "action.published" || event.type === "tension.published") {
+  if (event.type === "action.published" || event.type === "action.assigned" || event.type === "tension.published") {
     const payload = event.payload;
     if (payload && typeof payload === "object" && !Array.isArray(payload) && "actorUserId" in payload) {
       const actorUserId = payload.actorUserId;
@@ -445,12 +446,18 @@ export async function notificationActorUserIdForEvent(
   return actorAudit?.actorUserId ?? null;
 }
 
-async function createNotificationsForEvent(tx: Prisma.TransactionClient, event: ClaimedEvent) {
+export async function createNotificationsForEvent(tx: Prisma.TransactionClient, event: ClaimedEvent) {
   if (!event.workspaceId) {
     return;
   }
 
   if (await createAdviceNotificationsForEvent(tx, event)) {
+    return;
+  }
+
+  if (event.type === "action.assigned") {
+    const actorUserId = await notificationActorUserIdForEvent(tx, event);
+    await createActionAssignmentNotification(tx, event, actorUserId);
     return;
   }
 
@@ -460,6 +467,9 @@ async function createNotificationsForEvent(tx: Prisma.TransactionClient, event: 
   }
 
   const actorUserId = await notificationActorUserIdForEvent(tx, event);
+  const assignedUserId = event.type === "action.published"
+    ? await createActionAssignmentNotification(tx, event, actorUserId)
+    : null;
 
   const members = await tx.member.findMany({
     where: {
@@ -478,7 +488,7 @@ async function createNotificationsForEvent(tx: Prisma.TransactionClient, event: 
     await createNotificationIntent(tx, {
       workspaceId: event.workspaceId,
       type: notification.type,
-      recipientUserIds: members.map((member) => member.userId),
+      recipientUserIds: members.map((member) => member.userId).filter((userId) => userId !== assignedUserId),
       actorUserId,
       entityType: notification.entityType,
       entityId: notification.entityId,
