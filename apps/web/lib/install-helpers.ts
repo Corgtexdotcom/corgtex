@@ -129,8 +129,12 @@ export function buildClaudeCodeCommand(connectorUrl: string): string {
   return `claude mcp add --transport http ${mcpConnectionName(connectorUrl)} --scope user ${connectorUrl}`;
 }
 
+export function buildCodexMcpCommand(connectorUrl: string): string {
+  return `codex mcp add ${mcpConnectionName(connectorUrl)} --url ${connectorUrl}`;
+}
+
 export function buildCopilotCliCommand(connectorUrl: string): string {
-  return `copilot mcp add ${mcpConnectionName(connectorUrl)} --type http --url ${connectorUrl} --tools "*"`;
+  return `copilot mcp add --transport http ${mcpConnectionName(connectorUrl)} ${connectorUrl}`;
 }
 
 export function buildGeminiMcpCommand(connectorUrl: string): string {
@@ -140,11 +144,11 @@ export function buildGeminiMcpCommand(connectorUrl: string): string {
 export const CLAUDE_CONNECTORS_URL = "https://claude.ai/customize/connectors";
 export const CLAUDE_CHAT_URL = "https://claude.ai/new";
 export const CHATGPT_CHAT_URL = "https://chatgpt.com/";
-export const CHATGPT_CONNECTORS_URL = "https://chatgpt.com/#settings/Connectors";
-export const CHATGPT_CONNECTORS_ADVANCED_URL = "https://chatgpt.com/#settings/Connectors/Advanced";
+export const CHATGPT_APPS_GUIDE_URL = "https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt";
+export const CODEX_MCP_DOCS_URL = "https://learn.chatgpt.com/docs/extend/mcp?surface=cli";
 export const COPILOT_DOCS_URL = "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference";
 export const COPILOT_VSCODE_MCP_DOCS_URL = "https://code.visualstudio.com/docs/copilot/chat/mcp-servers";
-export const CURSOR_MCP_DOCS_URL = "https://docs.cursor.com/context/model-context-protocol";
+export const CURSOR_MCP_DOCS_URL = "https://cursor.com/docs/mcp";
 export const GEMINI_MCP_DOCS_URL = "https://google-gemini.github.io/gemini-cli/docs/tools/mcp-server.html";
 export const OPENWORK_DOWNLOAD_URL = "https://openworklabs.com/download";
 
@@ -163,6 +167,7 @@ export type InstallerProviderKey =
   | "openwork"
   | "claude"
   | "chatgpt"
+  | "codex"
   | "cursor"
   | "copilot"
   | "gemini"
@@ -173,6 +178,7 @@ const INSTALLER_PROVIDER_SLUGS: Record<string, InstallerProviderKey> = {
   openwork: "openwork",
   claude: "claude",
   chatgpt: "chatgpt",
+  codex: "codex",
   cursor: "cursor",
   copilot: "copilot",
   gemini: "gemini",

@@ -124,8 +124,8 @@ export const AI_WORKSPACE_PROVIDER_REGISTRY = {
     key: "chatgpt",
     label: "ChatGPT",
     shortLabel: "ChatGPT",
-    outcome: "Bring Corgtex company context into a ChatGPT workspace that supports custom connectors.",
-    description: "Use this path when the customer already standardizes on ChatGPT and wants Corgtex available through approved connectors.",
+    outcome: "Bring Corgtex company context into ChatGPT web through a custom MCP app.",
+    description: "Use this path when the customer already standardizes on ChatGPT web and wants Corgtex available through an approved app. Codex uses a separate local MCP setup.",
     category: "BYO",
     recommendedDefault: false,
     freeDefault: false,
@@ -141,7 +141,7 @@ export const AI_WORKSPACE_PROVIDER_REGISTRY = {
         primaryAction: "copyAndOpen",
         manualSteps: [
           "Confirm the ChatGPT workspace plan and admin policy allow custom MCP apps or connectors.",
-          "Open ChatGPT connector settings and enable Developer Mode from Advanced settings if required.",
+          "Open Workspace settings → Apps → Create and enable Developer mode if required.",
           "Create a Corgtex app and paste the HTTPS Corgtex MCP URL.",
           "Scan tools. When ChatGPT opens Corgtex, authorize as your current Corgtex user for the selected workspace.",
           "Test with an admin account, then publish or approve the connector for users.",
@@ -155,9 +155,9 @@ export const AI_WORKSPACE_PROVIDER_REGISTRY = {
         audience: "Users in workspaces where custom app creation is already allowed.",
         primaryAction: "copyAndOpen",
         manualSteps: [
-          "Open ChatGPT Settings, then Connectors, then Advanced settings.",
+          "Open ChatGPT web Settings → Apps → Advanced Settings.",
           "Turn on Developer Mode.",
-          "Create a personal Corgtex app using the HTTPS Corgtex MCP URL.",
+          "Open Settings → Apps → Create and create a Corgtex app using the HTTPS Corgtex MCP URL.",
           "Scan tools. When ChatGPT opens Corgtex, authorize as your current Corgtex user, then select Corgtex from Developer Mode in chat.",
         ],
         limitations: ["User-created apps may be blocked or require review in managed ChatGPT workspaces."],
@@ -299,12 +299,12 @@ export const AI_WORKSPACE_PROVIDER_REGISTRY = {
     setupVariants: [
       {
         variantKey: "cursor_deeplink",
-        label: "Cursor MCP install",
+        label: "Cursor MCP configuration",
         audience: "Technical and product teams using Cursor.",
-        primaryAction: "cursorInstall",
+        primaryAction: "copy",
         manualSteps: [
-          "Open the Add to Cursor prompt or use Cursor MCP settings.",
-          "Install the Corgtex Streamable HTTP MCP server.",
+          "Open Cursor MCP settings or your user/workspace mcp.json file.",
+          "Paste the generated Corgtex Streamable HTTP MCP configuration.",
           "When Cursor opens Corgtex, authorize as your current Corgtex user for the selected workspace.",
           "Confirm Corgtex tools are visible before changing files.",
         ],

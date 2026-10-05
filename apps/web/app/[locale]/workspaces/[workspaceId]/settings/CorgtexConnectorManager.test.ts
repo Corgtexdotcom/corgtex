@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildClaudeCodeCommand,
   buildClaudeInstallerShareUrl,
+  buildCodexMcpCommand,
   buildCopilotCliCommand,
   buildCopilotCliMcpConfig,
   buildCursorInstallLinks,
@@ -15,8 +16,7 @@ import {
   buildInstallerShareUrl,
   buildVsCodeMcpConfig,
   CHATGPT_CHAT_URL,
-  CHATGPT_CONNECTORS_ADVANCED_URL,
-  CHATGPT_CONNECTORS_URL,
+  CHATGPT_APPS_GUIDE_URL,
   CLAUDE_CHAT_URL,
   CLAUDE_CONNECTORS_URL,
   CLAUDE_INSTALLER_PATH,
@@ -81,7 +81,7 @@ describe("CorgtexConnectorManager setup helpers", () => {
 
   it("builds Copilot and VS Code MCP setup snippets", () => {
     expect(buildCopilotCliCommand(CONNECTOR_URL)).toBe(
-      "copilot mcp add corgtex --type http --url https://mcp.corgtex.com/mcp --tools \"*\"",
+      "copilot mcp add --transport http corgtex https://mcp.corgtex.com/mcp",
     );
     expect(buildCopilotCliMcpConfig(CONNECTOR_URL)).toEqual({
       mcpServers: {
@@ -119,10 +119,10 @@ describe("CorgtexConnectorManager setup helpers", () => {
     expect(CLAUDE_CONNECTORS_URL).toBe("https://claude.ai/customize/connectors");
   });
 
-  it("opens ChatGPT connector settings for developer-mode MCP apps", () => {
-    expect(CHATGPT_CONNECTORS_URL).toBe("https://chatgpt.com/#settings/Connectors");
-    expect(CHATGPT_CONNECTORS_ADVANCED_URL).toBe("https://chatgpt.com/#settings/Connectors/Advanced");
+  it("links to current ChatGPT Apps guidance and keeps Codex setup distinct", () => {
+    expect(CHATGPT_APPS_GUIDE_URL).toContain("developer-mode-and-mcp-apps-in-chatgpt");
     expect(CHATGPT_CHAT_URL).toBe("https://chatgpt.com/");
+    expect(buildCodexMcpCommand(CONNECTOR_URL)).toBe("codex mcp add corgtex --url https://mcp.corgtex.com/mcp");
   });
 
   it("opens a new Claude chat from connected rail state", () => {
