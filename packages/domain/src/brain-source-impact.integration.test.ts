@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { archiveWorkspaceArtifact, restoreWorkspaceArtifact } from "./archive";
@@ -108,6 +108,60 @@ describe("Brain source archive impact", () => {
     expect(await articleOutcome).toMatchObject({ code: "SOURCE_CHANGED", status: 409 });
     expect(await prisma.brainArticle.count({ where: { workspaceId: workspace.id } })).toBe(0);
     await archiveWorkspaceArtifact(editor, { workspaceId: workspace.id, entityType: "Document", entityId: document.id });
+  });
+
+  it("rejects document archive when a concurrent replacement commits a new source", async () => {
+    const workspace = await prisma.workspace.create({ data: { name: "Document replacement race", slug: `replacement-race-${randomUUID()}` } });
+    const user = await prisma.user.create({ data: { email: `replacement-race-${randomUUID()}@example.test`, passwordHash: "fixture" } });
+    await prisma.member.create({ data: { workspaceId: workspace.id, userId: user.id, role: "ADMIN" } });
+    const actor: AppActor = { kind: "user", user: { id: user.id, email: user.email, displayName: "Admin" } };
+    const document = await prisma.document.create({ data: {
+      workspaceId: workspace.id, title: "Replacement document", source: "FILE_UPLOAD", storageKey: `synthetic/${randomUUID()}`,
+      textContent: "Original text",
+    } });
+    let releaseReplacement!: () => void;
+    let replacementReady!: () => void;
+    const held = new Promise<void>((resolve) => { releaseReplacement = resolve; });
+    const ready = new Promise<void>((resolve) => { replacementReady = resolve; });
+    const replacing = prisma.$transaction(async (tx) => {
+      // Match replacement of a document without existing Brain source entries:
+      // hold the document row while the new linked source is still uncommitted.
+      await tx.$queryRaw`SELECT id FROM "Document" WHERE id = ${document.id} FOR UPDATE`;
+      await tx.document.update({ where: { id: document.id }, data: { textContent: "Replacement text" } });
+      const source = await tx.brainSource.create({ data: {
+        workspaceId: workspace.id, sourceType: "FILE_UPLOAD", tier: 2, content: "Replacement text",
+        metadata: { documentId: document.id },
+      } });
+      replacementReady();
+      await held;
+      return source;
+    }, { timeout: 15_000 });
+    await ready;
+    let archivePid: number | undefined;
+    const archiving = prisma.$transaction(async (tx) => {
+      const [connection] = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      archivePid = connection.pid;
+      return archiveWorkspaceArtifact(actor, { workspaceId: workspace.id, entityType: "Document", entityId: document.id, _tx: tx });
+    }, { timeout: 15_000 }).then(() => null, (error: unknown) => error);
+    try {
+      // Both the original UPDATE and the fixed explicit row lock wait here;
+      // PostgreSQL proves archive passed its initial, empty source-set read.
+      await vi.waitFor(async () => {
+        expect(archivePid).toBeDefined();
+        const [state] = await prisma.$queryRaw<{ blocked: boolean }[]>`SELECT cardinality(pg_blocking_pids(${archivePid!}::int)) > 0 AS blocked`;
+        expect(state.blocked).toBe(true);
+      }, { timeout: 5_000 });
+      releaseReplacement();
+      const source = await replacing;
+      expect(await archiving).toMatchObject({ status: 409, code: "SOURCE_CHANGED" });
+      expect(await prisma.document.findUniqueOrThrow({ where: { id: document.id } }))
+        .toMatchObject({ archivedAt: null, textContent: "Replacement text" });
+      expect((await prisma.brainSource.findUniqueOrThrow({ where: { id: source.id } })).archivedAt).toBeNull();
+      expect(await prisma.workspaceArchiveRecord.count({ where: { entityType: "Document", entityId: document.id } })).toBe(0);
+    } finally {
+      releaseReplacement();
+      await Promise.allSettled([replacing, archiving]);
+    }
   });
 
   it("does not commit an in-flight edit or publication after article archive commits", async () => {

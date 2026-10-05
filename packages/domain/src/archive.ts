@@ -625,7 +625,7 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
 
   const archive = async (tx: Prisma.TransactionClient) => {
     await lockWorkspaceArchiveArtifact(tx, config.entityType, params.entityId);
-    const record = await findRecord(tx, config, params.workspaceId, params.entityId);
+    let record = await findRecord(tx, config, params.workspaceId, params.entityId);
     await config.canArchive?.({ tx, record, actor, membership });
     if (params.expectedVersion !== undefined) {
       invariant(record.version === params.expectedVersion, 409, "VERSION_CONFLICT", "The record changed. Reload and try again.");
@@ -635,7 +635,7 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
     }
 
     if (config.entityType === "BrainSource" || config.entityType === "Document") {
-      const documentSources = config.entityType === "Document" ? await tx.brainSource.findMany({
+      let documentSources = config.entityType === "Document" ? await tx.brainSource.findMany({
         where: {
           workspaceId: params.workspaceId,
           metadata: { path: ["documentId"], equals: record.id },
@@ -645,6 +645,18 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
       const sourceIds = config.entityType === "BrainSource" ? [record.id] : documentSources.map((source) => source.id);
       if (config.entityType === "Document") {
         for (const sourceId of sourceIds.sort()) await lockBrainSourceLink(tx, sourceId);
+        // File replacement also locks sources before the document. Re-read after
+        // waiting for its row lock; never acquire newly discovered source locks
+        // here, which would invert that order.
+        await tx.$queryRaw`SELECT id FROM "Document" WHERE id = ${record.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+        record = await findRecord(tx, config, params.workspaceId, params.entityId);
+        if (record.archivedAt) return record;
+        documentSources = await tx.brainSource.findMany({
+          where: { workspaceId: params.workspaceId, metadata: { path: ["documentId"], equals: record.id } },
+          select: { id: true, archivedAt: true },
+        });
+        invariant(documentSources.every((source) => sourceIds.includes(source.id)), 409, "SOURCE_CHANGED",
+          "Document source links changed. Reload before archiving the document.");
       }
       const impacts = await findSourceArticleImpacts(tx, params.workspaceId, sourceIds);
       invariant(
