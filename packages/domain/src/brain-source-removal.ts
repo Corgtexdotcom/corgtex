@@ -30,7 +30,26 @@ type RemovalPayload = RemovalRequest & {
   generationToken?: string;
   regenerationRunId?: string;
   candidates?: Record<string, string>;
+  archiveDocumentId?: string;
+  continuationSourceIds?: string[];
+  nextPendingSourceId?: string | null;
 };
+
+function linkedDocumentId(metadata: Prisma.JsonValue | null) {
+  return metadata && typeof metadata === "object" && !Array.isArray(metadata)
+    && typeof metadata.documentId === "string" ? metadata.documentId : null;
+}
+
+async function archiveLinkedDocumentIfResolved(tx: Prisma.TransactionClient, actor: AppActor, workspaceId: string, documentId?: string) {
+  if (!documentId) return;
+  const activeSources = await tx.brainSource.count({ where: {
+    workspaceId, archivedAt: null, metadata: { path: ["documentId"], equals: documentId },
+  } });
+  if (activeSources > 0) return;
+  const document = await tx.document.findFirst({ where: { id: documentId, workspaceId, archivedAt: null } });
+  if (document) await archiveWorkspaceArtifact(actor, { workspaceId, entityType: "Document", entityId: documentId,
+    reason: "Linked sources removed after reviewed article removal.", _tx: tx });
+}
 
 function hashArticle(article: {
   updatedAt: Date; title: string; type: string; authority: string; bodyMd: string;
@@ -141,12 +160,23 @@ async function latestRemovalJob(tx: Prisma.TransactionClient | typeof prisma, wo
   });
 }
 
-export async function requestBrainSourceRemoval(actor: AppActor, params: { workspaceId: string; sourceId: string }) {
+export async function requestBrainSourceRemoval(actor: AppActor, params: {
+  workspaceId: string; sourceId: string; archiveLinkedDocument?: boolean; _tx?: Prisma.TransactionClient;
+}) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  return prisma.$transaction(async (tx) => {
+  const request = async (tx: Prisma.TransactionClient) => {
     const existingSource = await tx.brainSource.findFirst({ where: { id: params.sourceId, workspaceId: params.workspaceId } });
     invariant(existingSource, 404, "NOT_FOUND", "Source not found.");
-    if (existingSource.archivedAt) return { id: existingSource.id, status: "archived" as const };
+    const archiveDocumentId = params.archiveLinkedDocument ? linkedDocumentId(existingSource.metadata) : null;
+    if (existingSource.archivedAt) {
+      await archiveLinkedDocumentIfResolved(tx, actor, params.workspaceId, archiveDocumentId ?? undefined);
+      return { id: existingSource.id, status: "archived" as const };
+    }
+    if (params.archiveLinkedDocument) {
+      invariant(archiveDocumentId, 409, "SOURCE_CHANGED", "The source no longer belongs to a document.");
+      invariant(await tx.document.count({ where: { id: archiveDocumentId, workspaceId: params.workspaceId, archivedAt: null } }) === 1,
+        409, "SOURCE_CHANGED", "The linked document is unavailable.");
+    }
     const plan = await currentPlan(tx, params.workspaceId, params.sourceId);
     if (plan.articles.length > 0) await requireRemovalManager(actor, params.workspaceId);
     if (plan.articles.every((article) => article.action === "archive")) {
@@ -160,6 +190,7 @@ export async function requestBrainSourceRemoval(actor: AppActor, params: { works
         workspaceId: params.workspaceId, entityType: "BrainSource", entityId: params.sourceId,
         reason: "Removed after linked articles were archived.", _tx: tx,
       });
+      await archiveLinkedDocumentIfResolved(tx, actor, params.workspaceId, archiveDocumentId ?? undefined);
       return { id: params.sourceId, status: "archived" as const };
     }
     const latest = await latestRemovalJob(tx, params.workspaceId, params.sourceId);
@@ -167,15 +198,76 @@ export async function requestBrainSourceRemoval(actor: AppActor, params: { works
       const payload = readPayload(latest.payload);
       if (requestMatches(plan, payload) && (latest.status === "PENDING" || latest.status === "RUNNING"
         || (latest.status === "COMPLETED" && (payload.phase === "READY" || payload.phase === "APPLIED")))) {
+        if (archiveDocumentId && payload.archiveDocumentId !== archiveDocumentId) {
+          invariant(false, 409, "REMOVAL_ALREADY_PENDING", "Finish the existing source review before removing its document.");
+        }
         return { id: params.sourceId, status: "pending" as const, jobId: latest.id };
       }
     }
     const job = await tx.workflowJob.create({ data: {
       workspaceId: params.workspaceId, type: "agent.brain-source-regenerate",
       dedupeKey: `brain-source-removal:${params.workspaceId}:${params.sourceId}:${randomUUID()}`,
-      payload: { ...plan, phase: "REQUESTED" } as Prisma.InputJsonObject,
+      payload: { ...plan, phase: "REQUESTED", ...(archiveDocumentId ? { archiveDocumentId } : {}) } as Prisma.InputJsonObject,
     } });
     return { id: params.sourceId, status: "pending" as const, jobId: job.id };
+  };
+  return params._tx ? request(params._tx) : prisma.$transaction(request, { maxWait: 5_000, timeout: 120_000 });
+}
+
+/** Continue a confirmed multi-source removal only after each shared-source review is accepted. */
+export async function continueBrainSourceRemovals(tx: Prisma.TransactionClient, actor: AppActor, workspaceId: string, sourceIds: string[]) {
+  for (let index = 0; index < sourceIds.length; index++) {
+    const sourceId = sourceIds[index];
+    const source = await tx.brainSource.findFirst({ where: { id: sourceId, workspaceId } });
+    invariant(source, 409, "SOURCE_CHANGED", "A selected source is unavailable.");
+    const result = await requestBrainSourceRemoval(actor, {
+      workspaceId, sourceId, archiveLinkedDocument: !!linkedDocumentId(source.metadata), _tx: tx,
+    });
+    if (result.status !== "pending") continue;
+    const job = await tx.workflowJob.findUniqueOrThrow({ where: { id: result.jobId } });
+    const payload = readPayload(job.payload);
+    invariant(!payload.continuationSourceIds, 409, "REMOVAL_ALREADY_PENDING", "A source already has a removal sequence in progress.");
+    await tx.workflowJob.update({ where: { id: job.id }, data: {
+      payload: { ...payload, continuationSourceIds: sourceIds.slice(index + 1) } as Prisma.InputJsonObject,
+    } });
+    return { pendingJobId: job.id, pendingSourceId: sourceId };
+  }
+  return { pendingJobId: null, pendingSourceId: null };
+}
+
+export async function retryBrainSourceRemoval(actor: AppActor, params: { workspaceId: string; jobId: string }) {
+  await requireRemovalManager(actor, params.workspaceId);
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "WorkflowJob" WHERE id = ${params.jobId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    const oldJob = await tx.workflowJob.findFirst({ where: {
+      id: params.jobId, workspaceId: params.workspaceId, type: "agent.brain-source-regenerate",
+    } });
+    invariant(oldJob, 404, "NOT_FOUND", "Source removal job not found.");
+    const old = readPayload(oldJob.payload);
+    invariant(oldJob.status === "FAILED" || (oldJob.status === "COMPLETED" && (old.phase === "STALE" || old.phase === "REJECTED")),
+      409, "INVALID_STATE", "This source review is not ready to retry.");
+    const latest = await latestRemovalJob(tx, params.workspaceId, old.sourceId);
+    invariant(latest?.id === oldJob.id, 409, "INVALID_STATE", "A newer source review already exists.");
+    const source = await tx.brainSource.findFirst({ where: { id: old.sourceId, workspaceId: params.workspaceId } });
+    invariant(source && (!old.archiveDocumentId || linkedDocumentId(source.metadata) === old.archiveDocumentId),
+      409, "SOURCE_CHANGED", "The source document changed; review it again.");
+    const result = await requestBrainSourceRemoval(actor, {
+      workspaceId: params.workspaceId, sourceId: old.sourceId,
+      archiveLinkedDocument: !!old.archiveDocumentId, _tx: tx,
+    });
+    if (result.status === "pending") {
+      const newJob = await tx.workflowJob.findUniqueOrThrow({ where: { id: result.jobId } });
+      const payload = readPayload(newJob.payload);
+      await tx.workflowJob.update({ where: { id: newJob.id }, data: {
+        payload: { ...payload, continuationSourceIds: old.continuationSourceIds ?? [] } as Prisma.InputJsonObject,
+      } });
+    } else {
+      const continued = old.continuationSourceIds?.length
+        ? await continueBrainSourceRemovals(tx, actor, params.workspaceId, old.continuationSourceIds)
+        : { pendingSourceId: null };
+      return { ...result, pendingSourceId: continued.pendingSourceId };
+    }
+    return result;
   }, { maxWait: 5_000, timeout: 120_000 });
 }
 
@@ -292,11 +384,13 @@ export async function resolveBrainSourceRemoval(actor: AppActor, params: {
     const job = await tx.workflowJob.findFirst({ where: { id: params.jobId, workspaceId: params.workspaceId, type: "agent.brain-source-regenerate" } });
     invariant(job, 404, "NOT_FOUND", "Regeneration candidate not found.");
     const payload = readPayload(job.payload);
-    if (payload.phase === "APPLIED" && params.decision === "accept") return { status: "applied" as const, sourceId: payload.sourceId };
+    if (payload.phase === "APPLIED" && params.decision === "accept") return {
+      status: "applied" as const, sourceId: payload.sourceId, pendingSourceId: payload.nextPendingSourceId ?? null,
+    };
     invariant(job.status === "COMPLETED" && payload.phase === "READY", 409, "INVALID_STATE", "Candidate is not ready for review.");
     if (params.decision === "reject") {
       await tx.workflowJob.update({ where: { id: job.id }, data: { payload: { ...payload, phase: "REJECTED" } as Prisma.InputJsonObject } });
-      return { status: "rejected" as const, sourceId: payload.sourceId };
+      return { status: "rejected" as const, sourceId: payload.sourceId, pendingSourceId: null };
     }
     await currentPlan(tx, params.workspaceId, payload.sourceId, payload);
     invariant(payload.candidates && payload.regenerationRunId, 409, "INVALID_STATE", "Candidate provenance is missing.");
@@ -337,7 +431,13 @@ export async function resolveBrainSourceRemoval(actor: AppActor, params: {
     }
     await archiveWorkspaceArtifact(actor, { workspaceId: params.workspaceId, entityType: "BrainSource", entityId: payload.sourceId,
       reason: "Removed after reviewed article regeneration.", _tx: tx });
-    await tx.workflowJob.update({ where: { id: job.id }, data: { payload: { ...payload, phase: "APPLIED" } as Prisma.InputJsonObject } });
-    return { status: "applied" as const, sourceId: payload.sourceId };
+    await archiveLinkedDocumentIfResolved(tx, actor, params.workspaceId, payload.archiveDocumentId);
+    const continued = payload.continuationSourceIds?.length
+      ? await continueBrainSourceRemovals(tx, actor, params.workspaceId, payload.continuationSourceIds)
+      : { pendingSourceId: null };
+    await tx.workflowJob.update({ where: { id: job.id }, data: {
+      payload: { ...payload, phase: "APPLIED", nextPendingSourceId: continued.pendingSourceId } as Prisma.InputJsonObject,
+    } });
+    return { status: "applied" as const, sourceId: payload.sourceId, pendingSourceId: continued.pendingSourceId };
   }, { maxWait: 5_000, timeout: 120_000 });
 }

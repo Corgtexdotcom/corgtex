@@ -85,9 +85,9 @@ describe("Brain source removal review", () => {
     const [review] = await listBrainSourceRemovalReviews(actor, { workspaceId: workspace.id, sourceIds: [removed.id] });
     expect(review.articles[0]).toMatchObject({ currentBodyMd: "Human revised facts", candidateBodyMd: "Facts from remaining source only" });
     expect(await resolveBrainSourceRemoval(actor, { workspaceId: workspace.id, jobId: requested.jobId, decision: "accept" }))
-      .toEqual({ status: "applied", sourceId: removed.id });
+      .toEqual({ status: "applied", sourceId: removed.id, pendingSourceId: null });
     expect(await resolveBrainSourceRemoval(actor, { workspaceId: workspace.id, jobId: requested.jobId, decision: "accept" }))
-      .toEqual({ status: "applied", sourceId: removed.id });
+      .toEqual({ status: "applied", sourceId: removed.id, pendingSourceId: null });
     const updated = await prisma.brainArticle.findUniqueOrThrow({ where: { id: article.id }, include: { versions: true } });
     expect(updated.bodyMd).toBe("Facts from remaining source only");
     expect(updated.sourceIds).toEqual([remaining.id]);

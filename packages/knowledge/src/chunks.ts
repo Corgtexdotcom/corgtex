@@ -245,6 +245,25 @@ export async function syncBrainArticleKnowledge(params: {
   }, { maxWait: 5_000, timeout: 180_000 });
 }
 
+export async function syncDocumentKnowledge(params: { workspaceId: string; documentId: string; workflowJobId?: string }) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`document_index:${params.workspaceId}:${params.documentId}`}, 0))`;
+    const document = await tx.document.findUnique({ where: { id: params.documentId }, select: {
+      id: true, workspaceId: true, title: true, source: true, mimeType: true, storageKey: true,
+      textContent: true, accessDomain: true, archivedAt: true,
+    } });
+    if (!document || document.workspaceId !== params.workspaceId) return 0;
+    return syncKnowledgeForSource({
+      workspaceId: params.workspaceId, sourceType: "DOCUMENT", accessDomain: document.accessDomain,
+      sourceId: document.id, sourceTitle: document.title,
+      content: document.archivedAt ? "" : [document.title, document.textContent].filter(Boolean).join("\n\n"),
+      metadata: { source: document.source, mimeType: document.mimeType, storageKey: document.storageKey,
+        ...(params.workflowJobId ? { workflowJobId: params.workflowJobId } : {}) },
+      workflowJobId: params.workflowJobId,
+    });
+  }, { maxWait: 5_000, timeout: 180_000 });
+}
+
 export type WorkspaceIndexingHealth = {
   status: "healthy" | "degraded" | "unhealthy";
   metrics: {
@@ -323,7 +342,7 @@ export async function reindexWorkspace(workspaceId: string) {
     }),
     prisma.document.findMany({
       where: { workspaceId, textContent: { not: null }, archivedAt: null },
-      select: { id: true, title: true, textContent: true, source: true, mimeType: true, storageKey: true, accessDomain: true },
+      select: { id: true },
     }),
   ]);
 
@@ -359,22 +378,8 @@ export async function reindexWorkspace(workspaceId: string) {
   }
 
   for (const doc of documentsToReindex) {
-    if (!doc.textContent) continue;
     try {
-      await syncKnowledgeForSource({
-        workspaceId,
-        sourceType: "DOCUMENT",
-        accessDomain: doc.accessDomain,
-        sourceId: doc.id,
-        sourceTitle: doc.title,
-        content: [doc.title, doc.textContent].filter(Boolean).join("\n\n"),
-        metadata: {
-          source: doc.source,
-          mimeType: doc.mimeType,
-          storageKey: doc.storageKey,
-        },
-      });
-      reindexedDocuments++;
+      if (await syncDocumentKnowledge({ workspaceId, documentId: doc.id })) reindexedDocuments++;
     } catch (err) {
       errors.push(`Failed to reindex document ${doc.id}: ${err instanceof Error ? err.message : String(err)}`);
     }

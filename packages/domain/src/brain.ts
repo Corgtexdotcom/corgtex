@@ -654,6 +654,7 @@ export async function ingestSource(actor: AppActor, params: {
 
 export async function listSources(actor: AppActor, params: {
   workspaceId: string;
+  sourceId?: string;
   absorbed?: boolean;
   take?: number;
   skip?: number;
@@ -666,6 +667,7 @@ export async function listSources(actor: AppActor, params: {
 
   const where: Prisma.BrainSourceWhereInput = {
     workspaceId: params.workspaceId,
+    ...(params.sourceId ? { id: params.sourceId } : {}),
     accessDomain: { in: accessDomains },
     ...archiveFilterWhere(params.archiveFilter),
   };

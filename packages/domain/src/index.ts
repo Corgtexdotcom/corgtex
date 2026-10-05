@@ -22,6 +22,7 @@ export * from "./brain";
 export * from "./brain-derivation";
 export * from "./brain-source-impact";
 export * from "./brain-source-removal";
+export * from "./brain-article-removal";
 export * from "./brain-access";
 export * from "./brain-source-recovery";
 export * from "./audit-trail";

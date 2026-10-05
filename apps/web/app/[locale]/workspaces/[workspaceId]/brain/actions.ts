@@ -4,12 +4,15 @@ import { enforceDemoGuard } from "@/lib/demo-guard";
 
 import type { BrainArticleAuthority, BrainArticleType, BrainSourceType } from "@prisma/client";
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 import {
   AGREEMENT_BRAIN_ARTICLE_AUTHORITIES,
   AGREEMENT_BRAIN_ARTICLE_TYPES,
   createArticle,
+  confirmBrainArticleRemoval,
   deleteSource,
   resolveBrainSourceRemoval,
+  retryBrainSourceRemoval,
   updateArticle,
   ingestSource,
   publishArticle,
@@ -178,6 +181,35 @@ export async function resolveSourceRemovalAction(formData: FormData) {
   const actor = await requirePageActor();
   const decision = asString(formData, "decision");
   if (decision !== "accept" && decision !== "reject") throw new Error("Invalid source review decision.");
-  await resolveBrainSourceRemoval(actor, { workspaceId, jobId: asString(formData, "jobId"), decision });
+  const result = await resolveBrainSourceRemoval(actor, { workspaceId, jobId: asString(formData, "jobId"), decision });
   refresh(workspaceId);
+  redirect(`/workspaces/${workspaceId}/brain/sources${result.pendingSourceId
+    ? `?review=${encodeURIComponent(result.pendingSourceId)}`
+    : result.status === "rejected" ? `?review=${encodeURIComponent(result.sourceId)}` : ""}`);
+}
+
+export async function retrySourceRemovalAction(formData: FormData) {
+  const workspaceId = asString(formData, "workspaceId");
+  if (workspaceId) await enforceDemoGuard(workspaceId);
+  const actor = await requirePageActor();
+  const result = await retryBrainSourceRemoval(actor, { workspaceId, jobId: asString(formData, "jobId") });
+  refresh(workspaceId);
+  const reviewSourceId = result.status === "pending" ? result.id : result.pendingSourceId;
+  redirect(`/workspaces/${workspaceId}/brain/sources${reviewSourceId ? `?review=${encodeURIComponent(reviewSourceId)}` : ""}`);
+}
+
+export async function confirmArticleRemovalAction(formData: FormData) {
+  const workspaceId = asString(formData, "workspaceId");
+  if (workspaceId) await enforceDemoGuard(workspaceId);
+  const actor = await requirePageActor();
+  const slug = asString(formData, "slug");
+  const mode = asString(formData, "mode");
+  if (mode !== "keep_sources" && mode !== "remove_sources") throw new Error("Invalid article removal option.");
+  const result = await confirmBrainArticleRemoval(actor, {
+    workspaceId, slug, mode, expectedToken: asString(formData, "expectedToken"),
+    confirmation: asString(formData, "confirmation"),
+  });
+  refresh(workspaceId, slug);
+  if (result.pendingSourceId) redirect(`/workspaces/${workspaceId}/brain/sources?review=${encodeURIComponent(result.pendingSourceId)}`);
+  redirect(`/workspaces/${workspaceId}/brain/${slug}`);
 }

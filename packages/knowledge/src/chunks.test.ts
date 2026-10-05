@@ -17,7 +17,7 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
       $executeRaw: vi.fn(),
       brainArticle: { findMany: vi.fn(), findUnique: vi.fn() },
       brainSource: { count: vi.fn() },
-      document: { count: vi.fn(), findMany: vi.fn() },
+      document: { count: vi.fn(), findMany: vi.fn(), findUnique: vi.fn() },
       knowledgeChunk: { count: vi.fn(), findMany: vi.fn(), deleteMany: vi.fn(), createMany: vi.fn() },
       workflowJob: { findMany: vi.fn() },
     },
@@ -200,6 +200,10 @@ describe("Workspace Reindex", () => {
     vi.mocked(prisma.document.findMany).mockResolvedValue([
       { id: "d1", title: "Doc 1", textContent: "Text 1", source: "API", mimeType: "text/plain", storageKey: "d1.txt", accessDomain: "FINANCE" } as any,
     ]);
+    vi.mocked(prisma.document.findUnique).mockResolvedValue({
+      id: "d1", workspaceId: "ws_1", title: "Doc 1", textContent: "Text 1", source: "API",
+      mimeType: "text/plain", storageKey: "d1.txt", accessDomain: "FINANCE", archivedAt: null,
+    } as any);
 
     // a1 is chunked, a2 and d1 are not
     vi.mocked(prisma.knowledgeChunk.findMany).mockImplementation((async (args: any) => {
@@ -244,6 +248,23 @@ describe("Workspace Reindex", () => {
     expect(prisma.knowledgeChunk.createMany).not.toHaveBeenCalled();
     expect(prisma.knowledgeChunk.deleteMany).toHaveBeenCalledWith({
       where: { workspaceId: "ws_1", sourceType: "BRAIN_ARTICLE", sourceId: "a1" },
+    });
+  });
+
+  it("does not restore document chunks when a document is archived after the reindex list is read", async () => {
+    vi.mocked(prisma.brainArticle.findMany).mockResolvedValue([]);
+    vi.mocked(prisma.document.findMany).mockResolvedValue([{ id: "d1" } as any]);
+    vi.mocked(prisma.document.findUnique).mockResolvedValue({
+      id: "d1", workspaceId: "ws_1", title: "Old document", textContent: "Old text", source: "API",
+      mimeType: "text/plain", storageKey: "d1.txt", accessDomain: "WORKSPACE", archivedAt: new Date(),
+    } as any);
+    vi.mocked(prisma.knowledgeChunk.findMany).mockResolvedValue([]);
+
+    const result = await reindexWorkspace("ws_1");
+    expect(result.reindexedDocuments).toBe(0);
+    expect(defaultModelGateway.embed).not.toHaveBeenCalled();
+    expect(prisma.knowledgeChunk.deleteMany).toHaveBeenCalledWith({
+      where: { workspaceId: "ws_1", sourceType: "DOCUMENT", sourceId: "d1" },
     });
   });
 });

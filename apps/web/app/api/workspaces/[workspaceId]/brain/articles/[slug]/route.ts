@@ -1,6 +1,6 @@
 import type { BrainArticleAuthority, BrainArticleType } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
-import { deleteArticle, getArticle, updateArticle } from "@corgtex/domain";
+import { AppError, confirmBrainArticleRemoval, deleteArticle, getArticle, previewBrainArticleRemoval, updateArticle } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 
@@ -10,6 +10,10 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId, slug } = await params;
+    if (request.nextUrl.searchParams.get("removalPreview") === "true") {
+      const removalPreview = await previewBrainArticleRemoval(actor, { workspaceId, slug });
+      return NextResponse.json({ removalPreview });
+    }
     const article = await getArticle(actor, { workspaceId, slug });
     return NextResponse.json({ article });
   } catch (error) {
@@ -46,6 +50,15 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId, slug } = await params;
+    const mode = request.nextUrl.searchParams.get("mode");
+    if (mode !== null) {
+      if (mode !== "keep_sources" && mode !== "remove_sources") throw new AppError(400, "INVALID_INPUT", "Invalid article removal option.");
+      const result = await confirmBrainArticleRemoval(actor, {
+        workspaceId, slug, mode, expectedToken: request.nextUrl.searchParams.get("expectedToken") ?? "",
+        confirmation: "archive_article",
+      });
+      return NextResponse.json(result);
+    }
     const result = await deleteArticle(actor, { workspaceId, slug });
     return NextResponse.json(result);
   } catch (error) {

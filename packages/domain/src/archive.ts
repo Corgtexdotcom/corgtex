@@ -220,6 +220,11 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
     delegate: "brainArticle",
     findWhere: (workspaceId, slugOrId) => ({ workspaceId, OR: [{ id: slugOrId }, { slug: slugOrId }] }),
     label: titleOrName,
+    canArchive: async ({ record, actor, membership }) => {
+      invariant(actor.kind === "agent" || membership?.role === "ADMIN"
+        || (record.ownerMemberId !== null && record.ownerMemberId === membership?.id),
+      403, "FORBIDDEN", "Only the article owner or a workspace admin can archive this article.");
+    },
     beforePurge: async (tx, record) => {
       await tx.knowledgeChunk.deleteMany({
         where: {
@@ -674,6 +679,14 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
         workspaceId: params.workspaceId, sourceType: "BRAIN_ARTICLE", sourceId: record.id,
       } });
     }
+    if (config.entityType === "Document") {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`document_index:${params.workspaceId}:${record.id}`}, 0))`;
+      await tx.knowledgeChunk.deleteMany({ where: {
+        workspaceId: params.workspaceId, sourceType: "DOCUMENT", sourceId: record.id,
+      } });
+      await appendEvents(tx, [{ workspaceId: params.workspaceId, type: "document.updated",
+        aggregateType: "Document", aggregateId: record.id, payload: { documentId: record.id } }]);
+    }
     if (config.entityType === "Goal") {
       await recomputeGoalParentProgressForArchiveTransition(tx, actor, record);
     }
@@ -789,6 +802,11 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
     }
     if (config.entityType === "BrainArticle") {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brain_article_index:${params.workspaceId}:${record.id}`}, 0))`;
+    }
+    if (config.entityType === "Document") {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`document_index:${params.workspaceId}:${record.id}`}, 0))`;
+      await appendEvents(tx, [{ workspaceId: params.workspaceId, type: "document.updated",
+        aggregateType: "Document", aggregateId: record.id, payload: { documentId: record.id } }]);
     }
     if (config.entityType === "Goal") {
       await recomputeGoalParentProgressForArchiveTransition(tx, actor, updated);
