@@ -1,5 +1,5 @@
 import { prisma } from "@corgtex/shared";
-import { syncKnowledgeForSource } from "@corgtex/knowledge";
+import { syncDocumentKnowledge, syncKnowledgeForSource } from "@corgtex/knowledge";
 import {
   fetchCalendarEvents,
   fetchFilteredEmailMessages,
@@ -93,40 +93,7 @@ export async function handleDocumentKnowledgeSync(jobId: string, payload: { docu
   if (!payload.documentId) {
     return;
   }
-
-  const document = await prisma.document.findUnique({
-    where: { id: payload.documentId },
-    select: {
-      id: true,
-      workspaceId: true,
-      title: true,
-      source: true,
-      mimeType: true,
-      storageKey: true,
-      textContent: true,
-      accessDomain: true,
-    },
-  });
-
-  if (!document || document.workspaceId !== workspaceId) {
-    return;
-  }
-
-  await syncKnowledgeForSource({
-    workspaceId,
-    sourceType: "DOCUMENT",
-    accessDomain: document.accessDomain,
-    sourceId: document.id,
-    sourceTitle: document.title,
-    content: [document.title, document.textContent].filter(Boolean).join("\n\n"),
-    metadata: {
-      source: document.source,
-      mimeType: document.mimeType,
-      storageKey: document.storageKey,
-      workflowJobId: jobId,
-    },
-    workflowJobId: jobId,
-  });
+  return syncDocumentKnowledge({ workspaceId, documentId: payload.documentId, workflowJobId: jobId });
 }
 
 export async function handleExternalResourceKnowledgeSync(jobId: string, payload: { resourceId?: string }, workspaceId: string) {

@@ -455,7 +455,6 @@ async function suiteAgentTrigger(workspaceId, cookie) {
     { agentKey: "inbox-triage", payload: {} },
     { agentKey: "brain-maintenance", payload: {} },
     { agentKey: "constitution-synthesis", payload: {} },
-    { agentKey: "finance-reconciliation-prep", payload: {} },
     {
       agentKey: "proposal-drafting",
       payload: { prompt: `E2E test: Draft a proposal for standardized meeting formats — ${TEST_ID}` },
@@ -771,6 +770,7 @@ This article validates the full [[Brain]] lifecycle including [[Knowledge Sync]]
 // ---------------------------------------------------------------------------
 async function cleanup(workspaceId, cookie) {
   console.log("\n━━━ Cleanup ━━━");
+  let deletionFailures = 0;
 
   // Delete brain articles
   for (const slug of createdResources.brainArticleSlugs) {
@@ -782,9 +782,11 @@ async function cleanup(workspaceId, cookie) {
       if (res.ok) {
         console.log(`  Deleted article: ${slug}`);
       } else {
+        deletionFailures++;
         console.log(`  WARNING:  Failed to delete article ${slug}: ${res.status}`);
       }
     } catch (err) {
+      deletionFailures++;
       console.log(`  WARNING:  Error deleting article ${slug}: ${err.message}`);
     }
   }
@@ -799,9 +801,11 @@ async function cleanup(workspaceId, cookie) {
       if (res.ok) {
         console.log(`  Deleted brain source: ${sourceId}`);
       } else {
+        deletionFailures++;
         console.log(`  WARNING:  Failed to delete brain source ${sourceId}: ${res.status}`);
       }
     } catch (err) {
+      deletionFailures++;
       console.log(`  WARNING:  Error deleting brain source ${sourceId}: ${err.message}`);
     }
   }
@@ -816,9 +820,11 @@ async function cleanup(workspaceId, cookie) {
       if (res.ok) {
         console.log(`  Deleted document: ${docId}`);
       } else {
+        deletionFailures++;
         console.log(`  WARNING:  Failed to delete document ${docId}: ${res.status}`);
       }
     } catch (err) {
+      deletionFailures++;
       console.log(`  WARNING:  Error deleting document ${docId}: ${err.message}`);
     }
   }
@@ -833,9 +839,11 @@ async function cleanup(workspaceId, cookie) {
       if (res.ok) {
         console.log(`  Deleted meeting: ${meetingId}`);
       } else {
+        deletionFailures++;
         console.log(`  WARNING:  Failed to delete meeting ${meetingId}: ${res.status}`);
       }
     } catch (err) {
+      deletionFailures++;
       console.log(`  WARNING:  Error deleting meeting ${meetingId}: ${err.message}`);
     }
   }
@@ -857,9 +865,11 @@ async function cleanup(workspaceId, cookie) {
       if (res.ok) {
         console.log(`  Deleted conversation: ${conversationId}`);
       } else {
+        deletionFailures++;
         console.log(`  WARNING:  Failed to delete conversation ${conversationId}: ${res.status}`);
       }
     } catch (err) {
+      deletionFailures++;
       console.log(`  WARNING:  Error deleting conversation ${conversationId}: ${err.message}`);
     }
   }
@@ -869,7 +879,11 @@ async function cleanup(workspaceId, cookie) {
     console.log(`  ℹ  Agent runs observed: ${createdResources.agentRunIds.join(", ")}`);
   }
 
-  console.log("  ✅ Cleanup complete (all test data deleted)");
+  if (deletionFailures > 0) {
+    console.log(`  WARNING:  Cleanup finished with ${deletionFailures} resource deletion failure(s)`);
+  } else {
+    console.log("  ✅ Resource cleanup finished");
+  }
 }
 
 // ---------------------------------------------------------------------------

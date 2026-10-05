@@ -6,7 +6,6 @@ import { PDFParse } from "pdf-parse";
 import { defaultStorage } from "@corgtex/storage";
 import {
   appendEvents,
-  archiveWorkspaceArtifact,
   checkWorkspaceDuplicateGuard,
   duplicateGuardAuditMeta,
   duplicateGuardContentHash,
@@ -198,29 +197,42 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
     await lockAndAssertTrialStorageCapacity(tx, params.workspaceId, params.size, {
       replacingDocumentId: params.documentId,
     });
+    // Match confirmed removal's source -> document lock order. Discover the
+    // source set before locking, then reject changed linkage after both locks.
+    const sourceQuery: Prisma.BrainSourceWhereInput = {
+      workspaceId: params.workspaceId,
+      sourceType: { in: ["DOC", "FILE_UPLOAD"] },
+      metadata: { path: ["documentId"], equals: params.documentId },
+    };
+    const discoveredSources = await tx.brainSource.findMany({ where: sourceQuery, select: { id: true } });
+    const sourceBeforeLock = await tx.brainSource.findFirst({ where: { ...sourceQuery, archivedAt: null } });
+    const lockedSourceIds = [...new Set([
+      ...discoveredSources.map((source) => source.id), ...(sourceBeforeLock ? [sourceBeforeLock.id] : []),
+    ])].sort();
+    for (const sourceId of lockedSourceIds) {
+      await lockWorkspaceArchiveArtifact(tx, "BrainSource", sourceId);
+      await tx.$queryRaw`SELECT "id" FROM "BrainSource" WHERE "id" = ${sourceId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    }
     await tx.$queryRaw`SELECT "id" FROM "Document" WHERE "id" = ${params.documentId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const existing = await tx.document.findFirst({
       where: { id: params.documentId, workspaceId: params.workspaceId, archivedAt: null },
     });
-    if (!existing) {
-      throw new AppError(404, "NOT_FOUND", "Document not found.");
-    }
-
-    const sourceBeforeLock = await tx.brainSource.findFirst({
-      where: {
-        workspaceId: params.workspaceId,
-        sourceType: { in: ["DOC", "FILE_UPLOAD"] },
-        archivedAt: null,
-        metadata: { path: ["documentId"], equals: existing.id },
-      },
-    });
-    if (sourceBeforeLock) {
-      await lockWorkspaceArchiveArtifact(tx, "BrainSource", sourceBeforeLock.id);
-      await tx.$queryRaw`SELECT "id" FROM "BrainSource" WHERE "id" = ${sourceBeforeLock.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    if (!existing) throw new AppError(404, "NOT_FOUND", "Document not found.");
+    const currentSources = await tx.brainSource.findMany({ where: sourceQuery, select: { id: true } });
+    if (currentSources.some((source) => !lockedSourceIds.includes(source.id))) {
+      throw new AppError(409, "SOURCE_CHANGED", "Document source links changed. Reload before replacing the file.");
     }
     const existingSource = sourceBeforeLock
       ? await tx.brainSource.findFirst({ where: { id: sourceBeforeLock.id, workspaceId: params.workspaceId, archivedAt: null } })
       : null;
+    const linkedArticle = lockedSourceIds.length > 0 ? await tx.brainArticle.findFirst({
+      where: { workspaceId: params.workspaceId, archivedAt: null, sourceIds: { hasSome: lockedSourceIds } },
+      select: { id: true },
+    }) : null;
+    if (linkedArticle) {
+      throw new AppError(409, "DOCUMENT_REPLACEMENT_REVIEW_REQUIRED",
+        "Review or archive this document's linked Brain articles before replacing the file.");
+    }
     // Updating a file replaces its extracted snapshot as well as its blob.
     // Merging old text would keep superseded content searchable under the new file.
     const replacementText = params.textContent;
@@ -299,53 +311,10 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
         },
       });
 
-    // Articles can contain a synthesis of this source, including text that no
-    // longer exists in the replacement. Archive the whole article, preserving
-    // its body and versions for review; multi-source prose cannot be split by
-    // source reliably. Re-absorption creates a fresh article from the new text.
-    const historicalSources = await tx.brainSource.findMany({
-      where: {
-        workspaceId: params.workspaceId,
-        sourceType: { in: ["DOC", "FILE_UPLOAD"] },
-        metadata: { path: ["documentId"], equals: document.id },
-      },
-      select: { id: true },
-    });
-    const affectedSourceIds = [...new Set([
-      ...historicalSources.map((item) => item.id),
-      ...(sourceBeforeLock ? [sourceBeforeLock.id] : []),
-    ])];
-    const linkedArticles = affectedSourceIds.length > 0
-      ? await tx.brainArticle.findMany({
-        where: { workspaceId: params.workspaceId, archivedAt: null, sourceIds: { hasSome: affectedSourceIds } },
-        select: { id: true },
-      })
-      : [];
-    const archivedArticleIds: string[] = [];
-    for (const article of linkedArticles.sort((left, right) => left.id.localeCompare(right.id))) {
-      await tx.$queryRaw`SELECT "id" FROM "BrainArticle" WHERE "id" = ${article.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
-      const current = await tx.brainArticle.findFirst({
-        where: { id: article.id, workspaceId: params.workspaceId, archivedAt: null, sourceIds: { hasSome: affectedSourceIds } },
-        select: { id: true },
-      });
-      if (!current) continue;
-      await archiveWorkspaceArtifact(actor, {
-        workspaceId: params.workspaceId,
-        entityType: "BrainArticle",
-        entityId: article.id,
-        reason: `Document ${document.id} was replaced by a new upload. Review source-linked content before restoring.`,
-        _tx: tx,
-      });
-      archivedArticleIds.push(article.id);
-    }
-
     await tx.knowledgeChunk.deleteMany({
       where: {
         workspaceId: params.workspaceId,
-        OR: [
-          { sourceType: "DOCUMENT", sourceId: document.id },
-          { sourceType: "BRAIN_ARTICLE", sourceId: { in: archivedArticleIds } },
-        ],
+        sourceType: "DOCUMENT", sourceId: document.id,
       },
     });
     if (getSharedStateBackend() === "postgres") await invalidateKnowledgeCache(params.workspaceId, tx);
@@ -376,13 +345,7 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
         aggregateId: source.id,
         payload: { sourceId: source.id },
       },
-      ...archivedArticleIds.map((articleId) => ({
-        workspaceId: params.workspaceId,
-        type: "brain-article.updated",
-        aggregateType: "BrainArticle",
-        aggregateId: articleId,
-        payload: { articleId },
-      })),
+
     ]);
 
     return { document, source };

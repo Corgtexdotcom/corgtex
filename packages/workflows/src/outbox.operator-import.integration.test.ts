@@ -12,7 +12,8 @@ const globalEventIds: string[] = [];
 describe("operator import scheduler exclusion", () => {
   beforeAll(() => {
     const url = new URL(process.env.DATABASE_URL!);
-    if (!["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) || !url.pathname.includes("test")) {
+    if (!["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)
+      || (!url.pathname.includes("test") && url.pathname !== "/corgtex_nightly")) {
       throw new Error("Scheduler integration tests require a local test database.");
     }
   });

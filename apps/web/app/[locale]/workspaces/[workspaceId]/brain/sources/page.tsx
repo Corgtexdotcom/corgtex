@@ -1,7 +1,7 @@
-import { duplicateGuardErrorPayload, isDuplicateGuardMatchError, listSources, requireWorkspaceMembership } from "@corgtex/domain";
+import { duplicateGuardErrorPayload, isDuplicateGuardMatchError, listBrainSourceArchiveImpacts, listBrainSourceRemovalReviews, listSources, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { prisma } from "@corgtex/shared";
-import { deleteSourceAction, ingestSourceAction } from "../actions";
+import { deleteSourceAction, ingestSourceAction, resolveSourceRemovalAction, retrySourceRemovalAction } from "../actions";
 import { getTranslations } from "next-intl/server";
 import { DuplicateGuardForm, type DuplicateGuardFormState } from "../../add/DuplicateGuardForm";
 import { BrainSourceFileUploadForm } from "./BrainSourceFileUploadForm";
@@ -11,18 +11,33 @@ export const dynamic = "force-dynamic";
 
 export default async function BrainSourcesPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ workspaceId: string }>;
+  searchParams: Promise<{ review?: string }>;
 }) {
   const { workspaceId } = await params;
+  const { review: reviewSourceId } = await searchParams;
   const actor = await requirePageActor();
   const t = await getTranslations("brain");
-  const [membership, { items: sources }, currentWorkspace] = await Promise.all([
+  const [membership, { items: sources }, currentWorkspace, sourceRemovalFlag] = await Promise.all([
     requireWorkspaceMembership({ actor, workspaceId }),
-    listSources(actor, { workspaceId, take: 50 }),
+    listSources(actor, { workspaceId, take: 50, sourceId: reviewSourceId }),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
+    prisma.workspaceFeatureFlag.findUnique({ where: { workspaceId_flag: {
+      workspaceId, flag: "BRAIN_SOURCE_REMOVAL",
+    } }, select: { enabled: true } }),
   ]);
+  const sourceRemovalEnabled = sourceRemovalFlag?.enabled === true;
   const isDemo = currentWorkspace?.slug === "jnj-demo";
+  const sourceImpacts = new Map((await listBrainSourceArchiveImpacts(actor, {
+    workspaceId,
+    sourceIds: sources.map((source) => source.id),
+  })).map((impact) => [impact.sourceId, impact]));
+  const canReview = actor.kind === "agent" || membership?.role === "ADMIN";
+  const removalReviews = new Map((canReview ? await listBrainSourceRemovalReviews(actor, {
+    workspaceId, sourceIds: sources.map((source) => source.id),
+  }) : []).map((review) => [review.sourceId, review]));
 
   async function ingestSourceAndReturn(_state: DuplicateGuardFormState, formData: FormData): Promise<DuplicateGuardFormState> {
     "use server";
@@ -95,6 +110,10 @@ export default async function BrainSourcesPage({
         <h2>{t("sourcesCount", { count: sources.length })}</h2>
         <div className="list">
           {sources.map((s) => {
+            const impact = sourceImpacts.get(s.id);
+            const review = removalReviews.get(s.id);
+            const hasUnresolvedReview = !!review && review.phase !== "APPLIED";
+            const hasUnclassifiedLink = impact?.visibleArticles.some((article) => article.kind === "unclassified") ?? false;
             const canArchive = !isDemo && (
               actor.kind === "agent"
               || membership?.role === "ADMIN"
@@ -125,11 +144,74 @@ export default async function BrainSourcesPage({
                   )}
                 </div>
                 <p style={{ margin: "8px 0 0", fontSize: "0.85rem" }}>{s.content.slice(0, 200)}{s.content.length > 200 ? "..." : ""}</p>
-                {canArchive && (
+                {impact?.blocked && (
+                  <div className="muted" style={{ marginTop: 8 }}>
+                    <p>{t("sourceArchiveNeedsReview")}</p>
+                    {impact.visibleArticles.map((article) => (
+                      <div key={article.id}>
+                        <a href={`/workspaces/${workspaceId}/brain/${article.slug}`}>{article.title}</a>
+                        {" · "}{t(article.kind === "derived" ? "derivedArticleLink" : "unclassifiedArticleLink")}
+                      </div>
+                    ))}
+                    {impact.hasHiddenArticles && <p>{t("sourceArchiveHiddenLinks")}</p>}
+                  </div>
+                )}
+                {canReview && hasUnclassifiedLink && <p className="muted">{t("sourceRemovalUnclassified")}</p>}
+                {canReview && (impact?.blocked || hasUnresolvedReview) && !hasUnclassifiedLink && !isDemo && (
+                  <div className="stack" style={{ marginTop: 8 }}>
+                    {!sourceRemovalEnabled && <p className="muted">{t("sourceRemovalPaused")}</p>}
+                    {review?.phase === "READY" && review.status === "COMPLETED" ? (
+                      <div className="panel stack">
+                        <p>{t("sourceRemovalReady")}</p>
+                        {review.articles.map((article) => (
+                          <details key={article.id}>
+                            <summary>{article.title} · {t(article.action === "archive" ? "sourceRemovalArchiveArticle" : "sourceRemovalRegenerateArticle")}</summary>
+                            {article.action === "regenerate" && <div className="stack">
+                              <h4>{t("sourceRemovalCurrentBody")}</h4>
+                              <pre style={{ whiteSpace: "pre-wrap", maxHeight: 300, overflow: "auto" }}>{article.currentBodyMd}</pre>
+                              <h4>{t("sourceRemovalCandidateBody")}</h4>
+                              <pre style={{ whiteSpace: "pre-wrap", maxHeight: 300, overflow: "auto" }}>{article.candidateBodyMd}</pre>
+                            </div>}
+                          </details>
+                        ))}
+                        <div className="actions-inline">
+                          {(["accept", "reject"] as const).map((decision) => (
+                            <form key={decision} action={resolveSourceRemovalAction}>
+                              <input type="hidden" name="workspaceId" value={workspaceId} />
+                              <input type="hidden" name="jobId" value={review.jobId} />
+                              <input type="hidden" name="decision" value={decision} />
+                              <button type="submit" className={decision === "accept" ? "danger small" : "secondary small"}
+                                disabled={decision === "accept" && !sourceRemovalEnabled}>
+                                {t(decision === "accept" ? "sourceRemovalAccept" : "sourceRemovalReject")}
+                              </button>
+                            </form>
+                          ))}
+                        </div>
+                      </div>
+                    ) : review && (review.status === "PENDING" || review.status === "RUNNING") ? (
+                      <p className="muted">{t("sourceRemovalPending")}</p>
+                    ) : review && (review.status === "FAILED" || review.phase === "STALE" || review.phase === "REJECTED") ? (
+                      <form action={retrySourceRemovalAction}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="jobId" value={review.jobId} />
+                        <button type="submit" className="secondary small" disabled={!sourceRemovalEnabled}>{t("sourceRemovalRetryAction")}</button>
+                        <p className="muted">{t("sourceRemovalRetry")}</p>
+                      </form>
+                    ) : (
+                      <form action={deleteSourceAction}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="sourceId" value={s.id} />
+                        <button type="submit" className="secondary small" disabled={!sourceRemovalEnabled}>{t("sourceRemovalPrepare")}</button>
+                        {review && <p className="muted">{t("sourceRemovalRetry")}</p>}
+                      </form>
+                    )}
+                  </div>
+                )}
+                {canArchive && !hasUnresolvedReview && (
                   <form action={deleteSourceAction} style={{ marginTop: 8 }}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="sourceId" value={s.id} />
-                    <button type="submit" className="danger small">{t("archiveSource")}</button>
+                    <button type="submit" className="danger small" disabled={impact?.blocked}>{t("archiveSource")}</button>
                   </form>
                 )}
               </div>

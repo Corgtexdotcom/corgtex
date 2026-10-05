@@ -77,6 +77,7 @@ describe("module registry feature flag parity", () => {
 
   it("derives the same default-enabled map as the control-plane defaults", () => {
     const defaults = defaultWorkspaceFeatureFlags();
+    expect(defaults.BRAIN_SOURCE_REMOVAL).toBe(false);
     for (const entry of CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS) {
       expect(defaults[entry.flag as keyof typeof defaults]).toBe(entry.defaultEnabled);
     }

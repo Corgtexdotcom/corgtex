@@ -4193,6 +4193,9 @@ model BrainArticle {
   lastVerifiedAt   DateTime?
   staleAfterDays   Int                   @default(90)
   sourceIds        String[]
+  // Explicit agent-created lineage. Legacy sourceIds may also be citations.
+  derivationJson   Json?
+  humanEditedAt    DateTime?
   archivedAt       DateTime?
   archivedByUserId String?
   archiveReason    String?

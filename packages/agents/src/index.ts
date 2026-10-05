@@ -1,4 +1,5 @@
 export * from "./brain-absorb";
+export * from "./brain-source-regenerate";
 export * from "./brain-maintenance";
 export * from "./company-understanding";
 export * from "./conversation";

@@ -31,6 +31,7 @@ function flag(
  */
 export const WORKSPACE_FEATURE_FLAG_ORDER = [
   "GOALS",
+  "BRAIN_SOURCE_REMOVAL",
   "TOOL_LINKS",
   "FINANCE",
   "FINANCE_PROJECTS",
@@ -104,6 +105,8 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     dataOwnership: "corgtex_postgres",
     nav: { href: "/brain", labelKey: "brain", icon: "brain", group: "workspace" },
     scopes: ["brain:read", "brain:write"],
+    subFlags: [flag("BRAIN_SOURCE_REMOVAL", "Brain source removal",
+      "Reviewed removal of sources linked to Brain articles. Enable only after compatible workers are deployed.", false)],
   },
   {
     key: "tools",

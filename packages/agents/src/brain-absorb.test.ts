@@ -56,6 +56,7 @@ vi.mock("@corgtex/domain", () => ({
   rebuildBacklinks: rebuildBacklinksMock,
   lockWorkspaceArchiveArtifact: lockWorkspaceArchiveArtifactMock,
   brainSourceRecoveryIdentity: recoveryIdentityMock,
+  brainSourceContentFingerprint: vi.fn(() => "source-fingerprint"),
 }));
 
 vi.mock("@corgtex/knowledge", () => ({
@@ -322,6 +323,7 @@ describe("absorbSource", () => {
       title: "Launch notes",
       authority: "REFERENCE",
       sourceIds: ["source-1"],
+      derivation: { sourceId: "source-1", sourceFingerprint: "source-fingerprint", agentRunId: "run-1" },
     }));
     expect(lockWorkspaceArchiveArtifactMock).toHaveBeenCalledTimes(1);
     expect(lockWorkspaceArchiveArtifactMock).toHaveBeenCalledWith(prismaMock, "BrainSource", "source-1");

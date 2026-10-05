@@ -597,7 +597,7 @@ describe("file-ingestion", () => {
       },
       brainArticle: {
         findMany: vi.fn().mockResolvedValue([{ id: "article-old", workspaceId: "ws_1", sourceIds: ["source-archived"], archivedAt: null }]),
-        findFirst: vi.fn().mockResolvedValue({ id: "article-old", workspaceId: "ws_1", sourceIds: ["source-archived"], archivedAt: null }),
+        findFirst: vi.fn().mockResolvedValue(null),
       },
       knowledgeChunk: { deleteMany: vi.fn() },
       auditLog: { create: vi.fn() },
@@ -643,21 +643,17 @@ describe("file-ingestion", () => {
     expect(txObj.brainSource.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ metadata: { path: ["documentId"], equals: "doc-existing" } }),
     }));
-    expect(txObj.brainArticle.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ sourceIds: { hasSome: ["source-existing", "source-archived"] } }),
+    expect(txObj.brainArticle.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ sourceIds: { hasSome: ["source-archived", "source-existing"] } }),
     }));
-    expect(archiveWorkspaceArtifact).toHaveBeenCalledWith(actor, expect.objectContaining({
-      workspaceId: "ws_1", entityType: "BrainArticle", entityId: "article-old", _tx: txObj,
-    }));
+    expect(archiveWorkspaceArtifact).not.toHaveBeenCalled();
     expect(txObj.knowledgeChunk.deleteMany).toHaveBeenCalledWith({
-      where: {
-        workspaceId: "ws_1",
-        OR: [
-          { sourceType: "DOCUMENT", sourceId: "doc-existing" },
-          { sourceType: "BRAIN_ARTICLE", sourceId: { in: ["article-old"] } },
-        ],
-      },
+      where: { workspaceId: "ws_1", sourceType: "DOCUMENT", sourceId: "doc-existing" },
     });
+    const sourceLocks = txObj.$queryRaw.mock.calls.map(([query]) => query.join("?"));
+    expect(sourceLocks[0]).toContain('FROM "BrainSource"');
+    expect(sourceLocks[1]).toContain('FROM "BrainSource"');
+    expect(sourceLocks[2]).toContain('FROM "Document"');
     expect(res.document.storageKey).toBe(replacementStorageKey);
     expect(assertTrialStorageCapacity).toHaveBeenCalledWith(
       "ws_1",
@@ -696,7 +692,7 @@ describe("file-ingestion", () => {
         findMany: vi.fn().mockResolvedValue([{ id: "source-new" }]),
         create: vi.fn().mockResolvedValue({ id: "source-new" }),
       },
-      brainArticle: { findMany: vi.fn().mockResolvedValue([]) },
+      brainArticle: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(null) },
       knowledgeChunk: { deleteMany: vi.fn() },
       auditLog: { create: vi.fn() },
     };
@@ -717,7 +713,7 @@ describe("file-ingestion", () => {
     }));
   });
 
-  it("keeps the prior document when archival fails and retries replacement with a new blob", async () => {
+  it("pauses linked-article replacement before writes and retries after article review", async () => {
     const { defaultStorage } = await import("@corgtex/storage");
     const decision = { resolution: "update_existing", match: { entityType: "Document", entityId: "doc-existing" } } as any;
     vi.mocked(checkWorkspaceDuplicateGuard).mockResolvedValue(decision);
@@ -749,14 +745,17 @@ describe("file-ingestion", () => {
     vi.mocked(prisma.$transaction)
       .mockImplementationOnce(async (callback: any) => callback(firstTx))
       .mockImplementationOnce(async (callback: any) => callback(retryTx));
-    vi.mocked(archiveWorkspaceArtifact).mockRejectedValueOnce(new Error("Archive unavailable"));
+    retryTx.brainArticle.findFirst.mockResolvedValue(null);
     const input = {
       workspaceId: "ws_1", fileName: "replacement.txt", mimeType: "text/plain",
       fileBuffer: Buffer.from("Replacement"), uploadSource: "FILE_UPLOAD",
       duplicateGuard: { resolution: "update_existing" as const, targetEntityId: "doc-existing" },
     };
 
-    await expect(ingestFile(actor, input)).rejects.toThrow("Archive unavailable");
+    await expect(ingestFile(actor, input)).rejects.toMatchObject({ status: 409, code: "DOCUMENT_REPLACEMENT_REVIEW_REQUIRED" });
+    expect(firstTx.document.update).not.toHaveBeenCalled();
+    expect(firstTx.brainSource.update).not.toHaveBeenCalled();
+    expect(archiveWorkspaceArtifact).not.toHaveBeenCalled();
     expect(firstTx.knowledgeChunk.deleteMany).not.toHaveBeenCalled();
     const failedKey = vi.mocked(defaultStorage.put).mock.calls[0]?.[0];
     expect(defaultStorage.delete).toHaveBeenCalledWith(failedKey);
@@ -807,7 +806,7 @@ describe("file-ingestion", () => {
         update: vi.fn(),
         create: vi.fn().mockResolvedValue({ id: "source-replacement", sourceType: "FILE_UPLOAD", tier: 2 }),
       },
-      brainArticle: { findMany: vi.fn().mockResolvedValue([]) },
+      brainArticle: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(null) },
       knowledgeChunk: { deleteMany: vi.fn() },
       auditLog: { create: vi.fn() },
       eventRecord: { createMany: vi.fn() },
@@ -891,7 +890,7 @@ describe("file-ingestion", () => {
         update: vi.fn(),
         create: vi.fn().mockResolvedValue({ id: "source-new" }),
       },
-      brainArticle: { findMany: vi.fn().mockResolvedValue([]) },
+      brainArticle: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(null) },
       knowledgeChunk: { deleteMany: vi.fn() },
       auditLog: { create: vi.fn() },
       eventRecord: { createMany: vi.fn() },

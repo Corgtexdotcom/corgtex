@@ -1,6 +1,6 @@
 import { runInboxTriageAgent, runDailyCheckInAgent, runMeetingSummaryAgent, runActionExtractionAgent, runProposalDraftingAgent, runConstitutionUpdateTriggerAgent, runConstitutionSynthesisAgent, runCrmDripFollowupAgent, runCrmEmailExtractionAgent, runCrmLeadEnrichmentAgent, runCompanyUnderstandingAgent } from "@corgtex/agents";
 import { executeAgentRun } from "@corgtex/agents";
-import { runBrainMaintenance, absorbSource } from "@corgtex/agents";
+import { runBrainMaintenance, absorbSource, runBrainSourceRegenerationJob } from "@corgtex/agents";
 import { assertBrainSourceRecoveryJob } from "@corgtex/domain";
 
 function asString(value: unknown) {
@@ -12,7 +12,8 @@ export async function runAgentWorkflowJob(job: {
   workspaceId: string | null;
   type: string;
   payload: unknown;
-}) {
+  attempts?: number;
+}, claimOwner?: string) {
   if (!job.workspaceId) {
     return null;
   }
@@ -145,6 +146,13 @@ export async function runAgentWorkflowJob(job: {
       throw new Error("Brain source recovery was skipped by agent runtime before processing.");
     }
     return result;
+  }
+
+  if (job.type === "agent.brain-source-regenerate") {
+    if (!Number.isSafeInteger(job.attempts) || (job.attempts ?? 0) < 1 || !claimOwner) {
+      throw new Error("Brain source regeneration requires a claimed worker attempt.");
+    }
+    return runBrainSourceRegenerationJob({ workspaceId: job.workspaceId, jobId: job.id, expectedAttempt: job.attempts!, expectedOwner: claimOwner });
   }
 
   if (job.type === "agent.company-understanding") {

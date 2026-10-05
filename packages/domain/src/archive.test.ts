@@ -59,10 +59,11 @@ const { prismaMock, storageDeleteMock, appendEventsMock } = vi.hoisted(() => {
     },
     brainSource: {
       findFirst: vi.fn(),
+      findMany: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
     },
-    brainArticle: { findFirst: vi.fn(), update: vi.fn() },
+    brainArticle: { findFirst: vi.fn(), findMany: vi.fn(), update: vi.fn() },
     financeImportBatch: {
       findFirst: vi.fn(),
     },
@@ -87,6 +88,7 @@ vi.mock("./auth", async (importOriginal) => {
 
 vi.mock("@corgtex/shared", () => ({
   setSupportAuthorizationActor: vi.fn(),
+  incrementCacheVersion: vi.fn(async () => 1),
   getMcpOrigin: () => undefined,
   prisma: prismaMock,
   parseAllowedWorkspaceIds: vi.fn(() => new Set<string>()),
@@ -135,6 +137,8 @@ describe("workspace archive domain", () => {
     prismaMock.workItemVersion.deleteMany.mockResolvedValue({ count: 0 });
     prismaMock.knowledgeChunk.deleteMany.mockResolvedValue({ count: 0 });
     prismaMock.financeImportBatch.findFirst.mockResolvedValue(null);
+    prismaMock.brainArticle.findMany.mockResolvedValue([]);
+    prismaMock.brainSource.findMany.mockResolvedValue([]);
     prismaMock.crmAccount.findMany.mockResolvedValue([]);
     prismaMock.crmContact.findMany.mockResolvedValue([]);
     prismaMock.crmDeal.findMany.mockResolvedValue([]);
@@ -193,7 +197,7 @@ describe("workspace archive domain", () => {
   it("reindexes a restored Brain article after its source is reviewed", async () => {
     const archived = {
       id: "article-1", workspaceId: "workspace-1", slug: "reviewed-article",
-      title: "Reviewed article", archivedAt: new Date("2026-10-05T00:00:00Z"),
+      title: "Reviewed article", sourceIds: [], archivedAt: new Date("2026-10-05T00:00:00Z"),
     };
     prismaMock.brainArticle.findFirst.mockResolvedValue(archived);
     prismaMock.brainArticle.update.mockResolvedValue({ ...archived, archivedAt: null });
@@ -696,6 +700,39 @@ describe("workspace archive domain", () => {
     expect(prismaMock.brainSource.update).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: "source-1" },
     }));
+  });
+
+  it("blocks generic source archive when a generated article depends on the source", async () => {
+    const source = { id: "source-1", workspaceId: "workspace-1", authorMemberId: null, archivedAt: null };
+    prismaMock.brainSource.findFirst.mockResolvedValue(source);
+    prismaMock.brainArticle.findMany.mockResolvedValue([{ id: "article-1", slug: "notes", title: "Notes", isPrivate: false,
+      ownerMemberId: null, sourceIds: ["source-1"], derivationJson: { version: 1, origin: "brain-absorb",
+        agentRunId: "run-1", sources: [{ sourceId: "source-1", fingerprint: "a".repeat(64) }] } }]);
+    const { archiveWorkspaceArtifact } = await import("./archive");
+
+    await expect(archiveWorkspaceArtifact(actor, { workspaceId: "workspace-1", entityType: "BrainSource", entityId: source.id }))
+      .rejects.toMatchObject({ status: 409, code: "SOURCE_ARTICLE_IMPACT_REVIEW_REQUIRED" });
+    expect(prismaMock.brainArticle.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({
+      workspaceId: "workspace-1", archivedAt: null,
+    }) }));
+    expect(prismaMock.brainSource.update).not.toHaveBeenCalled();
+    expect(prismaMock.workspaceArchiveRecord.create).not.toHaveBeenCalled();
+  });
+
+  it("blocks generic document archive when its source has an unclassified article link", async () => {
+    const document = { id: "document-1", workspaceId: "workspace-1", title: "Notes", archivedAt: null };
+    prismaMock.document.findFirst.mockResolvedValue(document);
+    prismaMock.brainSource.findMany.mockResolvedValue([{ id: "source-1" }]);
+    prismaMock.brainArticle.findMany.mockResolvedValue([{ id: "article-1", slug: "notes", title: "Notes", isPrivate: false,
+      ownerMemberId: null, sourceIds: ["source-1"], derivationJson: null }]);
+    const { archiveWorkspaceArtifact } = await import("./archive");
+
+    await expect(archiveWorkspaceArtifact(actor, { workspaceId: "workspace-1", entityType: "Document", entityId: document.id }))
+      .rejects.toMatchObject({ status: 409, code: "SOURCE_ARTICLE_IMPACT_REVIEW_REQUIRED" });
+    expect(prismaMock.brainSource.findMany).toHaveBeenCalledWith({ where: {
+      workspaceId: "workspace-1", metadata: { path: ["documentId"], equals: "document-1" },
+    }, select: { id: true, archivedAt: true } });
+    expect(prismaMock.document.update).not.toHaveBeenCalled();
   });
 
   it("blocks non-author contributors and legacy authorless sources through the generic BrainSource archive path", async () => {

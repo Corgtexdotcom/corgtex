@@ -83,23 +83,28 @@ export async function syncKnowledgeForSource(params: {
   metadata?: Record<string, unknown>;
   workflowJobId?: string;
   agentRunId?: string;
+  sourceUpdatedAt?: Date;
 }) {
   const chunks = chunkText(params.content);
   if (chunks.length === 0) {
     const retired = await prisma.$transaction(async (tx) => {
       if (params.sourceType === "BRAIN_ARTICLE") {
         await tx.$queryRaw`SELECT "id" FROM "BrainArticle" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
-        const active = await tx.brainArticle.findFirst({
-          where: { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null, isPrivate: false },
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brain_article_index:${params.workspaceId}:${params.sourceId}`}, 0))`;
+        const current = await tx.brainArticle.findFirst({
+          where: { id: params.sourceId, workspaceId: params.workspaceId,
+            ...(params.sourceUpdatedAt ? { updatedAt: params.sourceUpdatedAt } : { archivedAt: null, isPrivate: false }) },
           select: { id: true },
         });
-        if (active) return false;
+        if (params.sourceUpdatedAt ? !current : current) return false;
       }
       const storageKey = params.sourceType === "DOCUMENT" ? params.metadata?.storageKey : null;
       if (typeof storageKey === "string") {
         await tx.$queryRaw`SELECT "id" FROM "Document" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`document_index:${params.workspaceId}:${params.sourceId}`}, 0))`;
         const document = await tx.document.findFirst({
-          where: { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null, storageKey },
+          where: { id: params.sourceId, workspaceId: params.workspaceId, storageKey,
+            ...(params.sourceUpdatedAt ? { updatedAt: params.sourceUpdatedAt } : { archivedAt: null }) },
           select: { id: true },
         });
         if (!document) return false;
@@ -159,8 +164,10 @@ export async function syncKnowledgeForSource(params: {
   const persisted = await prisma.$transaction(async (tx) => {
     if (params.sourceType === "BRAIN_ARTICLE") {
       await tx.$queryRaw`SELECT "id" FROM "BrainArticle" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brain_article_index:${params.workspaceId}:${params.sourceId}`}, 0))`;
       const article = await tx.brainArticle.findFirst({
-        where: { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null, isPrivate: false, bodyMd: params.content },
+        where: { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null, isPrivate: false, bodyMd: params.content,
+          ...(params.sourceUpdatedAt ? { updatedAt: params.sourceUpdatedAt } : {}) },
         select: { id: true },
       });
       if (!article) return false;
@@ -168,8 +175,10 @@ export async function syncKnowledgeForSource(params: {
     const storageKey = params.sourceType === "DOCUMENT" ? params.metadata?.storageKey : null;
     if (typeof storageKey === "string") {
       await tx.$queryRaw`SELECT "id" FROM "Document" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`document_index:${params.workspaceId}:${params.sourceId}`}, 0))`;
       const document = await tx.document.findFirst({
-        where: { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null, storageKey },
+        where: { id: params.sourceId, workspaceId: params.workspaceId, storageKey,
+            ...(params.sourceUpdatedAt ? { updatedAt: params.sourceUpdatedAt } : { archivedAt: null }) },
         select: { id: true },
       });
       if (!document) return false;
@@ -268,44 +277,33 @@ export async function syncBrainArticleKnowledge(params: {
 }) {
   const article = await prisma.brainArticle.findUnique({
     where: { id: params.articleId },
-    select: {
-      id: true,
-      workspaceId: true,
-      title: true,
-      slug: true,
-      type: true,
-      authority: true,
-      bodyMd: true,
-      isPrivate: true,
-      archivedAt: true,
-    },
+    select: { id: true, workspaceId: true, title: true, slug: true, type: true,
+      authority: true, bodyMd: true, isPrivate: true, archivedAt: true, updatedAt: true },
   });
-
-  if (!article || article.workspaceId !== params.workspaceId) {
-    return 0;
-  }
-  if (article.isPrivate || article.archivedAt) {
-    return syncKnowledgeForSource({
-      workspaceId: params.workspaceId,
-      sourceType: "BRAIN_ARTICLE",
-      accessDomain: "WORKSPACE",
-      sourceId: article.id,
-      content: "",
-    });
-  }
-
+  if (!article || article.workspaceId !== params.workspaceId) return 0;
   return syncKnowledgeForSource({
-    workspaceId: params.workspaceId,
-    sourceType: "BRAIN_ARTICLE",
-    accessDomain: "WORKSPACE",
-    sourceId: article.id,
-    sourceTitle: article.title,
-    content: article.bodyMd,
-    metadata: {
-      type: article.type,
-      authority: article.authority,
-      slug: article.slug,
-    },
+    workspaceId: params.workspaceId, sourceType: "BRAIN_ARTICLE", accessDomain: "WORKSPACE",
+    sourceId: article.id, sourceTitle: article.title,
+    content: article.archivedAt || article.isPrivate ? "" : article.bodyMd,
+    sourceUpdatedAt: article.updatedAt,
+    metadata: { type: article.type, authority: article.authority, slug: article.slug },
+  });
+}
+
+export async function syncDocumentKnowledge(params: { workspaceId: string; documentId: string; workflowJobId?: string }) {
+  const document = await prisma.document.findUnique({ where: { id: params.documentId }, select: {
+    id: true, workspaceId: true, title: true, source: true, mimeType: true, storageKey: true,
+    textContent: true, accessDomain: true, archivedAt: true, updatedAt: true,
+  } });
+  if (!document || document.workspaceId !== params.workspaceId) return 0;
+  return syncKnowledgeForSource({
+    workspaceId: params.workspaceId, sourceType: "DOCUMENT", accessDomain: document.accessDomain,
+    sourceId: document.id, sourceTitle: document.title,
+    content: document.archivedAt ? "" : [document.title, document.textContent].filter(Boolean).join("\n\n"),
+    sourceUpdatedAt: document.updatedAt,
+    metadata: { source: document.source, mimeType: document.mimeType, storageKey: document.storageKey,
+      ...(params.workflowJobId ? { workflowJobId: params.workflowJobId } : {}) },
+    workflowJobId: params.workflowJobId,
   });
 }
 
@@ -383,11 +381,11 @@ export async function reindexWorkspace(workspaceId: string) {
   const [articles, documents] = await Promise.all([
     prisma.brainArticle.findMany({
       where: { workspaceId, isPrivate: false, archivedAt: null },
-      select: { id: true, title: true, bodyMd: true, slug: true, type: true, authority: true },
+      select: { id: true },
     }),
     prisma.document.findMany({
       where: { workspaceId, textContent: { not: null }, archivedAt: null },
-      select: { id: true, title: true, textContent: true, source: true, mimeType: true, storageKey: true, accessDomain: true },
+      select: { id: true },
     }),
   ]);
 
@@ -415,42 +413,16 @@ export async function reindexWorkspace(workspaceId: string) {
 
   for (const article of articlesToReindex) {
     try {
-      await syncKnowledgeForSource({
-        workspaceId,
-        sourceType: "BRAIN_ARTICLE",
-        accessDomain: "WORKSPACE",
-        sourceId: article.id,
-        sourceTitle: article.title,
-        content: article.bodyMd,
-        metadata: {
-          type: article.type,
-          authority: article.authority,
-          slug: article.slug,
-        },
-      });
-      reindexedArticles++;
+      // Re-read under the article index lock: this list may predate an archive.
+      if (await syncBrainArticleKnowledge({ workspaceId, articleId: article.id })) reindexedArticles++;
     } catch (err) {
       errors.push(`Failed to reindex article ${article.id}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
   for (const doc of documentsToReindex) {
-    if (!doc.textContent) continue;
     try {
-      await syncKnowledgeForSource({
-        workspaceId,
-        sourceType: "DOCUMENT",
-        accessDomain: doc.accessDomain,
-        sourceId: doc.id,
-        sourceTitle: doc.title,
-        content: [doc.title, doc.textContent].filter(Boolean).join("\n\n"),
-        metadata: {
-          source: doc.source,
-          mimeType: doc.mimeType,
-          storageKey: doc.storageKey,
-        },
-      });
-      reindexedDocuments++;
+      if (await syncDocumentKnowledge({ workspaceId, documentId: doc.id })) reindexedDocuments++;
     } catch (err) {
       errors.push(`Failed to reindex document ${doc.id}: ${err instanceof Error ? err.message : String(err)}`);
     }
