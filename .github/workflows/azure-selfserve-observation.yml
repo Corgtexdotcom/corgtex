@@ -1,0 +1,71 @@
+name: Azure Self-Serve Observation
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_release_sha:
+        description: Exact SHA currently running on Azure self-serve production.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  observe:
+    name: Azure Self-Serve Read-only Observation
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: fleet-release-production
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Confirm the exact live Azure release
+        id: release
+        env:
+          EXPECTED_RELEASE_SHA: ${{ inputs.expected_release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          health_json="$(curl --connect-timeout 10 --max-time 30 -fsS -H 'Cache-Control: no-cache' https://selfserve.corgtex.com/api/health)"
+          manifest_json="$(node scripts/azure-only-observation-manifest.mjs "$EXPECTED_RELEASE_SHA" <<< "$health_json")"
+          printf 'manifest_json=%s\n' "$manifest_json" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to Azure for read-only telemetry
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Observe Azure self-serve release
+        env:
+          OBSERVATION_MANIFEST_JSON: ${{ steps.release.outputs.manifest_json }}
+          OBSERVATION_REQUIRE_SOURCE: "true"
+          AZURE_APPLICATIONINSIGHTS_APP_NAME: ${{ vars.AZURE_APPLICATIONINSIGHTS_APP_NAME || 'appi-corgtex-ss-prod' }}
+          AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP: ${{ vars.AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP || 'rg-corgtex-selfserve-production-wus3' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .artifacts/azure-selfserve-observation
+          node scripts/post-deploy-observation-gate.mjs \
+            --manifest-json "$OBSERVATION_MANIFEST_JSON" \
+            --targets azure-selfserve \
+            --window-minutes 20 \
+            --summary-file .artifacts/azure-selfserve-observation/summary.json
+
+      - name: Upload observation summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: azure-selfserve-observation
+          path: .artifacts/azure-selfserve-observation/summary.json
+          if-no-files-found: ignore

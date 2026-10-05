@@ -18,9 +18,6 @@ import {
   submitProposal,
   updateProposal,
   postDeliberationEntry,
-  resolveDeliberationEntry,
-  updateDeliberationEntry,
-  upsertWorkspaceExternalResourceFromUrl
 } from "@corgtex/domain";
 import type { AdviceRequestAudienceType, AdviceRequestPreferredChannel } from "@prisma/client";
 import type { WorkItemEditActionState } from "@/lib/components/WorkItemEditForm";
@@ -157,23 +154,6 @@ export async function editProposalAction(
   }
   refresh(workspaceId);
   return { status: "success" };
-}
-
-export async function attachProposalExternalResourceAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await upsertWorkspaceExternalResourceFromUrl(actor, {
-    workspaceId,
-    url: asString(formData, "url"),
-    descriptionMd: asOptional(formData, "descriptionMd"),
-    entityType: "Proposal",
-    entityId: asString(formData, "proposalId"),
-    purpose: "reference",
-  });
-  refresh(workspaceId);
 }
 
 export async function submitProposalAction(formData: FormData) {
@@ -334,35 +314,6 @@ export async function postDeliberationEntryAction(formData: FormData) {
     targetMemberId: asOptional(formData, "targetMemberId") || undefined,
     targetCircleId: asOptional(formData, "targetCircleId") || undefined,
     adviceRequestId: asOptional(formData, "adviceRequestId") || undefined,
-  });
-  refresh(workspaceId);
-}
-
-export async function resolveDeliberationEntryAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await resolveDeliberationEntry(actor, {
-    workspaceId,
-    entryId: asString(formData, "entryId"),
-    resolvedNote: asString(formData, "resolvedNote"),
-  });
-  refresh(workspaceId);
-}
-
-export async function updateDeliberationEntryAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await updateDeliberationEntry(actor, {
-    workspaceId,
-    entryId: asString(formData, "entryId"),
-    entryType: asString(formData, "entryType"),
-    bodyMd: asString(formData, "bodyMd"),
   });
   refresh(workspaceId);
 }

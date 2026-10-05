@@ -7,6 +7,7 @@ import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from
 import { loadAdviceRequestCountSummaries } from "./advice-requests";
 import { invariant } from "./errors";
 import { humanMemberIdentityWhere } from "./member-identity";
+import { createNotificationIntent } from "./notifications";
 import { requireDraftManager } from "./draft-permissions";
 import { requireCollaborativeWorkItemEditor } from "./collaborative-permissions";
 import { resolveWorkspaceProposalLink } from "./proposal-links";
@@ -567,6 +568,33 @@ export async function updateTension(actor: AppActor, params: {
         aggregateId: updated.id,
         payload: { tensionId: updated.id, actorUserId: actor.kind === "user" ? actor.user.id : null },
       }]);
+    }
+
+    if (tension.status === "OPEN" && !tension.isPrivate
+      && updated.status === "OPEN" && !updated.isPrivate && !updated.archivedAt
+      && changedFields.includes("assigneeMemberId") && updated.assigneeMemberId) {
+      const assignee = await tx.member.findFirst({
+        where: {
+          id: updated.assigneeMemberId,
+          workspaceId: params.workspaceId,
+          isActive: true,
+          ...humanMemberIdentityWhere(),
+        },
+        select: { userId: true },
+      });
+      if (assignee) {
+        await createNotificationIntent(tx, {
+          workspaceId: params.workspaceId,
+          type: "tension.assigned",
+          recipientUserIds: [assignee.userId],
+          actorUserId: actor.kind === "user" ? actor.user.id : null,
+          entityType: "Tension",
+          entityId: updated.id,
+          title: `You were assigned a tension: ${updated.title}`,
+          priority: "HIGH",
+          dedupeKey: `tension-assigned:${updated.id}:${updated.version}`,
+        });
+      }
     }
 
     return updated;

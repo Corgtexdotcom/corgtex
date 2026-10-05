@@ -1,6 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import { describe, expect, it, vi } from "vitest";
-import { calculateRetryDelayMs, deriveAdviceNotificationContent, notificationActorUserIdForEvent } from "./outbox";
+import { calculateRetryDelayMs, createNotificationsForEvent, deriveAdviceNotificationContent, notificationActorUserIdForEvent } from "./outbox";
 import { deriveJobsForEvent, triageBucketStart } from "./derive-jobs";
 import { deriveDispatchNotifications, deriveNotificationsForEvent } from "./derive-notifications";
 
@@ -469,6 +469,85 @@ describe("deriveNotificationsForEvent", () => {
     releaseLock?.();
     expect(await pending).toEqual([]);
     expect(actionFindFirst).toHaveBeenCalledOnce();
+  });
+});
+
+describe("Action assignment dispatch", () => {
+  function fixture() {
+    const recipients = [
+      { userId: "user-2", user: { email: "assignee@example.com" } },
+      { userId: "user-3", user: { email: "other@example.com" } },
+    ];
+    const createMany = vi.fn().mockImplementation(async ({ data }: { data: unknown[] }) => ({ count: data.length }));
+    const upsert = vi.fn().mockImplementation(async ({ create }: { create: { workspaceId: string; userId: string } }) => ({
+      id: "assigned-notification", workspaceId: create.workspaceId, userId: create.userId,
+    }));
+    const preferences = vi.fn().mockResolvedValue([]);
+    const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      action: { findFirst: vi.fn().mockResolvedValue({ title: "Current action title" }) },
+      member: {
+        findFirst: vi.fn().mockResolvedValue({ userId: "user-2" }),
+        findMany: vi.fn().mockImplementation(async ({ where }: { where: { userId?: { in?: string[] } } }) => (
+          where.userId?.in
+            ? recipients.filter((recipient) => where.userId?.in?.includes(recipient.userId))
+            : recipients.map(({ userId }) => ({ userId }))
+        )),
+      },
+      notificationPreference: { findMany: preferences },
+      notification: { createMany, upsert },
+    } as unknown as Prisma.TransactionClient;
+    const event = {
+      id: "event-publication", type: "action.published", workspaceId: "workspace-1",
+      aggregateType: "Action", aggregateId: "action-1",
+      payload: { actionId: "action-1", assigneeMemberId: "member-2", actorUserId: "publisher-1" },
+      attempts: 0, createdAt: new Date("2026-10-05T00:00:00Z"),
+    };
+    return { tx, event, createMany, upsert, preferences };
+  }
+
+  it("sends one targeted assignment notice and broadcasts to other members", async () => {
+    const { tx, event, createMany, upsert } = fixture();
+
+    await createNotificationsForEvent(tx, event);
+
+    expect(upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { dedupeKey: "action-assigned:event-publication:user-2" },
+      create: expect.objectContaining({ userId: "user-2", type: "action.assigned" }),
+    }));
+    expect(createMany).toHaveBeenCalledWith({
+      data: [expect.objectContaining({ userId: "user-3", type: "action.created" })],
+    });
+  });
+
+  it("keeps the generic publication notice when assignment notices are off", async () => {
+    const { tx, event, createMany, upsert, preferences } = fixture();
+    preferences.mockImplementation(async ({ where }: { where: { notifType: { in: string[] } } }) => (
+      where.notifType.in.includes("action.assigned")
+        ? [{ userId: "user-2", notifType: "action.assigned", channel: "OFF" }]
+        : []
+    ));
+
+    await createNotificationsForEvent(tx, event);
+
+    expect(upsert).not.toHaveBeenCalled();
+    expect(createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({ userId: "user-2", type: "action.created" }),
+        expect.objectContaining({ userId: "user-3", type: "action.created" }),
+      ],
+    });
+  });
+
+  it("sends only a targeted notice after public reassignment", async () => {
+    const { tx, event, createMany, upsert } = fixture();
+
+    await createNotificationsForEvent(tx, { ...event, id: "event-reassignment", type: "action.assigned" });
+
+    expect(upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ userId: "user-2", type: "action.assigned" }),
+    }));
+    expect(createMany).not.toHaveBeenCalled();
   });
 });
 

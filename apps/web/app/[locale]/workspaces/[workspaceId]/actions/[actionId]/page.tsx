@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { AppError, getAction, getWorkspaceArchiveRecord, listActionChecklistItems, listAdviceRequests, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { ConfirmSubmitButton } from "@/lib/components/ConfirmSubmitButton";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
@@ -43,6 +44,7 @@ export default async function ActionDetailPage({
   const tWork = await getTranslations("workItems");
   const format = await getFormatter();
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const isDemo = (await prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }))?.slug === "jnj-demo";
   let action: Awaited<ReturnType<typeof getAction>>;
   try {
     action = await getAction(actor, { workspaceId, actionId, includeArchived: true });
@@ -125,10 +127,10 @@ export default async function ActionDetailPage({
   const priorityText = formatWorkItemPriority(action.priority, priorityLabels);
   const authorName = action.author?.displayName || action.author?.email || "Unknown";
   const assigneeName = action.assigneeMember?.user?.displayName || action.assigneeMember?.user?.email || null;
-  const canManage = !isArchived && (actor.kind === "agent"
+  const canManage = !isDemo && !isArchived && (actor.kind === "agent"
     || membership?.role === "ADMIN"
     || (actor.kind === "user" && action.authorUserId === actor.user.id));
-  const isAdmin = actor.kind === "agent" || membership?.role === "ADMIN";
+  const isAdmin = !isDemo && (actor.kind === "agent" || membership?.role === "ADMIN");
   const actorUserId = actor.kind === "user" ? actor.user.id : null;
   const actorMemberId = deliberationTargets.actorMemberId;
   const actorCircleIds = new Set(deliberationTargets.actorCircleIds);
@@ -136,7 +138,7 @@ export default async function ActionDetailPage({
     actorUserId && action.authorUserId === actorUserId
       || actorMemberId && action.assigneeMemberId === actorMemberId,
   );
-  const canManageEntry = (entry: (typeof deliberationEntries)[number]) => !isArchived && Boolean(
+  const canManageEntry = (entry: (typeof deliberationEntries)[number]) => !isDemo && !isArchived && Boolean(
     isAdmin
       || (actorUserId && entry.authorUserId === actorUserId)
       || isParentResponsible
@@ -144,10 +146,10 @@ export default async function ActionDetailPage({
       || (entry.targetCircleId && actorCircleIds.has(entry.targetCircleId)),
   );
   const canCollaborateOnSubmittedAction = !action.isPrivate && (actor.kind === "agent" || Boolean(membership?.isActive));
-  const canEditContent = !isArchived && action.status === "DRAFT"
+  const canEditContent = !isDemo && !isArchived && (action.status === "DRAFT"
     ? canManage
-    : !isArchived && (action.status === "OPEN" || action.status === "IN_PROGRESS") && canCollaborateOnSubmittedAction;
-  const canRequestInput = !isArchived
+    : (action.status === "OPEN" || action.status === "IN_PROGRESS") && canCollaborateOnSubmittedAction);
+  const canRequestInput = !isDemo && !isArchived
     && (action.status === "OPEN" || action.status === "IN_PROGRESS")
     && !action.isPrivate
     && (canManage || isParentResponsible);
@@ -228,7 +230,7 @@ export default async function ActionDetailPage({
           hiddenFields={{ workspaceId, parentId: actionId }}
         />
       ) : null,
-      replyForm: !isArchived && (action.status === "OPEN" || action.status === "IN_PROGRESS") && request.status === "ACTIVE" ? (
+      replyForm: !isDemo && !isArchived && (action.status === "OPEN" || action.status === "IN_PROGRESS") && request.status === "ACTIVE" ? (
         <DeliberationComposer
           postAction={postActionDeliberationAction}
           hiddenFields={{ workspaceId, parentId: actionId, adviceRequestId: request.id }}
@@ -283,7 +285,7 @@ export default async function ActionDetailPage({
         />
       )}
 
-      {!isArchived && (canManage || canEditContent || action.status === "OPEN" || action.status === "IN_PROGRESS") && (
+      {!isDemo && !isArchived && (canManage || canEditContent || action.status === "OPEN" || action.status === "IN_PROGRESS") && (
         <section className="ws-section" style={{ marginBottom: 24 }}>
           <div className="actions-inline">
             {canManage && canOpenPrivateDraft(action) && hasEligibleAssignee && (
@@ -428,7 +430,7 @@ export default async function ActionDetailPage({
 
       <section className="ws-section" style={{ marginBottom: 48 }}>
         <h2 className="nr-section-header">References</h2>
-        <p className="nr-item-meta">{t("referenceSourcesHint")}</p>
+        {!isDemo && <p className="nr-item-meta">{t("referenceSourcesHint")}</p>}
         {referenceFiles.length > 0 && (
           <div className="nr-evidence-list">
             {referenceFiles.map((row) => (
@@ -445,7 +447,7 @@ export default async function ActionDetailPage({
             showFolderSelect={false}
           />
         )}
-        {!isArchived && (
+        {!isDemo && !isArchived && (
           <ExternalResourceAttachForm
             action={attachActionExternalResourceAction}
             hiddenFields={{ workspaceId, actionId: action.id }}
@@ -541,7 +543,7 @@ export default async function ActionDetailPage({
           hiddenFields={{ workspaceId, parentId: actionId }}
           emptyMessage={t("discussionEmpty")}
         />
-        {!isArchived && (action.status === "OPEN" || action.status === "IN_PROGRESS") && (
+        {!isDemo && !isArchived && (action.status === "OPEN" || action.status === "IN_PROGRESS") && (
           <DeliberationComposer
             postAction={postActionDeliberationAction}
             hiddenFields={{ workspaceId, parentId: actionId }}

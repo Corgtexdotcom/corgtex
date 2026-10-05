@@ -95,6 +95,14 @@
         "src/**/*.ts",
         "src/**/*.tsx"
       ]
+    },
+    "packages/knowledge": {
+      "ignoreDependencies": [
+        // Dynamically required by file parsers via packageRequire.resolve at runtime.
+        "@xmldom/xmldom",
+        "officeparser",
+        "pdfjs-dist"
+      ]
     }
   }
 }
