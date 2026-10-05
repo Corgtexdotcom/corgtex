@@ -68,6 +68,11 @@ describe("Brain source removal review", () => {
     await prisma.workspaceFeatureFlag.create({ data: {
       workspaceId: workspace.id, flag: "BRAIN_SOURCE_REMOVAL", enabled: true,
     } });
+    const reader: AppActor = { kind: "agent", authProvider: "credential", label: "Brain-only reader",
+      workspaceIds: [workspace.id], scopes: ["brain:read"] };
+    await expect(deleteSource(reader, { workspaceId: workspace.id, sourceId: removed.id }))
+      .rejects.toMatchObject({ status: 403 });
+    expect(await prisma.workflowJob.count({ where: { workspaceId: workspace.id, type: "agent.brain-source-regenerate" } })).toBe(0);
     const requested = await deleteSource(actor, { workspaceId: workspace.id, sourceId: removed.id });
     expect(requested.status).toBe("pending");
     expect(await prisma.workflowJob.count({ where: { workspaceId: workspace.id, type: "agent.brain-source-regenerate" } })).toBe(1);

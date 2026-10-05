@@ -60,7 +60,7 @@ describe("confirmed Brain article removal", () => {
     expect((await prisma.document.findUniqueOrThrow({ where: { id: document.id } })).archivedAt).toBeNull();
   });
 
-  it("rejects restricted source previews for a brain-only credential", async () => {
+  it("redacts restricted source and document previews for a brain-only credential", async () => {
     const { workspace } = await fixture();
     const { document, source } = await sourceWithDocument(workspace.id, "Finance confidential");
     await prisma.brainSource.update({ where: { id: source.id }, data: { accessDomain: "FINANCE" } });
@@ -69,12 +69,12 @@ describe("confirmed Brain article removal", () => {
     } });
     const credential: AppActor = { kind: "agent", authProvider: "credential", label: "Brain reader",
       workspaceIds: [workspace.id], scopes: ["brain:read"] };
-    await expect(previewBrainArticleRemoval(credential, { workspaceId: workspace.id, slug: article.slug }))
-      .rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+    expect(await previewBrainArticleRemoval(credential, { workspaceId: workspace.id, slug: article.slug }))
+      .toMatchObject({ sources: [], documents: [], canRemoveSources: false, blockReasons: expect.arrayContaining(["restricted"]) });
     await prisma.brainSource.update({ where: { id: source.id }, data: { accessDomain: "WORKSPACE" } });
     await prisma.document.update({ where: { id: document.id }, data: { accessDomain: "FINANCE" } });
-    await expect(previewBrainArticleRemoval(credential, { workspaceId: workspace.id, slug: article.slug }))
-      .rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+    expect(await previewBrainArticleRemoval(credential, { workspaceId: workspace.id, slug: article.slug }))
+      .toMatchObject({ sources: [], documents: [], canRemoveSources: false, blockReasons: expect.arrayContaining(["restricted"]) });
     expect(await prisma.workspaceArchiveRecord.count()).toBe(0);
   });
 
@@ -87,6 +87,7 @@ describe("confirmed Brain article removal", () => {
     } });
     await expect(previewBrainArticleRemoval(outsider, { workspaceId: workspace.id, slug: article.slug }))
       .rejects.toMatchObject({ status: 403, code: "NOT_A_MEMBER" });
+    await prisma.brainSource.update({ where: { id: source.id }, data: { accessDomain: "FINANCE" } });
     const preview = await previewBrainArticleRemoval(owner, { workspaceId: workspace.id, slug: article.slug });
     expect(preview.hasSources).toBe(true);
     expect(preview.canRemoveSources).toBe(false);

@@ -30,22 +30,22 @@ async function buildPreview(tx: Prisma.TransactionClient, actor: AppActor, works
     403, "FORBIDDEN", "Only the article owner or a workspace admin can remove this article.");
 
   const accessDomains = await resolveKnowledgeAccessDomains(actor, workspaceId);
-  const requireSourceAccess = (sources: Array<{ accessDomain: typeof accessDomains[number] }>) => {
-    invariant(sources.every((source) => accessDomains.includes(source.accessDomain)),
-      403, "FORBIDDEN", "Source access is required to preview article removal.");
+  let canViewDetails = true;
+  const checkSourceAccess = (sources: Array<{ accessDomain: typeof accessDomains[number] }>) => {
+    if (sources.some((source) => !accessDomains.includes(source.accessDomain))) canViewDetails = false;
   };
   const directIds = [...new Set([...article.sourceIds, ...sourceIdsInDerivation(article.derivationJson)])].sort();
   const directSources = await tx.brainSource.findMany({ where: { workspaceId, id: { in: directIds } } });
-  requireSourceAccess(directSources);
+  checkSourceAccess(directSources);
   const documentIds = [...new Set(directSources.map((source) => documentId(source.metadata)).filter((id): id is string => !!id))].sort();
   const documents = await tx.document.findMany({ where: { workspaceId, id: { in: documentIds } },
     select: { id: true, title: true, updatedAt: true, archivedAt: true, accessDomain: true } });
-  requireSourceAccess(documents);
+  checkSourceAccess(documents);
   const documentSources = documentIds.length ? await tx.brainSource.findMany({ where: {
     workspaceId, archivedAt: null,
     OR: documentIds.map((id) => ({ metadata: { path: ["documentId"], equals: id } })),
   } }) : [];
-  requireSourceAccess(documentSources);
+  checkSourceAccess(documentSources);
   const sources = [...new Map([...directSources, ...documentSources].map((source) => [source.id, source])).values()]
     .sort((a, b) => a.id.localeCompare(b.id));
   const activeIds = sources.filter((source) => !source.archivedAt).map((source) => source.id);
@@ -58,12 +58,12 @@ async function buildPreview(tx: Prisma.TransactionClient, actor: AppActor, works
     ...item.sourceIds, ...sourceIdsInDerivation(item.derivationJson),
   ]))].filter((id) => !activeIds.includes(id)).sort();
   const relatedSources = await tx.brainSource.findMany({ where: { workspaceId, id: { in: relatedIds } } });
-  requireSourceAccess(relatedSources);
+  checkSourceAccess(relatedSources);
   const relatedDocumentIds = [...new Set(relatedSources.map((source) => documentId(source.metadata)).filter((id): id is string => !!id))]
     .filter((id) => !documentIds.includes(id)).sort();
   const relatedDocuments = await tx.document.findMany({ where: { workspaceId, id: { in: relatedDocumentIds } },
     select: { id: true, updatedAt: true, archivedAt: true, accessDomain: true } });
-  requireSourceAccess(relatedDocuments);
+  checkSourceAccess(relatedDocuments);
   const byArticleId = new Map(impactedArticles.map((item) => [item.id, item]));
   const byDocumentId = new Map(documents.map((item) => [item.id, item]));
   const blockReasons: Array<"source_missing" | "document_missing" | "restricted" | "unclassified" | "feature_disabled"> = [];
@@ -74,7 +74,7 @@ async function buildPreview(tx: Prisma.TransactionClient, actor: AppActor, works
   if (documentIds.length !== documents.length || documents.some((item) => item.archivedAt)) {
     blockReasons.push("document_missing");
   }
-  if (sources.some((source) => source.accessDomain !== "WORKSPACE")) {
+  if (!canViewDetails || sources.some((source) => source.accessDomain !== "WORKSPACE")) {
     blockReasons.push("restricted");
   }
   if (relatedIds.length !== relatedSources.length || relatedSources.some((source) => source.archivedAt)) {
@@ -125,8 +125,8 @@ async function buildPreview(tx: Prisma.TransactionClient, actor: AppActor, works
     hasSources: directIds.length > 0,
     canRemoveSources: canRemoveSources && blockReasons.length === 0 && directIds.length > 0,
     blockReasons: [...new Set(blockReasons)],
-    sources: canRemoveSources ? sourceDetails : [],
-    documents: canRemoveSources ? documents.map((item) => ({ id: item.id, title: item.title })) : [],
+    sources: canRemoveSources && canViewDetails ? sourceDetails : [],
+    documents: canRemoveSources && canViewDetails ? documents.map((item) => ({ id: item.id, title: item.title })) : [],
     sourceIds: activeIds, lockIds, documentIds, lockDocumentIds: [...new Set([...documentIds, ...relatedDocumentIds])].sort(),
   };
 }
