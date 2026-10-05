@@ -283,6 +283,32 @@ describe("knowledge retrieval cache", () => {
     expect(fetch).toHaveBeenCalledOnce();
   });
 
+  it.each(["obsolete hit", "empty index"])("uses current Postgres chunks when Azure has an %s", async (caseName) => {
+    process.env.KNOWLEDGE_SEARCH_PROVIDER = "azure";
+    process.env.AZURE_SEARCH_ENDPOINT = "https://corgtex-search.search.windows.net";
+    process.env.AZURE_SEARCH_INDEX_NAME = "client-knowledge";
+    process.env.AZURE_SEARCH_QUERY_KEY = "query-key";
+    process.env.AZURE_SEARCH_VECTOR_DIMENSIONS = "2";
+    const azureHits = caseName === "obsolete hit" ? [{
+      id: "old-document-chunk", sourceType: "DOCUMENT", sourceId: "doc-1",
+      sourceTitle: "Prior policy", content: "Superseded approval rule", chunkIndex: 0,
+      "@search.score": 1,
+    }] : [];
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ value: azureHits }), { status: 200 })));
+    prismaMock.knowledgeChunk.findMany.mockResolvedValue([{
+      id: "new-document-chunk", sourceType: "DOCUMENT", sourceId: "doc-1",
+      sourceTitle: "Current policy", chunkIndex: 0, content: "Current approval rule",
+      embedding: [1, 0], createdAt: new Date("2026-04-03T09:05:00Z"),
+    }]);
+
+    const results = await searchIndexedKnowledge({ workspaceId: "ws-1", query: "approval rule" });
+    expect(results).toEqual([expect.objectContaining({
+      chunkId: "new-document-chunk", sourceId: "doc-1", snippet: "Current approval rule",
+    })]);
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(prismaMock.knowledgeChunk.findMany.mock.calls.some(([args]) => args?.take === 500)).toBe(true);
+  });
+
   it("partitions grounded-answer caches by access domain and source type", async () => {
     prismaMock.knowledgeChunk.findMany.mockResolvedValue([
       {

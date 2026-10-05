@@ -234,7 +234,18 @@ export async function searchIndexedKnowledge(params: {
     configuredProvider,
   });
 
-  const currentResults = await currentKnowledgeCitations(params.workspaceId, accessDomains, results);
+  let currentResults = await currentKnowledgeCitations(params.workspaceId, accessDomains, results);
+  // Azure writes can finish out of order after SQL commits. The SQL receipts
+  // reject obsolete Azure hits above; if Azure has no current hit, use the
+  // committed Postgres index so a newer upload stays discoverable.
+  if (effectiveProvider !== "postgres" && currentResults.length === 0) {
+    const postgresResults = await searchIndexedKnowledgePostgres({
+      ...params,
+      query,
+      accessDomains,
+    });
+    currentResults = await currentKnowledgeCitations(params.workspaceId, accessDomains, postgresResults);
+  }
   await setCacheJson(cacheKey, currentResults, SEARCH_CACHE_TTL_MS);
   return currentResults;
 }

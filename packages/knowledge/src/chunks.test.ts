@@ -177,6 +177,16 @@ describe("syncKnowledgeForSource", () => {
     expect(syncAzureKnowledgeSourceMock).not.toHaveBeenCalled();
   });
 
+  it("does not let an old empty document sync remove newer chunks", async () => {
+    vi.mocked(prisma.document.findFirst).mockResolvedValueOnce(null);
+    expect(await syncKnowledgeForSource({
+      workspaceId: "ws_1", sourceType: "DOCUMENT", accessDomain: "WORKSPACE",
+      sourceId: "doc-1", content: "", metadata: { storageKey: "old-blob" },
+    })).toBe(0);
+    expect(prisma.knowledgeChunk.deleteMany).not.toHaveBeenCalled();
+    expect(syncAzureKnowledgeSourceMock).not.toHaveBeenCalled();
+  });
+
   it("does not let an old article sync restore chunks after quarantine", async () => {
     vi.mocked(prisma.brainArticle.findFirst).mockResolvedValueOnce(null);
     expect(await syncKnowledgeForSource({

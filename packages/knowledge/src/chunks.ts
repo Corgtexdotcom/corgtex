@@ -95,6 +95,15 @@ export async function syncKnowledgeForSource(params: {
         });
         if (active) return false;
       }
+      const storageKey = params.sourceType === "DOCUMENT" ? params.metadata?.storageKey : null;
+      if (typeof storageKey === "string") {
+        await tx.$queryRaw`SELECT "id" FROM "Document" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+        const document = await tx.document.findFirst({
+          where: { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null, storageKey },
+          select: { id: true },
+        });
+        if (!document) return false;
+      }
       await tx.knowledgeChunk.deleteMany({
         where: {
           workspaceId: params.workspaceId,
