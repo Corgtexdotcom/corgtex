@@ -45,6 +45,7 @@ const requireWorkspaceMembership = vi.fn();
 const appendEvents = vi.fn();
 const resolveKnowledgeAccessDomains = vi.fn();
 const archiveWorkspaceArtifact = vi.fn();
+const requestBrainSourceRemoval = vi.fn();
 
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
@@ -71,6 +72,8 @@ vi.mock("./archive", () => ({
   },
   archiveWorkspaceArtifact,
 }));
+
+vi.mock("./brain-source-removal", () => ({ requestBrainSourceRemoval }));
 
 const ownerActor = {
   kind: "user",
@@ -622,19 +625,18 @@ describe("brain source ingestion", () => {
     });
   });
 
-  it("delegates Brain source archiving to the central archive service", async () => {
+  it("delegates Brain source removal to the review lifecycle", async () => {
     const { deleteSource } = await import("./brain");
+    requestBrainSourceRemoval.mockResolvedValue({ id: "source-1", status: "archived" });
 
     await expect(deleteSource(ownerActor, {
       workspaceId: "ws-1",
       sourceId: "source-1",
-    })).resolves.toEqual({ id: "source-1" });
+    })).resolves.toEqual({ id: "source-1", status: "archived" });
 
-    expect(archiveWorkspaceArtifact).toHaveBeenCalledWith(ownerActor, {
+    expect(requestBrainSourceRemoval).toHaveBeenCalledWith(ownerActor, {
       workspaceId: "ws-1",
-      entityType: "BrainSource",
-      entityId: "source-1",
-      reason: "Archived from Brain source delete path.",
+      sourceId: "source-1",
     });
   });
 

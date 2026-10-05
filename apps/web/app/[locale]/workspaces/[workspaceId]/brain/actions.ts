@@ -9,6 +9,7 @@ import {
   AGREEMENT_BRAIN_ARTICLE_TYPES,
   createArticle,
   deleteSource,
+  resolveBrainSourceRemoval,
   updateArticle,
   ingestSource,
   publishArticle,
@@ -168,5 +169,15 @@ export async function deleteSourceAction(formData: FormData) {
     workspaceId,
     sourceId: asString(formData, "sourceId"),
   });
+  refresh(workspaceId);
+}
+
+export async function resolveSourceRemovalAction(formData: FormData) {
+  const workspaceId = asString(formData, "workspaceId");
+  if (workspaceId) await enforceDemoGuard(workspaceId);
+  const actor = await requirePageActor();
+  const decision = asString(formData, "decision");
+  if (decision !== "accept" && decision !== "reject") throw new Error("Invalid source review decision.");
+  await resolveBrainSourceRemoval(actor, { workspaceId, jobId: asString(formData, "jobId"), decision });
   refresh(workspaceId);
 }

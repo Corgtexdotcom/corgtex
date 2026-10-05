@@ -7,6 +7,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { resolveKnowledgeAccessDomains } from "./brain-access";
 import { lockActiveArticleSources } from "./brain-source-links";
+import { requestBrainSourceRemoval } from "./brain-source-removal";
 import { brainSourceContentFingerprint, type BrainArticleDerivationV1 } from "./brain-derivation";
 import { invariant } from "./errors";
 import { persistedMemberId } from "./membership";
@@ -299,6 +300,7 @@ export async function updateArticle(actor: AppActor, params: {
       where: { id: article.id },
       data,
     });
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brain_article_index:${params.workspaceId}:${article.id}`}, 0))`;
 
     await tx.auditLog.create({
       data: {
@@ -708,14 +710,7 @@ export async function deleteSource(actor: AppActor, params: {
   workspaceId: string;
   sourceId: string;
 }) {
-  const archived = await archiveWorkspaceArtifact(actor, {
-    workspaceId: params.workspaceId,
-    entityType: "BrainSource",
-    entityId: params.sourceId,
-    reason: "Archived from Brain source delete path.",
-  });
-
-  return { id: archived.id };
+  return requestBrainSourceRemoval(actor, params);
 }
 
 // ---------------------------------------------------------------------------

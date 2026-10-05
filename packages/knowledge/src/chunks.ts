@@ -196,37 +196,53 @@ export async function syncBrainArticleKnowledge(params: {
   workspaceId: string;
   articleId: string;
 }) {
-  const article = await prisma.brainArticle.findUnique({
-    where: { id: params.articleId },
-    select: {
-      id: true,
-      workspaceId: true,
-      title: true,
-      slug: true,
-      type: true,
-      authority: true,
-      bodyMd: true,
-      isPrivate: true,
-    },
-  });
+  // Hold this article's index lock through embedding and Azure publication.
+  // Archive/update takes the same lock before commit, then emits a fresh sync.
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brain_article_index:${params.workspaceId}:${params.articleId}`}, 0))`;
+    const article = await tx.brainArticle.findUnique({
+      where: { id: params.articleId },
+      select: {
+        id: true,
+        workspaceId: true,
+        title: true,
+        slug: true,
+        type: true,
+        authority: true,
+        bodyMd: true,
+        isPrivate: true,
+        archivedAt: true,
+      },
+    });
 
-  if (!article || article.workspaceId !== params.workspaceId || article.isPrivate) {
-    return 0;
-  }
+    if (!article || article.workspaceId !== params.workspaceId) {
+      return 0;
+    }
 
-  return syncKnowledgeForSource({
-    workspaceId: params.workspaceId,
-    sourceType: "BRAIN_ARTICLE",
-    accessDomain: "WORKSPACE",
-    sourceId: article.id,
-    sourceTitle: article.title,
-    content: article.bodyMd,
-    metadata: {
-      type: article.type,
-      authority: article.authority,
-      slug: article.slug,
-    },
-  });
+    if (article.archivedAt || article.isPrivate) {
+      return syncKnowledgeForSource({
+        workspaceId: params.workspaceId,
+        sourceType: "BRAIN_ARTICLE",
+        accessDomain: "WORKSPACE",
+        sourceId: article.id,
+        content: "",
+      });
+    }
+
+    return syncKnowledgeForSource({
+      workspaceId: params.workspaceId,
+      sourceType: "BRAIN_ARTICLE",
+      accessDomain: "WORKSPACE",
+      sourceId: article.id,
+      sourceTitle: article.title,
+      content: article.bodyMd,
+      metadata: {
+        type: article.type,
+        authority: article.authority,
+        slug: article.slug,
+      },
+    });
+  }, { maxWait: 5_000, timeout: 180_000 });
 }
 
 export type WorkspaceIndexingHealth = {
@@ -303,7 +319,7 @@ export async function reindexWorkspace(workspaceId: string) {
   const [articles, documents] = await Promise.all([
     prisma.brainArticle.findMany({
       where: { workspaceId, isPrivate: false, archivedAt: null },
-      select: { id: true, title: true, bodyMd: true, slug: true, type: true, authority: true },
+      select: { id: true },
     }),
     prisma.document.findMany({
       where: { workspaceId, textContent: { not: null }, archivedAt: null },
@@ -335,20 +351,8 @@ export async function reindexWorkspace(workspaceId: string) {
 
   for (const article of articlesToReindex) {
     try {
-      await syncKnowledgeForSource({
-        workspaceId,
-        sourceType: "BRAIN_ARTICLE",
-        accessDomain: "WORKSPACE",
-        sourceId: article.id,
-        sourceTitle: article.title,
-        content: article.bodyMd,
-        metadata: {
-          type: article.type,
-          authority: article.authority,
-          slug: article.slug,
-        },
-      });
-      reindexedArticles++;
+      // Re-read under the article index lock: this list may predate an archive.
+      if (await syncBrainArticleKnowledge({ workspaceId, articleId: article.id })) reindexedArticles++;
     } catch (err) {
       errors.push(`Failed to reindex article ${article.id}: ${err instanceof Error ? err.message : String(err)}`);
     }

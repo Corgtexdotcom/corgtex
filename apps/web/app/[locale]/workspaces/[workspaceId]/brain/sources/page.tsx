@@ -1,7 +1,7 @@
-import { duplicateGuardErrorPayload, isDuplicateGuardMatchError, listBrainSourceArchiveImpacts, listSources, requireWorkspaceMembership } from "@corgtex/domain";
+import { duplicateGuardErrorPayload, isDuplicateGuardMatchError, listBrainSourceArchiveImpacts, listBrainSourceRemovalReviews, listSources, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { prisma } from "@corgtex/shared";
-import { deleteSourceAction, ingestSourceAction } from "../actions";
+import { deleteSourceAction, ingestSourceAction, resolveSourceRemovalAction } from "../actions";
 import { getTranslations } from "next-intl/server";
 import { DuplicateGuardForm, type DuplicateGuardFormState } from "../../add/DuplicateGuardForm";
 import { BrainSourceFileUploadForm } from "./BrainSourceFileUploadForm";
@@ -27,6 +27,10 @@ export default async function BrainSourcesPage({
     workspaceId,
     sourceIds: sources.map((source) => source.id),
   })).map((impact) => [impact.sourceId, impact]));
+  const canReview = actor.kind === "agent" || membership?.role === "ADMIN";
+  const removalReviews = new Map((canReview ? await listBrainSourceRemovalReviews(actor, {
+    workspaceId, sourceIds: sources.map((source) => source.id),
+  }) : []).map((review) => [review.sourceId, review]));
 
   async function ingestSourceAndReturn(_state: DuplicateGuardFormState, formData: FormData): Promise<DuplicateGuardFormState> {
     "use server";
@@ -100,6 +104,8 @@ export default async function BrainSourcesPage({
         <div className="list">
           {sources.map((s) => {
             const impact = sourceImpacts.get(s.id);
+            const review = removalReviews.get(s.id);
+            const hasUnclassifiedLink = impact?.visibleArticles.some((article) => article.kind === "unclassified") ?? false;
             const canArchive = !isDemo && (
               actor.kind === "agent"
               || membership?.role === "ADMIN"
@@ -140,6 +146,48 @@ export default async function BrainSourcesPage({
                       </div>
                     ))}
                     {impact.hasHiddenArticles && <p>{t("sourceArchiveHiddenLinks")}</p>}
+                  </div>
+                )}
+                {canReview && hasUnclassifiedLink && <p className="muted">{t("sourceRemovalUnclassified")}</p>}
+                {canReview && impact?.blocked && !hasUnclassifiedLink && !isDemo && (
+                  <div className="stack" style={{ marginTop: 8 }}>
+                    {review?.phase === "READY" && review.status === "COMPLETED" ? (
+                      <div className="panel stack">
+                        <p>{t("sourceRemovalReady")}</p>
+                        {review.articles.map((article) => (
+                          <details key={article.id}>
+                            <summary>{article.title} · {t(article.action === "archive" ? "sourceRemovalArchiveArticle" : "sourceRemovalRegenerateArticle")}</summary>
+                            {article.action === "regenerate" && <div className="stack">
+                              <h4>{t("sourceRemovalCurrentBody")}</h4>
+                              <pre style={{ whiteSpace: "pre-wrap", maxHeight: 300, overflow: "auto" }}>{article.currentBodyMd}</pre>
+                              <h4>{t("sourceRemovalCandidateBody")}</h4>
+                              <pre style={{ whiteSpace: "pre-wrap", maxHeight: 300, overflow: "auto" }}>{article.candidateBodyMd}</pre>
+                            </div>}
+                          </details>
+                        ))}
+                        <div className="actions-inline">
+                          {(["accept", "reject"] as const).map((decision) => (
+                            <form key={decision} action={resolveSourceRemovalAction}>
+                              <input type="hidden" name="workspaceId" value={workspaceId} />
+                              <input type="hidden" name="jobId" value={review.jobId} />
+                              <input type="hidden" name="decision" value={decision} />
+                              <button type="submit" className={decision === "accept" ? "danger small" : "secondary small"}>
+                                {t(decision === "accept" ? "sourceRemovalAccept" : "sourceRemovalReject")}
+                              </button>
+                            </form>
+                          ))}
+                        </div>
+                      </div>
+                    ) : review && (review.status === "PENDING" || review.status === "RUNNING") ? (
+                      <p className="muted">{t("sourceRemovalPending")}</p>
+                    ) : (
+                      <form action={deleteSourceAction}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="sourceId" value={s.id} />
+                        <button type="submit" className="secondary small">{t("sourceRemovalPrepare")}</button>
+                        {review && <p className="muted">{t("sourceRemovalRetry")}</p>}
+                      </form>
+                    )}
                   </div>
                 )}
                 {canArchive && (

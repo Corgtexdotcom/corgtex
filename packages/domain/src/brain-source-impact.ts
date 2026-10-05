@@ -3,6 +3,7 @@ import { prisma, type AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { resolveKnowledgeAccessDomains } from "./brain-access";
 import { invariant } from "./errors";
+import type { BrainArticleDerivationV1 } from "./brain-derivation";
 
 type ImpactClient = Pick<Prisma.TransactionClient, "brainArticle">;
 
@@ -25,15 +26,16 @@ export function sourceIdsInDerivation(value: Prisma.JsonValue | null) {
     && typeof source.sourceId === "string" ? [source.sourceId] : []);
 }
 
-function validDerivationSourceIds(value: Prisma.JsonValue | null) {
+export function readBrainArticleDerivation(value: Prisma.JsonValue | null): BrainArticleDerivationV1 | null {
   if (!value || typeof value !== "object" || Array.isArray(value)
     || value.version !== 1 || value.origin !== "brain-absorb"
     || typeof value.agentRunId !== "string" || !value.agentRunId.trim()
-    || !Array.isArray(value.sources) || value.sources.length === 0) return [];
+    || !Array.isArray(value.sources) || value.sources.length === 0) return null;
   const valid = value.sources.every((source) => source && typeof source === "object" && !Array.isArray(source)
     && typeof source.sourceId === "string" && source.sourceId.trim()
     && typeof source.fingerprint === "string" && /^[a-f0-9]{64}$/.test(source.fingerprint));
-  return valid ? sourceIdsInDerivation(value) : [];
+  if (!valid || new Set(sourceIdsInDerivation(value)).size !== value.sources.length) return null;
+  return value as BrainArticleDerivationV1;
 }
 
 /** This classifies only explicit lineage. A legacy sourceIds link stays unclassified. */
@@ -61,7 +63,7 @@ export async function findSourceArticleImpacts(
     },
   });
   for (const article of articles) {
-    const explicit = new Set(validDerivationSourceIds(article.derivationJson));
+    const explicit = new Set(readBrainArticleDerivation(article.derivationJson)?.sources.map((source) => source.sourceId) ?? []);
     const linked = new Set([...article.sourceIds, ...sourceIdsInDerivation(article.derivationJson)]);
     for (const sourceId of linked) {
       const impact = impacts.get(sourceId);

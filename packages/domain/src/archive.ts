@@ -668,8 +668,18 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
       }
       throw error;
     }
+    if (config.entityType === "BrainArticle") {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brain_article_index:${params.workspaceId}:${record.id}`}, 0))`;
+      await tx.knowledgeChunk.deleteMany({ where: {
+        workspaceId: params.workspaceId, sourceType: "BRAIN_ARTICLE", sourceId: record.id,
+      } });
+    }
     if (config.entityType === "Goal") {
       await recomputeGoalParentProgressForArchiveTransition(tx, actor, record);
+    }
+    if (config.entityType === "BrainArticle") {
+      await appendEvents(tx, [{ workspaceId: params.workspaceId, type: "brain-article.updated",
+        aggregateType: "BrainArticle", aggregateId: record.id, payload: { articleId: record.id } }]);
     }
 
     if (isWorkspacePermalinkEntityType(config.entityType)) {
@@ -777,6 +787,9 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
       }
       throw error;
     }
+    if (config.entityType === "BrainArticle") {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brain_article_index:${params.workspaceId}:${record.id}`}, 0))`;
+    }
     if (config.entityType === "Goal") {
       await recomputeGoalParentProgressForArchiveTransition(tx, actor, updated);
     }
@@ -790,6 +803,10 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
           payload: { sourceId: record.id },
         },
       ]);
+    }
+    if (config.entityType === "BrainArticle") {
+      await appendEvents(tx, [{ workspaceId: params.workspaceId, type: "brain-article.updated",
+        aggregateType: "BrainArticle", aggregateId: record.id, payload: { articleId: record.id } }]);
     }
 
     if (archiveRecord) {

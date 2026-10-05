@@ -633,7 +633,7 @@ async function scheduleRecurringRecorderCalendarSync(workspaceId: string, source
   });
 }
 
-async function handleJob(job: ClaimedJob) {
+async function handleJob(job: ClaimedJob, workerId: string) {
   const payload = job.payload as Record<string, unknown>;
 
   if (job.type === FINANCE_REPORT_IMPORT_EXTRACTION_JOB_TYPE) {
@@ -1108,6 +1108,10 @@ async function handleJob(job: ClaimedJob) {
     return;
   }
 
+  if (job.type === "agent.brain-source-regenerate") {
+    return runAgentWorkflowJob(job, workerId);
+  }
+
   if (job.type.startsWith("agent.")) {
     const result = await runAgentWorkflowJob(job);
     if (result && typeof result === "object" && "skipped" in result && result.reason === "concurrency_limit") {
@@ -1185,14 +1189,28 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
   const startedAt = Date.now();
   let failed = false;
   let failure: unknown = null;
+  let superseded = false;
   try {
     const diagnostic = job.type === RELEASE_DIAGNOSTIC_JOB_TYPE;
     await withWorkspaceSupportExecution(job, () => withMcpConnectionExecution(job, async () => {
       await recordMeetingProgressForJob(job, "ACTIVE");
-      const result = await (diagnostic ? handleReleaseDiagnostic(job, workerId) : handleJob(job));
+      const result = await (diagnostic ? handleReleaseDiagnostic(job, workerId) : handleJob(job, workerId));
+      superseded = job.type === "agent.brain-source-regenerate"
+        && !!result && typeof result === "object" && "phase" in result && result.phase === "SUPERSEDED";
       await recordMeetingProgressForJob(job, resultWasSkipped(result) ? "SKIPPED" : "COMPLETED");
     }));
-    if (!diagnostic) await completeJob(job.id);
+    if (!diagnostic) {
+      if (job.type === "agent.brain-source-regenerate" && !superseded) {
+        // A reclaimed job may still have an older model call in flight.
+        await prisma.workflowJob.updateMany({
+          where: { id: job.id, workspaceId: job.workspaceId, type: job.type,
+            status: "RUNNING", lockedBy: workerId, attempts: job.attempts },
+          data: { status: "COMPLETED", completedAt: new Date(), error: null, lockedAt: null, lockedBy: null },
+        });
+      } else if (!superseded) {
+        await completeJob(job.id);
+      }
+    }
   } catch (error) {
     failed = true;
     failure = error;
@@ -1205,6 +1223,16 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
       await prisma.workflowJob.updateMany({
         where: { id: job.id, workspaceId: job.workspaceId, type: RELEASE_DIAGNOSTIC_JOB_TYPE, status: "RUNNING", lockedBy: workerId },
         data: { status: "FAILED", lockedAt: null, lockedBy: null, error: "Release diagnostic failed; reconcile the exact operation." },
+      });
+    } else if (job.type === "agent.brain-source-regenerate") {
+      const status: WorkflowJobStatus = job.attempts >= MAX_ATTEMPTS || executionAuthorizationRevoked(error) ? "FAILED" : "PENDING";
+      await prisma.workflowJob.updateMany({
+        where: { id: job.id, workspaceId: job.workspaceId, type: job.type,
+          status: "RUNNING", lockedBy: workerId, attempts: job.attempts },
+        data: { status, error: error instanceof Error ? error.message : "Unknown worker error.",
+          completedAt: status === "FAILED" ? new Date() : null,
+          runAfter: status === "PENDING" ? nextRetryTime(job.attempts) : undefined,
+          lockedAt: null, lockedBy: null },
       });
     } else {
       await failJob(job, error);
