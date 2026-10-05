@@ -217,7 +217,39 @@ async function syncAzureSourceBestEffort(params: Parameters<typeof syncAzureKnow
     throw new Error("Azure Search indexing is enabled but not configured for writes.");
   }
   try {
-    await syncAzureKnowledgeSource(params);
+    let desired = params;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const result = await syncAzureKnowledgeSource(desired);
+      if (result.skipped) return;
+
+      // Another worker may commit a newer SQL revision while this Azure call
+      // is in flight. Repair from SQL before declaring the older job complete.
+      const current = await prisma.knowledgeChunk.findMany({
+        where: { workspaceId: params.workspaceId, sourceType: params.sourceType, sourceId: params.sourceId },
+        orderBy: { chunkIndex: "asc" },
+      });
+      const currentIds = current.map((chunk) => chunk.id).sort();
+      const attemptedIds = desired.chunks.map((chunk) => chunk.id).sort();
+      if (currentIds.length === attemptedIds.length && currentIds.every((id, index) => id === attemptedIds[index])) return;
+      desired = {
+        ...params,
+        chunks: current.map((chunk) => ({
+          id: chunk.id,
+          workspaceId: chunk.workspaceId,
+          sourceType: chunk.sourceType,
+          accessDomain: chunk.accessDomain,
+          sourceId: chunk.sourceId,
+          sourceTitle: chunk.sourceTitle,
+          chunkIndex: chunk.chunkIndex,
+          content: chunk.content,
+          embedding: Array.isArray(chunk.embedding) ? chunk.embedding.filter((value): value is number => typeof value === "number") : [],
+          metadata: chunk.metadata,
+          sensitivity: chunk.sensitivity,
+          createdAt: chunk.createdAt,
+        })),
+      };
+    }
+    throw new Error("Knowledge source changed during Azure indexing; retry to reconcile the latest SQL revision.");
   } catch (error) {
     if (getKnowledgeSearchProvider() === "azure") {
       throw error;

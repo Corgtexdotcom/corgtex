@@ -309,6 +309,56 @@ describe("knowledge retrieval cache", () => {
     expect(prismaMock.knowledgeChunk.findMany.mock.calls.some(([args]) => args?.take === 500)).toBe(true);
   });
 
+  it("recovers current chunks from a cached obsolete Azure hit after cache invalidation fails", async () => {
+    process.env.KNOWLEDGE_SEARCH_PROVIDER = "azure";
+    process.env.AZURE_SEARCH_ENDPOINT = "https://corgtex-search.search.windows.net";
+    process.env.AZURE_SEARCH_INDEX_NAME = "client-knowledge";
+    process.env.AZURE_SEARCH_QUERY_KEY = "query-key";
+    process.env.AZURE_SEARCH_VECTOR_DIMENSIONS = "2";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ value: [{
+      id: "old-document-chunk", sourceType: "DOCUMENT", sourceId: "doc-1",
+      sourceTitle: "Prior policy", content: "Superseded approval rule", chunkIndex: 0,
+      "@search.score": 1,
+    }] }), { status: 200 })));
+    const oldChunk = {
+      id: "old-document-chunk", sourceType: "DOCUMENT", sourceId: "doc-1",
+      sourceTitle: "Prior policy", chunkIndex: 0, content: "Superseded approval rule",
+      embedding: [1, 0], createdAt: new Date("2026-04-03T09:00:00Z"),
+    };
+    const newChunk = {
+      ...oldChunk, id: "new-document-chunk", sourceTitle: "Current policy",
+      content: "Current approval rule", createdAt: new Date("2026-04-03T09:05:00Z"),
+    };
+    prismaMock.knowledgeChunk.findMany.mockResolvedValue([oldChunk]);
+    expect((await searchIndexedKnowledge({ workspaceId: "ws-1", query: "approval rule" }))[0]?.chunkId).toBe(oldChunk.id);
+
+    // Model the committed replacement with an unchanged search-cache version.
+    prismaMock.knowledgeChunk.findMany.mockResolvedValue([newChunk]);
+    const current = await searchIndexedKnowledge({ workspaceId: "ws-1", query: "approval rule" });
+    expect(current).toEqual([expect.objectContaining({ chunkId: newChunk.id, snippet: newChunk.content })]);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("fills a partial Azure result when its other hit has an obsolete SQL receipt", async () => {
+    process.env.KNOWLEDGE_SEARCH_PROVIDER = "azure";
+    process.env.AZURE_SEARCH_ENDPOINT = "https://corgtex-search.search.windows.net";
+    process.env.AZURE_SEARCH_INDEX_NAME = "client-knowledge";
+    process.env.AZURE_SEARCH_QUERY_KEY = "query-key";
+    process.env.AZURE_SEARCH_VECTOR_DIMENSIONS = "2";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ value: [
+      { id: "old-document-chunk", sourceType: "DOCUMENT", sourceId: "doc-1", sourceTitle: "Prior policy", content: "Old rule", chunkIndex: 0, "@search.score": 1 },
+      { id: "other-chunk", sourceType: "DOCUMENT", sourceId: "doc-2", sourceTitle: "Other policy", content: "Other rule", chunkIndex: 0, "@search.score": 0.8 },
+    ] }), { status: 200 })));
+    prismaMock.knowledgeChunk.findMany.mockResolvedValue([
+      { id: "new-document-chunk", sourceType: "DOCUMENT", sourceId: "doc-1", sourceTitle: "Current policy", chunkIndex: 0, content: "Current rule", embedding: [1, 0], createdAt: new Date("2026-04-03T09:05:00Z") },
+      { id: "other-chunk", sourceType: "DOCUMENT", sourceId: "doc-2", sourceTitle: "Other policy", chunkIndex: 0, content: "Other rule", embedding: [1, 0], createdAt: new Date("2026-04-03T09:00:00Z") },
+    ]);
+
+    const results = await searchIndexedKnowledge({ workspaceId: "ws-1", query: "rule" });
+    expect(results.map((item) => item.chunkId)).toEqual(["other-chunk", "new-document-chunk"]);
+    expect(results.find((item) => item.chunkId === "old-document-chunk")).toBeUndefined();
+  });
+
   it("partitions grounded-answer caches by access domain and source type", async () => {
     prismaMock.knowledgeChunk.findMany.mockResolvedValue([
       {

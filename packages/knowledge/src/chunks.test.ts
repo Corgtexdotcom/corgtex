@@ -211,6 +211,47 @@ describe("syncKnowledgeForSource", () => {
       workspaceId: "ws_1", sourceType: "BRAIN_ARTICLE", sourceId: "article-old", chunks: [],
     }));
   });
+
+  it("repairs an older Azure write from current SQL chunks before its worker completes", async () => {
+    process.env.KNOWLEDGE_SEARCH_PROVIDER = "azure";
+    process.env.AZURE_SEARCH_ENDPOINT = "https://corgtex-search.search.windows.net";
+    process.env.AZURE_SEARCH_INDEX_NAME = "client-knowledge";
+    process.env.AZURE_SEARCH_ADMIN_KEY = "admin-key";
+    let signalOldStarted!: () => void;
+    let releaseOld!: () => void;
+    const oldStarted = new Promise<void>((resolve) => { signalOldStarted = resolve; });
+    const oldRelease = new Promise<void>((resolve) => { releaseOld = resolve; });
+    let current: any[] = [];
+    vi.mocked(prisma.knowledgeChunk.findMany).mockImplementation((async () => current) as any);
+    syncAzureKnowledgeSourceMock.mockImplementation(async (input) => {
+      if (input.chunks[0]?.content === "Old policy") {
+        signalOldStarted();
+        await oldRelease;
+      } else if (current.length === 0) {
+        current = (vi.mocked(prisma.knowledgeChunk.createMany).mock.calls.at(-1)?.[0]?.data ?? []) as any[];
+      }
+      return { skipped: false, deleted: 1, uploaded: 1 };
+    });
+
+    const oldWorker = syncKnowledgeForSource({
+      workspaceId: "ws_1", sourceType: "DOCUMENT", accessDomain: "WORKSPACE",
+      sourceId: "doc-1", content: "Old policy", metadata: { storageKey: "old-blob" },
+    });
+    await oldStarted;
+    await syncKnowledgeForSource({
+      workspaceId: "ws_1", sourceType: "DOCUMENT", accessDomain: "WORKSPACE",
+      sourceId: "doc-1", content: "Current policy", metadata: { storageKey: "new-blob" },
+    });
+    releaseOld();
+    await oldWorker;
+
+    expect(syncAzureKnowledgeSourceMock).toHaveBeenCalledTimes(3);
+    expect(syncAzureKnowledgeSourceMock.mock.calls[0]?.[0].chunks[0].content).toBe("Old policy");
+    expect(syncAzureKnowledgeSourceMock.mock.calls[1]?.[0].chunks[0].content).toBe("Current policy");
+    expect(syncAzureKnowledgeSourceMock.mock.calls[2]?.[0].chunks).toEqual([expect.objectContaining({
+      id: current[0].id, content: "Current policy", metadata: expect.objectContaining({ storageKey: "new-blob" }),
+    })]);
+  });
 });
 
 describe("Workspace Reindex", () => {

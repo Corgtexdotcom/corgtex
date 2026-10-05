@@ -175,6 +175,26 @@ async function currentKnowledgeCitations<T extends KnowledgeCitation>(
   });
 }
 
+async function currentSearchResults(
+  params: Parameters<typeof searchIndexedKnowledgePostgres>[0],
+  provider: "postgres" | "azure" | "dual_compare",
+  candidates: KnowledgeSearchResult[],
+) {
+  const current = await currentKnowledgeCitations(params.workspaceId, params.accessDomains, candidates);
+  if (provider === "postgres" || (current.length === candidates.length && current.length > 0)) return current;
+
+  // A late Azure write or a failed cache invalidation can leave either stale
+  // hits or no hits. Fill missing results from committed SQL receipts.
+  const postgres = await currentKnowledgeCitations(
+    params.workspaceId,
+    params.accessDomains,
+    await searchIndexedKnowledgePostgres(params),
+  );
+  const seen = new Set(current.map((item) => item.chunkId));
+  return [...current, ...postgres.filter((item) => !seen.has(item.chunkId))]
+    .slice(0, params.limit ?? DEFAULT_SEARCH_LIMIT);
+}
+
 export async function invalidateKnowledgeCache(workspaceId?: string, transaction?: Prisma.TransactionClient) {
   if (!workspaceId) {
     await incrementCacheVersion("knowledge:all", transaction);
@@ -223,7 +243,7 @@ export async function searchIndexedKnowledge(params: {
   });
   const cached = await getCacheJson<KnowledgeSearchResult[]>(cacheKey);
   if (cached) {
-    return currentKnowledgeCitations(params.workspaceId, accessDomains, cached);
+    return currentSearchResults({ ...params, query, accessDomains }, effectiveProvider, cached);
   }
 
   const results = await executeKnowledgeSearch({
@@ -234,18 +254,7 @@ export async function searchIndexedKnowledge(params: {
     configuredProvider,
   });
 
-  let currentResults = await currentKnowledgeCitations(params.workspaceId, accessDomains, results);
-  // Azure writes can finish out of order after SQL commits. The SQL receipts
-  // reject obsolete Azure hits above; if Azure has no current hit, use the
-  // committed Postgres index so a newer upload stays discoverable.
-  if (effectiveProvider !== "postgres" && currentResults.length === 0) {
-    const postgresResults = await searchIndexedKnowledgePostgres({
-      ...params,
-      query,
-      accessDomains,
-    });
-    currentResults = await currentKnowledgeCitations(params.workspaceId, accessDomains, postgresResults);
-  }
+  const currentResults = await currentSearchResults({ ...params, query, accessDomains }, effectiveProvider, results);
   await setCacheJson(cacheKey, currentResults, SEARCH_CACHE_TTL_MS);
   return currentResults;
 }
