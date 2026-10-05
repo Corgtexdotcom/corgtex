@@ -21,6 +21,8 @@ import {
   type WorkItemEntityType,
 } from "./work-item-versions";
 import { appendEvents } from "./events";
+import { findSourceArticleImpacts, sourceIdsInDerivation } from "./brain-source-impact";
+import { lockActiveArticleSources, lockBrainSourceLink } from "./brain-source-links";
 
 export type ArchiveFilter = "active" | "archived" | "all";
 
@@ -457,7 +459,9 @@ export async function lockWorkspaceArchiveArtifact(
   entityType: ArchiveEntityType,
   entityId: string,
 ) {
-  if (entityType === "BrainSource" || entityType === "DecisionRecord" || CRM_ARCHIVE_ENTITY_TYPES.has(entityType)) {
+  if (entityType === "BrainSource") {
+    await lockBrainSourceLink(tx, entityId);
+  } else if (entityType === "DecisionRecord" || CRM_ARCHIVE_ENTITY_TYPES.has(entityType)) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`workspace_archive:${entityType}:${entityId}`}, 0))`;
   }
   if (WORK_ITEM_ARCHIVE_ENTITY_TYPES.has(entityType)) {
@@ -625,6 +629,26 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
       return record;
     }
 
+    if (config.entityType === "BrainSource" || config.entityType === "Document") {
+      const sourceIds = config.entityType === "BrainSource" ? [record.id] : (await tx.brainSource.findMany({
+        where: {
+          workspaceId: params.workspaceId,
+          metadata: { path: ["documentId"], equals: record.id },
+        },
+        select: { id: true },
+      })).map((source) => source.id);
+      if (config.entityType === "Document") {
+        for (const sourceId of sourceIds.sort()) await lockBrainSourceLink(tx, sourceId);
+      }
+      const impacts = await findSourceArticleImpacts(tx, params.workspaceId, sourceIds);
+      invariant(
+        ![...impacts.values()].some((impact) => impact.articles.length > 0),
+        409,
+        "SOURCE_ARTICLE_IMPACT_REVIEW_REQUIRED",
+        "Linked Brain articles must be resolved before this source can be archived.",
+      );
+    }
+
     const previousState = jsonSnapshot(record);
     const archivedAt = new Date();
     let updated;
@@ -726,6 +750,10 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
       invariant(record.version === params.expectedVersion, 409, "VERSION_CONFLICT", "The record changed. Reload and try again.");
     }
     await config.canRestore?.(tx, record);
+    if (config.entityType === "BrainArticle") {
+      const sourceIds = [...new Set([...(record.sourceIds as string[]), ...sourceIdsInDerivation(record.derivationJson)])];
+      await lockActiveArticleSources(tx, params.workspaceId, sourceIds);
+    }
     const archiveRecord = await activeArchiveRecord(tx, params.workspaceId, config.entityType, record.id);
     const previousState = archiveRecord?.previousState && typeof archiveRecord.previousState === "object"
       ? archiveRecord.previousState as Record<string, unknown>

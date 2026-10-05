@@ -4,6 +4,7 @@ const { prismaMock } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
     $queryRaw: vi.fn(),
+    $executeRaw: vi.fn(),
     brainArticle: {
       count: vi.fn(),
       create: vi.fn(),
@@ -297,6 +298,7 @@ describe("Brain article draft lifecycle", () => {
       fileStorageKey: "file-1", fileMimeType: "text/plain", archivedAt: null,
     };
     prismaMock.brainSource.findFirst.mockResolvedValue(source);
+    prismaMock.brainSource.findMany.mockResolvedValue([source]);
     prismaMock.brainArticle.create.mockResolvedValue({ id: "article-1", slug: "notes", title: "Notes", type: "PROJECT" });
 
     await createArticle({ kind: "agent", label: "brain-absorb", workspaceIds: ["ws-1"] } as any, {
@@ -327,6 +329,7 @@ describe("Brain article draft lifecycle", () => {
       fileStorageKey: "file-2", fileMimeType: "text/plain", archivedAt: null,
     };
     prismaMock.brainArticle.create.mockResolvedValue({ id: "article-1", slug: "notes", title: "Notes", type: "PROJECT" });
+    prismaMock.brainSource.findMany.mockResolvedValue([source]);
     await createArticle(ownerActor, {
       workspaceId: "ws-1", title: "Notes", type: "PROJECT", bodyMd: "Human notes", sourceIds: [source.id],
     });

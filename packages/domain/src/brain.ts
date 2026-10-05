@@ -6,6 +6,7 @@ import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { resolveKnowledgeAccessDomains } from "./brain-access";
+import { lockActiveArticleSources } from "./brain-source-links";
 import { brainSourceContentFingerprint, type BrainArticleDerivationV1 } from "./brain-derivation";
 import { invariant } from "./errors";
 import { persistedMemberId } from "./membership";
@@ -137,6 +138,7 @@ export async function createArticle(actor: AppActor, params: {
 
   const run = async (tx: Prisma.TransactionClient) => {
     let derivation: BrainArticleDerivationV1 | null = null;
+    await lockActiveArticleSources(tx, params.workspaceId, params.sourceIds ?? []);
     if (params.derivation) {
       invariant(actor.kind === "agent" && actor.label === "brain-absorb", 403, "FORBIDDEN", "Only source absorption can record article derivation.");
       invariant(params.sourceIds?.includes(params.derivation.sourceId), 400, "INVALID_INPUT", "Derived source must be linked to the article.");
@@ -251,6 +253,10 @@ export async function updateArticle(actor: AppActor, params: {
     if (editsDraftContent) {
       invariant(article.authority === "DRAFT", 400, "INVALID_STATE", "Only draft Brain articles can be edited.");
       await requireDraftManager({ actor, workspaceId: params.workspaceId, record: article, resolvedMembership: membership, tx });
+    }
+
+    if (params.sourceIds !== undefined) {
+      await lockActiveArticleSources(tx, params.workspaceId, params.sourceIds);
     }
 
     // Create version snapshot of previous body before updating

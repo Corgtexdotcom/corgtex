@@ -1,4 +1,4 @@
-import { duplicateGuardErrorPayload, isDuplicateGuardMatchError, listSources, requireWorkspaceMembership } from "@corgtex/domain";
+import { duplicateGuardErrorPayload, isDuplicateGuardMatchError, listBrainSourceArchiveImpacts, listSources, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { prisma } from "@corgtex/shared";
 import { deleteSourceAction, ingestSourceAction } from "../actions";
@@ -23,6 +23,10 @@ export default async function BrainSourcesPage({
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
   ]);
   const isDemo = currentWorkspace?.slug === "jnj-demo";
+  const sourceImpacts = new Map((await listBrainSourceArchiveImpacts(actor, {
+    workspaceId,
+    sourceIds: sources.map((source) => source.id),
+  })).map((impact) => [impact.sourceId, impact]));
 
   async function ingestSourceAndReturn(_state: DuplicateGuardFormState, formData: FormData): Promise<DuplicateGuardFormState> {
     "use server";
@@ -95,6 +99,7 @@ export default async function BrainSourcesPage({
         <h2>{t("sourcesCount", { count: sources.length })}</h2>
         <div className="list">
           {sources.map((s) => {
+            const impact = sourceImpacts.get(s.id);
             const canArchive = !isDemo && (
               actor.kind === "agent"
               || membership?.role === "ADMIN"
@@ -125,11 +130,23 @@ export default async function BrainSourcesPage({
                   )}
                 </div>
                 <p style={{ margin: "8px 0 0", fontSize: "0.85rem" }}>{s.content.slice(0, 200)}{s.content.length > 200 ? "..." : ""}</p>
+                {impact?.blocked && (
+                  <div className="muted" style={{ marginTop: 8 }}>
+                    <p>{t("sourceArchiveNeedsReview")}</p>
+                    {impact.visibleArticles.map((article) => (
+                      <div key={article.id}>
+                        <a href={`/workspaces/${workspaceId}/brain/${article.slug}`}>{article.title}</a>
+                        {" · "}{t(article.kind === "derived" ? "derivedArticleLink" : "unclassifiedArticleLink")}
+                      </div>
+                    ))}
+                    {impact.hasHiddenArticles && <p>{t("sourceArchiveHiddenLinks")}</p>}
+                  </div>
+                )}
                 {canArchive && (
                   <form action={deleteSourceAction} style={{ marginTop: 8 }}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="sourceId" value={s.id} />
-                    <button type="submit" className="danger small">{t("archiveSource")}</button>
+                    <button type="submit" className="danger small" disabled={impact?.blocked}>{t("archiveSource")}</button>
                   </form>
                 )}
               </div>
