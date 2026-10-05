@@ -365,6 +365,38 @@ describe("Brain article draft lifecycle", () => {
       data: { bodyMd: "Human notes", humanEditedAt: expect.any(Date) },
     });
   });
+
+  it("does not mark an unchanged generated draft as human-edited on form submission", async () => {
+    const { updateArticle } = await import("./brain");
+    const article = {
+      id: "article-1", workspaceId: "ws-1", slug: "notes", title: "Notes",
+      type: "PROJECT", bodyMd: "Generated notes", authority: "DRAFT",
+      frontmatterJson: { category: "notes" }, ownerMemberId: "mem-1",
+      staleAfterDays: 30, sourceIds: ["source-1"],
+      isPrivate: true, archivedAt: null,
+      derivationJson: { version: 1, origin: "brain-absorb", agentRunId: "run-1", sources: [] },
+      humanEditedAt: null,
+    };
+    prismaMock.brainArticle.findUnique.mockResolvedValue(article);
+    prismaMock.brainArticle.update.mockResolvedValue(article);
+
+    await updateArticle(ownerActor, {
+      workspaceId: "ws-1", slug: "notes", title: " Notes ", type: "PROJECT",
+      bodyMd: "Generated notes", authority: "DRAFT",
+      frontmatterJson: { category: "notes" }, ownerMemberId: "mem-1",
+      staleAfterDays: 30, sourceIds: ["source-1"],
+    });
+
+    expect(prismaMock.brainArticleVersion.create).not.toHaveBeenCalled();
+    expect(prismaMock.brainArticle.update).toHaveBeenCalledWith({
+      where: { id: "article-1" },
+      data: {
+        title: "Notes", type: "PROJECT", bodyMd: "Generated notes", authority: "DRAFT",
+        frontmatterJson: { category: "notes" }, ownerMemberId: "mem-1",
+        staleAfterDays: 30, sourceIds: ["source-1"],
+      },
+    });
+  });
 });
 
 describe("Brain status access domains", () => {

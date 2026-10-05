@@ -1,5 +1,6 @@
 import type { BrainArticleAuthority, BrainArticleType, BrainDiscussionTargetType, BrainSourceType } from "@prisma/client";
 import { Prisma } from "@prisma/client";
+import { isDeepStrictEqual } from "node:util";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
@@ -285,7 +286,9 @@ export async function updateArticle(actor: AppActor, params: {
     if (params.ownerMemberId !== undefined) data.ownerMemberId = params.ownerMemberId;
     if (params.staleAfterDays !== undefined) data.staleAfterDays = params.staleAfterDays;
     if (params.sourceIds !== undefined) data.sourceIds = params.sourceIds;
-    if (actor.kind === "user" && article.derivationJson && editsDraftContent) {
+    const changesDraftContent = Object.entries(data).some(([field, value]) =>
+      !isDeepStrictEqual(article[field as keyof typeof article], value));
+    if (actor.kind === "user" && article.derivationJson && changesDraftContent) {
       data.humanEditedAt = new Date();
     }
 
