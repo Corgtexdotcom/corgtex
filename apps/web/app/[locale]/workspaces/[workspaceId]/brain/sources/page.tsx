@@ -20,11 +20,15 @@ export default async function BrainSourcesPage({
   const { review: reviewSourceId } = await searchParams;
   const actor = await requirePageActor();
   const t = await getTranslations("brain");
-  const [membership, { items: sources }, currentWorkspace] = await Promise.all([
+  const [membership, { items: sources }, currentWorkspace, sourceRemovalFlag] = await Promise.all([
     requireWorkspaceMembership({ actor, workspaceId }),
     listSources(actor, { workspaceId, take: 50, sourceId: reviewSourceId }),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
+    prisma.workspaceFeatureFlag.findUnique({ where: { workspaceId_flag: {
+      workspaceId, flag: "BRAIN_SOURCE_REMOVAL",
+    } }, select: { enabled: true } }),
   ]);
+  const sourceRemovalEnabled = sourceRemovalFlag?.enabled === true;
   const isDemo = currentWorkspace?.slug === "jnj-demo";
   const sourceImpacts = new Map((await listBrainSourceArchiveImpacts(actor, {
     workspaceId,
@@ -155,6 +159,7 @@ export default async function BrainSourcesPage({
                 {canReview && hasUnclassifiedLink && <p className="muted">{t("sourceRemovalUnclassified")}</p>}
                 {canReview && (impact?.blocked || hasUnresolvedReview) && !hasUnclassifiedLink && !isDemo && (
                   <div className="stack" style={{ marginTop: 8 }}>
+                    {!sourceRemovalEnabled && <p className="muted">{t("sourceRemovalPaused")}</p>}
                     {review?.phase === "READY" && review.status === "COMPLETED" ? (
                       <div className="panel stack">
                         <p>{t("sourceRemovalReady")}</p>
@@ -175,7 +180,8 @@ export default async function BrainSourcesPage({
                               <input type="hidden" name="workspaceId" value={workspaceId} />
                               <input type="hidden" name="jobId" value={review.jobId} />
                               <input type="hidden" name="decision" value={decision} />
-                              <button type="submit" className={decision === "accept" ? "danger small" : "secondary small"}>
+                              <button type="submit" className={decision === "accept" ? "danger small" : "secondary small"}
+                                disabled={decision === "accept" && !sourceRemovalEnabled}>
                                 {t(decision === "accept" ? "sourceRemovalAccept" : "sourceRemovalReject")}
                               </button>
                             </form>
@@ -188,14 +194,14 @@ export default async function BrainSourcesPage({
                       <form action={retrySourceRemovalAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="jobId" value={review.jobId} />
-                        <button type="submit" className="secondary small">{t("sourceRemovalRetryAction")}</button>
+                        <button type="submit" className="secondary small" disabled={!sourceRemovalEnabled}>{t("sourceRemovalRetryAction")}</button>
                         <p className="muted">{t("sourceRemovalRetry")}</p>
                       </form>
                     ) : (
                       <form action={deleteSourceAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="sourceId" value={s.id} />
-                        <button type="submit" className="secondary small">{t("sourceRemovalPrepare")}</button>
+                        <button type="submit" className="secondary small" disabled={!sourceRemovalEnabled}>{t("sourceRemovalPrepare")}</button>
                         {review && <p className="muted">{t("sourceRemovalRetry")}</p>}
                       </form>
                     )}

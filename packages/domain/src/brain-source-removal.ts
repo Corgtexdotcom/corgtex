@@ -4,6 +4,7 @@ import { incrementCacheVersion, prisma, type AppActor } from "@corgtex/shared";
 import { archiveWorkspaceArtifact } from "./archive";
 import { requireWorkspaceMembership } from "./auth";
 import { brainSourceContentFingerprint } from "./brain-derivation";
+import { requireBrainSourceRemovalEnabled } from "./brain-removal-gate";
 import { findSourceArticleImpacts, readBrainArticleDerivation, sourceIdsInDerivation } from "./brain-source-impact";
 import { lockActiveArticleSources, lockBrainSourceLink } from "./brain-source-links";
 import { AppError, invariant } from "./errors";
@@ -179,6 +180,7 @@ export async function requestBrainSourceRemoval(actor: AppActor, params: {
     }
     const plan = await currentPlan(tx, params.workspaceId, params.sourceId);
     if (plan.articles.length > 0) await requireRemovalManager(actor, params.workspaceId);
+    if (plan.articles.length > 0) await requireBrainSourceRemovalEnabled(tx, params.workspaceId);
     if (plan.articles.every((article) => article.action === "archive")) {
       for (const article of plan.articles) {
         await archiveWorkspaceArtifact(actor, {
@@ -392,6 +394,7 @@ export async function resolveBrainSourceRemoval(actor: AppActor, params: {
       await tx.workflowJob.update({ where: { id: job.id }, data: { payload: { ...payload, phase: "REJECTED" } as Prisma.InputJsonObject } });
       return { status: "rejected" as const, sourceId: payload.sourceId, pendingSourceId: null };
     }
+    await requireBrainSourceRemovalEnabled(tx, params.workspaceId);
     await currentPlan(tx, params.workspaceId, payload.sourceId, payload);
     invariant(payload.candidates && payload.regenerationRunId, 409, "INVALID_STATE", "Candidate provenance is missing.");
     const generationRun = await tx.agentRun.findFirst({ where: {

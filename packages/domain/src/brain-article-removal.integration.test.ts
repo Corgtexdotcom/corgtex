@@ -7,8 +7,11 @@ import { confirmBrainArticleRemoval, previewBrainArticleRemoval } from "./brain-
 import { generateBrainSourceRemovalCandidate, resolveBrainSourceRemoval, retryBrainSourceRemoval } from "./brain-source-removal";
 import { archiveWorkspaceArtifact } from "./archive";
 
-async function fixture() {
+async function fixture(sourceRemovalEnabled = true) {
   const workspace = await prisma.workspace.create({ data: { name: "Article removal fixture", slug: `article-removal-${randomUUID()}` } });
+  if (sourceRemovalEnabled) await prisma.workspaceFeatureFlag.create({ data: {
+    workspaceId: workspace.id, flag: "BRAIN_SOURCE_REMOVAL", enabled: true,
+  } });
   const admin = await prisma.user.create({ data: { email: `article-admin-${randomUUID()}@example.test`, passwordHash: "fixture" } });
   const owner = await prisma.user.create({ data: { email: `article-owner-${randomUUID()}@example.test`, passwordHash: "fixture" } });
   const outsider = await prisma.user.create({ data: { email: `article-outsider-${randomUUID()}@example.test`, passwordHash: "fixture" } });
@@ -35,6 +38,27 @@ function confirmParams(workspaceId: string, slug: string, expectedToken: string,
 
 describe("confirmed Brain article removal", () => {
   beforeEach(truncateAllTables);
+
+  it("hides linked source removal while disabled but permits article-only archive", async () => {
+    const { workspace, admin } = await fixture(false);
+    const { document, source } = await sourceWithDocument(workspace.id, "Paused");
+    const article = await prisma.brainArticle.create({ data: {
+      workspaceId: workspace.id, slug: "paused", title: "Paused", type: "PROJECT", bodyMd: "Original", sourceIds: [source.id],
+    } });
+    const preview = await previewBrainArticleRemoval(admin, { workspaceId: workspace.id, slug: article.slug });
+    expect(preview.canRemoveSources).toBe(false);
+    expect(preview.blockReasons).toContain("feature_disabled");
+    await expect(confirmBrainArticleRemoval(admin, confirmParams(workspace.id, article.slug, preview.token, "remove_sources")))
+      .rejects.toMatchObject({ status: 409, code: "BRAIN_SOURCE_REMOVAL_DISABLED" });
+    await expect(archiveWorkspaceArtifact(admin, { workspaceId: workspace.id, entityType: "Document", entityId: document.id }))
+      .rejects.toMatchObject({ status: 409, code: "SOURCE_ARTICLE_IMPACT_REVIEW_REQUIRED" });
+    expect(await prisma.workflowJob.count({ where: { workspaceId: workspace.id, type: "agent.brain-source-regenerate" } })).toBe(0);
+    expect((await prisma.brainArticle.findUniqueOrThrow({ where: { id: article.id } })).archivedAt).toBeNull();
+    expect(await confirmBrainArticleRemoval(admin, confirmParams(workspace.id, article.slug, preview.token, "keep_sources")))
+      .toMatchObject({ id: article.id, pendingJobId: null });
+    expect((await prisma.brainSource.findUniqueOrThrow({ where: { id: source.id } })).archivedAt).toBeNull();
+    expect((await prisma.document.findUniqueOrThrow({ where: { id: document.id } })).archivedAt).toBeNull();
+  });
 
   it("keeps sources for an owner, leaves preview/cancel read-only, and rejects stale or repeated confirmation", async () => {
     const { workspace, admin, owner, outsider, ownerMember } = await fixture();

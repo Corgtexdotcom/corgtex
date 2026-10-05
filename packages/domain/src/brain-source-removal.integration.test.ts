@@ -8,14 +8,18 @@ import { searchIndexedKnowledge } from "../../knowledge/src/retrieval";
 import { syncBrainArticleKnowledge } from "../../knowledge/src/chunks";
 import { createArticle, deleteSource } from "./brain";
 import { brainSourceContentFingerprint } from "./brain-derivation";
+import { archiveWorkspaceArtifact } from "./archive";
 import {
   generateBrainSourceRemovalCandidate,
   listBrainSourceRemovalReviews,
   resolveBrainSourceRemoval,
 } from "./brain-source-removal";
 
-async function fixture() {
+async function fixture(sourceRemovalEnabled = true) {
   const workspace = await prisma.workspace.create({ data: { name: "Removal fixture", slug: `removal-${randomUUID()}` } });
+  if (sourceRemovalEnabled) await prisma.workspaceFeatureFlag.create({ data: {
+    workspaceId: workspace.id, flag: "BRAIN_SOURCE_REMOVAL", enabled: true,
+  } });
   const admin = await prisma.user.create({ data: { email: `removal-admin-${randomUUID()}@example.test`, passwordHash: "fixture" } });
   const contributor = await prisma.user.create({ data: { email: `removal-member-${randomUUID()}@example.test`, passwordHash: "fixture" } });
   await prisma.member.create({ data: { workspaceId: workspace.id, userId: admin.id, role: "ADMIN" } });
@@ -33,6 +37,41 @@ async function fixture() {
 
 describe("Brain source removal review", () => {
   beforeEach(truncateAllTables);
+
+  it("defaults off for linked sources while generic archive stays guarded and unlinked archiving works", async () => {
+    const { workspace, actor, removed, remaining } = await fixture(false);
+    const article = await prisma.brainArticle.create({ data: {
+      workspaceId: workspace.id, slug: "gated-source", title: "Gated source", type: "PROJECT",
+      bodyMd: "Current body", sourceIds: [removed.id, remaining.id],
+      derivationJson: { version: 1, origin: "brain-absorb", agentRunId: "synthetic-run", sources: [
+        { sourceId: removed.id, fingerprint: brainSourceContentFingerprint(removed) },
+        { sourceId: remaining.id, fingerprint: brainSourceContentFingerprint(remaining) },
+      ] },
+    } });
+    await expect(deleteSource(actor, { workspaceId: workspace.id, sourceId: removed.id }))
+      .rejects.toMatchObject({ status: 409, code: "BRAIN_SOURCE_REMOVAL_DISABLED" });
+    await expect(archiveWorkspaceArtifact(actor, { workspaceId: workspace.id, entityType: "BrainSource", entityId: removed.id }))
+      .rejects.toMatchObject({ status: 409, code: "SOURCE_ARTICLE_IMPACT_REVIEW_REQUIRED" });
+    const mcpActor: AppActor = { kind: "agent", authProvider: "credential", label: "Synthetic MCP caller",
+      workspaceIds: [workspace.id], scopes: ["archive:write", "brain:write"] };
+    await expect(archiveWorkspaceArtifact(mcpActor, { workspaceId: workspace.id, entityType: "BrainSource", entityId: removed.id }))
+      .rejects.toMatchObject({ status: 409, code: "SOURCE_ARTICLE_IMPACT_REVIEW_REQUIRED" });
+    expect(await prisma.workflowJob.count({ where: { workspaceId: workspace.id, type: "agent.brain-source-regenerate" } })).toBe(0);
+    expect(await prisma.workspaceArchiveRecord.count({ where: { workspaceId: workspace.id } })).toBe(0);
+    expect((await prisma.brainArticle.findUniqueOrThrow({ where: { id: article.id } })).archivedAt).toBeNull();
+    expect((await prisma.brainSource.findUniqueOrThrow({ where: { id: removed.id } })).archivedAt).toBeNull();
+    const unlinked = await prisma.brainSource.create({ data: {
+      workspaceId: workspace.id, sourceType: "DOC", tier: 1, content: "Unlinked facts",
+    } });
+    expect(await deleteSource(actor, { workspaceId: workspace.id, sourceId: unlinked.id }))
+      .toEqual({ id: unlinked.id, status: "archived" });
+    await prisma.workspaceFeatureFlag.create({ data: {
+      workspaceId: workspace.id, flag: "BRAIN_SOURCE_REMOVAL", enabled: true,
+    } });
+    const requested = await deleteSource(actor, { workspaceId: workspace.id, sourceId: removed.id });
+    expect(requested.status).toBe("pending");
+    expect(await prisma.workflowJob.count({ where: { workspaceId: workspace.id, type: "agent.brain-source-regenerate" } })).toBe(1);
+  });
 
   it("recoverably archives an article when its only verified source is removed, including a repeat request", async () => {
     const { workspace, actor, removed } = await fixture();
@@ -87,6 +126,15 @@ describe("Brain source removal review", () => {
       .rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
     const [review] = await listBrainSourceRemovalReviews(actor, { workspaceId: workspace.id, sourceIds: [removed.id] });
     expect(review.articles[0]).toMatchObject({ currentBodyMd: "Human revised facts", candidateBodyMd: "Facts from remaining source only" });
+    await prisma.workspaceFeatureFlag.update({ where: { workspaceId_flag: {
+      workspaceId: workspace.id, flag: "BRAIN_SOURCE_REMOVAL",
+    } }, data: { enabled: false } });
+    await expect(resolveBrainSourceRemoval(actor, { workspaceId: workspace.id, jobId: requested.jobId, decision: "accept" }))
+      .rejects.toMatchObject({ status: 409, code: "BRAIN_SOURCE_REMOVAL_DISABLED" });
+    expect((await prisma.brainArticle.findUniqueOrThrow({ where: { id: article.id } })).bodyMd).toBe("Human revised facts");
+    await prisma.workspaceFeatureFlag.update({ where: { workspaceId_flag: {
+      workspaceId: workspace.id, flag: "BRAIN_SOURCE_REMOVAL",
+    } }, data: { enabled: true } });
     await prisma.knowledgeChunk.create({ data: {
       workspaceId: workspace.id, sourceType: "BRAIN_ARTICLE", sourceId: article.id,
       content: "Human revised facts", sourceTitle: article.title, embedding: [0.1],

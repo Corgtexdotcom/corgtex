@@ -4,6 +4,7 @@ import { prisma, type AppActor } from "@corgtex/shared";
 import { archiveWorkspaceArtifact } from "./archive";
 import { requireWorkspaceMembership } from "./auth";
 import { brainSourceContentFingerprint } from "./brain-derivation";
+import { isBrainSourceRemovalEnabled, requireBrainSourceRemovalEnabled } from "./brain-removal-gate";
 import { findSourceArticleImpacts, readBrainArticleDerivation, sourceIdsInDerivation } from "./brain-source-impact";
 import { lockBrainSourceLink } from "./brain-source-links";
 import { continueBrainSourceRemovals } from "./brain-source-removal";
@@ -54,7 +55,8 @@ async function buildPreview(tx: Prisma.TransactionClient, actor: AppActor, works
     select: { id: true, updatedAt: true, archivedAt: true } });
   const byArticleId = new Map(impactedArticles.map((item) => [item.id, item]));
   const byDocumentId = new Map(documents.map((item) => [item.id, item]));
-  const blockReasons: Array<"source_missing" | "document_missing" | "restricted" | "unclassified"> = [];
+  const blockReasons: Array<"source_missing" | "document_missing" | "restricted" | "unclassified" | "feature_disabled"> = [];
+  if (directIds.length > 0 && !await isBrainSourceRemovalEnabled(tx, workspaceId)) blockReasons.push("feature_disabled");
   if (directIds.length !== directSources.length || directSources.some((source) => source.archivedAt)) {
     blockReasons.push("source_missing");
   }
@@ -142,6 +144,7 @@ export async function confirmBrainArticleRemoval(actor: AppActor, params: {
     const current = await buildPreview(tx, actor, params.workspaceId, params.slug);
     invariant(current.token === params.expectedToken, 409, "REMOVAL_PREVIEW_CHANGED", "Article or source impact changed. Review again.");
     if (params.mode === "remove_sources") {
+      await requireBrainSourceRemovalEnabled(tx, params.workspaceId);
       invariant(current.canRemoveSources, 409, "SOURCE_ARTICLE_IMPACT_REVIEW_REQUIRED",
         "These sources need separate review before they can be removed.");
     }
