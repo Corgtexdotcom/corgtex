@@ -372,7 +372,7 @@ describe("Brain article draft lifecycle", () => {
       id: "article-1", workspaceId: "ws-1", slug: "notes", title: "Notes",
       type: "PROJECT", bodyMd: "Generated notes", authority: "DRAFT",
       frontmatterJson: { category: "notes" }, ownerMemberId: "mem-1",
-      staleAfterDays: 30, sourceIds: ["source-1"],
+      staleAfterDays: 30, sourceIds: [],
       isPrivate: true, archivedAt: null,
       derivationJson: { version: 1, origin: "brain-absorb", agentRunId: "run-1", sources: [] },
       humanEditedAt: null,
@@ -384,7 +384,7 @@ describe("Brain article draft lifecycle", () => {
       workspaceId: "ws-1", slug: "notes", title: " Notes ", type: "PROJECT",
       bodyMd: "Generated notes", authority: "DRAFT",
       frontmatterJson: { category: "notes" }, ownerMemberId: "mem-1",
-      staleAfterDays: 30, sourceIds: ["source-1"],
+      staleAfterDays: 30, sourceIds: [],
     });
 
     expect(prismaMock.brainArticleVersion.create).not.toHaveBeenCalled();
@@ -393,7 +393,7 @@ describe("Brain article draft lifecycle", () => {
       data: {
         title: "Notes", type: "PROJECT", bodyMd: "Generated notes", authority: "DRAFT",
         frontmatterJson: { category: "notes" }, ownerMemberId: "mem-1",
-        staleAfterDays: 30, sourceIds: ["source-1"],
+        staleAfterDays: 30, sourceIds: [],
       },
     });
   });
