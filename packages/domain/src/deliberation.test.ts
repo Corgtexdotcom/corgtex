@@ -35,13 +35,14 @@ const { prismaMock, state } = vi.hoisted(() => {
       id: string;
       workspaceId: string;
       authorUserId: string;
+      title?: string;
       version: number;
       status?: string;
       archivedAt?: Date | null;
       resolutionOutcome?: string | null;
       isPrivate?: boolean;
     }>(),
-    tensions: new Map<string, { id: string; workspaceId: string; authorUserId: string; assigneeMemberId: string | null; title: string; version: number; isPrivate?: boolean }>(),
+    tensions: new Map<string, { id: string; workspaceId: string; authorUserId: string; assigneeMemberId: string | null; title: string; version: number; status?: string; isPrivate?: boolean; archivedAt?: Date | null }>(),
     actions: new Map<string, { id: string; workspaceId: string; authorUserId: string; assigneeMemberId: string | null; version: number; isPrivate?: boolean }>(),
     circles: new Map<string, { id: string; workspaceId: string; archivedAt: Date | null }>(),
     roleAssignments: [] as Array<{ memberId: string; circleId: string; expiresAt: Date | null }>,
@@ -54,7 +55,7 @@ const { prismaMock, state } = vi.hoisted(() => {
       targetCircleId?: string | null;
       processId?: string;
       recipients?: Array<{ memberId: string }>;
-      process: { subjectType: string; subjectId: string };
+      process: { subjectType: string; subjectId: string; ownerMember?: { id: string; userId: string } | null };
       completedAt?: Date | null;
     }>(),
     entries: [] as EntryRecord[],
@@ -241,6 +242,13 @@ const { prismaMock, state } = vi.hoisted(() => {
         store.notifications.push(...data);
         return { count: data.length };
       }),
+      upsert: vi.fn(async ({ where, create }: any) => {
+        const existing = store.notifications.find((notification) => notification.dedupeKey === where.dedupeKey);
+        if (existing) return existing;
+        const notification = { id: `notification-${store.notifications.length + 1}`, ...create };
+        store.notifications.push(notification);
+        return notification;
+      }),
     },
   };
 
@@ -301,8 +309,8 @@ describe("deliberation", () => {
     state.members.set("admin-member", { id: "admin-member", workspaceId, userId: "admin-user", role: "ADMIN", isActive: true });
     state.members.set(memberId, { id: memberId, workspaceId, userId: "member-user", role: "CONTRIBUTOR", isActive: true });
     state.members.set("other-member", { id: "other-member", workspaceId, userId: "other-user", role: "CONTRIBUTOR", isActive: true });
-    state.proposals.set(proposalId, { id: proposalId, workspaceId, authorUserId: "admin-user", version: 1, status: "OPEN", archivedAt: null });
-    state.tensions.set("tension-1", { id: "tension-1", workspaceId, authorUserId: "admin-user", assigneeMemberId: null, title: "Clarify launch owner", version: 1 });
+    state.proposals.set(proposalId, { id: proposalId, workspaceId, authorUserId: "admin-user", title: "Improve onboarding", version: 1, status: "OPEN", archivedAt: null });
+    state.tensions.set("tension-1", { id: "tension-1", workspaceId, authorUserId: "admin-user", assigneeMemberId: null, title: "Clarify launch owner", version: 1, status: "OPEN", archivedAt: null });
     state.actions.set(actionId, { id: actionId, workspaceId, authorUserId: "admin-user", assigneeMemberId: memberId, version: 1 });
     state.adviceRequests.set("request-1", {
       id: "request-1",
@@ -339,6 +347,181 @@ describe("deliberation", () => {
     expect(list[0].parentVersion).toBe(1);
   });
 
+  it("notifies a public proposal author when another member replies", async () => {
+    await postDeliberationEntry(memberActor, {
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentId: proposalId,
+      entryType: "REACTION",
+      bodyMd: "I think this is ready.",
+    });
+
+    expect(state.notifications).toEqual([
+      expect.objectContaining({
+        workspaceId,
+        userId: "admin-user",
+        type: "deliberation.reply",
+        entityType: "Proposal",
+        entityId: proposalId,
+        title: "Member replied to your proposal: Improve onboarding",
+        bodyMd: "I think this is ready.",
+      }),
+    ]);
+  });
+
+  it("notifies a public tension author when another member replies", async () => {
+    await postDeliberationEntry(memberActor, {
+      workspaceId,
+      parentType: "TENSION",
+      parentId: "tension-1",
+      entryType: "REACTION",
+      bodyMd: "The ownership is clear now.",
+    });
+
+    expect(state.notifications).toEqual([
+      expect.objectContaining({
+        userId: "admin-user",
+        type: "deliberation.reply",
+        entityType: "Tension",
+        entityId: "tension-1",
+        title: "Member replied to your tension: Clarify launch owner",
+      }),
+    ]);
+  });
+
+  it("does not notify authors about their own replies or replies to private or draft tensions", async () => {
+    await postDeliberationEntry(adminActor, {
+      workspaceId, parentType: "TENSION", parentId: "tension-1", entryType: "REACTION", bodyMd: "My update.",
+    });
+    state.tensions.get("tension-1")!.isPrivate = true;
+    await postDeliberationEntry(memberActor, {
+      workspaceId, parentType: "TENSION", parentId: "tension-1", entryType: "REACTION", bodyMd: "Private reply.",
+    });
+    state.tensions.get("tension-1")!.isPrivate = false;
+    state.tensions.get("tension-1")!.status = "DRAFT";
+    await postDeliberationEntry(memberActor, {
+      workspaceId, parentType: "TENSION", parentId: "tension-1", entryType: "REACTION", bodyMd: "Draft reply.",
+    });
+
+    expect(state.notifications).toEqual([]);
+  });
+
+  it("does not expose private or archived proposal replies to outbound notifications", async () => {
+    state.proposals.get(proposalId)!.isPrivate = true;
+    await postDeliberationEntry(memberActor, {
+      workspaceId, parentType: "PROPOSAL", parentId: proposalId, entryType: "REACTION", bodyMd: "Private reply.",
+    });
+    state.proposals.get(proposalId)!.isPrivate = false;
+    state.proposals.get(proposalId)!.archivedAt = new Date();
+    await expect(postDeliberationEntry(memberActor, {
+      workspaceId, parentType: "PROPOSAL", parentId: proposalId, entryType: "REACTION", bodyMd: "Archived reply.",
+    })).rejects.toMatchObject({ code: "INVALID_STATE" });
+
+    expect(state.notifications).toEqual([]);
+  });
+
+  it("respects the parent author's reply preference", async () => {
+    state.notificationPreferences.push({ userId: "admin-user", notifType: "deliberation.reply", channel: "OFF" });
+    await postDeliberationEntry(memberActor, {
+      workspaceId, parentType: "PROPOSAL", parentId: proposalId, entryType: "REACTION", bodyMd: "No alert requested.",
+    });
+
+    expect(state.notifications).toEqual([]);
+  });
+
+  it("does not duplicate an explicit mention of the parent author", async () => {
+    await postDeliberationEntry(memberActor, {
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentId: proposalId,
+      entryType: "REACTION",
+      bodyMd: "@Admin please check this.",
+    });
+
+    expect(state.notifications).toEqual([
+      expect.objectContaining({ userId: "admin-user", type: "deliberation.mention" }),
+    ]);
+  });
+
+  it("falls back to a reply alert when the parent author has mentions turned off", async () => {
+    state.notificationPreferences.push({ userId: "admin-user", notifType: "deliberation.mention", channel: "OFF" });
+    await postDeliberationEntry(memberActor, {
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentId: proposalId,
+      entryType: "REACTION",
+      bodyMd: "@Admin please check this.",
+    });
+
+    expect(state.notifications).toEqual([
+      expect.objectContaining({ userId: "admin-user", type: "deliberation.reply" }),
+    ]);
+  });
+
+  it("does not duplicate an advice reply notification for the parent author who requested advice", async () => {
+    state.adviceRequests.get("request-1")!.requestedByUserId = "admin-user";
+    await postDeliberationEntry(memberActor, {
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentId: proposalId,
+      entryType: "REACTION",
+      bodyMd: "My advice.",
+      adviceRequestId: "request-1",
+    });
+
+    expect(state.notifications).toEqual([]);
+    expect(state.events).toContainEqual(expect.objectContaining({ type: "advice.reply_posted" }));
+  });
+
+  it.each(["PROPOSAL", "TENSION"])("notifies a distinct public %s author for an advice-linked reply", async (parentType) => {
+    const parentId = parentType === "PROPOSAL" ? proposalId : "tension-1";
+    const request = state.adviceRequests.get("request-1")!;
+    request.requestedByUserId = "other-user";
+    request.process = {
+      subjectType: parentType, subjectId: parentId,
+      ownerMember: { id: "other-member", userId: "other-user" },
+    };
+    await postDeliberationEntry(memberActor, {
+      workspaceId, parentType, parentId, entryType: "REACTION", bodyMd: "Advice for the original author.",
+      adviceRequestId: "request-1",
+    });
+
+    expect(state.notifications).toEqual([
+      expect.objectContaining({ userId: "admin-user", type: "deliberation.reply" }),
+    ]);
+    expect(state.events).toContainEqual(expect.objectContaining({ type: "advice.reply_posted" }));
+  });
+
+  it("does not duplicate advice notifications when the parent author owns the process", async () => {
+    const request = state.adviceRequests.get("request-1")!;
+    request.requestedByUserId = "other-user";
+    request.process.ownerMember = { id: "admin-member", userId: "admin-user" };
+    await postDeliberationEntry(memberActor, {
+      workspaceId, parentType: "PROPOSAL", parentId: proposalId, entryType: "REACTION", bodyMd: "My advice.",
+      adviceRequestId: "request-1",
+    });
+
+    expect(state.notifications).toEqual([]);
+    expect(state.events).toContainEqual(expect.objectContaining({ type: "advice.reply_posted" }));
+  });
+
+  it.each(["preference-off", "private", "inactive", "mentioned"])("preserves %s filtering for a distinct advice-linked parent author", async (condition) => {
+    state.adviceRequests.get("request-1")!.requestedByUserId = "other-user";
+    if (condition === "preference-off") {
+      state.notificationPreferences.push({ userId: "admin-user", notifType: "deliberation.reply", channel: "OFF" });
+    }
+    if (condition === "private") state.proposals.get(proposalId)!.isPrivate = true;
+    if (condition === "inactive") state.members.get("admin-member")!.isActive = false;
+    await postDeliberationEntry(memberActor, {
+      workspaceId, parentType: "PROPOSAL", parentId: proposalId, entryType: "REACTION",
+      bodyMd: condition === "mentioned" ? "@Admin my advice." : "My advice.", adviceRequestId: "request-1",
+    });
+
+    expect(state.notifications).toEqual(condition === "mentioned"
+      ? [expect.objectContaining({ userId: "admin-user", type: "deliberation.mention" })]
+      : []);
+  });
+
   it("notifies a selected person target when posting a deliberation entry", async () => {
     const entry = await postDeliberationEntry(otherActor, {
       workspaceId,
@@ -359,6 +542,7 @@ describe("deliberation", () => {
         title: "Other mentioned you in a tension: Clarify launch owner",
         bodyMd: "@Member can you weigh in before Friday?",
       }),
+      expect.objectContaining({ userId: "admin-user", type: "deliberation.reply" }),
     ]);
     expect(state.notifications[0]).not.toMatchObject({ userId: "other-user" });
     expect(entry.targetMemberId).toBe(memberId);
@@ -373,13 +557,14 @@ describe("deliberation", () => {
       bodyMd: "Looping in @Member because this affects onboarding.",
     });
 
-    expect(state.notifications).toHaveLength(1);
+    expect(state.notifications).toHaveLength(2);
     expect(state.notifications[0]).toMatchObject({
       userId: "member-user",
       type: "deliberation.mention",
       entityType: "Tension",
       entityId: "tension-1",
     });
+    expect(state.notifications[1]).toMatchObject({ userId: "admin-user", type: "deliberation.reply" });
   });
 
   it("does not notify ambiguous manual @mentions", async () => {
@@ -394,7 +579,9 @@ describe("deliberation", () => {
       bodyMd: "Looping in @Member because there are two possible matches.",
     });
 
-    expect(state.notifications).toEqual([]);
+    expect(state.notifications).toEqual([
+      expect.objectContaining({ userId: "admin-user", type: "deliberation.reply" }),
+    ]);
   });
 
   it("notifies selected target circle members without resolving the circle label as a user mention", async () => {
@@ -414,6 +601,7 @@ describe("deliberation", () => {
 
     expect(state.notifications).toEqual([
       expect.objectContaining({ userId: "member-user", type: "deliberation.mention" }),
+      expect.objectContaining({ userId: "admin-user", type: "deliberation.reply" }),
     ]);
   });
 

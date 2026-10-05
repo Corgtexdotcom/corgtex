@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createNotificationIntent } from "./notifications";
 
 const { prismaMock } = vi.hoisted(() => {
   const prisma = {
@@ -49,6 +50,10 @@ const { prismaMock } = vi.hoisted(() => {
 
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
+}));
+
+vi.mock("./notifications", () => ({
+  createNotificationIntent: vi.fn().mockResolvedValue({ count: 1 }),
 }));
 
 vi.mock("./auth", () => ({
@@ -435,6 +440,96 @@ describe("tensions domain", () => {
       where: expect.objectContaining({ id: "t-1" }),
       data: { assigneeMemberId: "responsible-member-1", version: 2 },
     });
+    expect(createNotificationIntent).not.toHaveBeenCalled();
+  });
+
+  it.each(["old-member", null])("notifies a new responsible member when an open public tension moves from %s", async (previousAssigneeMemberId) => {
+    prismaMock.tension.findUnique.mockResolvedValueOnce({
+      id: "t-1", workspaceId: "ws-1", authorUserId: "u-1", title: "Test tension",
+      status: "OPEN", isPrivate: false, version: 1, archivedAt: null,
+      assigneeMemberId: previousAssigneeMemberId,
+    });
+    prismaMock.member.findFirst.mockResolvedValueOnce({ id: "new-member" });
+    prismaMock.member.findFirst.mockResolvedValueOnce({ userId: "u-2" });
+    prismaMock.tension.update.mockResolvedValueOnce({
+      id: "t-1", workspaceId: "ws-1", title: "Test tension", status: "OPEN",
+      isPrivate: false, version: 2, archivedAt: null, assigneeMemberId: "new-member",
+    });
+    const { updateTension } = await import("./tensions");
+
+    await updateTension(actor, {
+      workspaceId: "ws-1", tensionId: "t-1", assigneeMemberId: "new-member",
+    });
+
+    expect(createNotificationIntent).toHaveBeenCalledWith(prismaMock, expect.objectContaining({
+      workspaceId: "ws-1",
+      type: "tension.assigned",
+      recipientUserIds: ["u-2"],
+      actorUserId: "u-1",
+      entityType: "Tension",
+      entityId: "t-1",
+      dedupeKey: "tension-assigned:t-1:2",
+    }));
+  });
+
+  it("does not add a direct assignment notice when a draft is published with an assignee", async () => {
+    prismaMock.tension.findUnique.mockResolvedValueOnce({
+      id: "t-1", workspaceId: "ws-1", authorUserId: "u-1", title: "Test tension",
+      status: "DRAFT", isPrivate: true, version: 1, archivedAt: null, assigneeMemberId: null,
+    });
+    prismaMock.member.findFirst.mockResolvedValueOnce({ id: "new-member" });
+    prismaMock.tension.update.mockResolvedValueOnce({
+      id: "t-1", workspaceId: "ws-1", title: "Test tension", status: "OPEN",
+      isPrivate: false, version: 2, archivedAt: null, assigneeMemberId: "new-member",
+    });
+    const { updateTension } = await import("./tensions");
+
+    await updateTension(actor, {
+      workspaceId: "ws-1", tensionId: "t-1", status: "OPEN", assigneeMemberId: "new-member",
+    });
+
+    expect(createNotificationIntent).not.toHaveBeenCalled();
+    expect(prismaMock.event.createMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: [expect.objectContaining({ type: "tension.published" })],
+    }));
+  });
+
+  it("does not notify when an open public tension is unassigned", async () => {
+    prismaMock.tension.findUnique.mockResolvedValueOnce({
+      id: "t-1", workspaceId: "ws-1", authorUserId: "u-1", title: "Test tension",
+      status: "OPEN", isPrivate: false, version: 1, archivedAt: null, assigneeMemberId: "old-member",
+    });
+    prismaMock.tension.update.mockResolvedValueOnce({
+      id: "t-1", workspaceId: "ws-1", title: "Test tension", status: "OPEN",
+      isPrivate: false, version: 2, archivedAt: null, assigneeMemberId: null,
+    });
+    const { updateTension } = await import("./tensions");
+
+    await updateTension(actor, { workspaceId: "ws-1", tensionId: "t-1", assigneeMemberId: null });
+
+    expect(createNotificationIntent).not.toHaveBeenCalled();
+  });
+
+  it("rechecks the new assignee is active before creating a notice", async () => {
+    prismaMock.tension.findUnique.mockResolvedValueOnce({
+      id: "t-1", workspaceId: "ws-1", authorUserId: "u-1", title: "Test tension",
+      status: "OPEN", isPrivate: false, version: 1, archivedAt: null, assigneeMemberId: "old-member",
+    });
+    prismaMock.member.findFirst.mockResolvedValueOnce({ id: "new-member" });
+    prismaMock.member.findFirst.mockResolvedValueOnce(null);
+    prismaMock.tension.update.mockResolvedValueOnce({
+      id: "t-1", workspaceId: "ws-1", title: "Test tension", status: "OPEN",
+      isPrivate: false, version: 2, archivedAt: null, assigneeMemberId: "new-member",
+    });
+    const { updateTension } = await import("./tensions");
+
+    await updateTension(actor, { workspaceId: "ws-1", tensionId: "t-1", assigneeMemberId: "new-member" });
+
+    expect(prismaMock.member.findFirst).toHaveBeenLastCalledWith({
+      where: expect.objectContaining({ id: "new-member", workspaceId: "ws-1", isActive: true }),
+      select: { userId: true },
+    });
+    expect(createNotificationIntent).not.toHaveBeenCalled();
   });
 
   it("clears a tension raised-by member", async () => {

@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { AppError, getAction, getWorkspaceArchiveRecord, listHumanMembers, requireWorkspaceMembership } from "@corgtex/domain";
+import { prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { ActionEditorForm } from "@/lib/components/ActionEditorForm";
 import { UnavailableItemStatus } from "@/lib/components/UnavailableItemStatus";
@@ -20,6 +21,7 @@ export default async function ActionEditPage({
   const tCommon = await getTranslations("common");
   const tWork = await getTranslations("workItems");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const isDemo = (await prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }))?.slug === "jnj-demo";
   let action: Awaited<ReturnType<typeof getAction>>;
   try {
     action = await getAction(actor, { workspaceId, actionId, includeArchived: true });
@@ -47,13 +49,13 @@ export default async function ActionEditPage({
   }
 
   const isArchived = Boolean(action.archivedAt);
-  const canManage = !isArchived && (actor.kind === "agent"
+  const canManage = !isDemo && !isArchived && (actor.kind === "agent"
     || membership?.role === "ADMIN"
     || (actor.kind === "user" && action.authorUserId === actor.user.id));
   const canCollaborateOnSubmittedAction = !action.isPrivate && (actor.kind === "agent" || Boolean(membership?.isActive));
-  const canEditContent = action.status === "DRAFT"
+  const canEditContent = !isDemo && (action.status === "DRAFT"
     ? canManage
-    : !isArchived && (action.status === "OPEN" || action.status === "IN_PROGRESS") && canCollaborateOnSubmittedAction;
+    : !isArchived && (action.status === "OPEN" || action.status === "IN_PROGRESS") && canCollaborateOnSubmittedAction);
   const detailHref = `/workspaces/${workspaceId}/actions/${action.id}`;
   const members = await listHumanMembers(workspaceId);
   const actionMembers = members.map((member) => ({
