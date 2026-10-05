@@ -46,6 +46,10 @@ async function visiblePublicationTitle(
   }
 
   if (event.type === "action.published") {
+    // Hold the row until notification intents are committed in the caller's
+    // transaction. A concurrent return to draft or archive must complete
+    // before this visibility read or wait until after the intents commit.
+    await tx.$queryRaw`SELECT "id" FROM "Action" WHERE "id" = ${event.aggregateId} AND "workspaceId" = ${event.workspaceId} FOR UPDATE`;
     const action = await tx.action.findFirst({
       where: {
         id: event.aggregateId,
@@ -60,6 +64,7 @@ async function visiblePublicationTitle(
     return action?.title ?? null;
   }
 
+  await tx.$queryRaw`SELECT "id" FROM "Tension" WHERE "id" = ${event.aggregateId} AND "workspaceId" = ${event.workspaceId} FOR UPDATE`;
   const tension = await tx.tension.findFirst({
     where: {
       id: event.aggregateId,

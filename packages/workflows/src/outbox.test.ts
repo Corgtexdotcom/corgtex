@@ -392,7 +392,9 @@ describe("deriveNotificationsForEvent", () => {
   it("checks current workspace visibility before notifying about a publication", async () => {
     const actionFindFirst = vi.fn().mockResolvedValue({ title: "Visible action" });
     const tensionFindFirst = vi.fn().mockResolvedValue(null);
+    const lockRow = vi.fn().mockResolvedValue([]);
     const tx = {
+      $queryRaw: lockRow,
       action: { findFirst: actionFindFirst },
       tension: { findFirst: tensionFindFirst },
     } as unknown as Prisma.TransactionClient;
@@ -432,6 +434,25 @@ describe("deriveNotificationsForEvent", () => {
       aggregateType: "Action", payload: { runtimeMeta: { replayOfEventId: "original" } },
     })).toEqual([]);
     expect(actionFindFirst).toHaveBeenCalledTimes(1);
+    expect(lockRow).toHaveBeenCalledTimes(2);
+    expect(lockRow.mock.invocationCallOrder[0]).toBeLessThan(actionFindFirst.mock.invocationCallOrder[0]);
+    expect(lockRow.mock.invocationCallOrder[1]).toBeLessThan(tensionFindFirst.mock.invocationCallOrder[0]);
+  });
+
+  it("waits for a concurrent visibility change before reading the publication", async () => {
+    let releaseLock: (() => void) | undefined;
+    const lockRow = vi.fn().mockImplementation(() => new Promise<void>((resolve) => { releaseLock = resolve; }));
+    const actionFindFirst = vi.fn().mockResolvedValue(null);
+    const tx = { $queryRaw: lockRow, action: { findFirst: actionFindFirst } } as unknown as Prisma.TransactionClient;
+    const pending = deriveDispatchNotifications(tx, {
+      type: "action.published", workspaceId: "workspace-1", aggregateId: "action-1",
+      aggregateType: "Action", payload: { title: "Previously public title" },
+    });
+
+    expect(actionFindFirst).not.toHaveBeenCalled();
+    releaseLock?.();
+    expect(await pending).toEqual([]);
+    expect(actionFindFirst).toHaveBeenCalledOnce();
   });
 });
 
