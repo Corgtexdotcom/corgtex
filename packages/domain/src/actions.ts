@@ -716,7 +716,11 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
           type: "action.published",
           aggregateType: "Action",
           aggregateId: action.id,
-          payload: { actionId: action.id, actorUserId: actor.kind === "user" ? actor.user.id : null },
+          payload: {
+            actionId: action.id,
+            assigneeMemberId,
+            actorUserId: actor.kind === "user" ? actor.user.id : null,
+          },
         },
       ]);
     }
@@ -976,6 +980,21 @@ export async function updateAction(actor: AppActor, params: {
       },
     ]);
 
+    if (action.status !== "DRAFT" && (updated.status === "OPEN" || updated.status === "IN_PROGRESS") && !updated.isPrivate
+      && updated.assigneeMemberId && action.assigneeMemberId !== updated.assigneeMemberId) {
+      await appendEvents(tx, [{
+        workspaceId: params.workspaceId,
+        type: "action.assigned",
+        aggregateType: "Action",
+        aggregateId: updated.id,
+        payload: {
+          actionId: updated.id,
+          assigneeMemberId: updated.assigneeMemberId,
+          actorUserId: actor.kind === "user" ? actor.user.id : null,
+        },
+      }]);
+    }
+
     if (action.status === "DRAFT" && updated.status !== "DRAFT" && !updated.isPrivate) {
       await recordAudit(tx, actor, {
         workspaceId: params.workspaceId,
@@ -989,7 +1008,11 @@ export async function updateAction(actor: AppActor, params: {
         type: "action.published",
         aggregateType: "Action",
         aggregateId: updated.id,
-        payload: { actionId: updated.id, actorUserId: actor.kind === "user" ? actor.user.id : null },
+        payload: {
+          actionId: updated.id,
+          assigneeMemberId: updated.assigneeMemberId,
+          actorUserId: actor.kind === "user" ? actor.user.id : null,
+        },
       }]);
     }
 
@@ -1111,7 +1134,11 @@ export async function publishAction(actor: AppActor, params: {
         type: "action.published",
         aggregateType: "Action",
         aggregateId: updated.id,
-        payload: { actionId: updated.id, actorUserId: actor.kind === "user" ? actor.user.id : null },
+        payload: {
+          actionId: updated.id,
+          assigneeMemberId,
+          actorUserId: actor.kind === "user" ? actor.user.id : null,
+        },
       },
     ]);
 

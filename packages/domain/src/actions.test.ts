@@ -695,7 +695,7 @@ describe("action domain lifecycle", () => {
       expect.objectContaining({
         type: "action.published",
         aggregateId: "action-public",
-        payload: { actionId: "action-public", actorUserId: "user-1" },
+        payload: { actionId: "action-public", assigneeMemberId: "member-2", actorUserId: "user-1" },
       }),
     ]);
   });
@@ -801,7 +801,7 @@ describe("action domain lifecycle", () => {
     });
     prismaMock.action.update.mockResolvedValueOnce({
       id: "draft-1", workspaceId: "workspace-1", title: "Visible action",
-      status: "OPEN", isPrivate: false, version: 1,
+      status: "OPEN", isPrivate: false, assigneeMemberId: "member-2", version: 1,
     });
     const { updateAction } = await import("./actions");
 
@@ -811,7 +811,8 @@ describe("action domain lifecycle", () => {
       action: "action.published", entityId: "draft-1",
     }));
     expect(appendEvents).toHaveBeenCalledWith(expect.anything(), [expect.objectContaining({
-      type: "action.published", aggregateId: "draft-1", payload: { actionId: "draft-1", actorUserId: "user-1" },
+      type: "action.published", aggregateId: "draft-1",
+      payload: { actionId: "draft-1", assigneeMemberId: "member-2", actorUserId: "user-1" },
     })]);
     expect(appendEvents).toHaveBeenCalledTimes(2);
   });
@@ -1036,6 +1037,53 @@ describe("action domain lifecycle", () => {
       where: expect.objectContaining({ id: "action-1" }),
       data: { assigneeMemberId: "member-2", version: 2 },
     }));
+  });
+
+  it("emits a targeted assignment event when a public Action changes owner", async () => {
+    prismaMock.action.findUnique.mockResolvedValueOnce({
+      id: "action-1", workspaceId: "workspace-1", authorUserId: "user-1",
+      title: "Follow up", status: "OPEN", isPrivate: false, version: 1,
+      assigneeMemberId: "member-2", archivedAt: null, duplicateOfActionId: null,
+    });
+    prismaMock.member.findFirst.mockResolvedValue({ id: "member-3" });
+    prismaMock.action.update.mockResolvedValueOnce({
+      id: "action-1", workspaceId: "workspace-1", title: "Follow up",
+      status: "OPEN", isPrivate: false, version: 2, assigneeMemberId: "member-3",
+    });
+
+    const { updateAction } = await import("./actions");
+    await updateAction(actor, {
+      workspaceId: "workspace-1", actionId: "action-1", assigneeMemberId: "member-3",
+    });
+
+    expect(appendEvents).toHaveBeenCalledWith(expect.anything(), [expect.objectContaining({
+      type: "action.assigned",
+      workspaceId: "workspace-1",
+      aggregateType: "Action",
+      aggregateId: "action-1",
+      payload: { actionId: "action-1", assigneeMemberId: "member-3", actorUserId: "user-1" },
+    })]);
+  });
+
+  it("keeps draft assignment private until the Action is published", async () => {
+    prismaMock.action.findUnique.mockResolvedValueOnce({
+      id: "draft-1", workspaceId: "workspace-1", authorUserId: "user-1",
+      title: "Private follow up", status: "DRAFT", isPrivate: true, version: 1,
+      assigneeMemberId: "member-2", archivedAt: null, duplicateOfActionId: null,
+    });
+    prismaMock.member.findFirst.mockResolvedValue({ id: "member-3" });
+    prismaMock.action.update.mockResolvedValueOnce({
+      id: "draft-1", workspaceId: "workspace-1", title: "Private follow up",
+      status: "DRAFT", isPrivate: true, version: 2, assigneeMemberId: "member-3",
+    });
+
+    const { updateAction } = await import("./actions");
+    await updateAction(actor, {
+      workspaceId: "workspace-1", actionId: "draft-1", assigneeMemberId: "member-3",
+    });
+
+    expect(appendEvents.mock.calls.flatMap(([, events]) => events).map((event) => event.type))
+      .toEqual(["action.updated"]);
   });
 
   it("allows an assigned member to edit an open action and snapshots the previous version", async () => {
