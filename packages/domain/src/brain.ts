@@ -1,11 +1,13 @@
 import type { BrainArticleAuthority, BrainArticleType, BrainDiscussionTargetType, BrainSourceType } from "@prisma/client";
 import { Prisma } from "@prisma/client";
+import { isDeepStrictEqual } from "node:util";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { resolveKnowledgeAccessDomains } from "./brain-access";
+import { brainSourceContentFingerprint, type BrainArticleDerivationV1 } from "./brain-derivation";
 import { invariant } from "./errors";
 import { persistedMemberId } from "./membership";
 import { requireDraftManager } from "./draft-permissions";
@@ -79,6 +81,8 @@ export async function createArticle(actor: AppActor, params: {
   sourceIds?: string[];
   isPrivate?: boolean;
   duplicateGuard?: DuplicateGuardOptions | null;
+  // Supplied only by the source absorption agent for a newly generated article.
+  derivation?: { sourceId: string; sourceFingerprint: string; agentRunId: string };
   tx?: Prisma.TransactionClient;
 }) {
   const membership = await requireWorkspaceMembership({
@@ -133,6 +137,23 @@ export async function createArticle(actor: AppActor, params: {
   const membershipId = persistedMemberId(membership);
 
   const run = async (tx: Prisma.TransactionClient) => {
+    let derivation: BrainArticleDerivationV1 | null = null;
+    if (params.derivation) {
+      invariant(actor.kind === "agent" && actor.label === "brain-absorb", 403, "FORBIDDEN", "Only source absorption can record article derivation.");
+      invariant(params.sourceIds?.includes(params.derivation.sourceId), 400, "INVALID_INPUT", "Derived source must be linked to the article.");
+      await tx.$queryRaw`SELECT id FROM "BrainSource" WHERE id = ${params.derivation.sourceId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+      const source = await tx.brainSource.findFirst({
+        where: { id: params.derivation.sourceId, workspaceId: params.workspaceId, archivedAt: null },
+      });
+      invariant(source, 404, "NOT_FOUND", "Derivation source not found.");
+      invariant(brainSourceContentFingerprint(source) === params.derivation.sourceFingerprint, 409, "SOURCE_CHANGED", "Source changed during article generation.");
+      derivation = {
+        version: 1,
+        origin: "brain-absorb",
+        agentRunId: params.derivation.agentRunId,
+        sources: [{ sourceId: source.id, fingerprint: params.derivation.sourceFingerprint }],
+      };
+    }
     const slug = await nextAvailableArticleSlug(tx, params.workspaceId, requestedSlug);
     const article = await tx.brainArticle.create({
       data: {
@@ -146,6 +167,7 @@ export async function createArticle(actor: AppActor, params: {
         ownerMemberId: isPrivate ? (membershipId ?? params.ownerMemberId ?? null) : (params.ownerMemberId ?? null),
         staleAfterDays: params.staleAfterDays ?? 90,
         sourceIds: params.sourceIds ?? [],
+        ...(derivation ? { derivationJson: derivation } : {}),
         isPrivate,
         publishedAt: isPrivate ? null : new Date(),
         lastVerifiedAt: new Date(),
@@ -264,6 +286,11 @@ export async function updateArticle(actor: AppActor, params: {
     if (params.ownerMemberId !== undefined) data.ownerMemberId = params.ownerMemberId;
     if (params.staleAfterDays !== undefined) data.staleAfterDays = params.staleAfterDays;
     if (params.sourceIds !== undefined) data.sourceIds = params.sourceIds;
+    const changesDraftContent = Object.entries(data).some(([field, value]) =>
+      !isDeepStrictEqual(article[field as keyof typeof article], value));
+    if (actor.kind === "user" && article.derivationJson && changesDraftContent) {
+      data.humanEditedAt = new Date();
+    }
 
     const updated = await tx.brainArticle.update({
       where: { id: article.id },
