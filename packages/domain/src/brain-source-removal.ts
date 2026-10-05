@@ -422,6 +422,11 @@ export async function resolveBrainSourceRemoval(actor: AppActor, params: {
         lastVerifiedAt: new Date(),
       } });
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brain_article_index:${params.workspaceId}:${record.id}`}, 0))`;
+      // The reviewed body is authoritative immediately. Remove old SQL receipts
+      // in the same commit; a queued index job may be paused or fail.
+      await tx.knowledgeChunk.deleteMany({ where: {
+        workspaceId: params.workspaceId, sourceType: "BRAIN_ARTICLE", sourceId: record.id,
+      } });
       await tx.auditLog.create({ data: { workspaceId: params.workspaceId,
         actorUserId: actor.kind === "user" ? actor.user.id : null, action: "brain-article.regenerated",
         entityType: "BrainArticle", entityId: record.id, meta: { sourceId: payload.sourceId, jobId: job.id },

@@ -132,7 +132,7 @@ async function knowledgeCacheVersion(workspaceId: string) {
   return `${globalVersion}:${workspaceVersion}`;
 }
 
-/** Archived or private source rows are authoritative even if SQL/Azure or a response cache lags. */
+/** Source rows and current SQL chunk receipts are authoritative even if Azure or a response cache lags. */
 async function activeKnowledgeResults<T extends KnowledgeCitation>(workspaceId: string, results: T[]): Promise<T[]> {
   const articleIds = [...new Set(results.filter((item) => item.sourceType === "BRAIN_ARTICLE").map((item) => item.sourceId))];
   const documentIds = [...new Set(results.filter((item) => item.sourceType === "DOCUMENT").map((item) => item.sourceId))];
@@ -147,8 +147,20 @@ async function activeKnowledgeResults<T extends KnowledgeCitation>(workspaceId: 
   ]);
   const activeArticles = new Set(articles.map((item) => item.id));
   const activeDocuments = new Set(documents.map((item) => item.id));
-  return results.filter((item) => item.sourceType === "BRAIN_ARTICLE" ? activeArticles.has(item.sourceId)
-    : item.sourceType === "DOCUMENT" ? activeDocuments.has(item.sourceId) : true);
+  const articleChunkIds = [...new Set(results.filter((item) => item.sourceType === "BRAIN_ARTICLE" && activeArticles.has(item.sourceId))
+    .map((item) => item.chunkId))];
+  const articleChunks = articleChunkIds.length ? await prisma.knowledgeChunk.findMany({ where: {
+    id: { in: articleChunkIds }, workspaceId, sourceType: "BRAIN_ARTICLE",
+  }, select: { id: true, sourceId: true, chunkIndex: true, content: true } }) : [];
+  const currentArticleChunks = new Map(articleChunks.map((chunk) => [chunk.id, chunk]));
+  return results.filter((item) => {
+    if (item.sourceType === "BRAIN_ARTICLE") {
+      const chunk = currentArticleChunks.get(item.chunkId);
+      return activeArticles.has(item.sourceId) && chunk?.sourceId === item.sourceId
+        && chunk.chunkIndex === item.chunkIndex && chunk.content.slice(0, 400) === item.snippet;
+    }
+    return item.sourceType === "DOCUMENT" ? activeDocuments.has(item.sourceId) : true;
+  });
 }
 
 export async function invalidateKnowledgeCache(workspaceId?: string, transaction?: Prisma.TransactionClient) {

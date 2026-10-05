@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
 import { prisma, type AppActor } from "@corgtex/shared";
+import { defaultModelGateway } from "@corgtex/models";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
+import { searchIndexedKnowledge } from "../../knowledge/src/retrieval";
+import { syncBrainArticleKnowledge } from "../../knowledge/src/chunks";
 import { createArticle, deleteSource } from "./brain";
 import { brainSourceContentFingerprint } from "./brain-derivation";
 import {
@@ -84,8 +87,37 @@ describe("Brain source removal review", () => {
       .rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
     const [review] = await listBrainSourceRemovalReviews(actor, { workspaceId: workspace.id, sourceIds: [removed.id] });
     expect(review.articles[0]).toMatchObject({ currentBodyMd: "Human revised facts", candidateBodyMd: "Facts from remaining source only" });
-    expect(await resolveBrainSourceRemoval(actor, { workspaceId: workspace.id, jobId: requested.jobId, decision: "accept" }))
-      .toEqual({ status: "applied", sourceId: removed.id, pendingSourceId: null });
+    await prisma.knowledgeChunk.create({ data: {
+      workspaceId: workspace.id, sourceType: "BRAIN_ARTICLE", sourceId: article.id,
+      content: "Human revised facts", sourceTitle: article.title, embedding: [0.1],
+    } });
+    const embed = vi.spyOn(defaultModelGateway, "embed").mockImplementation(async ({ input }) => ({
+      embeddings: (Array.isArray(input) ? input : [input]).map(() => [0.1]),
+      usage: { provider: "fixture", model: "fixture-embed" },
+    }));
+    const rerank = vi.spyOn(defaultModelGateway, "rerank").mockImplementation(async ({ documents }) => ({
+      results: documents.map((document, index) => ({ index, score: 1, document })),
+      usage: { provider: "fixture", model: "fixture-rerank" },
+    }));
+    try {
+      const query = { workspaceId: workspace.id, query: "Human revised facts", sourceTypes: ["BRAIN_ARTICLE" as const] };
+      expect((await searchIndexedKnowledge(query))[0]?.snippet).toBe("Human revised facts");
+      expect(await resolveBrainSourceRemoval(actor, { workspaceId: workspace.id, jobId: requested.jobId, decision: "accept" }))
+        .toEqual({ status: "applied", sourceId: removed.id, pendingSourceId: null });
+      expect(await prisma.knowledgeChunk.count({ where: {
+        workspaceId: workspace.id, sourceType: "BRAIN_ARTICLE", sourceId: article.id,
+      } })).toBe(0);
+      expect(await searchIndexedKnowledge(query)).toEqual([]);
+      embed.mockRejectedValueOnce(new Error("synthetic indexing failure"));
+      await expect(syncBrainArticleKnowledge({ workspaceId: workspace.id, articleId: article.id }))
+        .rejects.toThrow("synthetic indexing failure");
+      expect(await searchIndexedKnowledge(query)).toEqual([]);
+      expect(await syncBrainArticleKnowledge({ workspaceId: workspace.id, articleId: article.id })).toBe(1);
+      expect((await searchIndexedKnowledge(query))[0]?.snippet).toBe("Facts from remaining source only");
+    } finally {
+      embed.mockRestore();
+      rerank.mockRestore();
+    }
     expect(await resolveBrainSourceRemoval(actor, { workspaceId: workspace.id, jobId: requested.jobId, decision: "accept" }))
       .toEqual({ status: "applied", sourceId: removed.id, pendingSourceId: null });
     const updated = await prisma.brainArticle.findUniqueOrThrow({ where: { id: article.id }, include: { versions: true } });

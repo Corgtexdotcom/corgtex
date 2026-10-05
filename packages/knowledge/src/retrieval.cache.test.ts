@@ -137,6 +137,97 @@ describe("knowledge retrieval cache", () => {
     expect(modelGatewayMock.chat).toHaveBeenCalledTimes(1);
   });
 
+  it("drops cached active-article snippets and answers when their SQL chunk receipt is removed", async () => {
+    const chunk = { id: "old-article-chunk", sourceType: "BRAIN_ARTICLE", sourceId: "article-1",
+      sourceTitle: "Synthetic article", chunkIndex: 0, content: "Withdrawn source claim", createdAt: new Date() };
+    let current = true;
+    prismaMock.knowledgeChunk.findMany.mockImplementation(async (query) => {
+      if (query.select?.embedding) return [{ id: chunk.id, embedding: [1, 0] }];
+      if (query.select?.content) return current ? [chunk] : [];
+      return [chunk];
+    });
+    const question = "What is the source claim?";
+    expect((await answerKnowledgeQuestion({ workspaceId: "ws-1", question })).citations).toHaveLength(1);
+    current = false; // Reviewed regeneration has committed; the index worker is still paused.
+    expect(await searchIndexedKnowledge({ workspaceId: "ws-1", query: question, limit: 8 })).toEqual([]);
+    expect(await answerKnowledgeQuestion({ workspaceId: "ws-1", question })).toEqual({
+      answer: "I could not find relevant indexed knowledge for that question.", citations: [],
+    });
+    expect(modelGatewayMock.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it("discards an article result when reviewed regeneration commits during reranking or answering", async () => {
+    const chunk = { id: "in-flight-article", sourceType: "BRAIN_ARTICLE", sourceId: "article-1",
+      sourceTitle: "Synthetic article", chunkIndex: 0, content: "Withdrawn source claim", createdAt: new Date() };
+    let current = true;
+    prismaMock.knowledgeChunk.findMany.mockImplementation(async (query) => {
+      if (query.select?.embedding) return [{ id: chunk.id, embedding: [1, 0] }];
+      if (query.select?.content) return current ? [chunk] : [];
+      return [chunk];
+    });
+    let releaseRerank!: () => void;
+    let rerankEntered!: () => void;
+    const holdRerank = new Promise<void>((resolve) => { releaseRerank = resolve; });
+    const enteredRerank = new Promise<void>((resolve) => { rerankEntered = resolve; });
+    modelGatewayMock.rerank.mockImplementationOnce(async () => {
+      rerankEntered();
+      await holdRerank;
+      return { results: [{ index: 0, score: 0.9 }], usage: { model: "fake-rerank" } };
+    });
+    const query = "Withdrawn source claim";
+    const inFlightSearch = searchIndexedKnowledge({ workspaceId: "ws-1", query });
+    await enteredRerank;
+    current = false;
+    releaseRerank();
+    expect(await inFlightSearch).toEqual([]);
+
+    current = true;
+    await invalidateKnowledgeCache("ws-1");
+    let releaseChat!: () => void;
+    let chatEntered!: () => void;
+    const holdChat = new Promise<void>((resolve) => { releaseChat = resolve; });
+    const enteredChat = new Promise<void>((resolve) => { chatEntered = resolve; });
+    modelGatewayMock.chat.mockImplementationOnce(async () => {
+      chatEntered();
+      await holdChat;
+      return { content: "Stale answer", usage: { model: "fake-chat" } };
+    });
+    const inFlightAnswer = answerKnowledgeQuestion({ workspaceId: "ws-1", question: query });
+    await enteredChat;
+    current = false;
+    releaseChat();
+    expect(await inFlightAnswer).toEqual({
+      answer: "I could not find relevant indexed knowledge for that question.", citations: [],
+    });
+  });
+
+  it("filters stale Azure hits for an active article until the new chunk exists in SQL", async () => {
+    process.env.KNOWLEDGE_SEARCH_PROVIDER = "azure";
+    process.env.AZURE_SEARCH_ENDPOINT = "https://corgtex-search.search.windows.net";
+    process.env.AZURE_SEARCH_INDEX_NAME = "client-knowledge";
+    process.env.AZURE_SEARCH_QUERY_KEY = "query-key";
+    process.env.AZURE_SEARCH_VECTOR_DIMENSIONS = "2";
+    let azureChunk = {
+      id: "old-article-chunk", sourceType: "BRAIN_ARTICLE", sourceId: "article-1",
+      sourceTitle: "Active article", chunkIndex: 0, content: "Withdrawn source claim", "@search.score": 2,
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ value: [azureChunk] }), { status: 200 })));
+    prismaMock.knowledgeChunk.findMany.mockResolvedValue([]);
+
+    expect(await searchIndexedKnowledge({ workspaceId: "ws-1", query: "Withdrawn source claim" })).toEqual([]);
+    expect(prismaMock.knowledgeChunk.findMany).toHaveBeenCalledWith({ where: {
+      id: { in: ["old-article-chunk"] }, workspaceId: "ws-1", sourceType: "BRAIN_ARTICLE",
+    }, select: { id: true, sourceId: true, chunkIndex: true, content: true } });
+    azureChunk = { ...azureChunk, id: "new-article-chunk", content: "Verified remaining claim" };
+    prismaMock.knowledgeChunk.findMany.mockResolvedValue([{
+      id: azureChunk.id, sourceId: "article-1", chunkIndex: 0, content: azureChunk.content,
+    }]);
+    await invalidateKnowledgeCache("ws-1");
+    expect(await searchIndexedKnowledge({ workspaceId: "ws-1", query: "remaining claim" })).toEqual([
+      expect.objectContaining({ chunkId: "new-article-chunk", snippet: "Verified remaining claim" }),
+    ]);
+  });
+
   it("filters Azure hits against active article rows even if index cleanup has failed", async () => {
     process.env.KNOWLEDGE_SEARCH_PROVIDER = "azure";
     process.env.AZURE_SEARCH_ENDPOINT = "https://corgtex-search.search.windows.net";
