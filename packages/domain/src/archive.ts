@@ -763,6 +763,17 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
         },
       ]);
     }
+    if (config.entityType === "BrainArticle") {
+      await appendEvents(tx, [
+        {
+          workspaceId: params.workspaceId,
+          type: "brain-article.updated",
+          aggregateType: "BrainArticle",
+          aggregateId: record.id,
+          payload: { articleId: record.id },
+        },
+      ]);
+    }
 
     if (archiveRecord) {
       await tx.workspaceArchiveRecord.update({

@@ -7,10 +7,13 @@ import { extractPptxText, PptxExtractionError } from "./pptx-extraction";
 import { prisma } from "@corgtex/shared";
 import {
   assertTrialStorageCapacity,
+  archiveWorkspaceArtifact,
   checkWorkspaceDuplicateGuard,
+  duplicateGuardContentHash,
   duplicateGuardMergeText,
   isGlobalOperator,
   lockAndAssertTrialStorageCapacity,
+  lockWorkspaceArchiveArtifact,
   requireWorkspaceMembership,
 } from "@corgtex/domain";
 
@@ -18,6 +21,8 @@ vi.mock("./pptx-extraction", async (importOriginal) => {
   const actual = await importOriginal() as any;
   return { ...actual, extractPptxText: vi.fn(actual.extractPptxText) };
 });
+
+vi.mock("./retrieval", () => ({ invalidateKnowledgeCache: vi.fn() }));
 
 vi.mock("@corgtex/shared", () => ({
   prisma: {
@@ -35,6 +40,7 @@ vi.mock("@corgtex/shared", () => ({
     },
   },
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+  getSharedStateBackend: vi.fn(() => "redis"),
 }));
 
 vi.mock("@corgtex/domain", () => ({
@@ -44,7 +50,9 @@ vi.mock("@corgtex/domain", () => ({
   duplicateGuardContentHash: vi.fn((value?: string | null) => value?.trim() ? `hash:${value.trim()}` : null),
   duplicateGuardMergeText: vi.fn((existing?: string | null, incoming?: string | null) => incoming?.trim() || existing || null),
   assertTrialStorageCapacity: vi.fn().mockResolvedValue(undefined),
+  archiveWorkspaceArtifact: vi.fn().mockResolvedValue({}),
   lockAndAssertTrialStorageCapacity: vi.fn().mockResolvedValue(undefined),
+  lockWorkspaceArchiveArtifact: vi.fn().mockResolvedValue(undefined),
   requireWorkspaceMembership: vi.fn().mockResolvedValue({ id: "mem1" }),
   isGlobalOperator: vi.fn().mockReturnValue(false),
   getStorageUsageSummary: vi.fn().mockResolvedValue({ usageBytes: 0, limitBytes: Infinity }),
@@ -576,15 +584,22 @@ describe("file-ingestion", () => {
       archivedAt: null,
     };
     const txObj = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
       document: {
         findFirst: vi.fn().mockResolvedValue(existingDocument),
         update: vi.fn().mockImplementation(async (args: any) => ({ ...existingDocument, ...args.data })),
       },
       brainSource: {
         findFirst: vi.fn().mockResolvedValue(existingSource),
+        findMany: vi.fn().mockResolvedValue([{ id: "source-existing" }, { id: "source-archived" }]),
         update: vi.fn().mockImplementation(async (args: any) => ({ ...existingSource, ...args.data })),
         create: vi.fn(),
       },
+      brainArticle: {
+        findMany: vi.fn().mockResolvedValue([{ id: "article-old", workspaceId: "ws_1", sourceIds: ["source-archived"], archivedAt: null }]),
+        findFirst: vi.fn().mockResolvedValue({ id: "article-old", workspaceId: "ws_1", sourceIds: ["source-archived"], archivedAt: null }),
+      },
+      knowledgeChunk: { deleteMany: vi.fn() },
       auditLog: { create: vi.fn() },
     };
     vi.mocked(prisma.$transaction).mockImplementationOnce(async (callback: any) => callback(txObj));
@@ -624,6 +639,25 @@ describe("file-ingestion", () => {
     }));
     expect(txObj.brainSource.update.mock.calls[0]?.[0]?.data.content).toContain("New replacement text");
     expect(txObj.brainSource.create).not.toHaveBeenCalled();
+    expect(lockWorkspaceArchiveArtifact).toHaveBeenCalledWith(txObj, "BrainSource", "source-existing");
+    expect(txObj.brainSource.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ metadata: { path: ["documentId"], equals: "doc-existing" } }),
+    }));
+    expect(txObj.brainArticle.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ sourceIds: { hasSome: ["source-existing", "source-archived"] } }),
+    }));
+    expect(archiveWorkspaceArtifact).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "ws_1", entityType: "BrainArticle", entityId: "article-old", _tx: txObj,
+    }));
+    expect(txObj.knowledgeChunk.deleteMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "ws_1",
+        OR: [
+          { sourceType: "DOCUMENT", sourceId: "doc-existing" },
+          { sourceType: "BRAIN_ARTICLE", sourceId: { in: ["article-old"] } },
+        ],
+      },
+    });
     expect(res.document.storageKey).toBe(replacementStorageKey);
     expect(assertTrialStorageCapacity).toHaveBeenCalledWith(
       "ws_1",
@@ -637,6 +671,99 @@ describe("file-ingestion", () => {
     );
     expect(vi.mocked(lockAndAssertTrialStorageCapacity).mock.invocationCallOrder[0])
       .toBeLessThan(txObj.document.update.mock.invocationCallOrder[0]);
+  });
+
+  it("uses a fresh byte hash for a replacement whose text cannot be normalized for deduplication", async () => {
+    const replacement = Buffer.from("新しい契約条項");
+    vi.mocked(duplicateGuardContentHash).mockReturnValueOnce(null);
+    vi.mocked(checkWorkspaceDuplicateGuard).mockResolvedValueOnce({
+      resolution: "update_existing",
+      match: { entityType: "Document", entityId: "doc-existing" },
+    } as any);
+    const existingDocument = {
+      id: "doc-existing", workspaceId: "ws_1", title: "Old", source: "FILE_UPLOAD",
+      storageKey: "old-key", textContent: "Old", metadata: { contentHash: "old-hash" }, archivedAt: null,
+    };
+    vi.mocked((prisma as any).document.findFirst).mockResolvedValueOnce(existingDocument);
+    const txObj = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      document: {
+        findFirst: vi.fn().mockResolvedValue(existingDocument),
+        update: vi.fn().mockImplementation(async (args: any) => ({ ...existingDocument, ...args.data })),
+      },
+      brainSource: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([{ id: "source-new" }]),
+        create: vi.fn().mockResolvedValue({ id: "source-new" }),
+      },
+      brainArticle: { findMany: vi.fn().mockResolvedValue([]) },
+      knowledgeChunk: { deleteMany: vi.fn() },
+      auditLog: { create: vi.fn() },
+    };
+    vi.mocked(prisma.$transaction).mockImplementationOnce(async (callback: any) => callback(txObj));
+
+    await ingestFile(actor, {
+      workspaceId: "ws_1", fileName: "replacement.txt", mimeType: "text/plain",
+      fileBuffer: replacement, uploadSource: "FILE_UPLOAD",
+      duplicateGuard: { resolution: "update_existing", targetEntityId: "doc-existing" },
+    });
+
+    const expectedHash = createHash("sha256").update(replacement).digest("hex");
+    expect(txObj.document.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ metadata: expect.objectContaining({ contentHash: expectedHash }) }),
+    }));
+    expect(txObj.brainSource.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ metadata: expect.objectContaining({ contentHash: expectedHash }) }),
+    }));
+  });
+
+  it("keeps the prior document when archival fails and retries replacement with a new blob", async () => {
+    const { defaultStorage } = await import("@corgtex/storage");
+    const decision = { resolution: "update_existing", match: { entityType: "Document", entityId: "doc-existing" } } as any;
+    vi.mocked(checkWorkspaceDuplicateGuard).mockResolvedValue(decision);
+    const existingDocument = {
+      id: "doc-existing", workspaceId: "ws_1", title: "Old", source: "FILE_UPLOAD",
+      storageKey: "old-key", textContent: "Old", metadata: {}, archivedAt: null,
+    };
+    vi.mocked((prisma as any).document.findFirst).mockResolvedValue(existingDocument);
+    const makeTx = () => ({
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      document: {
+        findFirst: vi.fn().mockResolvedValue(existingDocument),
+        update: vi.fn().mockImplementation(async (args: any) => ({ ...existingDocument, ...args.data })),
+      },
+      brainSource: {
+        findFirst: vi.fn().mockResolvedValue({ id: "source-existing", workspaceId: "ws_1", metadata: { documentId: "doc-existing" } }),
+        findMany: vi.fn().mockResolvedValue([{ id: "source-existing" }]),
+        update: vi.fn().mockResolvedValue({ id: "source-existing" }),
+      },
+      brainArticle: {
+        findMany: vi.fn().mockResolvedValue([{ id: "article-old" }]),
+        findFirst: vi.fn().mockResolvedValue({ id: "article-old" }),
+      },
+      knowledgeChunk: { deleteMany: vi.fn() },
+      auditLog: { create: vi.fn() },
+    });
+    const firstTx = makeTx();
+    const retryTx = makeTx();
+    vi.mocked(prisma.$transaction)
+      .mockImplementationOnce(async (callback: any) => callback(firstTx))
+      .mockImplementationOnce(async (callback: any) => callback(retryTx));
+    vi.mocked(archiveWorkspaceArtifact).mockRejectedValueOnce(new Error("Archive unavailable"));
+    const input = {
+      workspaceId: "ws_1", fileName: "replacement.txt", mimeType: "text/plain",
+      fileBuffer: Buffer.from("Replacement"), uploadSource: "FILE_UPLOAD",
+      duplicateGuard: { resolution: "update_existing" as const, targetEntityId: "doc-existing" },
+    };
+
+    await expect(ingestFile(actor, input)).rejects.toThrow("Archive unavailable");
+    expect(firstTx.knowledgeChunk.deleteMany).not.toHaveBeenCalled();
+    const failedKey = vi.mocked(defaultStorage.put).mock.calls[0]?.[0];
+    expect(defaultStorage.delete).toHaveBeenCalledWith(failedKey);
+    await ingestFile(actor, input);
+    expect(retryTx.knowledgeChunk.deleteMany).toHaveBeenCalled();
+    expect(vi.mocked(defaultStorage.put).mock.calls[1]?.[0]).not.toBe(failedKey);
+    expect(defaultStorage.delete).toHaveBeenCalledTimes(1);
   });
 
   it("creates a new uploader-owned source instead of restoring an archived duplicate source", async () => {
@@ -669,15 +796,19 @@ describe("file-ingestion", () => {
     };
     vi.mocked((prisma as any).document.findFirst).mockResolvedValueOnce(existingDocument);
     const txObj = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
       document: {
         findFirst: vi.fn().mockResolvedValue(existingDocument),
         update: vi.fn().mockImplementation(async (args: any) => ({ ...existingDocument, ...args.data })),
       },
       brainSource: {
         findFirst: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([{ id: "source-replacement" }]),
         update: vi.fn(),
         create: vi.fn().mockResolvedValue({ id: "source-replacement", sourceType: "FILE_UPLOAD", tier: 2 }),
       },
+      brainArticle: { findMany: vi.fn().mockResolvedValue([]) },
+      knowledgeChunk: { deleteMany: vi.fn() },
       auditLog: { create: vi.fn() },
       eventRecord: { createMany: vi.fn() },
     };
@@ -749,15 +880,19 @@ describe("file-ingestion", () => {
     };
     vi.mocked((prisma as any).document.findFirst).mockResolvedValueOnce(existingDocument);
     const txObj = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
       document: {
         findFirst: vi.fn().mockResolvedValue(existingDocument),
         update: vi.fn().mockImplementation(async (args: any) => ({ ...existingDocument, ...args.data })),
       },
       brainSource: {
         findFirst: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([{ id: "source-new" }]),
         update: vi.fn(),
         create: vi.fn().mockResolvedValue({ id: "source-new" }),
       },
+      brainArticle: { findMany: vi.fn().mockResolvedValue([]) },
+      knowledgeChunk: { deleteMany: vi.fn() },
       auditLog: { create: vi.fn() },
       eventRecord: { createMany: vi.fn() },
     };

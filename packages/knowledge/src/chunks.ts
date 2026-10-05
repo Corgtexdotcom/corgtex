@@ -86,7 +86,15 @@ export async function syncKnowledgeForSource(params: {
 }) {
   const chunks = chunkText(params.content);
   if (chunks.length === 0) {
-    await prisma.$transaction(async (tx) => {
+    const retired = await prisma.$transaction(async (tx) => {
+      if (params.sourceType === "BRAIN_ARTICLE") {
+        await tx.$queryRaw`SELECT "id" FROM "BrainArticle" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+        const active = await tx.brainArticle.findFirst({
+          where: { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null, isPrivate: false },
+          select: { id: true },
+        });
+        if (active) return false;
+      }
       await tx.knowledgeChunk.deleteMany({
         where: {
           workspaceId: params.workspaceId,
@@ -95,7 +103,9 @@ export async function syncKnowledgeForSource(params: {
         },
       });
       if (getSharedStateBackend() === "postgres") await invalidateKnowledgeCache(params.workspaceId, tx);
+      return true;
     });
+    if (!retired) return 0;
     await syncAzureSourceBestEffort({
       workspaceId: params.workspaceId,
       sourceType: params.sourceType,
@@ -137,7 +147,24 @@ export async function syncKnowledgeForSource(params: {
     };
   });
 
-  await prisma.$transaction(async (tx) => {
+  const persisted = await prisma.$transaction(async (tx) => {
+    if (params.sourceType === "BRAIN_ARTICLE") {
+      await tx.$queryRaw`SELECT "id" FROM "BrainArticle" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+      const article = await tx.brainArticle.findFirst({
+        where: { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null, isPrivate: false, bodyMd: params.content },
+        select: { id: true },
+      });
+      if (!article) return false;
+    }
+    const storageKey = params.sourceType === "DOCUMENT" ? params.metadata?.storageKey : null;
+    if (typeof storageKey === "string") {
+      await tx.$queryRaw`SELECT "id" FROM "Document" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+      const document = await tx.document.findFirst({
+        where: { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null, storageKey },
+        select: { id: true },
+      });
+      if (!document) return false;
+    }
     await tx.knowledgeChunk.deleteMany({
       where: {
         workspaceId: params.workspaceId,
@@ -149,7 +176,9 @@ export async function syncKnowledgeForSource(params: {
     // PostgreSQL cache invalidation commits with its source rows. A failure must
     // roll both back instead of leaving cached results after a committed change.
     if (getSharedStateBackend() === "postgres") await invalidateKnowledgeCache(params.workspaceId, tx);
+    return true;
   });
+  if (!persisted) return 0;
 
   await syncAzureSourceBestEffort({
     workspaceId: params.workspaceId,
@@ -207,11 +236,21 @@ export async function syncBrainArticleKnowledge(params: {
       authority: true,
       bodyMd: true,
       isPrivate: true,
+      archivedAt: true,
     },
   });
 
-  if (!article || article.workspaceId !== params.workspaceId || article.isPrivate) {
+  if (!article || article.workspaceId !== params.workspaceId) {
     return 0;
+  }
+  if (article.isPrivate || article.archivedAt) {
+    return syncKnowledgeForSource({
+      workspaceId: params.workspaceId,
+      sourceType: "BRAIN_ARTICLE",
+      accessDomain: "WORKSPACE",
+      sourceId: article.id,
+      content: "",
+    });
   }
 
   return syncKnowledgeForSource({

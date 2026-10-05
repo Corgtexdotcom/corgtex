@@ -132,6 +132,49 @@ async function knowledgeCacheVersion(workspaceId: string) {
   return `${globalVersion}:${workspaceVersion}`;
 }
 
+// The SQL chunk is the current indexing receipt. Azure and cached results may
+// outlive a replacement; never return a hit whose receipt was removed, or an
+// article that has since been archived or made private.
+async function currentKnowledgeCitations<T extends KnowledgeCitation>(
+  workspaceId: string,
+  accessDomains: KnowledgeAccessDomain[],
+  citations: T[],
+): Promise<T[]> {
+  if (citations.length === 0) return citations;
+  const chunks = await prisma.knowledgeChunk.findMany({
+    where: { id: { in: citations.map((citation) => citation.chunkId) }, workspaceId, accessDomain: { in: accessDomains } },
+    select: { id: true, sourceType: true, sourceId: true, metadata: true },
+  });
+  const articleIds = chunks.filter((chunk) => chunk.sourceType === "BRAIN_ARTICLE").map((chunk) => chunk.sourceId);
+  const articles = articleIds.length > 0
+    ? await prisma.brainArticle.findMany({
+      where: { id: { in: articleIds }, workspaceId, archivedAt: null, isPrivate: false },
+      select: { id: true },
+    })
+    : [];
+  const activeArticleIds = new Set(articles.map((article) => article.id));
+  const documentChunks = chunks.filter((chunk) => chunk.sourceType === "DOCUMENT"
+    && typeof (chunk.metadata as Record<string, unknown> | null)?.storageKey === "string");
+  const documents = documentChunks.length > 0
+    ? await prisma.document.findMany({
+      where: { id: { in: documentChunks.map((chunk) => chunk.sourceId) }, workspaceId, archivedAt: null },
+      select: { id: true, storageKey: true },
+    })
+    : [];
+  const documentStorageKeys = new Map(documents.map((document) => [document.id, document.storageKey]));
+  const currentChunks = new Map(chunks.map((chunk) => [chunk.id, chunk]));
+  return citations.filter((citation) => {
+    const chunk = currentChunks.get(citation.chunkId);
+    if (!chunk || chunk.sourceType !== citation.sourceType || chunk.sourceId !== citation.sourceId) return false;
+    if (chunk.sourceType === "BRAIN_ARTICLE") return activeArticleIds.has(chunk.sourceId);
+    if (chunk.sourceType === "DOCUMENT") {
+      const indexedStorageKey = (chunk.metadata as Record<string, unknown> | null)?.storageKey;
+      if (typeof indexedStorageKey === "string") return documentStorageKeys.get(chunk.sourceId) === indexedStorageKey;
+    }
+    return true;
+  });
+}
+
 export async function invalidateKnowledgeCache(workspaceId?: string, transaction?: Prisma.TransactionClient) {
   if (!workspaceId) {
     await incrementCacheVersion("knowledge:all", transaction);
@@ -180,7 +223,7 @@ export async function searchIndexedKnowledge(params: {
   });
   const cached = await getCacheJson<KnowledgeSearchResult[]>(cacheKey);
   if (cached) {
-    return cached;
+    return currentKnowledgeCitations(params.workspaceId, accessDomains, cached);
   }
 
   const results = await executeKnowledgeSearch({
@@ -191,8 +234,9 @@ export async function searchIndexedKnowledge(params: {
     configuredProvider,
   });
 
-  await setCacheJson(cacheKey, results, SEARCH_CACHE_TTL_MS);
-  return results;
+  const currentResults = await currentKnowledgeCitations(params.workspaceId, accessDomains, results);
+  await setCacheJson(cacheKey, currentResults, SEARCH_CACHE_TTL_MS);
+  return currentResults;
 }
 
 async function executeKnowledgeSearch(params: {
@@ -443,7 +487,8 @@ export async function answerKnowledgeQuestion(params: {
     citations: KnowledgeCitation[];
   }>(cacheKey);
   if (cached) {
-    return cached;
+    const currentCitations = await currentKnowledgeCitations(params.workspaceId, accessDomains, cached.citations);
+    if (currentCitations.length === cached.citations.length) return cached;
   }
 
   const citations = await searchIndexedKnowledge({
@@ -492,6 +537,10 @@ export async function answerKnowledgeQuestion(params: {
     answer: response.content,
     citations: citations.map(({ score, ...citation }) => citation),
   };
+  const currentCitations = await currentKnowledgeCitations(params.workspaceId, accessDomains, answer.citations);
+  if (currentCitations.length !== answer.citations.length) {
+    return { answer: "I could not find relevant indexed knowledge for that question.", citations: [] as KnowledgeCitation[] };
+  }
   await setCacheJson(cacheKey, answer, SEARCH_CACHE_TTL_MS);
   return answer;
 }

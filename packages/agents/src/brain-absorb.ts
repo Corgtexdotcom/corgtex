@@ -120,18 +120,14 @@ export async function absorbSource(params: {
     return { skipped: true, reason: initialSkipReason };
   }
   const sourceId = source.id;
+  const initialSourceIdentity = brainSourceRecoveryIdentity(source);
 
   async function currentSkipReason(client: Pick<typeof prisma, "brainSource"> = prisma) {
-    if (params.expectedSourceIdentity) {
-      const current = await client.brainSource.findUnique({ where: { id: params.sourceId } });
-      assertRecoveryIdentity(current);
-      return sourceSkipReason(current, params.workspaceId);
-    }
-    const current = await client.brainSource.findUnique({
-      where: { id: params.sourceId },
-      select: { workspaceId: true, absorbedAt: true, archivedAt: true },
-    });
-    return sourceSkipReason(current, params.workspaceId);
+    const current = await client.brainSource.findUnique({ where: { id: params.sourceId } });
+    assertRecoveryIdentity(current);
+    const reason = sourceSkipReason(current, params.workspaceId);
+    if (reason) return reason;
+    return brainSourceRecoveryIdentity(current!) === initialSourceIdentity ? null : "source_changed";
   }
 
   async function skippedIfSourceInactive() {
@@ -142,9 +138,7 @@ export async function absorbSource(params: {
   async function runSourceWritePhase<T>(operation: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T | SourceSkipResult> {
     return prisma.$transaction(async (tx) => {
       await lockWorkspaceArchiveArtifact(tx, "BrainSource", sourceId);
-      if (params.expectedSourceIdentity) {
-        await tx.$queryRaw`SELECT id FROM "BrainSource" WHERE id = ${sourceId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
-      }
+      await tx.$queryRaw`SELECT id FROM "BrainSource" WHERE id = ${sourceId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
       const reason = await currentSkipReason(tx);
       if (reason) return { skipped: true, reason, sourceId };
       return operation(tx);
@@ -170,11 +164,13 @@ export async function absorbSource(params: {
       authority: true,
       bodyMd: true,
       sourceIds: true,
+      archivedAt: true,
       frontmatterJson: true,
     },
   });
 
-  const articleIndex = articles.map((a) => ({
+  const activeArticles = articles.filter((article) => !article.archivedAt);
+  const articleIndex = activeArticles.map((a) => ({
     slug: a.slug,
     title: a.title,
     type: a.type,
@@ -239,7 +235,7 @@ Determine:
 
   // Step 2: Update existing articles
   for (const slug of updateSlugs) {
-    const existing = articles.find((a) => a.slug === slug);
+    const existing = activeArticles.find((a) => a.slug === slug);
     if (!existing) continue;
     if (existing.authority !== "DRAFT") {
       skippedNonDraftSlugs.push(existing.slug);
@@ -408,7 +404,7 @@ Rules:
       },
       include: {
         fromArticle: {
-          select: { id: true, slug: true, title: true, type: true, authority: true, bodyMd: true },
+          select: { id: true, slug: true, title: true, type: true, authority: true, bodyMd: true, archivedAt: true },
         },
       },
     });
@@ -419,6 +415,7 @@ Rules:
       if (
         !plannedTouchedArticleIds.includes(bl.fromArticle.id) &&
         bl.fromArticle.authority === "DRAFT" &&
+        !bl.fromArticle.archivedAt &&
         !candidateArticles.has(bl.fromArticle.id)
       ) {
         candidateArticles.set(bl.fromArticle.id, bl.fromArticle);

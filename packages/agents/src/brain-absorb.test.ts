@@ -143,7 +143,8 @@ describe("absorbSource", () => {
 
   it("rechecks recovery identity under the source row lock before any output write", async () => {
     const { absorbSource } = await import("./brain-absorb");
-    recoveryIdentityMock.mockReturnValueOnce("a".repeat(64)).mockReturnValueOnce("a".repeat(64)).mockReturnValueOnce("b".repeat(64));
+    recoveryIdentityMock.mockReturnValueOnce("a".repeat(64)).mockReturnValueOnce("a".repeat(64))
+      .mockReturnValueOnce("a".repeat(64)).mockReturnValueOnce("a".repeat(64)).mockReturnValueOnce("b".repeat(64));
     await expect(absorbSource({ workspaceId: "workspace-1", sourceId: "source-1", agentRunId: "run-1", expectedSourceIdentity: "a".repeat(64) })).rejects.toThrow("SOURCE_CHANGED");
     expect(prismaMock.$queryRaw).toHaveBeenCalled();
     expect(createArticleMock).not.toHaveBeenCalled();
@@ -256,6 +257,26 @@ describe("absorbSource", () => {
     expect(modelGatewayMock.chat).toHaveBeenCalled();
     expect(createArticleMock).not.toHaveBeenCalled();
     expect(updateArticleMock).not.toHaveBeenCalled();
+    expect(markSourceAbsorbedMock).not.toHaveBeenCalled();
+  });
+
+  it("does not publish a draft synthesized from a replaced upload", async () => {
+    const original = {
+      id: "source-1", workspaceId: "workspace-1", sourceType: "FILE_UPLOAD", tier: 2,
+      title: "Upload", content: "Old contract terms", absorbedAt: null, archivedAt: null,
+    };
+    const replacement = { ...original, content: "New contract terms" };
+    recoveryIdentityMock.mockImplementation((source: { content: string }) => source.content);
+    prismaMock.brainSource.findUnique
+      .mockResolvedValueOnce(original)
+      .mockResolvedValueOnce(original)
+      .mockResolvedValueOnce(replacement);
+
+    const { absorbSource } = await import("./brain-absorb");
+    expect(await absorbSource({ workspaceId: "workspace-1", sourceId: "source-1", agentRunId: "run-1" }))
+      .toEqual({ skipped: true, reason: "source_changed", sourceId: "source-1" });
+    expect(lockWorkspaceArchiveArtifactMock).toHaveBeenCalledWith(prismaMock, "BrainSource", "source-1");
+    expect(createArticleMock).not.toHaveBeenCalled();
     expect(markSourceAbsorbedMock).not.toHaveBeenCalled();
   });
 

@@ -10,6 +10,8 @@ const { prismaMock, modelGatewayMock } = vi.hoisted(() => {
     prismaMock: {
       $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({ knowledgeChunk: knowledgeChunkMock })),
       knowledgeChunk: knowledgeChunkMock,
+      brainArticle: { findMany: vi.fn() },
+      document: { findMany: vi.fn() },
     },
     modelGatewayMock: {
       embed: vi.fn(async ({ input }: { input: string | string[] }) => {
@@ -71,7 +73,10 @@ describe("knowledge retrieval cache", () => {
     resetLocalCacheStore();
     await invalidateKnowledgeCache();
 
-    prismaMock.knowledgeChunk.findMany.mockReset();
+    prismaMock.knowledgeChunk.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.brainArticle.findMany.mockReset().mockImplementation(async ({ where }: any) =>
+      where.id.in.map((id: string) => ({ id })));
+    prismaMock.document.findMany.mockReset().mockResolvedValue([]);
     prismaMock.knowledgeChunk.deleteMany.mockReset();
     prismaMock.knowledgeChunk.createMany.mockReset();
     modelGatewayMock.embed.mockClear();
@@ -109,7 +114,7 @@ describe("knowledge retrieval cache", () => {
     });
 
     expect(first).toEqual(second);
-    expect(prismaMock.knowledgeChunk.findMany).toHaveBeenCalledTimes(2);
+    expect(prismaMock.knowledgeChunk.findMany).toHaveBeenCalledTimes(4);
     expect(prismaMock.knowledgeChunk.findMany.mock.calls[0]?.[0]).toMatchObject({
       where: { accessDomain: { in: ["WORKSPACE"] } },
     });
@@ -120,6 +125,7 @@ describe("knowledge retrieval cache", () => {
   it("returns authorized positive lexical matches when query embedding is rate limited", async () => {
     const chunk = { id: "allowed", sourceType: "DOCUMENT", sourceId: "doc-allowed", sourceTitle: "Travel policy", chunkIndex: 0, content: "Travel reimbursement policy.", createdAt: new Date("2026-04-03T09:00:00Z") };
     prismaMock.knowledgeChunk.findMany
+      .mockResolvedValue([chunk])
       .mockResolvedValueOnce([{ ...chunk, id: "withdrawn" }, chunk, { ...chunk, id: "unrelated", sourceTitle: "Other", content: "Bananas and pears" }])
       .mockResolvedValueOnce([{ id: "allowed", embedding: [1, 0] }, { id: "unrelated", embedding: [1, 0] }]);
     modelGatewayMock.embed.mockRejectedValueOnce(new ModelProviderHttpError(429, "provider fixture throttled"));
@@ -138,6 +144,7 @@ describe("knowledge retrieval cache", () => {
   it("returns the combined ranking when reranking is rate limited", async () => {
     const chunk = { id: "lexical", sourceType: "DOCUMENT", sourceId: "doc-1", sourceTitle: "Policy", chunkIndex: 0, content: "travel policy", createdAt: new Date("2026-04-03T09:00:00Z") };
     prismaMock.knowledgeChunk.findMany
+      .mockResolvedValue([{ ...chunk, id: "semantic", content: "travel" }])
       .mockResolvedValueOnce([chunk, { ...chunk, id: "semantic", content: "travel" }])
       .mockResolvedValueOnce([{ id: "lexical", embedding: [-1, 0] }, { id: "semantic", embedding: [1, 0] }]);
     modelGatewayMock.rerank.mockRejectedValueOnce(new ModelProviderHttpError(429, "provider fixture throttled"));
@@ -199,8 +206,8 @@ describe("knowledge retrieval cache", () => {
       accessDomains: ["FINANCE", "WORKSPACE"],
     });
 
-    expect(prismaMock.knowledgeChunk.findMany).toHaveBeenCalledTimes(4);
-    expect(prismaMock.knowledgeChunk.findMany.mock.calls[2]?.[0]).toMatchObject({
+    expect(prismaMock.knowledgeChunk.findMany).toHaveBeenCalledTimes(7);
+    expect(prismaMock.knowledgeChunk.findMany.mock.calls[3]?.[0]).toMatchObject({
       where: { accessDomain: { in: ["FINANCE", "WORKSPACE"] } },
     });
     expect(modelGatewayMock.embed).toHaveBeenCalledTimes(2);
@@ -236,6 +243,44 @@ describe("knowledge retrieval cache", () => {
     expect(modelGatewayMock.chat).toHaveBeenCalledTimes(1);
     expect(modelGatewayMock.embed).toHaveBeenCalledTimes(1);
     expect(modelGatewayMock.rerank).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects cached search and answer text after a source-linked article is quarantined", async () => {
+    const oldChunk = {
+      id: "old-article-chunk", sourceType: "BRAIN_ARTICLE", sourceId: "old-article",
+      sourceTitle: "Prior policy", chunkIndex: 0, content: "The old approval rule applies.",
+      embedding: [1, 0], createdAt: new Date("2026-04-03T09:00:00Z"),
+    };
+    prismaMock.knowledgeChunk.findMany.mockResolvedValue([oldChunk]);
+    const first = await answerKnowledgeQuestion({ workspaceId: "ws-1", question: "What is the approval rule?" });
+    expect(first.citations).toHaveLength(1);
+
+    // Replacement removes the SQL receipt; an old answer cache and Azure index
+    // may still contain the old text until asynchronous cleanup finishes.
+    prismaMock.knowledgeChunk.findMany.mockResolvedValue([]);
+    prismaMock.brainArticle.findMany.mockResolvedValue([]);
+    expect(await searchIndexedKnowledge({ workspaceId: "ws-1", query: "approval rule" })).toEqual([]);
+    expect(await answerKnowledgeQuestion({ workspaceId: "ws-1", question: "What is the approval rule?" })).toEqual({
+      answer: "I could not find relevant indexed knowledge for that question.", citations: [],
+    });
+    expect(modelGatewayMock.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an Azure hit whose SQL receipt was removed by file replacement", async () => {
+    process.env.KNOWLEDGE_SEARCH_PROVIDER = "azure";
+    process.env.AZURE_SEARCH_ENDPOINT = "https://corgtex-search.search.windows.net";
+    process.env.AZURE_SEARCH_INDEX_NAME = "client-knowledge";
+    process.env.AZURE_SEARCH_QUERY_KEY = "query-key";
+    process.env.AZURE_SEARCH_VECTOR_DIMENSIONS = "2";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ value: [{
+      id: "old-document-chunk", sourceType: "DOCUMENT", sourceId: "doc-1",
+      sourceTitle: "Old policy", content: "Superseded file text", chunkIndex: 0,
+      "@search.score": 1,
+    }] }), { status: 200 })));
+    prismaMock.knowledgeChunk.findMany.mockResolvedValue([]);
+
+    expect(await searchIndexedKnowledge({ workspaceId: "ws-1", query: "Superseded file text" })).toEqual([]);
+    expect(fetch).toHaveBeenCalledOnce();
   });
 
   it("partitions grounded-answer caches by access domain and source type", async () => {
