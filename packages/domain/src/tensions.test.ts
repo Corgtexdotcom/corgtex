@@ -238,7 +238,7 @@ describe("tensions domain", () => {
         expect.objectContaining({
           type: "tension.published",
           aggregateId: "t-public",
-          payload: { tensionId: "t-public" },
+          payload: { tensionId: "t-public", actorUserId: "u-1" },
         }),
       ],
     });
@@ -478,6 +478,27 @@ describe("tensions domain", () => {
 
     expect(prismaMock.workItemVersion.create).not.toHaveBeenCalled();
     expect(prismaMock.tension.update).not.toHaveBeenCalled();
+  });
+
+  it("emits one publication event when a draft opens through update", async () => {
+    prismaMock.tension.findUnique.mockResolvedValueOnce({
+      id: "t-1", workspaceId: "ws-1", authorUserId: "u-1", title: "Visible tension",
+      status: "DRAFT", isPrivate: true, version: 1, publishedAt: null, archivedAt: null,
+    });
+    prismaMock.tension.update.mockResolvedValueOnce({
+      id: "t-1", workspaceId: "ws-1", title: "Visible tension", status: "OPEN", isPrivate: false, version: 1,
+    });
+    const { updateTension } = await import("./tensions");
+
+    await updateTension(actor, { workspaceId: "ws-1", tensionId: "t-1", status: "OPEN" });
+
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ action: "tension.published", entityId: "t-1" }),
+    }));
+    expect(prismaMock.event.createMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: [expect.objectContaining({ type: "tension.published", aggregateId: "t-1", payload: { tensionId: "t-1", actorUserId: "u-1" } })],
+    }));
+    expect(prismaMock.event.createMany).toHaveBeenCalledTimes(2);
   });
 
   it("allows the author to edit an open tension and preserves the previous version", async () => {

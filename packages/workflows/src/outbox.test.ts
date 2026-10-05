@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { calculateRetryDelayMs, deriveAdviceNotificationContent } from "./outbox";
+import type { Prisma } from "@prisma/client";
+import { describe, expect, it, vi } from "vitest";
+import { calculateRetryDelayMs, deriveAdviceNotificationContent, notificationActorUserIdForEvent } from "./outbox";
 import { deriveJobsForEvent, triageBucketStart } from "./derive-jobs";
-import { deriveNotificationsForEvent } from "./derive-notifications";
+import { deriveDispatchNotifications, deriveNotificationsForEvent } from "./derive-notifications";
 
 describe("deriveJobsForEvent", () => {
   it("creates a knowledge sync job for approved proposals", () => {
@@ -285,6 +286,22 @@ describe("deriveJobsForEvent", () => {
 });
 
 describe("deriveNotificationsForEvent", () => {
+  it("attributes queued republish events to each publisher instead of the latest audit", async () => {
+    const findFirst = vi.fn().mockResolvedValue({ actorUserId: "user-b" });
+    const tx = { auditLog: { findFirst } } as unknown as Prisma.TransactionClient;
+    const publication = { type: "action.published", workspaceId: "workspace-1", aggregateType: "Action", aggregateId: "action-1" };
+
+    expect(await notificationActorUserIdForEvent(tx, { ...publication, payload: { actorUserId: "user-a" } })).toBe("user-a");
+    expect(await notificationActorUserIdForEvent(tx, { ...publication, payload: { actorUserId: "user-b" } })).toBe("user-b");
+    expect(await notificationActorUserIdForEvent(tx, {
+      ...publication, type: "tension.published", aggregateType: "Tension", payload: { actorUserId: null },
+    })).toBeNull();
+    expect(findFirst).not.toHaveBeenCalled();
+
+    expect(await notificationActorUserIdForEvent(tx, { ...publication, payload: {} })).toBe("user-b");
+    expect(findFirst).toHaveBeenCalledOnce();
+  });
+
   it("creates a notification for submitted proposals with title", () => {
     const notifications = deriveNotificationsForEvent({
       type: "proposal.submitted",
@@ -354,9 +371,20 @@ describe("deriveNotificationsForEvent", () => {
     ]);
   });
 
-  it("uses payload titles for created actions", () => {
+  it("does not notify the workspace about private draft creation", () => {
+    for (const type of ["action.created", "tension.created"]) {
+      expect(deriveNotificationsForEvent({
+        type,
+        workspaceId: "workspace-1",
+        aggregateId: "private-draft",
+        payload: { title: "Confidential draft" },
+      })).toEqual([]);
+    }
+  });
+
+  it("notifies the workspace when an action is published", () => {
     const notifications = deriveNotificationsForEvent({
-      type: "action.created",
+      type: "action.published",
       workspaceId: "workspace-1",
       aggregateType: "Action",
       aggregateId: "action-1",
@@ -375,6 +403,72 @@ describe("deriveNotificationsForEvent", () => {
         bodyMd: "An action item was added to the workspace.",
       },
     ]);
+  });
+
+  it("checks current workspace visibility before notifying about a publication", async () => {
+    const actionFindFirst = vi.fn().mockResolvedValue({ title: "Visible action" });
+    const tensionFindFirst = vi.fn().mockResolvedValue(null);
+    const lockRow = vi.fn().mockResolvedValue([]);
+    const tx = {
+      $queryRaw: lockRow,
+      action: { findFirst: actionFindFirst },
+      tension: { findFirst: tensionFindFirst },
+    } as unknown as Prisma.TransactionClient;
+
+    expect(await deriveDispatchNotifications(tx, {
+      type: "action.published", workspaceId: "workspace-1", aggregateId: "action-1",
+      aggregateType: "Action", payload: {},
+    })).toEqual([{
+      type: "action.created", entityType: "Action", entityId: "action-1",
+      title: "New action: Visible action", bodyMd: "An action item was added to the workspace.",
+    }]);
+    expect(actionFindFirst).toHaveBeenCalledWith({
+      where: {
+        id: "action-1", workspaceId: "workspace-1", isPrivate: false,
+        status: { not: "DRAFT" }, archivedAt: null, duplicateOfActionId: null,
+      },
+      select: { title: true },
+    });
+
+    expect(await deriveDispatchNotifications(tx, {
+      type: "tension.published", workspaceId: "workspace-1", aggregateId: "tension-1",
+      aggregateType: "Tension", payload: {},
+    })).toEqual([]);
+    expect(tensionFindFirst).toHaveBeenCalledWith({
+      where: {
+        id: "tension-1", workspaceId: "workspace-1", isPrivate: false,
+        status: { not: "DRAFT" }, archivedAt: null,
+      },
+      select: { title: true },
+    });
+    expect(await deriveDispatchNotifications(tx, {
+      type: "action.published", workspaceId: "workspace-1", aggregateId: null,
+      aggregateType: "Action", payload: {},
+    })).toEqual([]);
+    expect(await deriveDispatchNotifications(tx, {
+      type: "action.published", workspaceId: "workspace-1", aggregateId: "action-1",
+      aggregateType: "Action", payload: { runtimeMeta: { replayOfEventId: "original" } },
+    })).toEqual([]);
+    expect(actionFindFirst).toHaveBeenCalledTimes(1);
+    expect(lockRow).toHaveBeenCalledTimes(2);
+    expect(lockRow.mock.invocationCallOrder[0]).toBeLessThan(actionFindFirst.mock.invocationCallOrder[0]);
+    expect(lockRow.mock.invocationCallOrder[1]).toBeLessThan(tensionFindFirst.mock.invocationCallOrder[0]);
+  });
+
+  it("waits for a concurrent visibility change before reading the publication", async () => {
+    let releaseLock: (() => void) | undefined;
+    const lockRow = vi.fn().mockImplementation(() => new Promise<void>((resolve) => { releaseLock = resolve; }));
+    const actionFindFirst = vi.fn().mockResolvedValue(null);
+    const tx = { $queryRaw: lockRow, action: { findFirst: actionFindFirst } } as unknown as Prisma.TransactionClient;
+    const pending = deriveDispatchNotifications(tx, {
+      type: "action.published", workspaceId: "workspace-1", aggregateId: "action-1",
+      aggregateType: "Action", payload: { title: "Previously public title" },
+    });
+
+    expect(actionFindFirst).not.toHaveBeenCalled();
+    releaseLock?.();
+    expect(await pending).toEqual([]);
+    expect(actionFindFirst).toHaveBeenCalledOnce();
   });
 });
 
