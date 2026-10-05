@@ -238,7 +238,7 @@ describe("tensions domain", () => {
         expect.objectContaining({
           type: "tension.published",
           aggregateId: "t-public",
-          payload: { tensionId: "t-public" },
+          payload: { tensionId: "t-public", actorUserId: "u-1" },
         }),
       ],
     });
@@ -496,7 +496,7 @@ describe("tensions domain", () => {
       data: expect.objectContaining({ action: "tension.published", entityId: "t-1" }),
     }));
     expect(prismaMock.event.createMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: [expect.objectContaining({ type: "tension.published", aggregateId: "t-1" })],
+      data: [expect.objectContaining({ type: "tension.published", aggregateId: "t-1", payload: { tensionId: "t-1", actorUserId: "u-1" } })],
     }));
     expect(prismaMock.event.createMany).toHaveBeenCalledTimes(2);
   });

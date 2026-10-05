@@ -415,6 +415,36 @@ async function createAdviceNotificationsForEvent(tx: Prisma.TransactionClient, e
   return true;
 }
 
+export async function notificationActorUserIdForEvent(
+  tx: Prisma.TransactionClient,
+  event: Pick<ClaimedEvent, "type" | "workspaceId" | "aggregateType" | "aggregateId" | "payload">,
+): Promise<string | null> {
+  if (event.type === "action.published" || event.type === "tension.published") {
+    const payload = event.payload;
+    if (payload && typeof payload === "object" && !Array.isArray(payload) && "actorUserId" in payload) {
+      const actorUserId = payload.actorUserId;
+      if (actorUserId === null || (typeof actorUserId === "string" && actorUserId.length > 0)) {
+        return actorUserId;
+      }
+    }
+  }
+
+  // Events created before publication actor attribution retain the old audit fallback.
+  const actorAudit = event.workspaceId && event.aggregateType && event.aggregateId
+    ? await tx.auditLog.findFirst({
+      where: {
+        workspaceId: event.workspaceId,
+        action: event.type,
+        entityType: event.aggregateType,
+        entityId: event.aggregateId,
+      },
+      orderBy: { createdAt: "desc" },
+      select: { actorUserId: true },
+    })
+    : null;
+  return actorAudit?.actorUserId ?? null;
+}
+
 async function createNotificationsForEvent(tx: Prisma.TransactionClient, event: ClaimedEvent) {
   if (!event.workspaceId) {
     return;
@@ -429,24 +459,13 @@ async function createNotificationsForEvent(tx: Prisma.TransactionClient, event: 
     return;
   }
 
-  const actorAudit = event.aggregateType && event.aggregateId
-    ? await tx.auditLog.findFirst({
-      where: {
-        workspaceId: event.workspaceId,
-        action: event.type,
-        entityType: event.aggregateType,
-        entityId: event.aggregateId,
-      },
-      orderBy: { createdAt: "desc" },
-      select: { actorUserId: true },
-    })
-    : null;
+  const actorUserId = await notificationActorUserIdForEvent(tx, event);
 
   const members = await tx.member.findMany({
     where: {
       workspaceId: event.workspaceId,
       isActive: true,
-      ...(actorAudit?.actorUserId ? { userId: { not: actorAudit.actorUserId } } : {}),
+      ...(actorUserId ? { userId: { not: actorUserId } } : {}),
     },
     select: { userId: true },
   });
@@ -460,7 +479,7 @@ async function createNotificationsForEvent(tx: Prisma.TransactionClient, event: 
       workspaceId: event.workspaceId,
       type: notification.type,
       recipientUserIds: members.map((member) => member.userId),
-      actorUserId: actorAudit?.actorUserId ?? null,
+      actorUserId,
       entityType: notification.entityType,
       entityId: notification.entityId,
       title: notification.title,

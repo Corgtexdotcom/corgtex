@@ -695,7 +695,7 @@ describe("action domain lifecycle", () => {
       expect.objectContaining({
         type: "action.published",
         aggregateId: "action-public",
-        payload: { actionId: "action-public" },
+        payload: { actionId: "action-public", actorUserId: "user-1" },
       }),
     ]);
   });
@@ -811,7 +811,7 @@ describe("action domain lifecycle", () => {
       action: "action.published", entityId: "draft-1",
     }));
     expect(appendEvents).toHaveBeenCalledWith(expect.anything(), [expect.objectContaining({
-      type: "action.published", aggregateId: "draft-1",
+      type: "action.published", aggregateId: "draft-1", payload: { actionId: "draft-1", actorUserId: "user-1" },
     })]);
     expect(appendEvents).toHaveBeenCalledTimes(2);
   });

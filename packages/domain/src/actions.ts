@@ -716,7 +716,7 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
           type: "action.published",
           aggregateType: "Action",
           aggregateId: action.id,
-          payload: { actionId: action.id },
+          payload: { actionId: action.id, actorUserId: actor.kind === "user" ? actor.user.id : null },
         },
       ]);
     }
@@ -989,7 +989,7 @@ export async function updateAction(actor: AppActor, params: {
         type: "action.published",
         aggregateType: "Action",
         aggregateId: updated.id,
-        payload: { actionId: updated.id },
+        payload: { actionId: updated.id, actorUserId: actor.kind === "user" ? actor.user.id : null },
       }]);
     }
 
@@ -1111,7 +1111,7 @@ export async function publishAction(actor: AppActor, params: {
         type: "action.published",
         aggregateType: "Action",
         aggregateId: updated.id,
-        payload: { actionId: updated.id },
+        payload: { actionId: updated.id, actorUserId: actor.kind === "user" ? actor.user.id : null },
       },
     ]);
 

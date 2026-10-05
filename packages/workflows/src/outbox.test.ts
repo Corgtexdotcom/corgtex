@@ -1,6 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import { describe, expect, it, vi } from "vitest";
-import { calculateRetryDelayMs, deriveAdviceNotificationContent } from "./outbox";
+import { calculateRetryDelayMs, deriveAdviceNotificationContent, notificationActorUserIdForEvent } from "./outbox";
 import { deriveJobsForEvent, triageBucketStart } from "./derive-jobs";
 import { deriveDispatchNotifications, deriveNotificationsForEvent } from "./derive-notifications";
 
@@ -286,6 +286,22 @@ describe("deriveJobsForEvent", () => {
 });
 
 describe("deriveNotificationsForEvent", () => {
+  it("attributes queued republish events to each publisher instead of the latest audit", async () => {
+    const findFirst = vi.fn().mockResolvedValue({ actorUserId: "user-b" });
+    const tx = { auditLog: { findFirst } } as unknown as Prisma.TransactionClient;
+    const publication = { type: "action.published", workspaceId: "workspace-1", aggregateType: "Action", aggregateId: "action-1" };
+
+    expect(await notificationActorUserIdForEvent(tx, { ...publication, payload: { actorUserId: "user-a" } })).toBe("user-a");
+    expect(await notificationActorUserIdForEvent(tx, { ...publication, payload: { actorUserId: "user-b" } })).toBe("user-b");
+    expect(await notificationActorUserIdForEvent(tx, {
+      ...publication, type: "tension.published", aggregateType: "Tension", payload: { actorUserId: null },
+    })).toBeNull();
+    expect(findFirst).not.toHaveBeenCalled();
+
+    expect(await notificationActorUserIdForEvent(tx, { ...publication, payload: {} })).toBe("user-b");
+    expect(findFirst).toHaveBeenCalledOnce();
+  });
+
   it("creates a notification for submitted proposals with title", () => {
     const notifications = deriveNotificationsForEvent({
       type: "proposal.submitted",

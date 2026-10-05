@@ -352,7 +352,7 @@ export async function createTension(actor: AppActor, params: CreateTensionParams
           type: "tension.published",
           aggregateType: "Tension",
           aggregateId: tension.id,
-          payload: { tensionId: tension.id },
+          payload: { tensionId: tension.id, actorUserId: actor.kind === "user" ? actor.user.id : null },
         },
       ]);
     }
@@ -565,7 +565,7 @@ export async function updateTension(actor: AppActor, params: {
         type: "tension.published",
         aggregateType: "Tension",
         aggregateId: updated.id,
-        payload: { tensionId: updated.id },
+        payload: { tensionId: updated.id, actorUserId: actor.kind === "user" ? actor.user.id : null },
       }]);
     }
 
@@ -671,7 +671,7 @@ export async function publishTension(actor: AppActor, params: {
         type: "tension.published",
         aggregateType: "Tension",
         aggregateId: updated.id,
-        payload: { tensionId: updated.id },
+        payload: { tensionId: updated.id, actorUserId: actor.kind === "user" ? actor.user.id : null },
       },
     ]);
 
