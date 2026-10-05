@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { archiveWorkspaceArtifact } from "./archive";
 import { requireWorkspaceMembership } from "./auth";
+import { resolveKnowledgeAccessDomains } from "./brain-access";
 import { brainSourceContentFingerprint } from "./brain-derivation";
 import { isBrainSourceRemovalEnabled, requireBrainSourceRemovalEnabled } from "./brain-removal-gate";
 import { findSourceArticleImpacts, readBrainArticleDerivation, sourceIdsInDerivation } from "./brain-source-impact";
@@ -28,15 +29,23 @@ async function buildPreview(tx: Prisma.TransactionClient, actor: AppActor, works
   invariant(canRemoveSources || (article.ownerMemberId !== null && article.ownerMemberId === membership?.id),
     403, "FORBIDDEN", "Only the article owner or a workspace admin can remove this article.");
 
+  const accessDomains = await resolveKnowledgeAccessDomains(actor, workspaceId);
+  const requireSourceAccess = (sources: Array<{ accessDomain: typeof accessDomains[number] }>) => {
+    invariant(sources.every((source) => accessDomains.includes(source.accessDomain)),
+      403, "FORBIDDEN", "Source access is required to preview article removal.");
+  };
   const directIds = [...new Set([...article.sourceIds, ...sourceIdsInDerivation(article.derivationJson)])].sort();
   const directSources = await tx.brainSource.findMany({ where: { workspaceId, id: { in: directIds } } });
+  requireSourceAccess(directSources);
   const documentIds = [...new Set(directSources.map((source) => documentId(source.metadata)).filter((id): id is string => !!id))].sort();
   const documents = await tx.document.findMany({ where: { workspaceId, id: { in: documentIds } },
-    select: { id: true, title: true, updatedAt: true, archivedAt: true } });
+    select: { id: true, title: true, updatedAt: true, archivedAt: true, accessDomain: true } });
+  requireSourceAccess(documents);
   const documentSources = documentIds.length ? await tx.brainSource.findMany({ where: {
     workspaceId, archivedAt: null,
     OR: documentIds.map((id) => ({ metadata: { path: ["documentId"], equals: id } })),
   } }) : [];
+  requireSourceAccess(documentSources);
   const sources = [...new Map([...directSources, ...documentSources].map((source) => [source.id, source])).values()]
     .sort((a, b) => a.id.localeCompare(b.id));
   const activeIds = sources.filter((source) => !source.archivedAt).map((source) => source.id);
@@ -49,10 +58,12 @@ async function buildPreview(tx: Prisma.TransactionClient, actor: AppActor, works
     ...item.sourceIds, ...sourceIdsInDerivation(item.derivationJson),
   ]))].filter((id) => !activeIds.includes(id)).sort();
   const relatedSources = await tx.brainSource.findMany({ where: { workspaceId, id: { in: relatedIds } } });
+  requireSourceAccess(relatedSources);
   const relatedDocumentIds = [...new Set(relatedSources.map((source) => documentId(source.metadata)).filter((id): id is string => !!id))]
     .filter((id) => !documentIds.includes(id)).sort();
   const relatedDocuments = await tx.document.findMany({ where: { workspaceId, id: { in: relatedDocumentIds } },
-    select: { id: true, updatedAt: true, archivedAt: true } });
+    select: { id: true, updatedAt: true, archivedAt: true, accessDomain: true } });
+  requireSourceAccess(relatedDocuments);
   const byArticleId = new Map(impactedArticles.map((item) => [item.id, item]));
   const byDocumentId = new Map(documents.map((item) => [item.id, item]));
   const blockReasons: Array<"source_missing" | "document_missing" | "restricted" | "unclassified" | "feature_disabled"> = [];
