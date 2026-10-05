@@ -9,6 +9,11 @@ function hashPassword(password) {
 }
 
 async function main() {
+  const databaseUrl = process.env.DATABASE_URL ? new URL(process.env.DATABASE_URL) : null;
+  if (!databaseUrl || !["localhost", "127.0.0.1", "[::1]"].includes(databaseUrl.hostname)
+    || databaseUrl.pathname !== "/corgtex_e2e" || process.env.MODEL_PROVIDER !== "fake") {
+    throw new Error("E2E seed requires a local corgtex_e2e database and the fake model provider.");
+  }
   const workspaceSlug = process.env.WORKSPACE_SLUG?.trim() || "corgtex";
   const email = (process.env.AGENT_E2E_EMAIL?.trim() || "system+corgtex@corgtex.local").toLowerCase();
   const password = process.env.AGENT_E2E_PASSWORD?.trim() || "corgtex-test-agent-pw";
@@ -21,6 +26,17 @@ async function main() {
   if (!workspace) {
     throw new Error(`Workspace '${workspaceSlug}' not found. Run npm run prisma:seed first.`);
   }
+
+  // The default CORE_FREE plan pauses model work. This isolated fixture must
+  // permit fake-model calls for meeting, conversation, and worker checks.
+  await prisma.$transaction([
+    prisma.workspace.update({ where: { id: workspace.id }, data: { plan: "PAYG_AI" } }),
+    prisma.modelUsageBudget.upsert({
+      where: { workspaceId: workspace.id },
+      create: { workspaceId: workspace.id, monthlyCostCapUsd: 100 },
+      update: { monthlyCostCapUsd: 100 },
+    }),
+  ]);
 
   const existingUser = await prisma.user.findUnique({
     where: { email },

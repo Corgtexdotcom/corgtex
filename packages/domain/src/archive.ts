@@ -1,6 +1,6 @@
 import type { MemberRole } from "@prisma/client";
 import { Prisma } from "@prisma/client";
-import { prisma } from "@corgtex/shared";
+import { incrementCacheVersion, prisma } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
@@ -21,6 +21,8 @@ import {
   type WorkItemEntityType,
 } from "./work-item-versions";
 import { appendEvents } from "./events";
+import { findSourceArticleImpacts, sourceIdsInDerivation } from "./brain-source-impact";
+import { lockActiveArticleSources, lockBrainSourceLink } from "./brain-source-links";
 
 export type ArchiveFilter = "active" | "archived" | "all";
 
@@ -218,6 +220,11 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
     delegate: "brainArticle",
     findWhere: (workspaceId, slugOrId) => ({ workspaceId, OR: [{ id: slugOrId }, { slug: slugOrId }] }),
     label: titleOrName,
+    canArchive: async ({ record, actor, membership }) => {
+      invariant(actor.kind === "agent" || membership?.role === "ADMIN"
+        || (record.ownerMemberId !== null && record.ownerMemberId === membership?.id),
+      403, "FORBIDDEN", "Only the article owner or a workspace admin can archive this article.");
+    },
     beforePurge: async (tx, record) => {
       await tx.knowledgeChunk.deleteMany({
         where: {
@@ -457,7 +464,9 @@ export async function lockWorkspaceArchiveArtifact(
   entityType: ArchiveEntityType,
   entityId: string,
 ) {
-  if (entityType === "BrainSource" || entityType === "DecisionRecord" || CRM_ARCHIVE_ENTITY_TYPES.has(entityType)) {
+  if (entityType === "BrainSource") {
+    await lockBrainSourceLink(tx, entityId);
+  } else if (entityType === "DecisionRecord" || CRM_ARCHIVE_ENTITY_TYPES.has(entityType)) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`workspace_archive:${entityType}:${entityId}`}, 0))`;
   }
   if (WORK_ITEM_ARCHIVE_ENTITY_TYPES.has(entityType)) {
@@ -625,6 +634,31 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
       return record;
     }
 
+    if (config.entityType === "BrainSource" || config.entityType === "Document") {
+      const documentSources = config.entityType === "Document" ? await tx.brainSource.findMany({
+        where: {
+          workspaceId: params.workspaceId,
+          metadata: { path: ["documentId"], equals: record.id },
+        },
+        select: { id: true, archivedAt: true },
+      }) : [];
+      const sourceIds = config.entityType === "BrainSource" ? [record.id] : documentSources.map((source) => source.id);
+      if (config.entityType === "Document") {
+        for (const sourceId of sourceIds.sort()) await lockBrainSourceLink(tx, sourceId);
+      }
+      const impacts = await findSourceArticleImpacts(tx, params.workspaceId, sourceIds);
+      invariant(
+        ![...impacts.values()].some((impact) => impact.articles.length > 0),
+        409,
+        "SOURCE_ARTICLE_IMPACT_REVIEW_REQUIRED",
+        "Linked Brain articles must be resolved before this source can be archived.",
+      );
+      if (config.entityType === "Document") {
+        invariant(documentSources.every((source) => source.archivedAt), 409, "DOCUMENT_SOURCE_REMOVAL_REQUIRED",
+          "Remove this document's Brain source entries through source review, then retry document deletion.");
+      }
+    }
+
     const previousState = jsonSnapshot(record);
     const archivedAt = new Date();
     let updated;
@@ -644,8 +678,29 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
       }
       throw error;
     }
+    if (config.entityType === "BrainArticle") {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brain_article_index:${params.workspaceId}:${record.id}`}, 0))`;
+      await tx.knowledgeChunk.deleteMany({ where: {
+        workspaceId: params.workspaceId, sourceType: "BRAIN_ARTICLE", sourceId: record.id,
+      } });
+    }
+    if (config.entityType === "Document") {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`document_index:${params.workspaceId}:${record.id}`}, 0))`;
+      await tx.knowledgeChunk.deleteMany({ where: {
+        workspaceId: params.workspaceId, sourceType: "DOCUMENT", sourceId: record.id,
+      } });
+      await appendEvents(tx, [{ workspaceId: params.workspaceId, type: "document.updated",
+        aggregateType: "Document", aggregateId: record.id, payload: { documentId: record.id } }]);
+    }
+    if (config.entityType === "BrainArticle" || config.entityType === "Document") {
+      await incrementCacheVersion(`knowledge:${params.workspaceId}`, tx);
+    }
     if (config.entityType === "Goal") {
       await recomputeGoalParentProgressForArchiveTransition(tx, actor, record);
+    }
+    if (config.entityType === "BrainArticle") {
+      await appendEvents(tx, [{ workspaceId: params.workspaceId, type: "brain-article.updated",
+        aggregateType: "BrainArticle", aggregateId: record.id, payload: { articleId: record.id } }]);
     }
 
     if (isWorkspacePermalinkEntityType(config.entityType)) {
@@ -726,6 +781,10 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
       invariant(record.version === params.expectedVersion, 409, "VERSION_CONFLICT", "The record changed. Reload and try again.");
     }
     await config.canRestore?.(tx, record);
+    if (config.entityType === "BrainArticle") {
+      const sourceIds = [...new Set([...(record.sourceIds as string[]), ...sourceIdsInDerivation(record.derivationJson)])];
+      await lockActiveArticleSources(tx, params.workspaceId, sourceIds);
+    }
     const archiveRecord = await activeArchiveRecord(tx, params.workspaceId, config.entityType, record.id);
     const previousState = archiveRecord?.previousState && typeof archiveRecord.previousState === "object"
       ? archiveRecord.previousState as Record<string, unknown>
@@ -749,6 +808,17 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
       }
       throw error;
     }
+    if (config.entityType === "BrainArticle") {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brain_article_index:${params.workspaceId}:${record.id}`}, 0))`;
+    }
+    if (config.entityType === "Document") {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`document_index:${params.workspaceId}:${record.id}`}, 0))`;
+      await appendEvents(tx, [{ workspaceId: params.workspaceId, type: "document.updated",
+        aggregateType: "Document", aggregateId: record.id, payload: { documentId: record.id } }]);
+    }
+    if (config.entityType === "BrainArticle" || config.entityType === "Document") {
+      await incrementCacheVersion(`knowledge:${params.workspaceId}`, tx);
+    }
     if (config.entityType === "Goal") {
       await recomputeGoalParentProgressForArchiveTransition(tx, actor, updated);
     }
@@ -762,6 +832,10 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
           payload: { sourceId: record.id },
         },
       ]);
+    }
+    if (config.entityType === "BrainArticle") {
+      await appendEvents(tx, [{ workspaceId: params.workspaceId, type: "brain-article.updated",
+        aggregateType: "BrainArticle", aggregateId: record.id, payload: { articleId: record.id } }]);
     }
 
     if (archiveRecord) {

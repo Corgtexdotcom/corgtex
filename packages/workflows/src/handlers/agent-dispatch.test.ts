@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { runCompanyUnderstandingAgentMock, runActionExtractionAgentMock, recoveryGuard, execute, absorb } = vi.hoisted(() => ({
+const { runCompanyUnderstandingAgentMock, runActionExtractionAgentMock, runBrainSourceRegenerationJobMock, recoveryGuard, execute, absorb } = vi.hoisted(() => ({
   runCompanyUnderstandingAgentMock: vi.fn(),
   runActionExtractionAgentMock: vi.fn(),
+  runBrainSourceRegenerationJobMock: vi.fn(),
   recoveryGuard: vi.fn(), execute: vi.fn(), absorb: vi.fn(),
 }));
 
@@ -11,6 +12,7 @@ vi.mock("@corgtex/domain", () => ({ assertBrainSourceRecoveryJob: recoveryGuard 
 vi.mock("@corgtex/agents", () => ({
   executeAgentRun: execute,
   absorbSource: absorb,
+  runBrainSourceRegenerationJob: runBrainSourceRegenerationJobMock,
   runBrainMaintenance: vi.fn(),
   runInboxTriageAgent: vi.fn(),
   runDailyCheckInAgent: vi.fn(),
@@ -30,6 +32,14 @@ describe("runAgentWorkflowJob", () => {
     vi.resetAllMocks();
     runCompanyUnderstandingAgentMock.mockResolvedValue({ id: "run-1" });
     absorb.mockResolvedValue({ absorbed: true, sourceId: "source" });
+  });
+
+  it("dispatches source regeneration using the job and tenant identity", async () => {
+    const { runAgentWorkflowJob } = await import("./agent-dispatch");
+    runBrainSourceRegenerationJobMock.mockResolvedValue({ phase: "READY", candidateCount: 1 });
+    await expect(runAgentWorkflowJob({ id: "job-1", workspaceId: "ws-1", type: "agent.brain-source-regenerate", payload: {}, attempts: 1 }, "worker-1"))
+      .resolves.toEqual({ phase: "READY", candidateCount: 1 });
+    expect(runBrainSourceRegenerationJobMock).toHaveBeenCalledWith({ workspaceId: "ws-1", jobId: "job-1", expectedAttempt: 1, expectedOwner: "worker-1" });
   });
 
   it("validates recovery before agent runtime and passes its identity to absorption", async () => {

@@ -63,7 +63,7 @@ type InitialArticleWritePlan =
     articleId: string;
     slug: string;
     bodyMd: string;
-    sourceIds: string[];
+    expectedUpdatedAt: Date;
     changeSummary: string;
   }
   | {
@@ -162,7 +162,7 @@ export async function absorbSource(params: {
 
   // Load the article index for matching
   const articles = await prisma.brainArticle.findMany({
-    where: { workspaceId: params.workspaceId },
+    where: { workspaceId: params.workspaceId, archivedAt: null },
     select: {
       id: true,
       slug: true,
@@ -170,6 +170,7 @@ export async function absorbSource(params: {
       type: true,
       authority: true,
       bodyMd: true,
+      updatedAt: true,
       sourceIds: true,
       frontmatterJson: true,
     },
@@ -285,7 +286,7 @@ Rules:
       articleId: existing.id,
       slug: existing.slug,
       bodyMd: synthesized.content,
-      sourceIds: [...new Set([...(existing.sourceIds ?? []), source.id])],
+      expectedUpdatedAt: existing.updatedAt,
       changeSummary: `Absorbed ${source.sourceType} source: ${result.summary ?? "new information"}`,
     });
     plannedTouchedArticleIds.push(existing.id);
@@ -495,7 +496,9 @@ Rules:
           workspaceId: params.workspaceId,
           slug: plan.slug,
           bodyMd: plan.bodyMd,
-          sourceIds: plan.sourceIds,
+          expectedUpdatedAt: plan.expectedUpdatedAt,
+          absorbedSource: { sourceId: source.id, sourceFingerprint: brainSourceContentFingerprint(source),
+            agentRunId: params.agentRunId },
           changeSummary: plan.changeSummary,
           agentRunId: params.agentRunId,
           tx,

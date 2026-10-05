@@ -121,6 +121,7 @@ export default async function BrainArticlePage({
             {article.authority === "DRAFT" && (
               <Link href={`/workspaces/${workspaceId}/brain/${article.slug}/edit`} className="secondary small">{t("edit")}</Link>
             )}
+            <Link href={`/workspaces/${workspaceId}/brain/${article.slug}/remove`} className="secondary small">{t("removeArticle")}</Link>
           </div>
         )}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", borderBottom: "1px solid var(--line)", paddingBottom: 16 }}>

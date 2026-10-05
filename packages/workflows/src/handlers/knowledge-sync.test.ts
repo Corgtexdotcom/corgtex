@@ -10,6 +10,7 @@ const {
   prismaMock,
   syncExternalContentSourceMock,
   syncKnowledgeForSourceMock,
+  syncDocumentKnowledgeMock,
 } = vi.hoisted(() => ({
   fetchCalendarEventsMock: vi.fn(),
   fetchFilteredEmailMessagesMock: vi.fn(),
@@ -40,6 +41,7 @@ const {
     },
   },
   syncKnowledgeForSourceMock: vi.fn(),
+  syncDocumentKnowledgeMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -48,6 +50,7 @@ vi.mock("@corgtex/shared", () => ({
 
 vi.mock("@corgtex/knowledge", () => ({
   syncKnowledgeForSource: syncKnowledgeForSourceMock,
+  syncDocumentKnowledge: syncDocumentKnowledgeMock,
   syncBrainArticleKnowledge: vi.fn(),
 }));
 
@@ -90,31 +93,15 @@ function slackMessage(overrides: Record<string, unknown> = {}) {
 describe("handleDocumentKnowledgeSync", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    prismaMock.document.findUnique.mockResolvedValue({
-      id: "document-1",
-      workspaceId: "workspace-1",
-      title: "Synthetic finance report",
-      source: "UPLOAD",
-      mimeType: "application/pdf",
-      storageKey: "synthetic/report.pdf",
-      textContent: "Synthetic reported actuals",
-      accessDomain: "FINANCE",
-    });
-    syncKnowledgeForSourceMock.mockResolvedValue(undefined);
+    syncDocumentKnowledgeMock.mockResolvedValue(1);
   });
 
-  it("propagates the document access domain into chunk indexing", async () => {
+  it("routes document indexing through the archive-safe synchronization path", async () => {
     const { handleDocumentKnowledgeSync } = await import("./knowledge-sync");
 
     await handleDocumentKnowledgeSync("job-1", { documentId: "document-1" }, "workspace-1");
 
-    expect(syncKnowledgeForSourceMock).toHaveBeenCalledWith(expect.objectContaining({
-      workspaceId: "workspace-1",
-      sourceType: "DOCUMENT",
-      accessDomain: "FINANCE",
-      sourceId: "document-1",
-      workflowJobId: "job-1",
-    }));
+    expect(syncDocumentKnowledgeMock).toHaveBeenCalledWith({ workspaceId: "workspace-1", documentId: "document-1", workflowJobId: "job-1" });
   });
 });
 

@@ -4,6 +4,7 @@ const { prismaMock } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
     $queryRaw: vi.fn(),
+    $executeRaw: vi.fn(),
     brainArticle: {
       count: vi.fn(),
       create: vi.fn(),
@@ -44,6 +45,7 @@ const requireWorkspaceMembership = vi.fn();
 const appendEvents = vi.fn();
 const resolveKnowledgeAccessDomains = vi.fn();
 const archiveWorkspaceArtifact = vi.fn();
+const requestBrainSourceRemoval = vi.fn();
 
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
@@ -70,6 +72,8 @@ vi.mock("./archive", () => ({
   },
   archiveWorkspaceArtifact,
 }));
+
+vi.mock("./brain-source-removal", () => ({ requestBrainSourceRemoval }));
 
 const ownerActor = {
   kind: "user",
@@ -146,6 +150,8 @@ describe("Brain article draft lifecycle", () => {
       isPrivate: true,
       ownerMemberId: "mem-1",
       archivedAt: null,
+      sourceIds: [],
+      updatedAt: new Date("2026-04-01T00:00:00.000Z"),
     });
 
     await expect(updateArticle({
@@ -177,6 +183,8 @@ describe("Brain article draft lifecycle", () => {
       isPrivate: true,
       ownerMemberId: null,
       archivedAt: null,
+      sourceIds: [],
+      updatedAt: new Date("2026-04-01T00:00:00.000Z"),
     });
     prismaMock.brainArticle.update.mockResolvedValue({
       id: "article-1",
@@ -297,6 +305,7 @@ describe("Brain article draft lifecycle", () => {
       fileStorageKey: "file-1", fileMimeType: "text/plain", archivedAt: null,
     };
     prismaMock.brainSource.findFirst.mockResolvedValue(source);
+    prismaMock.brainSource.findMany.mockResolvedValue([source]);
     prismaMock.brainArticle.create.mockResolvedValue({ id: "article-1", slug: "notes", title: "Notes", type: "PROJECT" });
 
     await createArticle({ kind: "agent", label: "brain-absorb", workspaceIds: ["ws-1"] } as any, {
@@ -327,6 +336,7 @@ describe("Brain article draft lifecycle", () => {
       fileStorageKey: "file-2", fileMimeType: "text/plain", archivedAt: null,
     };
     prismaMock.brainArticle.create.mockResolvedValue({ id: "article-1", slug: "notes", title: "Notes", type: "PROJECT" });
+    prismaMock.brainSource.findMany.mockResolvedValue([source]);
     await createArticle(ownerActor, {
       workspaceId: "ws-1", title: "Notes", type: "PROJECT", bodyMd: "Human notes", sourceIds: [source.id],
     });
@@ -346,6 +356,7 @@ describe("Brain article draft lifecycle", () => {
       id: "article-1", workspaceId: "ws-1", slug: "notes", title: "Notes",
       bodyMd: "Generated notes", authority: "DRAFT", isPrivate: true,
       ownerMemberId: "mem-1", archivedAt: null,
+      sourceIds: [], updatedAt: new Date("2026-04-01T00:00:00.000Z"),
       derivationJson: { version: 1, origin: "brain-absorb", agentRunId: "run-1", sources: [] },
       humanEditedAt: null,
     };
@@ -366,6 +377,29 @@ describe("Brain article draft lifecycle", () => {
     });
   });
 
+  it.each(["archive", "reviewed regeneration"])("rejects an in-flight draft update after %s wins the article row", async (change) => {
+    const { updateArticle } = await import("./brain");
+    const old = { id: "article-1", workspaceId: "ws-1", slug: "notes", title: "Notes",
+      bodyMd: "Before review", authority: "DRAFT", isPrivate: true, ownerMemberId: "mem-1",
+      sourceIds: [], derivationJson: null, archivedAt: null, updatedAt: new Date("2026-04-01T00:00:00.000Z") };
+    const current = { ...old, bodyMd: "Reviewed replacement",
+      archivedAt: change === "archive" ? new Date("2026-04-02T00:00:00.000Z") : null,
+      updatedAt: new Date("2026-04-02T00:00:00.000Z") };
+    prismaMock.brainArticle.findUnique.mockResolvedValueOnce(old).mockResolvedValueOnce(current);
+    await expect(updateArticle(ownerActor, { workspaceId: "ws-1", slug: "notes", bodyMd: "Stale human edit" }))
+      .rejects.toMatchObject({ status: 409, code: "ARTICLE_CHANGED" });
+    expect(prismaMock.brainArticle.update).not.toHaveBeenCalled();
+  });
+
+  it("does not publish an archived draft", async () => {
+    const { publishArticle } = await import("./brain");
+    prismaMock.brainArticle.findUnique.mockResolvedValue({ id: "article-1", workspaceId: "ws-1", slug: "notes",
+      authority: "DRAFT", isPrivate: true, archivedAt: new Date() });
+    await expect(publishArticle(ownerActor, { workspaceId: "ws-1", slug: "notes" }))
+      .rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+    expect(prismaMock.brainArticle.update).not.toHaveBeenCalled();
+  });
+
   it("does not mark an unchanged generated draft as human-edited on form submission", async () => {
     const { updateArticle } = await import("./brain");
     const article = {
@@ -375,7 +409,7 @@ describe("Brain article draft lifecycle", () => {
       staleAfterDays: 30, sourceIds: [],
       isPrivate: true, archivedAt: null,
       derivationJson: { version: 1, origin: "brain-absorb", agentRunId: "run-1", sources: [] },
-      humanEditedAt: null,
+      humanEditedAt: null, updatedAt: new Date("2026-04-01T00:00:00.000Z"),
     };
     prismaMock.brainArticle.findUnique.mockResolvedValue(article);
     prismaMock.brainArticle.update.mockResolvedValue(article);
@@ -651,19 +685,18 @@ describe("brain source ingestion", () => {
     });
   });
 
-  it("delegates Brain source archiving to the central archive service", async () => {
+  it("delegates Brain source removal to the review lifecycle", async () => {
     const { deleteSource } = await import("./brain");
+    requestBrainSourceRemoval.mockResolvedValue({ id: "source-1", status: "archived" });
 
     await expect(deleteSource(ownerActor, {
       workspaceId: "ws-1",
       sourceId: "source-1",
-    })).resolves.toEqual({ id: "source-1" });
+    })).resolves.toEqual({ id: "source-1", status: "archived" });
 
-    expect(archiveWorkspaceArtifact).toHaveBeenCalledWith(ownerActor, {
+    expect(requestBrainSourceRemoval).toHaveBeenCalledWith(ownerActor, {
       workspaceId: "ws-1",
-      entityType: "BrainSource",
-      entityId: "source-1",
-      reason: "Archived from Brain source delete path.",
+      sourceId: "source-1",
     });
   });
 

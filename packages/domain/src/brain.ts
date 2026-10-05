@@ -7,7 +7,10 @@ import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { resolveKnowledgeAccessDomains } from "./brain-access";
+import { lockActiveArticleSources, lockBrainSourceLink } from "./brain-source-links";
+import { requestBrainSourceRemoval } from "./brain-source-removal";
 import { brainSourceContentFingerprint, type BrainArticleDerivationV1 } from "./brain-derivation";
+import { readBrainArticleDerivation, sourceIdsInDerivation } from "./brain-source-impact";
 import { invariant } from "./errors";
 import { persistedMemberId } from "./membership";
 import { requireDraftManager } from "./draft-permissions";
@@ -138,6 +141,7 @@ export async function createArticle(actor: AppActor, params: {
 
   const run = async (tx: Prisma.TransactionClient) => {
     let derivation: BrainArticleDerivationV1 | null = null;
+    await lockActiveArticleSources(tx, params.workspaceId, params.sourceIds ?? []);
     if (params.derivation) {
       invariant(actor.kind === "agent" && actor.label === "brain-absorb", 403, "FORBIDDEN", "Only source absorption can record article derivation.");
       invariant(params.sourceIds?.includes(params.derivation.sourceId), 400, "INVALID_INPUT", "Derived source must be linked to the article.");
@@ -221,6 +225,9 @@ export async function updateArticle(actor: AppActor, params: {
   sourceIds?: string[];
   changeSummary?: string;
   agentRunId?: string | null;
+  expectedUpdatedAt?: Date;
+  // Only the absorption agent can append verified generation lineage.
+  absorbedSource?: { sourceId: string; sourceFingerprint: string; agentRunId: string };
   tx?: Prisma.TransactionClient;
 }) {
   const membership = await requireWorkspaceMembership({
@@ -230,7 +237,7 @@ export async function updateArticle(actor: AppActor, params: {
   });
 
   const run = async (tx: Prisma.TransactionClient) => {
-    const article = await tx.brainArticle.findUnique({
+    const preliminary = await tx.brainArticle.findUnique({
       where: {
         workspaceId_slug: {
           workspaceId: params.workspaceId,
@@ -238,8 +245,24 @@ export async function updateArticle(actor: AppActor, params: {
         },
       },
     });
-
-    invariant(article, 404, "NOT_FOUND", "Article not found.");
+    invariant(preliminary, 404, "NOT_FOUND", "Article not found.");
+    const sourceIdsToLock = [...new Set([
+      ...preliminary.sourceIds, ...sourceIdsInDerivation(preliminary.derivationJson),
+      ...(params.sourceIds ?? []), ...(params.absorbedSource ? [params.absorbedSource.sourceId] : []),
+    ])].sort();
+    for (const id of sourceIdsToLock) await lockBrainSourceLink(tx, id);
+    await tx.$queryRaw`SELECT id FROM "BrainArticle" WHERE id = ${preliminary.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    const article = await tx.brainArticle.findUnique({ where: { id: preliminary.id } });
+    invariant(article && !article.archivedAt, 409, "ARTICLE_CHANGED", "Article was archived or changed. Refresh and try again.");
+    invariant(article.updatedAt.getTime() === preliminary.updatedAt.getTime()
+      && JSON.stringify(article) === JSON.stringify(preliminary)
+      && (!params.expectedUpdatedAt || article.updatedAt.getTime() === params.expectedUpdatedAt.getTime()),
+    409, "ARTICLE_CHANGED", "Article changed. Refresh and try again.");
+    invariant(sourceIdsInDerivation(article.derivationJson).every((id) => sourceIdsToLock.includes(id))
+      && article.sourceIds.every((id) => sourceIdsToLock.includes(id)),
+    409, "ARTICLE_CHANGED", "Article sources changed. Refresh and try again.");
+    invariant(!params.absorbedSource || (actor.kind === "agent" && params.sourceIds === undefined),
+      403, "FORBIDDEN", "Only the absorption agent can append verified source lineage.");
 
     const editsDraftContent = params.title !== undefined
       || params.type !== undefined
@@ -248,11 +271,17 @@ export async function updateArticle(actor: AppActor, params: {
       || params.frontmatterJson !== undefined
       || params.ownerMemberId !== undefined
       || params.staleAfterDays !== undefined
-      || params.sourceIds !== undefined;
+      || params.sourceIds !== undefined
+      || params.absorbedSource !== undefined;
     if (editsDraftContent) {
       invariant(article.authority === "DRAFT", 400, "INVALID_STATE", "Only draft Brain articles can be edited.");
       await requireDraftManager({ actor, workspaceId: params.workspaceId, record: article, resolvedMembership: membership, tx });
     }
+
+    const nextSourceIds = params.absorbedSource
+      ? [...new Set([...article.sourceIds, params.absorbedSource.sourceId])]
+      : params.sourceIds;
+    if (nextSourceIds !== undefined) await lockActiveArticleSources(tx, params.workspaceId, nextSourceIds);
 
     // Create version snapshot of previous body before updating
     if (params.bodyMd !== undefined && params.bodyMd !== article.bodyMd) {
@@ -285,7 +314,22 @@ export async function updateArticle(actor: AppActor, params: {
     if (params.frontmatterJson !== undefined) data.frontmatterJson = params.frontmatterJson;
     if (params.ownerMemberId !== undefined) data.ownerMemberId = params.ownerMemberId;
     if (params.staleAfterDays !== undefined) data.staleAfterDays = params.staleAfterDays;
-    if (params.sourceIds !== undefined) data.sourceIds = params.sourceIds;
+    if (nextSourceIds !== undefined) data.sourceIds = nextSourceIds;
+    if (params.absorbedSource) {
+      const source = await tx.brainSource.findFirst({ where: {
+        id: params.absorbedSource.sourceId, workspaceId: params.workspaceId, archivedAt: null,
+      } });
+      invariant(source && brainSourceContentFingerprint(source) === params.absorbedSource.sourceFingerprint,
+        409, "SOURCE_CHANGED", "Absorbed source changed before article update.");
+      const prior = readBrainArticleDerivation(article.derivationJson);
+      const priorIds = new Set(prior?.sources.map((entry) => entry.sourceId) ?? []);
+      if (prior && article.sourceIds.length === priorIds.size && article.sourceIds.every((id) => priorIds.has(id))) {
+        data.derivationJson = { ...prior, agentRunId: params.absorbedSource.agentRunId,
+          sources: [...prior.sources.filter((entry) => entry.sourceId !== source.id),
+            { sourceId: source.id, fingerprint: params.absorbedSource.sourceFingerprint }],
+        };
+      }
+    }
     const changesDraftContent = Object.entries(data).some(([field, value]) =>
       !isDeepStrictEqual(article[field as keyof typeof article], value));
     if (actor.kind === "user" && article.derivationJson && changesDraftContent) {
@@ -296,6 +340,7 @@ export async function updateArticle(actor: AppActor, params: {
       where: { id: article.id },
       data,
     });
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brain_article_index:${params.workspaceId}:${article.id}`}, 0))`;
 
     await tx.auditLog.create({
       data: {
@@ -649,6 +694,7 @@ export async function ingestSource(actor: AppActor, params: {
 
 export async function listSources(actor: AppActor, params: {
   workspaceId: string;
+  sourceId?: string;
   absorbed?: boolean;
   take?: number;
   skip?: number;
@@ -661,6 +707,7 @@ export async function listSources(actor: AppActor, params: {
 
   const where: Prisma.BrainSourceWhereInput = {
     workspaceId: params.workspaceId,
+    ...(params.sourceId ? { id: params.sourceId } : {}),
     accessDomain: { in: accessDomains },
     ...archiveFilterWhere(params.archiveFilter),
   };
@@ -705,14 +752,7 @@ export async function deleteSource(actor: AppActor, params: {
   workspaceId: string;
   sourceId: string;
 }) {
-  const archived = await archiveWorkspaceArtifact(actor, {
-    workspaceId: params.workspaceId,
-    entityType: "BrainSource",
-    entityId: params.sourceId,
-    reason: "Archived from Brain source delete path.",
-  });
-
-  return { id: archived.id };
+  return requestBrainSourceRemoval(actor, params);
 }
 
 // ---------------------------------------------------------------------------
@@ -1030,6 +1070,7 @@ export async function publishArticle(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "BrainArticle" WHERE "workspaceId" = ${params.workspaceId} AND slug = ${params.slug} FOR UPDATE`;
     const article = await tx.brainArticle.findUnique({
       where: {
         workspaceId_slug: {
@@ -1040,7 +1081,7 @@ export async function publishArticle(actor: AppActor, params: {
       include: { ownerMember: true }
     });
 
-    invariant(article, 404, "NOT_FOUND", "Article not found.");
+    invariant(article && !article.archivedAt, 404, "NOT_FOUND", "Active article not found.");
     invariant(article.isPrivate, 400, "INVALID_STATE", "Article is already public.");
     invariant(article.authority === "DRAFT", 400, "INVALID_STATE", "Only draft Brain articles can be opened.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: article, resolvedMembership: membership });
@@ -1096,6 +1137,7 @@ export async function returnArticleToDraft(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "BrainArticle" WHERE "workspaceId" = ${params.workspaceId} AND slug = ${params.slug} FOR UPDATE`;
     const article = await tx.brainArticle.findUnique({
       where: {
         workspaceId_slug: {

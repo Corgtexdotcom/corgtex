@@ -72,6 +72,7 @@ const EXPECTED_NAV_GROUPS: NavGroup[] = [
 
 const EXPECTED_DEFAULT_FLAGS = {
   GOALS: true,
+  BRAIN_SOURCE_REMOVAL: false,
   TOOL_LINKS: false,
   FINANCE: true,
   FINANCE_PROJECTS: false,

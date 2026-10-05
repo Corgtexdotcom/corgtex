@@ -234,6 +234,20 @@ afterEach(() => {
 });
 
 describe("runPendingJobs", () => {
+  it("does not complete a source regeneration claim superseded before generation", async () => {
+    txMock.$queryRaw.mockResolvedValueOnce([{
+      id: "job-old", workspaceId: "ws-1", type: "agent.brain-source-regenerate", payload: {}, attempts: 1,
+    }]);
+    runAgentWorkflowJobMock.mockResolvedValue({ phase: "SUPERSEDED" });
+    prismaMock.workflowJob.updateMany.mockClear();
+
+    await expect(runPendingJobs("worker-old", 1)).resolves.toBe(1);
+
+    expect(runAgentWorkflowJobMock).toHaveBeenCalledWith(expect.objectContaining({ id: "job-old", attempts: 1 }), "worker-old");
+    expect(prismaMock.workflowJob.updateMany).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.update).not.toHaveBeenCalled();
+  });
+
   it.each([null, { workspaceId: "ws-1", revokedAt: new Date(), client: { isActive: true } },
     { workspaceId: "foreign", revokedAt: null, client: { isActive: true } },
     { workspaceId: "ws-1", revokedAt: null, client: { isActive: false } }])("rejects disconnected MCP provenance before the actual worker handler %j", async token => {
