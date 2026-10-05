@@ -10,7 +10,7 @@ Corgtex is an AI-native workspace operating system designed for self-managed org
 - **Proposals & Tensions:** Built-in asynchronous decision-making via consent-based proposals.
 - **Organization Brain:** An AI-powered centralized knowledge base and wiki that your organization's members can query.
 - **AI Agents:** Integrated AI agents grounded in your organizational data (Slack bot, embedded chat).
-- **Finance Module:** Off-chain ledger tracking, spend requests, allocations, and approval flows.
+- **Finance Module:** Project work, time, expenses, invoices, cash payables, and AI usage budgets.
 - **Multi-Tenant Ready:** Native support for multiple isolated workspaces in the same deployment.
 
 ## Architecture
@@ -67,7 +67,7 @@ Required environment variables for the core application (usually set in `.env` o
 | `ADMIN_PASSWORD` | Password for the initial bootstrap admin user |
 | `WORKSPACE_NAME` | Display name of the initial workspace |
 | `WORKSPACE_SLUG` | URL slug identifier for the workspace |
-| `SEED_SCRIPTS` | Optional comma-separated seed scripts to run after the base seed at web startup |
+| `SEED_SCRIPTS` | Optional comma-separated extra seed scripts for `combined` or `migrate-and-seed` startup; ignored in `web` and `migrate-and-web` modes |
 | `CORGTEX_AUTO_SEED_JNJ_DEMO` | Set to `true` only on demo/trial runtimes that should refresh the public J&J demo workspace on each deploy |
 | `NEXT_PUBLIC_INTERCOM_APP_ID` | Optional Intercom Messenger app ID. Leave unset to keep Intercom disabled, including for self-managed deployments. |
 | `NEXT_PUBLIC_INTERCOM_API_BASE` | Optional Intercom API base for the Messenger region. Defaults to `https://api-iam.intercom.io`. |
@@ -86,13 +86,11 @@ Required environment variables for the core application (usually set in `.env` o
 - `MODEL_PRICE_OVERRIDES_JSON`: Required for Azure deployments without built-in pricing
 - `MODEL_OMIT_TEMPERATURE_MODELS`: Optional comma-separated deployment aliases whose provider rejects `temperature`; `corgtex-gpt56-luna` is always treated this way.
 
-## Enterprise Deployment (Configuration Repo Pattern)
+## Enterprise Deployment
 
-For enterprises requiring total data isolation or specific seeded configurations, Corgtex is designed to be consumed via a thin wrapper repository.
+Hosted customers use dedicated deployments and private bootstrap bundles. Customer-owned or self-hosted deployments may later use a separate private configuration repository for deployment overlays or bundle references.
 
-Instead of forking this platform, you can create a private Configuration Repo (`corgtex/deploy-acmecorp`) containing only your custom `SEEDDATA/` and `seed-script.mjs`. Your Dockerfile can build from the `corgtex/corgtex` source by setting the `SEED_SCRIPTS=scripts/seed-acme.mjs` environment variable to override the default SaaS sample seeds.
-
-See the [Configuration Repo Template docs](CONTRIBUTING.md) for more details.
+See [Enterprise Deployments](docs/deploy/enterprise.mdx) for the supported deployment model.
 
 ## Contributing
 

@@ -2,6 +2,7 @@
 import { McpConnections } from "./McpConnections";
 
 import { useMemo, useState } from "react";
+import { buildInstallerPath } from "@/lib/install-helpers";
 
 import {
   buildAiWorkspaceSetupCards,
@@ -311,6 +312,13 @@ export function AiWorkspaceManager({
             ) : null}
           </select>
         </label>
+        <p className="nr-item-meta" style={{ fontSize: "0.85rem", margin: 0 }}>
+          Using Codex CLI or its IDE extension?{" "}
+          <a href={buildInstallerPath("codex", { workspaceId, returnTo: `/workspaces/${workspaceId}/settings?tab=ai-workspaces` })}>
+            Open Codex setup
+          </a>
+          . ChatGPT web app setup is a separate path.
+        </p>
       </div>
 
       {activeCard ? (

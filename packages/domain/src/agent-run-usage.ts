@@ -80,17 +80,20 @@ export function withAgentRunModelUsageSummary<TRun extends { modelUsage: ModelUs
   };
 }
 
+export function currentUsagePeriodStart(now: Date, periodStartDay: number): Date {
+  const startInMonth = (year: number, month: number) => {
+    const lastDay = new Date(year, month + 1, 0).getDate();
+    return new Date(year, month, Math.min(periodStartDay, lastDay));
+  };
+  const currentMonthStart = startInMonth(now.getFullYear(), now.getMonth());
+  return now >= currentMonthStart
+    ? currentMonthStart
+    : startInMonth(now.getFullYear(), now.getMonth() - 1);
+}
+
 export async function getWorkspaceMonthlyUsage(workspaceId: string, periodStartDay: number = 1): Promise<number> {
   const { prisma } = await import("@corgtex/shared");
-  const now = new Date();
-  
-  // Calculate the start of the current period based on periodStartDay
-  let periodStart = new Date(now.getFullYear(), now.getMonth(), periodStartDay);
-  
-  if (now.getDate() < periodStartDay) {
-    // If we're before the start day in the current month, the period started last month
-    periodStart = new Date(now.getFullYear(), now.getMonth() - 1, periodStartDay);
-  }
+  const periodStart = currentUsagePeriodStart(new Date(), periodStartDay);
 
   const usages = await prisma.modelUsage.findMany({
     where: {

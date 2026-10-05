@@ -463,6 +463,8 @@ function isLoopbackRedirectUrl(url: URL) {
   return url.protocol === "http:" && isLoopbackHostname(url.hostname);
 }
 
+const CURSOR_DESKTOP_MCP_REDIRECT = "cursor://anysphere.cursor-mcp/oauth/callback";
+
 function validateMcpRedirectUri(uri: string) {
   let parsed: URL;
   try {
@@ -475,7 +477,7 @@ function validateMcpRedirectUri(uri: string) {
     throw new AppError(400, "INVALID_INPUT", `Redirect URI must not include a fragment: ${uri}`);
   }
 
-  if (parsed.protocol === "https:" || isLoopbackRedirectUrl(parsed)) {
+  if (parsed.protocol === "https:" || isLoopbackRedirectUrl(parsed) || uri === CURSOR_DESKTOP_MCP_REDIRECT) {
     return parsed.toString();
   }
 

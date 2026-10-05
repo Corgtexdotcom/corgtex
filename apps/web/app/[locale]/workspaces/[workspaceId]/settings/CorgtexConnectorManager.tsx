@@ -330,7 +330,7 @@ export function CorgtexConnectorManager({ connectorUrl, workspaceName, workspace
             Share a link with a teammate instead
           </summary>
           <div className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 8 }}>
-            Send this URL to anyone with a Corgtex login. The page walks them through three clicks — no terminal, no install:
+            Send this URL to anyone with a Corgtex login. The page guides them through connector setup and OAuth approval:
             <code
               style={{
                 display: "block",

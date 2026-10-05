@@ -220,7 +220,13 @@ export default async function OAuthAuthorizePage(props: Props) {
       ? actor.user.displayName || actor.user.email
       : "this Corgtex account";
     const currentUserEmail = actor.kind === "user" ? actor.user.email : null;
-    const selectedWorkspace = allowedWorkspaces[0];
+    const selectedWorkspace = (boundWorkspace
+      ? allowedWorkspaces.find((entry) => entry.workspace.id === boundWorkspace)
+      : allowedWorkspaces[0]) ?? null;
+    if (!selectedWorkspace) {
+      return <ErrorPanel>You do not have access to a workspace registered for the Corgtex connector.</ErrorPanel>;
+    }
+    const workspaceChoiceLocked = Boolean(boundWorkspace);
     let consent: string | undefined;
     if (boundWorkspace && actor.kind === "user") {
       await requireWorkspaceMembership({ actor, workspaceId: boundWorkspace });
@@ -275,7 +281,7 @@ export default async function OAuthAuthorizePage(props: Props) {
 
             <form action="/api/oauth/authorize" method="POST">
               <div className="border-b border-[var(--line-subtle)] px-6 py-6">
-                {hasMultipleWorkspaces ? (
+                {!workspaceChoiceLocked && hasMultipleWorkspaces ? (
                   <label className="block text-sm font-medium text-[var(--text-strong)]">
                     Workspace
                     <select

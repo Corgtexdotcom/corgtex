@@ -48,8 +48,8 @@ See [Testing](docs/contributing/testing.mdx).
 - Start new work from current `origin/main` in a clean task branch/worktree.
 - Default to one coherent PR for the complete outcome. Split only where each part is
   independently useful, safe, testable, deployable, and rollbackable.
-- Put the short contract from [`.agents/plan-template.md`](.agents/plan-template.md)
-  in the PR body: outcome, risk, file scope, acceptance, tests, and rollback.
+- Use the [PR template](.github/pull_request_template.md) for the short contract:
+  outcome, risk tier, behavior scope, acceptance, validation, and rollback.
 - Keep the contract public-safe. Never include credentials, secrets, or customer-
   private facts.
 - Update the PR body when real scope or acceptance changes; do not manufacture a
@@ -58,9 +58,9 @@ See [Testing](docs/contributing/testing.mdx).
   ignored `.artifacts/` and link it through Corgtex Build Artifacts or a safe private
   fallback.
 
-CI verifies the contract, declared file scope, security hygiene, tests, build, and
-documentation. An independent reviewer evaluates the complete current diff and
-objective risks. See [Agent delivery](docs/contributing/agent-pipeline.mdx) and
+Required CI and live PR metadata checks validate the contract, security hygiene,
+tests, build, and documentation. An independent reviewer evaluates the complete
+current diff and objective risks. See [Agent delivery](docs/contributing/agent-pipeline.mdx) and
 [Branching and pull requests](docs/contributing/pull-requests.mdx).
 
 ## Public documentation
