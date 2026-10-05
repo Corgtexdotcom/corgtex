@@ -15,6 +15,9 @@ it("records both verified sources through real absorption before reviewed remova
   const workspace = await prisma.workspace.create({ data: {
     name: "Multi-source absorption", slug: `multi-absorb-${randomUUID()}`,
   } });
+  await prisma.workspaceFeatureFlag.create({ data: {
+    workspaceId: workspace.id, flag: "BRAIN_SOURCE_REMOVAL", enabled: true,
+  } });
   const user = await prisma.user.create({ data: { email: `multi-absorb-${randomUUID()}@example.test`, passwordHash: "fixture" } });
   await prisma.member.create({ data: { workspaceId: workspace.id, userId: user.id, role: "ADMIN" } });
   const admin: AppActor = { kind: "user", user: { id: user.id, email: user.email, displayName: "Admin" } };
