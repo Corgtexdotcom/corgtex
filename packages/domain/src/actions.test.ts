@@ -825,7 +825,7 @@ describe("action domain lifecycle", () => {
     prismaMock.action.update.mockResolvedValueOnce({ id: "open-1", status: "DRAFT", assigneeMemberId: null, version: 2 });
     const { updateAction } = await import("./actions");
     await expect(updateAction(actor, {
-      workspaceId: "workspace-1", actionId: "open-1", status: "DRAFT", assigneeMemberId: null,
+      workspaceId: "workspace-1", actionId: "open-1", status: "DRAFT", assigneeMemberId: null, expectedVersion: 1,
     })).resolves.toMatchObject({ status: "DRAFT", assigneeMemberId: null });
     expect(prismaMock.action.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ status: "DRAFT", assigneeMemberId: null, isPrivate: true }),
@@ -960,6 +960,7 @@ describe("action domain lifecycle", () => {
       actionId: "action-1",
       title: "Follow up now",
       priority: 5,
+      expectedVersion: 1,
     })).resolves.toMatchObject({
       id: "action-1",
       version: 2,
@@ -1012,6 +1013,7 @@ describe("action domain lifecycle", () => {
       workspaceId: "workspace-1",
       actionId: "action-1",
       assigneeMemberId: "member-2",
+      expectedVersion: 1,
     })).resolves.toMatchObject({
       assigneeMemberId: "member-2",
       version: 2,
@@ -1053,7 +1055,7 @@ describe("action domain lifecycle", () => {
 
     const { updateAction } = await import("./actions");
     await updateAction(actor, {
-      workspaceId: "workspace-1", actionId: "action-1", assigneeMemberId: "member-3",
+      workspaceId: "workspace-1", actionId: "action-1", assigneeMemberId: "member-3", expectedVersion: 1,
     });
 
     expect(appendEvents).toHaveBeenCalledWith(expect.anything(), [expect.objectContaining({
@@ -1079,7 +1081,7 @@ describe("action domain lifecycle", () => {
 
     const { updateAction } = await import("./actions");
     await updateAction(actor, {
-      workspaceId: "workspace-1", actionId: "draft-1", assigneeMemberId: "member-3",
+      workspaceId: "workspace-1", actionId: "draft-1", assigneeMemberId: "member-3", expectedVersion: 1,
     });
 
     expect(appendEvents.mock.calls.flatMap(([, events]) => events).map((event) => event.type))
@@ -1131,6 +1133,7 @@ describe("action domain lifecycle", () => {
       workspaceId: "workspace-1",
       actionId: "action-1",
       title: "Assignee update",
+      expectedVersion: 1,
     })).resolves.toMatchObject({
       id: "action-1",
       version: 2,
@@ -1193,6 +1196,7 @@ describe("action domain lifecycle", () => {
       workspaceId: "workspace-1",
       actionId: "action-1",
       title: "Allowed update",
+      expectedVersion: 1,
     })).resolves.toMatchObject({
       id: "action-1",
       version: 2,
@@ -1296,6 +1300,70 @@ describe("action domain lifecycle", () => {
     expect(recordAudit).toHaveBeenCalledTimes(1);
     expect(appendEvents).toHaveBeenCalledTimes(1);
     expect(prismaMock.workItemVersion.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("proposed contract: a stale caller cannot overwrite content by omitting its observed version", async () => {
+    const stored = {
+      id: "action-stale-omitted",
+      workspaceId: "workspace-1",
+      authorUserId: "user-1",
+      title: "Original title",
+      status: "OPEN",
+      version: 1,
+      isPrivate: false,
+      publishedAt: new Date("2026-06-01T00:00:00.000Z"),
+      archivedAt: null,
+      duplicateOfActionId: null,
+    };
+    const secondCallersObservedVersion = stored.version;
+    prismaMock.action.findUnique.mockImplementation(async () => ({ ...stored }));
+    prismaMock.action.update.mockImplementation(async ({ where, data }: {
+      where: { version: number };
+      data: { title: string; version: number };
+    }) => {
+      expect(where.version).toBe(stored.version);
+      Object.assign(stored, data);
+      return { ...stored };
+    });
+
+    const { updateAction } = await import("./actions");
+    await updateAction(actor, {
+      workspaceId: "workspace-1",
+      actionId: stored.id,
+      title: "First editor",
+      expectedVersion: secondCallersObservedVersion,
+    });
+    await expect(updateAction(actor, {
+      workspaceId: "workspace-1",
+      actionId: stored.id,
+      title: "Second editor from a stale view",
+      // This caller also observed version 1, but the domain API lets it omit it.
+    })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+
+    expect(prismaMock.action.update.mock.calls.map(([call]) => call.where.version)).toEqual([1]);
+    expect(stored.title).toBe("First editor");
+  });
+
+  it("rejects missing versions for same-value and mixed content intent without effects", async () => {
+    prismaMock.action.findUnique.mockResolvedValue({
+      id: "action-1", workspaceId: "workspace-1", authorUserId: "user-1",
+      title: "Current title", status: "OPEN", version: 2, isPrivate: false,
+      assigneeMemberId: "member-2", archivedAt: null, duplicateOfActionId: null,
+    });
+    const { updateAction } = await import("./actions");
+
+    for (const params of [
+      { title: "Current title" },
+      { title: "Changed title", status: "IN_PROGRESS" as const },
+    ]) {
+      await expect(updateAction(actor, { workspaceId: "workspace-1", actionId: "action-1", ...params }))
+        .rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+    }
+
+    expect(prismaMock.action.update).not.toHaveBeenCalled();
+    expect(prismaMock.workItemVersion.create).not.toHaveBeenCalled();
+    expect(recordAudit).not.toHaveBeenCalled();
+    expect(appendEvents).not.toHaveBeenCalled();
   });
 
   it("honors expectedVersion and rejects early if it does not match current version without side effects", async () => {

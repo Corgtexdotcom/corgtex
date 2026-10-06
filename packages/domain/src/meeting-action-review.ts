@@ -859,7 +859,7 @@ export async function confirmSlackMeetingActionReviewProposal(actor: AppActor, p
       select: { id: true },
     });
     if (!existingOwner) {
-      await updateAction(actor, { workspaceId: params.workspaceId, actionId: action.id, assigneeMemberId });
+      await updateAction(actor, { workspaceId: params.workspaceId, actionId: action.id, assigneeMemberId, expectedVersion: action.version });
     }
     opened = await publishAction(actor, { workspaceId: params.workspaceId, actionId: action.id });
   }

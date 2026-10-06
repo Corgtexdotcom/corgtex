@@ -759,6 +759,7 @@ describe("Goals Domain", () => {
         ownerMemberId: "member-1",
         status: "ACTIVE",
         isPrivate: false,
+        version: 1,
       } as any);
       vi.mocked(prisma.goal.update).mockResolvedValueOnce({
         id: "goal-1",
@@ -772,6 +773,7 @@ describe("Goals Domain", () => {
         goalId: "goal-1",
         status: "ON_TRACK",
         progressPercent: 65,
+        expectedVersion: 1,
       })).resolves.toMatchObject({
         id: "goal-1",
         status: "ON_TRACK",
@@ -895,6 +897,7 @@ describe("Goals Domain", () => {
         workspaceId: "ws-1",
         goalId: "goal-1",
         title: "Updated goal",
+        expectedVersion: 1,
       })).resolves.toMatchObject({
         id: "goal-1",
         version: 2,
@@ -1056,6 +1059,45 @@ describe("Goals Domain", () => {
       expect(prisma.workItemVersion.create).not.toHaveBeenCalled();
       expect(recordAudit).not.toHaveBeenCalled();
       expect(appendEvents).not.toHaveBeenCalled();
+    });
+
+    it("rejects missing versions for same-value, progress, and mixed content intent", async () => {
+      vi.mocked(prisma.goal.findUnique).mockResolvedValue({
+        id: "goal-1", workspaceId: "ws-1", archivedAt: null,
+        authorUserId: "user-1", title: "Current goal", status: "ACTIVE",
+        isPrivate: false, progressPercent: 50, version: 2, parentGoalId: null,
+      } as any);
+      const { recordAudit } = await import("./audit-trail");
+      const { appendEvents } = await import("./events");
+
+      for (const params of [
+        { title: "Current goal" },
+        { progressPercent: 50 },
+        { title: "Changed goal", status: "ON_TRACK" as const },
+      ]) {
+        await expect(updateGoal(actor, { workspaceId: "ws-1", goalId: "goal-1", ...params }))
+          .rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+      }
+
+      expect(prisma.goal.update).not.toHaveBeenCalled();
+      expect(prisma.workItemVersion.create).not.toHaveBeenCalled();
+      expect(recordAudit).not.toHaveBeenCalled();
+      expect(appendEvents).not.toHaveBeenCalled();
+    });
+
+    it("preserves a status-only update without an observed content version", async () => {
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
+        id: "goal-1", workspaceId: "ws-1", archivedAt: null,
+        authorUserId: "user-1", status: "ACTIVE", isPrivate: false,
+        version: 2, parentGoalId: null,
+      } as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({
+        id: "goal-1", workspaceId: "ws-1", status: "ON_TRACK", version: 2,
+      } as any);
+
+      await expect(updateGoal(actor, { workspaceId: "ws-1", goalId: "goal-1", status: "ON_TRACK" }))
+        .resolves.toMatchObject({ status: "ON_TRACK", version: 2 });
+      expect(prisma.workItemVersion.create).not.toHaveBeenCalled();
     });
 
     it("rejects 0, negative, or fractional expectedVersion as invalid input even on no-op", async () => {
@@ -2225,7 +2267,7 @@ describe("Goals Domain", () => {
       vi.mocked(prisma.goal.update).mockClear();
       vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce(goal as any);
       vi.mocked(prisma.goal.update).mockResolvedValueOnce({ ...goal, title: "Updated" } as any);
-      await updateGoal(actor, { workspaceId: "ws-1", goalId: "goal-order-test", title: "Updated" });
+      await updateGoal(actor, { workspaceId: "ws-1", goalId: "goal-order-test", title: "Updated", expectedVersion: 1 });
       const lockOrder1 = vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[0];
       const updateOrder1 = vi.mocked(prisma.goal.update).mock.invocationCallOrder[0];
       expect(lockOrder1).toBeLessThan(updateOrder1);

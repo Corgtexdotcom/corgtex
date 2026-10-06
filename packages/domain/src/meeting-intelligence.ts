@@ -1227,7 +1227,7 @@ export async function applyInsight(
       let opened = action;
       if (action.status === "DRAFT" && hintedMemberId) {
         if (!action.assigneeMemberId || !(await loadMemberDirectory()).some((member) => member.id === action.assigneeMemberId)) {
-          await updateAction(actor, { workspaceId: params.workspaceId, actionId: action.id, assigneeMemberId: hintedMemberId });
+          await updateAction(actor, { workspaceId: params.workspaceId, actionId: action.id, assigneeMemberId: hintedMemberId, expectedVersion: action.version });
         }
         opened = await publishAction(actor, { workspaceId: params.workspaceId, actionId: action.id });
       }
