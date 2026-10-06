@@ -4,7 +4,7 @@ export const MEETING_STATUS_FILTERS = ["COMPLETED", "SCHEDULED"] as const;
 
 export type MeetingStatusFilter = (typeof MEETING_STATUS_FILTERS)[number];
 
-export const ACTION_NEEDED_MEETING_EVIDENCE_STATES = new Set<MeetingEvidenceState["state"]>([
+const ACTION_NEEDED_MEETING_EVIDENCE_STATES = new Set<MeetingEvidenceState["state"]>([
   "needs_transcript",
   "provider_recovery_pending",
 ]);
