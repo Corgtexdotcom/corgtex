@@ -96,7 +96,8 @@ export function projectOpsInventory(rows, details, targetDeploymentId) {
   }
   mappings.sort((a, b) => a.deploymentId.localeCompare(b.deploymentId));
   activeLeases.sort((a, b) => a.deploymentId.localeCompare(b.deploymentId));
-  return { status: activeLeases.length ? "blocked" : "verified", checkedDeploymentCount: deployments.length,
+  return { status: activeLeases.length ? "blocked" : "observed", leaseEvidence: "non_atomic_sequential_reads",
+    checkedDeploymentCount: deployments.length,
     effectiveDeploymentCount: active.length, sharedWorkspaceCount: shared.length, targetDeploymentId, mappings, activeLeases };
 }
 
@@ -164,7 +165,17 @@ export async function collectOpsReceipt({ fetchImpl = fetch, token, targetDeploy
     }
     const readback = await tool(fetchImpl, token, "list_customers", { includeAllDeployments: true, uncapped: true });
     if (inventoryIdentity(rows) !== inventoryIdentity(readback)) fail("INVENTORY_CHANGED");
-    receipt.controlPlane = projectOpsInventory(rows, details, targetDeploymentId);
+    projectOpsInventory(rows, details, targetDeploymentId);
+    const finalDetails = new Map();
+    for (const row of deployments) {
+      const current = await tool(fetchImpl, token, "get_customer_deployment_status", { deploymentId: row.id });
+      const before = details.get(row.id);
+      if (JSON.stringify(lease(before)) !== JSON.stringify(lease(current))) fail("LEASE_CHANGED_DURING_SCAN");
+      finalDetails.set(row.id, current);
+    }
+    const finalReadback = await tool(fetchImpl, token, "list_customers", { includeAllDeployments: true, uncapped: true });
+    if (inventoryIdentity(rows) !== inventoryIdentity(finalReadback)) fail("INVENTORY_CHANGED");
+    receipt.controlPlane = projectOpsInventory(rows, finalDetails, targetDeploymentId);
     if (receipt.controlPlane.activeLeases.length) receipt.readiness.reasons.unshift("ACTIVE_RELEASE_LEASE");
   } catch (error) {
     receipt.controlPlane = { status: "unavailable", checkedDeploymentCount: 0, mappings: [], activeLeases: [],

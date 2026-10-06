@@ -26,6 +26,7 @@ function rpc(result, status = 200) {
 }
 
 function fixtureFetch({ rows = [target, shared], rowsAfterReadback = rows, byId = details,
+  byIdAfterReadback = byId,
   tools = ["list_customers", "get_customer_deployment_status"], supportsUncapped = true,
   status = 200, onCall = () => {} } = {}) {
   let listCalls = 0;
@@ -44,7 +45,8 @@ function fixtureFetch({ rows = [target, shared], rowsAfterReadback = rows, byId 
     })) });
     if (body.method !== "tools/call") throw new Error("unexpected method");
     const value = body.params.name === "list_customers"
-      ? (++listCalls === 1 ? rows : rowsAfterReadback) : byId.get(body.params.arguments.deploymentId);
+      ? (++listCalls === 1 ? rows : rowsAfterReadback)
+      : (listCalls < 2 ? byId : byIdAfterReadback).get(body.params.arguments.deploymentId);
     if (body.params.name === "list_customers") {
       assert.deepEqual(body.params.arguments, { includeAllDeployments: true, uncapped: true });
     }
@@ -60,7 +62,8 @@ function collect(fetchImpl) {
 test("returns bounded Ops mappings and an explicitly blocked flag/overall receipt", async () => {
   const calls = [];
   const receipt = await collect(fixtureFetch({ onCall: (body) => calls.push(body) }));
-  assert.equal(receipt.controlPlane.status, "verified");
+  assert.equal(receipt.controlPlane.status, "observed");
+  assert.equal(receipt.controlPlane.leaseEvidence, "non_atomic_sequential_reads");
   assert.equal(receipt.controlPlane.checkedDeploymentCount, 2);
   assert.equal(receipt.controlPlane.sharedWorkspaceCount, 1);
   assert.deepEqual(receipt.controlPlane.activeLeases, []);
@@ -69,7 +72,7 @@ test("returns bounded Ops mappings and an explicitly blocked flag/overall receip
   assert.equal(receipt.featureFlag.status, "unavailable");
   assert.equal(receipt.featureFlag.enabledCount, null);
   assert.deepEqual(receipt.readiness, { status: "blocked", reasons: ["AUTHORITATIVE_FLAG_EVIDENCE_UNAVAILABLE"] });
-  assert.equal(calls.length, 5);
+  assert.equal(calls.length, 8);
   assert.ok(!JSON.stringify(receipt).includes("synthetic-token"));
 });
 
@@ -85,6 +88,18 @@ test("active lease blocks Ops evidence and includes only lease fields", async ()
   assert.ok(receipt.readiness.reasons.includes("ACTIVE_RELEASE_LEASE"));
   assert.ok(!JSON.stringify(receipt).includes("private-owner"));
   assert.ok(!JSON.stringify(receipt).includes("private-hash"));
+});
+
+test("lease acquired during the scan fails closed instead of verifying Ops", async () => {
+  const leased = new Map(details);
+  leased.set(targetId, { ...details.get(targetId), releaseLeaseId: "198a4459-c41d-4b6c-adc9-c9c470693633",
+    releaseLeaseOwner: "private-owner", releaseLeasePhase: "RESERVED",
+    releaseLeaseExpiresAt: "2026-10-07T00:00:00.000Z" });
+  const receipt = await collect(fixtureFetch({ byIdAfterReadback: leased }));
+  assert.equal(receipt.controlPlane.status, "unavailable");
+  assert.equal(receipt.controlPlane.code, "LEASE_CHANGED_DURING_SCAN");
+  assert.equal(receipt.readiness.status, "blocked");
+  assert.ok(!JSON.stringify(receipt).includes("private-owner"));
 });
 
 test("lease on an inactive deployment still blocks the fleet receipt", async () => {
@@ -170,7 +185,7 @@ test("writes only a private blocked receipt and exits nonzero", async () => {
     assert.equal((await stat(file)).mode & 0o777, 0o600);
     const body = JSON.parse(await readFile(file, "utf8"));
     assert.equal(body.readiness.status, "blocked");
-    assert.equal(body.controlPlane.status, "verified");
+    assert.equal(body.controlPlane.status, "observed");
     assert.ok(!JSON.stringify({ body, logs }).includes("synthetic-token"));
   } finally {
     process.exitCode = oldExitCode;
