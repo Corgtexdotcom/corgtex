@@ -6,8 +6,10 @@ import {
   updateAgentConfig,
   updateCompanyUnderstandingGoalApplyMode,
   updateWorkspaceNewspaperSchedule,
+  updateWorkspaceSlackNudgeWindow,
   type CompanyUnderstandingGoalApplyMode,
   type NewspaperWeekday,
+  type SlackNudgeWindow,
 } from "@corgtex/domain";
 import { revalidatePath } from "next/cache";
 import { assertAgentModelOverrideAllowed } from "../../agents/model-override-options";
@@ -40,6 +42,13 @@ export async function updateAgentNewspaperScheduleAction(
   await updateWorkspaceNewspaperSchedule(actor, { workspaceId, ...schedule });
   revalidatePath(`/workspaces/${workspaceId}/settings/agents`);
   revalidatePath(`/workspaces/${workspaceId}/settings`);
+}
+
+export async function updateSlackNudgeWindowAction(workspaceId: string, window: SlackNudgeWindow | null) {
+  await enforceDemoGuard(workspaceId);
+  const actor = await requirePageActor();
+  await updateWorkspaceSlackNudgeWindow(actor, { workspaceId, window });
+  revalidatePath(`/workspaces/${workspaceId}/settings/agents`);
 }
 
 export async function updateCompanyUnderstandingGoalApplyModeAction(

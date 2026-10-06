@@ -38,6 +38,47 @@ describe("agent-config", () => {
     prismaMock.modelUsageBudget.findMany.mockResolvedValue([]);
   });
 
+  describe("workspace Slack reminder window", () => {
+    const window = { timeZone: "America/Toronto", weekdays: [1, 2, 3, 4, 5], startLocalTime: "09:00", endLocalTime: "17:00" };
+
+    it("preserves other Slack configuration when an admin sets or removes the window", async () => {
+      const { requireWorkspaceMembership } = await import("./auth");
+      const { updateWorkspaceSlackNudgeWindow } = await import("./agent-config");
+      const actor = { kind: "user", user: { id: "u-1" } } as any;
+      prismaMock.workspaceAgentConfig.findUnique.mockResolvedValue({ configJson: { proactiveEnabled: false, customFlag: "keep" } });
+      await updateWorkspaceSlackNudgeWindow(actor, { workspaceId: "ws-1", window });
+      expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor, workspaceId: "ws-1", allowedRoles: ["ADMIN"] });
+      expect(prismaMock.workspaceAgentConfig.upsert).toHaveBeenCalledWith(expect.objectContaining({
+        update: { configJson: expect.objectContaining({ proactiveEnabled: false, customFlag: "keep", proactiveNudgeWindow: window }) },
+      }));
+
+      prismaMock.workspaceAgentConfig.findUnique.mockResolvedValue({ configJson: { proactiveEnabled: false, proactiveNudgeWindow: window } });
+      await updateWorkspaceSlackNudgeWindow(actor, { workspaceId: "ws-1", window: null });
+      const removed = prismaMock.workspaceAgentConfig.upsert.mock.calls[1][0].update.configJson;
+      expect(removed.proactiveEnabled).toBe(false);
+      expect(removed).not.toHaveProperty("proactiveNudgeWindow");
+    });
+
+    it("rejects invalid schedules before writing", async () => {
+      const { updateWorkspaceSlackNudgeWindow } = await import("./agent-config");
+      await expect(updateWorkspaceSlackNudgeWindow({ kind: "user", user: { id: "u-1" } } as any, {
+        workspaceId: "ws-1", window: { ...window, timeZone: "EST" },
+      })).rejects.toThrow("valid IANA time zone");
+      expect(prismaMock.workspaceAgentConfig.upsert).not.toHaveBeenCalled();
+    });
+
+    it("does not read or write Slack settings when membership rejects the actor", async () => {
+      const { requireWorkspaceMembership } = await import("./auth");
+      const { updateWorkspaceSlackNudgeWindow } = await import("./agent-config");
+      vi.mocked(requireWorkspaceMembership).mockRejectedValueOnce(new Error("Forbidden"));
+      await expect(updateWorkspaceSlackNudgeWindow({ kind: "user", user: { id: "u-1" } } as any, {
+        workspaceId: "ws-1", window,
+      })).rejects.toThrow("Forbidden");
+      expect(prismaMock.workspaceAgentConfig.findUnique).not.toHaveBeenCalled();
+      expect(prismaMock.workspaceAgentConfig.upsert).not.toHaveBeenCalled();
+    });
+  });
+
   describe("updateAgentConfig", () => {
     it("updates agent config with governance policy", async () => {
       const { prisma } = await import("@corgtex/shared");

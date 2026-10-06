@@ -9,6 +9,7 @@ import {
   createWorkItemFromCommunicationSource,
   getAgentModelOverride,
   isAgentEnabled,
+  isSlackNudgeWindowOpen,
   isSlackThreadFollowupSuppressed,
   listHumanMembers,
   postDeliberationEntry,
@@ -104,6 +105,7 @@ function slackAgentConfig(value: unknown) {
     unansweredFollowupDelayMinutes: delayMinutes(config.unansweredFollowupDelayMinutes, DEFAULT_UNANSWERED_DELAY_MINUTES),
     unansweredActionCreationDelayMinutes: delayMinutes(config.unansweredActionCreationDelayMinutes, DEFAULT_UNANSWERED_ACTION_DELAY_MINUTES),
     staleActionFollowupDelayMinutes: delayMinutes(config.staleActionFollowupDelayMinutes, DEFAULT_STALE_ACTION_FOLLOWUP_DELAY_MINUTES),
+    proactiveNudgeWindow: config.proactiveNudgeWindow,
     mutedChannelIds,
   };
 }
@@ -643,8 +645,10 @@ export async function runSlackProactiveScan(params: {
   }
 
   const unansweredCutoff = new Date(now.getTime() - config.unansweredFollowupDelayMinutes * 60 * 1000);
-  const recentCutoff = new Date(now.getTime() - PROACTIVE_LOOKBACK_MINUTES * 60 * 1000);
-  const candidates = await prisma.communicationMessage.findMany({
+  // A configured weekly window can reopen just after the old seven-day cutoff.
+  // Keep two weeks of eligible sources so the next allowed scan can reach them.
+  const recentCutoff = new Date(now.getTime() - PROACTIVE_LOOKBACK_MINUTES * (config.proactiveNudgeWindow ? 2 : 1) * 60 * 1000);
+  const candidateQuery = {
     where: {
       workspaceId: params.workspaceId,
       installationId: params.installationId,
@@ -657,15 +661,34 @@ export async function runSlackProactiveScan(params: {
       isHidden: false,
       isDeleted: false,
     },
-    orderBy: { messageTs: "desc" },
+    orderBy: config.proactiveNudgeWindow
+      ? [{ messageTs: "asc" as const }, { id: "asc" as const }]
+      : { messageTs: "desc" as const },
     take: 100,
-  });
+  } satisfies Prisma.CommunicationMessageFindManyArgs;
+  const candidates = await prisma.communicationMessage.findMany(candidateQuery);
 
   const model = await getAgentModelOverride(params.workspaceId, "slack-agent")
     ?? resolveModel(AGENT_REGISTRY["slack-agent"].defaultModelTier);
   let nudges = 0;
   let firstNudgeReviews = 0;
-  for (const candidate of candidates.filter((message) => looksUnanswered(message.text ?? "") && !isAddressedToSlackBot(message.text ?? "", installation.botUserId))) {
+  const nudgeWindowOpen = () => isSlackNudgeWindowOpen(new Date(), config.proactiveNudgeWindow);
+  async function* eligibleFirstNudgeCandidates() {
+    if (!nudgeWindowOpen()) return;
+    let page = candidates;
+    while (true) {
+      for (const message of page) {
+        if (looksUnanswered(message.text ?? "") && !isAddressedToSlackBot(message.text ?? "", installation!.botUserId)) yield message;
+      }
+      if (!config.proactiveNudgeWindow || page.length < candidateQuery.take) return;
+      page = await prisma.communicationMessage.findMany({
+        ...candidateQuery,
+        cursor: { id: page[page.length - 1]!.id },
+        skip: 1,
+      });
+    }
+  }
+  for await (const candidate of eligibleFirstNudgeCandidates()) {
     const threadTs = threadTsForMessage(candidate);
     const cachePrefix = `${PROACTIVE_FIRST_NUDGE_CLAIM_PREFIX}:${params.installationId}:${candidate.id}:`;
     const textHash = createHash("sha256").update(candidate.text ?? "").digest("hex").slice(0, 16);
@@ -764,6 +787,10 @@ export async function runSlackProactiveScan(params: {
     });
     if (latestReplies > 0) continue;
 
+    // Model review may have crossed the local closing time. Leave the source
+    // untouched so the next allowed scan can reconsider it.
+    if (!nudgeWindowOpen()) continue;
+
     const claimKey = `${PROACTIVE_FIRST_NUDGE_CLAIM_PREFIX}:${params.installationId}:${candidate.id}`;
     let claim: { id: string; createdAt: Date };
     try {
@@ -835,6 +862,10 @@ export async function runSlackProactiveScan(params: {
         select: { id: true },
       });
       if (!currentSource) {
+        await prisma.communicationEntityLink.deleteMany({ where: { id: claim.id, workspaceId: params.workspaceId, claimKey, action: PROACTIVE_NUDGE_PENDING, createdAt: claim.createdAt } });
+        continue;
+      }
+      if (!nudgeWindowOpen()) {
         await prisma.communicationEntityLink.deleteMany({ where: { id: claim.id, workspaceId: params.workspaceId, claimKey, action: PROACTIVE_NUDGE_PENDING, createdAt: claim.createdAt } });
         continue;
       }

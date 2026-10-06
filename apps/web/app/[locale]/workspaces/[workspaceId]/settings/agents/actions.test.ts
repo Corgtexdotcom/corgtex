@@ -17,6 +17,7 @@ const updateAgentConfig = vi.fn();
 const updateCompanyUnderstandingGoalApplyMode = vi.fn();
 const updateWorkspaceNewspaperCadence = vi.fn();
 const updateWorkspaceNewspaperSchedule = vi.fn();
+const updateWorkspaceSlackNudgeWindow = vi.fn();
 
 vi.mock("@/lib/demo-guard", () => ({
   enforceDemoGuard,
@@ -31,6 +32,7 @@ vi.mock("@corgtex/domain", () => ({
   updateCompanyUnderstandingGoalApplyMode,
   updateWorkspaceNewspaperCadence,
   updateWorkspaceNewspaperSchedule,
+  updateWorkspaceSlackNudgeWindow,
 }));
 
 vi.mock("next/cache", () => ({
@@ -76,5 +78,14 @@ describe("agent settings actions", () => {
     });
     expect(revalidatePath).toHaveBeenCalledWith("/workspaces/workspace-1/settings/agents");
     expect(revalidatePath).toHaveBeenCalledWith("/workspaces/workspace-1/settings");
+  });
+
+  it("passes a workspace Slack reminder window through the admin domain action", async () => {
+    const { updateSlackNudgeWindowAction } = await import("./actions");
+    const window = { timeZone: "America/Toronto", weekdays: [1, 2, 3, 4, 5], startLocalTime: "09:00", endLocalTime: "17:00" };
+    await updateSlackNudgeWindowAction("workspace-1", window);
+    expect(enforceDemoGuard).toHaveBeenCalledWith("workspace-1");
+    expect(updateWorkspaceSlackNudgeWindow).toHaveBeenCalledWith(actor, { workspaceId: "workspace-1", window });
+    expect(revalidatePath).toHaveBeenCalledWith("/workspaces/workspace-1/settings/agents");
   });
 });

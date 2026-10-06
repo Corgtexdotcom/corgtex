@@ -80,7 +80,8 @@ vi.mock("@corgtex/models", () => ({
   },
 }));
 
-vi.mock("@corgtex/domain", () => ({
+vi.mock("@corgtex/domain", async () => ({
+  isSlackNudgeWindowOpen: (await import("../../../domain/src/slack-nudge-window")).isSlackNudgeWindowOpen,
   AGENT_REGISTRY: {
     "slack-agent": {
       defaultModelTier: "standard",
@@ -373,6 +374,51 @@ describe("Slack context jobs", () => {
     expect(prismaMock.communicationEntityLink.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: { action: "proactive_unanswered_nudge" },
     }));
+  });
+
+  it("holds Saturday's first nudge without review or claim until Monday's Toronto window", async () => {
+    prismaMock.workspaceAgentConfig.findUnique.mockResolvedValue({ configJson: {
+      proactiveActionPublicationEnabled: true,
+      proactiveNudgeWindow: { timeZone: "America/Toronto", weekdays: [1, 2, 3, 4, 5], startLocalTime: "09:00", endLocalTime: "17:00" },
+    } });
+    vi.setSystemTime(new Date("2026-10-03T19:00:00.000Z"));
+    prismaMock.communicationMessage.findMany.mockResolvedValue([
+      candidate({
+        text: "Does anyone know who owns the launch checklist?",
+        messageTs: new Date("2026-10-02T18:00:00.000Z"),
+      }),
+    ]);
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    const result = await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
+
+    expect(result.nudges).toBe(0);
+    expect(extractMock).not.toHaveBeenCalled();
+    expect(prismaMock.communicationEntityLink.create).not.toHaveBeenCalled();
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+
+    vi.setSystemTime(new Date("2026-10-05T13:00:00.000Z"));
+    const resumed = await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
+    expect(resumed.nudges).toBe(1);
+    expect(sendSlackMessageMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("reaches a held request beyond the first 100 messages and past the old seven-day cutoff", async () => {
+    prismaMock.workspaceAgentConfig.findUnique.mockResolvedValue({ configJson: {
+      proactiveNudgeWindow: { timeZone: "America/Toronto", weekdays: [1], startLocalTime: "09:00", endLocalTime: "10:00" },
+    } });
+    vi.setSystemTime(new Date("2026-10-12T13:59:00Z"));
+    const filler = Array.from({ length: 100 }, (_, index) => candidate({ id: `filler-${index}`, text: "FYI, the launch plan is ready." }));
+    const held = candidate({ id: "held-request", text: "Can someone confirm the launch owner?", messageTs: new Date("2026-10-05T13:01:00Z") });
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce(filler).mockResolvedValueOnce([held]);
+    const { runSlackProactiveScan } = await import("./slack-context");
+    const result = await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
+    expect(result.nudges).toBe(1);
+    expect(prismaMock.communicationMessage.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ messageTs: expect.objectContaining({ gte: new Date("2026-09-28T13:59:00Z") }) }),
+      cursor: { id: "filler-99" }, skip: 1,
+    }));
+    expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ messageId: "held-request" }) }));
   });
 
   it("does not nudge unanswered public Slack questions before 24 hours", async () => {

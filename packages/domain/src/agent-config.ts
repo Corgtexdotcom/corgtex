@@ -5,6 +5,11 @@ import { AGENT_REGISTRY, type RegisteredAgentKey } from "./agent-registry";
 import { AppError } from "./errors";
 import type { MemberKind, NewspaperCadence, Prisma } from "@prisma/client";
 import { isHumanMemberIdentity } from "./member-identity";
+import { parseSlackNudgeWindow } from "./slack-nudge-window";
+import type { SlackNudgeWindow } from "./slack-nudge-window";
+
+export { isSlackNudgeWindowOpen, parseSlackNudgeWindow } from "./slack-nudge-window";
+export type { SlackNudgeWindow } from "./slack-nudge-window";
 
 export type AgentConfigSummary = {
   agentKey: RegisteredAgentKey;
@@ -320,6 +325,9 @@ function normalizeAgentConfigJson(agentKey: string, configJson: unknown): Prisma
     return toInputJson({
       ...DEFAULT_SLACK_AGENT_CONFIG,
       ...config,
+      ...(config.proactiveNudgeWindow !== undefined
+        ? { proactiveNudgeWindow: parseSlackNudgeWindow(config.proactiveNudgeWindow) }
+        : {}),
       proactiveConfidenceThreshold: typeof config.proactiveConfidenceThreshold === "number"
         ? Math.max(0, Math.min(1, config.proactiveConfidenceThreshold))
         : DEFAULT_SLACK_AGENT_CONFIG.proactiveConfidenceThreshold,
@@ -337,6 +345,30 @@ function normalizeAgentConfigJson(agentKey: string, configJson: unknown): Prisma
   }
 
   return toInputJson(config) as Prisma.InputJsonObject;
+}
+
+export async function updateWorkspaceSlackNudgeWindow(
+  actor: AppActor,
+  params: { workspaceId: string; window: SlackNudgeWindow | null },
+) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"] });
+  const window = parseSlackNudgeWindow(params.window);
+  const existing = await prisma.workspaceAgentConfig.findUnique({
+    where: { workspaceId_agentKey: { workspaceId: params.workspaceId, agentKey: "slack-agent" } },
+    select: { configJson: true },
+  });
+  const configJson = isRecord(existing?.configJson) ? { ...existing.configJson } : {};
+  if (window) configJson.proactiveNudgeWindow = window;
+  else delete configJson.proactiveNudgeWindow;
+  const normalized = normalizeAgentConfigJson("slack-agent", configJson);
+  return prisma.workspaceAgentConfig.upsert({
+    where: { workspaceId_agentKey: { workspaceId: params.workspaceId, agentKey: "slack-agent" } },
+    create: {
+      workspaceId: params.workspaceId, agentKey: "slack-agent", enabled: true,
+      modelOverride: null, governancePolicy: null, configJson: normalized,
+    },
+    update: { configJson: normalized },
+  });
 }
 
 function defaultConfigJson(agentKey: string) {
