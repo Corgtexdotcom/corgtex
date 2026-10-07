@@ -5,7 +5,6 @@ import { revalidatePath } from "next/cache";
 import {
   AppError,
   applyContextGraphProposedDiff,
-  buildSelectedRegionContext,
   createContextMapManualEditProposal,
   createPersonalContextMapView,
   reviewContextGraphProposedDiff,
@@ -58,20 +57,6 @@ export async function createPersonalContextMapViewAction(params: {
   const mapView = await createPersonalContextMapView(actor, params);
   revalidatePath(`/workspaces/${params.workspaceId}/maps`);
   return { id: mapView.id, name: mapView.name };
-}
-
-export async function buildSelectedRegionContextAction(params: {
-  workspaceId: string;
-  mapViewId: string;
-  objectIds: string[];
-}) {
-  const actor = await requirePageActor();
-  return buildSelectedRegionContext(actor, {
-    workspaceId: params.workspaceId,
-    mapViewId: params.mapViewId,
-    objectIds: params.objectIds,
-    depth: 2,
-  });
 }
 
 export async function createContextMapManualEditProposalAction(params: {

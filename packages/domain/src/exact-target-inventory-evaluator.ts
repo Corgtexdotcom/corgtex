@@ -11,9 +11,7 @@ import {
   exactTargetInventoryAllowedDispositions,
   exactTargetInventoryClassDispositions,
   exactTargetInventoryEvaluationPurposes,
-  exactTargetInventoryClaimKinds,
   exactTargetInventoryComponentKinds,
-  exactTargetInventoryProofPurposes,
   exactTargetInventoryUseSiteProofRequirements,
   exactTargetInventoryWorkloadClasses,
   type ExactTargetInventoryArtifactIdentity,
@@ -103,9 +101,6 @@ const evaluationPurpose = (purpose: unknown): ExactTargetInventoryEvaluationPurp
 
 const boundedId = (value: unknown): value is string =>
   typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
-
-const boundedSlug = (value: unknown): value is string =>
-  typeof value === "string" && /^[a-z0-9][a-z0-9-]{2,63}$/.test(value);
 
 const boundedPath = (value: unknown): value is string => {
   if (typeof value !== "string" || !/^evidence\/[a-z0-9][a-z0-9./-]{2,120}\.json$/.test(value)) return false;
