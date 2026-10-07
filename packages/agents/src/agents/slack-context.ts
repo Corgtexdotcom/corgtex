@@ -685,8 +685,11 @@ export async function runSlackProactiveScan(params: {
     const saved = checkpoint?.message;
     let after = saved?.messageTs && !saved.isDeleted
       && saved.workspaceId === params.workspaceId && saved.installationId === params.installationId
-      && saved.messageTs >= recentCutoff && saved.messageTs <= unansweredCutoff
+      && saved.messageTs <= unansweredCutoff
       ? { id: saved.id, messageTs: saved.messageTs } : undefined;
+    // A weekly window may reopen after unfinished rows age out of the initial
+    // lookback. Finish that bounded cycle before starting a new 14-day cycle.
+    const cycleCutoff = after && after.messageTs < recentCutoff ? after.messageTs : recentCutoff;
     let processed: { id: string; messageTs: Date | null } | undefined;
     let exhausted = false;
     try {
@@ -696,6 +699,7 @@ export async function runSlackProactiveScan(params: {
           ...candidateQuery,
           where: {
             ...candidateQuery.where,
+            messageTs: { gte: cycleCutoff, lte: unansweredCutoff },
             ...(after ? { OR: [
               { messageTs: { gt: after.messageTs } },
               { messageTs: after.messageTs, id: { gt: after.id } },

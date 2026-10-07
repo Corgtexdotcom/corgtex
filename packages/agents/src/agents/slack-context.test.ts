@@ -447,7 +447,9 @@ describe("Slack context jobs", () => {
     });
     prismaMock.communicationMessage.findMany.mockImplementation(async ({ where, take }) => {
       const after = where.OR?.[1]?.id?.gt;
-      return rows.slice(after ? rows.findIndex((row) => row.id === after) + 1 : 0).slice(0, take);
+      return rows.slice(after ? rows.findIndex((row) => row.id === after) + 1 : 0)
+        .filter((row) => row.messageTs && row.messageTs >= where.messageTs.gte && row.messageTs <= where.messageTs.lte)
+        .slice(0, take);
     });
     return () => checkpoint;
   }
@@ -467,6 +469,30 @@ describe("Slack context jobs", () => {
       workspaceId: "workspace-1", installationId: "install-1", claimKey: "slack:first-nudge-scan-cursor:install-1",
     }) }));
     expect(prismaMock.communicationEntityLink.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ action: "proactive_first_nudge_scan_cursor", createdAt: expect.any(Date) }) }));
+  });
+
+  it("retains unfinished backlog when a weekly window reopens beyond the initial lookback", async () => {
+    const messageTs = new Date("2026-09-23T15:00:00Z");
+    const rows = Array.from({ length: 501 }, (_, index) => candidate({
+      id: `row-${String(index).padStart(4, "0")}`, messageTs, text: "FYI, launch plan ready.",
+    }));
+    rows.push(candidate({ id: "held", messageTs: new Date(messageTs.getTime() + 60_000), text: "Can someone confirm the owner?" }));
+    const checkpoint = installScanFixture(rows);
+    prismaMock.workspaceAgentConfig.findUnique.mockResolvedValue({ configJson: {
+      proactiveNudgeWindow: { timeZone: "UTC", weekdays: [1], startLocalTime: "09:00", endLocalTime: "10:00" },
+    } });
+    vi.setSystemTime(new Date("2026-10-05T09:59:00Z"));
+    const { runSlackProactiveScan } = await import("./slack-context");
+    const params = { workspaceId: "workspace-1", installationId: "install-1" };
+    expect((await runSlackProactiveScan(params)).nudges).toBe(0);
+    expect(checkpoint()?.message?.id).toBe("row-0499");
+
+    vi.setSystemTime(new Date("2026-10-12T09:59:00Z"));
+    expect((await runSlackProactiveScan(params)).nudges).toBe(1);
+    expect(checkpoint()?.message).toBeNull();
+    expect(prismaMock.communicationMessage.findMany).toHaveBeenLastCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ messageTs: expect.objectContaining({ gte: messageTs }) }),
+    }));
   });
 
   it("keeps a closing-time candidate after the last fully examined ordinary row", async () => {
@@ -495,7 +521,7 @@ describe("Slack context jobs", () => {
     expect(checkpoint()?.message?.id).toBe("ask-9");
   });
 
-  it.each([null, candidate({ id: "deleted", isDeleted: true }), candidate({ id: "expired", messageTs: new Date("2026-09-01T00:00:00Z") }), candidate({ id: "foreign", workspaceId: "other" })])("resets a deleted, expired, or foreign saved cursor", async (saved) => {
+  it.each([null, candidate({ id: "deleted", isDeleted: true }), candidate({ id: "future", messageTs: new Date("2026-11-01T00:00:00Z") }), candidate({ id: "foreign", workspaceId: "other" })])("resets a deleted, future, or foreign saved cursor", async (saved) => {
     installScanFixture([], saved);
     const { runSlackProactiveScan } = await import("./slack-context");
     await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
