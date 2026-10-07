@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
@@ -35,8 +35,18 @@ async function fixture(sourceRemovalEnabled = true) {
   return { workspace, actor, member, removed, remaining };
 }
 
+const runtimeOptIn = "BRAIN_SOURCE_REMOVAL_RUNTIME_ENABLED";
+const previousRuntimeOptIn = process.env[runtimeOptIn];
+
 describe("Brain source removal review", () => {
-  beforeEach(truncateAllTables);
+  beforeEach(async () => {
+    process.env[runtimeOptIn] = "true";
+    await truncateAllTables();
+  });
+  afterEach(() => {
+    if (previousRuntimeOptIn === undefined) delete process.env[runtimeOptIn];
+    else process.env[runtimeOptIn] = previousRuntimeOptIn;
+  });
 
   it("defaults off for linked sources while generic archive stays guarded and unlinked archiving works", async () => {
     const { workspace, actor, removed, remaining } = await fixture(false);
@@ -73,6 +83,11 @@ describe("Brain source removal review", () => {
     await expect(deleteSource(reader, { workspaceId: workspace.id, sourceId: removed.id }))
       .rejects.toMatchObject({ status: 403 });
     expect(await prisma.workflowJob.count({ where: { workspaceId: workspace.id, type: "agent.brain-source-regenerate" } })).toBe(0);
+    delete process.env[runtimeOptIn];
+    await expect(deleteSource(actor, { workspaceId: workspace.id, sourceId: removed.id }))
+      .rejects.toMatchObject({ status: 409, code: "BRAIN_SOURCE_REMOVAL_DISABLED" });
+    expect(await prisma.workflowJob.count({ where: { workspaceId: workspace.id, type: "agent.brain-source-regenerate" } })).toBe(0);
+    process.env[runtimeOptIn] = "true";
     const requested = await deleteSource(actor, { workspaceId: workspace.id, sourceId: removed.id });
     expect(requested.status).toBe("pending");
     expect(await prisma.workflowJob.count({ where: { workspaceId: workspace.id, type: "agent.brain-source-regenerate" } })).toBe(1);
@@ -131,6 +146,11 @@ describe("Brain source removal review", () => {
       .rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
     const [review] = await listBrainSourceRemovalReviews(actor, { workspaceId: workspace.id, sourceIds: [removed.id] });
     expect(review.articles[0]).toMatchObject({ currentBodyMd: "Human revised facts", candidateBodyMd: "Facts from remaining source only" });
+    process.env[runtimeOptIn] = "false";
+    await expect(resolveBrainSourceRemoval(actor, { workspaceId: workspace.id, jobId: requested.jobId, decision: "accept" }))
+      .rejects.toMatchObject({ status: 409, code: "BRAIN_SOURCE_REMOVAL_DISABLED" });
+    expect((await prisma.brainArticle.findUniqueOrThrow({ where: { id: article.id } })).bodyMd).toBe("Human revised facts");
+    process.env[runtimeOptIn] = "true";
     await prisma.workspaceFeatureFlag.update({ where: { workspaceId_flag: {
       workspaceId: workspace.id, flag: "BRAIN_SOURCE_REMOVAL",
     } }, data: { enabled: false } });

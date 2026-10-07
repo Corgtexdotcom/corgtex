@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { brainSourceContentFingerprint } from "./brain-derivation";
@@ -36,8 +36,40 @@ function confirmParams(workspaceId: string, slug: string, expectedToken: string,
   return { workspaceId, slug, expectedToken, mode, confirmation: "archive_article" };
 }
 
+const runtimeOptIn = "BRAIN_SOURCE_REMOVAL_RUNTIME_ENABLED";
+const previousRuntimeOptIn = process.env[runtimeOptIn];
+
 describe("confirmed Brain article removal", () => {
-  beforeEach(truncateAllTables);
+  beforeEach(async () => {
+    process.env[runtimeOptIn] = "true";
+    await truncateAllTables();
+  });
+  afterEach(() => {
+    if (previousRuntimeOptIn === undefined) delete process.env[runtimeOptIn];
+    else process.env[runtimeOptIn] = previousRuntimeOptIn;
+  });
+
+  it("keeps linked sources when a stored true flag has no runtime opt-in", async () => {
+    const { workspace, admin, outsider } = await fixture();
+    const { document, source } = await sourceWithDocument(workspace.id, "Runtime paused");
+    const article = await prisma.brainArticle.create({ data: {
+      workspaceId: workspace.id, slug: "runtime-paused", title: "Runtime paused", type: "PROJECT",
+      bodyMd: "Original", sourceIds: [source.id],
+    } });
+    delete process.env[runtimeOptIn];
+    await expect(previewBrainArticleRemoval(outsider, { workspaceId: workspace.id, slug: article.slug }))
+      .rejects.toMatchObject({ status: 403, code: "NOT_A_MEMBER" });
+    const preview = await previewBrainArticleRemoval(admin, { workspaceId: workspace.id, slug: article.slug });
+    expect(preview.canRemoveSources).toBe(false);
+    expect(preview.blockReasons).toContain("feature_disabled");
+    await expect(confirmBrainArticleRemoval(admin, confirmParams(workspace.id, article.slug, preview.token, "remove_sources")))
+      .rejects.toMatchObject({ status: 409, code: "BRAIN_SOURCE_REMOVAL_DISABLED" });
+    expect((await prisma.brainSource.findUniqueOrThrow({ where: { id: source.id } })).archivedAt).toBeNull();
+    expect((await prisma.document.findUniqueOrThrow({ where: { id: document.id } })).archivedAt).toBeNull();
+    expect(await confirmBrainArticleRemoval(admin, confirmParams(workspace.id, article.slug, preview.token, "keep_sources")))
+      .toMatchObject({ id: article.id, pendingJobId: null });
+    expect((await prisma.brainSource.findUniqueOrThrow({ where: { id: source.id } })).archivedAt).toBeNull();
+  });
 
   it("hides linked source removal while disabled but permits article-only archive", async () => {
     const { workspace, admin } = await fixture(false);

@@ -20,6 +20,7 @@ export * from "./agreements";
 export * from "./decisions";
 export * from "./brain";
 export * from "./brain-derivation";
+export * from "./brain-removal-gate";
 export * from "./brain-source-impact";
 export * from "./brain-source-removal";
 export * from "./brain-article-removal";
