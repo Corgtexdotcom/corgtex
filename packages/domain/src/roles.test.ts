@@ -319,6 +319,53 @@ describe("roles domain", () => {
     }));
   });
 
+  it.each(["ADMIN", "FACILITATOR"] as const)("updateRole persists a changed description for a %s", async (role) => {
+    const editor: AppActor = {
+      kind: "user",
+      user: { id: "editor-1", email: "editor@example.com", displayName: "Editor", globalRole: "USER" },
+    };
+    prismaMock.member.findUnique.mockResolvedValue({
+      id: "membership-1", workspaceId: "workspace-1", userId: "editor-1", role, isActive: true,
+    });
+    prismaMock.role.findUnique.mockResolvedValue({
+      id: "role-1", circleId: "circle-1", purposeMd: "Old description", archivedAt: null,
+      circle: { workspaceId: "workspace-1" },
+    });
+    prismaMock.role.update.mockResolvedValue({
+      id: "role-1", circleId: "circle-1", name: "Lead", purposeMd: "New description",
+      accountabilities: [], artifacts: [], metricsMd: null, coreRoleType: null,
+      circle: { id: "circle-1", name: "Circle" },
+    });
+
+    const { updateRole } = await import("./roles");
+    await expect(updateRole(editor, {
+      workspaceId: "workspace-1", roleId: "role-1", purposeMd: "  New description  ",
+    })).resolves.toMatchObject({ purposeMd: "New description" });
+    expect(prismaMock.role.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: { purposeMd: "New description" },
+    }));
+    expect(prismaMock.roleVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ roleId: "role-1", purposeMd: "New description", changeType: "updated" }),
+    }));
+  });
+
+  it("updateRole rejects a regular member's description change before writing", async () => {
+    const member: AppActor = {
+      kind: "user",
+      user: { id: "member-1", email: "member@example.com", displayName: "Member", globalRole: "USER" },
+    };
+    prismaMock.member.findUnique.mockResolvedValue({
+      id: "membership-1", workspaceId: "workspace-1", userId: "member-1", role: "CONTRIBUTOR", isActive: true,
+    });
+
+    const { updateRole } = await import("./roles");
+    await expect(updateRole(member, {
+      workspaceId: "workspace-1", roleId: "role-1", purposeMd: "Unapproved change",
+    })).rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+    expect(prismaMock.role.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.role.update).not.toHaveBeenCalled();
+  });
+
   it("updateRole moves a role to another workspace circle", async () => {
     prismaMock.role.findUnique.mockResolvedValue({
       id: "role-1",

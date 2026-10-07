@@ -1855,6 +1855,7 @@
     "pageDescription": "Opera roles por círculo, estado de dotación y portafolio de miembro.",
     "pageTitle": "Roles",
     "purpose": "Propósito",
+    "readOnlyEditHelp": "Solo los facilitadores y administradores del espacio de trabajo pueden editar las descripciones de los roles. Pídeles que hagan el cambio.",
     "reassignTo": "Reasignar a",
     "removeHolder": "Quitar {name}",
     "selectMember": "Selecciona un miembro",
