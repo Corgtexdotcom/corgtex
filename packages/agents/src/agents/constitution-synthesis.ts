@@ -4,6 +4,53 @@ import { defaultModelGateway } from "@corgtex/models";
 import { createConstitutionVersion, loadConstitutionCorpusSnapshot } from "@corgtex/domain";
 import { executeAgentRun } from "../runtime";
 
+function parseConstitutionSynthesis(content: string, policyIds: Set<string>) {
+  let value: unknown;
+  try {
+    value = JSON.parse(content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""));
+  } catch {
+    throw new Error("Invalid Constitution synthesis output.");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Invalid Constitution synthesis output.");
+  }
+  if (Object.keys(value).some((key) => key !== "bodyMd" && key !== "pointSources")) {
+    throw new Error("Invalid Constitution synthesis output.");
+  }
+  const { bodyMd, pointSources } = value as Record<string, unknown>;
+  if (typeof bodyMd !== "string" || !bodyMd.trim() || !Array.isArray(pointSources) || pointSources.length !== 10) {
+    throw new Error("Invalid Constitution synthesis output.");
+  }
+  const headings = [...bodyMd.matchAll(/^##\s+(\d+)\.\s+\S/gm)].map((match) => Number(match[1]));
+  if (headings.length !== 10 || headings.some((pointOrder, index) => pointOrder !== index + 1)) {
+    throw new Error("Invalid Constitution point order.");
+  }
+
+  const references: Array<{ pointOrder: number; sourceOrder: number; policyCorpusId: string; sourceKind: "PROPOSAL" }> = [];
+  for (const [index, entry] of pointSources.entries()) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error("Invalid Constitution source mapping.");
+    }
+    if (Object.keys(entry).some((key) => key !== "pointOrder" && key !== "policyCorpusIds")) {
+      throw new Error("Invalid Constitution source mapping.");
+    }
+    const { pointOrder, policyCorpusIds } = entry as Record<string, unknown>;
+    if (pointOrder !== index + 1 || !Array.isArray(policyCorpusIds)) {
+      throw new Error("Invalid Constitution source mapping.");
+    }
+    const seenPolicies = new Set<string>();
+    for (const [sourceIndex, policyId] of policyCorpusIds.entries()) {
+      if (typeof policyId !== "string" || !policyIds.has(policyId) || seenPolicies.has(policyId)) {
+        throw new Error("Invalid Constitution source mapping.");
+      }
+      seenPolicies.add(policyId);
+      references.push({ pointOrder: index + 1, sourceOrder: sourceIndex + 1, policyCorpusId: policyId, sourceKind: "PROPOSAL" });
+    }
+  }
+  if (references.length === 0) throw new Error("Constitution synthesis must cite accepted policies.");
+  return { bodyMd, references };
+}
+
 export async function runConstitutionSynthesisAgent(params: {
   workspaceId: string;
   triggerRef: string;
@@ -55,6 +102,13 @@ export async function runConstitutionSynthesisAgent(params: {
           },
         };
       }
+      if (!corpusFingerprint || !/^[a-f0-9]{64}$/i.test(corpusFingerprint)) {
+        throw new Error("Constitution synthesis requires a verified policy corpus fingerprint.");
+      }
+      const policyIds = policies.map((policy) => (policy as { id?: unknown }).id);
+      if (!policyIds.every((id): id is string => typeof id === "string" && !!id.trim())) {
+        throw new Error("Constitution synthesis requires exact accepted policy IDs.");
+      }
 
       const synthesized = await helpers.tool("model.chat", { policyCount: policies.length }, async () => defaultModelGateway.chat({ model,
         workspaceId: params.workspaceId,
@@ -74,6 +128,8 @@ The constitution should:
 - Reference source proposals for traceability.
 - Be written in clear, authoritative markdown.
 
+Return only a JSON object with bodyMd and pointSources. In bodyMd, use exactly ten numbered headings from "## 1. ..." through "## 10. ..." after the fixed Mission, Vision, and Purpose section. pointSources must contain one entry for each point, in order: { "pointOrder": 1, "policyCorpusIds": ["an exact policy id"] }. Cite only accepted policy IDs supplied below that directly support the point. An unsupported point may have an empty list. Never invent source IDs or include proposal or tension details in this mapping.
+
 ${currentConstitution ? "You are UPDATING the existing constitution. You MUST preserve the existing Mission, Vision, and Purpose exactly as written. Update the 10 points based on the new policies." : "You are creating the FIRST constitution version. Establish the 10 points from the provided context."}`,
           },
           {
@@ -81,6 +137,7 @@ ${currentConstitution ? "You are UPDATING the existing constitution. You MUST pr
             content: JSON.stringify({
               currentConstitution: currentConstitution?.bodyMd ?? null,
               policies: policies.map((p: Record<string, unknown>) => ({
+                id: p.id,
                 title: p.title,
                 bodyMd: p.bodyMd,
                 acceptedAt: p.acceptedAt,
@@ -89,6 +146,11 @@ ${currentConstitution ? "You are UPDATING the existing constitution. You MUST pr
           },
         ],
       }));
+
+      const { bodyMd, references } = parseConstitutionSynthesis(
+        synthesized.content,
+        new Set(policyIds),
+      );
 
       const diffSummary = currentConstitution
         ? await helpers.tool("model.chat", { purpose: "diff-summary" }, async () => defaultModelGateway.chat({ model,
@@ -104,7 +166,7 @@ ${currentConstitution ? "You are UPDATING the existing constitution. You MUST pr
                 role: "user",
                 content: JSON.stringify({
                   previous: currentConstitution.bodyMd.slice(0, 2000),
-                  updated: synthesized.content.slice(0, 2000),
+                  updated: bodyMd.slice(0, 2000),
                 }),
               },
             ],
@@ -116,7 +178,8 @@ ${currentConstitution ? "You are UPDATING the existing constitution. You MUST pr
       const newVersion = await helpers.step("persist-version", { version: latestVersion + 1 }, async () =>
         createConstitutionVersion({
           workspaceId: params.workspaceId,
-          bodyMd: synthesized.content,
+          bodyMd,
+          references,
           diffSummary: diffSummary?.content ?? (currentConstitution ? null : "Initial constitution generated from policy corpus."),
           triggerType: "agent",
           triggerRef: runId,

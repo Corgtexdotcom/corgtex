@@ -106,7 +106,7 @@ describe("createConstitutionVersion", () => {
 
   it("derives snapshots and creates version-owned references atomically", async () => {
     const references = [
-      { pointOrder: 1, sourceOrder: 1, policyCorpusId: "policy-1", sourceKind: "PROPOSAL" as const, proposalId: "proposal-1" },
+      { pointOrder: 1, sourceOrder: 1, policyCorpusId: "policy-1", sourceKind: "PROPOSAL" as const },
       { pointOrder: 1, sourceOrder: 2, policyCorpusId: "policy-1", sourceKind: "TENSION" as const, tensionId: "tension-1" },
     ];
     txMock.policyCorpus.findMany.mockResolvedValue([policy]);
@@ -138,6 +138,7 @@ describe("createConstitutionVersion", () => {
     const invalidReferenceSets = [
       [{ pointOrder: 1, sourceOrder: 1, policyCorpusId: "policy-1", sourceKind: "TENSION" as const, tensionId: "private-tension" }],
       [{ pointOrder: 1, sourceOrder: 1, policyCorpusId: "other-workspace", sourceKind: "PROPOSAL" as const, proposalId: "proposal-1" }],
+      [{ pointOrder: 1, sourceOrder: 1, policyCorpusId: "policy-1", sourceKind: "PROPOSAL" as const, proposalId: "wrong-proposal" }],
       [{ pointOrder: 1, sourceOrder: 1, policyCorpusId: "policy-1", sourceKind: "PROPOSAL" as const, proposalId: "proposal-1", tensionId: "tension-1" }],
       [1, 2].map((sourceOrder) => ({ pointOrder: 1, sourceOrder, policyCorpusId: "policy-1", sourceKind: "PROPOSAL" as const, proposalId: "proposal-1" })),
     ];

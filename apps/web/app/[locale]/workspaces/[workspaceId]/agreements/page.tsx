@@ -75,6 +75,14 @@ export default async function AgreementsPage({
   const t = await getTranslations("agreements");
   const agreements = await listWorkspaceAgreements(actor, { workspaceId });
   const currentConstitution = agreements.currentConstitution;
+  const constitutionSources = Array.from(
+    (currentConstitution?.sourceReferences ?? []).reduce((points, source) => {
+      const sources = points.get(source.pointOrder) ?? [];
+      sources.push(source);
+      points.set(source.pointOrder, sources);
+      return points;
+    }, new Map<number, NonNullable<typeof currentConstitution>["sourceReferences"]>()),
+  );
   const category = normalizeCategory(resolvedSearch.category);
   const workspacePolicyCount = agreements.policyCorpus.filter((policy) => !policy.circle).length;
   const circleScopes = Array.from(
@@ -156,6 +164,27 @@ export default async function AgreementsPage({
           {currentConstitution ? (
             <div className="agreements-document">
               <MarkdownRenderer markdown={currentConstitution.bodyMd} variant="compact" />
+              {constitutionSources.length > 0 && (
+                <section aria-labelledby="constitution-origin-heading" className="mt-6 border-t border-line pt-4">
+                  <h3 id="constitution-origin-heading" className="mb-3 text-sm font-semibold text-text">{t("constitutionOrigins")}</h3>
+                  <ol className="space-y-3">
+                    {constitutionSources.map(([pointOrder, sources]) => (
+                      <li key={pointOrder} className="list-none">
+                        <strong className="block text-sm">{t("constitutionPoint", { number: pointOrder })}</strong>
+                        <ul className="mt-1 space-y-1">
+                          {sources.map((source) => (
+                            <li key={`${source.sourceKind}-${source.targetId}`} className="list-none text-sm">
+                              <Link href={`/workspaces/${workspaceId}/${source.sourceKind === "PROPOSAL" ? "proposals" : "tensions"}/${source.targetId}`} className="underline underline-offset-2" style={{ color: "var(--accent)" }}>
+                                {source.title}
+                              </Link>
+                            </li>
+                          ))}
+                        </ul>
+                      </li>
+                    ))}
+                  </ol>
+                </section>
+              )}
             </div>
           ) : (
             <p className="work-conversation-empty">{t("noConstitution")}</p>
@@ -194,10 +223,14 @@ export default async function AgreementsPage({
                     {policy.circle ? <span className="tag">{policy.circle.name}</span> : <span className="tag info">{t("scopeWorkspace")}</span>}
                   </div>
                   <div className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 4 }}>
-                    <Link href={`/workspaces/${workspaceId}/proposals/${policy.proposal.id}`} style={{ color: "inherit", textDecoration: "underline" }}>
-                      {policy.proposal.title}
-                    </Link>
-                    {" · "}
+                    {policy.proposal && (
+                      <>
+                        <Link href={`/workspaces/${workspaceId}/proposals/${policy.proposal.id}`} style={{ color: "inherit", textDecoration: "underline" }}>
+                          {policy.proposal.title}
+                        </Link>
+                        {" · "}
+                      </>
+                    )}
                     {t("accepted", { date: formatDate(policy.acceptedAt) ?? "" })}
                   </div>
                   {category === "policies" ? (

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { getPrismaClient } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
+import { listWorkspaceAgreements } from "./agreements";
 import {
   acquireConstitutionCorpusAdvisoryLock,
   createConstitutionVersion,
@@ -26,6 +27,7 @@ async function createCorpusFixture(slug = "constitution-source") {
       passwordHash: "test-password-hash",
     },
   });
+  await prisma.member.create({ data: { workspaceId: workspace.id, userId: user.id, role: "CONTRIBUTOR" } });
   const proposal = await prisma.proposal.create({
     data: {
       workspaceId: workspace.id,
@@ -60,7 +62,7 @@ async function createCorpusFixture(slug = "constitution-source") {
       acceptedAt: new Date("2026-08-10T00:00:00.000Z"),
     },
   });
-  return { workspace, proposal, tension, policy };
+  return { workspace, user, proposal, tension, policy };
 }
 
 async function waitForQueuedCorpusLock(workspaceId: string) {
@@ -215,6 +217,12 @@ describe("Constitution provenance database contract", () => {
     })).rejects.toThrow("Invalid Constitution source reference.");
     await expect(createConstitutionVersion({
       workspaceId: localWorkspace.id,
+      bodyMd: "# Unknown policy",
+      modelUsed: "integration-test",
+      references: [{ pointOrder: 1, sourceOrder: 1, policyCorpusId: "unknown-policy-id", sourceKind: "PROPOSAL" }],
+    })).rejects.toThrow("Invalid Constitution source reference.");
+    await expect(createConstitutionVersion({
+      workspaceId: localWorkspace.id,
       bodyMd: "# Cross-workspace tension",
       modelUsed: "integration-test",
       references: [{
@@ -323,6 +331,7 @@ describe("Constitution provenance database contract", () => {
       bodyMd: "# Stale synthesis",
       modelUsed: "integration-test",
       expectedCorpusFingerprint: snapshot.fingerprint,
+      references: [{ pointOrder: 1, sourceOrder: 1, policyCorpusId: policy.id, sourceKind: "PROPOSAL" }],
     });
     await waitForQueuedCorpusLock(workspace.id);
     releaseWriter();
@@ -341,7 +350,7 @@ describe("Constitution provenance database contract", () => {
       modelUsed: "integration-test",
       expectedCorpusFingerprint: snapshot.fingerprint,
       references: [
-        { pointOrder: 1, sourceOrder: 1, policyCorpusId: policy.id, sourceKind: "PROPOSAL", proposalId: proposal.id },
+        { pointOrder: 1, sourceOrder: 1, policyCorpusId: policy.id, sourceKind: "PROPOSAL" },
         { pointOrder: 1, sourceOrder: 2, policyCorpusId: policy.id, sourceKind: "TENSION", tensionId: tension.id },
       ],
     });
@@ -374,5 +383,86 @@ describe("Constitution provenance database contract", () => {
       { policyCorpusId: policy.id, proposalId: proposal.id, labelSnapshot: proposal.title },
       { policyCorpusId: policy.id, tensionId: tension.id, labelSnapshot: tension.title },
     ]);
+  });
+
+  it("shows current authorized origins and hides archived or private sources without snapshot fallback", async () => {
+    const { workspace, user, proposal, tension, policy } = await createCorpusFixture("constitution-visible-origins");
+    const actor = { kind: "user" as const, user: { id: user.id, email: user.email, displayName: user.displayName } };
+    const snapshot = await loadConstitutionCorpusSnapshot(prisma, workspace.id);
+    await createConstitutionVersion({
+      workspaceId: workspace.id,
+      bodyMd: "# Constitution with sources",
+      modelUsed: "integration-test",
+      expectedCorpusFingerprint: snapshot.fingerprint,
+      references: [
+        { pointOrder: 1, sourceOrder: 1, policyCorpusId: policy.id, sourceKind: "PROPOSAL" },
+        { pointOrder: 1, sourceOrder: 2, policyCorpusId: policy.id, sourceKind: "TENSION", tensionId: tension.id },
+      ],
+    });
+    await prisma.proposal.update({ where: { id: proposal.id }, data: { title: "Current proposal title" } });
+    await prisma.tension.update({ where: { id: tension.id }, data: { title: "Current tension title" } });
+
+    const visible = await listWorkspaceAgreements(actor, { workspaceId: workspace.id });
+    expect(visible.currentConstitution?.sourceReferences).toMatchObject([
+      { targetId: proposal.id, title: "Current proposal title" },
+      { targetId: tension.id, title: "Current tension title" },
+    ]);
+    expect(visible.policyCorpus[0]?.proposal).toEqual({ id: proposal.id, title: "Current proposal title" });
+    expect(JSON.stringify(visible)).not.toContain("Missing provenance");
+
+    await prisma.tension.update({ where: { id: tension.id }, data: { archivedAt: new Date() } });
+    await prisma.proposal.update({ where: { id: proposal.id }, data: { archivedAt: new Date() } });
+    const archived = await listWorkspaceAgreements(actor, { workspaceId: workspace.id });
+    expect(archived.currentConstitution?.sourceReferences).toEqual([]);
+    expect(archived.policyCorpus[0]?.proposal).toBeNull();
+    expect(JSON.stringify(archived)).not.toContain(proposal.id);
+    expect(JSON.stringify(archived)).not.toContain(tension.id);
+
+    await prisma.proposal.update({ where: { id: proposal.id }, data: { archivedAt: null, status: "DRAFT", isPrivate: true, publishedAt: null } });
+    const privateOrigin = await listWorkspaceAgreements(actor, { workspaceId: workspace.id });
+    expect(privateOrigin.currentConstitution?.sourceReferences).toEqual([]);
+    expect(privateOrigin.policyCorpus[0]?.proposal).toBeNull();
+    expect(JSON.stringify(privateOrigin)).not.toContain(proposal.id);
+  });
+
+  it("keeps legacy Constitutions plain and drops deleted source IDs and labels", async () => {
+    const { workspace, user, proposal, tension, policy } = await createCorpusFixture("constitution-deleted-origins");
+    const actor = { kind: "user" as const, user: { id: user.id, email: user.email, displayName: user.displayName } };
+    await createConstitutionVersion({ workspaceId: workspace.id, bodyMd: "# Legacy Constitution", modelUsed: "integration-test" });
+    const legacy = await listWorkspaceAgreements(actor, { workspaceId: workspace.id });
+    expect(legacy.currentConstitution?.sourceReferences).toEqual([]);
+
+    await createConstitutionVersion({
+      workspaceId: workspace.id,
+      bodyMd: "# Constitution with source",
+      modelUsed: "integration-test",
+      references: [
+        { pointOrder: 1, sourceOrder: 1, policyCorpusId: policy.id, sourceKind: "PROPOSAL" },
+        { pointOrder: 1, sourceOrder: 2, policyCorpusId: policy.id, sourceKind: "TENSION", tensionId: tension.id },
+      ],
+    });
+    await prisma.policyCorpus.delete({ where: { id: policy.id } });
+    await prisma.tension.delete({ where: { id: tension.id } });
+    await prisma.proposal.delete({ where: { id: proposal.id } });
+
+    const deleted = await listWorkspaceAgreements(actor, { workspaceId: workspace.id });
+    expect(deleted.currentConstitution?.sourceReferences).toEqual([]);
+    expect(JSON.stringify(deleted)).not.toContain(proposal.id);
+    expect(JSON.stringify(deleted)).not.toContain(tension.id);
+    expect(JSON.stringify(deleted)).not.toContain("Missing provenance");
+    expect(JSON.stringify(deleted)).not.toContain("Adopt source provenance");
+  });
+
+  it("keeps public demo agreement reads inside the dedicated workspace without writes", async () => {
+    const { workspace, user } = await createCorpusFixture("jnj-demo");
+    await prisma.user.update({ where: { id: user.id }, data: { email: "demo@jnj-demo.corgtex.app" } });
+    const actor = { kind: "user" as const, user: { id: user.id, email: "demo@jnj-demo.corgtex.app", displayName: user.displayName } };
+    const foreign = await createWorkspace("constitution-demo-foreign");
+    const before = await prisma.constitution.count({ where: { workspaceId: workspace.id } });
+
+    const agreements = await listWorkspaceAgreements(actor, { workspaceId: workspace.id });
+    expect(agreements.policyCorpus).toHaveLength(1);
+    await expect(listWorkspaceAgreements(actor, { workspaceId: foreign.id })).rejects.toMatchObject({ status: 403 });
+    await expect(prisma.constitution.count({ where: { workspaceId: workspace.id } })).resolves.toBe(before);
   });
 });
