@@ -689,6 +689,7 @@ export async function runSlackProactiveScan(params: {
     }
   }
   for await (const candidate of eligibleFirstNudgeCandidates()) {
+    if (!nudgeWindowOpen()) break;
     const threadTs = threadTsForMessage(candidate);
     const cachePrefix = `${PROACTIVE_FIRST_NUDGE_CLAIM_PREFIX}:${params.installationId}:${candidate.id}:`;
     const textHash = createHash("sha256").update(candidate.text ?? "").digest("hex").slice(0, 16);
@@ -729,6 +730,7 @@ export async function runSlackProactiveScan(params: {
     if (replies > 0) continue;
 
     if (firstNudgeReviews >= MAX_FIRST_NUDGE_REVIEWS) break;
+    if (!nudgeWindowOpen()) break;
     firstNudgeReviews += 1;
     // Silence and punctuation are only candidate signals, not permission to interrupt.
     const review = await defaultModelGateway.extract({
@@ -739,6 +741,9 @@ export async function runSlackProactiveScan(params: {
       schemaHint: "{ explicitAsk: boolean, resolutionState: string, workDisposition: string, confidence: number, couldNot: string[] }",
       input: JSON.stringify({ text: candidate.text }),
     });
+    // A review that finishes after closing must not mark this source or start
+    // reviewing the next one. Leave both eligible for the next allowed scan.
+    if (!nudgeWindowOpen()) break;
     const output = review.output;
     const confidentReview = typeof output.explicitAsk === "boolean"
       && ["open", "answered"].includes(String(output.resolutionState))
@@ -789,7 +794,7 @@ export async function runSlackProactiveScan(params: {
 
     // Model review may have crossed the local closing time. Leave the source
     // untouched so the next allowed scan can reconsider it.
-    if (!nudgeWindowOpen()) continue;
+    if (!nudgeWindowOpen()) break;
 
     const claimKey = `${PROACTIVE_FIRST_NUDGE_CLAIM_PREFIX}:${params.installationId}:${candidate.id}`;
     let claim: { id: string; createdAt: Date };
