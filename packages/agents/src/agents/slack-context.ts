@@ -106,6 +106,7 @@ function slackAgentConfig(value: unknown) {
     unansweredActionCreationDelayMinutes: delayMinutes(config.unansweredActionCreationDelayMinutes, DEFAULT_UNANSWERED_ACTION_DELAY_MINUTES),
     staleActionFollowupDelayMinutes: delayMinutes(config.staleActionFollowupDelayMinutes, DEFAULT_STALE_ACTION_FOLLOWUP_DELAY_MINUTES),
     proactiveNudgeWindow: config.proactiveNudgeWindow,
+    proactiveNudgeWindowVersion: asString(config.proactiveNudgeWindowVersion),
     mutedChannelIds,
   };
 }
@@ -675,7 +676,10 @@ export async function runSlackProactiveScan(params: {
   async function* eligibleFirstNudgeCandidates() {
     if (!nudgeWindowOpen()) return;
     const configured = Boolean(config.proactiveNudgeWindow);
-    const claimKey = `slack:first-nudge-scan-cursor:${params.installationId}`;
+    // Old in-flight scans can finish after a policy reset, but can only write
+    // their own generation. A new activation always starts its own lookback.
+    const generation = config.proactiveNudgeWindowVersion ? `:${config.proactiveNudgeWindowVersion}` : "";
+    const claimKey = `slack:first-nudge-scan-cursor:${params.installationId}${generation}`;
     const action = "proactive_first_nudge_scan_cursor";
     const scope = { workspaceId: params.workspaceId, installationId: params.installationId, provider: "SLACK" as const, claimKey, action };
     const checkpoint = configured ? await prisma.communicationEntityLink.findFirst({

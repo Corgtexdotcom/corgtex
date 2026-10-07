@@ -495,6 +495,53 @@ describe("Slack context jobs", () => {
     }));
   });
 
+  it.each([false, true])("ignores an old in-flight scan after window removal and re-enable (existing cursor: %s)", async (existingCursor) => {
+    const window = { timeZone: "UTC", weekdays: [1], startLocalTime: "09:00", endLocalTime: "10:00" };
+    let configJson: Record<string, unknown> = { proactiveNudgeWindow: window, proactiveNudgeWindowVersion: "old" };
+    prismaMock.workspaceAgentConfig.findUnique.mockImplementation(async () => ({ configJson }));
+    const prefix = "slack:first-nudge-scan-cursor:install-1:";
+    const checkpoints = new Map<string, any>();
+    const rows = Array.from({ length: 500 }, (_, index) => candidate({ id: `old-${index}`, text: "FYI, ready.", messageTs: new Date("2026-09-23T15:00:00Z") }));
+    rows.push(candidate({ id: "old-request", text: "Can someone confirm the owner?", messageTs: new Date("2026-09-23T15:01:00Z") }));
+    if (existingCursor) checkpoints.set(`${prefix}old`, { id: "cursor", createdAt: new Date("2026-10-04T00:00:00Z"), message: candidate({ id: "earlier", messageTs: new Date("2026-09-22T15:00:00Z") }) });
+    prismaMock.communicationEntityLink.findFirst.mockImplementation(async ({ where }) => checkpoints.get(where.claimKey) ?? null);
+    const save = (key: string, data: any) => checkpoints.set(key, { id: "cursor", createdAt: data.createdAt, message: rows.find((row) => row.id === data.messageId) ?? null });
+    prismaMock.communicationEntityLink.create.mockImplementation(async ({ data }) => { save(data.claimKey, data); return { id: "cursor", createdAt: data.createdAt }; });
+    prismaMock.communicationEntityLink.updateMany.mockImplementation(async ({ where, data }) => {
+      if (checkpoints.get(where.claimKey)?.createdAt !== where.createdAt) return { count: 0 };
+      save(where.claimKey, data); return { count: 1 };
+    });
+    let queried!: () => void;
+    let resume!: () => void;
+    const firstQuery = new Promise<void>((resolve) => { queried = resolve; });
+    const paused = new Promise<void>((resolve) => { resume = resolve; });
+    let first = true;
+    prismaMock.communicationMessage.findMany.mockImplementation(async ({ where, take }) => {
+      if (first) { first = false; queried(); await paused; }
+      const after = where.OR?.[1]?.id?.gt;
+      return rows.slice(after ? rows.findIndex((row) => row.id === after) + 1 : 0)
+        .filter((row) => row.messageTs >= where.messageTs.gte && row.messageTs <= where.messageTs.lte).slice(0, take);
+    });
+    vi.setSystemTime(new Date("2026-10-05T09:00:00Z"));
+    const { runSlackProactiveScan } = await import("./slack-context");
+    const params = { workspaceId: "workspace-1", installationId: "install-1" };
+    const oldScan = runSlackProactiveScan(params);
+    await firstQuery;
+    configJson = { proactiveNudgeWindowVersion: "removed" };
+    checkpoints.clear(); // Policy mutation cleans up, but the old scan is still running.
+    vi.setSystemTime(new Date("2026-11-02T09:00:00Z"));
+    configJson = { proactiveNudgeWindow: window, proactiveNudgeWindowVersion: "new" };
+    resume();
+    await oldScan;
+    if (!existingCursor) expect(checkpoints.get(`${prefix}old`)?.message?.id).toBe("old-499");
+    expect((await runSlackProactiveScan(params)).nudges).toBe(0);
+    expect(prismaMock.communicationMessage.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ where: expect.objectContaining({
+      messageTs: expect.objectContaining({ gte: new Date("2026-10-19T09:00:00Z") }),
+    }) }));
+    expect(prismaMock.communicationEntityLink.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ claimKey: `${prefix}new` }) }));
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+  });
+
   it("keeps a closing-time candidate after the last fully examined ordinary row", async () => {
     const rows = [candidate({ id: "ordinary", text: "FYI, ready.", messageTs: new Date("2026-10-02T15:00:00Z") }), candidate({ id: "held", text: "Who can confirm?", messageTs: new Date("2026-10-02T15:00:00Z") })];
     const checkpoint = installScanFixture(rows);

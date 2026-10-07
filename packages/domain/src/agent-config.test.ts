@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { prismaMock } = vi.hoisted(() => ({
   prismaMock: {
+    $transaction: vi.fn(),
+    communicationEntityLink: { deleteMany: vi.fn() },
     workspaceAgentConfig: {
       upsert: vi.fn(),
       findUnique: vi.fn(),
@@ -33,6 +35,8 @@ vi.mock("./auth", () => ({
 describe("agent-config", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    prismaMock.$transaction.mockImplementation(async (callback) => callback(prismaMock));
+    prismaMock.communicationEntityLink.deleteMany.mockResolvedValue({ count: 1 });
     delete process.env.MODEL_PROVIDER;
     delete process.env.MODEL_PROVIDER_ROUTES_JSON;
     prismaMock.modelUsageBudget.findMany.mockResolvedValue([]);
@@ -57,6 +61,49 @@ describe("agent-config", () => {
       const removed = prismaMock.workspaceAgentConfig.upsert.mock.calls[1][0].update.configJson;
       expect(removed.proactiveEnabled).toBe(false);
       expect(removed).not.toHaveProperty("proactiveNudgeWindow");
+    });
+
+    it("starts a fresh generation after removal and re-enable, while unchanged saves preserve progress", async () => {
+      const { updateWorkspaceSlackNudgeWindow } = await import("./agent-config");
+      const actor = { kind: "user", user: { id: "u-1" } } as any;
+      let saved: Record<string, unknown> = { proactiveNudgeWindow: window, proactiveNudgeWindowVersion: "old-generation" };
+      prismaMock.workspaceAgentConfig.findUnique.mockImplementation(async () => ({ configJson: saved }));
+      prismaMock.workspaceAgentConfig.upsert.mockImplementation(async ({ update }) => { saved = update.configJson; return { configJson: saved }; });
+      await updateWorkspaceSlackNudgeWindow(actor, { workspaceId: "ws-1", window });
+      expect(saved.proactiveNudgeWindowVersion).toBe("old-generation");
+      expect(prismaMock.communicationEntityLink.deleteMany).not.toHaveBeenCalled();
+      await updateWorkspaceSlackNudgeWindow(actor, { workspaceId: "ws-1", window: null });
+      const removedGeneration = saved.proactiveNudgeWindowVersion;
+      expect(removedGeneration).not.toBe("old-generation");
+      expect(saved).not.toHaveProperty("proactiveNudgeWindow");
+      await updateWorkspaceSlackNudgeWindow(actor, { workspaceId: "ws-1", window });
+      expect(saved.proactiveNudgeWindowVersion).not.toBe(removedGeneration);
+      expect(saved.proactiveNudgeWindowVersion).not.toBe("old-generation");
+      expect(prismaMock.communicationEntityLink.deleteMany).toHaveBeenCalledTimes(2);
+      expect(prismaMock.communicationEntityLink.deleteMany).toHaveBeenCalledWith({ where: {
+        workspaceId: "ws-1", provider: "SLACK", action: "proactive_first_nudge_scan_cursor",
+        claimKey: { startsWith: "slack:first-nudge-scan-cursor:" },
+      } });
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(3);
+    });
+
+    it("also versions generic Slack policy changes and ignores caller-supplied generations", async () => {
+      const { updateAgentConfig } = await import("./agent-config");
+      const actor = { kind: "user", user: { id: "u-1" } } as any;
+      prismaMock.workspaceAgentConfig.findUnique.mockResolvedValue({ configJson: {
+        proactiveNudgeWindow: window, proactiveNudgeWindowVersion: "current-generation",
+      } });
+      await updateAgentConfig(actor, { workspaceId: "ws-1", agentKey: "slack-agent", configJson: {
+        proactiveNudgeWindow: window, proactiveNudgeWindowVersion: "stale-generation",
+      } });
+      expect(prismaMock.workspaceAgentConfig.upsert.mock.calls[0][0].update.configJson.proactiveNudgeWindowVersion).toBe("current-generation");
+      await updateAgentConfig(actor, { workspaceId: "ws-1", agentKey: "slack-agent", configJson: {
+        proactiveNudgeWindow: { ...window, startLocalTime: "10:00" }, proactiveNudgeWindowVersion: "stale-generation",
+      } });
+      const version = prismaMock.workspaceAgentConfig.upsert.mock.calls[1][0].update.configJson.proactiveNudgeWindowVersion;
+      expect(version).not.toBe("current-generation");
+      expect(version).not.toBe("stale-generation");
+      expect(prismaMock.communicationEntityLink.deleteMany).toHaveBeenCalledTimes(1);
     });
 
     it("rejects invalid schedules before writing", async () => {
