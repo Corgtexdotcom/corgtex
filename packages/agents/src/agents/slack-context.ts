@@ -666,7 +666,6 @@ export async function runSlackProactiveScan(params: {
       : { messageTs: "desc" as const },
     take: 100,
   } satisfies Prisma.CommunicationMessageFindManyArgs;
-  const candidates = await prisma.communicationMessage.findMany(candidateQuery);
 
   const model = await getAgentModelOverride(params.workspaceId, "slack-agent")
     ?? resolveModel(AGENT_REGISTRY["slack-agent"].defaultModelTier);
@@ -675,17 +674,64 @@ export async function runSlackProactiveScan(params: {
   const nudgeWindowOpen = () => isSlackNudgeWindowOpen(new Date(), config.proactiveNudgeWindow);
   async function* eligibleFirstNudgeCandidates() {
     if (!nudgeWindowOpen()) return;
-    let page = candidates;
-    while (true) {
-      for (const message of page) {
-        if (looksUnanswered(message.text ?? "") && !isAddressedToSlackBot(message.text ?? "", installation!.botUserId)) yield message;
+    const configured = Boolean(config.proactiveNudgeWindow);
+    const claimKey = `slack:first-nudge-scan-cursor:${params.installationId}`;
+    const action = "proactive_first_nudge_scan_cursor";
+    const scope = { workspaceId: params.workspaceId, installationId: params.installationId, provider: "SLACK" as const, claimKey, action };
+    const checkpoint = configured ? await prisma.communicationEntityLink.findFirst({
+      where: scope,
+      select: { id: true, createdAt: true, message: { select: { id: true, messageTs: true, workspaceId: true, installationId: true, isDeleted: true } } },
+    }) : null;
+    const saved = checkpoint?.message;
+    let after = saved?.messageTs && !saved.isDeleted
+      && saved.workspaceId === params.workspaceId && saved.installationId === params.installationId
+      && saved.messageTs >= recentCutoff && saved.messageTs <= unansweredCutoff
+      ? { id: saved.id, messageTs: saved.messageTs } : undefined;
+    let processed: { id: string; messageTs: Date | null } | undefined;
+    let exhausted = false;
+    try {
+      for (let pageNumber = 0; pageNumber < (configured ? 5 : 1); pageNumber += 1) {
+        if (!nudgeWindowOpen()) break;
+        const page = await prisma.communicationMessage.findMany({
+          ...candidateQuery,
+          where: {
+            ...candidateQuery.where,
+            ...(after ? { OR: [
+              { messageTs: { gt: after.messageTs } },
+              { messageTs: after.messageTs, id: { gt: after.id } },
+            ] } : {}),
+          },
+        });
+        for (const message of page) {
+          if (!nudgeWindowOpen()) return;
+          if (looksUnanswered(message.text ?? "") && !isAddressedToSlackBot(message.text ?? "", installation!.botUserId)) yield message;
+          // A consumer break never reaches this assignment: replay the interrupted
+          // candidate on the next run, including when review crosses closing time.
+          processed = message;
+        }
+        if (page.length < candidateQuery.take) { exhausted = true; break; }
+        const last = page[page.length - 1]!;
+        if (!last.messageTs) break;
+        after = { id: last.id, messageTs: last.messageTs };
       }
-      if (!config.proactiveNudgeWindow || page.length < candidateQuery.take) return;
-      page = await prisma.communicationMessage.findMany({
-        ...candidateQuery,
-        cursor: { id: page[page.length - 1]!.id },
-        skip: 1,
-      });
+    } finally {
+      if (configured && (processed || exhausted)) {
+        const messageId = exhausted ? null : processed!.id;
+        // createdAt is a monotonic CAS token, including same-clock concurrent jobs.
+        const createdAt = new Date(Math.max(Date.now(), (checkpoint?.createdAt.getTime() ?? 0) + 1));
+        const data = { messageId, entityType: "CommunicationInstallation", entityId: params.installationId, createdAt };
+        if (checkpoint) {
+          await prisma.communicationEntityLink.updateMany({
+            where: { ...scope, id: checkpoint.id, createdAt: checkpoint.createdAt }, data,
+          });
+        } else {
+          try {
+            await prisma.communicationEntityLink.create({ data: { ...scope, ...data } });
+          } catch (error) {
+            if (!isUniqueConstraintError(error)) throw error;
+          }
+        }
+      }
     }
   }
   for await (const candidate of eligibleFirstNudgeCandidates()) {
@@ -872,7 +918,7 @@ export async function runSlackProactiveScan(params: {
       }
       if (!nudgeWindowOpen()) {
         await prisma.communicationEntityLink.deleteMany({ where: { id: claim.id, workspaceId: params.workspaceId, claimKey, action: PROACTIVE_NUDGE_PENDING, createdAt: claim.createdAt } });
-        continue;
+        break;
       }
       const sendClaim = await prisma.communicationEntityLink.updateMany({
         where: { id: claim.id, workspaceId: params.workspaceId, claimKey, action: PROACTIVE_NUDGE_PENDING, createdAt: claim.createdAt },

@@ -33,4 +33,26 @@ describe("Slack first-nudge window", () => {
     expect(() => parseSlackNudgeWindow({ ...chironeWindow, weekdays: [1, 1] })).toThrow("Invalid Slack nudge window.");
     expect(() => parseSlackNudgeWindow({ ...chironeWindow, endLocalTime: "09:00" })).toThrow("Invalid Slack nudge window.");
   });
+
+  it("rejects windows shorter than the hourly scan cadence", () => {
+    expect(() => parseSlackNudgeWindow({ ...chironeWindow, startLocalTime: "09:15", endLocalTime: "09:45" }))
+      .toThrow("Slack nudge windows must last at least one hour.");
+    expect(parseSlackNudgeWindow({ ...chironeWindow, startLocalTime: "09:15", endLocalTime: "10:15" }))
+      .toMatchObject({ startLocalTime: "09:15", endLocalTime: "10:15" });
+  });
+
+  it.each(["Etc/UTC", "US/Eastern", "Etc/GMT+5", "Asia/Kathmandu"])("accepts runtime-supported IANA identifier %s", (timeZone) => {
+    expect(parseSlackNudgeWindow({ ...chironeWindow, timeZone })?.timeZone).toBe(timeZone);
+  });
+
+  it("admits an hourly UTC scan inside a one-hour window in a quarter-hour-offset zone", () => {
+    const window = { ...chironeWindow, timeZone: "Asia/Kathmandu", startLocalTime: "09:15", endLocalTime: "10:15" };
+    expect(isSlackNudgeWindowOpen(new Date("2026-10-05T03:00:00Z"), window)).toBe(false);
+    expect(isSlackNudgeWindowOpen(new Date("2026-10-05T04:00:00Z"), window)).toBe(true);
+    expect(isSlackNudgeWindowOpen(new Date("2026-10-05T05:00:00Z"), window)).toBe(false);
+  });
+
+  it("rejects an unknown IANA identifier", () => {
+    expect(() => parseSlackNudgeWindow({ ...chironeWindow, timeZone: "Invalid/Place" })).toThrow("valid IANA time zone");
+  });
 });

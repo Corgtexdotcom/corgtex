@@ -43,6 +43,12 @@ function SlackNudgeWindowSettings({ workspaceId, savedWindow }: {
  const [endLocalTime, setEndLocalTime] = useState(savedWindow?.endLocalTime ?? "17:00");
  const [activeWindow, setActiveWindow] = useState(savedWindow !== null);
  const [error, setError] = useState(false);
+ const minuteOfDay = (value: string) => {
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) return NaN;
+  const [hour, minute] = value.split(":").map(Number);
+  return hour * 60 + minute;
+ };
+ const windowMinutes = minuteOfDay(endLocalTime) - minuteOfDay(startLocalTime);
  const weekdayLabels = ["weekdayMonday", "weekdayTuesday", "weekdayWednesday", "weekdayThursday", "weekdayFriday", "weekdaySaturday", "weekdaySunday"] as const;
  const save = () => startTransition(async () => {
   try { await updateSlackNudgeWindowAction(workspaceId, { timeZone, weekdays, startLocalTime, endLocalTime }); setActiveWindow(true); setError(false); }
@@ -70,7 +76,7 @@ function SlackNudgeWindowSettings({ workspaceId, savedWindow }: {
    </label>)}
   </div>
   <div className="flex gap-2">
-   <button type="button" disabled={isPending || !timeZone.trim() || !weekdays.length || startLocalTime >= endLocalTime} onClick={save} className="text-sm border border-line rounded-md px-3 py-1.5 disabled:opacity-50">{t("slackNudgeSave")}</button>
+   <button type="button" disabled={isPending || !timeZone.trim() || !weekdays.length || !Number.isFinite(windowMinutes) || windowMinutes < 60} onClick={save} className="text-sm border border-line rounded-md px-3 py-1.5 disabled:opacity-50">{t("slackNudgeSave")}</button>
    {activeWindow && <button type="button" disabled={isPending} onClick={clear} className="text-sm border border-line rounded-md px-3 py-1.5 disabled:opacity-50">{t("slackNudgeRemove")}</button>}
   </div>
   {error && <p role="alert" className="text-xs text-red-700">{t("slackNudgeSaveError")}</p>}

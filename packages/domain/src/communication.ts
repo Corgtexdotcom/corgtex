@@ -2489,7 +2489,9 @@ export async function publishSlackHome(installationId: string, externalUserId: s
       prisma.action.findMany({ where: { workspaceId: installation.workspaceId, status: { in: ["OPEN", "IN_PROGRESS"] } }, take: 5, orderBy: { createdAt: "desc" } }),
       prisma.proposal.findMany({ where: { workspaceId: installation.workspaceId, status: "OPEN" }, take: 5, orderBy: { createdAt: "desc" } }),
       prisma.tension.findMany({ where: { workspaceId: installation.workspaceId, status: "OPEN" }, take: 5, orderBy: { createdAt: "desc" } }),
-      prisma.communicationEntityLink.findMany({ where: { workspaceId: installation.workspaceId, installationId }, take: 5, orderBy: { createdAt: "desc" } }),
+      prisma.communicationEntityLink.findMany({ where: { workspaceId: installation.workspaceId, installationId,
+        action: { not: "proactive_first_nudge_scan_cursor" },
+      }, take: 5, orderBy: { createdAt: "desc" } }),
     ]);
     blocks.push(
       { type: "header", text: { type: "plain_text", text: "Today in Corgtex" } },

@@ -2962,7 +2962,7 @@
     "newspaperLocalTime": "Local time",
     "newspaperTimeZone": "Timezone",
     "slackNudgeWindow": "First reminder window",
-    "slackNudgeWindowHelp": "Choose local hours for unsolicited Slack reminders. Outside this window, eligible reminders wait for the next scan. Leave unset for the current behavior.",
+    "slackNudgeWindowHelp": "Choose a window of at least one hour for unsolicited Slack reminders. Outside this window, eligible reminders wait for the next scan. Leave unset for the current behavior.",
     "slackNudgeStart": "From",
     "slackNudgeEnd": "Until",
     "slackNudgeSave": "Save window",

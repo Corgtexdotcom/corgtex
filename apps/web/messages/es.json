@@ -2957,7 +2957,7 @@
     "newspaperLocalTime": "Hora local",
     "newspaperTimeZone": "Zona horaria",
     "slackNudgeWindow": "Horario del primer recordatorio",
-    "slackNudgeWindowHelp": "Elige el horario local para los recordatorios de Slack no solicitados. Fuera de este horario, los recordatorios pendientes esperan a la próxima revisión. Sin configurar, se mantiene el comportamiento actual.",
+    "slackNudgeWindowHelp": "Elige un horario de al menos una hora para los recordatorios de Slack no solicitados. Fuera de este horario, los recordatorios pendientes esperan a la próxima revisión. Sin configurar, se mantiene el comportamiento actual.",
     "slackNudgeStart": "Desde",
     "slackNudgeEnd": "Hasta",
     "slackNudgeSave": "Guardar horario",
