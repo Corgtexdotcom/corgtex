@@ -12,6 +12,7 @@ import { ThemeToggle } from "../../../ThemeToggle";
 import { DesktopWorkspaceNav } from "./DesktopWorkspaceNav";
 import { buildWorkspaceCapabilities } from "@/lib/workspace-capabilities";
 import { filterNavGroupsByWorkspaceAccess, getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
+import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 import { MobileWorkspaceShell } from "./MobileWorkspaceShell";
 import { getControlPlaneHref } from "@/lib/control-plane-url";
 import { WorkspaceAddMenu } from "./WorkspaceAddMenu";
@@ -98,6 +99,7 @@ export default async function WorkspaceLayout({
   const actor = await requirePageActor();
   const userId = actor.kind === "user" ? actor.user.id : null;
   const workspaces = filterWorkspacesForDeploymentScope(await listActorWorkspaces(actor));
+  const switchableWorkspaces = workspaces.map(({ id, name, slug }) => ({ id, name, slug, ...workspaceBranding({ name, slug }) }));
   const current = workspaces.find((w: Workspace) => w.id === workspaceId);
   if (!current) {
     redirect(localizedPath(workspaces[0] ? `/workspaces/${workspaces[0].id}` : "/find-account", locale));
@@ -151,7 +153,6 @@ export default async function WorkspaceLayout({
   const protocol = host.includes("localhost") ? "http" : "https";
   const origin = `${protocol}://${host}`;
   const connectorUrl = getWorkspaceMcpInstallUrl(workspaceId);
-  const currentBranding = current ? workspaceBranding(current) : { primaryName: "Corgtex", secondaryLabel: "Workspace" };
   const controlPlaneHref = getControlPlaneHref("/control-plane", locale);
   const isDemo = current?.slug === "jnj-demo";
   const showPlatformAdmin = isGlobalOperator(actor);
@@ -246,11 +247,11 @@ export default async function WorkspaceLayout({
   );
 
   return (
-    <div className="ws-layout">
+    <div className="ws-layout" key={workspaceId}>
       <MobileWorkspaceShell
+        key={workspaceId}
+        workspaces={switchableWorkspaces}
         workspaceId={workspaceId}
-        workspaceName={currentBranding.primaryName}
-        workspaceLabel={currentBranding.secondaryLabel}
         navGroups={visibleNavGroups}
         unreadCount={unreadCount}
         conversations={conversationSummaries}
@@ -261,12 +262,7 @@ export default async function WorkspaceLayout({
       />
       <aside className="ws-sidebar">
         <div className="ws-sidebar-header">
-          <a href="/" className="ws-logo">{currentBranding.primaryName}</a>
-          {current && (
-            <div className="ws-workspace-name">
-              {currentBranding.secondaryLabel}
-            </div>
-          )}
+          <WorkspaceSwitcher workspaceId={workspaceId} workspaces={switchableWorkspaces} />
         </div>
 
         <DesktopWorkspaceNav
