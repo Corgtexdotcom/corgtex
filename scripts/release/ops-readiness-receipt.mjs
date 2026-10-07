@@ -18,8 +18,37 @@ class ReceiptError extends Error {
 function fail(code) { throw new ReceiptError(code); }
 function object(value) { return value !== null && typeof value === "object" && !Array.isArray(value); }
 function uuid(value) { return typeof value === "string" && UUID.test(value); }
-function inventoryIdentity(rows) {
+function validatedDeployments(rows) {
   if (!Array.isArray(rows) || rows.length === 0 || rows.length >= 500) fail("INVENTORY_INCOMPLETE");
+  const ids = new Set();
+  const deployments = [];
+  for (const row of rows) {
+    if (!object(row) || !uuid(row.id) || ids.has(row.id) || typeof row.hasDeployment !== "boolean") {
+      fail("INVENTORY_INCOMPLETE");
+    }
+    ids.add(row.id);
+    if (row.hasDeployment === false) {
+      // Account-only rows have an explicit discriminator and no deployment fields.
+      if (row.customerAccountId !== row.id || row.url !== ""
+        || ["deploymentKind", "deploymentStatus", "environment", "cloudProvider", "managedWorkspaceId", "remoteWorkspaceId"]
+          .some((field) => row[field] !== null)) fail("INVENTORY_INCOMPLETE");
+      continue;
+    }
+    if (!["SHARED_WORKSPACE", "HOSTED_DEDICATED", "REMOTE_MANAGED", "SELF_HOSTED", "CUSTOMER_CONTROL_PLANE", "INTERNAL", "DEMO"].includes(row.deploymentKind)
+      || !["DRAFT", "PROVISIONING", "BOOTSTRAPPING", "ACTIVE", "DEGRADED", "SUSPENDED", "RETIRED"].includes(row.deploymentStatus)
+      || typeof row.environment !== "string" || !row.environment.trim()
+      || !["RAILWAY", "AZURE", "SELF_HOSTED", "UNKNOWN"].includes(row.cloudProvider)
+      || typeof row.url !== "string"
+      || ["customerAccountId", "managedWorkspaceId", "remoteWorkspaceId"].some((field) => row[field] !== null && !uuid(row[field]))) {
+      fail("INVENTORY_INCOMPLETE");
+    }
+    deployments.push(row);
+  }
+  if (deployments.length > 250) fail("INVENTORY_INCOMPLETE");
+  return deployments;
+}
+function inventoryIdentity(rows) {
+  validatedDeployments(rows);
   return JSON.stringify(rows.map((row) => [row?.id, row?.hasDeployment, row?.deploymentKind,
     row?.deploymentStatus, row?.environment, row?.cloudProvider, row?.url, row?.customerAccountId,
     row?.managedWorkspaceId, row?.remoteWorkspaceId]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
@@ -58,17 +87,7 @@ function lease(detail) {
 }
 
 export function projectOpsInventory(rows, details, targetDeploymentId) {
-  if (!Array.isArray(rows) || rows.length === 0 || rows.length >= 500) fail("INVENTORY_INCOMPLETE");
-  if (rows.some((row) => object(row) && row.deploymentKind === "SHARED_WORKSPACE" && row.hasDeployment !== true)) {
-    fail("SHARED_MAPPING_INCOMPLETE");
-  }
-  const deployments = rows.filter((row) => object(row) && row.hasDeployment === true);
-  if (deployments.length > 250) fail("INVENTORY_INCOMPLETE");
-  const ids = new Set();
-  for (const row of deployments) {
-    if (!uuid(row.id) || ids.has(row.id)) fail("INVENTORY_INCOMPLETE");
-    ids.add(row.id);
-  }
+  const deployments = validatedDeployments(rows);
   const active = deployments.filter((row) => row.deploymentStatus === "ACTIVE" && row.environment === "production");
   if (!active.length || deployments.some((row) => row.deploymentStatus === "ACTIVE" && !row.environment)) {
     fail("INVENTORY_INCOMPLETE");
@@ -76,7 +95,7 @@ export function projectOpsInventory(rows, details, targetDeploymentId) {
   const target = active.find((row) => row.id === targetDeploymentId);
   if (!target || target.cloudProvider !== "AZURE" || !selfserveOrigin(target.url)) fail("TARGET_MAPPING_MISSING");
   const shared = active.filter((row) => row.deploymentKind === "SHARED_WORKSPACE");
-  if (!shared.length || shared.some((row) => !uuid(row.managedWorkspaceId))) fail("SHARED_MAPPING_INCOMPLETE");
+  if (!shared.length || shared.some((row) => !uuid(row.managedWorkspaceId) && !uuid(row.remoteWorkspaceId))) fail("SHARED_MAPPING_INCOMPLETE");
 
   const mappings = [];
   const activeLeases = [];
@@ -155,9 +174,7 @@ export async function collectOpsReceipt({ fetchImpl = fetch, token, targetDeploy
       fail("CONTROL_PLANE_METHOD_UNSUPPORTED");
     }
     const rows = await tool(fetchImpl, token, "list_customers", { includeAllDeployments: true, uncapped: true });
-    if (!Array.isArray(rows) || rows.length === 0 || rows.length >= 500) fail("INVENTORY_INCOMPLETE");
-    const deployments = rows.filter((row) => object(row) && row.hasDeployment === true);
-    if (deployments.length > 250) fail("INVENTORY_INCOMPLETE");
+    const deployments = validatedDeployments(rows);
     const details = new Map();
     for (const row of deployments) {
       if (!uuid(row.id)) fail("INVENTORY_INCOMPLETE");

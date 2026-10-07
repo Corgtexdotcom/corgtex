@@ -76,6 +76,57 @@ test("returns bounded Ops mappings and an explicitly blocked flag/overall receip
   assert.ok(!JSON.stringify(receipt).includes("synthetic-token"));
 });
 
+test("remote shared-workspace mappings are observed while overall readiness remains blocked", async () => {
+  const remote = { ...shared, managedWorkspaceId: null, remoteWorkspaceId: workspaceId, cloudProvider: "AZURE" };
+  const byId = new Map(details);
+  byId.set(sharedId, { ...details.get(sharedId), ...remote });
+  const receipt = await collect(fixtureFetch({ rows: [target, remote], byId }));
+  assert.equal(receipt.controlPlane.status, "observed");
+  assert.equal(receipt.controlPlane.mappings[0].managedWorkspaceId, null);
+  assert.equal(receipt.controlPlane.mappings[0].remoteWorkspaceId, workspaceId);
+  assert.equal(receipt.readiness.status, "blocked");
+});
+
+const accountOnly = { id: accountId, customerAccountId: accountId, hasDeployment: false, url: "",
+  deploymentKind: null, deploymentStatus: null, environment: null, cloudProvider: null,
+  managedWorkspaceId: null, remoteWorkspaceId: null };
+
+test("explicit account-only rows do not trigger deployment reads", async () => {
+  const calls = [];
+  const receipt = await collect(fixtureFetch({ rows: [target, shared, accountOnly], onCall: (body) => calls.push(body) }));
+  assert.equal(receipt.controlPlane.status, "observed");
+  assert.equal(receipt.controlPlane.checkedDeploymentCount, 2);
+  assert.equal(calls.filter((body) => body.params?.name === "get_customer_deployment_status").length, 4);
+  assert.equal(receipt.readiness.status, "blocked");
+});
+
+for (const [name, malformed] of [
+  ["null", null], ["primitive", "bad row"], ["empty object", {}],
+  ["missing discriminator", { ...accountOnly, hasDeployment: undefined }],
+  ["string discriminator", { ...accountOnly, hasDeployment: "false" }],
+  ["deployment disguised as account", { ...shared, id: accountId, hasDeployment: false }],
+  ["incomplete account", { id: accountId, hasDeployment: false }],
+  ["missing deployment status", { ...shared, id: accountId, deploymentStatus: undefined }],
+  ["missing deployment kind", { ...shared, id: accountId, deploymentKind: undefined }],
+  ["missing deployment environment", { ...shared, id: accountId, environment: undefined }],
+  ["missing deployment provider", { ...shared, id: accountId, cloudProvider: undefined }],
+  ["invalid deployment identity", { ...shared, id: "invalid" }],
+  ["duplicate identity", shared],
+]) {
+  test(`rejects ${name} before filtering or collecting deployment details`, async () => {
+    const rows = [target, shared, malformed];
+    assert.throws(() => projectOpsInventory(rows, details, targetId), { code: "INVENTORY_INCOMPLETE" });
+    const calls = [];
+    const receipt = await collect(fixtureFetch({ rows, onCall: (body) => calls.push(body) }));
+    assert.equal(receipt.controlPlane.code, "INVENTORY_INCOMPLETE");
+    assert.equal(receipt.readiness.status, "blocked");
+    assert.ok(!calls.some((body) => body.params?.name === "get_customer_deployment_status"));
+    const readback = await collect(fixtureFetch({ rowsAfterReadback: rows }));
+    assert.equal(readback.controlPlane.code, "INVENTORY_INCOMPLETE");
+    assert.equal(readback.readiness.status, "blocked");
+  });
+}
+
 test("active lease blocks Ops evidence and includes only lease fields", async () => {
   const leased = new Map(details);
   leased.set(targetId, { ...details.get(targetId), releaseLeaseId: "198a4459-c41d-4b6c-adc9-c9c470693633",
