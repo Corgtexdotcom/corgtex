@@ -25,6 +25,12 @@ Production web image builds also require stable build metadata. These values are
 | `CORGTEX_RELEASE_GIT_SHA` | Preferred immutable release SHA used for the Next.js `deploymentId`, build ID, and `/api/health` release metadata. The release workflow sets this from the Git commit SHA. |
 | `RAILWAY_GIT_COMMIT_SHA` / `GITHUB_SHA` | Fallback SHA sources used when `CORGTEX_RELEASE_GIT_SHA` is absent. |
 
+## Brain Source Removal Activation
+
+`BRAIN_SOURCE_REMOVAL_RUNTIME_ENABLED` is a server-side runtime opt-in. It is disabled when unset or set to anything other than the exact string `true`. The reviewed linked Brain source removal flow also requires the workspace's `BRAIN_SOURCE_REMOVAL` flag to be enabled; neither setting alone activates it. The runtime gate covers previews, requests, retries, and acceptance of queued reviews. It does not cancel queued or executing regeneration jobs; final acceptance remains blocked while the gate is off.
+
+Leave the runtime opt-in unset through a web-then-worker rollout, including mixed revisions. After compatible workers are running and release acceptance is complete, review existing workspace flag values, then separately approve and set the runtime opt-in on web. Only then use the normal workspace flag controls to enable reviewed removal where intended. Turning the runtime opt-in off pauses new reviewed linked-source removals and review acceptance, but does not replace job reconciliation or recovery. Older web revisions can still use their preexisting generic source archive path until they are replaced; this opt-in governs the new reviewed flow.
+
 ## Initial Seeding Settings
 
 When you launch a fresh Corgtex instance, the database must be seeded with an initial workspace and an administrative user.

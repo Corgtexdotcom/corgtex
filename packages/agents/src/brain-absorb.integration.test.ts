@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
@@ -9,7 +9,16 @@ import { absorbSource } from "./brain-absorb";
 
 vi.mock("@corgtex/knowledge", () => ({ syncBrainArticleKnowledge: vi.fn(async () => 0) }));
 
-beforeEach(truncateAllTables);
+const runtimeOptIn = "BRAIN_SOURCE_REMOVAL_RUNTIME_ENABLED";
+const previousRuntimeOptIn = process.env[runtimeOptIn];
+beforeEach(async () => {
+  process.env[runtimeOptIn] = "true";
+  await truncateAllTables();
+});
+afterEach(() => {
+  if (previousRuntimeOptIn === undefined) delete process.env[runtimeOptIn];
+  else process.env[runtimeOptIn] = previousRuntimeOptIn;
+});
 
 it("records both verified sources through real absorption before reviewed removal", async () => {
   const workspace = await prisma.workspace.create({ data: {

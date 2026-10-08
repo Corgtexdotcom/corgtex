@@ -1,4 +1,4 @@
-import { duplicateGuardErrorPayload, isDuplicateGuardMatchError, listBrainSourceArchiveImpacts, listBrainSourceRemovalReviews, listSources, requireWorkspaceMembership } from "@corgtex/domain";
+import { duplicateGuardErrorPayload, isBrainSourceRemovalEnabled, isDuplicateGuardMatchError, listBrainSourceArchiveImpacts, listBrainSourceRemovalReviews, listSources, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { prisma } from "@corgtex/shared";
 import { deleteSourceAction, ingestSourceAction, resolveSourceRemovalAction, retrySourceRemovalAction } from "../actions";
@@ -20,15 +20,12 @@ export default async function BrainSourcesPage({
   const { review: reviewSourceId } = await searchParams;
   const actor = await requirePageActor();
   const t = await getTranslations("brain");
-  const [membership, { items: sources }, currentWorkspace, sourceRemovalFlag] = await Promise.all([
+  const [membership, { items: sources }, currentWorkspace, sourceRemovalEnabled] = await Promise.all([
     requireWorkspaceMembership({ actor, workspaceId }),
     listSources(actor, { workspaceId, take: 50, sourceId: reviewSourceId }),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
-    prisma.workspaceFeatureFlag.findUnique({ where: { workspaceId_flag: {
-      workspaceId, flag: "BRAIN_SOURCE_REMOVAL",
-    } }, select: { enabled: true } }),
+    isBrainSourceRemovalEnabled(prisma, workspaceId),
   ]);
-  const sourceRemovalEnabled = sourceRemovalFlag?.enabled === true;
   const isDemo = currentWorkspace?.slug === "jnj-demo";
   const sourceImpacts = new Map((await listBrainSourceArchiveImpacts(actor, {
     workspaceId,
