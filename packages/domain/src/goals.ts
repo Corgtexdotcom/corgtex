@@ -542,7 +542,10 @@ export async function createGoal(
     if (params.level && existing.level !== params.level) updateParams.level = params.level;
     if (params.status && existing.status !== params.status) updateParams.status = params.status;
     const updatedFields = Object.keys(updateParams).length > 3;
-    if (updatedFields) await updateGoal(actor, updateParams);
+    if (updatedFields) {
+      updateParams.expectedVersion = existing.version;
+      await updateGoal(actor, updateParams);
+    }
     const addedKeyResults = await appendMissingDuplicateGoalKeyResults(actor, params, duplicateDecision.match.entityId, membership);
     return updatedFields || addedKeyResults
       ? getGoal(actor, { workspaceId: params.workspaceId, goalId: duplicateDecision.match.entityId, _membership: params._membership })
@@ -691,6 +694,7 @@ export async function updateGoal(
       || params.parentGoalId !== undefined
       || params.circleId !== undefined
       || params.ownerMemberId !== undefined;
+    const editsContent = editsDraftContent || params.progressPercent !== undefined;
     const changesWorkflow = params.status !== undefined || params.progressPercent !== undefined;
 
     if (editsDraftContent) {
@@ -739,6 +743,9 @@ export async function updateGoal(
     if (params.circleId !== undefined) data.circleId = params.circleId || null;
     if (params.ownerMemberId !== undefined) data.ownerMemberId = params.ownerMemberId || null;
 
+    if (editsContent) {
+      invariant(params.expectedVersion !== undefined, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
+    }
     if (params.expectedVersion !== undefined) {
       invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
       invariant(params.expectedVersion === goal.version, 409, "VERSION_CONFLICT", "The record changed before this update could be applied. Please refresh and try again.");

@@ -74,10 +74,10 @@ describe("Slack meeting action assignee eligibility", () => {
 
   it("opens a legacy claimed private draft before marking the Slack insight applied", async () => {
     db.member.findMany.mockResolvedValue([{ id: "active", user: { displayName: "Milan", email: "milan@example.test" } }]);
-    createAction.mockResolvedValueOnce({ id: "legacy-action", status: "DRAFT", assigneeMemberId: null });
+    createAction.mockResolvedValueOnce({ id: "legacy-action", status: "DRAFT", assigneeMemberId: null, version: 4 });
     publishAction.mockResolvedValueOnce({ id: "legacy-action", status: "OPEN" });
     await confirmSlackMeetingActionReviewProposal(actor, params);
-    expect(updateAction).toHaveBeenCalledWith(actor, { workspaceId: "ws-1", actionId: "legacy-action", assigneeMemberId: "active" });
+    expect(updateAction).toHaveBeenCalledWith(actor, { workspaceId: "ws-1", actionId: "legacy-action", assigneeMemberId: "active", expectedVersion: 4 });
     expect(updateAction.mock.invocationCallOrder[0]).toBeLessThan(publishAction.mock.invocationCallOrder[0]);
     expect(publishAction).toHaveBeenCalledWith(actor, { workspaceId: "ws-1", actionId: "legacy-action" });
     expect(db.meetingInsight.update).toHaveBeenCalledWith(expect.objectContaining({
@@ -100,7 +100,7 @@ describe("Slack meeting action assignee eligibility", () => {
   it.each(["inactive-owner", "system-owner"])('repairs a reused Slack review draft with an ineligible %s', async (ownerId) => {
     db.member.findMany.mockResolvedValue([{ id: "active", user: { displayName: "Milan", email: "milan@example.test" } }]);
     db.member.findFirst.mockResolvedValue(null);
-    createAction.mockResolvedValueOnce({ id: "stale-draft", status: "DRAFT", assigneeMemberId: ownerId });
+    createAction.mockResolvedValueOnce({ id: "stale-draft", status: "DRAFT", assigneeMemberId: ownerId, version: 7 });
     publishAction.mockResolvedValueOnce({ id: "stale-draft", status: "OPEN" });
 
     await confirmSlackMeetingActionReviewProposal(actor, params);
@@ -109,7 +109,7 @@ describe("Slack meeting action assignee eligibility", () => {
       where: { id: ownerId, workspaceId: "ws-1", isActive: true, ...humanMemberIdentityWhere() },
       select: { id: true },
     });
-    expect(updateAction).toHaveBeenCalledWith(actor, { workspaceId: "ws-1", actionId: "stale-draft", assigneeMemberId: "active" });
+    expect(updateAction).toHaveBeenCalledWith(actor, { workspaceId: "ws-1", actionId: "stale-draft", assigneeMemberId: "active", expectedVersion: 7 });
     expect(updateAction.mock.invocationCallOrder[0]).toBeLessThan(publishAction.mock.invocationCallOrder[0]);
   });
 

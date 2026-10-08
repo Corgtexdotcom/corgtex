@@ -1140,14 +1140,14 @@ describe("meeting-intelligence", () => {
         operation: "CREATE", status: "SUGGESTED", title: "Prepare the update", bodyMd: "Milan will prepare the update.",
         assigneeHint: "Milan", meeting: { id: "meeting-1", title: "Weekly sync" },
       } as never);
-      createActionMock.mockResolvedValue({ id: "action-draft", status: "DRAFT", assigneeMemberId: null });
+      createActionMock.mockResolvedValue({ id: "action-draft", status: "DRAFT", assigneeMemberId: null, version: 3 });
       publishActionMock.mockResolvedValue({ id: "action-draft", status: "OPEN" });
 
       await applyInsight(mockActor, { workspaceId: "ws-1", insightId: "insight-reused-draft",
         actionDuplicateGuard: { resolution: "use_existing", targetEntityId: "action-draft" } });
 
       expect(updateActionMock).toHaveBeenCalledWith(mockActor, {
-        workspaceId: "ws-1", actionId: "action-draft", assigneeMemberId: "member-raised",
+        workspaceId: "ws-1", actionId: "action-draft", assigneeMemberId: "member-raised", expectedVersion: 3,
       });
       expect(updateActionMock.mock.invocationCallOrder[0]).toBeLessThan(publishActionMock.mock.invocationCallOrder[0]);
       expect(prisma.meetingInsight.update).toHaveBeenCalledWith(expect.objectContaining({
@@ -1181,14 +1181,14 @@ describe("meeting-intelligence", () => {
         operation: "CREATE", status: "SUGGESTED", title: "Prepare the update", bodyMd: "Milan will prepare the update.",
         assigneeHint: "Milan", meeting: { id: "meeting-1", title: "Weekly sync" },
       } as never);
-      createActionMock.mockResolvedValue({ id: "action-stale-draft", status: "DRAFT", assigneeMemberId: ownerId });
+      createActionMock.mockResolvedValue({ id: "action-stale-draft", status: "DRAFT", assigneeMemberId: ownerId, version: 6 });
       publishActionMock.mockResolvedValue({ id: "action-stale-draft", status: "OPEN" });
 
       await applyInsight(mockActor, { workspaceId: "ws-1", insightId: "insight-stale-draft",
         actionDuplicateGuard: { resolution: "use_existing", targetEntityId: "action-stale-draft" } });
 
       expect(updateActionMock).toHaveBeenCalledWith(mockActor, {
-        workspaceId: "ws-1", actionId: "action-stale-draft", assigneeMemberId: "member-raised",
+        workspaceId: "ws-1", actionId: "action-stale-draft", assigneeMemberId: "member-raised", expectedVersion: 6,
       });
       expect(updateActionMock.mock.invocationCallOrder[0]).toBeLessThan(publishActionMock.mock.invocationCallOrder[0]);
     });

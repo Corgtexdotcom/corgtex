@@ -583,6 +583,7 @@ async function applyActionDuplicateUpdate(
   if (!existing.proposalId && params.proposalId) updateParams.proposalId = params.proposalId;
   if (params.priority !== undefined && params.priority !== null && existing.priority !== params.priority) updateParams.priority = params.priority;
   if (Object.keys(updateParams).length === 2) return existing;
+  updateParams.expectedVersion = existing.version;
   updateParams._membership = membership;
   updateParams._tx = tx;
   return updateAction(actor, updateParams);
@@ -893,6 +894,9 @@ export async function updateAction(actor: AppActor, params: {
     }
     if (params.isPrivate !== undefined) data.isPrivate = params.isPrivate;
 
+    if (editsContent) {
+      invariant(params.expectedVersion !== undefined, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
+    }
     if (params.expectedVersion !== undefined) {
       invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
       invariant(params.expectedVersion === action.version, 409, "VERSION_CONFLICT", "The record changed before this update could be applied. Please refresh and try again.");

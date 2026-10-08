@@ -265,6 +265,7 @@ describe("proposal AI summaries", () => {
       proposalId: "p-edit",
       bodyMd: words(130),
       includeAiSummary: true,
+      expectedVersion: 1,
     });
 
     expect(prisma.proposal.update).toHaveBeenCalledWith(expect.objectContaining({
@@ -323,6 +324,7 @@ describe("proposal AI summaries", () => {
       proposalId: "p-edit",
       bodyMd: words(130),
       includeAiSummary: false,
+      expectedVersion: 2,
     });
 
     expect(defaultModelGateway.extract).not.toHaveBeenCalled();
@@ -625,6 +627,7 @@ describe("proposal owner updates", () => {
       workspaceId: "ws-1",
       proposalId: "p-owner-change",
       ownerMemberId: "mem-owner",
+      expectedVersion: 1,
     });
 
     expect(prisma.proposal.update).toHaveBeenCalledWith(expect.objectContaining({
@@ -1008,7 +1011,7 @@ describe("updateProposal AI-summary transaction scope", () => {
       const { updateProposal } = await import("./proposals");
       vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(proposal as any);
       await expect(updateProposal(actor, {
-        workspaceId: "ws-1", proposalId: "p-scope", bodyMd: words(130), includeAiSummary: true, ...overrides,
+        workspaceId: "ws-1", proposalId: "p-scope", bodyMd: words(130), includeAiSummary: true, expectedVersion: 1, ...overrides,
       })).rejects.toMatchObject(expected);
       await expectNoInferenceNoWrites();
     });
@@ -1024,7 +1027,7 @@ describe("updateProposal AI-summary transaction scope", () => {
           archivedAt: variant === "archived" ? new Date() : null,
         });
         await expect(updateProposal(actor, {
-          workspaceId: "ws-1", proposalId: "p-scope", bodyMd: words(130), includeAiSummary: true, circleId: "circle-1",
+          workspaceId: "ws-1", proposalId: "p-scope", bodyMd: words(130), includeAiSummary: true, circleId: "circle-1", expectedVersion: 1,
         })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
         await expectNoInferenceNoWrites();
       },
@@ -1041,6 +1044,7 @@ describe("updateProposal AI-summary transaction scope", () => {
         bodyMd: words(130),
         includeAiSummary: true,
         ownerMemberId: "mem-missing",
+        expectedVersion: 1,
       })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
 
       await expectNoInferenceNoWrites();
@@ -1080,6 +1084,7 @@ describe("updateProposal AI-summary transaction scope", () => {
         proposalId: "p-scope",
         title: "Probe title",
         includeAiSummary: true,
+        expectedVersion: 1,
       });
     } finally {
       vi.mocked((prisma as any).$transaction).mockImplementation(async (cb: any) => cb(prisma));
@@ -1118,6 +1123,7 @@ describe("updateProposal AI-summary transaction scope", () => {
         workspaceId: "ws-1",
         proposalId: "p-scope",
         includeAiSummary: true,
+        expectedVersion: base.version,
         ...params,
       } as any);
       const rejection = expect(promise).rejects.toMatchObject(expected);
@@ -1254,33 +1260,25 @@ describe("updateProposal AI-summary transaction scope", () => {
     ]);
   });
 
-  describe("omitted expectedVersion compatibility (group 5)", () => {
-    it("applies an unchanged-input concurrent version bump and emits one event", async () => {
+  describe("required observed version (group 5)", () => {
+    it("rejects omitted expectedVersion before model cost or writes", async () => {
       const { appendEvents } = await import("./events");
       const { defaultModelGateway } = await import("@corgtex/models");
       const { updateProposal } = await import("./proposals");
 
       const base = baseProposal({ bodyMd: words(130) });
-      vi.mocked(prisma.proposal.findUnique)
-        .mockResolvedValueOnce(base as any)
-        .mockResolvedValueOnce({ ...base, version: 2 } as any);
-      vi.mocked(defaultModelGateway.extract).mockResolvedValueOnce({
-        output: { summary: "Bump-safe summary." },
-      } as any);
-      vi.mocked((prisma.proposal as any).update).mockImplementation(async ({ data }: any) => ({ ...base, ...data }));
+      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(base as any);
 
-      await updateProposal(actor, {
+      await expect(updateProposal(actor, {
         workspaceId: "ws-1",
         proposalId: "p-scope",
         bodyMd: words(140),
         includeAiSummary: true,
-      });
+      })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
 
-      expect(prisma.proposal.update).toHaveBeenCalledTimes(1);
-      expect(prisma.proposal.update).toHaveBeenCalledWith(expect.objectContaining({
-        where: expect.objectContaining({ version: 2 }),
-      }));
-      expect(appendEvents).toHaveBeenCalledTimes(1);
+      expect(defaultModelGateway.extract).not.toHaveBeenCalled();
+      expect(prisma.proposal.update).not.toHaveBeenCalled();
+      expect(appendEvents).not.toHaveBeenCalled();
     });
 
     it("rejects drifted AI inputs with 409, never persists the generated summary, and emits no event", async () => {
@@ -1301,6 +1299,7 @@ describe("updateProposal AI-summary transaction scope", () => {
         proposalId: "p-scope",
         title: "Caller supplied title",
         includeAiSummary: true,
+        expectedVersion: 1,
       })).rejects.toMatchObject({ status: 409, code: "VERSION_CONFLICT" });
 
       expect(defaultModelGateway.extract).toHaveBeenCalledTimes(1);
@@ -1324,6 +1323,7 @@ describe("updateProposal AI-summary transaction scope", () => {
         proposalId: "p-scope",
         bodyMd: words(100),
         includeAiSummary: true,
+        expectedVersion: 1,
       });
 
       expect(defaultModelGateway.extract).not.toHaveBeenCalled();
@@ -1346,6 +1346,7 @@ describe("updateProposal AI-summary transaction scope", () => {
         workspaceId: "ws-1",
         proposalId: "p-scope",
         includeAiSummary: false,
+        expectedVersion: 1,
       });
 
       expect(defaultModelGateway.extract).not.toHaveBeenCalled();
@@ -1377,6 +1378,7 @@ describe("updateProposal AI-summary transaction scope", () => {
         workspaceId: "ws-1",
         proposalId: "p-scope",
         summary: "  Manual summary  ",
+        expectedVersion: 1,
       });
 
       expect(defaultModelGateway.extract).not.toHaveBeenCalled();
@@ -1407,11 +1409,34 @@ describe("updateProposal AI-summary transaction scope", () => {
       workspaceId: "ws-1",
       proposalId: "p-scope",
       title: "Scope title",
+      expectedVersion: 1,
     });
 
     expect(result).toBe(loaded);
     expect(prisma.proposal.update).not.toHaveBeenCalled();
     expect((prisma as any).workItemVersion.create).not.toHaveBeenCalled();
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
+    expect(appendEvents).not.toHaveBeenCalled();
+  });
+
+  it("rejects missing versions for same-value content and summary intent without effects", async () => {
+    const { appendEvents } = await import("./events");
+    const { defaultModelGateway } = await import("@corgtex/models");
+    const { updateProposal } = await import("./proposals");
+    vi.mocked(prisma.proposal.findUnique).mockResolvedValue(baseProposal() as any);
+
+    for (const params of [
+      { title: "Scope title" },
+      { includeAiSummary: false },
+      { title: "Changed title", includeAiSummary: true },
+    ]) {
+      await expect(updateProposal(actor, { workspaceId: "ws-1", proposalId: "p-scope", ...params }))
+        .rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+    }
+
+    expect(defaultModelGateway.extract).not.toHaveBeenCalled();
+    expect(prisma.proposal.update).not.toHaveBeenCalled();
+    expect(prisma.workItemVersion.create).not.toHaveBeenCalled();
     expect(prisma.auditLog.create).not.toHaveBeenCalled();
     expect(appendEvents).not.toHaveBeenCalled();
   });
@@ -2899,7 +2924,7 @@ describe("submitProposal event payload", () => {
       vi.mocked(prisma.$executeRaw).mockClear();
       vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(baseProposal as any);
       vi.mocked(prisma.proposal.update).mockResolvedValueOnce({ ...baseProposal, title: "New Title" } as any);
-      await updateProposal(actor, { workspaceId: "ws-1", proposalId, title: "New Title" });
+      await updateProposal(actor, { workspaceId: "ws-1", proposalId, title: "New Title", expectedVersion: baseProposal.version });
       expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), `Proposal:${proposalId}`);
 
       // 2. archiveProposal

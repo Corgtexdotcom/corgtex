@@ -373,6 +373,7 @@ describe("tensions domain", () => {
       workspaceId: "ws-1",
       tensionId: "t-1",
       raisedByMemberId: "raised-member-1",
+      expectedVersion: 1,
     });
 
     expect(prismaMock.member.findFirst).toHaveBeenCalledWith({
@@ -417,6 +418,7 @@ describe("tensions domain", () => {
       workspaceId: "ws-1",
       tensionId: "t-1",
       assigneeMemberId: "responsible-member-1",
+      expectedVersion: 1,
     });
 
     expect(prismaMock.member.findFirst).toHaveBeenCalledWith({
@@ -458,7 +460,7 @@ describe("tensions domain", () => {
     const { updateTension } = await import("./tensions");
 
     await updateTension(actor, {
-      workspaceId: "ws-1", tensionId: "t-1", assigneeMemberId: "new-member",
+      workspaceId: "ws-1", tensionId: "t-1", assigneeMemberId: "new-member", expectedVersion: 1,
     });
 
     expect(createNotificationIntent).toHaveBeenCalledWith(prismaMock, expect.objectContaining({
@@ -485,7 +487,7 @@ describe("tensions domain", () => {
     const { updateTension } = await import("./tensions");
 
     await updateTension(actor, {
-      workspaceId: "ws-1", tensionId: "t-1", status: "OPEN", assigneeMemberId: "new-member",
+      workspaceId: "ws-1", tensionId: "t-1", status: "OPEN", assigneeMemberId: "new-member", expectedVersion: 1,
     });
 
     expect(createNotificationIntent).not.toHaveBeenCalled();
@@ -505,7 +507,7 @@ describe("tensions domain", () => {
     });
     const { updateTension } = await import("./tensions");
 
-    await updateTension(actor, { workspaceId: "ws-1", tensionId: "t-1", assigneeMemberId: null });
+    await updateTension(actor, { workspaceId: "ws-1", tensionId: "t-1", assigneeMemberId: null, expectedVersion: 1 });
 
     expect(createNotificationIntent).not.toHaveBeenCalled();
   });
@@ -523,7 +525,7 @@ describe("tensions domain", () => {
     });
     const { updateTension } = await import("./tensions");
 
-    await updateTension(actor, { workspaceId: "ws-1", tensionId: "t-1", assigneeMemberId: "new-member" });
+    await updateTension(actor, { workspaceId: "ws-1", tensionId: "t-1", assigneeMemberId: "new-member", expectedVersion: 1 });
 
     expect(prismaMock.member.findFirst).toHaveBeenLastCalledWith({
       where: expect.objectContaining({ id: "new-member", workspaceId: "ws-1", isActive: true }),
@@ -550,6 +552,7 @@ describe("tensions domain", () => {
       workspaceId: "ws-1",
       tensionId: "t-1",
       raisedByMemberId: null,
+      expectedVersion: 1,
     });
 
     expect(prismaMock.member.findFirst).not.toHaveBeenCalled();
@@ -566,6 +569,7 @@ describe("tensions domain", () => {
       workspaceId: "ws-1",
       tensionId: "t-1",
       raisedByMemberId: null,
+      expectedVersion: 1,
     })).resolves.toMatchObject({
       id: "t-1",
       version: 1,
@@ -573,6 +577,28 @@ describe("tensions domain", () => {
 
     expect(prismaMock.workItemVersion.create).not.toHaveBeenCalled();
     expect(prismaMock.tension.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects missing versions for same-value and mixed content intent without effects", async () => {
+    prismaMock.tension.findUnique.mockResolvedValue({
+      id: "t-1", workspaceId: "ws-1", authorUserId: "u-1",
+      title: "Current tension", status: "OPEN", version: 2,
+      isPrivate: false, archivedAt: null,
+    });
+    const { updateTension } = await import("./tensions");
+
+    for (const params of [
+      { title: "Current tension" },
+      { title: "Changed tension", status: "RESOLVED" as const, resolvedVia: "Done" },
+    ]) {
+      await expect(updateTension(actor, { workspaceId: "ws-1", tensionId: "t-1", ...params }))
+        .rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+    }
+
+    expect(prismaMock.tension.update).not.toHaveBeenCalled();
+    expect(prismaMock.workItemVersion.create).not.toHaveBeenCalled();
+    expect(prismaMock.auditLog.create).not.toHaveBeenCalled();
+    expect(prismaMock.event.createMany).not.toHaveBeenCalled();
   });
 
   it("emits one publication event when a draft opens through update", async () => {
@@ -622,6 +648,7 @@ describe("tensions domain", () => {
       workspaceId: "ws-1",
       tensionId: "t-open",
       title: "New title",
+      expectedVersion: 1,
     })).resolves.toMatchObject({
       id: "t-open",
       version: 2,
@@ -682,6 +709,7 @@ describe("tensions domain", () => {
       workspaceId: "ws-1",
       tensionId: "t-open",
       title: "Assigned update",
+      expectedVersion: 1,
     })).resolves.toMatchObject({
       id: "t-open",
       version: 2,
@@ -734,6 +762,7 @@ describe("tensions domain", () => {
       workspaceId: "ws-1",
       tensionId: "t-open",
       title: "Member edit",
+      expectedVersion: 1,
     })).resolves.toMatchObject({
       id: "t-open",
       version: 2,
