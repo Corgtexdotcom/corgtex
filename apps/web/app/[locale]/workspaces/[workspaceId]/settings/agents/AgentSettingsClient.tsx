@@ -1,13 +1,14 @@
 "use client";
 
-import { useTransition } from"react";
+import { useState, useTransition } from"react";
 import {
  toggleAgentAction,
  updateAgentModelAction,
  updateAgentNewspaperScheduleAction,
+ updateSlackNudgeWindowAction,
  updateCompanyUnderstandingGoalApplyModeAction,
 } from"./actions";
-import type { AgentConfigSummary, CompanyUnderstandingGoalApplyMode, NewspaperWeekday } from"@corgtex/domain";
+import type { AgentConfigSummary, CompanyUnderstandingGoalApplyMode, NewspaperWeekday, SlackNudgeWindow } from"@corgtex/domain";
 import type { AgentModelOverrideOption } from "../../agents/model-override-options";
 import { useTranslations } from "next-intl";
 
@@ -28,6 +29,58 @@ function newspaperLocalTimeValue(value: unknown) {
 
 function newspaperTimeZoneValue(value: unknown) {
  return typeof value ==="string" && value.trim().length > 0 ? value : "UTC";
+}
+
+function SlackNudgeWindowSettings({ workspaceId, savedWindow }: {
+ workspaceId: string;
+ savedWindow: SlackNudgeWindow | null;
+}) {
+ const t = useTranslations("settings");
+ const [isPending, startTransition] = useTransition();
+ const [timeZone, setTimeZone] = useState(savedWindow?.timeZone ?? "");
+ const [weekdays, setWeekdays] = useState(savedWindow?.weekdays ?? [1, 2, 3, 4, 5]);
+ const [startLocalTime, setStartLocalTime] = useState(savedWindow?.startLocalTime ?? "09:00");
+ const [endLocalTime, setEndLocalTime] = useState(savedWindow?.endLocalTime ?? "17:00");
+ const [activeWindow, setActiveWindow] = useState(savedWindow !== null);
+ const [error, setError] = useState(false);
+ const minuteOfDay = (value: string) => {
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) return NaN;
+  const [hour, minute] = value.split(":").map(Number);
+  return hour * 60 + minute;
+ };
+ const windowMinutes = minuteOfDay(endLocalTime) - minuteOfDay(startLocalTime);
+ const weekdayLabels = ["weekdayMonday", "weekdayTuesday", "weekdayWednesday", "weekdayThursday", "weekdayFriday", "weekdaySaturday", "weekdaySunday"] as const;
+ const save = () => startTransition(async () => {
+  try { await updateSlackNudgeWindowAction(workspaceId, { timeZone, weekdays, startLocalTime, endLocalTime }); setActiveWindow(true); setError(false); }
+  catch { setError(true); }
+ });
+ const clear = () => startTransition(async () => {
+  try { await updateSlackNudgeWindowAction(workspaceId, null); setActiveWindow(false); setError(false); }
+  catch { setError(true); }
+ });
+ return <div className="flex flex-col items-start lg:items-end gap-2 w-full max-w-72">
+  <label className="text-sm font-medium text-text">{t("slackNudgeWindow")}</label>
+  <p className="text-xs text-muted text-left lg:text-right">{t("slackNudgeWindowHelp")}</p>
+  <label className="flex flex-col gap-1 text-xs text-muted w-full">
+   {t("newspaperTimeZone")}
+   <input type="text" required disabled={isPending} value={timeZone} onChange={(e) => setTimeZone(e.target.value)} placeholder="America/Toronto" className="text-sm border border-line rounded-md bg-surface-strong text-text py-1.5 px-3" />
+  </label>
+  <div className="flex flex-col gap-2 w-full">
+   <label className="flex flex-col gap-1 text-xs text-muted min-w-0 w-full">{t("slackNudgeStart")}<input type="time" required disabled={isPending} value={startLocalTime} onChange={(e) => setStartLocalTime(e.target.value)} className="w-full min-w-0 text-sm border border-line rounded-md bg-surface-strong text-text py-1.5 px-3" /></label>
+   <label className="flex flex-col gap-1 text-xs text-muted min-w-0 w-full">{t("slackNudgeEnd")}<input type="time" required disabled={isPending} value={endLocalTime} onChange={(e) => setEndLocalTime(e.target.value)} className="w-full min-w-0 text-sm border border-line rounded-md bg-surface-strong text-text py-1.5 px-3" /></label>
+  </div>
+  <div className="flex flex-wrap gap-2 justify-start lg:justify-end">
+   {weekdayLabels.map((label, index) => <label key={label} className="flex items-center gap-1 text-xs text-muted">
+    <input type="checkbox" disabled={isPending} checked={weekdays.includes(index + 1)} onChange={(e) => setWeekdays((days) => e.target.checked ? [...days, index + 1].sort() : days.filter((day) => day !== index + 1))} className="h-4 w-4 shrink-0" />
+    {t(label)}
+   </label>)}
+  </div>
+  <div className="flex gap-2">
+   <button type="button" disabled={isPending || !timeZone.trim() || !weekdays.length || !Number.isFinite(windowMinutes) || windowMinutes < 60} onClick={save} className="text-sm border border-line rounded-md px-3 py-1.5 disabled:opacity-50">{t("slackNudgeSave")}</button>
+   {activeWindow && <button type="button" disabled={isPending} onClick={clear} className="text-sm border border-line rounded-md px-3 py-1.5 disabled:opacity-50">{t("slackNudgeRemove")}</button>}
+  </div>
+  {error && <p role="alert" className="text-xs text-red-700">{t("slackNudgeSaveError")}</p>}
+ </div>;
 }
 
 export function AgentSettingsClient({
@@ -121,7 +174,7 @@ export function AgentSettingsClient({
  </div>
 
  {/* Controls Column */}
- <div className="flex flex-row lg:flex-col items-center lg:items-end justify-between gap-4 shrink-0">
+ <div className={`flex justify-between gap-4 ${agent.agentKey === "slack-agent" ? "flex-col items-stretch lg:items-end w-full lg:w-auto" : "flex-row lg:flex-col items-center lg:items-end shrink-0"}`}>
  <div className="flex items-center gap-3">
  <label className="text-sm font-medium text-text">
  {t("lblStatus")}
@@ -218,6 +271,10 @@ export function AgentSettingsClient({
  {t("newspaperCadenceAdminHelp")}
  </p>
  </div>
+ )}
+
+ {agent.agentKey ==="slack-agent" && (
+  <SlackNudgeWindowSettings workspaceId={workspaceId} savedWindow={agent.configJson?.proactiveNudgeWindow ?? null} />
  )}
 
  {agent.agentKey ==="company-understanding" && (

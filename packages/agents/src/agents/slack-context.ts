@@ -9,6 +9,7 @@ import {
   createWorkItemFromCommunicationSource,
   getAgentModelOverride,
   isAgentEnabled,
+  isSlackNudgeWindowOpen,
   isSlackThreadFollowupSuppressed,
   listHumanMembers,
   postDeliberationEntry,
@@ -104,6 +105,8 @@ function slackAgentConfig(value: unknown) {
     unansweredFollowupDelayMinutes: delayMinutes(config.unansweredFollowupDelayMinutes, DEFAULT_UNANSWERED_DELAY_MINUTES),
     unansweredActionCreationDelayMinutes: delayMinutes(config.unansweredActionCreationDelayMinutes, DEFAULT_UNANSWERED_ACTION_DELAY_MINUTES),
     staleActionFollowupDelayMinutes: delayMinutes(config.staleActionFollowupDelayMinutes, DEFAULT_STALE_ACTION_FOLLOWUP_DELAY_MINUTES),
+    proactiveNudgeWindow: config.proactiveNudgeWindow,
+    proactiveNudgeWindowVersion: asString(config.proactiveNudgeWindowVersion),
     mutedChannelIds,
   };
 }
@@ -643,8 +646,10 @@ export async function runSlackProactiveScan(params: {
   }
 
   const unansweredCutoff = new Date(now.getTime() - config.unansweredFollowupDelayMinutes * 60 * 1000);
-  const recentCutoff = new Date(now.getTime() - PROACTIVE_LOOKBACK_MINUTES * 60 * 1000);
-  const candidates = await prisma.communicationMessage.findMany({
+  // A configured weekly window can reopen just after the old seven-day cutoff.
+  // Keep two weeks of eligible sources so the next allowed scan can reach them.
+  const recentCutoff = new Date(now.getTime() - PROACTIVE_LOOKBACK_MINUTES * (config.proactiveNudgeWindow ? 2 : 1) * 60 * 1000);
+  const candidateQuery = {
     where: {
       workspaceId: params.workspaceId,
       installationId: params.installationId,
@@ -657,15 +662,97 @@ export async function runSlackProactiveScan(params: {
       isHidden: false,
       isDeleted: false,
     },
-    orderBy: { messageTs: "desc" },
+    orderBy: config.proactiveNudgeWindow
+      ? [{ messageTs: "asc" as const }, { id: "asc" as const }]
+      : { messageTs: "desc" as const },
     take: 100,
-  });
+  } satisfies Prisma.CommunicationMessageFindManyArgs;
 
   const model = await getAgentModelOverride(params.workspaceId, "slack-agent")
     ?? resolveModel(AGENT_REGISTRY["slack-agent"].defaultModelTier);
   let nudges = 0;
   let firstNudgeReviews = 0;
-  for (const candidate of candidates.filter((message) => looksUnanswered(message.text ?? "") && !isAddressedToSlackBot(message.text ?? "", installation.botUserId))) {
+  const nudgeWindowOpen = () => isSlackNudgeWindowOpen(new Date(), config.proactiveNudgeWindow);
+  const currentNudgePolicyAllowsSend = async () => {
+    const current = await readSlackAgentConfig(params.workspaceId);
+    return current.publicIngestionEnabled && current.proactiveEnabled
+      && current.proactiveNudgeWindowVersion === config.proactiveNudgeWindowVersion
+      && JSON.stringify(current.proactiveNudgeWindow ?? null) === JSON.stringify(config.proactiveNudgeWindow ?? null)
+      && isSlackNudgeWindowOpen(new Date(), current.proactiveNudgeWindow);
+  };
+  async function* eligibleFirstNudgeCandidates() {
+    if (!nudgeWindowOpen()) return;
+    const configured = Boolean(config.proactiveNudgeWindow);
+    // Old in-flight scans can finish after a policy reset, but can only write
+    // their own generation. A new activation always starts its own lookback.
+    const generation = config.proactiveNudgeWindowVersion ? `:${config.proactiveNudgeWindowVersion}` : "";
+    const claimKey = `slack:first-nudge-scan-cursor:${params.installationId}${generation}`;
+    const action = "proactive_first_nudge_scan_cursor";
+    const scope = { workspaceId: params.workspaceId, installationId: params.installationId, provider: "SLACK" as const, claimKey, action };
+    const checkpoint = configured ? await prisma.communicationEntityLink.findFirst({
+      where: scope,
+      select: { id: true, createdAt: true, message: { select: { id: true, messageTs: true, workspaceId: true, installationId: true } } },
+    }) : null;
+    const saved = checkpoint?.message;
+    // A soft-deleted source still supplies a valid ordering position.
+    // Candidate reads below continue to exclude deleted messages.
+    let after = saved?.messageTs
+      && saved.workspaceId === params.workspaceId && saved.installationId === params.installationId
+      && saved.messageTs <= unansweredCutoff
+      ? { id: saved.id, messageTs: saved.messageTs } : undefined;
+    // A weekly window may reopen after unfinished rows age out of the initial
+    // lookback. Finish that bounded cycle before starting a new 14-day cycle.
+    const cycleCutoff = after && after.messageTs < recentCutoff ? after.messageTs : recentCutoff;
+    let processed: { id: string; messageTs: Date | null } | undefined;
+    let exhausted = false;
+    try {
+      for (let pageNumber = 0; pageNumber < (configured ? 5 : 1); pageNumber += 1) {
+        if (!nudgeWindowOpen()) break;
+        const page = await prisma.communicationMessage.findMany({
+          ...candidateQuery,
+          where: {
+            ...candidateQuery.where,
+            messageTs: { gte: cycleCutoff, lte: unansweredCutoff },
+            ...(after ? { OR: [
+              { messageTs: { gt: after.messageTs } },
+              { messageTs: after.messageTs, id: { gt: after.id } },
+            ] } : {}),
+          },
+        });
+        for (const message of page) {
+          if (!nudgeWindowOpen()) return;
+          if (looksUnanswered(message.text ?? "") && !isAddressedToSlackBot(message.text ?? "", installation!.botUserId)) yield message;
+          // A consumer break never reaches this assignment: replay the interrupted
+          // candidate on the next run, including when review crosses closing time.
+          processed = message;
+        }
+        if (page.length < candidateQuery.take) { exhausted = true; break; }
+        const last = page[page.length - 1]!;
+        if (!last.messageTs) break;
+        after = { id: last.id, messageTs: last.messageTs };
+      }
+    } finally {
+      if (configured && (processed || exhausted)) {
+        const messageId = exhausted ? null : processed!.id;
+        // createdAt is a monotonic CAS token, including same-clock concurrent jobs.
+        const createdAt = new Date(Math.max(Date.now(), (checkpoint?.createdAt.getTime() ?? 0) + 1));
+        const data = { messageId, entityType: "CommunicationInstallation", entityId: params.installationId, createdAt };
+        if (checkpoint) {
+          await prisma.communicationEntityLink.updateMany({
+            where: { ...scope, id: checkpoint.id, createdAt: checkpoint.createdAt }, data,
+          });
+        } else {
+          try {
+            await prisma.communicationEntityLink.create({ data: { ...scope, ...data } });
+          } catch (error) {
+            if (!isUniqueConstraintError(error)) throw error;
+          }
+        }
+      }
+    }
+  }
+  for await (const candidate of eligibleFirstNudgeCandidates()) {
+    if (!nudgeWindowOpen()) break;
     const threadTs = threadTsForMessage(candidate);
     const cachePrefix = `${PROACTIVE_FIRST_NUDGE_CLAIM_PREFIX}:${params.installationId}:${candidate.id}:`;
     const textHash = createHash("sha256").update(candidate.text ?? "").digest("hex").slice(0, 16);
@@ -706,6 +793,7 @@ export async function runSlackProactiveScan(params: {
     if (replies > 0) continue;
 
     if (firstNudgeReviews >= MAX_FIRST_NUDGE_REVIEWS) break;
+    if (!await currentNudgePolicyAllowsSend()) break;
     firstNudgeReviews += 1;
     // Silence and punctuation are only candidate signals, not permission to interrupt.
     const review = await defaultModelGateway.extract({
@@ -716,6 +804,9 @@ export async function runSlackProactiveScan(params: {
       schemaHint: "{ explicitAsk: boolean, resolutionState: string, workDisposition: string, confidence: number, couldNot: string[] }",
       input: JSON.stringify({ text: candidate.text }),
     });
+    // Inference may outlive a policy edit or closing time. Re-read the policy
+    // before marking this source; a new generation starts its own scan.
+    if (!await currentNudgePolicyAllowsSend()) break;
     const output = review.output;
     const confidentReview = typeof output.explicitAsk === "boolean"
       && ["open", "answered"].includes(String(output.resolutionState))
@@ -763,6 +854,9 @@ export async function runSlackProactiveScan(params: {
       },
     });
     if (latestReplies > 0) continue;
+
+    // Suppression/reply reads can outlive an admin's schedule change too.
+    if (!await currentNudgePolicyAllowsSend()) break;
 
     const claimKey = `${PROACTIVE_FIRST_NUDGE_CLAIM_PREFIX}:${params.installationId}:${candidate.id}`;
     let claim: { id: string; createdAt: Date };
@@ -837,6 +931,10 @@ export async function runSlackProactiveScan(params: {
       if (!currentSource) {
         await prisma.communicationEntityLink.deleteMany({ where: { id: claim.id, workspaceId: params.workspaceId, claimKey, action: PROACTIVE_NUDGE_PENDING, createdAt: claim.createdAt } });
         continue;
+      }
+      if (!await currentNudgePolicyAllowsSend()) {
+        await prisma.communicationEntityLink.deleteMany({ where: { id: claim.id, workspaceId: params.workspaceId, claimKey, action: PROACTIVE_NUDGE_PENDING, createdAt: claim.createdAt } });
+        break;
       }
       const sendClaim = await prisma.communicationEntityLink.updateMany({
         where: { id: claim.id, workspaceId: params.workspaceId, claimKey, action: PROACTIVE_NUDGE_PENDING, createdAt: claim.createdAt },
