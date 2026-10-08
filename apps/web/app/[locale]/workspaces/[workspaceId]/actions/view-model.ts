@@ -1,3 +1,34 @@
+import type { ActionSort } from "@corgtex/domain";
+import { buildWorkItemQuery } from "@/lib/work-item-view";
+
+const ACTION_SORTS: readonly ActionSort[] = ["priority", "date", "created_asc", "due_asc", "due_desc", "alpha"];
+export const ACTION_PAGE_SIZE = 200;
+const MAX_ACTION_PAGE = Math.floor(2_147_483_647 / ACTION_PAGE_SIZE) + 1;
+
+export function normalizeActionPage(value: string | string[] | undefined) {
+  const candidate = Array.isArray(value) ? value[0] : value;
+  if (!candidate || !/^[1-9]\d*$/.test(candidate)) return 1;
+  const page = Number(candidate);
+  return Number.isSafeInteger(page) && page <= MAX_ACTION_PAGE ? page : 1;
+}
+
+export function normalizeActionSort(value: string | string[] | undefined): ActionSort {
+  const candidate = Array.isArray(value) ? value[0] : value;
+  return ACTION_SORTS.includes(candidate as ActionSort) ? candidate as ActionSort : "priority";
+}
+
+export function buildActionListQuery(
+  params: Omit<Parameters<typeof buildWorkItemQuery>[0], "sort"> & { sort?: ActionSort; page?: number },
+  scope?: string,
+) {
+  const { sort, page, ...queryParams } = params;
+  const query = new URLSearchParams(buildWorkItemQuery(queryParams).slice(1));
+  if (sort && sort !== "priority") query.set("sort", sort);
+  if (page && page > 1) query.set("page", String(page));
+  if (scope === "workspace" || scope === "assigned") query.set("scope", scope);
+  return query.size > 0 ? `?${query}` : "?";
+}
+
 export const ACTION_STATUS_FILTERS = ["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED", "ALL"] as const;
 const ACTION_VISIBLE_STATUS_FILTERS = ["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"] as const;
 

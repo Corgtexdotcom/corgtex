@@ -3,8 +3,11 @@ import {
   ACTION_STATUS_META,
   actionStatusFormValues,
   actionMatchesStatusFilter,
+  buildActionListQuery,
   groupActionsByStatus,
   hasEligibleActionAssignee,
+  normalizeActionPage,
+  normalizeActionSort,
   normalizeActionStatusFilter,
   normalizeActionStatusFilters,
   resolveActionAssigneeScope,
@@ -12,6 +15,45 @@ import {
 } from "./view-model";
 
 describe("actions view model", () => {
+  it("keeps old Date links on newest-created while accepting explicit date directions", () => {
+    expect(normalizeActionSort(undefined)).toBe("priority");
+    expect(normalizeActionSort("date")).toBe("date");
+    expect(normalizeActionSort("created_asc")).toBe("created_asc");
+    expect(normalizeActionSort("due_asc")).toBe("due_asc");
+    expect(normalizeActionSort("due_desc")).toBe("due_desc");
+    expect(normalizeActionSort("unknown")).toBe("priority");
+    expect(normalizeActionSort(["due_asc", "date"])).toBe("due_asc");
+  });
+  it("normalizes invalid Action page references to the first page", () => {
+    expect(normalizeActionPage(undefined)).toBe(1);
+    expect(normalizeActionPage("0")).toBe(1);
+    expect(normalizeActionPage("-1")).toBe(1);
+    expect(normalizeActionPage("2.5")).toBe(1);
+    expect(normalizeActionPage("99999999999999999999")).toBe(1);
+    expect(normalizeActionPage("999999999")).toBe(1);
+    expect(normalizeActionPage(["2", "3"])).toBe(2);
+  });
+
+  it("preserves the Actions table, status, owner, and circle filters across due sorting", () => {
+    const due = new URLSearchParams(buildActionListQuery({
+      view: "table",
+      status: ["OPEN", "IN_PROGRESS"],
+      circleIds: ["circle-1"],
+      assigneeMemberIds: ["member-1"],
+      sort: "due_asc",
+      page: 2,
+    }, "assigned").slice(1));
+    expect(due.get("view")).toBe("table");
+    expect(due.getAll("status")).toEqual(["OPEN", "IN_PROGRESS"]);
+    expect(due.getAll("circleId")).toEqual(["circle-1"]);
+    expect(due.getAll("assigneeMemberId")).toEqual(["member-1"]);
+    expect(due.get("scope")).toBe("assigned");
+    expect(due.get("sort")).toBe("due_asc");
+    expect(due.get("page")).toBe("2");
+
+    expect(buildActionListQuery({ sort: "date" })).toBe("?sort=date");
+    expect(buildActionListQuery({ sort: "priority" })).toBe("?");
+  });
   it("starts on the current member's Actions while keeping explicit workspace and owner filters", () => {
     expect(resolveActionAssigneeScope([], "member-daniel", undefined)).toMatchObject({
       assigneeMemberIds: ["member-daniel"], includeOwnDrafts: true, actionScope: "mine", assignedToMeActive: false,

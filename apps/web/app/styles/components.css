@@ -3301,6 +3301,19 @@ a.meeting-agenda-item:hover {
     box-shadow: var(--shadow-lg);
   }
 
+  .nr-icon-menu-popover-spacious {
+    min-width: 260px;
+  }
+
+  @media (max-width: 640px) {
+    .nr-icon-menu-popover-spacious {
+      left: 50%;
+      right: auto;
+      transform: translateX(-50%);
+      min-width: min(260px, calc(100vw - 32px));
+    }
+  }
+
   .nr-icon-menu-item {
     display: flex;
     width: 100%;

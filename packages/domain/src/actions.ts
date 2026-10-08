@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { prisma } from "@corgtex/shared";
-import type { AppActor } from "@corgtex/shared";
+import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import type { ActionStatus, MeetingInsight, Prisma } from "@prisma/client";
 import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
@@ -31,12 +31,14 @@ import {
 import { privacyFilter } from "./privacy";
 
 export type WorkItemSort = "priority" | "date" | "alpha";
+export type ActionSort = WorkItemSort | "created_asc" | "due_asc" | "due_desc";
 
 export type ListActionsOptions = {
   take?: number;
   skip?: number;
   archiveFilter?: ArchiveFilter;
   status?: ActionStatus;
+  statuses?: readonly ActionStatus[];
   circleId?: string | null;
   circleIds?: string[] | null;
   assigneeMemberId?: string | null;
@@ -48,7 +50,7 @@ export type ListActionsOptions = {
   createdTo?: Date;
   dueFrom?: Date;
   dueTo?: Date;
-  sort?: WorkItemSort;
+  sort?: ActionSort;
 };
 
 type ActionChecklistSummary = {
@@ -127,9 +129,19 @@ function appendActionWhereAnd(where: Prisma.ActionWhereInput, condition: Prisma.
   where.AND = and;
 }
 
-function workItemOrderBy(sort: WorkItemSort | undefined): Prisma.ActionOrderByWithRelationInput[] {
+function workItemOrderBy(sort: ActionSort | undefined): Prisma.ActionOrderByWithRelationInput[] {
   if (sort === "alpha") {
     return [{ title: "asc" }, { createdAt: "desc" }, { id: "desc" }];
+  }
+  if (sort === "created_asc") {
+    return [{ createdAt: "asc" }, { id: "asc" }];
+  }
+  if (sort === "due_asc" || sort === "due_desc") {
+    return [
+      { dueAt: { sort: sort === "due_asc" ? "asc" : "desc", nulls: "last" } },
+      { createdAt: "desc" },
+      { id: "desc" },
+    ];
   }
   if (sort === "date") {
     return [{ createdAt: "desc" }, { id: "desc" }];
@@ -240,16 +252,14 @@ function completedByUserIdForActor(actor: AppActor, workspaceId: string) {
   return actor.kind === "user" ? actor.user.id : actorUserIdForWorkspace(actor, workspaceId);
 }
 
-export async function listActions(actor: AppActor, workspaceId: string, opts?: ListActionsOptions) {
-  const take = opts?.take ?? 20;
-  const skip = opts?.skip ?? 0;
-  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+function actionListWhere(actor: AppActor, membership: MembershipSummary | null, workspaceId: string, opts?: ListActionsOptions) {
   const where: Prisma.ActionWhereInput = {
     workspaceId,
     ...privacyFilter(actor, membership),
     ...archiveFilterWhere(opts?.archiveFilter),
   };
-  if (opts?.status) where.status = opts.status;
+  if (opts?.statuses?.length) where.status = { in: [...opts.statuses] };
+  else if (opts?.status) where.status = opts.status;
   const circleIds = listFilterValues(opts?.circleIds);
   if (circleIds.length > 0) where.circleId = { in: circleIds };
   else if (opts?.circleId) where.circleId = opts.circleId;
@@ -288,7 +298,27 @@ export async function listActions(actor: AppActor, workspaceId: string, opts?: L
       ],
     });
   }
-  
+  return where;
+}
+
+export async function countActionsByStatus(actor: AppActor, workspaceId: string, opts?: ListActionsOptions) {
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const where = actionListWhere(actor, membership, workspaceId, { ...opts, status: undefined, statuses: undefined });
+  const groups = await prisma.action.groupBy({ by: ["status"], where, _count: { _all: true } });
+  const counts = { DRAFT: 0, OPEN: 0, IN_PROGRESS: 0, COMPLETED: 0, ALL: 0 };
+  for (const group of groups) {
+    counts[group.status] = group._count._all;
+    counts.ALL += group._count._all;
+  }
+  return counts;
+}
+
+export async function listActions(actor: AppActor, workspaceId: string, opts?: ListActionsOptions) {
+  const take = opts?.take ?? 20;
+  const skip = opts?.skip ?? 0;
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const where = actionListWhere(actor, membership, workspaceId, opts);
+
   const [items, total] = await Promise.all([
     prisma.action.findMany({
       where,
