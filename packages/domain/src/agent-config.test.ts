@@ -109,7 +109,7 @@ describe("agent-config", () => {
     it("rejects invalid schedules before writing", async () => {
       const { updateWorkspaceSlackNudgeWindow } = await import("./agent-config");
       await expect(updateWorkspaceSlackNudgeWindow({ kind: "user", user: { id: "u-1" } } as any, {
-        workspaceId: "ws-1", window: { ...window, timeZone: "EST" },
+        workspaceId: "ws-1", window: { ...window, timeZone: "Invalid/Place" },
       })).rejects.toThrow("valid IANA time zone");
       expect(prismaMock.workspaceAgentConfig.upsert).not.toHaveBeenCalled();
     });
