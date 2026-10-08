@@ -3,39 +3,59 @@ import {
   buildMeetingListView,
   filterMeetingRecordingForEvidenceState,
   isActionNeededMeetingEvidenceState,
-  normalizeMeetingStatusFilters,
+  normalizeMeetingStatusFilter,
+  type MeetingStatusFilter,
 } from "./meetingListView";
 
 type TestMeeting = {
   id: string;
   title: string;
+  recordedAt: Date;
+  transcript: string | null;
 };
 
-const completedMeeting: TestMeeting = { id: "completed", title: "Completed meeting" };
-const needsTranscriptMeeting: TestMeeting = { id: "needs-transcript", title: "Needs transcript" };
-const recoveryPendingMeeting: TestMeeting = { id: "recovery-pending", title: "Recorder recovery" };
-const upcomingMeeting: TestMeeting = { id: "upcoming", title: "Upcoming meeting" };
+const meeting = (id: string, day: number, transcript: string | null = null): TestMeeting => ({
+  id,
+  title: id,
+  recordedAt: new Date(`2026-10-${String(day).padStart(2, "0")}T12:00:00.000Z`),
+  transcript,
+});
+
+const completedReady = meeting("completed-ready", 5, "Reviewed transcript");
+const completedMissing = meeting("completed-missing", 6);
+const completedBlank = meeting("completed-blank", 7, "  \n  ");
+const needsTranscript = meeting("needs-transcript", 4);
+const recoveryPending = meeting("recovery-pending", 3);
+const upcoming = meeting("upcoming", 9);
+const scheduledReady = meeting("scheduled-ready", 8, "Uploaded transcript");
 
 function evidenceStates() {
   return new Map([
-    [needsTranscriptMeeting.id, { state: "needs_transcript" as const, action: "upload_transcript" as const }],
-    [recoveryPendingMeeting.id, { state: "provider_recovery_pending" as const, action: "upload_transcript" as const }],
-    [upcomingMeeting.id, { state: "upcoming_recordable" as const, action: "schedule_recorder" as const }],
+    [needsTranscript.id, { state: "needs_transcript" as const, action: "upload_transcript" as const }],
+    [recoveryPending.id, { state: "provider_recovery_pending" as const, action: "upload_transcript" as const }],
+    [upcoming.id, { state: "upcoming_recordable" as const, action: "schedule_recorder" as const }],
+    [scheduledReady.id, { state: "ready" as const, action: "none" as const }],
   ]);
 }
 
-function view(statusFilters: Array<"COMPLETED" | "SCHEDULED"> = []) {
+function view(statusFilter: MeetingStatusFilter = "ALL") {
   return buildMeetingListView({
-    completedMeetings: [completedMeeting],
-    scheduledMeetings: [needsTranscriptMeeting, recoveryPendingMeeting, upcomingMeeting],
+    completedMeetings: [completedReady, completedMissing, completedBlank],
+    scheduledMeetings: [needsTranscript, recoveryPending, upcoming, scheduledReady],
     evidenceStateByMeetingId: evidenceStates(),
-    statusFilters,
+    statusFilter,
   });
 }
 
+const counts = { all: 2, completed: 1, transcriptNeeded: 4, scheduled: 2 };
+
 describe("meeting list view", () => {
-  it("normalizes all selected statuses back to the all view", () => {
-    expect(normalizeMeetingStatusFilters(["COMPLETED", "SCHEDULED"])).toEqual([]);
+  it("normalizes legacy and repeated status values to one explicit view", () => {
+    expect(normalizeMeetingStatusFilter(undefined)).toBe("ALL");
+    expect(normalizeMeetingStatusFilter("unknown")).toBe("ALL");
+    expect(normalizeMeetingStatusFilter("TRANSCRIPT_NEEDED")).toBe("TRANSCRIPT_NEEDED");
+    expect(normalizeMeetingStatusFilter(["unknown", "SCHEDULED", "TRANSCRIPT_NEEDED"])).toBe("SCHEDULED");
+    expect(normalizeMeetingStatusFilter(["COMPLETED", "SCHEDULED"])).toBe("COMPLETED");
   });
 
   it("treats missing transcripts and provider recovery as action-needed past meetings", () => {
@@ -53,30 +73,54 @@ describe("meeting list view", () => {
     expect(filterMeetingRecordingForEvidenceState(completedRecording, { recorderEnabled: false })).toBe(completedRecording);
   });
 
-  it("shows action-needed scheduled rows in the completed area for the all view", () => {
+  it("defaults All to transcript-available meetings only, newest first", () => {
     const result = view();
 
-    expect(result.completedMeetings).toEqual([completedMeeting]);
-    expect(result.actionNeededMeetings).toEqual([needsTranscriptMeeting, recoveryPendingMeeting]);
-    expect(result.upcomingMeetings).toEqual([upcomingMeeting]);
-    expect(result.counts).toEqual({ all: 4, completed: 3, scheduled: 1 });
+    expect(result.recordedMeetings).toEqual([scheduledReady, completedReady]);
+    expect(result.transcriptNeededMeetings).toEqual([]);
+    expect(result.scheduledMeetings).toEqual([]);
+    expect(result.counts).toEqual(counts);
   });
 
-  it("keeps action-needed scheduled rows visible when filtering to completed", () => {
-    const result = view(["COMPLETED"]);
+  it("keeps the legacy Completed filter scoped to completed meetings with transcripts", () => {
+    const result = view("COMPLETED");
 
-    expect(result.completedMeetings).toEqual([completedMeeting]);
-    expect(result.actionNeededMeetings).toEqual([needsTranscriptMeeting, recoveryPendingMeeting]);
-    expect(result.upcomingMeetings).toEqual([]);
-    expect(result.counts).toEqual({ all: 4, completed: 3, scheduled: 1 });
+    expect(result.recordedMeetings).toEqual([completedReady]);
+    expect(result.transcriptNeededMeetings).toEqual([]);
+    expect(result.scheduledMeetings).toEqual([]);
+    expect(result.counts).toEqual(counts);
   });
 
-  it("excludes action-needed past rows from the scheduled filter", () => {
-    const result = view(["SCHEDULED"]);
+  it("shows missing completed and recovery rows only in Transcript needed", () => {
+    const result = view("TRANSCRIPT_NEEDED");
 
-    expect(result.completedMeetings).toEqual([]);
-    expect(result.actionNeededMeetings).toEqual([]);
-    expect(result.upcomingMeetings).toEqual([upcomingMeeting]);
-    expect(result.counts).toEqual({ all: 4, completed: 3, scheduled: 1 });
+    expect(result.recordedMeetings).toEqual([]);
+    expect(result.transcriptNeededMeetings).toEqual([
+      completedBlank, completedMissing, needsTranscript, recoveryPending,
+    ]);
+    expect(result.scheduledMeetings).toEqual([]);
+    expect(result.counts).toEqual(counts);
+  });
+
+  it("keeps scheduled records in their explicit view without recovery rows", () => {
+    const result = view("SCHEDULED");
+
+    expect(result.recordedMeetings).toEqual([]);
+    expect(result.transcriptNeededMeetings).toEqual([]);
+    expect(result.scheduledMeetings).toEqual([upcoming, scheduledReady]);
+    expect(result.counts).toEqual(counts);
+  });
+
+  it("keeps counts equal to the full visible list beyond the first screen", () => {
+    const completedMeetings = Array.from({ length: 64 }, (_, index) => meeting(`recorded-${index}`, 1, "Transcript"));
+    const result = buildMeetingListView({
+      completedMeetings: [...completedMeetings, completedMissing],
+      scheduledMeetings: [needsTranscript],
+      evidenceStateByMeetingId: evidenceStates(),
+      statusFilter: "ALL",
+    });
+
+    expect(result.recordedMeetings).toHaveLength(64);
+    expect(result.counts).toEqual({ all: 64, completed: 64, transcriptNeeded: 2, scheduled: 0 });
   });
 });
