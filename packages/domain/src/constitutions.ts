@@ -117,7 +117,8 @@ async function resolveSourceReferences(
     const policyProposalEligible = policy?.proposal.workspaceId === workspaceId
       && !policy.proposal.isPrivate && policy.proposal.publishedAt != null;
     const proposalSource = reference.sourceKind === "PROPOSAL"
-      && reference.proposalId === policy?.proposal.id && !reference.tensionId
+      && (reference.proposalId === undefined || reference.proposalId === policy?.proposal.id)
+      && !reference.tensionId
       && policyProposalEligible;
     const tension = reference.sourceKind === "TENSION" && !reference.proposalId && policyProposalEligible
       ? policy?.proposal.tensions.find((candidate) => candidate.id === reference.tensionId)

@@ -1196,6 +1196,8 @@
   "agreements": {
     "accepted": "Aceptada {date}",
     "constitutionMeta": "v{version} · {date}",
+    "constitutionOrigins": "Fuentes por punto de la Constitución",
+    "constitutionPoint": "Punto {number}",
     "filterAll": "Todas",
     "filterConstitution": "Constitución",
     "filterPolicies": "Políticas aceptadas",
