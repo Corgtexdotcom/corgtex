@@ -643,6 +643,11 @@ export async function RoleDirectorySurface({
 
   return (
     <div>
+      {!isDemo && !canManageStructure && (
+        <p role="note" className="muted" style={{ margin: "0 0 16px" }}>
+          {t("readOnlyEditHelp")}
+        </p>
+      )}
       {showToolbar && (
         <div className="nr-work-board-header">
           <div className="nr-filter-bar nr-filter-bar-wrap">

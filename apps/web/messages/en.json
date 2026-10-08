@@ -1857,6 +1857,7 @@
     "pageDescription": "Operate roles across every circle, staffing state, and member portfolio.",
     "pageTitle": "Roles",
     "purpose": "Purpose",
+    "readOnlyEditHelp": "Only workspace facilitators and admins can edit role descriptions. Ask one of them to make a change.",
     "reassignTo": "Reassign to",
     "removeHolder": "Remove {name}",
     "selectMember": "Select a member",
