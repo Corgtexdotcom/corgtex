@@ -8,6 +8,7 @@ type MeetingArchiveDialogLabels = {
   title: string;
   reason: string;
   reasonPlaceholder: string;
+  help: string;
   submit: string;
   cancel: string;
 };
@@ -36,6 +37,7 @@ export function MeetingArchiveDialog({
         <form action={action} className="stack nr-form-section" onSubmit={() => setOpen(false)}>
           <input type="hidden" name="workspaceId" value={workspaceId} />
           <input type="hidden" name="meetingId" value={meetingId} />
+          <p className="meeting-context-help">{labels.help}</p>
           <label>
             {labels.reason}
             <textarea name="archiveReason" placeholder={labels.reasonPlaceholder} required rows={4} />

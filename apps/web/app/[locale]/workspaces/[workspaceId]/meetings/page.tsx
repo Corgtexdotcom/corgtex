@@ -14,6 +14,7 @@ import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
 import { MeetingArchiveDialog } from "./MeetingArchiveDialog";
+import { MeetingPageGuidance } from "./MeetingPageGuidance";
 import { MeetingTranscriptUploadForm } from "./MeetingTranscriptUploadForm";
 import { MeetingAttendeePicker } from "./MeetingAttendeePicker";
 import { WorkItemAttentionBadge, WorkItemBadge, WorkItemFilterControls } from "@/lib/components/WorkItemControls";
@@ -114,6 +115,7 @@ export default async function MeetingsPage({
     title: t("removeMeetingTitle"),
     reason: t("removeMeetingReasonLabel"),
     reasonPlaceholder: t("removeMeetingReasonPlaceholder"),
+    help: t("meetingGuideArchiveDialog"),
     submit: t("removeMeetingSubmit"),
     cancel: tCommon("cancel"),
   };
@@ -216,12 +218,13 @@ export default async function MeetingsPage({
         </div>
       </header>
 
-      <section className="panel" aria-label={t("meetingGuideTitle")} style={{ marginBottom: 24 }}>
-        <h2 style={{ marginTop: 0 }}>{t("meetingGuideTitle")}</h2>
-        <p>{t("meetingGuideWorkflow")}</p>
-        <p>{recorderEnabled ? t("meetingGuideRecorderReady") : t("meetingGuideRecorderUnavailable")}</p>
-        <p style={{ marginBottom: 0 }}>{t("meetingGuideArchive")}</p>
-      </section>
+      <MeetingPageGuidance
+        title={t("meetingGuideTitle")}
+        workflow={t("meetingGuideWorkflow")}
+        archive={t("meetingGuideArchive")}
+        openBrain={t("meetingGuideOpenBrain")}
+        workspaceId={workspaceId}
+      />
 
       {recorderSentMeeting ? (
         <div className="form-message form-message-success" role="status" style={{ marginBottom: 24 }}>
@@ -289,6 +292,7 @@ export default async function MeetingsPage({
         />
 
         <h2 className="nr-section-header">{completedSectionTitle}</h2>
+        <p className="meeting-context-help">{t("meetingGuideReviewActions")}</p>
         {completedDisplayCount === 0 && <p className="nr-meta">{t("noMeetings")}</p>}
         {completedDisplayCount > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
@@ -440,8 +444,11 @@ export default async function MeetingsPage({
                   <option value="FREQ=MONTHLY">{t("recurrenceMonthly")}</option>
                 </select>
               </label>
+              <p className="meeting-context-help">
+                {recorderEnabled ? t("meetingGuideRecorderReady") : t("meetingGuideRecorderUnavailable")}
+              </p>
               <label>
-                Meeting URL
+                {t("formMeetingUrl")}
                 <input name="meetingUrl" type="url" placeholder="https://teams.microsoft.com/meet/..." />
               </label>
               <MeetingAttendeePicker
