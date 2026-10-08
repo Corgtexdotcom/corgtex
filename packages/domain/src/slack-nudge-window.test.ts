@@ -29,7 +29,7 @@ describe("Slack first-nudge window", () => {
 
   it("leaves other workspaces unchanged when unset and fails closed on malformed policy", () => {
     expect(isSlackNudgeWindowOpen(new Date("2026-10-03T19:00:00Z"), undefined)).toBe(true);
-    expect(isSlackNudgeWindowOpen(new Date("2026-10-03T19:00:00Z"), { ...chironeWindow, timeZone: "EST" })).toBe(false);
+    expect(isSlackNudgeWindowOpen(new Date("2026-10-03T19:00:00Z"), { ...chironeWindow, timeZone: "Invalid/Place" })).toBe(false);
     expect(() => parseSlackNudgeWindow({ ...chironeWindow, weekdays: [1, 1] })).toThrow("Invalid Slack nudge window.");
     expect(() => parseSlackNudgeWindow({ ...chironeWindow, endLocalTime: "09:00" })).toThrow("Invalid Slack nudge window.");
   });
@@ -41,8 +41,18 @@ describe("Slack first-nudge window", () => {
       .toMatchObject({ startLocalTime: "09:15", endLocalTime: "10:15" });
   });
 
-  it.each(["Etc/UTC", "US/Eastern", "Etc/GMT+5", "Asia/Kathmandu"])("accepts runtime-supported IANA identifier %s", (timeZone) => {
+  it.each(["Etc/UTC", "US/Eastern", "Etc/GMT+5", "Asia/Kathmandu", "CET", "GB", "Japan", "EST"])("accepts runtime-supported IANA identifier %s", (timeZone) => {
     expect(parseSlackNudgeWindow({ ...chironeWindow, timeZone })?.timeZone).toBe(timeZone);
+  });
+
+  it.each([
+    ["CET", "2026-10-05T07:00:00Z"],
+    ["GB", "2026-10-05T08:00:00Z"],
+    ["Japan", "2026-10-05T00:00:00Z"],
+  ])("evaluates the local boundary for %s", (timeZone, instant) => {
+    const window = { ...chironeWindow, timeZone };
+    expect(isSlackNudgeWindowOpen(new Date(Date.parse(instant) - 1), window)).toBe(false);
+    expect(isSlackNudgeWindowOpen(new Date(instant), window)).toBe(true);
   });
 
   it("admits an hourly UTC scan inside a one-hour window in a quarter-hour-offset zone", () => {

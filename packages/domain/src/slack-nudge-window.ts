@@ -37,9 +37,6 @@ export function parseSlackNudgeWindow(value: unknown): SlackNudgeWindow | null {
   if (endMinute - startMinute < 60) {
     throw new AppError(400, "INVALID_INPUT", "Slack nudge windows must last at least one hour.");
   }
-  if (timeZone !== "UTC" && !timeZone.includes("/")) {
-    throw new AppError(400, "INVALID_INPUT", "Slack nudge window requires a valid IANA time zone.");
-  }
   try {
     new Intl.DateTimeFormat("en-US", { timeZone });
   } catch {
