@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   membership: vi.fn(),
   action: vi.fn(),
   actions: vi.fn(),
+  actionCounts: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -25,6 +26,7 @@ vi.mock("@corgtex/domain", () => ({
   requireWorkspaceMembership: mocks.membership,
   getAction: mocks.action,
   listActions: mocks.actions,
+  countActionsByStatus: mocks.actionCounts,
   listCircles: async () => [],
   listHumanMembers: async () => [{ id: "synthetic-member", user: { displayName: "Synthetic Member", email: "synthetic@example.test" } }],
   listAdviceRequests: async () => [],
@@ -108,6 +110,7 @@ beforeEach(() => {
   mocks.membership.mockResolvedValue({ id: "synthetic-member", role: "ADMIN", isActive: true });
   mocks.action.mockResolvedValue(action);
   mocks.actions.mockResolvedValue({ items: [action], total: 1 });
+  mocks.actionCounts.mockResolvedValue({ DRAFT: 0, OPEN: 1, IN_PROGRESS: 0, COMPLETED: 0, ALL: 1 });
 });
 
 afterEach(() => vi.unstubAllGlobals());
