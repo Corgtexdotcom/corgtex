@@ -568,12 +568,58 @@ describe("Slack context jobs", () => {
     expect(checkpoint()?.message?.id).toBe("ask-9");
   });
 
-  it.each([null, candidate({ id: "deleted", isDeleted: true }), candidate({ id: "future", messageTs: new Date("2026-11-01T00:00:00Z") }), candidate({ id: "foreign", workspaceId: "other" })])("resets a deleted, future, or foreign saved cursor", async (saved) => {
+  it.each([null, candidate({ id: "future", messageTs: new Date("2026-11-01T00:00:00Z") }), candidate({ id: "foreign", workspaceId: "other" })])("resets a missing, future, or foreign saved cursor", async (saved) => {
     installScanFixture([], saved);
     const { runSlackProactiveScan } = await import("./slack-context");
     await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
     expect(prismaMock.communicationMessage.findMany.mock.calls[0][0].where.OR).toBeUndefined();
     expect(prismaMock.communicationEntityLink.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ messageId: null }) }));
+  });
+
+  it("resumes old weekly backlog after its checkpoint source is soft-deleted", async () => {
+    const saved = candidate({ id: "deleted-cursor", messageTs: new Date("2026-09-23T15:00:00Z"), isDeleted: true });
+    const held = candidate({ id: "held-request", text: "Can someone confirm the owner?", messageTs: new Date("2026-09-23T15:01:00Z") });
+    installScanFixture([held], saved);
+    vi.setSystemTime(new Date("2026-10-12T16:59:00Z"));
+    const { runSlackProactiveScan } = await import("./slack-context");
+    expect((await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" })).nudges).toBe(1);
+    expect(prismaMock.communicationMessage.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({
+      isDeleted: false, messageTs: expect.objectContaining({ gte: saved.messageTs }),
+      OR: expect.arrayContaining([expect.objectContaining({ id: { gt: "deleted-cursor" } })]),
+    }) }));
+    expect(extractMock).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(extractMock.mock.calls[0][0].input).text).toBe(held.text);
+  });
+
+  it.each(["after inference", "before claim", "after claim/source reread", "open generation change", "legacy schedule change"])("stops first nudges after an admin policy change: %s", async (boundary) => {
+    const window = { timeZone: "UTC", weekdays: [1], startLocalTime: "09:00", endLocalTime: "17:00" };
+    let configJson = { proactiveNudgeWindow: window, proactiveNudgeWindowVersion: boundary === "legacy schedule change" ? "" : "initial" };
+    prismaMock.workspaceAgentConfig.findUnique.mockImplementation(async () => ({ configJson }));
+    vi.setSystemTime(new Date("2026-10-05T16:00:00Z"));
+    const narrow = () => { configJson = { proactiveNudgeWindow: { ...window, endLocalTime: boundary === "open generation change" ? "16:30" : "15:00" }, proactiveNudgeWindowVersion: boundary === "legacy schedule change" ? "" : "narrowed" }; };
+    const candidates = [candidate({ id: "first", text: "Can someone confirm the owner?", messageTs: new Date("2026-10-02T15:00:00Z") }), candidate({ id: "second", text: "Can someone confirm another owner?", messageTs: new Date("2026-10-02T15:01:00Z") })];
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce(candidates);
+    extractMock.mockImplementationOnce(async () => {
+      if (["after inference", "open generation change", "legacy schedule change"].includes(boundary)) narrow();
+      return { output: { explicitAsk: true, resolutionState: "open", workDisposition: "request", confidence: 0.97, couldNot: [] } };
+    });
+    if (boundary === "before claim") prismaMock.communicationMessage.count.mockResolvedValueOnce(0).mockImplementationOnce(async () => { narrow(); return 0; });
+    if (boundary === "after claim/source reread") prismaMock.communicationMessage.findFirst.mockImplementationOnce(async () => { narrow(); return { id: "first" }; });
+    const { runSlackProactiveScan } = await import("./slack-context");
+    expect((await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" })).nudges).toBe(0);
+    expect(extractMock).toHaveBeenCalledTimes(1);
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+    expect(prismaMock.communicationEntityLink.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.communicationEntityLink.updateMany).not.toHaveBeenCalledWith(expect.objectContaining({ data: { action: "proactive_unanswered_nudge_sending" } }));
+    if (boundary === "after claim/source reread") {
+      expect(prismaMock.communicationEntityLink.deleteMany).toHaveBeenCalledWith({ where: {
+        id: "link-1", workspaceId: "workspace-1", claimKey: "slack-proactive-first-nudge:install-1:first",
+        action: "proactive_unanswered_nudge_pending", createdAt: new Date("2026-04-29T21:00:00Z"),
+      } });
+    } else {
+      expect(prismaMock.communicationEntityLink.create).not.toHaveBeenCalled();
+      expect(prismaMock.communicationEntityLink.deleteMany).not.toHaveBeenCalled();
+    }
   });
 
   it("leaves a first nudge unclaimed when model review crosses the closing time", async () => {

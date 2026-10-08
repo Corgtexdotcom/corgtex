@@ -673,6 +673,13 @@ export async function runSlackProactiveScan(params: {
   let nudges = 0;
   let firstNudgeReviews = 0;
   const nudgeWindowOpen = () => isSlackNudgeWindowOpen(new Date(), config.proactiveNudgeWindow);
+  const currentNudgePolicyAllowsSend = async () => {
+    const current = await readSlackAgentConfig(params.workspaceId);
+    return current.publicIngestionEnabled && current.proactiveEnabled
+      && current.proactiveNudgeWindowVersion === config.proactiveNudgeWindowVersion
+      && JSON.stringify(current.proactiveNudgeWindow ?? null) === JSON.stringify(config.proactiveNudgeWindow ?? null)
+      && isSlackNudgeWindowOpen(new Date(), current.proactiveNudgeWindow);
+  };
   async function* eligibleFirstNudgeCandidates() {
     if (!nudgeWindowOpen()) return;
     const configured = Boolean(config.proactiveNudgeWindow);
@@ -684,10 +691,12 @@ export async function runSlackProactiveScan(params: {
     const scope = { workspaceId: params.workspaceId, installationId: params.installationId, provider: "SLACK" as const, claimKey, action };
     const checkpoint = configured ? await prisma.communicationEntityLink.findFirst({
       where: scope,
-      select: { id: true, createdAt: true, message: { select: { id: true, messageTs: true, workspaceId: true, installationId: true, isDeleted: true } } },
+      select: { id: true, createdAt: true, message: { select: { id: true, messageTs: true, workspaceId: true, installationId: true } } },
     }) : null;
     const saved = checkpoint?.message;
-    let after = saved?.messageTs && !saved.isDeleted
+    // A soft-deleted source still supplies a valid ordering position.
+    // Candidate reads below continue to exclude deleted messages.
+    let after = saved?.messageTs
       && saved.workspaceId === params.workspaceId && saved.installationId === params.installationId
       && saved.messageTs <= unansweredCutoff
       ? { id: saved.id, messageTs: saved.messageTs } : undefined;
@@ -784,7 +793,7 @@ export async function runSlackProactiveScan(params: {
     if (replies > 0) continue;
 
     if (firstNudgeReviews >= MAX_FIRST_NUDGE_REVIEWS) break;
-    if (!nudgeWindowOpen()) break;
+    if (!await currentNudgePolicyAllowsSend()) break;
     firstNudgeReviews += 1;
     // Silence and punctuation are only candidate signals, not permission to interrupt.
     const review = await defaultModelGateway.extract({
@@ -795,9 +804,9 @@ export async function runSlackProactiveScan(params: {
       schemaHint: "{ explicitAsk: boolean, resolutionState: string, workDisposition: string, confidence: number, couldNot: string[] }",
       input: JSON.stringify({ text: candidate.text }),
     });
-    // A review that finishes after closing must not mark this source or start
-    // reviewing the next one. Leave both eligible for the next allowed scan.
-    if (!nudgeWindowOpen()) break;
+    // Inference may outlive a policy edit or closing time. Re-read the policy
+    // before marking this source; a new generation starts its own scan.
+    if (!await currentNudgePolicyAllowsSend()) break;
     const output = review.output;
     const confidentReview = typeof output.explicitAsk === "boolean"
       && ["open", "answered"].includes(String(output.resolutionState))
@@ -846,9 +855,8 @@ export async function runSlackProactiveScan(params: {
     });
     if (latestReplies > 0) continue;
 
-    // Model review may have crossed the local closing time. Leave the source
-    // untouched so the next allowed scan can reconsider it.
-    if (!nudgeWindowOpen()) break;
+    // Suppression/reply reads can outlive an admin's schedule change too.
+    if (!await currentNudgePolicyAllowsSend()) break;
 
     const claimKey = `${PROACTIVE_FIRST_NUDGE_CLAIM_PREFIX}:${params.installationId}:${candidate.id}`;
     let claim: { id: string; createdAt: Date };
@@ -924,7 +932,7 @@ export async function runSlackProactiveScan(params: {
         await prisma.communicationEntityLink.deleteMany({ where: { id: claim.id, workspaceId: params.workspaceId, claimKey, action: PROACTIVE_NUDGE_PENDING, createdAt: claim.createdAt } });
         continue;
       }
-      if (!nudgeWindowOpen()) {
+      if (!await currentNudgePolicyAllowsSend()) {
         await prisma.communicationEntityLink.deleteMany({ where: { id: claim.id, workspaceId: params.workspaceId, claimKey, action: PROACTIVE_NUDGE_PENDING, createdAt: claim.createdAt } });
         break;
       }
