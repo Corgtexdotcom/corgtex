@@ -160,7 +160,12 @@ export function MobileWorkspaceShell({
     <>
       <div className="mobile-shell" aria-label={tMobile("shellLabel")}>
         <header className="mobile-topbar">
-          <WorkspaceSwitcher workspaceId={workspaceId} workspaces={workspaces} mobile />
+          <WorkspaceSwitcher
+            workspaceId={workspaceId}
+            workspaces={workspaces}
+            mobile
+            onSingleWorkspaceNavigate={() => setMode("workspace", "brand")}
+          />
 
           <div className="mobile-mode-switch" role="group" aria-label={tMobile("modeSwitchLabel")}>
             <button

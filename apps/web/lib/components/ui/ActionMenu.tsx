@@ -19,6 +19,7 @@ interface ActionMenuProps {
   triggerClassName?: string;
   panelClassName?: string;
   panelRole?: "menu" | "dialog";
+  onOpen?: () => void;
 }
 
 const PANEL_MARGIN = 8;
@@ -43,6 +44,7 @@ export function ActionMenu({
   triggerClassName = "",
   panelClassName = "",
   panelRole = "menu",
+  onOpen,
 }: ActionMenuProps) {
   const triggerId = useId();
   const panelId = `${triggerId}-panel`;
@@ -203,10 +205,14 @@ export function ActionMenu({
         aria-haspopup={panelRole}
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          if (!open) onOpen?.();
+          setOpen(!open);
+        }}
         onKeyDown={(event) => {
           if (event.key === "ArrowDown" || event.key === "ArrowUp") {
             event.preventDefault();
+            if (!open) onOpen?.();
             setOpen(true);
           }
         }}

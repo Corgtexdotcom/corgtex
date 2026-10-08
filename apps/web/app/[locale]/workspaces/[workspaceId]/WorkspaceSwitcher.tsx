@@ -22,10 +22,12 @@ export function WorkspaceSwitcher({
   workspaceId,
   workspaces,
   mobile = false,
+  onSingleWorkspaceNavigate,
 }: {
   workspaceId: string;
   workspaces: SwitchableWorkspace[];
   mobile?: boolean;
+  onSingleWorkspaceNavigate?: () => void;
 }) {
   const locale = useLocale();
   const t = useTranslations("workspaceSwitcher");
@@ -131,6 +133,7 @@ export function WorkspaceSwitcher({
       <a
         className="workspace-switcher-static"
         href={workspaceHomeHref(locale, workspaceId)}
+        onClick={mobile ? onSingleWorkspaceNavigate : undefined}
       >
         <span className="workspace-switcher-identity">
           <strong>{branding.primaryName}</strong>
@@ -171,6 +174,7 @@ export function WorkspaceSwitcher({
       triggerClassName="workspace-switcher-trigger"
       panelClassName="workspace-switcher-panel"
       panelRole="dialog"
+      onOpen={() => setQuery("")}
     >
       {content}
     </ActionMenu>
