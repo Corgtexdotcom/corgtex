@@ -81,11 +81,6 @@ export type MeetingTranscriptActionState = {
   retryRequiresTranscriptUpload?: boolean;
 };
 
-const initialMeetingTranscriptActionState: MeetingTranscriptActionState = {
-  status: "idle",
-  message: null,
-};
-
 const DUPLICATE_GUARD_RESOLUTIONS: DuplicateGuardResolution[] = [
   "use_existing",
   "update_existing",
@@ -415,12 +410,6 @@ export async function importMeetingInviteAction(formData: FormData) {
   await importMeetingInvite(actor, { workspaceId, icsText });
   await enqueueMeetingAgendaPreparation(actor, { workspaceId });
   refresh(workspaceId);
-}
-
-export async function uploadMeetingTranscriptAction(formData: FormData) {
-  const result = await uploadMeetingTranscriptStateAction(initialMeetingTranscriptActionState, formData);
-  if (result.status === "success") return;
-  throw new Error(result.message ?? "Transcript upload needs more information.");
 }
 
 export async function uploadMeetingTranscriptStateAction(
