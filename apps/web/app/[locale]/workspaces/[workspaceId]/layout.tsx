@@ -13,6 +13,7 @@ import { DesktopWorkspaceNav } from "./DesktopWorkspaceNav";
 import { buildWorkspaceCapabilities } from "@/lib/workspace-capabilities";
 import { filterNavGroupsByWorkspaceAccess, getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
+import { accessibleSwitcherWorkspaces } from "./workspace-switcher-access";
 import { MobileWorkspaceShell } from "./MobileWorkspaceShell";
 import { getControlPlaneHref } from "@/lib/control-plane-url";
 import { WorkspaceAddMenu } from "./WorkspaceAddMenu";
@@ -99,7 +100,8 @@ export default async function WorkspaceLayout({
   const actor = await requirePageActor();
   const userId = actor.kind === "user" ? actor.user.id : null;
   const workspaces = filterWorkspacesForDeploymentScope(await listActorWorkspaces(actor));
-  const switchableWorkspaces = workspaces.map(({ id, name, slug }) => ({ id, name, slug, ...workspaceBranding({ name, slug }) }));
+  const switchableWorkspaces = (await accessibleSwitcherWorkspaces(actor, workspaces))
+    .map(({ id, name, slug }) => ({ id, name, slug, ...workspaceBranding({ name, slug }) }));
   const current = workspaces.find((w: Workspace) => w.id === workspaceId);
   if (!current) {
     redirect(localizedPath(workspaces[0] ? `/workspaces/${workspaces[0].id}` : "/find-account", locale));
