@@ -1,0 +1,50 @@
+name: Ops Release Readiness Receipt
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact 40-character candidate SHA; must equal this workflow run's SHA
+        required: true
+        type: string
+      target_deployment_id:
+        description: Exact Azure self-serve deployment ID in Ops
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ops-release-readiness-receipt
+  cancel-in-progress: false
+
+jobs:
+  receipt:
+    if: github.ref == 'refs/heads/main' && github.repository == 'Corgtexdotcom/corgtex'
+    runs-on: ubuntu-latest
+    environment: fleet-release-production
+    timeout-minutes: 10
+    env:
+      CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
+      RELEASE_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      RELEASE_TARGET_DEPLOYMENT_ID: ${{ inputs.target_deployment_id }}
+      RELEASE_READINESS_RECEIPT_FILE: ${{ runner.temp }}/ops-release-readiness-receipt.json
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Read Ops mappings and leases, retain blocked flag state
+        run: node scripts/release/ops-readiness-receipt.mjs
+      - name: Retain bounded read-only receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ops-release-readiness-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ops-release-readiness-receipt.json
+          if-no-files-found: error
+          retention-days: 7
