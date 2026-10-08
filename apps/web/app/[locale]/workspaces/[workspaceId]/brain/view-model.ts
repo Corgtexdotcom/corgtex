@@ -92,7 +92,7 @@ export type BrainIndexState<TArticle extends BrainArticleDirectoryItem, TMeeting
 
 const TYPE_ORDER = new Map<string, number>(BRAIN_ARTICLE_TYPES.map((type, index) => [type, index]));
 
-export function firstSearchParam(value: string | string[] | undefined) {
+function firstSearchParam(value: string | string[] | undefined) {
   return Array.isArray(value) ? value[0] : value;
 }
 
@@ -118,7 +118,7 @@ export function normalizeBrainIndexSearch(searchParams: BrainSearchParams) {
   };
 }
 
-export function getBrainRangeCutoff(range: BrainRange, now = new Date()) {
+function getBrainRangeCutoff(range: BrainRange, now = new Date()) {
   if (range === "all") return null;
 
   const cutoff = new Date(now);

@@ -230,7 +230,7 @@ export function activeHumanRoleAssignments(role: RoleDirectoryRole, now = new Da
   ));
 }
 
-export function roleNeedsOnboarding(
+function roleNeedsOnboarding(
   role: RoleDirectoryRole,
   onboardingByRoleMember: ReadonlyMap<string, RoleDirectoryOnboarding>,
   now = new Date(),
