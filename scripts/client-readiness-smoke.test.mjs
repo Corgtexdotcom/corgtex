@@ -14,6 +14,7 @@ import {
   labelConsoleEntry,
   localePrefixFromUrl,
   optionalRouteCatalog,
+  readStoredMobileMode,
   resolveSelectedWorkspace,
   submitLoginForm,
   visibleLoginErrorMessage,
@@ -273,6 +274,24 @@ describe("client readiness smoke login handling", () => {
 });
 
 describe("client readiness mobile mode handling", () => {
+  it("reads the selected workspace mode without falling back to another workspace or the legacy key", async () => {
+    const stored = new Map([
+      ["corgtex.mobileMode", "workspace"],
+      ["corgtex.mobileMode.workspace-1", "ai"],
+      ["corgtex.mobileMode.workspace-2", "workspace"],
+    ]);
+    vi.stubGlobal("window", { localStorage: { getItem: (key) => stored.get(key) ?? null } });
+    const fakePage = { evaluate: vi.fn(async (callback, key) => callback(key)) };
+    try {
+      await expect(readStoredMobileMode(fakePage, "/es/workspaces/workspace-1/settings")).resolves.toBe("ai");
+      await expect(readStoredMobileMode(fakePage, "/workspaces/workspace-2")).resolves.toBe("workspace");
+      await expect(readStoredMobileMode(fakePage, "/workspaces/missing")).resolves.toBeNull();
+      await expect(readStoredMobileMode(fakePage, "/find-account")).rejects.toThrow("requires a workspace path");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   function mobileModePage({ visibleAfterClicks = 1 } = {}) {
     let clicks = 0;
     const button = {

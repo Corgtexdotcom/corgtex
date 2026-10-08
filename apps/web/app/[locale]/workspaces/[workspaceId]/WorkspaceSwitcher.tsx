@@ -34,6 +34,16 @@ export function WorkspaceSwitcher({
   const [switching, setSwitching] = useState(false);
   const navigating = useRef(false);
   useEffect(() => {
+    if (!mobile) return;
+    const breakpoint = window.matchMedia("(max-width: 720px)");
+    function closeOutsideMobile() {
+      if (!breakpoint.matches) setOpen(false);
+    }
+    closeOutsideMobile();
+    breakpoint.addEventListener("change", closeOutsideMobile);
+    return () => breakpoint.removeEventListener("change", closeOutsideMobile);
+  }, [mobile]);
+  useEffect(() => {
     // Back/forward cache can restore the departing document with its click lock.
     function restore() {
       navigating.current = false;

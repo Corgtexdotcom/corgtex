@@ -24,6 +24,17 @@ interface ActionMenuProps {
 const PANEL_MARGIN = 8;
 const VIEWPORT_PADDING = 12;
 
+function visibleFocusableControls(panel: HTMLElement, selector: string) {
+  return Array.from(panel.querySelectorAll<HTMLElement>(selector)).filter(
+    (control) =>
+      control.tabIndex >= 0 &&
+      !control.matches(":disabled") &&
+      !control.closest("[hidden], [inert]") &&
+      control.getClientRects().length > 0 &&
+      getComputedStyle(control).visibility === "visible",
+  );
+}
+
 export function ActionMenu({
   label,
   children,
@@ -58,12 +69,18 @@ export function ActionMenu({
   useEffect(() => {
     if (!open) focusedOnOpen.current = false;
     if (open && pos && pos.top >= 0 && !focusedOnOpen.current) {
-      focusedOnOpen.current = true;
-      panelRef.current
-        ?.querySelector<HTMLElement>(
-          "input, button:not(:disabled), a[href], [tabindex='0']",
-        )
-        ?.focus();
+      const panel = panelRef.current;
+      if (!panel) return;
+      for (const control of visibleFocusableControls(
+        panel,
+        "input:not([type='hidden']), textarea, select, button, a[href], [tabindex]",
+      )) {
+        control.focus();
+        if (document.activeElement === control) {
+          focusedOnOpen.current = true;
+          break;
+        }
+      }
     }
   }, [open, pos]);
 
@@ -243,10 +260,9 @@ export function ActionMenu({
                 return;
               if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key))
                 return;
-              const items = Array.from(
-                event.currentTarget.querySelectorAll<HTMLElement>(
-                  "button:not(:disabled), a[href], [tabindex='0']",
-                ),
+              const items = visibleFocusableControls(
+                event.currentTarget,
+                "button, a[href], [tabindex='0']",
               );
               if (!items.length) return;
               event.preventDefault();
