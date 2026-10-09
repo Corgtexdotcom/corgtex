@@ -845,6 +845,45 @@ details[open] > .settings-disclosure-summary::before {
   transform: rotate(45deg);
 }
 
+.meeting-page-guidance {
+  max-width: 68ch;
+  margin: -12px 0 24px;
+}
+
+.meeting-page-guidance-summary {
+  color: var(--accent);
+  font-size: 0.86rem;
+}
+
+.meeting-page-guidance-summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.meeting-page-guidance-copy {
+  padding-top: 8px;
+}
+
+.meeting-page-guidance-copy p,
+.meeting-context-help {
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.5;
+}
+
+.meeting-page-guidance-copy p {
+  margin: 0 0 8px;
+}
+
+.meeting-context-help {
+  max-width: 72ch;
+  margin: 0;
+}
+
+.ws-section > .meeting-context-help {
+  margin: -8px 0 16px;
+}
+
 .agent-question-card {
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
