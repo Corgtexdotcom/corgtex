@@ -1,8 +1,8 @@
 import type { MeetingEvidenceState } from "@corgtex/domain";
 
-export const MEETING_STATUS_FILTERS = ["COMPLETED", "SCHEDULED"] as const;
+export const MEETING_STATUS_FILTERS = ["COMPLETED", "TRANSCRIPT_NEEDED", "SCHEDULED"] as const;
 
-export type MeetingStatusFilter = (typeof MEETING_STATUS_FILTERS)[number];
+export type MeetingStatusFilter = "ALL" | (typeof MEETING_STATUS_FILTERS)[number];
 
 const ACTION_NEEDED_MEETING_EVIDENCE_STATES = new Set<MeetingEvidenceState["state"]>([
   "needs_transcript",
@@ -13,28 +13,27 @@ const ACTIVE_RECORDING_STATUSES = new Set(["PENDING", "SCHEDULED", "JOINING", "R
 
 type MeetingListRow = {
   id: string;
+  recordedAt: Date | string;
+  transcript: string | null;
 };
 
-export type MeetingListView<TCompleted extends MeetingListRow, TScheduled extends MeetingListRow> = {
-  completedMeetings: TCompleted[];
-  actionNeededMeetings: TScheduled[];
-  upcomingMeetings: TScheduled[];
+export type MeetingListView<TMeeting extends MeetingListRow> = {
+  recordedMeetings: TMeeting[];
+  transcriptNeededMeetings: TMeeting[];
+  scheduledMeetings: TMeeting[];
   counts: {
     all: number;
     completed: number;
+    transcriptNeeded: number;
     scheduled: number;
   };
 };
 
-export function normalizeMeetingStatusFilters(value: string | string[] | undefined): MeetingStatusFilter[] {
+export function normalizeMeetingStatusFilter(value: string | string[] | undefined): MeetingStatusFilter {
   const values = Array.isArray(value) ? value : value ? [value] : [];
-  const seen = new Set<MeetingStatusFilter>();
-  for (const entry of values) {
-    if (MEETING_STATUS_FILTERS.includes(entry as MeetingStatusFilter)) {
-      seen.add(entry as MeetingStatusFilter);
-    }
-  }
-  return seen.size === MEETING_STATUS_FILTERS.length ? [] : [...seen];
+  return values.find((entry): entry is (typeof MEETING_STATUS_FILTERS)[number] => (
+    MEETING_STATUS_FILTERS.includes(entry as (typeof MEETING_STATUS_FILTERS)[number])
+  )) ?? "ALL";
 }
 
 export function isActionNeededMeetingEvidenceState(state: MeetingEvidenceState | null | undefined) {
@@ -56,29 +55,44 @@ export function filterMeetingRecordingForEvidenceState<TRecording extends { stat
   return null;
 }
 
-export function buildMeetingListView<TCompleted extends MeetingListRow, TScheduled extends MeetingListRow>(params: {
-  completedMeetings: TCompleted[];
-  scheduledMeetings: TScheduled[];
+function hasTranscript(meeting: MeetingListRow) {
+  return Boolean(meeting.transcript?.trim());
+}
+
+function newestFirst<TMeeting extends MeetingListRow>(meetings: TMeeting[]) {
+  return meetings.sort((left, right) => new Date(right.recordedAt).getTime() - new Date(left.recordedAt).getTime());
+}
+
+export function buildMeetingListView<TMeeting extends MeetingListRow>(params: {
+  completedMeetings: TMeeting[];
+  scheduledMeetings: TMeeting[];
   evidenceStateByMeetingId: Map<string, MeetingEvidenceState>;
-  statusFilters: readonly MeetingStatusFilter[];
-}): MeetingListView<TCompleted, TScheduled> {
-  const actionNeededMeetings = params.scheduledMeetings.filter((meeting) => (
-    isActionNeededMeetingEvidenceState(params.evidenceStateByMeetingId.get(meeting.id))
-  ));
-  const upcomingMeetings = params.scheduledMeetings.filter((meeting) => (
+  statusFilter: MeetingStatusFilter;
+}): MeetingListView<TMeeting> {
+  const completedWithTranscript = params.completedMeetings.filter(hasTranscript);
+  const scheduledWithTranscript = params.scheduledMeetings.filter(hasTranscript);
+  const recordedMeetings = newestFirst([...completedWithTranscript, ...scheduledWithTranscript]);
+  const transcriptNeededMeetings = newestFirst([
+    ...params.completedMeetings.filter((meeting) => !hasTranscript(meeting)),
+    ...params.scheduledMeetings.filter((meeting) => (
+      !hasTranscript(meeting) && isActionNeededMeetingEvidenceState(params.evidenceStateByMeetingId.get(meeting.id))
+    )),
+  ]);
+  const scheduledMeetings = params.scheduledMeetings.filter((meeting) => (
     !isActionNeededMeetingEvidenceState(params.evidenceStateByMeetingId.get(meeting.id))
   ));
-  const showCompletedArea = !params.statusFilters.includes("SCHEDULED");
-  const showScheduledArea = !params.statusFilters.includes("COMPLETED");
 
   return {
-    completedMeetings: showCompletedArea ? params.completedMeetings : [],
-    actionNeededMeetings: showCompletedArea ? actionNeededMeetings : [],
-    upcomingMeetings: showScheduledArea ? upcomingMeetings : [],
+    recordedMeetings: params.statusFilter === "ALL"
+      ? recordedMeetings
+      : params.statusFilter === "COMPLETED" ? completedWithTranscript : [],
+    transcriptNeededMeetings: params.statusFilter === "TRANSCRIPT_NEEDED" ? transcriptNeededMeetings : [],
+    scheduledMeetings: params.statusFilter === "SCHEDULED" ? scheduledMeetings : [],
     counts: {
-      all: params.completedMeetings.length + actionNeededMeetings.length + upcomingMeetings.length,
-      completed: params.completedMeetings.length + actionNeededMeetings.length,
-      scheduled: upcomingMeetings.length,
+      all: recordedMeetings.length,
+      completed: completedWithTranscript.length,
+      transcriptNeeded: transcriptNeededMeetings.length,
+      scheduled: scheduledMeetings.length,
     },
   };
 }
