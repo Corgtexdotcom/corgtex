@@ -1,4 +1,13 @@
 {
+  "workspaceSwitcher": {
+    "title": "Cambiar espacio de trabajo",
+    "trigger": "Cambiar espacio de trabajo: {name}",
+    "search": "Buscar espacios de trabajo",
+    "current": "Espacio de trabajo actual",
+    "empty": "No hay espacios de trabajo coincidentes",
+    "switching": "Abriendo espacio de trabajo…",
+    "leaveWarning": "¿Abrir {name}? Se perderán los cambios o borradores sin guardar en este espacio de trabajo. Cancela para guardarlos primero."
+  },
   "actions": {
     "allWorkspaceActions": "Todas las acciones del espacio",
     "myActions": "Mis acciones",
@@ -1593,6 +1602,8 @@
     "importInviteTitle": "+ Importar invitación de calendario",
     "meetingNotFound": "Reunión no encontrada",
     "meetingEvidenceNeedsTranscript": "Se necesita transcripción",
+    "meetingFiltersLabel": "Filtrar reuniones",
+    "meetingsWithTranscripts": "Reuniones con transcripción",
     "meetingsRecorded": "{count} reunión(es) registradas",
     "meetingsNeedTranscript": "{count} necesitan transcripción",
     "meetingsScheduled": "{count} programadas",
@@ -1601,8 +1612,9 @@
     "newMeetingTitle": "+ Ingerir nueva reunión",
     "newScheduledMeetingTitle": "+ Programar reunión regular",
     "noMeetings": "Aún no se han ingerido reuniones.",
+    "noMeetingsWithTranscripts": "Aún no hay reuniones con transcripción. Consulta Se necesita transcripción para ver las reuniones pendientes de carga.",
     "needsTranscriptMeetings": "Necesitan transcripción",
-    "noNeedsTranscriptMeetings": "Ninguna reunión programada pasada necesita transcripción.",
+    "noNeedsTranscriptMeetings": "Ninguna reunión necesita transcripción.",
     "noUpcomingMeetings": "Aún no hay reuniones programadas.",
     "pageTitle": "Reuniones de junta",
     "participantLabel": "Participante",

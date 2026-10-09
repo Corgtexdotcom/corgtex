@@ -33,8 +33,7 @@ import {
 import {
   buildMeetingListView,
   filterMeetingRecordingForEvidenceState,
-  MEETING_STATUS_FILTERS,
-  normalizeMeetingStatusFilters,
+  normalizeMeetingStatusFilter,
 } from "./meetingListView";
 
 export const dynamic = "force-dynamic";
@@ -51,7 +50,7 @@ export default async function MeetingsPage({
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const canArchiveMeeting = actor.kind === "agent" || membership?.role === "ADMIN";
   const resolvedSearch = searchParams ? await searchParams : {};
-  const statusFilters = normalizeMeetingStatusFilters(resolvedSearch.status);
+  const statusFilter = normalizeMeetingStatusFilter(resolvedSearch.status);
   const { memberIds } = resolveWorkItemFilters(resolvedSearch);
   const dateValues = {
     recordedFrom: normalizeDateOnly(resolvedSearch.recordedFrom),
@@ -87,11 +86,11 @@ export default async function MeetingsPage({
     completedMeetings: filteredCompletedMeetings,
     scheduledMeetings,
     evidenceStateByMeetingId: meetingEvidenceStateById,
-    statusFilters,
+    statusFilter,
   });
-  const completedMeetings = meetingListView.completedMeetings;
-  const actionNeededMeetings = meetingListView.actionNeededMeetings;
-  const upcomingMeetings = meetingListView.upcomingMeetings;
+  const recordedMeetings = meetingListView.recordedMeetings;
+  const transcriptNeededMeetings = meetingListView.transcriptNeededMeetings;
+  const scheduledVisibleMeetings = meetingListView.scheduledMeetings;
   const recorderSentMeetingId = Array.isArray(resolvedSearch.recorderSent)
     ? resolvedSearch.recorderSent[0] ?? null
     : resolvedSearch.recorderSent ?? null;
@@ -104,12 +103,8 @@ export default async function MeetingsPage({
   const t = await getTranslations("meetings");
   const tCommon = await getTranslations("common");
   const tWork = await getTranslations("workItems");
-  const filterState = { memberIds, dates: dateValues, status: statusFilters };
+  const filterState = { memberIds, dates: dateValues };
   const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
-  const completedDisplayCount = completedMeetings.length + actionNeededMeetings.length;
-  const completedSectionTitle = actionNeededMeetings.length > 0
-    ? t("completedAndTranscriptRecovery")
-    : t("completedMeetings");
   const archiveDialogLabels = {
     button: t("btnRemoveMeeting"),
     title: t("removeMeetingTitle"),
@@ -121,12 +116,14 @@ export default async function MeetingsPage({
   };
   const renderRecorderControls = (meeting: (typeof scheduledMeetings)[number]) => {
     const recording = filterMeetingRecordingForEvidenceState(latestRecordingByMeeting.get(meeting.id), { recorderEnabled });
-    const evidenceState = meetingEvidenceStateById.get(meeting.id) ?? deriveMeetingEvidenceState({
-      now,
-      recorderEnabled,
-      meeting,
-      latestRecording: recording ?? null,
-    });
+    const evidenceState = meeting.status === "COMPLETED" && !meeting.transcript?.trim()
+      ? { state: "needs_transcript" as const, action: "upload_transcript" as const }
+      : meetingEvidenceStateById.get(meeting.id) ?? deriveMeetingEvidenceState({
+        now,
+        recorderEnabled,
+        meeting,
+        latestRecording: recording ?? null,
+      });
     const statusLabel = evidenceState.state === "provider_recovery_pending"
       ? t("recorderRecoveryPending")
       : evidenceState.state === "needs_transcript"
@@ -212,9 +209,9 @@ export default async function MeetingsPage({
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
         <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem" }}>{t("pageTitle")}</h1>
         <div className="nr-masthead-meta">
-          <span>{t("meetingsRecorded", { count: completedMeetings.length })}</span>
-          <span>{t("meetingsScheduled", { count: upcomingMeetings.length })}</span>
-          <span>{t("meetingsNeedTranscript", { count: actionNeededMeetings.length })}</span>
+          <span>{t("meetingsRecorded", { count: meetingListView.counts.all })}</span>
+          <span>{t("meetingsScheduled", { count: meetingListView.counts.scheduled })}</span>
+          <span>{t("meetingsNeedTranscript", { count: meetingListView.counts.transcriptNeeded })}</span>
         </div>
       </header>
 
@@ -238,33 +235,30 @@ export default async function MeetingsPage({
 
       {/* ── OUTPUT SECTIONS (primary content) ────────────────────── */}
 
-      <section className="ws-section" style={{ marginBottom: 48 }}>
-        <div className="nr-filter-bar nr-filter-bar-wrap">
+      <section className="ws-section" style={{ marginBottom: 24 }}>
+        <nav className="nr-filter-bar nr-filter-bar-wrap" aria-label={t("meetingFiltersLabel")}>
           {([
             { status: "ALL", label: tWork("statusAll"), count: meetingListView.counts.all },
             { status: "COMPLETED", label: t("completedMeetings"), count: meetingListView.counts.completed },
+            { status: "TRANSCRIPT_NEEDED", label: t("meetingEvidenceNeedsTranscript"), count: meetingListView.counts.transcriptNeeded },
             { status: "SCHEDULED", label: t("scheduledMeetings"), count: meetingListView.counts.scheduled },
           ] as const).map((item) => {
-            const isActive = item.status === "ALL" ? statusFilters.length === 0 : statusFilters.includes(item.status);
+            const isActive = item.status === statusFilter;
             return (
               <a
                 key={item.status}
-                href={buildWorkItemQuery({ ...filterState, status: item.status })}
+                href={buildWorkItemQuery({ ...filterState, status: item.status === "ALL" ? undefined : item.status })}
                 className={`nr-filter-item ${isActive ? "nr-filter-active" : ""}`}
+                aria-current={isActive ? "page" : undefined}
               >
                 {item.label} ({item.count})
               </a>
             );
           })}
-        </div>
+        </nav>
         <WorkItemFilterControls
           action={`/workspaces/${workspaceId}/meetings`}
-          statusOptions={MEETING_STATUS_FILTERS.map((status) => ({
-            id: status,
-            label: status === "COMPLETED" ? t("completedMeetings") : t("scheduledMeetings"),
-          }))}
-          statusValues={statusFilters}
-          showStatusFilter={false}
+          status={statusFilter === "ALL" ? undefined : statusFilter}
           summaryLabel={tWork("advancedFilters")}
           memberIds={memberIds}
           circles={[]}
@@ -290,63 +284,37 @@ export default async function MeetingsPage({
             clear: tWork("clearFilters"),
           }}
         />
+      </section>
 
-        <h2 className="nr-section-header">{completedSectionTitle}</h2>
+      {(statusFilter === "ALL" || statusFilter === "COMPLETED") && <section className="ws-section" style={{ marginBottom: 48 }}>
+        <h2 className="nr-section-header">{statusFilter === "ALL" ? t("meetingsWithTranscripts") : t("completedMeetings")}</h2>
         <p className="meeting-context-help">{t("meetingGuideReviewActions")}</p>
-        {completedDisplayCount === 0 && <p className="nr-meta">{t("noMeetings")}</p>}
-        {completedDisplayCount > 0 && (
+        {recordedMeetings.length === 0 && <p className="nr-meta">{t("noMeetingsWithTranscripts")}</p>}
+        {recordedMeetings.length > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-            {actionNeededMeetings.map((meeting) => (
-              <div className="nr-item" key={meeting.id}>
-                {renderRecorderControls(meeting)}
-                <Link href={`/workspaces/${workspaceId}/meetings/${meeting.id}`} style={{ textDecoration: "none", color: "inherit" }}>
-                  <div className="nr-item-title">{meeting.title ?? t("untitledMeeting")}</div>
-                  <div className="nr-item-meta">
-                    {new Date(meeting.recordedAt).toLocaleString()} • {meeting.source}
-                    {meeting.agendaPostedAt ? ` • ${t("agendaPosted")}` : ""}
-                  </div>
-                </Link>
-                <ItemActions
-                  moreLabel={tCommon("moreActions")}
-                  primary={
-                    renderTranscriptUploadMenu(meeting, "primary small", "nr-inline-transcript-upload")
-                  }
-                  more={
-                    <>
-                      <Link href={`/workspaces/${workspaceId}/meetings/${meeting.id}`}>
-                        {tCommon("btnView")}
-                      </Link>
-                      {canArchiveMeeting && renderArchiveDialog(meeting.id)}
-                    </>
-                  }
-                />
-              </div>
-            ))}
             {/* Featured latest meeting */}
-            {completedMeetings.length > 0 && (
-              <div style={{ borderBottom: "1px solid var(--line)", paddingBottom: "24px", marginBottom: "8px" }}>
-                <Link href={`/workspaces/${workspaceId}/meetings/${completedMeetings[0].id}`} style={{ textDecoration: "none", color: "inherit", display: "block" }}>
-                  <div className="nr-meta" style={{ marginBottom: "8px" }}>{completedMeetings[0].source}</div>
-                  <h2 className="nr-lead-headline" style={{ fontSize: "1.8rem" }}>{completedMeetings[0].title ?? t("untitledMeeting")}</h2>
-                  <div className="nr-item-meta" style={{ marginBottom: "12px" }}>{new Date(completedMeetings[0].recordedAt).toLocaleString()}</div>
-                  {completedMeetings[0].summaryMd && <MarkdownExcerpt markdown={completedMeetings[0].summaryMd} maxLength={520} as="p" className="nr-excerpt" />}
-                </Link>
-                <ItemActions
-                  moreLabel={tCommon("moreActions")}
-                  primary={
-                    <Link className="link-button small" href={`/workspaces/${workspaceId}/meetings/${completedMeetings[0].id}`}>
-                      {tCommon("btnView")}
-                    </Link>
-                  }
-                  more={
-                    canArchiveMeeting ? renderArchiveDialog(completedMeetings[0].id) : null
-                  }
-                />
-              </div>
-            )}
+            <div style={{ borderBottom: "1px solid var(--line)", paddingBottom: "24px", marginBottom: "8px" }}>
+              <Link href={`/workspaces/${workspaceId}/meetings/${recordedMeetings[0].id}`} style={{ textDecoration: "none", color: "inherit", display: "block" }}>
+                <div className="nr-meta" style={{ marginBottom: "8px" }}>{recordedMeetings[0].source}</div>
+                <h2 className="nr-lead-headline" style={{ fontSize: "1.8rem" }}>{recordedMeetings[0].title ?? t("untitledMeeting")}</h2>
+                <div className="nr-item-meta" style={{ marginBottom: "12px" }}>{new Date(recordedMeetings[0].recordedAt).toLocaleString()}</div>
+                {recordedMeetings[0].summaryMd && <MarkdownExcerpt markdown={recordedMeetings[0].summaryMd} maxLength={520} as="p" className="nr-excerpt" />}
+              </Link>
+              <ItemActions
+                moreLabel={tCommon("moreActions")}
+                primary={
+                  <Link className="link-button small" href={`/workspaces/${workspaceId}/meetings/${recordedMeetings[0].id}`}>
+                    {tCommon("btnView")}
+                  </Link>
+                }
+                more={
+                  canArchiveMeeting ? renderArchiveDialog(recordedMeetings[0].id) : null
+                }
+              />
+            </div>
 
             {/* Other meetings list */}
-            {completedMeetings.slice(1).map((meeting) => (
+            {recordedMeetings.slice(1).map((meeting) => (
               <div className="nr-item" key={meeting.id}>
                 <Link href={`/workspaces/${workspaceId}/meetings/${meeting.id}`} style={{ textDecoration: "none", color: "inherit" }}>
                   <div className="nr-item-title">{meeting.title ?? t("untitledMeeting")}</div>
@@ -372,14 +340,47 @@ export default async function MeetingsPage({
             ))}
           </div>
         )}
-      </section>
+      </section>}
 
-      <section className="ws-section" style={{ marginBottom: 48 }}>
-        <h2 className="nr-section-header">{t("upcomingMeetings")}</h2>
-        {upcomingMeetings.length === 0 && <p className="nr-meta">{t("noUpcomingMeetings")}</p>}
-        {upcomingMeetings.length > 0 && (
+      {statusFilter === "TRANSCRIPT_NEEDED" && <section className="ws-section" style={{ marginBottom: 48 }}>
+        <h2 className="nr-section-header">{t("meetingEvidenceNeedsTranscript")}</h2>
+        {transcriptNeededMeetings.length === 0 && <p className="nr-meta">{t("noNeedsTranscriptMeetings")}</p>}
+        {transcriptNeededMeetings.length > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            {upcomingMeetings.map((meeting) => (
+            {transcriptNeededMeetings.map((meeting) => (
+              <div className="nr-item" key={meeting.id}>
+                {renderRecorderControls(meeting)}
+                <Link href={`/workspaces/${workspaceId}/meetings/${meeting.id}`} style={{ textDecoration: "none", color: "inherit" }}>
+                  <div className="nr-item-title">{meeting.title ?? t("untitledMeeting")}</div>
+                  <div className="nr-item-meta">
+                    {new Date(meeting.recordedAt).toLocaleString()} • {meeting.source}
+                    {meeting.agendaPostedAt ? ` • ${t("agendaPosted")}` : ""}
+                  </div>
+                </Link>
+                <ItemActions
+                  moreLabel={tCommon("moreActions")}
+                  primary={renderTranscriptUploadMenu(meeting, "primary small", "nr-inline-transcript-upload")}
+                  more={
+                    <>
+                      <Link href={`/workspaces/${workspaceId}/meetings/${meeting.id}`}>
+                        {tCommon("btnView")}
+                      </Link>
+                      {canArchiveMeeting && renderArchiveDialog(meeting.id)}
+                    </>
+                  }
+                />
+              </div>
+            ))}
+          </div>
+        )}
+      </section>}
+
+      {statusFilter === "SCHEDULED" && <section className="ws-section" style={{ marginBottom: 48 }}>
+        <h2 className="nr-section-header">{t("scheduledMeetings")}</h2>
+        {scheduledVisibleMeetings.length === 0 && <p className="nr-meta">{t("noUpcomingMeetings")}</p>}
+        {scheduledVisibleMeetings.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            {scheduledVisibleMeetings.map((meeting) => (
               <div className="nr-item" key={meeting.id}>
                 {renderRecorderControls(meeting)}
                 <Link href={`/workspaces/${workspaceId}/meetings/${meeting.id}`} style={{ textDecoration: "none", color: "inherit" }}>
@@ -396,7 +397,7 @@ export default async function MeetingsPage({
                       <Link className="link-button small" href={`/workspaces/${workspaceId}/meetings/${meeting.id}`}>
                         {tCommon("btnView")}
                       </Link>
-                      {renderTranscriptUploadMenu(meeting)}
+                      {!meeting.transcript?.trim() && renderTranscriptUploadMenu(meeting)}
                     </>
                   }
                 />
@@ -404,7 +405,7 @@ export default async function MeetingsPage({
             ))}
           </div>
         )}
-      </section>
+      </section>}
 
       {/* ── INPUT SECTIONS (collapsed by default) ────────────────── */}
 
