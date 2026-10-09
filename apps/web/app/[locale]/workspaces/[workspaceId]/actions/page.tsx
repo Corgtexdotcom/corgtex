@@ -1,4 +1,4 @@
-import { countActionsByStatus, listActions, listAdviceRequests, listCircles, listHumanMembers, requireWorkspaceMembership, type ActionSort } from "@corgtex/domain";
+import { countActionsByStatus, listActions, listCircles, listHumanMembers, requireWorkspaceMembership, type ActionSort } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import type { ReactNode } from "react";
 import { requirePageActor } from "@/lib/auth";
@@ -149,8 +149,8 @@ export default async function ActionsPage({
     resolvedSearch.status,
     view === "kanban" ? null : "OPEN",
   );
-  const { circleIds, assigneeMemberIds: selectedAssigneeIds } = resolveWorkItemFilters(resolvedSearch);
-  const sort = normalizeActionSort(resolvedSearch.sort);
+  const { circleIds, assigneeMemberIds: selectedAssigneeIds, sort: legacySort } = resolveWorkItemFilters(resolvedSearch);
+  const sort = view === "kanban" ? legacySort : normalizeActionSort(resolvedSearch.sort);
   const currentMemberId = membership?.id && membership.id !== "global-operator" ? membership.id : null;
   const { actionScope, baseScope, assigneeMemberIds, includeOwnDrafts, assignedToMeActive } = resolveActionAssigneeScope(
     selectedAssigneeIds, currentMemberId, resolvedSearch.scope,
@@ -178,11 +178,10 @@ export default async function ActionsPage({
     : 0;
   const pageCount = Math.max(1, Math.ceil(selectedTotal / ACTION_PAGE_SIZE));
   const page = Math.min(requestedPage, pageCount);
-  const [actionResult, circles, members, activeInputRequests] = await Promise.all([
+  const [actionResult, circles, members] = await Promise.all([
     listActions(actor, workspaceId, { ...actionListOptions, skip: (page - 1) * ACTION_PAGE_SIZE }),
     listCircles(workspaceId),
     listHumanMembers(workspaceId),
-    listAdviceRequests(actor, { workspaceId, subjectType: "ACTION", status: "ACTIVE", take: 500 }),
   ]);
   const actions = actionResult.items;
   const activeHumanMemberIds = new Set(members.map((member) => member.id));
@@ -213,12 +212,6 @@ export default async function ActionsPage({
   for (const row of evidenceRows) {
     evidenceByActionId.set(row.entityId, [...(evidenceByActionId.get(row.entityId) ?? []), row]);
   }
-  const activeRequestCountByActionId = new Map<string, number>();
-  for (const request of activeInputRequests) {
-    const subjectId = request.process.subjectId;
-    activeRequestCountByActionId.set(subjectId, (activeRequestCountByActionId.get(subjectId) ?? 0) + 1);
-  }
-
   const groupedActions = groupActionsByStatus(actions);
   const displayActions = view === "kanban"
     ? actions.filter((action) => actionMatchesStatusFilters(action, statusFilters))
@@ -603,7 +596,7 @@ export default async function ActionsPage({
     const createdAge = ageText(action.createdAt);
     const dueDate = dueDateLabel(action.dueAt);
     const evidence = evidenceByActionId.get(action.id) ?? [];
-    const activeRequestCount = activeRequestCountByActionId.get(action.id) ?? 0;
+    const activeRequestCount = action.activeInputRequestCount ?? 0;
     const { canEditContent, hiddenTransitions, moreItems, primary } = actionControls(action);
     const cardBadges: ReactNode[] = [];
     if (action.status === "DRAFT" && !hasEligibleActionAssignee(action.assigneeMemberId, activeHumanMemberIds)) {
@@ -717,7 +710,7 @@ export default async function ActionsPage({
     const createdAge = ageText(action.createdAt);
     const dueDate = dueDateLabel(action.dueAt);
     const evidence = evidenceByActionId.get(action.id) ?? [];
-    const activeRequestCount = activeRequestCountByActionId.get(action.id) ?? 0;
+    const activeRequestCount = action.activeInputRequestCount ?? 0;
     const { hiddenTransitions, moreItems, primary } = actionControls(action);
 
     return {
