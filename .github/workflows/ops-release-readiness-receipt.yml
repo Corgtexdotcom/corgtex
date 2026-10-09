@@ -29,7 +29,6 @@ jobs:
       CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
       RELEASE_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
       RELEASE_TARGET_DEPLOYMENT_ID: ${{ inputs.target_deployment_id }}
-      RELEASE_READINESS_RECEIPT_FILE: ${{ runner.temp }}/ops-release-readiness-receipt.json
     steps:
       - uses: actions/checkout@v5
         with:
@@ -39,6 +38,8 @@ jobs:
         with:
           node-version: 22
       - name: Read Ops mappings and leases, retain blocked flag state
+        env:
+          RELEASE_READINESS_RECEIPT_FILE: ${{ runner.temp }}/ops-release-readiness-receipt.json
         run: node scripts/release/ops-readiness-receipt.mjs
       - name: Retain bounded read-only receipt
         if: always()
