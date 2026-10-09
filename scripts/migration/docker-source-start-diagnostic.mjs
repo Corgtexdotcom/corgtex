@@ -4,30 +4,30 @@ const FAILURE_CODE = "SOURCE_CONTAINER_START_FAILED";
 const STDERR_TAIL_BYTES = 4096;
 const STDERR_HARD_LIMIT_BYTES = 1024 * 1024;
 
-function safeStderrSummary(stderr, spawnFailed) {
-  if (spawnFailed) return ["SPAWN_FAILED", "Docker command could not start"];
+function safeStderrCategory(stderr, spawnFailed) {
+  if (spawnFailed) return "SPAWN_FAILED";
   if (/toomanyrequests|unauthenticated pull rate limit/i.test(stderr)) {
-    return ["DOCKER_HUB_RATE_LIMIT", "Docker Hub unauthenticated pull rate limit"];
+    return "DOCKER_HUB_RATE_LIMIT";
   }
   if (/context deadline exceeded|client\.timeout exceeded|i\/o timeout|tls handshake timeout/i.test(stderr)) {
-    return ["REGISTRY_TIMEOUT", "Container registry request timed out"];
+    return "COMMAND_TIMEOUT";
   }
   if (/manifest unknown|manifest.*not found/i.test(stderr)) {
-    return ["MANIFEST_UNAVAILABLE", "Pinned image manifest unavailable"];
+    return "MANIFEST_UNAVAILABLE";
   }
   if (/no space left on device/i.test(stderr)) {
-    return ["NO_SPACE", "Docker host has no space left"];
+    return "NO_SPACE";
   }
   if (/port is already allocated|address already in use/i.test(stderr)) {
-    return ["PORT_CONFLICT", "Docker host port is already in use"];
+    return "PORT_CONFLICT";
   }
   if (/cannot connect to the docker daemon|is the docker daemon running/i.test(stderr)) {
-    return ["DAEMON_UNAVAILABLE", "Docker daemon is unavailable"];
+    return "DAEMON_UNAVAILABLE";
   }
-  return ["UNKNOWN_REDACTED", "Docker stderr withheld because it could contain private values"];
+  return "UNKNOWN_REDACTED";
 }
 
-function stderrCollector() {
+function stderrCollector(command) {
   let tail = Buffer.alloc(0);
   let totalBytes = 0;
 
@@ -39,15 +39,12 @@ function stderrCollector() {
       return totalBytes;
     },
     summary(exitStatus, spawnFailed = false) {
-      const [stderrCategory, stderrExcerpt] = safeStderrSummary(tail.toString("utf8"), spawnFailed);
       return {
         event: "docker_source_container_start_failed",
         error: FAILURE_CODE,
-        stderrCategory,
-        stderrExcerpt,
-        stderrBytes: totalBytes,
-        stderrTruncated: totalBytes > STDERR_TAIL_BYTES,
-        exitStatus: Number.isInteger(exitStatus) ? exitStatus : null,
+        command: command === "run" ? "RUN" : "OTHER",
+        category: safeStderrCategory(tail.toString("utf8"), spawnFailed),
+        exitStatus: Number.isInteger(exitStatus) && exitStatus >= 0 && exitStatus <= 255 ? exitStatus : null,
       };
     },
   };
@@ -58,7 +55,7 @@ function reportDiagnostic(summary) {
 }
 
 export function runDockerSourceStart(args, { spawnCommand = spawn, report = reportDiagnostic } = {}) {
-  const diagnostic = stderrCollector();
+  const diagnostic = stderrCollector(args[0]);
   return new Promise((resolve, reject) => {
     let child;
     try {

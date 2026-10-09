@@ -45,20 +45,20 @@ test("reports a bounded safe Docker Hub rate-limit clue without command argument
   const { report } = await failedStart([prefix, stderr]);
 
   assert.equal(report.error, "SOURCE_CONTAINER_START_FAILED");
-  assert.equal(report.stderrCategory, "DOCKER_HUB_RATE_LIMIT");
-  assert.equal(report.stderrExcerpt, "Docker Hub unauthenticated pull rate limit");
-  assert.equal(report.stderrBytes, Buffer.byteLength(prefix + stderr));
-  assert.equal(report.stderrTruncated, true);
+  assert.equal(report.command, "RUN");
+  assert.equal(report.category, "DOCKER_HUB_RATE_LIMIT");
   assert.equal(report.exitStatus, 1);
+  assert.deepEqual(Object.keys(report).sort(), ["category", "command", "error", "event", "exitStatus"]);
   const serialized = JSON.stringify(report);
   for (const privateValue of ["never-print-this", "private-token", "private-password", "db.example.invalid", "POSTGRES_PASSWORD"]) {
     assert.equal(serialized.includes(privateValue), false);
   }
 });
 
-test("classifies registry timeouts and host failures using only fixed safe excerpts", async () => {
+test("classifies generic timeouts neutrally and host failures using fixed categories", async () => {
   const cases = [
-    ["Get https://auth.docker.io/token?account=user&token=private: context deadline exceeded", "REGISTRY_TIMEOUT"],
+    ["Get https://auth.docker.io/token?account=user&token=private: context deadline exceeded", "COMMAND_TIMEOUT"],
+    ["Docker engine i/o timeout; password=private", "COMMAND_TIMEOUT"],
     ["Error response from daemon: no space left on device; password=private", "NO_SPACE"],
     ["Bind for 127.0.0.1:1234 failed: port is already allocated; password=private", "PORT_CONFLICT"],
     ["Cannot connect to the Docker daemon; password=private", "DAEMON_UNAVAILABLE"],
@@ -66,17 +66,17 @@ test("classifies registry timeouts and host failures using only fixed safe excer
   ];
   for (const [stderr, expectedCategory] of cases) {
     const { report } = await failedStart([stderr]);
-    assert.equal(report.stderrCategory, expectedCategory);
+    assert.equal(report.category, expectedCategory);
     assert.equal(JSON.stringify(report).includes("private"), false);
   }
 });
 
 test("unknown stderr and spawn errors stay redacted, and only one diagnostic is reported", async () => {
   const { report } = await failedStart(["credential=super-secret; unexpected failure"]);
-  assert.equal(report.stderrCategory, "UNKNOWN_REDACTED");
+  assert.equal(report.category, "UNKNOWN_REDACTED");
   assert.equal(JSON.stringify(report).includes("super-secret"), false);
   const authFailure = await failedStart(["Get https://auth.docker.io/token: unauthorized; token=super-secret"]);
-  assert.equal(authFailure.report.stderrCategory, "UNKNOWN_REDACTED");
+  assert.equal(authFailure.report.category, "UNKNOWN_REDACTED");
   assert.equal(JSON.stringify(authFailure.report).includes("super-secret"), false);
 
   const child = fakeChild();
@@ -89,15 +89,15 @@ test("unknown stderr and spawn errors stay redacted, and only one diagnostic is 
   child.emit("close", 1);
   await assert.rejects(promise, { code: "SOURCE_CONTAINER_START_FAILED" });
   assert.equal(reports.length, 1);
-  assert.equal(reports[0].stderrCategory, "SPAWN_FAILED");
+  assert.equal(reports[0].category, "SPAWN_FAILED");
   assert.equal(JSON.stringify(reports[0]).includes("super-secret"), false);
 });
 
 test("keeps the existing excessive-stderr kill boundary and emits nothing on success", async () => {
   const { child, report } = await failedStart([Buffer.alloc(1024 * 1024 + 1, "x")], null);
   assert.deepEqual(child.kills, ["SIGKILL"]);
-  assert.equal(report.stderrCategory, "UNKNOWN_REDACTED");
-  assert.equal(report.stderrTruncated, true);
+  assert.equal(report.category, "UNKNOWN_REDACTED");
+  assert.deepEqual(Object.keys(report).sort(), ["category", "command", "error", "event", "exitStatus"]);
 
   const successfulChild = fakeChild();
   const reports = [];
