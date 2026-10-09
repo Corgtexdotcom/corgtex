@@ -9,6 +9,7 @@ import { test } from "node:test";
 import pg from "pg";
 import { createCutoverJournal, openCutoverCustody } from "./ops-core-custody.mjs";
 import { openProviderOperationRecorder } from "./ops-core-provider-operations.mjs";
+import { safeDockerFixtureFailure } from "./docker-fixture-command-diagnostic.mjs";
 
 const IMAGE = "public.ecr.aws/docker/library/postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280";
 const LABEL = "corgtex.postgres-fence-test";
@@ -58,7 +59,7 @@ test(`PG18 source fence ${scenario}: durable reconciliation without replay`, { t
     const result = spawnSync("docker", ["--config", directory, "--host", dockerHost, ...args], {
       encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 120_000, maxBuffer: 16 * 1024 * 1024,
     });
-    if (result.error || result.status !== 0) throw new Error("LOCAL_DOCKER_COMMAND_FAILED");
+    if (result.error || result.status !== 0) throw new Error(safeDockerFixtureFailure(args[0], result));
     return { stdout: result.stdout.trim(), stderr: result.stderr.trim() };
   };
   const connect = async (config) => {
