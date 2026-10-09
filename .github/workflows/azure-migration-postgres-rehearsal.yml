@@ -106,7 +106,7 @@ jobs:
             --pattern source-baseline.json --dir "$SYNTHETIC_BUNDLE_DIR"
       - name: Cache pinned public PostgreSQL client before any Azure start
         timeout-minutes: 3
-        run: docker pull postgres:18.6@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+        run: docker pull public.ecr.aws/docker/library/postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
       - name: Bootstrap and attest pinned local synthetic source
         id: synthetic_bootstrap
         timeout-minutes: 12
@@ -467,7 +467,7 @@ jobs:
       - run: npm ci --ignore-scripts
         timeout-minutes: 5
       - name: Cache pinned PostgreSQL 18 client before Azure start
-        run: docker pull postgres:18.6@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+        run: docker pull public.ecr.aws/docker/library/postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
         timeout-minutes: 5
       - uses: azure/login@v2
         with:
@@ -671,7 +671,7 @@ jobs:
       AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      POSTGRES_CLIENT_IMAGE: postgres:18.6@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+      POSTGRES_CLIENT_IMAGE: public.ecr.aws/docker/library/postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
 
     steps:
       - uses: actions/checkout@v5
