@@ -35,7 +35,7 @@ export { SCHEMA_RESTRICT_KEY, schemaTokenDigest, tokenizeSchemaDump } from "./po
 const { Client } = pg;
 const execFileAsync = promisify(execFile);
 
-export const POSTGRES_CLIENT_IMAGE = "postgres:18.6@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280";
+export const POSTGRES_CLIENT_IMAGE = "public.ecr.aws/docker/library/postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280";
 const MAX_STATE_BYTES = 64 * 1024;
 const MAX_SOURCE_TLS_ROOT_CERT_BYTES = 16 * 1024;
 const MAX_TARGET_TLS_ROOT_CERT_BYTES = 32 * 1024;

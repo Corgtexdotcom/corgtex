@@ -8,6 +8,7 @@ const hasExactFoundationDatabases = (names) =>
   JSON.stringify([...names].sort()) === JSON.stringify(expectedFoundationDatabases);
 
 describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
+  const ciWorkflow = read(".github/workflows/ci.yml");
   const workflow = read(".github/workflows/azure-migration-postgres-rehearsal.yml");
   const runner = read("scripts/migration/run-postgres-restore-rehearsal.mjs");
   const smoke = read("scripts/migration/postgres-restore-rehearsal-smoke.mjs");
@@ -52,7 +53,8 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
   });
 
   it("uses an immutable official PostgreSQL 18.6 client and rejects local older clients", () => {
-    const image = "postgres:18.6@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280";
+    const image = "public.ecr.aws/docker/library/postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280";
+    expect(ciWorkflow).toContain(`docker pull ${image}`);
     expect(workflow).toContain(image);
     expect(runner).toContain(image);
     expect(workflow).toContain('client_version="$(docker run --rm "$POSTGRES_CLIENT_IMAGE" pg_dump --version)"');

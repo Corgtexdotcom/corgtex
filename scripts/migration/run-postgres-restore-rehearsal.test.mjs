@@ -299,7 +299,7 @@ const constraintManifest = async (rows) => collectConstraintCatalogManifest({
 describe("PostgreSQL restore rehearsal runner", () => {
   it("pins the immutable PostgreSQL 18.6 client", () => {
     expect(POSTGRES_CLIENT_IMAGE).toBe(
-      "postgres:18.6@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280",
+      "public.ecr.aws/docker/library/postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280",
     );
   });
 
