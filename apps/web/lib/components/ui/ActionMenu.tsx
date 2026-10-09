@@ -1,36 +1,99 @@
 "use client";
 
-import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { createPortal } from "react-dom";
 
 interface ActionMenuProps {
   label: string;
-  children: ReactNode;
+  children: ReactNode | ((close: () => void) => ReactNode);
   className?: string;
+  trigger?: ReactNode;
+  triggerClassName?: string;
+  panelClassName?: string;
+  panelRole?: "menu" | "dialog";
+  onOpen?: () => void;
 }
 
 const PANEL_MARGIN = 8;
 const VIEWPORT_PADDING = 12;
 
-export function ActionMenu({ label, children, className = "" }: ActionMenuProps) {
+function visibleFocusableControls(panel: HTMLElement, selector: string) {
+  return Array.from(panel.querySelectorAll<HTMLElement>(selector)).filter(
+    (control) =>
+      control.tabIndex >= 0 &&
+      !control.matches(":disabled") &&
+      !control.closest("[hidden], [inert]") &&
+      control.getClientRects().length > 0 &&
+      getComputedStyle(control).visibility === "visible",
+  );
+}
+
+export function ActionMenu({
+  label,
+  children,
+  className = "",
+  trigger,
+  triggerClassName = "",
+  panelClassName = "",
+  panelRole = "menu",
+  onOpen,
+}: ActionMenuProps) {
   const triggerId = useId();
   const panelId = `${triggerId}-panel`;
   const [open, setOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const [pos, setPos] = useState<{ top: number; left: number; minWidth: number } | null>(null);
+  const focusedOnOpen = useRef(false);
+  const [pos, setPos] = useState<{
+    top: number;
+    left: number;
+    minWidth: number;
+  } | null>(null);
 
   useEffect(() => {
     setMounted(true);
   }, []);
 
-  const close = useCallback(() => setOpen(false), []);
+  const close = useCallback(() => {
+    setOpen(false);
+    triggerRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    if (!open) focusedOnOpen.current = false;
+    if (open && pos && pos.top >= 0 && !focusedOnOpen.current) {
+      const panel = panelRef.current;
+      if (!panel) return;
+      for (const control of visibleFocusableControls(
+        panel,
+        "input:not([type='hidden']), textarea, select, button, a[href], [tabindex]",
+      )) {
+        control.focus();
+        if (document.activeElement === control) {
+          focusedOnOpen.current = true;
+          break;
+        }
+      }
+    }
+  }, [open, pos]);
 
   const recompute = useCallback(() => {
     const trigger = triggerRef.current;
     const panel = panelRef.current;
     if (!trigger || !panel) return;
+    if (!trigger.getClientRects().length) {
+      setOpen(false);
+      return;
+    }
     const triggerRect = trigger.getBoundingClientRect();
     const panelRect = panel.getBoundingClientRect();
     const vw = document.documentElement.clientWidth;
@@ -85,7 +148,7 @@ export function ActionMenu({ label, children, className = "" }: ActionMenuProps)
       if (!target) return;
       if (triggerRef.current?.contains(target)) return;
       if (panelRef.current?.contains(target)) return;
-      close();
+      setOpen(false);
     }
     function handleKey(event: KeyboardEvent) {
       if (event.key === "Escape") {
@@ -96,14 +159,17 @@ export function ActionMenu({ label, children, className = "" }: ActionMenuProps)
     window.addEventListener("scroll", handleScrollOrResize, true);
     window.addEventListener("resize", handleScrollOrResize);
     document.addEventListener("mousedown", handleDocumentPointerDown);
-    document.addEventListener("touchstart", handleDocumentPointerDown, { passive: true });
+    document.addEventListener("touchstart", handleDocumentPointerDown, {
+      passive: true,
+    });
     document.addEventListener("keydown", handleKey);
     // Watch the panel's own size so it stays inside the viewport when nested
     // <details> entries expand or collapse without a scroll/resize event.
     const panel = panelRef.current;
-    const resizeObserver = panel && typeof ResizeObserver !== "undefined"
-      ? new ResizeObserver(() => recompute())
-      : null;
+    const resizeObserver =
+      panel && typeof ResizeObserver !== "undefined"
+        ? new ResizeObserver(() => recompute())
+        : null;
     if (panel && resizeObserver) resizeObserver.observe(panel);
     return () => {
       window.removeEventListener("scroll", handleScrollOrResize, true);
@@ -133,41 +199,98 @@ export function ActionMenu({ label, children, className = "" }: ActionMenuProps)
         ref={triggerRef}
         id={triggerId}
         type="button"
-        className="action-menu-trigger"
+        className={`action-menu-trigger ${triggerClassName}`}
         aria-label={label}
         title={label}
-        aria-haspopup="menu"
+        aria-haspopup={panelRole}
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          if (!open) onOpen?.();
+          setOpen(!open);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            if (!open) onOpen?.();
+            setOpen(true);
+          }
+        }}
       >
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-          <circle cx="3" cy="8" r="1.5" fill="currentColor" />
-          <circle cx="8" cy="8" r="1.5" fill="currentColor" />
-          <circle cx="13" cy="8" r="1.5" fill="currentColor" />
-        </svg>
+        {trigger ?? (
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 16 16"
+            fill="none"
+            aria-hidden="true"
+          >
+            <circle cx="3" cy="8" r="1.5" fill="currentColor" />
+            <circle cx="8" cy="8" r="1.5" fill="currentColor" />
+            <circle cx="13" cy="8" r="1.5" fill="currentColor" />
+          </svg>
+        )}
       </button>
-      {mounted && open && createPortal(
-        <div
-          ref={panelRef}
-          id={panelId}
-          role="menu"
-          aria-labelledby={triggerId}
-          className="action-menu-panel"
-          style={{
-            position: "fixed",
-            top: pos?.top ?? -9999,
-            left: pos?.left ?? -9999,
-            minWidth: pos?.minWidth ?? 220,
-            visibility: pos && pos.top >= 0 ? "visible" : "hidden",
-          }}
-          onClick={handlePanelClick}
-          onSubmit={handlePanelSubmit}
-        >
-          {children}
-        </div>,
-        document.body,
-      )}
+      {mounted &&
+        open &&
+        createPortal(
+          <div
+            ref={panelRef}
+            id={panelId}
+            role={panelRole}
+            aria-labelledby={triggerId}
+            className={`action-menu-panel ${panelClassName}`}
+            style={{
+              position: "fixed",
+              top: pos?.top ?? -9999,
+              left: pos?.left ?? -9999,
+              minWidth: pos?.minWidth ?? 220,
+              visibility: pos && pos.top >= 0 ? "visible" : "hidden",
+            }}
+            onClick={handlePanelClick}
+            onSubmit={handlePanelSubmit}
+            onBlur={(event) => {
+              const next = event.relatedTarget as Node | null;
+              if (
+                !event.currentTarget.contains(next) &&
+                !triggerRef.current?.contains(next)
+              )
+                setOpen(false);
+            }}
+            onKeyDown={(event) => {
+              if (
+                event.target instanceof HTMLInputElement ||
+                event.target instanceof HTMLTextAreaElement ||
+                event.target instanceof HTMLSelectElement
+              )
+                return;
+              if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key))
+                return;
+              const items = visibleFocusableControls(
+                event.currentTarget,
+                "button, a[href], [tabindex='0']",
+              );
+              if (!items.length) return;
+              event.preventDefault();
+              const index = items.indexOf(
+                document.activeElement as HTMLElement,
+              );
+              const next =
+                event.key === "Home"
+                  ? 0
+                  : event.key === "End"
+                    ? items.length - 1
+                    : (index +
+                        (event.key === "ArrowUp" ? -1 : 1) +
+                        items.length) %
+                      items.length;
+              items[next]?.focus();
+            }}
+          >
+            {typeof children === "function" ? children(close) : children}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

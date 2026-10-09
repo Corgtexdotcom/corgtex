@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { usePathname, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
+import { WorkspaceSwitcher, type SwitchableWorkspace } from "./WorkspaceSwitcher";
 import { ChatInterface } from "./chat/ChatInterface";
 import { AiWorkspaceLaunchPanel } from "./AiWorkspaceLaunchPanel";
 import type { NavGroup } from "@/lib/nav-config";
@@ -30,8 +31,7 @@ type ConversationSummary = {
 
 type MobileWorkspaceShellProps = {
   workspaceId: string;
-  workspaceName: string;
-  workspaceLabel: string;
+  workspaces: SwitchableWorkspace[];
   navGroups: NavGroup[];
   unreadCount: number;
   conversations: ConversationSummary[];
@@ -49,8 +49,7 @@ function navHref(workspaceId: string, href: string) {
 
 export function MobileWorkspaceShell({
   workspaceId,
-  workspaceName,
-  workspaceLabel,
+  workspaces,
   navGroups,
   unreadCount,
   conversations,
@@ -116,7 +115,7 @@ export function MobileWorkspaceShell({
       return nextMode;
     });
     try {
-      window.localStorage.setItem(MODE_STORAGE_KEY, nextMode);
+      window.localStorage.setItem(`${MODE_STORAGE_KEY}.${workspaceId}`, nextMode);
     } catch {
       // Storage can be unavailable in private or restricted browsing contexts.
     }
@@ -124,7 +123,7 @@ export function MobileWorkspaceShell({
 
   useEffect(() => {
     try {
-      const stored = window.localStorage.getItem(MODE_STORAGE_KEY);
+      const stored = window.localStorage.getItem(`${MODE_STORAGE_KEY}.${workspaceId}`);
       if (stored === "workspace" || stored === "ai") {
         setModeState(stored);
       }
@@ -133,7 +132,7 @@ export function MobileWorkspaceShell({
     } finally {
       setHasLoadedStoredMode(true);
     }
-  }, []);
+  }, [workspaceId]);
 
   useEffect(() => {
     document.documentElement.dataset.mobileMode = mode;
@@ -161,14 +160,12 @@ export function MobileWorkspaceShell({
     <>
       <div className="mobile-shell" aria-label={tMobile("shellLabel")}>
         <header className="mobile-topbar">
-          <a
-            href={navHref(workspaceId, "")}
-            className="mobile-brand"
-            onClick={() => setMode("workspace", "brand")}
-          >
-            <span className="mobile-brand-name">{workspaceName}</span>
-            <span className="mobile-brand-label">{workspaceLabel}</span>
-          </a>
+          <WorkspaceSwitcher
+            workspaceId={workspaceId}
+            workspaces={workspaces}
+            mobile
+            onSingleWorkspaceNavigate={() => setMode("workspace", "brand")}
+          />
 
           <div className="mobile-mode-switch" role="group" aria-label={tMobile("modeSwitchLabel")}>
             <button
