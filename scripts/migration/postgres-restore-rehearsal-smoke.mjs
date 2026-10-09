@@ -29,6 +29,7 @@ import {
 } from "./postgres-check-structure.mjs";
 import { validatePostgresRestoreRehearsal } from "./validate-postgres-restore-rehearsal.mjs";
 import { runRetainedPostgresCopyFixture } from "./ops-core-postgres-copy-fixture.mjs";
+import { runDockerSourceStart } from "./docker-source-start-diagnostic.mjs";
 
 const { Client } = pg;
 const SERVER_IMAGE = "pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a";
@@ -218,12 +219,12 @@ const main = async () => {
 
     await run("docker", ["network", "create", network], "NETWORK_CREATE_FAILED");
     networkCreated = true;
-    await run("docker", [
+    await runDockerSourceStart([
       "run", "--detach", "--name", sourceContainer, "--network", network,
       "--publish", `127.0.0.1:${sourcePort}:5432`,
       "--env", `POSTGRES_PASSWORD=${TEST_PASSWORD}`,
       SERVER_IMAGE,
-    ], "SOURCE_CONTAINER_START_FAILED");
+    ]);
     sourceStarted = true;
     await run("docker", [
       "run", "--detach", "--name", targetContainer, "--network", network,
