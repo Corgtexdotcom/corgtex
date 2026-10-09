@@ -10,7 +10,7 @@ import pg from "pg";
 import { createCutoverJournal, openCutoverCustody } from "./ops-core-custody.mjs";
 import { openProviderOperationRecorder } from "./ops-core-provider-operations.mjs";
 
-const IMAGE = "postgres:18.6@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280";
+const IMAGE = "public.ecr.aws/docker/library/postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280";
 const LABEL = "corgtex.postgres-fence-test";
 const { Client } = pg;
 

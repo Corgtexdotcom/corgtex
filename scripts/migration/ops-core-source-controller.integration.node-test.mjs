@@ -14,7 +14,7 @@ import { runOpsCoreSourceFence, assertOpsCoreSourceFenced, recoverOpsCoreSource,
 import { createRailwayPostgresCustody } from "./railway-postgres-custody.mjs";
 import { RailwaySourceFence } from "./railway-source-fence.mjs";
 
-const IMAGE = "postgres:18.6@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280";
+const IMAGE = "public.ecr.aws/docker/library/postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280";
 const LABEL = "corgtex.source-controller-test";
 const id = value => `00000000-0000-4000-8000-${String(value).padStart(12, "0")}`;
 const PG_SERVICE = id(4);
