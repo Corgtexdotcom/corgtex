@@ -1,5 +1,6 @@
 "use server";
 
+import { redirect } from "next/navigation";
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
 import { asString, asOptional, refresh } from "../action-utils";
@@ -118,11 +119,14 @@ export async function deleteRoleAction(formData: FormData) {
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
+  const roleId = asString(formData, "roleId");
+  const locale = asString(formData, "locale") === "es" ? "es" : "en";
   await deleteRole(actor, {
     workspaceId,
-    roleId: asString(formData, "roleId"),
+    roleId,
   });
   refresh(workspaceId);
+  redirect(`/${locale}/workspaces/${workspaceId}/roles?archivedRole=${encodeURIComponent(roleId)}`);
 }
 
 export async function assignRoleAction(formData: FormData) {
