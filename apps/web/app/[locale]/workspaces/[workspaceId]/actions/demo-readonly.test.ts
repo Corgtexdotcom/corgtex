@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   membership: vi.fn(),
   action: vi.fn(),
   actions: vi.fn(),
+  actionCounts: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -25,6 +26,7 @@ vi.mock("@corgtex/domain", () => ({
   requireWorkspaceMembership: mocks.membership,
   getAction: mocks.action,
   listActions: mocks.actions,
+  countActionsByStatus: mocks.actionCounts,
   listCircles: async () => [],
   listHumanMembers: async () => [{ id: "synthetic-member", user: { displayName: "Synthetic Member", email: "synthetic@example.test" } }],
   listAdviceRequests: async () => [],
@@ -108,6 +110,7 @@ beforeEach(() => {
   mocks.membership.mockResolvedValue({ id: "synthetic-member", role: "ADMIN", isActive: true });
   mocks.action.mockResolvedValue(action);
   mocks.actions.mockResolvedValue({ items: [action], total: 1 });
+  mocks.actionCounts.mockResolvedValue({ DRAFT: 0, OPEN: 1, IN_PROGRESS: 0, COMPLETED: 0, ALL: 1 });
 });
 
 afterEach(() => vi.unstubAllGlobals());
@@ -154,5 +157,30 @@ describe("Action pages in the read-only demo", () => {
     mocks.membership.mockRejectedValueOnce(new Error("Not a member"));
     await expect(renderList()).rejects.toThrow("Not a member");
     expect(mocks.workspace).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("Actions sorting integration", () => {
+  it.each([
+    ["due_asc", "priority"], ["due_desc", "priority"],
+    ["created_asc", "priority"], ["created_desc", "priority"],
+    ["date", "date"], ["alpha", "alpha"],
+  ])("keeps legacy Kanban query ordering for %s", async (requestedSort, expectedSort) => {
+    await ActionsPage({ params, searchParams: Promise.resolve({ view: "kanban", sort: requestedSort, page: "2" }) });
+    expect(mocks.actions).toHaveBeenCalledWith(expect.anything(), "synthetic-workspace", expect.objectContaining({
+      sort: expectedSort, take: 200, skip: 0, statuses: undefined,
+    }));
+    expect(mocks.actionCounts).not.toHaveBeenCalled();
+  });
+
+  it.each(["list", "table"])("shows exact per-action input counts on older %s pages", async (view) => {
+    mocks.actions.mockResolvedValue({ items: [{ ...action, activeInputRequestCount: 2 }], total: 201 });
+    mocks.actionCounts.mockResolvedValue({ DRAFT: 0, OPEN: 201, IN_PROGRESS: 0, COMPLETED: 0, ALL: 201 });
+    const html = renderIntl(await ActionsPage({ params, searchParams: Promise.resolve({ view, sort: "due_asc", page: "2" }) }));
+    expect(mocks.actions).toHaveBeenCalledWith(expect.anything(), "synthetic-workspace", expect.objectContaining({
+      sort: "due_asc", take: 200, skip: 200,
+    }));
+    expect(html).toContain("2 input requests");
   });
 });

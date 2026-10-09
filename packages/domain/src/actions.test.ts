@@ -13,6 +13,7 @@ const { prismaMock } = vi.hoisted(() => ({
       findUnique: vi.fn(),
       update: vi.fn(),
       count: vi.fn(),
+      groupBy: vi.fn(),
     },
     actionCreationSource: {
       findUnique: vi.fn(),
@@ -568,6 +569,52 @@ describe("action domain lifecycle", () => {
         },
       },
     });
+  });
+
+  it.each([
+    ["date", [{ createdAt: "desc" }, { id: "desc" }]],
+    ["created_asc", [{ createdAt: "asc" }, { id: "asc" }]],
+    ["due_asc", [{ dueAt: { sort: "asc", nulls: "last" } }, { createdAt: "desc" }, { id: "desc" }]],
+    ["due_desc", [{ dueAt: { sort: "desc", nulls: "last" } }, { createdAt: "desc" }, { id: "desc" }]],
+  ] as const)("orders the full filtered Action query by %s before limiting the page", async (sort, orderBy) => {
+    prismaMock.action.findMany.mockResolvedValueOnce([]);
+    prismaMock.action.count.mockResolvedValueOnce(237);
+
+    const { listActions } = await import("./actions");
+    const result = await listActions(actor, "workspace-1", { sort, take: 25, skip: 50 });
+
+    expect(result).toMatchObject({ total: 237, take: 25, skip: 50 });
+    expect(prismaMock.action.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ workspaceId: "workspace-1" }),
+      orderBy,
+      take: 25,
+      skip: 50,
+    }));
+  });
+
+  it("applies the selected lifecycle status before due sorting and pagination", async () => {
+    prismaMock.action.findMany.mockResolvedValueOnce([]);
+    prismaMock.action.count.mockResolvedValueOnce(1);
+    prismaMock.action.groupBy.mockResolvedValueOnce([
+      { status: "OPEN", _count: { _all: 1 } },
+      { status: "COMPLETED", _count: { _all: 205 } },
+    ]);
+
+    const { countActionsByStatus, listActions } = await import("./actions");
+    const result = await listActions(actor, "workspace-1", { statuses: ["OPEN"], sort: "due_asc", take: 200 });
+    const counts = await countActionsByStatus(actor, "workspace-1");
+
+    expect(result.total).toBe(1);
+    expect(prismaMock.action.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ status: { in: ["OPEN"] } }),
+      orderBy: [{ dueAt: { sort: "asc", nulls: "last" } }, { createdAt: "desc" }, { id: "desc" }],
+      take: 200,
+    }));
+    expect(prismaMock.action.groupBy).toHaveBeenCalledWith(expect.objectContaining({
+      by: ["status"],
+      where: expect.objectContaining({ workspaceId: "workspace-1" }),
+    }));
+    expect(counts).toEqual({ DRAFT: 0, OPEN: 1, IN_PROGRESS: 0, COMPLETED: 205, ALL: 206 });
   });
 
   it("returns checklist progress only as action summary counts", async () => {

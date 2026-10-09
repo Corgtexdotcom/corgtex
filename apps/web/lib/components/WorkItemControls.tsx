@@ -200,12 +200,13 @@ export function WorkItemToolbar({
   sortPriorityLabel,
   sortDateLabel,
   sortAlphaLabel,
+  customSortOptions,
   label,
   availableViews,
   showSort = true,
 }: {
   currentView: WorkItemViewMode;
-  currentSort: WorkItemSort;
+  currentSort: string;
   listHref?: string;
   kanbanHref?: string;
   tableHref?: string;
@@ -217,14 +218,15 @@ export function WorkItemToolbar({
   sortPriorityLabel: string;
   sortDateLabel: string;
   sortAlphaLabel: string;
+  customSortOptions?: readonly { id: string; label: string; href: string }[];
   label: string;
   availableViews?: WorkItemViewMode[];
   showSort?: boolean;
 }) {
-  const sortOptions: Array<{ id: WorkItemSort; label: string; icon: ReactNode }> = [
-    { id: "priority", label: sortPriorityLabel, icon: <ArrowDownWideNarrow size={15} aria-hidden="true" /> },
-    { id: "date", label: sortDateLabel, icon: <ArrowUpDown size={15} aria-hidden="true" /> },
-    { id: "alpha", label: sortAlphaLabel, icon: <ArrowDownAZ size={15} aria-hidden="true" /> },
+  const sortOptions = customSortOptions ?? [
+    { id: "priority", label: sortPriorityLabel, href: sortLinks.priority },
+    { id: "date", label: sortDateLabel, href: sortLinks.date },
+    { id: "alpha", label: sortAlphaLabel, href: sortLinks.alpha },
   ];
 
   return (
@@ -245,14 +247,19 @@ export function WorkItemToolbar({
           <summary className="nr-icon-link" aria-label={sortLabel} title={sortLabel}>
             <ArrowUpDown size={17} aria-hidden="true" />
           </summary>
-          <div className="nr-icon-menu-popover">
+          <div className={`nr-icon-menu-popover ${customSortOptions ? "nr-icon-menu-popover-spacious" : ""}`}>
             {sortOptions.map((option) => (
               <a
                 key={option.id}
-                href={sortLinks[option.id]}
+                href={option.href}
                 className={`nr-icon-menu-item ${currentSort === option.id ? "nr-icon-menu-item-active" : ""}`}
+                aria-current={currentSort === option.id ? "true" : undefined}
               >
-                {option.icon}
+                {option.id === "priority"
+                  ? <ArrowDownWideNarrow size={15} aria-hidden="true" />
+                  : option.id === "alpha"
+                    ? <ArrowDownAZ size={15} aria-hidden="true" />
+                    : <ArrowUpDown size={15} aria-hidden="true" />}
                 <span>{option.label}</span>
               </a>
             ))}
@@ -295,7 +302,7 @@ export function WorkItemFilterControls({
   status?: string;
   view?: WorkItemViewMode;
   scope?: WorkItemScope;
-  sort?: WorkItemSort;
+  sort?: string;
   columns?: readonly string[];
   circleId?: string;
   circleIds?: readonly string[];

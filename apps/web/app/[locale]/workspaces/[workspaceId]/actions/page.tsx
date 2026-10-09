@@ -1,4 +1,4 @@
-import { listActions, listAdviceRequests, listCircles, listHumanMembers, requireWorkspaceMembership } from "@corgtex/domain";
+import { countActionsByStatus, listActions, listCircles, listHumanMembers, requireWorkspaceMembership, type ActionSort } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import type { ReactNode } from "react";
 import { requirePageActor } from "@/lib/auth";
@@ -13,14 +13,18 @@ import { getTranslations } from "next-intl/server";
 import { ActionEditorForm } from "@/lib/components/ActionEditorForm";
 import { ConfirmSubmitButton } from "@/lib/components/ConfirmSubmitButton";
 import {
+  ACTION_PAGE_SIZE,
   ACTION_STATUS_FILTERS,
   ACTION_STATUS_META,
   type ActionStatusFilter,
   type ActionStatusQuery,
   actionStatusFormValues,
   actionMatchesStatusFilters,
+  buildActionListQuery,
   groupActionsByStatus,
   hasEligibleActionAssignee,
+  normalizeActionPage,
+  normalizeActionSort,
   resolveActionAssigneeScope,
   resolveActionStatusSearch,
 } from "./view-model";
@@ -46,6 +50,7 @@ import {
   toggleWorkItemColumnVisibility,
 } from "@/lib/work-item-view";
 import { formatWorkItemPriority, normalizeWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
+import { ActionPagination } from "./ActionPagination";
 
 export const dynamic = "force-dynamic";
 
@@ -144,32 +149,41 @@ export default async function ActionsPage({
     resolvedSearch.status,
     view === "kanban" ? null : "OPEN",
   );
-  const { circleIds, assigneeMemberIds: selectedAssigneeIds, sort } = resolveWorkItemFilters(resolvedSearch);
+  const { circleIds, assigneeMemberIds: selectedAssigneeIds, sort: legacySort } = resolveWorkItemFilters(resolvedSearch);
+  const sort = view === "kanban" ? legacySort : normalizeActionSort(resolvedSearch.sort);
   const currentMemberId = membership?.id && membership.id !== "global-operator" ? membership.id : null;
   const { actionScope, baseScope, assigneeMemberIds, includeOwnDrafts, assignedToMeActive } = resolveActionAssigneeScope(
     selectedAssigneeIds, currentMemberId, resolvedSearch.scope,
   );
-  const buildActionQuery = (params: Parameters<typeof buildWorkItemQuery>[0], scope = baseScope) => {
-    const query = new URLSearchParams(buildWorkItemQuery(params).slice(1));
-    if (scope === "workspace" || scope === "assigned") query.set("scope", scope);
-    return query.size > 0 ? `?${query}` : "?";
-  };
+  const buildActionQuery = (
+    params: Omit<Parameters<typeof buildWorkItemQuery>[0], "sort"> & { sort?: ActionSort; page?: number },
+    scope = baseScope,
+  ) => buildActionListQuery(params, scope);
   // Actions use their assignee as the person filter. Ignore old "person involved"
   // query parameters so a hidden legacy filter cannot change the visible results.
   const memberIds: string[] = [];
-  const [{ items: actions }, circles, members, activeInputRequests] = await Promise.all([
-    listActions(actor, workspaceId, {
-      take: 200,
-      circleIds,
-      assigneeMemberIds,
-      includeOwnDrafts,
-      memberIds,
-      sort,
-    }),
+  const requestedPage = view === "kanban" ? 1 : normalizeActionPage(resolvedSearch.page);
+  const actionListFilters = { circleIds, assigneeMemberIds, includeOwnDrafts, memberIds };
+  const actionListOptions = {
+    ...actionListFilters,
+    sort,
+    statuses: view === "kanban" ? undefined : statusFilters,
+    take: ACTION_PAGE_SIZE,
+  };
+  const actionStatusCounts = view === "kanban" ? null : await countActionsByStatus(actor, workspaceId, actionListFilters);
+  const selectedTotal = actionStatusCounts
+    ? statusFilters.length === 0
+      ? actionStatusCounts.ALL
+      : statusFilters.reduce((total, status) => total + actionStatusCounts[status], 0)
+    : 0;
+  const pageCount = Math.max(1, Math.ceil(selectedTotal / ACTION_PAGE_SIZE));
+  const page = Math.min(requestedPage, pageCount);
+  const [actionResult, circles, members] = await Promise.all([
+    listActions(actor, workspaceId, { ...actionListOptions, skip: (page - 1) * ACTION_PAGE_SIZE }),
     listCircles(workspaceId),
     listHumanMembers(workspaceId),
-    listAdviceRequests(actor, { workspaceId, subjectType: "ACTION", status: "ACTIVE", take: 500 }),
   ]);
+  const actions = actionResult.items;
   const activeHumanMemberIds = new Set(members.map((member) => member.id));
 
   const actionIds = actions.map((action) => action.id);
@@ -198,14 +212,10 @@ export default async function ActionsPage({
   for (const row of evidenceRows) {
     evidenceByActionId.set(row.entityId, [...(evidenceByActionId.get(row.entityId) ?? []), row]);
   }
-  const activeRequestCountByActionId = new Map<string, number>();
-  for (const request of activeInputRequests) {
-    const subjectId = request.process.subjectId;
-    activeRequestCountByActionId.set(subjectId, (activeRequestCountByActionId.get(subjectId) ?? 0) + 1);
-  }
-
   const groupedActions = groupActionsByStatus(actions);
-  const displayActions = actions.filter((action) => actionMatchesStatusFilters(action, statusFilters));
+  const displayActions = view === "kanban"
+    ? actions.filter((action) => actionMatchesStatusFilters(action, statusFilters))
+    : actions;
   type ActionListItem = (typeof actions)[number];
   type ActionColumnStatus = "DRAFT" | "OPEN" | "IN_PROGRESS" | "COMPLETED";
   const actionColumnStatuses: ActionColumnStatus[] = ["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"];
@@ -242,6 +252,31 @@ export default async function ActionsPage({
       status: filter,
       group: boardGroupQuery,
     });
+  const actionSortHref = (nextSort: ActionSort) => buildActionQuery({
+    view: view === "table" ? "table" : "list",
+    circleIds,
+    assigneeMemberIds: selectedAssigneeIds,
+    memberIds,
+    status: statusQuery,
+    sort: nextSort,
+  });
+  const actionPageHref = (nextPage: number) => buildActionQuery({
+    view,
+    circleIds,
+    assigneeMemberIds: selectedAssigneeIds,
+    memberIds,
+    status: statusQuery,
+    sort,
+    page: nextPage,
+  });
+  const actionSortOptions: Array<{ id: ActionSort; label: string; href: string }> = [
+    { id: "priority", label: tWork("sortPriority"), href: actionSortHref("priority") },
+    { id: "date", label: t("sortCreatedNewest"), href: actionSortHref("date") },
+    { id: "created_asc", label: t("sortCreatedOldest"), href: actionSortHref("created_asc") },
+    { id: "due_asc", label: t("sortDueSoonest"), href: actionSortHref("due_asc") },
+    { id: "due_desc", label: t("sortDueLatest"), href: actionSortHref("due_desc") },
+    { id: "alpha", label: tWork("sortAlpha"), href: actionSortHref("alpha") },
+  ];
   const actionFilterActive = (filter: ActionStatusFilter) => view === "kanban" && boardGroup === "status"
     ? filter === "ALL"
       ? allActionColumnsVisible
@@ -561,7 +596,7 @@ export default async function ActionsPage({
     const createdAge = ageText(action.createdAt);
     const dueDate = dueDateLabel(action.dueAt);
     const evidence = evidenceByActionId.get(action.id) ?? [];
-    const activeRequestCount = activeRequestCountByActionId.get(action.id) ?? 0;
+    const activeRequestCount = action.activeInputRequestCount ?? 0;
     const { canEditContent, hiddenTransitions, moreItems, primary } = actionControls(action);
     const cardBadges: ReactNode[] = [];
     if (action.status === "DRAFT" && !hasEligibleActionAssignee(action.assigneeMemberId, activeHumanMemberIds)) {
@@ -675,7 +710,7 @@ export default async function ActionsPage({
     const createdAge = ageText(action.createdAt);
     const dueDate = dueDateLabel(action.dueAt);
     const evidence = evidenceByActionId.get(action.id) ?? [];
-    const activeRequestCount = activeRequestCountByActionId.get(action.id) ?? 0;
+    const activeRequestCount = action.activeInputRequestCount ?? 0;
     const { hiddenTransitions, moreItems, primary } = actionControls(action);
 
     return {
@@ -877,7 +912,7 @@ export default async function ActionsPage({
                 href={actionFilterHref(s)}
                 className={`nr-filter-item ${actionFilterActive(s) ? "nr-filter-active" : ""}`}
               >
-                {t(ACTION_STATUS_META[s].labelKey)} ({groupedActions[s].length})
+                {t(ACTION_STATUS_META[s].labelKey)} ({actionStatusCounts?.[s] ?? groupedActions[s].length})
               </a>
             ))}
             {currentMemberId && (
@@ -910,10 +945,11 @@ export default async function ActionsPage({
             kanbanHref={buildActionQuery({ circleIds, assigneeMemberIds: selectedAssigneeIds, memberIds, view: "kanban", status: statusQuery, group: boardGroupQuery })}
             tableHref={buildActionQuery({ sort, circleIds, assigneeMemberIds: selectedAssigneeIds, memberIds, status: statusQuery, view: "table" })}
             sortLinks={{
-              priority: buildActionQuery({ view: view === "table" ? "table" : "list", circleIds, assigneeMemberIds: selectedAssigneeIds, memberIds, status: statusQuery, sort: "priority" }),
-              date: buildActionQuery({ view: view === "table" ? "table" : "list", circleIds, assigneeMemberIds: selectedAssigneeIds, memberIds, status: statusQuery, sort: "date" }),
-              alpha: buildActionQuery({ view: view === "table" ? "table" : "list", circleIds, assigneeMemberIds: selectedAssigneeIds, memberIds, status: statusQuery, sort: "alpha" }),
+              priority: actionSortHref("priority"),
+              date: actionSortHref("date"),
+              alpha: actionSortHref("alpha"),
             }}
+            customSortOptions={actionSortOptions}
             listLabel={tWork("listView")}
             kanbanLabel={tWork("kanbanView")}
             tableLabel={tWork("tableView")}
@@ -1012,6 +1048,16 @@ export default async function ActionsPage({
             {displayActions.length === 0 && renderEmptyActionState()}
             {displayActions.map((action) => renderActionCard(action))}
           </div>
+        )}
+        {view !== "kanban" && (
+          <ActionPagination
+            page={page}
+            pageCount={pageCount}
+            summary={t("paginationSummary", { page, pageCount, count: displayActions.length, total: actionResult.total })}
+            previousHref={actionPageHref(page - 1)}
+            nextHref={actionPageHref(page + 1)}
+            labels={{ pagination: t("paginationLabel"), previous: t("paginationPrevious"), next: t("paginationNext") }}
+          />
         )}
       </section>
     </>
