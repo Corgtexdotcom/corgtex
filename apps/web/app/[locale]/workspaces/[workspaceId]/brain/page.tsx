@@ -1,3 +1,4 @@
+import React from "react";
 import { getBrainStatus, listArticles, requireWorkspaceMembership, listMeetings, listDocuments, resolveKnowledgeAccessDomains } from "@corgtex/domain";
 import { answerKnowledgeQuestion, searchIndexedKnowledge } from "@corgtex/knowledge";
 import { prisma } from "@corgtex/shared";
@@ -354,12 +355,12 @@ export default async function BrainPage({
               <input type="hidden" name="workspaceId" value={workspaceId} />
               <input name="title" required placeholder={t("articleTitle")} />
               <div className="brain-field-grid">
-                <select name="type">
+                <select name="type" aria-label={t("labelType")}>
                   {CREATABLE_ARTICLE_TYPES.map((type) => (
                     <option key={type} value={type}>{type}</option>
                   ))}
                 </select>
-                <select name="authority">
+                <select name="authority" aria-label={t("labelAuthority")}>
                   <option value="DRAFT">{t("authorityDraft")}</option>
                   <option value="REFERENCE">{t("authorityReference")}</option>
                   <option value="AUTHORITATIVE">{t("authorityAuthoritative")}</option>
