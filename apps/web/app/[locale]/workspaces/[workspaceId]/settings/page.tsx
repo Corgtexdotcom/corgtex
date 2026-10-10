@@ -34,48 +34,24 @@ import { OnboardingRestartButton } from "./OnboardingRestartButton";
 import { AiWorkspaceManager } from "./AiWorkspaceManager";
 import { normalizeSelectedProvider, normalizeSelectedService } from "./ai-workspace-ui";
 import { AgentBudgetManager } from "./agents/AgentBudgetManager";
+import { ToolsMovedPanel } from "./ToolsMovedPanel";
 
 export const dynamic = "force-dynamic";
 
 type SearchParamValue = string | string[] | undefined;
 
-function toolsHref(workspaceId: string, query: string) {
-  return `/workspaces/${workspaceId}/tools${query}`;
-}
-
-function ToolsMovedPanel({ workspaceId, compact = false }: { workspaceId: string; compact?: boolean }) {
-  return (
-    <section className="nr-item stack" style={{ gap: 12, padding: 18 }}>
-      <div>
-        <h2 className="nr-section-header" style={{ marginTop: 0 }}>
-          Tools and integrations
-        </h2>
-        <p className="nr-item-meta" style={{ fontSize: "0.85rem", margin: 0 }}>
-          Connector setup, databases, webhooks, apps, and shared tool links now live in Tools.
-        </p>
-      </div>
-      <div className="actions-inline">
-        <a className="button secondary small" href={toolsHref(workspaceId, "?type=CONNECTOR")}>Connectors</a>
-        <a className="button secondary small" href={toolsHref(workspaceId, "?type=DATA_SOURCE")}>Data sources</a>
-        <a className="button secondary small" href={toolsHref(workspaceId, "?type=TOOL&q=webhooks")}>Webhooks</a>
-        {!compact && <a className="button secondary small" href={toolsHref(workspaceId, "?type=TOOL&q=meeting%20transcripts")}>Meeting transcripts</a>}
-      </div>
-    </section>
-  );
-}
-
 export default async function SettingsPage({
   params,
   searchParams,
 }: {
-  params: Promise<{ workspaceId: string }>;
+  params: Promise<{ locale: string; workspaceId: string }>;
   searchParams: Promise<{
     tab?: string;
     provider?: SearchParamValue;
     service?: SearchParamValue;
   }>;
 }) {
-  const { workspaceId } = await params;
+  const { locale, workspaceId } = await params;
   const search = await searchParams;
   const actor = await requirePageActor();
   const featureFlags = await getWorkspaceFeatureFlags(workspaceId);
@@ -383,14 +359,14 @@ export default async function SettingsPage({
                 </div>
               </section>
             )}
-            <ToolsMovedPanel workspaceId={workspaceId} />
+            <ToolsMovedPanel locale={locale} workspaceId={workspaceId} toolsAvailable={featureFlags.TOOL_LINKS} dataSourcesAvailable={featureFlags.SETTINGS_GENERAL} />
             <SsoConfigManager workspaceId={workspaceId} configs={ssoConfigs} />
           </div>
         </div>
       )}
 
       {tab === "data-sources" && (
-        <ToolsMovedPanel workspaceId={workspaceId} compact />
+        <ToolsMovedPanel locale={locale} workspaceId={workspaceId} compact toolsAvailable={featureFlags.TOOL_LINKS} dataSourcesAvailable={featureFlags.SETTINGS_GENERAL} />
       )}
 
       {tab === "members" && (

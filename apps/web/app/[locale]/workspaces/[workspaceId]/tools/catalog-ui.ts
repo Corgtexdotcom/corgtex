@@ -111,11 +111,27 @@ export function normalizeCatalogQuery(value: CatalogSearchParamValue) {
   return firstSearchParam(value)?.slice(0, 120) ?? "";
 }
 
-export function normalizeToolsSurface(value: CatalogSearchParamValue): ToolsSurface {
+export function normalizeToolsSurface(value: CatalogSearchParamValue, type?: CatalogSearchParamValue): ToolsSurface {
   const surface = firstSearchParam(value)?.toLowerCase();
   if (surface === "apps") return "APPS";
   if (surface === "all") return "ALL";
+  if (surface === "links") return "LINKS";
+  if (normalizeCatalogType(type) !== "ALL") return "APPS";
   return "LINKS";
+}
+
+export function toolsFilterHref(
+  pathname: string,
+  currentSearch: string,
+  { surface, type, query }: { surface: ToolsSurface; type: CatalogItemType | "ALL"; query: string },
+) {
+  const params = new URLSearchParams(currentSearch);
+  params.set("surface", surface.toLowerCase());
+  if (surface === "APPS" && type !== "ALL") params.set("type", type);
+  else params.delete("type");
+  if (query) params.set("q", normalizeCatalogQuery(query));
+  else params.delete("q");
+  return `${pathname}?${params.toString()}`;
 }
 
 export function hasCatalogFilter({ activeType, query }: CatalogFilterState) {

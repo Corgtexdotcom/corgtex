@@ -2,8 +2,9 @@ import { listCatalogItems, listCatalogRequests, listCircles, listWorkspaceExtern
 import { requirePageActor } from "@/lib/auth";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { getTranslations } from "next-intl/server";
-import { normalizeCatalogQuery, normalizeCatalogType, normalizeToolsSurface, type CatalogSearchParamValue } from "./catalog-ui";
+import { type CatalogSearchParamValue } from "./catalog-ui";
 import { ToolsDirectoryClient } from "./ToolsDirectoryClient";
+import { ToolsViewSwitch } from "./ToolsViewSwitch";
 
 export const dynamic = "force-dynamic";
 
@@ -11,11 +12,11 @@ export default async function ToolsPage({
   params,
   searchParams,
 }: {
-  params: Promise<{ workspaceId: string }>;
+  params: Promise<{ locale: string; workspaceId: string }>;
   searchParams: Promise<{ view?: CatalogSearchParamValue; surface?: CatalogSearchParamValue; type?: CatalogSearchParamValue; q?: CatalogSearchParamValue }>;
 }) {
-  const { workspaceId } = await params;
-  const { view, surface, type, q } = await searchParams;
+  const { locale, workspaceId } = await params;
+  const { view } = await searchParams;
   const actor = await requirePageActor();
   await requireWorkspaceMembership({ actor, workspaceId });
   await requireWorkspaceFeature(workspaceId, "TOOL_LINKS");
@@ -41,31 +42,14 @@ export default async function ToolsPage({
               <span>Connect what is live, request realistic pilots, and keep apps, agents, data sources, and protected shared links governed in one place.</span>
             </div>
           </div>
-          <div className="actions-inline">
-            <a
-              href={`/workspaces/${workspaceId}/tools?view=list`}
-              className="link-button small"
-              style={{ opacity: initialView === "grid" ? 0.62 : 1 }}
-            >
-              {t("btnListView")}
-            </a>
-            <a
-              href={`/workspaces/${workspaceId}/tools?view=grid`}
-              className="link-button small"
-              style={{ opacity: initialView === "grid" ? 1 : 0.62 }}
-            >
-              {t("btnGridView")}
-            </a>
-          </div>
+          <ToolsViewSwitch listLabel={t("btnListView")} gridLabel={t("btnGridView")} />
         </div>
       </header>
 
       <ToolsDirectoryClient
+        key={`${locale}:${workspaceId}`}
         workspaceId={workspaceId}
         initialView={initialView}
-        initialSurface={normalizeToolsSurface(surface)}
-        initialType={normalizeCatalogType(type)}
-        initialQuery={normalizeCatalogQuery(q)}
         initialCatalogItems={catalog.items.map((item) => ({
           ...item,
           createdAt: item.createdAt.toISOString(),
