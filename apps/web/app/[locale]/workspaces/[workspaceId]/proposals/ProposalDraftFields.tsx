@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import React, { useId, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { WorkItemMemberSelect, type WorkItemMemberOption } from "@/lib/components/WorkItemMemberSelect";
@@ -46,6 +46,7 @@ export function ProposalDraftFields({
 }) {
   const t = useTranslations("proposals");
   const tWork = useTranslations("workItems");
+  const bodyId = useId();
   const [title, setTitle] = useState(defaultTitle);
   const [bodyMd, setBodyMd] = useState(defaultBodyMd);
   const [includeAiSummary, setIncludeAiSummary] = useState(true);
@@ -66,16 +67,17 @@ export function ProposalDraftFields({
         {t("formTitle")}
         <input name="title" value={title} onChange={(event) => setTitle(event.target.value)} required />
       </label>
-      <label>
-        {t("formBody")}
+      <div className="md-editor-field">
+        <label htmlFor={bodyId}>{t("formBody")}</label>
         <MarkdownEditor
+          id={bodyId}
           name="bodyMd"
           value={bodyMd}
           onValueChange={setBodyMd}
           required
           placeholder={t("formBodyPlaceholder")}
         />
-      </label>
+      </div>
       <WorkItemMemberSelect
         name="ownerMemberId"
         label={t("formOwner")}

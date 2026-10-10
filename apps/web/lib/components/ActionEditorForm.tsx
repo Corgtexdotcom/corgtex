@@ -57,6 +57,7 @@ export function ActionEditorForm({
   currentHref?: string;
   children?: ReactNode;
 }) {
+  const notesId = React.useId();
   const fields = (
     <>
       <input type="hidden" name="workspaceId" value={workspaceId} />
@@ -66,10 +67,10 @@ export function ActionEditorForm({
         {labels.title}
         <input name="title" defaultValue={title ?? ""} required />
       </label>
-      <label>
-        {labels.notes}
-        <MarkdownEditor name="bodyMd" defaultValue={bodyMd ?? ""} rows={6} />
-      </label>
+      <div className="md-editor-field">
+        <label htmlFor={notesId}>{labels.notes}</label>
+        <MarkdownEditor id={notesId} name="bodyMd" defaultValue={bodyMd ?? ""} rows={6} />
+      </div>
       <WorkItemMemberSelect
         name="assigneeMemberId"
         label={labels.assignee}

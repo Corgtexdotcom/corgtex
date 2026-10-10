@@ -1,7 +1,18 @@
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { getTranslations } from "next-intl/server";
+import React, { useId } from "react";
 
 type Option = { id: string; title: string };
+
+function DecisionBodyField({ label, defaultValue }: { label: string; defaultValue?: string }) {
+  const id = useId();
+  return (
+    <div className="md-editor-field">
+      <label htmlFor={id}>{label}</label>
+      <MarkdownEditor id={id} name="bodyMd" rows={8} defaultValue={defaultValue} required />
+    </div>
+  );
+}
 
 export async function DecisionFields({
   workspaceId,
@@ -34,10 +45,7 @@ export async function DecisionFields({
         {t("decisionTitle")}
         <input name="title" defaultValue={decision?.title} maxLength={200} required />
       </label>
-      <label>
-        {t("details")}
-        <MarkdownEditor name="bodyMd" rows={8} defaultValue={decision?.bodyMd} required />
-      </label>
+      <DecisionBodyField label={t("details")} defaultValue={decision?.bodyMd} />
       <div className="actions-inline">
         <label style={{ flex: 1 }}>
           {t("date")}
