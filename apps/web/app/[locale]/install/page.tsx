@@ -2,7 +2,8 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { getWorkspaceMcpInstallUrl } from "@corgtex/domain";
 import { WorkspacePicker } from "./WorkspacePicker";
-import { buildInstallerPath } from "@/lib/install-helpers";
+import { firstInstallerParam, installerReturnTo, installerTileHref } from "./installer-navigation";
+import { requireInstallerWorkspace } from "./installer-workspace";
 
 export const dynamic = "force-dynamic";
 
@@ -16,71 +17,68 @@ const TILES = [
     id: "openwork",
     title: "OpenWork",
     body: "Recommended default work surface. Copy the MCP URL, open OpenWork, then authorize in Corgtex.",
-    href: buildInstallerPath("openwork"),
     primary: true,
   },
   {
     id: "claude",
     title: "Claude (web, desktop, Cowork)",
     body: "Copy the workspace URL, add a custom connector in Claude, then approve Corgtex access.",
-    href: buildInstallerPath("claude"),
     primary: false,
   },
   {
     id: "chatgpt",
     title: "ChatGPT web",
     body: "Create a custom app in ChatGPT Apps settings, scan tools, then approve Corgtex access.",
-    href: buildInstallerPath("chatgpt"),
     primary: false,
   },
   {
     id: "codex",
     title: "Codex CLI and IDE",
     body: "Copy a workspace-specific MCP command for Codex, then sign in through OAuth.",
-    href: buildInstallerPath("codex"),
     primary: false,
   },
   {
     id: "cursor",
     title: "Cursor",
     body: "Copy a workspace-specific mcp.json entry, then authorize in Corgtex.",
-    href: buildInstallerPath("cursor"),
     primary: false,
   },
   {
     id: "copilot",
     title: "GitHub Copilot",
     body: "Use the VS Code MCP config or Copilot CLI command from a guided setup page.",
-    href: buildInstallerPath("copilot"),
     primary: false,
   },
   {
     id: "gemini",
     title: "Gemini CLI",
     body: "Copy the Gemini CLI command or settings JSON, then authenticate through Corgtex.",
-    href: buildInstallerPath("gemini"),
     primary: false,
   },
   {
     id: "claude-code",
     title: "Claude Code",
     body: "One terminal command, then sign in through your browser.",
-    href: buildInstallerPath("claude-code"),
     primary: false,
   },
   {
     id: "generic-mcp",
     title: "Generic MCP client",
     body: "Copy the Corgtex MCP URL for any client that supports remote MCP or Streamable HTTP.",
-    href: buildInstallerPath("generic-mcp"),
     primary: false,
   },
 ];
 
-export default async function InstallIndexPage({ searchParams }: { searchParams: Promise<{ workspaceId?: string }> }) {
-  const { workspaceId } = await searchParams;
-  if (!workspaceId) return <WorkspacePicker path="/install" />;
+export default async function InstallIndexPage({ params, searchParams }: {
+  params: Promise<{ locale: string }>;
+  searchParams: Promise<{ workspaceId?: string | string[]; returnTo?: string | string[] }>;
+}) {
+  const [{ locale }, search] = await Promise.all([params, searchParams]);
+  const workspaceId = firstInstallerParam(search.workspaceId);
+  if (!workspaceId) return <WorkspacePicker path="/install" locale={locale} />;
+  await requireInstallerWorkspace(workspaceId);
   const connectorUrl = getWorkspaceMcpInstallUrl(workspaceId);
+  const returnTo = installerReturnTo(search.returnTo, workspaceId, locale);
 
   return (
     <main className="min-h-screen bg-[var(--bg)] px-4 py-10 sm:py-16">
@@ -99,7 +97,7 @@ export default async function InstallIndexPage({ searchParams }: { searchParams:
           {TILES.map((tile) => (
             <li key={tile.id}>
               <Link
-                href={buildInstallerPath(tile.id, { workspaceId })}
+                href={installerTileHref(locale, tile.id, workspaceId, returnTo)}
                 className="block h-full rounded-[var(--radius-lg)] border bg-[var(--surface)] p-5 transition hover:border-[var(--line)]"
                 style={{
                   borderColor: tile.primary ? "var(--accent)" : "var(--line-subtle)",
