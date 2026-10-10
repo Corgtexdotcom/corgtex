@@ -17,6 +17,7 @@ import { WorkItemLifecycleBadge } from "@/lib/components/WorkItemControls";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import { hasEligibleActionAssignee } from "../view-model";
+import { appendActionReturnTo, readActionListReturnHref } from "../return-context";
 import { attachActionExternalResourceAction, createActionChecklistItemAction, deleteActionAction, deleteActionChecklistItemAction, postActionDeliberationAction, publishActionAction, requestActionInputAction, resolveActionDeliberationAction, returnActionToDraftAction, updateActionAction, updateActionChecklistItemAction, updateActionDeliberationAction } from "../../actions";
 import { getFormatter, getTranslations } from "next-intl/server";
 import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
@@ -34,10 +35,15 @@ async function archivedSafeRead<T>(isArchived: boolean, read: Promise<T>, fallba
 
 export default async function ActionDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ workspaceId: string; actionId: string }>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { workspaceId, actionId } = await params;
+  const returnTo = readActionListReturnHref(workspaceId, (await searchParams)?.returnTo);
+  const backHref = returnTo ?? `/workspaces/${workspaceId}/actions`;
+  const editHref = (id: string) => appendActionReturnTo(`/workspaces/${workspaceId}/actions/${id}/edit`, returnTo);
   const actor = await requirePageActor();
   const t = await getTranslations("actions");
   const tCommon = await getTranslations("common");
@@ -63,7 +69,7 @@ export default async function ActionDetailPage({
           entityType="Action"
           entityId={actionId}
           archiveRecord={canShowArchiveRecord ? archiveRecord : null}
-          backHref={`/workspaces/${workspaceId}/actions`}
+          backHref={backHref}
           backLabel={t("backToActions")}
         />
       );
@@ -248,7 +254,7 @@ export default async function ActionDetailPage({
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
         <div style={{ marginBottom: 16 }}>
-          <Link href={`/workspaces/${workspaceId}/actions`} style={{ textDecoration: "none", color: "var(--muted)" }}>
+          <Link href={backHref} style={{ textDecoration: "none", color: "var(--muted)" }}>
             {t("backToActions")}
           </Link>
         </div>
@@ -296,7 +302,7 @@ export default async function ActionDetailPage({
               </form>
             )}
             {canManage && canOpenPrivateDraft(action) && !hasEligibleAssignee && (
-              <Link href={`/workspaces/${workspaceId}/actions/${action.id}/edit`} className="secondary small">
+              <Link href={editHref(action.id)} className="secondary small">
                 {t("assignBeforeOpen")}
               </Link>
             )}
@@ -330,7 +336,7 @@ export default async function ActionDetailPage({
               </form>
             )}
             {canEditContent && (
-              <Link href={`/workspaces/${workspaceId}/actions/${action.id}/edit`} className="secondary small">
+              <Link href={editHref(action.id)} className="secondary small">
                 {t("btnEdit")}
               </Link>
             )}
