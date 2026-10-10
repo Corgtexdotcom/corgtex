@@ -9,7 +9,7 @@ import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import Link from "next/link";
 import { KnowledgeFileUploader } from "../KnowledgeFileUploader";
-import { BrainSearchResultCard } from "./BrainSearchResultCard";
+import { BrainSearchResults } from "./BrainSearchResults";
 import { listLinkableBrainSearchMeetingRefs } from "./search-meeting-refs";
 import {
   BRAIN_ARTICLE_TYPES,
@@ -17,9 +17,9 @@ import {
   buildBrainIndexState,
   canManageBrainArticle,
   getUnresolvedBrainSearchArticleRefs,
+  groupBrainSearchResults,
   normalizeBrainIndexSearch,
   resolveBrainSearchResults,
-  toBrainSearchDisplayResult,
 } from "./view-model";
 
 export const dynamic = "force-dynamic";
@@ -95,6 +95,10 @@ export default async function BrainPage({
     [...articles, ...resolvedSearchArticleRefs],
     resolvedSearchMeetingRefs,
   );
+  const groupedSearchResults = groupBrainSearchResults(
+    resolvedSearchResults,
+    new Set(allDocuments.map((document) => document.id)),
+  );
 
   const filterHref = (type: string | null) => buildBrainIndexHref({ query, question, range, type });
   const rangeHref = (nextRange: "30d" | "90d" | "all") => buildBrainIndexHref({ query, question, range: nextRange, type: selectedType });
@@ -145,19 +149,28 @@ export default async function BrainPage({
             />
           </form>
 
-          {resolvedSearchResults.length > 0 && (
-            <div className="brain-search-results">
-              <h3>{t("results")}</h3>
-              {resolvedSearchResults.map((result) => (
-                <BrainSearchResultCard
-                  key={result.chunkId}
-                  result={toBrainSearchDisplayResult(result)}
-                  workspaceId={workspaceId}
-                  unavailableLabel={t("unlinkedSearchResult")}
-                />
-              ))}
-              <p className="brain-coverage-note">{t("searchCoverageNote")}</p>
-            </div>
+          {query.trim() && (
+            <BrainSearchResults
+              groups={groupedSearchResults.groups}
+              rawResultCount={searchResults.length}
+              hasUnavailableSources={groupedSearchResults.hasUnavailableSources}
+              workspaceId={workspaceId}
+              labels={{
+                results: t("results"),
+                noResults: t("searchNoResults"),
+                noAvailableSources: t("searchNoAvailableSources"),
+                someSourcesUnavailable: t("searchSomeSourcesUnavailable"),
+                coverageNote: t("searchCoverageNote"),
+                unavailableSource: t("unlinkedSearchResult"),
+                sourceType: {
+                  MEETING: t("searchSourceMeeting"),
+                  BRAIN_ARTICLE: t("searchSourceArticle"),
+                  DOCUMENT: t("searchSourceDocument"),
+                },
+                passagesShown: (count) => t("searchPassagesShown", { count }),
+                morePassages: (count) => t("searchMorePassages", { count }),
+              }}
+            />
           )}
         </div>
 
