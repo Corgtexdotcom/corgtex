@@ -9,12 +9,15 @@ import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import Link from "next/link";
 import { KnowledgeFileUploader } from "../KnowledgeFileUploader";
+import { BrainSearchResults } from "./BrainSearchResults";
+import { listLinkableBrainSearchMeetingRefs } from "./search-meeting-refs";
 import {
   BRAIN_ARTICLE_TYPES,
   buildBrainIndexHref,
   buildBrainIndexState,
   canManageBrainArticle,
   getUnresolvedBrainSearchArticleRefs,
+  groupBrainSearchResults,
   normalizeBrainIndexSearch,
   resolveBrainSearchResults,
 } from "./view-model";
@@ -77,14 +80,25 @@ export default async function BrainPage({
     searchParams: resolvedSearch,
     typeCounts: articleTypeCounts,
   });
-  const resolvedSearchArticleRefs = await listSearchResultArticleRefs({
-    workspaceId,
-    actor,
-    membership,
-    results: searchResults,
-    visibleArticleRefs: articles,
-  });
-  const resolvedSearchResults = resolveBrainSearchResults(searchResults, [...articles, ...resolvedSearchArticleRefs]);
+  const [resolvedSearchArticleRefs, resolvedSearchMeetingRefs] = await Promise.all([
+    listSearchResultArticleRefs({
+      workspaceId,
+      actor,
+      membership,
+      results: searchResults,
+      visibleArticleRefs: articles,
+    }),
+    listLinkableBrainSearchMeetingRefs({ actor, workspaceId, results: searchResults }),
+  ]);
+  const resolvedSearchResults = resolveBrainSearchResults(
+    searchResults,
+    [...articles, ...resolvedSearchArticleRefs],
+    resolvedSearchMeetingRefs,
+  );
+  const groupedSearchResults = groupBrainSearchResults(
+    resolvedSearchResults,
+    new Set(allDocuments.map((document) => document.id)),
+  );
 
   const filterHref = (type: string | null) => buildBrainIndexHref({ query, question, range, type });
   const rangeHref = (nextRange: "30d" | "90d" | "all") => buildBrainIndexHref({ query, question, range: nextRange, type: selectedType });
@@ -135,31 +149,28 @@ export default async function BrainPage({
             />
           </form>
 
-          {resolvedSearchResults.length > 0 && (
-            <div className="brain-search-results">
-              <h3>{t("results")}</h3>
-              {resolvedSearchResults.map((result) => {
-                const resultBody = (
-                  <>
-                    <div className="brain-search-result-title">{result.title ?? result.sourceId}</div>
-                    <div className="nr-meta">{result.sourceType}</div>
-                    <p className="nr-excerpt">{result.snippet.slice(0, 150)}...</p>
-                    {!result.articleSlug && <div className="nr-meta">{t("unlinkedSearchResult")}</div>}
-                  </>
-                );
-
-                return result.articleSlug ? (
-                  <a key={result.chunkId} href={`/workspaces/${workspaceId}/brain/${result.articleSlug}`} className="nr-item brain-search-result">
-                    {resultBody}
-                  </a>
-                ) : (
-                  <div key={result.chunkId} className="nr-item brain-search-result">
-                    {resultBody}
-                  </div>
-                );
-              })}
-              <p className="brain-coverage-note">{t("searchCoverageNote")}</p>
-            </div>
+          {query.trim() && (
+            <BrainSearchResults
+              groups={groupedSearchResults.groups}
+              rawResultCount={searchResults.length}
+              hasUnavailableSources={groupedSearchResults.hasUnavailableSources}
+              workspaceId={workspaceId}
+              labels={{
+                results: t("results"),
+                noResults: t("searchNoResults"),
+                noAvailableSources: t("searchNoAvailableSources"),
+                someSourcesUnavailable: t("searchSomeSourcesUnavailable"),
+                coverageNote: t("searchCoverageNote"),
+                unavailableSource: t("unlinkedSearchResult"),
+                sourceType: {
+                  MEETING: t("searchSourceMeeting"),
+                  BRAIN_ARTICLE: t("searchSourceArticle"),
+                  DOCUMENT: t("searchSourceDocument"),
+                },
+                passagesShown: (count) => t("searchPassagesShown", { count }),
+                morePassages: (count) => t("searchMorePassages", { count }),
+              }}
+            />
           )}
         </div>
 

@@ -765,12 +765,18 @@ a.notification-title:hover,
 .brain-ask-form textarea { resize: vertical; }
 .brain-search-results h3, .brain-coverage-note, .brain-article-excerpt, .brain-article-meta, .brain-empty p, .brain-range-links a, .brain-raw-item span { color: var(--muted); }
 .brain-search-results h3 { margin: 0; font-size: 0.78rem; }
-.brain-search-result, .brain-filter-chip, .brain-article-title, .brain-type-summary a, .brain-raw-item { text-decoration: none; }
-.brain-search-result { color: inherit; }
+.brain-filter-chip, .brain-article-title, .brain-type-summary a, .brain-raw-item { text-decoration: none; }
 .brain-search-result-title, .brain-answer-title, .brain-citation strong, .brain-article-title, .brain-type-summary-head strong, .brain-raw-item strong, .brain-create-panel h2 { color: var(--text); }
 .brain-search-result-title, .brain-answer-title, .brain-article-title { font-weight: 700; }
-.brain-search-result-title { line-height: 1.35; }
-.brain-search-result .nr-excerpt { margin: 4px 0 0; font-size: 0.85rem; }
+.brain-search-result-title { margin: 0; line-height: 1.35; overflow-wrap: anywhere; }
+.brain-search-result-title a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.brain-search-source { min-width: 0; }
+.brain-search-source-head { display: grid; gap: 4px; }
+.brain-search-source .nr-excerpt { margin: 8px 0; font-size: 0.85rem; overflow-wrap: anywhere; }
+.brain-search-passages summary { color: var(--accent); cursor: pointer; font-size: 0.85rem; font-weight: 600; }
+.brain-search-passages ol { margin: 8px 0 0; padding-left: 22px; }
+.brain-search-passages li { margin-top: 8px; color: var(--text); font-size: 0.85rem; line-height: 1.45; overflow-wrap: anywhere; }
+.brain-search-empty { margin: 0; color: var(--muted); font-size: 0.9rem; }
 .brain-coverage-note { margin: 0; font-size: 0.8rem; line-height: 1.45; }
 .brain-answer { gap: 12px; border-color: var(--line); background: var(--accent-soft); padding: 16px; }
 .brain-answer p { margin: 0; color: var(--text); font-size: 0.95rem; line-height: 1.55; }
