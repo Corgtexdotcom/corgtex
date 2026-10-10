@@ -9,6 +9,8 @@ import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import Link from "next/link";
 import { KnowledgeFileUploader } from "../KnowledgeFileUploader";
+import { BrainSearchResultCard } from "./BrainSearchResultCard";
+import { listLinkableBrainSearchMeetingRefs } from "./search-meeting-refs";
 import {
   BRAIN_ARTICLE_TYPES,
   buildBrainIndexHref,
@@ -17,6 +19,7 @@ import {
   getUnresolvedBrainSearchArticleRefs,
   normalizeBrainIndexSearch,
   resolveBrainSearchResults,
+  toBrainSearchDisplayResult,
 } from "./view-model";
 
 export const dynamic = "force-dynamic";
@@ -77,14 +80,21 @@ export default async function BrainPage({
     searchParams: resolvedSearch,
     typeCounts: articleTypeCounts,
   });
-  const resolvedSearchArticleRefs = await listSearchResultArticleRefs({
-    workspaceId,
-    actor,
-    membership,
-    results: searchResults,
-    visibleArticleRefs: articles,
-  });
-  const resolvedSearchResults = resolveBrainSearchResults(searchResults, [...articles, ...resolvedSearchArticleRefs]);
+  const [resolvedSearchArticleRefs, resolvedSearchMeetingRefs] = await Promise.all([
+    listSearchResultArticleRefs({
+      workspaceId,
+      actor,
+      membership,
+      results: searchResults,
+      visibleArticleRefs: articles,
+    }),
+    listLinkableBrainSearchMeetingRefs({ actor, workspaceId, results: searchResults }),
+  ]);
+  const resolvedSearchResults = resolveBrainSearchResults(
+    searchResults,
+    [...articles, ...resolvedSearchArticleRefs],
+    resolvedSearchMeetingRefs,
+  );
 
   const filterHref = (type: string | null) => buildBrainIndexHref({ query, question, range, type });
   const rangeHref = (nextRange: "30d" | "90d" | "all") => buildBrainIndexHref({ query, question, range: nextRange, type: selectedType });
@@ -138,26 +148,14 @@ export default async function BrainPage({
           {resolvedSearchResults.length > 0 && (
             <div className="brain-search-results">
               <h3>{t("results")}</h3>
-              {resolvedSearchResults.map((result) => {
-                const resultBody = (
-                  <>
-                    <div className="brain-search-result-title">{result.title ?? result.sourceId}</div>
-                    <div className="nr-meta">{result.sourceType}</div>
-                    <p className="nr-excerpt">{result.snippet.slice(0, 150)}...</p>
-                    {!result.articleSlug && <div className="nr-meta">{t("unlinkedSearchResult")}</div>}
-                  </>
-                );
-
-                return result.articleSlug ? (
-                  <a key={result.chunkId} href={`/workspaces/${workspaceId}/brain/${result.articleSlug}`} className="nr-item brain-search-result">
-                    {resultBody}
-                  </a>
-                ) : (
-                  <div key={result.chunkId} className="nr-item brain-search-result">
-                    {resultBody}
-                  </div>
-                );
-              })}
+              {resolvedSearchResults.map((result) => (
+                <BrainSearchResultCard
+                  key={result.chunkId}
+                  result={toBrainSearchDisplayResult(result)}
+                  workspaceId={workspaceId}
+                  unavailableLabel={t("unlinkedSearchResult")}
+                />
+              ))}
               <p className="brain-coverage-note">{t("searchCoverageNote")}</p>
             </div>
           )}
