@@ -78,6 +78,16 @@ export type BrainSearchDisplayResult = {
   meetingId: string | null;
 };
 
+export type BrainSearchSourceGroup = {
+  key: string;
+  sourceType: "MEETING" | "BRAIN_ARTICLE" | "DOCUMENT";
+  sourceId: string;
+  title: string | null;
+  articleSlug: string | null;
+  meetingId: string | null;
+  passages: Array<{ chunkId: string; chunkIndex: number; snippet: string }>;
+};
+
 export type BrainTypeCount = {
   type: string;
   count: number;
@@ -245,6 +255,55 @@ export function toBrainSearchDisplayResult<T extends BrainSearchResultLike & {
     articleSlug: result.articleSlug,
     meetingId: result.meetingId,
   };
+}
+
+/** Preserve retrieval order; only validated, currently visible sources may identify a group. */
+export function groupBrainSearchResults<T extends BrainSearchResultLike & {
+  chunkId: string;
+  chunkIndex: number;
+  title: string | null;
+  snippet: string;
+}>(
+  results: Array<ResolvedBrainSearchResult<T>>,
+  visibleDocumentIds: ReadonlySet<string>,
+): { groups: BrainSearchSourceGroup[]; hasUnavailableSources: boolean } {
+  const groups = new Map<string, BrainSearchSourceGroup>();
+  const seenChunks = new Set<string>();
+  let hasUnavailableSources = false;
+
+  for (const result of results) {
+    const valid = result.sourceType === "MEETING"
+      ? result.meetingId === result.sourceId
+      : result.sourceType === "BRAIN_ARTICLE"
+        ? Boolean(result.articleSlug)
+        : result.sourceType === "DOCUMENT" && visibleDocumentIds.has(result.sourceId);
+    if (!valid || !result.sourceId) {
+      hasUnavailableSources = true;
+      continue;
+    }
+    if (seenChunks.has(result.chunkId)) continue;
+    seenChunks.add(result.chunkId);
+
+    const sourceType = result.sourceType as BrainSearchSourceGroup["sourceType"];
+    const key = `${sourceType}:${result.sourceId}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = {
+        key,
+        sourceType,
+        sourceId: result.sourceId,
+        title: result.title,
+        articleSlug: result.articleSlug,
+        meetingId: result.meetingId,
+        passages: [],
+      };
+      groups.set(key, group);
+    }
+    if (!group.title && result.title) group.title = result.title;
+    group.passages.push({ chunkId: result.chunkId, chunkIndex: result.chunkIndex, snippet: result.snippet });
+  }
+
+  return { groups: [...groups.values()], hasUnavailableSources };
 }
 
 export function getUnresolvedBrainSearchArticleRefs<T extends BrainSearchResultLike>(
