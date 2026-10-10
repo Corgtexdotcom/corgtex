@@ -275,6 +275,7 @@ describe("client readiness smoke login handling", () => {
 
 describe("client readiness mobile mode handling", () => {
   it("reads the selected workspace mode without falling back to another workspace or the legacy key", async () => {
+    const build = { contract: "workspace-scoped-v1" };
     const stored = new Map([
       ["corgtex.mobileMode", "workspace"],
       ["corgtex.mobileMode.workspace-1", "ai"],
@@ -283,10 +284,24 @@ describe("client readiness mobile mode handling", () => {
     vi.stubGlobal("window", { localStorage: { getItem: (key) => stored.get(key) ?? null } });
     const fakePage = { evaluate: vi.fn(async (callback, key) => callback(key)) };
     try {
-      await expect(readStoredMobileMode(fakePage, "/es/workspaces/workspace-1/settings")).resolves.toBe("ai");
-      await expect(readStoredMobileMode(fakePage, "/workspaces/workspace-2")).resolves.toBe("workspace");
-      await expect(readStoredMobileMode(fakePage, "/workspaces/missing")).resolves.toBeNull();
-      await expect(readStoredMobileMode(fakePage, "/find-account")).rejects.toThrow("requires a workspace path");
+      await expect(readStoredMobileMode(fakePage, "/es/workspaces/workspace-1/settings", build)).resolves.toBe("ai");
+      await expect(readStoredMobileMode(fakePage, "/workspaces/workspace-2", build)).resolves.toBe("workspace");
+      await expect(readStoredMobileMode(fakePage, "/workspaces/missing", build)).resolves.toBeNull();
+      await expect(readStoredMobileMode(fakePage, "/find-account", build)).rejects.toThrow("requires a workspace path");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reads only the legacy global key for a verified legacy build", async () => {
+    const stored = new Map([["corgtex.mobileMode", "ai"], ["corgtex.mobileMode.workspace-1", "workspace"]]);
+    vi.stubGlobal("window", { localStorage: { getItem: (key) => stored.get(key) ?? null } });
+    const fakePage = { evaluate: vi.fn(async (callback, key) => callback(key)) };
+    try {
+      await expect(readStoredMobileMode(fakePage, "/workspaces/workspace-1", { contract: "legacy-global-v1" })).resolves.toBe("ai");
+      stored.delete("corgtex.mobileMode");
+      await expect(readStoredMobileMode(fakePage, "/workspaces/workspace-1", { contract: "legacy-global-v1" })).resolves.toBeNull();
+      await expect(readStoredMobileMode(fakePage, "/workspaces/workspace-1")).rejects.toThrow("BUILD_UNKNOWN");
     } finally {
       vi.unstubAllGlobals();
     }
