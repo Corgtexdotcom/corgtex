@@ -9,6 +9,7 @@ import {
   normalizeCatalogType,
   normalizeToolsSurface,
   splitDefaultCatalogSections,
+  toolsFilterHref,
   type CatalogItemForUi,
 } from "./catalog-ui";
 
@@ -87,6 +88,20 @@ describe("Tools catalog UI helpers", () => {
     expect(normalizeToolsSurface("apps")).toBe("APPS");
     expect(normalizeToolsSurface(["all", "apps"])).toBe("ALL");
     expect(normalizeToolsSurface("connectors")).toBe("LINKS");
+    expect(normalizeToolsSurface(undefined, "DATA_SOURCE")).toBe("APPS");
+    expect(normalizeToolsSurface("invalid", "DATA_SOURCE")).toBe("APPS");
+    expect(normalizeToolsSurface("links", "DATA_SOURCE")).toBe("LINKS");
+    expect(normalizeToolsSurface(undefined, "UNKNOWN")).toBe("LINKS");
+  });
+
+  it("keeps workspace navigation parameters aligned with the visible filter", () => {
+    const pathname = "/es/workspaces/workspace-1/tools";
+    expect(toolsFilterHref(pathname, "view=grid&ref=settings&type=TOOL&type=AGENT", {
+      surface: "APPS", type: "DATA_SOURCE", query: "warehouse",
+    })).toBe(`${pathname}?view=grid&ref=settings&type=DATA_SOURCE&surface=apps&q=warehouse`);
+    expect(toolsFilterHref(pathname, "surface=apps&type=DATA_SOURCE&q=warehouse&view=grid", {
+      surface: "LINKS", type: "DATA_SOURCE", query: "",
+    })).toBe(`${pathname}?surface=links&view=grid`);
   });
 
   it("matches search across title, outcome, description, category, and type", () => {
