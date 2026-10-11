@@ -3,6 +3,7 @@ import { requirePageActor } from "@/lib/auth";
 import { updateArticleAction } from "../../actions";
 import { getTranslations } from "next-intl/server";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { BrainArticleTypeControl } from "../../BrainArticleTypeControl";
 
 export const dynamic = "force-dynamic";
 
@@ -33,11 +34,7 @@ export default async function BrainArticleEditPage({
         <div className="actions-inline">
           <label style={{ flex: 1 }}>
             {t("labelType")}
-            <select name="type" defaultValue={article.type}>
-              {["PRODUCT","ARCHITECTURE","PROCESS","RUNBOOK","DECISION","TEAM","PERSON","CUSTOMER","INCIDENT","PROJECT","INTEGRATION","PATTERN","STRATEGY","CULTURE","GLOSSARY"].map((t) => (
-                <option key={t} value={t}>{t}</option>
-              ))}
-            </select>
+            <BrainArticleTypeControl type={article.type} label={t("labelType")} />
           </label>
           <label style={{ flex: 1 }}>
             {t("labelAuthority")}

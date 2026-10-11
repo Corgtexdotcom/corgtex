@@ -277,6 +277,9 @@ export async function updateArticle(actor: AppActor, params: {
       invariant(article.authority === "DRAFT", 400, "INVALID_STATE", "Only draft Brain articles can be edited.");
       await requireDraftManager({ actor, workspaceId: params.workspaceId, record: article, resolvedMembership: membership, tx });
     }
+    if (params.type !== undefined && params.type !== article.type) {
+      invariant(article.type !== "DIGEST" && params.type !== "DIGEST", 400, "INVALID_INPUT", "Digest article type cannot be changed.");
+    }
 
     const nextSourceIds = params.absorbedSource
       ? [...new Set([...article.sourceIds, params.absorbedSource.sourceId])]

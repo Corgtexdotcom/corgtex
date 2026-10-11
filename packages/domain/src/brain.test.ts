@@ -431,6 +431,49 @@ describe("Brain article draft lifecycle", () => {
       },
     });
   });
+
+  it("preserves a DIGEST's type and provenance when saving other draft fields", async () => {
+    const { updateArticle } = await import("./brain");
+    const current = {
+      id: "digest-1", workspaceId: "ws-1", slug: "weekly-digest", title: "Weekly digest",
+      type: "DIGEST", bodyMd: "Before", authority: "DRAFT", isPrivate: true,
+      ownerMemberId: "mem-1", archivedAt: null, sourceIds: [],
+      derivationJson: { version: 1, origin: "brain-absorb", agentRunId: "run-1", sources: [] },
+      humanEditedAt: null, updatedAt: new Date("2026-04-01T00:00:00.000Z"),
+    };
+    prismaMock.brainArticle.findUnique.mockResolvedValue(current);
+    prismaMock.brainArticle.update.mockResolvedValue({ ...current, bodyMd: "After" });
+    prismaMock.brainArticleVersion.findFirst.mockResolvedValue(null);
+
+    await updateArticle(ownerActor, {
+      workspaceId: "ws-1", slug: "weekly-digest", title: "Weekly digest",
+      authority: "DRAFT", bodyMd: "Before",
+    });
+    expect(prismaMock.brainArticle.update).toHaveBeenCalledWith({ where: { id: "digest-1" },
+      data: { title: "Weekly digest", authority: "DRAFT", bodyMd: "Before" } });
+    expect(prismaMock.brainArticleVersion.create).not.toHaveBeenCalled();
+
+    await updateArticle(ownerActor, { workspaceId: "ws-1", slug: "weekly-digest", bodyMd: "After" });
+    expect(prismaMock.brainArticle.update).toHaveBeenLastCalledWith({ where: { id: "digest-1" },
+      data: { bodyMd: "After", humanEditedAt: expect.any(Date) } });
+    expect(prismaMock.brainArticleVersion.create).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["DIGEST", "PRODUCT"], ["PROJECT", "DIGEST"],
+  ])("rejects an unapproved article type conversion from %s to %s", async (existingType, requestedType) => {
+    const { updateArticle } = await import("./brain");
+    prismaMock.brainArticle.findUnique.mockResolvedValue({
+      id: "article-1", workspaceId: "ws-1", slug: "notes", title: "Notes",
+      type: existingType, bodyMd: "Notes", authority: "DRAFT", isPrivate: true,
+      ownerMemberId: "mem-1", archivedAt: null, sourceIds: [],
+      updatedAt: new Date("2026-04-01T00:00:00.000Z"),
+    });
+
+    await expect(updateArticle(ownerActor, { workspaceId: "ws-1", slug: "notes", type: requestedType as "DIGEST" }))
+      .rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+    expect(prismaMock.brainArticle.update).not.toHaveBeenCalled();
+  });
 });
 
 describe("Brain status access domains", () => {

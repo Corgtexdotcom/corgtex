@@ -55,6 +55,38 @@ afterEach(() => {
 });
 
 describe("Brain article server actions", () => {
+  it("leaves the type unset when saving a DIGEST edit form", async () => {
+    const { updateArticleAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("slug", "weekly-digest");
+    formData.set("title", "Weekly digest");
+    formData.set("authority", "DRAFT");
+    formData.set("bodyMd", "Unchanged digest body");
+
+    await updateArticleAction(formData);
+
+    expect(updateArticle).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1", slug: "weekly-digest", type: undefined,
+      title: "Weekly digest", authority: "DRAFT", bodyMd: "Unchanged digest body",
+    }));
+  });
+
+  it("keeps an ordinary article type when saving its edit form", async () => {
+    const { updateArticleAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("slug", "project-notes");
+    formData.set("type", "PROJECT");
+    formData.set("bodyMd", "Project notes");
+
+    await updateArticleAction(formData);
+
+    expect(updateArticle).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1", slug: "project-notes", type: "PROJECT",
+    }));
+  });
+
   it("archives a Brain source through the existing delete path", async () => {
     const { deleteSourceAction } = await import("./actions");
     const formData = new FormData();

@@ -10,6 +10,7 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "@corgtex/shared";
 import { getTranslations } from "next-intl/server";
 import { publishArticleAction, returnArticleToDraftAction } from "../actions";
+import { BrainArticleTypeControl } from "../BrainArticleTypeControl";
 
 export const dynamic = "force-dynamic";
 
@@ -78,7 +79,8 @@ export default async function BrainArticlePage({
   async function updateArticleAction(formData: FormData) {
     "use server";
     const bodyMd = formData.get("bodyMd") as string;
-    const type = formData.get("type") as BrainArticleType;
+    const submittedType = formData.get("type");
+    const type = typeof submittedType === "string" && submittedType ? submittedType as BrainArticleType : undefined;
     const authority = formData.get("authority") as BrainArticleAuthority;
     
     await updateArticle(actor, {
@@ -153,11 +155,8 @@ export default async function BrainArticlePage({
           <h3 style={{ fontSize: "1rem", color: "var(--muted)", marginBottom: "16px" }}>{t("editor")}</h3>
           <form action={updateArticleAction} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
             <div style={{ display: "flex", gap: "8px" }}>
-              <select name="type" defaultValue={article.type} style={{ flex: 1, padding: "8px", fontSize: "0.85rem", border: "1px solid var(--line)" }}>
-                {["PRODUCT","ARCHITECTURE","PROCESS","RUNBOOK","DECISION","TEAM","PERSON","CUSTOMER","INCIDENT","PROJECT","INTEGRATION","PATTERN","STRATEGY","CULTURE","GLOSSARY"].map((t) => (
-                  <option key={t} value={t}>{t}</option>
-                ))}
-              </select>
+              <BrainArticleTypeControl type={article.type} label={t("labelType")}
+                style={{ flex: 1, padding: "8px", fontSize: "0.85rem", border: "1px solid var(--line)" }} />
               <select name="authority" defaultValue={article.authority} style={{ flex: 1, padding: "8px", fontSize: "0.85rem", border: "1px solid var(--line)" }}>
                 <option value="DRAFT">{t("authorityDraft")}</option>
                 <option value="REFERENCE">{t("authorityReference")}</option>
