@@ -4,6 +4,8 @@ import { getWorkspaceMcpInstallUrl } from "@corgtex/domain";
 import { WorkspacePicker } from "../WorkspacePicker";
 import { installerProviderSlug, type InstallerProviderKey } from "@/lib/install-helpers";
 import { GuidedProviderInstaller } from "./GuidedProviderInstaller";
+import { firstInstallerParam, installerDirectoryHref, installerReturnTo } from "../installer-navigation";
+import { requireInstallerWorkspace } from "../installer-workspace";
 
 export const dynamic = "force-dynamic";
 
@@ -19,20 +21,10 @@ const PAGE_TITLES: Record<InstallerProviderKey, string> = {
   "generic-mcp": "Connect Corgtex to any MCP client",
 };
 
-function safeReturnTo(value: string | string[] | undefined) {
-  const candidate = Array.isArray(value) ? value[0] : value;
-  if (!candidate || !candidate.startsWith("/") || candidate.startsWith("//")) return null;
-  return candidate;
-}
-
-function firstParam(value: string | string[] | undefined) {
-  return Array.isArray(value) ? value[0] : value ?? null;
-}
-
 export async function generateMetadata({
   params,
 }: {
-  params: Promise<{ tool: string }>;
+  params: Promise<{ locale: string; tool: string }>;
 }): Promise<Metadata> {
   const { tool } = await params;
   const providerKey = installerProviderSlug(tool);
@@ -52,17 +44,18 @@ export default async function GuidedInstallPage({
   params,
   searchParams,
 }: {
-  params: Promise<{ tool: string }>;
+  params: Promise<{ locale: string; tool: string }>;
   searchParams: Promise<{ workspaceId?: string | string[]; returnTo?: string | string[] }>;
 }) {
-  const [{ tool }, search] = await Promise.all([params, searchParams]);
+  const [{ locale, tool }, search] = await Promise.all([params, searchParams]);
   const providerKey = installerProviderSlug(tool);
   if (!providerKey || providerKey === "claude" || providerKey === "claude-code") notFound();
 
-  const workspaceId = firstParam(search.workspaceId);
-  if (!workspaceId) return <WorkspacePicker path={`/install/${providerKey}`} />;
+  const workspaceId = firstInstallerParam(search.workspaceId);
+  if (!workspaceId) return <WorkspacePicker path={`/install/${providerKey}`} locale={locale} />;
+  await requireInstallerWorkspace(workspaceId);
   const connectorUrl = getWorkspaceMcpInstallUrl(workspaceId);
-  const returnTo = safeReturnTo(search.returnTo);
+  const returnTo = installerReturnTo(search.returnTo, workspaceId, locale);
 
   return (
     <main className="min-h-screen bg-[var(--bg)] px-4 py-10 sm:py-16">
@@ -71,6 +64,7 @@ export default async function GuidedInstallPage({
         connectorUrl={connectorUrl}
         workspaceId={workspaceId}
         returnTo={returnTo}
+        integrationsHref={installerDirectoryHref(locale, workspaceId, returnTo)}
       />
     </main>
   );

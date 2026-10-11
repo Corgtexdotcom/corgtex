@@ -15,9 +15,10 @@ async function writeClipboard(value: string): Promise<boolean> {
 type Props = {
   command: string;
   fallbackInstallHref: string;
+  integrationsHref: string;
 };
 
-export function ClaudeCodeInstaller({ command, fallbackInstallHref }: Props) {
+export function ClaudeCodeInstaller({ command, fallbackInstallHref, integrationsHref }: Props) {
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
 
@@ -86,7 +87,7 @@ export function ClaudeCodeInstaller({ command, fallbackInstallHref }: Props) {
       </ol>
 
       <footer className="border-t border-[var(--line-subtle)] pt-4 text-center text-xs text-[var(--text-muted)]">
-        Need a different AI tool? <a href="../" className="underline">See all integrations</a>
+        Need a different AI tool? <a href={integrationsHref} className="underline">See all integrations</a>
       </footer>
     </div>
   );

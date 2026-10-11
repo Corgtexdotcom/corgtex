@@ -73,6 +73,7 @@ type Props = {
   connectorUrl: string;
   workspaceId?: string | null;
   returnTo?: string | null;
+  integrationsHref: string;
 };
 
 async function writeClipboard(value: string): Promise<boolean> {
@@ -328,7 +329,7 @@ export function buildProviderConfig(providerKey: InstallerProviderKey, connector
   };
 }
 
-export function GuidedProviderInstaller({ providerKey, connectorUrl, workspaceId, returnTo }: Props) {
+export function GuidedProviderInstaller({ providerKey, connectorUrl, workspaceId, returnTo, integrationsHref }: Props) {
   const config = useMemo(() => buildProviderConfig(providerKey, connectorUrl), [connectorUrl, providerKey]);
   const [status, setStatus] = useState<ActionStatus | null>(null);
   const [completionMessage, setCompletionMessage] = useState<string | null>(null);
@@ -571,7 +572,7 @@ export function GuidedProviderInstaller({ providerKey, connectorUrl, workspaceId
       ) : null}
 
       <footer className="border-t border-[var(--line-subtle)] pt-4 text-center text-xs text-[var(--text-muted)]">
-        Need a different AI tool? <a href="../" className="underline">See all integrations</a>
+        Need a different AI tool? <a href={integrationsHref} className="underline">See all integrations</a>
       </footer>
     </div>
   );

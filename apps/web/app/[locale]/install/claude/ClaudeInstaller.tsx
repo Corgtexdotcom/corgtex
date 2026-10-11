@@ -38,9 +38,10 @@ type Props = {
   connectorUrl: string;
   workspaceId?: string | null;
   returnTo?: string | null;
+  integrationsHref: string;
 };
 
-export function ClaudeInstaller({ connectorUrl, workspaceId, returnTo }: Props) {
+export function ClaudeInstaller({ connectorUrl, workspaceId, returnTo, integrationsHref }: Props) {
   const [copied, setCopied] = useState(false);
   const [opened, setOpened] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
@@ -262,7 +263,7 @@ export function ClaudeInstaller({ connectorUrl, workspaceId, returnTo }: Props) 
       </section>
 
       <footer className="border-t border-[var(--line-subtle)] pt-4 text-center text-xs text-[var(--text-muted)]">
-        Need a different AI tool? <a href="../" className="underline">See all integrations</a>
+        Need a different AI tool? <a href={integrationsHref} className="underline">See all integrations</a>
       </footer>
     </div>
   );
