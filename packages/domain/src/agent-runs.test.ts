@@ -4,8 +4,12 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
   const actual = await importOriginal<any>();
   const mockedPrisma = {
     ...actual.prisma,
-    agentStep: { update: vi.fn() },
-    agentRun: { update: vi.fn(), findUnique: vi.fn(), findMany: vi.fn() },
+    agentStep: { updateMany: vi.fn() },
+    agentRun: { updateMany: vi.fn(), findUnique: vi.fn(), findMany: vi.fn() },
+    workflowJob: { create: vi.fn() },
+    auditLog: { create: vi.fn() },
+    proposal: { create: vi.fn(), update: vi.fn() },
+    action: { create: vi.fn() },
   };
   mockedPrisma.$transaction = vi.fn(async (cb) => cb(mockedPrisma));
 
@@ -20,6 +24,7 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
 vi.mock("./auth", () => ({
   requireWorkspaceMembership: vi.fn().mockResolvedValue(true),
 }));
+vi.mock("./proposals", () => ({ getProposal: vi.fn() }));
 
 describe("agent-runs", () => {
   it("returns summarized model usage for listed runs without exposing raw usage rows", async () => {
@@ -120,51 +125,95 @@ describe("agent-runs", () => {
   });
 
   describe("submitAgentFeedback", () => {
-    it("verifies run ownership, scopes step update by agentRunId, and resumes the run", async () => {
+    it("claims one review reply and queues an advisory continuation", async () => {
       const { prisma } = await import("@corgtex/shared");
       const { submitAgentFeedback } = await import("./agent-runs");
-
-      // Run exists in the workspace
       vi.mocked(prisma.agentRun.findUnique).mockResolvedValue({
-        id: "run-1",
+        id: "run-1", agentKey: "proposal-drafting", status: "WAITING_APPROVAL", approvalRequired: true,
+        resultJson: { prompt: "Budget policy", proposalDraft: { title: "Draft" } },
+        planJson: { payload: { meetingId: "meeting-1" } },
       } as any);
-
-      vi.mocked(prisma.agentStep.update).mockResolvedValue({
-        id: "step-1",
-        humanFeedback: "proceed",
-        status: "COMPLETED",
-      } as any);
-
-      vi.mocked(prisma.agentRun.update).mockResolvedValue({
-        id: "run-1",
-        status: "PENDING",
-      } as any);
+      vi.mocked(prisma.agentRun.updateMany).mockResolvedValue({ count: 1 } as any);
+      vi.mocked(prisma.agentStep.updateMany).mockResolvedValue({ count: 1 } as any);
+      vi.mocked(prisma.workflowJob.create).mockResolvedValue({ id: "job-2" } as any);
 
       const actor = { kind: "user", user: { id: "u-1" } } as any;
-
       const result = await submitAgentFeedback(actor, {
-        workspaceId: "ws-1",
-        agentRunId: "run-1",
-        stepId: "step-1",
-        feedback: "proceed",
+        workspaceId: "ws-1", agentRunId: "run-1", stepId: "step-1", feedback: "Please clarify",
       });
-
-      // Verify the run was looked up scoped to workspace
       expect(prisma.agentRun.findUnique).toHaveBeenCalledWith({
         where: { id: "run-1", workspaceId: "ws-1" },
-        select: { id: true },
+        select: { id: true, agentKey: true, status: true, approvalRequired: true, resultJson: true, planJson: true },
       });
+      expect(prisma.agentRun.updateMany).toHaveBeenCalledWith({
+        where: { id: "run-1", workspaceId: "ws-1", status: "WAITING_APPROVAL", approvalRequired: true },
+        data: expect.objectContaining({ status: "COMPLETED", approvalRequired: false, resultJson: expect.objectContaining({ feedbackDisposition: "ADVISORY_CONTINUATION_QUEUED" }) }),
+      });
+      expect(prisma.agentStep.updateMany).toHaveBeenCalledWith({
+        where: { id: "step-1", agentRunId: "run-1", name: "approval-checkpoint", status: "PENDING", humanFeedback: null },
+        data: expect.objectContaining({ humanFeedback: "Please clarify", status: "COMPLETED" }),
+      });
+      expect(prisma.workflowJob.create).toHaveBeenCalledWith({ data: expect.objectContaining({
+        workspaceId: "ws-1", type: "agent.proposal-drafting",
+        payload: expect.objectContaining({ reviewFeedback: "Please clarify", sourceAgentRunId: "run-1", meetingId: "meeting-1" }),
+      }) });
+      expect(prisma.auditLog.create).toHaveBeenCalledWith({ data: expect.objectContaining({ action: "agentRun.feedbackSubmitted", entityId: "run-1" }) });
+      expect(result).toEqual({ id: "step-1", continuationJobId: "job-2" });
+      expect(prisma.proposal.create).not.toHaveBeenCalled();
+      expect(prisma.proposal.update).not.toHaveBeenCalled();
+      expect(prisma.action.create).not.toHaveBeenCalled();
+    });
 
-      expect(result.id).toBe("step-1");
-      // Step update must be scoped by agentRunId to prevent cross-run writes
-      expect(prisma.agentStep.update).toHaveBeenCalledWith({
-        where: { id: "step-1", agentRunId: "run-1" },
-        data: expect.objectContaining({ humanFeedback: "proceed", status: "COMPLETED" }),
-      });
-      expect(prisma.agentRun.update).toHaveBeenCalledWith({
-        where: { id: "run-1", workspaceId: "ws-1" },
-        data: { status: "PENDING" },
-      });
+    it.each([
+      [{ status: "COMPLETED", approvalRequired: false }, "stale run"],
+      [{ agentKey: "meeting-summary" }, "unsupported agent"],
+    ])("rejects %s without queueing", async (changes, _reason) => {
+      const { prisma } = await import("@corgtex/shared");
+      const { submitAgentFeedback } = await import("./agent-runs");
+      vi.mocked(prisma.agentRun.findUnique).mockResolvedValue({
+        id: "run-1", agentKey: "proposal-drafting", status: "WAITING_APPROVAL", approvalRequired: true,
+        resultJson: { prompt: "Budget policy" }, ...changes,
+      } as any);
+      vi.mocked(prisma.workflowJob.create).mockClear();
+      await expect(submitAgentFeedback({ kind: "user", user: { id: "u-1" } } as any, {
+        workspaceId: "ws-1", agentRunId: "run-1", stepId: "step-1", feedback: "Clarify",
+      })).rejects.toMatchObject({ status: 409 });
+      expect(prisma.workflowJob.create).not.toHaveBeenCalled();
+    });
+
+    it.each(["agentRun", "agentStep"])("rejects an already claimed %s without queueing", async (failedClaim) => {
+      const { prisma } = await import("@corgtex/shared");
+      const { submitAgentFeedback } = await import("./agent-runs");
+      vi.mocked(prisma.agentRun.findUnique).mockResolvedValue({
+        id: "run-1", agentKey: "proposal-drafting", status: "WAITING_APPROVAL", approvalRequired: true,
+        resultJson: { prompt: "Budget policy" },
+      } as any);
+      vi.mocked(prisma.agentRun.updateMany).mockResolvedValue({ count: failedClaim === "agentRun" ? 0 : 1 } as any);
+      vi.mocked(prisma.agentStep.updateMany).mockResolvedValue({ count: failedClaim === "agentStep" ? 0 : 1 } as any);
+      vi.mocked(prisma.workflowJob.create).mockClear();
+      await expect(submitAgentFeedback({ kind: "user", user: { id: "u-1" } } as any, {
+        workspaceId: "ws-1", agentRunId: "run-1", stepId: "step-1", feedback: "Clarify",
+      })).rejects.toMatchObject({ status: 409 });
+      expect(prisma.workflowJob.create).not.toHaveBeenCalled();
+    });
+
+    it("rechecks constitution proposal visibility before claiming a stale reply", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { getProposal } = await import("./proposals");
+      const { submitAgentFeedback } = await import("./agent-runs");
+      vi.mocked(prisma.agentRun.findUnique).mockResolvedValue({
+        id: "run-1", agentKey: "constitution-update-trigger", status: "WAITING_APPROVAL", approvalRequired: true,
+        resultJson: { proposalId: "proposal-1", impactSummary: "Review policy" },
+      } as any);
+      vi.mocked(getProposal).mockRejectedValueOnce(new Error("Proposal not visible"));
+      vi.mocked(prisma.agentRun.updateMany).mockClear();
+      vi.mocked(prisma.workflowJob.create).mockClear();
+      await expect(submitAgentFeedback({ kind: "user", user: { id: "u-1" } } as any, {
+        workspaceId: "ws-1", agentRunId: "run-1", stepId: "step-1", feedback: "Clarify",
+      })).rejects.toThrow("Proposal not visible");
+      expect(getProposal).toHaveBeenCalledWith(expect.anything(), { workspaceId: "ws-1", proposalId: "proposal-1" });
+      expect(prisma.agentRun.updateMany).not.toHaveBeenCalled();
+      expect(prisma.workflowJob.create).not.toHaveBeenCalled();
     });
   });
 });

@@ -1127,6 +1127,10 @@ async function handleJob(job: ClaimedJob, workerId: string) {
     if (result && typeof result === "object" && "skipped" in result && result.reason === "concurrency_limit") {
       throw new RetryableWorkflowJobError("Agent concurrency limit reached.");
     }
+    if (typeof payload.sourceAgentRunId === "string" && payload.sourceAgentRunId &&
+      (!result || typeof result !== "object" || !("status" in result) || result.status !== "WAITING_APPROVAL")) {
+      throw new RetryableWorkflowJobError("Agent feedback continuation did not reach a review checkpoint.");
+    }
     return result;
   }
 }

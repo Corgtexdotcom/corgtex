@@ -234,6 +234,20 @@ afterEach(() => {
 });
 
 describe("runPendingJobs", () => {
+  it("does not complete feedback jobs that never reach a new review checkpoint", async () => {
+    txMock.$queryRaw.mockResolvedValueOnce([{
+      id: "feedback-job", workspaceId: "ws-1", type: "agent.proposal-drafting",
+      payload: { prompt: "Budget policy", sourceAgentRunId: "old-run" }, attempts: 1,
+    }]);
+    runAgentWorkflowJobMock.mockResolvedValue({ skipped: true, reason: "kill_switch" });
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "feedback-job" },
+      data: expect.objectContaining({ status: "PENDING", error: "Agent feedback continuation did not reach a review checkpoint." }),
+    });
+  });
+
   it("does not complete a source regeneration claim superseded before generation", async () => {
     txMock.$queryRaw.mockResolvedValueOnce([{
       id: "job-old", workspaceId: "ws-1", type: "agent.brain-source-regenerate", payload: {}, attempts: 1,

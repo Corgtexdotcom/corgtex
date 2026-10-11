@@ -64,6 +64,8 @@ export async function runAgentWorkflowJob(job: {
       prompt: asString(payload.prompt),
       meetingId: asString(payload.meetingId) || null,
       triggerType: payload.triggerType === "API" ? "API" : "MANUAL",
+      reviewFeedback: asString(payload.reviewFeedback) || undefined,
+      previousAdvice: asString(payload.previousAdvice) || undefined,
     });
   }
 
@@ -73,6 +75,8 @@ export async function runAgentWorkflowJob(job: {
       triggerRef: job.id,
       proposalId: asString(payload.proposalId),
       triggerType: payload.triggerType === "MANUAL" ? "MANUAL" : "EVENT",
+      reviewFeedback: asString(payload.reviewFeedback) || undefined,
+      previousAdvice: asString(payload.previousAdvice) || undefined,
     });
   }
 
