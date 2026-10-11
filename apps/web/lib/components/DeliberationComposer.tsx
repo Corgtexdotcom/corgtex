@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useMemo, useRef, useState, useTransition } from "react";
+import React, { useEffect, useId, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import {
@@ -205,6 +205,7 @@ export function DeliberationComposer({ postAction, apiEndpoint, hiddenFields, en
             value={bodyMd}
             onValueChange={handleBodyChange}
             placeholder={t("entryPlaceholder")}
+            ariaLabel={t("entryPlaceholder")}
             rows={4}
             disabled={submitDisabled}
             ariaAutocomplete={targetOptions.length > 0 ? "list" : undefined}

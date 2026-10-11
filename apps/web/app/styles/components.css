@@ -1124,6 +1124,12 @@ details[open] > .settings-disclosure-summary::before {
 
 /* ── Markdown Editor ── */
 
+.md-editor-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .md-editor {
   display: grid;
   gap: 0;

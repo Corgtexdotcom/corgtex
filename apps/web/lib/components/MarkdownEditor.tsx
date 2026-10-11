@@ -1,11 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { htmlToMarkdown } from "@/lib/markdown-paste";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 
 export function MarkdownEditor({
+  id,
   name,
   defaultValue,
   resetKey,
@@ -22,7 +23,9 @@ export function MarkdownEditor({
   ariaAutocomplete,
   ariaControls,
   ariaActivedescendant,
+  ariaLabel,
 }: {
+  id?: string;
   name: string;
   defaultValue?: string;
   resetKey?: string;
@@ -39,6 +42,7 @@ export function MarkdownEditor({
   ariaAutocomplete?: React.AriaAttributes["aria-autocomplete"];
   ariaControls?: string;
   ariaActivedescendant?: string;
+  ariaLabel?: string;
 }) {
   const internalRef = useRef<HTMLTextAreaElement | null>(null);
   const lastResetKeyRef = useRef(resetKey);
@@ -188,6 +192,7 @@ export function MarkdownEditor({
         )}
       </div>
       <textarea
+        id={id}
         ref={setTextareaRef}
         name={name}
         value={editorValue}
@@ -204,6 +209,7 @@ export function MarkdownEditor({
         aria-autocomplete={ariaAutocomplete}
         aria-controls={ariaControls}
         aria-activedescendant={ariaActivedescendant}
+        aria-label={ariaLabel}
         style={{ display: preview ? "none" : "block" }}
       />
     </div>
