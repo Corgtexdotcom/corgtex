@@ -42,6 +42,20 @@ describe("Action list return context", () => {
     expect(readActionListReturnHref(workspaceId, dueBoardHref)).toBe(dueBoardHref);
   });
 
+  it("round trips valid filter selections beyond the former 4096-character limit", () => {
+    const assigneeMemberIds = Array.from({ length: 75 }, (_, index) =>
+      `12345678-1234-1234-1234-${String(index).padStart(12, "0")}`);
+    const listHref = buildActionListReturnHref(workspaceId, buildActionListQuery({
+      view: "table", assigneeMemberIds,
+    }, "workspace"));
+    expect(listHref.length).toBeGreaterThan(4096);
+
+    const detailHref = appendActionReturnTo(`${listPath}/action-1`, listHref);
+    const restored = readActionListReturnHref(workspaceId, returnToFrom(detailHref));
+    expect(restored).toBe(listHref);
+    expect(new URL(restored!, "https://app.local").searchParams.getAll("assigneeMemberId")).toEqual(assigneeMemberIds);
+  });
+
   it("uses the ordinary Actions list for direct links or malformed context", () => {
     expect(readActionListReturnHref(workspaceId, undefined)).toBeNull();
     expect(readActionListReturnHref(workspaceId, [listPath, listPath])).toBeNull();

@@ -6,7 +6,6 @@ const RETURN_KEYS = new Set([
 const SINGLE_KEYS = ["view", "sort", "scope", "page", "group", "columns"] as const;
 const STATUSES = new Set<ActionStatusFilter>(["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED", "ALL"]);
 const COLUMN_STATUSES = new Set(["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"]);
-const MAX_RETURN_LENGTH = 4096;
 const FILTER_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 function actionsPath(workspaceId: string) {
@@ -25,7 +24,7 @@ export function appendActionReturnTo(path: string, listHref: string | null) {
 // Rebuild its URL from known Actions parameters under this workspace's list path.
 export function readActionListReturnHref(workspaceId: string, raw: string | string[] | undefined): string | null {
   const path = actionsPath(workspaceId);
-  if (typeof raw !== "string" || raw.length > MAX_RETURN_LENGTH || (raw !== path && !raw.startsWith(`${path}?`))) {
+  if (typeof raw !== "string" || (raw !== path && !raw.startsWith(`${path}?`))) {
     return null;
   }
 
