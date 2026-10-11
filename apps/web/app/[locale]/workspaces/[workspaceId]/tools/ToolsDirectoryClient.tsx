@@ -1,7 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import React, { useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { CheckboxFilter, TableActionGroup } from "@/lib/components/ControlPrimitives";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
@@ -15,7 +15,11 @@ import {
   getCatalogCardActions,
   hasCatalogFilter,
   inferLinkLibraryType,
+  normalizeCatalogQuery,
+  normalizeCatalogType,
+  normalizeToolsSurface,
   splitDefaultCatalogSections,
+  toolsFilterHref,
   type CatalogCardAction,
   type AppCategory,
   type AppInstallationStatus,
@@ -391,9 +395,6 @@ export function ToolsDirectoryClient({
   canManageCatalog,
   circles,
   initialView,
-  initialSurface,
-  initialType,
-  initialQuery,
   initialExternalResources,
 }: {
   workspaceId: string;
@@ -403,12 +404,10 @@ export function ToolsDirectoryClient({
   canManageCatalog: boolean;
   circles: CircleOption[];
   initialView: "list" | "grid";
-  initialSurface: ToolsSurface;
-  initialType: CatalogItemType | "ALL";
-  initialQuery: string;
   initialExternalResources: ExternalResource[];
 }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const t = useTranslations("tools");
   const [links, setLinks] = useState(initialLinks);
   const [items, setItems] = useState(initialCatalogItems);
@@ -417,9 +416,9 @@ export function ToolsDirectoryClient({
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [isFormOpen, setIsFormOpen] = useState(false);
-  const [activeSurface, setActiveSurface] = useState<ToolsSurface>(initialSurface);
-  const [activeType, setActiveType] = useState<CatalogItemType | "ALL">(initialType);
-  const [query, setQuery] = useState(initialQuery);
+  const activeType = normalizeCatalogType(searchParams.getAll("type"));
+  const activeSurface = normalizeToolsSurface(searchParams.getAll("surface"), searchParams.getAll("type"));
+  const query = normalizeCatalogQuery(searchParams.getAll("q"));
   const [requestDraft, setRequestDraft] = useState<RequestDraft>(EMPTY_REQUEST);
   const [publishDraft, setPublishDraft] = useState<PublishDraft>(EMPTY_PUBLISH);
   const [isPublishOpen, setIsPublishOpen] = useState(false);
@@ -428,6 +427,12 @@ export function ToolsDirectoryClient({
   const [revealed, setRevealed] = useState<Record<string, string | null>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const isEditing = Boolean(editingId);
+
+  function navigateFilters(surface: ToolsSurface, type: CatalogItemType | "ALL", nextQuery: string, replace = false) {
+    const href = toolsFilterHref(window.location.pathname, window.location.search, { surface, type, query: nextQuery });
+    if (replace) window.history.replaceState(null, "", href);
+    else window.history.pushState(null, "", href);
+  }
 
   const groupedLinks = useMemo(() => {
     return [...links].sort((a, b) => a.title.localeCompare(b.title));
@@ -971,6 +976,7 @@ export function ToolsDirectoryClient({
               <span className={`tag ${item.accessMode === "OPEN" ? "success" : "info"}`}>
                 {item.accessMode === "OPEN" ? "Open" : item.accessMode === "ADMIN_ONLY" ? "Admin" : item.accessMode === "REQUEST" ? "Request" : "Disabled"}
               </span>
+              {item.status === "DISABLED" && item.accessMode !== "DISABLED" && <span className="tag info">Disabled</span>}
               {availabilityLabel && <span className={`tag ${readiness?.availability === "LIVE" ? "success" : "info"}`}>{availabilityLabel}</span>}
               {item.type === "APP" && <span className="tag">{displayEnum(item.appCategory)}</span>}
               {item.type === "APP" && <span className={`tag ${item.installationStatus === "INSTALLED" || item.installationStatus === "APPROVED" ? "success" : "info"}`}>
@@ -1280,10 +1286,10 @@ export function ToolsDirectoryClient({
   return (
     <section className="ws-section stack" style={{ gap: 28 }}>
       <div className="stack" style={{ gap: 16 }}>
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 12, alignItems: "center" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 360px), 1fr))", gap: 12, alignItems: "center" }}>
           <input
             value={query}
-            onChange={(event) => setQuery(event.target.value)}
+            onChange={(event) => navigateFilters(activeSurface, activeType, event.target.value, true)}
             placeholder="Find a link, file, folder, app, or connector"
             aria-label="Search tools"
           />
@@ -1296,9 +1302,11 @@ export function ToolsDirectoryClient({
             <a className="link-button secondary small" href={`/workspaces/${workspaceId}/brain`}>
               Add reference to Brain
             </a>
-            <button type="button" className="secondary small" onClick={() => setIsFormOpen((open) => !open)}>
-              {isFormOpen ? t("btnCancel") : "Add manual link"}
-            </button>
+            {showLinks && (
+              <button type="button" className="secondary small" onClick={() => setIsFormOpen((open) => !open)}>
+                {isFormOpen ? t("btnCancel") : "Add manual link"}
+              </button>
+            )}
           </TableActionGroup>
         </div>
 
@@ -1327,15 +1335,15 @@ export function ToolsDirectoryClient({
               type="button"
               key={surface}
               className={`nr-filter-item ${activeSurface === surface ? "nr-filter-active" : ""}`}
-              onClick={() => setActiveSurface(surface)}
+              onClick={() => navigateFilters(surface, surface === "APPS" ? activeType : "ALL", query)}
             >
               {SURFACE_LABELS[surface]} ({surface === "LINKS" ? linkLibraryItems.length : surface === "APPS" ? items.length : linkLibraryItems.length + items.length})
             </button>
           ))}
         </div>
         {showApps && (
-          <div className="nr-filter-bar">
-            <button type="button" className={`nr-filter-item ${activeType === "ALL" ? "nr-filter-active" : ""}`} onClick={() => setActiveType("ALL")}>
+          <div className="nr-filter-bar nr-filter-bar-wrap">
+            <button type="button" className={`nr-filter-item ${activeType === "ALL" ? "nr-filter-active" : ""}`} onClick={() => navigateFilters("APPS", "ALL", query)}>
               All apps ({items.length})
             </button>
             {TYPE_ORDER.map((type) => (
@@ -1343,7 +1351,7 @@ export function ToolsDirectoryClient({
                 type="button"
                 key={type}
                 className={`nr-filter-item ${activeType === type ? "nr-filter-active" : ""}`}
-                onClick={() => setActiveType(type)}
+                onClick={() => navigateFilters("APPS", type, query)}
               >
                 {TYPE_LABELS[type]} ({items.filter((item) => item.type === type).length})
               </button>
@@ -1495,7 +1503,7 @@ export function ToolsDirectoryClient({
         </form>
       )}
 
-      {isFormOpen && (
+      {showLinks && isFormOpen && (
         <form
           onSubmit={submitForm}
           className="nr-form-section stack"
@@ -1760,8 +1768,16 @@ export function ToolsDirectoryClient({
           </div>
           {visibleItems.length === 0 ? (
             <div className="nr-item" style={{ textAlign: "center", padding: "48px 24px" }}>
-              <h2 style={{ margin: "0 0 8px", fontSize: "1.1rem" }}>No catalog items found.</h2>
-              <p className="muted" style={{ margin: 0 }}>Try another search or add a manual link.</p>
+              <h2 style={{ margin: "0 0 8px", fontSize: "1.1rem" }}>
+                {activeType === "DATA_SOURCE" ? "No data sources found." : "No catalog items found."}
+              </h2>
+              <p className="muted" style={{ margin: 0 }}>
+                {query.trim()
+                  ? "Try another search."
+                  : activeType === "DATA_SOURCE"
+                    ? "No data sources are available in this workspace."
+                    : "Try another filter or add a manual link."}
+              </p>
             </div>
           ) : (
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 16 }}>
@@ -1771,7 +1787,7 @@ export function ToolsDirectoryClient({
         </section>
       )}
 
-      <details>
+      {showLinks && <details>
         <summary className="nr-section-header" style={{ cursor: "pointer", margin: 0 }}>
           Manual shared-link management
         </summary>
@@ -1783,7 +1799,7 @@ export function ToolsDirectoryClient({
             </div>
           ) : initialView === "grid" ? renderGridView() : renderListView()}
         </div>
-      </details>
+      </details>}
     </section>
   );
 }
