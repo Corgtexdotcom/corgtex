@@ -482,7 +482,7 @@ async function fetchLinkedAnswerEvidence(params: {
   const references = [...new Set([params.source.externalMessageId, threadTs])]
     .filter((ts) => /^\d+\.\d{6}$/.test(ts))
     .map((ts) => `/archives/${params.source.externalChannelId}/p${ts.replace(".", "")}`);
-  const referencePattern = new RegExp(`https://[a-z0-9-]+\\.slack\\.com(?:${references.map(escapeRegExp).join("|")})(?=[?\\s>|]|$)`, "i");
+  const referencePattern = new RegExp(`(?:^|[\\s<(])https://[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.enterprise)?\\.slack\\.com(?:${references.map(escapeRegExp).join("|")})(?=[?\\s>|]|$)`, "i");
   if (!references.length || !params.source.messageTs) return { messages: [], limited: true, truncated: false };
   const since = new Date(Math.max(params.source.messageTs.getTime(), now.getTime() - 14 * 24 * 60 * 60 * 1000));
   const messages = await prisma.communicationMessage.findMany({
@@ -492,7 +492,12 @@ async function fetchLinkedAnswerEvidence(params: {
       messageTs: { gte: since, lte: now },
       textRedactedAt: null, isBot: false, isHidden: false, isDeleted: false,
       OR: references.map((reference) => ({ text: { contains: reference } })),
-      NOT: { externalChannelId: params.source.externalChannelId, OR: [{ externalMessageId: threadTs }, { threadExternalId: threadTs }] },
+      // SQL nullable thread IDs require an explicit root branch; exclude only
+      // the actual source thread, including its root, in the source channel.
+      AND: [{ OR: [
+        { externalChannelId: { not: params.source.externalChannelId } },
+        { externalMessageId: { not: threadTs }, OR: [{ threadExternalId: null }, { threadExternalId: { not: threadTs } }] },
+      ] }],
     },
     orderBy: [{ messageTs: "desc" }, { id: "desc" }],
     take: MAX_LINKED_ANSWER_MESSAGES + 1,
@@ -663,19 +668,18 @@ export async function runSlackProactiveScan(params: {
   });
   if (!installation) return { skipped: true, reason: "slack_installation_missing" };
 
-  const muted = new Set(config.mutedChannelIds);
-  const channels = await prisma.communicationChannel.findMany({
-    where: {
-      installationId: params.installationId,
-      workspaceId: params.workspaceId,
-      provider: "SLACK",
-      kind: "PUBLIC",
-      isIngestEnabled: true,
-      isArchived: false,
-    },
-    select: { externalChannelId: true },
-  });
-  const channelIds = channels.map((channel) => channel.externalChannelId).filter((id) => !muted.has(id));
+  const eligibleChannelIds = async (mutedChannelIds: string[]) => {
+    const channels = await prisma.communicationChannel.findMany({
+      where: {
+        installationId: params.installationId, workspaceId: params.workspaceId,
+        provider: "SLACK", kind: "PUBLIC", isIngestEnabled: true, isArchived: false,
+      },
+      select: { externalChannelId: true },
+    });
+    const muted = new Set(mutedChannelIds);
+    return channels.map((channel) => channel.externalChannelId).filter((id) => !muted.has(id));
+  };
+  const channelIds = await eligibleChannelIds(config.mutedChannelIds);
   if (channelIds.length === 0) return { skipped: true, reason: "no_channels" };
 
   const now = new Date();
@@ -808,27 +812,19 @@ export async function runSlackProactiveScan(params: {
     if (!nudgeWindowOpen()) break;
     const threadTs = threadTsForMessage(candidate);
     const cachePrefix = `${PROACTIVE_FIRST_NUDGE_CLAIM_PREFIX}:${params.installationId}:${candidate.id}:`;
-    const linkedAnswers = await fetchLinkedAnswerEvidence({ ...params, source: candidate, channelIds });
-    const evidenceSnapshot = JSON.stringify(linkedAnswers);
-    const textHash = createHash("sha256").update(JSON.stringify({ text: candidate.text, sourceMessageTs: candidate.messageTs, linkedAnswers })).digest("hex").slice(0, 16);
-    const nonActionClaimKey = `${cachePrefix}${textHash}`;
-    const deferredClaimKey = `${cachePrefix}deferred:${textHash}`;
     if (await isSlackThreadFollowupSuppressed({ workspaceId: params.workspaceId, installationId: params.installationId, channelId: candidate.externalChannelId, threadTs })) continue;
-    const handledQuery = {
-      workspaceId: params.workspaceId,
-      installationId: params.installationId,
-      messageId: candidate.id,
+    // Permanent dispositions do not depend on a linked-evidence fingerprint.
+    // Apply these inexpensive gates before scanning cross-channel text.
+    const permanentHandledQuery = {
+      workspaceId: params.workspaceId, installationId: params.installationId, messageId: candidate.id,
       OR: [
         { action: { in: ["proactive_unanswered_nudge", "proactive_unanswered_resolved"] } },
-        { action: PROACTIVE_NON_ACTION, claimKey: nonActionClaimKey },
         { action: PROACTIVE_NON_ACTION, claimKey: null },
         { action: PROACTIVE_NON_ACTION, claimKey: { not: { startsWith: cachePrefix } } },
-        { action: PROACTIVE_REVIEW_DEFERRED, claimKey: deferredClaimKey, createdAt: { gte: new Date(now.getTime() - UNCERTAIN_FIRST_NUDGE_RETRY_HOURS * 60 * 60 * 1000) } },
         { entityType: "Action" },
       ],
     };
-    const alreadyHandled = await prisma.communicationEntityLink.findFirst({ where: handledQuery, select: { id: true } });
-    if (alreadyHandled) continue;
+    if (await prisma.communicationEntityLink.findFirst({ where: permanentHandledQuery, select: { id: true } })) continue;
 
     const replies = await prisma.communicationMessage.count({
       where: {
@@ -849,6 +845,20 @@ export async function runSlackProactiveScan(params: {
 
     if (firstNudgeReviews >= MAX_FIRST_NUDGE_REVIEWS) break;
     if (!await currentNudgePolicyAllowsSend()) break;
+    const linkedAnswers = await fetchLinkedAnswerEvidence({ ...params, source: candidate, channelIds });
+    const evidenceSnapshot = JSON.stringify(linkedAnswers);
+    const textHash = createHash("sha256").update(JSON.stringify({ text: candidate.text, sourceMessageTs: candidate.messageTs, linkedAnswers })).digest("hex").slice(0, 16);
+    const nonActionClaimKey = `${cachePrefix}${textHash}`;
+    const deferredClaimKey = `${cachePrefix}deferred:${textHash}`;
+    const handledQuery = {
+      ...permanentHandledQuery,
+      OR: [
+        ...permanentHandledQuery.OR,
+        { action: PROACTIVE_NON_ACTION, claimKey: nonActionClaimKey },
+        { action: PROACTIVE_REVIEW_DEFERRED, claimKey: deferredClaimKey, createdAt: { gte: new Date(now.getTime() - UNCERTAIN_FIRST_NUDGE_RETRY_HOURS * 60 * 60 * 1000) } },
+      ],
+    };
+    if (await prisma.communicationEntityLink.findFirst({ where: handledQuery, select: { id: true } })) continue;
     firstNudgeReviews += 1;
     // Silence and punctuation are only candidate signals, not permission to interrupt.
     const reviewedAt = new Date();
@@ -907,14 +917,18 @@ export async function runSlackProactiveScan(params: {
       && output.confidence >= 0 && output.confidence <= 1
       && output.confidence >= config.proactiveConfidenceThreshold
       && Array.isArray(output.couldNot) && output.couldNot.length === 0;
-    if (!confidentReview || (output.temporalState === "current" && !responseStillUseful())) {
+    if (!confidentReview || (output.temporalState === "current" && !responseStillUseful())
+      || (output.temporalState === "expired" && deadline && responseStillUseful())) {
       // Expiry during inference is retryable, not proof of a terminal disposition.
       // Rotate uncertain sources without spending another inference in this run.
       await deferReview();
       continue;
     }
     // Do not use a verdict if its linked evidence changed during inference.
-    if (JSON.stringify(await fetchLinkedAnswerEvidence({ ...params, source: candidate, channelIds })) !== evidenceSnapshot) continue;
+    const currentConfig = await readSlackAgentConfig(params.workspaceId);
+    const currentChannelIds = await eligibleChannelIds(currentConfig.mutedChannelIds);
+    if (!currentChannelIds.includes(candidate.externalChannelId)) continue;
+    if (JSON.stringify(await fetchLinkedAnswerEvidence({ ...params, source: candidate, channelIds: currentChannelIds })) !== evidenceSnapshot) continue;
     if (output.temporalState === "expired" || output.explicitAsk !== true || output.resolutionState !== "open" || output.workDisposition !== "request") {
       await recordProactiveMarker({
         installationId: params.installationId, workspaceId: params.workspaceId,

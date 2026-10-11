@@ -479,6 +479,84 @@ describe("Slack context jobs", () => {
     expect(prismaMock.communicationEntityLink.upsert).not.toHaveBeenCalled();
   });
 
+  it.each(["future", "equal", "past"])("checks expired verdict consistency with a %s deadline", async (boundary) => {
+    vi.setSystemTime(new Date("2026-10-10T10:00:00Z"));
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([candidate({ text: "Can everyone confirm attendance for October 10, 2026 10:00 UTC?", messageTs: new Date("2026-10-09T09:00:00Z") })]);
+    extractMock.mockResolvedValueOnce({ output: { explicitAsk: true, resolutionState: "open", workDisposition: "request", responseUsefulUntil: boundary === "future" ? "2026-10-10T10:00:00.001Z" : boundary === "past" ? "2026-10-10T09:59:59.999Z" : "2026-10-10T10:00:00.000Z", temporalState: "expired", temporalEvidence: "October 10, 2026 10:00 UTC", answerEvidence: null, confidence: 0.99, couldNot: [] } });
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+    expect(prismaMock.communicationEntityLink.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ action: boundary === "future" ? "proactive_unanswered_review_deferred" : "proactive_unanswered_non_action" }) }));
+  });
+
+  it.each(["stopped", "handled", "replied"])("skips linked searches for a %s source", async (gate) => {
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([candidate({ text: "Can someone confirm the review room?" })]);
+    if (gate === "stopped") isSlackThreadFollowupSuppressedMock.mockResolvedValue(true);
+    if (gate === "handled") prismaMock.communicationEntityLink.findFirst.mockResolvedValue({ id: "handled" });
+    if (gate === "replied") prismaMock.communicationMessage.count.mockResolvedValue(1);
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
+    expect(linkedEvidenceMock).not.toHaveBeenCalled();
+    expect(extractMock).not.toHaveBeenCalled();
+  });
+
+  it("does not search linked evidence after the review budget is exhausted", async () => {
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce(Array.from({ length: 11 }, (_, index) => candidate({ id: `source-${index}`, text: "Can someone confirm the review room?" })));
+    extractMock.mockResolvedValue({ output: {} });
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
+    expect(extractMock).toHaveBeenCalledTimes(10);
+    expect(linkedEvidenceMock).toHaveBeenCalledTimes(10);
+  });
+
+  it("keeps unrelated same-channel roots eligible with a null-safe query", async () => {
+    const source = candidate({ text: "Can someone confirm the review room?", messageTs: new Date("2026-04-28T09:00:00Z") });
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([source]);
+    linkedEvidenceMock.mockResolvedValue([linkedAnswer(source, { threadExternalId: null })]);
+    extractMock.mockResolvedValueOnce({ output: { explicitAsk: true, resolutionState: "answered", workDisposition: "request", responseUsefulUntil: null, temporalState: "current", temporalEvidence: "", answerEvidence: { messageId: "answer-1", quote: "Room B." }, confidence: 0.99, couldNot: [] } });
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
+    expect(linkedEvidenceMock.mock.calls[0][0].where).toMatchObject({ AND: [{ OR: [{ externalChannelId: { not: "C1" } }, { externalMessageId: { not: source.externalMessageId }, OR: [{ threadExternalId: null }, { threadExternalId: { not: source.externalMessageId } }] }] }] });
+    expect(JSON.parse(extractMock.mock.calls[0][0].input).linkedAnswers.messages).toHaveLength(1);
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["https://example.enterprise.slack.com", true],
+    ["https://example.slack.com", true],
+    ["https://example.enterprise.slack.com.evil.test", false],
+    ["https://example.evil.slack.com", false],
+    ["https://evil.test/https://example.enterprise.slack.com", false],
+    ["https://evil.test@https://example.enterprise.slack.com", false],
+    ["https://example.enterprise.slack.com@evil.test", false],
+    ["http://example.enterprise.slack.com", false],
+  ])("validates linked permalink host %s", async (host, accepted) => {
+    const source = candidate({ text: "Can someone confirm the review room?", messageTs: new Date("2026-04-28T09:00:00Z") });
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([source]);
+    linkedEvidenceMock.mockResolvedValue([linkedAnswer(source, { text: `<${host}/archives/C1/p1714320000000100|source> Room B.` })]);
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
+    expect(JSON.parse(extractMock.mock.calls[0][0].input).linkedAnswers.messages).toHaveLength(accepted ? 1 : 0);
+  });
+
+  it.each(["muted", "archived", "ingestion-disabled", "private"])("rechecks a linked channel becoming %s during inference", async (change) => {
+    const source = candidate({ text: "Can someone confirm the review room?", messageTs: new Date("2026-04-28T09:00:00Z") });
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([source]);
+    prismaMock.communicationChannel.findMany.mockResolvedValue([{ externalChannelId: "C1" }, { externalChannelId: "C2" }]);
+    linkedEvidenceMock.mockResolvedValue([linkedAnswer(source, { externalChannelId: "C2" })]);
+    extractMock.mockImplementationOnce(async () => {
+      if (change === "muted") prismaMock.workspaceAgentConfig.findUnique.mockResolvedValue({ configJson: { proactiveActionPublicationEnabled: true, mutedChannelIds: ["C2"] } });
+      else prismaMock.communicationChannel.findMany.mockResolvedValue([{ externalChannelId: "C1" }]);
+      return { output: { explicitAsk: true, resolutionState: "answered", workDisposition: "request", responseUsefulUntil: null, temporalState: "current", temporalEvidence: "", answerEvidence: { messageId: "answer-1", quote: "Room B." }, confidence: 0.99, couldNot: [] } };
+    });
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
+    expect(linkedEvidenceMock.mock.calls[1][0].where.externalChannelId).toEqual({ in: ["C1"] });
+    expect(prismaMock.communicationChannel.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ where: expect.objectContaining({ workspaceId: "workspace-1", installationId: "install-1", provider: "SLACK", kind: "PUBLIC", isArchived: false, isIngestEnabled: true }) }));
+    expect(prismaMock.communicationEntityLink.upsert).not.toHaveBeenCalled();
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+  });
+
   it("supplies an explicitly linked answer from another public thread and suppresses the request", async () => {
     const source = candidate({ text: "Can someone confirm the review room?", messageTs: new Date("2026-04-28T09:00:00Z") });
     const answer = linkedAnswer(source);
@@ -530,7 +608,7 @@ describe("Slack context jobs", () => {
     { externalChannelId: "private-channel" }, { externalChannelId: "muted-channel" },
     { isDeleted: true }, { isHidden: true }, { isBot: true }, { textRedactedAt: new Date() },
     { messageTs: new Date("2026-04-27T00:00:00Z") }, { messageTs: new Date("2026-04-30T00:00:00Z") },
-    { threadExternalId: "1714320000.000100" },
+    { threadExternalId: "1714320000.000100" }, { externalMessageId: "1714320000.000100", threadExternalId: null },
     { text: "The room for a similar review is Room B." },
     { text: "https://example.slack.com/archives/C1/p17143200000001001 Room B." },
     { text: "https://example.test/archives/C1/p1714320000000100 Room B." },
@@ -1138,7 +1216,11 @@ describe("Slack context jobs", () => {
 
   it("does not nudge when an Action link arrives during semantic review", async () => {
     prismaMock.communicationMessage.findMany.mockResolvedValueOnce([candidate({ text: "Can someone confirm the launch date?" })]);
-    prismaMock.communicationEntityLink.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: "action-link" });
+    const originalExtract = extractMock.getMockImplementation()!;
+    extractMock.mockImplementationOnce(async (request) => {
+      prismaMock.communicationEntityLink.findFirst.mockResolvedValue({ id: "action-link" });
+      return originalExtract(request);
+    });
     const { runSlackProactiveScan } = await import("./slack-context");
     await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
     expect(extractMock).toHaveBeenCalledTimes(1);
