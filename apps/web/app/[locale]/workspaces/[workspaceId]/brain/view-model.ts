@@ -66,6 +66,16 @@ export type BrainSearchResultLike = {
 
 export type ResolvedBrainSearchResult<T extends BrainSearchResultLike> = T & {
   articleSlug: string | null;
+  meetingId: string | null;
+};
+
+export type BrainSearchDisplayResult = {
+  sourceType: string;
+  sourceId: string;
+  title: string | null;
+  snippet: string;
+  articleSlug: string | null;
+  meetingId: string | null;
 };
 
 export type BrainTypeCount = {
@@ -197,14 +207,44 @@ export function buildBrainTypeSummaries<T extends BrainArticleDirectoryItem>(
 export function resolveBrainSearchResults<T extends BrainSearchResultLike>(
   results: T[],
   articles: Array<{ id: string; slug: string }>,
+  meetings: Array<{ id: string }> = [],
 ): Array<ResolvedBrainSearchResult<T>> {
   const slugById = new Map(articles.map((article) => [article.id, article.slug]));
   const slugSet = new Set(articles.map((article) => article.slug));
+  const meetingIds = new Set(meetings.map((meeting) => meeting.id));
 
   return results.map((result) => ({
     ...result,
-    articleSlug: slugById.get(result.sourceId) ?? (slugSet.has(result.sourceId) ? result.sourceId : null),
+    articleSlug: result.sourceType === "BRAIN_ARTICLE"
+      ? slugById.get(result.sourceId) ?? (slugSet.has(result.sourceId) ? result.sourceId : null)
+      : null,
+    meetingId: result.sourceType === "MEETING" && meetingIds.has(result.sourceId)
+      ? result.sourceId
+      : null,
   }));
+}
+
+export function getBrainSearchMeetingIds<T extends BrainSearchResultLike>(results: T[]) {
+  return [...new Set(results.filter((result) => result.sourceType === "MEETING")
+    .map((result) => result.sourceId))];
+}
+
+export function toBrainSearchDisplayResult<T extends BrainSearchResultLike & {
+  title: string | null;
+  snippet: string;
+}>(result: ResolvedBrainSearchResult<T>): BrainSearchDisplayResult {
+  if (result.sourceType === "MEETING" && !result.meetingId) {
+    return { sourceType: "MEETING", sourceId: "", title: null, snippet: "", articleSlug: null, meetingId: null };
+  }
+
+  return {
+    sourceType: result.sourceType,
+    sourceId: result.sourceId,
+    title: result.title,
+    snippet: result.snippet,
+    articleSlug: result.articleSlug,
+    meetingId: result.meetingId,
+  };
 }
 
 export function getUnresolvedBrainSearchArticleRefs<T extends BrainSearchResultLike>(

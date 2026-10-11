@@ -7,11 +7,13 @@ import {
   canManageBrainArticle,
   filterBrainArticlesByType,
   filterBrainRecordsByRange,
+  getBrainSearchMeetingIds,
   getUnresolvedBrainSearchArticleRefs,
   normalizeBrainArticleType,
   normalizeBrainIndexSearch,
   normalizeBrainRange,
   resolveBrainSearchResults,
+  toBrainSearchDisplayResult,
   type BrainArticleDirectoryItem,
 } from "./view-model";
 
@@ -175,7 +177,42 @@ describe("Brain index view model", () => {
     );
 
     expect(results.map((result) => result.articleSlug)).toEqual(["strategy-article", "already-a-slug", null, null]);
+    expect(results.map((result) => result.meetingId)).toEqual([null, null, null, null]);
     expect(getUnresolvedBrainSearchArticleRefs(results, visibleArticleRefs)).toEqual(["missing"]);
+  });
+
+  it("links only validated meeting IDs and never confuses a meeting with an article", () => {
+    const results = [
+      { sourceId: "meeting-1", sourceType: "MEETING" },
+      { sourceId: "article-id", sourceType: "MEETING" },
+      { sourceId: "calendar-event-1", sourceType: "MEETING" },
+      { sourceId: "article-id", sourceType: "BRAIN_ARTICLE" },
+    ];
+    const resolved = resolveBrainSearchResults(results, [{ id: "article-id", slug: "article-slug" }], [{ id: "meeting-1" }]);
+
+    expect(resolved.map((result) => [result.articleSlug, result.meetingId])).toEqual([
+      [null, "meeting-1"],
+      [null, null],
+      [null, null],
+      ["article-slug", null],
+    ]);
+    expect(getBrainSearchMeetingIds([...results, results[0]])).toEqual([
+      "meeting-1", "article-id", "calendar-event-1",
+    ]);
+  });
+
+  it("removes all indexed identity and content before an unavailable meeting reaches UI props", () => {
+    const [result] = resolveBrainSearchResults([{
+      sourceType: "MEETING", sourceId: "foreign-meeting-id",
+      title: "Foreign secret title", snippet: "Foreign secret transcript", chunkId: "chunk-1",
+    }], [{ id: "foreign-meeting-id", slug: "wrong-article" }], []);
+
+    const display = toBrainSearchDisplayResult(result);
+
+    expect(display).toEqual({ sourceType: "MEETING", sourceId: "", title: null, snippet: "",
+      articleSlug: null, meetingId: null });
+    expect(JSON.stringify(display)).not.toContain("foreign-meeting-id");
+    expect(JSON.stringify(display)).not.toContain("Foreign secret");
   });
 
   it("builds filter hrefs that preserve non-default URL state", () => {
