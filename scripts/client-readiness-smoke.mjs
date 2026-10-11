@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 import { chromium } from "playwright";
 import { openSelfserveValidationSession } from "./selfserve-validation-smoke.mjs";
 import { SELFSERVE_VALIDATION_TARGET, selfserveReadRequestAllowed } from "./lib/selfserve-validation-target.mjs";
+import { assertUnchangedMobileModeBuild, inspectMobileModeBuild, mobileModeStorageKey } from "./lib/mobile-mode-build.mjs";
 
 import {
   DEMO_WORKSPACE_SLUG,
@@ -233,12 +234,10 @@ export function localePrefixFromUrl(value) {
   }
 }
 
-export async function readStoredMobileMode(page, workspacePath) {
-  const workspaceId = workspacePath.match(/\/workspaces\/([^/?#]+)/)?.[1];
-  if (!workspaceId) throw new Error("Mobile mode verification requires a workspace path.");
+export async function readStoredMobileMode(page, workspacePath, build) {
   return page.evaluate(
     (key) => window.localStorage.getItem(key),
-    `corgtex.mobileMode.${workspaceId}`,
+    mobileModeStorageKey(build, workspacePath),
   );
 }
 
@@ -305,7 +304,7 @@ function serializeError(error) {
   };
 }
 
-async function writeResults(status, routeResults, findings, consoleErrors, fatalError = null) {
+async function writeResults(status, routeResults, findings, consoleErrors, fatalError = null, mobileModeBuild = null) {
   await writeFile(
     path.join(outDir, "qa-results.json"),
     `${JSON.stringify(
@@ -318,6 +317,7 @@ async function writeResults(status, routeResults, findings, consoleErrors, fatal
         findings,
         consoleErrors,
         fatalError,
+        mobileModeBuild,
       },
       null,
       2,
@@ -492,7 +492,7 @@ export async function installSelfserveReadOnlyRouting(page) {
   ) ? route.continue() : route.abort("blockedbyclient"));
 }
 
-async function verifyMobileShell(page, locale, workspacePath, findings, routeResults) {
+async function verifyMobileShell(page, locale, workspacePath, findings, routeResults, build) {
   let fakeConversationCounter = 0;
   await installMobileAnalyticsMock(page);
   await page.route("**/api/workspaces/*/conversations", async (route) => {
@@ -590,7 +590,7 @@ async function verifyMobileShell(page, locale, workspacePath, findings, routeRes
     }
     await expectTextVisible(page, ".mobile-ai-workbench .chat-message.user", smokePrompt, `mobile-shell-${viewportName}-ai-user-message`, findings);
     await expectTextVisible(page, ".mobile-ai-workbench .chat-message.assistant", "Smoke response", `mobile-shell-${viewportName}-ai-response`, findings);
-    const storedMode = await readStoredMobileMode(page, workspacePath);
+    const storedMode = await readStoredMobileMode(page, workspacePath, build);
     if (storedMode !== "ai") {
       findings.push({ name: `mobile-shell-${viewportName}-mode-store`, route: page.url(), status: storedMode });
     }
@@ -633,7 +633,20 @@ async function main() {
   const consoleErrors = [];
   const findings = [];
   const routeResults = [];
+  const mobileModeBuild = { initial: null, final: null };
+  const inspectBuild = async (phase) => {
+    try {
+      mobileModeBuild[phase] = await inspectMobileModeBuild(baseUrl, {
+        expectedGitSha: process.env.CLIENT_READINESS_SMOKE_EXPECTED_GIT_SHA
+          || process.env.SELFSERVE_VALIDATION_EXPECTED_SHA || null,
+      });
+    } catch (error) {
+      mobileModeBuild[phase] = error?.mobileModeBuild ?? null;
+      throw error;
+    }
+  };
   try {
+    await inspectBuild("initial");
     browser = await chromium.launch();
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     if (process.env.PRODUCTION_VALIDATION_TARGET === SELFSERVE_VALIDATION_TARGET.name) {
@@ -740,9 +753,11 @@ async function main() {
       );
     }
 
-    await verifyMobileShell(page, locale, workspacePath, findings, routeResults);
+    await verifyMobileShell(page, locale, workspacePath, findings, routeResults, mobileModeBuild.initial);
+    await inspectBuild("final");
+    assertUnchangedMobileModeBuild(mobileModeBuild.initial, mobileModeBuild.final);
 
-    await writeResults("completed", routeResults, findings, consoleErrors);
+    await writeResults("completed", routeResults, findings, consoleErrors, null, mobileModeBuild);
 
     if (findings.length > 0 || consoleErrors.length > 0) {
       throw new Error(`Client readiness smoke found ${findings.length} route findings and ${consoleErrors.length} console errors.`);
@@ -755,7 +770,7 @@ async function main() {
       status: "failed",
       error: fatalError.message,
     });
-    await writeResults("failed", routeResults, findings, consoleErrors, fatalError);
+    await writeResults("failed", routeResults, findings, consoleErrors, fatalError, mobileModeBuild);
     throw error;
   } finally {
     delete globalThis.__corgtexClientReadinessSetRouteLabel;

@@ -151,6 +151,19 @@ describe("production validation context", () => {
     expect(requiresProductionAppRelease(undefined)).toBe(true);
   });
 
+  it("treats build-aware client readiness verifier sources as smoke-only changes", () => {
+    const smokeFiles = [
+      "scripts/client-readiness-smoke.mjs",
+      "scripts/client-readiness-smoke.test.mjs",
+      "scripts/lib/mobile-mode-build.mjs",
+      "scripts/lib/mobile-mode-build.test.mjs",
+      "scripts/production-validation-context.mjs",
+      "scripts/production-validation-context.test.mjs",
+    ];
+    expect(requiresProductionAppRelease(smokeFiles)).toBe(false);
+    expect(requiresProductionAppRelease([...smokeFiles, "apps/web/app/api/health/route.ts"])).toBe(true);
+  });
+
   it("classifies the full Git range, including a runtime change before a site-only final commit", async () => {
     const fixture = await gitFixture();
     await fixture.write("README.md");
