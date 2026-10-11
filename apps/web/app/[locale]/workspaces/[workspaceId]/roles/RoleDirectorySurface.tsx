@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { getTranslations } from "next-intl/server";
+import { getLocale, getTranslations } from "next-intl/server";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
 import { WorkItemFilterControls, WorkItemToolbar } from "@/lib/components/WorkItemControls";
@@ -122,6 +122,7 @@ export async function RoleDirectorySurface({
   showFilters = true,
 }: RoleDirectorySurfaceProps) {
   const t = await getTranslations("roles");
+  const locale = (await getLocale()) === "es" ? "es" : "en";
   const tCommon = await getTranslations("common");
   const tWork = await getTranslations("workItems");
   const view = showToolbar ? normalizeWorkItemView(searchParams.view) : "list";
@@ -476,6 +477,7 @@ export async function RoleDirectorySurface({
         <summary className="nr-hide-marker nr-action-summary">{t("actionArchive")}</summary>
         <form action={deleteRoleAction} className="action-menu-form">
           {hiddenWorkspace(workspaceId)}
+          <input type="hidden" name="locale" value={locale} />
           <input type="hidden" name="roleId" value={role.id} />
           <ConfirmSubmitButton className="danger" message={t("confirmArchiveRole")}>
             {t("actionArchive")}

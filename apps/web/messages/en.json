@@ -1831,6 +1831,9 @@
     "website": "Website"
   },
   "roles": {
+    "archivedRoleDescription": "This role no longer appears in the active structure.",
+    "archivedRoleTitle": "Role archived",
+    "archiveSuccess": "Role archived. It no longer appears in the active structure.",
     "accountabilityCount": "{count, plural, one {# accountability} other {# accountabilities}}",
     "accountabilities": "Accountabilities",
     "actionAssign": "Assign",
@@ -1894,7 +1897,8 @@
     "temporaryActive": "Temporary until {date}",
     "temporaryExpired": "Expired {date}",
     "unknownHolder": "Unknown holder",
-    "unassigned": "No members assigned."
+    "unassigned": "No members assigned.",
+    "viewArchivedRecords": "View Archived Records"
   },
   "tools": {
     "accessNotes": "Access notes",

@@ -1,4 +1,4 @@
-import { AppError, getRole, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, getRole, getWorkspaceArchiveRecord, requireWorkspaceMembership } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { notFound } from "next/navigation";
@@ -25,14 +25,46 @@ export default async function RoleDetailPage({ params }: PageProps) {
   const actor = await requirePageActor();
   const t = await getTranslations("roles");
 
-  let role;
   let membership;
   try {
-    [role, membership] = await Promise.all([
-      getRole(actor, { workspaceId, roleId }),
-      requireWorkspaceMembership({ actor, workspaceId }),
-    ]);
+    membership = await requireWorkspaceMembership({ actor, workspaceId });
   } catch (error) {
+    if (error instanceof AppError && (error.status === 403 || error.status === 404)) {
+      notFound();
+    }
+    throw error;
+  }
+
+  let role;
+  try {
+    role = await getRole(actor, { workspaceId, roleId });
+  } catch (error) {
+    if (error instanceof AppError && error.status === 404) {
+      const canManageStructure = membership?.role === "ADMIN" || membership?.role === "FACILITATOR";
+      const archiveRecord = canManageStructure
+        ? await getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Role", entityId: roleId })
+        : null;
+      if (archiveRecord) {
+        return (
+          <>
+            <header className="nr-masthead nr-masthead-left">
+              <Link href={`/workspaces/${workspaceId}/roles`}>{t("backToRoles")}</Link>
+              <h1 className="nr-masthead-title">{t("archivedRoleTitle")}</h1>
+            </header>
+            <section className="ws-section">
+              <div className="nr-item">
+                <p style={{ margin: 0 }}>{t("archivedRoleDescription")}</p>
+                {membership?.role === "ADMIN" && (
+                  <Link href={`/workspaces/${workspaceId}/audit?tab=archive&archiveEntityType=Role`} style={{ display: "inline-block", marginTop: 12 }}>
+                    {t("viewArchivedRecords")}
+                  </Link>
+                )}
+              </div>
+            </section>
+          </>
+        );
+      }
+    }
     if (error instanceof AppError && (error.status === 403 || error.status === 404)) {
       notFound();
     }

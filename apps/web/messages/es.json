@@ -1831,6 +1831,9 @@
     "website": "Sitio web"
   },
   "roles": {
+    "archivedRoleDescription": "Este rol ya no aparece en la estructura activa.",
+    "archivedRoleTitle": "Rol archivado",
+    "archiveSuccess": "Rol archivado. Ya no aparece en la estructura activa.",
     "accountabilityCount": "{count, plural, one {# responsabilidad} other {# responsabilidades}}",
     "accountabilities": "Responsabilidades",
     "actionAssign": "Asignar",
@@ -1894,7 +1897,8 @@
     "temporaryActive": "Temporal hasta {date}",
     "temporaryExpired": "Venció {date}",
     "unknownHolder": "Responsable desconocido",
-    "unassigned": "Sin miembros asignados."
+    "unassigned": "Sin miembros asignados.",
+    "viewArchivedRecords": "Ver registros archivados"
   },
   "tools": {
     "accessNotes": "Notas de acceso",

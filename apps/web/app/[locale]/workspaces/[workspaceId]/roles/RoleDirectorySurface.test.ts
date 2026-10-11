@@ -1,13 +1,13 @@
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { getTranslations } from "next-intl/server";
+import { getLocale, getTranslations } from "next-intl/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import enMessages from "@/messages/en.json";
 import esMessages from "@/messages/es.json";
 import { RoleDirectorySurface } from "./RoleDirectorySurface";
 
-vi.mock("next-intl/server", () => ({ getTranslations: vi.fn() }));
+vi.mock("next-intl/server", () => ({ getLocale: vi.fn(), getTranslations: vi.fn() }));
 vi.mock("@/lib/components/ui/ActionMenu", () => ({
   ActionMenu: ({ children }: { children: React.ReactNode }) => children,
 }));
@@ -38,10 +38,10 @@ function translation(messages: typeof enMessages | typeof esMessages, namespace:
   return typeof value === "string" ? value : key;
 }
 
-async function renderRoleDirectory(canManageStructure: boolean) {
+async function renderRoleDirectory(canManageStructure: boolean, baseHref = "/workspaces/workspace-1/roles") {
   const surface = await RoleDirectorySurface({
     workspaceId: "workspace-1",
-    baseHref: "/workspaces/workspace-1/roles",
+    baseHref,
     roles: [role],
     circles: [role.circle],
     members: [],
@@ -57,6 +57,7 @@ describe("Role directory edit guidance", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.stubGlobal("React", React);
+    vi.mocked(getLocale).mockResolvedValue("en");
   });
 
   it.each([
@@ -83,5 +84,19 @@ describe("Role directory edit guidance", () => {
     expect(markup).toContain('name="purposeMd"');
     expect(markup).toContain(enMessages.roles.actionEdit);
     expect(markup).not.toContain(enMessages.roles.readOnlyEditHelp);
+  });
+
+  it.each([
+    ["list", "/workspaces/workspace-1/roles"],
+    ["detail", "/workspaces/workspace-1/roles/role-1"],
+  ])("keeps the confirmation form wired from the %s view", async (_view, baseHref) => {
+    vi.mocked(getTranslations).mockImplementation(async (namespace) => (
+      (key: string) => translation(enMessages, String(namespace), key)
+    ) as never);
+
+    const markup = await renderRoleDirectory(true, baseHref);
+    expect(markup).toContain('name="roleId" value="role-1"');
+    expect(markup).toContain('name="locale" value="en"');
+    expect(markup).toContain('<button type="submit" class="danger" disabled="">Archive</button>');
   });
 });

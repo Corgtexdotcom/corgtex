@@ -1,6 +1,7 @@
-import { requireWorkspaceMembership } from "@corgtex/domain";
+import { getWorkspaceArchiveRecord, requireWorkspaceMembership } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import { getTranslations } from "next-intl/server";
+import Link from "next/link";
 import { requirePageActor } from "@/lib/auth";
 import { RoleDirectorySurface } from "./RoleDirectorySurface";
 import { loadRoleDirectoryData } from "./role-directory";
@@ -27,6 +28,10 @@ export default async function RolesPage({
   const isDemo = currentWorkspace?.slug === "jnj-demo";
   const currentMemberId = membership?.id && membership.id !== "global-operator" ? membership.id : null;
   const canManageStructure = !isDemo && (membership?.role === "ADMIN" || membership?.role === "FACILITATOR");
+  const archivedRoleId = typeof resolvedSearch.archivedRole === "string" ? resolvedSearch.archivedRole : null;
+  const archivedRole = canManageStructure && archivedRoleId
+    ? await getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Role", entityId: archivedRoleId })
+    : null;
 
   return (
     <>
@@ -36,6 +41,17 @@ export default async function RolesPage({
           <span>{t("pageDescription")}</span>
         </div>
       </header>
+
+      {archivedRole && (
+        <div role="status" className="nr-item" style={{ marginBottom: 24 }}>
+          <strong>{t("archiveSuccess")}</strong>
+          {membership?.role === "ADMIN" && (
+            <Link href={`/workspaces/${workspaceId}/audit?tab=archive&archiveEntityType=Role`} style={{ display: "block", marginTop: 8 }}>
+              {t("viewArchivedRecords")}
+            </Link>
+          )}
+        </div>
+      )}
 
       <section className="ws-section">
         <RoleDirectorySurface
