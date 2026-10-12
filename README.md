@@ -23,14 +23,30 @@ graph TB
 
   PKG_DOMAIN[packages/domain<br/>Business Logic]
   PKG_AGENTS[packages/agents<br/>Agent Runtime]
+  PKG_CONNECTORS_SQL[packages/connectors-sql<br/>SQL Connectors]
+  PKG_KNOWLEDGE[packages/knowledge<br/>Knowledge]
+  PKG_MCP[packages/mcp<br/>MCP Tools]
+  PKG_MODELS[packages/models<br/>Model Abstractions]
   PKG_SHARED[packages/shared<br/>DB / Auth / Config]
+  PKG_STORAGE[packages/storage<br/>Storage]
+  PKG_WORKFLOWS[packages/workflows<br/>Background Workflows]
 
   APP_WEB --> PKG_DOMAIN
-  APP_WORKER --> PKG_DOMAIN
+  APP_WEB --> PKG_KNOWLEDGE
+  APP_WEB --> PKG_MODELS
+  APP_WORKER --> PKG_WORKFLOWS
+  PKG_WORKFLOWS --> PKG_AGENTS
+  PKG_AGENTS --> PKG_KNOWLEDGE
+  PKG_AGENTS --> PKG_MODELS
+  PKG_CONNECTORS_SQL --> PKG_KNOWLEDGE
+  PKG_MCP --> PKG_AGENTS
+  PKG_KNOWLEDGE --> PKG_STORAGE
   PKG_DOMAIN --> PKG_SHARED
-  PKG_AGENTS --> PKG_SHARED
-  APP_WORKER --> PKG_AGENTS
+  PKG_DOMAIN --> PKG_STORAGE
+  PKG_MODELS --> PKG_SHARED
 ```
+
+Arrows show selected direct workspace dependencies; each package's `package.json` lists its full set.
 
 - **Framework:** Next.js 15 (App Router), React 19, Tailwind CSS 3
 - **Database:** PostgreSQL via Prisma
