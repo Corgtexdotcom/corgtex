@@ -1,5 +1,5 @@
 import type { AppActor } from "@corgtex/shared";
-import { ingestConversationOnDemand } from "@corgtex/domain";
+import { AppError, ingestConversationOnDemand } from "@corgtex/domain";
 
 export const saveToBrainTool = {
   type: "function" as const,
@@ -33,12 +33,23 @@ export async function saveToBrainAction(actor: AppActor, ctx: { workspaceId: str
   title: string;
   sourceType?: string;
 }) {
-  const source = await ingestConversationOnDemand(actor, {
-    workspaceId: ctx.workspaceId,
-    content: args.content,
-    title: args.title,
-    sourceType: args.sourceType,
-  });
+  let source;
+  try {
+    source = await ingestConversationOnDemand(actor, {
+      workspaceId: ctx.workspaceId,
+      content: args.content,
+      title: args.title,
+      sourceType: args.sourceType,
+    });
+  } catch (error) {
+    if (error instanceof AppError && error.code === "UNKNOWN_LINEAGE") {
+      return {
+        success: false,
+        message: "I couldn't save this conversation to Brain because its source permissions could not be verified.",
+      };
+    }
+    throw error;
+  }
 
   return {
     success: true,
