@@ -3,9 +3,11 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { readableArtifactIds, recordArtifactInputLineage } from "./source-lineage";
-import { listSources } from "./brain";
+import { ingestSource, listSources } from "./brain";
 import { getAction, listActions } from "./actions";
 import { getTension, listTensions } from "./tensions";
+import { listCompanyDirectionFromBrain } from "./goals";
+import { createCheckIn, respondToCheckIn } from "./check-ins";
 
 describe("complete input lineage", () => {
   beforeEach(async () => { await truncateAllTables(); });
@@ -89,7 +91,7 @@ describe("complete input lineage", () => {
     } });
     const legacyChat = await prisma.brainSource.create({ data: {
       workspaceId: workspace.id, sourceType: "CONVERSATION_INSIGHT", tier: 3,
-      content: "Synthetic legacy private canary",
+      title: "Predictable hidden answer", content: "Synthetic legacy private canary",
     } });
     const rawSource = await prisma.brainSource.create({ data: {
       workspaceId: workspace.id, sourceType: "DOC", tier: 1, content: "Synthetic shared source",
@@ -120,9 +122,19 @@ describe("complete input lineage", () => {
       .toEqual([rawSource.id]);
     expect((await listSources(readerActor, { workspaceId: otherWorkspace.id })).total).toBe(0);
     expect(await readableArtifactIds(readerActor, workspace.id, "BrainArticle", [derivedArticle])).toEqual(new Set());
+    await expect(ingestSource(readerActor, { workspaceId: workspace.id, sourceType: "DOC", tier: 1,
+      title: legacyChat.title, content: "Unrelated new text",
+      duplicateGuard: { resolution: "use_existing", targetEntityId: legacyChat.id },
+    })).rejects.toMatchObject({ code: "DUPLICATE_GUARD_TARGET_NOT_FOUND" });
+    const newSource = await ingestSource(readerActor, { workspaceId: workspace.id, sourceType: "DOC", tier: 1,
+      title: legacyChat.title, content: "Unrelated new text", duplicateGuard: {},
+    });
+    expect(newSource.id).not.toBe(legacyChat.id);
     await prisma.brainArticle.update({ where: { id: privateArticle.id }, data: { bodyMd: "Changed owner original" } });
     expect((await listSources(ownerActor, { workspaceId: workspace.id })).items.map((source) => source.id))
-      .toEqual([rawSource.id]);
+      .toEqual(expect.arrayContaining([rawSource.id, newSource.id]));
+    expect((await listSources(ownerActor, { workspaceId: workspace.id })).items.map((source) => source.id))
+      .not.toContain(copiedChat.id);
     expect(await readableArtifactIds(ownerActor, workspace.id, "BrainArticle", [derivedArticle])).toEqual(new Set());
   });
 
@@ -161,5 +173,77 @@ describe("complete input lineage", () => {
     await prisma.proposal.update({ where: { id: privateProposal.id }, data: { title: "Changed unproven title" } });
     expect((await getAction(ownerActor, { workspaceId: workspace.id, actionId: action.id })).proposal).toBeNull();
     expect((await getTension(ownerActor, { workspaceId: workspace.id, tensionId: tension.id })).proposal).toBeNull();
+  });
+
+  it("keeps unknown source titles out of company direction and shares consented answers with their upstream limits", async () => {
+    const workspace = await prisma.workspace.create({ data: { name: "Direction lineage fixture", slug: `direction-lineage-${randomUUID()}` } });
+    const owner = await prisma.user.create({ data: { email: `direction-owner-${randomUUID()}@example.test`, passwordHash: "synthetic" } });
+    const reader = await prisma.user.create({ data: { email: `direction-reader-${randomUUID()}@example.test`, passwordHash: "synthetic" } });
+    const ownerMember = await prisma.member.create({ data: { workspaceId: workspace.id, userId: owner.id, role: "CONTRIBUTOR" } });
+    await prisma.member.create({ data: { workspaceId: workspace.id, userId: reader.id, role: "CONTRIBUTOR" } });
+    const ownerActor: AppActor = { kind: "user", user: { id: owner.id, email: owner.email, displayName: "Owner" } };
+    const readerActor: AppActor = { kind: "user", user: { id: reader.id, email: reader.email, displayName: "Reader" } };
+    const privateArticle = await prisma.brainArticle.create({ data: {
+      workspaceId: workspace.id, slug: "direction-private", title: "Private direction", type: "PROJECT",
+      bodyMd: "Synthetic private direction", sourceIds: [], isPrivate: true, ownerMemberId: ownerMember.id,
+    } });
+    await prisma.$transaction(async (tx) => {
+      await recordArtifactInputLineage({ tx, actor: ownerActor, workspaceId: workspace.id,
+        artifact: { kind: "BrainArticle", id: privateArticle.id }, content: privateArticle,
+        origin: "HUMAN_ORIGINAL", inputs: [],
+      });
+    });
+    const unknownSource = await prisma.brainSource.create({ data: {
+      workspaceId: workspace.id, sourceType: "CONVERSATION_INSIGHT", tier: 3,
+      title: "Synthetic hidden direction canary", content: "Hidden synthetic content",
+    } });
+    const goal = await prisma.goal.create({ data: {
+      workspaceId: workspace.id, authorUserId: owner.id, title: "Visible goal", status: "ACTIVE",
+    } });
+    const link = await prisma.goalLink.create({ data: {
+      goalId: goal.id, entityType: "BrainSource", entityId: unknownSource.id,
+      source: "company-understanding", metadata: { label: "Synthetic hidden direction canary" },
+    } });
+    await prisma.$transaction(async (tx) => {
+      await recordArtifactInputLineage({ tx, actor: ownerActor, workspaceId: workspace.id,
+        artifact: { kind: "Goal", id: goal.id }, content: goal, origin: "HUMAN_ORIGINAL", inputs: [],
+      });
+      await recordArtifactInputLineage({ tx, actor: ownerActor, workspaceId: workspace.id,
+        artifact: { kind: "GoalLink", id: link.id }, content: link, origin: "HUMAN_ORIGINAL", inputs: [],
+      });
+    });
+    const direction = await listCompanyDirectionFromBrain(readerActor, { workspaceId: workspace.id });
+    expect(direction.evidenceLinkCount).toBe(0);
+    expect(JSON.stringify(direction)).not.toContain("Synthetic hidden direction canary");
+
+    const sharedQuestion = await createCheckIn(ownerActor, { workspaceId: workspace.id,
+      memberId: ownerMember.id, questionText: "Shared company question", questionSource: "human",
+      questionType: "COMPANY_UNDERSTANDING",
+    });
+    await respondToCheckIn(ownerActor, { workspaceId: workspace.id, checkInId: sharedQuestion.id,
+      responseMd: "Synthetic shared answer" });
+    const restrictedQuestion = await createCheckIn(ownerActor, { workspaceId: workspace.id,
+      memberId: ownerMember.id, questionText: "Restricted company question", questionSource: "human",
+      questionType: "COMPANY_UNDERSTANDING", lineageInputs: [{ kind: "BrainArticle", id: privateArticle.id }],
+    });
+    await respondToCheckIn(ownerActor, { workspaceId: workspace.id, checkInId: restrictedQuestion.id,
+      responseMd: "Synthetic restricted answer" });
+    const readerSources = await listSources(readerActor, { workspaceId: workspace.id });
+    expect(readerSources.items.some((source) => source.content.includes("Synthetic shared answer"))).toBe(true);
+    expect(JSON.stringify(readerSources)).not.toContain("Synthetic restricted answer");
+    const sharedSource = readerSources.items.find((source) => source.content.includes("Synthetic shared answer"));
+    expect(sharedSource).toBeDefined();
+    const sharedArticle = await prisma.brainArticle.create({ data: {
+      workspaceId: workspace.id, slug: "shared-answer-article", title: "Shared answer article", type: "PROJECT",
+      bodyMd: "Synthetic shared answer", sourceIds: [sharedSource!.id],
+    } });
+    await prisma.$transaction(async (tx) => {
+      await recordArtifactInputLineage({ tx, actor: ownerActor, workspaceId: workspace.id,
+        artifact: { kind: "BrainArticle", id: sharedArticle.id }, content: sharedArticle,
+        origin: "DERIVED", inputs: [{ kind: "BrainSource", id: sharedSource!.id }],
+      });
+    });
+    expect(await readableArtifactIds(readerActor, workspace.id, "BrainArticle", [sharedArticle]))
+      .toEqual(new Set([sharedArticle.id]));
   });
 });

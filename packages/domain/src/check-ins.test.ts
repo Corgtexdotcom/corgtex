@@ -51,6 +51,7 @@ vi.mock("./events", () => ({
 
 vi.mock("./source-lineage", () => ({
   recordArtifactInputLineage: vi.fn(),
+  currentArtifactInputRoots: vi.fn(async () => []),
   readableArtifactIds: vi.fn(async (_actor: unknown, _workspaceId: string, _kind: string, records: Array<{ id: string }>) =>
     new Set(records.map((record) => record.id))),
 }));

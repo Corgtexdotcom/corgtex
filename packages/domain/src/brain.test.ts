@@ -653,7 +653,7 @@ describe("brain source ingestion", () => {
     };
     expect(prismaMock.brainSource.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where,
-      orderBy: { createdAt: "desc" },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     }));
     expect(prismaMock.brainSource.count).not.toHaveBeenCalled();
   });

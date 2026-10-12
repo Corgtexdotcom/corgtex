@@ -761,8 +761,12 @@ function candidateTime(candidate: DuplicateGuardCandidate) {
   return Number.isFinite(time) ? time : 0;
 }
 
-async function findDuplicateGuardMatch(input: DuplicateGuardInput, options?: DuplicateGuardOptions | null, client?: Prisma.TransactionClient) {
-  const rows = await latestRows(input.entityType, input.workspaceId, candidateLimit(options?.candidateLimit), input, client);
+type CandidateFilter = (rows: unknown[]) => Promise<unknown[]>;
+
+async function findDuplicateGuardMatch(input: DuplicateGuardInput, options?: DuplicateGuardOptions | null,
+  client?: Prisma.TransactionClient, filter?: CandidateFilter) {
+  const loaded = await latestRows(input.entityType, input.workspaceId, candidateLimit(options?.candidateLimit), input, client);
+  const rows = filter ? await filter(loaded) : loaded;
   const candidates = mapRows(input.entityType, rows);
   const matches = candidates
     .map((candidate) => scoreCandidate(input, candidate))
@@ -776,18 +780,19 @@ async function findDuplicateGuardMatch(input: DuplicateGuardInput, options?: Dup
   return matches.map(cleanCandidate);
 }
 
-export async function checkWorkspaceDuplicateGuard(input: DuplicateGuardInput, options?: DuplicateGuardOptions | null, client?: Prisma.TransactionClient): Promise<DuplicateGuardDecision | null> {
+export async function checkWorkspaceDuplicateGuard(input: DuplicateGuardInput, options?: DuplicateGuardOptions | null,
+  client?: Prisma.TransactionClient, filter?: CandidateFilter): Promise<DuplicateGuardDecision | null> {
   if (options == null) return null;
   const resolution = options?.resolution ?? null;
   if ((resolution === "use_existing" || resolution === "update_existing") && !options?.targetEntityId) {
     invariant(false, 400, "DUPLICATE_GUARD_TARGET_REQUIRED", "Duplicate resolution requires a target entity ID.");
   }
   if (resolution === "create_new") {
-    const [match] = await findDuplicateGuardMatch(input, options, client);
+    const [match] = await findDuplicateGuardMatch(input, options, client, filter);
     return match ? { resolution, match } : null;
   }
 
-  const matches = await findDuplicateGuardMatch(input, options, client);
+  const matches = await findDuplicateGuardMatch(input, options, client, filter);
   const match = options?.targetEntityId
     ? matches.find((candidate) => candidate.entityId === options.targetEntityId)
     : matches[0] ?? null;

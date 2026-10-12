@@ -6,7 +6,7 @@ import { recordAudit } from "./audit-trail";
 import { archiveFilterWhere, type ArchiveFilter } from "./archive";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import { invariant } from "./errors";
-import { advanceHumanArtifactInputLineage, recordArtifactInputLineage, readableArtifactIds, type LineageInput, type LineageRoot } from "./source-lineage";
+import { advanceHumanArtifactInputLineage, recordArtifactInputLineage, readableArtifactIds, readableBrainSourceIds, type LineageInput, type LineageRoot } from "./source-lineage";
 import { privacyFilter } from "./privacy";
 import { resolveKnowledgeAccessDomains } from "./brain-access";
 import {
@@ -1170,7 +1170,8 @@ export async function listCompanyDirectionFromBrain(
       : Promise.resolve([]),
   ]);
 
-  const sourceById = new Map(brainSources.map((source) => [source.id, source]));
+  const visibleSourceIds = await readableBrainSourceIds(actor, params.workspaceId, brainSources);
+  const sourceById = new Map(brainSources.filter((source) => visibleSourceIds.has(source.id)).map((source) => [source.id, source]));
   const visibleArticleIds = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", brainArticles);
   const articleById = new Map(brainArticles.filter((article) => visibleArticleIds.has(article.id)).map((article) => [article.id, article]));
   const evidenceVisible = (entityType: string, entityId: string) =>
@@ -1652,6 +1653,16 @@ export async function createGoalLink(
   const source = params.source?.trim() || null;
 
   return prisma.$transaction(async (tx) => {
+    if (params.entityType === "BrainSource") {
+      const target = await tx.brainSource.findFirst({ where: { id: params.entityId, workspaceId: params.workspaceId } });
+      invariant(target && (await readableBrainSourceIds(actor, params.workspaceId, [target], tx)).has(target.id),
+        404, "NOT_FOUND", "Linked source not found.");
+    }
+    if (params.entityType === "BrainArticle") {
+      const target = await tx.brainArticle.findFirst({ where: { id: params.entityId, workspaceId: params.workspaceId } });
+      invariant(target && (await readableArtifactIds(actor, params.workspaceId, "BrainArticle", [target], tx)).has(target.id),
+        404, "NOT_FOUND", "Linked article not found.");
+    }
     const link = await tx.goalLink.upsert({
       where: {
         goalId_entityType_entityId: {

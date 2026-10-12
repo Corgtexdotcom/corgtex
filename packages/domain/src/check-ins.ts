@@ -4,7 +4,7 @@ import type { Prisma } from "@prisma/client";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 import { appendEvents } from "./events";
-import { recordArtifactInputLineage, readableArtifactIds, type LineageInput, type LineageRoot } from "./source-lineage";
+import { currentArtifactInputRoots, recordArtifactInputLineage, readableArtifactIds, type LineageInput, type LineageRoot } from "./source-lineage";
 
 const COMPANY_UNDERSTANDING_TYPE = "COMPANY_UNDERSTANDING";
 const COMPANY_KNOWLEDGE_POLICY = "COMPANY_KNOWLEDGE";
@@ -310,6 +310,11 @@ export async function respondToCheckIn(actor: AppActor, params: {
     const events: Parameters<typeof appendEvents>[1] = [];
 
     if (checkIn.questionType === COMPANY_UNDERSTANDING_TYPE) {
+      // The employee explicitly elects to contribute the answer as company knowledge.
+      // Carry the question's permission-bearing inputs, not its recipient-only envelope.
+      const questionRoots = await currentArtifactInputRoots(tx, params.workspaceId,
+        { kind: "CheckIn", id: checkIn.id }, checkIn);
+      invariant(questionRoots, 409, "UNKNOWN_LINEAGE", "Question inputs cannot be verified.");
       const source = await tx.brainSource.create({
         data: {
           workspaceId: params.workspaceId,
@@ -337,7 +342,8 @@ export async function respondToCheckIn(actor: AppActor, params: {
       await recordArtifactInputLineage({
         tx, actor, workspaceId: params.workspaceId,
         artifact: { kind: "BrainSource", id: source.id }, content: source,
-        origin: "DERIVED", inputs: [{ kind: "CheckIn", id: checkIn.id }],
+        origin: questionRoots.length ? "DERIVED" : "HUMAN_ORIGINAL",
+        inputs: [], inheritedRoots: questionRoots,
       });
 
       events.push({

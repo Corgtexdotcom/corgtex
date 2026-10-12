@@ -147,7 +147,11 @@ describe("newspaper delivery", () => {
     prismaMock.newspaperDelivery.findMany.mockResolvedValue([]);
     prismaMock.emailDelivery.findMany.mockResolvedValue([]);
     prismaMock.newspaperEdition.upsert.mockResolvedValue({ id: "edition-1" });
-    prismaMock.newspaperEdition.findMany.mockResolvedValue([]);
+    prismaMock.newspaperEdition.findMany.mockResolvedValue([
+      { id: "edition-1", runKey: "run-1", workflowJobId: "job-1" },
+      { id: "edition-2", runKey: "run-2", workflowJobId: "job-2" },
+      { id: "edition-3", runKey: "run-3", workflowJobId: "job-3" },
+    ]);
     prismaMock.workspaceAgentConfig.findUnique.mockResolvedValue(null);
     prismaMock.workflowJob.findMany.mockResolvedValue([]);
     prismaMock.member.findMany.mockResolvedValue([]);
@@ -203,13 +207,26 @@ describe("newspaper delivery", () => {
     });
     const token = html.match(/\/api\/newspaper\/click\/([^"]+)/)?.[1];
 
-    await expect(recordNewspaperLinkClick(token ?? "")).resolves.toEqual({
+    await expect(recordNewspaperLinkClick({ kind: "user", user: { id: "u-1" } } as any, token ?? "")).resolves.toEqual({
       targetUrl: "https://example.com/report",
     });
 
     expect(trackedLinks[0].clickCount).toBe(1);
     expect(trackedLinks[0].firstClickedAt).toBeInstanceOf(Date);
     expect(trackedLinks[0].lastClickedAt).toBeInstanceOf(Date);
+  });
+
+  it("stops tracked redirects after the edition becomes unreadable", async () => {
+    const { instrumentNewspaperHtmlLinks, recordNewspaperLinkClick } = await import("./newspaper-delivery");
+    const html = await instrumentNewspaperHtmlLinks({
+      workspaceId: "ws-1", runKey: "run-1", html: '<a href="https://example.com/private">Private</a>',
+    });
+    const token = html.match(/\/api\/newspaper\/click\/([^"]+)/)?.[1] ?? "";
+    readableArtifactIdsMock.mockResolvedValueOnce(new Set());
+
+    await expect(recordNewspaperLinkClick({ kind: "user", user: { id: "u-1" } } as any, token))
+      .rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+    expect(trackedLinks[0].clickCount).toBe(0);
   });
 
   it("rejects unknown tokens and stored non-http targets", async () => {
@@ -223,11 +240,11 @@ describe("newspaper delivery", () => {
       clickCount: 0,
     });
 
-    await expect(recordNewspaperLinkClick("missing-token")).rejects.toMatchObject({
+    await expect(recordNewspaperLinkClick({ kind: "user", user: { id: "u-1" } } as any, "missing-token")).rejects.toMatchObject({
       status: 404,
       code: "NOT_FOUND",
     });
-    await expect(recordNewspaperLinkClick("bad-token")).rejects.toMatchObject({
+    await expect(recordNewspaperLinkClick({ kind: "user", user: { id: "u-1" } } as any, "bad-token")).rejects.toMatchObject({
       status: 404,
       code: "NOT_FOUND",
     });
@@ -333,6 +350,19 @@ describe("newspaper delivery", () => {
     }));
     expect(rows[0]).not.toHaveProperty("clickCount");
     expect(rows[0]).not.toHaveProperty("clickedAt");
+  });
+
+  it("withholds delivery counts and recipient rows when the edition has no readable lineage", async () => {
+    const { listNewspaperDeliverySummaries, listNewspaperDeliveryDetails } = await import("./newspaper-delivery");
+    prismaMock.newspaperDelivery.findMany.mockResolvedValue([
+      { id: "delivery-hidden", runKey: "run-1", subject: "Restricted subject", status: "SENT" },
+    ]);
+    readableArtifactIdsMock.mockResolvedValueOnce(new Set()).mockResolvedValueOnce(new Set());
+
+    expect(await listNewspaperDeliverySummaries({ kind: "user", user: { id: "u-1" } } as any, "ws-1"))
+      .toEqual([]);
+    expect(await listNewspaperDeliveryDetails({ kind: "user", user: { id: "u-1" } } as any, "ws-1"))
+      .toEqual([]);
   });
 
   it("upserts canonical newspaper editions by workspace, cadence, and date", async () => {
@@ -532,14 +562,11 @@ describe("newspaper delivery", () => {
       effectiveCadence: "WEEKLY",
       receivesNewspaper: true,
     }));
-    expect(diagnostics.sourceCounts.sevenDays).toEqual(expect.objectContaining({
-      meetings: 2,
-      openActions: 1,
-    }));
+    expect(diagnostics.sourceCounts).toBeNull();
     expect(diagnostics.recentJobs).toHaveLength(1);
     expect(diagnostics.recentDeliveries[0]).toEqual(expect.objectContaining({
       status: "SKIPPED",
-      error: "No digest inputs.",
+      error: null,
     }));
     expect(diagnostics.recentEditions[0]).toEqual(expect.objectContaining({
       cadence: "WEEKLY",
@@ -593,7 +620,7 @@ describe("newspaper delivery", () => {
       expect.objectContaining({
         id: "delivery-failed",
         recipientEmail: "member@example.com",
-        error: "provider unavailable",
+        error: null,
       }),
     ]);
   });

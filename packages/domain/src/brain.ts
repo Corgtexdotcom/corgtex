@@ -1,4 +1,4 @@
-import type { BrainArticleAuthority, BrainArticleType, BrainDiscussionTargetType, BrainSourceType } from "@prisma/client";
+import type { BrainArticleAuthority, BrainArticleType, BrainDiscussionTargetType, BrainSource, BrainSourceType } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { isDeepStrictEqual } from "node:util";
 import { prisma } from "@corgtex/shared";
@@ -668,12 +668,18 @@ export async function ingestSource(actor: AppActor, params: {
     sourceUrl: metadataString(params.metadata, "sourceUrl")
       ?? metadataString(params.metadata, "url")
       ?? metadataString(params.metadata, "externalUrl"),
-  }, params.duplicateGuard);
+  }, params.duplicateGuard, undefined, async (rows) => {
+    const sources = rows as BrainSource[];
+    const readable = await readableBrainSourceIds(actor, params.workspaceId, sources);
+    return sources.filter((source) => readable.has(source.id));
+  });
   if (duplicateDecision?.resolution === "use_existing") {
     const source = await prisma.brainSource.findFirst({
       where: { id: duplicateDecision.match.entityId, workspaceId: params.workspaceId, archivedAt: null },
     });
     invariant(source, 404, "NOT_FOUND", "Source not found.");
+    invariant((await readableBrainSourceIds(actor, params.workspaceId, [source])).has(source.id),
+      404, "NOT_FOUND", "Source not found.");
     return source;
   }
   if (duplicateDecision?.resolution === "update_existing") {
@@ -682,6 +688,8 @@ export async function ingestSource(actor: AppActor, params: {
         where: { id: duplicateDecision.match.entityId, workspaceId: params.workspaceId, archivedAt: null },
       });
       invariant(existing, 404, "NOT_FOUND", "Source not found.");
+      invariant((await readableBrainSourceIds(actor, params.workspaceId, [existing], tx)).has(existing.id),
+        404, "NOT_FOUND", "Source not found.");
       const mergedContent = duplicateGuardMergeText(existing.content, content) ?? existing.content;
       const source = await tx.brainSource.update({
         where: { id: existing.id },
@@ -788,7 +796,14 @@ export async function listSources(actor: AppActor, params: {
     where.absorbedAt = null;
   }
 
-  const candidates = await prisma.brainSource.findMany({
+  const batchSize = 100;
+  let cursor: string | undefined;
+  let total = 0;
+  const items: Prisma.BrainSourceGetPayload<{ include: {
+    authorMember: { include: { user: { select: { displayName: true; email: true } } } };
+  } }>[] = [];
+  for (;;) {
+    const candidates = await prisma.brainSource.findMany({
       where,
       include: {
         authorMember: {
@@ -797,11 +812,21 @@ export async function listSources(actor: AppActor, params: {
           },
         },
       },
-      orderBy: { createdAt: "desc" },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: batchSize,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     });
-  const visibleIds = await readableBrainSourceIds(actor, params.workspaceId, candidates);
-  const visible = candidates.filter((source) => visibleIds.has(source.id));
-  return { items: visible.slice(skip, skip + take), total: visible.length, take, skip };
+    if (candidates.length === 0) break;
+    const visibleIds = await readableBrainSourceIds(actor, params.workspaceId, candidates);
+    for (const source of candidates) {
+      if (!visibleIds.has(source.id)) continue;
+      if (total >= skip && items.length < take) items.push(source);
+      total++;
+    }
+    if (candidates.length < batchSize) break;
+    cursor = candidates[candidates.length - 1].id;
+  }
+  return { items, total, take, skip };
 }
 
 export async function markSourceAbsorbed(_actor: AppActor, params: {

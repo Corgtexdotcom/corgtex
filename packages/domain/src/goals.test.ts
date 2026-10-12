@@ -55,9 +55,11 @@ vi.mock("@corgtex/shared", () => ({
     },
     brainSource: {
       findMany: vi.fn(),
+      findFirst: vi.fn(),
     },
     brainArticle: {
       findMany: vi.fn(),
+      findFirst: vi.fn(),
     },
     checkIn: {
       findMany: vi.fn(),
@@ -91,6 +93,8 @@ vi.mock("./source-lineage", () => ({
   advanceHumanArtifactInputLineage: vi.fn(),
   recordArtifactInputLineage: vi.fn(),
   readableArtifactIds: vi.fn(async (_actor: unknown, _workspaceId: string, _kind: string, records: Array<{ id: string }>) =>
+    new Set(records.map((record) => record.id))),
+  readableBrainSourceIds: vi.fn(async (_actor: unknown, _workspaceId: string, records: Array<{ id: string }>) =>
     new Set(records.map((record) => record.id))),
 }));
 
@@ -477,6 +481,7 @@ describe("Goals Domain", () => {
 
   describe("createGoalLink", () => {
     it("stores evidence confidence and generated source metadata", async () => {
+      vi.mocked(prisma.brainSource.findFirst).mockResolvedValueOnce({ id: "source-1" } as any);
       vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
         id: "goal-1",
         workspaceId: "ws-1",

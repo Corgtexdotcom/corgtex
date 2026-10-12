@@ -142,9 +142,12 @@ async function rootIsReadable(db: LineageClient, actor: AppActor, workspaceId: s
     const key = `${root.kind}:${root.id}`;
     if (visited.has(key)) return false;
     const manifest = await latestManifest(db, workspaceId, root);
-    if (!manifest || manifest.origin !== "DERIVED" || manifest.contentHash !== root.fingerprint) return false;
+    if (!manifest || manifest.contentHash !== root.fingerprint) return false;
     const upstream = parseRoots(manifest.rootsJson);
-    if (!upstream?.length) return false;
+    // A member's expressly contributed company answer can be an original source.
+    // Copied/model-produced sources require a nonempty upstream proof.
+    if (manifest.origin === "HUMAN_ORIGINAL") return upstream?.length === 0;
+    if (manifest.origin !== "DERIVED" || !upstream?.length) return false;
     const nextVisited = new Set(visited).add(key);
     for (const input of upstream) {
       if (!await rootIsReadable(db, actor, workspaceId, membership, domains, input, nextVisited)) return false;

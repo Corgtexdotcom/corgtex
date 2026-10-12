@@ -228,18 +228,28 @@ export async function recordNewspaperDelivery(params: {
   });
 }
 
-export async function recordNewspaperLinkClick(token: string) {
+export async function recordNewspaperLinkClick(actor: AppActor, token: string) {
   const tokenHash = sha256(token.trim());
   const link = await prisma.newspaperTrackedLink.findUnique({
     where: { tokenHash },
     select: {
       id: true,
+      workspaceId: true,
+      runKey: true,
       targetUrl: true,
       firstClickedAt: true,
     },
   });
 
   if (!link) {
+    throw new AppError(404, "NOT_FOUND", "Newspaper link not found.");
+  }
+
+  try {
+    await requireWorkspaceMembership({ actor, workspaceId: link.workspaceId });
+    const readableRuns = await readableNewspaperRunKeys(actor, link.workspaceId, [link.runKey]);
+    if (!readableRuns.has(link.runKey)) throw new Error("Unreadable edition");
+  } catch {
     throw new AppError(404, "NOT_FOUND", "Newspaper link not found.");
   }
 
@@ -259,6 +269,15 @@ export async function recordNewspaperLinkClick(token: string) {
   });
 
   return { targetUrl: target };
+}
+
+async function readableNewspaperRunKeys(actor: AppActor, workspaceId: string, runKeys: string[]) {
+  if (runKeys.length === 0) return new Set<string>();
+  const editions = await prisma.newspaperEdition.findMany({
+    where: { workspaceId, runKey: { in: [...new Set(runKeys)] } },
+  });
+  const readable = await readableArtifactIds(actor, workspaceId, "NewspaperEdition", editions);
+  return new Set(editions.filter((edition) => readable.has(edition.id)).map((edition) => edition.runKey));
 }
 
 export async function listNewspaperDeliverySummaries(actor: AppActor, workspaceId: string, opts?: { take?: number }) {
@@ -283,6 +302,7 @@ export async function listNewspaperDeliverySummaries(actor: AppActor, workspaceI
     },
   });
 
+  const readableRuns = await readableNewspaperRunKeys(actor, workspaceId, deliveries.map((delivery) => delivery.runKey));
   const groups = new Map<string, {
     runKey: string;
     kind: NewspaperDeliveryKind;
@@ -302,6 +322,7 @@ export async function listNewspaperDeliverySummaries(actor: AppActor, workspaceI
   }>();
 
   for (const delivery of deliveries) {
+    if (!readableRuns.has(delivery.runKey)) continue;
     const group = groups.get(delivery.runKey) ?? {
       runKey: delivery.runKey,
       kind: delivery.kind,
@@ -362,7 +383,7 @@ export async function listNewspaperDeliverySummaries(actor: AppActor, workspaceI
 export async function listNewspaperDeliveryDetails(actor: AppActor, workspaceId: string, opts?: { take?: number }) {
   await requireWorkspaceMembership({ actor, workspaceId });
 
-  return prisma.newspaperDelivery.findMany({
+  const deliveries = await prisma.newspaperDelivery.findMany({
     where: { workspaceId },
     orderBy: { createdAt: "desc" },
     take: opts?.take ?? 100,
@@ -392,185 +413,8 @@ export async function listNewspaperDeliveryDetails(actor: AppActor, workspaceId:
       },
     },
   });
-}
-
-async function countNewspaperSources(workspaceId: string, since: Date) {
-  const [
-    meetings,
-    proposals,
-    resolvedTensions,
-    openActions,
-    goals,
-    goalUpdates,
-    roleChanges,
-    roleHolderChanges,
-    newMembers,
-    brainArticles,
-    documents,
-    activeAdviceRequests,
-    conversations,
-    slackMessages,
-    buildArtifacts,
-  ] = await Promise.all([
-    prisma.meeting.count({
-      where: {
-        workspaceId,
-        archivedAt: null,
-        OR: [
-          { recordedAt: { gte: since } },
-          { updatedAt: { gte: since } },
-          { summaryPostedAt: { gte: since } },
-          { aiProcessedAt: { gte: since } },
-        ],
-      },
-    }),
-    prisma.proposal.count({
-      where: {
-        workspaceId,
-        archivedAt: null,
-        isPrivate: false,
-        OR: [
-          { createdAt: { gte: since } },
-          { updatedAt: { gte: since } },
-          { publishedAt: { gte: since } },
-          { decidedAt: { gte: since } },
-        ],
-      },
-    }),
-    prisma.tension.count({
-      where: {
-        workspaceId,
-        archivedAt: null,
-        isPrivate: false,
-        status: "RESOLVED",
-        OR: [
-          { resolvedAt: { gte: since } },
-          { updatedAt: { gte: since } },
-        ],
-      },
-    }),
-    prisma.action.count({
-      where: {
-        workspaceId,
-        archivedAt: null,
-        isPrivate: false,
-        status: { in: ["OPEN", "IN_PROGRESS"] },
-      },
-    }),
-    prisma.goal.count({
-      where: {
-        workspaceId,
-        archivedAt: null,
-        OR: [
-          { updatedAt: { gte: since } },
-          { status: { in: ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"] } },
-        ],
-      },
-    }),
-    prisma.goalUpdate.count({
-      where: {
-        createdAt: { gte: since },
-        goal: {
-          workspaceId,
-          archivedAt: null,
-        },
-      },
-    }),
-    prisma.roleVersion.count({
-      where: {
-        workspaceId,
-        createdAt: { gte: since },
-      },
-    }),
-    prisma.roleHolderHistory.count({
-      where: {
-        workspaceId,
-        OR: [
-          { startedAt: { gte: since } },
-          { endedAt: { gte: since } },
-        ],
-      },
-    }),
-    prisma.member.count({
-      where: {
-        workspaceId,
-        isActive: true,
-        joinedAt: { gte: since },
-      },
-    }),
-    prisma.brainArticle.count({
-      where: {
-        workspaceId,
-        archivedAt: null,
-        isPrivate: false,
-        type: { not: "DIGEST" },
-        OR: [
-          { createdAt: { gte: since } },
-          { updatedAt: { gte: since } },
-          { publishedAt: { gte: since } },
-        ],
-      },
-    }),
-    prisma.document.count({
-      where: {
-        workspaceId,
-        archivedAt: null,
-        OR: [
-          { createdAt: { gte: since } },
-          { updatedAt: { gte: since } },
-        ],
-      },
-    }),
-    prisma.adviceRequest.count({
-      where: {
-        workspaceId,
-        status: "ACTIVE",
-      },
-    }),
-    prisma.conversationSession.count({
-      where: {
-        workspaceId,
-        turns: { some: { createdAt: { gte: since } } },
-      },
-    }),
-    prisma.communicationMessage.count({
-      where: {
-        workspaceId,
-        provider: "SLACK",
-        isHidden: false,
-        isDeleted: false,
-        receivedAt: { gte: since },
-      },
-    }),
-    prisma.buildArtifact.count({
-      where: {
-        workspaceId,
-        OR: [
-          { updatedAt: { gte: since } },
-          { mergedAt: { gte: since } },
-          { closedAt: { gte: since } },
-        ],
-      },
-    }),
-  ]);
-
-  return {
-    meetings,
-    proposals,
-    resolvedTensions,
-    openActions,
-    goals,
-    goalUpdates,
-    roleChanges,
-    roleHolderChanges,
-    newMembers,
-    brainArticles,
-    documents,
-    activeAdviceRequests,
-    conversations,
-    slackMessages,
-    buildArtifacts,
-  };
+  const readableRuns = await readableNewspaperRunKeys(actor, workspaceId, deliveries.map((delivery) => delivery.runKey));
+  return deliveries.filter((delivery) => readableRuns.has(delivery.runKey));
 }
 
 function nextRunsForRecipients(params: {
@@ -730,9 +574,7 @@ export async function getNewspaperDiagnostics(actor: AppActor, workspaceId: stri
   const recipientCadences = new Set<NewspaperCadence>(
     recipients.filter((recipient) => recipient.receivesNewspaper).map((recipient) => recipient.effectiveCadence),
   );
-  const [oneDayCounts, sevenDayCounts, jobs, deliveries, editions] = await Promise.all([
-    countNewspaperSources(workspaceId, new Date(now.getTime() - 24 * 60 * 60 * 1000)),
-    countNewspaperSources(workspaceId, new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)),
+  const [jobs, deliveries, editions] = await Promise.all([
     prisma.workflowJob.findMany({
       where: {
         workspaceId,
@@ -744,8 +586,6 @@ export async function getNewspaperDiagnostics(actor: AppActor, workspaceId: stri
         id: true,
         status: true,
         dedupeKey: true,
-        payload: true,
-        error: true,
         runAfter: true,
         createdAt: true,
         startedAt: true,
@@ -777,20 +617,14 @@ export async function getNewspaperDiagnostics(actor: AppActor, workspaceId: stri
       where: { workspaceId },
       orderBy: { generatedAt: "desc" },
       take,
-      select: {
-        id: true,
-        workflowJobId: true,
-        cadence: true,
-        dateKey: true,
-        runKey: true,
-        title: true,
-        slug: true,
-        generatedAt: true,
-        updatedAt: true,
-      },
     }),
   ]);
-  const providerMessageIds = Array.from(new Set(deliveries
+  const readableEditions = await readableArtifactIds(actor, workspaceId, "NewspaperEdition", editions);
+  const visibleEditions = editions.filter((edition) => readableEditions.has(edition.id));
+  const visibleRuns = new Set(visibleEditions.map((edition) => edition.runKey));
+  const visibleJobIds = new Set(visibleEditions.map((edition) => edition.workflowJobId).filter(Boolean));
+  const visibleDeliveries = deliveries.filter((delivery) => visibleRuns.has(delivery.runKey));
+  const providerMessageIds = Array.from(new Set(visibleDeliveries
     .map((delivery) => delivery.providerMessageId)
     .filter((id): id is string => Boolean(id))));
   const emailDeliveryRows = providerMessageIds.length > 0
@@ -806,6 +640,7 @@ export async function getNewspaperDiagnostics(actor: AppActor, workspaceId: stri
       })
     : [];
   const emailDeliveryByMessageId = new Map(emailDeliveryRows.map((delivery) => [delivery.providerMessageId, delivery]));
+  const deliveryAlert = buildNewspaperDeliveryAlert(visibleDeliveries, emailDeliveryByMessageId);
 
   return {
     workspaceId,
@@ -813,13 +648,18 @@ export async function getNewspaperDiagnostics(actor: AppActor, workspaceId: stri
     defaultSchedule: schedule,
     nextRuns: nextRunsForRecipients({ now, schedule, recipientCadences }),
     recipients,
-    sourceCounts: {
-      oneDay: oneDayCounts,
-      sevenDays: sevenDayCounts,
+    // The generator's aggregate input counts have no per-source proof yet.
+    sourceCounts: null,
+    recentJobs: jobs.filter((job) => visibleJobIds.has(job.id)),
+    recentDeliveries: visibleDeliveries.map((delivery) => ({ ...delivery, subject: null, error: null })),
+    recentEditions: visibleEditions.map((edition) => ({
+      id: edition.id, workflowJobId: edition.workflowJobId, cadence: edition.cadence,
+      dateKey: edition.dateKey, runKey: edition.runKey, title: edition.title, slug: edition.slug,
+      generatedAt: edition.generatedAt, updatedAt: edition.updatedAt,
+    })),
+    deliveryAlert: {
+      ...deliveryAlert,
+      affectedRecipients: deliveryAlert.affectedRecipients.map((recipient) => ({ ...recipient, error: null })),
     },
-    recentJobs: jobs,
-    recentDeliveries: deliveries,
-    recentEditions: editions,
-    deliveryAlert: buildNewspaperDeliveryAlert(deliveries, emailDeliveryByMessageId),
   };
 }
