@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { runCompanyUnderstandingAgentMock, runActionExtractionAgentMock, runBrainSourceRegenerationJobMock, recoveryGuard, execute, absorb } = vi.hoisted(() => ({
+const { runCompanyUnderstandingAgentMock, runActionExtractionAgentMock, runBrainSourceRegenerationJobMock, runProposalDraftingAgentMock, runConstitutionUpdateTriggerAgentMock, recoveryGuard, execute, absorb } = vi.hoisted(() => ({
   runCompanyUnderstandingAgentMock: vi.fn(),
   runActionExtractionAgentMock: vi.fn(),
   runBrainSourceRegenerationJobMock: vi.fn(),
+  runProposalDraftingAgentMock: vi.fn(),
+  runConstitutionUpdateTriggerAgentMock: vi.fn(),
   recoveryGuard: vi.fn(), execute: vi.fn(), absorb: vi.fn(),
 }));
 
@@ -18,8 +20,8 @@ vi.mock("@corgtex/agents", () => ({
   runDailyCheckInAgent: vi.fn(),
   runMeetingSummaryAgent: vi.fn(),
   runActionExtractionAgent: runActionExtractionAgentMock,
-  runProposalDraftingAgent: vi.fn(),
-  runConstitutionUpdateTriggerAgent: vi.fn(),
+  runProposalDraftingAgent: runProposalDraftingAgentMock,
+  runConstitutionUpdateTriggerAgent: runConstitutionUpdateTriggerAgentMock,
   runConstitutionSynthesisAgent: vi.fn(),
   runCrmDripFollowupAgent: vi.fn(),
   runCrmEmailExtractionAgent: vi.fn(),
@@ -32,6 +34,34 @@ describe("runAgentWorkflowJob", () => {
     vi.resetAllMocks();
     runCompanyUnderstandingAgentMock.mockResolvedValue({ id: "run-1" });
     absorb.mockResolvedValue({ absorbed: true, sourceId: "source" });
+  });
+
+  it("dispatches advisory review feedback to a new drafting run without protected actions", async () => {
+    const { runAgentWorkflowJob } = await import("./agent-dispatch");
+    runProposalDraftingAgentMock.mockResolvedValue({ id: "new-run", status: "WAITING_APPROVAL" });
+    await expect(runAgentWorkflowJob({
+      id: "continuation-job", workspaceId: "ws-1", type: "agent.proposal-drafting",
+      payload: { triggerType: "MANUAL", prompt: "Budget policy", meetingId: "meeting-1", reviewFeedback: "Clarify", previousAdvice: "Earlier draft" },
+    })).resolves.toEqual({ id: "new-run", status: "WAITING_APPROVAL" });
+    expect(runProposalDraftingAgentMock).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "ws-1", triggerRef: "continuation-job", prompt: "Budget policy", meetingId: "meeting-1",
+      triggerType: "MANUAL", reviewFeedback: "Clarify", previousAdvice: "Earlier draft",
+    });
+    expect(runConstitutionUpdateTriggerAgentMock).not.toHaveBeenCalled();
+  });
+
+  it("dispatches constitution feedback only to advisory analysis", async () => {
+    const { runAgentWorkflowJob } = await import("./agent-dispatch");
+    runConstitutionUpdateTriggerAgentMock.mockResolvedValue({ id: "new-run", status: "WAITING_APPROVAL" });
+    await expect(runAgentWorkflowJob({
+      id: "continuation-job", workspaceId: "ws-1", type: "agent.constitution-update-trigger",
+      payload: { triggerType: "MANUAL", proposalId: "proposal-1", reviewFeedback: "Clarify", previousAdvice: "Earlier impact" },
+    })).resolves.toEqual({ id: "new-run", status: "WAITING_APPROVAL" });
+    expect(runConstitutionUpdateTriggerAgentMock).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "ws-1", triggerRef: "continuation-job", proposalId: "proposal-1",
+      triggerType: "MANUAL", reviewFeedback: "Clarify", previousAdvice: "Earlier impact",
+    });
+    expect(runProposalDraftingAgentMock).not.toHaveBeenCalled();
   });
 
   it("dispatches source regeneration using the job and tenant identity", async () => {

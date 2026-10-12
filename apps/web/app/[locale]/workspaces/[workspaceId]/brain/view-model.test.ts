@@ -9,6 +9,7 @@ import {
   filterBrainRecordsByRange,
   getBrainSearchMeetingIds,
   getUnresolvedBrainSearchArticleRefs,
+  groupBrainSearchResults,
   normalizeBrainArticleType,
   normalizeBrainIndexSearch,
   normalizeBrainRange,
@@ -213,6 +214,41 @@ describe("Brain index view model", () => {
       articleSlug: null, meetingId: null });
     expect(JSON.stringify(display)).not.toContain("foreign-meeting-id");
     expect(JSON.stringify(display)).not.toContain("Foreign secret");
+  });
+
+  it("groups validated chunks by source while preserving first-ranked source and passage order", () => {
+    const results = resolveBrainSearchResults([
+      { chunkId: "meeting-high", chunkIndex: 8, sourceType: "MEETING", sourceId: "shared-id", title: null, snippet: "Best meeting passage" },
+      { chunkId: "article-high", chunkIndex: 2, sourceType: "BRAIN_ARTICLE", sourceId: "article-1", title: "Plan", snippet: "Article passage" },
+      { chunkId: "meeting-low", chunkIndex: 1, sourceType: "MEETING", sourceId: "shared-id", title: "Current meeting", snippet: "Another meeting passage" },
+      { chunkId: "document-high", chunkIndex: 0, sourceType: "DOCUMENT", sourceId: "shared-id", title: "Reference", snippet: "Document passage" },
+      { chunkId: "meeting-high", chunkIndex: 8, sourceType: "MEETING", sourceId: "shared-id", title: "Current meeting", snippet: "Duplicate hit" },
+    ], [{ id: "article-1", slug: "plan" }], [{ id: "shared-id" }]);
+
+    const grouped = groupBrainSearchResults(results, new Set(["shared-id"]));
+
+    expect(grouped.groups.map((group) => group.key)).toEqual([
+      "MEETING:shared-id", "BRAIN_ARTICLE:article-1", "DOCUMENT:shared-id",
+    ]);
+    expect(grouped.groups[0].title).toBe("Current meeting");
+    expect(grouped.groups[0].passages.map((passage) => passage.chunkId)).toEqual(["meeting-high", "meeting-low"]);
+    expect(grouped.groups[0].passages.map((passage) => passage.chunkIndex)).toEqual([8, 1]);
+    expect(grouped.groups[1].articleSlug).toBe("plan");
+    expect(grouped.hasUnavailableSources).toBe(false);
+  });
+
+  it("does not expose or group missing and unauthorized source content", () => {
+    const results = resolveBrainSearchResults([
+      { chunkId: "foreign-meeting", chunkIndex: 0, sourceType: "MEETING", sourceId: "foreign-1", title: "Hidden meeting", snippet: "Hidden transcript" },
+      { chunkId: "hidden-article", chunkIndex: 1, sourceType: "BRAIN_ARTICLE", sourceId: "private-1", title: "Hidden article", snippet: "Hidden body" },
+      { chunkId: "missing-document", chunkIndex: 2, sourceType: "DOCUMENT", sourceId: "missing-1", title: "Hidden document", snippet: "Hidden file" },
+    ], [], []);
+
+    const grouped = groupBrainSearchResults(results, new Set());
+
+    expect(grouped).toEqual({ groups: [], hasUnavailableSources: true });
+    expect(JSON.stringify(grouped)).not.toContain("Hidden");
+    expect(groupBrainSearchResults([], new Set())).toEqual({ groups: [], hasUnavailableSources: false });
   });
 
   it("builds filter hrefs that preserve non-default URL state", () => {

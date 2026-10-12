@@ -10,7 +10,7 @@
   "topbarLinks": [
     {
       "name": "GitHub",
-      "url": "https://github.com/corgtex/corgtex"
+      "url": "https://github.com/Corgtexdotcom/corgtex"
     },
     {
       "name": "Try the Demo",
@@ -106,6 +106,6 @@
     ]
   },
   "footerSocials": {
-    "github": "https://github.com/corgtex/corgtex"
+    "github": "https://github.com/Corgtexdotcom/corgtex"
   }
 }

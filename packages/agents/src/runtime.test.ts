@@ -35,6 +35,7 @@ const prismaMock = {
     findUnique: vi.fn(),
   },
   meeting: {
+    findFirst: vi.fn(),
     findUnique: vi.fn(),
     update: vi.fn(),
     updateMany: vi.fn(),
@@ -410,24 +411,47 @@ describe("agent runtime", () => {
       raw: "{\"title\":\"Budget policy\"}",
       usage: { provider: "fake", model: "fake", inputTokens: 1, outputTokens: 1, latencyMs: 1, estimatedCostUsd: "0.000000" },
     });
+    prismaMock.meeting.findFirst.mockResolvedValue({
+      id: "meeting-1", title: "Budget sync", summaryMd: null, transcript: "Discussed spending thresholds.",
+    });
 
     const { runProposalDraftingAgent } = await import(".");
     await runProposalDraftingAgent({
       workspaceId: "ws-1",
       triggerRef: "job-4",
       prompt: "Create a budget policy",
+      meetingId: "meeting-1",
+      reviewFeedback: "Clarify the threshold",
+      previousAdvice: "Earlier draft",
     });
 
     expect(knowledgeMock.searchIndexedKnowledge).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: "ws-1",
       query: "Create a budget policy",
     }));
+    expect(prismaMock.meeting.findFirst).toHaveBeenCalledWith({
+      where: { id: "meeting-1", workspaceId: "ws-1" },
+      select: expect.objectContaining({ id: true, transcript: true }),
+    });
     expect(prismaMock.agentRun.update).toHaveBeenLastCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         status: "WAITING_APPROVAL",
         approvalRequired: true,
       }),
     }));
+    expect(prismaMock.agentStep.createMany).toHaveBeenCalledWith({ data: expect.arrayContaining([
+      expect.objectContaining({
+        name: "approval-checkpoint", status: "PENDING",
+        outputJson: { question: "Review this advisory draft. Reply with changes; creating a proposal record requires a separate action." },
+      }),
+    ]) });
+    expect(modelGatewayMock.chat).toHaveBeenCalledWith(expect.objectContaining({
+      messages: expect.arrayContaining([expect.objectContaining({
+        role: "user", content: expect.stringContaining("Discussed spending thresholds."),
+      })]),
+    }));
+    expect(JSON.stringify(modelGatewayMock.chat.mock.calls[0]?.[0]?.messages)).toContain("Clarify the threshold");
+    expect(prismaMock.proposal.count).not.toHaveBeenCalled();
   });
 
   it("waits for approval after constitution follow-up analysis", async () => {
@@ -455,6 +479,8 @@ describe("agent runtime", () => {
       workspaceId: "ws-1",
       triggerRef: "job-5",
       proposalId: "proposal-1",
+      reviewFeedback: "Explain the policy impact",
+      previousAdvice: "Earlier assessment",
     });
 
     expect(prismaMock.agentRun.update).toHaveBeenLastCalledWith(expect.objectContaining({
@@ -462,6 +488,17 @@ describe("agent runtime", () => {
         status: "WAITING_APPROVAL",
         approvalRequired: true,
       }),
+    }));
+    expect(prismaMock.agentStep.createMany).toHaveBeenCalledWith({ data: expect.arrayContaining([
+      expect.objectContaining({
+        name: "approval-checkpoint", status: "PENDING",
+        outputJson: { question: "Review this advisory policy analysis. Reply with changes; protected follow-up requires a separate action." },
+      }),
+    ]) });
+    expect(modelGatewayMock.chat).toHaveBeenCalledWith(expect.objectContaining({
+      messages: expect.arrayContaining([expect.objectContaining({
+        role: "user", content: expect.stringContaining("Explain the policy impact"),
+      })]),
     }));
   });
 });

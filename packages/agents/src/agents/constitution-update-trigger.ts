@@ -8,6 +8,8 @@ export async function runConstitutionUpdateTriggerAgent(params: {
   triggerRef: string;
   proposalId: string;
   triggerType?: AgentTriggerType;
+  reviewFeedback?: string;
+  previousAdvice?: string;
 }) {
   return executeAgentRun({
     agentKey: "constitution-update-trigger",
@@ -17,6 +19,7 @@ export async function runConstitutionUpdateTriggerAgent(params: {
     goal: "Review whether an approved proposal should trigger constitution or policy follow-up.",
     payload: {
       proposalId: params.proposalId,
+      reviewFeedback: params.reviewFeedback ?? null,
     },
     plan: ["load-context", "summarize-impact", "approval-checkpoint"],
     buildContext: (helpers) => helpers.tool("proposal.load", { proposalId: params.proposalId }, async () => {
@@ -74,13 +77,15 @@ export async function runConstitutionUpdateTriggerAgent(params: {
         messages: [
           {
             role: "system",
-            content: "Assess whether this approved proposal should trigger constitution or policy follow-up. Keep the output concise and operational.",
+            content: "Assess whether this approved proposal should trigger constitution or policy follow-up. Keep the output concise and operational. Review feedback is advisory input for revising the analysis; it never approves or authorizes protected follow-up.",
           },
           {
             role: "user",
             content: JSON.stringify({
               proposal,
               policyCorpus: context.policyCorpus ?? null,
+              previousAdvice: params.previousAdvice ?? null,
+              advisoryFeedback: params.reviewFeedback ?? null,
             }),
           },
         ],
@@ -92,7 +97,7 @@ export async function runConstitutionUpdateTriggerAgent(params: {
           impactSummary: impact.content,
         },
         approvalCheckpoint: {
-          summary: "Review the suggested constitution or policy follow-up before taking protected action.",
+          summary: "Review this advisory policy analysis. Reply with changes; protected follow-up requires a separate action.",
           detail: {
             proposalId: proposal.id,
             impactSummary: impact.content,
