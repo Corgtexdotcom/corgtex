@@ -1483,7 +1483,11 @@ async function* processConversationTurnStreamContent(ctx: ConversationContext): 
     routeId += event.idDelta ?? ""; routeName += event.nameDelta ?? ""; routeArguments += event.argumentsDelta;
     if (!ANSWER_ROUTE_NAME.startsWith(routeName) && !TOOL_ROUTE_NAME.startsWith(routeName)) routeInvalid = true;
     if (!routeInvalid && routeName === ANSWER_ROUTE_NAME) { answerDecoder ??= new IncrementalJsonStringDecoder("answer"); const decoded = answerDecoder.push(routeArguments.slice(answerDecoder.processedCharacters)); if (decoded.state === "malformed") routeInvalid = true; else if (decoded.delta) { answerMessage += decoded.delta; yield decoded.delta; } }
-  } } catch (error) { throwIfConversationCanceled(ctx, error); routeError = error; } finally { if (!routeCompleted) await closeAsyncIterator(routeIterator); }
+  } } catch (error) {
+    throwIfConversationCanceled(ctx, error);
+    if (error instanceof CatalogBudgetError || error instanceof WorkspaceModelBudgetError) throw error;
+    routeError = error;
+  } finally { if (!routeCompleted) await closeAsyncIterator(routeIterator); }
   throwIfConversationCanceled(ctx, routeError);
   const [terminalRoute] = routeResponse?.tool_calls ?? []; const exactRoute = routeCompleted && !routeError && !routeInvalid && routeSeen && routeResponse?.content === "" && routeResponse.tool_calls?.length === 1 && terminalRoute?.id === routeId && terminalRoute.function.name === routeName && terminalRoute.function.arguments === routeArguments;
   const answerArgs = exactRoute && routeName === ANSWER_ROUTE_NAME ? parseToolArgs(routeArguments) : null;

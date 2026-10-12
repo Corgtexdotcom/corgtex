@@ -555,14 +555,69 @@ describe("processConversationTurn", () => {
       expect(storeAgentMemoryMock).not.toHaveBeenCalled();
     });
 
-    it.each(["eager read", "initial read", "followup", "added read", "synthesis"].flatMap((stage) =>
+    it.each(["daily", "monthly"])("preserves initial model %s denial after eager retrieval spends the last credential allowance", async (kind) => {
+      const { prisma } = await import("@corgtex/shared");
+      const { assertCatalogModelBudget, CatalogBudgetError } = await vi.importActual<typeof import("@corgtex/models")>("@corgtex/models");
+      const scope = { workspaceId: "ws-1", catalogItemId: "catalog-1", agentCredentialId: "credential-1" };
+      const actor = { kind: "agent", authProvider: "credential", credentialId: scope.agentCredentialId, catalogItemId: scope.catalogItemId, workspaceIds: [scope.workspaceId], scopes: ["brain:read"] } as any;
+      const usage: Array<{ estimatedCostUsd: string; billableCostUsd: string }> = [];
+      vi.mocked(prisma.agentCredential.findFirst).mockResolvedValue({
+        catalogItemId: scope.catalogItemId, isActive: true, catalogItem: null,
+        dailyCallLimit: kind === "daily" ? 1 : null, monthlyBudgetCents: kind === "monthly" ? 1 : null,
+      } as any);
+      vi.mocked(prisma.modelUsage.count).mockResolvedValue(0);
+      vi.mocked(prisma.modelUsage.findMany).mockResolvedValue([]);
+      await assertCatalogModelBudget(scope); // The turn starts with remaining allowance.
+      vi.mocked(searchIndexedKnowledge).mockImplementationOnce(async (request) => {
+        expect(request).toMatchObject(scope);
+        usage.push({ estimatedCostUsd: "0.01", billableCostUsd: "0.01" });
+        vi.mocked(prisma.modelUsage.count).mockResolvedValue(usage.length);
+        vi.mocked(prisma.modelUsage.findMany).mockResolvedValue(usage as any);
+        return [{ chunkId: "eager-chunk", sourceId: "doc-1", sourceType: "DOCUMENT", title: "Policy", chunkIndex: 0, snippet: "Synthetic policy evidence.", score: 1 }];
+      });
+      conversationTurnFindManyMock.mockResolvedValue(Array.from({ length: 5 }, (_, index) => ({ sequenceNumber: index + 1, userMessage: "prior", assistantMessage: "answer" })));
+      let budgetError: unknown;
+      const denyInitialModel = async (request: Record<string, any>) => {
+        expect(request).toMatchObject(scope);
+        expect(usage).toHaveLength(1);
+        expect(JSON.stringify(request.messages)).toContain("Synthetic policy evidence.");
+        try { await assertCatalogModelBudget(request as typeof scope); }
+        catch (error) { budgetError = error; throw error; }
+        throw new Error("Expected the initial model budget gate to deny the request.");
+      };
+      const closeRoute = vi.fn(async () => ({ done: true as const, value: undefined }));
+      if (streaming) chatEventStreamMock.mockImplementationOnce((request) => ({
+        next: () => denyInitialModel(request), return: closeRoute, [Symbol.asyncIterator]() { return this; },
+      }));
+      else chatMock.mockImplementationOnce(denyInitialModel);
+      const emitted: string[] = [];
+      const { processConversationTurn, processConversationTurnStream } = await import("./conversation");
+      const ctx = { ...turnContext(), actor };
+      const result = streaming ? (async () => {
+        for await (const chunk of processConversationTurnStream(ctx)) emitted.push(chunk);
+      })() : processConversationTurn(ctx);
+      const caught = await result.then(() => null, (error: unknown) => error);
+      expect(emitted).toEqual([]);
+      expect(caught).toMatchObject({ code: kind === "daily" ? "CATALOG_DAILY_LIMIT_EXCEEDED" : "CATALOG_MONTHLY_BUDGET_EXCEEDED", status: 429 });
+      expect(caught).toBe(budgetError);
+      expect(budgetError).toBeInstanceOf(CatalogBudgetError);
+      expect(searchIndexedKnowledge).toHaveBeenCalledOnce();
+      expect(streaming ? chatEventStreamMock : chatMock).toHaveBeenCalledOnce();
+      expect(chatStreamMock).not.toHaveBeenCalled();
+      if (streaming) expect(closeRoute).toHaveBeenCalledOnce();
+      expect(storeAgentMemoryMock).not.toHaveBeenCalled();
+      expect(conversationPendingOperationCreateMock).not.toHaveBeenCalled();
+      expect(createActivityMock).not.toHaveBeenCalled();
+    });
+
+    it.each(["eager read", "initial model", "initial read", "followup", "added read", "synthesis"].flatMap((stage) =>
       ["daily", "monthly", "workspace"].map((kind) => [stage, kind] as const),
     ))("preserves the canonical %s %s budget error", async (stage, kind) => {
       const { CatalogBudgetError, WorkspaceModelBudgetError } = await import("@corgtex/models");
       const error = kind === "workspace"
         ? new WorkspaceModelBudgetError("BUDGET_EXCEEDED", "Workspace model budget reached.")
         : new CatalogBudgetError(kind === "daily" ? "CATALOG_DAILY_LIMIT_EXCEEDED" : "CATALOG_MONTHLY_BUDGET_EXCEEDED", "Credential model budget reached.");
-      script([{ content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] }]);
+      if (stage !== "initial model") script([{ content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] }]);
       if (stage === "added read" || stage === "synthesis") {
         script([{ content: "", tool_calls: [toolCall("second", "search_brain", { query: "details" })] }]);
       }
@@ -579,10 +634,10 @@ describe("processConversationTurn", () => {
       } else chatMock.mockRejectedValueOnce(error);
       const actor = { kind: "agent", authProvider: "credential", credentialId: "credential-1", catalogItemId: "catalog-1", workspaceIds: ["ws-1"], scopes: ["brain:read"] } as any;
       await expect(run({ ...turnContext(), actor })).rejects.toBe(error);
-      expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(stage === "eager read" ? 0 : stage === "initial read" ? 1 : stage === "synthesis" ? 3 : 2);
-      expect(searchIndexedKnowledge).toHaveBeenCalledTimes(stage === "eager read" ? 1 : stage === "initial read" || stage === "followup" ? 2 : 3);
+      expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(stage === "eager read" ? 0 : stage === "initial model" || stage === "initial read" ? 1 : stage === "synthesis" ? 3 : 2);
+      expect(searchIndexedKnowledge).toHaveBeenCalledTimes(stage === "eager read" || stage === "initial model" ? 1 : stage === "initial read" || stage === "followup" ? 2 : 3);
       expect(storeAgentMemoryMock).not.toHaveBeenCalled();
-      if (streaming && (stage === "followup" || stage === "synthesis")) expect(closed).toHaveBeenCalledOnce();
+      if (streaming && (stage === "initial model" || stage === "followup" || stage === "synthesis")) expect(closed).toHaveBeenCalledOnce();
     });
 
     it.each(["daily", "monthly"])("uses the canonical credential %s gate when chat 2 spends the remaining allowance", async (kind) => {
