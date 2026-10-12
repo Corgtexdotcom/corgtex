@@ -76,7 +76,13 @@ vi.mock("@corgtex/shared", () => ({
     conversationTurn: {
       findMany: conversationTurnFindManyMock,
     },
-    auditLog: { findFirst: vi.fn().mockResolvedValue(null), update: vi.fn() }, tension: { findMany: vi.fn().mockResolvedValue([]) }, action: { findMany: vi.fn().mockResolvedValue([]) },
+    auditLog: { findFirst: vi.fn().mockResolvedValue(null), update: vi.fn() },
+    tension: { findMany: vi.fn().mockResolvedValue([]), count: vi.fn().mockResolvedValue(0) },
+    action: { findMany: vi.fn().mockResolvedValue([]), count: vi.fn().mockResolvedValue(0) },
+    proposal: { findMany: vi.fn().mockResolvedValue([]), count: vi.fn().mockResolvedValue(0) },
+    goal: { count: vi.fn().mockResolvedValue(0) },
+    member: { count: vi.fn().mockResolvedValue(0) },
+    circle: { count: vi.fn().mockResolvedValue(0) },
     conversationPendingOperation: {
       create: conversationPendingOperationCreateMock,
       count: conversationPendingOperationCountMock,
@@ -530,6 +536,52 @@ describe("processConversationTurn", () => {
       take: 20,
     }));
     expect(result.assistantMessage).toBe("The active quarterly goal is Launch goal.");
+  });
+
+  it.each(["turn", "stream"] as const)("keeps the authenticated human actor for every workspace reader in the %s path", async (path) => {
+    const actor = testUserActor();
+    const { prisma } = await import("@corgtex/shared");
+    const { requireWorkspaceMembership } = await import("@corgtex/domain");
+    const injected = {
+      workspaceId: "foreign-workspace", userId: "other-user",
+      actor: { kind: "agent", workspaceIds: ["foreign-workspace"] },
+      assigneeId: "other-member", status: "DRAFT",
+    };
+    const calls = [
+      toolCall("read-actions", "query_actions", injected),
+      toolCall("read-tensions", "query_tensions", injected),
+      toolCall("read-proposals", "query_proposals", injected),
+      toolCall("read-overview", "get_workspace_overview", injected),
+    ];
+    if (path === "turn") {
+      chatMock.mockResolvedValueOnce({ content: "", tool_calls: calls })
+        .mockResolvedValueOnce({ content: "Read results." });
+      const { processConversationTurn } = await import("./conversation");
+      await processConversationTurn(turnContext(actor));
+    } else {
+      chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: calls }))
+        .mockReturnValueOnce(streamResponse(["Read results."], { content: "Read results." }));
+      const { processConversationTurnStream } = await import("./conversation");
+      await collectConversationStream(processConversationTurnStream(turnContext(actor)));
+    }
+    expect(requireWorkspaceMembership).toHaveBeenCalledTimes(5);
+    for (const [params] of vi.mocked(requireWorkspaceMembership).mock.calls) {
+      expect(params.actor).toBe(actor);
+      expect(params.workspaceId).toBe("ws-1");
+    }
+    const visibility = {
+      workspaceId: "ws-1", archivedAt: null,
+      OR: [{ isPrivate: false }, { isPrivate: true, status: "DRAFT", authorUserId: actor.user.id }],
+    };
+    for (const model of [prisma.action, prisma.tension]) {
+      expect(model.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: { ...visibility, status: "DRAFT", assigneeMemberId: "other-member" },
+      }));
+      expect(model.count).toHaveBeenCalledWith({ where: { ...visibility, status: "OPEN" } });
+    }
+    expect(prisma.proposal.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { ...visibility, status: "DRAFT" } }));
+    expect(prisma.proposal.count).toHaveBeenCalledWith({ where: { ...visibility, status: { in: ["DRAFT", "OPEN"] } } });
+    expect(prisma.goal.count).toHaveBeenCalledWith({ where: { ...visibility, status: { notIn: ["DRAFT", "ABANDONED"] } } });
   });
 
   it("does not fall back to a bootstrap agent when no authenticated actor is provided", async () => {
