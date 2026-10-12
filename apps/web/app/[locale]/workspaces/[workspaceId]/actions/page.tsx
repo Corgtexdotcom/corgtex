@@ -51,6 +51,7 @@ import {
 } from "@/lib/work-item-view";
 import { formatWorkItemPriority, normalizeWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
 import { ActionPagination } from "./ActionPagination";
+import { appendActionReturnTo, buildActionListReturnHref } from "./return-context";
 
 export const dynamic = "force-dynamic";
 
@@ -221,6 +222,23 @@ export default async function ActionsPage({
   const actionColumnStatuses: ActionColumnStatus[] = ["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"];
   const visibleActionColumnIds = normalizeVisibleWorkItemColumns(resolvedSearch.columns, actionColumnStatuses);
   const allActionColumnsVisible = visibleActionColumnIds.length === actionColumnStatuses.length;
+  const listReturnHref = buildActionListReturnHref(workspaceId, buildActionQuery({
+    view,
+    status: statusQuery,
+    sort: view !== "kanban" ? sort : undefined,
+    circleIds,
+    assigneeMemberIds: selectedAssigneeIds,
+    memberIds,
+    group: boardGroupQuery,
+    columns: view === "kanban" && boardGroup === "status" && !allActionColumnsVisible ? visibleActionColumnIds : undefined,
+    page,
+  }));
+  const actionDetailHref = (actionId: string) => appendActionReturnTo(
+    `/workspaces/${workspaceId}/actions/${actionId}`, listReturnHref,
+  );
+  const actionEditHref = (actionId: string) => appendActionReturnTo(
+    `/workspaces/${workspaceId}/actions/${actionId}/edit`, listReturnHref,
+  );
   const buildActionColumnHref = (status: ActionColumnStatus, queryStatus: ActionStatusQuery = statusQuery) => buildActionQuery({
     view: "kanban",
     status: queryStatus,
@@ -486,7 +504,7 @@ export default async function ActionsPage({
     }
     if (canEditContent) {
       moreItems.push(
-        <a key="edit" className="secondary small" href={`/workspaces/${workspaceId}/actions/${action.id}/edit`}>
+        <a key="edit" className="secondary small" href={actionEditHref(action.id)}>
           {t("btnEdit")}
         </a>,
       );
@@ -589,7 +607,7 @@ export default async function ActionsPage({
   }
 
   function renderActionCard(action: ActionListItem, compact = false) {
-    const detailHref = `/workspaces/${workspaceId}/actions/${action.id}`;
+    const detailHref = actionDetailHref(action.id);
     const statusMeta = ACTION_STATUS_META[action.status as keyof typeof ACTION_STATUS_META] ?? ACTION_STATUS_META.OPEN;
     const authorName = action.author?.displayName || action.author?.email || "Unknown";
     const assigneeName = action.assigneeMember?.user?.displayName || action.assigneeMember?.user?.email;
@@ -703,7 +721,7 @@ export default async function ActionsPage({
   ];
 
   function actionTableRow(action: ActionListItem): WorkItemTableRow {
-    const detailHref = `/workspaces/${workspaceId}/actions/${action.id}`;
+    const detailHref = actionDetailHref(action.id);
     const statusMeta = ACTION_STATUS_META[action.status as keyof typeof ACTION_STATUS_META] ?? ACTION_STATUS_META.OPEN;
     const authorName = action.author?.displayName || action.author?.email || "Unknown";
     const assigneeName = action.assigneeMember?.user?.displayName || action.assigneeMember?.user?.email;

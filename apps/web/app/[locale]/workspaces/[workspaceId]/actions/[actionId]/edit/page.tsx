@@ -7,15 +7,20 @@ import { UnavailableItemStatus } from "@/lib/components/UnavailableItemStatus";
 import { editActionAction } from "../../../actions";
 import { getTranslations } from "next-intl/server";
 import type { WorkItemPriorityLabels } from "@/lib/work-item-priority";
+import { appendActionReturnTo, readActionListReturnHref } from "../../return-context";
 
 export const dynamic = "force-dynamic";
 
 export default async function ActionEditPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ workspaceId: string; actionId: string }>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { workspaceId, actionId } = await params;
+  const returnTo = readActionListReturnHref(workspaceId, (await searchParams)?.returnTo);
+  const backHref = returnTo ?? `/workspaces/${workspaceId}/actions`;
   const actor = await requirePageActor();
   const t = await getTranslations("actions");
   const tCommon = await getTranslations("common");
@@ -40,7 +45,7 @@ export default async function ActionEditPage({
           entityType="Action"
           entityId={actionId}
           archiveRecord={canShowArchiveRecord ? archiveRecord : null}
-          backHref={`/workspaces/${workspaceId}/actions`}
+          backHref={backHref}
           backLabel={t("backToActions")}
         />
       );
@@ -56,7 +61,7 @@ export default async function ActionEditPage({
   const canEditContent = !isDemo && (action.status === "DRAFT"
     ? canManage
     : !isArchived && (action.status === "OPEN" || action.status === "IN_PROGRESS") && canCollaborateOnSubmittedAction);
-  const detailHref = `/workspaces/${workspaceId}/actions/${action.id}`;
+  const detailHref = appendActionReturnTo(`/workspaces/${workspaceId}/actions/${action.id}`, returnTo);
   const members = await listHumanMembers(workspaceId);
   const actionMembers = members.map((member) => ({
     id: member.id,
