@@ -12,6 +12,7 @@ const listGoalsMock = vi.fn();
 const listProposalsMock = vi.fn();
 const listTensionsMock = vi.fn();
 const getGoalMock = vi.fn();
+const getProposalMock = vi.fn();
 const updateActionMock = vi.fn();
 const updateGoalMock = vi.fn();
 const updateProposalMock = vi.fn();
@@ -183,6 +184,7 @@ vi.mock("@corgtex/domain", async () => {
   listExternalMcpConnections: listExternalMcpConnectionsMock,
   listGoals: listGoalsMock,
   getGoal: getGoalMock,
+  getProposal: getProposalMock,
   createGoal: createGoalMock,
   updateGoal: updateGoalMock,
   deleteGoal: deleteGoalMock,
@@ -380,6 +382,7 @@ describe("createCorgtexMcpServer", () => {
       }]),
     ));
     getGoalMock.mockReset().mockResolvedValue({ id: "goal-1", cadence: "QUARTERLY" });
+    getProposalMock.mockReset().mockResolvedValue(null);
     updateActionMock.mockReset().mockResolvedValue({
       id: "action-1",
       status: "OPEN",
@@ -2412,7 +2415,7 @@ describe("createCorgtexMcpServer", () => {
         assigneeMember: { id: "member-responsible", user: { displayName: "Responsible", email: "responsible@example.test" } },
         raisedByMember: { id: "member-raiser", user: { displayName: "Raiser", email: "raiser@example.test" } },
       } as never);
-    vi.mocked(prisma.proposal.findFirst)
+    getProposalMock
       .mockResolvedValueOnce({
         id: "proposal-1",
         title: "Clarify ownership",
@@ -2787,9 +2790,7 @@ describe("createCorgtexMcpServer", () => {
 
   it("omits ownerMemberId from MCP create_proposal input so the domain default applies", async () => {
     const { createCorgtexMcpServer } = await import("./server");
-    const { prisma } = await import("@corgtex/shared");
-
-    vi.mocked(prisma.proposal.findFirst).mockResolvedValueOnce({
+    getProposalMock.mockResolvedValueOnce({
       id: "proposal-1",
       title: "Clarify ownership",
       status: "DRAFT",
@@ -2826,7 +2827,7 @@ describe("createCorgtexMcpServer", () => {
     const { requireScope } = await import("./auth");
     const { prisma } = await import("@corgtex/shared");
 
-    vi.mocked(prisma.proposal.findFirst).mockResolvedValueOnce({
+    getProposalMock.mockResolvedValueOnce({
       id: "proposal-1",
       title: "Clarify ownership",
       status: "DRAFT",
@@ -2853,17 +2854,8 @@ describe("createCorgtexMcpServer", () => {
     });
 
     expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "proposals:read");
-    expect(prisma.proposal.findFirst).toHaveBeenCalledWith(expect.objectContaining({
-      include: expect.objectContaining({
-        adviceProcess: {
-          include: {
-            requests: {
-              select: { status: true },
-            },
-          },
-        },
-      }),
-    }));
+    expect(getProposalMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }),
+      { workspaceId: "ws-1", proposalId: "proposal-1" });
     expect(JSON.parse(response.content[0].text)).toMatchObject({
       adviceRequestCount: 2,
       activeAdviceRequestCount: 1,
@@ -3437,6 +3429,7 @@ describe("createCorgtexMcpServer", () => {
         expect(tool.inputSchema.safeParse({ ...testCase.args, expectedVersion }).success).toBe(false);
       }
       testCase.domainFn.mockClear().mockResolvedValueOnce({ id: "id-1", version: 3 });
+      if (testCase.name === "update_proposal") getProposalMock.mockResolvedValueOnce({ id: "id-1", version: 3 });
       recordAuditMock.mockClear();
       const success = await tool.handler(testCase.args);
       expect(testCase.domainFn).toHaveBeenCalledWith(expect.anything(), expect.objectContaining(testCase.args));

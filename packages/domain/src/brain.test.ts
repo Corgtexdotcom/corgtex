@@ -47,6 +47,7 @@ const appendEvents = vi.fn();
 const resolveKnowledgeAccessDomains = vi.fn();
 const archiveWorkspaceArtifact = vi.fn();
 const requestBrainSourceRemoval = vi.fn();
+const readableArtifactIds = vi.fn(async (_actor, _workspaceId, _kind, records) => new Set(records.map((record: { id: string }) => record.id)));
 
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
@@ -79,7 +80,7 @@ vi.mock("./source-lineage", () => ({
   recordArtifactInputLineage: vi.fn(),
   copyArtifactInputLineage: vi.fn().mockResolvedValue(true),
   currentArtifactInputRoots: vi.fn().mockResolvedValue([]),
-  readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) => new Set(records.map((record: { id: string }) => record.id))),
+  readableArtifactIds,
 }));
 
 const ownerActor = {
@@ -105,6 +106,8 @@ describe("Brain article draft lifecycle", () => {
     prismaMock.workspacePermalink.upsert.mockResolvedValue({});
     prismaMock.auditLog.create.mockResolvedValue({});
     prismaMock.event.createMany.mockResolvedValue({ count: 1 });
+    readableArtifactIds.mockImplementation(async (_actor, _workspaceId, _kind, records) =>
+      new Set(records.map((record: { id: string }) => record.id)));
   });
 
   it("lets workspace admins list private draft articles", async () => {
@@ -281,6 +284,21 @@ describe("Brain article draft lifecycle", () => {
         publishedAt: null,
       },
     });
+  });
+
+  it("withholds revoked source lineage before publishing or returning a draft", async () => {
+    const { publishArticle, returnArticleToDraft } = await import("./brain");
+    readableArtifactIds.mockResolvedValue(new Set());
+    const article = { id: "article-1", workspaceId: "ws-1", slug: "notes", title: "Restricted notes",
+      bodyMd: "Restricted body", authority: "DRAFT", isPrivate: true, ownerMemberId: "mem-1",
+      archivedAt: null, ownerMember: { id: "mem-1", userId: "user-1" } };
+    prismaMock.brainArticle.findUnique.mockResolvedValue(article);
+    await expect(publishArticle(ownerActor, { workspaceId: "ws-1", slug: "notes" }))
+      .rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+    prismaMock.brainArticle.findUnique.mockResolvedValue({ ...article, authority: "AUTHORITATIVE", isPrivate: false });
+    await expect(returnArticleToDraft(ownerActor, { workspaceId: "ws-1", slug: "notes" }))
+      .rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+    expect(prismaMock.brainArticle.update).not.toHaveBeenCalled();
   });
 
   it("does not persist the synthetic global-operator membership as a private article owner", async () => {

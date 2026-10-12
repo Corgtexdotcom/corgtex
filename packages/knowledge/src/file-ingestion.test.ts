@@ -23,6 +23,9 @@ vi.mock("./pptx-extraction", async (importOriginal) => {
 });
 
 vi.mock("./retrieval", () => ({ invalidateKnowledgeCache: vi.fn() }));
+vi.mock("../../domain/src/source-lineage", () => ({
+  currentArtifactInputRoots: vi.fn().mockResolvedValue(null),
+}));
 
 vi.mock("@corgtex/shared", () => ({
   prisma: {
@@ -648,9 +651,7 @@ describe("file-ingestion", () => {
       where: expect.objectContaining({ metadata: { path: ["documentId"], equals: "doc-existing" } }),
     }));
     expect(txObj.brainArticle.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ OR: expect.arrayContaining([
-        { sourceIds: { hasSome: ["source-archived", "source-existing"] } },
-      ]) }),
+      where: { workspaceId: "ws_1", archivedAt: null },
     }));
     expect(archiveWorkspaceArtifact).not.toHaveBeenCalled();
     expect(txObj.knowledgeChunk.deleteMany).toHaveBeenCalledWith({

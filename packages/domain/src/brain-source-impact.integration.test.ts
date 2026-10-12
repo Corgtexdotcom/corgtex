@@ -73,7 +73,7 @@ describe("Brain source archive impact", () => {
     })).rejects.toMatchObject({ code: "SOURCE_CHANGED", status: 409 });
     await expect(updateArticle(editor, {
       workspaceId: workspace.id, slug: legacyArticle.slug, sourceIds: [source.id, unlinked.id],
-    })).rejects.toMatchObject({ code: "SOURCE_CHANGED", status: 409 });
+    })).rejects.toMatchObject({ code: "NOT_FOUND", status: 404 });
   });
 
   it("serializes article links with source archive before document archive", async () => {

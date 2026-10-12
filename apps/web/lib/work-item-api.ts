@@ -1,5 +1,6 @@
 import {
   coerceWorkItemPriorityInput,
+  getProposal,
   loadAdviceRequestCountSummaries,
   normalizeActionWorkItem,
   normalizeGoalWorkItem,
@@ -9,6 +10,7 @@ import {
   workItemUserDisplayName,
 } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
+import type { AppActor } from "@corgtex/shared";
 
 type UserLike = {
   displayName?: string | null;
@@ -117,18 +119,6 @@ export async function loadTensionWorkItemResponse(workspaceId: string, tensionId
   };
 }
 
-export async function loadProposalWorkItemResponse(workspaceId: string, proposalId: string) {
-  return prisma.proposal.findFirst({
-    where: { id: proposalId, workspaceId },
-    include: {
-      ownerMember: { include: memberUserInclude },
-      adviceProcess: {
-        include: {
-          requests: {
-            select: { status: true },
-          },
-        },
-      },
-    },
-  });
+export async function loadProposalWorkItemResponse(actor: AppActor, workspaceId: string, proposalId: string) {
+  return getProposal(actor, { workspaceId, proposalId });
 }

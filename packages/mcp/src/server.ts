@@ -175,6 +175,7 @@ import type { AgentScope } from "@corgtex/domain";
 import { fetchReadableKnowledgeChunk, searchIndexedKnowledge } from "@corgtex/knowledge";
 import { processConversationTurn } from "@corgtex/agents";
 import { prisma, env, toInputJson } from "@corgtex/shared";
+import type { AppActor } from "@corgtex/shared";
 import type { McpSessionContext } from "./auth";
 import { requireScope } from "./auth";
 
@@ -446,20 +447,13 @@ async function loadTensionWorkItemResponse(workspaceId: string, tensionId: strin
   };
 }
 
-async function loadProposalWorkItemResponse(workspaceId: string, proposalId: string, fallback: any) {
-  return await prisma.proposal.findFirst({
-    where: { id: proposalId, workspaceId },
-    include: {
-      ownerMember: { include: memberUserInclude },
-      adviceProcess: {
-        include: {
-          requests: {
-            select: { status: true },
-          },
-        },
-      },
-    },
-  }) ?? fallback;
+async function loadProposalWorkItemResponse(actor: AppActor, workspaceId: string, proposalId: string) {
+  try {
+    return await getProposal(actor, { workspaceId, proposalId });
+  } catch (error) {
+    if (error instanceof AppError && error.status === 404) return null;
+    throw error;
+  }
 }
 
 function structuredJsonResult(value: Record<string, unknown>) {
@@ -2567,7 +2561,8 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           authorMemberId: params.authorMemberId,
           duplicateGuard: duplicateGuardOptionsFromParams(params),
         });
-        const proposalForResponse = await loadProposalWorkItemResponse(workspaceId, proposal.id, proposal);
+        const proposalForResponse = await loadProposalWorkItemResponse(actor, workspaceId, proposal.id);
+        if (!proposalForResponse) return jsonResult({ id: proposal.id, status: "WITHHELD" });
         const permanent = await permanentUrl(workspaceId, "Proposal", proposal.id);
         const item = normalizeProposalWorkItem(proposalForResponse);
         return jsonResult({
@@ -2632,7 +2627,8 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         }
         throw error;
       }
-      const proposalForResponse = await loadProposalWorkItemResponse(workspaceId, updated.id, updated);
+      const proposalForResponse = await loadProposalWorkItemResponse(actor, workspaceId, updated.id);
+      if (!proposalForResponse) return jsonResult({ id: updated.id, status: "WITHHELD" });
       const item = normalizeProposalWorkItem(proposalForResponse);
       return jsonResult({
         id: item.id,

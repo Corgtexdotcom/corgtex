@@ -64,6 +64,7 @@ const { prismaMock, storageDeleteMock, appendEventsMock } = vi.hoisted(() => {
       delete: vi.fn(),
     },
     brainArticle: { findFirst: vi.fn(), findMany: vi.fn(), update: vi.fn() },
+    artifactInputLineage: { findFirst: vi.fn().mockResolvedValue(null), findMany: vi.fn().mockResolvedValue([]) },
     financeImportBatch: {
       findFirst: vi.fn(),
     },

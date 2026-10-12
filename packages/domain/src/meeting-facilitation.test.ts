@@ -38,6 +38,7 @@ const {
     action: { findMany: vi.fn() },
     proposal: { findMany: vi.fn() },
     meetingInsight: { findMany: vi.fn() },
+    knowledgeChunk: { findMany: vi.fn() },
     deliberationEntry: { findMany: vi.fn() },
   },
   defaultModelGatewayMock: {
@@ -63,6 +64,12 @@ vi.mock("@corgtex/models", () => ({
 
 vi.mock("./auth", () => ({
   requireWorkspaceMembership: vi.fn(),
+}));
+
+vi.mock("./source-lineage", () => ({
+  lineageContentFingerprint: vi.fn(() => "fingerprint"),
+  readableArtifactIds: vi.fn(async (_actor: unknown, _workspaceId: string, _kind: string,
+    rows: Array<{ id: string }>) => new Set(rows.map((row) => row.id))),
 }));
 
 vi.mock("./communication", () => ({
@@ -92,6 +99,7 @@ describe("meeting facilitation", () => {
     prismaMock.action.findMany.mockReset().mockResolvedValue([]);
     prismaMock.proposal.findMany.mockReset().mockResolvedValue([]);
     prismaMock.meetingInsight.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.knowledgeChunk.findMany.mockReset().mockResolvedValue([]);
     prismaMock.deliberationEntry.findMany.mockReset().mockResolvedValue([]);
     prismaMock.meetingFollowUpReview.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.meetingFollowUpReview.upsert.mockReset().mockResolvedValue({ id: "review-1" });

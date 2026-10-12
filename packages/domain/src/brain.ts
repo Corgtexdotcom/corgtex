@@ -1129,6 +1129,8 @@ export async function publishArticle(actor: AppActor, params: {
     });
 
     invariant(article && !article.archivedAt, 404, "NOT_FOUND", "Active article not found.");
+    invariant((await readableArtifactIds(actor, params.workspaceId, "BrainArticle", [article], tx)).has(article.id),
+      404, "NOT_FOUND", "Active article not found.");
     invariant(article.isPrivate, 400, "INVALID_STATE", "Article is already public.");
     invariant(article.authority === "DRAFT", 400, "INVALID_STATE", "Only draft Brain articles can be opened.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: article, resolvedMembership: membership });
@@ -1203,6 +1205,8 @@ export async function returnArticleToDraft(actor: AppActor, params: {
     });
 
     invariant(article && !article.archivedAt, 404, "NOT_FOUND", "Article not found.");
+    invariant((await readableArtifactIds(actor, params.workspaceId, "BrainArticle", [article], tx)).has(article.id),
+      404, "NOT_FOUND", "Article not found.");
     invariant(!article.isPrivate, 400, "INVALID_STATE", "Only public Brain articles can be returned to draft.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: article, resolvedMembership: membership });
     const priorRoots = await currentArtifactInputRoots(tx, params.workspaceId,

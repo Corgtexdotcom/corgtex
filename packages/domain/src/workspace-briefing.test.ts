@@ -20,6 +20,7 @@ const {
     workspaceBriefing: {
       upsert: vi.fn(),
       findFirst: vi.fn(),
+      findMany: vi.fn(),
     },
   },
   requireWorkspaceMembershipMock: vi.fn(),
@@ -33,6 +34,9 @@ vi.mock("@corgtex/shared", () => ({
 vi.mock("./auth", () => ({
   requireWorkspaceMembership: requireWorkspaceMembershipMock,
 }));
+
+const readableArtifactIdsMock = vi.hoisted(() => vi.fn());
+vi.mock("./source-lineage", () => ({ readableArtifactIds: readableArtifactIdsMock }));
 
 function baseCandidate(overrides: Partial<WorkspaceBriefingCandidate>): WorkspaceBriefingCandidate {
   return {
@@ -72,6 +76,22 @@ describe("workspace briefing", () => {
     }
     prismaMock.workspaceBriefing.upsert.mockImplementation(async ({ create }: any) => ({ id: "briefing-1", ...create }));
     prismaMock.workspaceBriefing.findFirst.mockResolvedValue(null);
+    prismaMock.workspaceBriefing.findMany.mockResolvedValue([]);
+    readableArtifactIdsMock.mockImplementation(async (_actor: unknown, _workspaceId: string, _kind: string,
+      rows: Array<{ id: string }>) => new Set(rows.map((row) => row.id)));
+  });
+
+  it("returns only a briefing whose complete inputs are currently readable", async () => {
+    const { getLatestWorkspaceBriefing } = await import("./workspace-briefing");
+    prismaMock.workspaceBriefing.findMany.mockResolvedValueOnce([
+      { id: "hidden", workspaceId: "ws-1", title: "Payroll" },
+      { id: "safe", workspaceId: "ws-1", title: "Public update" },
+    ]);
+    readableArtifactIdsMock.mockResolvedValueOnce(new Set(["safe"]));
+
+    const result = await getLatestWorkspaceBriefing({ workspaceId: "ws-1",
+      actor: { kind: "user", user: { id: "user-1" } } as any });
+    expect(result?.id).toBe("safe");
   });
 
   it("ranks actionable, time-sensitive candidates as lead briefing items", async () => {

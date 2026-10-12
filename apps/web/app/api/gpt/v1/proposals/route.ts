@@ -85,7 +85,7 @@ export async function POST(request: NextRequest) {
           ...(ownerMemberId.value !== undefined ? { ownerMemberId: ownerMemberId.value } : {}),
           priority: workItemPriorityFromBody(body),
         });
-    const proposalForResponse = await loadProposalWorkItemResponse(workspaceId, proposal.id) ?? proposal;
+    const proposalForResponse = await loadProposalWorkItemResponse(actor, workspaceId, proposal.id);
     const item = serializeProposalWorkItem(proposalForResponse);
 
     const origin = env.APP_URL.replace(/\/$/, "");
