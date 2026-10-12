@@ -1,8 +1,8 @@
 import { prisma } from "@corgtex/shared";
 import type { ModelTool } from "@corgtex/models";
 import type { AppActor } from "@corgtex/shared";
-import { listGoals, privacyFilter, requireWorkspaceMembership } from "@corgtex/domain";
-import type { TensionStatus, ActionStatus, ProposalStatus, GoalCadence, GoalLevel, GoalStatus } from "@prisma/client";
+import { AppError, listGoals, privacyFilter, requireWorkspaceMembership } from "@corgtex/domain";
+import type { Prisma, TensionStatus, ActionStatus, ProposalStatus, GoalCadence, GoalLevel, GoalStatus } from "@prisma/client";
 
 export const getWorkspaceOverviewTool: ModelTool = {
   type: "function",
@@ -90,30 +90,31 @@ export const queryGoalsTool: ModelTool = {
   },
 };
 
-export async function getWorkspaceOverview(workspaceId: string) {
+async function workspaceReaderWhere(workspaceId: string, actor?: AppActor) {
+  if (!actor) {
+    throw new AppError(401, "AUTH_REQUIRED", "Authenticated actor is required for workspace readers.");
+  }
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  return { workspaceId, archivedAt: null, ...privacyFilter(actor, membership) };
+}
+
+export async function getWorkspaceOverview(workspaceId: string, actor?: AppActor) {
+  const where = await workspaceReaderWhere(workspaceId, actor);
   const [memberCount, circleCount, openTensions, openActions, activeProposals, activeGoals] = await Promise.all([
     prisma.member.count({ where: { workspaceId, isActive: true } }),
     prisma.circle.count({ where: { workspaceId } }),
-    prisma.tension.count({ where: { workspaceId, status: "OPEN" } }),
-    prisma.action.count({ where: { workspaceId, status: "OPEN" } }),
-    prisma.proposal.count({ where: { workspaceId, status: { in: ["DRAFT", "OPEN"] } } }),
-    prisma.goal.count({ where: { workspaceId, archivedAt: null, status: { notIn: ["DRAFT", "ABANDONED"] } } }),
+    prisma.tension.count({ where: { ...where, status: "OPEN" } }),
+    prisma.action.count({ where: { ...where, status: "OPEN" } }),
+    prisma.proposal.count({ where: { ...where, status: { in: ["DRAFT", "OPEN"] } } }),
+    prisma.goal.count({ where: { ...where, status: { notIn: ["DRAFT", "ABANDONED"] } } }),
   ]);
 
   return { memberCount, circleCount, openTensions, openActions, activeProposals, activeGoals };
 }
 
 export async function queryTensions(workspaceId: string, status?: TensionStatus, assigneeId?: string, tensionId?: string, actor?: AppActor) {
-  const where: any = { workspaceId };
-  if (tensionId) {
-    where.id = tensionId;
-    if (actor) {
-      const membership = await requireWorkspaceMembership({ actor, workspaceId });
-      Object.assign(where, privacyFilter(actor, membership));
-    } else {
-      where.isPrivate = false;
-    }
-  }
+  const where: Prisma.TensionWhereInput = await workspaceReaderWhere(workspaceId, actor);
+  if (tensionId) where.id = tensionId;
   if (status) where.status = status;
   if (assigneeId) where.assigneeMemberId = assigneeId;
 
@@ -121,10 +122,17 @@ export async function queryTensions(workspaceId: string, status?: TensionStatus,
     where,
     take: 20,
     orderBy: { createdAt: "desc" },
-    include: {
+    select: {
+      id: true,
+      version: true,
+      title: true,
+      status: true,
+      priority: true,
+      bodyMd: true,
+      createdAt: true,
       author: { select: { displayName: true } },
-      assigneeMember: { include: { user: { select: { displayName: true } } } },
-      raisedByMember: { include: { user: { select: { displayName: true } } } },
+      assigneeMember: { select: { user: { select: { displayName: true } } } },
+      raisedByMember: { select: { user: { select: { displayName: true } } } },
     },
   });
 
@@ -143,16 +151,8 @@ export async function queryTensions(workspaceId: string, status?: TensionStatus,
 }
 
 export async function queryActions(workspaceId: string, status?: ActionStatus, assigneeId?: string, actionId?: string, actor?: AppActor) {
-  const where: any = { workspaceId };
-  if (actionId) {
-    where.id = actionId;
-    if (actor) {
-      const membership = await requireWorkspaceMembership({ actor, workspaceId });
-      Object.assign(where, privacyFilter(actor, membership));
-    } else {
-      where.isPrivate = false;
-    }
-  }
+  const where: Prisma.ActionWhereInput = await workspaceReaderWhere(workspaceId, actor);
+  if (actionId) where.id = actionId;
   if (status) where.status = status;
   if (assigneeId) where.assigneeMemberId = assigneeId;
 
@@ -160,7 +160,17 @@ export async function queryActions(workspaceId: string, status?: ActionStatus, a
     where,
     take: 20,
     orderBy: { createdAt: "desc" },
-    include: { author: { select: { displayName: true } }, assigneeMember: { include: { user: { select: { displayName: true } } } } },
+    select: {
+      id: true,
+      version: true,
+      title: true,
+      status: true,
+      bodyMd: true,
+      dueAt: true,
+      createdAt: true,
+      author: { select: { displayName: true } },
+      assigneeMember: { select: { user: { select: { displayName: true } } } },
+    },
   });
 
   return actions.map(a => ({
@@ -176,15 +186,21 @@ export async function queryActions(workspaceId: string, status?: ActionStatus, a
   }));
 }
 
-export async function queryProposals(workspaceId: string, status?: ProposalStatus) {
-  const where: any = { workspaceId };
+export async function queryProposals(workspaceId: string, status?: ProposalStatus, actor?: AppActor) {
+  const where: Prisma.ProposalWhereInput = await workspaceReaderWhere(workspaceId, actor);
   if (status) where.status = status;
 
   const proposals = await prisma.proposal.findMany({
     where,
     take: 20,
     orderBy: { createdAt: "desc" },
-    include: { author: { select: { displayName: true } } },
+    select: {
+      id: true,
+      title: true,
+      status: true,
+      createdAt: true,
+      author: { select: { displayName: true } },
+    },
   });
 
   return proposals.map(p => ({
