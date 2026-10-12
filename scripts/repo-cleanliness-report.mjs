@@ -89,3 +89,7 @@ console.log(`Repo cleanliness reports written to ${artifactDir}`);
 for (const report of reports) {
   console.log(`- ${report.name}: exit=${report.exitCode ?? report.signal} ${report.output}`);
 }
+
+if (mode === "locals") {
+  process.exitCode = reports[0].exitCode ?? 1;
+}

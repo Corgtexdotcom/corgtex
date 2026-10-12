@@ -97,7 +97,7 @@
     "check:seed-fixtures": "node scripts/check-seed-fixtures.mjs",
     "meeting-recorder:cleanup": "node scripts/meeting-recorder-cleanup.mjs",
     "knowledge:azure-search": "tsx scripts/azure-knowledge-search.ts",
-    "check": "npm run lint && npm run typecheck && npm run prisma:validate && npm run check:public-docs && npm run check:private-boundary && npm run contrast-audit"
+    "check": "npm run lint && npm run typecheck && npm run check:unused:locals && npm run prisma:validate && npm run check:public-docs && npm run check:private-boundary && npm run contrast-audit"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
