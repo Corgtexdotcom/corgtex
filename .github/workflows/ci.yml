@@ -150,6 +150,8 @@ jobs:
 
       - run: npm run typecheck
 
+      - run: npm run check:unused:locals
+
       - run: npm run prisma:validate
 
       - run: npm run check:private-boundary
