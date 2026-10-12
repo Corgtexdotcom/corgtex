@@ -484,8 +484,8 @@ export async function listProposals(actor: AppActor, workspaceId: string, opts?:
           },
         },
         circle: { select: { id: true, name: true } },
-        tensions: { select: { id: true, title: true, status: true } },
-        actions: { select: { id: true, title: true, status: true } },
+        tensions: { where: privacyFilter(actor, membership), select: { id: true, title: true, status: true } },
+        actions: { where: privacyFilter(actor, membership), select: { id: true, title: true, status: true } },
         adviceProcess: {
           include: {
             requests: {
@@ -526,8 +526,8 @@ export async function getProposal(actor: AppActor, params: {
         },
       },
       circle: { select: { id: true, name: true } },
-      tensions: { select: { id: true, title: true, status: true } },
-      actions: { select: { id: true, title: true, status: true } },
+      tensions: { where: privacyFilter(actor, membership), select: { id: true, title: true, status: true } },
+      actions: { where: privacyFilter(actor, membership), select: { id: true, title: true, status: true } },
       adviceProcess: {
         include: {
           requests: {

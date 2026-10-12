@@ -1510,6 +1510,14 @@ describe("listProposals", () => {
         { id: "desc" },
       ],
       include: expect.objectContaining({
+        tensions: expect.objectContaining({ where: { OR: [
+          { isPrivate: false },
+          { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
+        ] } }),
+        actions: expect.objectContaining({ where: { OR: [
+          { isPrivate: false },
+          { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
+        ] } }),
         adviceProcess: {
           include: {
             requests: {
