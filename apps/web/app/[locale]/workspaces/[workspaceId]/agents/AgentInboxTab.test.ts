@@ -77,7 +77,7 @@ describe("AgentInboxTab", () => {
     "hides source details and reply when the proposal is %s",
     async () => {
       getProposalMock.mockRejectedValue(new Error("SYNTHETIC_PRIVATE_TRACE"));
-      const html = await htmlFor(run({ steps: [{ id: "synthetic-step", outputJson: { question: "Private question" } }] }));
+      const html = await htmlFor(run({ steps: [{ id: "synthetic-step", name: "approval-checkpoint", status: "PENDING", outputJson: { question: "Private question" } }] }));
       expect(html).toContain("missing the context needed for a safe reply");
       expect(html).not.toContain("Policy follow-up suggested.");
       expect(html).not.toContain("Private question");
@@ -99,7 +99,7 @@ describe("AgentInboxTab", () => {
   });
 
   it("preserves the existing reply form for an explicit question with a visible proposal", async () => {
-    const html = await htmlFor(run({ steps: [{ id: "synthetic-step", outputJson: { question: "Which policy change should be reviewed?" } }] }));
+    const html = await htmlFor(run({ steps: [{ id: "synthetic-step", name: "approval-checkpoint", status: "PENDING", outputJson: { question: "Which policy change should be reviewed?" } }] }));
     expect(html).toContain("Which policy change should be reviewed?");
     expect(html).toContain("Reply to the agent");
     expect(html).toContain('name="stepId" value="synthetic-step"');
@@ -107,19 +107,38 @@ describe("AgentInboxTab", () => {
     expect(html).not.toContain(secret);
   });
 
-  it("keeps a valid non-constitution question but suppresses its missing-question form", async () => {
-    const valid = await htmlFor(run({ agentKey: "proposal-drafting", steps: [{ id: "synthetic-step", outputJson: { question: "What should the draft say?" } }] }));
-    const missing = await htmlFor(run({ agentKey: "proposal-drafting" }));
+  it("uses only the pending review step even when another step sorts last", async () => {
+    const html = await htmlFor(run({ steps: [
+      { id: "review-step", name: "approval-checkpoint", status: "PENDING", outputJson: { question: "Revise the policy advice?" } },
+      { id: "trace-step", name: "load-context", status: "COMPLETED", outputJson: { question: "Untrusted trace question" } },
+    ] }));
+    expect(html).toContain("Revise the policy advice?");
+    expect(html).toContain('name="stepId" value="review-step"');
+    expect(html).not.toContain("Untrusted trace question");
+  });
+
+  it("shows the proposal draft being reviewed and suppresses incomplete review forms", async () => {
+    const resultJson = {
+      proposalDraft: { title: "Budget thresholds", summary: "Review spending limits.", bodyMd: "# Budget thresholds\n\nRequire two signatures." },
+      approvalCheckpoint: { detail: { proposalDraft: { title: "Budget thresholds", bodyMd: "# Budget thresholds\n\nRequire two signatures." } } },
+    };
+    const valid = await htmlFor(run({ agentKey: "proposal-drafting", resultJson, steps: [{ id: "synthetic-step", name: "approval-checkpoint", status: "PENDING", outputJson: { question: "What should the draft say?" } }] }));
+    const missing = await htmlFor(run({ agentKey: "proposal-drafting", resultJson }));
+    const malformed = await htmlFor(run({ agentKey: "proposal-drafting", resultJson: { proposalDraft: resultJson.proposalDraft }, steps: [{ id: "synthetic-step", name: "approval-checkpoint", status: "PENDING", outputJson: { question: "What should the draft say?" } }] }));
     expect(valid).toContain("What should the draft say?");
+    expect(valid).toContain("Budget thresholds");
+    expect(valid).toContain("Review spending limits.");
+    expect(valid).toContain("Require two signatures.");
     expect(valid).toContain("<form");
     expect(missing).toContain("missing the context needed for a safe reply");
     expect(missing).not.toContain("<form");
+    expect(malformed).not.toContain("<form");
     expect(getProposalMock).not.toHaveBeenCalled();
   });
 
   it("renders localized context and a labeled reply in Spanish", async () => {
     locale = "es";
-    const html = await htmlFor(run({ steps: [{ id: "synthetic-step", outputJson: { question: "¿Qué decisión?" } }] }));
+    const html = await htmlFor(run({ steps: [{ id: "synthetic-step", name: "approval-checkpoint", status: "PENDING", outputJson: { question: "¿Qué decisión?" } }] }));
     expect(html).toContain("Contexto de revisión");
     expect(html).toContain("Propuesta: Synthetic approved proposal");
     expect(html).toContain('href="/es/workspaces/synthetic-workspace/proposals/synthetic-proposal"');

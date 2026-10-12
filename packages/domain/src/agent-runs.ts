@@ -3,6 +3,7 @@ import { checkRateLimit, prisma, RATE_LIMITS } from "@corgtex/shared";
 import { withAgentRunModelUsageSummary } from "./agent-run-usage";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
+import { getProposal } from "./proposals";
 
 export type AgentKey =
   | "inbox-triage"
@@ -196,33 +197,77 @@ export async function submitAgentFeedback(actor: AppActor, params: {
     allowedRoles: ["ADMIN", "FACILITATOR"],
   });
 
+  const feedback = params.feedback.trim();
+  invariant(feedback.length > 0 && feedback.length <= 4000, 400, "INVALID_INPUT", "Feedback must be 1 to 4000 characters.");
+
   return prisma.$transaction(async (tx) => {
-    // Verify the run belongs to this workspace before touching the step
     const run = await tx.agentRun.findUnique({
       where: { id: params.agentRunId, workspaceId: params.workspaceId },
-      select: { id: true },
+      select: { id: true, agentKey: true, status: true, approvalRequired: true, resultJson: true, planJson: true },
     });
     invariant(run, 404, "NOT_FOUND", "Agent run not found in this workspace.");
+    invariant(run.status === "WAITING_APPROVAL" && run.approvalRequired, 409, "INVALID_STATE", "Agent run is not waiting for feedback.");
+    const result = run.resultJson && typeof run.resultJson === "object" && !Array.isArray(run.resultJson)
+      ? run.resultJson as Record<string, unknown> : {};
+    const prompt = typeof result.prompt === "string" ? result.prompt.trim().slice(0, 8000) : "";
+    const proposalId = typeof result.proposalId === "string" ? result.proposalId.trim().slice(0, 200) : "";
+    const plan = run.planJson && typeof run.planJson === "object" && !Array.isArray(run.planJson)
+      ? run.planJson as Record<string, unknown> : {};
+    const planPayload = plan.payload && typeof plan.payload === "object" && !Array.isArray(plan.payload)
+      ? plan.payload as Record<string, unknown> : {};
+    const meetingId = typeof planPayload.meetingId === "string" ? planPayload.meetingId.trim().slice(0, 200) : "";
+    const previousAdvice = run.agentKey === "proposal-drafting"
+      ? JSON.stringify(result.proposalDraft ?? {}).slice(0, 20000)
+      : (typeof result.impactSummary === "string" ? result.impactSummary : "").slice(0, 20000);
+    invariant(
+      (run.agentKey === "proposal-drafting" && Boolean(prompt)) ||
+      (run.agentKey === "constitution-update-trigger" && Boolean(proposalId)),
+      409, "INVALID_STATE", "This agent run cannot accept a review reply.",
+    );
+    if (run.agentKey === "constitution-update-trigger") {
+      // A stale inbox form cannot revive analysis of a now-hidden or archived proposal.
+      await getProposal(actor, { workspaceId: params.workspaceId, proposalId });
+    }
 
-    // Save feedback to the step — scope by agentRunId to prevent cross-run writes
-    const step = await tx.agentStep.update({
-      where: { id: params.stepId, agentRunId: params.agentRunId },
+    // Conditional claims make simultaneous replies and stale forms mutually exclusive.
+    const claimedRun = await tx.agentRun.updateMany({
+      where: { id: run.id, workspaceId: params.workspaceId, status: "WAITING_APPROVAL", approvalRequired: true },
       data: {
-        humanFeedback: params.feedback,
-        status: "COMPLETED",
-        completedAt: new Date(),
+        status: "COMPLETED", approvalRequired: false, completedAt: new Date(),
+        resultJson: { ...result, feedbackDisposition: "ADVISORY_CONTINUATION_QUEUED" },
       },
     });
+    invariant(claimedRun.count === 1, 409, "INVALID_STATE", "This review has already been answered.");
+    const claimedStep = await tx.agentStep.updateMany({
+      where: { id: params.stepId, agentRunId: run.id, name: "approval-checkpoint", status: "PENDING", humanFeedback: null },
+      data: { humanFeedback: feedback, status: "COMPLETED", completedAt: new Date() },
+    });
+    invariant(claimedStep.count === 1, 409, "INVALID_STATE", "This review step has already been answered.");
 
-    // Resume the run
-    await tx.agentRun.update({
-      where: { id: params.agentRunId, workspaceId: params.workspaceId },
+    const job = await tx.workflowJob.create({
       data: {
-        status: "PENDING", // Ready for worker to pick up again
+        workspaceId: params.workspaceId,
+        type: run.agentKey === "proposal-drafting" ? "agent.proposal-drafting" : "agent.constitution-update-trigger",
+        payload: {
+          triggerType: "MANUAL",
+          ...(prompt ? { prompt, meetingId: meetingId || null } : { proposalId }),
+          reviewFeedback: feedback,
+          previousAdvice,
+          sourceAgentRunId: run.id,
+        },
       },
     });
-
-    return step;
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "agentRun.feedbackSubmitted",
+        entityType: "AgentRun",
+        entityId: run.id,
+        meta: { continuationJobId: job.id, stepId: params.stepId },
+      },
+    });
+    return { id: params.stepId, continuationJobId: job.id };
   });
 }
 

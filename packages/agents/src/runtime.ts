@@ -271,6 +271,16 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
 
     const outcome = await params.execute(context, helpers, run.id, model);
     const nextStatus: AgentRunStatus = outcome.approvalCheckpoint ? "WAITING_APPROVAL" : "COMPLETED";
+    if (outcome.approvalCheckpoint) {
+      accumulatedSteps.push({
+        agentRunId: run.id,
+        name: "approval-checkpoint",
+        status: "PENDING",
+        inputJson: toJson(outcome.approvalCheckpoint.detail),
+        outputJson: toJson({ question: outcome.approvalCheckpoint.summary }),
+        startedAt: new Date(),
+      });
+    }
 
     const finalRun = await prisma.$transaction(async (tx) => {
       if (accumulatedSteps.length > 0) {

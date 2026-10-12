@@ -3,14 +3,17 @@ import { getProposal, type listAgentRuns } from "@corgtex/domain";
 import { getTranslations } from "next-intl/server";
 import { Link } from "@/i18n/routing";
 import { submitAgentFeedbackAction } from "./actions";
+import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 
 type PendingRun = Awaited<ReturnType<typeof listAgentRuns>>[number];
 type Checkpoint = { summary: string; proposalId: string; impactSummary: string };
+type Draft = { title: string; summary: string | null; bodyMd: string };
 export type InboxCard = {
   run: PendingRun;
   question: string | null;
   stepId: string | null;
   checkpoint: Checkpoint | null;
+  draft: Draft | null;
   proposal: { id: string; title: string } | null;
   incomplete: boolean;
 };
@@ -38,19 +41,33 @@ function constitutionCheckpoint(resultJson: unknown): Checkpoint | null {
   return { summary, proposalId, impactSummary };
 }
 
+function proposalDraft(resultJson: unknown): Draft | null {
+  const result = record(resultJson);
+  const draft = record(result?.proposalDraft);
+  const checkpointDraft = record(record(record(result?.approvalCheckpoint)?.detail)?.proposalDraft);
+  const title = nonemptyString(draft?.title);
+  const bodyMd = nonemptyString(draft?.bodyMd);
+  if (!title || !bodyMd || checkpointDraft?.title !== title || checkpointDraft?.bodyMd !== bodyMd) return null;
+  return { title, summary: nonemptyString(draft?.summary), bodyMd };
+}
+
 async function inboxCard(run: PendingRun, actor: AppActor, workspaceId: string): Promise<InboxCard> {
-  const lastStep = run.steps.at(-1);
-  const question = nonemptyString(record(lastStep?.outputJson)?.question);
-  const base = { run, question, stepId: lastStep?.id ?? null, checkpoint: null, proposal: null };
+  const reviewStep = [...run.steps].reverse().find((step) => step.name === "approval-checkpoint" && step.status === "PENDING");
+  const question = nonemptyString(record(reviewStep?.outputJson)?.question);
+  const base = { run, question, stepId: reviewStep?.id ?? null, checkpoint: null, draft: null, proposal: null };
+  if (run.agentKey === "proposal-drafting") {
+    const draft = proposalDraft(run.resultJson);
+    return { ...base, draft, incomplete: !question || !reviewStep || !draft };
+  }
   if (run.agentKey !== "constitution-update-trigger") {
-    return { ...base, incomplete: !question || !lastStep };
+    return { ...base, incomplete: !question || !reviewStep };
   }
   const checkpoint = constitutionCheckpoint(run.resultJson);
   if (!checkpoint) return { ...base, question: null, incomplete: true };
   try {
     // This read enforces membership, visibility, workspace, and active status.
     const proposal = await getProposal(actor, { workspaceId, proposalId: checkpoint.proposalId });
-    return { ...base, checkpoint, proposal: { id: proposal.id, title: proposal.title }, incomplete: !question || !lastStep };
+    return { ...base, checkpoint, proposal: { id: proposal.id, title: proposal.title }, incomplete: !question || !reviewStep };
   } catch {
     // Missing, hidden, foreign, archived, and unavailable sources render alike.
     return { ...base, question: null, incomplete: true };
@@ -90,7 +107,7 @@ export async function AgentInboxView({
           </div>
         ) : (
           <div className="stack" style={{ gap: 16 }}>
-            {cards.map(({ run, question, stepId, checkpoint, proposal, incomplete }) => (
+            {cards.map(({ run, question, stepId, checkpoint, draft, proposal, incomplete }) => (
               <div key={run.id} className="agent-question-card" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                 <div className="row">
                   <span className="tag neutral">{run.agentKey}</span>
@@ -112,6 +129,14 @@ export async function AgentInboxView({
                     </Link>
                     <p className="nr-excerpt">{checkpoint.summary}</p>
                     <p className="nr-excerpt">{checkpoint.impactSummary}</p>
+                  </div>
+                )}
+                {!incomplete && draft && (
+                  <div className="stack" style={{ gap: 8 }}>
+                    <strong>{t("reviewContext")}</strong>
+                    <h3>{draft.title}</h3>
+                    {draft.summary && <p className="nr-excerpt">{draft.summary}</p>}
+                    <MarkdownRenderer markdown={draft.bodyMd} variant="document" allowImages={false} />
                   </div>
                 )}
                 <div style={{ background: "var(--surface-sunken)", padding: 12, borderRadius: 8, border: "1px dashed var(--line)" }}>
