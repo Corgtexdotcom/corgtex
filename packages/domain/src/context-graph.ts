@@ -658,7 +658,7 @@ async function upsertObjectWithTx(
 
   const dedupeKey = data.dedupeKey ?? objectDedupeKey(workspaceId, data.sourceEntityType, data.sourceEntityId);
 
-  if (dedupeKey) await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`context-graph-object:${dedupeKey}`}, 0))`;
+  if (dedupeKey) await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`context-graph-object:${dedupeKey}`}, 0))`;
   let previous = dedupeKey ? await tx.contextGraphObject.findFirst({ where: { dedupeKey } }) : null;
   invariant(!previous || previous.workspaceId === workspaceId, 404, "NOT_FOUND", "Context graph object not found.");
   if (previous) {
@@ -761,7 +761,7 @@ async function upsertRelationshipWithTx(
     ...creatorData(actor, agentRunId),
   };
 
-  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`context-graph-relationship:${dedupeKey}`}, 0))`;
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`context-graph-relationship:${dedupeKey}`}, 0))`;
   let previous = await tx.contextGraphRelationship.findFirst({ where: { dedupeKey } });
   invariant(!previous || previous.workspaceId === workspaceId, 404, "NOT_FOUND", "Context graph relationship not found.");
   if (previous) {

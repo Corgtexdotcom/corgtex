@@ -171,7 +171,7 @@ export async function absorbSource(params: {
   // workspace article index would make every generated page depend on every
   // article title and alias, even when it cites only this source.
   const articles = await prisma.brainArticle.findMany({
-    where: { workspaceId: params.workspaceId, archivedAt: null, isPrivate: false },
+    where: { workspaceId: params.workspaceId, archivedAt: null },
   });
 
   const readableArticleIds = await readableArtifactIds(agentActor, params.workspaceId, "BrainArticle", articles);

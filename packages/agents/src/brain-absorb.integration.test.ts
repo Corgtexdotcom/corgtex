@@ -39,8 +39,8 @@ it("records both verified sources through real absorption before reviewed remova
   const extract = vi.spyOn(defaultModelGateway, "extract")
     .mockResolvedValueOnce({ output: { articleType: "PROJECT", updateSlugs: [],
       createNew: { title: "Synthetic project", slug: "synthetic-project" }, summary: "Created" } } as never)
-    .mockResolvedValueOnce({ output: { articleType: "PROJECT", updateSlugs: ["synthetic-project"],
-      createNew: null, summary: "Updated" } } as never);
+    .mockResolvedValueOnce({ output: { articleType: "PROJECT",
+      createNew: { title: "Synthetic project", slug: "synthetic-project" }, summary: "Updated" } } as never);
   const chat = vi.spyOn(defaultModelGateway, "chat")
     .mockResolvedValueOnce({ content: "Body from first source" } as never)
     .mockResolvedValueOnce({ content: "Body from both sources" } as never);

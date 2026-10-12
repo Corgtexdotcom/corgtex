@@ -6,6 +6,7 @@ import { brainSourceContentFingerprint } from "./brain-derivation";
 import { confirmBrainArticleRemoval, previewBrainArticleRemoval } from "./brain-article-removal";
 import { generateBrainSourceRemovalCandidate, resolveBrainSourceRemoval, retryBrainSourceRemoval } from "./brain-source-removal";
 import { archiveWorkspaceArtifact } from "./archive";
+import { advanceHumanArtifactInputLineage, recordArtifactInputLineage } from "./source-lineage";
 
 async function fixture(sourceRemovalEnabled = true) {
   const workspace = await prisma.workspace.create({ data: { name: "Article removal fixture", slug: `article-removal-${randomUUID()}` } });
@@ -36,6 +37,26 @@ function confirmParams(workspaceId: string, slug: string, expectedToken: string,
   return { workspaceId, slug, expectedToken, mode, confirmation: "archive_article" };
 }
 
+async function attestArticle(actor: AppActor, article: Awaited<ReturnType<typeof prisma.brainArticle.create>>,
+  includeDocuments = false) {
+  const sources = await prisma.brainSource.findMany({ where: { workspaceId: article.workspaceId, id: { in: article.sourceIds } } });
+  const documentIds = includeDocuments
+    ? sources.map((source) => documentId(source.metadata)).filter((id): id is string => !!id) : [];
+  await prisma.$transaction(async (tx) => recordArtifactInputLineage({
+    tx, actor, workspaceId: article.workspaceId,
+    artifact: { kind: "BrainArticle", id: article.id }, content: article,
+    origin: "DERIVED", inputs: [
+      ...article.sourceIds.map((id) => ({ kind: "BrainSource" as const, id })),
+      ...documentIds.map((id) => ({ kind: "Document" as const, id })),
+    ],
+  }));
+}
+
+function documentId(metadata: unknown) {
+  return metadata && typeof metadata === "object" && !Array.isArray(metadata)
+    && "documentId" in metadata && typeof metadata.documentId === "string" ? metadata.documentId : null;
+}
+
 const runtimeOptIn = "BRAIN_SOURCE_REMOVAL_RUNTIME_ENABLED";
 const previousRuntimeOptIn = process.env[runtimeOptIn];
 
@@ -56,6 +77,7 @@ describe("confirmed Brain article removal", () => {
       workspaceId: workspace.id, slug: "runtime-paused", title: "Runtime paused", type: "PROJECT",
       bodyMd: "Original", sourceIds: [source.id],
     } });
+    await attestArticle(admin, article);
     delete process.env[runtimeOptIn];
     await expect(previewBrainArticleRemoval(outsider, { workspaceId: workspace.id, slug: article.slug }))
       .rejects.toMatchObject({ status: 403, code: "NOT_A_MEMBER" });
@@ -77,6 +99,7 @@ describe("confirmed Brain article removal", () => {
     const article = await prisma.brainArticle.create({ data: {
       workspaceId: workspace.id, slug: "paused", title: "Paused", type: "PROJECT", bodyMd: "Original", sourceIds: [source.id],
     } });
+    await attestArticle(admin, article);
     const preview = await previewBrainArticleRemoval(admin, { workspaceId: workspace.id, slug: article.slug });
     expect(preview.canRemoveSources).toBe(false);
     expect(preview.blockReasons).toContain("feature_disabled");
@@ -93,20 +116,21 @@ describe("confirmed Brain article removal", () => {
   });
 
   it("redacts restricted source and document previews for a brain-only credential", async () => {
-    const { workspace } = await fixture();
+    const { workspace, admin } = await fixture();
     const { document, source } = await sourceWithDocument(workspace.id, "Finance confidential");
-    await prisma.brainSource.update({ where: { id: source.id }, data: { accessDomain: "FINANCE" } });
     const article = await prisma.brainArticle.create({ data: {
       workspaceId: workspace.id, slug: "restricted-preview", title: "Article", type: "PROJECT", bodyMd: "Body", sourceIds: [source.id],
     } });
+    await attestArticle(admin, article, true);
+    await prisma.brainSource.update({ where: { id: source.id }, data: { accessDomain: "FINANCE" } });
     const credential: AppActor = { kind: "agent", authProvider: "credential", label: "Brain reader",
       workspaceIds: [workspace.id], scopes: ["brain:read"] };
-    expect(await previewBrainArticleRemoval(credential, { workspaceId: workspace.id, slug: article.slug }))
-      .toMatchObject({ sources: [], documents: [], canRemoveSources: false, blockReasons: expect.arrayContaining(["restricted"]) });
+    await expect(previewBrainArticleRemoval(credential, { workspaceId: workspace.id, slug: article.slug }))
+      .rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
     await prisma.brainSource.update({ where: { id: source.id }, data: { accessDomain: "WORKSPACE" } });
     await prisma.document.update({ where: { id: document.id }, data: { accessDomain: "FINANCE" } });
-    expect(await previewBrainArticleRemoval(credential, { workspaceId: workspace.id, slug: article.slug }))
-      .toMatchObject({ sources: [], documents: [], canRemoveSources: false, blockReasons: expect.arrayContaining(["restricted"]) });
+    await expect(previewBrainArticleRemoval(credential, { workspaceId: workspace.id, slug: article.slug }))
+      .rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
     expect(await prisma.workspaceArchiveRecord.count()).toBe(0);
   });
 
@@ -117,9 +141,13 @@ describe("confirmed Brain article removal", () => {
       workspaceId: workspace.id, slug: "keep-article", title: "Keep article", type: "PROJECT", bodyMd: "Original",
       ownerMemberId: ownerMember.id, sourceIds: [source.id],
     } });
+    await attestArticle(admin, article);
     await expect(previewBrainArticleRemoval(outsider, { workspaceId: workspace.id, slug: article.slug }))
       .rejects.toMatchObject({ status: 403, code: "NOT_A_MEMBER" });
     await prisma.brainSource.update({ where: { id: source.id }, data: { accessDomain: "FINANCE" } });
+    await expect(previewBrainArticleRemoval(owner, { workspaceId: workspace.id, slug: article.slug }))
+      .rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+    await prisma.brainSource.update({ where: { id: source.id }, data: { accessDomain: "WORKSPACE" } });
     const preview = await previewBrainArticleRemoval(owner, { workspaceId: workspace.id, slug: article.slug });
     expect(preview.hasSources).toBe(true);
     expect(preview.canRemoveSources).toBe(false);
@@ -133,7 +161,10 @@ describe("confirmed Brain article removal", () => {
       confirmation: "" })).rejects.toMatchObject({ status: 400, code: "INVALID_CONFIRMATION" });
     await expect(confirmBrainArticleRemoval(owner, confirmParams(workspace.id, article.slug, preview.token, "remove_sources")))
       .rejects.toMatchObject({ status: 409, code: "SOURCE_ARTICLE_IMPACT_REVIEW_REQUIRED" });
-    await prisma.brainArticle.update({ where: { id: article.id }, data: { bodyMd: "Human revision" } });
+    const revised = await prisma.brainArticle.update({ where: { id: article.id }, data: { bodyMd: "Human revision" } });
+    await prisma.$transaction(async (tx) => advanceHumanArtifactInputLineage({ tx, actor: owner,
+      workspaceId: workspace.id, artifact: { kind: "BrainArticle", id: article.id }, before: article, after: revised,
+    }));
     await expect(confirmBrainArticleRemoval(owner, confirmParams(workspace.id, article.slug, preview.token, "keep_sources")))
       .rejects.toMatchObject({ status: 409, code: "REMOVAL_PREVIEW_CHANGED" });
     const refreshed = await previewBrainArticleRemoval(owner, { workspaceId: workspace.id, slug: article.slug });
@@ -160,6 +191,7 @@ describe("confirmed Brain article removal", () => {
       workspaceId: workspace.id, slug: "remove-all", title: "Remove all", type: "PROJECT", bodyMd: "Body",
       sourceIds: [source.id],
     } });
+    await attestArticle(admin, article);
     const preview = await previewBrainArticleRemoval(admin, { workspaceId: workspace.id, slug: article.slug });
     expect(preview.canRemoveSources).toBe(true);
     expect(preview.sources.map((item) => item.id).sort()).toEqual([source.id, extra.id].sort());
@@ -191,6 +223,8 @@ describe("confirmed Brain article removal", () => {
         { sourceId: remaining.id, fingerprint: brainSourceContentFingerprint(remaining) },
       ] },
     } });
+    await attestArticle(admin, target);
+    await attestArticle(admin, shared);
     const preview = await previewBrainArticleRemoval(admin, { workspaceId: workspace.id, slug: target.slug });
     expect(preview.sources[0].sharedArticles).toMatchObject([{ id: shared.id, action: "regenerate" }]);
     const requested = await confirmBrainArticleRemoval(admin, confirmParams(workspace.id, target.slug, preview.token, "remove_sources"));
@@ -233,6 +267,7 @@ describe("confirmed Brain article removal", () => {
     const target = await prisma.brainArticle.create({ data: {
       workspaceId: workspace.id, slug: "legacy-target", title: "Target", type: "PROJECT", bodyMd: "Target", sourceIds: [source.id],
     } });
+    await attestArticle(admin, target);
     await prisma.brainArticle.create({ data: {
       workspaceId: workspace.id, slug: "legacy-shared", title: "Legacy shared", type: "PROJECT", bodyMd: "Citation only", sourceIds: [source.id],
     } });
@@ -255,6 +290,7 @@ describe("confirmed Brain article removal", () => {
     const target = await prisma.brainArticle.create({ data: {
       workspaceId: workspace.id, slug: "mixed-target", title: "Target", type: "PROJECT", bodyMd: "Target", sourceIds: [source.id],
     } });
+    await attestArticle(admin, target);
     await prisma.brainArticle.create({ data: {
       workspaceId: workspace.id, slug: "mixed-shared", title: "Mixed shared", type: "PROJECT", bodyMd: "Mixed",
       sourceIds: [source.id, citation.id], derivationJson: {
@@ -264,7 +300,8 @@ describe("confirmed Brain article removal", () => {
     } });
     const preview = await previewBrainArticleRemoval(admin, { workspaceId: workspace.id, slug: target.slug });
     expect(preview.canRemoveSources).toBe(false);
-    expect(preview.sources[0].sharedArticles).toMatchObject([{ action: "manual_review" }]);
+    expect(preview.sources[0].sharedArticles).toEqual([]);
+    expect(preview.blockReasons).toContain("unclassified");
     await expect(confirmBrainArticleRemoval(admin, confirmParams(workspace.id, target.slug, preview.token, "remove_sources")))
       .rejects.toMatchObject({ status: 409, code: "SOURCE_ARTICLE_IMPACT_REVIEW_REQUIRED" });
     expect((await prisma.brainArticle.findUniqueOrThrow({ where: { id: target.id } })).archivedAt).toBeNull();
@@ -281,7 +318,8 @@ describe("confirmed Brain article removal", () => {
         workspaceId: workspace.id, slug: `${condition}-target`, title: "Target", type: "PROJECT", bodyMd: "Target",
         sourceIds: [removed.id],
       } });
-      await prisma.brainArticle.create({ data: {
+      await attestArticle(admin, target);
+      const shared = await prisma.brainArticle.create({ data: {
         workspaceId: workspace.id, slug: `${condition}-shared`, title: "Shared", type: "PROJECT", bodyMd: "Shared",
         sourceIds: [removed.id, remaining.id], derivationJson: {
           version: 1, origin: "brain-absorb", agentRunId: "synthetic-run", sources: [
@@ -290,6 +328,7 @@ describe("confirmed Brain article removal", () => {
           ],
         },
       } });
+      await attestArticle(admin, shared);
       if (condition === "restricted") {
         await prisma.brainSource.update({ where: { id: remaining.id }, data: { accessDomain: "FINANCE" } });
       } else if (condition === "archived") {
@@ -324,6 +363,8 @@ describe("confirmed Brain article removal", () => {
         ],
       },
     } });
+    await attestArticle(admin, target);
+    await attestArticle(admin, shared);
     const preview = await previewBrainArticleRemoval(admin, { workspaceId: workspace.id, slug: target.slug });
     expect(preview.sources.flatMap((item) => item.sharedArticles).map((item) => item.action)).toEqual(["archive", "archive"]);
     const result = await confirmBrainArticleRemoval(admin, confirmParams(workspace.id, target.slug, preview.token, "remove_sources"));
@@ -367,6 +408,7 @@ describe("confirmed Brain article removal", () => {
       workspaceId: workspace.id, slug: "retry-target", title: "Retry target", type: "PROJECT", bodyMd: "Target",
       sourceIds: [first.source.id, second.source.id],
     } });
+    await attestArticle(admin, target);
     const shared = [];
     for (const [index, source] of [first.source, second.source].entries()) {
       shared.push(await prisma.brainArticle.create({ data: {
@@ -378,6 +420,7 @@ describe("confirmed Brain article removal", () => {
           ],
         },
       } }));
+      await attestArticle(admin, shared[shared.length - 1]);
     }
     const preview = await previewBrainArticleRemoval(admin, { workspaceId: workspace.id, slug: target.slug });
     const requested = await confirmBrainArticleRemoval(admin, confirmParams(workspace.id, target.slug, preview.token, "remove_sources"));

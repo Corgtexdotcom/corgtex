@@ -71,6 +71,9 @@ async function buildPreview(tx: Prisma.TransactionClient, actor: AppActor, works
   const byArticleId = new Map(impactedArticles.map((item) => [item.id, item]));
   const byDocumentId = new Map(documents.map((item) => [item.id, item]));
   const blockReasons: Array<"source_missing" | "document_missing" | "restricted" | "unclassified" | "feature_disabled"> = [];
+  // A hidden or unproven linked article must still block source removal. Its
+  // identity and count stay out of the caller-facing shared article list.
+  if (impactedArticles.some((item) => !readableImpactedIds.has(item.id))) blockReasons.push("unclassified");
   if (directIds.length > 0 && !await isBrainSourceRemovalEnabled(tx, workspaceId)) blockReasons.push("feature_disabled");
   if (directIds.length !== directSources.length || directSources.some((source) => source.archivedAt)) {
     blockReasons.push("source_missing");

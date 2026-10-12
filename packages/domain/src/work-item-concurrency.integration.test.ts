@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { getPrismaClient, type AppActor } from "@corgtex/shared";
+import { recordArtifactInputLineage } from "./source-lineage";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { updateAction } from "./actions";
 import { updateGoal } from "./goals";
@@ -53,13 +54,27 @@ async function createItem(kind: Kind, workspaceId: string, userId: string) {
   switch (kind) {
     case "Action": return prisma.action.create({ data });
     case "Tension": return prisma.tension.create({ data });
-    case "Proposal": return prisma.proposal.create({ data: { ...data, bodyMd: "Original proposal body" } });
-    case "Goal": return prisma.goal.create({ data: {
+    case "Proposal": {
+      const item = await prisma.proposal.create({ data: { ...data, bodyMd: "Original proposal body" } });
+      await prisma.$transaction(async (tx) => recordArtifactInputLineage({ tx,
+        actor: { kind: "user", user: { id: userId, email: `version-race-${userId}@example.test`, displayName: "Version editor" } }, workspaceId,
+        artifact: { kind: "Proposal", id: item.id }, content: item, origin: "HUMAN_ORIGINAL", inputs: [],
+      }));
+      return item;
+    }
+    case "Goal": {
+      const item = await prisma.goal.create({ data: {
       ...data,
       status: "ACTIVE",
       descriptionMd: "Original goal body",
       progressPercent: 0,
-    } });
+      } });
+      await prisma.$transaction(async (tx) => recordArtifactInputLineage({ tx,
+        actor: { kind: "user", user: { id: userId, email: `version-race-${userId}@example.test`, displayName: "Version editor" } }, workspaceId,
+        artifact: { kind: "Goal", id: item.id }, content: item, origin: "HUMAN_ORIGINAL", inputs: [],
+      }));
+      return item;
+    }
   }
 }
 

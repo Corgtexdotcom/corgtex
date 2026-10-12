@@ -127,7 +127,10 @@ async function currentPlan(tx: Prisma.TransactionClient, workspaceId: string, so
     const sourceRootIds = new Set(sourceRoots.map((root) => root.id));
     if (expected && !roots) invariant(false, 409, "SOURCE_CHANGED", "Article lineage changed; prepare a new candidate.");
     invariant(link?.kind === "derived" && roots && sourceRootIds.has(sourceId)
-      && roots.every((root) => root.kind === "BrainSource")
+      // Absorption keeps the prior article body as an immutable version input.
+      // Regeneration discards that body and uses only the independently proven
+      // remaining BrainSources; the version stays preserved in history.
+      && roots.every((root) => root.kind === "BrainSource" || root.kind === "BrainArticleVersion")
       && article.sourceIds.every((id) => sourceRootIds.has(id)),
     409, "UNCLASSIFIED_SOURCE_LINK", "An article has a source link with unknown provenance; resolve it manually.");
     const remaining = sourceRoots.filter((item) => item.id !== sourceId)
