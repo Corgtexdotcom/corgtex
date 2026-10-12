@@ -11,6 +11,8 @@ import { lockActiveArticleSources, lockBrainSourceLink } from "./brain-source-li
 import { requestBrainSourceRemoval } from "./brain-source-removal";
 import { brainSourceContentFingerprint, type BrainArticleDerivationV1 } from "./brain-derivation";
 import { readBrainArticleDerivation, sourceIdsInDerivation } from "./brain-source-impact";
+import { copyArtifactInputLineage, currentArtifactInputRoots, readableArtifactIds,
+  recordArtifactInputLineage } from "./source-lineage";
 import { invariant } from "./errors";
 import { persistedMemberId } from "./membership";
 import { requireDraftManager } from "./draft-permissions";
@@ -178,6 +180,13 @@ export async function createArticle(actor: AppActor, params: {
       },
     });
 
+    await recordArtifactInputLineage({
+      tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "BrainArticle", id: article.id }, content: article,
+      origin: actor.kind === "user" && !(params.sourceIds?.length) ? "HUMAN_ORIGINAL" : "DERIVED",
+      inputs: (params.sourceIds ?? []).map((id) => ({ kind: "BrainSource", id })),
+    });
+
     await ensureWorkspacePermalink(tx, actor, {
       workspaceId: params.workspaceId,
       entityType: "BrainArticle",
@@ -285,8 +294,13 @@ export async function updateArticle(actor: AppActor, params: {
       ? [...new Set([...article.sourceIds, params.absorbedSource.sourceId])]
       : params.sourceIds;
     if (nextSourceIds !== undefined) await lockActiveArticleSources(tx, params.workspaceId, nextSourceIds);
+    const priorRoots = await currentArtifactInputRoots(tx, params.workspaceId,
+      { kind: "BrainArticle", id: article.id }, article);
+    invariant(actor.kind !== "agent" || priorRoots !== null, 409, "UNKNOWN_LINEAGE",
+      "An agent cannot reuse an article whose inputs are unknown.");
 
     // Create version snapshot of previous body before updating
+    let previousVersionId: string | null = null;
     if (params.bodyMd !== undefined && params.bodyMd !== article.bodyMd) {
       const lastVersion = await tx.brainArticleVersion.findFirst({
         where: { articleId: article.id },
@@ -294,7 +308,7 @@ export async function updateArticle(actor: AppActor, params: {
         select: { version: true },
       });
 
-      await tx.brainArticleVersion.create({
+      const previousVersion = await tx.brainArticleVersion.create({
         data: {
           articleId: article.id,
           version: (lastVersion?.version ?? 0) + 1,
@@ -303,6 +317,11 @@ export async function updateArticle(actor: AppActor, params: {
           agentRunId: params.agentRunId ?? null,
         },
       });
+      if (priorRoots && await copyArtifactInputLineage({
+        tx, workspaceId: params.workspaceId,
+        from: { kind: "BrainArticle", id: article.id }, fromContent: article,
+        to: { kind: "BrainArticleVersion", id: previousVersion.id }, toContent: previousVersion,
+      })) previousVersionId = previousVersion.id;
     }
 
     const data: Record<string, unknown> = {};
@@ -343,6 +362,19 @@ export async function updateArticle(actor: AppActor, params: {
       where: { id: article.id },
       data,
     });
+    if (priorRoots) {
+      const inputs = [
+        ...(previousVersionId ? [{ kind: "BrainArticleVersion" as const, id: previousVersionId }] : []),
+        ...(nextSourceIds ?? []).map((id) => ({ kind: "BrainSource" as const, id })),
+      ];
+      await recordArtifactInputLineage({
+        tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "BrainArticle", id: updated.id }, content: updated,
+        origin: inputs.length || priorRoots.length ? "DERIVED" : "HUMAN_ORIGINAL",
+        inputs,
+        inheritedRoots: priorRoots,
+      });
+    }
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brain_article_index:${params.workspaceId}:${article.id}`}, 0))`;
 
     await tx.auditLog.create({
@@ -437,7 +469,22 @@ export async function getArticle(actor: AppActor, params: {
     invariant(canReadPrivateDraft, 404, "NOT_FOUND", "Article not found.");
   }
 
-  return article;
+  const readable = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", [article]);
+  invariant(readable.has(article.id), 404, "NOT_FOUND", "Article not found.");
+  const linkedIds = [...new Set([
+    ...article.backlinksTo.map((link) => link.fromArticleId),
+    ...article.backlinksFrom.map((link) => link.toArticleId),
+  ])];
+  const linked = linkedIds.length ? await prisma.brainArticle.findMany({
+    where: { workspaceId: params.workspaceId, id: { in: linkedIds }, archivedAt: null },
+  }) : [];
+  const readableLinked = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", linked);
+
+  return {
+    ...article,
+    backlinksTo: article.backlinksTo.filter((link) => readableLinked.has(link.fromArticleId)),
+    backlinksFrom: article.backlinksFrom.filter((link) => readableLinked.has(link.toArticleId)),
+  };
 }
 
 export async function listArticles(actor: AppActor, params: {
@@ -494,6 +541,11 @@ export async function listArticles(actor: AppActor, params: {
     ];
   }
 
+  const candidates = await prisma.brainArticle.findMany({ where });
+  const readableIds = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", candidates);
+  where.AND = [...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []),
+    { id: { in: [...readableIds] } }];
+
   const [items, total] = await Promise.all([
     prisma.brainArticle.findMany({
       where,
@@ -503,9 +555,7 @@ export async function listArticles(actor: AppActor, params: {
             user: { select: { displayName: true, email: true } },
           },
         },
-        _count: {
-          select: { backlinksTo: true, discussions: true },
-        },
+        _count: { select: { discussions: true } },
       },
       orderBy: { updatedAt: "desc" },
       take,
@@ -514,7 +564,17 @@ export async function listArticles(actor: AppActor, params: {
     prisma.brainArticle.count({ where }),
   ]);
 
-  return { items, total, take, skip };
+  const backlinkCounts = await prisma.brainBacklink.groupBy({
+    by: ["toArticleId"],
+    where: { workspaceId: params.workspaceId,
+      toArticleId: { in: items.map((article) => article.id) },
+      fromArticleId: { in: [...readableIds] } },
+    _count: { _all: true },
+  });
+  const counts = new Map(backlinkCounts.map((entry) => [entry.toArticleId, entry._count._all]));
+  return { items: items.map((article) => ({ ...article,
+    _count: { ...article._count, backlinksTo: counts.get(article.id) ?? 0 },
+  })), total, take, skip };
 }
 
 export async function deleteArticle(actor: AppActor, params: {
@@ -551,15 +611,19 @@ export async function listArticleVersions(actor: AppActor, params: {
         slug: params.slug,
       },
     },
-    select: { id: true },
   });
 
   invariant(article, 404, "NOT_FOUND", "Article not found.");
 
-  return prisma.brainArticleVersion.findMany({
+  const readableArticle = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", [article]);
+  invariant(readableArticle.has(article.id), 404, "NOT_FOUND", "Article not found.");
+
+  const versions = await prisma.brainArticleVersion.findMany({
     where: { articleId: article.id },
     orderBy: { version: "desc" },
   });
+  const readableVersions = await readableArtifactIds(actor, params.workspaceId, "BrainArticleVersion", versions);
+  return versions.filter((version) => readableVersions.has(version.id));
 }
 
 // ---------------------------------------------------------------------------
@@ -992,61 +1056,37 @@ export async function getBrainStatus(actor: AppActor, params: {
   });
   const accessDomains = await resolveKnowledgeAccessDomains(actor, params.workspaceId);
 
-  const [
-    articles,
-    staleArticles,
-    unabsorbedSources,
-    openDiscussionThreads,
-    unownedArticles,
-    articlesWithBacklinks,
-  ] = await Promise.all([
-    prisma.brainArticle.findMany({
-      where: { workspaceId: params.workspaceId },
-      select: { id: true, type: true, authority: true },
-    }),
-    prisma.brainArticle.count({
-      where: {
-        workspaceId: params.workspaceId,
-        OR: [
-          {
-            lastVerifiedAt: null,
-            createdAt: { lt: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) },
-          },
-          {
-            lastVerifiedAt: { lt: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) },
-          },
-        ],
-      },
-    }),
+  const [articles, unabsorbedSources, articlesWithBacklinks] = await Promise.all([
+    prisma.brainArticle.findMany({ where: { workspaceId: params.workspaceId } }),
     prisma.brainSource.count({
       where: {
         workspaceId: params.workspaceId,
         accessDomain: { in: accessDomains },
+        archivedAt: null,
         absorbedAt: null,
       },
     }),
-    prisma.brainDiscussionThread.count({
-      where: {
-        article: { workspaceId: params.workspaceId },
-        status: "OPEN",
-      },
-    }),
-    prisma.brainArticle.count({
-      where: { workspaceId: params.workspaceId, ownerMemberId: null },
-    }),
     prisma.brainBacklink.findMany({
       where: { workspaceId: params.workspaceId },
-      select: { toArticleId: true },
-      distinct: ["toArticleId"],
+      select: { fromArticleId: true, toArticleId: true },
     }),
   ]);
-
-  const linkedIds = new Set(articlesWithBacklinks.map((b) => b.toArticleId));
-  const orphanArticles = articles.filter((a) => !linkedIds.has(a.id)).length;
+  const visibleIds = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", articles);
+  const visibleArticles = articles.filter((article) => visibleIds.has(article.id));
+  const linkedIds = new Set(articlesWithBacklinks
+    .filter((backlink) => visibleIds.has(backlink.fromArticleId) && visibleIds.has(backlink.toArticleId))
+    .map((backlink) => backlink.toArticleId));
+  const orphanArticles = visibleArticles.filter((article) => !linkedIds.has(article.id)).length;
+  const staleArticles = visibleArticles.filter((article) =>
+    (article.lastVerifiedAt ?? article.createdAt).getTime() < Date.now() - 90 * 24 * 60 * 60 * 1000).length;
+  const unownedArticles = visibleArticles.filter((article) => article.ownerMemberId === null).length;
+  const openDiscussionThreads = await prisma.brainDiscussionThread.count({
+    where: { articleId: { in: [...visibleIds] }, status: "OPEN" },
+  });
 
   const articleCountByType: Record<string, number> = {};
   const articleCountByAuthority: Record<string, number> = {};
-  for (const article of articles) {
+  for (const article of visibleArticles) {
     articleCountByType[article.type] = (articleCountByType[article.type] ?? 0) + 1;
     articleCountByAuthority[article.authority] = (articleCountByAuthority[article.authority] ?? 0) + 1;
   }
@@ -1054,7 +1094,7 @@ export async function getBrainStatus(actor: AppActor, params: {
   return {
     articleCountByType,
     articleCountByAuthority,
-    totalArticles: articles.length,
+    totalArticles: visibleArticles.length,
     staleArticles,
     unabsorbedSources,
     openDiscussionThreads,
@@ -1088,10 +1128,17 @@ export async function publishArticle(actor: AppActor, params: {
     invariant(article.isPrivate, 400, "INVALID_STATE", "Article is already public.");
     invariant(article.authority === "DRAFT", 400, "INVALID_STATE", "Only draft Brain articles can be opened.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: article, resolvedMembership: membership });
+    const priorRoots = await currentArtifactInputRoots(tx, params.workspaceId,
+      { kind: "BrainArticle", id: article.id }, article);
 
     const updated = await tx.brainArticle.update({
       where: { id: article.id },
       data: { isPrivate: false, publishedAt: new Date() },
+    });
+    if (priorRoots) await recordArtifactInputLineage({
+      tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "BrainArticle", id: updated.id }, content: updated,
+      origin: priorRoots.length ? "DERIVED" : "HUMAN_ORIGINAL", inputs: [], inheritedRoots: priorRoots,
     });
 
     await tx.auditLog.create({
@@ -1154,6 +1201,8 @@ export async function returnArticleToDraft(actor: AppActor, params: {
     invariant(article && !article.archivedAt, 404, "NOT_FOUND", "Article not found.");
     invariant(!article.isPrivate, 400, "INVALID_STATE", "Only public Brain articles can be returned to draft.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: article, resolvedMembership: membership });
+    const priorRoots = await currentArtifactInputRoots(tx, params.workspaceId,
+      { kind: "BrainArticle", id: article.id }, article);
 
     const updated = await tx.brainArticle.update({
       where: { id: article.id },
@@ -1162,6 +1211,11 @@ export async function returnArticleToDraft(actor: AppActor, params: {
         isPrivate: true,
         publishedAt: null,
       },
+    });
+    if (priorRoots) await recordArtifactInputLineage({
+      tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "BrainArticle", id: updated.id }, content: updated,
+      origin: priorRoots.length ? "DERIVED" : "HUMAN_ORIGINAL", inputs: [], inheritedRoots: priorRoots,
     });
 
     await tx.auditLog.create({

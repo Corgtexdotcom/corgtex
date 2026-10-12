@@ -85,6 +85,12 @@ vi.mock("@corgtex/shared", () => ({
   },
 }));
 
+vi.mock("./source-lineage", () => ({
+  recordArtifactInputLineage: vi.fn(),
+  currentArtifactInputRoots: vi.fn().mockResolvedValue([]),
+  readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) => new Set(records.map((record: { id: string }) => record.id))),
+}));
+
 vi.mock("./auth", () => ({
   isGlobalOperator: vi.fn((actor: any) => actor.kind === "user" && actor.user?.globalRole === "OPERATOR"),
   requireWorkspaceMembership: vi.fn().mockResolvedValue({
@@ -1459,7 +1465,7 @@ describe("listProposals", () => {
       where: expect.objectContaining({
         workspaceId: "ws-1",
         circleId: "circle-1",
-        AND: [
+        AND: expect.arrayContaining([
           {
             OR: [
               { isPrivate: false },
@@ -1484,7 +1490,7 @@ describe("listProposals", () => {
               expect.objectContaining({ tensions: expect.any(Object) }),
             ]),
           }),
-        ],
+        ]),
       }),
       orderBy: [
         { createdAt: "desc" },

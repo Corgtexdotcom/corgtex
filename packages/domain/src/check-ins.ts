@@ -4,6 +4,7 @@ import type { Prisma } from "@prisma/client";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 import { appendEvents } from "./events";
+import { recordArtifactInputLineage, readableArtifactIds, type LineageInput, type LineageRoot } from "./source-lineage";
 
 const COMPANY_UNDERSTANDING_TYPE = "COMPANY_UNDERSTANDING";
 const COMPANY_KNOWLEDGE_POLICY = "COMPANY_KNOWLEDGE";
@@ -61,6 +62,8 @@ export async function createCheckIn(actor: AppActor, params: {
   relatedEntityId?: string | null;
   relatedConversationId?: string | null;
   responseUsePolicy?: string | null;
+  lineageInputs?: LineageInput[];
+  lineageRoots?: LineageRoot[];
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   
@@ -69,7 +72,8 @@ export async function createCheckIn(actor: AppActor, params: {
   const questionType = params.questionType?.trim() || "WELLBEING";
   const questionSource = params.questionSource.trim() || "AI";
 
-  return prisma.checkIn.create({
+  return prisma.$transaction(async (tx) => {
+    const question = await tx.checkIn.create({
     data: {
       workspaceId: params.workspaceId,
       memberId: params.memberId,
@@ -85,6 +89,16 @@ export async function createCheckIn(actor: AppActor, params: {
       responseUsePolicy: params.responseUsePolicy?.trim()
         || (questionType === COMPANY_UNDERSTANDING_TYPE ? COMPANY_KNOWLEDGE_POLICY : MEMBER_CHECKIN_POLICY),
     },
+    });
+    if (params.lineageInputs || params.lineageRoots || actor.kind === "user") {
+      await recordArtifactInputLineage({
+        tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "CheckIn", id: question.id }, content: question,
+        origin: params.lineageInputs?.length || params.lineageRoots?.length ? "DERIVED" : "HUMAN_ORIGINAL",
+        inputs: params.lineageInputs ?? [], inheritedRoots: params.lineageRoots,
+      });
+    }
+    return question;
   });
 }
 
@@ -99,6 +113,8 @@ export async function createCompanyUnderstandingQuestion(actor: AppActor, params
   relatedEntityType?: string | null;
   relatedEntityId?: string | null;
   relatedConversationId?: string | null;
+  lineageInputs?: LineageInput[];
+  lineageRoots?: LineageRoot[];
 }) {
   return createCheckIn(actor, {
     ...params,

@@ -515,12 +515,14 @@ async function answerSlackConversation(params: {
   }
 
   const knowledge = await answerKnowledgeQuestion({
+    actor: params.actor,
     workspaceId: params.workspaceId,
     question: params.prompt,
     workflowJobId: params.workflowJobId,
     agentRunId: params.agentRunId,
   }).catch(() => null);
   const slackKnowledge = await searchIndexedKnowledge({
+    actor: params.actor,
     workspaceId: params.workspaceId,
     query: params.prompt,
     sourceTypes: ["SLACK"],
@@ -943,6 +945,7 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
         done.push(`Prepared a brief: ${actions} open actions, ${tensions} open tensions, and ${proposals} open proposals.`);
       } else if (parsed.intent === "answer_question") {
         const answer = await helpers.tool("knowledge.answer", { prompt: params.prompt }, () => answerKnowledgeQuestion({
+          actor,
           workspaceId: params.workspaceId,
           question: params.prompt,
           workflowJobId: params.workflowJobId,

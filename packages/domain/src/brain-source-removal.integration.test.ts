@@ -173,8 +173,9 @@ describe("Brain source removal review", () => {
       usage: { provider: "fixture", model: "fixture-rerank" },
     }));
     try {
-      const query = { workspaceId: workspace.id, query: "Human revised facts", sourceTypes: ["BRAIN_ARTICLE" as const] };
-      expect((await searchIndexedKnowledge(query))[0]?.snippet).toBe("Human revised facts");
+      const query = { actor, workspaceId: workspace.id, query: "Human revised facts", sourceTypes: ["BRAIN_ARTICLE" as const] };
+      // Legacy manually written content and receipts have no complete lineage.
+      expect(await searchIndexedKnowledge(query)).toEqual([]);
       expect(await resolveBrainSourceRemoval(actor, { workspaceId: workspace.id, jobId: requested.jobId, decision: "accept" }))
         .toEqual({ status: "applied", sourceId: removed.id, pendingSourceId: null });
       expect(await prisma.knowledgeChunk.count({ where: {

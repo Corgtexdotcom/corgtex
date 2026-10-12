@@ -57,6 +57,8 @@ vi.mock("@corgtex/domain", () => ({
   lockWorkspaceArchiveArtifact: lockWorkspaceArchiveArtifactMock,
   brainSourceRecoveryIdentity: recoveryIdentityMock,
   brainSourceContentFingerprint: vi.fn(() => "source-fingerprint"),
+  resolveKnowledgeAccessDomains: vi.fn(async () => ["WORKSPACE"]),
+  readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) => new Set(records.map((record: { id: string }) => record.id))),
 }));
 
 vi.mock("@corgtex/knowledge", () => ({
@@ -78,6 +80,7 @@ describe("absorbSource", () => {
       channel: "text-paste",
       content: "Launch content",
       ingestionGuidanceMd: "Prioritize launch blockers.",
+      accessDomain: "WORKSPACE",
       absorbedAt: null,
       archivedAt: null,
     });
@@ -191,6 +194,7 @@ describe("absorbSource", () => {
         channel: "text-paste",
         content: "Launch content",
         ingestionGuidanceMd: null,
+        accessDomain: "WORKSPACE",
         absorbedAt: null,
         archivedAt: null,
       })
@@ -225,6 +229,7 @@ describe("absorbSource", () => {
         channel: "text-paste",
         content: "Launch content",
         ingestionGuidanceMd: null,
+        accessDomain: "WORKSPACE",
         absorbedAt: null,
         archivedAt: null,
       })
@@ -264,7 +269,7 @@ describe("absorbSource", () => {
   it("does not publish a draft synthesized from a replaced upload", async () => {
     const original = {
       id: "source-1", workspaceId: "workspace-1", sourceType: "FILE_UPLOAD", tier: 2,
-      title: "Upload", content: "Old contract terms", absorbedAt: null, archivedAt: null,
+      title: "Upload", content: "Old contract terms", accessDomain: "WORKSPACE", absorbedAt: null, archivedAt: null,
     };
     const replacement = { ...original, content: "New contract terms" };
     recoveryIdentityMock.mockImplementation((source: { content: string }) => source.content);
@@ -298,7 +303,7 @@ describe("absorbSource", () => {
       output: {
         articleType: "PROJECT",
         updateSlugs: ["launch"],
-        createNew: null,
+        createNew: { title: "Launch", slug: "launch" },
         summary: "Launch context",
       },
     });
@@ -319,7 +324,7 @@ describe("absorbSource", () => {
     expect(updateArticleMock).not.toHaveBeenCalled();
     expect(createArticleMock).toHaveBeenCalledWith(expect.objectContaining({ label: "brain-absorb" }), expect.objectContaining({
       workspaceId: "workspace-1",
-      slug: "launch-notes",
+      slug: "launch-2",
       title: "Launch notes",
       authority: "REFERENCE",
       sourceIds: ["source-1"],

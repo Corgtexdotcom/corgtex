@@ -1,6 +1,9 @@
+import { createHash } from "node:crypto";
 import type { KnowledgeAccessDomain, KnowledgeSourceType, Prisma } from "@prisma/client";
 import { getCacheJson, getCacheVersion, incrementCacheVersion, prisma, cosineSimilarity, logger, setCacheJson } from "@corgtex/shared";
 import { defaultModelGateway, ModelProviderHttpError } from "@corgtex/models";
+import type { AppActor } from "@corgtex/shared";
+import { lineageContentFingerprint, readableArtifactIds, resolveKnowledgeAccessDomains, type LineageKind } from "@corgtex/domain";
 import type { SensitivityLabel } from "./sensitivity";
 import { getKnowledgeSearchProvider, isAzureKnowledgeSearchConfigured, normalizeKnowledgeAccessDomains, searchAzureKnowledge } from "./azure-search";
 
@@ -78,6 +81,7 @@ function lexicalScore(query: string, content: string, title?: string | null) {
 
 function searchCacheKey(params: {
   workspaceId: string;
+  actor: AppActor;
   cacheVersion: string;
   query: string;
   limit?: number;
@@ -88,7 +92,8 @@ function searchCacheKey(params: {
   indexName?: string;
 }) {
   return [
-    "knowledge-search",
+    "knowledge-search-lineage-v1",
+    createHash("sha256").update(JSON.stringify(params.actor)).digest("hex"),
     params.provider ?? "postgres",
     params.indexName ?? "",
     params.workspaceId,
@@ -96,13 +101,14 @@ function searchCacheKey(params: {
     params.query.trim().toLowerCase(),
     String(params.limit ?? DEFAULT_SEARCH_LIMIT),
     [...(params.sourceTypes ?? [])].sort().join(","),
-    params.maxSensitivity ?? "PUBLIC",
+    params.maxSensitivity ?? "ANY",
     params.accessDomains.join(","),
   ].join("::");
 }
 
 function answerCacheKey(params: {
   workspaceId: string;
+  actor: AppActor;
   cacheVersion: string;
   question: string;
   limit?: number;
@@ -112,7 +118,8 @@ function answerCacheKey(params: {
   indexName?: string;
 }) {
   return [
-    "knowledge-answer",
+    "knowledge-answer-lineage-v1",
+    createHash("sha256").update(JSON.stringify(params.actor)).digest("hex"),
     params.provider ?? "postgres",
     params.indexName ?? "",
     params.workspaceId,
@@ -132,47 +139,103 @@ async function knowledgeCacheVersion(workspaceId: string) {
   return `${globalVersion}:${workspaceVersion}`;
 }
 
-// The SQL chunk is the current indexing receipt. Azure and cached results may
-// outlive a replacement; never return a hit whose receipt was removed, or an
-// article that has since been archived or made private.
-async function currentKnowledgeCitations<T extends KnowledgeCitation>(
-  workspaceId: string,
-  accessDomains: KnowledgeAccessDomain[],
-  citations: T[],
-): Promise<T[]> {
-  if (citations.length === 0) return citations;
-  const chunks = await prisma.knowledgeChunk.findMany({
-    where: { id: { in: citations.map((citation) => citation.chunkId) }, workspaceId, accessDomain: { in: accessDomains } },
-    select: { id: true, sourceType: true, sourceId: true, metadata: true },
-  });
-  const articleIds = chunks.filter((chunk) => chunk.sourceType === "BRAIN_ARTICLE").map((chunk) => chunk.sourceId);
-  const articles = articleIds.length > 0
-    ? await prisma.brainArticle.findMany({
-      where: { id: { in: articleIds }, workspaceId, archivedAt: null, isPrivate: false },
-      select: { id: true },
-    })
-    : [];
-  const activeArticleIds = new Set(articles.map((article) => article.id));
-  const documentChunks = chunks.filter((chunk) => chunk.sourceType === "DOCUMENT"
-    && typeof (chunk.metadata as Record<string, unknown> | null)?.storageKey === "string");
-  const documents = documentChunks.length > 0
-    ? await prisma.document.findMany({
-      where: { id: { in: documentChunks.map((chunk) => chunk.sourceId) }, workspaceId, archivedAt: null },
-      select: { id: true, storageKey: true },
-    })
-    : [];
-  const documentStorageKeys = new Map(documents.map((document) => [document.id, document.storageKey]));
-  const currentChunks = new Map(chunks.map((chunk) => [chunk.id, chunk]));
-  return citations.filter((citation) => {
-    const chunk = currentChunks.get(citation.chunkId);
-    if (!chunk || chunk.sourceType !== citation.sourceType || chunk.sourceId !== citation.sourceId) return false;
-    if (chunk.sourceType === "BRAIN_ARTICLE") return activeArticleIds.has(chunk.sourceId);
-    if (chunk.sourceType === "DOCUMENT") {
-      const indexedStorageKey = (chunk.metadata as Record<string, unknown> | null)?.storageKey;
-      if (typeof indexedStorageKey === "string") return documentStorageKeys.get(chunk.sourceId) === indexedStorageKey;
+const knowledgeLineageKinds: Partial<Record<KnowledgeSourceType, LineageKind>> = {
+  BRAIN_ARTICLE: "BrainArticle",
+  DOCUMENT: "Document",
+  MEETING: "Meeting",
+  PROPOSAL: "Proposal",
+};
+
+type RetrievalAccess = {
+  actor: AppActor;
+  workspaceId: string;
+  accessDomains: KnowledgeAccessDomain[];
+  maxSensitivity?: SensitivityLabel;
+  sourceTypes?: KnowledgeSourceType[];
+};
+
+type ReadableSource = { contentHash: string };
+
+async function currentAccessDomains(actor: AppActor, workspaceId: string, requested?: KnowledgeAccessDomain[]) {
+  // Missing actor in an old caller cannot turn a domain hint into authorization.
+  if (!actor) return [] as KnowledgeAccessDomain[];
+  const current = await resolveKnowledgeAccessDomains(actor, workspaceId);
+  return normalizeKnowledgeAccessDomains(requested).filter((domain) => current.includes(domain));
+}
+
+/** Full source rows are needed to verify the content fingerprint, including uncited prompt inputs. */
+async function readableKnowledgeSources(params: RetrievalAccess, sourceIds?: Map<KnowledgeSourceType, string[]>) {
+  const sources = new Map<string, ReadableSource>();
+  const requested = params.sourceTypes?.length ? params.sourceTypes : Object.keys(knowledgeLineageKinds) as KnowledgeSourceType[];
+  for (const sourceType of [...new Set(requested)]) {
+    const kind = knowledgeLineageKinds[sourceType];
+    if (!kind) continue; // No complete input proof exists for this source type.
+    const ids = sourceIds?.get(sourceType);
+    if (sourceIds && !ids?.length) continue;
+    const where = { workspaceId: params.workspaceId, ...(ids ? { id: { in: ids } } : {}), archivedAt: null };
+    const records = sourceType === "BRAIN_ARTICLE"
+      ? await prisma.brainArticle.findMany({ where: { ...where, isPrivate: false } })
+      : sourceType === "DOCUMENT"
+        ? await prisma.document.findMany({ where: { ...where, accessDomain: { in: params.accessDomains } } })
+        : sourceType === "MEETING"
+          ? await prisma.meeting.findMany({ where })
+          : await prisma.proposal.findMany({ where });
+    const readable = await readableArtifactIds(params.actor, params.workspaceId, kind, records);
+    for (const record of records) {
+      if (readable.has(record.id)) sources.set(`${sourceType}:${record.id}`, {
+        contentHash: lineageContentFingerprint(kind, record),
+      });
     }
-    return true;
+  }
+  return sources;
+}
+
+// SQL receipts and live source inputs are authoritative over cached/Azure text.
+async function currentKnowledgeCitations<T extends KnowledgeCitation>(params: RetrievalAccess, citations: T[]): Promise<T[]> {
+  const accessDomains = await currentAccessDomains(params.actor, params.workspaceId, params.accessDomains);
+  if (citations.length === 0 || accessDomains.length === 0) return [];
+  const chunks = await prisma.knowledgeChunk.findMany({
+    where: {
+      id: { in: citations.map((citation) => citation.chunkId) },
+      workspaceId: params.workspaceId,
+      accessDomain: { in: accessDomains },
+      sourceType: params.sourceTypes?.length ? { in: params.sourceTypes } : undefined,
+      sensitivity: params.maxSensitivity ? { in: levelsUpTo(params.maxSensitivity) } : undefined,
+    },
+    select: { id: true, sourceType: true, sourceId: true, sourceTitle: true, chunkIndex: true, content: true, metadata: true },
   });
+  const sourceIds = new Map<KnowledgeSourceType, string[]>();
+  for (const chunk of chunks) sourceIds.set(chunk.sourceType, [...(sourceIds.get(chunk.sourceType) ?? []), chunk.sourceId]);
+  const sources = await readableKnowledgeSources({ ...params, accessDomains }, sourceIds);
+  const receipts = new Map(chunks.map((chunk) => [chunk.id, chunk]));
+  return citations.filter((citation) => {
+    const chunk = receipts.get(citation.chunkId);
+    if (!chunk || chunk.sourceType !== citation.sourceType || chunk.sourceId !== citation.sourceId
+      || chunk.chunkIndex !== citation.chunkIndex || chunk.content.slice(0, 400) !== citation.snippet
+      || chunk.sourceTitle !== citation.title) return false;
+    const source = sources.get(`${chunk.sourceType}:${chunk.sourceId}`);
+    return !!source && (chunk.metadata as Record<string, unknown> | null)?.sourceContentHash === source.contentHash;
+  });
+}
+
+/** Fetching a previously returned id uses the same live proof as search/cache reads. */
+export async function fetchReadableKnowledgeChunk(actor: AppActor, workspaceId: string, chunkId: string) {
+  if (!actor) return null;
+  const accessDomains = normalizeKnowledgeAccessDomains(await resolveKnowledgeAccessDomains(actor, workspaceId));
+  if (accessDomains.length === 0) return null;
+  const chunk = await prisma.knowledgeChunk.findFirst({
+    where: { id: chunkId, workspaceId, accessDomain: { in: accessDomains } },
+  });
+  if (!chunk) return null;
+  const citations = await currentKnowledgeCitations({ actor, workspaceId, accessDomains }, [{
+    chunkId: chunk.id,
+    sourceType: chunk.sourceType,
+    sourceId: chunk.sourceId,
+    title: chunk.sourceTitle,
+    chunkIndex: chunk.chunkIndex,
+    snippet: chunk.content.slice(0, 400),
+  }]);
+  return citations.length === 1 ? chunk : null;
 }
 
 async function currentSearchResults(
@@ -180,51 +243,12 @@ async function currentSearchResults(
   provider: "postgres" | "azure" | "dual_compare",
   candidates: KnowledgeSearchResult[],
 ) {
-  const current = await currentKnowledgeCitations(params.workspaceId, params.accessDomains,
-    await activeKnowledgeResults(params.workspaceId, candidates));
+  const current = await currentKnowledgeCitations(params, candidates);
   if (provider === "postgres" || (current.length === candidates.length && current.length > 0)) return current;
-
-  // A late Azure write or a failed cache invalidation can leave either stale
-  // hits or no hits. Fill missing results from committed SQL receipts.
-  const postgres = await currentKnowledgeCitations(
-    params.workspaceId,
-    params.accessDomains,
-    await activeKnowledgeResults(params.workspaceId, await searchIndexedKnowledgePostgres(params)),
-  );
+  const postgres = await currentKnowledgeCitations(params, await searchIndexedKnowledgePostgres(params));
   const seen = new Set(current.map((item) => item.chunkId));
   return [...current, ...postgres.filter((item) => !seen.has(item.chunkId))]
     .slice(0, params.limit ?? DEFAULT_SEARCH_LIMIT);
-}
-
-/** Source rows and current SQL chunk receipts are authoritative even if Azure or a response cache lags. */
-async function activeKnowledgeResults<T extends KnowledgeCitation>(workspaceId: string, results: T[]): Promise<T[]> {
-  const articleIds = [...new Set(results.filter((item) => item.sourceType === "BRAIN_ARTICLE").map((item) => item.sourceId))];
-  const documentIds = [...new Set(results.filter((item) => item.sourceType === "DOCUMENT").map((item) => item.sourceId))];
-  if (articleIds.length === 0 && documentIds.length === 0) return results;
-  const [articles, documents] = await Promise.all([
-    articleIds.length ? prisma.brainArticle.findMany({ where: {
-      id: { in: articleIds }, workspaceId, archivedAt: null, isPrivate: false,
-    }, select: { id: true } }) : [],
-    documentIds.length ? prisma.document.findMany({ where: {
-      id: { in: documentIds }, workspaceId, archivedAt: null,
-    }, select: { id: true } }) : [],
-  ]);
-  const activeArticles = new Set(articles.map((item) => item.id));
-  const activeDocuments = new Set(documents.map((item) => item.id));
-  const articleChunkIds = [...new Set(results.filter((item) => item.sourceType === "BRAIN_ARTICLE" && activeArticles.has(item.sourceId))
-    .map((item) => item.chunkId))];
-  const articleChunks = articleChunkIds.length ? await prisma.knowledgeChunk.findMany({ where: {
-    id: { in: articleChunkIds }, workspaceId, sourceType: "BRAIN_ARTICLE",
-  }, select: { id: true, sourceId: true, chunkIndex: true, content: true } }) : [];
-  const currentArticleChunks = new Map(articleChunks.map((chunk) => [chunk.id, chunk]));
-  return results.filter((item) => {
-    if (item.sourceType === "BRAIN_ARTICLE") {
-      const chunk = currentArticleChunks.get(item.chunkId);
-      return activeArticles.has(item.sourceId) && chunk?.sourceId === item.sourceId
-        && chunk.chunkIndex === item.chunkIndex && chunk.content.slice(0, 400) === item.snippet;
-    }
-    return item.sourceType === "DOCUMENT" ? activeDocuments.has(item.sourceId) : true;
-  });
 }
 
 export async function invalidateKnowledgeCache(workspaceId?: string, transaction?: Prisma.TransactionClient) {
@@ -238,6 +262,7 @@ export async function invalidateKnowledgeCache(workspaceId?: string, transaction
 
 
 export async function searchIndexedKnowledge(params: {
+  actor: AppActor;
   workspaceId: string;
   query: string;
   limit?: number;
@@ -251,7 +276,7 @@ export async function searchIndexedKnowledge(params: {
   if (!query) {
     return [] as KnowledgeSearchResult[];
   }
-  const accessDomains = normalizeKnowledgeAccessDomains(params.accessDomains);
+  const accessDomains = await currentAccessDomains(params.actor, params.workspaceId, params.accessDomains);
   if (accessDomains.length === 0) {
     return [] as KnowledgeSearchResult[];
   }
@@ -263,6 +288,7 @@ export async function searchIndexedKnowledge(params: {
 
   const cacheVersion = await knowledgeCacheVersion(params.workspaceId);
   const cacheKey = searchCacheKey({
+    actor: params.actor,
     workspaceId: params.workspaceId,
     cacheVersion,
     query,
@@ -278,20 +304,21 @@ export async function searchIndexedKnowledge(params: {
     return currentSearchResults({ ...params, query, accessDomains }, effectiveProvider, cached);
   }
 
-  const results = await activeKnowledgeResults(params.workspaceId, await executeKnowledgeSearch({
+  const results = await executeKnowledgeSearch({
     ...params,
     query,
     accessDomains,
     provider: effectiveProvider,
     configuredProvider,
-  }));
+  });
 
   const currentResults = await currentSearchResults({ ...params, query, accessDomains }, effectiveProvider, results);
   await setCacheJson(cacheKey, currentResults, SEARCH_CACHE_TTL_MS);
-  return currentResults;
+  return currentKnowledgeCitations({ ...params, accessDomains }, currentResults);
 }
 
 async function executeKnowledgeSearch(params: {
+  actor: AppActor;
   workspaceId: string;
   query: string;
   limit?: number;
@@ -361,6 +388,7 @@ function logDualCompare(
 }
 
 async function searchIndexedKnowledgePostgres(params: {
+  actor: AppActor;
   workspaceId: string;
   query: string;
   limit?: number;
@@ -372,6 +400,7 @@ async function searchIndexedKnowledgePostgres(params: {
 }, queryEmbeddingOverride?: number[]) {
   const query = params.query;
 
+  const sources = await readableKnowledgeSources(params);
   const sourceTypeWindows = params.sourceTypes?.length
     ? [...new Set(params.sourceTypes)]
     : [undefined];
@@ -380,6 +409,14 @@ async function searchIndexedKnowledgePostgres(params: {
       workspaceId: params.workspaceId,
       accessDomain: { in: params.accessDomains },
       sourceType,
+      OR: [...sources].filter(([key]) => !sourceType || key.startsWith(`${sourceType}:`)).map(([key, source]) => {
+        const separator = key.indexOf(":");
+        return {
+          sourceType: key.slice(0, separator) as KnowledgeSourceType,
+          sourceId: key.slice(separator + 1),
+          metadata: { path: ["sourceContentHash"], equals: source.contentHash },
+        };
+      }),
       sensitivity: params.maxSensitivity
         ? { in: levelsUpTo(params.maxSensitivity) }
         : undefined,
@@ -393,10 +430,14 @@ async function searchIndexedKnowledgePostgres(params: {
       sourceTitle: true,
       chunkIndex: true,
       content: true,
+      metadata: true,
       createdAt: true,
     },
   })));
-  const chunks = chunkWindows.flat().sort((left, right) =>
+  const chunks = chunkWindows.flat().filter((chunk) => {
+    const source = sources.get(`${chunk.sourceType}:${chunk.sourceId}`);
+    return !!source && (chunk.metadata as Record<string, unknown> | null)?.sourceContentHash === source.contentHash;
+  }).sort((left, right) =>
     (right.createdAt?.getTime() ?? 0) - (left.createdAt?.getTime() ?? 0)
     || left.chunkIndex - right.chunkIndex);
 
@@ -509,6 +550,7 @@ async function searchIndexedKnowledgePostgres(params: {
 }
 
 export async function answerKnowledgeQuestion(params: {
+  actor: AppActor;
   workspaceId: string;
   question: string;
   limit?: number;
@@ -517,7 +559,7 @@ export async function answerKnowledgeQuestion(params: {
   workflowJobId?: string;
   agentRunId?: string;
 }) {
-  const accessDomains = normalizeKnowledgeAccessDomains(params.accessDomains);
+  const accessDomains = await currentAccessDomains(params.actor, params.workspaceId, params.accessDomains);
   if (accessDomains.length === 0) {
     return {
       answer: "I could not find relevant indexed knowledge for that question.",
@@ -539,12 +581,12 @@ export async function answerKnowledgeQuestion(params: {
     citations: KnowledgeCitation[];
   }>(cacheKey);
   if (cached) {
-    const currentCitations = await currentKnowledgeCitations(params.workspaceId, accessDomains,
-      await activeKnowledgeResults(params.workspaceId, cached.citations));
+    const currentCitations = await currentKnowledgeCitations({ ...params, accessDomains }, cached.citations);
     if (currentCitations.length === cached.citations.length) return cached;
   }
 
   const citations = await searchIndexedKnowledge({
+    actor: params.actor,
     workspaceId: params.workspaceId,
     query: params.question,
     limit: params.limit ?? DEFAULT_ANSWER_LIMIT,
@@ -586,18 +628,17 @@ export async function answerKnowledgeQuestion(params: {
     ],
   });
 
-  if ((await activeKnowledgeResults(params.workspaceId, citations)).length !== citations.length) {
-    return { answer: "I could not find relevant indexed knowledge for that question.", citations: [] as KnowledgeCitation[] };
-  }
-
   const answer = {
     answer: response.content,
     citations: citations.map(({ score, ...citation }) => citation),
   };
-  const currentCitations = await currentKnowledgeCitations(params.workspaceId, accessDomains, answer.citations);
+  const currentCitations = await currentKnowledgeCitations({ ...params, accessDomains }, answer.citations);
   if (currentCitations.length !== answer.citations.length) {
     return { answer: "I could not find relevant indexed knowledge for that question.", citations: [] as KnowledgeCitation[] };
   }
   await setCacheJson(cacheKey, answer, SEARCH_CACHE_TTL_MS);
+  if ((await currentKnowledgeCitations({ ...params, accessDomains }, answer.citations)).length !== answer.citations.length) {
+    return { answer: "I could not find relevant indexed knowledge for that question.", citations: [] as KnowledgeCitation[] };
+  }
   return answer;
 }

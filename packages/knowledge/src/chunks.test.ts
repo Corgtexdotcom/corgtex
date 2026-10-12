@@ -1,8 +1,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { getWorkspaceIndexingHealth, reindexWorkspace, syncBrainArticleKnowledge, syncKnowledgeForSource } from "./chunks";
+import { getWorkspaceIndexingHealth, reindexWorkspace, syncBrainArticleKnowledge, syncKnowledgeForSource as syncKnowledgeForSourceImpl } from "./chunks";
 import { prisma } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
+import { lineageContentFingerprint } from "@corgtex/domain";
 import { invalidateKnowledgeCache } from "./retrieval";
+
+// Native source fixtures mirror the canonical writer input unless a regression
+// explicitly supplies an archived, replaced, or changed database row.
+const sourceSnapshots = new Map<string, any>();
+async function syncKnowledgeForSource(params: Parameters<typeof syncKnowledgeForSourceImpl>[0]) {
+  sourceSnapshots.set(params.sourceId, { id: params.sourceId, workspaceId: params.workspaceId,
+    title: params.sourceTitle?.trim() || null, textContent: params.content, bodyMd: params.content,
+    accessDomain: params.accessDomain, archivedAt: null, isPrivate: false });
+  return syncKnowledgeForSourceImpl(params);
+}
 
 const { syncAzureKnowledgeSourceMock } = vi.hoisted(() => ({
   syncAzureKnowledgeSourceMock: vi.fn().mockResolvedValue({ skipped: true, deleted: 0, uploaded: 0 }),
@@ -119,8 +130,8 @@ describe("syncKnowledgeForSource", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(defaultModelGateway.embed).mockResolvedValue({ embeddings: [[1, 0]], usage: { provider: "test", model: "fake-embed" } });
-    vi.mocked(prisma.brainArticle.findFirst).mockResolvedValue({ id: "active" } as any);
-    vi.mocked(prisma.document.findFirst).mockResolvedValue({ id: "active" } as any);
+    vi.mocked(prisma.brainArticle.findFirst).mockImplementation((async (query: any) => sourceSnapshots.get(query.where.id) ?? null) as any);
+    vi.mocked(prisma.document.findFirst).mockImplementation((async (query: any) => sourceSnapshots.get(query.where.id) ?? null) as any);
   });
 
   it("does not delete prior chunks when embedding fails", async () => {
@@ -171,8 +182,7 @@ describe("syncKnowledgeForSource", () => {
       sourceId: "doc-1", content: "Old uploaded text", metadata: { storageKey: "old-blob" },
     })).toBe(0);
     expect(prisma.document.findFirst).toHaveBeenCalledWith({
-      where: { id: "doc-1", workspaceId: "ws_1", archivedAt: null, storageKey: "old-blob" },
-      select: { id: true },
+      where: { id: "doc-1", workspaceId: "ws_1", archivedAt: null },
     });
     expect(prisma.knowledgeChunk.deleteMany).not.toHaveBeenCalled();
     expect(syncAzureKnowledgeSourceMock).not.toHaveBeenCalled();
@@ -327,11 +337,17 @@ describe("Workspace Reindex", () => {
     vi.mocked(prisma.knowledgeChunk.findMany).mockImplementation((async (args: any) => {
       const condition = args as any;
       if (condition.where?.sourceType === "BRAIN_ARTICLE") {
-        return [{ sourceId: "a1" } as any];
+        return [{ sourceId: "a1", metadata: { sourceContentHash: lineageContentFingerprint("BrainArticle", {
+          id: "a1", title: "Article 1", bodyMd: "Body 1", slug: "a-1", type: "PRODUCT", authority: "REFERENCE",
+        }) } } as any];
       }
       return []; // No documents chunked
     }) as any);
 
+    sourceSnapshots.set("a2", { id: "a2", title: "Article 2", bodyMd: "Body 2" });
+    sourceSnapshots.set("d1", { id: "d1", title: "Doc 1", textContent: "Text 1" });
+    vi.mocked(prisma.brainArticle.findFirst).mockImplementation((async (query: any) => sourceSnapshots.get(query.where.id) ?? null) as any);
+    vi.mocked(prisma.document.findFirst).mockImplementation((async (query: any) => sourceSnapshots.get(query.where.id) ?? null) as any);
     const result = await reindexWorkspace("ws_1");
     if (result.errors.length > 0) {
       console.error(result.errors);
@@ -417,6 +433,7 @@ describe("PostgreSQL knowledge cache transaction", () => {
     vi.stubEnv("SHARED_STATE_BACKEND", "postgres");
     vi.stubEnv("KNOWLEDGE_SEARCH_PROVIDER", "postgres");
     vi.mocked(invalidateKnowledgeCache).mockResolvedValue(undefined);
+    vi.mocked(prisma.document.findFirst).mockImplementation((async (query: any) => sourceSnapshots.get(query.where.id) ?? null) as any);
     vi.mocked(defaultModelGateway.embed).mockResolvedValue({ embeddings: [[1, 0]], usage: { provider: "test", model: "fake-embed" } });
   });
   afterEach(() => {
@@ -436,5 +453,56 @@ describe("PostgreSQL knowledge cache transaction", () => {
     await expect(syncKnowledgeForSource({ workspaceId: "ws_1", sourceType: "DOCUMENT", accessDomain: "WORKSPACE", sourceId: "source-1", content: "Synthetic content" })).rejects.toThrow("version unavailable");
     expect(syncAzureKnowledgeSourceMock).not.toHaveBeenCalled();
     expect(invalidateKnowledgeCache).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("knowledge indexing source revision receipts", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    delete process.env.KNOWLEDGE_SEARCH_PROVIDER;
+    vi.mocked(prisma.brainArticle.findFirst).mockImplementation((async (query: any) => sourceSnapshots.get(query.where.id) ?? null) as any);
+    vi.mocked(prisma.document.findFirst).mockImplementation((async (query: any) => sourceSnapshots.get(query.where.id) ?? null) as any);
+    vi.mocked(defaultModelGateway.embed).mockResolvedValue({ embeddings: [[1, 0]], usage: { provider: "test", model: "fake-embed" } });
+  });
+
+  it.each(["DOCUMENT", "BRAIN_ARTICLE"] as const)("rejects a changed %s revision after embedding, preserving prior receipts", async (sourceType) => {
+    vi.mocked(defaultModelGateway.embed).mockImplementationOnce(async () => {
+      const row = sourceSnapshots.get("revision-race");
+      row.title = "Synthetic updated title";
+      return { embeddings: [[1, 0]], usage: { provider: "test", model: "fake-embed" } };
+    });
+    expect(await syncKnowledgeForSource({ workspaceId: "ws_1", sourceType, sourceId: "revision-race", accessDomain: "WORKSPACE",
+      sourceTitle: "Synthetic initial title", content: "Synthetic content" })).toBe(0);
+    expect(prisma.knowledgeChunk.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.knowledgeChunk.createMany).not.toHaveBeenCalled();
+    expect(syncAzureKnowledgeSourceMock).not.toHaveBeenCalled();
+  });
+
+  it("writes its captured revision hash instead of trusting caller metadata", async () => {
+    expect(await syncKnowledgeForSource({ workspaceId: "ws_1", sourceType: "DOCUMENT", sourceId: "receipt-proof", accessDomain: "WORKSPACE",
+      content: "Synthetic content", metadata: { sourceContentHash: "spoofed" } })).toBe(1);
+    const data = vi.mocked(prisma.knowledgeChunk.createMany).mock.calls[0][0]!.data as any[];
+    expect(data[0].metadata.sourceContentHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(data[0].metadata.sourceContentHash).not.toBe("spoofed");
+    expect(prisma.$queryRaw).toHaveBeenCalled();
+  });
+
+  it("rebuilds a legacy receipt even when the source already has indexed chunks", async () => {
+    const row = { id: "legacy-article", workspaceId: "ws_1", title: "Synthetic original", bodyMd: "Synthetic policy", archivedAt: null, isPrivate: false };
+    sourceSnapshots.set(row.id, row);
+    vi.mocked(prisma.brainArticle.findMany).mockResolvedValue([row] as any);
+    vi.mocked(prisma.brainArticle.findUnique).mockResolvedValue(row as any);
+    vi.mocked(prisma.document.findMany).mockResolvedValue([]);
+    vi.mocked(prisma.knowledgeChunk.findMany).mockResolvedValue([{ sourceId: row.id, metadata: {} }] as any);
+    expect(await reindexWorkspace("ws_1")).toMatchObject({ reindexedArticles: 1, errors: [] });
+    expect(prisma.knowledgeChunk.createMany).toHaveBeenCalled();
+  });
+
+  it("withholds an unverified native source instead of certifying arbitrary caller content", async () => {
+    sourceSnapshots.set("native-source", { id: "native-source", title: null, textContent: "Current stored content", archivedAt: null });
+    expect(await syncKnowledgeForSourceImpl({ workspaceId: "ws_1", sourceType: "DOCUMENT", sourceId: "native-source", accessDomain: "WORKSPACE",
+      content: "Stale caller content" })).toBe(0);
+    expect(defaultModelGateway.embed).not.toHaveBeenCalled();
+    expect(prisma.knowledgeChunk.createMany).not.toHaveBeenCalled();
   });
 });

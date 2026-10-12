@@ -108,6 +108,7 @@ export async function searchConnectedContextAction(actor: AppActor, ctx: ToolCon
   if (args.includeCorgtex !== false) {
     const accessDomains = await resolveInteractiveKnowledgeAccessDomains(actor, ctx.workspaceId);
     const results = await searchIndexedKnowledge({
+      actor,
       workspaceId: ctx.workspaceId,
       query: args.query,
       limit,

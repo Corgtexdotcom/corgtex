@@ -28,6 +28,7 @@ const { prismaMock } = vi.hoisted(() => ({
     },
     brainBacklink: {
       findMany: vi.fn(),
+      groupBy: vi.fn(),
     },
     workspacePermalink: {
       upsert: vi.fn(),
@@ -74,6 +75,12 @@ vi.mock("./archive", () => ({
 }));
 
 vi.mock("./brain-source-removal", () => ({ requestBrainSourceRemoval }));
+vi.mock("./source-lineage", () => ({
+  recordArtifactInputLineage: vi.fn(),
+  copyArtifactInputLineage: vi.fn().mockResolvedValue(true),
+  currentArtifactInputRoots: vi.fn().mockResolvedValue([]),
+  readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) => new Set(records.map((record: { id: string }) => record.id))),
+}));
 
 const ownerActor = {
   kind: "user",
@@ -112,12 +119,12 @@ describe("Brain article draft lifecycle", () => {
     });
     prismaMock.brainArticle.findMany.mockResolvedValue([]);
     prismaMock.brainArticle.count.mockResolvedValue(0);
+    prismaMock.brainBacklink.groupBy.mockResolvedValue([]);
 
     await listArticles({ kind: "user", user: { id: "admin-1" } } as any, { workspaceId: "ws-1" });
 
     expect(prismaMock.brainArticle.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: {
-        AND: [
+      where: { AND: expect.arrayContaining([
           { workspaceId: "ws-1", archivedAt: null },
           {
             OR: [
@@ -125,8 +132,7 @@ describe("Brain article draft lifecycle", () => {
               { isPrivate: true, authority: "DRAFT" },
             ],
           },
-        ],
-      },
+      ]) },
     }));
   });
 
@@ -491,6 +497,7 @@ describe("Brain status access domains", () => {
     prismaMock.brainSource.count.mockResolvedValue(2);
     prismaMock.brainDiscussionThread.count.mockResolvedValue(0);
     prismaMock.brainBacklink.findMany.mockResolvedValue([]);
+    prismaMock.brainBacklink.groupBy.mockResolvedValue([]);
   });
 
   it.each([
@@ -509,6 +516,7 @@ describe("Brain status access domains", () => {
       where: {
         workspaceId: "ws-1",
         accessDomain: { in: domains },
+        archivedAt: null,
         absorbedAt: null,
       },
     });

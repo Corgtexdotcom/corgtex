@@ -27,6 +27,7 @@ export async function runProposalDraftingAgent(params: {
     plan: ["load-context", "search-knowledge", "draft-proposal", "structure-draft", "approval-checkpoint"],
     buildContext: async (helpers, runId) => {
       const citations = await helpers.tool("knowledge.search", { prompt: params.prompt }, () => searchIndexedKnowledge({
+        actor: { kind: "agent", authProvider: "bootstrap", label: "proposal-drafting", workspaceIds: [params.workspaceId] },
         workspaceId: params.workspaceId,
         agentRunId: runId,
         query: params.prompt,

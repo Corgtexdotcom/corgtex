@@ -2,6 +2,7 @@ import { prisma } from "@corgtex/shared";
 import {
   contextGraphSystemActor,
   attachContextGraphEvidence,
+  readableArtifactIds,
   syncContextGraphForMeeting,
   upsertContextGraphObject,
   upsertContextGraphRelationship,
@@ -181,8 +182,10 @@ export async function handleContextGraphSync(
       include: { circle: { select: { id: true, name: true, purposeMd: true } } },
     });
     if (!proposal) return;
+    if (!(await readableArtifactIds(actor, workspaceId, "Proposal", [proposal])).has(proposal.id)) return;
     const object = await upsertContextGraphObject(actor, {
       workspaceId,
+      lineageInputs: [{ kind: "Proposal", id: proposal.id }],
       objectType: proposal.status === "RESOLVED" ? "Decision" : "Hypothesis",
       title: proposal.title,
       summary: [proposal.summary, proposal.bodyMd].filter(Boolean).join("\n\n"),
@@ -491,12 +494,17 @@ export async function handleContextGraphSync(
       },
     });
     if (!goal) return;
+    if (!(await readableArtifactIds(actor, workspaceId, "Goal", [goal])).has(goal.id)) {
+      await archiveGoalGraphFacts(workspaceId, goal.id);
+      return;
+    }
     if (isPrivateDraftGoal(goal)) {
       await archiveGoalGraphFacts(workspaceId, goal.id);
       return;
     }
     const object = await upsertContextGraphObject(actor, {
       workspaceId,
+      lineageInputs: [{ kind: "Goal", id: goal.id }],
       objectType: "Goal",
       title: goal.title,
       summary: goal.descriptionMd,
@@ -595,6 +603,7 @@ export async function handleContextGraphSync(
     if (document.accessDomain !== "WORKSPACE") return;
     await upsertContextGraphObject(actor, {
       workspaceId,
+      lineageInputs: [{ kind: "Document", id: document.id }],
       objectType: "Document",
       title: document.title,
       summary: document.textContent?.slice(0, 1000) ?? null,
@@ -611,8 +620,10 @@ export async function handleContextGraphSync(
   if (payload.sourceType === "BRAIN_ARTICLE") {
     const article = await prisma.brainArticle.findFirst({ where: { id: payload.sourceId, workspaceId } });
     if (!article) return;
+    if (!(await readableArtifactIds(actor, workspaceId, "BrainArticle", [article])).has(article.id)) return;
     const object = await upsertContextGraphObject(actor, {
       workspaceId,
+      lineageInputs: [{ kind: "BrainArticle", id: article.id }],
       objectType: articleTypeToObjectType(article.type),
       title: article.title,
       summary: article.bodyMd.slice(0, 1600),
@@ -629,6 +640,7 @@ export async function handleContextGraphSync(
     });
     await attachContextGraphEvidence(actor, {
       workspaceId,
+      lineageInputs: [{ kind: "BrainArticle", id: article.id }],
       objectId: object.id,
       sourceType: "BRAIN_ARTICLE",
       sourceId: article.id,

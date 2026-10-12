@@ -774,6 +774,7 @@ model Workspace {
   events                         Event[]
   workflowJobs                   WorkflowJob[]
   knowledge                      KnowledgeChunk[]
+  artifactInputLineage           ArtifactInputLineage[]
   modelUsage                     ModelUsage[]
   agentRuns                      AgentRun[]
   agentCreds                     AgentCredential[]
@@ -3719,6 +3720,26 @@ model KnowledgeChunk {
 
   @@index([workspaceId, sourceType, sourceId])
   @@index([workspaceId, accessDomain, sourceType, sourceId])
+}
+
+/// Immutable evidence for the complete inputs to one saved artifact revision.
+/// An absent row means unknown lineage and must never be treated as an empty input set.
+model ArtifactInputLineage {
+  id           String   @id @default(uuid())
+  workspaceId  String
+  artifactType String
+  artifactId   String
+  revision     Int
+  origin       String
+  contentHash  String
+  inputsJson   Json     @default("[]")
+  rootsJson    Json     @default("[]")
+  recordedAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, artifactType, artifactId, revision])
+  @@index([workspaceId, artifactType, artifactId, recordedAt])
 }
 
 model ContextGraphObject {

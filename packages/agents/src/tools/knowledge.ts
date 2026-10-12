@@ -40,6 +40,7 @@ export async function searchBrain(actor: AppActor, workspaceId: string, query: s
   const safeLimit = Math.min(limit || 5, 10);
   const accessDomains = await resolveInteractiveKnowledgeAccessDomains(actor, workspaceId);
   const chunks = await searchIndexedKnowledge({
+    actor,
     workspaceId,
     query,
     limit: safeLimit,

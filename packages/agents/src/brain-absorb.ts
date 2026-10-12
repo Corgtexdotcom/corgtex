@@ -9,6 +9,8 @@ import {
   lockWorkspaceArchiveArtifact,
   brainSourceRecoveryIdentity,
   brainSourceContentFingerprint,
+  readableArtifactIds,
+  resolveKnowledgeAccessDomains,
 } from "@corgtex/domain";
 import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
 import type { AppActor } from "@corgtex/shared";
@@ -153,25 +155,20 @@ export async function absorbSource(params: {
     label: "brain-absorb",
     workspaceIds: [params.workspaceId],
   };
+  const accessibleDomains = await resolveKnowledgeAccessDomains(agentActor, params.workspaceId);
+  if (!accessibleDomains.includes(source.accessDomain)) {
+    return { skipped: true, reason: "source_restricted", sourceId };
+  }
 
-  // Load the article index for matching
+  // The model only sees the source at classification time. Showing it the
+  // workspace article index would make every generated page depend on every
+  // article title and alias, even when it cites only this source.
   const articles = await prisma.brainArticle.findMany({
-    where: { workspaceId: params.workspaceId, archivedAt: null },
-    select: {
-      id: true,
-      slug: true,
-      title: true,
-      type: true,
-      authority: true,
-      bodyMd: true,
-      updatedAt: true,
-      sourceIds: true,
-      archivedAt: true,
-      frontmatterJson: true,
-    },
+    where: { workspaceId: params.workspaceId, archivedAt: null, isPrivate: false },
   });
 
-  const activeArticles = articles.filter((article) => !article.archivedAt);
+  const readableArticleIds = await readableArtifactIds(agentActor, params.workspaceId, "BrainArticle", articles);
+  const activeArticles = articles.filter((article) => !article.archivedAt && readableArticleIds.has(article.id));
   const articleIndex = activeArticles.map((a) => ({
     slug: a.slug,
     title: a.title,
@@ -195,17 +192,12 @@ Source title: ${source.title ?? "untitled"}
 Source channel: ${source.channel ?? "unknown"}
 ${source.ingestionGuidanceMd ? `User ingestion guidance:\n${source.ingestionGuidanceMd}` : "User ingestion guidance: none"}
 
-Existing articles in the wiki:
-${articleIndex.map((a) => `- "${a.title}" (${a.type}, ${a.authority}) [slug: ${a.slug}]${a.aliases.length > 0 ? ` aliases: ${a.aliases.join(", ")}` : ""}`).join("\n")}
-
 Determine:
 1. What type of knowledge this source contains (one of: PRODUCT, ARCHITECTURE, PROCESS, RUNBOOK, DECISION, TEAM, PERSON, CUSTOMER, INCIDENT, PROJECT, INTEGRATION, PATTERN, STRATEGY, CULTURE, GLOSSARY)
-2. Which existing articles should be updated (list their slugs), if any
-3. Whether a new article should be created, and if so, suggest a title and slug
-4. A brief summary of what this source adds to the wiki`,
+2. Suggest a title and slug for the most specific article supported by this source
+3. A brief summary of what this source adds to the wiki. Do not use other wiki articles.`,
     schemaHint: `{
   articleType: string,
-  updateSlugs: string[],
   createNew: { title: string, slug: string } | null,
   summary: string
 }`,
@@ -217,14 +209,18 @@ Determine:
 
   const result = analysis.output as {
     articleType?: string;
-    updateSlugs?: string[];
     createNew?: { title: string; slug: string } | null;
     summary?: string;
   };
 
   const articleType = (result.articleType ?? "GLOSSARY") as BrainArticleType;
-  const updateSlugs = Array.isArray(result.updateSlugs) ? result.updateSlugs : [];
   const createNew = result.createNew && typeof result.createNew === "object" ? result.createNew : null;
+  const suggestedSlug = createNew?.slug ? slugify(createNew.slug, "source") : "";
+  const suggestedTitle = createNew?.title?.trim().toLowerCase() ?? "";
+  const updateSlugs = articleIndex
+    .filter((article) => article.slug === suggestedSlug || article.title.trim().toLowerCase() === suggestedTitle
+      || article.aliases.some((alias) => alias.trim().toLowerCase() === suggestedTitle))
+    .map((article) => article.slug);
   const documentLikeSource = isDocumentLikeSource(source.sourceType);
 
   const postAnalysisSkip = await skippedIfSourceInactive();
@@ -292,7 +288,7 @@ Rules:
   if (createNew && createNew.title && createNew.slug) {
     // Check it doesn't already exist
     const existingSlug = articles.find((a) => a.slug === createNew.slug);
-    if (!existingSlug) {
+    if (!existingSlug && updateSlugs.length === 0) {
       const drafted = await defaultModelGateway.chat({
         model,
         workspaceId: params.workspaceId,
@@ -363,7 +359,6 @@ Rules:
             title: fallbackTitle,
             sourceContent: source.content.slice(0, 4000),
             ingestionGuidanceMd: source.ingestionGuidanceMd,
-            skippedExistingArticles: skippedNonDraftSlugs,
             summary: result.summary ?? null,
           }),
         },
@@ -406,7 +401,7 @@ Rules:
       },
       include: {
         fromArticle: {
-          select: { id: true, slug: true, title: true, type: true, authority: true, bodyMd: true, archivedAt: true },
+          select: { id: true, slug: true, title: true, type: true, authority: true, bodyMd: true, archivedAt: true, isPrivate: true },
         },
       },
     });
@@ -416,7 +411,7 @@ Rules:
     for (const bl of inboundBacklinks) {
       if (
         !plannedTouchedArticleIds.includes(bl.fromArticle.id) &&
-        bl.fromArticle.authority === "DRAFT" &&
+        bl.fromArticle.authority === "DRAFT" && !bl.fromArticle.isPrivate &&
         !bl.fromArticle.archivedAt &&
         !candidateArticles.has(bl.fromArticle.id)
       ) {
@@ -425,18 +420,17 @@ Rules:
     }
 
     // Limit cascade breadth
-    const candidates = [...candidateArticles.values()].slice(0, MAX_CASCADE_BREADTH);
+    const candidateRows = await prisma.brainArticle.findMany({
+      where: { workspaceId: params.workspaceId, id: { in: [...candidateArticles.keys()] }, archivedAt: null, isPrivate: false },
+    });
+    const safeCandidateIds = await readableArtifactIds(agentActor, params.workspaceId, "BrainArticle", candidateRows);
+    const candidates = [...candidateArticles.values()].filter((candidate) => safeCandidateIds.has(candidate.id))
+      .slice(0, MAX_CASCADE_BREADTH);
 
     for (const candidate of candidates) {
       try {
         // Build a summary of what changed in the touched articles
-        const changedSummaries = plannedTouchedArticleIds
-          .map((id) => {
-            const a = articles.find((x) => x.id === id);
-            return a ? `"${a.title}" was updated` : null;
-          })
-          .filter(Boolean)
-          .join("; ");
+        const changedSummaries = "A related article was updated from the new source";
 
         const cascadeCheck = await defaultModelGateway.chat({
           model,
@@ -528,6 +522,8 @@ Rules:
         workspaceId: params.workspaceId,
         slug: plan.slug,
         bodyMd: plan.bodyMd,
+        absorbedSource: { sourceId: source.id, sourceFingerprint: brainSourceContentFingerprint(source),
+          agentRunId: params.agentRunId },
         changeSummary: plan.changeSummary,
         agentRunId: params.agentRunId,
         tx,

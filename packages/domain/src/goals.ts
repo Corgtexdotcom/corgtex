@@ -6,6 +6,7 @@ import { recordAudit } from "./audit-trail";
 import { archiveFilterWhere, type ArchiveFilter } from "./archive";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import { invariant } from "./errors";
+import { recordArtifactInputLineage, type LineageInput, type LineageRoot } from "./source-lineage";
 import { privacyFilter } from "./privacy";
 import {
   requireCollaborativeWorkItemEditor,
@@ -53,6 +54,8 @@ type CreateGoalParams = {
   keyResults?: GoalKeyResultInput[];
   duplicateGuard?: DuplicateGuardOptions | null;
   _membership?: MembershipSummary | null;
+  lineageInputs?: LineageInput[];
+  lineageRoots?: LineageRoot[];
 };
 
 const COMPANY_UNDERSTANDING_SOURCE = "company-understanding";
@@ -591,6 +594,15 @@ export async function createGoal(
         ownerMemberId: params.ownerMemberId || null,
       },
     });
+
+    if (params.lineageInputs || params.lineageRoots || actor.kind === "user") {
+      await recordArtifactInputLineage({
+        tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "Goal", id: goal.id }, content: goal,
+        origin: params.lineageInputs?.length || params.lineageRoots?.length ? "DERIVED" : "HUMAN_ORIGINAL",
+        inputs: params.lineageInputs ?? [], inheritedRoots: params.lineageRoots,
+      });
+    }
 
     await ensureWorkspacePermalink(tx, actor, {
       workspaceId: params.workspaceId,
@@ -1607,6 +1619,8 @@ export async function createGoalLink(
     source?: string | null;
     metadata?: Prisma.InputJsonValue;
     _membership?: MembershipSummary | null;
+    lineageInputs?: LineageInput[];
+    lineageRoots?: LineageRoot[];
   }
 ) {
   const membership = await requireWorkspaceMembership({
@@ -1649,6 +1663,15 @@ export async function createGoalLink(
         metadata: params.metadata,
       },
     });
+
+    if (params.lineageInputs || params.lineageRoots || actor.kind === "user") {
+      await recordArtifactInputLineage({
+        tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "GoalLink", id: link.id }, content: link,
+        origin: params.lineageInputs?.length || params.lineageRoots?.length ? "DERIVED" : "HUMAN_ORIGINAL",
+        inputs: params.lineageInputs ?? [], inheritedRoots: params.lineageRoots,
+      });
+    }
 
     await appendEvents(tx, [
       {

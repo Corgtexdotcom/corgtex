@@ -9,6 +9,8 @@ import { findSourceArticleImpacts, readBrainArticleDerivation, sourceIdsInDeriva
 import { lockActiveArticleSources, lockBrainSourceLink } from "./brain-source-links";
 import { AppError, invariant } from "./errors";
 import { appendEvents } from "./events";
+import { copyArtifactInputLineage, recordArtifactInputLineage } from "./source-lineage";
+import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 
 type RemovalArticle = {
   id: string;
@@ -32,6 +34,7 @@ type RemovalPayload = RemovalRequest & {
   generationToken?: string;
   regenerationRunId?: string;
   candidates?: Record<string, string>;
+  candidateTitles?: Record<string, string>;
   archiveDocumentId?: string;
   continuationSourceIds?: string[];
   nextPendingSourceId?: string | null;
@@ -302,7 +305,7 @@ export async function generateBrainSourceRemovalCandidate(params: {
   if ("done" in claim) return { phase: claim.done };
   const { payload, token, attempts } = claim;
 
-  const finish = async (candidates: Record<string, string> | null) => prisma.$transaction(async (tx) => {
+  const finish = async (candidates: Record<string, string> | null, candidateTitles: Record<string, string> = {}) => prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM "WorkflowJob" WHERE id = ${params.jobId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const current = await tx.workflowJob.findFirst({ where: { id: params.jobId, workspaceId: params.workspaceId, type: "agent.brain-source-regenerate" } });
     invariant(current, 404, "NOT_FOUND", "Regeneration job not found.");
@@ -334,7 +337,7 @@ export async function generateBrainSourceRemovalCandidate(params: {
       startedAt: current.startedAt ?? new Date(), completedAt: new Date(),
     } });
     await tx.workflowJob.update({ where: { id: current.id }, data: {
-      payload: { ...payload, phase: "READY", candidates, regenerationRunId: run.id } as Prisma.InputJsonObject,
+      payload: { ...payload, phase: "READY", candidates, candidateTitles, regenerationRunId: run.id } as Prisma.InputJsonObject,
     } });
     return { phase: "READY" as const, candidateCount: Object.keys(candidates!).length };
   });
@@ -346,6 +349,7 @@ export async function generateBrainSourceRemovalCandidate(params: {
     return finish(null);
   }
   const candidates: Record<string, string> = {};
+  const candidateTitles: Record<string, string> = {};
   for (const article of payload.articles.filter((item) => item.action === "regenerate")) {
     const ids = article.remaining.map((item) => item.sourceId);
     const sources = await prisma.brainSource.findMany({
@@ -353,11 +357,15 @@ export async function generateBrainSourceRemovalCandidate(params: {
       select: { id: true, title: true, content: true },
     });
     invariant(sources.length === ids.length, 409, "SOURCE_CHANGED", "A remaining source changed before regeneration.");
-    const bodyMd = (await params.generate({ id: article.id, title: article.title }, sources)).trim();
+    // The removed article's old title may itself contain withdrawn information.
+    // Give the model only a title from the independently retained sources.
+    const safeTitle = sources[0]?.title?.trim() || "Remaining-source article";
+    const bodyMd = (await params.generate({ id: article.id, title: safeTitle }, sources)).trim();
     invariant(bodyMd.length > 0 && bodyMd.length <= 100_000, 422, "INVALID_CANDIDATE", "Regeneration produced an invalid candidate.");
     candidates[article.id] = bodyMd;
+    candidateTitles[article.id] = safeTitle;
   }
-  return finish(candidates);
+  return finish(candidates, candidateTitles);
 }
 
 export async function listBrainSourceRemovalReviews(actor: AppActor, params: { workspaceId: string; sourceIds: string[] }) {
@@ -375,6 +383,7 @@ export async function listBrainSourceRemovalReviews(actor: AppActor, params: { w
         id: item.id, title: item.title, action: item.action,
         currentBodyMd: articles.find((article) => article.id === item.id)?.bodyMd ?? null,
         candidateBodyMd: payload.phase === "READY" ? payload.candidates?.[item.id] ?? null : null,
+        candidateTitle: payload.phase === "READY" ? payload.candidateTitles?.[item.id] ?? null : null,
       })),
     };
   }));
@@ -400,7 +409,7 @@ export async function resolveBrainSourceRemoval(actor: AppActor, params: {
     }
     await requireBrainSourceRemovalEnabled(tx, params.workspaceId);
     await currentPlan(tx, params.workspaceId, payload.sourceId, payload);
-    invariant(payload.candidates && payload.regenerationRunId, 409, "INVALID_STATE", "Candidate provenance is missing.");
+    invariant(payload.candidates && payload.candidateTitles && payload.regenerationRunId, 409, "INVALID_STATE", "Candidate provenance is missing.");
     const generationRun = await tx.agentRun.findFirst({ where: {
       id: payload.regenerationRunId, workspaceId: params.workspaceId,
       agentKey: "brain-source-regenerate", triggerRef: job.id, status: "COMPLETED",
@@ -413,21 +422,36 @@ export async function resolveBrainSourceRemoval(actor: AppActor, params: {
         continue;
       }
       const bodyMd = payload.candidates[article.id];
+      const title = payload.candidateTitles[article.id];
       invariant(typeof bodyMd === "string" && bodyMd.trim(), 409, "INVALID_STATE", "Candidate body is missing.");
+      invariant(typeof title === "string" && title.trim(), 409, "INVALID_STATE", "Candidate title is missing.");
       const record = await tx.brainArticle.findFirst({ where: { id: article.id, workspaceId: params.workspaceId, archivedAt: null } });
       invariant(record, 409, "SOURCE_CHANGED", "Article changed before review.");
       const derivation = readBrainArticleDerivation(record.derivationJson);
       invariant(derivation, 409, "SOURCE_CHANGED", "Article provenance changed before review.");
       const prior = await tx.brainArticleVersion.findFirst({ where: { articleId: record.id }, orderBy: { version: "desc" }, select: { version: true } });
-      await tx.brainArticleVersion.create({ data: {
+      const previousVersion = await tx.brainArticleVersion.create({ data: {
         articleId: record.id, version: (prior?.version ?? 0) + 1, bodyMd: record.bodyMd,
         changeSummary: "Previous body before reviewed source regeneration.",
       } });
-      await tx.brainArticle.update({ where: { id: record.id }, data: {
-        bodyMd, sourceIds: record.sourceIds.filter((id) => id !== payload.sourceId),
+      await copyArtifactInputLineage({ tx, workspaceId: params.workspaceId,
+        from: { kind: "BrainArticle", id: record.id }, fromContent: record,
+        to: { kind: "BrainArticleVersion", id: previousVersion.id }, toContent: previousVersion,
+      });
+      const slug = `regenerated-${record.id}`;
+      const updated = await tx.brainArticle.update({ where: { id: record.id }, data: {
+        title, slug, bodyMd, sourceIds: article.remaining.map((item) => item.sourceId),
         derivationJson: { ...derivation, agentRunId: generationRun.id, sources: article.remaining },
         lastVerifiedAt: new Date(),
       } });
+      await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "BrainArticle", id: updated.id }, content: updated, origin: "DERIVED",
+        inputs: article.remaining.map((item) => ({ kind: "BrainSource", id: item.sourceId })),
+      });
+      await ensureWorkspacePermalink(tx, actor, { workspaceId: params.workspaceId,
+        entityType: "BrainArticle", entityId: updated.id,
+        canonicalPath: workspaceEntityCanonicalPath(params.workspaceId, "BrainArticle", updated),
+      });
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brain_article_index:${params.workspaceId}:${record.id}`}, 0))`;
       // The reviewed body is authoritative immediately. Remove old SQL receipts
       // in the same commit; a queued index job may be paused or fail.

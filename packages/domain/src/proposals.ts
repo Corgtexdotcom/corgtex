@@ -6,6 +6,7 @@ import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, isGlobalOperator, requireWorkspaceMembership } from "./auth";
 import { getApprovalPolicy, ensureApprovalFlow, withdrawActiveApprovalFlowForSubject } from "./approvals";
 import { invariant } from "./errors";
+import { currentArtifactInputRoots, readableArtifactIds, recordArtifactInputLineage, type LineageInput, type LineageRoot } from "./source-lineage";
 import { privacyFilter } from "./privacy";
 import { archiveFilterWhere, type ArchiveFilter } from "./archive";
 import { requireDraftManager } from "./draft-permissions";
@@ -67,6 +68,8 @@ type CreateProposalParams = {
   sourceTensionId?: string | null;
   relatedActionIds?: string[] | null;
   duplicateGuard?: DuplicateGuardOptions | null;
+  lineageInputs?: LineageInput[];
+  lineageRoots?: LineageRoot[];
 };
 
 type CreateProposalFromTensionParams = Omit<CreateProposalParams, "title" | "bodyMd" | "sourceTensionId"> & {
@@ -457,6 +460,9 @@ export async function listProposals(actor: AppActor, workspaceId: string, opts?:
     appendProposalWhereAnd(where, { OR: memberRelatedProposalWhere(workspaceId, memberIds) });
   }
 
+  const candidates = await prisma.proposal.findMany({ where });
+  const visibleIds = await readableArtifactIds(actor, workspaceId, "Proposal", candidates);
+  appendProposalWhereAnd(where, { id: { in: [...visibleIds] } });
   const [items, total] = await Promise.all([
     prisma.proposal.findMany({
       where,
@@ -532,6 +538,8 @@ export async function getProposal(actor: AppActor, params: {
     },
   });
   invariant(proposal, 404, "NOT_FOUND", "Proposal not found.");
+  invariant((await readableArtifactIds(actor, params.workspaceId, "Proposal", [proposal])).has(proposal.id),
+    404, "NOT_FOUND", "Proposal not found.");
   return proposal;
 }
 
@@ -749,6 +757,14 @@ export async function createProposal(actor: AppActor, params: CreateProposalPara
         autoApproveAt: null,
       },
     });
+
+    if (params.lineageInputs || params.lineageRoots || (actor.kind === "user" && !params.sourceTensionId && !params.meetingId)) {
+      await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "Proposal", id: proposal.id }, content: proposal,
+        origin: params.lineageInputs?.length || params.lineageRoots?.length ? "DERIVED" : "HUMAN_ORIGINAL",
+        inputs: params.lineageInputs ?? [], inheritedRoots: params.lineageRoots,
+      });
+    }
 
     await ensureWorkspacePermalink(tx, actor, {
       workspaceId: params.workspaceId,
@@ -1033,6 +1049,8 @@ async function runUpdateProposalTransaction(
     });
 
     invariant(proposal && proposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
+    const priorRoots = await currentArtifactInputRoots(tx, params.workspaceId,
+      { kind: "Proposal", id: proposal.id }, proposal);
     if (aiAdmission) {
       // Drift checks: any inference input derived from stored state (fields the
       // caller did not supply) must still match the authoritative reloaded
@@ -1131,6 +1149,10 @@ async function runUpdateProposalTransaction(
       }
       throw error;
     }
+    if (priorRoots) await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Proposal", id: updated.id }, content: updated,
+      origin: priorRoots.length ? "DERIVED" : "HUMAN_ORIGINAL", inputs: [], inheritedRoots: priorRoots,
+    });
 
     await tx.auditLog.create({
       data: {

@@ -9,6 +9,12 @@ import {
   createContextGraphProposedDiff,
   createGoal,
   createGoalLink,
+  brainSourceContentFingerprint,
+  currentArtifactInputRoots,
+  lineageContentFingerprint,
+  readableArtifactIds,
+  resolveKnowledgeAccessDomains,
+  type LineageInput,
   getCompanyUnderstandingGoalApplyMode,
   type CompanyUnderstandingGoalApplyMode,
   type ContextGraphDiffInput,
@@ -18,6 +24,11 @@ import { executeAgentRun } from "./runtime";
 const HIGH_CONFIDENCE = 0.85;
 const DRAFT_CONFIDENCE = 0.65;
 const COMPANY_UNDERSTANDING_SOURCE = "company-understanding";
+type SynthesisLineage = {
+  lineageInputs: LineageInput[];
+  lineageRoots: NonNullable<Awaited<ReturnType<typeof currentArtifactInputRoots>>>;
+};
+
 const GOAL_CADENCE_ORDER: GoalCadence[] = ["TEN_YEAR", "FIVE_YEAR", "ANNUAL", "QUARTERLY", "MONTHLY", "WEEKLY"];
 const GOAL_CADENCE_RANK = new Map(GOAL_CADENCE_ORDER.map((cadence, index) => [cadence, index]));
 
@@ -362,8 +373,9 @@ async function createQuestionIfNew(
   workspaceId: string,
   memberId: string | null,
   question: QuestionInsight,
-  metadata?: Prisma.InputJsonObject,
-  triggerSourceId?: string | null,
+  metadata: Prisma.InputJsonObject | undefined,
+  triggerSourceId: string | null | undefined,
+  lineage: SynthesisLineage,
 ) {
   if (!memberId) return { kind: "question" as const, skipped: true, reason: "no_member" };
   const existing = await prisma.checkIn.findFirst({
@@ -382,6 +394,7 @@ async function createQuestionIfNew(
   }
   const created = await createCompanyUnderstandingQuestion(actor, {
     workspaceId,
+    ...lineage,
     memberId,
     questionText: question.questionText,
     questionSource: COMPANY_UNDERSTANDING_SOURCE,
@@ -417,7 +430,8 @@ async function linkGoalEvidence(
   goalId: string,
   goal: GoalInsight,
   agentRunId: string,
-  triggerSourceId?: string | null,
+  triggerSourceId: string | null | undefined,
+  lineage: SynthesisLineage,
 ) {
   for (const evidence of goal.evidenceRefs) {
     if (!(await triggerSourceStillAvailable(workspaceId, triggerSourceId))) {
@@ -425,6 +439,7 @@ async function linkGoalEvidence(
     }
     await createGoalLink(actor, {
       workspaceId,
+      ...lineage,
       goalId,
       entityType: evidence.sourceType,
       entityId: evidence.sourceId,
@@ -518,7 +533,8 @@ async function applyGoalInsight(
   agentRunId: string,
   questionMemberId: string | null,
   goalIndex: GoalIndex,
-  triggerSourceId?: string | null,
+  triggerSourceId: string | null | undefined,
+  lineage: SynthesisLineage,
 ) {
   const existing = findGoalIndexEntry(goalIndex, goal.title, goal.cadence);
 
@@ -535,7 +551,7 @@ async function applyGoalInsight(
     }, {
       generatedFrom: "goal-low-confidence",
       title: goal.title,
-    }, triggerSourceId);
+    }, triggerSourceId, lineage);
   }
 
   const parent = goal.parentTitle
@@ -548,6 +564,7 @@ async function applyGoalInsight(
 
   const target = existing ?? await createGoal(actor, {
     workspaceId,
+    ...lineage,
     title: goal.title,
     descriptionMd: goal.descriptionMd,
     level: "COMPANY",
@@ -568,7 +585,7 @@ async function applyGoalInsight(
     });
   }
 
-  await linkGoalEvidence(actor, workspaceId, target.id, goal, agentRunId, triggerSourceId);
+  await linkGoalEvidence(actor, workspaceId, target.id, goal, agentRunId, triggerSourceId, lineage);
   return {
     kind: "goal" as const,
     created: !existing,
@@ -598,14 +615,15 @@ async function applyMapProposal(
   proposal: MapProposalInsight,
   agentRunId: string,
   questionMemberId: string | null,
-  triggerSourceId?: string | null,
+  triggerSourceId: string | null | undefined,
+  lineage: SynthesisLineage,
 ) {
   if (proposal.confidence < DRAFT_CONFIDENCE || proposal.evidenceRefs.length === 0 || proposal.objects.length === 0) {
     return createQuestionIfNew(actor, workspaceId, questionMemberId, mapQuestionForProposal(proposal), {
       generatedFrom: "map-low-confidence",
       mapType: proposal.mapType,
       title: proposal.title,
-    }, triggerSourceId);
+    }, triggerSourceId, lineage);
   }
 
   const reason = `Company understanding proposal: ${proposal.mapType}: ${proposal.title}`;
@@ -656,6 +674,7 @@ async function applyMapProposal(
 
   const created = await createContextGraphProposedDiff(actor, {
     workspaceId,
+    ...lineage,
     diff,
     reason,
     evidence: {
@@ -676,25 +695,28 @@ export async function runCompanyUnderstandingSynthesis(params: {
   model: string;
 }) {
   const actor = companyUnderstandingActor(params.workspaceId);
-  const [sources, articles] = await Promise.all([
+  const accessDomains = await resolveKnowledgeAccessDomains(actor, params.workspaceId);
+  const [candidateSources, candidateArticles] = await Promise.all([
     prisma.brainSource.findMany({
       where: {
         workspaceId: params.workspaceId,
         archivedAt: null,
         absorbedAt: { not: null },
+        accessDomain: { in: accessDomains },
         ...(params.sourceId ? { id: params.sourceId } : {}),
       },
       orderBy: { createdAt: "desc" },
       take: params.sourceId ? 1 : 20,
-      select: { id: true, sourceType: true, tier: true, title: true, content: true, ingestionGuidanceMd: true, absorbedAt: true },
     }),
     prisma.brainArticle.findMany({
       where: { workspaceId: params.workspaceId, archivedAt: null },
       orderBy: { updatedAt: "desc" },
-      take: 40,
-      select: { id: true, slug: true, title: true, type: true, authority: true, bodyMd: true, sourceIds: true },
     }),
   ]);
+
+  const readableArticles = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", candidateArticles);
+  const sources = candidateSources.filter((source) => !source.archivedAt && accessDomains.includes(source.accessDomain));
+  const articles = candidateArticles.filter((article) => readableArticles.has(article.id)).slice(0, 40);
 
   if (params.sourceId && sources.length === 0) {
     return { skipped: true, reason: "source_unavailable" };
@@ -704,22 +726,34 @@ export async function runCompanyUnderstandingSynthesis(params: {
     return { skipped: true, reason: "no_brain_evidence" };
   }
 
-  const existingGoals = await prisma.goal.findMany({
+  const candidateGoals = await prisma.goal.findMany({
     where: { workspaceId: params.workspaceId, archivedAt: null },
     orderBy: { updatedAt: "desc" },
-    take: 200,
-    select: {
-      id: true,
-      title: true,
-      status: true,
-      cadence: true,
-      parentGoalId: true,
+    include: {
       links: {
         where: { source: COMPANY_UNDERSTANDING_SOURCE },
         select: { id: true },
       },
     },
   });
+  const readableGoals = await readableArtifactIds(actor, params.workspaceId, "Goal", candidateGoals);
+  const existingGoals = candidateGoals.filter((goal) => readableGoals.has(goal.id)).slice(0, 200);
+  const lineage: SynthesisLineage = { lineageInputs: [], lineageRoots: [] };
+  for (const source of sources) {
+    const input: LineageInput = { kind: "BrainSource", id: source.id };
+    lineage.lineageInputs.push(input);
+    lineage.lineageRoots.push({ ...input, fingerprint: brainSourceContentFingerprint(source) });
+  }
+  for (const [kind, records] of [["BrainArticle", articles], ["Goal", existingGoals]] as const) {
+    for (const record of records) {
+      const input: LineageInput = { kind, id: record.id };
+      const roots = await currentArtifactInputRoots(prisma, params.workspaceId, input, record);
+      // A record can lose its current proof between admission and capture.
+      if (!roots) return { skipped: true, reason: "input_changed" };
+      lineage.lineageInputs.push(input);
+      lineage.lineageRoots.push({ ...input, fingerprint: lineageContentFingerprint(kind, record) }, ...roots);
+    }
+  }
   const goalApplyMode = await getCompanyUnderstandingGoalApplyMode(params.workspaceId);
 
   const extraction = await defaultModelGateway.extract({
@@ -778,12 +812,25 @@ Expected JSON shape:
         sourceIds: article.sourceIds,
         bodyMd: article.bodyMd.slice(0, 2000),
       })),
-      existingGoals,
+      existingGoals: existingGoals.map((goal) => ({
+        id: goal.id, title: goal.title, status: goal.status, cadence: goal.cadence,
+        parentGoalId: goal.parentGoalId,
+      })),
       goalApplyMode,
     }),
   });
 
   const normalized = normalizeCompanyUnderstandingOutput(extraction.output, params.sourceId);
+  const admittedInputs = new Set(lineage.lineageInputs.map((input) => `${input.kind}:${input.id}`));
+  for (const insight of [...normalized.goals, ...normalized.mapProposals]) {
+    insight.evidenceRefs = insight.evidenceRefs.filter((evidence) => admittedInputs.has(`${evidence.sourceType}:${evidence.sourceId}`));
+  }
+  for (const question of [...normalized.questions, ...normalized.missingEvidence]) {
+    if (!admittedInputs.has(`${question.relatedEntityType}:${question.relatedEntityId}`)) {
+      question.relatedEntityType = null;
+      question.relatedEntityId = null;
+    }
+  }
   const questionMemberId = await resolveQuestionMemberId(params.workspaceId);
   const goalIndex = buildGoalIndex(existingGoals);
   const goalResults = [];
@@ -800,15 +847,16 @@ Expected JSON shape:
       questionMemberId,
       goalIndex,
       params.sourceId ?? null,
+      lineage,
     ));
   }
   for (const question of [...normalized.questions, ...normalized.missingEvidence]) {
     questionResults.push(await createQuestionIfNew(actor, params.workspaceId, questionMemberId, question, {
       generatedFrom: "company-understanding",
-    }, params.sourceId ?? null));
+    }, params.sourceId ?? null, lineage));
   }
   for (const proposal of normalized.mapProposals) {
-    mapResults.push(await applyMapProposal(actor, params.workspaceId, proposal, params.agentRunId, questionMemberId, params.sourceId ?? null));
+    mapResults.push(await applyMapProposal(actor, params.workspaceId, proposal, params.agentRunId, questionMemberId, params.sourceId ?? null, lineage));
   }
 
   return {

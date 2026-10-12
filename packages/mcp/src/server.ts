@@ -16,6 +16,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
   listProposals,
+  getProposal,
+  readableArtifactIds,
   archiveWorkspaceArtifact,
   createProposal,
   updateProposal,
@@ -170,7 +172,7 @@ import {
   isDuplicateGuardMatchError,
 } from "@corgtex/domain";
 import type { AgentScope } from "@corgtex/domain";
-import { searchIndexedKnowledge } from "@corgtex/knowledge";
+import { fetchReadableKnowledgeChunk, searchIndexedKnowledge } from "@corgtex/knowledge";
 import { processConversationTurn } from "@corgtex/agents";
 import { prisma, env, toInputJson } from "@corgtex/shared";
 import type { McpSessionContext } from "./auth";
@@ -806,6 +808,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     async ({ query, limit }: { query: string; limit?: number }) => {
       requireScope(sessionCtx, "brain:read");
       const results = await searchIndexedKnowledge({
+        actor,
         workspaceId,
         query,
         limit: limit ?? 5,
@@ -824,6 +827,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     async ({ query, limit }: { query: string; limit?: number }) => {
       requireScope(sessionCtx, "brain:read");
       const results = await searchIndexedKnowledge({
+        actor,
         workspaceId,
         query,
         limit: limit ?? 5,
@@ -852,19 +856,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
     async ({ id }: { id: string }) => {
       requireScope(sessionCtx, "brain:read");
-      const chunk = await prisma.knowledgeChunk.findFirst({
-        where: { id, workspaceId },
-        select: {
-          id: true,
-          sourceType: true,
-          sourceId: true,
-          sourceTitle: true,
-          chunkIndex: true,
-          content: true,
-          metadata: true,
-          createdAt: true,
-        },
-      });
+      const chunk = await fetchReadableKnowledgeChunk(actor, workspaceId, id);
       if (!chunk) {
         return structuredJsonResult({ error: "Not found", id });
       }
@@ -895,24 +887,26 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     async ({ objectType, status, take }: { objectType?: string; status?: string; take?: number }) => {
       requireToolCapability("query_context_graph");
       const limit = Math.min(Math.max(take ?? 50, 1), 100);
-      const objects = await prisma.contextGraphObject.findMany({
+      const candidateObjects = await prisma.contextGraphObject.findMany({
         where: {
           workspaceId,
           ...(objectType ? { objectType } : {}),
           ...(status ? { status } : { status: { not: "archived" } }),
         },
         orderBy: [{ objectType: "asc" }, { updatedAt: "desc" }],
-        take: limit,
       });
-      const relationships = await prisma.contextGraphRelationship.findMany({
+      const visibleObjectIds = await readableArtifactIds(actor, workspaceId, "ContextGraphObject", candidateObjects);
+      const objects = candidateObjects.filter((object) => visibleObjectIds.has(object.id)).slice(0, limit);
+      const candidateRelationships = await prisma.contextGraphRelationship.findMany({
         where: {
           workspaceId,
           sourceObjectId: { in: objects.map((object) => object.id) },
           targetObjectId: { in: objects.map((object) => object.id) },
           status: { not: "archived" },
         },
-        take: limit * 2,
       });
+      const visibleRelationshipIds = await readableArtifactIds(actor, workspaceId, "ContextGraphRelationship", candidateRelationships);
+      const relationships = candidateRelationships.filter((relationship) => visibleRelationshipIds.has(relationship.id)).slice(0, limit * 2);
       return structuredJsonResult({ objects, relationships, webUrl: webUrl(workspaceId, "/maps") });
     },
   );
@@ -950,14 +944,21 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       if (Boolean(objectId) === Boolean(relationshipId)) {
         throw new Error("Provide exactly one of objectId or relationshipId.");
       }
-      const evidenceRefs = await prisma.contextGraphEvidenceRef.findMany({
+      const ownerKind = objectId ? "ContextGraphObject" : "ContextGraphRelationship";
+      const owner = objectId
+        ? await prisma.contextGraphObject.findFirst({ where: { id: objectId, workspaceId } })
+        : await prisma.contextGraphRelationship.findFirst({ where: { id: relationshipId, workspaceId } });
+      if (!owner || !(await readableArtifactIds(actor, workspaceId, ownerKind, [owner])).has(owner.id))
+        return structuredJsonResult({ evidenceRefs: [] });
+      const candidates = await prisma.contextGraphEvidenceRef.findMany({
         where: {
           workspaceId,
           ...(objectId ? { objectId } : { relationshipId }),
         },
         orderBy: { createdAt: "desc" },
-        take: Math.min(Math.max(take ?? 20, 1), 50),
       });
+      const visibleEvidenceIds = await readableArtifactIds(actor, workspaceId, "ContextGraphEvidenceRef", candidates.filter((ref) => !ref.knowledgeChunkId));
+      const evidenceRefs = candidates.filter((ref) => visibleEvidenceIds.has(ref.id)).slice(0, Math.min(Math.max(take ?? 20, 1), 50));
       return structuredJsonResult({ evidenceRefs });
     },
   );
@@ -1185,6 +1186,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       if (includeCorgtex !== false) {
         requireScope(sessionCtx, "brain:read");
         const results = await searchIndexedKnowledge({
+          actor,
           workspaceId,
           query,
           limit: safeLimit,
@@ -1320,7 +1322,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           where: { id: workspaceId },
           select: { id: true, slug: true, name: true, description: true, createdAt: true },
         }),
-        prisma.proposal.count({ where: { workspaceId } }),
+        listProposals(actor, workspaceId, { take: 0 }).then((result) => result.total),
         prisma.action.count({ where: { workspaceId } }),
         prisma.tension.count({ where: { workspaceId } }),
         prisma.member.count({ where: { workspaceId, isActive: true } }),
@@ -2452,21 +2454,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
     async ({ proposalId }: { proposalId: string }) => {
       requireScope(sessionCtx, "proposals:read");
-      const proposal = await prisma.proposal.findFirst({
-        where: { id: proposalId, workspaceId },
-        include: {
-          author: { select: { displayName: true, email: true } },
-          ownerMember: { include: { user: { select: { displayName: true, email: true } } } },
-          circle: { select: { id: true, name: true } },
-          adviceProcess: {
-            include: {
-              requests: {
-                select: { status: true },
-              },
-            },
-          },
-        },
-      });
+      const proposal = await getProposal(actor, { workspaceId, proposalId }).catch(() => null);
       if (!proposal) return jsonResult({ error: "Not found" });
       const item = normalizeProposalWorkItem(proposal);
       return jsonResult({

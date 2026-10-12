@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import type { KnowledgeAccessDomain, KnowledgeSourceType } from "@prisma/client";
+import type { KnowledgeAccessDomain, KnowledgeSourceType, Prisma } from "@prisma/client";
 import { getSharedStateBackend, prisma } from "@corgtex/shared";
+import { lineageContentFingerprint, type LineageKind } from "@corgtex/domain";
 import { defaultModelGateway } from "@corgtex/models";
 import { invalidateKnowledgeCache } from "./retrieval";
 import { getKnowledgeSearchProvider, isAzureKnowledgeSearchConfigured, logAzureKnowledgeIndexingWarning, syncAzureKnowledgeSource } from "./azure-search";
@@ -73,6 +74,32 @@ export function chunkText(input: string, maxLength = 1200, overlapSize = 150) {
   return doSplit(normalized, separators);
 }
 
+type SourceSnapshot = { kind: LineageKind; contentHash: string; content: string; rawContent: string | null; title: string | null };
+
+async function knowledgeSourceSnapshot(params: { workspaceId: string; sourceType: KnowledgeSourceType; sourceId: string },
+  db: typeof prisma | Prisma.TransactionClient = prisma): Promise<SourceSnapshot | null> {
+  const where = { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null };
+  const row = params.sourceType === "BRAIN_ARTICLE" ? await db.brainArticle.findFirst({ where: { ...where, isPrivate: false } })
+    : params.sourceType === "DOCUMENT" ? await db.document.findFirst({ where })
+      : params.sourceType === "MEETING" ? await db.meeting.findFirst({ where })
+        : params.sourceType === "PROPOSAL" ? await db.proposal.findFirst({ where }) : null;
+  if (!row) return null;
+  const kind: LineageKind = params.sourceType === "BRAIN_ARTICLE" ? "BrainArticle"
+    : params.sourceType === "DOCUMENT" ? "Document" : params.sourceType === "MEETING" ? "Meeting" : "Proposal";
+  const source = row as unknown as Record<string, unknown>;
+  const fields = kind === "BrainArticle" ? [source.bodyMd]
+    : kind === "Document" ? [source.title, source.textContent]
+      : kind === "Meeting" ? [source.title, source.summaryMd, source.transcript]
+        : [source.title, source.summary, source.bodyMd];
+  return {
+    kind,
+    contentHash: lineageContentFingerprint(kind, row),
+    content: fields.filter(Boolean).join("\n\n"),
+    rawContent: kind === "Document" && typeof source.textContent === "string" ? source.textContent : null,
+    title: typeof source.title === "string" ? source.title : null,
+  };
+}
+
 export async function syncKnowledgeForSource(params: {
   workspaceId: string;
   sourceType: KnowledgeSourceType;
@@ -130,6 +157,11 @@ export async function syncKnowledgeForSource(params: {
     return 0;
   }
 
+  const snapshot = await knowledgeSourceSnapshot(params);
+  if (["BRAIN_ARTICLE", "DOCUMENT", "MEETING", "PROPOSAL"].includes(params.sourceType)
+    && (!snapshot || (snapshot.content !== params.content && snapshot.rawContent !== params.content)
+      || snapshot.title !== (params.sourceTitle?.trim() || null))) return 0;
+
   const embeddingResponse = await defaultModelGateway.embed({
     workspaceId: params.workspaceId,
     workflowJobId: params.workflowJobId,
@@ -151,6 +183,7 @@ export async function syncKnowledgeForSource(params: {
       embedding: embeddingResponse.embeddings[index] ?? null,
       metadata: {
         ...(params.metadata ?? {}),
+        sourceContentHash: snapshot?.contentHash ?? null,
         chunkIndex: index,
         sourceType: params.sourceType,
         sensitivityPatterns: sensitivity.matchedPatterns,
@@ -162,6 +195,12 @@ export async function syncKnowledgeForSource(params: {
   });
 
   const persisted = await prisma.$transaction(async (tx) => {
+    if (snapshot) {
+      // Serialize source edits with this receipt commit, then compare the exact
+      // revision captured before the embedding call. Restoration is a new revision.
+      if (snapshot.kind === "Meeting") await tx.$queryRaw`SELECT "id" FROM "Meeting" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+      if (snapshot.kind === "Proposal") await tx.$queryRaw`SELECT "id" FROM "Proposal" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+    }
     if (params.sourceType === "BRAIN_ARTICLE") {
       await tx.$queryRaw`SELECT "id" FROM "BrainArticle" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brain_article_index:${params.workspaceId}:${params.sourceId}`}, 0))`;
@@ -182,6 +221,13 @@ export async function syncKnowledgeForSource(params: {
         select: { id: true },
       });
       if (!document) return false;
+    }
+    if (snapshot) {
+      if (snapshot.kind === "Document" && typeof storageKey !== "string") {
+        await tx.$queryRaw`SELECT "id" FROM "Document" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+      }
+      const current = await knowledgeSourceSnapshot(params, tx);
+      if (!current || current.contentHash !== snapshot.contentHash) return false;
     }
     await tx.knowledgeChunk.deleteMany({
       where: {
@@ -277,8 +323,6 @@ export async function syncBrainArticleKnowledge(params: {
 }) {
   const article = await prisma.brainArticle.findUnique({
     where: { id: params.articleId },
-    select: { id: true, workspaceId: true, title: true, slug: true, type: true,
-      authority: true, bodyMd: true, isPrivate: true, archivedAt: true, updatedAt: true },
   });
   if (!article || article.workspaceId !== params.workspaceId) return 0;
   return syncKnowledgeForSource({
@@ -381,28 +425,31 @@ export async function reindexWorkspace(workspaceId: string) {
   const [articles, documents] = await Promise.all([
     prisma.brainArticle.findMany({
       where: { workspaceId, isPrivate: false, archivedAt: null },
-      select: { id: true },
     }),
     prisma.document.findMany({
       where: { workspaceId, textContent: { not: null }, archivedAt: null },
-      select: { id: true },
     }),
   ]);
 
   const existingArticleChunks = await prisma.knowledgeChunk.findMany({
     where: { workspaceId, sourceType: "BRAIN_ARTICLE", sourceId: { in: articles.map((a) => a.id) } },
-    select: { sourceId: true },
+    select: { sourceId: true, metadata: true },
     distinct: ["sourceId"],
   });
 
   const existingDocumentChunks = await prisma.knowledgeChunk.findMany({
     where: { workspaceId, sourceType: "DOCUMENT", sourceId: { in: documents.map((d) => d.id) } },
-    select: { sourceId: true },
+    select: { sourceId: true, metadata: true },
     distinct: ["sourceId"],
   });
 
-  const chunkedArticleIds = new Set(existingArticleChunks.map((c) => c.sourceId));
-  const chunkedDocumentIds = new Set(existingDocumentChunks.map((c) => c.sourceId));
+  const articleHashes = new Map(articles.map((article) => [article.id, lineageContentFingerprint("BrainArticle", article)]));
+  const documentHashes = new Map(documents.map((document) => [document.id, lineageContentFingerprint("Document", document)]));
+  // A legacy or superseded receipt needs rebuilding even when SQL still has a chunk.
+  const chunkedArticleIds = new Set(existingArticleChunks.filter((chunk) =>
+    (chunk.metadata as Record<string, unknown> | null)?.sourceContentHash === articleHashes.get(chunk.sourceId)).map((chunk) => chunk.sourceId));
+  const chunkedDocumentIds = new Set(existingDocumentChunks.filter((chunk) =>
+    (chunk.metadata as Record<string, unknown> | null)?.sourceContentHash === documentHashes.get(chunk.sourceId)).map((chunk) => chunk.sourceId));
 
   const articlesToReindex = articles.filter((a) => !chunkedArticleIds.has(a.id));
   const documentsToReindex = documents.filter((d) => !chunkedDocumentIds.has(d.id));
