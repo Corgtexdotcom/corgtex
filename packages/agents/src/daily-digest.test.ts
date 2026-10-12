@@ -1777,6 +1777,8 @@ describe("runDailyDigest", () => {
         }),
       }),
     }));
+    expect(instrumentNewspaperHtmlLinksMock).not.toHaveBeenCalled();
+    expect(sendEmailMock.mock.calls[0][0].html).not.toContain("/api/newspaper/click/");
     expect(txMock.demoLead.update).toHaveBeenCalledWith({
       where: { id: "lead-1" },
       data: { welcomeEmailSentAt: expect.any(Date) },

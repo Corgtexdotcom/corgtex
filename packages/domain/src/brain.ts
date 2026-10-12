@@ -11,7 +11,7 @@ import { lockActiveArticleSources, lockBrainSourceLink } from "./brain-source-li
 import { requestBrainSourceRemoval } from "./brain-source-removal";
 import { brainSourceContentFingerprint, type BrainArticleDerivationV1 } from "./brain-derivation";
 import { readBrainArticleDerivation, sourceIdsInDerivation } from "./brain-source-impact";
-import { copyArtifactInputLineage, currentArtifactInputRoots, readableArtifactIds, readableBrainSourceIds,
+import { brainSourceNeedsLineage, copyArtifactInputLineage, currentArtifactInputRoots, readableArtifactIds, readableBrainSourceIds,
   recordArtifactInputLineage } from "./source-lineage";
 import { invariant } from "./errors";
 import { persistedMemberId } from "./membership";
@@ -690,6 +690,8 @@ export async function ingestSource(actor: AppActor, params: {
       invariant(existing, 404, "NOT_FOUND", "Source not found.");
       invariant((await readableBrainSourceIds(actor, params.workspaceId, [existing], tx)).has(existing.id),
         404, "NOT_FOUND", "Source not found.");
+      invariant(!brainSourceNeedsLineage(existing), 409, "UNKNOWN_LINEAGE",
+        "Copied or generated conversation sources must be rebuilt with their complete inputs.");
       const mergedContent = duplicateGuardMergeText(existing.content, content) ?? existing.content;
       const source = await tx.brainSource.update({
         where: { id: existing.id },

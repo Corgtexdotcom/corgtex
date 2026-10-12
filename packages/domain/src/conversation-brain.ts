@@ -4,12 +4,16 @@ import type { BrainSourceType } from "@prisma/client";
 import { requireWorkspaceMembership } from "./auth";
 import { appendEvents } from "./events";
 import { getUningestedConversations } from "./conversations";
+import { invariant } from "./errors";
+import { recordArtifactInputLineage, type LineageInput, type LineageRoot } from "./source-lineage";
 
 export async function ingestConversationOnDemand(actor: AppActor, params: {
   workspaceId: string;
   title: string;
   content: string;
   sourceType?: string;
+  lineageInputs?: LineageInput[];
+  lineageRoots?: LineageRoot[];
 }) {
   const membership = await requireWorkspaceMembership({
     actor,
@@ -17,6 +21,8 @@ export async function ingestConversationOnDemand(actor: AppActor, params: {
   });
 
   const finalSourceType = (params.sourceType as BrainSourceType) || "CONVERSATION";
+  invariant(Boolean(params.lineageInputs?.length || params.lineageRoots?.length),
+    409, "UNKNOWN_LINEAGE", "Conversation content cannot be saved until all its input permissions are verified.");
 
   return prisma.$transaction(async (tx) => {
     const source = await tx.brainSource.create({
@@ -29,6 +35,12 @@ export async function ingestConversationOnDemand(actor: AppActor, params: {
         authorMemberId: membership?.id || null,
         channel: "chat-demand",
       },
+    });
+
+    await recordArtifactInputLineage({
+      tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "BrainSource", id: source.id }, content: source,
+      origin: "DERIVED", inputs: params.lineageInputs ?? [], inheritedRoots: params.lineageRoots,
     });
 
     await tx.auditLog.create({

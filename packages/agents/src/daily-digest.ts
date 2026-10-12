@@ -1960,12 +1960,9 @@ export async function sendDemoWelcomeNewspaper(params: {
 
   const subject = "Welcome to Corgtex - your first newspaper";
   const runKey = params.workflowJobId ?? `demo-welcome:${lead.id}`;
-  const html = await instrumentNewspaperHtmlLinks({
-    workspaceId: params.workspaceId,
-    workflowJobId: params.workflowJobId ?? null,
-    runKey,
-    html: buildDemoWelcomeNewspaperHtml({ workspaceName: lead.workspace.name }),
-  });
+  // Demo welcome links are public onboarding links. They have no edition or
+  // member identity with which to authorize a tracked newspaper redirect.
+  const html = buildDemoWelcomeNewspaperHtml({ workspaceName: lead.workspace.name });
   let deliveryStatus: "SENT" | "SKIPPED" = "SENT";
   let providerMessageId: string | null = null;
   let deliveryError: string | null = null;

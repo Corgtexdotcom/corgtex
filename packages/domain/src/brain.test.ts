@@ -77,6 +77,9 @@ vi.mock("./archive", () => ({
 
 vi.mock("./brain-source-removal", () => ({ requestBrainSourceRemoval }));
 vi.mock("./source-lineage", () => ({
+  brainSourceNeedsLineage: (source: { sourceType?: string; channel?: string | null }) =>
+    source.sourceType === "CONVERSATION" || source.sourceType === "CONVERSATION_INSIGHT"
+      || ["chat-demand", "daily-batch", "daily-digest", "daily-question"].includes(source.channel ?? ""),
   recordArtifactInputLineage: vi.fn(),
   copyArtifactInputLineage: vi.fn().mockResolvedValue(true),
   currentArtifactInputRoots: vi.fn().mockResolvedValue([]),

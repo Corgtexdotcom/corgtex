@@ -8,6 +8,7 @@ import { getAction, listActions } from "./actions";
 import { getTension, listTensions } from "./tensions";
 import { listCompanyDirectionFromBrain } from "./goals";
 import { createCheckIn, respondToCheckIn } from "./check-ins";
+import { ingestConversationOnDemand } from "./conversation-brain";
 
 describe("complete input lineage", () => {
   beforeEach(async () => { await truncateAllTables(); });
@@ -106,6 +107,17 @@ describe("complete input lineage", () => {
         origin: "DERIVED", inputs: [{ kind: "BrainArticle", id: privateArticle.id }],
       });
     });
+    await expect(ingestConversationOnDemand(ownerActor, { workspaceId: workspace.id,
+      title: "Unproven copied chat", content: "Synthetic private canary",
+    })).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    const savedChat = await ingestConversationOnDemand(ownerActor, { workspaceId: workspace.id,
+      title: "Proven copied chat", content: "Synthetic private canary",
+      lineageInputs: [{ kind: "BrainArticle", id: privateArticle.id }],
+    });
+    expect((await listSources(ownerActor, { workspaceId: workspace.id })).items.map((source) => source.id))
+      .toContain(savedChat.id);
+    expect((await listSources(readerActor, { workspaceId: workspace.id })).items.map((source) => source.id))
+      .not.toContain(savedChat.id);
     const derivedArticle = await prisma.brainArticle.create({ data: {
       workspaceId: workspace.id, slug: "copied-chat-article", title: "Copied chat article", type: "PROJECT",
       bodyMd: copiedChat.content, sourceIds: [copiedChat.id],
@@ -117,7 +129,7 @@ describe("complete input lineage", () => {
       });
     });
     expect((await listSources(ownerActor, { workspaceId: workspace.id })).items.map((source) => source.id).sort())
-      .toEqual([rawSource.id, copiedChat.id].sort());
+      .toEqual([rawSource.id, copiedChat.id, savedChat.id].sort());
     expect((await listSources(readerActor, { workspaceId: workspace.id })).items.map((source) => source.id))
       .toEqual([rawSource.id]);
     expect((await listSources(readerActor, { workspaceId: otherWorkspace.id })).total).toBe(0);
@@ -130,6 +142,10 @@ describe("complete input lineage", () => {
       title: legacyChat.title, content: "Unrelated new text", duplicateGuard: {},
     });
     expect(newSource.id).not.toBe(legacyChat.id);
+    await expect(ingestSource(ownerActor, { workspaceId: workspace.id, sourceType: "CONVERSATION", tier: 3,
+      title: "Copied chat", content: copiedChat.content,
+      duplicateGuard: { resolution: "update_existing", targetEntityId: copiedChat.id },
+    })).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
     await prisma.brainArticle.update({ where: { id: privateArticle.id }, data: { bodyMd: "Changed owner original" } });
     expect((await listSources(ownerActor, { workspaceId: workspace.id })).items.map((source) => source.id))
       .toEqual(expect.arrayContaining([rawSource.id, newSource.id]));
