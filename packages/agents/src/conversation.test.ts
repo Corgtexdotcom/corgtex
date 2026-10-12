@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
+  assertCatalogModelBudgetMock,
   applyContextGraphProposedDiffMock,
   buildSelectedRegionContextMock,
   buildRoleOnboardingContextForConversationMock,
@@ -33,6 +34,7 @@ const {
   storeAgentMemoryMock,
   workspaceFeatureFlagFindManyMock,
 } = vi.hoisted(() => ({
+  assertCatalogModelBudgetMock: vi.fn(),
   applyContextGraphProposedDiffMock: vi.fn(),
   buildSelectedRegionContextMock: vi.fn(),
   buildRoleOnboardingContextForConversationMock: vi.fn(),
@@ -73,6 +75,8 @@ vi.mock("@corgtex/shared", () => ({
     MODEL_PROVIDER: "openai_compatible",
   },
   prisma: {
+    agentCredential: { findFirst: vi.fn() },
+    modelUsage: { count: vi.fn(), findMany: vi.fn() },
     conversationTurn: {
       findMany: conversationTurnFindManyMock,
     },
@@ -109,6 +113,7 @@ vi.mock("@corgtex/knowledge", () => ({
 
 vi.mock("@corgtex/models", async (importOriginal) => ({
   ...await importOriginal<typeof import("@corgtex/models")>(),
+  assertCatalogModelBudget: assertCatalogModelBudgetMock,
   defaultModelGateway: { chat: chatMock, chatEventStream: chatEventStreamMock, chatStream: chatStreamMock },
 }));
 
@@ -202,6 +207,7 @@ describe("processConversationTurn", () => {
     chatEventStreamMock.mockImplementation((request: any) => (async function* () { const stream = chatStreamMock(request)[Symbol.asyncIterator](); let message = ""; let terminal: any; while (true) { const next = await stream.next(); if (next.done) { terminal = next.value; break; } message += next.value; } const calls = terminal?.tool_calls ?? []; const name = calls.length ? "route_conversation_tools" : "respond_conversation"; const args = calls.length ? { calls: calls.map((call: any) => { try { return { name: call.function.name, arguments: JSON.parse(call.function.arguments) }; } catch { return { name: call.function.name, arguments: null }; } }) } : { answer: message || terminal?.content || "" }; const wrapper = { id: "route-test", type: "function", function: { name, arguments: JSON.stringify(args) } }; yield { type: "tool_call_delta", index: 0, idDelta: wrapper.id, nameDelta: name, argumentsDelta: wrapper.function.arguments }; return { ...terminal, content: "", tool_calls: [wrapper] }; })());
     vi.mocked(searchIndexedKnowledge).mockReset().mockResolvedValue([]);
     checkBudgetMock.mockReset().mockResolvedValue({ allowed: true, usedPct: 0, usedUsd: 0, capUsd: 5 });
+    assertCatalogModelBudgetMock.mockReset().mockResolvedValue(undefined);
     conversationTurnFindManyMock.mockResolvedValue([]);
     resolveKnowledgeAccessDomainsMock.mockResolvedValue(["WORKSPACE"]);
     conversationPendingOperationStore.length = 0;
@@ -528,6 +534,72 @@ describe("processConversationTurn", () => {
       expect(result.assistantMessage).toContain("workspace model budget was reached");
       expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(stage === "before continuation" ? 1 : 2);
       expect(searchIndexedKnowledge).toHaveBeenCalledTimes(stage === "before synthesis" ? 3 : 2);
+    });
+
+    it("rejects eager Finance context revoked during the initial model before any tool or continuation", async () => {
+      resolveKnowledgeAccessDomainsMock.mockResolvedValue(["WORKSPACE", "FINANCE"]);
+      vi.mocked(searchIndexedKnowledge).mockResolvedValueOnce([{ snippet: "SYNTHETIC_FINANCE_MARKER" }] as any);
+      conversationTurnFindManyMock.mockResolvedValue(Array.from({ length: 5 }, (_, index) => ({ sequenceNumber: index + 1, userMessage: "prior", assistantMessage: "answer" })));
+      const initial = { content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] };
+      const revoke = () => { resolveKnowledgeAccessDomainsMock.mockResolvedValue(["WORKSPACE"]); return initial; };
+      if (streaming) chatStreamMock.mockReturnValueOnce((async function* () { yield ""; return revoke(); })());
+      else chatMock.mockImplementationOnce(async () => revoke());
+      script([
+        { content: "", tool_calls: [toolCall("second", "search_brain", { query: "details" })] },
+        { content: "SYNTHETIC_FINANCE_MARKER" },
+      ]);
+      await expect(run()).rejects.toMatchObject({ code: "KNOWLEDGE_ACCESS_CHANGED" });
+      expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(1);
+      expect(searchIndexedKnowledge).toHaveBeenCalledTimes(1);
+      expect(storeAgentMemoryMock).not.toHaveBeenCalled();
+    });
+
+    it.each(["daily", "monthly"])("uses the canonical credential %s gate when chat 2 spends the remaining allowance", async (kind) => {
+      const { prisma } = await import("@corgtex/shared");
+      const { assertCatalogModelBudget } = await vi.importActual<typeof import("@corgtex/models")>("@corgtex/models");
+      assertCatalogModelBudgetMock.mockImplementation(assertCatalogModelBudget);
+      vi.mocked(prisma.agentCredential.findFirst).mockResolvedValue({
+        catalogItemId: "catalog-1", isActive: true,
+        dailyCallLimit: kind === "daily" ? 2 : null,
+        monthlyBudgetCents: kind === "monthly" ? 2 : null,
+        catalogItem: null,
+      } as any);
+      vi.mocked(prisma.modelUsage.count).mockResolvedValue(1);
+      vi.mocked(prisma.modelUsage.findMany).mockResolvedValue([{ estimatedCostUsd: "0.01", billableCostUsd: "0.01" }] as any);
+      script([{ content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] }]);
+      const spend = () => {
+        vi.mocked(prisma.modelUsage.count).mockResolvedValue(2);
+        vi.mocked(prisma.modelUsage.findMany).mockResolvedValue(Array.from({ length: 2 }, () => ({ estimatedCostUsd: "0.01", billableCostUsd: "0.01" })) as any);
+        return { content: "Unverified result.", tool_calls: [toolCall("second", "search_brain", { query: "must not run" })] };
+      };
+      if (streaming) chatStreamMock.mockReturnValueOnce((async function* () { yield "Unverified result."; return spend(); })());
+      else chatMock.mockImplementationOnce(async () => spend());
+      const actor = { kind: "agent", authProvider: "credential", credentialId: "credential-1", catalogItemId: "catalog-1", workspaceIds: ["ws-1"], scopes: ["brain:read"] } as any;
+      await expect(run({ ...turnContext(), actor })).rejects.toMatchObject({ code: kind === "daily" ? "CATALOG_DAILY_LIMIT_EXCEEDED" : "CATALOG_MONTHLY_BUDGET_EXCEEDED" });
+      expect(assertCatalogModelBudgetMock).toHaveBeenCalledWith({ workspaceId: "ws-1", catalogItemId: "catalog-1", agentCredentialId: "credential-1" });
+      expect(searchIndexedKnowledge).toHaveBeenCalledTimes(2);
+      expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(2);
+      expect(storeAgentMemoryMock).not.toHaveBeenCalled();
+      const usage = kind === "daily" ? prisma.modelUsage.count : prisma.modelUsage.findMany;
+      expect(usage).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ workspaceId: "ws-1", agentCredentialId: "credential-1" }) }));
+    });
+
+    it("rechecks the canonical credential allowance between added reads", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { assertCatalogModelBudget } = await vi.importActual<typeof import("@corgtex/models")>("@corgtex/models");
+      assertCatalogModelBudgetMock.mockImplementation(assertCatalogModelBudget);
+      vi.mocked(prisma.agentCredential.findFirst).mockResolvedValue({ catalogItemId: "catalog-1", isActive: true, dailyCallLimit: 2, monthlyBudgetCents: null, catalogItem: null } as any);
+      // Another request can consume the remaining allowance between read boundaries.
+      vi.mocked(prisma.modelUsage.count).mockReset().mockResolvedValueOnce(1).mockResolvedValueOnce(2);
+      script([
+        { content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] },
+        { content: "", tool_calls: [toolCall("second", "search_brain", { query: "permitted" }), toolCall("third", "search_brain", { query: "must not run" })] },
+      ]);
+      const actor = { kind: "agent", authProvider: "credential", credentialId: "credential-1", catalogItemId: "catalog-1", workspaceIds: ["ws-1"], scopes: ["brain:read"] } as any;
+      await expect(run({ ...turnContext(), actor })).rejects.toMatchObject({ code: "CATALOG_DAILY_LIMIT_EXCEEDED" });
+      expect(assertCatalogModelBudgetMock).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(searchIndexedKnowledge).mock.calls.map(([args]) => args.query)).toEqual(["Update it.", "overview", "permitted"]);
+      expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(2);
     });
 
     it.each(["membership", "support", "finance"])("stops after an added read revokes %s access, before synthesis or memory", async (kind) => {
