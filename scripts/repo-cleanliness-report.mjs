@@ -34,6 +34,10 @@ function runReport(name, command, args, outputFile) {
 
   writeFileSync(join(artifactDir, outputFile), output);
 
+  if (mode === "locals" && result.status !== 0) {
+    process.stderr.write(`${output}\n`);
+  }
+
   if (result.error) {
     throw result.error;
   }
@@ -88,4 +92,8 @@ writeFileSync(
 console.log(`Repo cleanliness reports written to ${artifactDir}`);
 for (const report of reports) {
   console.log(`- ${report.name}: exit=${report.exitCode ?? report.signal} ${report.output}`);
+}
+
+if (mode === "locals") {
+  process.exitCode = reports[0].exitCode ?? 1;
 }
