@@ -238,6 +238,7 @@ export async function createTensionAction(actor: AppActor, ctx: any, args: any) 
   try {
     result = await createTension(actor, {
       workspaceId: ctx.workspaceId,
+      lineageRoots: ctx.lineageRoots,
       title: args.title,
       bodyMd: args.bodyMd,
       circleId: args.circleId,
@@ -266,6 +267,7 @@ export async function updateTensionAction(actor: AppActor, ctx: any, args: any) 
   try {
     result = await updateTension(actor, {
       workspaceId: ctx.workspaceId,
+      lineageRoots: ctx.lineageRoots,
       tensionId: args.tensionId,
       expectedVersion: args.expectedVersion,
       status: args.status as TensionStatus,
@@ -299,6 +301,7 @@ export async function createActionItemAction(actor: AppActor, ctx: any, args: an
   try {
     result = await createAction(actor, {
       workspaceId: ctx.workspaceId,
+      lineageRoots: ctx.lineageRoots,
       title: args.title,
       bodyMd: args.bodyMd,
       circleId: args.circleId,
@@ -328,6 +331,7 @@ export async function updateActionItemAction(actor: AppActor, ctx: any, args: an
   try {
     result = await updateAction(actor, {
       workspaceId: ctx.workspaceId,
+      lineageRoots: ctx.lineageRoots,
       actionId: args.actionId,
       expectedVersion: args.expectedVersion,
       status: args.status as ActionStatus,
@@ -370,6 +374,7 @@ export async function createProposalAction(actor: AppActor, ctx: any, args: any)
     result = sourceTensionId
       ? await createProposalFromTension(actor, {
         workspaceId: ctx.workspaceId,
+      lineageRoots: ctx.lineageRoots,
         sourceTensionId,
         title: typeof args.title === "string" ? args.title : null,
         summary: typeof args.summary === "string" ? args.summary : null,
@@ -381,6 +386,7 @@ export async function createProposalAction(actor: AppActor, ctx: any, args: any)
       })
       : await createProposal(actor, {
         workspaceId: ctx.workspaceId,
+      lineageRoots: ctx.lineageRoots,
         title: typeof args.title === "string" ? args.title : "",
         summary: typeof args.summary === "string" ? args.summary : null,
         bodyMd: typeof args.bodyMd === "string" ? args.bodyMd : "",
@@ -407,6 +413,7 @@ export async function createGoalAction(actor: AppActor, ctx: any, args: any) {
   try {
     result = await createGoal(actor, {
       workspaceId: ctx.workspaceId,
+      lineageRoots: ctx.lineageRoots,
       title: args.title,
       descriptionMd: args.descriptionMd,
       cadence: args.cadence as GoalCadence | undefined,

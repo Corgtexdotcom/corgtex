@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { WebClient } from "@slack/web-api";
-import { Prisma, type CommunicationInstallation, type CommunicationProvider } from "@prisma/client";
+import { Prisma, type CommunicationInstallation, type CommunicationMessage, type CommunicationProvider } from "@prisma/client";
 import {
   decryptSecret,
   encryptSecret,
@@ -12,10 +12,13 @@ import {
 } from "@corgtex/shared";
 import type { AppActor, HumanActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
+import { loadReadableDigestQuery } from "./digest-lineage";
 import { createAction, publishAction } from "./actions";
 import { ingestSource } from "./brain";
+import { isArtifactInputProofReadable, type LineageRoot } from "./source-lineage";
 import { AppError, invariant } from "./errors";
 import {
+  assertMeetingReviewPublicPublication,
   buildSlackMeetingActionReviewEditView,
   confirmSlackMeetingActionReviewProposal,
   dismissSlackMeetingActionReviewProposal,
@@ -684,7 +687,7 @@ export async function ingestCommunicationEvent(provider: CommunicationProvider, 
 
 async function resolveHumanActorForSlackUser(installation: Pick<CommunicationInstallation, "id" | "workspaceId" | "provider" | "status" | "botTokenEnc">, externalUserId: string): Promise<HumanActor | null> {
   const installationId = installation.id;
-  if (installation.provider !== "SLACK" || installation.status !== "ACTIVE") return null;
+  if (!externalUserId.trim() || installation.provider !== "SLACK" || installation.status !== "ACTIVE") return null;
   const authorizedActor = async (user: HumanActor["user"]): Promise<HumanActor | null> => {
     const actor: HumanActor = { kind: "user", user };
     try {
@@ -699,6 +702,7 @@ async function resolveHumanActorForSlackUser(installation: Pick<CommunicationIns
     where: { installationId_externalUserId: { installationId, externalUserId } },
   });
 
+  if (mapped?.isBot || mapped?.isDeleted) return null;
   if (mapped?.userId) {
     const user = await prisma.user.findUnique({
       where: { id: mapped.userId },
@@ -756,6 +760,7 @@ async function resolveHumanActorForSlackUser(installation: Pick<CommunicationIns
       },
     });
 
+    if (profile.user?.is_bot || profile.user?.deleted) return null;
     return user ? await authorizedActor(user) : null;
   } catch {
     return null;
@@ -1757,6 +1762,7 @@ export async function processSlackInboundEvent(inboundEventId: string) {
 
 export async function createWorkItemFromCommunicationSource(actor: AppActor, params: {
   workspaceId: string;
+  lineageRoots?: LineageRoot[];
   provider: CommunicationProvider;
   installationId: string;
   kind: CommunicationWorkItemKind;
@@ -1770,6 +1776,11 @@ export async function createWorkItemFromCommunicationSource(actor: AppActor, par
   open?: boolean;
   claimKey?: string | null;
 }) {
+  if (params.lineageRoots) {
+    invariant(params.lineageRoots.length > 0 && await isArtifactInputProofReadable(actor, params.workspaceId, params.lineageRoots),
+      409, "SOURCE_CHANGED", "Communication inputs changed before persistence.");
+    invariant(params.kind !== "BRAIN_NOTE", 409, "UNKNOWN_LINEAGE", "Generated Brain notes require an atomic source-input receipt.");
+  }
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Title is required.");
   const claimKey = params.claimKey?.trim() || null;
@@ -1789,6 +1800,7 @@ export async function createWorkItemFromCommunicationSource(actor: AppActor, par
       const action = await prisma.$transaction(async (tx) => {
         const created = await createAction(actor, {
           workspaceId: params.workspaceId,
+          lineageRoots: params.lineageRoots,
           title,
           bodyMd,
           assigneeMemberId: params.assigneeMemberId ?? null,
@@ -1844,6 +1856,7 @@ export async function createWorkItemFromCommunicationSource(actor: AppActor, par
   if (params.kind === "ACTION") {
     const action = await createAction(actor, {
       workspaceId: params.workspaceId,
+      lineageRoots: params.lineageRoots,
       title,
       bodyMd,
       assigneeMemberId: params.assigneeMemberId ?? null,
@@ -1860,6 +1873,7 @@ export async function createWorkItemFromCommunicationSource(actor: AppActor, par
   } else if (params.kind === "TENSION") {
     const tension = await createTension(actor, {
       workspaceId: params.workspaceId,
+      lineageRoots: params.lineageRoots,
       title,
       bodyMd,
       raisedByMemberId: params.raisedByMemberId ?? null,
@@ -1870,7 +1884,7 @@ export async function createWorkItemFromCommunicationSource(actor: AppActor, par
     }
     result = { entityType: "Tension", entityId: tension.id };
   } else if (params.kind === "PROPOSAL") {
-    const proposal = await createProposal(actor, { workspaceId: params.workspaceId, title, summary: title, bodyMd, isPrivate: true });
+    const proposal = await createProposal(actor, { workspaceId: params.workspaceId, lineageRoots: params.lineageRoots, title, summary: title, bodyMd, isPrivate: true });
     if (params.open) {
       await submitProposal(actor, { workspaceId: params.workspaceId, proposalId: proposal.id });
     }
@@ -2080,6 +2094,10 @@ export async function handleSlackInteraction(payload: Record<string, unknown>) {
         privateMetadata: asString(view.private_metadata),
         values,
       });
+      await assertMeetingReviewPublicPublication(actor, {
+        workspaceId: installation.workspaceId, installationId: installation.id,
+        channelId: result.channelId, lineageRoots: result.lineageRoots,
+      });
       await updateSlackMessage(installation.id, {
         channel: result.channelId,
         ts: result.messageTs,
@@ -2171,6 +2189,10 @@ export async function handleSlackInteraction(payload: Record<string, unknown>) {
             reviewId,
             insightId,
           });
+        await assertMeetingReviewPublicPublication(actor, {
+          workspaceId: installation.workspaceId, installationId: installation.id,
+          channelId: result.channelId, lineageRoots: result.lineageRoots,
+        });
         await updateSlackMessage(installation.id, {
           channel: result.channelId,
           ts: result.messageTs,
@@ -2256,8 +2278,12 @@ export async function updateSlackMessage(installationId: string, target: {
 
 export async function syncSlackMeetingActionReviewAfterWebApply(actor: AppActor, params: { workspaceId: string; insightId: string }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  const refreshed = await refreshSlackMeetingActionReviewAfterWebApply(params);
+  const refreshed = await refreshSlackMeetingActionReviewAfterWebApply(actor, params);
   if (!refreshed) return;
+  await assertMeetingReviewPublicPublication(actor, {
+    workspaceId: params.workspaceId, installationId: refreshed.installationId,
+    channelId: refreshed.update.channelId, lineageRoots: refreshed.update.lineageRoots,
+  });
   await updateSlackMessage(refreshed.installationId, {
     channel: refreshed.update.channelId,
     ts: refreshed.update.messageTs,
@@ -2276,7 +2302,8 @@ async function openSlackModal(installationId: string, triggerId: string, view: u
   });
 }
 
-export async function validateSlackPostTarget(installationId: string, rawChannelId: string): Promise<SlackPostTargetValidation> {
+export async function validateSlackPostTarget(installationId: string, rawChannelId: string,
+  options?: { requirePublic?: boolean }): Promise<SlackPostTargetValidation> {
   const channelId = normalizeSlackChannelId(rawChannelId);
   if (!channelId) {
     return {
@@ -2302,6 +2329,13 @@ export async function validateSlackPostTarget(installationId: string, rawChannel
         ok: false,
         code: "SLACK_CHANNEL_NOT_FOUND",
         message: "Slack channel not found. Use a channel ID like C0123456789.",
+      };
+    }
+    if (options?.requirePublic && channel.is_private !== false) {
+      return {
+        ok: false,
+        code: "SLACK_CHANNEL_NOT_PUBLIC",
+        message: "Choose an active public Slack channel for this publication.",
       };
     }
     if (Boolean(channel.is_archived)) {
@@ -2540,18 +2574,38 @@ export async function purgeExpiredCommunicationMessages(workspaceId?: string) {
   return result;
 }
 
-export async function listSlackMessagesForDigest(workspaceId: string, since: Date, until?: Date) {
-  return prisma.communicationMessage.findMany({
+export async function listSlackMessagesForDigest(actor: AppActor, workspaceId: string,
+  since: Date, until?: Date, audience?: AppActor[]) {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const channels = await prisma.communicationChannel.findMany({
     where: {
-      workspaceId,
-      provider: "SLACK",
-      receivedAt: until ? { gte: since, lte: until } : { gte: since },
-      text: { not: null },
-      isBot: false,
-      isHidden: false,
-      isDeleted: false,
+      workspaceId, provider: "SLACK", kind: "PUBLIC", isIngestEnabled: true, isArchived: false,
+      installation: { workspaceId, provider: "SLACK", status: "ACTIVE", disconnectedAt: null },
     },
-    orderBy: { receivedAt: "asc" },
-    take: 500,
+    select: { installationId: true, externalChannelId: true },
+  });
+  if (channels.length === 0) return [];
+  return loadReadableDigestQuery<CommunicationMessage>({
+    actor, audience, workspaceId, kind: "CommunicationMessage", limit: 500, keyset: true,
+    loadBatch: ({ take, after }) => prisma.communicationMessage.findMany({
+      where: {
+        workspaceId,
+        provider: "SLACK",
+        installation: { workspaceId, status: "ACTIVE", disconnectedAt: null },
+        OR: channels.map((channel) => ({ installationId: channel.installationId, externalChannelId: channel.externalChannelId })),
+        receivedAt: until ? { gte: since, lte: until } : { gte: since },
+        text: { not: null },
+        textRedactedAt: null,
+        isBot: false,
+        isHidden: false,
+        isDeleted: false,
+        ...(after ? { AND: [{ OR: [
+          { receivedAt: { gt: after.receivedAt } },
+          { receivedAt: after.receivedAt, id: { gt: after.id } },
+        ] }] } : {}),
+      },
+      orderBy: [{ receivedAt: "asc" }, { id: "asc" }],
+      take,
+    }),
   });
 }

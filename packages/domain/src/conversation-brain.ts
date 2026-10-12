@@ -107,6 +107,9 @@ export async function batchIngestDailyConversations(params: {
         },
       });
 
+      const lineageActor: AppActor = { kind: "agent", authProvider: "bootstrap", label: "conversation-batch", workspaceIds: [params.workspaceId] };
+      await recordArtifactInputLineage({ tx, actor: lineageActor, workspaceId: params.workspaceId,
+        artifact: { kind: "BrainSource", id: src.id }, content: src, origin: "DERIVED", inputs: [], inheritedRoots: session.lineageRoots });
       await appendEvents(tx, [
         {
           workspaceId: params.workspaceId,

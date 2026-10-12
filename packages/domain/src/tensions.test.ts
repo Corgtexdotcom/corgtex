@@ -1,5 +1,13 @@
+import { prepareProducerLineage, finishProducerLineage } from "./producer-lineage";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createNotificationIntent } from "./notifications";
+import { captureArtifactInputProof } from "./source-lineage";
+import { AppError } from "./errors";
+
+vi.mock("./producer-lineage", () => ({
+  prepareProducerLineage: vi.fn().mockResolvedValue({ mode: "HUMAN_ORIGINAL", inputs: [], roots: [] }),
+  finishProducerLineage: vi.fn().mockResolvedValue(undefined),
+}));
 
 const { prismaMock } = vi.hoisted(() => {
   const prisma = {
@@ -17,6 +25,7 @@ const { prismaMock } = vi.hoisted(() => {
       findMany: vi.fn(),
     },
     tensionUpvote: {
+      findUnique: vi.fn().mockResolvedValue(null),
       upsert: vi.fn(),
     },
     member: {
@@ -55,6 +64,7 @@ vi.mock("@corgtex/shared", () => ({
 vi.mock("./notifications", () => ({
   createNotificationIntent: vi.fn().mockResolvedValue({ count: 1 }),
 }));
+vi.mock("./audit-trail", () => ({ recordAudit: vi.fn() }));
 
 vi.mock("./auth", () => ({
   requireWorkspaceMembership: vi.fn().mockResolvedValue({ id: "mem-1", workspaceId: "ws-1", userId: "u-1", role: "MEMBER", isActive: true }),
@@ -62,6 +72,7 @@ vi.mock("./auth", () => ({
 }));
 
 vi.mock("./source-lineage", () => ({
+  captureArtifactInputProof: vi.fn().mockResolvedValue([]),
   readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) =>
     new Set(records.map((record: { id: string }) => record.id))),
 }));
@@ -71,6 +82,7 @@ const actor = { kind: "user", user: { id: "u-1" } } as any;
 describe("tensions domain", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(captureArtifactInputProof).mockReset().mockResolvedValue([]);
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
     prismaMock.auditLog.create.mockResolvedValue({});
     prismaMock.$executeRaw.mockResolvedValue({});
@@ -994,6 +1006,7 @@ describe("tensions domain", () => {
           include: {
             user: {
               select: {
+                id: true,
                 displayName: true,
                 email: true,
               },
@@ -1003,7 +1016,6 @@ describe("tensions domain", () => {
       }),
       orderBy: [
         { priority: "desc" },
-        { upvotes: { _count: "desc" } },
         { createdAt: "desc" },
         { id: "desc" },
       ],
@@ -1016,9 +1028,7 @@ describe("tensions domain", () => {
       },
       select: {
         subjectId: true,
-        requests: {
-          select: { status: true },
-        },
+        requests: true,
       },
     });
   });
@@ -1031,9 +1041,9 @@ describe("tensions domain", () => {
       {
         subjectId: "t-1",
         requests: [
-          { status: "ACTIVE" },
-          { status: "CANCELED" },
-          { status: "COMPLETED" },
+          { id: "request-active", status: "ACTIVE" },
+          { id: "request-canceled", status: "CANCELED" },
+          { id: "request-completed", status: "COMPLETED" },
         ],
       },
     ]);
@@ -1081,12 +1091,7 @@ describe("tensions domain", () => {
         resolvedAt: { gte: closedFrom, lte: closedTo },
       }),
     }));
-    expect(prismaMock.tension.count).toHaveBeenCalledWith({
-      where: expect.objectContaining({
-        publishedAt: { gte: openedFrom, lte: openedTo },
-        resolvedAt: { gte: closedFrom, lte: closedTo },
-      }),
-    });
+    expect(prismaMock.tension.count).not.toHaveBeenCalled();
   });
 
   it("sets resolvedAt when resolving a tension", async () => {
@@ -1295,8 +1300,8 @@ describe("tensions domain", () => {
       include: {
         author: { select: { id: true, displayName: true, email: true } },
         circle: { select: { id: true, name: true } },
-        assigneeMember: { include: { user: { select: { displayName: true, email: true } } } },
-        raisedByMember: { include: { user: { select: { displayName: true, email: true } } } },
+        assigneeMember: { include: { user: { select: { id: true, displayName: true, email: true } } } },
+        raisedByMember: { include: { user: { select: { id: true, displayName: true, email: true } } } },
         proposal: true,
         upvotes: true,
       },
@@ -1488,4 +1493,62 @@ describe("tensions domain", () => {
       }),
     });
   });
+
+  it("records original tension content inside its creation transaction", async () => {
+    const { createTension } = await import("./tensions");
+    await createTension(actor, { workspaceId: "ws-1", title: "Synthetic tension" });
+    expect(prepareProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ tx: prismaMock, copied: false }));
+    expect(finishProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ tx: prismaMock,
+      artifact: { kind: "Tension", id: "t-1" } }));
+  });
+
+  it.each(["list", "detail"] as const)("withholds revoked tension %s labels without hiding the independently public body", async (surface) => {
+    const tension = { id: "public-tension", workspaceId: "ws-1", title: "Public tension", bodyMd: "Independent body",
+      authorUserId: "departed", author: { id: "departed", displayName: "Private profile", email: "private@example.test" },
+      circleId: "restricted-circle", circle: { id: "restricted-circle", name: "Private circle" },
+      assigneeMemberId: "departed-member", assigneeMember: { id: "departed-member", user: { id: "departed", displayName: "Private profile", email: "private@example.test" } },
+      raisedByMemberId: "departed-member", raisedByMember: { id: "departed-member", user: { id: "departed", displayName: "Private profile", email: "private@example.test" } },
+      upvotes: [], proposalId: null, proposal: null,
+    };
+    prismaMock.tension.findMany.mockResolvedValue([tension]);
+    prismaMock.tension.findFirst.mockResolvedValue(tension);
+    const { getTension, listTensions } = await import("./tensions");
+    const read = async () => surface === "list" ? (await listTensions(actor, "ws-1")).items[0] : getTension(actor, { workspaceId: "ws-1", tensionId: tension.id });
+    expect(await read()).toMatchObject({ author: tension.author, raisedByMember: tension.raisedByMember });
+    vi.mocked(captureArtifactInputProof).mockRejectedValue(new AppError(403, "SOURCE_RESTRICTED", "Source unavailable."));
+    const output = await read();
+    expect(output).toMatchObject({ title: tension.title, bodyMd: tension.bodyMd, authorUserId: null,
+      author: { id: "", displayName: null, email: "" }, assigneeMemberId: null, assigneeMember: null,
+      raisedByMemberId: null, raisedByMember: null, circleId: null, circle: null });
+    expect(JSON.stringify(output)).not.toMatch(/Private profile|Private circle|private@example|departed|restricted-circle/);
+  });
+
+  it("filters exact votes and voter access before priority ranking and pagination", async () => {
+    const hiddenVotes = [1, 2, 3].map((id) => ({ id: `hidden-vote-${id}`, tensionId: "raw-winner", userId: `other-workspace-user-${id}` }));
+    const visibleVote = { id: "permitted-vote", tensionId: "safe-winner", userId: "active-local-user" };
+    const rawWinner = { id: "raw-winner", workspaceId: "ws-1", priority: 1, createdAt: new Date("2026-10-12"), upvotes: hiddenVotes };
+    const safeWinner = { id: "safe-winner", workspaceId: "ws-1", priority: 1, createdAt: new Date("2026-10-11"), upvotes: [visibleVote] };
+    prismaMock.tension.findMany.mockResolvedValue([rawWinner, safeWinner]);
+    const { listTensions, getTension } = await import("./tensions");
+    vi.mocked(captureArtifactInputProof).mockImplementation(async (_reader, workspaceId, inputs) => {
+      expect(workspaceId).toBe("ws-1");
+      if (inputs.some((input) => input.kind === "User" && input.id.startsWith("other-workspace-user"))) {
+        throw new AppError(403, "SOURCE_RESTRICTED", "Voter not entitled in target workspace.");
+      }
+      return [];
+    });
+    const page = await listTensions(actor, "ws-1", { take: 1 });
+    expect(page.total).toBe(2); expect(page.items).toHaveLength(1);
+    expect(page.items[0]).toMatchObject({ id: "safe-winner", upvotes: [visibleVote] });
+    expect(captureArtifactInputProof).toHaveBeenCalledWith(actor, "ws-1", [
+      { kind: "TensionUpvote", id: visibleVote.id, snapshot: visibleVote }, { kind: "User", id: visibleVote.userId },
+    ]);
+    prismaMock.tension.findFirst.mockResolvedValue(rawWinner);
+    expect((await getTension(actor, { workspaceId: "ws-1", tensionId: rawWinner.id })).upvotes).toEqual([]);
+    vi.mocked(captureArtifactInputProof).mockRejectedValue(new AppError(403, "SOURCE_RESTRICTED", "Voter membership revoked."));
+    const afterRevocation = await listTensions(actor, "ws-1", { take: 1 });
+    expect(afterRevocation.items[0]).toMatchObject({ id: "raw-winner", upvotes: [] });
+    expect(JSON.stringify(afterRevocation)).not.toContain("other-workspace-user");
+  });
+
 });

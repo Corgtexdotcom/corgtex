@@ -1,9 +1,10 @@
 import type { AppActor } from "@corgtex/shared";
 import type { ModelTool } from "@corgtex/models";
-import { completeActivity, createActivity, createCommunicationSuggestion, listCrmActivities } from "@corgtex/domain";
+import { type LineageRoot, completeActivity, createActivity, createCommunicationSuggestion, listCrmActivities } from "@corgtex/domain";
 
 type CrmToolContext = {
   workspaceId: string;
+  lineageRoots?: LineageRoot[];
   pageContext?: {
     surface: string;
     selectedIds?: {
@@ -260,6 +261,7 @@ export async function listDueRelationshipWorkAction(actor: AppActor, ctx: CrmToo
 export async function recordRelationshipActivityAction(actor: AppActor, ctx: CrmToolContext, args: any) {
   const activity = await createActivity(actor, {
     workspaceId: ctx.workspaceId,
+    lineageRoots: ctx.lineageRoots,
     title: args.title,
     type: args.type,
     bodyMd: args.bodyMd,
@@ -277,6 +279,7 @@ export async function completeRelationshipActivityAction(actor: AppActor, ctx: C
   if (!activityId) throw new Error("A CRM activity ID is required.");
   const activity = await completeActivity(actor, {
     workspaceId: ctx.workspaceId,
+    lineageRoots: ctx.lineageRoots,
     activityId,
     completedAt: args.completedAt ? new Date(args.completedAt) : undefined,
   });
@@ -286,6 +289,7 @@ export async function completeRelationshipActivityAction(actor: AppActor, ctx: C
 export async function createCommunicationSuggestionAction(actor: AppActor, ctx: CrmToolContext, args: any) {
   const suggestion = await createCommunicationSuggestion(actor, {
     workspaceId: ctx.workspaceId,
+    lineageRoots: ctx.lineageRoots,
     title: args.title,
     bodyMd: args.bodyMd,
     subject: args.subject,

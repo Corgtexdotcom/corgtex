@@ -8,6 +8,7 @@ const {
 } = vi.hoisted(() => ({
   trackedLinks: [] as any[],
   prismaMock: {
+    $transaction: vi.fn(),
     workspaceAgentConfig: {
       findUnique: vi.fn(),
     },
@@ -101,11 +102,25 @@ vi.mock("./auth", () => ({
   requireWorkspaceMembership: requireWorkspaceMembershipMock,
 }));
 
-vi.mock("./source-lineage", () => ({ readableArtifactIds: readableArtifactIdsMock }));
+vi.mock("./source-lineage", async () => {
+  const { AppError } = await import("./errors");
+  return { readableArtifactIds: readableArtifactIdsMock,
+    captureArtifactInputProof: vi.fn(async (actor, workspaceId, inputs) => {
+      const input = inputs[0];
+      const readable = await readableArtifactIdsMock(actor, workspaceId, input.kind, [input.snapshot]);
+      if (!readable.has(input.id)) throw new AppError(409, "UNKNOWN_LINEAGE", "Unknown input");
+      return [{ kind: input.kind, id: input.id, fingerprint: "synthetic-proof" }];
+    }),
+    recordArtifactInputLineage: vi.fn(), invalidateArtifactInputLineage: vi.fn(),
+  };
+});
 
 describe("newspaper delivery", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock));
+    readableArtifactIdsMock.mockImplementation(async (_actor: unknown, _workspaceId: string, _kind: string,
+      rows: Array<{ id: string }>) => new Set(rows.map((row) => row.id)));
     trackedLinks.splice(0, trackedLinks.length);
     requireWorkspaceMembershipMock.mockResolvedValue({ id: "member-1" });
 
@@ -294,8 +309,8 @@ describe("newspaper delivery", () => {
       },
     ]);
     prismaMock.newspaperTrackedLink.findMany.mockResolvedValue([
-      { runKey: "run-1", clickCount: 2 },
-      { runKey: "run-1", clickCount: 0 },
+      { id: "link-1", runKey: "run-1", clickCount: 2 },
+      { id: "link-2", runKey: "run-1", clickCount: 0 },
     ]);
 
     await expect(listNewspaperDeliverySummaries({ kind: "user", user: { id: "u-1" } } as any, "ws-1")).resolves.toEqual([
@@ -352,12 +367,12 @@ describe("newspaper delivery", () => {
     expect(rows[0]).not.toHaveProperty("clickedAt");
   });
 
-  it("withholds delivery counts and recipient rows when the edition has no readable lineage", async () => {
+  it("withholds delivery counts and recipient rows when their own input receipts are unreadable", async () => {
     const { listNewspaperDeliverySummaries, listNewspaperDeliveryDetails } = await import("./newspaper-delivery");
     prismaMock.newspaperDelivery.findMany.mockResolvedValue([
       { id: "delivery-hidden", runKey: "run-1", subject: "Restricted subject", status: "SENT" },
     ]);
-    readableArtifactIdsMock.mockResolvedValueOnce(new Set()).mockResolvedValueOnce(new Set());
+    readableArtifactIdsMock.mockResolvedValue(new Set());
 
     expect(await listNewspaperDeliverySummaries({ kind: "user", user: { id: "u-1" } } as any, "ws-1"))
       .toEqual([]);
@@ -459,7 +474,8 @@ describe("newspaper delivery", () => {
     });
     expect(prismaMock.newspaperEdition.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: { workspaceId: "ws-1" },
-      orderBy: { generatedAt: "desc" },
+      orderBy: [{ generatedAt: "desc" }, { id: "desc" }],
+      take: 50, skip: 0,
     }));
     expect(rows[0]).toEqual(expect.objectContaining({
       id: "edition-1",

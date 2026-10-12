@@ -26,6 +26,7 @@ export * from "./brain-source-removal";
 export * from "./brain-article-removal";
 export * from "./brain-access";
 export * from "./source-lineage";
+export * from "./digest-lineage";
 export * from "./brain-source-recovery";
 export * from "./audit-trail";
 export * from "./archive";
@@ -150,3 +151,10 @@ export * from "./customer-issue-publication";
 export * from "./exact-target-inventory";
 export * from "./workspace-support-access";
 export * from "./workspace-support-configuration";
+
+export * from "./source-scoped-read";
+export * from "./brain-article-variants";
+
+export * from "./conversation-lineage";
+export * from "./source-lineage-rebuild";
+export * from "./source-lineage-backfill";

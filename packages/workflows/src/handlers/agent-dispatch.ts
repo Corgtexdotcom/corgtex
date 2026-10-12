@@ -1,6 +1,6 @@
 import { runInboxTriageAgent, runDailyCheckInAgent, runMeetingSummaryAgent, runActionExtractionAgent, runProposalDraftingAgent, runConstitutionUpdateTriggerAgent, runConstitutionSynthesisAgent, runCrmDripFollowupAgent, runCrmEmailExtractionAgent, runCrmLeadEnrichmentAgent, runCompanyUnderstandingAgent } from "@corgtex/agents";
 import { executeAgentRun } from "@corgtex/agents";
-import { runBrainMaintenance, absorbSource, runBrainSourceRegenerationJob } from "@corgtex/agents";
+import { runBrainMaintenance, absorbSource, runBrainSourceRegenerationJob, runBrainArticleVariantJob } from "@corgtex/agents";
 import { assertBrainSourceRecoveryJob } from "@corgtex/domain";
 
 function asString(value: unknown) {
@@ -64,8 +64,9 @@ export async function runAgentWorkflowJob(job: {
       prompt: asString(payload.prompt),
       meetingId: asString(payload.meetingId) || null,
       triggerType: payload.triggerType === "API" ? "API" : "MANUAL",
-      reviewFeedback: asString(payload.reviewFeedback) || undefined,
-      previousAdvice: asString(payload.previousAdvice) || undefined,
+      requestInputId: asString(payload.requestInputId) || undefined,
+      feedbackInputId: asString(payload.feedbackInputId) || undefined,
+      priorRunSnapshotId: asString(payload.priorRunSnapshotId) || undefined,
     });
   }
 
@@ -75,8 +76,9 @@ export async function runAgentWorkflowJob(job: {
       triggerRef: job.id,
       proposalId: asString(payload.proposalId),
       triggerType: payload.triggerType === "MANUAL" ? "MANUAL" : "EVENT",
-      reviewFeedback: asString(payload.reviewFeedback) || undefined,
-      previousAdvice: asString(payload.previousAdvice) || undefined,
+      requestInputId: asString(payload.requestInputId) || undefined,
+      feedbackInputId: asString(payload.feedbackInputId) || undefined,
+      priorRunSnapshotId: asString(payload.priorRunSnapshotId) || undefined,
     });
   }
 
@@ -150,6 +152,13 @@ export async function runAgentWorkflowJob(job: {
       throw new Error("Brain source recovery was skipped by agent runtime before processing.");
     }
     return result;
+  }
+
+  if (job.type === "agent.brain-article-variant") {
+    if (!Number.isSafeInteger(job.attempts) || (job.attempts ?? 0) < 1 || !claimOwner) {
+      throw new Error("Article variant generation requires a claimed worker attempt.");
+    }
+    return runBrainArticleVariantJob({ workspaceId: job.workspaceId, jobId: job.id, expectedAttempt: job.attempts!, expectedOwner: claimOwner });
   }
 
   if (job.type === "agent.brain-source-regenerate") {

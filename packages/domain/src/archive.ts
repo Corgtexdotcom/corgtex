@@ -724,6 +724,12 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
       });
     }
 
+    if (["BrainSource", "Document"].includes(config.entityType)) await appendEvents(tx, [{
+      workspaceId: params.workspaceId, type: "source-lineage.changed",
+      aggregateType: config.entityType, aggregateId: record.id,
+      payload: { kind: config.entityType, id: record.id, change: "archived" },
+    }]);
+
     await tx.workspaceArchiveRecord.create({
       data: {
         workspaceId: params.workspaceId,
@@ -857,6 +863,14 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
       ]);
     }
 
+    // BrainSource restore already emits brain-source.created above, whose
+    // absorption dependency schedules exactly one complete lineage rebuild.
+    if (config.entityType === "Document") await appendEvents(tx, [{
+      workspaceId: params.workspaceId, type: "source-lineage.changed",
+      aggregateType: config.entityType, aggregateId: record.id,
+      payload: { kind: config.entityType, id: record.id, change: "restored" },
+    }]);
+
     if (archiveRecord) {
       await tx.workspaceArchiveRecord.update({
         where: { id: archiveRecord.id },
@@ -920,6 +934,11 @@ export async function purgeWorkspaceArtifact(actor: AppActor, params: {
     }
 
     await delegate(tx, config).delete({ where: { id: record.id } });
+    if (["BrainSource", "Document"].includes(config.entityType)) await appendEvents(tx, [{
+      workspaceId: params.workspaceId, type: "source-lineage.changed",
+      aggregateType: config.entityType, aggregateId: record.id,
+      payload: { kind: config.entityType, id: record.id, change: "purged" },
+    }]);
     await tx.workspaceArchiveRecord.update({
       where: { id: archiveRecord.id },
       data: {

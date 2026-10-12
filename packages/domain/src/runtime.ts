@@ -57,7 +57,7 @@ export async function listRuntimeEvents(actor: AppActor, workspaceId: string, op
     workspaceId,
   });
 
-  return prisma.event.findMany({
+  const rows = await prisma.event.findMany({
     where: { workspaceId },
     select: {
       id: true,
@@ -86,6 +86,7 @@ export async function listRuntimeEvents(actor: AppActor, workspaceId: string, op
     orderBy: { createdAt: "desc" },
     take: normalizeTake(opts?.take),
   });
+  return rows.map((row) => ({ ...row, error: row.error ? "Runtime operation failed. Inspect current permitted inputs before retrying." : null }));
 }
 
 export async function listRuntimeJobs(actor: AppActor, workspaceId: string, opts?: { take?: number }) {
@@ -94,7 +95,7 @@ export async function listRuntimeJobs(actor: AppActor, workspaceId: string, opts
     workspaceId,
   });
 
-  return prisma.workflowJob.findMany({
+  const rows = await prisma.workflowJob.findMany({
     where: { workspaceId },
     select: {
       id: true,
@@ -122,6 +123,7 @@ export async function listRuntimeJobs(actor: AppActor, workspaceId: string, opts
     orderBy: { createdAt: "desc" },
     take: normalizeTake(opts?.take),
   });
+  return rows.map((row) => ({ ...row, error: row.error ? "Runtime operation failed. Inspect current permitted inputs before retrying." : null }));
 }
 
 export async function replayEvent(actor: AppActor, params: {
@@ -251,15 +253,18 @@ export async function replayWorkflowJob(actor: AppActor, params: {
 export async function listFailedJobs(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number }) {
   await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: ["ADMIN", "FACILITATOR"] });
 
-  return prisma.workflowJob.findMany({
+  const rows = await prisma.workflowJob.findMany({
     where: {
       workspaceId,
       status: "FAILED"
     },
+    select: { id: true, workspaceId: true, eventId: true, type: true, status: true, dedupeKey: true, attempts: true,
+      runAfter: true, lockedAt: true, lockedBy: true, startedAt: true, completedAt: true, createdAt: true, updatedAt: true },
     orderBy: { createdAt: "desc" },
     take: opts?.take ?? 50,
     skip: opts?.skip ?? 0
   });
+  return rows.map((row) => ({ ...row, payload: null, error: "Runtime operation failed. Inspect current permitted inputs before retrying." }));
 }
 
 export async function discardFailedJob(actor: AppActor, params: { workspaceId: string; workflowJobId: string }) {

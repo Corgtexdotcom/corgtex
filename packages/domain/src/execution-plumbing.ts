@@ -27,6 +27,10 @@ import { isKnownScope, type AgentScope } from "./agent-auth";
 import { OPERATIONAL_ARTIFACT_FILTER } from "./operational-artifacts";
 import { privacyFilter } from "./privacy";
 import { formatWorkItemPriority } from "./work-item-priority";
+import { captureArtifactInputProof, captureArtifactInputSnapshotProof, isArtifactInputProofPubliclyShareable,
+  isArtifactInputProofReadable, type LineageRoot } from "./source-lineage";
+import { finishProducerLineage, prepareProducerLineage, type ProducerLineageParams } from "./producer-lineage";
+import { captureReadableDigestInputs } from "./digest-lineage";
 
 const SECRET_KEY_PATTERN = /(token|secret|password|credential|api[_-]?key|access[_-]?key|refresh|authorization|bearer)/i;
 const SECRET_QUERY_VALUE_PATTERN = /([?&](?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|api[_-]?key|secret|signature|sig|authorization)=)[^&#\s]+/gi;
@@ -44,11 +48,12 @@ type WritebackTargetSummary = {
   webPath: string;
   context?: JsonRecord;
   crmLinks?: CrmLinks;
+  lineageRoots?: LineageRoot[];
 };
 
 type ExecutionRequestRecord = Awaited<ReturnType<typeof loadExecutionRequest>>;
 
-export type CreateExecutionRequestParams = {
+export type CreateExecutionRequestParams = ProducerLineageParams & {
   workspaceId: string;
   goal: string;
   provider?: string | AiWorkspaceProvider | null;
@@ -347,6 +352,40 @@ const executionRequestInclude = {
   },
 };
 
+const CRM_RECEIPT_KEY = "__crmInputReceipt";
+
+function asRecord(value: unknown): JsonRecord | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : null;
+}
+
+function crmPacketRoots(request: { writebackTargetType: ExecutionWritebackTargetType | null; contextJson: unknown }): LineageRoot[] | null {
+  if (request.writebackTargetType !== "CRM_COMMUNICATION") return null;
+  const context = asRecord(request.contextJson);
+  const receipt = asRecord(context?.[CRM_RECEIPT_KEY]);
+  const roots = receipt?.roots;
+  invariant(receipt?.version === 1 && Array.isArray(roots) && roots.length > 0
+    && roots.every((root) => { const row = asRecord(root); return row && typeof row.kind === "string"
+      && typeof row.id === "string" && row.id.length > 0 && typeof row.fingerprint === "string" && /^[a-f0-9]{64}$/.test(row.fingerprint); }),
+  409, "UNKNOWN_LINEAGE", "CRM execution context has no complete input receipt.");
+  return roots as LineageRoot[];
+}
+
+async function requireCrmPacketProof(actor: AppActor, workspaceId: string,
+  request: { writebackTargetType: ExecutionWritebackTargetType | null; contextJson: unknown }) {
+  const roots = crmPacketRoots(request);
+  if (!roots) return;
+  invariant(await isArtifactInputProofReadable(actor, workspaceId, roots), 403, "SOURCE_RESTRICTED", "Execution context is no longer readable.");
+  invariant(await isArtifactInputProofPubliclyShareable(actor, workspaceId, roots),
+    403, "SOURCE_RESTRICTED", "Execution context is not shareable with this external destination.");
+}
+
+function withoutCrmReceipt(context: unknown) {
+  const record = asRecord(context);
+  if (!record || !(CRM_RECEIPT_KEY in record)) return context;
+  const { [CRM_RECEIPT_KEY]: _receipt, ...visible } = record;
+  return visible;
+}
+
 function executionRequestAccessWhere(actor: AppActor, workspaceId: string, requestId?: string): Prisma.ExecutionRequestWhereInput {
   const where: Prisma.ExecutionRequestWhereInput = {
     workspaceId,
@@ -378,6 +417,7 @@ async function loadExecutionRequest(actor: AppActor, workspaceId: string, reques
     include: executionRequestInclude,
   });
   invariant(request, 404, "NOT_FOUND", "Execution request not found.");
+  await requireCrmPacketProof(actor, workspaceId, request);
   return request;
 }
 
@@ -533,20 +573,7 @@ async function validateWritebackTarget(
     case "CRM_COMMUNICATION": {
       const item = await client.crmCommunicationSuggestion.findFirst({
         where: { id: targetId, workspaceId, ...activeCrmParentWhere(["account", "contact", "deal", "activity"]) },
-        select: {
-          id: true,
-          status: true,
-          channel: true,
-          title: true,
-          subject: true,
-          bodyMd: true,
-          recipientEmail: true,
-          recipientName: true,
-          source: true,
-          accountId: true,
-          contactId: true,
-          dealId: true,
-          activityId: true,
+        include: {
           account: {
             select: {
               id: true,
@@ -587,6 +614,12 @@ async function validateWritebackTarget(
         },
       });
       invariant(item, 404, "NOT_FOUND", "CRM communication write-back target not found.");
+      invariant(actor, 401, "UNAUTHORIZED", "Actor required for CRM execution context.");
+      const lineageRoots = await captureArtifactInputProof(actor, workspaceId, [
+        { kind: "CrmCommunicationSuggestion", id: item.id, snapshot: item },
+        ...([["account", "CrmAccount"], ["contact", "CrmContact"], ["deal", "CrmDeal"], ["activity", "CrmActivity"]] as const)
+          .flatMap(([field, kind]) => item[field] ? [{ kind, id: item[field]!.id, snapshot: item[field]! }] : []),
+      ], client);
       invariant(item.status !== "SENT" && item.status !== "DECLINED", 400, "INVALID_STATE", "Finalized communication suggestions cannot be requested for external execution.");
       return {
         type,
@@ -596,6 +629,7 @@ async function validateWritebackTarget(
         webPath: item.account ? `/leads/accounts/${item.account.id}?view=review` : "/leads?view=review",
         context: crmCommunicationTargetContext(item),
         crmLinks: { accountId: item.accountId, contactId: item.contactId, dealId: item.dealId, activityId: item.activityId },
+        lineageRoots,
       };
     }
     case "COMMENT":
@@ -631,7 +665,7 @@ function buildExecutionPacket(params: {
     status: request.status,
     goal: request.goal,
     actor: request.actorJson,
-    relevantContext: request.contextJson,
+    relevantContext: withoutCrmReceipt(request.contextJson),
     allowedScopes: request.allowedScopes,
     policyConstraints: request.policyConstraintsJson,
     expectedOutput: request.expectedOutputJson,
@@ -652,7 +686,7 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
 
   if (idempotencyKey) {
     const existing = await findExistingExecutionRequestByIdempotency(actor, params.workspaceId, idempotencyKey);
-    if (existing) return serializeExecutionRequest(existing);
+    if (existing) { await requireCrmPacketProof(actor, params.workspaceId, existing); return serializeExecutionRequest(existing); }
   }
 
   const goal = params.goal.trim();
@@ -666,6 +700,9 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
   }
   const target = await validateWritebackTarget(params.workspaceId, targetType, params.writebackTargetId, actor, membership);
   const context = params.context === undefined ? target?.context ?? null : params.context;
+  if (targetType === "CRM_COMMUNICATION" && (params.context !== undefined || actor.kind !== "user")) {
+    invariant(params.lineageRoots?.length, 409, "UNKNOWN_LINEAGE", "Custom CRM execution context requires its complete producer receipt.");
+  }
 
   const workspace = await prisma.workspace.findUnique({
     where: { id: params.workspaceId },
@@ -676,12 +713,33 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
   let request: NonNullable<ExecutionRequestRecord>;
   try {
     request = await prisma.$transaction(async (tx) => {
+      let packetContext = context;
+      let suggestionReceipt: Awaited<ReturnType<typeof prepareProducerLineage>> | undefined;
       if (targetType === "CRM_COMMUNICATION" && target?.id) {
-        await lockActiveCommunicationSuggestion(tx, {
+        const suggestion = await lockActiveCommunicationSuggestion(tx, {
           workspaceId: params.workspaceId,
           suggestionId: target.id,
           expectedLinks: target.crmLinks,
         });
+        const direct = target.lineageRoots?.find((root) => root.kind === "CrmCommunicationSuggestion" && root.id === suggestion.id);
+        invariant(direct, 409, "UNKNOWN_LINEAGE", "CRM execution target has no source receipt.");
+        const snapshots = await captureArtifactInputSnapshotProof(actor, params.workspaceId, direct, tx);
+        const lockedTarget = await validateWritebackTarget(params.workspaceId, targetType, suggestion.id, actor, membership, tx);
+        const roots = [...(lockedTarget?.lineageRoots ?? []), ...(params.lineageRoots ?? [])]
+          .filter((root) => root.kind !== "CrmCommunicationSuggestion" || root.id !== suggestion.id);
+        roots.push(...snapshots);
+        roots.push(...await captureArtifactInputProof(actor, params.workspaceId,
+          [{ kind: "Workspace", id: workspace.id, snapshot: workspace }], tx));
+        invariant(await isArtifactInputProofReadable(actor, params.workspaceId, roots, tx), 409, "SOURCE_CHANGED", "CRM execution inputs changed before persistence.");
+        invariant(await isArtifactInputProofPubliclyShareable(actor, params.workspaceId, roots, tx),
+          403, "SOURCE_RESTRICTED", "CRM execution context is not shareable with this external destination.");
+        if (params.lineageRoots?.length) invariant(await isArtifactInputProofReadable(actor, params.workspaceId, params.lineageRoots, tx),
+          409, "SOURCE_CHANGED", "Custom execution context inputs changed before persistence.");
+        const supplied = params.context === undefined ? lockedTarget?.context : params.context;
+        packetContext = { ...(asRecord(supplied) ?? { providedContext: supplied }),
+          [CRM_RECEIPT_KEY]: { version: 1, roots } };
+        suggestionReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+          artifact: { kind: "CrmCommunicationSuggestion", id: suggestion.id }, before: suggestion, allowSystemTransition: true });
       }
       const created = await tx.executionRequest.create({
         data: {
@@ -691,7 +749,7 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
           provider,
           goal,
           actorJson: jsonInput(params.actor ?? { actorKind: actor.kind }),
-          contextJson: jsonInput(context),
+          contextJson: jsonInput(packetContext),
           allowedScopes,
           policyConstraintsJson: jsonInput(params.policyConstraints ?? null),
           expectedOutputJson: jsonInput(params.expectedOutput ?? null),
@@ -711,7 +769,7 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
         include: { results: { orderBy: { submittedAt: "desc" }, take: 10 } },
       });
       if (targetType === "CRM_COMMUNICATION" && target?.id) {
-        await tx.crmCommunicationSuggestion.update({
+        const suggestion = await tx.crmCommunicationSuggestion.update({
           where: { id: target.id },
           data: {
             status: "REQUESTED",
@@ -723,6 +781,9 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
             failureReason: null,
           },
         });
+        invariant(suggestionReceipt, 409, "UNKNOWN_LINEAGE", "CRM execution transition has no receipt.");
+        await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+          artifact: { kind: "CrmCommunicationSuggestion", id: suggestion.id }, content: suggestion, receipt: suggestionReceipt });
         await recordAudit(tx, actor, {
           workspaceId: params.workspaceId,
           action: "crm.communication_suggestion.requested",
@@ -754,6 +815,7 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
     if (!idempotencyKey || !isPrismaUniqueError(error)) throw error;
     const existing = await findExistingExecutionRequestByIdempotency(actor, params.workspaceId, idempotencyKey);
     invariant(existing, 409, "CONFLICT", "Execution request idempotency conflict.");
+    await requireCrmPacketProof(actor, params.workspaceId, existing);
     return serializeExecutionRequest(existing);
   }
 
@@ -782,9 +844,17 @@ export async function listExecutionRequests(actor: AppActor, params: {
     },
     include: executionRequestInclude,
     orderBy: { createdAt: "desc" },
-    take: Math.min(Math.max(params.take ?? 20, 1), 100),
+    take: 5001,
   });
-  return requests.map(serializeExecutionRequest);
+  invariant(requests.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Execution source permission scan exceeds its supported size.");
+  const visible: typeof requests = [];
+  for (const request of requests) {
+    try { await requireCrmPacketProof(actor, params.workspaceId, request); visible.push(request); }
+    catch (error) {
+      if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
+    }
+  }
+  return visible.slice(0, Math.min(Math.max(params.take ?? 20, 1), 100)).map(serializeExecutionRequest);
 }
 
 export async function getExecutionPacket(actor: AppActor, params: { workspaceId: string; requestId: string }) {
@@ -1012,7 +1082,7 @@ export async function listWritebackTargets(actor: AppActor, params: ListWritebac
   }
   if (includeType("CRM_COMMUNICATION")) {
     requireExecutionScope(actor, "relationships:read");
-    const records = await prisma.crmCommunicationSuggestion.findMany({
+    const candidates = await prisma.crmCommunicationSuggestion.findMany({
       where: {
         workspaceId: params.workspaceId,
         ...activeCrmParentWhere(["account", "contact", "deal", "activity"]),
@@ -1027,17 +1097,15 @@ export async function listWritebackTargets(actor: AppActor, params: ListWritebac
           }
           : {}),
       },
-      select: {
-        id: true,
-        title: true,
-        subject: true,
-        status: true,
-        accountId: true,
-      },
       orderBy: { updatedAt: "desc" },
-      take,
+      take: 5001,
     });
-    items.push(...records.map((record) => ({
+    invariant(candidates.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "CRM target permission scan exceeds its supported size.");
+    const readable = await captureReadableDigestInputs({ actor, workspaceId: params.workspaceId, kind: "CrmCommunicationSuggestion", records: candidates });
+    const records: typeof candidates = [];
+    for (const candidate of readable.records) if (await isArtifactInputProofPubliclyShareable(actor, params.workspaceId, readable.proofs.get(candidate.id) ?? [])) records.push(candidate);
+    const sampled = records.slice(0, take);
+    items.push(...sampled.map((record) => ({
       type: "CRM_COMMUNICATION" as const,
       id: record.id,
       title: record.subject ?? record.title,

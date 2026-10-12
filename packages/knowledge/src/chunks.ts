@@ -79,7 +79,7 @@ type SourceSnapshot = { kind: LineageKind; contentHash: string; content: string;
 async function knowledgeSourceSnapshot(params: { workspaceId: string; sourceType: KnowledgeSourceType; sourceId: string },
   db: typeof prisma | Prisma.TransactionClient = prisma): Promise<SourceSnapshot | null> {
   const where = { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null };
-  const row = params.sourceType === "BRAIN_ARTICLE" ? await db.brainArticle.findFirst({ where: { ...where, isPrivate: false } })
+  const row = params.sourceType === "BRAIN_ARTICLE" ? await db.brainArticle.findFirst({ where: { ...where, OR: [{ isPrivate: false }, { variantOfArticleId: { not: null }, isPrivate: true }] } })
     : params.sourceType === "DOCUMENT" ? await db.document.findFirst({ where })
       : params.sourceType === "MEETING" ? await db.meeting.findFirst({ where })
         : params.sourceType === "PROPOSAL" ? await db.proposal.findFirst({ where }) : null;
@@ -205,7 +205,7 @@ export async function syncKnowledgeForSource(params: {
       await tx.$queryRaw`SELECT "id" FROM "BrainArticle" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brain_article_index:${params.workspaceId}:${params.sourceId}`}, 0))`;
       const article = await tx.brainArticle.findFirst({
-        where: { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null, isPrivate: false, bodyMd: params.content,
+        where: { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null, OR: [{ isPrivate: false }, { variantOfArticleId: { not: null }, isPrivate: true }], bodyMd: params.content,
           ...(params.sourceUpdatedAt ? { updatedAt: params.sourceUpdatedAt } : {}) },
         select: { id: true },
       });
@@ -328,7 +328,7 @@ export async function syncBrainArticleKnowledge(params: {
   return syncKnowledgeForSource({
     workspaceId: params.workspaceId, sourceType: "BRAIN_ARTICLE", accessDomain: "WORKSPACE",
     sourceId: article.id, sourceTitle: article.title,
-    content: article.archivedAt || article.isPrivate ? "" : article.bodyMd,
+    content: article.archivedAt || (article.isPrivate && !article.variantOfArticleId) ? "" : article.bodyMd,
     sourceUpdatedAt: article.updatedAt,
     metadata: { type: article.type, authority: article.authority, slug: article.slug },
   });

@@ -1,4 +1,5 @@
 import { createHmac } from "node:crypto";
+import { AppError } from "./errors";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
@@ -10,6 +11,11 @@ const {
   meetingReviewDismissMock,
   meetingReviewEditViewMock,
   meetingReviewModalUpdateMock,
+  captureDigestProofMock,
+  digestProofReadableMock,
+  reviewPublicationMock,
+  reviewRefreshMock,
+  requireMembershipMock,
 } = vi.hoisted(() => {
   const tx = {
     communicationInstallation: {
@@ -71,6 +77,7 @@ const {
         upsert: vi.fn(),
       },
       communicationChannel: {
+        findMany: vi.fn(),
         upsert: vi.fn(),
       },
       communicationExternalUser: {
@@ -111,6 +118,11 @@ const {
     meetingReviewDismissMock: vi.fn(),
     meetingReviewEditViewMock: vi.fn(),
     meetingReviewModalUpdateMock: vi.fn(),
+    captureDigestProofMock: vi.fn(),
+    digestProofReadableMock: vi.fn(),
+    reviewPublicationMock: vi.fn(),
+    reviewRefreshMock: vi.fn(),
+    requireMembershipMock: vi.fn(),
   };
 });
 
@@ -151,11 +163,18 @@ vi.mock("./brain", () => ({
   ingestSource: vi.fn(),
 }));
 
+vi.mock("./source-lineage", () => ({
+  captureArtifactInputProof: captureDigestProofMock,
+  isArtifactInputProofReadable: digestProofReadableMock,
+}));
+
 vi.mock("./auth", () => ({
-  requireWorkspaceMembership: vi.fn(),
+  requireWorkspaceMembership: requireMembershipMock,
 }));
 
 vi.mock("./meeting-action-review", () => ({
+  assertMeetingReviewPublicPublication: reviewPublicationMock,
+  refreshSlackMeetingActionReviewAfterWebApply: reviewRefreshMock,
   SLACK_MEETING_ACTION_REVIEW_EDIT_CALLBACK_ID: "corgtex_meeting_review_edit_modal",
   isSlackMeetingActionReviewAction: (actionId: string) => [
     "corgtex_meeting_review_confirm",
@@ -198,6 +217,16 @@ function slackMessageRow(overrides: Record<string, unknown> = {}) {
 describe("communication Slack integration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    requireMembershipMock.mockReset().mockResolvedValue(undefined);
+    reviewPublicationMock.mockReset().mockImplementation(async (actor, params) => {
+      await requireMembershipMock({ actor, workspaceId: params.workspaceId });
+      if (!params.lineageRoots?.length) throw new AppError(403, "UNKNOWN_LINEAGE", "Synthetic review input proof is unavailable.");
+    });
+    reviewRefreshMock.mockReset().mockResolvedValue(null);
+    captureDigestProofMock.mockReset().mockImplementation(async (_actor, _workspaceId, inputs) =>
+      inputs.map((input: any) => ({ kind: input.kind, id: input.id, fingerprint: "a".repeat(64) })));
+    digestProofReadableMock.mockReset().mockResolvedValue(true);
+    prismaMock.communicationChannel.findMany.mockReset().mockResolvedValue([{ installationId: "install-1", externalChannelId: "C1" }]);
     vi.stubEnv("SLACK_WORKSPACE_BINDINGS_JSON", undefined);
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof txMock) => Promise<unknown>) => callback(txMock));
     createActionMock.mockResolvedValue({ id: "action-1" });
@@ -247,6 +276,7 @@ describe("communication Slack integration", () => {
       blocks: [{ type: "section", text: { type: "mrkdwn", text: "updated" } }],
       text: "Corgtex meeting follow-up review",
       responseText: "Created action.",
+      lineageRoots: [{ kind: "MeetingFollowUpReview", id: "review-1", fingerprint: "a".repeat(64) }],
     });
     meetingReviewDismissMock.mockReset().mockResolvedValue({
       channelId: "C1",
@@ -254,6 +284,7 @@ describe("communication Slack integration", () => {
       blocks: [{ type: "section", text: { type: "mrkdwn", text: "updated" } }],
       text: "Corgtex meeting follow-up review",
       responseText: "Dismissed.",
+      lineageRoots: [{ kind: "MeetingFollowUpReview", id: "review-1", fingerprint: "a".repeat(64) }],
     });
     meetingReviewEditViewMock.mockReset().mockResolvedValue({ type: "modal", callback_id: "corgtex_meeting_review_edit_modal", blocks: [] });
     meetingReviewModalUpdateMock.mockReset().mockResolvedValue({
@@ -262,6 +293,7 @@ describe("communication Slack integration", () => {
       blocks: [{ type: "section", text: { type: "mrkdwn", text: "updated" } }],
       text: "Corgtex meeting follow-up review",
       responseText: "Updated.",
+      lineageRoots: [{ kind: "MeetingFollowUpReview", id: "review-1", fingerprint: "a".repeat(64) }],
     });
   });
 
@@ -294,7 +326,7 @@ describe("communication Slack integration", () => {
     const since = new Date("2026-04-29T12:00:00.000Z");
     const until = new Date("2026-04-30T12:00:00.000Z");
 
-    await listSlackMessagesForDigest("workspace-1", since, until);
+    await listSlackMessagesForDigest({ kind: "agent", authProvider: "bootstrap", label: "Digest test", workspaceIds: ["workspace-1"] }, "workspace-1", since, until);
 
     expect(prismaMock.communicationMessage.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
@@ -307,6 +339,69 @@ describe("communication Slack integration", () => {
         isDeleted: false,
       }),
     }));
+  });
+
+  it("fills the 500-message digest sample after discarding earlier unauthorized snapshots", async () => {
+    const { listSlackMessagesForDigest } = await import("./communication");
+    const actor = { kind: "agent" as const, authProvider: "bootstrap" as const, label: "Digest test", workspaceIds: ["workspace-1"] };
+    const since = new Date("2026-04-29T12:00:00Z");
+    const rows = Array.from({ length: 1070 }, (_, index) => ({
+      id: `digest-${String(index).padStart(4, "0")}`, workspaceId: "workspace-1", installationId: "install-1", provider: "SLACK",
+      externalChannelId: "C1", receivedAt: new Date(since.getTime() + index), text: `Synthetic Slack input ${index}`,
+      isBot: false, isHidden: false, isDeleted: false, textRedactedAt: null,
+    }));
+    prismaMock.communicationMessage.findMany.mockImplementation(async (query) => {
+      const cursor = query.where.AND?.[0].OR;
+      return rows.filter((row) => !cursor || row.receivedAt > cursor[0].receivedAt.gt
+        || (row.receivedAt.getTime() === cursor[1].receivedAt.getTime() && row.id > cursor[1].id.gt)).slice(0, query.take);
+    });
+    captureDigestProofMock.mockImplementation(async (_actor, _workspaceId, inputs) => {
+      if (Number(inputs[0].id.split("-")[1]) < 550) throw new AppError(409, "SOURCE_RESTRICTED", "Synthetic revoked input");
+      return [{ kind: "CommunicationMessage", id: inputs[0].id, fingerprint: "a".repeat(64) }];
+    });
+
+    const selected = await listSlackMessagesForDigest(actor, "workspace-1", since);
+
+    expect(selected).toHaveLength(500);
+    expect(selected[0].id).toBe("digest-0550");
+    expect(selected.at(-1)?.id).toBe("digest-1049");
+    expect(prismaMock.communicationMessage.findMany).toHaveBeenCalledTimes(11);
+    expect(prismaMock.communicationMessage.findMany.mock.calls.every(([query]) => query.take === 100)).toBe(true);
+    expect(prismaMock.communicationMessage.findMany.mock.calls[1][0]).toMatchObject({
+      orderBy: [{ receivedAt: "asc" }, { id: "asc" }],
+      where: { AND: [{ OR: [{ receivedAt: { gt: rows[99].receivedAt } }, { receivedAt: rows[99].receivedAt, id: { gt: rows[99].id } }] }] },
+    });
+  });
+
+  it("applies the shared audience gate before the Slack digest sample cap", async () => {
+    const { listSlackMessagesForDigest } = await import("./communication");
+    const actor = { kind: "agent" as const, authProvider: "bootstrap" as const, label: "Digest test", workspaceIds: ["workspace-1"] };
+    const audience = [{ kind: "user" as const, user: { id: "synthetic-user", email: "synthetic@example.test", displayName: "Synthetic user" } }];
+    const rows = [{ id: "revoked-for-reader", receivedAt: new Date("2026-04-29T12:00:00Z") }, { id: "shared", receivedAt: new Date("2026-04-29T13:00:00Z") }];
+    prismaMock.communicationMessage.findMany.mockResolvedValue(rows);
+    digestProofReadableMock.mockImplementation(async (_actor, _workspaceId, roots) => roots[0].id === "shared");
+
+    expect(await listSlackMessagesForDigest(actor, "workspace-1", new Date("2026-04-29T00:00:00Z"), undefined, audience)).toEqual([rows[1]]);
+    expect(digestProofReadableMock).toHaveBeenCalledWith(audience[0], "workspace-1", expect.any(Array));
+  });
+
+  it("prefilters live public channels and installs before loading digest messages", async () => {
+    const { listSlackMessagesForDigest } = await import("./communication");
+    const actor = { kind: "agent" as const, authProvider: "bootstrap" as const, label: "Digest test", workspaceIds: ["workspace-1"] };
+    await listSlackMessagesForDigest(actor, "workspace-1", new Date("2026-04-29T00:00:00Z"));
+    expect(prismaMock.communicationChannel.findMany).toHaveBeenCalledWith({
+      where: { workspaceId: "workspace-1", provider: "SLACK", kind: "PUBLIC", isIngestEnabled: true, isArchived: false,
+        installation: { workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE", disconnectedAt: null } },
+      select: { installationId: true, externalChannelId: true },
+    });
+    expect(prismaMock.communicationMessage.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({
+      OR: [{ installationId: "install-1", externalChannelId: "C1" }], textRedactedAt: null,
+      installation: { workspaceId: "workspace-1", status: "ACTIVE", disconnectedAt: null },
+    }) }));
+    prismaMock.communicationMessage.findMany.mockClear();
+    prismaMock.communicationChannel.findMany.mockResolvedValue([]);
+    expect(await listSlackMessagesForDigest(actor, "workspace-1", new Date("2026-04-29T00:00:00Z"))).toEqual([]);
+    expect(prismaMock.communicationMessage.findMany).not.toHaveBeenCalled();
   });
 
   it("rejects stale Slack request timestamps", async () => {
@@ -1586,6 +1681,22 @@ describe("communication Slack integration", () => {
     expect(response.text).toContain("working");
   });
 
+  it.each([true, undefined])("withholds a required public destination when Slack reports privacy %s", async (isPrivate) => {
+    const { validateSlackPostTarget } = await import("./communication");
+    prismaMock.communicationInstallation.findUnique.mockResolvedValue({ id: "install-1", botTokenEnc: "enc:bot-token" });
+    slackWebClientMock.conversations.info.mockResolvedValue({ ok: true, channel: { id: "C1", name: "synthetic-target", is_private: isPrivate, is_member: true, is_archived: false } });
+    expect(await validateSlackPostTarget("install-1", "C1", { requirePublic: true })).toMatchObject({ ok: false, code: "SLACK_CHANNEL_NOT_PUBLIC" });
+  });
+
+  it("accepts an expressly public provider destination while preserving other private agenda validation", async () => {
+    const { validateSlackPostTarget } = await import("./communication");
+    prismaMock.communicationInstallation.findUnique.mockResolvedValue({ id: "install-1", botTokenEnc: "enc:bot-token" });
+    slackWebClientMock.conversations.info.mockResolvedValueOnce({ ok: true, channel: { id: "C1", name: "synthetic-public", is_private: false, is_member: true, is_archived: false } });
+    expect(await validateSlackPostTarget("install-1", "C1", { requirePublic: true })).toMatchObject({ ok: true });
+    slackWebClientMock.conversations.info.mockResolvedValueOnce({ ok: true, channel: { id: "C1", name: "synthetic-private", is_private: true, is_member: true, is_archived: false } });
+    expect(await validateSlackPostTarget("install-1", "C1")).toMatchObject({ ok: true });
+  });
+
   it("routes signed meeting-review confirm block actions through Corgtex-side authorization", async () => {
     const { handleSlackInteraction } = await import("./communication");
     const installation = {
@@ -1713,6 +1824,99 @@ describe("communication Slack integration", () => {
       channel: "C1",
       ts: "1714320000.000100",
     }));
+  });
+
+  it("forwards the current web requester and complete rendered receipt before updating Slack", async () => {
+    const { syncSlackMeetingActionReviewAfterWebApply } = await import("./communication");
+    const actor = { kind: "user" as const, user: { id: "user-1", email: "user@example.test", displayName: "User" } };
+    const params = { workspaceId: "workspace-1", insightId: "insight-1" };
+    const update = { channelId: "C1", messageTs: "1714320000.000100", blocks: [],
+      text: "Synthetic complete review", responseText: "Updated", lineageRoots: [
+        { kind: "Meeting", id: "meeting-1", fingerprint: "a".repeat(64) },
+        { kind: "MeetingInsight", id: "uncited-insight-2", fingerprint: "b".repeat(64) },
+      ] };
+    reviewRefreshMock.mockResolvedValue({ installationId: "install-1", update });
+    prismaMock.communicationInstallation.findUnique.mockResolvedValue({ id: "install-1", workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE", botTokenEnc: "enc:bot-token" });
+
+    await syncSlackMeetingActionReviewAfterWebApply(actor, params);
+
+    expect(reviewRefreshMock).toHaveBeenCalledWith(actor, params);
+    expect(reviewPublicationMock).toHaveBeenCalledWith(actor, { workspaceId: "workspace-1", installationId: "install-1", channelId: "C1", lineageRoots: update.lineageRoots });
+    expect(reviewPublicationMock.mock.invocationCallOrder[0]).toBeLessThan(slackWebClientMock.chat.update.mock.invocationCallOrder[0]);
+    expect(slackWebClientMock.chat.update).toHaveBeenCalledWith(expect.objectContaining({ text: "Synthetic complete review" }));
+  });
+
+  it.each(["interaction", "modal", "web"] as const)("blocks the %s Slack review update when its publication proof is revoked", async (path) => {
+    const { handleSlackInteraction, syncSlackMeetingActionReviewAfterWebApply } = await import("./communication");
+    const user = { id: "user-1", email: "user@example.test", displayName: "User", globalRole: "USER" as const };
+    const actor = { kind: "user" as const, user };
+    prismaMock.communicationInstallation.findUnique.mockResolvedValue({ id: "install-1", workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE", botTokenEnc: "enc:bot-token", externalWorkspaceId: "T1" });
+    prismaMock.communicationExternalUser.findUnique.mockResolvedValue({ userId: user.id });
+    prismaMock.user.findUnique.mockResolvedValue(user);
+    const update = { channelId: "C1", messageTs: "1714320000.000100", blocks: [], text: "Synthetic stale review", responseText: "Updated", lineageRoots: [{ kind: "Meeting", id: "meeting-1", fingerprint: "a".repeat(64) }] };
+    meetingReviewConfirmMock.mockResolvedValue(update);
+    meetingReviewModalUpdateMock.mockResolvedValue(update);
+    reviewRefreshMock.mockResolvedValue({ installationId: "install-1", update });
+    reviewPublicationMock.mockRejectedValueOnce(new AppError(403, "SOURCE_RESTRICTED", "Synthetic source revoked after rendering."));
+    const request = path === "web" ? syncSlackMeetingActionReviewAfterWebApply(actor, { workspaceId: "workspace-1", insightId: "insight-1" })
+      : handleSlackInteraction({ team: { id: "T1" }, user: { id: "U1" }, ...(path === "modal" ? {
+        type: "view_submission", view: { callback_id: "corgtex_meeting_review_edit_modal", private_metadata: "{}", state: { values: {} } },
+      } : { type: "block_actions", actions: [{ action_id: "corgtex_meeting_review_confirm", value: JSON.stringify({ reviewId: "review-1", insightId: "insight-1" }) }] }) });
+    if (path === "interaction") expect(await request).toEqual({ response_type: "ephemeral", text: "Synthetic source revoked after rendering." });
+    else await expect(request).rejects.toMatchObject({ code: "SOURCE_RESTRICTED" });
+    expect(reviewPublicationMock).toHaveBeenCalledWith(actor, { workspaceId: "workspace-1", installationId: "install-1", channelId: "C1", lineageRoots: update.lineageRoots });
+    expect(slackWebClientMock.chat.update).not.toHaveBeenCalled();
+  });
+
+  it.each(["interaction", "modal", "web"] as const)("blocks the %s Slack review update when legacy lineage is unknown", async (path) => {
+    const { handleSlackInteraction, syncSlackMeetingActionReviewAfterWebApply } = await import("./communication");
+    const user = { id: "user-1", email: "user@example.test", displayName: "User" };
+    const actor = { kind: "user" as const, user };
+    prismaMock.communicationInstallation.findUnique.mockResolvedValue({ id: "install-1", workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE", botTokenEnc: "enc:bot-token", externalWorkspaceId: "T1" });
+    prismaMock.communicationExternalUser.findUnique.mockResolvedValue({ userId: user.id });
+    prismaMock.user.findUnique.mockResolvedValue(user);
+    const update = { channelId: "C1", messageTs: "1714320000.000100", blocks: [], text: "Synthetic unknown review", responseText: "Updated", lineageRoots: [] };
+    meetingReviewConfirmMock.mockResolvedValue(update);
+    meetingReviewModalUpdateMock.mockResolvedValue(update);
+    reviewRefreshMock.mockResolvedValue({ installationId: "install-1", update });
+    const request = path === "web" ? syncSlackMeetingActionReviewAfterWebApply(actor, { workspaceId: "workspace-1", insightId: "insight-1" })
+      : handleSlackInteraction({ team: { id: "T1" }, user: { id: "U1" }, ...(path === "modal" ? {
+        type: "view_submission", view: { callback_id: "corgtex_meeting_review_edit_modal", private_metadata: "{}", state: { values: {} } },
+      } : { type: "block_actions", actions: [{ action_id: "corgtex_meeting_review_confirm", value: JSON.stringify({ reviewId: "review-1", insightId: "insight-1" }) }] }) });
+    if (path === "interaction") expect(await request).toEqual({ response_type: "ephemeral", text: "Synthetic review input proof is unavailable." });
+    else await expect(request).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    expect(slackWebClientMock.chat.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects a Slack review sender whose membership was revoked after rendering", async () => {
+    const { handleSlackInteraction } = await import("./communication");
+    prismaMock.communicationInstallation.findUnique.mockResolvedValue({ id: "install-1", workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE", botTokenEnc: "enc:bot-token", externalWorkspaceId: "T1" });
+    prismaMock.communicationExternalUser.findUnique.mockResolvedValue({ userId: "user-1" });
+    prismaMock.user.findUnique.mockResolvedValue({ id: "user-1", email: "user@example.test", displayName: "User" });
+    const update = { channelId: "C1", messageTs: "1714320000.000100", blocks: [], text: "Synthetic stale membership review", responseText: "Updated", lineageRoots: [{ kind: "Meeting", id: "meeting-1", fingerprint: "a".repeat(64) }] };
+    meetingReviewConfirmMock.mockImplementationOnce(async () => {
+      requireMembershipMock.mockRejectedValueOnce(new AppError(403, "NOT_A_MEMBER", "Synthetic requester membership was revoked."));
+      return update;
+    });
+    expect(await handleSlackInteraction({ type: "block_actions", team: { id: "T1" }, user: { id: "U1" }, actions: [{
+      action_id: "corgtex_meeting_review_confirm", value: JSON.stringify({ reviewId: "review-1", insightId: "insight-1" }),
+    }] })).toEqual({ response_type: "ephemeral", text: "Synthetic requester membership was revoked." });
+    expect(reviewPublicationMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "user", user: expect.objectContaining({ id: "user-1" }) }), expect.any(Object));
+    expect(slackWebClientMock.chat.update).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing", "deleted", "bot", "departed"] as const)("does not substitute an actor for a %s Slack review requester", async (condition) => {
+    const { handleSlackInteraction } = await import("./communication");
+    prismaMock.communicationInstallation.findUnique.mockResolvedValue({ id: "install-1", workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE", botTokenEnc: "enc:bot-token", externalWorkspaceId: "T1" });
+    prismaMock.communicationExternalUser.findUnique.mockResolvedValue({ userId: "user-1", isDeleted: condition === "deleted", isBot: condition === "bot" });
+    prismaMock.user.findUnique.mockResolvedValue({ id: "user-1", email: "user@example.test", displayName: "User" });
+    if (condition === "departed") requireMembershipMock.mockRejectedValueOnce(new AppError(403, "NOT_A_MEMBER", "Synthetic departed member"));
+    expect(await handleSlackInteraction({ type: "block_actions", team: { id: "T1" }, user: condition === "missing" ? {} : { id: "U1" }, actions: [{
+      action_id: "corgtex_meeting_review_confirm", value: JSON.stringify({ reviewId: "review-1", insightId: "insight-1" }),
+    }] })).toMatchObject({ response_type: "ephemeral" });
+    expect(meetingReviewConfirmMock).not.toHaveBeenCalled();
+    expect(reviewPublicationMock).not.toHaveBeenCalled();
+    expect(slackWebClientMock.chat.update).not.toHaveBeenCalled();
   });
 
   it("purges expired raw message content while preserving rows", async () => {

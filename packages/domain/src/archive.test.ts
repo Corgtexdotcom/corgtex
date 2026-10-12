@@ -899,6 +899,10 @@ describe("workspace archive domain", () => {
     expect(prismaMock.$executeRaw).toHaveBeenCalled();
     expect(prismaMock.$executeRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.brainSource.findFirst.mock.invocationCallOrder[0]);
     expect(prismaMock.$executeRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.brainSource.update.mock.invocationCallOrder[0]);
+    expect(appendEventsMock).toHaveBeenCalledWith(prismaMock, [{
+      workspaceId: "workspace-1", type: "source-lineage.changed", aggregateType: "BrainSource", aggregateId: "source-1",
+      payload: { kind: "BrainSource", id: "source-1", change: "archived" },
+    }]);
   });
 
   it("requeues BrainSource processing when a source is restored", async () => {
@@ -939,6 +943,19 @@ describe("workspace archive domain", () => {
     ]);
   });
 
+  it("rebuilds current source lineage when a document is restored", async () => {
+    const document = { id: "document-restored", workspaceId: "workspace-1", title: "Restored document", archivedAt: new Date() };
+    prismaMock.document.findFirst.mockResolvedValue(document);
+    prismaMock.document.update.mockResolvedValue({ ...document, archivedAt: null });
+    prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValue({ id: "archive-document", previousState: {} });
+    const { restoreWorkspaceArtifact } = await import("./archive");
+    await restoreWorkspaceArtifact(actor, { workspaceId: "workspace-1", entityType: "Document", entityId: document.id });
+    expect(appendEventsMock).toHaveBeenCalledWith(prismaMock, [{
+      workspaceId: "workspace-1", type: "source-lineage.changed", aggregateType: "Document", aggregateId: document.id,
+      payload: { kind: "Document", id: document.id, change: "restored" },
+    }]);
+  });
+
   it("retains generic lifecycle behavior for unlinked knowledge artifacts", async () => {
     const document = {
       id: "document-1",
@@ -973,6 +990,14 @@ describe("workspace archive domain", () => {
       reason: "synthetic cleanup",
     })).resolves.toEqual({ id: source.id });
 
+    expect(appendEventsMock).toHaveBeenCalledWith(prismaMock, [{
+      workspaceId: "workspace-1", type: "source-lineage.changed", aggregateType: "Document", aggregateId: document.id,
+      payload: { kind: "Document", id: document.id, change: "archived" },
+    }]);
+    expect(appendEventsMock).toHaveBeenCalledWith(prismaMock, [{
+      workspaceId: "workspace-1", type: "source-lineage.changed", aggregateType: "BrainSource", aggregateId: source.id,
+      payload: { kind: "BrainSource", id: source.id, change: "purged" },
+    }]);
     expect(prismaMock.document.update).toHaveBeenCalled();
     expect(prismaMock.knowledgeChunk.deleteMany).toHaveBeenCalled();
     expect(storageDeleteMock).toHaveBeenCalledWith("private/unlinked");

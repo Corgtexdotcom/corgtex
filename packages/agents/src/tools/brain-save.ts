@@ -1,5 +1,5 @@
 import type { AppActor } from "@corgtex/shared";
-import { AppError, ingestConversationOnDemand } from "@corgtex/domain";
+import { AppError, ingestConversationOnDemand, type LineageRoot } from "@corgtex/domain";
 
 export const saveToBrainTool = {
   type: "function" as const,
@@ -28,7 +28,7 @@ export const saveToBrainTool = {
   },
 };
 
-export async function saveToBrainAction(actor: AppActor, ctx: { workspaceId: string }, args: {
+export async function saveToBrainAction(actor: AppActor, ctx: { workspaceId: string; lineageRoots?: LineageRoot[] }, args: {
   content: string;
   title: string;
   sourceType?: string;
@@ -37,6 +37,7 @@ export async function saveToBrainAction(actor: AppActor, ctx: { workspaceId: str
   try {
     source = await ingestConversationOnDemand(actor, {
       workspaceId: ctx.workspaceId,
+      lineageRoots: ctx.lineageRoots,
       content: args.content,
       title: args.title,
       sourceType: args.sourceType,

@@ -107,7 +107,7 @@ export default async function WorkspaceLayout({
   }
 
   const [unreadCount, conversationsResult, dailyQuestions, featureFlags, membership, invitePolicy, workspaceRuntime, onboardingState, hasInitialKnowledge, googleConnection, productFeedbackTarget, hasSupportAccess] = await Promise.all([
-    userId ? countUnreadNotifications(userId, workspaceId) : Promise.resolve(0),
+    userId ? countUnreadNotifications(actor, workspaceId) : Promise.resolve(0),
     listConversations(actor, workspaceId, { take: 30 }).catch(() => ({ items: [], total: 0, take: 30, skip: 0 })),
     userId ? listDailyCompanyUnderstandingQuestions(actor, { workspaceId, take: 3 }).catch(() => []) : Promise.resolve([]),
     getWorkspaceFeatureFlags(workspaceId),

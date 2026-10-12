@@ -27,7 +27,10 @@ const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => {
     workflowJob: {
       upsert: vi.fn(),
     },
+    proposal: { findMany: vi.fn() },
+    tension: { findMany: vi.fn() },
     meetingInsight: {
+      findMany: vi.fn(),
       deleteMany: vi.fn(),
     },
     meetingTranscriptSourceRecord: {
@@ -70,6 +73,13 @@ vi.mock("@corgtex/shared", () => ({
   },
 }));
 
+vi.mock("./source-lineage", () => ({
+  currentArtifactInputRoots: vi.fn(async () => [{ kind: "MeetingTranscript", id: "meeting-1", fingerprint: "a".repeat(64) }]),
+  invalidateArtifactInputLineage: vi.fn(),
+  recordArtifactInputLineage: vi.fn(),
+  readableArtifactIds: vi.fn(async (_actor: unknown, _workspace: string, _kind: string, records: Array<{ id: string }>) => new Set(records.map((record) => record.id))),
+}));
+
 vi.mock("./auth", () => ({
   requireWorkspaceMembership: requireWorkspaceMembershipMock,
 }));
@@ -92,6 +102,9 @@ describe("meetings domain", () => {
     prismaMock.auditLog.create.mockResolvedValue({});
     prismaMock.event.createMany.mockResolvedValue({ count: 1 });
     prismaMock.meetingInsight.deleteMany.mockResolvedValue({ count: 0 });
+    prismaMock.meetingInsight.findMany.mockResolvedValue([]);
+    prismaMock.proposal.findMany.mockResolvedValue([]);
+    prismaMock.tension.findMany.mockResolvedValue([]);
     prismaMock.meetingTranscriptSourceRecord.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.meetingTranscriptProcessingProgress.findUnique.mockResolvedValue(null);
     prismaMock.meetingTranscriptProcessingProgress.upsert.mockResolvedValue({ id: "progress-1" });
@@ -115,10 +128,10 @@ describe("meetings domain", () => {
     prismaMock.meeting.findMany.mockResolvedValue([{ id: "meeting-1" }]);
 
     const { listMeetings } = await import("./meetings");
-    await expect(listMeetings("workspace-1")).resolves.toEqual([{ id: "meeting-1" }]);
+    await expect(listMeetings(actor, "workspace-1")).resolves.toEqual([{ id: "meeting-1" }]);
     expect(prismaMock.meeting.findMany).toHaveBeenCalledWith({
       where: { workspaceId: "workspace-1", archivedAt: null },
-      orderBy: { recordedAt: "desc" },
+      orderBy: [{ recordedAt: "desc" }, { id: "asc" }], take: 100,
     });
   });
 
@@ -130,7 +143,7 @@ describe("meetings domain", () => {
     prismaMock.meeting.findMany.mockResolvedValue([{ id: "meeting-1" }]);
 
     const { listMeetings } = await import("./meetings");
-    await expect(listMeetings("workspace-1", { memberIds: ["member-1", "member-2", "member-1"] })).resolves.toEqual([{ id: "meeting-1" }]);
+    await expect(listMeetings(actor, "workspace-1", { memberIds: ["member-1", "member-2", "member-1"] })).resolves.toEqual([{ id: "meeting-1" }]);
     expect(prismaMock.member.findMany).toHaveBeenCalledWith({
       where: {
         id: { in: ["member-1", "member-2"] },
@@ -155,15 +168,17 @@ describe("meetings domain", () => {
         ],
         archivedAt: null,
       },
-      orderBy: { recordedAt: "desc" },
+      orderBy: [{ recordedAt: "desc" }, { id: "asc" }], take: 100,
     });
   });
 
   it("getMeeting returns a meeting with related records", async () => {
     prismaMock.meeting.findFirst.mockResolvedValue({
       id: "meeting-1",
+      proposals: [], tensions: [], series: null,
       insights: [
         {
+          id: "insight-1",
           status: "APPLIED",
           type: "ACTION_ITEM",
           operation: "CREATE",
@@ -179,22 +194,18 @@ describe("meetings domain", () => {
         },
       ],
     });
+    const record = await prismaMock.meeting.findFirst();
+    prismaMock.meetingInsight.findMany.mockResolvedValue(record.insights);
+    prismaMock.meeting.findFirst.mockClear();
     prismaMock.action.findMany.mockResolvedValue([{ id: "action-1", title: "Follow up" }]);
 
     const { getMeeting } = await import("./meetings");
-    await expect(getMeeting("workspace-1", "meeting-1")).resolves.toEqual(expect.objectContaining({
+    await expect(getMeeting(actor, "workspace-1", "meeting-1")).resolves.toEqual(expect.objectContaining({
       id: "meeting-1",
       raisedActions: [{ id: "action-1", title: "Follow up" }],
     }));
-    expect(prismaMock.meeting.findFirst).toHaveBeenCalledWith(expect.objectContaining({
-      include: expect.objectContaining({
-        insights: {
-          orderBy: [
-            { sourceRecordedAt: { sort: "desc", nulls: "last" } },
-            { createdAt: "desc" },
-          ],
-        },
-      }),
+    expect(prismaMock.meetingInsight.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { workspaceId: "workspace-1", meetingId: "meeting-1" }, take: 100,
     }));
     expect(prismaMock.action.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
@@ -208,7 +219,7 @@ describe("meetings domain", () => {
     prismaMock.meeting.findFirst.mockResolvedValue(null);
 
     const { getMeeting } = await import("./meetings");
-    await expect(getMeeting("workspace-1", "missing-meeting")).resolves.toBeNull();
+    await expect(getMeeting(actor, "workspace-1", "missing-meeting")).resolves.toBeNull();
     expect(prismaMock.action.findMany).not.toHaveBeenCalled();
   });
 
@@ -463,7 +474,7 @@ describe("meetings domain", () => {
     const { getMeetingParticipants } = await import("./meetings");
     prismaMock.member.findMany.mockResolvedValue([]);
 
-    await expect(getMeetingParticipants("workspace-1", ["member-1", "user-1"])).resolves.toEqual([]);
+    await expect(getMeetingParticipants(actor, "workspace-1", ["member-1", "user-1"])).resolves.toEqual([]);
 
     expect(prismaMock.member.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: {
@@ -474,6 +485,26 @@ describe("meetings domain", () => {
         ],
       },
     }));
+  });
+
+  it("withholds unproven participant roles and departed profiles", async () => {
+    const { readableArtifactIds } = await import("./source-lineage");
+    const { getMeetingParticipants } = await import("./meetings");
+    prismaMock.member.findMany.mockResolvedValue([
+      { id: "member-visible", user: { id: "user-visible", displayName: "Public", email: "public@example.test" },
+        roleAssignments: [{ id: "assignment-secret", role: { id: "role-secret", name: "Finance role" } },
+          { id: "assignment-public", role: { id: "role-public", name: "Public role" } }] },
+      { id: "member-departed", user: { id: "user-departed", displayName: "Departed", email: "departed@example.test" }, roleAssignments: [] },
+    ]);
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _ws, kind, rows) => new Set(rows
+      .filter((row) => !(kind === "Role" && row.id === "role-secret") && !(kind === "User" && row.id === "user-departed"))
+      .map((row) => row.id)));
+    const participants = await getMeetingParticipants(actor, "workspace-1", ["member-visible", "member-departed"]);
+    expect(participants).toHaveLength(1);
+    expect(participants[0].roleAssignments).toEqual([{ id: "assignment-public", role: { name: "Public role" } }]);
+    expect(JSON.stringify(participants)).not.toContain("Finance");
+    expect(JSON.stringify(participants)).not.toContain("Departed");
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _ws, _kind, rows) => new Set(rows.map((row) => row.id)));
   });
 
   it("createMeetingSeries stores a supported recorder URL for inherited occurrences", async () => {
@@ -1573,4 +1604,43 @@ describe("meetings domain", () => {
       }),
     }));
   });
+  it("keeps original meeting fields while withholding unknown derived content and linked insight counts", async () => {
+    const { readableArtifactIds } = await import("./source-lineage");
+    vi.mocked(readableArtifactIds).mockImplementation(async (_reader, _workspace, kind, rows) =>
+      new Set(kind === "MeetingTranscript" ? rows.map((row) => row.id) : []));
+    const record = { id: "meeting-safe", workspaceId: "workspace-1", title: "Original title", source: "manual",
+      transcript: "Original public transcript", summaryMd: "Finance secret", blocksJson: { secret: "Finance block" },
+      decisionsJson: { secret: "Finance decision" }, agendaJson: { secret: "Finance agenda" }, series: null,
+      proposals: [], tensions: [], insights: [{ id: "secret-insight", title: "Finance suggestion", status: "APPLIED",
+        type: "ACTION_ITEM", operation: "CREATE", appliedEntityType: "Action", appliedEntityId: "finance-action" }] };
+    prismaMock.meeting.findMany.mockResolvedValue([record]);
+    prismaMock.meeting.findFirst.mockResolvedValue(record);
+    const { listMeetings, getMeeting } = await import("./meetings");
+    const listing = await listMeetings(actor, "workspace-1");
+    expect(listing[0]).toMatchObject({ title: "Original title", transcript: "Original public transcript", summaryMd: null,
+      blocksJson: null, decisionsJson: null, agendaJson: null });
+    const detail = await getMeeting(actor, "workspace-1", "meeting-safe");
+    expect(detail?.insights).toEqual([]);
+    expect(detail?.raisedActions).toEqual([]);
+    expect(prismaMock.action.findMany).not.toHaveBeenCalled();
+    expect(JSON.stringify(detail)).not.toContain("Finance");
+  });
+
+  it("filters duplicate candidates before scoring and redacts unknown summary copies", async () => {
+    const { readableArtifactIds } = await import("./source-lineage");
+    const { createMeeting } = await import("./meetings");
+    const recordedAt = new Date("2026-05-01T09:00:00Z");
+    const unknown = { id: "unknown-summary", workspaceId: "workspace-1", title: "Secret finance summary",
+      transcript: null, summaryMd: "Secret finance summary", source: "manual", recordedAt, createdAt: recordedAt };
+    prismaMock.meeting.findMany.mockResolvedValue([unknown]);
+    prismaMock.meeting.create.mockResolvedValue({ id: "safe-new", workspaceId: "workspace-1", source: "manual", recordedAt });
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _ws, kind, rows) => new Set(kind === "MeetingTranscript" ? rows.map((row) => row.id) : []));
+    await expect(createMeeting(actor, { workspaceId: "workspace-1", title: unknown.title, source: "manual", recordedAt,
+      summaryMd: unknown.summaryMd, duplicateGuard: {} })).resolves.toMatchObject({ id: "safe-new" });
+    prismaMock.meeting.findMany.mockResolvedValue([{ ...unknown, title: "Public original", transcript: "Public original transcript" }]);
+    await expect(createMeeting(actor, { workspaceId: "workspace-1", title: "Public original", source: "manual", recordedAt,
+      transcript: "Public original transcript", duplicateGuard: {} })).rejects.toMatchObject({ code: "DUPLICATE_GUARD_MATCH" });
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _ws, _kind, rows) => new Set(rows.map((row) => row.id)));
+  });
+
 });

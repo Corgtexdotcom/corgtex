@@ -9,9 +9,9 @@ import {
   createContextGraphProposedDiff,
   createGoal,
   createGoalLink,
-  brainSourceContentFingerprint,
-  currentArtifactInputRoots,
-  lineageContentFingerprint,
+  captureArtifactInputProof,
+  readableBrainSourceIds,
+  type LineageRoot,
   readableArtifactIds,
   resolveKnowledgeAccessDomains,
   type LineageInput,
@@ -26,7 +26,7 @@ const DRAFT_CONFIDENCE = 0.65;
 const COMPANY_UNDERSTANDING_SOURCE = "company-understanding";
 type SynthesisLineage = {
   lineageInputs: LineageInput[];
-  lineageRoots: NonNullable<Awaited<ReturnType<typeof currentArtifactInputRoots>>>;
+  lineageRoots: LineageRoot[];
 };
 
 const GOAL_CADENCE_ORDER: GoalCadence[] = ["TEN_YEAR", "FIVE_YEAR", "ANNUAL", "QUARTERLY", "MONTHLY", "WEEKLY"];
@@ -378,7 +378,7 @@ async function createQuestionIfNew(
   lineage: SynthesisLineage,
 ) {
   if (!memberId) return { kind: "question" as const, skipped: true, reason: "no_member" };
-  const existing = await prisma.checkIn.findFirst({
+  const candidates = await prisma.checkIn.findMany({
     where: {
       workspaceId,
       memberId,
@@ -386,8 +386,9 @@ async function createQuestionIfNew(
       status: "OPEN",
       questionText: question.questionText,
     },
-    select: { id: true },
   });
+  const readable = await readableArtifactIds(actor, workspaceId, "CheckIn", candidates);
+  const existing = candidates.find((candidate) => readable.has(candidate.id));
   if (existing) return { kind: "question" as const, skipped: true, reason: "duplicate_question", id: existing.id };
   if (!(await triggerSourceStillAvailable(workspaceId, triggerSourceId))) {
     return { kind: "question" as const, skipped: true, reason: "source_unavailable" };
@@ -627,10 +628,11 @@ async function applyMapProposal(
   }
 
   const reason = `Company understanding proposal: ${proposal.mapType}: ${proposal.title}`;
-  const existing = await prisma.contextGraphProposedDiff.findFirst({
+  const candidates = await prisma.contextGraphProposedDiff.findMany({
     where: { workspaceId, status: "pending", reason },
-    select: { id: true },
   });
+  const readable = await readableArtifactIds(actor, workspaceId, "ContextGraphProposedDiff", candidates);
+  const existing = candidates.find((candidate) => readable.has(candidate.id));
   if (existing) return { kind: "map-proposal" as const, skipped: true, reason: "duplicate_map_proposal", id: existing.id };
   if (!(await triggerSourceStillAvailable(workspaceId, triggerSourceId))) {
     return { kind: "map-proposal" as const, skipped: true, reason: "source_unavailable" };
@@ -706,7 +708,7 @@ export async function runCompanyUnderstandingSynthesis(params: {
         ...(params.sourceId ? { id: params.sourceId } : {}),
       },
       orderBy: { createdAt: "desc" },
-      take: params.sourceId ? 1 : 20,
+      ...(params.sourceId ? { take: 1 } : {}),
     }),
     prisma.brainArticle.findMany({
       where: { workspaceId: params.workspaceId, archivedAt: null },
@@ -715,7 +717,8 @@ export async function runCompanyUnderstandingSynthesis(params: {
   ]);
 
   const readableArticles = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", candidateArticles);
-  const sources = candidateSources.filter((source) => !source.archivedAt && accessDomains.includes(source.accessDomain));
+  const readableSources = await readableBrainSourceIds(actor, params.workspaceId, candidateSources);
+  const sources = candidateSources.filter((source) => readableSources.has(source.id)).slice(0, 20);
   const articles = candidateArticles.filter((article) => readableArticles.has(article.id)).slice(0, 40);
 
   if (params.sourceId && sources.length === 0) {
@@ -738,21 +741,21 @@ export async function runCompanyUnderstandingSynthesis(params: {
   });
   const readableGoals = await readableArtifactIds(actor, params.workspaceId, "Goal", candidateGoals);
   const existingGoals = candidateGoals.filter((goal) => readableGoals.has(goal.id)).slice(0, 200);
-  const lineage: SynthesisLineage = { lineageInputs: [], lineageRoots: [] };
-  for (const source of sources) {
-    const input: LineageInput = { kind: "BrainSource", id: source.id };
-    lineage.lineageInputs.push(input);
-    lineage.lineageRoots.push({ ...input, fingerprint: brainSourceContentFingerprint(source) });
-  }
-  for (const [kind, records] of [["BrainArticle", articles], ["Goal", existingGoals]] as const) {
-    for (const record of records) {
-      const input: LineageInput = { kind, id: record.id };
-      const roots = await currentArtifactInputRoots(prisma, params.workspaceId, input, record);
-      // A record can lose its current proof between admission and capture.
-      if (!roots) return { skipped: true, reason: "input_changed" };
-      lineage.lineageInputs.push(input);
-      lineage.lineageRoots.push({ ...input, fingerprint: lineageContentFingerprint(kind, record) }, ...roots);
-    }
+  const capturedInputs = [
+    ...sources.map((snapshot) => ({ kind: "BrainSource" as const, id: snapshot.id, snapshot })),
+    ...articles.map((snapshot) => ({ kind: "BrainArticle" as const, id: snapshot.id, snapshot })),
+    ...existingGoals.map((snapshot) => ({ kind: "Goal" as const, id: snapshot.id, snapshot })),
+  ];
+  const lineage: SynthesisLineage = {
+    lineageInputs: capturedInputs.map(({ kind, id }) => ({ kind, id })),
+    lineageRoots: [],
+  };
+  try {
+    lineage.lineageRoots = await captureArtifactInputProof(actor, params.workspaceId, capturedInputs);
+  } catch (error) {
+    if (typeof error !== "object" || error === null || !("code" in error)
+      || !["SOURCE_CHANGED", "UNKNOWN_LINEAGE", "SOURCE_RESTRICTED"].includes(String(error.code))) throw error;
+    return { skipped: true, reason: "input_changed" };
   }
   const goalApplyMode = await getCompanyUnderstandingGoalApplyMode(params.workspaceId);
 

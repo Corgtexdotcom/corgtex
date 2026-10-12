@@ -9,6 +9,8 @@ const {
   createDiffMock,
   getApplyModeMock,
   readableArtifactIdsMock,
+  readableSourcesMock,
+  captureProofMock,
   currentRootsMock,
   sourceFingerprintMock,
   artifactFingerprintMock,
@@ -18,8 +20,8 @@ const {
     brainArticle: { findMany: vi.fn() },
     goal: { findMany: vi.fn() },
     member: { findFirst: vi.fn() },
-    checkIn: { findFirst: vi.fn() },
-    contextGraphProposedDiff: { findFirst: vi.fn() },
+    checkIn: { findMany: vi.fn() },
+    contextGraphProposedDiff: { findMany: vi.fn() },
   },
   modelGatewayMock: {
     extract: vi.fn(),
@@ -30,6 +32,8 @@ const {
   createDiffMock: vi.fn(),
   getApplyModeMock: vi.fn(),
   readableArtifactIdsMock: vi.fn(),
+  readableSourcesMock: vi.fn(),
+  captureProofMock: vi.fn(),
   currentRootsMock: vi.fn(),
   sourceFingerprintMock: vi.fn(),
   artifactFingerprintMock: vi.fn(),
@@ -94,6 +98,8 @@ vi.mock("@corgtex/domain", () => ({
   getCompanyUnderstandingGoalApplyMode: getApplyModeMock,
   resolveKnowledgeAccessDomains: vi.fn().mockResolvedValue(["WORKSPACE"]),
   readableArtifactIds: readableArtifactIdsMock,
+  readableBrainSourceIds: readableSourcesMock,
+  captureArtifactInputProof: captureProofMock,
   currentArtifactInputRoots: currentRootsMock,
   brainSourceContentFingerprint: sourceFingerprintMock,
   lineageContentFingerprint: artifactFingerprintMock,
@@ -106,6 +112,9 @@ describe("company understanding synthesis", () => {
       {
         id: "source-1",
         accessDomain: "WORKSPACE",
+        workspaceId: "workspace-1",
+        archivedAt: null,
+        channel: null,
         sourceType: "DOC",
         tier: 1,
         title: "Company plan",
@@ -128,17 +137,50 @@ describe("company understanding synthesis", () => {
     ]);
     prismaMock.goal.findMany.mockResolvedValue([]);
     prismaMock.member.findFirst.mockResolvedValue({ id: "member-1" });
-    prismaMock.checkIn.findFirst.mockResolvedValue(null);
-    prismaMock.contextGraphProposedDiff.findFirst.mockResolvedValue(null);
+    prismaMock.checkIn.findMany.mockResolvedValue([]);
+    prismaMock.contextGraphProposedDiff.findMany.mockResolvedValue([]);
     createGoalMock.mockResolvedValue({ id: "goal-1" });
     createGoalLinkMock.mockResolvedValue({ id: "link-1" });
     createQuestionMock.mockResolvedValue({ id: "question-1" });
     createDiffMock.mockResolvedValue({ id: "diff-1" });
     getApplyModeMock.mockResolvedValue("AUTO");
     readableArtifactIdsMock.mockImplementation(async (_actor, _workspaceId, _kind, records) => new Set(records.map((record: { id: string }) => record.id)));
+    readableSourcesMock.mockImplementation(async (_actor, _workspaceId, records) => new Set(records.filter((row: { accessDomain: string; archivedAt?: unknown }) => row.accessDomain === "WORKSPACE" && !row.archivedAt).map((row: { id: string }) => row.id)));
+    captureProofMock.mockImplementation(async (_actor, _workspaceId, inputs) => {
+      const roots = [];
+      for (const input of inputs) {
+        roots.push({ kind: input.kind, id: input.id, fingerprint: input.kind === "BrainSource"
+          ? sourceFingerprintMock(input.snapshot) : artifactFingerprintMock(input.kind, input.snapshot) });
+        if (input.kind !== "BrainSource") {
+          const inherited = await currentRootsMock(null, null, input, input.snapshot);
+          if (!inherited) throw { code: "UNKNOWN_LINEAGE" };
+          roots.push(...inherited);
+        }
+      }
+      return roots;
+    });
     currentRootsMock.mockResolvedValue([]);
     sourceFingerprintMock.mockImplementation((record) => `source-fingerprint:${record.id}`);
     artifactFingerprintMock.mockImplementation((kind, record) => `${kind}-fingerprint:${record.id}`);
+  });
+
+  it.each([false, true])("only readable duplicates suppress fresh map proposals and questions (readable=%s)", async (permitted) => {
+    prismaMock.checkIn.findMany.mockResolvedValue([{ id: "old-question", questionText: "Who owns onboarding?" }]);
+    prismaMock.contextGraphProposedDiff.findMany.mockResolvedValue([{ id: "old-diff", reason: "Company understanding proposal: org: Onboarding ownership" }]);
+    readableArtifactIdsMock.mockImplementation(async (_actor, _workspaceId, kind, records) =>
+      new Set(["CheckIn", "ContextGraphProposedDiff"].includes(kind) && !permitted ? [] : records.map((row: { id: string }) => row.id)));
+    modelGatewayMock.extract.mockResolvedValue({ output: {
+      openQuestions: [{ questionText: "Who owns onboarding?", reason: "Clarify owner", confidence: 0.9 }],
+      mapProposals: [{ title: "Onboarding ownership", mapType: "org", confidence: 0.9,
+        evidenceRefs: [{ sourceType: "BrainSource", sourceId: "source-1" }],
+        objects: [{ ref: "team", objectType: "Team", title: "Onboarding team", summary: "Current permitted source" }], relationships: [] }],
+    } });
+    const { runCompanyUnderstandingSynthesis } = await import("./company-understanding");
+    await runCompanyUnderstandingSynthesis({ workspaceId: "workspace-1", agentRunId: "run-1", model: "gpt-4o-mini" });
+    expect(createQuestionMock).toHaveBeenCalledTimes(permitted ? 0 : 1);
+    expect(createDiffMock).toHaveBeenCalledTimes(permitted ? 0 : 1);
+    expect(modelGatewayMock.extract.mock.calls[0]?.[0].input).not.toContain("old-diff");
+    expect(modelGatewayMock.extract.mock.calls[0]?.[0].input).not.toContain("old-question");
   });
 
   it("normalizes all six goal cadences from model labels", async () => {
@@ -189,6 +231,19 @@ describe("company understanding synthesis", () => {
       confidence: 0.91,
       source: "company-understanding",
     }));
+  });
+
+  it("applies the workspace source limit after excluding unreadable copied sources", async () => {
+    const source = (await prismaMock.brainSource.findMany())[0];
+    const records = Array.from({ length: 21 }, (_, index) => ({ ...source, id: `source-${index}` }));
+    prismaMock.brainSource.findMany.mockResolvedValue(records);
+    readableSourcesMock.mockResolvedValue(new Set(["source-20"]));
+    modelGatewayMock.extract.mockResolvedValue({ output: {} });
+    const { runCompanyUnderstandingSynthesis } = await import("./company-understanding");
+    const result = await runCompanyUnderstandingSynthesis({ workspaceId: "workspace-1", agentRunId: "run-1", model: "gpt-4o-mini" });
+    expect(result).toMatchObject({ sourceCount: 1 });
+    expect(prismaMock.brainSource.findMany).toHaveBeenLastCalledWith(expect.not.objectContaining({ take: 20 }));
+    expect(JSON.parse(modelGatewayMock.extract.mock.calls[0]?.[0].input).sources.map((row: { id: string }) => row.id)).toEqual(["source-20"]);
   });
 
   it("skips source-triggered synthesis when the exact source is unavailable", async () => {
@@ -626,6 +681,19 @@ describe("company understanding synthesis", () => {
     expect(createGoalLinkMock).not.toHaveBeenCalled();
     expect(createQuestionMock).not.toHaveBeenCalled();
     expect(createDiffMock).not.toHaveBeenCalled();
+  });
+
+
+  it("excludes unknown copied Brain sources before the synthesis prompt", async () => {
+    const source = (await prismaMock.brainSource.findMany())[0];
+    prismaMock.brainSource.findMany.mockResolvedValue([source, { ...source, id: "unknown-copy", sourceType: "CONVERSATION", content: "Synthetic unproven copied content" }]);
+    readableSourcesMock.mockResolvedValue(new Set([source.id]));
+    modelGatewayMock.extract.mockResolvedValue({ output: {} });
+    const { runCompanyUnderstandingSynthesis } = await import("./company-understanding");
+    await runCompanyUnderstandingSynthesis({ workspaceId: "workspace-1", agentRunId: "run-1", model: "synthetic" });
+    const prompt = JSON.parse(modelGatewayMock.extract.mock.calls[0][0].input);
+    expect(prompt.sources.map((row: { id: string }) => row.id)).toEqual(["source-1"]);
+    expect(modelGatewayMock.extract.mock.calls[0][0].input).not.toContain("unproven copied");
   });
 
 });

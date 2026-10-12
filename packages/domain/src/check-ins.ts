@@ -4,7 +4,10 @@ import type { Prisma } from "@prisma/client";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 import { appendEvents } from "./events";
-import { currentArtifactInputRoots, recordArtifactInputLineage, readableArtifactIds, type LineageInput, type LineageRoot } from "./source-lineage";
+import { currentArtifactInputRoots, recordArtifactInputLineage, readableArtifactIds, type LineageInput, type LineageRoot,
+  assertArtifactInputWriteFence, captureArtifactInputProof, captureArtifactInputSnapshotProof, isArtifactInputProofReadable } from "./source-lineage";
+import { AppError } from "./errors";
+import { mergeArtifactInputProofs } from "./digest-lineage";
 
 const COMPANY_UNDERSTANDING_TYPE = "COMPANY_UNDERSTANDING";
 const COMPANY_KNOWLEDGE_POLICY = "COMPANY_KNOWLEDGE";
@@ -172,47 +175,73 @@ export async function createDailyCompanyUnderstandingQuestions(actor: AppActor, 
   workspaceId: string;
   memberId: string;
   now?: Date;
+  lineageRoots?: readonly LineageRoot[];
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-
-  const member = await prisma.member.findUnique({
-    where: { id: params.memberId },
-    select: { id: true, workspaceId: true, isActive: true },
-  });
-  invariant(member?.isActive && member.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Member not found.");
-
-  const todayStart = startOfUtcDay(params.now);
-  const existingQuestions = await prisma.checkIn.findMany({
-    where: {
-      workspaceId: params.workspaceId,
-      memberId: params.memberId,
-      questionType: COMPANY_UNDERSTANDING_TYPE,
+  return prisma.$transaction(async (tx) => {
+    await assertArtifactInputWriteFence(tx);
+    // The quota and every question receipt share one transaction and recipient lock.
+    await tx.$executeRaw`SELECT "id" FROM "Member" WHERE "id" = ${params.memberId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    const member = await tx.member.findUnique({ where: { id: params.memberId },
+      include: { user: { select: { id: true, email: true, displayName: true } } } });
+    invariant(member?.isActive && member.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Member not found.");
+    const recipient: AppActor = { kind: "user", user: { id: member.user.id, email: member.user.email, displayName: member.user.displayName } };
+    const nativeRoots = await captureArtifactInputProof(actor, params.workspaceId, [
+      { kind: "Workspace", id: params.workspaceId }, { kind: "Member", id: member.id, snapshot: member },
+      { kind: "User", id: member.user.id, snapshot: member.user },
+    ], tx);
+    const baseRoots = mergeArtifactInputProofs(nativeRoots, [...(params.lineageRoots ?? [])]);
+    invariant(await isArtifactInputProofReadable(actor, params.workspaceId, baseRoots, tx)
+      && await isArtifactInputProofReadable(recipient, params.workspaceId, baseRoots, tx),
+    409, "SOURCE_CHANGED", "Daily question inputs are not currently available to the recipient.");
+    const todayStart = startOfUtcDay(params.now);
+    const existingQuestions = await tx.checkIn.findMany({ where: {
+      workspaceId: params.workspaceId, memberId: params.memberId, questionType: COMPANY_UNDERSTANDING_TYPE,
       OR: [{ status: "OPEN" }, { createdAt: { gte: todayStart } }],
-    },
+    }, orderBy: { id: "asc" }, take: 5001 });
+    invariant(existingQuestions.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Daily question permission scan exceeds its supported size.");
+    const safeQuestions = [];
+    const quotaProofs: LineageRoot[][] = [];
+    for (const question of existingQuestions) {
+      try {
+        const proof = await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "CheckIn", id: question.id, snapshot: question }], tx);
+        if (!await isArtifactInputProofReadable(recipient, params.workspaceId, proof, tx)) continue;
+        safeQuestions.push(question); quotaProofs.push(proof);
+      } catch (error) {
+        if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
+      }
+    }
+    const liveRoots = mergeArtifactInputProofs(baseRoots, ...quotaProofs);
+    const inheritedRoots: LineageRoot[][] = [baseRoots];
+    for (const question of safeQuestions) inheritedRoots.push(await captureArtifactInputSnapshotProof(actor, params.workspaceId,
+      { kind: "CheckIn", id: question.id }, tx));
+    const recipeRoots = mergeArtifactInputProofs(...inheritedRoots);
+    const createdToday = safeQuestions.filter((question) => question.createdAt >= todayStart).length;
+    const remaining = Math.max(DAILY_COMPANY_QUESTION_CAP - createdToday, 0);
+    const existingText = new Set(safeQuestions.map((question) => question.questionText.trim().toLowerCase()));
+    const candidates = DAILY_COMPANY_QUESTION_TEMPLATES.filter((template) => !existingText.has(template.questionText.toLowerCase()));
+    const created = [];
+    for (const template of candidates.slice(0, remaining)) {
+      invariant(await isArtifactInputProofReadable(actor, params.workspaceId, liveRoots, tx)
+        && await isArtifactInputProofReadable(recipient, params.workspaceId, liveRoots, tx),
+      409, "SOURCE_CHANGED", "Daily question inputs changed before persistence.");
+      const question = await tx.checkIn.create({ data: {
+        workspaceId: params.workspaceId, memberId: member.id, questionText: template.questionText,
+        questionSource: "daily-check-in", questionType: COMPANY_UNDERSTANDING_TYPE, status: "OPEN",
+        priority: template.priority, confidence: template.confidence, metadata: template.metadata,
+        responseUsePolicy: COMPANY_KNOWLEDGE_POLICY,
+      } });
+      await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "CheckIn", id: question.id }, content: question, origin: "DERIVED", inputs: [], inheritedRoots: recipeRoots });
+      created.push(question);
+    }
+    const outcomeRoots = created.length ? await captureArtifactInputProof(actor, params.workspaceId,
+      created.map((question) => ({ kind: "CheckIn" as const, id: question.id, snapshot: question })), tx) : [];
+    invariant(await isArtifactInputProofReadable(recipient, params.workspaceId, mergeArtifactInputProofs(liveRoots, outcomeRoots), tx),
+      409, "SOURCE_CHANGED", "Daily question outputs are no longer available to the recipient.");
+    return { created: created.length, cap: DAILY_COMPANY_QUESTION_CAP,
+      lineageRoots: mergeArtifactInputProofs(liveRoots, outcomeRoots) };
   });
-  const visible = await readableArtifactIds(actor, params.workspaceId, "CheckIn", existingQuestions);
-  const safeQuestions = existingQuestions.filter((question) => visible.has(question.id));
-  const createdToday = safeQuestions.filter((question) => question.createdAt >= todayStart).length;
-
-  const remaining = Math.max(DAILY_COMPANY_QUESTION_CAP - createdToday, 0);
-  if (remaining === 0) return { created: 0, cap: DAILY_COMPANY_QUESTION_CAP };
-
-  const existingText = new Set(safeQuestions.map((question) => question.questionText.trim().toLowerCase()));
-  const candidates = DAILY_COMPANY_QUESTION_TEMPLATES.filter((template) => !existingText.has(template.questionText.toLowerCase()));
-  const created = [];
-  for (const template of candidates.slice(0, remaining)) {
-    created.push(await createCompanyUnderstandingQuestion(actor, {
-      workspaceId: params.workspaceId,
-      memberId: params.memberId,
-      questionText: template.questionText,
-      questionSource: "daily-check-in",
-      priority: template.priority,
-      confidence: template.confidence,
-      metadata: template.metadata,
-    }));
-  }
-
-  return { created: created.length, cap: DAILY_COMPANY_QUESTION_CAP };
 }
 
 export async function startCompanyUnderstandingQuestionConversation(actor: AppActor, params: {

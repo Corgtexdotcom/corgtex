@@ -25,7 +25,7 @@ export default async function MembersPage({
   }
 
   const featureFlags = await getWorkspaceFeatureFlags(workspaceId);
-  const members = await listMembersEnriched(workspaceId, { includeInactive: false });
+  const members = await listMembersEnriched(actor, workspaceId, { includeInactive: false });
   const agents = featureFlags.AGENT_GOVERNANCE ? await listAgentIdentities(actor, workspaceId) : [];
 
   return (

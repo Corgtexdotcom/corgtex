@@ -2,7 +2,9 @@ import { prisma } from "@corgtex/shared";
 import {
   contextGraphSystemActor,
   attachContextGraphEvidence,
-  readableArtifactIds,
+  captureArtifactInputProof,
+  type LineageKind,
+  type LineageRoot,
   syncContextGraphForMeeting,
   upsertContextGraphObject,
   upsertContextGraphRelationship,
@@ -31,13 +33,13 @@ function isPrivateDraftGoal(goal: { isPrivate?: boolean | null; status: string }
   return goal.isPrivate === true && goal.status === "DRAFT";
 }
 
-async function archiveGoalGraphFacts(workspaceId: string, goalId: string) {
+async function archiveNativeGraphFacts(workspaceId: string, sourceEntityType: string, sourceEntityId: string) {
   await Promise.all([
     prisma.contextGraphObject.updateMany({
       where: {
         workspaceId,
-        sourceEntityType: "Goal",
-        sourceEntityId: goalId,
+        sourceEntityType,
+        sourceEntityId,
         status: { not: "archived" },
       },
       data: { status: "archived" },
@@ -45,8 +47,8 @@ async function archiveGoalGraphFacts(workspaceId: string, goalId: string) {
     prisma.contextGraphRelationship.updateMany({
       where: {
         workspaceId,
-        sourceEntityType: "Goal",
-        sourceEntityId: goalId,
+        sourceEntityType,
+        sourceEntityId,
         status: { not: "archived" },
       },
       data: { status: "archived" },
@@ -74,6 +76,36 @@ export async function handleContextGraphSync(
 ) {
   if (!payload.sourceType || !payload.sourceId) return;
   const actor = contextGraphSystemActor(workspaceId);
+  const receipts = new Map<string, LineageRoot[]>();
+  const capture = async (kind: LineageKind, row: { id: string; [key: string]: unknown } | null | undefined) => {
+    if (!row?.id) return null;
+    try {
+      const roots = await captureArtifactInputProof(actor, workspaceId, [{ kind, id: row.id, snapshot: row }]);
+      receipts.set(`${kind}:${row.id}`, roots);
+      return roots;
+    } catch (error) {
+      if (error instanceof Error && "code" in error
+        && ["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED", "NOT_FOUND"].includes(String(error.code))) return null;
+      throw error;
+    }
+  };
+  const primary = async (kind: LineageKind, row: { id: string; [key: string]: unknown } | null) => {
+    if (!row) return false;
+    if (await capture(kind, row)) return true;
+    await archiveNativeGraphFacts(workspaceId, kind, row.id);
+    return false;
+  };
+  const rootsFor = (kind: string | null | undefined, id: string | null | undefined) => {
+    const roots = receipts.get(`${kind}:${id}`);
+    if (!roots) throw new Error("Graph sync input receipt is missing.");
+    return roots;
+  };
+  const writeObject = (params: Parameters<typeof upsertContextGraphObject>[1]) => upsertContextGraphObject(actor, {
+    ...params, lineageInputs: [], lineageRoots: [...rootsFor(params.sourceEntityType, params.sourceEntityId), ...(params.lineageRoots ?? [])],
+  });
+  const writeRelationship = (params: Parameters<typeof upsertContextGraphRelationship>[1]) => upsertContextGraphRelationship(actor, {
+    ...params, lineageInputs: [], lineageRoots: [...rootsFor(params.sourceEntityType, params.sourceEntityId), ...(params.lineageRoots ?? [])],
+  });
 
   if (payload.sourceType === "MEETING") {
     await syncContextGraphForMeeting(actor, { workspaceId, meetingId: payload.sourceId });
@@ -88,9 +120,11 @@ export async function handleContextGraphSync(
         circle: { select: { id: true, name: true, purposeMd: true } },
       },
     });
-    if (!action) return;
-    const object = await upsertContextGraphObject(actor, {
+    if (!action || !await primary("Action", action)) return;
+    const assigneeRoots = await capture("Member", action.assigneeMember);
+    const object = await writeObject({
       workspaceId,
+      lineageRoots: assigneeRoots ?? [],
       objectType: "Task",
       title: action.title,
       summary: action.bodyMd,
@@ -102,11 +136,11 @@ export async function handleContextGraphSync(
       properties: {
         status: action.status,
         dueAt: action.dueAt?.toISOString() ?? null,
-        assignee: action.assigneeMember?.user.displayName ?? null,
+        assignee: assigneeRoots ? action.assigneeMember?.user.displayName ?? null : null,
       },
     });
-    if (action.circle) {
-      const circle = await upsertContextGraphObject(actor, {
+    if (action.circle && await capture("Circle", action.circle)) {
+      const circle = await writeObject({
         workspaceId,
         objectType: "Team",
         title: action.circle.name,
@@ -115,7 +149,7 @@ export async function handleContextGraphSync(
         sourceEntityType: "Circle",
         sourceEntityId: action.circle.id,
       });
-      await upsertContextGraphRelationship(actor, {
+      await writeRelationship({
         workspaceId,
         sourceObjectId: object.id,
         targetObjectId: circle.id,
@@ -136,9 +170,11 @@ export async function handleContextGraphSync(
         circle: { select: { id: true, name: true, purposeMd: true } },
       },
     });
-    if (!tension) return;
-    const object = await upsertContextGraphObject(actor, {
+    if (!tension || !await primary("Tension", tension)) return;
+    const assigneeRoots = await capture("Member", tension.assigneeMember);
+    const object = await writeObject({
       workspaceId,
+      lineageRoots: assigneeRoots ?? [],
       objectType: "Risk",
       title: tension.title,
       summary: tension.bodyMd,
@@ -150,11 +186,11 @@ export async function handleContextGraphSync(
       properties: {
         status: tension.status,
         priority: tension.priority,
-        assignee: tension.assigneeMember?.user.displayName ?? null,
+        assignee: assigneeRoots ? tension.assigneeMember?.user.displayName ?? null : null,
       },
     });
-    if (tension.circle) {
-      const circle = await upsertContextGraphObject(actor, {
+    if (tension.circle && await capture("Circle", tension.circle)) {
+      const circle = await writeObject({
         workspaceId,
         objectType: "Team",
         title: tension.circle.name,
@@ -163,7 +199,7 @@ export async function handleContextGraphSync(
         sourceEntityType: "Circle",
         sourceEntityId: tension.circle.id,
       });
-      await upsertContextGraphRelationship(actor, {
+      await writeRelationship({
         workspaceId,
         sourceObjectId: object.id,
         targetObjectId: circle.id,
@@ -181,9 +217,8 @@ export async function handleContextGraphSync(
       where: { id: payload.sourceId, workspaceId },
       include: { circle: { select: { id: true, name: true, purposeMd: true } } },
     });
-    if (!proposal) return;
-    if (!(await readableArtifactIds(actor, workspaceId, "Proposal", [proposal])).has(proposal.id)) return;
-    const object = await upsertContextGraphObject(actor, {
+    if (!proposal || !await primary("Proposal", proposal)) return;
+    const object = await writeObject({
       workspaceId,
       lineageInputs: [{ kind: "Proposal", id: proposal.id }],
       objectType: proposal.status === "RESOLVED" ? "Decision" : "Hypothesis",
@@ -199,8 +234,8 @@ export async function handleContextGraphSync(
         resolutionOutcome: proposal.resolutionOutcome,
       },
     });
-    if (proposal.circle) {
-      const circle = await upsertContextGraphObject(actor, {
+    if (proposal.circle && await capture("Circle", proposal.circle)) {
+      const circle = await writeObject({
         workspaceId,
         objectType: "Team",
         title: proposal.circle.name,
@@ -209,7 +244,7 @@ export async function handleContextGraphSync(
         sourceEntityType: "Circle",
         sourceEntityId: proposal.circle.id,
       });
-      await upsertContextGraphRelationship(actor, {
+      await writeRelationship({
         workspaceId,
         sourceObjectId: object.id,
         targetObjectId: circle.id,
@@ -224,8 +259,8 @@ export async function handleContextGraphSync(
 
   if (payload.sourceType === "CIRCLE") {
     const circle = await prisma.circle.findFirst({ where: { id: payload.sourceId, workspaceId } });
-    if (!circle) return;
-    const object = await upsertContextGraphObject(actor, {
+    if (!circle || !await primary("Circle", circle)) return;
+    const object = await writeObject({
       workspaceId,
       objectType: "Team",
       title: circle.name,
@@ -238,8 +273,8 @@ export async function handleContextGraphSync(
     });
     if (circle.parentCircleId) {
       const parent = await prisma.circle.findFirst({ where: { id: circle.parentCircleId, workspaceId } });
-      if (parent) {
-        const parentObject = await upsertContextGraphObject(actor, {
+      if (parent && await capture("Circle", parent)) {
+        const parentObject = await writeObject({
           workspaceId,
           objectType: "Team",
           title: parent.name,
@@ -248,7 +283,7 @@ export async function handleContextGraphSync(
           sourceEntityType: "Circle",
           sourceEntityId: parent.id,
         });
-        await upsertContextGraphRelationship(actor, {
+        await writeRelationship({
           workspaceId,
           sourceObjectId: object.id,
           targetObjectId: parentObject.id,
@@ -267,8 +302,8 @@ export async function handleContextGraphSync(
       where: { id: payload.sourceId, circle: { workspaceId } },
       include: { circle: true },
     });
-    if (!role) return;
-    const roleObject = await upsertContextGraphObject(actor, {
+    if (!role || !await primary("Role", role)) return;
+    const roleObject = await writeObject({
       workspaceId,
       objectType: "Role",
       title: role.name,
@@ -280,7 +315,8 @@ export async function handleContextGraphSync(
       lastVerifiedAt: role.updatedAt,
       properties: { accountabilities: role.accountabilities, artifacts: role.artifacts },
     });
-    const circleObject = await upsertContextGraphObject(actor, {
+    if (!await capture("Circle", role.circle)) return;
+    const circleObject = await writeObject({
       workspaceId,
       objectType: "Team",
       title: role.circle.name,
@@ -289,7 +325,7 @@ export async function handleContextGraphSync(
       sourceEntityType: "Circle",
       sourceEntityId: role.circle.id,
     });
-    await upsertContextGraphRelationship(actor, {
+    await writeRelationship({
       workspaceId,
       sourceObjectId: roleObject.id,
       targetObjectId: circleObject.id,
@@ -313,8 +349,8 @@ export async function handleContextGraphSync(
         },
       },
     });
-    if (!member) return;
-    const person = await upsertContextGraphObject(actor, {
+    if (!member || !await primary("Member", member)) return;
+    const person = await writeObject({
       workspaceId,
       objectType: "Person",
       title: member.user.displayName?.trim() || member.user.email,
@@ -328,11 +364,13 @@ export async function handleContextGraphSync(
       },
     });
 
-    const desiredEdges = new Map<string, { targetObjectId: string; relationshipType: "member_of" | "assigned_to" }>();
+    const desiredEdges = new Map<string, { targetObjectId: string; relationshipType: "member_of" | "assigned_to"; lineageRoots: LineageRoot[] }>();
     if (member.isActive) {
       for (const assignment of member.roleAssignments) {
         if (assignment.role.archivedAt) continue;
-        const roleObject = await upsertContextGraphObject(actor, {
+        const assignmentRoots = await capture("RoleAssignment", assignment);
+        if (!assignmentRoots || !await capture("Role", assignment.role)) continue;
+        const roleObject = await writeObject({
           workspaceId,
           objectType: "Role",
           title: assignment.role.name,
@@ -341,7 +379,9 @@ export async function handleContextGraphSync(
           sourceEntityType: "Role",
           sourceEntityId: assignment.role.id,
         });
-        const circleObject = await upsertContextGraphObject(actor, {
+        desiredEdges.set(`assigned_to:${roleObject.id}`, { targetObjectId: roleObject.id, relationshipType: "assigned_to", lineageRoots: assignmentRoots });
+        if (!await capture("Circle", assignment.role.circle)) continue;
+        const circleObject = await writeObject({
           workspaceId,
           objectType: "Team",
           title: assignment.role.circle.name,
@@ -350,14 +390,14 @@ export async function handleContextGraphSync(
           sourceEntityType: "Circle",
           sourceEntityId: assignment.role.circle.id,
         });
-        desiredEdges.set(`assigned_to:${roleObject.id}`, { targetObjectId: roleObject.id, relationshipType: "assigned_to" });
-        desiredEdges.set(`member_of:${circleObject.id}`, { targetObjectId: circleObject.id, relationshipType: "member_of" });
+        desiredEdges.set(`member_of:${circleObject.id}`, { targetObjectId: circleObject.id, relationshipType: "member_of", lineageRoots: assignmentRoots });
       }
     }
     for (const edge of desiredEdges.values()) {
-      await upsertContextGraphRelationship(actor, {
+      await writeRelationship({
         workspaceId,
         sourceObjectId: person.id,
+        lineageRoots: edge.lineageRoots,
         targetObjectId: edge.targetObjectId,
         relationshipType: edge.relationshipType,
         status: "approved",
@@ -376,15 +416,10 @@ export async function handleContextGraphSync(
     });
     for (const edge of existingEdges) {
       if (desiredEdges.has(`${edge.relationshipType}:${edge.targetObjectId}`)) continue;
-      await upsertContextGraphRelationship(actor, {
-        workspaceId,
-        sourceObjectId: edge.sourceObjectId,
-        targetObjectId: edge.targetObjectId,
-        relationshipType: edge.relationshipType,
-        status: "archived",
-        sourceEntityType: "Member",
-        sourceEntityId: member.id,
-      });
+      await prisma.contextGraphRelationship.updateMany({ where: { workspaceId,
+        sourceObjectId: edge.sourceObjectId, targetObjectId: edge.targetObjectId,
+        relationshipType: edge.relationshipType, sourceEntityType: "Member", sourceEntityId: member.id,
+      }, data: { status: "archived" } });
     }
     return;
   }
@@ -401,9 +436,9 @@ export async function handleContextGraphSync(
         },
       },
     });
-    if (!identity) return;
+    if (!identity || !await primary("AgentIdentity", identity)) return;
     const active = identity.isActive && !identity.archivedAt;
-    const agentObject = await upsertContextGraphObject(actor, {
+    const agentObject = await writeObject({
       workspaceId,
       objectType: "Agent",
       title: identity.displayName,
@@ -420,11 +455,13 @@ export async function handleContextGraphSync(
       },
     });
 
-    const desiredEdges = new Map<string, { targetObjectId: string; relationshipType: "member_of" | "assigned_to" }>();
+    const desiredEdges = new Map<string, { targetObjectId: string; relationshipType: "member_of" | "assigned_to"; lineageRoots: LineageRoot[] }>();
     if (active) {
       for (const assignment of identity.circleAssignments) {
-        if (!assignment.circle.archivedAt) {
-          const circleObject = await upsertContextGraphObject(actor, {
+        const assignmentRoots = await capture("CircleAgentAssignment", assignment);
+        if (!assignmentRoots) continue;
+        if (!assignment.circle.archivedAt && await capture("Circle", assignment.circle)) {
+          const circleObject = await writeObject({
             workspaceId,
             objectType: "Team",
             title: assignment.circle.name,
@@ -433,10 +470,10 @@ export async function handleContextGraphSync(
             sourceEntityType: "Circle",
             sourceEntityId: assignment.circle.id,
           });
-          desiredEdges.set(`member_of:${circleObject.id}`, { targetObjectId: circleObject.id, relationshipType: "member_of" });
+          desiredEdges.set(`member_of:${circleObject.id}`, { targetObjectId: circleObject.id, relationshipType: "member_of", lineageRoots: assignmentRoots });
         }
-        if (assignment.role && !assignment.role.archivedAt) {
-          const roleObject = await upsertContextGraphObject(actor, {
+        if (assignment.role && !assignment.role.archivedAt && await capture("Role", assignment.role)) {
+          const roleObject = await writeObject({
             workspaceId,
             objectType: "Role",
             title: assignment.role.name,
@@ -445,14 +482,15 @@ export async function handleContextGraphSync(
             sourceEntityType: "Role",
             sourceEntityId: assignment.role.id,
           });
-          desiredEdges.set(`assigned_to:${roleObject.id}`, { targetObjectId: roleObject.id, relationshipType: "assigned_to" });
+          desiredEdges.set(`assigned_to:${roleObject.id}`, { targetObjectId: roleObject.id, relationshipType: "assigned_to", lineageRoots: assignmentRoots });
         }
       }
     }
     for (const edge of desiredEdges.values()) {
-      await upsertContextGraphRelationship(actor, {
+      await writeRelationship({
         workspaceId,
         sourceObjectId: agentObject.id,
+        lineageRoots: edge.lineageRoots,
         targetObjectId: edge.targetObjectId,
         relationshipType: edge.relationshipType,
         status: "approved",
@@ -471,15 +509,10 @@ export async function handleContextGraphSync(
     });
     for (const edge of existingEdges) {
       if (desiredEdges.has(`${edge.relationshipType}:${edge.targetObjectId}`)) continue;
-      await upsertContextGraphRelationship(actor, {
-        workspaceId,
-        sourceObjectId: edge.sourceObjectId,
-        targetObjectId: edge.targetObjectId,
-        relationshipType: edge.relationshipType,
-        status: "archived",
-        sourceEntityType: "AgentIdentity",
-        sourceEntityId: identity.id,
-      });
+      await prisma.contextGraphRelationship.updateMany({ where: { workspaceId,
+        sourceObjectId: edge.sourceObjectId, targetObjectId: edge.targetObjectId,
+        relationshipType: edge.relationshipType, sourceEntityType: "AgentIdentity", sourceEntityId: identity.id,
+      }, data: { status: "archived" } });
     }
     return;
   }
@@ -494,15 +527,12 @@ export async function handleContextGraphSync(
       },
     });
     if (!goal) return;
-    if (!(await readableArtifactIds(actor, workspaceId, "Goal", [goal])).has(goal.id)) {
-      await archiveGoalGraphFacts(workspaceId, goal.id);
-      return;
-    }
+    if (!await primary("Goal", goal)) return;
     if (isPrivateDraftGoal(goal)) {
-      await archiveGoalGraphFacts(workspaceId, goal.id);
+      await archiveNativeGraphFacts(workspaceId, "Goal", goal.id);
       return;
     }
-    const object = await upsertContextGraphObject(actor, {
+    const object = await writeObject({
       workspaceId,
       lineageInputs: [{ kind: "Goal", id: goal.id }],
       objectType: "Goal",
@@ -523,8 +553,9 @@ export async function handleContextGraphSync(
     });
 
     const desiredEdges = new Map<string, { sourceObjectId: string; targetObjectId: string; relationshipType: "part_of" | "owns" }>();
-    if (goal.parentGoal && !goal.parentGoal.archivedAt && !isPrivateDraftGoal(goal.parentGoal)) {
-      const parentObject = await upsertContextGraphObject(actor, {
+    if (goal.parentGoal && !goal.parentGoal.archivedAt && !isPrivateDraftGoal(goal.parentGoal)
+      && await capture("Goal", goal.parentGoal)) {
+      const parentObject = await writeObject({
         workspaceId,
         objectType: "Goal",
         title: goal.parentGoal.title,
@@ -535,8 +566,8 @@ export async function handleContextGraphSync(
       });
       desiredEdges.set(`part_of:${object.id}:${parentObject.id}`, { sourceObjectId: object.id, targetObjectId: parentObject.id, relationshipType: "part_of" });
     }
-    if (goal.circle && !goal.circle.archivedAt) {
-      const circleObject = await upsertContextGraphObject(actor, {
+    if (goal.circle && !goal.circle.archivedAt && await capture("Circle", goal.circle)) {
+      const circleObject = await writeObject({
         workspaceId,
         objectType: "Team",
         title: goal.circle.name,
@@ -547,8 +578,8 @@ export async function handleContextGraphSync(
       });
       desiredEdges.set(`owns:${circleObject.id}:${object.id}`, { sourceObjectId: circleObject.id, targetObjectId: object.id, relationshipType: "owns" });
     }
-    if (goal.ownerMember) {
-      const ownerObject = await upsertContextGraphObject(actor, {
+    if (goal.ownerMember && await capture("Member", goal.ownerMember)) {
+      const ownerObject = await writeObject({
         workspaceId,
         objectType: "Person",
         title: goal.ownerMember.user.displayName?.trim() || goal.ownerMember.user.email,
@@ -563,7 +594,7 @@ export async function handleContextGraphSync(
       desiredEdges.set(`owns:${ownerObject.id}:${object.id}`, { sourceObjectId: ownerObject.id, targetObjectId: object.id, relationshipType: "owns" });
     }
     for (const edge of desiredEdges.values()) {
-      await upsertContextGraphRelationship(actor, {
+      await writeRelationship({
         workspaceId,
         sourceObjectId: edge.sourceObjectId,
         targetObjectId: edge.targetObjectId,
@@ -584,24 +615,19 @@ export async function handleContextGraphSync(
     });
     for (const edge of existingEdges) {
       if (desiredEdges.has(`${edge.relationshipType}:${edge.sourceObjectId}:${edge.targetObjectId}`)) continue;
-      await upsertContextGraphRelationship(actor, {
-        workspaceId,
-        sourceObjectId: edge.sourceObjectId,
-        targetObjectId: edge.targetObjectId,
-        relationshipType: edge.relationshipType,
-        status: "archived",
-        sourceEntityType: "Goal",
-        sourceEntityId: goal.id,
-      });
+      await prisma.contextGraphRelationship.updateMany({ where: { workspaceId,
+        sourceObjectId: edge.sourceObjectId, targetObjectId: edge.targetObjectId,
+        relationshipType: edge.relationshipType, sourceEntityType: "Goal", sourceEntityId: goal.id,
+      }, data: { status: "archived" } });
     }
     return;
   }
 
   if (payload.sourceType === "DOCUMENT") {
     const document = await prisma.document.findFirst({ where: { id: payload.sourceId, workspaceId } });
-    if (!document) return;
+    if (!document || !await primary("Document", document)) return;
     if (document.accessDomain !== "WORKSPACE") return;
-    await upsertContextGraphObject(actor, {
+    await writeObject({
       workspaceId,
       lineageInputs: [{ kind: "Document", id: document.id }],
       objectType: "Document",
@@ -619,9 +645,8 @@ export async function handleContextGraphSync(
 
   if (payload.sourceType === "BRAIN_ARTICLE") {
     const article = await prisma.brainArticle.findFirst({ where: { id: payload.sourceId, workspaceId } });
-    if (!article) return;
-    if (!(await readableArtifactIds(actor, workspaceId, "BrainArticle", [article])).has(article.id)) return;
-    const object = await upsertContextGraphObject(actor, {
+    if (!article || !await primary("BrainArticle", article)) return;
+    const object = await writeObject({
       workspaceId,
       lineageInputs: [{ kind: "BrainArticle", id: article.id }],
       objectType: articleTypeToObjectType(article.type),
@@ -640,7 +665,7 @@ export async function handleContextGraphSync(
     });
     await attachContextGraphEvidence(actor, {
       workspaceId,
-      lineageInputs: [{ kind: "BrainArticle", id: article.id }],
+      lineageInputs: [], lineageRoots: rootsFor("BrainArticle", article.id),
       objectId: object.id,
       sourceType: "BRAIN_ARTICLE",
       sourceId: article.id,

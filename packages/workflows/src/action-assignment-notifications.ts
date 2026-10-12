@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import { createNotificationIntent } from "@corgtex/domain";
+import { captureNotificationEventRoots, notificationProducerActor } from "./notification-event-lineage";
 
 type AssignmentEvent = {
   id: string;
@@ -43,18 +44,22 @@ export async function createActionAssignmentNotification(
       archivedAt: null,
       duplicateOfActionId: null,
     },
-    select: { title: true },
   });
   if (!action) return null;
 
+  await tx.$queryRaw`SELECT id FROM "Member" WHERE id = ${assigneeMemberId} AND "workspaceId" = ${event.workspaceId} FOR UPDATE`;
   const assignee = await tx.member.findFirst({
     where: { id: assigneeMemberId, workspaceId: event.workspaceId, isActive: true },
-    select: { userId: true },
   });
   if (!assignee) return null;
 
+  const lineageRoots = await captureNotificationEventRoots(tx, event.workspaceId, [
+    { kind: "Action", id: action.id, snapshot: action }, { kind: "Member", id: assignee.id, snapshot: assignee },
+  ]);
+  if (!lineageRoots) return null;
   const result = await createNotificationIntent(tx, {
     workspaceId: event.workspaceId,
+    lineageActor: notificationProducerActor(event.workspaceId), lineageRoots,
     type: "action.assigned",
     recipientUserIds: [assignee.userId],
     actorUserId,

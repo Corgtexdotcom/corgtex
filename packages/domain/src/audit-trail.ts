@@ -1,6 +1,7 @@
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { Prisma } from "@prisma/client";
+import { redactAgentRunContent } from "./agent-runs";
 import { requireWorkspaceMembership } from "./auth";
 
 export async function recordAudit(
@@ -26,6 +27,13 @@ export async function recordAudit(
   });
 }
 
+/** Historical metadata has no complete producer receipt; identifiers are operational facts only. */
+function auditOperationalFields(row: Prisma.AuditLogGetPayload<Record<string, never>>) {
+  return { id: row.id, workspaceId: row.workspaceId, actorUserId: row.actorUserId,
+    action: row.action, entityType: row.entityType, entityId: row.entityId,
+    createdAt: row.createdAt, meta: null };
+}
+
 export async function listAuditLogs(actor: AppActor, workspaceId: string, opts?: {
   take?: number;
   entityType?: string;
@@ -35,7 +43,7 @@ export async function listAuditLogs(actor: AppActor, workspaceId: string, opts?:
 }) {
   await requireWorkspaceMembership({ actor, workspaceId });
 
-  return prisma.auditLog.findMany({
+  const rows = await prisma.auditLog.findMany({
     where: {
       workspaceId,
       ...(opts?.entityType ? { entityType: opts.entityType } : {}),
@@ -46,6 +54,7 @@ export async function listAuditLogs(actor: AppActor, workspaceId: string, opts?:
     orderBy: { createdAt: "desc" },
     take: opts?.take ?? 50,
   });
+  return rows.map(auditOperationalFields);
 }
 
 export async function getEntityTimeline(actor: AppActor, workspaceId: string, entityType: string, entityId: string) {
@@ -82,7 +91,11 @@ export async function getEntityTimeline(actor: AppActor, workspaceId: string, en
     }),
   ]);
 
-  return { auditLogs, relatedEvents };
+  return {
+    auditLogs: auditLogs.map(auditOperationalFields),
+    relatedEvents: relatedEvents.map(event => ({ id: event.id, type: event.type, status: event.status,
+      createdAt: event.createdAt, jobs: event.jobs, payload: null })),
+  };
 }
 
 export async function getAgentRunTrace(actor: AppActor, workspaceId: string, agentRunId: string) {
@@ -115,7 +128,7 @@ export async function getAgentRunTrace(actor: AppActor, workspaceId: string, age
     },
   });
 
-  return run;
+  return run ? redactAgentRunContent(actor, workspaceId, run) : null;
 }
 
 export async function getModelUsageSummary(actor: AppActor, workspaceId: string, opts?: {

@@ -146,6 +146,7 @@ vi.mock("@corgtex/knowledge", () => ({
 }));
 
 vi.mock("@corgtex/domain", async () => ({
+  ...await import("../../domain/src/source-lineage-rebuild"),
   withWorkspaceSupportExecution: (await import("../../domain/src/workspace-support-access")).withWorkspaceSupportExecution,
   withMcpConnectionExecution: (await import("../../domain/src/mcp-execution")).withMcpConnectionExecution,
   recordGovernanceScore: vi.fn(),

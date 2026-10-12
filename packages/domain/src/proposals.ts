@@ -4,9 +4,9 @@ import { Prisma, type ProposalResolutionOutcome, type ProposalStatus } from "@pr
 import { defaultModelGateway } from "@corgtex/models";
 import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, isGlobalOperator, requireWorkspaceMembership } from "./auth";
-import { getApprovalPolicy, ensureApprovalFlow, withdrawActiveApprovalFlowForSubject } from "./approvals";
-import { invariant } from "./errors";
-import { advanceHumanArtifactInputLineage, currentArtifactInputRoots, readableArtifactIds, recordArtifactInputLineage, type LineageInput, type LineageRoot } from "./source-lineage";
+import { getApprovalPolicy, ensureApprovalFlow, preserveApprovalFlowHistory, withdrawActiveApprovalFlowForSubject } from "./approvals";
+import { AppError, invariant } from "./errors";
+import { advanceHumanArtifactInputLineage, captureArtifactInputProof, captureArtifactInputSnapshotProof, invalidateArtifactInputLineage, lineageContentFingerprint, preserveUnknownArtifactInputSnapshot, currentArtifactInputRoots, readableArtifactIds, recordArtifactInputLineage, type LineageInput, type LineageRoot } from "./source-lineage";
 import { privacyFilter } from "./privacy";
 import { archiveFilterWhere, type ArchiveFilter } from "./archive";
 import { requireDraftManager } from "./draft-permissions";
@@ -86,11 +86,49 @@ function isPrismaNotFoundError(error: unknown) {
   return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "P2025";
 }
 
-function proposalSourceIds(params: { sourceTensionId?: string | null; relatedActionIds?: string[] | null }) {
-  return [
-    ...normalizeIds(params.sourceTensionId ? [params.sourceTensionId] : []),
-    ...normalizeIds(params.relatedActionIds),
-  ];
+async function preserveProposalResetHistory(tx: Prisma.TransactionClient, actor: AppActor, workspaceId: string,
+  proposal: { id: string; [key: string]: unknown }) {
+  const policies = await tx.policyCorpus.findMany({ where: { workspaceId, proposalId: proposal.id } });
+  for (const { kind, row } of [
+    { kind: "Proposal" as const, row: proposal },
+    ...policies.map((row) => ({ kind: "PolicyCorpus" as const, row })),
+  ]) {
+    try {
+      await captureArtifactInputSnapshotProof(actor, workspaceId,
+        { kind, id: row.id, fingerprint: lineageContentFingerprint(kind, row) }, tx);
+    } catch (error) {
+      if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
+      await preserveUnknownArtifactInputSnapshot(tx, workspaceId, { kind, id: row.id }, row);
+    }
+  }
+}
+
+async function advanceProposalResetProof(tx: Prisma.TransactionClient, actor: AppActor, workspaceId: string,
+  before: { id: string; [key: string]: unknown }, after: unknown) {
+  try {
+    return await advanceHumanArtifactInputLineage({ tx, actor, workspaceId,
+      artifact: { kind: "Proposal", id: before.id }, before, after, allowSystemTransition: true });
+  } catch (error) {
+    if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
+    await invalidateArtifactInputLineage({ tx, workspaceId,
+      artifact: { kind: "Proposal", id: before.id }, content: after });
+    return false;
+  }
+}
+
+async function writeProposalApprovalFlow(tx: Prisma.TransactionClient, actor: AppActor, workspaceId: string,
+  before: { id: string; [key: string]: unknown }, data: Prisma.ApprovalFlowUpdateInput) {
+  const updated = await tx.approvalFlow.update({ where: { id: before.id }, data });
+  // Clearing decisions/objections removes their old receipt roots. Preserve the
+  // content transition, but do not silently make a legacy/reset flow provable.
+  if (data.resultJson === Prisma.JsonNull) {
+    await invalidateArtifactInputLineage({ tx, workspaceId,
+      artifact: { kind: "ApprovalFlow", id: before.id }, content: updated });
+  } else {
+    await advanceHumanArtifactInputLineage({ tx, actor, workspaceId,
+      artifact: { kind: "ApprovalFlow", id: before.id }, before, after: updated, allowSystemTransition: true });
+  }
+  return updated;
 }
 
 async function activateProposalApprovalFlow(tx: Prisma.TransactionClient, params: {
@@ -101,6 +139,7 @@ async function activateProposalApprovalFlow(tx: Prisma.TransactionClient, params
   openedAt: Date;
 }) {
   const flow = await ensureApprovalFlow(tx, {
+    actor: params.actor,
     workspaceId: params.workspaceId,
     subjectType: "PROPOSAL",
     subjectId: params.proposalId,
@@ -108,7 +147,7 @@ async function activateProposalApprovalFlow(tx: Prisma.TransactionClient, params
     createdByUserId: params.actor.kind === "user" ? params.actor.user.id : null,
   });
 
-  await tx.approvalFlow.update({
+  const updated = await tx.approvalFlow.update({
     where: { id: flow.id },
     data: {
       status: "ACTIVE",
@@ -120,6 +159,8 @@ async function activateProposalApprovalFlow(tx: Prisma.TransactionClient, params
     },
   });
 
+  await advanceHumanArtifactInputLineage({ tx, actor: params.actor, workspaceId: params.workspaceId,
+    artifact: { kind: "ApprovalFlow", id: flow.id }, before: flow, after: updated, allowSystemTransition: true });
   return flow;
 }
 
@@ -263,23 +304,10 @@ async function loadVisibleSourceTension(
       archivedAt: null,
       ...privacyFilter(actor, membership),
     },
-    select: {
-      id: true,
-      workspaceId: true,
-      title: true,
-      bodyMd: true,
-      circleId: true,
-      meetingId: true,
-      assigneeMemberId: true,
-      raisedByMemberId: true,
-      proposalId: true,
-      priority: true,
-      status: true,
-      version: true,
-    },
   });
 
   invariant(tension, 404, "NOT_FOUND", "Source tension not found.");
+  invariant((await readableArtifactIds(actor, workspaceId, "Tension", [tension], tx)).has(tension.id), 404, "NOT_FOUND", "Source tension not found.");
   invariant(!tension.proposalId, 400, "INVALID_STATE", "Source tension is already linked to a proposal.");
   return tension;
 }
@@ -301,22 +329,11 @@ async function validateRelatedActions(
       archivedAt: null,
       ...privacyFilter(actor, membership),
     },
-    select: {
-      id: true,
-      workspaceId: true,
-      title: true,
-      bodyMd: true,
-      priority: true,
-      circleId: true,
-      assigneeMemberId: true,
-      dueAt: true,
-      proposalId: true,
-      status: true,
-      version: true,
-    },
   });
 
   invariant(actions.length === actionIds.length, 404, "NOT_FOUND", "Related action not found.");
+  const permittedIds = await readableArtifactIds(actor, workspaceId, "Action", actions, tx);
+  invariant(actions.every((action) => permittedIds.has(action.id)), 404, "NOT_FOUND", "Related action not found.");
   invariant(!actions.some((action) => action.proposalId), 400, "INVALID_STATE", "Related action is already linked to a proposal.");
 
   return actions;
@@ -439,6 +456,19 @@ function workItemOrderBy(sort: WorkItemSort | undefined): Prisma.ProposalOrderBy
   return [{ priority: "desc" }, { createdAt: "desc" }, { id: "desc" }];
 }
 
+async function readableProposalRelations<T extends { tensions: Array<{ id: string; title: string; status: unknown }>; actions: Array<{ id: string; title: string; status: unknown }>; adviceProcess: { requests: Array<{ id: string; status: unknown }> } | null }>(actor: AppActor, workspaceId: string, proposal: T) {
+  const [tensions, actions, requests] = await Promise.all([
+    readableArtifactIds(actor, workspaceId, "Tension", (proposal.tensions ?? []) as Array<{ id: string; [key: string]: unknown }>),
+    readableArtifactIds(actor, workspaceId, "Action", (proposal.actions ?? []) as Array<{ id: string; [key: string]: unknown }>),
+    readableArtifactIds(actor, workspaceId, "AdviceRequest", (proposal.adviceProcess?.requests ?? []) as Array<{ id: string; [key: string]: unknown }>),
+  ]);
+  return { ...proposal,
+    tensions: (proposal.tensions ?? []).filter((row) => tensions.has(row.id)).map((row) => ({ id: row.id, title: row.title, status: row.status })),
+    actions: (proposal.actions ?? []).filter((row) => actions.has(row.id)).map((row) => ({ id: row.id, title: row.title, status: row.status })),
+    adviceProcess: proposal.adviceProcess ? { ...proposal.adviceProcess, requests: (proposal.adviceProcess.requests ?? []).filter((row) => requests.has(row.id)).map((row) => ({ status: row.status })) } : null,
+  };
+}
+
 export async function listProposals(actor: AppActor, workspaceId: string, opts?: ListProposalsOptions) {
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
@@ -484,13 +514,11 @@ export async function listProposals(actor: AppActor, workspaceId: string, opts?:
           },
         },
         circle: { select: { id: true, name: true } },
-        tensions: { where: privacyFilter(actor, membership), select: { id: true, title: true, status: true } },
-        actions: { where: privacyFilter(actor, membership), select: { id: true, title: true, status: true } },
+        tensions: { where: privacyFilter(actor, membership) },
+        actions: { where: privacyFilter(actor, membership) },
         adviceProcess: {
           include: {
-            requests: {
-              select: { status: true },
-            },
+            requests: true,
           },
         },
       },
@@ -500,7 +528,7 @@ export async function listProposals(actor: AppActor, workspaceId: string, opts?:
     }),
     prisma.proposal.count({ where }),
   ]);
-  return { items, total, take, skip };
+  return { items: await Promise.all(items.map((proposal) => readableProposalRelations(actor, workspaceId, proposal))), total, take, skip };
 }
 
 export async function getProposal(actor: AppActor, params: {
@@ -526,13 +554,11 @@ export async function getProposal(actor: AppActor, params: {
         },
       },
       circle: { select: { id: true, name: true } },
-      tensions: { where: privacyFilter(actor, membership), select: { id: true, title: true, status: true } },
-      actions: { where: privacyFilter(actor, membership), select: { id: true, title: true, status: true } },
+      tensions: { where: privacyFilter(actor, membership) },
+      actions: { where: privacyFilter(actor, membership) },
       adviceProcess: {
         include: {
-          requests: {
-            select: { status: true },
-          },
+          requests: true,
         },
       },
     },
@@ -540,7 +566,7 @@ export async function getProposal(actor: AppActor, params: {
   invariant(proposal, 404, "NOT_FOUND", "Proposal not found.");
   invariant((await readableArtifactIds(actor, params.workspaceId, "Proposal", [proposal])).has(proposal.id),
     404, "NOT_FOUND", "Proposal not found.");
-  return proposal;
+  return readableProposalRelations(actor, params.workspaceId, proposal);
 }
 
 type SourceTensionForLinking = NonNullable<Awaited<ReturnType<typeof loadVisibleSourceTension>>>;
@@ -590,13 +616,15 @@ async function linkProposalSourcesAndActions(
     };
 
     try {
-      await tx.tension.update({
+      const updated = await tx.tension.update({
         where: tensionWhere as Prisma.TensionWhereUniqueInput,
         data: {
           proposalId: params.proposalId,
           version: newVersion,
         },
       });
+      await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "Tension", id: params.sourceTension.id }, before: params.sourceTension, after: updated, allowSystemTransition: true });
     } catch (error) {
       if (isPrismaNotFoundError(error)) {
         invariant(false, 409, "VERSION_CONFLICT", "The source tension changed before this update could be applied. Please refresh and try again.");
@@ -640,13 +668,15 @@ async function linkProposalSourcesAndActions(
       };
 
       try {
-        await tx.action.update({
+        const updated = await tx.action.update({
           where: actionWhere as Prisma.ActionWhereUniqueInput,
           data: {
             proposalId: params.proposalId,
             version: newVersion,
           },
         });
+        await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+          artifact: { kind: "Action", id: action.id }, before: action, after: updated, allowSystemTransition: true });
       } catch (error) {
         if (isPrismaNotFoundError(error)) {
           invariant(false, 409, "VERSION_CONFLICT", "A related action changed before this update could be applied. Please refresh and try again.");
@@ -693,6 +723,40 @@ async function applyProposalDuplicateUpdate(actor: AppActor, params: CreatePropo
   return proposal;
 }
 
+async function readableProposalSourceIds(actor: AppActor, workspaceId: string, params: { sourceTensionId?: string | null; relatedActionIds?: string[] | null }, sourceTension?: { id: string; [key: string]: unknown }) {
+  const actionIds = normalizeIds(params.relatedActionIds);
+  const tensionId = params.sourceTensionId?.trim();
+  const [actions, tension] = await Promise.all([
+    actionIds.length ? prisma.action.findMany({ where: { workspaceId, id: { in: actionIds }, archivedAt: null } }) : [],
+    sourceTension ?? (tensionId ? prisma.tension.findFirst({ where: { workspaceId, id: tensionId, archivedAt: null } }) : null),
+  ]);
+  const [actionProof, tensionProof] = await Promise.all([
+    readableArtifactIds(actor, workspaceId, "Action", actions),
+    readableArtifactIds(actor, workspaceId, "Tension", tension ? [tension] : []),
+  ]);
+  return [...(tension && tensionProof.has(tension.id) ? [tension.id] : []), ...actions.filter((row) => actionProof.has(row.id)).map((row) => row.id)];
+}
+
+async function readableProposalDuplicateRows(actor: AppActor, workspaceId: string, rows: unknown[]) {
+  const records = rows as Array<{ id: string; [key: string]: unknown }>;
+  const ids = await readableArtifactIds(actor, workspaceId, "Proposal", records);
+  const visible = records.filter((row) => ids.has(row.id));
+  const actionIds = visible.flatMap((row) => (row.actions as Array<{ id: string }> | undefined)?.map((action) => action.id) ?? []);
+  const tensionIds = visible.flatMap((row) => (row.tensions as Array<{ id: string }> | undefined)?.map((tension) => tension.id) ?? []);
+  const [actions, tensions] = await Promise.all([
+    actionIds.length ? prisma.action.findMany({ where: { workspaceId, id: { in: actionIds }, archivedAt: null } }) : [],
+    tensionIds.length ? prisma.tension.findMany({ where: { workspaceId, id: { in: tensionIds }, archivedAt: null } }) : [],
+  ]);
+  const [permittedActions, permittedTensions] = await Promise.all([
+    readableArtifactIds(actor, workspaceId, "Action", actions),
+    readableArtifactIds(actor, workspaceId, "Tension", tensions),
+  ]);
+  return visible.map((row) => ({ ...row,
+    actions: (row.actions as Array<{ id: string }> | undefined)?.filter((action) => permittedActions.has(action.id)),
+    tensions: (row.tensions as Array<{ id: string }> | undefined)?.filter((tension) => permittedTensions.has(tension.id)),
+  }));
+}
+
 export async function createProposal(actor: AppActor, params: CreateProposalParams) {
   const membership = await requireWorkspaceMembership({
     actor,
@@ -711,11 +775,11 @@ export async function createProposal(actor: AppActor, params: CreateProposalPara
     circleId: params.circleId,
     ownerMemberId: params.ownerMemberId,
     meetingId: params.meetingId,
-    sourceIds: proposalSourceIds(params),
+    sourceIds: params.duplicateGuard ? await readableProposalSourceIds(actor, params.workspaceId, params) : [],
     actorUserId: actor.kind === "user" ? actor.user.id : null,
     membershipId: membership?.id ?? null,
     includePrivate: actor.kind === "agent" || membership?.role === "ADMIN",
-  }, params.duplicateGuard);
+  }, params.duplicateGuard, undefined, (rows) => readableProposalDuplicateRows(actor, params.workspaceId, rows));
   if (duplicateDecision?.resolution === "use_existing") {
     return getProposal(actor, { workspaceId: params.workspaceId, proposalId: duplicateDecision.match.entityId });
   }
@@ -853,11 +917,11 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
       circleId: params.circleId ?? sourceTensionForGuard.circleId,
       ownerMemberId: params.ownerMemberId,
       meetingId: params.meetingId ?? sourceTensionForGuard.meetingId,
-      sourceIds: [sourceTensionForGuard.id, ...normalizeIds(params.relatedActionIds)],
+      sourceIds: await readableProposalSourceIds(actor, params.workspaceId, params, sourceTensionForGuard),
       actorUserId: actor.kind === "user" ? actor.user.id : null,
       membershipId: membership?.id ?? null,
       includePrivate: actor.kind === "agent" || membership?.role === "ADMIN",
-    }, params.duplicateGuard);
+    }, params.duplicateGuard, undefined, (rows) => readableProposalDuplicateRows(actor, params.workspaceId, rows));
     if (duplicateDecision?.resolution === "use_existing") {
       return getProposal(actor, { workspaceId: params.workspaceId, proposalId: duplicateDecision.match.entityId });
     }
@@ -881,6 +945,9 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
     invariant(sourceTension, 404, "NOT_FOUND", "Source tension not found.");
     const relatedActions = await validateRelatedActions(tx, actor, membership, params.workspaceId, params.relatedActionIds);
     const relatedActionIds = relatedActions.map((action) => action.id);
+    const sourceRoots = await captureArtifactInputSnapshotProof(actor, params.workspaceId, { kind: "Tension", id: sourceTension.id }, tx);
+    const relatedRoots: LineageRoot[] = [];
+    for (const action of relatedActions) relatedRoots.push(...await captureArtifactInputSnapshotProof(actor, params.workspaceId, { kind: "Action", id: action.id }, tx));
     const draft = proposalDraftFromTension(sourceTension, params);
     let authorUserId = actor.kind === "user"
       ? actor.user.id
@@ -907,6 +974,10 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
         autoApproveAt: null,
       },
     });
+
+    await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Proposal", id: proposal.id }, content: proposal, origin: "DERIVED",
+      inputs: params.lineageInputs ?? [], inheritedRoots: [...sourceRoots, ...relatedRoots, ...(params.lineageRoots ?? [])] });
 
     await ensureWorkspacePermalink(tx, actor, {
       workspaceId: params.workspaceId,
@@ -1425,6 +1496,8 @@ export async function returnProposalToDraft(actor: AppActor, params: {
     invariant(proposal.status === "OPEN" || proposal.status === "RESOLVED", 400, "INVALID_STATE", "Only open or resolved proposals can be returned to draft.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: proposal, resolvedMembership: membership });
 
+    await preserveProposalResetHistory(tx, actor, params.workspaceId, proposal);
+
     const flow = await tx.approvalFlow.findUnique({
       where: {
         subjectType_subjectId: {
@@ -1435,17 +1508,15 @@ export async function returnProposalToDraft(actor: AppActor, params: {
     });
 
     if (flow) {
+      await preserveApprovalFlowHistory(tx, actor, params.workspaceId, flow);
       await tx.approvalDecision.deleteMany({ where: { flowId: flow.id } });
       await tx.objection.deleteMany({ where: { flowId: flow.id } });
-      await tx.approvalFlow.update({
-        where: { id: flow.id },
-        data: {
+      await writeProposalApprovalFlow(tx, actor, params.workspaceId, flow, {
           status: "DRAFT",
           openedAt: null,
           closesAt: null,
           closedAt: null,
           resultJson: Prisma.JsonNull,
-        },
       });
     }
     await tx.policyCorpus.deleteMany({
@@ -1477,8 +1548,7 @@ export async function returnProposalToDraft(actor: AppActor, params: {
         autoApproveAt: null,
       },
     });
-    await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
-      artifact: { kind: "Proposal", id: proposal.id }, before: proposal, after: updated });
+    const contentReadable = await advanceProposalResetProof(tx, actor, params.workspaceId, proposal, updated);
 
     await tx.auditLog.create({
       data: {
@@ -1500,7 +1570,7 @@ export async function returnProposalToDraft(actor: AppActor, params: {
       },
     ]);
 
-    return updated;
+    return contentReadable === false ? { id: updated.id, contentWithheld: true as const } : updated;
   });
 }
 
@@ -1530,6 +1600,8 @@ export async function reopenProposal(actor: AppActor, params: {
     invariant(!proposal.archivedAt, 400, "INVALID_STATE", "Archived proposals cannot be reopened.");
     invariant(proposal.status === "RESOLVED", 400, "INVALID_STATE", "Only resolved proposals can be reopened.");
 
+    await preserveProposalResetHistory(tx, actor, params.workspaceId, proposal);
+
     const existingFlow = await tx.approvalFlow.findUnique({
       where: {
         subjectType_subjectId: {
@@ -1539,6 +1611,7 @@ export async function reopenProposal(actor: AppActor, params: {
       },
     });
     const flow = existingFlow ?? await ensureApprovalFlow(tx, {
+      actor,
       workspaceId: params.workspaceId,
       subjectType: "PROPOSAL",
       subjectId: proposal.id,
@@ -1546,21 +1619,19 @@ export async function reopenProposal(actor: AppActor, params: {
       createdByUserId: actor.kind === "user" ? actor.user.id : null,
     });
 
+    await preserveApprovalFlowHistory(tx, actor, params.workspaceId, flow);
     const deletedDecisions = await tx.approvalDecision.deleteMany({ where: { flowId: flow.id } });
     const deletedObjections = await tx.objection.deleteMany({ where: { flowId: flow.id } });
     const deletedPolicyCorpus = await tx.policyCorpus.deleteMany({
       where: { proposalId: proposal.id },
     });
 
-    await tx.approvalFlow.update({
-      where: { id: flow.id },
-      data: {
+    await writeProposalApprovalFlow(tx, actor, params.workspaceId, flow, {
         status: "ACTIVE",
         openedAt: flow.openedAt ?? now,
         closesAt: null,
         closedAt: null,
         resultJson: Prisma.JsonNull,
-      },
     });
 
     const updated = await tx.proposal.update({
@@ -1575,8 +1646,7 @@ export async function reopenProposal(actor: AppActor, params: {
         publishedAt: proposal.publishedAt ?? now,
       },
     });
-    await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
-      artifact: { kind: "Proposal", id: proposal.id }, before: proposal, after: updated });
+    const contentReadable = await advanceProposalResetProof(tx, actor, params.workspaceId, proposal, updated);
 
     await tx.auditLog.create({
       data: {
@@ -1610,7 +1680,7 @@ export async function reopenProposal(actor: AppActor, params: {
       },
     ]);
 
-    return updated;
+    return contentReadable === false ? { id: updated.id, contentWithheld: true as const } : updated;
   });
 }
 
@@ -1662,6 +1732,8 @@ export async function supportReopenResolvedProposals(actor: AppActor, params: {
       invariant(!proposal.archivedAt, 400, "INVALID_STATE", `Archived proposal cannot be reopened: ${proposal.id}.`);
       invariant(proposal.status === "RESOLVED", 400, "INVALID_STATE", `Only resolved proposals can be reopened: ${proposal.id}.`);
 
+      await preserveProposalResetHistory(tx, actor, params.workspaceId, proposal);
+
       const existingFlow = await tx.approvalFlow.findUnique({
         where: {
           subjectType_subjectId: {
@@ -1671,6 +1743,7 @@ export async function supportReopenResolvedProposals(actor: AppActor, params: {
         },
       });
       const flow = existingFlow ?? await ensureApprovalFlow(tx, {
+        actor,
         workspaceId: params.workspaceId,
         subjectType: "PROPOSAL",
         subjectId: proposal.id,
@@ -1678,18 +1751,16 @@ export async function supportReopenResolvedProposals(actor: AppActor, params: {
         createdByUserId: null,
       });
 
+      await preserveApprovalFlowHistory(tx, actor, params.workspaceId, flow);
       const deletedDecisions = await tx.approvalDecision.deleteMany({ where: { flowId: flow.id } });
       const deletedObjections = await tx.objection.deleteMany({ where: { flowId: flow.id } });
 
-      await tx.approvalFlow.update({
-        where: { id: flow.id },
-        data: {
+      await writeProposalApprovalFlow(tx, actor, params.workspaceId, flow, {
           status: "ACTIVE",
           openedAt: flow.openedAt ?? now,
           closesAt: null,
           closedAt: null,
           resultJson: Prisma.JsonNull,
-        },
       });
 
       const deletedPolicyCorpus = await tx.policyCorpus.deleteMany({
@@ -1708,9 +1779,7 @@ export async function supportReopenResolvedProposals(actor: AppActor, params: {
           publishedAt: proposal.publishedAt ?? now,
         },
       });
-      await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
-        artifact: { kind: "Proposal", id: proposal.id }, before: proposal, after: updated,
-        allowSystemTransition: true });
+      const contentReadable = await advanceProposalResetProof(tx, actor, params.workspaceId, proposal, updated);
 
       await tx.auditLog.create({
         data: {
@@ -1747,7 +1816,7 @@ export async function supportReopenResolvedProposals(actor: AppActor, params: {
         },
       });
 
-      reopened.push({
+      reopened.push(contentReadable === false ? { id: updated.id, contentWithheld: true as const } : {
         id: updated.id,
         status: updated.status,
         flowId: flow.id,
@@ -1865,6 +1934,11 @@ export async function resolveProposal(actor: AppActor, params: {
       },
     });
 
+    const priorRoots = await currentArtifactInputRoots(tx, params.workspaceId, { kind: "Proposal", id: proposal.id }, proposal);
+    invariant(priorRoots, 409, "UNKNOWN_LINEAGE", "Proposal inputs cannot be verified.");
+    const evidenceInputs = normalizeIds(params.evidenceDocumentIds).map((id) => ({ kind: "Document" as const, id }));
+    const evidenceRoots = evidenceInputs.length ? await captureArtifactInputProof(actor, params.workspaceId, evidenceInputs, tx) : [];
+
     const updated = await tx.proposal.update({
       where: { id: proposal.id },
       data: {
@@ -1877,8 +1951,10 @@ export async function resolveProposal(actor: AppActor, params: {
         publishedAt: proposal.publishedAt || now,
       },
     });
-    await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
-      artifact: { kind: "Proposal", id: proposal.id }, before: proposal, after: updated });
+    await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Proposal", id: proposal.id }, content: updated,
+      origin: priorRoots.length || evidenceRoots.length ? "DERIVED" : "HUMAN_ORIGINAL",
+      inputs: [], inheritedRoots: [...priorRoots, ...evidenceRoots] });
 
     const evidenceDocumentIds = await createWorkItemEvidenceLinks(tx, {
       workspaceId: params.workspaceId,
@@ -1889,9 +1965,7 @@ export async function resolveProposal(actor: AppActor, params: {
     });
 
     if (flow) {
-      await tx.approvalFlow.update({
-        where: { id: flow.id },
-        data: {
+      await writeProposalApprovalFlow(tx, actor, params.workspaceId, flow, {
           status: params.outcome === "ADOPTED" ? "APPROVED" : params.outcome === "WITHDRAWN" ? "WITHDRAWN" : "REJECTED",
           closedAt: now,
           resultJson: {
@@ -1899,12 +1973,11 @@ export async function resolveProposal(actor: AppActor, params: {
             outcome: params.outcome,
             decisionMd,
           } as Prisma.InputJsonValue,
-        },
       });
     }
 
     if (params.outcome === "ADOPTED") {
-      await tx.policyCorpus.upsert({
+      const policy = await tx.policyCorpus.upsert({
         where: { proposalId: updated.id },
         update: {
           title: updated.title,
@@ -1921,6 +1994,9 @@ export async function resolveProposal(actor: AppActor, params: {
           circleId: updated.circleId,
         },
       });
+      await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "PolicyCorpus", id: policy.id }, content: policy,
+        origin: "DERIVED", inputs: [{ kind: "Proposal", id: updated.id }] });
     }
 
     await tx.auditLog.create({

@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 
-import { prisma } from "@corgtex/shared";
+import { prisma, type AppActor } from "@corgtex/shared";
 import type { Prisma } from "@prisma/client";
+import {
+  AppError, assertArtifactInputWriteFence, captureArtifactInputProof, captureArtifactInputSnapshotProof,
+  currentArtifactInputRoots, isArtifactInputProofReadable, lineageContentFingerprint, recordArtifactInputLineage,
+  requireWorkspaceMembership, type ArtifactInputWriteFence, type LineageInput, type LineageRoot,
+} from "@corgtex/domain";
 
 const PENDING_OPERATION_TTL_MS = 15 * 60 * 1000;
 const EXECUTING_OPERATION_LEASE_MS = 5 * 60 * 1000;
@@ -17,12 +22,15 @@ const STATUS = {
 
 type PendingOperationStatus = typeof STATUS[keyof typeof STATUS];
 
-type PendingOperationContext = {
+export type PendingOperationContext = {
   workspaceId: string;
   sessionId: string;
   userId: string | null;
   agentKey: string;
   userMessage: string;
+  actor?: AppActor;
+  lineageRoots?: readonly LineageRoot[];
+  persistenceFence?: ArtifactInputWriteFence;
 };
 
 export type PendingOperationRecord = {
@@ -49,6 +57,20 @@ export type PendingOperationRecord = {
   createdAt: Date;
   updatedAt: Date;
 };
+
+export type PendingOperationMetadata = { id: string; status: PendingOperationStatus; contentWithheld: true };
+export type PendingOperationView = PendingOperationRecord | PendingOperationMetadata;
+type Db = Prisma.TransactionClient | typeof prisma;
+type ExecutionState = {
+  ctx: PendingOperationContext;
+  operation: PendingOperationRecord;
+  argsHash: string;
+  leaseAt: number;
+  roots: LineageRoot[];
+  finalizing?: { tx: Prisma.TransactionClient; row: PendingOperationRecord; roots: LineageRoot[] };
+};
+const executions = new WeakMap<PendingOperationRecord, ExecutionState>();
+const CRM_WRITE_TOOLS = new Set(["record_relationship_activity", "complete_relationship_activity", "create_communication_suggestion"]);
 
 type PendingOperationIntent = {
   kind: "confirm" | "cancel";

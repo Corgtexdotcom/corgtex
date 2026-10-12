@@ -9,11 +9,12 @@ import { syncBrainArticleKnowledge } from "../../knowledge/src/chunks";
 import { createArticle, deleteSource, updateArticle } from "./brain";
 import { brainSourceContentFingerprint } from "./brain-derivation";
 import { archiveWorkspaceArtifact } from "./archive";
-import { recordArtifactInputLineage } from "./source-lineage";
+import { captureArtifactInputSnapshotProof, recordArtifactInputLineage } from "./source-lineage";
 import {
   generateBrainSourceRemovalCandidate,
   listBrainSourceRemovalReviews,
   resolveBrainSourceRemoval,
+  retryBrainSourceRemoval,
 } from "./brain-source-removal";
 
 async function fixture(sourceRemovalEnabled = true) {
@@ -59,7 +60,7 @@ describe("Brain source removal review", () => {
     else process.env[runtimeOptIn] = previousRuntimeOptIn;
   });
 
-  it("keeps an independently authored original active when its only added source is removed", async () => {
+  it("archives the derived composite while preserving its independently authored original version", async () => {
     const { workspace, actor, removed } = await fixture();
     const agent: AppActor = { kind: "agent", authProvider: "bootstrap", label: "brain-absorb", workspaceIds: [workspace.id] };
     const original = await createArticle(actor, { workspaceId: workspace.id, slug: "human-original",
@@ -69,9 +70,14 @@ describe("Brain source removal review", () => {
         sourceId: removed.id, sourceFingerprint: brainSourceContentFingerprint(removed), agentRunId: "synthetic-run",
       }, agentRunId: "synthetic-run" });
     await expect(deleteSource(actor, { workspaceId: workspace.id, sourceId: removed.id }))
-      .rejects.toMatchObject({ status: 409, code: "UNCLASSIFIED_SOURCE_LINK" });
-    expect((await prisma.brainArticle.findUniqueOrThrow({ where: { id: original.id } })).archivedAt).toBeNull();
-    expect((await prisma.brainSource.findUniqueOrThrow({ where: { id: removed.id } })).archivedAt).toBeNull();
+      .resolves.toEqual({ id: removed.id, status: "archived" });
+    const archived = await prisma.brainArticle.findUniqueOrThrow({ where: { id: original.id }, include: { versions: true } });
+    expect(archived.archivedAt).toBeInstanceOf(Date);
+    const originalVersion = archived.versions.find((version) => version.bodyMd === "Independently written body");
+    expect(originalVersion).toBeDefined();
+    expect(await prisma.artifactInputLineage.findFirst({ where: { artifactType: "BrainArticleVersion", artifactId: originalVersion!.id },
+      orderBy: { revision: "desc" } })).toMatchObject({ origin: "HUMAN_ORIGINAL", rootsJson: [] });
+    expect((await prisma.brainSource.findUniqueOrThrow({ where: { id: removed.id } })).archivedAt).toBeInstanceOf(Date);
   });
 
   it("defaults off for linked sources while generic archive stays guarded and unlinked archiving works", async () => {
@@ -173,7 +179,8 @@ describe("Brain source removal review", () => {
     await expect(listBrainSourceRemovalReviews(member, { workspaceId: workspace.id, sourceIds: [removed.id] }))
       .rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
     const [review] = await listBrainSourceRemovalReviews(actor, { workspaceId: workspace.id, sourceIds: [removed.id] });
-    expect(review.articles).toEqual([]);
+    expect(review.articles).toMatchObject([{ id: article.id, title: "Article unavailable", currentBodyMd: null,
+      candidateBodyMd: "Facts from remaining source only" }]);
     await prisma.brainSource.update({ where: { id: remaining.id }, data: { content: "Changed after candidate generation" } });
     const [staleReview] = await listBrainSourceRemovalReviews(actor, { workspaceId: workspace.id, sourceIds: [removed.id] });
     expect(staleReview.articles).toEqual([]);
@@ -397,4 +404,94 @@ describe("Brain source removal review", () => {
     expect(payload.phase).toBe("REJECTED");
     expect(Object.values(payload.candidates)).toEqual(["New proposal"]);
   });
+  it("preserves a proven human original while detaching citation-only source metadata", async () => {
+    const { workspace, actor, removed } = await fixture();
+    const article = await prisma.brainArticle.create({ data: { workspaceId: workspace.id,
+      slug: "independent-original", title: "Human original", type: "PROJECT", bodyMd: "Original human work", sourceIds: [removed.id] } });
+    await prisma.$transaction((tx) => recordArtifactInputLineage({ tx, actor, workspaceId: workspace.id,
+      artifact: { kind: "BrainArticle", id: article.id }, content: article, origin: "HUMAN_ORIGINAL", inputs: [] }));
+    await expect(deleteSource(actor, { workspaceId: workspace.id, sourceId: removed.id }))
+      .resolves.toEqual({ id: removed.id, status: "archived" });
+    expect(await prisma.brainArticle.findUniqueOrThrow({ where: { id: article.id } }))
+      .toMatchObject({ bodyMd: "Original human work", archivedAt: null, sourceIds: [] });
+    expect(await prisma.artifactInputLineage.findFirst({ where: { artifactId: article.id }, orderBy: { revision: "desc" } }))
+      .toMatchObject({ origin: "HUMAN_ORIGINAL", rootsJson: [] });
+  });
+
+  it("rebuilds snapshot-derived content after exclusion archive without copying contaminated retained sources", async () => {
+    const { workspace, actor, removed, remaining } = await fixture();
+    const copied = await prisma.brainSource.create({ data: { workspaceId: workspace.id, sourceType: "CONVERSATION", tier: 3,
+      title: "Contaminated copy", content: "Copied removed facts" } });
+    await prisma.$transaction((tx) => recordArtifactInputLineage({ tx, actor, workspaceId: workspace.id,
+      artifact: { kind: "BrainSource", id: copied.id }, content: copied, origin: "DERIVED", inputs: [{ kind: "BrainSource", id: removed.id }] }));
+    const article = await prisma.brainArticle.create({ data: { workspaceId: workspace.id,
+      slug: "snapshot-derived", title: "Withdrawn title", type: "PROJECT", bodyMd: "Old edited composite", humanEditedAt: new Date(), sourceIds: [] } });
+    await prisma.$transaction(async (tx) => {
+      const snapshot = await captureArtifactInputSnapshotProof(actor, workspace.id,
+        { kind: "BrainSource", id: copied.id, fingerprint: brainSourceContentFingerprint(copied) }, tx);
+      await recordArtifactInputLineage({ tx, actor, workspaceId: workspace.id,
+        artifact: { kind: "BrainArticle", id: article.id }, content: article, origin: "DERIVED",
+        inputs: [{ kind: "BrainSource", id: remaining.id }], inheritedRoots: snapshot });
+    });
+    const request = await deleteSource(actor, { workspaceId: workspace.id, sourceId: removed.id });
+    if (request.status !== "pending") throw new Error("Expected candidate review");
+    await prisma.brainSource.update({ where: { id: removed.id }, data: { archivedAt: new Date() } });
+    await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "RUNNING" } });
+    const generate = vi.fn(async () => "Independent replacement");
+    await expect(generateBrainSourceRemovalCandidate({ workspaceId: workspace.id, jobId: request.jobId,
+      expectedAttempt: 0, expectedOwner: null, generate })).resolves.toEqual({ phase: "READY", candidateCount: 1 });
+    expect(generate).toHaveBeenCalledWith({ id: article.id, title: remaining.title }, [expect.objectContaining({ id: remaining.id })]);
+    await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "COMPLETED" } });
+    const [review] = await listBrainSourceRemovalReviews(actor, { workspaceId: workspace.id, sourceIds: [removed.id] });
+    expect(review.articles).toMatchObject([{ id: article.id, title: "Article unavailable", currentBodyMd: null,
+      candidateTitle: remaining.title, candidateBodyMd: "Independent replacement" }]);
+    expect(JSON.stringify(review)).not.toContain("Withdrawn title");
+    await expect(resolveBrainSourceRemoval(actor, { workspaceId: workspace.id, jobId: request.jobId, decision: "accept" }))
+      .resolves.toMatchObject({ status: "applied" });
+    const updated = await prisma.brainArticle.findUniqueOrThrow({ where: { id: article.id }, include: { versions: true } });
+    expect(updated).toMatchObject({ bodyMd: "Independent replacement", sourceIds: [remaining.id], title: remaining.title });
+    expect(updated.versions).toMatchObject([{ bodyMd: "Old edited composite" }]);
+  });
+
+  it("discovers historical manifest ancestry and uses only current independent retained content", async () => {
+    const { workspace, actor, removed, remaining } = await fixture();
+    const copied = await prisma.brainSource.create({ data: { workspaceId: workspace.id, sourceType: "CONVERSATION", tier: 3,
+      title: "Old copy", content: "Old removed copy" } });
+    await prisma.$transaction((tx) => recordArtifactInputLineage({ tx, actor, workspaceId: workspace.id,
+      artifact: { kind: "BrainSource", id: copied.id }, content: copied, origin: "DERIVED", inputs: [{ kind: "BrainSource", id: removed.id }] }));
+    const article = await prisma.brainArticle.create({ data: { workspaceId: workspace.id, slug: "historical-derived",
+      title: "Old title", type: "PROJECT", bodyMd: "Historical generated body", sourceIds: [] } });
+    await attestArticle(actor, workspace.id, article.id, [copied.id, remaining.id]);
+    const fresh = await prisma.brainSource.update({ where: { id: copied.id }, data: { title: "Fresh copy", content: "Clean retained facts" } });
+    await prisma.$transaction((tx) => recordArtifactInputLineage({ tx, actor, workspaceId: workspace.id,
+      artifact: { kind: "BrainSource", id: copied.id }, content: fresh, origin: "DERIVED", inputs: [{ kind: "BrainSource", id: remaining.id }] }));
+    const request = await deleteSource(actor, { workspaceId: workspace.id, sourceId: removed.id });
+    if (request.status !== "pending") throw new Error("Expected candidate review");
+    await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "RUNNING" } });
+    const generate = vi.fn(async (_article: { id: string; title: string }, _sources: Array<{ id: string; title: string | null; content: string }>) => "Clean output");
+    await generateBrainSourceRemovalCandidate({ workspaceId: workspace.id, jobId: request.jobId, expectedAttempt: 0, expectedOwner: null, generate });
+    expect(generate.mock.calls[0]?.[1]).toEqual(expect.arrayContaining([expect.objectContaining({ id: copied.id, content: "Clean retained facts" })]));
+    expect(JSON.stringify(generate.mock.calls)).not.toContain("Old removed copy");
+  });
+
+  it("makes an archived exclusion stale on restore and refuses an implicit retry of the restored source", async () => {
+    const { workspace, actor, removed, remaining } = await fixture();
+    const article = await prisma.brainArticle.create({ data: { workspaceId: workspace.id, slug: "restore-race",
+      title: "Derived", type: "PROJECT", bodyMd: "Before", sourceIds: [removed.id, remaining.id] } });
+    await attestArticle(actor, workspace.id, article.id, [removed.id, remaining.id]);
+    const request = await deleteSource(actor, { workspaceId: workspace.id, sourceId: removed.id });
+    if (request.status !== "pending") throw new Error("Expected candidate review");
+    await prisma.brainSource.update({ where: { id: removed.id }, data: { archivedAt: new Date() } });
+    await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "RUNNING" } });
+    await expect(generateBrainSourceRemovalCandidate({ workspaceId: workspace.id, jobId: request.jobId,
+      expectedAttempt: 0, expectedOwner: null, generate: async () => {
+        await prisma.brainSource.update({ where: { id: removed.id }, data: { archivedAt: null } });
+        return "Never commit";
+      } })).resolves.toEqual({ phase: "STALE" });
+    await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "COMPLETED" } });
+    await expect(retryBrainSourceRemoval(actor, { workspaceId: workspace.id, jobId: request.jobId }))
+      .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(await prisma.brainArticle.findUniqueOrThrow({ where: { id: article.id } })).toMatchObject({ bodyMd: "Before" });
+  });
+
 });

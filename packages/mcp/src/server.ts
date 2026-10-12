@@ -415,7 +415,7 @@ const memberUserInclude = {
   },
 };
 
-async function loadActionWorkItemResponse(workspaceId: string, actionId: string, fallback: any) {
+async function loadActionWorkItemResponse(actor: AppActor, workspaceId: string, actionId: string, fallback: any) {
   const action = await prisma.action.findFirst({
     where: { id: actionId, workspaceId },
     include: {
@@ -423,14 +423,15 @@ async function loadActionWorkItemResponse(workspaceId: string, actionId: string,
     },
   }) ?? fallback;
   if (!action?.id) return action;
-  const requestCountSummaries = await loadAdviceRequestCountSummaries(workspaceId, "ACTION", [action.id]);
+  if (!(await readableArtifactIds(actor, workspaceId, "Action", [action])).has(action.id)) return { id: action.id, contentWithheld: true };
+  const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "ACTION", [action.id]);
   return {
     ...action,
     ...requestCountSummaries.get(action.id),
   };
 }
 
-async function loadTensionWorkItemResponse(workspaceId: string, tensionId: string, fallback: any) {
+async function loadTensionWorkItemResponse(actor: AppActor, workspaceId: string, tensionId: string, fallback: any) {
   const tension = await prisma.tension.findFirst({
     where: { id: tensionId, workspaceId },
     include: {
@@ -440,7 +441,8 @@ async function loadTensionWorkItemResponse(workspaceId: string, tensionId: strin
     },
   }) ?? fallback;
   if (!tension?.id) return tension;
-  const requestCountSummaries = await loadAdviceRequestCountSummaries(workspaceId, "TENSION", [tension.id]);
+  if (!(await readableArtifactIds(actor, workspaceId, "Tension", [tension])).has(tension.id)) return { id: tension.id, contentWithheld: true };
+  const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "TENSION", [tension.id]);
   return {
     ...tension,
     ...requestCountSummaries.get(tension.id),
@@ -1379,7 +1381,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         listActions(actor, workspaceId, { take: 100 }),
         listProposals(actor, workspaceId, { take: 50 }),
         listTensions(actor, workspaceId, { take: 50 }),
-        listMeetings(workspaceId),
+        listMeetings(actor, workspaceId),
       ]);
 
       const recentActions = actions.items
@@ -2833,7 +2835,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           duplicateGuard: duplicateGuardOptionsFromParams(params),
           source: params.idempotencyKey === undefined ? undefined : actionRequestSource("MCP_REQUEST", sessionActorId, params.idempotencyKey),
         });
-        const actionForResponse = await loadActionWorkItemResponse(workspaceId, action.id, action);
+        const actionForResponse = await loadActionWorkItemResponse(actor, workspaceId, action.id, action);
         const permanent = await permanentUrl(workspaceId, "Action", action.id);
         const item = normalizeActionWorkItem(actionForResponse);
         return jsonResult({
@@ -2913,7 +2915,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         }
         throw error;
       }
-      const actionForResponse = await loadActionWorkItemResponse(workspaceId, updated.id, updated);
+      const actionForResponse = await loadActionWorkItemResponse(actor, workspaceId, updated.id, updated);
       const item = normalizeActionWorkItem(actionForResponse);
       return jsonResult({
         id: item.id,
@@ -3061,7 +3063,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           authorMemberId: params.authorMemberId,
           duplicateGuard: duplicateGuardOptionsFromParams(params),
         });
-        const tensionForResponse = await loadTensionWorkItemResponse(workspaceId, tension.id, tension);
+        const tensionForResponse = await loadTensionWorkItemResponse(actor, workspaceId, tension.id, tension);
         const permanent = await permanentUrl(workspaceId, "Tension", tension.id);
         const item = normalizeTensionWorkItem(tensionForResponse);
         return jsonResult({
@@ -3145,7 +3147,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         }
         throw error;
       }
-      const tensionForResponse = await loadTensionWorkItemResponse(workspaceId, updated.id, updated);
+      const tensionForResponse = await loadTensionWorkItemResponse(actor, workspaceId, updated.id, updated);
       const item = normalizeTensionWorkItem(tensionForResponse);
       return jsonResult({
         id: item.id,
@@ -3556,7 +3558,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     async ({ includeInactive }: { includeInactive?: boolean }) => {
       requireScope(sessionCtx, "members:read");
       const members = includeInactive
-        ? await listMembersEnriched(workspaceId, { includeInactive: true })
+        ? await listMembersEnriched(actor, workspaceId, { includeInactive: true })
         : await listMembers(workspaceId);
       const simplified = members.map((m) => ({
         id: m.id,
@@ -3854,7 +3856,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
     async ({ archiveFilter }: { archiveFilter?: typeof ARCHIVE_FILTER[number] }) => {
       requireScope(sessionCtx, "meetings:read");
-      const meetings = await listMeetings(workspaceId, { archiveFilter });
+      const meetings = await listMeetings(actor, workspaceId, { archiveFilter });
       const simplified = meetings.map((m) => ({
         id: m.id,
         title: m.title,
@@ -3876,7 +3878,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
     async ({ meetingId }: { meetingId: string }) => {
       requireScope(sessionCtx, "meetings:read");
-      const meeting = await getMeeting(workspaceId, meetingId);
+      const meeting = await getMeeting(actor, workspaceId, meetingId);
       if (!meeting) return jsonResult({ error: "Not found" });
       return jsonResult({
         ...meeting,
@@ -4441,6 +4443,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         workspaceId,
         slug: params.slug,
         bodyMd: params.bodyMd,
+        copied: true,
         targetType: params.targetType ?? "ARTICLE",
         targetRef: params.targetRef ?? null,
       });
@@ -4461,8 +4464,8 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
     async ({ threadId, bodyMd }: { threadId: string; bodyMd: string }) => {
       requireScope(sessionCtx, "brain:write");
-      const comment = await addDiscussionComment(actor, { workspaceId, threadId, bodyMd });
-      return jsonResult({ id: comment.id, threadId: comment.threadId });
+      const comment = await addDiscussionComment(actor, { workspaceId, threadId, bodyMd, copied: true });
+      return jsonResult({ id: comment.id, threadId: comment.threadId, ...("contentWithheld" in comment ? { contentWithheld: true } : {}) });
     },
   );
 
@@ -4489,7 +4492,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     {},
     async () => {
       requireScope(sessionCtx, "circles:read");
-      const circles = await listCircles(workspaceId);
+      const circles = await listCircles(actor, workspaceId);
       const simplified = circles.map((c) => ({
         id: c.id,
         name: c.name,
@@ -4513,7 +4516,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     {},
     async () => {
       requireScope(sessionCtx, "governance:read");
-      const constitution = await getCurrentConstitution(workspaceId);
+      const constitution = await getCurrentConstitution(actor, workspaceId);
       return jsonResult({
         bodyMd: constitution?.bodyMd ?? null,
         version: constitution?.version ?? null,
@@ -4534,7 +4537,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         title: p.title,
         bodyMd: p.bodyMd,
         acceptedAt: p.acceptedAt,
-        proposal: p.proposal ? { id: p.proposal.id, title: p.proposal.title } : null,
+        proposal: p.proposal ? { id: p.proposal.id, title: p.proposal?.title ?? p.title } : null,
         circle: p.circle ? { id: p.circle.id, name: p.circle.name } : null,
       }));
       return jsonResult(simplified);
@@ -4641,7 +4644,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     { description: "The current version of the workspace constitution", mimeType: "text/markdown" },
     async () => {
       requireScope(sessionCtx, "governance:read");
-      const constitution = await getCurrentConstitution(workspaceId);
+      const constitution = await getCurrentConstitution(actor, workspaceId);
       return {
         contents: [{
           uri: "corgtex://workspace/constitution",
@@ -4664,7 +4667,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         title: p.title,
         bodyMd: p.bodyMd,
         acceptedAt: p.acceptedAt,
-        proposal: p.proposal ? { id: p.proposal.id, title: p.proposal.title } : null,
+        proposal: p.proposal ? { id: p.proposal.id, title: p.proposal?.title ?? p.title } : null,
         circle: p.circle ? { id: p.circle.id, name: p.circle.name } : null,
       }));
       return {

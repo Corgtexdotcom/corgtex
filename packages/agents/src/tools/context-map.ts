@@ -8,11 +8,13 @@ import {
   createContextGraphProposedDiff,
   getContextMapData,
   type ContextGraphDiffInput,
+  type LineageRoot,
 } from "@corgtex/domain";
 import type { ConversationPageContext } from "../page-context";
 
 type ContextMapToolContext = {
   workspaceId: string;
+  lineageRoots?: LineageRoot[];
   pageContext?: ConversationPageContext | null;
 };
 
@@ -222,6 +224,7 @@ async function createContextMapDiffAction(actor: AppActor, ctx: ContextMapToolCo
   await requireContextMapAi(ctx.workspaceId);
   const proposedDiff = await createContextGraphProposedDiff(actor, {
     workspaceId: ctx.workspaceId,
+    lineageInputs: [], lineageRoots: ctx.lineageRoots,
     reason: typeof args.reason === "string" ? args.reason : "Context map chat proposed a graph change.",
     diff: normalizeDiff(args.diff),
     evidence: graphEvidence(ctx, args.evidence),
@@ -237,6 +240,7 @@ async function applyContextMapDiffAction(actor: AppActor, ctx: ContextMapToolCon
   await requireContextMapAi(ctx.workspaceId);
   const proposedDiff = await createContextGraphProposedDiff(actor, {
     workspaceId: ctx.workspaceId,
+    lineageInputs: [], lineageRoots: ctx.lineageRoots,
     reason: typeof args.reason === "string" ? args.reason : "Context map chat applied a graph change.",
     diff: normalizeDiff(args.diff),
     evidence: graphEvidence(ctx, args.evidence),

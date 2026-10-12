@@ -14,8 +14,14 @@ const {
   isSlackThreadFollowupSuppressedMock,
   checkSlackThreadNudgeMock,
   slackSourceLinkMock,
+  captureProofMock,
+  proofReadableMock,
+  recordLineageMock,
 } = vi.hoisted(() => ({
   prismaMock: {
+    $transaction: vi.fn(),
+    $queryRaw: vi.fn(),
+    $executeRaw: vi.fn(),
     workspaceAgentConfig: {
       findUnique: vi.fn(),
     },
@@ -30,10 +36,12 @@ const {
       count: vi.fn(),
     },
     communicationChannel: {
+      findFirst: vi.fn(),
       findMany: vi.fn(),
       findUnique: vi.fn(),
     },
     communicationContextSummary: {
+      findUnique: vi.fn(),
       upsert: vi.fn(),
       deleteMany: vi.fn(),
     },
@@ -66,6 +74,9 @@ const {
   isSlackThreadFollowupSuppressedMock: vi.fn(),
   checkSlackThreadNudgeMock: vi.fn(),
   slackSourceLinkMock: vi.fn(),
+  captureProofMock: vi.fn(),
+  proofReadableMock: vi.fn(),
+  recordLineageMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -92,6 +103,13 @@ vi.mock("@corgtex/models", () => ({
 }));
 
 vi.mock("@corgtex/domain", async () => ({
+  captureArtifactInputProof: captureProofMock,
+  isArtifactInputProofReadable: proofReadableMock,
+  recordArtifactInputLineage: recordLineageMock,
+  lineageContentFingerprint: (_kind: string, row: unknown) => JSON.stringify(row),
+  invariant: (condition: boolean, _status: number, code: string, message: string) => {
+    if (!condition) throw Object.assign(new Error(message), { code });
+  },
   isSlackNudgeWindowOpen: (await import("../../../domain/src/slack-nudge-window")).isSlackNudgeWindowOpen,
   AGENT_REGISTRY: {
     "slack-agent": {
@@ -203,6 +221,12 @@ describe("Slack context jobs", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    prismaMock.$transaction.mockImplementation(async (callback) => callback(prismaMock));
+    captureProofMock.mockResolvedValue([{ kind: "CommunicationMessage", id: "message-1", fingerprint: "synthetic" }]);
+    proofReadableMock.mockResolvedValue(true);
+    recordLineageMock.mockResolvedValue({ id: "receipt-1" });
+    prismaMock.communicationContextSummary.findUnique.mockResolvedValue(null);
+    prismaMock.communicationChannel.findFirst.mockResolvedValue({ id: "channel-1", installationId: "install-1", workspaceId: "workspace-1", provider: "SLACK", externalChannelId: "C1", name: "general", kind: "PUBLIC", isIngestEnabled: true, isArchived: false });
     linkedEvidenceMock.mockResolvedValue([]);
     prismaMock.workspaceAgentConfig.findUnique.mockResolvedValue({
       configJson: { proactiveActionPublicationEnabled: true },
@@ -260,7 +284,7 @@ describe("Slack context jobs", () => {
   });
 
   it("summarizes stored Slack messages into durable context summaries", async () => {
-    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([
+    prismaMock.communicationMessage.findMany.mockResolvedValue([
       candidate({ id: "message-1", text: "Alice owns the launch checklist." }),
       candidate({ id: "message-2", externalMessageId: "1714320100.000100", text: "Bob will confirm the support window." }),
     ]);

@@ -3,6 +3,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const { prismaMock, markStaleContextGraphFactsMock, enqueueJobMock } = vi.hoisted(() => ({
   prismaMock: {
     member: { findMany: vi.fn() },
+    brainArticle: { findMany: vi.fn() },
+    proposal: { findMany: vi.fn() },
+    action: { findMany: vi.fn() },
+    tension: { findMany: vi.fn() },
+    circle: { findMany: vi.fn() },
+    role: { findMany: vi.fn() },
+    document: { findMany: vi.fn() },
+
     goal: { findMany: vi.fn() },
     agentIdentity: { findMany: vi.fn() },
     $transaction: vi.fn(),
@@ -27,6 +35,17 @@ vi.mock("../outbox", () => ({
 describe("context graph maintenance handlers", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    prismaMock.member.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.goal.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.agentIdentity.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.brainArticle.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.proposal.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.action.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.tension.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.circle.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.role.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.document.findMany.mockReset().mockResolvedValue([]);
+
     vi.unstubAllEnvs();
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
   });
@@ -90,4 +109,22 @@ describe("context graph maintenance handlers", () => {
       dedupeKey: "ws-1:context-graph-reconcile:AGENT_IDENTITY:agent-1:2026-06-09",
     });
   });
+  it("reconciles subsequent keyset pages and every native content family", async () => {
+    const first = Array.from({ length: 1000 }, (_, index) => ({ id: `m-${String(index).padStart(4, "0")}` }));
+    prismaMock.member.findMany.mockResolvedValueOnce(first).mockResolvedValueOnce([{ id: "m-1000" }]);
+    for (const [kind, id] of [["brainArticle", "a"], ["proposal", "p"], ["action", "w"], ["tension", "t"], ["circle", "c"], ["role", "r"], ["document", "d"]] as const) {
+      prismaMock[kind].findMany.mockResolvedValueOnce([{ id }]);
+    }
+    const { handleContextGraphReconcile } = await import("./context-graph-maintenance");
+    await expect(handleContextGraphReconcile("job", { dateISO: "2026-10-12" }, "ws-1")).resolves.toEqual({ enqueued: 1008 });
+    expect(prismaMock.member.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      where: { workspaceId: "ws-1", id: { gt: "m-0999" } }, orderBy: { id: "asc" }, take: 1000,
+    }));
+    expect(prismaMock.role.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { circle: { workspaceId: "ws-1" } } }));
+    expect(enqueueJobMock.mock.calls.map((call) => call[1].payload.sourceType)).toEqual(expect.arrayContaining([
+      "BRAIN_ARTICLE", "PROPOSAL", "ACTION", "TENSION", "CIRCLE", "ROLE", "DOCUMENT",
+    ]));
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(9);
+  });
+
 });

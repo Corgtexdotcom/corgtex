@@ -5,6 +5,7 @@ import {
   listAgentConfigs,
   listAgentCredentials,
   listAgentIdentities,
+  listAgentRuns,
   type AgentAuthoritySummary,
 } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
@@ -206,33 +207,8 @@ export async function AgentRegistryTab({
     listAgentConfigs(actor, workspaceId),
     listAgentCredentials(actor, workspaceId),
     getModelUsageBudget(actor, workspaceId),
-    prisma.agentRun.findMany({
-      where: { workspaceId },
-      orderBy: { createdAt: "desc" },
-      take: 100,
-      select: {
-        id: true,
-        agentKey: true,
-        status: true,
-        goal: true,
-        approvalRequired: true,
-        createdAt: true,
-        startedAt: true,
-      },
-    }),
-    prisma.agentRun.findMany({
-      where: { workspaceId, status: "WAITING_APPROVAL" },
-      orderBy: { createdAt: "desc" },
-      select: {
-        id: true,
-        agentKey: true,
-        status: true,
-        goal: true,
-        approvalRequired: true,
-        createdAt: true,
-        startedAt: true,
-      },
-    }),
+    listAgentRuns(actor, workspaceId, { take: 100 }),
+    listAgentRuns(actor, workspaceId, { status: "WAITING_APPROVAL", take: null }),
     prisma.agentRun.groupBy({
       by: ["agentKey"],
       where: { workspaceId, createdAt: { gte: thirtyDaysAgo } },

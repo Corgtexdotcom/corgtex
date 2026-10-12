@@ -8,6 +8,8 @@ import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import { invariant } from "./errors";
+import { currentArtifactInputRoots, invalidateArtifactInputLineage, readableArtifactIds, recordArtifactInputLineage } from "./source-lineage";
+import { meetingAgendaInputProjection, meetingTranscriptInputProjection, readMeetingInputBatches } from "./meeting-intelligence-context";
 import { requireMeetingProcessedContentEditor } from "./collaborative-permissions";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { extractSupportedMeetingUrlFromText, meetingUrlHash, normalizeMeetingUrl, normalizeRecorderMeetingUrl } from "./meeting-urls";
@@ -637,6 +639,7 @@ async function updateMeetingWithTranscriptTx(
 }
 
 export type ListMeetingsOptions = {
+  take?: number;
   archiveFilter?: ArchiveFilter;
   status?: MeetingStatus;
   memberId?: string | null;
@@ -652,7 +655,26 @@ function meetingDateRangeWhere(from?: Date, to?: Date): Prisma.DateTimeFilter | 
   return Object.keys(filter).length > 0 ? filter : undefined;
 }
 
-export async function listMeetings(workspaceId: string, opts?: ListMeetingsOptions) {
+async function projectMeetingsForReader<T extends { id: string }>(actor: AppActor, workspaceId: string, meetings: T[]) {
+  const rawIds = await readableArtifactIds(actor, workspaceId, "MeetingTranscript",
+    meetings.map((meeting) => meetingTranscriptInputProjection(meeting) as { id: string }));
+  const derivedIds = await readableArtifactIds(actor, workspaceId, "Meeting", meetings);
+  const agendaIds = await readableArtifactIds(actor, workspaceId, "MeetingAgenda",
+    meetings.map((meeting) => meetingAgendaInputProjection(meeting) as { id: string }));
+  return meetings.filter((meeting) => rawIds.has(meeting.id)).map((meeting) => {
+    const projected = { ...meeting } as T & { summaryMd?: string | null; blocksJson?: unknown; decisionsJson?: unknown; agendaJson?: unknown };
+    if (!derivedIds.has(meeting.id)) {
+      if ("summaryMd" in projected) projected.summaryMd = null;
+      if ("blocksJson" in projected) projected.blocksJson = null;
+      if ("decisionsJson" in projected) projected.decisionsJson = null;
+    }
+    if (!agendaIds.has(meeting.id) && "agendaJson" in projected) projected.agendaJson = null;
+    return projected;
+  });
+}
+
+export async function listMeetings(actor: AppActor, workspaceId: string, opts?: ListMeetingsOptions) {
+  await requireWorkspaceMembership({ actor, workspaceId });
   const memberIds = [...new Set([...(opts?.memberIds ?? []), opts?.memberId]
     .map((value) => value?.trim())
     .filter((value): value is string => Boolean(value)))];
@@ -679,7 +701,7 @@ export async function listMeetings(workspaceId: string, opts?: ListMeetingsOptio
   ])];
   const participantEmails = [...new Set(members.map((member) => member.user.email))];
   const recordedAt = meetingDateRangeWhere(opts?.recordedFrom, opts?.recordedTo);
-  return prisma.meeting.findMany({
+  return readMeetingInputBatches((page) => prisma.meeting.findMany({
     where: {
       workspaceId,
       ...(opts?.status ? { status: opts.status } : {}),
@@ -694,141 +716,95 @@ export async function listMeetings(workspaceId: string, opts?: ListMeetingsOptio
         : {}),
       ...archiveFilterWhere(opts?.archiveFilter),
     },
-    orderBy: { recordedAt: opts?.status === "SCHEDULED" ? "asc" : "desc" },
-  });
+    orderBy: [{ recordedAt: opts?.status === "SCHEDULED" ? "asc" : "desc" }, { id: "asc" }], ...page,
+  }), (rows) => projectMeetingsForReader(actor, workspaceId, rows), opts?.take);
 }
 
-export async function listUpcomingMeetings(workspaceId: string, opts?: { from?: Date; to?: Date }) {
+export async function listUpcomingMeetings(actor: AppActor, workspaceId: string, opts?: { from?: Date; to?: Date; take?: number }) {
+  await requireWorkspaceMembership({ actor, workspaceId });
   const from = opts?.from ?? new Date();
   const to = opts?.to ?? addDays(from, DEFAULT_OCCURRENCE_LOOKAHEAD_DAYS);
-  return prisma.meeting.findMany({
+  return readMeetingInputBatches((page) => prisma.meeting.findMany({
     where: {
       workspaceId,
       status: "SCHEDULED",
       archivedAt: null,
       recordedAt: { gte: from, lte: to },
     },
-    orderBy: { recordedAt: "asc" },
-  });
+    orderBy: [{ recordedAt: "asc" }, { id: "asc" }], ...page,
+  }), (rows) => projectMeetingsForReader(actor, workspaceId, rows), opts?.take);
 }
 
-export async function getMeeting(workspaceId: string, meetingId: string, opts?: { includeArchived?: boolean }) {
-  const meeting = await prisma.meeting.findFirst({
-    where: {
-      id: meetingId,
-      workspaceId,
-      ...(opts?.includeArchived ? {} : { archivedAt: null }),
-    },
-    include: {
-      series: true,
-      insights: {
-        orderBy: [
-          { sourceRecordedAt: { sort: "desc", nulls: "last" } },
-          { createdAt: "desc" },
-        ],
-      },
-      proposals: {
-        include: {
-          author: {
-            select: {
-              displayName: true,
-              email: true,
-            },
-          },
-          tensions: {
-            select: {
-              id: true,
-              title: true,
-              status: true,
-            },
-          },
-          actions: {
-            select: {
-              id: true,
-              title: true,
-              status: true,
-            },
-          },
-        },
-        orderBy: { createdAt: "desc" },
-      },
-      tensions: {
-        include: {
-          author: {
-            select: {
-              displayName: true,
-              email: true,
-            },
-          },
-        },
-        orderBy: { createdAt: "desc" },
-      },
-    },
-  });
+export async function getMeeting(actor: AppActor, workspaceId: string, meetingId: string, opts?: { includeArchived?: boolean }) {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const meeting = await prisma.meeting.findFirst({ where: { id: meetingId, workspaceId,
+    ...(opts?.includeArchived ? {} : { archivedAt: null }) }, include: { series: true } });
   if (!meeting) return null;
-
-  const raisedActionIds = [...new Set(meeting.insights
-    .filter((insight) => (
-      insight.status === "APPLIED"
-      && insight.appliedEntityType === "Action"
-      && insight.appliedEntityId
-      && insight.operation === "CREATE"
-      && (insight.type === "ACTION_ITEM" || insight.type === "FOLLOW_UP")
-    ))
-    .map((insight) => insight.appliedEntityId as string))];
-  const raisedActions = raisedActionIds.length > 0
-    ? await prisma.action.findMany({
-      where: {
-        workspaceId,
-        id: { in: raisedActionIds },
-        archivedAt: null,
-      },
-      include: {
-        author: {
-          select: {
-            displayName: true,
-            email: true,
-          },
-        },
-        assigneeMember: {
-          include: {
-            user: {
-              select: {
-                displayName: true,
-                email: true,
-              },
-            },
-          },
-        },
-      },
-      orderBy: { createdAt: "desc" },
-    })
-    : [];
-
-  return {
-    ...meeting,
-    raisedActions,
+  const projectedMeeting = (await projectMeetingsForReader(actor, workspaceId, [meeting]))[0];
+  if (!projectedMeeting) return null;
+  const admit = <T extends { id: string }>(kind: "MeetingInsight" | "Proposal" | "Tension" | "Action") => async (rows: T[]) => {
+    const ids = await readableArtifactIds(actor, workspaceId, kind, rows);
+    return rows.filter((row) => ids.has(row.id));
   };
+  const hasDerivedReceipt = (await readableArtifactIds(actor, workspaceId, "Meeting", [meeting])).has(meeting.id);
+  const [insights, proposalRows, tensions, visibleSeries] = await Promise.all([
+    hasDerivedReceipt ? readMeetingInputBatches((page) => prisma.meetingInsight.findMany({ where: { workspaceId, meetingId },
+      orderBy: [{ sourceRecordedAt: { sort: "desc", nulls: "last" } }, { createdAt: "desc" }, { id: "asc" }], ...page }),
+    admit("MeetingInsight")) : Promise.resolve([]),
+    readMeetingInputBatches((page) => prisma.proposal.findMany({ where: { workspaceId, meetingId, archivedAt: null },
+      include: { author: { select: { id: true, displayName: true, email: true } } },
+      orderBy: [{ createdAt: "desc" }, { id: "asc" }], ...page }), admit("Proposal")),
+    readMeetingInputBatches((page) => prisma.tension.findMany({ where: { workspaceId, meetingId, archivedAt: null },
+      include: { author: { select: { id: true, displayName: true, email: true } } },
+      orderBy: [{ createdAt: "desc" }, { id: "asc" }], ...page }), admit("Tension")),
+    meeting.series ? readableArtifactIds(actor, workspaceId, "MeetingSeries", [meeting.series]) : Promise.resolve(new Set<string>()),
+  ]);
+  if (meeting.series && !visibleSeries.has(meeting.series.id)) projectedMeeting.series = null;
+  const proposals = await Promise.all(proposalRows.map(async (proposal) => {
+    const [relatedTensions, relatedActions] = await Promise.all([
+      readMeetingInputBatches((page) => prisma.tension.findMany({ where: { workspaceId, proposalId: proposal.id, archivedAt: null },
+        orderBy: { id: "asc" }, ...page }), admit("Tension")),
+      readMeetingInputBatches((page) => prisma.action.findMany({ where: { workspaceId, proposalId: proposal.id, archivedAt: null },
+        orderBy: { id: "asc" }, ...page }), admit("Action")),
+    ]);
+    return { ...proposal, tensions: relatedTensions, actions: relatedActions };
+  }));
+  const raisedActionIds = [...new Set(insights.filter((insight) => insight.status === "APPLIED"
+    && insight.appliedEntityType === "Action" && insight.appliedEntityId && insight.operation === "CREATE"
+    && (insight.type === "ACTION_ITEM" || insight.type === "FOLLOW_UP")).map((insight) => insight.appliedEntityId as string))];
+  const raisedActions = raisedActionIds.length ? await readMeetingInputBatches((page) => prisma.action.findMany({
+    where: { workspaceId, id: { in: raisedActionIds }, archivedAt: null },
+    include: { author: { select: { id: true, displayName: true, email: true } },
+      assigneeMember: { include: { user: { select: { id: true, displayName: true, email: true } } } } },
+    orderBy: [{ createdAt: "desc" }, { id: "asc" }], ...page,
+  }), admit("Action")) : [];
+  // The labels are native profile inputs, whose current workspace membership is checked independently.
+  const users = [...proposals.map((row) => row.author), ...tensions.map((row) => row.author),
+    ...raisedActions.flatMap((row) => [row.author, row.assigneeMember?.user])].filter((row): row is NonNullable<typeof row> => Boolean(row));
+  const userIds = await readableArtifactIds(actor, workspaceId, "User", users);
+  const redactAuthor = <T extends { author: { id: string } | null }>(row: T) => ({ ...row, ...(row.author ? { author: userIds.has(row.author.id) ? row.author : null } : {}) });
+  for (const row of raisedActions) if (row.assigneeMember && !userIds.has(row.assigneeMember.user.id)) row.assigneeMember = null;
+  return { ...projectedMeeting, insights, proposals: proposals.map(redactAuthor), tensions: tensions.map(redactAuthor), raisedActions: raisedActions.map(redactAuthor) };
 }
 
-export async function getMeetingParticipants(workspaceId: string, participantIds: string[]) {
-  return prisma.member.findMany({
-    where: {
-      workspaceId,
-      OR: [
-        { id: { in: participantIds } },
-        { userId: { in: participantIds } },
-      ],
-    },
-    include: {
-      user: { select: { displayName: true, email: true } },
-      roleAssignments: {
-        include: {
-          role: { select: { name: true } },
-        },
-      },
-    },
+export async function getMeetingParticipants(actor: AppActor, workspaceId: string, participantIds: string[]) {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const participants = await readMeetingInputBatches((page) => prisma.member.findMany({
+    where: { workspaceId, OR: [{ id: { in: participantIds } }, { userId: { in: participantIds } }] },
+    include: { user: { select: { id: true, displayName: true, email: true } }, roleAssignments: { include: { role: true } } },
+    orderBy: { id: "asc" }, ...page,
+  }), async (rows) => {
+    const [members, users, assignments, roles] = await Promise.all([
+      readableArtifactIds(actor, workspaceId, "Member", rows),
+      readableArtifactIds(actor, workspaceId, "User", rows.map((row) => row.user)),
+      readableArtifactIds(actor, workspaceId, "RoleAssignment", rows.flatMap((row) => row.roleAssignments)),
+      readableArtifactIds(actor, workspaceId, "Role", rows.flatMap((row) => row.roleAssignments.map((assignment) => assignment.role))),
+    ]);
+    return rows.filter((row) => members.has(row.id) && users.has(row.user.id)).map((row) => ({ ...row,
+      roleAssignments: row.roleAssignments.filter((assignment) => assignments.has(assignment.id) && roles.has(assignment.role.id)),
+    }));
   });
+  return participants.map((row) => ({ ...row, roleAssignments: row.roleAssignments.map((assignment) => ({ ...assignment, role: { name: assignment.role.name } })) }));
 }
 
 export async function createMeetingSeries(actor: AppActor, params: {
@@ -901,6 +877,10 @@ export async function createMeetingSeries(actor: AppActor, params: {
       },
     });
 
+    if (actor.kind === "user") await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "MeetingSeries", id: series.id }, content: series, origin: "HUMAN_ORIGINAL", inputs: [] });
+    else await invalidateArtifactInputLineage({ tx, workspaceId: params.workspaceId,
+      artifact: { kind: "MeetingSeries", id: series.id }, content: series });
     const meetings = await materializeMeetingSeriesOccurrencesTx(tx, series);
 
     await tx.auditLog.create({
@@ -943,14 +923,10 @@ export async function setMeetingSeriesRecorderUrl(actor: AppActor, params: {
   return prisma.$transaction(async (tx) => {
     const series = await tx.meetingSeries.findFirst({
       where: { id: params.seriesId, workspaceId: params.workspaceId, archivedAt: null },
-      select: {
-        id: true,
-        title: true,
-        meetingUrlHash: true,
-      },
     });
     invariant(series, 404, "NOT_FOUND", "Meeting series not found.");
 
+    const priorRoots = await currentArtifactInputRoots(tx, params.workspaceId, { kind: "MeetingSeries", id: series.id }, series);
     const previousHash = series.meetingUrlHash;
     const updatedSeries = await tx.meetingSeries.update({
       where: { id: series.id },
@@ -960,6 +936,11 @@ export async function setMeetingSeriesRecorderUrl(actor: AppActor, params: {
       },
     });
 
+    if (priorRoots && (actor.kind === "user" || priorRoots.length)) await recordArtifactInputLineage({ tx, actor,
+      workspaceId: params.workspaceId, artifact: { kind: "MeetingSeries", id: updatedSeries.id }, content: updatedSeries,
+      origin: priorRoots.length ? "DERIVED" : "HUMAN_ORIGINAL", inputs: [], inheritedRoots: priorRoots });
+    else await invalidateArtifactInputLineage({ tx, workspaceId: params.workspaceId,
+      artifact: { kind: "MeetingSeries", id: updatedSeries.id }, content: updatedSeries });
     const updatedMeetings = await refreshMeetingSeriesRecorderUrlOccurrencesTx(tx, {
       workspaceId: params.workspaceId,
       seriesId: series.id,
@@ -1398,21 +1379,7 @@ export async function updateMeetingProcessedContent(actor: AppActor, params: {
   return prisma.$transaction(async (tx) => {
     const existing = await tx.meeting.findFirst({
       where: { id: params.meetingId, workspaceId: params.workspaceId, archivedAt: null },
-      select: {
-        id: true,
-        title: true,
-        transcript: true,
-        summaryMd: true,
-        ingestionGuidanceMd: true,
-        aiProcessedAt: true,
-        transcriptProcessingProgress: {
-          select: {
-            currentStage: true,
-            completedAt: true,
-            failedAt: true,
-          },
-        },
-      },
+      include: { transcriptProcessingProgress: { select: { currentStage: true, completedAt: true, failedAt: true } } },
     });
     invariant(existing, 404, "NOT_FOUND", "Meeting not found.");
     const processingActive = existing.transcriptProcessingProgress
@@ -1449,6 +1416,7 @@ export async function updateMeetingProcessedContent(actor: AppActor, params: {
     if (editsSummary) data.summaryMd = nextSummaryMd;
     if (editsGuidance) data.ingestionGuidanceMd = nextGuidanceMd;
 
+    const priorRoots = await currentArtifactInputRoots(tx, params.workspaceId, { kind: "Meeting", id: existing.id }, existing);
     let meeting: Awaited<ReturnType<typeof tx.meeting.update>>;
     try {
       meeting = await tx.meeting.update({
@@ -1468,6 +1436,10 @@ export async function updateMeetingProcessedContent(actor: AppActor, params: {
       throw error;
     }
 
+    if (actor.kind === "user" && priorRoots?.length && nextGuidanceMd === existing.ingestionGuidanceMd) await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Meeting", id: meeting.id }, content: meeting, origin: "DERIVED", inputs: [], inheritedRoots: priorRoots });
+    else await invalidateArtifactInputLineage({ tx, workspaceId: params.workspaceId,
+      artifact: { kind: "Meeting", id: meeting.id }, content: meeting });
     await tx.auditLog.create({
       data: {
         workspaceId: params.workspaceId,
@@ -1641,9 +1613,15 @@ export async function createMeeting(actor: AppActor, params: CreateMeetingParams
     meetingUrlHash: normalizedMeetingUrlHash,
     recordedAt: params.recordedAt,
     participantEmails: params.participantEmails,
-  }, params.duplicateGuard);
+  }, params.duplicateGuard, undefined, async (candidates) => {
+    const rows = candidates as Meeting[];
+    const derived = await readableArtifactIds(actor, params.workspaceId, "Meeting", rows);
+    const originals = await readableArtifactIds(actor, params.workspaceId, "MeetingTranscript", rows.map((row) => meetingTranscriptInputProjection(row) as Record<string, unknown> & { id: string }));
+    return rows.filter((row) => row.transcript != null ? originals.has(row.id) : derived.has(row.id))
+      .map((row) => derived.has(row.id) ? row : { ...row, summaryMd: null, blocksJson: null, decisionsJson: null, agendaJson: null });
+  });
   if (duplicateDecision?.resolution === "use_existing") {
-    const existing = await getMeeting(params.workspaceId, duplicateDecision.match.entityId);
+    const existing = await getMeeting(actor, params.workspaceId, duplicateDecision.match.entityId);
     invariant(existing, 404, "NOT_FOUND", "Meeting not found.");
     return existing;
   }

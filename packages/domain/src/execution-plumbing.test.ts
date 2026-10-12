@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
+import { AppError } from "./errors";
+import { captureArtifactInputProof, captureArtifactInputSnapshotProof, isArtifactInputProofReadable, isArtifactInputProofPubliclyShareable, type LineageRoot } from "./source-lineage";
+import { prepareProducerLineage, finishProducerLineage } from "./producer-lineage";
 
 const { prismaMock } = vi.hoisted(() => ({
   prismaMock: {
@@ -95,6 +98,15 @@ vi.mock("./crm", () => ({
   createConversationMessage,
   lockActiveCommunicationSuggestion,
 }));
+vi.mock("./source-lineage", () => ({
+  captureArtifactInputProof: vi.fn(), captureArtifactInputSnapshotProof: vi.fn(),
+  isArtifactInputProofReadable: vi.fn(), isArtifactInputProofPubliclyShareable: vi.fn(),
+}));
+vi.mock("./producer-lineage", () => ({ prepareProducerLineage: vi.fn(), finishProducerLineage: vi.fn() }));
+
+const directSuggestionRoot = { kind: "CrmCommunicationSuggestion" as const, id: "suggestion-1", fingerprint: "a".repeat(64) };
+const publicPromptRoot = { kind: "Document" as const, id: "source-1", fingerprint: "b".repeat(64) };
+const suggestionSnapshotRoot = { kind: "ArtifactInputSnapshot" as const, id: "suggestion-snapshot", fingerprint: "c".repeat(64) };
 
 const actor: AppActor = {
   kind: "user",
@@ -205,6 +217,8 @@ function requestFixture(overrides: Record<string, unknown> = {}) {
     updatedAt: new Date("2026-06-02T10:00:00.000Z"),
     results: [],
     ...overrides,
+    ...(overrides.writebackTargetType === "CRM_COMMUNICATION" && overrides.contextJson === undefined
+      ? { contextJson: { __crmInputReceipt: { version: 1, roots: [suggestionSnapshotRoot, publicPromptRoot] } } } : {}),
   };
 }
 
@@ -214,6 +228,15 @@ describe("execution plumbing domain", () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
+    vi.mocked(captureArtifactInputProof).mockImplementation(async (_actor, _workspaceId, inputs) => inputs.flatMap<LineageRoot>((input) =>
+      input.kind === "CrmCommunicationSuggestion" ? [{ ...directSuggestionRoot, id: input.id }, publicPromptRoot]
+        : [{ kind: input.kind, id: input.id, fingerprint: "d".repeat(64) }]));
+    vi.mocked(captureArtifactInputSnapshotProof).mockResolvedValue([suggestionSnapshotRoot, publicPromptRoot]);
+    vi.mocked(isArtifactInputProofReadable).mockResolvedValue(true);
+    vi.mocked(isArtifactInputProofPubliclyShareable).mockResolvedValue(true);
+    vi.mocked(prepareProducerLineage).mockResolvedValue({ mode: "ADVANCE", before: {}, allowSystemTransition: true });
+    vi.mocked(finishProducerLineage).mockResolvedValue(false);
+    lockActiveCommunicationSuggestion.mockResolvedValue(communicationSuggestionFixture());
     lastCreatedRequestData = null;
     lastCreatedResultData = null;
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
@@ -363,6 +386,7 @@ describe("execution plumbing domain", () => {
       provider: "openwork",
       goal: "Send the relationship follow-up externally",
       writebackTargetType: "communication-suggestion",
+      lineageRoots: [publicPromptRoot],
       writebackTargetId: "suggestion-1",
       idempotencyKey: "crm-request-key",
     });
@@ -413,6 +437,7 @@ describe("execution plumbing domain", () => {
     lockActiveCommunicationSuggestion.mockRejectedValueOnce(Object.assign(new Error("changed"), { code: "CRM_LINK_CLOSURE_CHANGED" }));
     const { createExecutionRequest } = await import("./execution-plumbing");
     await expect(createExecutionRequest(agentActor, { workspaceId: "workspace-1", goal: "Send", provider: "openwork",
+      lineageRoots: [publicPromptRoot],
       writebackTargetType: "CRM_COMMUNICATION", writebackTargetId: "suggestion-1" })).rejects.toMatchObject({ code: "CRM_LINK_CLOSURE_CHANGED" });
     expect(prismaMock.executionRequest.create).not.toHaveBeenCalled();
     expect(prismaMock.crmCommunicationSuggestion.update).not.toHaveBeenCalled();
@@ -1221,5 +1246,70 @@ describe("execution plumbing domain", () => {
         writebackEntityId: "result-1",
       }),
     }));
+  });
+  it("stores exact locked CRM packet receipts, advances suggestion lineage and keeps proofs out of exported packets", async () => {
+    const { createExecutionRequest, getExecutionPacket } = await import("./execution-plumbing");
+    await createExecutionRequest(actor, { workspaceId: "workspace-1", goal: "Send reviewed draft", writebackTargetType: "CRM_COMMUNICATION", writebackTargetId: "suggestion-1" });
+    const data = prismaMock.executionRequest.create.mock.calls[0][0].data;
+    expect(data.contextJson.__crmInputReceipt).toMatchObject({ version: 1, roots: expect.arrayContaining([suggestionSnapshotRoot, publicPromptRoot]) });
+    expect(data.contextJson.__crmInputReceipt.roots).not.toEqual(expect.arrayContaining([directSuggestionRoot]));
+    expect(captureArtifactInputSnapshotProof).toHaveBeenCalledWith(actor, "workspace-1", directSuggestionRoot, prismaMock);
+    expect(prepareProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ tx: prismaMock, actor,
+      artifact: { kind: "CrmCommunicationSuggestion", id: "suggestion-1" }, before: expect.objectContaining({ status: "SUGGESTED" }), allowSystemTransition: true }));
+    expect(finishProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ artifact: { kind: "CrmCommunicationSuggestion", id: "suggestion-1" },
+      content: expect.objectContaining({ status: "REQUESTED", externalRequestId: "request-1" }) }));
+    prismaMock.executionRequest.findFirst.mockResolvedValue(requestFixture({ writebackTargetType: "CRM_COMMUNICATION", contextJson: data.contextJson, status: "IN_PROGRESS" }));
+    const packet = await getExecutionPacket(actor, { workspaceId: "workspace-1", requestId: "request-1" });
+    expect(packet).toMatchObject({ relevantContext: { relationshipCommunication: { bodyMd: "Thanks for the call." } } });
+    expect(JSON.stringify(packet)).not.toContain("__crmInputReceipt");
+    expect(JSON.stringify(packet)).not.toContain(suggestionSnapshotRoot.fingerprint);
+  });
+
+  it("rejects unknown, stale, nonpublic and missing model-context receipts before creating an external packet", async () => {
+    const { createExecutionRequest } = await import("./execution-plumbing");
+    const params = { workspaceId: "workspace-1", goal: "Send", writebackTargetType: "CRM_COMMUNICATION", writebackTargetId: "suggestion-1" };
+    vi.mocked(captureArtifactInputProof).mockRejectedValueOnce(new AppError(409, "UNKNOWN_LINEAGE", "Unproven source."));
+    await expect(createExecutionRequest(actor, params)).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    vi.mocked(captureArtifactInputSnapshotProof).mockRejectedValueOnce(new AppError(409, "SOURCE_CHANGED", "Suggestion changed while locking."));
+    await expect(createExecutionRequest(actor, params)).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    vi.mocked(isArtifactInputProofPubliclyShareable).mockResolvedValueOnce(false);
+    await expect(createExecutionRequest(actor, params)).rejects.toMatchObject({ code: "SOURCE_RESTRICTED" });
+    await expect(createExecutionRequest(actor, { ...params, context: { modelOnlySecret: "Uncaptured prompt" } })).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    await expect(createExecutionRequest(agentActor, params)).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    expect(prismaMock.executionRequest.create).not.toHaveBeenCalled();
+    expect(prismaMock.crmCommunicationSuggestion.update).not.toHaveBeenCalled();
+  });
+
+  it("rechecks CRM packet ancestry for reads, requester changes and idempotent retries before any packet claim", async () => {
+    const request = requestFixture({ writebackTargetType: "CRM_COMMUNICATION" });
+    prismaMock.executionRequest.findFirst.mockResolvedValue(request);
+    prismaMock.executionRequest.findUnique.mockResolvedValue(request);
+    vi.mocked(isArtifactInputProofReadable).mockResolvedValue(false);
+    const { getExecutionPacket, getExecutionRequest, createExecutionRequest } = await import("./execution-plumbing");
+    const otherUser = { ...actor, user: { ...actor.user, id: "other-user" } } as AppActor;
+    await expect(getExecutionPacket(otherUser, { workspaceId: "workspace-1", requestId: request.id })).rejects.toMatchObject({ code: "SOURCE_RESTRICTED" });
+    await expect(getExecutionRequest(actor, { workspaceId: "workspace-1", requestId: request.id })).rejects.toMatchObject({ code: "SOURCE_RESTRICTED" });
+    await expect(createExecutionRequest(actor, { workspaceId: "workspace-1", goal: "Retry", idempotencyKey: "existing" })).rejects.toMatchObject({ code: "SOURCE_RESTRICTED" });
+    expect(prismaMock.executionRequest.updateMany).not.toHaveBeenCalled();
+    expect(prismaMock.executionRequest.create).not.toHaveBeenCalled();
+  });
+
+  it("filters unknown CRM requests and target titles before sampling and enforces an explicit read budget", async () => {
+    const { listExecutionRequests, listWritebackTargets } = await import("./execution-plumbing");
+    prismaMock.executionRequest.findMany.mockResolvedValue([
+      requestFixture({ id: "unknown", writebackTargetType: "CRM_COMMUNICATION", contextJson: null }),
+      requestFixture({ id: "known", writebackTargetType: "CRM_COMMUNICATION" }),
+    ]);
+    expect((await listExecutionRequests(actor, { workspaceId: "workspace-1", take: 1 })).map((row) => row.id)).toEqual(["known"]);
+    prismaMock.crmCommunicationSuggestion.findMany.mockResolvedValue([
+      communicationSuggestionFixture({ id: "unproven", title: "Hidden raw title" }), communicationSuggestionFixture({ id: "known", title: "Public draft", subject: null }),
+    ]);
+    vi.mocked(captureArtifactInputProof).mockImplementation(async (_reader, _ws, inputs) => {
+      if (inputs.some((input) => input.id === "unproven")) throw new AppError(409, "UNKNOWN_LINEAGE", "Unknown source.");
+      return [publicPromptRoot];
+    });
+    expect((await listWritebackTargets(actor, { workspaceId: "workspace-1", targetTypes: ["CRM_COMMUNICATION"], take: 1 })).items.map((row) => row.title)).toEqual(["Public draft"]);
+    prismaMock.executionRequest.findMany.mockResolvedValue(Array.from({ length: 5001 }, () => requestFixture()));
+    await expect(listExecutionRequests(actor, { workspaceId: "workspace-1" })).rejects.toMatchObject({ code: "SOURCE_READ_SCAN_LIMIT" });
   });
 });

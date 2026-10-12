@@ -25,6 +25,7 @@ vi.mock("@corgtex/shared", () => ({
     member: {
       findUnique: vi.fn(),
     },
+    $executeRaw: vi.fn(),
     brainSource: {
       create: vi.fn(),
     },
@@ -50,6 +51,10 @@ vi.mock("./events", () => ({
 }));
 
 vi.mock("./source-lineage", () => ({
+  assertArtifactInputWriteFence: vi.fn(),
+  captureArtifactInputProof: vi.fn(async (_actor, _ws, inputs) => inputs.map((input: { kind: string; id: string }) => ({ kind: input.kind, id: input.id, fingerprint: "a".repeat(64) }))),
+  captureArtifactInputSnapshotProof: vi.fn(async (_actor, _ws, input) => [{ kind: "ArtifactInputSnapshot", id: `snapshot-${input.id}`, fingerprint: "a".repeat(64) }]),
+  isArtifactInputProofReadable: vi.fn(async () => true),
   recordArtifactInputLineage: vi.fn(),
   currentArtifactInputRoots: vi.fn(async () => []),
   readableArtifactIds: vi.fn(async (_actor: unknown, _workspaceId: string, _kind: string, records: Array<{ id: string }>) =>
@@ -67,7 +72,7 @@ describe("getOverwhelmSignals", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked((prisma as any).$transaction).mockImplementation(async (fn: any) => fn(prisma));
-    vi.mocked((prisma as any).member.findUnique).mockResolvedValue({ id: memberId, workspaceId, isActive: true });
+    vi.mocked((prisma as any).member.findUnique).mockResolvedValue({ id: memberId, workspaceId, userId: "user-1", role: "CONTRIBUTOR", isActive: true, joinedAt: new Date(), user: { id: "user-1", email: "user@example.com", displayName: "User" } });
   });
 
   it("getOverwhelmSignals flags member with 3+ negative responses in 7 days", async () => {
@@ -153,7 +158,7 @@ describe("getOverwhelmSignals", () => {
   it("creates at most three daily company understanding questions and dedupes existing prompts", async () => {
     vi.mocked((prisma as any).checkIn.count).mockResolvedValueOnce(1);
     vi.mocked(prisma.checkIn.findMany).mockResolvedValueOnce([
-      { questionText: "What document, customer note, or working file would give CORGTEX the most useful company context today?" },
+      { id: "existing-question", createdAt: new Date("2026-06-08"), questionText: "What document, customer note, or working file would give CORGTEX the most useful company context today?" },
     ] as any);
     vi.mocked(prisma.checkIn.create).mockResolvedValue({ id: "checkin-new" } as any);
 
@@ -163,7 +168,7 @@ describe("getOverwhelmSignals", () => {
       now: new Date("2026-06-09T12:00:00.000Z"),
     });
 
-    expect(result).toEqual({ created: 2, cap: 3 });
+    expect(result).toMatchObject({ created: 2, cap: 3 });
     expect(prisma.checkIn.create).toHaveBeenCalledTimes(2);
     expect(prisma.checkIn.create).not.toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
@@ -185,7 +190,7 @@ describe("getOverwhelmSignals", () => {
       now: new Date("2026-06-09T12:00:00.000Z"),
     });
 
-    expect(result).toEqual({ created: 0, cap: 3 });
+    expect(result).toMatchObject({ created: 0, cap: 3 });
     expect(prisma.checkIn.create).not.toHaveBeenCalled();
   });
 

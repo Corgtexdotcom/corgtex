@@ -28,6 +28,7 @@ const { prismaMock, appendEventsMock, recordAuditMock, requireWorkspaceMembershi
     $executeRaw: vi.fn().mockResolvedValue(0),
     $transaction: vi.fn(async (callback: (tx: any) => Promise<unknown>) => callback(prismaMock)),
     artifactInputLineage: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn() },
+    artifactInputSnapshot: { findFirst: vi.fn(), create: vi.fn() },
     brainSource: { findFirst: vi.fn() },
     contextGraphObject: {
       create: vi.fn(),
@@ -2136,9 +2137,17 @@ describe("context graph domain", () => {
   it("applies an update using real lineage validation before mutating its own input", async () => {
     const lineage = await vi.importActual<typeof import("./source-lineage")>("./source-lineage");
     const manifests: any[] = [];
+    const snapshots: any[] = [];
     let object: any = { id: "public-object", workspaceId: "ws-1", objectType: "Process", title: "Original", summary: null,
       properties: {}, status: "approved", sourceEntityType: null, sourceEntityId: null };
     let proposedDiff: any;
+    prismaMock.artifactInputSnapshot.create.mockImplementation(async ({ data }: any) => {
+      const snapshot = { id: `snapshot-${snapshots.length + 1}`, ...data };
+      snapshots.push(snapshot);
+      return snapshot;
+    });
+    prismaMock.artifactInputSnapshot.findFirst.mockImplementation(async ({ where }: any) =>
+      snapshots.find((snapshot) => snapshot.id === where.id && snapshot.workspaceId === where.workspaceId) ?? null);
     resolveKnowledgeAccessDomainsMock.mockResolvedValue(["PUBLIC"]);
     prismaMock.artifactInputLineage.findFirst.mockImplementation(async ({ where }: any) =>
       [...manifests].reverse().find((row) => row.workspaceId === where.workspaceId && row.artifactType === where.artifactType && row.artifactId === where.artifactId) ?? null);
@@ -2165,7 +2174,12 @@ describe("context graph domain", () => {
     expect(proposedDiff.status).toBe("applied");
     expect(await lineage.readableArtifactIds(actor, "ws-1", "ContextGraphObject", [object], prismaMock as any)).toEqual(new Set([object.id]));
     expect(manifests.at(-1).contentHash).toBe(lineage.lineageContentFingerprint("ContextGraphObject", object));
-    expect(manifests.at(-1).rootsJson).toEqual([]);
+    expect(manifests.at(-1).rootsJson).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "ArtifactInputSnapshot" }),
+    ]));
+    expect(snapshots).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceKind: "ContextGraphObject", sourceId: object.id, contentJson: expect.objectContaining({ title: "Original" }) }),
+    ]));
     expect(prismaMock.$queryRaw).toHaveBeenCalled();
   });
 
@@ -2184,6 +2198,7 @@ describe("context graph domain", () => {
       [...manifests].reverse().filter((row) => row.workspaceId === where.workspaceId && row.artifactType === where.artifactType && where.artifactId.in.includes(row.artifactId)));
     prismaMock.artifactInputLineage.create.mockImplementation(async ({ data }: any) => { manifests.push(data); return data; });
     const object = { id: "mixed", workspaceId: "ws-1", title: "Synthesized", objectType: "Process", status: "approved" };
+    prismaMock.contextGraphObject.findFirst.mockImplementation(async ({ where }: any) => where.id === object.id ? object : null);
     await lineage.recordArtifactInputLineage({ tx: prismaMock as any, actor, workspaceId: "ws-1",
       artifact: { kind: "ContextGraphObject", id: object.id }, content: object, origin: "DERIVED",
       inputs: [{ kind: "BrainSource", id: "public-source" }, { kind: "BrainSource", id: "finance-source" }] });
@@ -2256,6 +2271,7 @@ describe("context graph domain", () => {
     prismaMock.artifactInputLineage.create.mockImplementation(async ({ data }: any) => { manifests.push(data); return data; });
     prismaMock.contextGraphObject.findFirst.mockImplementation(async ({ where }: any) => where.id === object.id && where.workspaceId === object.workspaceId ? object : null);
     prismaMock.contextGraphProposedDiff.create.mockImplementation(async ({ data }: any) => { proposedDiff = { id: "pending-snapshot", ...data }; return proposedDiff; });
+    prismaMock.contextGraphProposedDiff.findFirst.mockImplementation(async ({ where }: any) => where.id === proposedDiff?.id ? proposedDiff : null);
     recordArtifactInputLineageMock.mockImplementation(actual.recordArtifactInputLineage);
     currentArtifactInputRootsMock.mockImplementation(actual.currentArtifactInputRoots);
     await actual.recordArtifactInputLineage({ tx: prismaMock as any, actor, workspaceId: "ws-1",

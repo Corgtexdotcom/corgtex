@@ -6,11 +6,12 @@ import { requireWorkspaceMembership } from "./auth";
 import { resolveKnowledgeAccessDomains } from "./brain-access";
 import { brainSourceContentFingerprint } from "./brain-derivation";
 import { requireBrainSourceRemovalEnabled } from "./brain-removal-gate";
-import { findSourceArticleImpacts, sourceIdsInDerivation } from "./brain-source-impact";
+import { sourceIdsInDerivation } from "./brain-source-impact";
 import { lockActiveArticleSources, lockBrainSourceLink } from "./brain-source-links";
 import { AppError, invariant } from "./errors";
 import { appendEvents } from "./events";
-import { brainSourceNeedsLineage, copyArtifactInputLineage, currentArtifactInputRoots, lineageContentFingerprint, readableArtifactIds,
+import { advanceHumanArtifactInputLineage, brainSourceNeedsLineage, captureArtifactInputProof, copyArtifactInputLineage, currentArtifactInputRoots,
+  inspectStoredArtifactInputDependencies, isArtifactInputProofReadable, readableArtifactIds,
   readableBrainSourceIds, recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 
@@ -19,7 +20,7 @@ type RemovalArticle = {
   slug: string;
   title: string;
   hash: string;
-  action: "archive" | "regenerate";
+  action: "archive" | "regenerate" | "preserve";
   remaining: Array<{ sourceId: string; fingerprint: string }>;
 };
 
@@ -28,6 +29,8 @@ type RemovalRequest = {
   sourceId: string;
   sourceFingerprint: string;
   sourceDocumentId: string | null;
+  sourceArchivedAt?: string | null;
+  sourceArchiveStateHash?: string;
   articles: RemovalArticle[];
 };
 
@@ -37,6 +40,7 @@ type RemovalPayload = RemovalRequest & {
   regenerationRunId?: string;
   candidates?: Record<string, string>;
   candidateTitles?: Record<string, string>;
+  candidateRoots?: Record<string, LineageRoot[]>;
   archiveDocumentId?: string;
   continuationSourceIds?: string[];
   nextPendingSourceId?: string | null;
@@ -78,7 +82,7 @@ function readPayload(value: Prisma.JsonValue): RemovalPayload {
 
 function requestMatches(left: RemovalRequest, right: RemovalRequest) {
   const signature = (request: RemovalRequest) => JSON.stringify([
-    request.sourceId, request.sourceFingerprint, request.sourceDocumentId,
+    request.sourceId, request.sourceFingerprint, request.sourceDocumentId, request.sourceArchivedAt ?? null, request.sourceArchiveStateHash ?? null,
     request.articles.map((article) => [
       article.id, article.slug, article.title, article.hash, article.action,
       article.remaining.map((source) => [source.sourceId, source.fingerprint]),
@@ -94,121 +98,112 @@ async function lockSources(tx: Prisma.TransactionClient, ids: readonly string[])
   }
 }
 
-async function sourceOnlyVersionRoot(tx: Prisma.TransactionClient, workspaceId: string, articleId: string,
-  root: LineageRoot, sourceFingerprints: Map<string, string>, memo: Map<string, boolean>, visiting = new Set<string>()): Promise<boolean> {
-  if (root.kind !== "BrainArticleVersion" || visiting.has(root.id)) return false;
-  const key = `${root.id}:${root.fingerprint}`;
-  const cached = memo.get(key);
-  if (cached !== undefined) return cached;
-  const version = await tx.brainArticleVersion.findFirst({ where: { id: root.id, articleId } });
-  if (!version || lineageContentFingerprint("BrainArticleVersion", version) !== root.fingerprint) {
-    memo.set(key, false);
-    return false;
+async function archiveStateHash(tx: Prisma.TransactionClient, workspaceId: string, sourceId: string) {
+  const records = await tx.workspaceArchiveRecord.findMany({ where: {
+    workspaceId, entityType: "BrainSource", entityId: sourceId,
+  }, select: { id: true, archivedAt: true, restoredAt: true, purgedAt: true }, orderBy: { id: "asc" } });
+  return createHash("sha256").update(JSON.stringify(records)).digest("hex");
+}
+
+async function discoverRemovalArticles(tx: Prisma.TransactionClient, workspaceId: string, sourceId: string) {
+  const articles = await tx.brainArticle.findMany({ where: { workspaceId, archivedAt: null } });
+  const discovered = [];
+  for (const article of articles) {
+    const roots = await currentArtifactInputRoots(tx, workspaceId, { kind: "BrainArticle", id: article.id }, article);
+    const dependencies = roots ? await inspectStoredArtifactInputDependencies(tx, workspaceId, roots) : null;
+    // An attested original is independent even when it has citation-only links.
+    const linked = article.sourceIds.includes(sourceId) || sourceIdsInDerivation(article.derivationJson).includes(sourceId)
+      || dependencies?.roots.some((root) => root.kind === "BrainSource" && root.id === sourceId);
+    if (linked) discovered.push({ article, roots, dependencies });
   }
-  const manifest = await tx.artifactInputLineage.findFirst({ where: {
-    workspaceId, artifactType: "BrainArticleVersion", artifactId: version.id,
-  }, orderBy: { revision: "desc" } });
-  if (manifest?.origin !== "DERIVED") {
-    memo.set(key, false);
-    return false;
-  }
-  const inputs = await currentArtifactInputRoots(tx, workspaceId,
-    { kind: "BrainArticleVersion", id: version.id }, version);
-  if (!inputs?.length) {
-    memo.set(key, false);
-    return false;
-  }
-  const nextVisiting = new Set(visiting).add(root.id);
-  for (const input of inputs) {
-    if (input.kind === "BrainSource") {
-      if (sourceFingerprints.get(input.id) !== input.fingerprint) {
-        memo.set(key, false);
-        return false;
-      }
-    } else if (!await sourceOnlyVersionRoot(tx, workspaceId, articleId, input, sourceFingerprints, memo, nextVisiting)) {
-      memo.set(key, false);
-      return false;
-    }
-  }
-  memo.set(key, true);
-  return true;
+  return discovered.sort((left, right) => left.article.id.localeCompare(right.article.id));
 }
 
 async function currentPlan(tx: Prisma.TransactionClient, workspaceId: string, sourceId: string, expected?: RemovalRequest) {
-  // Discover first, then acquire source locks in one stable order. A changed
-  // article set after locking is rejected, never silently omitted.
-  const before = await findSourceArticleImpacts(tx, workspaceId, [sourceId]);
-  const beforeIds = (before.get(sourceId)?.articles ?? []).map((article) => article.id).sort();
-  const preliminary = await tx.brainArticle.findMany({
-    where: { workspaceId, id: { in: beforeIds }, archivedAt: null },
-  });
-  const preliminaryRoots = await Promise.all(preliminary.map((article) => currentArtifactInputRoots(tx, workspaceId,
-    { kind: "BrainArticle", id: article.id }, article)));
-  const allSourceIds = [sourceId, ...preliminary.flatMap((article) => [
+  // Internal ancestry discovery grants no read access. Snapshot and historical
+  // manifests identify exclusions even after their old content is unavailable.
+  const before = await discoverRemovalArticles(tx, workspaceId, sourceId);
+  const beforeIds = before.map(({ article }) => article.id);
+  const discoveredSourceIds = [sourceId, ...before.flatMap(({ article, dependencies }) => [
     ...article.sourceIds, ...sourceIdsInDerivation(article.derivationJson),
-  ]), ...preliminaryRoots.flatMap((roots) => roots?.filter((root) => root.kind === "BrainSource").map((root) => root.id) ?? [])];
+    ...(dependencies?.roots.filter((root) => root.kind === "BrainSource").map((root) => root.id) ?? []),
+  ])];
+  const currentSources = await tx.brainSource.findMany({ where: { workspaceId, id: { in: discoveredSourceIds } } });
+  const currentDependencies = await Promise.all(currentSources.map((source) => inspectStoredArtifactInputDependencies(tx, workspaceId,
+    [{ kind: "BrainSource", id: source.id, fingerprint: brainSourceContentFingerprint(source) }])));
+  const allSourceIds = [...discoveredSourceIds, ...currentDependencies.flatMap((dependencies) => dependencies.roots
+    .filter((root) => root.kind === "BrainSource").map((root) => root.id))];
   await lockSources(tx, allSourceIds);
   for (const id of beforeIds) {
     await tx.$queryRaw`SELECT id FROM "BrainArticle" WHERE id = ${id} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
   }
-  const after = await findSourceArticleImpacts(tx, workspaceId, [sourceId]);
-  const links = after.get(sourceId)?.articles ?? [];
-  const afterIds = links.map((article) => article.id).sort();
-  invariant(JSON.stringify(beforeIds) === JSON.stringify(afterIds), 409, "SOURCE_CHANGED", "Article links changed; retry source removal.");
-
-  const source = await tx.brainSource.findFirst({ where: { id: sourceId, workspaceId, archivedAt: null } });
-  invariant(source, 404, "NOT_FOUND", "Active source not found.");
-  const articles = await tx.brainArticle.findMany({ where: { workspaceId, id: { in: afterIds }, archivedAt: null } });
-  invariant(articles.length === afterIds.length, 409, "SOURCE_CHANGED", "Article links changed; retry source removal.");
+  const after = await discoverRemovalArticles(tx, workspaceId, sourceId);
+  invariant(JSON.stringify(beforeIds) === JSON.stringify(after.map(({ article }) => article.id)),
+    409, "SOURCE_CHANGED", "Article links changed; retry source removal.");
+  const source = await tx.brainSource.findFirst({ where: { id: sourceId, workspaceId } });
+  invariant(source, 404, "NOT_FOUND", "Source exclusion identity not found.");
   const plans: RemovalArticle[] = [];
-  for (const article of articles.sort((a, b) => a.id.localeCompare(b.id))) {
-    const link = links.find((item) => item.id === article.id);
-    const roots = await currentArtifactInputRoots(tx, workspaceId, { kind: "BrainArticle", id: article.id }, article);
-    const sourceRoots = roots?.filter((root) => root.kind === "BrainSource") ?? [];
-    const sourceRootIds = new Set(sourceRoots.map((root) => root.id));
-    const sourceFingerprints = new Map(sourceRoots.map((root) => [root.id, root.fingerprint]));
-    const versionMemo = new Map<string, boolean>();
-    let versionRootsSafe = Boolean(roots);
-    for (const root of roots?.filter((item) => item.kind === "BrainArticleVersion") ?? []) {
-      if (!await sourceOnlyVersionRoot(tx, workspaceId, article.id, root, sourceFingerprints, versionMemo)) {
-        versionRootsSafe = false;
-        break;
-      }
-    }
+  for (const { article, roots, dependencies } of after) {
     if (expected && !roots) invariant(false, 409, "SOURCE_CHANGED", "Article lineage changed; prepare a new candidate.");
-    invariant(link?.kind === "derived" && roots && sourceRootIds.has(sourceId)
-      // Absorption keeps the prior article body as an immutable version input.
-      // Regeneration discards that body and uses only the independently proven
-      // remaining BrainSources; the version stays preserved in history.
-      && roots.every((root) => root.kind === "BrainSource" || root.kind === "BrainArticleVersion")
-      && versionRootsSafe && !(article.humanEditedAt && sourceRoots.length === 1)
-      && article.sourceIds.every((id) => sourceRootIds.has(id)),
-    409, "UNCLASSIFIED_SOURCE_LINK", "An article has a source link with unknown provenance; resolve it manually.");
-    const remaining = sourceRoots.filter((item) => item.id !== sourceId)
-      .map((item) => ({ sourceId: item.id, fingerprint: item.fingerprint }));
-    plans.push({
-      id: article.id, slug: article.slug, title: article.title, hash: hashArticle(article),
-      action: remaining.length > 0 ? "regenerate" : "archive", remaining,
-    });
+    if (roots?.length === 0) {
+      plans.push({ id: article.id, slug: article.slug, title: article.title, hash: hashArticle(article), action: "preserve", remaining: [] });
+      continue;
+    }
+    invariant(roots?.length && dependencies?.complete
+      && dependencies.roots.some((root) => root.kind === "BrainSource" && root.id === sourceId),
+      409, "UNCLASSIFIED_SOURCE_LINK", "An article has a source link with unknown provenance; resolve it manually.");
+    const candidateIds = [...new Set(dependencies.roots.filter((root) => root.kind === "BrainSource" && root.id !== sourceId)
+      .map((root) => root.id))].sort();
+    invariant(candidateIds.every((id) => allSourceIds.includes(id)),
+      409, "SOURCE_CHANGED", "Source links changed; retry removal.");
+    const candidates = await tx.brainSource.findMany({ where: {
+      workspaceId, id: { in: candidateIds }, archivedAt: null, accessDomain: "WORKSPACE",
+    }, orderBy: { id: "asc" } });
+    const remaining: RemovalArticle["remaining"] = [];
+    for (const candidate of candidates) {
+      const fingerprint = brainSourceContentFingerprint(candidate);
+      const lineage = await inspectStoredArtifactInputDependencies(tx, workspaceId,
+        [{ kind: "BrainSource", id: candidate.id, fingerprint }]);
+      // Copied sources are not independent simply because their own archive flag
+      // is clear. Unknown provenance also cannot be used in the fresh model call.
+      if (!lineage.complete || lineage.roots.some((root) => root.kind === "BrainSource" && root.id === sourceId)) continue;
+      invariant(lineage.roots.filter((root) => root.kind === "BrainSource").every((root) => allSourceIds.includes(root.id)),
+        409, "SOURCE_CHANGED", "Retained source dependencies changed; retry removal.");
+      remaining.push({ sourceId: candidate.id, fingerprint });
+    }
+    plans.push({ id: article.id, slug: article.slug, title: article.title, hash: hashArticle(article),
+      action: remaining.length > 0 ? "regenerate" : "archive", remaining });
   }
   const remainingIds = [...new Set(plans.flatMap((article) => article.remaining.map((item) => item.sourceId)))];
-  // The preliminary read must have covered every remaining source lock.
-  invariant(remainingIds.every((id) => allSourceIds.includes(id)), 409, "SOURCE_CHANGED", "Source links changed; retry removal.");
   await lockActiveArticleSources(tx, workspaceId, remainingIds);
-  const remainingSources = await tx.brainSource.findMany({ where: { workspaceId, id: { in: remainingIds }, archivedAt: null } });
-  invariant(remainingSources.length === remainingIds.length, 409, "SOURCE_CHANGED", "A remaining source is unavailable.");
-  invariant(remainingSources.every((item) => item.accessDomain === "WORKSPACE"),
-    409, "RESTRICTED_SOURCE", "Restricted sources require manual review.");
-  const fingerprints = new Map(remainingSources.map((item) => [item.id, brainSourceContentFingerprint(item)]));
-  for (const article of plans) {
-    article.remaining = article.remaining.map((item) => ({ sourceId: item.sourceId, fingerprint: fingerprints.get(item.sourceId)! }));
-  }
+
   const plan: RemovalRequest = {
     version: 1, sourceId, sourceFingerprint: brainSourceContentFingerprint(source),
-    sourceDocumentId: linkedDocumentId(source.metadata), articles: plans,
+    sourceDocumentId: linkedDocumentId(source.metadata), sourceArchivedAt: source.archivedAt?.toISOString() ?? null,
+    sourceArchiveStateHash: await archiveStateHash(tx, workspaceId, sourceId), articles: plans,
   };
   if (expected) invariant(requestMatches(plan, expected), 409, "SOURCE_CHANGED", "Sources or articles changed; prepare a new candidate.");
   return plan;
+}
+
+async function preserveOriginalWithoutCitation(tx: Prisma.TransactionClient, actor: AppActor,
+  workspaceId: string, articleId: string, sourceId: string) {
+  const before = await tx.brainArticle.findFirst({ where: { id: articleId, workspaceId, archivedAt: null } });
+  invariant(before && (await currentArtifactInputRoots(tx, workspaceId, { kind: "BrainArticle", id: articleId }, before))?.length === 0,
+    409, "SOURCE_CHANGED", "The original article changed before source removal.");
+  const derivation = before.derivationJson && typeof before.derivationJson === "object" && !Array.isArray(before.derivationJson)
+    ? before.derivationJson : null;
+  const after = await tx.brainArticle.update({ where: { id: articleId }, data: {
+    sourceIds: before.sourceIds.filter((id) => id !== sourceId),
+    ...(derivation && Array.isArray(derivation.sources) ? { derivationJson: {
+      ...derivation, sources: derivation.sources.filter((entry) => !entry || typeof entry !== "object" || Array.isArray(entry) || entry.sourceId !== sourceId),
+    } as Prisma.InputJsonObject } : {}),
+  } });
+  await advanceHumanArtifactInputLineage({ tx, actor, workspaceId, artifact: { kind: "BrainArticle", id: articleId },
+    before, after, allowSystemTransition: true });
+  await appendEvents(tx, [{ workspaceId, type: "brain-article.updated", aggregateType: "BrainArticle", aggregateId: articleId,
+    payload: { articleId } }]);
+  await incrementCacheVersion(`knowledge:${workspaceId}`, tx);
 }
 
 async function requireRemovalManager(actor: AppActor, workspaceId: string) {
@@ -232,14 +227,23 @@ export async function requestBrainSourceRemoval(actor: AppActor, params: {
     invariant(existingSource, 404, "NOT_FOUND", "Source not found.");
     const archiveDocumentId = params.archiveLinkedDocument ? linkedDocumentId(existingSource.metadata) : null;
     if (existingSource.archivedAt) {
-      invariant(!brainSourceNeedsLineage(existingSource)
-        && (await resolveKnowledgeAccessDomains(actor, params.workspaceId)).includes(existingSource.accessDomain),
+      const priorJob = await latestRemovalJob(tx, params.workspaceId, existingSource.id);
+      const prior = priorJob ? readPayload(priorJob.payload) : null;
+      if (!prior || prior.phase === "APPLIED") {
+        invariant(!brainSourceNeedsLineage(existingSource)
+          && (await resolveKnowledgeAccessDomains(actor, params.workspaceId)).includes(existingSource.accessDomain),
+          404, "NOT_FOUND", "Source not found.");
+        await archiveLinkedDocumentIfResolved(tx, actor, params.workspaceId, archiveDocumentId ?? undefined);
+        return { id: existingSource.id, status: "archived" as const };
+      }
+      await requireRemovalManager(actor, params.workspaceId);
+      invariant(prior.sourceFingerprint === brainSourceContentFingerprint(existingSource)
+        && (!prior.sourceArchivedAt || prior.sourceArchivedAt === existingSource.archivedAt.toISOString()),
+        409, "SOURCE_CHANGED", "The source exclusion changed; prepare a new removal request.");
+    } else {
+      invariant((await readableBrainSourceIds(actor, params.workspaceId, [existingSource], tx)).has(existingSource.id),
         404, "NOT_FOUND", "Source not found.");
-      await archiveLinkedDocumentIfResolved(tx, actor, params.workspaceId, archiveDocumentId ?? undefined);
-      return { id: existingSource.id, status: "archived" as const };
     }
-    invariant((await readableBrainSourceIds(actor, params.workspaceId, [existingSource], tx)).has(existingSource.id),
-      404, "NOT_FOUND", "Source not found.");
     if (params.archiveLinkedDocument) {
       invariant(archiveDocumentId, 409, "SOURCE_CHANGED", "The source no longer belongs to a document.");
       invariant(await tx.document.count({ where: { id: archiveDocumentId, workspaceId: params.workspaceId, archivedAt: null } }) === 1,
@@ -250,14 +254,18 @@ export async function requestBrainSourceRemoval(actor: AppActor, params: {
       409, "SOURCE_CHANGED", "The source document changed; review it again.");
     if (plan.articles.length > 0) await requireRemovalManager(actor, params.workspaceId);
     if (plan.articles.length > 0) await requireBrainSourceRemovalEnabled(tx, params.workspaceId);
-    if (plan.articles.every((article) => article.action === "archive")) {
+    if (plan.articles.every((article) => article.action !== "regenerate")) {
       for (const article of plan.articles) {
+        if (article.action === "preserve") {
+          await preserveOriginalWithoutCitation(tx, actor, params.workspaceId, article.id, params.sourceId);
+          continue;
+        }
         await archiveWorkspaceArtifact(actor, {
           workspaceId: params.workspaceId, entityType: "BrainArticle", entityId: article.id,
           reason: "No verified sources remain after source removal.", _tx: tx,
         });
       }
-      await archiveWorkspaceArtifact(actor, {
+      if (!existingSource.archivedAt) await archiveWorkspaceArtifact(actor, {
         workspaceId: params.workspaceId, entityType: "BrainSource", entityId: params.sourceId,
         reason: "Removed after linked articles were archived.", _tx: tx,
       });
@@ -320,7 +328,13 @@ export async function retryBrainSourceRemoval(actor: AppActor, params: { workspa
     const latest = await latestRemovalJob(tx, params.workspaceId, old.sourceId);
     invariant(latest?.id === oldJob.id, 409, "INVALID_STATE", "A newer source review already exists.");
     const source = await tx.brainSource.findFirst({ where: { id: old.sourceId, workspaceId: params.workspaceId } });
-    invariant(source && (!old.archiveDocumentId || linkedDocumentId(source.metadata) === old.archiveDocumentId),
+    const restoredSinceRequest = await tx.workspaceArchiveRecord.count({ where: {
+      workspaceId: params.workspaceId, entityType: "BrainSource", entityId: old.sourceId,
+      restoredAt: { gt: oldJob.createdAt },
+    } });
+    invariant(!restoredSinceRequest, 409, "SOURCE_CHANGED", "The source was restored; prepare a new removal request.");
+    invariant(source && (!old.sourceArchivedAt || source.archivedAt?.toISOString() === old.sourceArchivedAt)
+      && (!old.archiveDocumentId || linkedDocumentId(source.metadata) === old.archiveDocumentId),
       409, "SOURCE_CHANGED", "The source document changed; review it again.");
     const result = await requestBrainSourceRemoval(actor, {
       workspaceId: params.workspaceId, sourceId: old.sourceId,
@@ -353,11 +367,23 @@ export async function generateBrainSourceRemovalCandidate(params: {
     await tx.$queryRaw`SELECT id FROM "WorkflowJob" WHERE id = ${params.jobId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const job = await tx.workflowJob.findFirst({ where: { id: params.jobId, workspaceId: params.workspaceId, type: "agent.brain-source-regenerate" } });
     invariant(job, 404, "NOT_FOUND", "Regeneration job not found.");
-    const payload = readPayload(job.payload);
+    let payload = readPayload(job.payload);
     if (job.status !== "RUNNING" || job.attempts !== params.expectedAttempt || job.lockedBy !== params.expectedOwner) {
       return { done: "SUPERSEDED" } as const;
     }
     if (payload.phase !== "REQUESTED" && payload.phase !== "GENERATING") return { done: payload.phase } as const;
+    const excluded = await tx.brainSource.findFirst({ where: { id: payload.sourceId, workspaceId: params.workspaceId } });
+    if (!payload.sourceArchivedAt && excluded?.archivedAt
+      && brainSourceContentFingerprint(excluded) === payload.sourceFingerprint) {
+      // Archive removes read eligibility immediately; it need not prevent a
+      // source-only replacement whose exclusion request was already authorized.
+      const restoredSinceRequest = await tx.workspaceArchiveRecord.count({ where: {
+        workspaceId: params.workspaceId, entityType: "BrainSource", entityId: payload.sourceId,
+        restoredAt: { gt: job.createdAt },
+      } });
+      if (!restoredSinceRequest) payload = { ...payload, sourceArchivedAt: excluded.archivedAt.toISOString(),
+        sourceArchiveStateHash: await archiveStateHash(tx, params.workspaceId, payload.sourceId) };
+    }
     const token = randomUUID();
     await tx.workflowJob.update({ where: { id: job.id }, data: {
       payload: { ...payload, phase: "GENERATING", generationToken: token } as Prisma.InputJsonObject,
@@ -367,7 +393,10 @@ export async function generateBrainSourceRemovalCandidate(params: {
   if ("done" in claim) return { phase: claim.done };
   const { payload, token, attempts } = claim;
 
-  const finish = async (candidates: Record<string, string> | null, candidateTitles: Record<string, string> = {}) => prisma.$transaction(async (tx) => {
+  const generationActor: AppActor = { kind: "agent", authProvider: "bootstrap", label: "brain-source-regenerate",
+    workspaceIds: [params.workspaceId] };
+  const finish = async (candidates: Record<string, string> | null, candidateTitles: Record<string, string> = {},
+    candidateRoots: Record<string, LineageRoot[]> = {}) => prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM "WorkflowJob" WHERE id = ${params.jobId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const current = await tx.workflowJob.findFirst({ where: { id: params.jobId, workspaceId: params.workspaceId, type: "agent.brain-source-regenerate" } });
     invariant(current, 404, "NOT_FOUND", "Regeneration job not found.");
@@ -384,6 +413,9 @@ export async function generateBrainSourceRemovalCandidate(params: {
         if (!(error instanceof AppError) || !["SOURCE_CHANGED", "NOT_FOUND", "UNCLASSIFIED_SOURCE_LINK", "RESTRICTED_SOURCE"].includes(error.code)) throw error;
         stale = true;
       }
+      for (const roots of Object.values(candidateRoots)) {
+        if (!await isArtifactInputProofReadable(generationActor, params.workspaceId, roots, tx)) stale = true;
+      }
     }
     if (stale) {
       await tx.workflowJob.update({ where: { id: current.id }, data: {
@@ -399,7 +431,7 @@ export async function generateBrainSourceRemovalCandidate(params: {
       startedAt: current.startedAt ?? new Date(), completedAt: new Date(),
     } });
     await tx.workflowJob.update({ where: { id: current.id }, data: {
-      payload: { ...payload, phase: "READY", candidates, candidateTitles, regenerationRunId: run.id } as Prisma.InputJsonObject,
+      payload: { ...payload, phase: "READY", candidates, candidateTitles, candidateRoots, regenerationRunId: run.id } as Prisma.InputJsonObject,
     } });
     return { phase: "READY" as const, candidateCount: Object.keys(candidates!).length };
   });
@@ -412,13 +444,25 @@ export async function generateBrainSourceRemovalCandidate(params: {
   }
   const candidates: Record<string, string> = {};
   const candidateTitles: Record<string, string> = {};
+  const candidateRoots: Record<string, LineageRoot[]> = {};
   for (const article of payload.articles.filter((item) => item.action === "regenerate")) {
     const ids = article.remaining.map((item) => item.sourceId);
     const sources = await prisma.brainSource.findMany({
       where: { workspaceId: params.workspaceId, id: { in: ids }, archivedAt: null },
-      select: { id: true, title: true, content: true },
     });
     invariant(sources.length === ids.length, 409, "SOURCE_CHANGED", "A remaining source changed before regeneration.");
+    try {
+      const roots = await captureArtifactInputProof(generationActor, params.workspaceId,
+        sources.map((source) => ({ kind: "BrainSource", id: source.id, snapshot: source })));
+      // A copied source depending on the excluded input is not an independent
+      // retained source, even when its own archive flag is still clear.
+      const dependencies = await inspectStoredArtifactInputDependencies(prisma, params.workspaceId, roots);
+      if (!dependencies.complete || dependencies.roots.some((root) => root.kind === "BrainSource" && root.id === payload.sourceId)) return finish(null);
+      candidateRoots[article.id] = roots;
+    } catch (error) {
+      if (error instanceof AppError && ["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) return finish(null);
+      throw error;
+    }
     // The removed article's old title may itself contain withdrawn information.
     // Give the model only a title from the independently retained sources.
     const safeTitle = sources[0]?.title?.trim() || "Remaining-source article";
@@ -427,17 +471,21 @@ export async function generateBrainSourceRemovalCandidate(params: {
     candidates[article.id] = bodyMd;
     candidateTitles[article.id] = safeTitle;
   }
-  return finish(candidates, candidateTitles);
+  return finish(candidates, candidateTitles, candidateRoots);
 }
 
 export async function listBrainSourceRemovalReviews(actor: AppActor, params: { workspaceId: string; sourceIds: string[] }) {
   await requireRemovalManager(actor, params.workspaceId);
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const entries = await Promise.all(params.sourceIds.map(async (sourceId) => {
     const source = await prisma.brainSource.findFirst({ where: { id: sourceId, workspaceId: params.workspaceId } });
-    if (!source || !(await readableBrainSourceIds(actor, params.workspaceId, [source])).has(source.id)) return null;
+    if (!source) return null;
     const job = await latestRemovalJob(prisma, params.workspaceId, sourceId);
     if (!job) return null;
     const payload = readPayload(job.payload);
+    const exclusionMatches = payload.sourceFingerprint === brainSourceContentFingerprint(source)
+      && (payload.sourceArchivedAt ?? null) === (source.archivedAt?.toISOString() ?? null);
+    if (!exclusionMatches) return null;
     const remainingIds = [...new Set(payload.articles.flatMap((item) => item.remaining.map((root) => root.sourceId)))];
     const remainingSources = await prisma.brainSource.findMany({
       where: { workspaceId: params.workspaceId, id: { in: remainingIds }, archivedAt: null },
@@ -448,17 +496,25 @@ export async function listBrainSourceRemovalReviews(actor: AppActor, params: { w
       where: { workspaceId: params.workspaceId, id: { in: payload.articles.map((item) => item.id) } },
     });
     const readableIds = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", articles);
+    const candidatePermissions = new Map(await Promise.all(payload.articles.map(async (item) => [item.id,
+      Boolean(payload.candidateRoots?.[item.id]?.length
+        && await isArtifactInputProofReadable(actor, params.workspaceId, payload.candidateRoots[item.id])),
+    ] as const)));
     return { sourceId, jobId: job.id, status: job.status, phase: payload.phase,
       articles: payload.articles.flatMap((item) => {
         const candidateReadable = item.action === "regenerate" && item.remaining.length > 0
+          && candidatePermissions.get(item.id)
           && item.remaining.every((root) => {
             const current = remainingById.get(root.sourceId);
             return current && readableRemaining.has(current.id)
               && brainSourceContentFingerprint(current) === root.fingerprint;
           });
-        // An independently readable candidate still reveals the existence and
-        // stable ID of the old article if the old article itself is restricted.
-        if (!readableIds.has(item.id)) return [];
+        const target = articles.find((article) => article.id === item.id);
+        const envelopePermits = target && !target.archivedAt && (actor.kind === "agent" || membership?.role === "ADMIN"
+          || !target.isPrivate || target.ownerMemberId === membership?.id);
+        if (item.action === "preserve" || !envelopePermits || (!readableIds.has(item.id) && !candidateReadable)) return [];
+        // The manager may review an independent candidate for an authorized job
+        // without receiving any metadata or body from its now-hidden predecessor.
         return [{
           id: item.id, title: readableIds.has(item.id) ? item.title : "Article unavailable", action: item.action,
           currentBodyMd: readableIds.has(item.id) ? articles.find((article) => article.id === item.id)?.bodyMd ?? null : null,
@@ -490,16 +546,24 @@ export async function resolveBrainSourceRemoval(actor: AppActor, params: {
     }
     await requireBrainSourceRemovalEnabled(tx, params.workspaceId);
     const source = await tx.brainSource.findFirst({ where: { id: payload.sourceId, workspaceId: params.workspaceId } });
-    invariant(source && (await readableBrainSourceIds(actor, params.workspaceId, [source], tx)).has(source.id),
-      404, "NOT_FOUND", "Source not found.");
+    invariant(source && (source.archivedAt
+      ? payload.sourceArchivedAt === source.archivedAt.toISOString()
+        && payload.sourceFingerprint === brainSourceContentFingerprint(source)
+      : !payload.sourceArchivedAt && (await readableBrainSourceIds(actor, params.workspaceId, [source], tx)).has(source.id)),
+      409, "SOURCE_CHANGED", "The source exclusion changed; prepare a new removal request.");
     await currentPlan(tx, params.workspaceId, payload.sourceId, payload);
-    invariant(payload.candidates && payload.candidateTitles && payload.regenerationRunId, 409, "INVALID_STATE", "Candidate provenance is missing.");
+    invariant(payload.candidates && payload.candidateTitles && payload.candidateRoots && payload.regenerationRunId,
+      409, "INVALID_STATE", "Candidate provenance is missing.");
     const generationRun = await tx.agentRun.findFirst({ where: {
       id: payload.regenerationRunId, workspaceId: params.workspaceId,
       agentKey: "brain-source-regenerate", triggerRef: job.id, status: "COMPLETED",
     }, select: { id: true } });
     invariant(generationRun, 409, "INVALID_STATE", "Candidate provenance is invalid.");
     for (const article of payload.articles) {
+      if (article.action === "preserve") {
+        await preserveOriginalWithoutCitation(tx, actor, params.workspaceId, article.id, payload.sourceId);
+        continue;
+      }
       if (article.action === "archive") {
         await archiveWorkspaceArtifact(actor, { workspaceId: params.workspaceId, entityType: "BrainArticle", entityId: article.id,
           reason: "No verified sources remain after source removal.", _tx: tx });
@@ -507,6 +571,9 @@ export async function resolveBrainSourceRemoval(actor: AppActor, params: {
       }
       const bodyMd = payload.candidates[article.id];
       const title = payload.candidateTitles[article.id];
+      const roots = payload.candidateRoots[article.id];
+      invariant(roots?.length && await isArtifactInputProofReadable(actor, params.workspaceId, roots, tx),
+        409, "SOURCE_CHANGED", "Candidate inputs changed before review.");
       invariant(typeof bodyMd === "string" && bodyMd.trim(), 409, "INVALID_STATE", "Candidate body is missing.");
       invariant(typeof title === "string" && title.trim(), 409, "INVALID_STATE", "Candidate title is missing.");
       const record = await tx.brainArticle.findFirst({ where: { id: article.id, workspaceId: params.workspaceId, archivedAt: null } });
@@ -514,6 +581,7 @@ export async function resolveBrainSourceRemoval(actor: AppActor, params: {
       const prior = await tx.brainArticleVersion.findFirst({ where: { articleId: record.id }, orderBy: { version: "desc" }, select: { version: true } });
       const previousVersion = await tx.brainArticleVersion.create({ data: {
         articleId: record.id, version: (prior?.version ?? 0) + 1, bodyMd: record.bodyMd,
+        accessEnvelopeJson: { isPrivate: record.isPrivate, ownerMemberId: record.ownerMemberId },
         changeSummary: "Previous body before reviewed source regeneration.",
       } });
       await copyArtifactInputLineage({ tx, workspaceId: params.workspaceId,
@@ -522,13 +590,14 @@ export async function resolveBrainSourceRemoval(actor: AppActor, params: {
       });
       const slug = `regenerated-${record.id}`;
       const updated = await tx.brainArticle.update({ where: { id: record.id }, data: {
-        title, slug, bodyMd, sourceIds: article.remaining.map((item) => item.sourceId),
+        title, slug, bodyMd, type: "PROJECT", frontmatterJson: Prisma.DbNull,
+        sourceIds: article.remaining.map((item) => item.sourceId),
         derivationJson: { version: 1, origin: "brain-absorb", agentRunId: generationRun.id, sources: article.remaining },
         lastVerifiedAt: new Date(),
       } });
       await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
         artifact: { kind: "BrainArticle", id: updated.id }, content: updated, origin: "DERIVED",
-        inputs: article.remaining.map((item) => ({ kind: "BrainSource", id: item.sourceId })),
+        inputs: [], inheritedRoots: roots,
       });
       await ensureWorkspacePermalink(tx, actor, { workspaceId: params.workspaceId,
         entityType: "BrainArticle", entityId: updated.id,
@@ -548,7 +617,7 @@ export async function resolveBrainSourceRemoval(actor: AppActor, params: {
         aggregateType: "BrainArticle", aggregateId: record.id, payload: { articleId: record.id } }]);
       await incrementCacheVersion(`knowledge:${params.workspaceId}`, tx);
     }
-    await archiveWorkspaceArtifact(actor, { workspaceId: params.workspaceId, entityType: "BrainSource", entityId: payload.sourceId,
+    if (!source.archivedAt) await archiveWorkspaceArtifact(actor, { workspaceId: params.workspaceId, entityType: "BrainSource", entityId: payload.sourceId,
       reason: "Removed after reviewed article regeneration.", _tx: tx });
     await archiveLinkedDocumentIfResolved(tx, actor, params.workspaceId, payload.archiveDocumentId);
     const continued = payload.continuationSourceIds?.length

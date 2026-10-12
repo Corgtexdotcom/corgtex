@@ -60,7 +60,7 @@ export default async function BrainPage({
     provisionalQuestion.trim()
       ? answerKnowledgeQuestion({ actor, workspaceId, question: provisionalQuestion, limit: 4, accessDomains, sourceTypes: ["BRAIN_ARTICLE", "DOCUMENT", "MEETING"] })
       : Promise.resolve(null),
-    listMeetings(workspaceId, { status: "COMPLETED" }),
+    listMeetings(actor, workspaceId, { status: "COMPLETED" }),
     listDocuments(actor, workspaceId),
   ]);
 

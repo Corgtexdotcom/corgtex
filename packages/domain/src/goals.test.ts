@@ -1,3 +1,4 @@
+import { prepareProducerLineage, finishProducerLineage } from "./producer-lineage";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
   addKeyResult,
@@ -16,6 +17,11 @@ import {
 } from "./goals";
 import { prisma } from "@corgtex/shared";
 import { readableArtifactIds } from "./source-lineage";
+
+vi.mock("./producer-lineage", () => ({
+  prepareProducerLineage: vi.fn().mockResolvedValue({ mode: "HUMAN_ORIGINAL", inputs: [], roots: [] }),
+  finishProducerLineage: vi.fn().mockResolvedValue(undefined),
+}));
 
 vi.mock("@corgtex/shared", () => ({
   prisma: {
@@ -41,6 +47,7 @@ vi.mock("@corgtex/shared", () => ({
       update: vi.fn(),
       delete: vi.fn(),
     },
+    recognition: { create: vi.fn() },
     goalUpdate: {
       create: vi.fn(),
     },
@@ -2369,4 +2376,49 @@ it("filters source-restricted goals before pagination", async () => {
   const goals = await listGoals(actor, { workspaceId: "ws-1", take: 1 });
   expect(goals.map((goal) => goal.id)).toEqual(["permitted"]);
   expect(prisma.goal.findMany).toHaveBeenCalledWith(expect.not.objectContaining({ take: 1 }));
+
+
 });
+
+
+  it("retains old GoalLink metadata and its earlier proof when a human omits replacement metadata", async () => {
+    vi.clearAllMocks();
+    const actor = { kind: "user", user: { id: "user-1" } } as any;
+    const prior = { id: "link-existing", goalId: "goal-1", entityType: "BrainSource", entityId: "source-1",
+      metadata: { quote: "Synthetic restricted quote" } };
+    vi.mocked(prisma.goal.findUnique).mockResolvedValue({ id: "goal-1", workspaceId: "ws-1", status: "ACTIVE", isPrivate: false, archivedAt: null } as any);
+    vi.mocked(prisma.brainSource.findFirst).mockResolvedValue({ id: "source-1" } as any);
+    vi.mocked(prisma.goalLink.findUnique).mockResolvedValue(prior as any);
+    vi.mocked(prisma.goalLink.upsert).mockResolvedValue({ ...prior, confidence: 0.5 } as any);
+    await createGoalLink(actor, { workspaceId: "ws-1", goalId: "goal-1", entityType: "BrainSource", entityId: "source-1", confidence: 0.5 });
+    expect(prepareProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ before: prior,
+      artifact: { kind: "GoalLink", id: prior.id } }));
+    expect(finishProducerLineage).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.objectContaining({ metadata: prior.metadata }) }));
+    const { recordArtifactInputLineage } = await import("./source-lineage");
+    expect(recordArtifactInputLineage).not.toHaveBeenCalled();
+  });
+
+  it("excludes source-restricted duplicate candidates before matching and returning snippets", async () => {
+    vi.clearAllMocks();
+    const actor = { kind: "user", user: { id: "user-1" } } as any;
+    vi.mocked(prisma.goal.findMany).mockResolvedValue([{ id: "hidden-goal", workspaceId: "ws-1",
+      title: "Synthetic operating goal", descriptionMd: "Synthetic restricted detail", status: "ACTIVE", isPrivate: false } ] as any);
+    vi.mocked(readableArtifactIds).mockResolvedValue(new Set());
+    vi.mocked(prisma.goal.create).mockResolvedValue({ id: "new-goal", workspaceId: "ws-1", title: "Synthetic operating goal" } as any);
+    await expect(createGoal(actor, { workspaceId: "ws-1", title: "Synthetic operating goal",
+      duplicateGuard: { onExact: "use_existing" } })).resolves.toMatchObject({ id: "new-goal" });
+    expect(prisma.goal.create).toHaveBeenCalled();
+  });
+
+  it("records recognition and its goal dependency in the same transaction", async () => {
+    const actor = { kind: "user", user: { id: "user-1", email: "synthetic@example.com", displayName: "Synthetic" } } as any;
+    vi.mocked(prisma.recognition.create).mockResolvedValue({ id: "recognition-proof", workspaceId: "ws-1" } as any);
+    const { createRecognition } = await import("./goals");
+    await createRecognition(actor, { workspaceId: "ws-1", goalId: "goal-1", recipientMemberId: "member-2",
+      title: "Synthetic appreciation", storyMd: "Synthetic story" });
+    expect(prepareProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ tx: prisma,
+      dependencies: [{ kind: "Goal", id: "goal-1" }] }));
+    expect(finishProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ tx: prisma,
+      artifact: { kind: "Recognition", id: "recognition-proof" } }));
+  });

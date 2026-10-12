@@ -76,7 +76,7 @@ export default async function TensionsPage({
   };
   const [{ items: tensions }, circles, members, activeInputRequests] = await Promise.all([
     listTensions(actor, workspaceId, { take: 200, circleIds, memberIds, sort, ...listDateFilters }),
-    listCircles(workspaceId),
+    listCircles(actor, workspaceId),
     listHumanMembers(workspaceId),
     listAdviceRequests(actor, { workspaceId, subjectType: "TENSION", status: "ACTIVE", take: 500 }),
   ]);

@@ -1656,7 +1656,7 @@ describe("processConversationTurn", () => {
 
     await stream.return({
       assistantMessage: "",
-      contextUsed: {},
+      contextUsed: {}, promptInputId: "", lineageRoots: [],
     });
 
     expect(firstModelStreamClosed).toBe(true);
@@ -1967,7 +1967,7 @@ describe("processConversationTurn", () => {
 
     await stream.return({
       assistantMessage: "",
-      contextUsed: {},
+      contextUsed: {}, promptInputId: "", lineageRoots: [],
     });
 
     expect(followupModelStreamClosed).toBe(true);

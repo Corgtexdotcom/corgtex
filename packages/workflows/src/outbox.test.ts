@@ -1,8 +1,22 @@
 import type { Prisma } from "@prisma/client";
+import { lineageContentFingerprint } from "../../domain/src/source-lineage";
 import { describe, expect, it, vi } from "vitest";
 import { calculateRetryDelayMs, createNotificationsForEvent, deriveAdviceNotificationContent, notificationActorUserIdForEvent } from "./outbox";
 import { deriveJobsForEvent, triageBucketStart } from "./derive-jobs";
 import { deriveDispatchNotifications, deriveNotificationsForEvent } from "./derive-notifications";
+
+function actionSource(title = "Current action title") {
+  return { id: "action-1", workspaceId: "workspace-1", title, bodyMd: "Current body", status: "OPEN", isPrivate: false,
+    archivedAt: null, duplicateOfActionId: null, authorUserId: "publisher-1", assigneeMemberId: "member-2", version: 1 };
+}
+function lineageStore(action: ReturnType<typeof actionSource>) {
+  const manifests: Record<string, any>[] = [{ artifactType: "Action", artifactId: action.id, revision: 1,
+    origin: "HUMAN_ORIGINAL", rootsJson: [], contentHash: lineageContentFingerprint("Action", action) }];
+  return {
+    findFirst: vi.fn(async ({ where }) => [...manifests].reverse().find(row => row.artifactType === where.artifactType && row.artifactId === where.artifactId) ?? null),
+    create: vi.fn(async ({ data }) => { manifests.push(data); return data; }),
+  };
+}
 
 describe("deriveJobsForEvent", () => {
   it("creates a knowledge sync job for approved proposals", () => {
@@ -155,7 +169,7 @@ describe("deriveJobsForEvent", () => {
     expect(deriveJobsForEvent({ ...event, aggregateId: "batch-2" })).toEqual([]);
   });
 
-  it("runs company understanding after brain source absorption", () => {
+  it("rebuilds permitted descendants after brain source absorption", () => {
     const jobs = deriveJobsForEvent({
       id: "event-brain-source",
       type: "brain-source.created",
@@ -176,10 +190,10 @@ describe("deriveJobsForEvent", () => {
       {
         workspaceId: "workspace-1",
         eventId: "event-brain-source",
-        type: "agent.company-understanding",
-        payload: { sourceId: "source-1" },
+        type: "source-lineage.rebuild",
+        payload: { eventId: "event-brain-source" },
         dependsOnDedupeKey: "event-brain-source:brain-absorb",
-        dedupeKey: "event-brain-source:company-understanding",
+        dedupeKey: "event-brain-source:source-lineage-rebuild",
       },
     ]);
   });
@@ -406,11 +420,13 @@ describe("deriveNotificationsForEvent", () => {
   });
 
   it("checks current workspace visibility before notifying about a publication", async () => {
-    const actionFindFirst = vi.fn().mockResolvedValue({ title: "Visible action" });
+    const action = actionSource("Visible action");
+    const actionFindFirst = vi.fn().mockResolvedValue(action);
     const tensionFindFirst = vi.fn().mockResolvedValue(null);
     const lockRow = vi.fn().mockResolvedValue([]);
     const tx = {
       $queryRaw: lockRow,
+      artifactInputLineage: lineageStore(action),
       action: { findFirst: actionFindFirst },
       tension: { findFirst: tensionFindFirst },
     } as unknown as Prisma.TransactionClient;
@@ -421,13 +437,14 @@ describe("deriveNotificationsForEvent", () => {
     })).toEqual([{
       type: "action.created", entityType: "Action", entityId: "action-1",
       title: "New action: Visible action", bodyMd: "An action item was added to the workspace.",
+      lineageActor: expect.objectContaining({ workspaceIds: ["workspace-1"] }),
+      lineageRoots: [{ kind: "Action", id: action.id, fingerprint: lineageContentFingerprint("Action", action) }],
     }]);
     expect(actionFindFirst).toHaveBeenCalledWith({
       where: {
         id: "action-1", workspaceId: "workspace-1", isPrivate: false,
         status: { not: "DRAFT" }, archivedAt: null, duplicateOfActionId: null,
       },
-      select: { title: true },
     });
 
     expect(await deriveDispatchNotifications(tx, {
@@ -439,7 +456,6 @@ describe("deriveNotificationsForEvent", () => {
         id: "tension-1", workspaceId: "workspace-1", isPrivate: false,
         status: { not: "DRAFT" }, archivedAt: null,
       },
-      select: { title: true },
     });
     expect(await deriveDispatchNotifications(tx, {
       type: "action.published", workspaceId: "workspace-1", aggregateId: null,
@@ -449,7 +465,7 @@ describe("deriveNotificationsForEvent", () => {
       type: "action.published", workspaceId: "workspace-1", aggregateId: "action-1",
       aggregateType: "Action", payload: { runtimeMeta: { replayOfEventId: "original" } },
     })).toEqual([]);
-    expect(actionFindFirst).toHaveBeenCalledTimes(1);
+    expect(actionFindFirst).toHaveBeenCalledTimes(3);
     expect(lockRow).toHaveBeenCalledTimes(2);
     expect(lockRow.mock.invocationCallOrder[0]).toBeLessThan(actionFindFirst.mock.invocationCallOrder[0]);
     expect(lockRow.mock.invocationCallOrder[1]).toBeLessThan(tensionFindFirst.mock.invocationCallOrder[0]);
@@ -478,16 +494,16 @@ describe("Action assignment dispatch", () => {
       { userId: "user-2", user: { email: "assignee@example.com" } },
       { userId: "user-3", user: { email: "other@example.com" } },
     ];
-    const createMany = vi.fn().mockImplementation(async ({ data }: { data: unknown[] }) => ({ count: data.length }));
-    const upsert = vi.fn().mockImplementation(async ({ create }: { create: { workspaceId: string; userId: string } }) => ({
-      id: "assigned-notification", workspaceId: create.workspaceId, userId: create.userId,
-    }));
+    const action = actionSource();
+    const create = vi.fn().mockImplementation(async ({ data }) => ({ id: `notification-${data.userId}-${data.type}`, ...data }));
     const preferences = vi.fn().mockResolvedValue([]);
+    const manifests = lineageStore(action);
     const tx = {
-      $queryRaw: vi.fn().mockResolvedValue([]),
-      action: { findFirst: vi.fn().mockResolvedValue({ title: "Current action title" }) },
+      $queryRaw: vi.fn().mockResolvedValue([]), $executeRaw: vi.fn().mockResolvedValue(1),
+      artifactInputLineage: manifests,
+      action: { findFirst: vi.fn().mockResolvedValue(action) },
       member: {
-        findFirst: vi.fn().mockResolvedValue({ userId: "user-2" }),
+        findFirst: vi.fn().mockResolvedValue({ id: "member-2", workspaceId: "workspace-1", userId: "user-2", isActive: true }),
         findMany: vi.fn().mockImplementation(async ({ where }: { where: { userId?: { in?: string[] } } }) => (
           where.userId?.in
             ? recipients.filter((recipient) => where.userId?.in?.includes(recipient.userId))
@@ -495,7 +511,7 @@ describe("Action assignment dispatch", () => {
         )),
       },
       notificationPreference: { findMany: preferences },
-      notification: { createMany, upsert },
+      notification: { create, findUnique: vi.fn().mockResolvedValue(null) },
     } as unknown as Prisma.TransactionClient;
     const event = {
       id: "event-publication", type: "action.published", workspaceId: "workspace-1",
@@ -503,51 +519,96 @@ describe("Action assignment dispatch", () => {
       payload: { actionId: "action-1", assigneeMemberId: "member-2", actorUserId: "publisher-1" },
       attempts: 0, createdAt: new Date("2026-10-05T00:00:00Z"),
     };
-    return { tx, event, createMany, upsert, preferences };
+    return { tx, event, create, preferences, manifests };
   }
 
-  it("sends one targeted assignment notice and broadcasts to other members", async () => {
-    const { tx, event, createMany, upsert } = fixture();
-
+  it("sends one targeted assignment notice and broadcasts to other members with atomic receipts", async () => {
+    const { tx, event, create, manifests } = fixture();
     await createNotificationsForEvent(tx, event);
-
-    expect(upsert).toHaveBeenCalledWith(expect.objectContaining({
-      where: { dedupeKey: "action-assigned:event-publication:user-2" },
-      create: expect.objectContaining({ userId: "user-2", type: "action.assigned" }),
-    }));
-    expect(createMany).toHaveBeenCalledWith({
-      data: [expect.objectContaining({ userId: "user-3", type: "action.created" })],
-    });
+    expect(create.mock.calls.map(([args]) => args.data)).toEqual([
+      expect.objectContaining({ userId: "user-2", type: "action.assigned", dedupeKey: "action-assigned:event-publication:user-2" }),
+      expect.objectContaining({ userId: "user-3", type: "action.created", title: "New action: Current action title" }),
+    ]);
+    expect(manifests.create.mock.calls.map(([args]) => args.data)).toEqual([
+      expect.objectContaining({ artifactType: "Notification", origin: "DERIVED", rootsJson: [expect.objectContaining({ kind: "Action" }), expect.objectContaining({ kind: "Member" })] }),
+      expect.objectContaining({ artifactType: "Notification", origin: "DERIVED", rootsJson: [expect.objectContaining({ kind: "Action" })] }),
+    ]);
   });
 
   it("keeps the generic publication notice when assignment notices are off", async () => {
-    const { tx, event, createMany, upsert, preferences } = fixture();
+    const { tx, event, create, preferences } = fixture();
     preferences.mockImplementation(async ({ where }: { where: { notifType: { in: string[] } } }) => (
       where.notifType.in.includes("action.assigned")
         ? [{ userId: "user-2", notifType: "action.assigned", channel: "OFF" }]
         : []
     ));
-
     await createNotificationsForEvent(tx, event);
-
-    expect(upsert).not.toHaveBeenCalled();
-    expect(createMany).toHaveBeenCalledWith({
-      data: [
-        expect.objectContaining({ userId: "user-2", type: "action.created" }),
-        expect.objectContaining({ userId: "user-3", type: "action.created" }),
-      ],
-    });
+    expect(create.mock.calls.map(([args]) => args.data)).toEqual([
+      expect.objectContaining({ userId: "user-2", type: "action.created" }),
+      expect.objectContaining({ userId: "user-3", type: "action.created" }),
+    ]);
   });
 
   it("sends only a targeted notice after public reassignment", async () => {
-    const { tx, event, createMany, upsert } = fixture();
-
+    const { tx, event, create } = fixture();
     await createNotificationsForEvent(tx, { ...event, id: "event-reassignment", type: "action.assigned" });
+    expect(create).toHaveBeenCalledOnce();
+    expect(create).toHaveBeenCalledWith({ data: expect.objectContaining({ userId: "user-2", type: "action.assigned" }) });
+  });
 
-    expect(upsert).toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({ userId: "user-2", type: "action.assigned" }),
-    }));
-    expect(createMany).not.toHaveBeenCalled();
+  it("withholds unknown current sources instead of copying stale event text", async () => {
+    const { tx, event, create, manifests } = fixture();
+    manifests.findFirst.mockResolvedValue(null);
+    await createNotificationsForEvent(tx, { ...event, payload: { ...event.payload, title: "Old permitted title" } });
+    expect(create).not.toHaveBeenCalled();
+    expect(manifests.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("current advice notification dispatch", () => {
+  async function fixture() {
+    const action = actionSource();
+    const request = { id: "request-1", workspaceId: action.workspaceId, processId: "process-1", requestedByUserId: "requester-1",
+      status: "ACTIVE", audienceType: "WORKSPACE", messageMd: "Current advice request", deadlineAt: new Date("2026-10-15T12:00:00Z") };
+    const manifests = lineageStore(action);
+    await manifests.create({ data: { artifactType: "AdviceRequest", artifactId: request.id, revision: 1,
+      origin: "HUMAN_ORIGINAL", rootsJson: [], contentHash: lineageContentFingerprint("AdviceRequest", request) } });
+    manifests.create.mockClear();
+    const create = vi.fn(async ({ data }) => ({ id: "notification-advice", ...data }));
+    const findTargets = vi.fn().mockResolvedValue(request);
+    const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([]), artifactInputLineage: manifests,
+      adviceRequest: { findFirst: vi.fn().mockResolvedValue(request), findUnique: findTargets },
+      adviceProcess: { findFirst: vi.fn().mockResolvedValue({ id: request.processId, workspaceId: action.workspaceId, subjectType: "ACTION", subjectId: action.id }) },
+      action: { findFirst: vi.fn().mockResolvedValue(action) },
+      member: { findMany: vi.fn().mockResolvedValue([{ id: "member-2", userId: "user-2" }]) },
+      notificationPreference: { findMany: vi.fn().mockResolvedValue([]) }, notification: { create },
+    } as unknown as Prisma.TransactionClient;
+    const event = { id: "advice-event", workspaceId: action.workspaceId, type: "advice.requested", aggregateType: "AdviceRequest", aggregateId: request.id,
+      payload: { adviceRequestId: request.id, subjectTitle: "Old revoked title", messageMd: "Old revoked message", deadlineAt: "old deadline", requestedByUserId: "old-requester" },
+      attempts: 0, createdAt: new Date("2026-10-12") };
+    return { tx, event, create, findTargets, manifests, action, request };
+  }
+
+  it("renders current subject, request and deadline and passes both receipts through persistence", async () => {
+    const { tx, event, create, manifests, action, request } = await fixture();
+    await createNotificationsForEvent(tx, event);
+    expect(create).toHaveBeenCalledWith({ data: expect.objectContaining({
+      userId: "user-2", title: `Input requested: ${action.title}`,
+      bodyMd: `${request.messageMd}\n\nDeadline: ${request.deadlineAt.toISOString()}`,
+    }) });
+    expect(manifests.create).toHaveBeenCalledWith({ data: expect.objectContaining({ artifactType: "Notification", origin: "DERIVED",
+      rootsJson: [expect.objectContaining({ kind: "AdviceRequest", id: request.id }), expect.objectContaining({ kind: "Action", id: action.id })],
+    }) });
+    expect(JSON.stringify(create.mock.calls)).not.toContain("Old revoked");
+  });
+
+  it("does not resolve recipients or write notifications when the current request has unknown lineage", async () => {
+    const { tx, event, create, findTargets, manifests } = await fixture();
+    manifests.findFirst.mockResolvedValue(null);
+    await createNotificationsForEvent(tx, event);
+    expect(findTargets).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
   });
 });
 

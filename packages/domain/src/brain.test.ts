@@ -9,6 +9,7 @@ const { prismaMock } = vi.hoisted(() => ({
       count: vi.fn(),
       create: vi.fn(),
       findMany: vi.fn(),
+      findFirst: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn(),
     },
@@ -23,9 +24,11 @@ const { prismaMock } = vi.hoisted(() => ({
       findMany: vi.fn(),
       update: vi.fn(),
     },
-    brainDiscussionThread: {
-      count: vi.fn(),
-    },
+    brainDiscussionThread: { count: vi.fn(), findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
+    brainDiscussionComment: { findFirst: vi.fn(), create: vi.fn() },
+    member: { findFirst: vi.fn() }, user: { findFirst: vi.fn() }, action: { findFirst: vi.fn() },
+    artifactInputLineage: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn() },
+    artifactInputSnapshot: { findFirst: vi.fn(), create: vi.fn() },
     brainBacklink: {
       findMany: vi.fn(),
       groupBy: vi.fn(),
@@ -76,7 +79,8 @@ vi.mock("./archive", () => ({
 }));
 
 vi.mock("./brain-source-removal", () => ({ requestBrainSourceRemoval }));
-vi.mock("./source-lineage", () => ({
+vi.mock("./source-lineage", async (original) => ({
+  ...await original<typeof import("./source-lineage")>(),
   brainSourceNeedsLineage: (source: { sourceType?: string; channel?: string | null }) =>
     source.sourceType === "CONVERSATION" || source.sourceType === "CONVERSATION_INSIGHT"
       || ["chat-demand", "daily-batch", "daily-digest", "daily-question"].includes(source.channel ?? ""),
@@ -414,6 +418,7 @@ describe("Brain article draft lifecycle", () => {
 
     expect(prismaMock.brainArticleVersion.create).toHaveBeenCalledWith({ data: {
       articleId: "article-1", version: 1, bodyMd: "Generated notes",
+      accessEnvelopeJson: { isPrivate: true, ownerMemberId: "mem-1" },
       changeSummary: null, agentRunId: null,
     } });
     expect(prismaMock.brainArticle.update).toHaveBeenCalledWith({
@@ -535,6 +540,8 @@ describe("Brain status access domains", () => {
     prismaMock.brainArticle.count.mockResolvedValue(0);
     prismaMock.brainSource.count.mockResolvedValue(2);
     prismaMock.brainDiscussionThread.count.mockResolvedValue(0);
+    prismaMock.brainDiscussionThread.findMany.mockResolvedValue([]);
+    prismaMock.brainSource.findMany.mockResolvedValue([]);
     prismaMock.brainBacklink.findMany.mockResolvedValue([]);
     prismaMock.brainBacklink.groupBy.mockResolvedValue([]);
   });
@@ -545,13 +552,15 @@ describe("Brain status access domains", () => {
   ])("scopes unabsorbed source counts to %j", async (domains, count) => {
     resolveKnowledgeAccessDomains.mockResolvedValue(domains);
     prismaMock.brainSource.count.mockResolvedValue(count);
+    prismaMock.brainSource.findMany.mockResolvedValue(Array.from({ length: count }, (_, index) => ({ id: `source-${index}`, accessDomain: domains[0] })));
     const { getBrainStatus } = await import("./brain");
 
     await expect(getBrainStatus(ownerActor, { workspaceId: "ws-1" }))
       .resolves.toMatchObject({ unabsorbedSources: count });
 
     expect(resolveKnowledgeAccessDomains).toHaveBeenCalledWith(ownerActor, "ws-1");
-    expect(prismaMock.brainSource.count).toHaveBeenCalledWith({
+    expect(prismaMock.brainSource.findMany).toHaveBeenCalledWith({
+      orderBy: { id: "asc" }, take: 100,
       where: {
         workspaceId: "ws-1",
         accessDomain: { in: domains },
@@ -872,5 +881,176 @@ describe("brain source ingestion", () => {
       }),
     }));
     expect(prismaMock.brainSource.create).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("Brain discussions with actual complete lineage receipts", () => {
+  const rows: Record<string, any[]> = {};
+  const timestamp = new Date("2026-10-12T10:00:00Z");
+  let source: typeof import("./source-lineage");
+  const otherActor = { kind: "user", user: { id: "user-2", email: "other@example.test", displayName: "Other" } } as any;
+  function relation(row: any, key: string) {
+    if (key === "article") return rows.brainArticle.find((item) => item.id === row.articleId);
+    if (key === "thread") return rows.brainDiscussionThread.find((item) => item.id === row.threadId);
+    if (key === "authorMember" || key === "ownerMember") return rows.member.find((item) => item.id === row[key + "Id"]);
+    if (key === "user") return rows.user.find((item) => item.id === row.userId);
+    return undefined;
+  }
+  function matches(row: any, where: any): boolean {
+    return Boolean(row) && Object.entries(where ?? {}).every(([key, value]: [string, any]) => {
+      if (key === "workspaceId_slug") return matches(row, value);
+      if (key === "AND") return (Array.isArray(value) ? value : [value]).every((part: any) => matches(row, part));
+      if (key === "OR") return value.some((part: any) => matches(row, part));
+      if (["article", "thread", "user"].includes(key)) return matches(relation(row, key), value);
+      if (key === "memberships") return rows.member.some((member) => member.userId === row.id && matches(member, value.some));
+      if (value && typeof value === "object" && !(value instanceof Date)) {
+        if ("in" in value) return value.in.includes(row[key]);
+        if ("gt" in value) return row[key] > value.gt;
+        throw new Error(`Unhandled discussion test predicate ${key}`);
+      }
+      return row[key] === value;
+    });
+  }
+  function project(table: string, row: any, args: any = {}): any {
+    if (!row) return null;
+    let result = { ...row };
+    for (const [key, request] of Object.entries(args.include ?? {}) as [string, any][]) {
+      if (["article", "thread", "authorMember", "ownerMember", "user"].includes(key)) {
+        const name = key === "article" ? "brainArticle" : key === "thread" ? "brainDiscussionThread" : key === "user" ? "user" : "member";
+        result[key] = project(name, relation(row, key), request);
+      } else if (key === "discussions") result[key] = rows.brainDiscussionThread.filter((thread) => thread.articleId === row.id && matches(thread, request.where)).map((thread) => project("brainDiscussionThread", thread, request));
+      else if (key === "comments") result[key] = rows.brainDiscussionComment.filter((comment) => comment.threadId === row.id).map((comment) => project("brainDiscussionComment", comment, request === true ? {} : request));
+      else if (["backlinksTo", "backlinksFrom"].includes(key)) result[key] = [];
+      else throw new Error(`Unhandled discussion test include ${table}.${key}`);
+    }
+    if (args.select) result = Object.fromEntries(Object.keys(args.select).map((key) => [key, result[key]]));
+    return result;
+  }
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    source = await vi.importActual<typeof import("./source-lineage")>("./source-lineage");
+    const mocked = await import("./source-lineage");
+    for (const name of ["readableArtifactIds", "recordArtifactInputLineage", "currentArtifactInputRoots"] as const) vi.mocked(mocked[name]).mockImplementation(source[name] as any);
+    for (const name of ["brainArticle", "brainSource", "brainDiscussionThread", "brainDiscussionComment", "member", "user", "action", "artifactInputLineage", "artifactInputSnapshot"]) {
+      rows[name] = [];
+      const delegate: any = (prismaMock as any)[name];
+      const find = async (args: any) => project(name, rows[name].filter((row) => matches(row, args.where)).at(-1), args);
+      if (delegate.findFirst) delegate.findFirst.mockImplementation(find);
+      if (delegate.findUnique) delegate.findUnique.mockImplementation(find);
+      if (delegate.findMany) delegate.findMany.mockImplementation(async (args: any) => rows[name].filter((row) => matches(row, args.where))
+        .sort((a, b) => name === "artifactInputLineage" ? b.revision - a.revision : a.id.localeCompare(b.id))
+        .slice(args.skip ?? 0, (args.skip ?? 0) + (args.take ?? rows[name].length)).map((row) => project(name, row, args)));
+      if (delegate.create) delegate.create.mockImplementation(async ({ data }: any) => {
+        const row = { id: `${name}-${rows[name].length}`, createdAt: timestamp, ...(name === "brainDiscussionThread" ? { status: "OPEN", resolvedAt: null, absorbedAt: null } : {}), ...data };
+        rows[name].push(row); return { ...row };
+      });
+      if (delegate.update) delegate.update.mockImplementation(async ({ where, data }: any) => {
+        const row = rows[name].find((item) => matches(item, where)); Object.assign(row, data); return { ...row };
+      });
+      if (delegate.count) delegate.count.mockImplementation(async (args: any) => rows[name].filter((row) => matches(row, args.where)).length);
+    }
+    prismaMock.$transaction.mockImplementation(async (run: any) => run(prismaMock));
+    prismaMock.$executeRaw.mockResolvedValue(1);
+    prismaMock.brainBacklink.findMany.mockResolvedValue([]); prismaMock.brainBacklink.groupBy.mockResolvedValue([]);
+    resolveKnowledgeAccessDomains.mockResolvedValue(["WORKSPACE"]);
+    requireWorkspaceMembership.mockImplementation(async ({ actor, workspaceId }: any) => {
+      if (actor.kind === "agent") return null;
+      const member = rows.member.find((row) => row.workspaceId === workspaceId && row.userId === actor.user.id && row.isActive);
+      if (!member) throw Object.assign(new Error("Membership denied"), { code: "NOT_A_MEMBER" });
+      return member;
+    });
+    for (const [id, memberId] of [["user-1", "mem-1"], ["user-2", "mem-2"]]) {
+      rows.user.push({ id, email: `${id}@example.test`, displayName: id, bio: null, avatarUrl: null, linkedinUrl: null, websiteUrl: null });
+      rows.member.push({ id: memberId, workspaceId: "ws-1", userId: id, role: "CONTRIBUTOR", isActive: true, joinedAt: timestamp });
+    }
+    const article = { id: "article-original", workspaceId: "ws-1", slug: "original", title: "Original article", bodyMd: "Original article body", isPrivate: false,
+      sourceIds: [], type: "REFERENCE", authority: "DRAFT", archivedAt: null, createdAt: timestamp, updatedAt: timestamp, ownerMemberId: null };
+    rows.brainArticle.push(article);
+    await source.recordArtifactInputLineage({ tx: prismaMock as any, actor: ownerActor, workspaceId: "ws-1", artifact: { kind: "BrainArticle", id: article.id }, content: article, origin: "HUMAN_ORIGINAL", inputs: [] });
+  });
+  async function originalThread() {
+    const { createDiscussionThread } = await import("./brain");
+    return createDiscussionThread(ownerActor, { workspaceId: "ws-1", slug: "original", targetType: "ARTICLE", bodyMd: "Original discussion comment" });
+  }
+  async function privateInput() {
+    const row = { id: "private-action", workspaceId: "ws-1", title: "Private input", bodyMd: "Private generated input", status: "DRAFT", authorUserId: "user-2", isPrivate: true, archivedAt: null as Date | null, createdAt: timestamp, updatedAt: timestamp };
+    rows.action.push(row);
+    await source.recordArtifactInputLineage({ tx: prismaMock as any, actor: otherActor, workspaceId: "ws-1", artifact: { kind: "Action", id: row.id }, content: row, origin: "HUMAN_ORIGINAL", inputs: [] });
+    return row;
+  }
+  it("writes original human thread and first comment atomically with empty-input receipts", async () => {
+    const thread = await originalThread();
+    expect(thread).toMatchObject({ articleId: "article-original", status: "OPEN" });
+    expect(rows.artifactInputLineage).toEqual(expect.arrayContaining([
+      expect.objectContaining({ artifactType: "BrainDiscussionThread", artifactId: thread.id, origin: "HUMAN_ORIGINAL", rootsJson: [] }),
+      expect.objectContaining({ artifactType: "BrainDiscussionComment", origin: "HUMAN_ORIGINAL", rootsJson: [] }),
+    ]));
+    const { getArticle } = await import("./brain");
+    expect((await getArticle(ownerActor, { workspaceId: "ws-1", slug: "original" })).discussions[0].comments).toMatchObject([{ bodyMd: "Original discussion comment" }]);
+  });
+  it("withholds copied/agent comments without a complete prompt receipt, including safe mutation response", async () => {
+    const thread = await originalThread();
+    const { addDiscussionComment, getArticle } = await import("./brain");
+    const actor = { kind: "agent", authProvider: "bootstrap", label: "synthetic", workspaceIds: ["ws-1"] } as any;
+    const comment = await addDiscussionComment(actor, { workspaceId: "ws-1", threadId: thread.id, bodyMd: "Unproven agent body" });
+    expect(comment).toEqual({ id: comment.id, threadId: thread.id, contentWithheld: true });
+    expect(rows.artifactInputLineage.at(-1)).toMatchObject({ artifactType: "BrainDiscussionComment", origin: "UNKNOWN" });
+    expect(JSON.stringify(await getArticle(ownerActor, { workspaceId: "ws-1", slug: "original" }))).not.toContain("Unproven agent body");
+  });
+  it("filters private copied and unknown comments before returning bodies while preserving originals", async () => {
+    const thread = await originalThread(), input = await privateInput();
+    const lineageRoots = await source.captureArtifactInputProof(otherActor, "ws-1", [{ kind: "Action", id: input.id }]);
+    const { addDiscussionComment, getArticle } = await import("./brain");
+    await addDiscussionComment(otherActor, { workspaceId: "ws-1", threadId: thread.id, bodyMd: input.bodyMd, copied: true, lineageRoots });
+    rows.brainDiscussionComment.push({ id: "legacy-comment", threadId: thread.id, authorMemberId: "mem-2", bodyMd: "Unknown historical body", createdAt: timestamp });
+    const visible = await getArticle(ownerActor, { workspaceId: "ws-1", slug: "original" });
+    expect(visible.discussions[0].comments.map((comment) => comment.bodyMd)).toEqual(["Original discussion comment"]);
+    expect((await getArticle(otherActor, { workspaceId: "ws-1", slug: "original" })).discussions[0].comments).toHaveLength(2);
+    input.archivedAt = new Date();
+    expect((await getArticle(otherActor, { workspaceId: "ws-1", slug: "original" })).discussions[0].comments).toHaveLength(1);
+  });
+  it("hides unknown target metadata and discussion counts before article lists and workspace status", async () => {
+    await originalThread();
+    rows.brainDiscussionThread.push({ id: "legacy-thread", articleId: "article-original", authorMemberId: "mem-2", targetType: "SECTION", targetRef: "Unknown private heading", status: "OPEN", createdAt: timestamp });
+    const { getArticle, listArticles, getBrainStatus } = await import("./brain");
+    expect(JSON.stringify(await getArticle(ownerActor, { workspaceId: "ws-1", slug: "original" }))).not.toContain("Unknown private heading");
+    expect((await listArticles(ownerActor, { workspaceId: "ws-1" })).items[0]._count.discussions).toBe(1);
+    expect((await getBrainStatus(ownerActor, { workspaceId: "ws-1" })).openDiscussionThreads).toBe(1);
+  });
+  it("redacts joined departed authors without suppressing a currently readable original comment", async () => {
+    await originalThread();
+    const { getArticle } = await import("./brain");
+    rows.member.find((row) => row.id === "mem-1").isActive = false;
+    const result = await getArticle(otherActor, { workspaceId: "ws-1", slug: "original" });
+    expect(result.discussions[0]).toMatchObject({ authorMember: null, authorMemberId: null, comments: [{ authorMember: null, authorMemberId: null, bodyMd: "Original discussion comment" }] });
+  });
+  it("rejects changed inputs before a copied comment is persisted and advances known thread status without recertifying unknown history", async () => {
+    const thread = await originalThread(), input = await privateInput();
+    const lineageRoots = await source.captureArtifactInputProof(otherActor, "ws-1", [{ kind: "Action", id: input.id }]);
+    input.bodyMd = "Changed after capture";
+    const { addDiscussionComment, resolveDiscussionThread } = await import("./brain");
+    await expect(addDiscussionComment(otherActor, { workspaceId: "ws-1", threadId: thread.id, bodyMd: "Model output", copied: true, lineageRoots })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(rows.brainDiscussionComment).toHaveLength(1);
+    expect(await resolveDiscussionThread(ownerActor, { workspaceId: "ws-1", threadId: thread.id })).toMatchObject({ status: "RESOLVED" });
+    expect(rows.artifactInputLineage.at(-1)).toMatchObject({ artifactType: "BrainDiscussionThread", origin: "HUMAN_ORIGINAL", revision: 2 });
+    const legacy = { id: "legacy-thread", articleId: "article-original", authorMemberId: "mem-2", targetType: "SECTION", targetRef: "Unknown private heading", status: "OPEN", createdAt: timestamp };
+    rows.brainDiscussionThread.push(legacy);
+    expect(await resolveDiscussionThread(ownerActor, { workspaceId: "ws-1", threadId: legacy.id })).toMatchObject({ contentWithheld: true });
+    expect(rows.artifactInputLineage.at(-1)).toMatchObject({ origin: "UNKNOWN" });
+  });
+  it("counts only independently permitted unabsorbed source bodies", async () => {
+    const input = await privateInput();
+    const publicSource = { id: "source-original", workspaceId: "ws-1", sourceType: "CONVERSATION", tier: 1, content: "Original public source", title: "Original", metadata: {}, accessDomain: "WORKSPACE", absorbedAt: null, archivedAt: null, createdAt: timestamp };
+    rows.brainSource.push(publicSource);
+    await source.recordArtifactInputLineage({ tx: prismaMock as any, actor: ownerActor, workspaceId: "ws-1", artifact: { kind: "BrainSource", id: publicSource.id }, content: publicSource, origin: "HUMAN_ORIGINAL", inputs: [] });
+    const restricted = { ...publicSource, id: "source-private", content: input.bodyMd };
+    rows.brainSource.push(restricted);
+    await source.recordArtifactInputLineage({ tx: prismaMock as any, actor: otherActor, workspaceId: "ws-1", artifact: { kind: "BrainSource", id: restricted.id }, content: restricted, origin: "DERIVED", inputs: [{ kind: "Action", id: input.id }] });
+    rows.brainSource.push({ ...publicSource, id: "source-legacy", content: "Unknown historical source" });
+    const { getBrainStatus } = await import("./brain");
+    expect(await getBrainStatus(ownerActor, { workspaceId: "ws-1" })).toMatchObject({ unabsorbedSources: 1 });
+    expect(await getBrainStatus(otherActor, { workspaceId: "ws-1" })).toMatchObject({ unabsorbedSources: 2 });
+    expect(prismaMock.brainSource.count).not.toHaveBeenCalled();
   });
 });

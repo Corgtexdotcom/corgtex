@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceBriefingCandidate } from "./workspace-briefing";
+import { AppError } from "./errors";
 
 const {
   prismaMock,
   requireWorkspaceMembershipMock,
 } = vi.hoisted(() => ({
   prismaMock: {
+    $transaction: vi.fn(),
     meeting: { findMany: vi.fn() },
     proposal: { findMany: vi.fn() },
     tension: { findMany: vi.fn() },
@@ -36,7 +38,15 @@ vi.mock("./auth", () => ({
 }));
 
 const readableArtifactIdsMock = vi.hoisted(() => vi.fn());
-vi.mock("./source-lineage", () => ({ readableArtifactIds: readableArtifactIdsMock }));
+vi.mock("./source-lineage", () => ({ readableArtifactIds: readableArtifactIdsMock,
+  captureArtifactInputProof: vi.fn(async (actor, workspaceId, inputs) => {
+    for (const input of inputs) if (input.kind === "WorkspaceBriefing"
+      && !(await readableArtifactIdsMock(actor, workspaceId, input.kind, [{ id: input.id }])).has(input.id)) throw new AppError(409, "UNKNOWN_LINEAGE", "Unknown fixture");
+    return inputs.map(({ kind, id }: any) => ({ kind, id, fingerprint: "a".repeat(64) }));
+  }),
+  recordArtifactInputLineage: vi.fn(), invalidateArtifactInputLineage: vi.fn(),
+  isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
+}));
 
 function baseCandidate(overrides: Partial<WorkspaceBriefingCandidate>): WorkspaceBriefingCandidate {
   return {
@@ -58,6 +68,7 @@ function baseCandidate(overrides: Partial<WorkspaceBriefingCandidate>): Workspac
 describe("workspace briefing", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock));
     requireWorkspaceMembershipMock.mockResolvedValue({ id: "member-1" });
     for (const model of [
       prismaMock.meeting,
@@ -1626,7 +1637,8 @@ describe("workspace briefing", () => {
           audienceType: "WORKSPACE",
           status: "ACTIVE",
         }),
-        take: 30,
+        take: 50,
+        skip: 0,
       }),
       expect.objectContaining({
         where: expect.objectContaining({
@@ -1638,7 +1650,8 @@ describe("workspace briefing", () => {
             { updatedAt: { gte: new Date("2026-04-29T00:00:00.000Z"), lte: new Date("2026-04-30T12:00:00.000Z") } },
           ],
         }),
-        take: 10,
+        take: 50,
+        skip: 0,
       }),
     ]));
   });

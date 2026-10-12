@@ -11,9 +11,9 @@ const roleAssignmentSchema = z.object({
 
 export async function GET(request: NextRequest, { params }: Params) {
   try {
-    await resolveRequestActor(request);
+    const actor = await resolveRequestActor(request);
     const { workspaceId } = await params;
-    const assignments = await listRoleAssignments(workspaceId);
+    const assignments = await listRoleAssignments(actor, workspaceId);
     return NextResponse.json({ assignments });
   } catch (error) {
     return handleRouteError(error);

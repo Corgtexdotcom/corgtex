@@ -1,3 +1,5 @@
+import { scanSourceReadableRecords } from "./source-scoped-read";
+import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { createHash } from "node:crypto";
 import { prisma } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
@@ -13,6 +15,7 @@ import { requireDraftManager } from "./draft-permissions";
 import { requireCollaborativeWorkItemEditor } from "./collaborative-permissions";
 import { resolveWorkspaceProposalLink } from "./proposal-links";
 import { readableArtifactIds } from "./source-lineage";
+import { captureReadableDigestInputs } from "./digest-lineage";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import {
@@ -59,7 +62,7 @@ type ActionChecklistSummary = {
   checklistCompletedCount: number;
 };
 
-type CreateActionParams = {
+type CreateActionParams = ProducerLineageParams & {
   workspaceId: string;
   title: string;
   bodyMd?: string | null;
@@ -166,7 +169,7 @@ async function resolveAssigneeMemberId(tx: Prisma.TransactionClient, workspaceId
   return member.id;
 }
 
-async function loadActionChecklistSummaries(workspaceId: string, actionIds: string[]) {
+async function loadActionChecklistSummaries(actor: AppActor, workspaceId: string, actionIds: string[]) {
   const summaries = new Map<string, ActionChecklistSummary>();
   if (actionIds.length === 0) return summaries;
 
@@ -175,13 +178,11 @@ async function loadActionChecklistSummaries(workspaceId: string, actionIds: stri
       workspaceId,
       actionId: { in: actionIds },
     },
-    select: {
-      actionId: true,
-      completedAt: true,
-    },
+
   });
 
-  for (const item of items) {
+  const visible = await readableArtifactIds(actor, workspaceId, "ActionChecklistItem", items);
+  for (const item of items.filter((item) => visible.has(item.id))) {
     const current = summaries.get(item.actionId) ?? { checklistItemCount: 0, checklistCompletedCount: 0 };
     current.checklistItemCount += 1;
     if (item.completedAt) current.checklistCompletedCount += 1;
@@ -234,11 +235,15 @@ async function lockEditableActionForChecklistMutation(
     version: action.version,
   };
 
+  const receipt = await prepareProducerLineage({ tx, actor, workspaceId,
+    artifact: { kind: "Action", id: action.id }, before: action, allowSystemTransition: true });
   try {
-    await tx.action.update({
+    const updated = await tx.action.update({
       where: updateWhere as Prisma.ActionWhereUniqueInput,
       data: { updatedAt: new Date() },
     });
+    await finishProducerLineage({ tx, actor, workspaceId,
+      artifact: { kind: "Action", id: action.id }, content: updated, receipt });
   } catch (error) {
     if (isPrismaNotFoundError(error)) {
       invariant(false, 409, "CONFLICT", "Action changed while editing. Refresh and try again.");
@@ -305,13 +310,38 @@ function actionListWhere(actor: AppActor, membership: MembershipSummary | null, 
 export async function countActionsByStatus(actor: AppActor, workspaceId: string, opts?: ListActionsOptions) {
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const where = actionListWhere(actor, membership, workspaceId, { ...opts, status: undefined, statuses: undefined });
-  const groups = await prisma.action.groupBy({ by: ["status"], where, _count: { _all: true } });
+  const rows = await scanSourceReadableRecords({ actor, workspaceId, kind: "Action", load: (afterId, take) => prisma.action.findMany({
+    where: { AND: [where, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take,
+  }) });
   const counts = { DRAFT: 0, OPEN: 0, IN_PROGRESS: 0, COMPLETED: 0, ALL: 0 };
-  for (const group of groups) {
-    counts[group.status] = group._count._all;
-    counts.ALL += group._count._all;
-  }
+  for (const row of rows) { counts[row.status] += 1; counts.ALL += 1; }
   return counts;
+}
+
+async function redactActionJoins<T extends {
+  authorUserId: string;
+  author?: { id: string; displayName: string | null; email: string };
+  assigneeMemberId?: string | null;
+  assigneeMember?: { id: string } | null;
+  circleId?: string | null;
+  circle?: { id: string } | null;
+}>(actor: AppActor, workspaceId: string, rows: T[]) {
+  const [authors, members, circles] = await Promise.all([
+    captureReadableDigestInputs({ actor, workspaceId, kind: "User", records: rows.flatMap((row) => row.author ? [row.author] : []) }),
+    captureReadableDigestInputs({ actor, workspaceId, kind: "Member", records: rows.flatMap((row) => row.assigneeMember ? [row.assigneeMember] : []) }),
+    captureReadableDigestInputs({ actor, workspaceId, kind: "Circle", records: rows.flatMap((row) => row.circle ? [row.circle] : []) }),
+  ]);
+  const authorIds = new Set(authors.records.map((row) => row.id));
+  const memberIds = new Set(members.records.map((row) => row.id));
+  const circleIds = new Set(circles.records.map((row) => row.id));
+  return rows.map((row) => ({ ...row,
+    authorUserId: authorIds.has(row.authorUserId) ? row.authorUserId : null,
+    author: row.author && authorIds.has(row.author.id) ? row.author as NonNullable<T["author"]> : { id: "", displayName: null, email: "" },
+    assigneeMemberId: row.assigneeMember && memberIds.has(row.assigneeMember.id) ? row.assigneeMemberId : null,
+    assigneeMember: row.assigneeMember && memberIds.has(row.assigneeMember.id) ? row.assigneeMember as NonNullable<T["assigneeMember"]> : null,
+    circleId: row.circle && circleIds.has(row.circle.id) ? row.circleId : null,
+    circle: row.circle && circleIds.has(row.circle.id) ? row.circle as NonNullable<T["circle"]> : null,
+  }));
 }
 
 export async function listActions(actor: AppActor, workspaceId: string, opts?: ListActionsOptions) {
@@ -320,12 +350,12 @@ export async function listActions(actor: AppActor, workspaceId: string, opts?: L
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const where = actionListWhere(actor, membership, workspaceId, opts);
 
-  const [items, total] = await Promise.all([
-    prisma.action.findMany({
+  const candidates = await prisma.action.findMany({
       where,
       include: {
         author: {
           select: {
+            id: true,
             displayName: true,
             email: true,
           },
@@ -334,36 +364,35 @@ export async function listActions(actor: AppActor, workspaceId: string, opts?: L
           include: {
             user: {
               select: {
+                id: true,
                 displayName: true,
                 email: true,
               },
             },
           },
         },
-        circle: {
-          select: {
-            id: true,
-            name: true,
-          },
-        },
+        circle: true,
         proposal: true,
       },
       orderBy: workItemOrderBy(opts?.sort),
-      take,
-      skip,
-    }),
-    prisma.action.count({ where }),
-  ]);
+      take: 5001,
+    });
+  invariant(candidates.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Source permission scan exceeds its supported size.");
+  const permitted = await readableArtifactIds(actor, workspaceId, "Action", candidates);
+  const admitted = candidates.filter((candidate) => permitted.has(candidate.id));
+  const total = admitted.length;
+  const items = admitted.slice(skip, skip + take);
   const itemIds = items.map((item) => item.id);
   const [requestCountSummaries, checklistSummaries] = await Promise.all([
-    loadAdviceRequestCountSummaries(workspaceId, "ACTION", itemIds),
-    loadActionChecklistSummaries(workspaceId, itemIds),
+    loadAdviceRequestCountSummaries(actor, workspaceId, "ACTION", itemIds),
+    loadActionChecklistSummaries(actor, workspaceId, itemIds),
   ]);
+  const redactedItems = await redactActionJoins(actor, workspaceId, items);
   const linkedProposals = items.flatMap((item) => item.proposal ? [item.proposal] : []);
   const visibleProposalIds = linkedProposals.length
     ? await readableArtifactIds(actor, workspaceId, "Proposal", linkedProposals) : new Set<string>();
   return {
-    items: items.map((item) => ({
+    items: redactedItems.map((item) => ({
       ...item,
       proposalId: item.proposal && visibleProposalIds.has(item.proposal.id) ? item.proposalId : null,
       proposal: item.proposal && visibleProposalIds.has(item.proposal.id)
@@ -403,6 +432,7 @@ export async function getAction(actor: AppActor, params: {
         include: {
           user: {
             select: {
+              id: true,
               displayName: true,
               email: true,
             },
@@ -419,10 +449,12 @@ export async function getAction(actor: AppActor, params: {
     },
   });
   invariant(action, 404, "NOT_FOUND", "Action not found.");
+  invariant((await readableArtifactIds(actor, params.workspaceId, "Action", [action])).has(action.id),
+    404, "NOT_FOUND", "Action not found.");
   const visibleProposalIds = action.proposal
     ? await readableArtifactIds(actor, params.workspaceId, "Proposal", [action.proposal]) : new Set<string>();
   return {
-    ...action,
+    ...(await redactActionJoins(actor, params.workspaceId, [action]))[0],
     proposalId: action.proposal && visibleProposalIds.has(action.proposal.id) ? action.proposalId : null,
     proposal: action.proposal && visibleProposalIds.has(action.proposal.id)
       ? { id: action.proposal.id, title: action.proposal.title } : null,
@@ -434,7 +466,7 @@ export async function listActionChecklistItems(actor: AppActor, params: {
   actionId: string;
 }) {
   await getAction(actor, { workspaceId: params.workspaceId, actionId: params.actionId });
-  return prisma.actionChecklistItem.findMany({
+  const items = await prisma.actionChecklistItem.findMany({
     where: {
       workspaceId: params.workspaceId,
       actionId: params.actionId,
@@ -445,9 +477,11 @@ export async function listActionChecklistItems(actor: AppActor, params: {
       { id: "asc" },
     ],
   });
+  const visible = await readableArtifactIds(actor, params.workspaceId, "ActionChecklistItem", items);
+  return items.filter((item) => visible.has(item.id));
 }
 
-export async function createActionChecklistItem(actor: AppActor, params: {
+export async function createActionChecklistItem(actor: AppActor, params: ProducerLineageParams & {
   workspaceId: string;
   actionId: string;
   title: string;
@@ -464,6 +498,8 @@ export async function createActionChecklistItem(actor: AppActor, params: {
       if (existing) {
         invariant(existing.workspaceId === params.workspaceId && existing.actionId === params.actionId && existing.title === title,
           409, "IDEMPOTENCY_CONFLICT", "This checklist request was already used for different content.");
+        invariant((await readableArtifactIds(actor, params.workspaceId, "ActionChecklistItem", [existing], tx)).has(existing.id),
+          404, "NOT_FOUND", "The earlier checklist item is no longer readable.");
         return existing;
       }
     }
@@ -475,6 +511,7 @@ export async function createActionChecklistItem(actor: AppActor, params: {
       orderBy: { sortOrder: "desc" },
       select: { sortOrder: true },
     });
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId, capture: params });
     const item = await tx.actionChecklistItem.create({
       data: {
         ...(params.idempotencyId ? { id: params.idempotencyId } : {}),
@@ -484,6 +521,9 @@ export async function createActionChecklistItem(actor: AppActor, params: {
         sortOrder: (lastItem?.sortOrder ?? -1) + 1,
       },
     });
+
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "ActionChecklistItem", id: item.id }, content: item, receipt });
 
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
@@ -504,7 +544,7 @@ export async function createActionChecklistItem(actor: AppActor, params: {
   });
 }
 
-export async function updateActionChecklistItem(actor: AppActor, params: {
+export async function updateActionChecklistItem(actor: AppActor, params: ProducerLineageParams & {
   workspaceId: string;
   checklistItemId: string;
   title?: string;
@@ -535,12 +575,18 @@ export async function updateActionChecklistItem(actor: AppActor, params: {
         : { disconnect: true };
     }
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "ActionChecklistItem", id: existing.id }, before: existing, capture: params,
+      allowSystemTransition: params.title === undefined });
     const updated = Object.keys(data).length > 0
       ? await tx.actionChecklistItem.update({
         where: { id: existing.id },
         data,
       })
       : existing;
+
+    if (Object.keys(data).length) await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "ActionChecklistItem", id: updated.id }, content: updated, receipt });
 
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
@@ -619,6 +665,8 @@ async function applyActionDuplicateUpdate(
   const updateParams: Parameters<typeof updateAction>[1] = {
     workspaceId: params.workspaceId,
     actionId,
+    lineageInputs: params.lineageInputs,
+    lineageRoots: params.lineageRoots,
   };
   if ((mergedBody ?? null) !== (existing.bodyMd ?? null)) updateParams.bodyMd = mergedBody;
   if (!existing.circleId && params.circleId) updateParams.circleId = params.circleId;
@@ -626,7 +674,8 @@ async function applyActionDuplicateUpdate(
   if (!existing.dueAt && params.dueAt) updateParams.dueAt = params.dueAt;
   if (!existing.proposalId && params.proposalId) updateParams.proposalId = params.proposalId;
   if (params.priority !== undefined && params.priority !== null && existing.priority !== params.priority) updateParams.priority = params.priority;
-  if (Object.keys(updateParams).length === 2) return existing;
+  if (!Object.keys(updateParams).some((field) => !["workspaceId", "actionId", "lineageInputs", "lineageRoots"].includes(field))) return existing;
+  updateParams.lineageCopied = Boolean(params.source && !["WEB_REQUEST", "API_REQUEST"].includes(params.source.type));
   updateParams.expectedVersion = existing.version;
   updateParams._membership = membership;
   updateParams._tx = tx;
@@ -688,7 +737,11 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
     actorUserId: actor.kind === "user" ? actor.user.id : null,
     membershipId: membership?.id ?? null,
     includePrivate: actor.kind === "agent" || membership?.role === "ADMIN",
-  }, params.duplicateGuard, tx);
+  }, params.duplicateGuard, tx, async (rows) => {
+    const records = rows as Array<{ id: string; [key: string]: unknown }>;
+    const visible = await readableArtifactIds(actor, params.workspaceId, "Action", records, tx ?? prisma);
+    return records.filter((record) => visible.has(record.id));
+  });
 
   const create = async (tx: Prisma.TransactionClient, duplicateDecision: Awaited<ReturnType<typeof duplicateDecisionForCreate>>) => {
     const assigneeMemberId = await resolveAssigneeMemberId(tx, params.workspaceId, params.assigneeMemberId);
@@ -701,6 +754,17 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
     if (actor.kind === "agent" && attributedMemberId) {
       authorUserId = await resolveWorkspaceMemberUserId(tx, params.workspaceId, attributedMemberId, "Action author must be an active member of this workspace.");
     }
+    const receipt = await prepareProducerLineage({
+      tx, actor, workspaceId: params.workspaceId, capture: params,
+      copied: Boolean(source && !["WEB_REQUEST", "API_REQUEST"].includes(source.type)),
+      dependencies: actor.kind === "agent" ? [
+        ...(source?.type === "MEETING_INSIGHT" ? [{ kind: "MeetingInsight" as const, id: source.id }] : []),
+        ...(params.proposalId ? [{ kind: "Proposal" as const, id: params.proposalId }] : []),
+        ...(params.circleId ? [{ kind: "Circle" as const, id: params.circleId }] : []),
+        ...(params.authorMemberId ? [{ kind: "Member" as const, id: params.authorMemberId }] : []),
+        ...(assigneeMemberId ? [{ kind: "Member" as const, id: assigneeMemberId }] : []),
+      ] : [],
+    });
     const action = await tx.action.create({
       data: {
         workspaceId: params.workspaceId,
@@ -717,6 +781,9 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
         publishedAt,
       },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Action", id: action.id }, content: action, receipt });
+
 
     await ensureWorkspacePermalink(tx, actor, {
       workspaceId: params.workspaceId,
@@ -813,9 +880,13 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
             where: { id: existing.duplicateOfActionId, workspaceId: params.workspaceId, archivedAt: null, duplicateOfActionId: null, ...privacyFilter(actor, membership) },
           });
           invariant(canonical, 409, "ACTION_SOURCE_UNAVAILABLE", "Canonical Action is no longer available.");
+          invariant((await readableArtifactIds(actor, params.workspaceId, "Action", [canonical], tx)).has(canonical.id),
+            404, "NOT_FOUND", "Action source is no longer readable.");
           return canonical;
         }
         invariant(!existing.archivedAt, 409, "ACTION_SOURCE_UNAVAILABLE", "Action source was archived. Review it before retrying.");
+        invariant((await readableArtifactIds(actor, params.workspaceId, "Action", [existing], tx)).has(existing.id),
+          404, "NOT_FOUND", "Action source is no longer readable.");
         return existing;
     }
 
@@ -834,9 +905,10 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
   return params._tx ? run(params._tx) : prisma.$transaction(run);
 }
 
-export async function updateAction(actor: AppActor, params: {
+export async function updateAction(actor: AppActor, params: ProducerLineageParams & {
   workspaceId: string;
   actionId: string;
+  lineageCopied?: boolean;
   title?: string;
   bodyMd?: string | null;
   status?: "DRAFT" | "OPEN" | "IN_PROGRESS" | "COMPLETED";
@@ -983,6 +1055,8 @@ export async function updateAction(actor: AppActor, params: {
     if (action.isPrivate !== undefined) updateWhere.isPrivate = action.isPrivate ?? false;
     updateWhere.version = params.expectedVersion ?? action.version;
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Action", id: action.id }, before: action, capture: params, copied: params.lineageCopied });
     let updated;
     try {
       updated = await tx.action.update({
@@ -995,6 +1069,9 @@ export async function updateAction(actor: AppActor, params: {
       }
       throw error;
     }
+
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Action", id: updated.id }, content: updated, receipt });
 
     const evidenceDocumentIds = params.status === "COMPLETED"
       ? await createWorkItemEvidenceLinks(tx, {
@@ -1163,10 +1240,15 @@ export async function publishAction(actor: AppActor, params: {
     const assigneeMemberId = await resolveAssigneeMemberId(tx, params.workspaceId, action.assigneeMemberId);
     invariant(assigneeMemberId, 400, "INVALID_INPUT", "Assign an active human member before opening this Action.");
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Action", id: action.id }, before: action, allowSystemTransition: true });
     const updated = await tx.action.update({
       where: { id: params.actionId, workspaceId: params.workspaceId, archivedAt: null, duplicateOfActionId: null, status: "DRAFT" },
       data: { status: "OPEN", isPrivate: false, publishedAt: new Date() },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Action", id: updated.id }, content: updated, receipt });
+
 
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
@@ -1216,6 +1298,8 @@ export async function returnActionToDraft(actor: AppActor, params: {
     invariant(action.status === "OPEN" || action.status === "IN_PROGRESS" || action.status === "COMPLETED", 400, "INVALID_STATE", "Only open, in-progress, or completed actions can be returned to draft.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: action, resolvedMembership: membership });
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Action", id: action.id }, before: action, allowSystemTransition: true });
     const updated = await tx.action.update({
       where: { id: params.actionId, workspaceId: params.workspaceId, archivedAt: null, duplicateOfActionId: null, status: action.status },
       data: {
@@ -1225,6 +1309,9 @@ export async function returnActionToDraft(actor: AppActor, params: {
         completedVia: null,
       },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Action", id: updated.id }, content: updated, receipt });
+
 
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,

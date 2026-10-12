@@ -1,7 +1,10 @@
 import { getSupportAuthorizationContext, prisma } from "@corgtex/shared";
-import { searchIndexedKnowledge } from "@corgtex/knowledge";
+import { getKnowledgeSearchInputRoots, searchIndexedKnowledge } from "@corgtex/knowledge";
 import { assertCatalogModelBudget, CatalogBudgetError, defaultModelGateway, IncrementalJsonStringDecoder, WorkspaceModelBudgetError } from "@corgtex/models";
-import { AppError, buildRoleOnboardingContextForConversation, checkBudget, loadRelevantMemories, requireWorkspaceMembership, storeAgentMemory, supportCapabilityVersion } from "@corgtex/domain";
+import { AppError, captureArtifactInputProof, withArtifactInputReadCapture, withArtifactInputWriteFence, type ArtifactInputWriteFence, checkBudget, loadRelevantMemories, requireWorkspaceMembership, storeAgentMemory, supportCapabilityVersion } from "@corgtex/domain";
+import { prepareConversationInputs, loadConversationHistory, loadConversationOnboarding, type ConversationInputCollector } from "./conversation-inputs";
+import { executeTrustedConversationReadTool } from "./conversation-tool-lineage";
+import { type LineageRoot } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import type { ChatMessage, ModelTool, ToolCall } from "@corgtex/models";
 import { checkCalendarAvailabilityTool, scheduleMeetingTool, checkCalendarAvailability, scheduleMeeting } from "./tools/calendar";
@@ -12,6 +15,7 @@ import {
   resolveInteractiveKnowledgeAccessDomains,
   searchBrainTool,
   searchBrain,
+  getBrainSearchInputReceipt,
 } from "./tools/knowledge";
 import { createTensionTool, updateTensionTool, createActionTool, updateActionTool, createProposalTool, createGoalTool, createTensionAction, updateTensionAction, createActionItemAction, updateActionItemAction, createProposalAction, createGoalAction } from "./tools/mutations";
 import { saveToBrainTool, saveToBrainAction } from "./tools/brain-save";
@@ -173,6 +177,10 @@ type ConversationContext = {
   actor?: AppActor;
   pageContext?: ConversationPageContext | null;
   signal?: AbortSignal;
+  persistenceFence?: ArtifactInputWriteFence;
+  collector?: ConversationInputCollector;
+  promptInputId?: string;
+  lineageRoots?: LineageRoot[];
 };
 
 type ConversationContextUsed = {
@@ -332,8 +340,10 @@ async function loadKnowledgeForConversation(params: {
       sourceTypes,
       accessDomains,
     });
+    const roots = await getKnowledgeSearchInputRoots(params.ctx.actor, params.ctx.workspaceId, results);
+    if (roots.length) await conversationCollector(params.ctx).captureTrusted(results, roots);
     return {
-      results: Array.isArray(results) ? results : [],
+      results: await conversationCollector(params.ctx).admitKnowledgeResults(Array.isArray(results) ? results : []),
       accessDomains,
       search: {
         query,
@@ -349,7 +359,7 @@ async function loadKnowledgeForConversation(params: {
         query,
         sourceTypes,
         hitCount: 0,
-        error: error instanceof Error ? error.message : String(error),
+        error: "Knowledge search is temporarily unavailable.",
       },
     };
   }
@@ -367,7 +377,7 @@ function knowledgeSearchInstruction(search: ConversationContextUsed["knowledgeSe
   return `Knowledge retrieval already searched ${sourceLabel} for this turn. Use the supplied results when answering from workspace context, cite them when relevant, and do not claim to have checked any other source unless a tool result is present.`;
 }
 
-const TOOL_HANDLERS: Partial<Record<string, (actor: AppActor, ctx: ConversationContext, args: any) => Promise<unknown>>> = {
+const RAW_TOOL_HANDLERS: Partial<Record<string, (actor: AppActor, ctx: ConversationContext, args: any) => Promise<unknown>>> = {
   check_calendar_availability: async (actor, ctx, args) => checkCalendarAvailability(ctx.userId, ctx.workspaceId, args.emails, args.timeMin, args.timeMax),
   schedule_meeting: async (actor, ctx, args) => scheduleMeeting(ctx.userId, ctx.workspaceId, args.title, args.description, args.startTime, args.endTime, args.attendeeEmails),
   create_corgtex_scheduled_meeting: async (actor, ctx, args) => createCorgtexScheduledMeeting(actor, ctx.workspaceId, args),
@@ -378,7 +388,7 @@ const TOOL_HANDLERS: Partial<Record<string, (actor: AppActor, ctx: ConversationC
   query_actions: async (actor, ctx, args) => queryActions(ctx.workspaceId, args.status, args.assigneeId, args.actionId, actor),
   query_proposals: async (actor, ctx, args) => queryProposals(ctx.workspaceId, args.status, actor),
   query_goals: async (actor, ctx, args) => queryGoals(actor, ctx.workspaceId, args.cadence, args.level, args.status),
-  query_org_structure: async (actor, ctx) => queryOrgStructure(ctx.workspaceId),
+  query_org_structure: async (actor, ctx) => queryOrgStructure(ctx.workspaceId, actor),
   create_tension: createTensionAction,
   update_tension: updateTensionAction,
   create_action: createActionItemAction,
@@ -405,6 +415,70 @@ const TOOL_HANDLERS: Partial<Record<string, (actor: AppActor, ctx: ConversationC
   create_communication_suggestion: async (actor, ctx, args) => createCommunicationSuggestionAction(actor, ctx, args),
   ...contextMapToolHandlers,
 };
+
+const CONVERSATION_MUTATION_TOOLS = new Set(["create_tension", "update_tension", "create_action", "update_action", "create_proposal", "create_goal", "save_to_brain", "record_relationship_activity", "complete_relationship_activity", "create_communication_suggestion", "create_context_map_diff", "apply_context_map_diff"]);
+function conversationCollector(ctx: ConversationContext) {
+  if (!ctx.collector) throw new AppError(409, "UNKNOWN_LINEAGE", "Conversation inputs have not been captured.");
+  return ctx.collector;
+}
+const TOOL_HANDLERS = Object.fromEntries(Object.entries(RAW_TOOL_HANDLERS).map(([toolName, handler]) => [toolName,
+  async (actor: AppActor, ctx: ConversationContext, args: any) => {
+    const collector = conversationCollector(ctx);
+    await collector.assertReadable();
+    if (toolName === "search_brain") {
+      const results = await handler!(actor, ctx, args);
+      const receipt = getBrainSearchInputReceipt(results);
+      if (receipt) await collector.addReceipt(results, receipt);
+      else if (Array.isArray(results) && results.length === 0) await collector.captureTrusted(results, await collector.roots());
+      else throw new AppError(409, "UNKNOWN_LINEAGE", "Knowledge search did not return its complete input receipt.");
+      return results;
+    }
+    const read = await executeTrustedConversationReadTool({ actor, workspaceId: ctx.workspaceId, toolName, args, pageContext: ctx.pageContext });
+    if (read) { await collector.addReceipt(read.value, read.receipt); return read.value; }
+    if (!CONVERSATION_MUTATION_TOOLS.has(toolName)) return { success: false, contentWithheld: true,
+      message: "This tool cannot provide a complete current source-permission receipt." };
+    const lineageRoots = await collector.roots();
+    const mutation = await withArtifactInputReadCapture(actor, ctx.workspaceId, async () => {
+      await captureArtifactInputProof(actor, ctx.workspaceId, [{ kind: "Workspace", id: ctx.workspaceId }]);
+      return withArtifactInputWriteFence(ctx.persistenceFence, () => handler!(actor, { ...ctx, lineageRoots }, args));
+    }, { preserveConsumedRevisions: true });
+    await collector.preserveConsumedRevisions();
+    // Include permitted duplicate/parent records read during mutation, even if the model omitted them.
+    await collector.captureTrusted(mutation.value, [...await collector.roots(), ...mutation.roots]);
+    return mutation.value;
+  }
+])) as typeof RAW_TOOL_HANDLERS;
+
+async function conversationChat(ctx: ConversationContext, request: Parameters<typeof defaultModelGateway.chat>[0]) {
+  await conversationCollector(ctx).assertReadable();
+  const response = await defaultModelGateway.chat(request);
+  await conversationCollector(ctx).assertReadable();
+  return response;
+}
+async function* conversationChatStream(ctx: ConversationContext, request: Parameters<typeof defaultModelGateway.chatStream>[0]) {
+  await conversationCollector(ctx).assertReadable();
+  const iterator = defaultModelGateway.chatStream(request);
+  try {
+    while (true) {
+      const result = await iterator.next();
+      await conversationCollector(ctx).assertReadable();
+      if (result.done) return result.value;
+      yield result.value;
+    }
+  } finally { await iterator.return(undefined as never); }
+}
+async function* conversationChatEventStream(ctx: ConversationContext, request: Parameters<typeof defaultModelGateway.chatEventStream>[0]) {
+  await conversationCollector(ctx).assertReadable();
+  const iterator = defaultModelGateway.chatEventStream(request);
+  try {
+    while (true) {
+      const result = await iterator.next();
+      await conversationCollector(ctx).assertReadable();
+      if (result.done) return result.value;
+      yield result.value;
+    }
+  } finally { await iterator.return(undefined as never); }
+}
 
 function isCrmWriteTool(toolName: string) {
   return CRM_WRITE_TOOL_NAMES.has(toolName);
@@ -910,9 +984,9 @@ async function continueBrainReads(
     };
     let response: import("@corgtex/models").ChatCompletionResponse | null = null;
     try {
-      if (!streaming) response = await defaultModelGateway.chat(request);
+      if (!streaming) response = await conversationChat(ctx, request);
       else {
-        const iterator = defaultModelGateway.chatStream(request)[Symbol.asyncIterator]();
+        const iterator = conversationChatStream(ctx, request)[Symbol.asyncIterator]();
         let completed = false;
         try {
           while (true) {
@@ -1017,9 +1091,12 @@ function throwIfConversationCanceled(ctx: ConversationContext, error?: unknown) 
 export async function processConversationTurn(ctx: ConversationContext) {
   await requireWorkspaceMembership({ actor: requireConversationToolActor(ctx), workspaceId: ctx.workspaceId });
   const origin = getSupportAuthorizationContext()?.origin;
-  const result = await processConversationTurnContent(ctx);
+  const prepared = await withArtifactInputWriteFence(ctx.persistenceFence, () => prepareConversationInputs({ ...ctx, actor: requireConversationToolActor(ctx) }));
+  const checkedContext = { ...ctx, ...prepared };
+  const result = await processConversationTurnContent(checkedContext);
+  const lineageRoots = await prepared.collector.roots();
   if (origin) await supportCapabilityVersion(origin.userId, origin.workspaceId, origin.version);
-  return result;
+  return { ...result, lineageRoots, promptInputId: prepared.promptInputId };
 }
 
 async function processConversationTurnContent(ctx: ConversationContext): Promise<{
@@ -1060,17 +1137,8 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
 
   const effectiveHistoryTurns = ctx.userMessage.length > 10_000 ? 5 : MAX_HISTORY_TURNS;
 
-  const priorTurnsDesc = await prisma.conversationTurn.findMany({
-    where: { conversationId: ctx.sessionId },
-    orderBy: { sequenceNumber: "desc" },
-    take: effectiveHistoryTurns,
-    select: {
-      sequenceNumber: true,
-      userMessage: true,
-      assistantMessage: true,
-    },
-  });
-  const priorTurns = [...priorTurnsDesc].reverse();
+  const priorTurns = await loadConversationHistory(requireConversationToolActor(ctx), ctx.workspaceId, ctx.sessionId,
+    effectiveHistoryTurns, conversationCollector(ctx));
   const turnCount = priorTurns.at(-1)?.sequenceNumber ?? 0;
 
   let knowledgeResults: unknown[] = [];
@@ -1088,10 +1156,12 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
   let memories: unknown[] = [];
   try {
     memories = await loadRelevantMemories({
+      actor: requireConversationToolActor(ctx),
       workspaceId: ctx.workspaceId,
       agentKey: ctx.agentKey,
       limit: 5,
     });
+    memories = await conversationCollector(ctx).admitRecords("AgentMemory", memories as Array<{ id: string }>);
   } catch {
     // Memories are best-effort
   }
@@ -1106,9 +1176,8 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
           slug: `person-${ctx.userId}`,
         },
       },
-      select: { bodyMd: true },
     });
-    if (profileArticle) {
+    if (profileArticle && (await conversationCollector(ctx).admitRecords("BrainArticle", [profileArticle])).length) {
       userProfile = profileArticle.bodyMd;
     }
   } catch {
@@ -1164,11 +1233,7 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
 
   let roleOnboardingContext: string | null = null;
   if (ctx.agentKey === "role-onboarding") {
-    roleOnboardingContext = await buildRoleOnboardingContextForConversation({
-      workspaceId: ctx.workspaceId,
-      conversationId: ctx.sessionId,
-      userId: ctx.userId,
-    });
+    roleOnboardingContext = await loadConversationOnboarding(ctx.workspaceId, ctx.sessionId, ctx.userId, conversationCollector(ctx));
     if (roleOnboardingContext) {
       messages.push({
         role: "system",
@@ -1188,7 +1253,7 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
   const followupTools = await toolsForContext(ctx);
   const tools = followupTools.filter(({ function: tool }) => !isVersionedUpdateTool(tool.name));
 
-  const response = await defaultModelGateway.chat({
+  const response = await conversationChat(ctx, {
     workspaceId: ctx.workspaceId,
     ...catalogUsageContext(ctx),
     model: env.MODEL_CHAT_CONVERSATION,
@@ -1251,7 +1316,7 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
     if (authorizeBrainRead && failedToolResults.length === 0 && pendingCrmOperations.length === 0) {
       followupMessage = finalMessage = await continueBrainReads(ctx, actor, messages, response.tool_calls, executedToolResults, failedToolResults, authorizeBrainRead, false);
     } else if (await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true)) {
-      const followup = await defaultModelGateway.chat({
+      const followup = await conversationChat(ctx, {
         workspaceId: ctx.workspaceId,
         ...catalogUsageContext(ctx),
         model: env.MODEL_CHAT_CONVERSATION,
@@ -1269,7 +1334,7 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
         const updateFailure = versionedUpdateFailure(executedToolResults, failedToolResults);
         followupMessage = updateFailure ?? VERSIONED_UPDATE_SUMMARY_UNAVAILABLE;
         if (!updateFailure && await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true)) {
-          try { const completed = await defaultModelGateway.chat({ workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx), model: env.MODEL_CHAT_CONVERSATION, taskType: "AGENT", messages, signal: ctx.signal }); throwIfConversationCanceled(ctx); followupMessage = completed.content || followupMessage; }
+          try { const completed = await conversationChat(ctx, { workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx), model: env.MODEL_CHAT_CONVERSATION, taskType: "AGENT", messages, signal: ctx.signal }); throwIfConversationCanceled(ctx); followupMessage = completed.content || followupMessage; }
           catch (error) { throwIfConversationCanceled(ctx, error); }
         }
         finalMessage = followupMessage;
@@ -1291,6 +1356,7 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
   if (turnCount > 0 && turnCount % 5 === 0) {
     try {
       await storeAgentMemory({
+        actor: requireConversationToolActor(ctx), lineageRoots: await conversationCollector(ctx).roots(),
         workspaceId: ctx.workspaceId,
         agentKey: ctx.agentKey,
         memoryType: "conversation_observation",
@@ -1321,13 +1387,22 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
 export async function* processConversationTurnStream(ctx: ConversationContext) {
   await requireWorkspaceMembership({ actor: requireConversationToolActor(ctx), workspaceId: ctx.workspaceId });
   const origin = getSupportAuthorizationContext()?.origin;
-  const iterator = processConversationTurnStreamContent(ctx);
+  const prepared = await withArtifactInputWriteFence(ctx.persistenceFence, () => prepareConversationInputs({ ...ctx, actor: requireConversationToolActor(ctx) }));
+  const iterator = processConversationTurnStreamContent({ ...ctx, ...prepared });
+  const buffered: string[] = [];
   try {
     while (true) {
       const result = await iterator.next();
+      if (!result.done) { buffered.push(result.value); continue; }
+      const lineageRoots = await prepared.collector.roots();
       if (origin) await supportCapabilityVersion(origin.userId, origin.workspaceId, origin.version);
-      if (result.done) return result.value;
-      yield result.value;
+      for (const chunk of buffered) {
+        throwIfConversationCanceled(ctx);
+        await prepared.collector.assertReadable();
+        if (origin) await supportCapabilityVersion(origin.userId, origin.workspaceId, origin.version);
+        yield chunk;
+      }
+      return { ...result.value, lineageRoots, promptInputId: prepared.promptInputId };
     }
   } finally {
     await iterator.return({ assistantMessage: "", contextUsed: {} });
@@ -1375,17 +1450,8 @@ async function* processConversationTurnStreamContent(ctx: ConversationContext): 
 
   const effectiveHistoryTurns = ctx.userMessage.length > 10_000 ? 5 : MAX_HISTORY_TURNS;
 
-  const priorTurnsDesc = await prisma.conversationTurn.findMany({
-    where: { conversationId: ctx.sessionId },
-    orderBy: { sequenceNumber: "desc" },
-    take: effectiveHistoryTurns,
-    select: {
-      sequenceNumber: true,
-      userMessage: true,
-      assistantMessage: true,
-    },
-  });
-  const priorTurns = [...priorTurnsDesc].reverse();
+  const priorTurns = await loadConversationHistory(requireConversationToolActor(ctx), ctx.workspaceId, ctx.sessionId,
+    effectiveHistoryTurns, conversationCollector(ctx));
   const turnCount = priorTurns.at(-1)?.sequenceNumber ?? 0;
 
   let knowledgeResults: unknown[] = [];
@@ -1402,10 +1468,12 @@ async function* processConversationTurnStreamContent(ctx: ConversationContext): 
   let memories: unknown[] = [];
   try {
     memories = await loadRelevantMemories({
+      actor: requireConversationToolActor(ctx),
       workspaceId: ctx.workspaceId,
       agentKey: ctx.agentKey,
       limit: 5,
     });
+    memories = await conversationCollector(ctx).admitRecords("AgentMemory", memories as Array<{ id: string }>);
   } catch {
   }
 
@@ -1447,11 +1515,7 @@ async function* processConversationTurnStreamContent(ctx: ConversationContext): 
 
   let roleOnboardingContext: string | null = null;
   if (ctx.agentKey === "role-onboarding") {
-    roleOnboardingContext = await buildRoleOnboardingContextForConversation({
-      workspaceId: ctx.workspaceId,
-      conversationId: ctx.sessionId,
-      userId: ctx.userId,
-    });
+    roleOnboardingContext = await loadConversationOnboarding(ctx.workspaceId, ctx.sessionId, ctx.userId, conversationCollector(ctx));
     if (roleOnboardingContext) {
       messages.push({
         role: "system",
@@ -1477,7 +1541,7 @@ async function* processConversationTurnStreamContent(ctx: ConversationContext): 
   let toolExecutionAttempted = false;
 
   const fakeAnswerOnly = env.MODEL_PROVIDER === "fake";
-  const routeIterator = defaultModelGateway.chatEventStream({ workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx), model: env.MODEL_CHAT_CONVERSATION, taskType: "AGENT", messages, ...(fakeAnswerOnly ? {} : { tools: conversationRouteTools(tools), tool_choice: "required" as const }), signal: ctx.signal })[Symbol.asyncIterator]();
+  const routeIterator = conversationChatEventStream(ctx, { workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx), model: env.MODEL_CHAT_CONVERSATION, taskType: "AGENT", messages, ...(fakeAnswerOnly ? {} : { tools: conversationRouteTools(tools), tool_choice: "required" as const }), signal: ctx.signal })[Symbol.asyncIterator]();
   let routeResponse: import("@corgtex/models").ChatCompletionResponse | null = null; let routeError: unknown; let routeCompleted = false; let routeInvalid = false; let routeSeen = false;
   let routeId = ""; let routeName = ""; let routeArguments = ""; let answerMessage = ""; let answerDecoder: IncrementalJsonStringDecoder | null = null;
   try { while (true) { const next = await routeIterator.next(); if (next.done) { routeCompleted = true; routeResponse = next.value; break; } const event = next.value;
@@ -1550,7 +1614,7 @@ async function* processConversationTurnStreamContent(ctx: ConversationContext): 
       const followupAllowed = !initialMutationRejected && await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true);
       const followupBudgetExhausted = !initialMutationRejected && !followupAllowed && pendingCrmOperations.length === 0;
       if (followupAllowed) {
-        const followupIterator = defaultModelGateway.chatStream({
+        const followupIterator = conversationChatStream(ctx, {
           workspaceId: ctx.workspaceId,
           ...catalogUsageContext(ctx),
           model: env.MODEL_CHAT_CONVERSATION,
@@ -1592,7 +1656,7 @@ async function* processConversationTurnStreamContent(ctx: ConversationContext): 
         else { finalMessage = followupMessage; if (finalMessage) yield finalMessage; }
         let summary = "";
         if (!updateFailure && await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true)) {
-          const completed = await collectChatStream(defaultModelGateway.chatStream({ workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx),
+          const completed = await collectChatStream(conversationChatStream(ctx, { workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx),
             model: env.MODEL_CHAT_CONVERSATION, taskType: "AGENT", messages, signal: ctx.signal }));
           throwIfConversationCanceled(ctx, completed.error); summary = completed.error ? "" : completed.message;
         }
@@ -1632,6 +1696,7 @@ async function* processConversationTurnStreamContent(ctx: ConversationContext): 
   if (turnCount > 0 && turnCount % 5 === 0) {
     try {
       await storeAgentMemory({
+        actor: requireConversationToolActor(ctx), lineageRoots: await conversationCollector(ctx).roots(),
         workspaceId: ctx.workspaceId,
         agentKey: ctx.agentKey,
         memoryType: "conversation_observation",

@@ -1,8 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { prismaMock, syncContextGraphForMeetingMock, upsertContextGraphObjectMock, upsertContextGraphRelationshipMock, readableArtifactIdsMock } = vi.hoisted(() => ({
+const { prismaMock, syncContextGraphForMeetingMock, upsertContextGraphObjectMock, upsertContextGraphRelationshipMock, captureArtifactInputProofMock } = vi.hoisted(() => ({
   prismaMock: {
     action: { findFirst: vi.fn() },
+    tension: { findFirst: vi.fn() },
+    proposal: { findFirst: vi.fn() },
+    circle: { findFirst: vi.fn() },
+    role: { findFirst: vi.fn() },
     brainArticle: { findFirst: vi.fn() },
     document: { findFirst: vi.fn() },
     member: { findFirst: vi.fn() },
@@ -14,7 +18,7 @@ const { prismaMock, syncContextGraphForMeetingMock, upsertContextGraphObjectMock
   syncContextGraphForMeetingMock: vi.fn(),
   upsertContextGraphObjectMock: vi.fn(),
   upsertContextGraphRelationshipMock: vi.fn(),
-  readableArtifactIdsMock: vi.fn(),
+  captureArtifactInputProofMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -27,14 +31,14 @@ vi.mock("@corgtex/domain", () => ({
   attachContextGraphEvidence: vi.fn(),
   upsertContextGraphObject: upsertContextGraphObjectMock,
   upsertContextGraphRelationship: upsertContextGraphRelationshipMock,
-  readableArtifactIds: readableArtifactIdsMock,
+  captureArtifactInputProof: captureArtifactInputProofMock,
 }));
 
 describe("handleContextGraphSync", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
-    readableArtifactIdsMock.mockImplementation(async (_actor: unknown, _workspaceId: string, _kind: string, records: Array<{ id: string }>) =>
-      new Set(records.map((record) => record.id)));
+    vi.resetAllMocks();
+    captureArtifactInputProofMock.mockReset().mockImplementation(async (_actor, _workspaceId, inputs) => inputs.map((input: { kind: string; id: string }) => ({ kind: input.kind, id: input.id, fingerprint: "a".repeat(64) })));
+
   });
 
   it("delegates meeting sync to the domain meeting graph sync", async () => {
@@ -59,7 +63,7 @@ describe("handleContextGraphSync", () => {
       dueAt: null,
       createdAt: new Date("2026-05-20T10:00:00.000Z"),
       updatedAt: new Date("2026-05-21T10:00:00.000Z"),
-      assigneeMember: { user: { displayName: "Alex", email: "alex@example.com" } },
+      assigneeMember: { id: "assignee-1", user: { displayName: "Alex", email: "alex@example.com" } },
       circle: { id: "circle-1", name: "Customer Success", purposeMd: "Own onboarding" },
     });
     upsertContextGraphObjectMock
@@ -81,6 +85,62 @@ describe("handleContextGraphSync", () => {
       targetObjectId: "circle-object-1",
       relationshipType: "part_of",
     }));
+  });
+
+  it("archives unknown primary facts without copying the old body", async () => {
+    const { handleContextGraphSync } = await import("./context-graph-sync");
+    const action = { id: "action-unknown", title: "Hidden legacy title", bodyMd: "Unknown legacy body" };
+    prismaMock.action.findFirst.mockResolvedValue(action);
+    captureArtifactInputProofMock.mockRejectedValue(Object.assign(new Error("Unknown lineage"), { code: "UNKNOWN_LINEAGE" }));
+
+    await handleContextGraphSync("job-1", { sourceType: "ACTION", sourceId: action.id }, "ws-1");
+
+    expect(upsertContextGraphObjectMock).not.toHaveBeenCalled();
+    expect(upsertContextGraphRelationshipMock).not.toHaveBeenCalled();
+    for (const model of [prismaMock.contextGraphObject, prismaMock.contextGraphRelationship]) {
+      expect(model.updateMany).toHaveBeenCalledWith({
+        where: { workspaceId: "ws-1", sourceEntityType: "Action", sourceEntityId: action.id, status: { not: "archived" } },
+        data: { status: "archived" },
+      });
+    }
+  });
+
+  it("omits restricted nested labels while retaining a proven primary object", async () => {
+    const { handleContextGraphSync } = await import("./context-graph-sync");
+    const action = {
+      id: "action-1", title: "Permitted task", bodyMd: "Permitted body", status: "OPEN", dueAt: null,
+      assigneeMember: { id: "member-private", user: { displayName: "Hidden person" } },
+      circle: { id: "circle-private", name: "Hidden team", purposeMd: "Hidden purpose" },
+    };
+    prismaMock.action.findFirst.mockResolvedValue(action);
+    captureArtifactInputProofMock.mockImplementation(async (_actor, _workspaceId, inputs) => {
+      if (inputs[0].kind !== "Action") throw Object.assign(new Error("Restricted"), { code: "SOURCE_RESTRICTED" });
+      return [{ kind: "Action", id: "action-1", fingerprint: "a".repeat(64) }];
+    });
+    upsertContextGraphObjectMock.mockResolvedValue({ id: "task-1" });
+
+    await handleContextGraphSync("job-1", { sourceType: "ACTION", sourceId: "action-1" }, "ws-1");
+
+    expect(captureArtifactInputProofMock).toHaveBeenNthCalledWith(1, expect.anything(), "ws-1", [{ kind: "Action", id: "action-1", snapshot: action }]);
+    expect(upsertContextGraphObjectMock).toHaveBeenCalledTimes(1);
+    expect(upsertContextGraphObjectMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      title: "Permitted task", properties: { status: "OPEN", dueAt: null, assignee: null },
+      lineageInputs: [], lineageRoots: [{ kind: "Action", id: "action-1", fingerprint: "a".repeat(64) }],
+    }));
+    expect(upsertContextGraphRelationshipMock).not.toHaveBeenCalled();
+  });
+
+  it("propagates write-time proof rejection without substituting a fresh receipt", async () => {
+    const { handleContextGraphSync } = await import("./context-graph-sync");
+    prismaMock.action.findFirst.mockResolvedValue({ id: "action-1", title: "Earlier task", status: "OPEN" });
+    const changed = Object.assign(new Error("Source changed during sync"), { code: "SOURCE_CHANGED" });
+    upsertContextGraphObjectMock.mockRejectedValue(changed);
+
+    await expect(handleContextGraphSync("job-1", { sourceType: "ACTION", sourceId: "action-1" }, "ws-1")).rejects.toBe(changed);
+
+    expect(captureArtifactInputProofMock).toHaveBeenCalledTimes(1);
+    expect(upsertContextGraphObjectMock).toHaveBeenCalledTimes(1);
+    expect(upsertContextGraphRelationshipMock).not.toHaveBeenCalled();
   });
 
   it("maps Brain process articles to process graph objects", async () => {
@@ -120,6 +180,7 @@ describe("handleContextGraphSync", () => {
       user: { displayName: "Ana Novak", email: "ana@example.com" },
       roleAssignments: [
         {
+          id: "assignment-1",
           role: {
             id: "role-1",
             name: "Onboarding lead",
@@ -152,6 +213,11 @@ describe("handleContextGraphSync", () => {
       targetObjectId: "role-object-1",
       relationshipType: "assigned_to",
       status: "approved",
+      lineageInputs: [],
+      lineageRoots: expect.arrayContaining([
+        { kind: "Member", id: "member-1", fingerprint: "a".repeat(64) },
+        { kind: "RoleAssignment", id: "assignment-1", fingerprint: "a".repeat(64) },
+      ]),
     }));
     expect(upsertContextGraphRelationshipMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       sourceObjectId: "person-1",
@@ -159,12 +225,11 @@ describe("handleContextGraphSync", () => {
       relationshipType: "member_of",
       status: "approved",
     }));
-    expect(upsertContextGraphRelationshipMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+    expect(prismaMock.contextGraphRelationship.updateMany).toHaveBeenCalledWith({ where: expect.objectContaining({
       sourceObjectId: "person-1",
       targetObjectId: "stale-role-object",
       relationshipType: "assigned_to",
-      status: "archived",
-    }));
+    }), data: { status: "archived" } });
   });
 
   it("archives person objects and their edges when a member is deactivated", async () => {
@@ -178,6 +243,7 @@ describe("handleContextGraphSync", () => {
       user: { displayName: null, email: "left@example.com" },
       roleAssignments: [
         {
+          id: "assignment-1",
           role: {
             id: "role-1",
             name: "Onboarding lead",
@@ -201,12 +267,13 @@ describe("handleContextGraphSync", () => {
       title: "left@example.com",
       status: "archived",
     }));
-    expect(upsertContextGraphRelationshipMock).toHaveBeenCalledTimes(1);
-    expect(upsertContextGraphRelationshipMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+    expect(upsertContextGraphRelationshipMock).not.toHaveBeenCalled();
+    expect(prismaMock.contextGraphRelationship.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
       targetObjectId: "circle-object-1",
       relationshipType: "member_of",
-      status: "archived",
-    }));
+      }), data: { status: "archived" },
+    });
   });
 
   it("maps goals to goal objects with parent, circle, and owner relationships", async () => {
@@ -295,6 +362,7 @@ describe("handleContextGraphSync", () => {
       updatedAt: new Date("2026-06-01T10:00:00.000Z"),
       circleAssignments: [
         {
+          id: "agent-assignment-1",
           circle: { id: "circle-1", name: "Operations", purposeMd: "Run the company", archivedAt: null },
           role: { id: "role-1", name: "Scribe", purposeMd: "Record decisions", archivedAt: null },
         },
@@ -345,6 +413,7 @@ describe("handleContextGraphSync", () => {
       updatedAt: new Date("2026-06-05T10:00:00.000Z"),
       circleAssignments: [
         {
+          id: "agent-assignment-1",
           circle: { id: "circle-1", name: "Operations", purposeMd: null, archivedAt: null },
           role: null,
         },
@@ -362,12 +431,13 @@ describe("handleContextGraphSync", () => {
       objectType: "Agent",
       status: "archived",
     }));
-    expect(upsertContextGraphRelationshipMock).toHaveBeenCalledTimes(1);
-    expect(upsertContextGraphRelationshipMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+    expect(upsertContextGraphRelationshipMock).not.toHaveBeenCalled();
+    expect(prismaMock.contextGraphRelationship.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
       targetObjectId: "circle-object-1",
       relationshipType: "member_of",
-      status: "archived",
-    }));
+      }), data: { status: "archived" },
+    });
   });
 
   it("marks public draft goals as proposed graph facts", async () => {

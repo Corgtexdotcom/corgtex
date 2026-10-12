@@ -775,6 +775,7 @@ model Workspace {
   workflowJobs                   WorkflowJob[]
   knowledge                      KnowledgeChunk[]
   artifactInputLineage           ArtifactInputLineage[]
+  artifactInputSnapshots         ArtifactInputSnapshot[]
   modelUsage                     ModelUsage[]
   agentRuns                      AgentRun[]
   agentCreds                     AgentCredential[]
@@ -785,6 +786,7 @@ model Workspace {
   agentMemories                  AgentMemory[]
   webhookEndpoints               WebhookEndpoint[]
   inboundWebhooks                InboundWebhook[]
+  conversationPromptInputs       ConversationPromptInput[]
   brainArticles                  BrainArticle[]
   brainSources                   BrainSource[]
   brainBacklinks                 BrainBacklink[]
@@ -888,6 +890,8 @@ model Workspace {
   contextMapViews                ContextMapView[]
   contextGraphProposedDiffs      ContextGraphProposedDiff[]
   managedCustomerDeployment      CustomerDeployment?
+  agentFeedbackInputs AgentFeedbackInput[]
+  agentRequestInputs AgentRequestInput[]
 }
 
 model WorkspaceFeatureFlag {
@@ -3742,6 +3746,24 @@ model ArtifactInputLineage {
   @@index([workspaceId, artifactType, artifactId, recordedAt])
 }
 
+/// Immutable source content and original access envelope for a mutable prompt input.
+model ArtifactInputSnapshot {
+  id                 String   @id @default(uuid())
+  workspaceId        String
+  sourceKind         String
+  sourceId           String
+  sourceFingerprint  String
+  origin             String
+  contentJson        Json
+  accessEnvelopeJson Json
+  rootsJson          Json
+  createdAt          DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, sourceKind, sourceId])
+}
+
 model ContextGraphObject {
   id                   String    @id @default(uuid())
   workspaceId          String
@@ -4099,6 +4121,7 @@ model ConversationSession {
 
   workspace      Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   user           User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  promptInputs   ConversationPromptInput[]
   turns          ConversationTurn[]
   roleOnboarding RoleOnboardingSession?
   checkIns       CheckIn[]
@@ -4165,10 +4188,26 @@ enum RoleOnboardingStatus {
   DISMISSED
 }
 
+model ConversationPromptInput {
+  id String @id @default(uuid())
+  workspaceId String
+  sessionId String
+  userId String
+  content String @db.Text
+  createdAt DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  session ConversationSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  turns ConversationTurn[]
+
+  @@index([workspaceId, sessionId, userId])
+}
+
 model ConversationTurn {
   id               String   @id @default(uuid())
   conversationId   String
   sequenceNumber   Int
+  promptInputId    String?
   userMessage      String   @db.Text
   assistantMessage String   @db.Text
   contextJson      Json?
@@ -4176,6 +4215,7 @@ model ConversationTurn {
   createdAt        DateTime @default(now())
 
   conversation ConversationSession @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  promptInput ConversationPromptInput? @relation(fields: [promptInputId], references: [id], onDelete: SetNull)
   agentRun     AgentRun?           @relation(fields: [agentRunId], references: [id], onDelete: SetNull)
 
   @@index([conversationId, sequenceNumber])
@@ -4217,6 +4257,12 @@ model BrainArticle {
   // Explicit agent-created lineage. Legacy sourceIds may also be citations.
   derivationJson   Json?
   humanEditedAt    DateTime?
+  // Member-specific immutable rebuilds never inherit the canonical body.
+  variantOfArticleId String?
+  variantTargetFingerprint String?
+  variantInputSetHash String?
+  variantSourceStateJson Json?
+  variantGenerationJobId String?
   archivedAt       DateTime?
   archivedByUserId String?
   archiveReason    String?
@@ -4231,6 +4277,8 @@ model BrainArticle {
   discussions   BrainDiscussionThread[]
 
   @@unique([workspaceId, slug])
+  @@unique([workspaceId, variantOfArticleId, ownerMemberId, variantTargetFingerprint, variantInputSetHash], map: "BrainArticle_variant_recipe_key")
+  @@index([workspaceId, variantOfArticleId, ownerMemberId])
   @@index([workspaceId, type])
   @@index([workspaceId, authority])
   @@index([workspaceId, archivedAt])
@@ -4241,6 +4289,7 @@ model BrainArticleVersion {
   articleId     String
   version       Int
   bodyMd        String   @db.Text
+  accessEnvelopeJson Json?
   changeSummary String?
   agentRunId    String?
   createdAt     DateTime @default(now())
@@ -6384,4 +6433,30 @@ model PendingTranscriptUpload {
   createdAt DateTime @default(now())
   @@index([expiresAt])
   @@index([workspaceId])
+}
+
+model AgentFeedbackInput {
+  id String @id @default(uuid())
+  workspaceId String
+  agentRunId String
+  stepId String
+  priorRunSnapshotId String?
+  userId String
+  content String @db.Text
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, agentRunId, userId])
+}
+
+model AgentRequestInput {
+  id String @id @default(uuid())
+  workspaceId String
+  userId String
+  agentKey String
+  prompt String @db.Text
+  meetingId String?
+  proposalId String?
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, userId, agentKey])
 }

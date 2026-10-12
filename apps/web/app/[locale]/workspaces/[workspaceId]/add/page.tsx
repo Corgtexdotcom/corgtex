@@ -710,13 +710,13 @@ export default async function WorkspaceAddPage({
   ] = await Promise.all([
     needsProposals ? listProposals(actor, workspaceId, { take: 100 }) : Promise.resolve({ items: [] }),
     needsMembers ? listHumanMembers(workspaceId) : Promise.resolve([]),
-    needsCircles ? listCircles(workspaceId) : Promise.resolve([]),
+    needsCircles ? listCircles(actor, workspaceId) : Promise.resolve([]),
     needsGoals ? listGoals(actor, { workspaceId }) : Promise.resolve([]),
     needsContacts ? listContacts(actor, workspaceId, { take: 100, accountId: contextAccountId ?? undefined }) : Promise.resolve({ items: [] }),
     needsAccounts ? listCrmAccounts(actor, workspaceId, { take: 100 }) : Promise.resolve({ items: [] }),
     needsDeals ? listDeals(actor, workspaceId, { take: 100, accountId: contextAccountId ?? undefined }) : Promise.resolve({ items: [] }),
     needsApprovedProspects ? listQualifications(actor, workspaceId, { status: "APPROVED" }) : Promise.resolve({ items: [] }),
-    needsRoles ? listRoles(workspaceId) : Promise.resolve([]),
+    needsRoles ? listRoles(actor, workspaceId) : Promise.resolve([]),
     needsProposalLinks ? listActions(actor, workspaceId, { take: 100 }) : Promise.resolve({ items: [] }),
     needsProposalLinks ? listTensions(actor, workspaceId, { take: 100 }) : Promise.resolve({ items: [] }),
   ]);

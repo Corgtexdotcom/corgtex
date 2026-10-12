@@ -80,6 +80,8 @@ vi.mock("@corgtex/domain", () => ({
   resolveKnowledgeAccessDomains: vi.fn(async () => ["WORKSPACE", "FINANCE"]),
   readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map((row: any) => row.id))),
   lineageContentFingerprint: (kind: string, row: any) => `${kind}:${row.id}`,
+  captureArtifactInputProof: vi.fn(async (_actor, _workspaceId, inputs) => inputs.map((input: any) => ({ kind: input.kind, id: input.id, fingerprint: `${input.kind}:${input.id}` }))),
+  isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
 }));
 
 const actor: AppActor = { kind: "user", user: { id: "synthetic-user", email: "synthetic@example.test", displayName: "Synthetic user" } };
@@ -263,8 +265,8 @@ describe("knowledge retrieval cache", () => {
             ]);
           }
           expect(azureRequests).toBe(1);
-          expectUsage(path === "azure" ? ["EMBEDDING"] : path === "dual_compare"
-            ? ["EMBEDDING", "RERANK"] : ["EMBEDDING", "EMBEDDING", "RERANK"]);
+          expectUsage(path === "cache refill" ? ["EMBEDDING", "RERANK", "EMBEDDING", "RERANK"]
+            : path === "provider fallback" ? ["EMBEDDING", "EMBEDDING", "RERANK"] : ["EMBEDDING", "RERANK"]);
         });
       },
     );
@@ -327,7 +329,7 @@ describe("knowledge retrieval cache", () => {
     });
 
     expect(first).toEqual(second);
-    expect(prismaMock.knowledgeChunk.findMany).toHaveBeenCalledTimes(5);
+    expect(prismaMock.knowledgeChunk.findMany.mock.calls.filter(([query]) => query.take === 500)).toHaveLength(1);
     expect(prismaMock.knowledgeChunk.findMany.mock.calls[0]?.[0]).toMatchObject({
       where: { accessDomain: { in: ["WORKSPACE"] } },
     });
@@ -428,7 +430,8 @@ describe("knowledge retrieval cache", () => {
 
     expect(await searchIndexedKnowledge({ actor, workspaceId: "ws-1", query: "Withdrawn source claim" })).toEqual([]);
     expect(prismaMock.knowledgeChunk.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ id: { in: ["old-article-chunk"] }, workspaceId: "ws-1", accessDomain: { in: ["WORKSPACE"] } }),
+      where: expect.objectContaining({ workspaceId: "ws-1", accessDomain: { in: ["WORKSPACE"] } }),
+      take: 500,
       select: expect.objectContaining({ id: true, sourceId: true, sourceType: true, chunkIndex: true, content: true, metadata: true }),
     }));
     azureChunk = { ...azureChunk, id: "new-article-chunk", content: "Verified remaining claim" };
@@ -455,7 +458,7 @@ describe("knowledge retrieval cache", () => {
 
     expect(await searchIndexedKnowledge({ actor, workspaceId: "ws-1", query: "Withdrawn claim" })).toEqual([]);
     expect(prismaMock.brainArticle.findMany).toHaveBeenCalledWith({ where: {
-      workspaceId: "ws-1", archivedAt: null, isPrivate: false,
+      workspaceId: "ws-1", archivedAt: null, OR: [{ isPrivate: false }, { variantOfArticleId: { not: null }, isPrivate: true }],
     } });
     expect(prismaMock.knowledgeChunk.findMany).not.toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ sourceType: "BRAIN_ARTICLE" }) }));
   });
@@ -544,7 +547,7 @@ describe("knowledge retrieval cache", () => {
       accessDomains: ["FINANCE", "WORKSPACE"],
     });
 
-    expect(prismaMock.knowledgeChunk.findMany).toHaveBeenCalledTimes(9);
+    expect(prismaMock.knowledgeChunk.findMany.mock.calls.filter(([query]) => query.take === 500)).toHaveLength(2);
     expect(prismaMock.knowledgeChunk.findMany.mock.calls[4]?.[0]).toMatchObject({
       where: { accessDomain: { in: ["FINANCE", "WORKSPACE"] } },
     });
@@ -677,7 +680,7 @@ describe("knowledge retrieval cache", () => {
     expect(fetch).toHaveBeenCalledOnce();
   });
 
-  it("fills a partial Azure result when its other hit has an obsolete SQL receipt", async () => {
+  it("ranks the complete current SQL pool when Azure has a partially obsolete result", async () => {
     process.env.KNOWLEDGE_SEARCH_PROVIDER = "azure";
     process.env.AZURE_SEARCH_ENDPOINT = "https://corgtex-search.search.windows.net";
     process.env.AZURE_SEARCH_INDEX_NAME = "client-knowledge";
@@ -693,7 +696,7 @@ describe("knowledge retrieval cache", () => {
     ]));
 
     const results = await searchIndexedKnowledge({ actor, workspaceId: "ws-1", query: "rule" });
-    expect(results.map((item) => item.chunkId)).toEqual(["other-chunk", "new-document-chunk"]);
+    expect(results.map((item) => item.chunkId)).toEqual(["new-document-chunk", "other-chunk"]);
     expect(results.find((item) => item.chunkId === "old-document-chunk")).toBeUndefined();
   });
 

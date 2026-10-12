@@ -1,3 +1,4 @@
+import { captureCurrentAdviceNotification } from "./notification-event-lineage";
 import type { EventStatus, NewspaperCadence, Prisma, WorkflowJobStatus } from "@prisma/client";
 import { logger, prisma } from "@corgtex/shared";
 import { withWorkspaceSupportExecution, withMcpConnectionExecution } from "@corgtex/domain";
@@ -6,7 +7,7 @@ import { handleReleaseDiagnostic } from "./release-diagnostic-handler";
 import { deriveDispatchNotifications } from "./derive-notifications";
 import { createActionAssignmentNotification } from "./action-assignment-notifications";
 import { recordWorkflowJobProcessedMetric } from "./job-metrics";
-import { handleKnowledgeSync, handleMeetingKnowledgeSync, handleDocumentKnowledgeSync, handleExternalResourceKnowledgeSync, handleExternalContentKnowledgeSync, handleEventKnowledgeSync, handleTensionKnowledgeSync, handleActionKnowledgeSync, handleCircleKnowledgeSync, handleRoleKnowledgeSync, handleSlackMessageKnowledgeSync, handleCalendarSync, handleOAuthDocumentsSync, handleOAuthEmailSync, handleContextGraphSync, handleContextGraphStalenessSweep, handleContextGraphReconcile } from "./handlers";
+import { handleKnowledgeSync, handleMeetingKnowledgeSync, handleDocumentKnowledgeSync, handleExternalResourceKnowledgeSync, handleExternalContentKnowledgeSync, handleEventKnowledgeSync, handleTensionKnowledgeSync, handleActionKnowledgeSync, handleCircleKnowledgeSync, handleRoleKnowledgeSync, handleSlackMessageKnowledgeSync, handleCalendarSync, handleOAuthDocumentsSync, handleOAuthEmailSync, handleContextGraphSync, handleContextGraphStalenessSweep, handleContextGraphReconcile, handleSourceLineageRebuild } from "./handlers";
 import { FINANCE_REPORT_IMPORT_EXTRACTION_JOB_TYPE, FINANCE_REPORT_IMPORT_PROPOSAL_JOB_TYPE, handleGovernanceScoring,
   runFinanceReportImportExtractionJob, runFinanceReportImportProposalJob } from "./handlers";
 import { runAgentWorkflowJob } from "./handlers";
@@ -365,24 +366,13 @@ async function createAdviceNotificationsForEvent(tx: Prisma.TransactionClient, e
     return false;
   }
 
-  const payload = isRecord(event.payload) ? event.payload : {};
-  const adviceRequestId = typeof payload.adviceRequestId === "string" && payload.adviceRequestId.trim().length > 0
-    ? payload.adviceRequestId.trim()
-    : event.aggregateType === "AdviceRequest" && event.aggregateId
-      ? event.aggregateId
-      : null;
-  if (!adviceRequestId) {
-    return true;
-  }
-
+  const captured = await captureCurrentAdviceNotification(tx, event);
+  if (!captured) return true;
+  const adviceRequestId = captured.adviceRequestId;
   const excludeUserIds = new Set<string>();
-  const requestedByUserId = typeof payload.requestedByUserId === "string" ? payload.requestedByUserId : null;
-  const authorUserId = typeof payload.authorUserId === "string" ? payload.authorUserId : null;
   if (event.type === "advice.reply_posted") {
-    if (authorUserId) excludeUserIds.add(authorUserId);
-  } else if (requestedByUserId) {
-    excludeUserIds.add(requestedByUserId);
-  }
+    if (captured.authorUserId) excludeUserIds.add(captured.authorUserId);
+  } else excludeUserIds.add(captured.requestedByUserId);
 
   const targets = event.type === "advice.reply_posted"
     ? await resolveAdviceRequestRequesterUsers(tx, {
@@ -400,9 +390,10 @@ async function createAdviceNotificationsForEvent(tx: Prisma.TransactionClient, e
     return true;
   }
 
-  const notification = deriveAdviceNotificationContent(event);
+  const notification = deriveAdviceNotificationContent({ type: event.type, payload: captured });
   await createNotificationIntent(tx, {
     workspaceId: event.workspaceId,
+    lineageActor: captured.lineageActor, lineageRoots: captured.lineageRoots,
     type: event.type,
     recipientUserIds: targets.map((target) => target.userId),
     actorUserId: Array.from(excludeUserIds)[0] ?? null,
@@ -487,6 +478,7 @@ export async function createNotificationsForEvent(tx: Prisma.TransactionClient, 
   for (const notification of notifications) {
     await createNotificationIntent(tx, {
       workspaceId: event.workspaceId,
+      lineageActor: notification.lineageActor, lineageRoots: notification.lineageRoots,
       type: notification.type,
       recipientUserIds: members.map((member) => member.userId).filter((userId) => userId !== assignedUserId),
       actorUserId,
@@ -1091,6 +1083,10 @@ async function handleJob(job: ClaimedJob, workerId: string) {
     return;
   }
 
+  if (job.type === "source-lineage.rebuild") {
+    return handleSourceLineageRebuild(job.id, payload as { eventId?: string }, job.workspaceId!);
+  }
+
   if (job.type === "brain.daily-digest") {
     const dateISO = (payload as { dateISO?: string }).dateISO;
     const dateKey = (payload as { dateKey?: string }).dateKey;
@@ -1101,6 +1097,8 @@ async function handleJob(job: ClaimedJob, workerId: string) {
         dateISO,
         dateKey,
         cadence: readNewspaperCadence(payload.cadence),
+        regenerationOnly: payload.regenerationOnly === true,
+        rebuildRef: typeof payload.rebuildRef === "string" ? payload.rebuildRef : undefined,
       });
     }
     return;
@@ -1118,7 +1116,7 @@ async function handleJob(job: ClaimedJob, workerId: string) {
     return;
   }
 
-  if (job.type === "agent.brain-source-regenerate") {
+  if (job.type === "agent.brain-source-regenerate" || job.type === "agent.brain-article-variant") {
     return runAgentWorkflowJob(job, workerId);
   }
 

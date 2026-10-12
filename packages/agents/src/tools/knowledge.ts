@@ -1,8 +1,13 @@
 import type { KnowledgeAccessDomain, KnowledgeSourceType } from "@prisma/client";
-import { resolveKnowledgeAccessDomains } from "@corgtex/domain";
+import { captureConversationInputReceipt, type ConversationInputReceipt, resolveKnowledgeAccessDomains } from "@corgtex/domain";
 import type { ModelTool, ModelUsageInput } from "@corgtex/models";
 import type { AppActor } from "@corgtex/shared";
-import { searchIndexedKnowledge } from "@corgtex/knowledge";
+import { getKnowledgeSearchInputRoots, searchIndexedKnowledge } from "@corgtex/knowledge";
+
+const brainSearchReceipts = new WeakMap<object, ConversationInputReceipt>();
+export function getBrainSearchInputReceipt(value: unknown) {
+  return value !== null && typeof value === "object" ? brainSearchReceipts.get(value) : undefined;
+}
 
 export const INTERACTIVE_KNOWLEDGE_SOURCE_TYPES = [
   "BRAIN_ARTICLE",
@@ -53,7 +58,8 @@ export async function searchBrain(
     accessDomains,
   });
 
-  return chunks.map(c => ({
+  const roots = await getKnowledgeSearchInputRoots(actor, workspaceId, chunks);
+  const result = chunks.map(c => ({
     chunkId: c.chunkId,
     sourceId: c.sourceId,
     sourceType: c.sourceType,
@@ -62,4 +68,6 @@ export async function searchBrain(
     snippet: c.snippet.substring(0, 500) + (c.snippet.length > 500 ? "..." : ""),
     score: c.score,
   }));
+  if (roots.length) brainSearchReceipts.set(result, await captureConversationInputReceipt({ actor, workspaceId, value: result, trustedRoots: roots }));
+  return result;
 }

@@ -50,7 +50,10 @@ const {
       findUnique: vi.fn(),
       findMany: vi.fn(),
     },
+    communicationChannel: { findFirst: vi.fn() },
+    agentRequestInput: { findFirst: vi.fn() },
     communicationMessage: {
+      findFirst: vi.fn(),
       findUnique: vi.fn(),
       findMany: vi.fn(),
     },
@@ -92,6 +95,35 @@ const {
   searchIndexedKnowledgeMock: vi.fn(),
 }));
 
+const lineage = vi.hoisted(() => {
+  const revoked = new Set<string>();
+  const unknown = new Set<string>();
+  const privateIds = new Set<string>();
+  const root = (input: any) => ({ kind: input.kind, id: input.id, fingerprint: JSON.stringify(input.snapshot ?? input) });
+  const capture = vi.fn(async (_actor: any, _ws: string, inputs: any[]) => {
+    if (inputs.some(input => unknown.has(input.id) || revoked.has(input.id))) throw Object.assign(new Error("Unavailable source"), { code: "UNKNOWN_LINEAGE" });
+    return inputs.map(root);
+  });
+  const readable = vi.fn(async (_actor: any, _ws: string, roots: any[]) => roots.every(root => !revoked.has(root.id) && !unknown.has(root.id)));
+  const publicProof = vi.fn(async (_actor: any, _ws: string, roots: any[]) => roots.every(root => !revoked.has(root.id) && !unknown.has(root.id) && !privateIds.has(root.id) && root.kind !== "AgentRequestInput"));
+  const merge = (...proofs: any[][]) => [...new Map(proofs.flat().map(root => [`${root.kind}:${root.id}`, root])).values()];
+  const captureRows = vi.fn(async ({ actor, workspaceId, kind, records }: any) => {
+    const permitted = records.filter((row: any) => !unknown.has(row.id) && !revoked.has(row.id));
+    const proofs = new Map<any, any[]>();
+    for (const row of permitted) proofs.set(row.id, await capture(actor, workspaceId, [{ kind, id: row.id, snapshot: row }]));
+    return { records: permitted, proofs, roots: merge(...proofs.values()) };
+  });
+  const target = vi.fn(async (_install: string, channelId: string) => ({ ok: true, channelId }));
+  const knowledgeRoots = vi.fn(async (_actor: any, _ws: string, rows: any[]) => rows.map(row => ({ kind: "KnowledgeChunk", id: row.chunkId, fingerprint: row.snippet })));
+  const run = vi.fn();
+  return { revoked, unknown, privateIds, capture, readable, publicProof, merge, captureRows, target, knowledgeRoots, run };
+});
+
+vi.mock("../runtime", () => ({
+  asString: (value: unknown) => typeof value === "string" ? value.trim() : "",
+  executeAgentRun: lineage.run,
+}));
+
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
   env: {
@@ -113,6 +145,13 @@ vi.mock("@corgtex/domain", () => ({
   resolveAgentIdentityLimits: vi.fn().mockResolvedValue(null),
   resolveAgentBehaviorContext: vi.fn().mockResolvedValue(null),
   createConstitutionVersion: vi.fn(),
+  captureArtifactInputProof: lineage.capture,
+  captureReadableDigestInputs: lineage.captureRows,
+  isArtifactInputProofReadable: lineage.readable,
+  isArtifactInputProofPubliclyShareable: lineage.publicProof,
+  mergeArtifactInputProofs: lineage.merge,
+  validateSlackPostTarget: lineage.target,
+  invariant: (condition: unknown, _status: number, code: string, message: string) => { if (!condition) throw Object.assign(new Error(message), { code }); },
   createWorkItemFromCommunicationSource: createWorkItemMock,
   deleteAction: deleteActionMock,
   deleteProposal: deleteProposalMock,
@@ -140,12 +179,14 @@ vi.mock("@corgtex/models", () => ({
 
 vi.mock("@corgtex/knowledge", () => ({
   searchIndexedKnowledge: searchIndexedKnowledgeMock,
+  getKnowledgeSearchInputRoots: lineage.knowledgeRoots,
   answerKnowledgeQuestion: answerKnowledgeQuestionMock,
 }));
 
 function basePayload() {
   return {
     source: "slash_command" as const,
+    requestInputId: "request-1",
     installationId: "install-1",
     workspaceId: "workspace-1",
     actorUserId: "user-1",
@@ -157,9 +198,38 @@ function basePayload() {
   };
 }
 
+async function runTrustedSlackAgent(run: (payload: any) => Promise<any>, payload: any) {
+  // Synthetic signed ingress persists the authored request before the worker runs.
+  prismaMock.agentRequestInput.findFirst.mockResolvedValue({ id: payload.requestInputId ?? "request-1", workspaceId: payload.workspaceId,
+    userId: payload.actorUserId, agentKey: "slack-agent", prompt: payload.prompt });
+  if (payload.source === "app_mention") {
+    prismaMock.communicationMessage.findFirst.mockResolvedValue({ id: payload.sourceMessageId ?? "incoming-message",
+      workspaceId: payload.workspaceId, installationId: payload.installationId, provider: "SLACK", externalChannelId: payload.channelId,
+      externalUserId: payload.externalUserId, externalMessageId: payload.messageTs ?? "1714320100.000100",
+      threadExternalId: payload.threadTs ?? payload.messageTs ?? "1714320100.000100", text: payload.prompt });
+  }
+  return run({ ...payload, messageTs: payload.source === "app_mention" ? payload.messageTs ?? "1714320100.000100" : payload.messageTs });
+}
+
 describe("runSlackAgent", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    lineage.revoked.clear(); lineage.unknown.clear(); lineage.privateIds.clear();
+    lineage.target.mockResolvedValue({ ok: true, channelId: "C1" });
+    lineage.run.mockImplementation(async params => {
+      const helpers = {
+        behaviorContext: null, behaviorLineageRoots: [],
+        captureInputs: async (roots: any[]) => ({ kind: "agent-input-receipt", roots }),
+        tool: async (_name: string, _input: unknown, work: () => Promise<any>, proof: any) => {
+          expect(proof?.receipt?.roots.length).toBeGreaterThan(0);
+          return work();
+        },
+      };
+      const context = await params.buildContext(helpers, "run-1");
+      return params.execute(context, helpers, "run-1", "fake-model");
+    });
+    prismaMock.communicationChannel.findFirst.mockResolvedValue({ id: "channel-1", workspaceId: "workspace-1", installationId: "install-1",
+      provider: "SLACK", externalChannelId: "C1", kind: "PUBLIC", isIngestEnabled: true, isArchived: false });
     prismaMock.$transaction.mockImplementation(async (fn: any) => fn(prismaMock));
     prismaMock.agentRun.findFirst.mockResolvedValue(null);
     prismaMock.agentRun.count.mockResolvedValue(0);
@@ -181,13 +251,14 @@ describe("runSlackAgent", () => {
       globalRole: "USER",
     });
     prismaMock.member.findUnique.mockResolvedValue({
-      id: "actor-member-1",
-      isActive: true,
+      id: "actor-member-1", workspaceId: "workspace-1", userId: "user-1",
+      isActive: true, user: { id: "user-1", email: "user@example.test", displayName: "User" },
     });
     prismaMock.communicationExternalUser.findUnique.mockResolvedValue({
+      id: "external-user-1", workspaceId: "workspace-1", installationId: "install-1", provider: "SLACK", externalUserId: "U1", userId: "user-1", memberId: "actor-member-1", isDeleted: false, isBot: false,
       rawProfile: { tz: "America/Los_Angeles" },
     });
-    prismaMock.communicationExternalUser.findMany.mockResolvedValue([]);
+    prismaMock.communicationExternalUser.findMany.mockImplementation(async () => [await prismaMock.communicationExternalUser.findUnique()]);
     prismaMock.communicationMessage.findUnique.mockResolvedValue(null);
     prismaMock.communicationMessage.findMany.mockResolvedValue([]);
     prismaMock.communicationContextSummary.findMany.mockResolvedValue([]);
@@ -205,7 +276,7 @@ describe("runSlackAgent", () => {
         id: "member-1",
         userId: "assignee-user-1",
         user: {
-          email: "milan@example.test",
+          id: "assignee-user-1", email: "milan@example.test",
           displayName: "Milan",
         },
       },
@@ -246,7 +317,7 @@ describe("runSlackAgent", () => {
     });
 
     const { runSlackAgent } = await import("./slack-agent");
-    await runSlackAgent(basePayload());
+    await runTrustedSlackAgent(runSlackAgent, basePayload());
 
     expect(createWorkItemMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "user" }), expect.objectContaining({
       kind: "ACTION",
@@ -269,7 +340,7 @@ describe("runSlackAgent", () => {
       entityType: "Action", entityId: "action-2", webUrl: "https://app.example.test/actions/action-2", opened: false,
     });
     const { runSlackAgent } = await import("./slack-agent");
-    await runSlackAgent(basePayload());
+    await runTrustedSlackAgent(runSlackAgent, basePayload());
     expect(createWorkItemMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "user" }), expect.objectContaining({
       kind: "ACTION", assigneeMemberId: null, open: false,
     }));
@@ -286,7 +357,7 @@ describe("runSlackAgent", () => {
     } });
     createWorkItemMock.mockResolvedValueOnce({ entityType: "Action", entityId: "action-2", webUrl: "https://app.example.test/actions/action-2", opened: false });
     const { runSlackAgent } = await import("./slack-agent");
-    await runSlackAgent(basePayload());
+    await runTrustedSlackAgent(runSlackAgent, basePayload());
     expect(createWorkItemMock).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
       kind: "ACTION", assigneeMemberId: null, open: false,
     }));
@@ -309,7 +380,7 @@ describe("runSlackAgent", () => {
     });
 
     const { runSlackAgent } = await import("./slack-agent");
-    await runSlackAgent({ ...basePayload(), prompt: "Create a proposal about onboarding ownership" });
+    await runTrustedSlackAgent(runSlackAgent, { ...basePayload(), prompt: "Create a proposal about onboarding ownership" });
 
     expect(createWorkItemMock).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
       kind: "PROPOSAL",
@@ -334,7 +405,7 @@ describe("runSlackAgent", () => {
     });
 
     const { runSlackAgent } = await import("./slack-agent");
-    await runSlackAgent({ ...basePayload(), prompt: "Turn this into a tension" });
+    await runTrustedSlackAgent(runSlackAgent, { ...basePayload(), prompt: "Turn this into a tension" });
 
     expect(createWorkItemMock).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
       kind: "TENSION",
@@ -354,7 +425,7 @@ describe("runSlackAgent", () => {
     });
 
     const { runSlackAgent } = await import("./slack-agent");
-    await runSlackAgent({ ...basePayload(), prompt: "maybe this thing" });
+    await runTrustedSlackAgent(runSlackAgent, { ...basePayload(), prompt: "maybe this thing" });
 
     expect(createWorkItemMock).not.toHaveBeenCalled();
     expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toContain("not confident");
@@ -362,7 +433,7 @@ describe("runSlackAgent", () => {
 
   it("answers capabilities questions without calling the model", async () => {
     const { runSlackAgent } = await import("./slack-agent");
-    await runSlackAgent({ ...basePayload(), prompt: "what can you do from Slack now?" });
+    await runTrustedSlackAgent(runSlackAgent, { ...basePayload(), prompt: "what can you do from Slack now?" });
 
     expect(extractMock).not.toHaveBeenCalled();
     expect(answerKnowledgeQuestionMock).not.toHaveBeenCalled();
@@ -384,7 +455,7 @@ describe("runSlackAgent", () => {
     });
 
     const { runSlackAgent } = await import("./slack-agent");
-    await runSlackAgent({ ...basePayload(), prompt: "help Jan follow up tomorrow" });
+    await runTrustedSlackAgent(runSlackAgent, { ...basePayload(), prompt: "help Jan follow up tomorrow" });
 
     expect(extractMock).toHaveBeenCalled();
     expect(createWorkItemMock).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
@@ -406,7 +477,7 @@ describe("runSlackAgent", () => {
     });
 
     const { runSlackAgent } = await import("./slack-agent");
-    await runSlackAgent({ ...basePayload(), prompt: "delete all old actions" });
+    await runTrustedSlackAgent(runSlackAgent, { ...basePayload(), prompt: "delete all old actions" });
 
     expect(createWorkItemMock).not.toHaveBeenCalled();
     expect(deleteActionMock).not.toHaveBeenCalled();
@@ -431,7 +502,7 @@ describe("runSlackAgent", () => {
     });
 
     const { runSlackAgent } = await import("./slack-agent");
-    await runSlackAgent({
+    await runTrustedSlackAgent(runSlackAgent, {
       ...basePayload(),
       source: "app_mention",
       prompt: "can you delete that proposal you just created",
@@ -456,7 +527,7 @@ describe("runSlackAgent", () => {
           ],
         }),
       }),
-      orderBy: { createdAt: "desc" },
+      orderBy: [{ createdAt: "desc" }, { id: "asc" }],
     }));
     expect(deleteProposalMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "user" }), {
       workspaceId: "workspace-1",
@@ -480,7 +551,7 @@ describe("runSlackAgent", () => {
 
   it("does not archive arbitrary records when no Slack-created undo target exists", async () => {
     const { runSlackAgent } = await import("./slack-agent");
-    await runSlackAgent({ ...basePayload(), prompt: "undo that last action" });
+    await runTrustedSlackAgent(runSlackAgent, { ...basePayload(), prompt: "undo that last action" });
 
     expect(extractMock).not.toHaveBeenCalled();
     expect(deleteActionMock).not.toHaveBeenCalled();
@@ -500,11 +571,10 @@ describe("runSlackAgent", () => {
     });
 
     const { runSlackAgent } = await import("./slack-agent");
-    await runSlackAgent({ ...basePayload(), prompt: "What does advice routing do?" });
+    await runTrustedSlackAgent(runSlackAgent, { ...basePayload(), prompt: "What does advice routing do?" });
 
-    expect(answerKnowledgeQuestionMock).toHaveBeenCalledWith(expect.objectContaining({
-      workspaceId: "workspace-1",
-      question: "What does advice routing do?",
+    expect(searchIndexedKnowledgeMock).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: "workspace-1", query: "What does advice routing do?",
     }));
     expect(chatMock).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: "workspace-1",
@@ -556,15 +626,15 @@ describe("runSlackAgent", () => {
     ]);
     searchIndexedKnowledgeMock.mockResolvedValueOnce([
       {
-        sourceTitle: "Slack #general",
-        content: "Slack message confirms the pilot budget cap is $20k.",
+        chunkId: "knowledge-1", title: "Slack #general",
+        snippet: "Slack message confirms the pilot budget cap is $20k.",
         metadata: { permalink: "https://slack.test/archives/C1/p1714320000000100" },
       },
     ]);
     chatMock.mockResolvedValueOnce({ content: "The agreed pilot budget cap is $20k." });
 
     const { runSlackAgent } = await import("./slack-agent");
-    await runSlackAgent({
+    await runTrustedSlackAgent(runSlackAgent, {
       ...basePayload(),
       source: "app_mention",
       prompt: "What budget cap was agreed in this thread?",
@@ -574,7 +644,6 @@ describe("runSlackAgent", () => {
 
     expect(searchIndexedKnowledgeMock).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: "workspace-1",
-      sourceTypes: ["SLACK"],
       query: "What budget cap was agreed in this thread?",
     }));
     const conversationCall = chatMock.mock.calls.find((call) => call[0]?.taskType === "AGENT");
@@ -589,8 +658,8 @@ describe("runSlackAgent", () => {
     expect(promptPayload.slackContextSummaries).toEqual(expect.arrayContaining([
       expect.objectContaining({ summaryMd: expect.stringContaining("$20k") }),
     ]));
-    expect(promptPayload.slackKnowledge).toEqual(expect.arrayContaining([
-      expect.objectContaining({ content: expect.stringContaining("$20k") }),
+    expect(promptPayload.knowledge).toEqual(expect.arrayContaining([
+      expect.objectContaining({ snippet: expect.stringContaining("$20k") }),
     ]));
     expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toContain("$20k");
   });
@@ -626,7 +695,7 @@ describe("runSlackAgent", () => {
     ]);
 
     const { runSlackAgent } = await import("./slack-agent");
-    await runSlackAgent({ ...basePayload(), prompt: "list all the members" });
+    await runTrustedSlackAgent(runSlackAgent, { ...basePayload(), prompt: "list all the members" });
 
     expect(createWorkItemMock).not.toHaveBeenCalled();
     expect(answerKnowledgeQuestionMock).not.toHaveBeenCalled();
@@ -667,7 +736,7 @@ describe("runSlackAgent", () => {
     ]);
 
     const { runSlackAgent } = await import("./slack-agent");
-    await runSlackAgent({ ...basePayload(), prompt: "can you find my account now" });
+    await runTrustedSlackAgent(runSlackAgent, { ...basePayload(), prompt: "can you find my account now" });
 
     expect(createWorkItemMock).not.toHaveBeenCalled();
     expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toContain("I found your Corgtex account");
@@ -679,12 +748,12 @@ describe("runSlackAgent", () => {
     prismaMock.member.findUnique.mockResolvedValueOnce(null);
 
     const { runSlackAgent } = await import("./slack-agent");
-    await runSlackAgent({ ...basePayload(), prompt: "list all the members" });
+    await runTrustedSlackAgent(runSlackAgent, { ...basePayload(), prompt: "list all the members" });
 
     expect(extractMock).not.toHaveBeenCalled();
     expect(listMembersMock).not.toHaveBeenCalled();
     expect(createWorkItemMock).not.toHaveBeenCalled();
-    expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toContain("could not match your Slack user");
-    expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).not.toContain("Milan");
+    expect(deliverSlackAgentResponseMock).not.toHaveBeenCalled();
+    expect(lineage.run).not.toHaveBeenCalled();
   });
 });

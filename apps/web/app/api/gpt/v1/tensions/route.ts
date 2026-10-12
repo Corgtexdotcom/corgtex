@@ -60,8 +60,9 @@ export async function POST(request: NextRequest) {
       assigneeMemberId: body.assigneeMemberId ?? null,
       priority: workItemPriorityFromBody(body),
     });
-    const tensionForResponse = await loadTensionWorkItemResponse(workspaceId, tension.id) ?? tension;
+    const tensionForResponse = await loadTensionWorkItemResponse(actor, workspaceId, tension.id) ?? tension;
     const item = serializeTensionWorkItem(tensionForResponse);
+    if ("contentWithheld" in item) return NextResponse.json(item);
 
     const origin = env.APP_URL.replace(/\/$/, "");
     const permanentPath = await getWorkspacePermanentPathForEntity({

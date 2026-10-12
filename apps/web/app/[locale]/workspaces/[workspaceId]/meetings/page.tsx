@@ -62,8 +62,8 @@ export default async function MeetingsPage({
     recordedTo: dateValues.recordedTo ? endOfUtcDate(dateValues.recordedTo) : undefined,
   };
   const [filteredCompletedMeetings, filteredUpcomingMeetings, featureFlags, recorderConfig, members] = await Promise.all([
-    listMeetings(workspaceId, { status: "COMPLETED", ...meetingFilters }),
-    listMeetings(workspaceId, { status: "SCHEDULED", ...meetingFilters }),
+    listMeetings(actor, workspaceId, { status: "COMPLETED", ...meetingFilters }),
+    listMeetings(actor, workspaceId, { status: "SCHEDULED", ...meetingFilters }),
     getWorkspaceFeatureFlags(workspaceId),
     getMeetingRecorderConfig(actor, workspaceId).catch(() => null),
     listHumanMembers(workspaceId),

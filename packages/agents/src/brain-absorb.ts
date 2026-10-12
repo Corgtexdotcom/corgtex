@@ -172,7 +172,7 @@ export async function absorbSource(params: {
   // workspace article index would make every generated page depend on every
   // article title and alias, even when it cites only this source.
   const articles = await prisma.brainArticle.findMany({
-    where: { workspaceId: params.workspaceId, archivedAt: null },
+    where: { workspaceId: params.workspaceId, archivedAt: null, variantOfArticleId: null },
   });
 
   const readableArticleIds = await readableArtifactIds(agentActor, params.workspaceId, "BrainArticle", articles);
@@ -431,7 +431,7 @@ Rules:
 
     // Limit cascade breadth
     const candidateRows = await prisma.brainArticle.findMany({
-      where: { workspaceId: params.workspaceId, id: { in: [...candidateArticles.keys()] }, archivedAt: null, isPrivate: false },
+      where: { workspaceId: params.workspaceId, id: { in: [...candidateArticles.keys()] }, archivedAt: null, isPrivate: false, variantOfArticleId: null },
     });
     const safeCandidateIds = await readableArtifactIds(agentActor, params.workspaceId, "BrainArticle", candidateRows);
     const candidates = [...candidateArticles.values()].filter((candidate) => safeCandidateIds.has(candidate.id))
