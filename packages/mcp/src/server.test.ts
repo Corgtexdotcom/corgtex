@@ -2825,7 +2825,6 @@ describe("createCorgtexMcpServer", () => {
   it("keeps MCP get_proposal advice counts aligned with list responses", async () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
-    const { prisma } = await import("@corgtex/shared");
 
     getProposalMock.mockResolvedValueOnce({
       id: "proposal-1",
