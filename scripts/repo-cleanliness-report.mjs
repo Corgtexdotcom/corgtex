@@ -34,6 +34,10 @@ function runReport(name, command, args, outputFile) {
 
   writeFileSync(join(artifactDir, outputFile), output);
 
+  if (mode === "locals" && result.status !== 0) {
+    process.stderr.write(`${output}\n`);
+  }
+
   if (result.error) {
     throw result.error;
   }
