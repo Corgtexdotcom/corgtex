@@ -830,6 +830,137 @@ async function executeVersionedFollowupTools(response: import("@corgtex/models")
     try { const result = await TOOL_HANDLERS[toolName]!(actor, ctx, args); executed.push({ toolName, args, result }); messages.push({ role: "tool", content: JSON.stringify(result), name: toolName, tool_call_id: call.id }); } catch (err) { const error = err instanceof Error ? err.message : String(err); failed.push({ toolName, args, error: err instanceof AppError && err.status === 400 ? error : "" }); messages.push({ role: "tool", content: JSON.stringify({ error }), name: toolName, tool_call_id: call.id }); } }
   return "executed" as const;
 }
+
+const BRAIN_READ_BATCH_LIMIT = 4;
+const BRAIN_READ_REJECTED = "I could not safely run the additional Brain search batch. No calls in that batch were executed.";
+function brainReadSummaryUnavailable(executed: ExecutedConversationToolResult[], failed: FailedConversationToolResult[]) {
+  return `Brain searches completed: ${executed.length}; failed: ${failed.length}. I could not complete a final answer from the Brain search results. Please retry or narrow the question.`;
+}
+
+function validBrainReadBatch(calls: ToolCall[], priorIds = new Set<string>()) {
+  if (!calls.length || calls.length > BRAIN_READ_BATCH_LIMIT) return false;
+  const ids = new Set(priorIds);
+  return calls.every((call) => {
+    if (!call.id?.trim() || ids.has(call.id) || call.function.name !== "search_brain") return false;
+    ids.add(call.id);
+    try {
+      const args: unknown = JSON.parse(call.function.arguments);
+      return isRecord(args) && matchesJsonSchema(args, searchBrainTool.function.parameters);
+    } catch {
+      return false;
+    }
+  });
+}
+
+function isBrainAuthorizationError(error: unknown) {
+  return error instanceof AppError && (error.status === 401 || error.status === 403);
+}
+
+async function createBrainReadAuthorization(actor: AppActor, ctx: ConversationContext) {
+  const origin = getSupportAuthorizationContext()?.origin;
+  throwIfConversationCanceled(ctx);
+  let domains = await resolveInteractiveKnowledgeAccessDomains(actor, ctx.workspaceId);
+  return async () => {
+    throwIfConversationCanceled(ctx);
+    await requireWorkspaceMembership({ actor, workspaceId: ctx.workspaceId });
+    throwIfConversationCanceled(ctx);
+    if (origin) await supportCapabilityVersion(origin.userId, origin.workspaceId, origin.version);
+    throwIfConversationCanceled(ctx);
+    const currentDomains = await resolveInteractiveKnowledgeAccessDomains(actor, ctx.workspaceId);
+    if (domains.some((domain) => !currentDomains.includes(domain))) {
+      throw new AppError(403, "KNOWLEDGE_ACCESS_CHANGED", "Knowledge access changed during this conversation. Please retry.");
+    }
+    domains = currentDomains;
+    throwIfConversationCanceled(ctx);
+  };
+}
+
+// Only a successful, pure Brain batch can enter this bounded read continuation.
+// Approval, mutations, durable effects, and usage accounting retain their existing owners.
+async function continueBrainReads(
+  ctx: ConversationContext,
+  actor: AppActor,
+  messages: ChatMessage[],
+  initialCalls: ToolCall[],
+  executed: ExecutedConversationToolResult[],
+  failed: FailedConversationToolResult[],
+  authorize: () => Promise<void>,
+  streaming: boolean,
+) {
+  const budgetAllows = async () => {
+    await authorize();
+    const allowed = await canRunFollowupModelAfterTools(ctx, [], true);
+    await authorize();
+    return allowed;
+  };
+  const reply = async (allowRead: boolean) => {
+    await authorize();
+    const request: import("@corgtex/models").ChatCompletionRequest = {
+      workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx), model: env.MODEL_CHAT_CONVERSATION,
+      taskType: "AGENT", messages, signal: ctx.signal,
+      ...(allowRead ? { tools: [searchBrainTool] } : { tool_choice: "none" }),
+    };
+    let response: import("@corgtex/models").ChatCompletionResponse | null = null;
+    try {
+      if (!streaming) response = await defaultModelGateway.chat(request);
+      else {
+        const iterator = defaultModelGateway.chatStream(request)[Symbol.asyncIterator]();
+        let completed = false;
+        try {
+          while (true) {
+            throwIfConversationCanceled(ctx);
+            const next = await iterator.next();
+            throwIfConversationCanceled(ctx);
+            if (next.done) { completed = true; response = next.value; break; }
+            // Buffer until the terminal response proves this is an answer, not an unexecuted call.
+          }
+        } finally {
+          if (!completed) await closeAsyncIterator(iterator);
+        }
+      }
+    } catch (error) {
+      throwIfConversationCanceled(ctx, error);
+      if (isBrainAuthorizationError(error)) throw error;
+    }
+    await authorize();
+    return response;
+  };
+
+  if (!await budgetAllows()) return toolBudgetFallback(executed, failed);
+  const followup = await reply(true);
+  if (!followup) return brainReadSummaryUnavailable(executed, failed);
+  const calls = followup.tool_calls ?? [];
+  if (!calls.length) return followup.content.trim() ? followup.content : brainReadSummaryUnavailable(executed, failed);
+  if (!validBrainReadBatch(calls, new Set(initialCalls.map(({ id }) => id)))) return BRAIN_READ_REJECTED;
+
+  messages.push({ role: "assistant", content: "", tool_calls: calls });
+  for (const call of calls) {
+    if (!await budgetAllows()) return toolBudgetFallback(executed, failed);
+    const args = JSON.parse(call.function.arguments) as Record<string, unknown>;
+    let result: unknown;
+    let failedRead = false;
+    try {
+      // searchBrain currently has no AbortSignal API. Recheck after it settles and
+      // never start another read, model request, or memory write after cancellation.
+      result = await TOOL_HANDLERS.search_brain!(actor, ctx, args);
+    } catch (error) {
+      throwIfConversationCanceled(ctx, error);
+      if (isBrainAuthorizationError(error)) throw error;
+      failedRead = true;
+    }
+    await authorize();
+    if (failedRead) {
+      const error = "The Brain search could not be completed. Please retry or narrow the question.";
+      failed.push({ toolName: "search_brain", args, error });
+      result = { error };
+    } else executed.push({ toolName: "search_brain", args, result });
+    messages.push({ role: "tool", content: JSON.stringify(result), name: "search_brain", tool_call_id: call.id });
+  }
+  if (!await budgetAllows()) return toolBudgetFallback(executed, failed);
+  const final = await reply(false);
+  return final && !final.tool_calls?.length && final.content.trim() ? final.content : brainReadSummaryUnavailable(executed, failed);
+}
+
 const UNSAFE_VERSIONED_FOLLOWUP = "I could not safely apply that update because the tool sequence did not use a matching observed version."; const VERSIONED_UPDATE_SUMMARY_UNAVAILABLE = "The versioned update was processed, but I could not generate a final summary. Read the current item version before retrying.";
 const VERSIONED_UPDATE_FAILED = "The versioned update could not be completed. Read the current item version before retrying."; const ROUTE_RESPONSE_FAILED = "I could not safely complete that response. Please retry."; const MODEL_BUDGET_EXHAUSTED = "I could not generate a response because the workspace model budget was reached.";
 const ANSWER_ROUTE_NAME = "respond_conversation"; const TOOL_ROUTE_NAME = "route_conversation_tools";
@@ -1070,8 +1201,10 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
   if (response.tool_calls && response.tool_calls.length > 0) {
     messages.push({ role: "assistant", content: response.content || "", tool_calls: response.tool_calls });
     const actor = requireConversationToolActor(ctx);
+    const authorizeBrainRead = validBrainReadBatch(response.tool_calls) ? await createBrainReadAuthorization(actor, ctx) : null;
 
     for (const call of response.tool_calls) {
+      await authorizeBrainRead?.();
       const handler = TOOL_HANDLERS[call.function.name];
       const toolArgs = effectiveToolArgs(call.function.name, ctx, call.function.arguments);
       if (handler) {
@@ -1092,6 +1225,7 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
           executedToolResults.push({ toolName: call.function.name, args: toolArgs, result: outcome.result });
           messages.push({ role: "tool", content: JSON.stringify(outcome.result), name: call.function.name, tool_call_id: call.id });
         } catch (err: any) {
+          if (authorizeBrainRead) { throwIfConversationCanceled(ctx, err); if (isBrainAuthorizationError(err)) throw err; }
           const error = err instanceof Error ? err.message : String(err);
           failedToolResults.push({ toolName: call.function.name, args: toolArgs, error });
           messages.push({ role: "tool", content: JSON.stringify({ error }), name: call.function.name, tool_call_id: call.id });
@@ -1100,10 +1234,13 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
         failedToolResults.push({ toolName: call.function.name, args: toolArgs, error: "Unknown capability" });
         messages.push({ role: "tool", content: JSON.stringify({ error: "Unknown capability" }), name: call.function.name, tool_call_id: call.id });
       }
+      await authorizeBrainRead?.();
     }
 
     let followupMessage = "";
-    if (await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true)) {
+    if (authorizeBrainRead && failedToolResults.length === 0 && pendingCrmOperations.length === 0) {
+      followupMessage = finalMessage = await continueBrainReads(ctx, actor, messages, response.tool_calls, executedToolResults, failedToolResults, authorizeBrainRead, false);
+    } else if (await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true)) {
       const followup = await defaultModelGateway.chat({
         workspaceId: ctx.workspaceId,
         ...catalogUsageContext(ctx),
@@ -1352,8 +1489,10 @@ async function* processConversationTurnStreamContent(ctx: ConversationContext): 
     const actor = requireConversationToolActor(ctx);
     const versionReadPending = initialCalls.some(({ function: tool }) => tool.name === "query_actions" || tool.name === "query_tensions");
     const initialMutationRejected = initialCalls.some(({ function: tool }) => isVersionedUpdateTool(tool.name));
+    const authorizeBrainRead = validBrainReadBatch(initialCalls) ? await createBrainReadAuthorization(actor, ctx) : null;
 
     for (const call of initialCalls) {
+      await authorizeBrainRead?.();
       const handler = TOOL_HANDLERS[call.function.name];
       const toolArgs = effectiveToolArgs(call.function.name, ctx, call.function.arguments);
       if (handler) {
@@ -1374,6 +1513,7 @@ async function* processConversationTurnStreamContent(ctx: ConversationContext): 
           executedToolResults.push({ toolName: call.function.name, args: toolArgs, result: outcome.result });
           messages.push({ role: "tool", content: JSON.stringify(outcome.result), name: call.function.name, tool_call_id: call.id });
         } catch (err: any) {
+          if (authorizeBrainRead) { throwIfConversationCanceled(ctx, err); if (isBrainAuthorizationError(err)) throw err; }
           const error = err instanceof Error ? err.message : String(err);
           failedToolResults.push({ toolName: call.function.name, args: toolArgs, error });
           messages.push({ role: "tool", content: JSON.stringify({ error }), name: call.function.name, tool_call_id: call.id });
@@ -1382,79 +1522,87 @@ async function* processConversationTurnStreamContent(ctx: ConversationContext): 
         failedToolResults.push({ toolName: call.function.name, args: toolArgs, error: "Unknown capability" });
         messages.push({ role: "tool", content: JSON.stringify({ error: "Unknown capability" }), name: call.function.name, tool_call_id: call.id });
       }
+      await authorizeBrainRead?.();
     }
 
-    let followupMessage = ""; let followupStreamFailed = false;
-    let followupResult: import("@corgtex/models").ChatCompletionResponse | null = null;
-    const followupAllowed = !initialMutationRejected && await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true);
-    const followupBudgetExhausted = !initialMutationRejected && !followupAllowed && pendingCrmOperations.length === 0;
-    if (followupAllowed) {
-      const followupIterator = defaultModelGateway.chatStream({
-        workspaceId: ctx.workspaceId,
-        ...catalogUsageContext(ctx),
-        model: env.MODEL_CHAT_CONVERSATION,
-        taskType: "AGENT",
-        messages,
-        tools: followupTools,
-        signal: ctx.signal,
-      })[Symbol.asyncIterator]();
+    if (authorizeBrainRead && failedToolResults.length === 0 && pendingCrmOperations.length === 0) {
+      finalMessage = await continueBrainReads(ctx, actor, messages, initialCalls, executedToolResults, failedToolResults, authorizeBrainRead, true);
+      yield finalMessage;
+      // The consumer may pause after delivery; revalidate before memory or return.
+      await authorizeBrainRead();
+    } else {
+      let followupMessage = ""; let followupStreamFailed = false;
+      let followupResult: import("@corgtex/models").ChatCompletionResponse | null = null;
+      const followupAllowed = !initialMutationRejected && await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true);
+      const followupBudgetExhausted = !initialMutationRejected && !followupAllowed && pendingCrmOperations.length === 0;
+      if (followupAllowed) {
+        const followupIterator = defaultModelGateway.chatStream({
+          workspaceId: ctx.workspaceId,
+          ...catalogUsageContext(ctx),
+          model: env.MODEL_CHAT_CONVERSATION,
+          taskType: "AGENT",
+          messages,
+          tools: followupTools,
+          signal: ctx.signal,
+        })[Symbol.asyncIterator]();
 
-      let followupStreamDone = false;
-      try {
-        while (true) {
-          const { done, value } = await followupIterator.next();
-          if (done) {
-            followupStreamDone = true;
-            followupResult = value;
-            break;
+        let followupStreamDone = false;
+        try {
+          while (true) {
+            const { done, value } = await followupIterator.next();
+            if (done) {
+              followupStreamDone = true;
+              followupResult = value;
+              break;
+            }
+            followupMessage += value;
           }
-          followupMessage += value;
-        }
-      } catch (error) {
-        followupStreamFailed = true;
-        throwIfConversationCanceled(ctx, error);
-      } finally {
-        if (!followupStreamDone) {
-          await closeAsyncIterator(followupIterator);
-        }
-      }
-    }
-    const followupState = initialMutationRejected ? "rejected"
-      : followupResult ? await executeVersionedFollowupTools(followupResult, followupTools, actor, ctx, messages, executedToolResults, failedToolResults) : "none";
-    if (followupStreamFailed && versionReadPending) finalMessage = "";
-    if (followupBudgetExhausted) { finalMessage = toolBudgetFallback(executedToolResults, failedToolResults); yield finalMessage; }
-    else if (followupState === "none") { if (!followupStreamFailed) finalMessage = (versionReadPending ? "" : finalMessage) + followupMessage; if (finalMessage) yield finalMessage; }
-    else if (followupState === "rejected") { finalMessage = UNSAFE_VERSIONED_FOLLOWUP; yield finalMessage; }
-    else if (followupState === "executed") {
-      const updateFailure = versionedUpdateFailure(executedToolResults, failedToolResults);
-      if (updateFailure) { finalMessage = updateFailure; yield finalMessage; }
-      else { finalMessage = followupMessage; if (finalMessage) yield finalMessage; }
-      let summary = "";
-      if (!updateFailure && await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true)) {
-        const completed = await collectChatStream(defaultModelGateway.chatStream({ workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx),
-          model: env.MODEL_CHAT_CONVERSATION, taskType: "AGENT", messages, signal: ctx.signal }));
-        throwIfConversationCanceled(ctx, completed.error); summary = completed.error ? "" : completed.message;
-      }
-      if (!updateFailure) { summary ||= VERSIONED_UPDATE_SUMMARY_UNAVAILABLE; yield summary; finalMessage += summary; }
-      throwIfConversationCanceled(ctx);
-    }
-    if (!followupBudgetExhausted && followupState === "none" && (!followupMessage.trim() || followupStreamFailed)) {
-      const toolFallback = crmToolFallback(executedToolResults, ctx.pageContext, failedToolResults)
-        ?? (pendingCrmOperations.length === 0 && toolExecutionAttempted ? emptyAssistantFallback() : null);
-      if (toolFallback) {
-        const nextMessage = [finalMessage.trim(), toolFallback].filter(Boolean).join("\n\n");
-        const toolFallbackAppendix = pendingNoticeAppendix(finalMessage, nextMessage);
-        if (toolFallbackAppendix) {
-          yield toolFallbackAppendix;
-          finalMessage = nextMessage;
+        } catch (error) {
+          followupStreamFailed = true;
+          throwIfConversationCanceled(ctx, error);
+        } finally {
+          if (!followupStreamDone) {
+            await closeAsyncIterator(followupIterator);
+          }
         }
       }
-    }
-    const finalMessageWithNotices = appendCrmPendingNotices(finalMessage, pendingCrmOperations);
-    const noticeAppendix = pendingNoticeAppendix(finalMessage, finalMessageWithNotices);
-    if (noticeAppendix) {
-      yield noticeAppendix;
-      finalMessage = finalMessageWithNotices;
+      const followupState = initialMutationRejected ? "rejected"
+        : followupResult ? await executeVersionedFollowupTools(followupResult, followupTools, actor, ctx, messages, executedToolResults, failedToolResults) : "none";
+      if (followupStreamFailed && versionReadPending) finalMessage = "";
+      if (followupBudgetExhausted) { finalMessage = toolBudgetFallback(executedToolResults, failedToolResults); yield finalMessage; }
+      else if (followupState === "none") { if (!followupStreamFailed) finalMessage = (versionReadPending ? "" : finalMessage) + followupMessage; if (finalMessage) yield finalMessage; }
+      else if (followupState === "rejected") { finalMessage = UNSAFE_VERSIONED_FOLLOWUP; yield finalMessage; }
+      else if (followupState === "executed") {
+        const updateFailure = versionedUpdateFailure(executedToolResults, failedToolResults);
+        if (updateFailure) { finalMessage = updateFailure; yield finalMessage; }
+        else { finalMessage = followupMessage; if (finalMessage) yield finalMessage; }
+        let summary = "";
+        if (!updateFailure && await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true)) {
+          const completed = await collectChatStream(defaultModelGateway.chatStream({ workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx),
+            model: env.MODEL_CHAT_CONVERSATION, taskType: "AGENT", messages, signal: ctx.signal }));
+          throwIfConversationCanceled(ctx, completed.error); summary = completed.error ? "" : completed.message;
+        }
+        if (!updateFailure) { summary ||= VERSIONED_UPDATE_SUMMARY_UNAVAILABLE; yield summary; finalMessage += summary; }
+        throwIfConversationCanceled(ctx);
+      }
+      if (!followupBudgetExhausted && followupState === "none" && (!followupMessage.trim() || followupStreamFailed)) {
+        const toolFallback = crmToolFallback(executedToolResults, ctx.pageContext, failedToolResults)
+          ?? (pendingCrmOperations.length === 0 && toolExecutionAttempted ? emptyAssistantFallback() : null);
+        if (toolFallback) {
+          const nextMessage = [finalMessage.trim(), toolFallback].filter(Boolean).join("\n\n");
+          const toolFallbackAppendix = pendingNoticeAppendix(finalMessage, nextMessage);
+          if (toolFallbackAppendix) {
+            yield toolFallbackAppendix;
+            finalMessage = nextMessage;
+          }
+        }
+      }
+      const finalMessageWithNotices = appendCrmPendingNotices(finalMessage, pendingCrmOperations);
+      const noticeAppendix = pendingNoticeAppendix(finalMessage, finalMessageWithNotices);
+      if (noticeAppendix) {
+        yield noticeAppendix;
+        finalMessage = finalMessageWithNotices;
+      }
     }
   }
 
