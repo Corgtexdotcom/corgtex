@@ -382,17 +382,30 @@ export async function listBrainSourceRemovalReviews(actor: AppActor, params: { w
     const job = await latestRemovalJob(prisma, params.workspaceId, sourceId);
     if (!job) return null;
     const payload = readPayload(job.payload);
+    const remainingIds = [...new Set(payload.articles.flatMap((item) => item.remaining.map((root) => root.sourceId)))];
+    const remainingSources = await prisma.brainSource.findMany({
+      where: { workspaceId: params.workspaceId, id: { in: remainingIds }, archivedAt: null },
+    });
+    const remainingById = new Map(remainingSources.map((item) => [item.id, item]));
     const articles = await prisma.brainArticle.findMany({
       where: { workspaceId: params.workspaceId, id: { in: payload.articles.map((item) => item.id) } },
     });
     const readableIds = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", articles);
     return { sourceId, jobId: job.id, status: job.status, phase: payload.phase,
-      articles: payload.articles.map((item) => ({
-        id: item.id, title: readableIds.has(item.id) ? item.title : "Article unavailable", action: item.action,
-        currentBodyMd: readableIds.has(item.id) ? articles.find((article) => article.id === item.id)?.bodyMd ?? null : null,
-        candidateBodyMd: payload.phase === "READY" ? payload.candidates?.[item.id] ?? null : null,
-        candidateTitle: payload.phase === "READY" ? payload.candidateTitles?.[item.id] ?? null : null,
-      })),
+      articles: payload.articles.map((item) => {
+        const candidateReadable = item.action === "regenerate" && item.remaining.length > 0
+          && item.remaining.every((root) => {
+            const current = remainingById.get(root.sourceId);
+            return current && domains.includes(current.accessDomain)
+              && brainSourceContentFingerprint(current) === root.fingerprint;
+          });
+        return {
+          id: item.id, title: readableIds.has(item.id) ? item.title : "Article unavailable", action: item.action,
+          currentBodyMd: readableIds.has(item.id) ? articles.find((article) => article.id === item.id)?.bodyMd ?? null : null,
+          candidateBodyMd: payload.phase === "READY" && candidateReadable ? payload.candidates?.[item.id] ?? null : null,
+          candidateTitle: payload.phase === "READY" && candidateReadable ? payload.candidateTitles?.[item.id] ?? null : null,
+        };
+      }),
     };
   }));
   return entries.filter((entry): entry is NonNullable<typeof entry> => entry !== null);

@@ -159,6 +159,10 @@ describe("Brain source removal review", () => {
       .rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
     const [review] = await listBrainSourceRemovalReviews(actor, { workspaceId: workspace.id, sourceIds: [removed.id] });
     expect(review.articles[0]).toMatchObject({ currentBodyMd: null, candidateBodyMd: "Facts from remaining source only" });
+    await prisma.brainSource.update({ where: { id: remaining.id }, data: { content: "Changed after candidate generation" } });
+    const [staleReview] = await listBrainSourceRemovalReviews(actor, { workspaceId: workspace.id, sourceIds: [removed.id] });
+    expect(staleReview.articles[0]).toMatchObject({ candidateBodyMd: null, candidateTitle: null });
+    await prisma.brainSource.update({ where: { id: remaining.id }, data: { content: "Current remaining facts" } });
     process.env[runtimeOptIn] = "false";
     await expect(resolveBrainSourceRemoval(actor, { workspaceId: workspace.id, jobId: requested.jobId, decision: "accept" }))
       .rejects.toMatchObject({ status: 409, code: "BRAIN_SOURCE_REMOVAL_DISABLED" });
