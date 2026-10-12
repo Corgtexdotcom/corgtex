@@ -34,18 +34,32 @@ function parse(source: string, filename = "specimen.ts") {
   return ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true,
     /\.[jt]sx$/.test(filename) ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
 }
+function unwrap(node: ts.Node): ts.Node {
+  while (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)
+    || ts.isNonNullExpression(node) || ts.isSatisfiesExpression(node)) node = node.expression;
+  return node;
+}
+function literalText(node: ts.Node | undefined): string | undefined {
+  if (!node) return undefined;
+  const value = unwrap(node); return ts.isStringLiteralLike(value) ? value.text : undefined;
+}
 function member(node: ts.Node): string | undefined {
   if (ts.isPropertyAccessExpression(node)) return node.name.text;
-  if (ts.isElementAccessExpression(node) && node.argumentExpression && ts.isStringLiteralLike(node.argumentExpression))
-    return node.argumentExpression.text;
+  if (ts.isElementAccessExpression(node)) return literalText(node.argumentExpression);
   return undefined;
 }
 function access(node: ts.Node): string | undefined {
+  node = unwrap(node);
   if (ts.isIdentifier(node)) return node.text;
   const name = member(node);
   if (name && (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node))) {
     const base = access(node.expression); return base ? `${base}.${name}` : undefined;
   }
+  return undefined;
+}
+function literalPropertyName(name: ts.PropertyName): string | undefined {
+  if (ts.isIdentifier(name) || ts.isStringLiteralLike(name)) return name.text;
+  if (ts.isComputedPropertyName(name)) return literalText(name.expression);
   return undefined;
 }
 // A regression guard for this deliberately small source, not a general JS sandbox or
@@ -75,8 +89,10 @@ function authorityIssues(source: string): string[] {
     }
     const property = member(node);
     if (property && FORBIDDEN_MEMBERS.has(property)) issues.add("forbidden operation");
-    if (ts.isPropertyAssignment(node) && (ts.isIdentifier(node.name) || ts.isStringLiteralLike(node.name))
-      && FORBIDDEN_MEMBERS.has(node.name.text)) issues.add("forbidden operation");
+    if ((ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node)
+      || ts.isGetAccessorDeclaration(node) || ts.isSetAccessorDeclaration(node) || ts.isMethodDeclaration(node))
+      && FORBIDDEN_MEMBERS.has(literalPropertyName(node.name) ?? ""))
+      issues.add("forbidden operation");
     if (ts.isIdentifier(node) && FORBIDDEN_IDENTIFIERS.has(node.text)) issues.add("ambient authority");
     if (ts.isIdentifier(node) && ["prisma", "tx", "Prisma"].includes(node.text)) {
       const declaration = ts.isImportSpecifier(node.parent) || (ts.isParameter(node.parent) && node.parent.name === node);
@@ -103,15 +119,14 @@ function referencesAdapter(source: string, filename = "specimen.ts"): boolean {
   let found = false;
   const matches = (value: string) => /(?:^|\/)tenant-purge-prisma-snapshot-adapter(?:\.[cm]?[jt]sx?)?$/.test(value);
   function visit(node: ts.Node) {
-    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier
-      && ts.isStringLiteralLike(node.moduleSpecifier) && matches(node.moduleSpecifier.text)) found = true;
-    if (ts.isExternalModuleReference(node) && node.expression && ts.isStringLiteralLike(node.expression)
-      && matches(node.expression.text)) found = true;
+    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node))
+      && matches(literalText(node.moduleSpecifier) ?? "")) found = true;
+    if (ts.isExternalModuleReference(node) && matches(literalText(node.expression) ?? "")) found = true;
     if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)
       && ts.isStringLiteralLike(node.argument.literal) && matches(node.argument.literal.text)) found = true;
-    if (ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword
+    if (ts.isCallExpression(node) && (unwrap(node.expression).kind === ts.SyntaxKind.ImportKeyword
       || access(node.expression) === "require" || access(node.expression) === "module.require")
-      && node.arguments.some((argument) => ts.isStringLiteralLike(argument) && matches(argument.text))) found = true;
+      && matches(literalText(node.arguments[0]) ?? "")) found = true;
     // Also catches a named re-export/import through an intermediate barrel or alias.
     if ((ts.isImportSpecifier(node) || ts.isExportSpecifier(node))
       && [node.name.text, node.propertyName?.text].includes(FACTORY)) found = true;
@@ -153,6 +168,14 @@ describe("snapshot adapter static authority conformance", () => {
     ["retry", "helper.retry(operation)", "forbidden operation"],
     ["lock", "helper['lock']()", "forbidden operation"],
     ["include", "const query = { include: { workspace: true } }", "forbidden operation"],
+    ["literal computed include", "const query = { ['include']: { workspace: true } }", "forbidden operation"],
+    ["template computed include", "const query = { [`include`]: { workspace: true } }", "forbidden operation"],
+    ["shorthand include", "const include = { workspace: true }; const query = { include }", "forbidden operation"],
+    ["getter include", "const query = { get include() { return { workspace: true }; } }", "forbidden operation"],
+    ["computed getter include", "const query = { get ['include']() { return { workspace: true }; } }", "forbidden operation"],
+    ["parenthesized computed include", "const query = { [('include')]: { workspace: true } }", "forbidden operation"],
+    ["asserted computed include", "const query = { ['include' as const]: { workspace: true } }", "forbidden operation"],
+    ["wrapped bracket retry", "helper[('retry')](operation)", "forbidden operation"],
     ["shared escape", "const anotherClient = prisma", "database capability escape"],
     ["transaction escape", "const { customerAccount } = tx", "database capability escape"],
     ["unknown read", "tx.workspace.findFirst({})", "database capability escape"],
@@ -194,11 +217,18 @@ describe("snapshot adapter remains inert and package-internal", () => {
     `type T = import('./${BASENAME}').T`, `import capture = require('./${BASENAME}')`,
     `import(/* deliberate comment */ './${BASENAME}')`, `require(/* deliberate comment */ './${BASENAME}')`,
     `module.require(/* comment */ './${BASENAME}')`, `import(\`./${BASENAME}\`)`,
+    `import(('./${BASENAME}'))`, `require(('./${BASENAME}'))`,
+    `require(('./${BASENAME}' as string))`, `(require)('./${BASENAME}')`,
+    `import(('./${BASENAME}' satisfies string))`, `require((<string>'./${BASENAME}')!)`,
     ...["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"].map((extension) => `export * from '../src/${BASENAME}.${extension}'`),
   ])("detects import/export specimen %s", (source) => { expect(referencesAdapter(source)).toBe(true); });
   it("ignores prose, comments, test names and unrelated imports", () => {
     expect(referencesAdapter(`// import './${BASENAME}'\nconst prose = "require('./${BASENAME}')";
       it('export * from ./${BASENAME}', () => {}); import './other';`)).toBe(false);
+  });
+  it("does not claim to evaluate variable or concatenated module paths", () => {
+    expect(referencesAdapter(`const target = './${BASENAME}'; import(target);`)).toBe(false);
+    expect(referencesAdapter("import('./tenant-purge-' + 'prisma-snapshot-adapter')")).toBe(false);
   });
   it.each([
     { ".": `./src/${BASENAME}.ts` }, { "./*": "./src/*.ts" }, { "./internal/*": "./src/*" },

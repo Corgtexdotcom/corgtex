@@ -786,6 +786,48 @@ describe("complete actual-adapter conformance", () => {
     expect(result?.topology.trial?.expired).toBe(true);
     expect(state.queries).toEqual(expectedQueries(true));
   });
+  it.each(QUERY_PLANS)("captures and normalizes $label under late iterator/toJSON/clock poison", async (plan) => {
+    const state = fixture({}, { id: WORKSPACE }, plan.trialMode, { linkedAccount: plan.linkedAccount });
+    const caller = key(); const mode = plan.trialMode ? TRIAL_MODE : MODE;
+    const define = Object.defineProperty; const remove = Reflect.deleteProperty;
+    const iterator = Object.getOwnPropertyDescriptor(Array.prototype, Symbol.iterator)!;
+    const toJSON = Object.getOwnPropertyDescriptor(Object.prototype, "toJSON");
+    const now = Object.getOwnPropertyDescriptor(Date, "now")!;
+    const iteratorError = new Error("late iterator poison"); const jsonError = new Error("late toJSON accessor poison");
+    const clockError = new Error("late clock poison");
+    let iteratorReads = 0; let jsonReads = 0; let clockReads = 0;
+    let iteratorFault: unknown; let jsonFault: unknown; let clockFault: unknown;
+    let result: Awaited<ReturnType<typeof captureAuthorizedTenantPurgeManifestValues>> | undefined;
+    try {
+      define(Array.prototype, Symbol.iterator, { configurable: true, writable: true,
+        value() { iteratorReads += 1; throw iteratorError; } });
+      define(Object.prototype, "toJSON", { configurable: true,
+        get() { jsonReads += 1; throw jsonError; } });
+      define(Date, "now", { configurable: true, writable: true,
+        value() { clockReads += 1; throw clockError; } });
+      // Positive controls run without assertions while shared prototypes are poisoned.
+      try { Reflect.apply(Array.prototype[Symbol.iterator], [], []); } catch (error) { iteratorFault = error; }
+      try { Reflect.get({}, "toJSON"); } catch (error) { jsonFault = error; }
+      try { Date.now(); } catch (error) { clockFault = error; }
+      iteratorReads = 0; jsonReads = 0; clockReads = 0;
+      // Both the actual factory and released normalization execute under all three poisons.
+      result = await captureAuthorizedTenantPurgeManifestValues(true, mode,
+        create(true, mode, RUN, caller, 100, 10, 1_000, 60));
+    } finally {
+      define(Array.prototype, Symbol.iterator, iterator);
+      if (toJSON) define(Object.prototype, "toJSON", toJSON); else remove(Object.prototype, "toJSON");
+      define(Date, "now", now);
+    }
+    expect(iteratorFault).toBe(iteratorError); expect(jsonFault).toBe(jsonError); expect(clockFault).toBe(clockError);
+    expect({ iteratorReads, jsonReads, clockReads }).toEqual({ iteratorReads: 0, jsonReads: 0, clockReads: 0 });
+    expect(result?.target).toEqual(plan.trialMode
+      ? { mode, trialId: TRIAL, deploymentId: DEPLOYMENT, workspaceId: WORKSPACE }
+      : { mode, accountId: ACCOUNT, deploymentId: DEPLOYMENT, workspaceId: WORKSPACE });
+    expect(result?.redactionKeyBytes).toEqual(new Array(32).fill(7));
+    expect(result?.blockers).toEqual(plan.linkedAccount ? ["LINKED_ACCOUNT", "SHARED_RESOURCE_AMBIGUITY"] : []);
+    expect(state.queries).toEqual(expectedQueries(plan.trialMode, plan.linkedAccount));
+    expectFrozenCopy(result);
+  });
   it.each(QUERY_PLANS)("detaches the last $label result before its transaction closes", async (plan) => {
     let revoke!: () => void;
     const index = expectedQueries(plan.trialMode, plan.linkedAccount).length - 1;
