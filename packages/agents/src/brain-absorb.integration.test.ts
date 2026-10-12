@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
-import { brainSourceContentFingerprint, generateBrainSourceRemovalCandidate,
+import { brainSourceContentFingerprint, createArticle, generateBrainSourceRemovalCandidate,
   requestBrainSourceRemoval, resolveBrainSourceRemoval } from "@corgtex/domain";
 import { absorbSource } from "./brain-absorb";
 
@@ -14,6 +14,36 @@ const previousRuntimeOptIn = process.env[runtimeOptIn];
 beforeEach(async () => {
   process.env[runtimeOptIn] = "true";
   await truncateAllTables();
+});
+
+it("does not match or expose another member's private human draft", async () => {
+  const workspace = await prisma.workspace.create({ data: {
+    name: "Private draft isolation", slug: `private-absorb-${randomUUID()}`,
+  } });
+  const owner = await prisma.user.create({ data: { email: `private-owner-${randomUUID()}@example.test`, passwordHash: "fixture" } });
+  await prisma.member.create({ data: { workspaceId: workspace.id, userId: owner.id, role: "CONTRIBUTOR" } });
+  const ownerActor: AppActor = { kind: "user", user: { id: owner.id, email: owner.email, displayName: "Owner" } };
+  const original = await createArticle(ownerActor, { workspaceId: workspace.id, slug: "owner-draft",
+    title: "Owner draft", type: "PROJECT", bodyMd: "Private human text", authority: "DRAFT" });
+  const source = await prisma.brainSource.create({ data: { workspaceId: workspace.id, sourceType: "RESEARCH",
+    tier: 2, title: "Unrelated source", content: "Shared synthetic fact" } });
+  const extract = vi.spyOn(defaultModelGateway, "extract").mockResolvedValue({ output: {
+    articleType: "PROJECT", createNew: { title: "Owner draft", slug: "owner-draft" }, summary: "Shared fact",
+  } } as never);
+  const chat = vi.spyOn(defaultModelGateway, "chat").mockResolvedValue({ content: "Shared synthetic fact" } as never);
+  try {
+    const result = await absorbSource({ workspaceId: workspace.id, sourceId: source.id, agentRunId: "private-run" });
+    expect(result).toMatchObject({ absorbed: true, updatedSlugs: [], createdSlug: null, touchedArticleCount: 0 });
+    expect(await prisma.brainArticle.findUniqueOrThrow({ where: { id: original.id } }))
+      .toMatchObject({ bodyMd: "Private human text", sourceIds: [] });
+    const generated = await prisma.brainArticle.findFirstOrThrow({ where: {
+      workspaceId: workspace.id, slug: "owner-draft-2",
+    } });
+    expect(generated.sourceIds).toEqual([source.id]);
+  } finally {
+    extract.mockRestore();
+    chat.mockRestore();
+  }
 });
 afterEach(() => {
   if (previousRuntimeOptIn === undefined) delete process.env[runtimeOptIn];
@@ -46,9 +76,9 @@ it("records both verified sources through real absorption before reviewed remova
     .mockResolvedValueOnce({ content: "Body from both sources" } as never);
   try {
     expect(await absorbSource({ workspaceId: workspace.id, sourceId: first.id, agentRunId: "first-run" }))
-      .toMatchObject({ absorbed: true, createdSlug: "synthetic-project" });
+      .toMatchObject({ absorbed: true, createdSlug: null });
     expect(await absorbSource({ workspaceId: workspace.id, sourceId: second.id, agentRunId: "second-run" }))
-      .toMatchObject({ absorbed: true, updatedSlugs: ["synthetic-project"] });
+      .toMatchObject({ absorbed: true, updatedSlugs: [] });
     const article = await prisma.brainArticle.findFirstOrThrow({ where: { workspaceId: workspace.id, slug: "synthetic-project" } });
     expect(article.sourceIds).toEqual([first.id, second.id]);
     expect(article.bodyMd).toBe("Body from both sources");

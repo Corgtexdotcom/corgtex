@@ -27,6 +27,20 @@ vi.mock("./auth", () => ({
 vi.mock("./proposals", () => ({ getProposal: vi.fn() }));
 
 describe("agent-runs", () => {
+  it("withholds unproven source-backed run payloads in the database query before the limit", async () => {
+    const { prisma } = await import("@corgtex/shared");
+    const { listAgentRuns } = await import("./agent-runs");
+    vi.mocked(prisma.agentRun.findMany).mockResolvedValue([
+      { id: "other", agentKey: "meeting-summary", planJson: {}, steps: [], toolCalls: [], modelUsage: [] },
+    ] as any);
+    const runs = await listAgentRuns({ kind: "user", user: { id: "u-1" } } as any, "ws-1", { take: 2 });
+    expect(prisma.agentRun.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ agentKey: { notIn: ["brain-absorb", "brain-source-regenerate", "company-understanding"] } }),
+      take: 2,
+    }));
+    expect(runs.map((run) => run.id)).toEqual(["other"]);
+  });
+
   it("returns summarized model usage for listed runs without exposing raw usage rows", async () => {
     const { prisma } = await import("@corgtex/shared");
     const { listAgentRuns } = await import("./agent-runs");

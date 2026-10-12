@@ -67,6 +67,9 @@ export async function listAgentRuns(actor: AppActor, workspaceId: string, opts?:
     where: {
       workspaceId,
       status: opts?.status,
+      // Historic source-backed runs have no complete content receipt. Their
+      // steps and result JSON may include private article names and source text.
+      agentKey: { notIn: ["brain-absorb", "brain-source-regenerate", "company-understanding"] },
     },
     include: {
       steps: {

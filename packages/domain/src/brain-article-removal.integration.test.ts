@@ -70,6 +70,19 @@ describe("confirmed Brain article removal", () => {
     else process.env[runtimeOptIn] = previousRuntimeOptIn;
   });
 
+  it("withholds a legacy target whose inputs cannot be proven", async () => {
+    const { workspace, admin } = await fixture();
+    const { source } = await sourceWithDocument(workspace.id, "Unproven legacy");
+    const article = await prisma.brainArticle.create({ data: {
+      workspaceId: workspace.id, slug: "legacy-unproven-target", title: "Legacy target", type: "PROJECT",
+      bodyMd: "Could contain unknown inputs", sourceIds: [source.id],
+    } });
+    await expect(previewBrainArticleRemoval(admin, { workspaceId: workspace.id, slug: article.slug }))
+      .rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+    expect((await prisma.brainArticle.findUniqueOrThrow({ where: { id: article.id } })).archivedAt).toBeNull();
+    expect((await prisma.brainSource.findUniqueOrThrow({ where: { id: source.id } })).archivedAt).toBeNull();
+  });
+
   it("keeps linked sources when a stored true flag has no runtime opt-in", async () => {
     const { workspace, admin, outsider } = await fixture();
     const { document, source } = await sourceWithDocument(workspace.id, "Runtime paused");

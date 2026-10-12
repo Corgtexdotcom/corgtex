@@ -9,6 +9,7 @@ import {
   lockWorkspaceArchiveArtifact,
   brainSourceRecoveryIdentity,
   brainSourceContentFingerprint,
+  readBrainArticleDerivation,
   readableArtifactIds,
   readableBrainSourceIds,
   resolveKnowledgeAccessDomains,
@@ -175,7 +176,9 @@ export async function absorbSource(params: {
   });
 
   const readableArticleIds = await readableArtifactIds(agentActor, params.workspaceId, "BrainArticle", articles);
-  const activeArticles = articles.filter((article) => !article.archivedAt && readableArticleIds.has(article.id));
+  const activeArticles = articles.filter((article) => !article.archivedAt && readableArticleIds.has(article.id)
+    && (!article.isPrivate || (article.ownerMemberId === null && article.humanEditedAt === null
+      && readBrainArticleDerivation(article.derivationJson) !== null)));
   const articleIndex = activeArticles.map((a) => ({
     slug: a.slug,
     title: a.title,
@@ -328,7 +331,7 @@ Rules:
 
       initialWritePlans.push({
         kind: "create",
-        slug: createNew.slug,
+        slug: uniqueSlug(slugify(createNew.slug, "source"), new Set(articles.map((article) => article.slug))),
         title: createNew.title,
         type: articleType,
         authority: source.tier === 1 || documentLikeSource ? "REFERENCE" : "DRAFT",
@@ -340,7 +343,7 @@ Rules:
 
   if (documentLikeSource && initialWritePlans.length === 0) {
     const fallbackTitle = source.title?.trim() || createNew?.title?.trim() || "Uploaded knowledge source";
-    const existingSlugs = new Set(activeArticles.map((article) => article.slug));
+    const existingSlugs = new Set(articles.map((article) => article.slug));
     const baseSlug = slugify(createNew?.slug || fallbackTitle, "uploaded-knowledge-source");
     const slug = uniqueSlug(baseSlug, existingSlugs);
     const drafted = await defaultModelGateway.chat({
@@ -388,7 +391,7 @@ Rules:
       skipped: true,
       reason: "non_draft_article",
       sourceId: source.id,
-      skippedSlugs: skippedNonDraftSlugs,
+      skippedSlugs: skippedNonDraftSlugs.filter((slug) => !activeArticles.find((article) => article.slug === slug)?.isPrivate),
       summary: result.summary ?? null,
     };
   }
@@ -487,6 +490,7 @@ Rules:
   const writeResult = await runSourceWritePhase(async (tx) => {
     const touchedArticleIds: string[] = [];
     let createdArticleSlug: string | null = null;
+    let publicTouchedArticleCount = 0;
 
     for (const plan of initialWritePlans) {
       if (plan.kind === "update") {
@@ -502,6 +506,7 @@ Rules:
           tx,
         });
         touchedArticleIds.push(article.id);
+        if (!article.isPrivate) publicTouchedArticleCount += 1;
         continue;
       }
 
@@ -521,7 +526,8 @@ Rules:
         tx,
       });
       touchedArticleIds.push(article.id);
-      createdArticleSlug = article.slug;
+      if (!article.isPrivate) publicTouchedArticleCount += 1;
+      createdArticleSlug = article.isPrivate ? null : article.slug;
     }
 
     for (const plan of cascadeWritePlans) {
@@ -536,6 +542,7 @@ Rules:
         tx,
       });
       touchedArticleIds.push(article.id);
+      if (!article.isPrivate) publicTouchedArticleCount += 1;
     }
 
     // Step 5: Rebuild backlinks
@@ -544,7 +551,7 @@ Rules:
     // Step 6: Mark source absorbed before releasing the archive lock.
     await markSourceAbsorbed(agentActor, { sourceId: source.id, tx });
 
-    return { touchedArticleIds, createdArticleSlug };
+    return { touchedArticleIds, createdArticleSlug, publicTouchedArticleCount };
   });
   if (isSourceSkipResult(writeResult)) return writeResult;
 
@@ -560,10 +567,10 @@ Rules:
   return {
     absorbed: true,
     sourceId: source.id,
-    updatedSlugs: updateSlugs,
+    updatedSlugs: updateSlugs.filter((slug) => !activeArticles.find((article) => article.slug === slug)?.isPrivate),
     createdSlug: writeResult.createdArticleSlug,
-    touchedArticleCount: writeResult.touchedArticleIds.length,
-    skippedSlugs: skippedNonDraftSlugs,
+    touchedArticleCount: writeResult.publicTouchedArticleCount,
+    skippedSlugs: skippedNonDraftSlugs.filter((slug) => !activeArticles.find((article) => article.slug === slug)?.isPrivate),
     summary: result.summary ?? null,
   };
 }

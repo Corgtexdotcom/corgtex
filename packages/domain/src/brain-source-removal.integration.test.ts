@@ -6,7 +6,7 @@ import { defaultModelGateway } from "@corgtex/models";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { searchIndexedKnowledge } from "../../knowledge/src/retrieval";
 import { syncBrainArticleKnowledge } from "../../knowledge/src/chunks";
-import { createArticle, deleteSource } from "./brain";
+import { createArticle, deleteSource, updateArticle } from "./brain";
 import { brainSourceContentFingerprint } from "./brain-derivation";
 import { archiveWorkspaceArtifact } from "./archive";
 import { recordArtifactInputLineage } from "./source-lineage";
@@ -57,6 +57,21 @@ describe("Brain source removal review", () => {
   afterEach(() => {
     if (previousRuntimeOptIn === undefined) delete process.env[runtimeOptIn];
     else process.env[runtimeOptIn] = previousRuntimeOptIn;
+  });
+
+  it("keeps an independently authored original active when its only added source is removed", async () => {
+    const { workspace, actor, removed } = await fixture();
+    const agent: AppActor = { kind: "agent", authProvider: "bootstrap", label: "brain-absorb", workspaceIds: [workspace.id] };
+    const original = await createArticle(actor, { workspaceId: workspace.id, slug: "human-original",
+      title: "Human original", type: "PROJECT", bodyMd: "Independently written body", authority: "DRAFT" });
+    await updateArticle(agent, { workspaceId: workspace.id, slug: original.slug,
+      bodyMd: "Independently written body plus source", absorbedSource: {
+        sourceId: removed.id, sourceFingerprint: brainSourceContentFingerprint(removed), agentRunId: "synthetic-run",
+      }, agentRunId: "synthetic-run" });
+    await expect(deleteSource(actor, { workspaceId: workspace.id, sourceId: removed.id }))
+      .rejects.toMatchObject({ status: 409, code: "UNCLASSIFIED_SOURCE_LINK" });
+    expect((await prisma.brainArticle.findUniqueOrThrow({ where: { id: original.id } })).archivedAt).toBeNull();
+    expect((await prisma.brainSource.findUniqueOrThrow({ where: { id: removed.id } })).archivedAt).toBeNull();
   });
 
   it("defaults off for linked sources while generic archive stays guarded and unlinked archiving works", async () => {
@@ -158,10 +173,10 @@ describe("Brain source removal review", () => {
     await expect(listBrainSourceRemovalReviews(member, { workspaceId: workspace.id, sourceIds: [removed.id] }))
       .rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
     const [review] = await listBrainSourceRemovalReviews(actor, { workspaceId: workspace.id, sourceIds: [removed.id] });
-    expect(review.articles[0]).toMatchObject({ currentBodyMd: null, candidateBodyMd: "Facts from remaining source only" });
+    expect(review.articles).toEqual([]);
     await prisma.brainSource.update({ where: { id: remaining.id }, data: { content: "Changed after candidate generation" } });
     const [staleReview] = await listBrainSourceRemovalReviews(actor, { workspaceId: workspace.id, sourceIds: [removed.id] });
-    expect(staleReview.articles[0]).toMatchObject({ candidateBodyMd: null, candidateTitle: null });
+    expect(staleReview.articles).toEqual([]);
     await prisma.brainSource.update({ where: { id: remaining.id }, data: { content: "Current remaining facts" } });
     process.env[runtimeOptIn] = "false";
     await expect(resolveBrainSourceRemoval(actor, { workspaceId: workspace.id, jobId: requested.jobId, decision: "accept" }))
