@@ -10,6 +10,7 @@ import {
   brainSourceRecoveryIdentity,
   brainSourceContentFingerprint,
   readableArtifactIds,
+  readableBrainSourceIds,
   resolveKnowledgeAccessDomains,
 } from "@corgtex/domain";
 import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
@@ -125,11 +126,21 @@ export async function absorbSource(params: {
   const sourceId = source.id;
   const initialSourceIdentity = brainSourceRecoveryIdentity(source);
 
+  const agentActor: AppActor = {
+    kind: "agent",
+    authProvider: "bootstrap",
+    label: "brain-absorb",
+    workspaceIds: [params.workspaceId],
+  };
+
   async function currentSkipReason(client: Pick<typeof prisma, "brainSource"> = prisma) {
     const current = await client.brainSource.findUnique({ where: { id: params.sourceId } });
     assertRecoveryIdentity(current);
     const reason = sourceSkipReason(current, params.workspaceId);
     if (reason) return reason;
+    if (!(await readableBrainSourceIds(agentActor, params.workspaceId, [current!], client as typeof prisma)).has(sourceId)) {
+      return "source_restricted";
+    }
     return brainSourceRecoveryIdentity(current!) === initialSourceIdentity ? null : "source_changed";
   }
 
@@ -148,15 +159,11 @@ export async function absorbSource(params: {
     }, { maxWait: 5_000, timeout: 120_000 });
   }
 
-  // Build an agent actor for domain service calls
-  const agentActor: AppActor = {
-    kind: "agent",
-    authProvider: "bootstrap",
-    label: "brain-absorb",
-    workspaceIds: [params.workspaceId],
-  };
   const accessibleDomains = await resolveKnowledgeAccessDomains(agentActor, params.workspaceId);
   if (!accessibleDomains.includes(source.accessDomain)) {
+    return { skipped: true, reason: "source_restricted", sourceId };
+  }
+  if (!(await readableBrainSourceIds(agentActor, params.workspaceId, [source])).has(sourceId)) {
     return { skipped: true, reason: "source_restricted", sourceId };
   }
 

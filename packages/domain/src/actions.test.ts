@@ -73,6 +73,11 @@ vi.mock("./events", () => ({
   appendEvents,
 }));
 
+vi.mock("./source-lineage", () => ({
+  readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) =>
+    new Set(records.map((record: { id: string }) => record.id))),
+}));
+
 const actor: AppActor = {
   kind: "user",
   user: {

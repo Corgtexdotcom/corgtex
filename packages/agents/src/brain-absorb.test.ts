@@ -59,6 +59,8 @@ vi.mock("@corgtex/domain", () => ({
   brainSourceContentFingerprint: vi.fn(() => "source-fingerprint"),
   resolveKnowledgeAccessDomains: vi.fn(async () => ["WORKSPACE"]),
   readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) => new Set(records.map((record: { id: string }) => record.id))),
+  readableBrainSourceIds: vi.fn(async (_actor, _workspaceId, records) =>
+    new Set(records.map((record: { id: string }) => record.id))),
 }));
 
 vi.mock("@corgtex/knowledge", () => ({
@@ -234,12 +236,20 @@ describe("absorbSource", () => {
         archivedAt: null,
       })
       .mockResolvedValueOnce({
+        id: "source-1",
         workspaceId: "workspace-1",
+        sourceType: "DOC",
+        channel: "text-paste",
+        accessDomain: "WORKSPACE",
         absorbedAt: null,
         archivedAt: null,
       })
       .mockResolvedValueOnce({
+        id: "source-1",
         workspaceId: "workspace-1",
+        sourceType: "DOC",
+        channel: "text-paste",
+        accessDomain: "WORKSPACE",
         absorbedAt: null,
         archivedAt: new Date("2026-08-20T10:00:00.000Z"),
       });

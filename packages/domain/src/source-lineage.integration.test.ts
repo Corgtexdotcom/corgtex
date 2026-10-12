@@ -3,6 +3,9 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { readableArtifactIds, recordArtifactInputLineage } from "./source-lineage";
+import { listSources } from "./brain";
+import { getAction, listActions } from "./actions";
+import { getTension, listTensions } from "./tensions";
 
 describe("complete input lineage", () => {
   beforeEach(async () => { await truncateAllTables(); });
@@ -64,5 +67,99 @@ describe("complete input lineage", () => {
     await prisma.brainSource.update({ where: { id: source.id }, data: { archivedAt: null, content: "Replaced fact" } });
     expect(await readableArtifactIds(ownerActor, workspace.id, "BrainArticle", records))
       .toEqual(new Set([privateOriginal.id]));
+  });
+
+  it("withholds copied chat sources and their articles unless every upstream permission still holds", async () => {
+    const workspace = await prisma.workspace.create({ data: { name: "Chat lineage fixture", slug: `chat-lineage-${randomUUID()}` } });
+    const otherWorkspace = await prisma.workspace.create({ data: { name: "Other", slug: `chat-other-${randomUUID()}` } });
+    const owner = await prisma.user.create({ data: { email: `chat-owner-${randomUUID()}@example.test`, passwordHash: "synthetic" } });
+    const reader = await prisma.user.create({ data: { email: `chat-reader-${randomUUID()}@example.test`, passwordHash: "synthetic" } });
+    const ownerMember = await prisma.member.create({ data: { workspaceId: workspace.id, userId: owner.id, role: "CONTRIBUTOR" } });
+    await prisma.member.create({ data: { workspaceId: workspace.id, userId: reader.id, role: "CONTRIBUTOR" } });
+    await prisma.member.create({ data: { workspaceId: otherWorkspace.id, userId: reader.id, role: "CONTRIBUTOR" } });
+    const ownerActor: AppActor = { kind: "user", user: { id: owner.id, email: owner.email, displayName: "Owner" } };
+    const readerActor: AppActor = { kind: "user", user: { id: reader.id, email: reader.email, displayName: "Reader" } };
+    const privateArticle = await prisma.brainArticle.create({ data: {
+      workspaceId: workspace.id, slug: "owner-original", title: "Owner original", type: "PROJECT",
+      bodyMd: "Synthetic private canary", sourceIds: [], isPrivate: true, ownerMemberId: ownerMember.id,
+    } });
+    const copiedChat = await prisma.brainSource.create({ data: {
+      workspaceId: workspace.id, sourceType: "CONVERSATION", tier: 3, channel: "daily-batch",
+      content: "Assistant: Synthetic private canary",
+    } });
+    const legacyChat = await prisma.brainSource.create({ data: {
+      workspaceId: workspace.id, sourceType: "CONVERSATION_INSIGHT", tier: 3,
+      content: "Synthetic legacy private canary",
+    } });
+    const rawSource = await prisma.brainSource.create({ data: {
+      workspaceId: workspace.id, sourceType: "DOC", tier: 1, content: "Synthetic shared source",
+    } });
+    await prisma.$transaction(async (tx) => {
+      await recordArtifactInputLineage({ tx, actor: ownerActor, workspaceId: workspace.id,
+        artifact: { kind: "BrainArticle", id: privateArticle.id }, content: privateArticle,
+        origin: "HUMAN_ORIGINAL", inputs: [],
+      });
+      await recordArtifactInputLineage({ tx, actor: ownerActor, workspaceId: workspace.id,
+        artifact: { kind: "BrainSource", id: copiedChat.id }, content: copiedChat,
+        origin: "DERIVED", inputs: [{ kind: "BrainArticle", id: privateArticle.id }],
+      });
+    });
+    const derivedArticle = await prisma.brainArticle.create({ data: {
+      workspaceId: workspace.id, slug: "copied-chat-article", title: "Copied chat article", type: "PROJECT",
+      bodyMd: copiedChat.content, sourceIds: [copiedChat.id],
+    } });
+    await prisma.$transaction(async (tx) => {
+      await recordArtifactInputLineage({ tx, actor: ownerActor, workspaceId: workspace.id,
+        artifact: { kind: "BrainArticle", id: derivedArticle.id }, content: derivedArticle,
+        origin: "DERIVED", inputs: [{ kind: "BrainSource", id: copiedChat.id }],
+      });
+    });
+    expect((await listSources(ownerActor, { workspaceId: workspace.id })).items.map((source) => source.id).sort())
+      .toEqual([rawSource.id, copiedChat.id].sort());
+    expect((await listSources(readerActor, { workspaceId: workspace.id })).items.map((source) => source.id))
+      .toEqual([rawSource.id]);
+    expect((await listSources(readerActor, { workspaceId: otherWorkspace.id })).total).toBe(0);
+    expect(await readableArtifactIds(readerActor, workspace.id, "BrainArticle", [derivedArticle])).toEqual(new Set());
+    await prisma.brainArticle.update({ where: { id: privateArticle.id }, data: { bodyMd: "Changed owner original" } });
+    expect((await listSources(ownerActor, { workspaceId: workspace.id })).items.map((source) => source.id))
+      .toEqual([rawSource.id]);
+    expect(await readableArtifactIds(ownerActor, workspace.id, "BrainArticle", [derivedArticle])).toEqual(new Set());
+  });
+
+  it("does not reveal private or unproven proposal metadata through public linked work items", async () => {
+    const workspace = await prisma.workspace.create({ data: { name: "Proposal lineage fixture", slug: `proposal-lineage-${randomUUID()}` } });
+    const owner = await prisma.user.create({ data: { email: `proposal-owner-${randomUUID()}@example.test`, passwordHash: "synthetic" } });
+    const reader = await prisma.user.create({ data: { email: `proposal-reader-${randomUUID()}@example.test`, passwordHash: "synthetic" } });
+    await prisma.member.create({ data: { workspaceId: workspace.id, userId: owner.id, role: "CONTRIBUTOR" } });
+    await prisma.member.create({ data: { workspaceId: workspace.id, userId: reader.id, role: "CONTRIBUTOR" } });
+    const ownerActor: AppActor = { kind: "user", user: { id: owner.id, email: owner.email, displayName: "Owner" } };
+    const readerActor: AppActor = { kind: "user", user: { id: reader.id, email: reader.email, displayName: "Reader" } };
+    const privateProposal = await prisma.proposal.create({ data: {
+      workspaceId: workspace.id, authorUserId: owner.id, title: "Synthetic private proposal canary",
+      bodyMd: "Synthetic private decision", status: "DRAFT", isPrivate: true,
+    } });
+    const action = await prisma.action.create({ data: {
+      workspaceId: workspace.id, authorUserId: owner.id, title: "Public action", status: "OPEN",
+      proposalId: privateProposal.id,
+    } });
+    const tension = await prisma.tension.create({ data: {
+      workspaceId: workspace.id, authorUserId: owner.id, title: "Public tension", status: "OPEN",
+      proposalId: privateProposal.id,
+    } });
+    await prisma.$transaction(async (tx) => {
+      await recordArtifactInputLineage({ tx, actor: ownerActor, workspaceId: workspace.id,
+        artifact: { kind: "Proposal", id: privateProposal.id }, content: privateProposal,
+        origin: "HUMAN_ORIGINAL", inputs: [],
+      });
+    });
+    expect((await getAction(readerActor, { workspaceId: workspace.id, actionId: action.id })).proposal).toBeNull();
+    expect((await getTension(readerActor, { workspaceId: workspace.id, tensionId: tension.id })).proposal).toBeNull();
+    expect((await listActions(readerActor, workspace.id)).items[0]).toMatchObject({ proposalId: null, proposal: null });
+    expect((await listTensions(readerActor, workspace.id)).items[0]).toMatchObject({ proposalId: null, proposal: null });
+    expect((await getAction(ownerActor, { workspaceId: workspace.id, actionId: action.id })).proposal?.title)
+      .toBe(privateProposal.title);
+    await prisma.proposal.update({ where: { id: privateProposal.id }, data: { title: "Changed unproven title" } });
+    expect((await getAction(ownerActor, { workspaceId: workspace.id, actionId: action.id })).proposal).toBeNull();
+    expect((await getTension(ownerActor, { workspaceId: workspace.id, tensionId: tension.id })).proposal).toBeNull();
   });
 });

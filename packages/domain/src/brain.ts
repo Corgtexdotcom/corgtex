@@ -11,7 +11,7 @@ import { lockActiveArticleSources, lockBrainSourceLink } from "./brain-source-li
 import { requestBrainSourceRemoval } from "./brain-source-removal";
 import { brainSourceContentFingerprint, type BrainArticleDerivationV1 } from "./brain-derivation";
 import { readBrainArticleDerivation, sourceIdsInDerivation } from "./brain-source-impact";
-import { copyArtifactInputLineage, currentArtifactInputRoots, readableArtifactIds,
+import { copyArtifactInputLineage, currentArtifactInputRoots, readableArtifactIds, readableBrainSourceIds,
   recordArtifactInputLineage } from "./source-lineage";
 import { invariant } from "./errors";
 import { persistedMemberId } from "./membership";
@@ -788,8 +788,7 @@ export async function listSources(actor: AppActor, params: {
     where.absorbedAt = null;
   }
 
-  const [items, total] = await Promise.all([
-    prisma.brainSource.findMany({
+  const candidates = await prisma.brainSource.findMany({
       where,
       include: {
         authorMember: {
@@ -799,13 +798,10 @@ export async function listSources(actor: AppActor, params: {
         },
       },
       orderBy: { createdAt: "desc" },
-      take,
-      skip,
-    }),
-    prisma.brainSource.count({ where }),
-  ]);
-
-  return { items, total, take, skip };
+    });
+  const visibleIds = await readableBrainSourceIds(actor, params.workspaceId, candidates);
+  const visible = candidates.filter((source) => visibleIds.has(source.id));
+  return { items: visible.slice(skip, skip + take), total: visible.length, take, skip };
 }
 
 export async function markSourceAbsorbed(_actor: AppActor, params: {

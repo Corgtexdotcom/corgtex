@@ -334,6 +334,11 @@ export async function respondToCheckIn(actor: AppActor, params: {
           },
         },
       });
+      await recordArtifactInputLineage({
+        tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "BrainSource", id: source.id }, content: source,
+        origin: "DERIVED", inputs: [{ kind: "CheckIn", id: checkIn.id }],
+      });
 
       events.push({
         workspaceId: params.workspaceId,

@@ -11,6 +11,7 @@ import { createNotificationIntent } from "./notifications";
 import { requireDraftManager } from "./draft-permissions";
 import { requireCollaborativeWorkItemEditor } from "./collaborative-permissions";
 import { resolveWorkspaceProposalLink } from "./proposal-links";
+import { readableArtifactIds } from "./source-lineage";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import {
@@ -208,7 +209,7 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
           },
         },
         upvotes: true,
-        proposal: { select: { id: true, title: true } },
+        proposal: true,
       },
       orderBy: workItemOrderBy(opts?.sort),
       take,
@@ -217,9 +218,15 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
     prisma.tension.count({ where }),
   ]);
   const requestCountSummaries = await loadAdviceRequestCountSummaries(workspaceId, "TENSION", items.map((item) => item.id));
+  const linkedProposals = items.flatMap((item) => item.proposal ? [item.proposal] : []);
+  const visibleProposalIds = linkedProposals.length
+    ? await readableArtifactIds(actor, workspaceId, "Proposal", linkedProposals) : new Set<string>();
   return {
     items: items.map((item) => ({
       ...item,
+      proposalId: item.proposal && visibleProposalIds.has(item.proposal.id) ? item.proposalId : null,
+      proposal: item.proposal && visibleProposalIds.has(item.proposal.id)
+        ? { id: item.proposal.id, title: item.proposal.title } : null,
       ...requestCountSummaries.get(item.id),
     })),
     total,
@@ -779,10 +786,17 @@ export async function getTension(actor: AppActor, params: { workspaceId: string;
       circle: { select: { id: true, name: true } },
       assigneeMember: { include: { user: { select: { displayName: true, email: true } } } },
       raisedByMember: { include: { user: { select: { displayName: true, email: true } } } },
-      proposal: { select: { id: true, title: true, status: true } },
+      proposal: true,
       upvotes: true,
     },
   });
   invariant(tension, 404, "NOT_FOUND", "Tension not found.");
-  return tension;
+  const visibleProposalIds = tension.proposal
+    ? await readableArtifactIds(actor, params.workspaceId, "Proposal", [tension.proposal]) : new Set<string>();
+  return {
+    ...tension,
+    proposalId: tension.proposal && visibleProposalIds.has(tension.proposal.id) ? tension.proposalId : null,
+    proposal: tension.proposal && visibleProposalIds.has(tension.proposal.id)
+      ? { id: tension.proposal.id, title: tension.proposal.title, status: tension.proposal.status } : null,
+  };
 }

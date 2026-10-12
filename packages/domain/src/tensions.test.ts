@@ -61,6 +61,11 @@ vi.mock("./auth", () => ({
   actorUserIdForWorkspace: vi.fn().mockResolvedValue("u-1"),
 }));
 
+vi.mock("./source-lineage", () => ({
+  readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) =>
+    new Set(records.map((record: { id: string }) => record.id))),
+}));
+
 const actor = { kind: "user", user: { id: "u-1" } } as any;
 
 describe("tensions domain", () => {
@@ -1292,7 +1297,7 @@ describe("tensions domain", () => {
         circle: { select: { id: true, name: true } },
         assigneeMember: { include: { user: { select: { displayName: true, email: true } } } },
         raisedByMember: { include: { user: { select: { displayName: true, email: true } } } },
-        proposal: { select: { id: true, title: true, status: true } },
+        proposal: true,
         upvotes: true,
       },
     });

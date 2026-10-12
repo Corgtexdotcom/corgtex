@@ -81,6 +81,9 @@ vi.mock("./source-lineage", () => ({
   copyArtifactInputLineage: vi.fn().mockResolvedValue(true),
   currentArtifactInputRoots: vi.fn().mockResolvedValue([]),
   readableArtifactIds,
+  readableBrainSourceIds: vi.fn(async (_actor, _workspaceId, records) =>
+    new Set(records.filter((record: { archivedAt?: Date | null }) => !record.archivedAt)
+      .map((record: { id: string }) => record.id))),
 }));
 
 const ownerActor = {
@@ -621,7 +624,7 @@ describe("brain source ingestion", () => {
       archivedAt: null,
     };
     expect(prismaMock.brainSource.findMany).toHaveBeenCalledWith(expect.objectContaining({ where }));
-    expect(prismaMock.brainSource.count).toHaveBeenCalledWith({ where });
+    expect(prismaMock.brainSource.count).not.toHaveBeenCalled();
   });
 
   it("preserves source filters and pagination for Finance-authorized domains", async () => {
@@ -637,7 +640,7 @@ describe("brain source ingestion", () => {
       skip: 4,
     })).resolves.toEqual({
       items: [],
-      total: 7,
+      total: 0,
       take: 12,
       skip: 4,
     });
@@ -651,10 +654,8 @@ describe("brain source ingestion", () => {
     expect(prismaMock.brainSource.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where,
       orderBy: { createdAt: "desc" },
-      take: 12,
-      skip: 4,
     }));
-    expect(prismaMock.brainSource.count).toHaveBeenCalledWith({ where });
+    expect(prismaMock.brainSource.count).not.toHaveBeenCalled();
   });
 
   it("does not query sources when access-domain resolution fails", async () => {

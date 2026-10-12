@@ -12,6 +12,7 @@ import { humanMemberIdentityWhere } from "./member-identity";
 import { requireDraftManager } from "./draft-permissions";
 import { requireCollaborativeWorkItemEditor } from "./collaborative-permissions";
 import { resolveWorkspaceProposalLink } from "./proposal-links";
+import { readableArtifactIds } from "./source-lineage";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import {
@@ -345,7 +346,7 @@ export async function listActions(actor: AppActor, workspaceId: string, opts?: L
             name: true,
           },
         },
-        proposal: { select: { id: true, title: true } },
+        proposal: true,
       },
       orderBy: workItemOrderBy(opts?.sort),
       take,
@@ -358,9 +359,15 @@ export async function listActions(actor: AppActor, workspaceId: string, opts?: L
     loadAdviceRequestCountSummaries(workspaceId, "ACTION", itemIds),
     loadActionChecklistSummaries(workspaceId, itemIds),
   ]);
+  const linkedProposals = items.flatMap((item) => item.proposal ? [item.proposal] : []);
+  const visibleProposalIds = linkedProposals.length
+    ? await readableArtifactIds(actor, workspaceId, "Proposal", linkedProposals) : new Set<string>();
   return {
     items: items.map((item) => ({
       ...item,
+      proposalId: item.proposal && visibleProposalIds.has(item.proposal.id) ? item.proposalId : null,
+      proposal: item.proposal && visibleProposalIds.has(item.proposal.id)
+        ? { id: item.proposal.id, title: item.proposal.title } : null,
       ...requestCountSummaries.get(item.id),
       checklistItemCount: checklistSummaries.get(item.id)?.checklistItemCount ?? 0,
       checklistCompletedCount: checklistSummaries.get(item.id)?.checklistCompletedCount ?? 0,
@@ -408,11 +415,18 @@ export async function getAction(actor: AppActor, params: {
           name: true,
         },
       },
-      proposal: { select: { id: true, title: true } },
+      proposal: true,
     },
   });
   invariant(action, 404, "NOT_FOUND", "Action not found.");
-  return action;
+  const visibleProposalIds = action.proposal
+    ? await readableArtifactIds(actor, params.workspaceId, "Proposal", [action.proposal]) : new Set<string>();
+  return {
+    ...action,
+    proposalId: action.proposal && visibleProposalIds.has(action.proposal.id) ? action.proposalId : null,
+    proposal: action.proposal && visibleProposalIds.has(action.proposal.id)
+      ? { id: action.proposal.id, title: action.proposal.title } : null,
+  };
 }
 
 export async function listActionChecklistItems(actor: AppActor, params: {

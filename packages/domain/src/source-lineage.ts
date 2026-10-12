@@ -17,6 +17,12 @@ export type LineageInput = { kind: LineageKind; id: string };
 export type LineageRoot = LineageInput & { fingerprint: string };
 type LineageClient = Prisma.TransactionClient | typeof prisma;
 
+/** These sources contain model output or copied conversation context, rather than direct source material. */
+export function brainSourceNeedsLineage(row: { sourceType?: unknown; channel?: unknown }) {
+  return row.sourceType === "CONVERSATION" || row.sourceType === "CONVERSATION_INSIGHT"
+    || ["chat-demand", "daily-batch", "daily-digest", "daily-question"].includes(String(row.channel));
+}
+
 const CONTENT_FIELDS: Record<LineageKind, string[]> = {
   BrainSource: [],
   BrainArticle: ["slug", "title", "type", "authority", "bodyMd", "frontmatterJson", "sourceIds", "isPrivate", "ownerMemberId", "publishedAt", "archivedAt"],
@@ -44,6 +50,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Hash only fields that can convey information or change visibility. */
 export function lineageContentFingerprint(kind: LineageKind, row: unknown): string {
   invariant(isRecord(row), 409, "UNKNOWN_LINEAGE", "Artifact content cannot be verified.");
+  if (kind === "BrainSource") {
+    return brainSourceContentFingerprint(row as Parameters<typeof brainSourceContentFingerprint>[0]);
+  }
   const fields = CONTENT_FIELDS[kind];
   return createHash("sha256").update(JSON.stringify([kind, ...fields.map((field) => row[field] ?? null)])).digest("hex");
 }
@@ -103,7 +112,8 @@ function actorCanReadRecord(actor: AppActor, membership: { id: string; role: str
 }
 
 async function rootIsReadable(db: LineageClient, actor: AppActor, workspaceId: string,
-  membership: { id: string; role: string } | null, domains: readonly string[], root: LineageRoot) {
+  membership: { id: string; role: string } | null, domains: readonly string[], root: LineageRoot,
+  visited = new Set<string>()) {
   const row = await loadArtifact(db, workspaceId, root);
   if (!isRecord(row) || isArchived(row)) return false;
   if (root.kind === "BrainArticleVersion") {
@@ -127,10 +137,20 @@ async function rootIsReadable(db: LineageClient, actor: AppActor, workspaceId: s
   if ((root.kind === "BrainSource" || root.kind === "Document")
     && !domains.includes(String((row as Record<string, unknown>).accessDomain))) return false;
   if (!actorCanReadRecord(actor, membership, root.kind, row)) return false;
-  const fingerprint = root.kind === "BrainSource"
-    ? brainSourceContentFingerprint(row as Parameters<typeof brainSourceContentFingerprint>[0])
-    : lineageContentFingerprint(root.kind, row);
-  return fingerprint === root.fingerprint;
+  if (lineageContentFingerprint(root.kind, row) !== root.fingerprint) return false;
+  if (root.kind === "BrainSource" && brainSourceNeedsLineage(row as Record<string, unknown>)) {
+    const key = `${root.kind}:${root.id}`;
+    if (visited.has(key)) return false;
+    const manifest = await latestManifest(db, workspaceId, root);
+    if (!manifest || manifest.origin !== "DERIVED" || manifest.contentHash !== root.fingerprint) return false;
+    const upstream = parseRoots(manifest.rootsJson);
+    if (!upstream?.length) return false;
+    const nextVisited = new Set(visited).add(key);
+    for (const input of upstream) {
+      if (!await rootIsReadable(db, actor, workspaceId, membership, domains, input, nextVisited)) return false;
+    }
+  }
+  return true;
 }
 
 async function latestManifest(db: LineageClient, workspaceId: string, input: LineageInput) {
@@ -189,7 +209,8 @@ export async function recordArtifactInputLineage(params: {
     invariant(await rootIsReadable(tx, actor, workspaceId, membership, domains, directRoot),
       409, "SOURCE_RESTRICTED", "An input is not accessible.");
     await expandRoot(directRoot);
-    if (input.kind !== "BrainSource" && input.kind !== "Document" && input.kind !== "Meeting") {
+    if ((input.kind === "BrainSource" && brainSourceNeedsLineage(row as Record<string, unknown>))
+      || (input.kind !== "BrainSource" && input.kind !== "Document" && input.kind !== "Meeting")) {
       const parent = await latestManifest(tx, workspaceId, input);
       invariant(parent && parent.contentHash === fingerprint, 409, "UNKNOWN_LINEAGE", "An input has incomplete lineage.");
       const parentRoots = parseRoots(parent.rootsJson);
@@ -339,4 +360,18 @@ export async function readableArtifactIds(actor: AppActor, workspaceId: string,
     if (allowed) visible.add(record.id);
   }
   return visible;
+}
+
+/** Direct source listings must not reveal copied/model-generated content without its upstream proof. */
+export async function readableBrainSourceIds(actor: AppActor, workspaceId: string,
+  records: Array<{ id: string; workspaceId: string; accessDomain: string; archivedAt: Date | null;
+    sourceType: string; channel: string | null; [key: string]: unknown }>, db: LineageClient = prisma) {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const domains = await resolveKnowledgeAccessDomains(actor, workspaceId);
+  const candidates = records.filter((row) => row.workspaceId === workspaceId
+    && row.archivedAt === null && domains.some((domain) => domain === row.accessDomain));
+  const derived = candidates.filter(brainSourceNeedsLineage);
+  const proven = await readableArtifactIds(actor, workspaceId, "BrainSource", derived, db);
+  return new Set(candidates.filter((row) => !brainSourceNeedsLineage(row) || proven.has(row.id))
+    .map((row) => row.id));
 }
