@@ -312,6 +312,7 @@ async function loadKnowledgeForConversation(params: {
   if (!query) {
     return { results: [] as unknown[], search: undefined };
   }
+  if (!params.ctx.actor) return { results: [] as unknown[], search: undefined };
 
   const sourceTypes = userMentionsSlack(params.ctx.userMessage)
     ? (["SLACK"] as KnowledgeSourceType[])
@@ -323,6 +324,7 @@ async function loadKnowledgeForConversation(params: {
       params.ctx.workspaceId,
     );
     const results = await searchIndexedKnowledge({
+      actor: params.ctx.actor,
       workspaceId: params.ctx.workspaceId,
       ...catalogUsageContext(params.ctx),
       query,

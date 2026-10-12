@@ -57,6 +57,7 @@ describe("interactive agent knowledge", () => {
 
     expect(resolveKnowledgeAccessDomainsMock).toHaveBeenCalledWith(actor, "workspace-1");
     expect(searchIndexedKnowledgeMock).toHaveBeenCalledWith({
+      actor,
       workspaceId: "workspace-1",
       catalogItemId: undefined,
       agentCredentialId: undefined,

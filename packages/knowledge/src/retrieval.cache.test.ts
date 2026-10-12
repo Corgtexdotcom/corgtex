@@ -86,7 +86,7 @@ const actor: AppActor = { kind: "user", user: { id: "synthetic-user", email: "sy
 const sourceKinds: Record<string, string> = { DOCUMENT: "Document", BRAIN_ARTICLE: "BrainArticle", MEETING: "Meeting", PROPOSAL: "Proposal" };
 // Existing cache/provider regressions use certified synthetic receipts. The lineage
 // suite separately exercises unknown and permission-revoked source proofs.
-const allSourceIds = ["doc-1", "doc-2", "doc-5", "doc-allowed", "doc-error", "doc-other", "doc-domain", "doc-answer-domain", "article-1", "old-article", "archived-article", "proposal-1"];
+const allSourceIds = ["doc-1", "doc-2", "doc-5", "doc-allowed", "doc-error", "doc-other", "doc-domain", "doc-answer-domain", "doc-ledger", "article-1", "old-article", "archived-article", "proposal-1"];
 function certifyRows(rows: any[]) {
   return rows.map((row) => row.sourceType && row.sourceId ? {
     ...row, metadata: { ...row.metadata, sourceContentHash: `${sourceKinds[row.sourceType]}:${row.sourceId}` },
@@ -134,8 +134,9 @@ describe("knowledge retrieval cache", () => {
 
   describe("credential accounting through the real gateway", () => {
     const scope = { workspaceId: "ws-1", catalogItemId: "catalog-1", agentCredentialId: "credential-1" };
-    const chunk = { id: "ledger-chunk", sourceType: "DOCUMENT", sourceId: "doc-ledger", sourceTitle: "Travel policy",
-      chunkIndex: 0, content: "Travel approval policy.", embedding: [1, 0], createdAt: new Date("2026-04-03T09:00:00Z") };
+    const searchScope = { ...scope, actor };
+    const chunk = certifyRows([{ id: "ledger-chunk", sourceType: "DOCUMENT", sourceId: "doc-ledger", sourceTitle: "Travel policy",
+      chunkIndex: 0, content: "Travel approval policy.", embedding: [1, 0], createdAt: new Date("2026-04-03T09:00:00Z") }])[0];
     let ledger: Array<Record<string, any>>;
     let modelRequests: number;
     let azureRequests: number;
@@ -227,17 +228,17 @@ describe("knowledge retrieval cache", () => {
         });
         const failure = { code: kind === "daily" ? "CATALOG_DAILY_LIMIT_EXCEEDED" : "CATALOG_MONTHLY_BUDGET_EXCEEDED", status: 429 };
         await withRealGateway(async () => {
-          const first = await searchIndexedKnowledge({ ...scope, query: "travel policy" });
+          const first = await searchIndexedKnowledge({ ...searchScope, query: "travel policy" });
           expect(first).toHaveLength(1);
           expectUsage(["EMBEDDING", "RERANK"]);
-          expect(await searchIndexedKnowledge({ ...scope, query: "travel policy" })).toEqual(first);
+          expect(await searchIndexedKnowledge({ ...searchScope, query: "travel policy" })).toEqual(first);
           expectUsage(["EMBEDDING", "RERANK"]); // A cache hit invents no model usage.
           if (allowance === 4) {
-            expect(await searchIndexedKnowledge({ ...scope, query: "approval policy" })).toHaveLength(1);
-            await expect(searchIndexedKnowledge({ ...scope, query: "another travel policy" })).rejects.toMatchObject(failure);
+            expect(await searchIndexedKnowledge({ ...searchScope, query: "approval policy" })).toHaveLength(1);
+            await expect(searchIndexedKnowledge({ ...searchScope, query: "another travel policy" })).rejects.toMatchObject(failure);
           } else {
             // At two calls, the next embed is blocked. At three, its rerank is blocked.
-            await expect(searchIndexedKnowledge({ ...scope, query: "approval policy" })).rejects.toMatchObject(failure);
+            await expect(searchIndexedKnowledge({ ...searchScope, query: "approval policy" })).rejects.toMatchObject(failure);
           }
           await expect(openAICompatibleModelGateway.chat({ ...scope, model: "gpt-4o-mini", taskType: "AGENT",
             messages: [{ role: "user", content: "Synthesize the policy." }],
@@ -254,10 +255,10 @@ describe("knowledge retrieval cache", () => {
         if (path === "provider fallback") azureStatus = 503;
         if (path === "stale refill") azureHits = [{ ...chunk, id: "stale-chunk", "@search.score": 1 }];
         await withRealGateway(async () => {
-          expect(await searchIndexedKnowledge({ ...scope, query: "travel policy" })).toHaveLength(1);
+          expect(await searchIndexedKnowledge({ ...searchScope, query: "travel policy" })).toHaveLength(1);
           if (path === "cache refill") {
             prismaMock.knowledgeChunk.findMany.mockResolvedValue([{ ...chunk, id: "replacement-chunk" }]);
-            expect(await searchIndexedKnowledge({ ...scope, query: "travel policy" })).toEqual([
+            expect(await searchIndexedKnowledge({ ...searchScope, query: "travel policy" })).toEqual([
               expect.objectContaining({ chunkId: "replacement-chunk" }),
             ]);
           }
@@ -275,7 +276,7 @@ describe("knowledge retrieval cache", () => {
         dailyCallLimit: kind === "daily" ? 1 : null, monthlyBudgetCents: kind === "monthly" ? 4 : null,
       });
       await withRealGateway(async () => {
-        await expect(searchIndexedKnowledge({ ...scope, query: "travel policy" })).rejects.toMatchObject({
+        await expect(searchIndexedKnowledge({ ...searchScope, query: "travel policy" })).rejects.toMatchObject({
           code: kind === "daily" ? "CATALOG_DAILY_LIMIT_EXCEEDED" : "CATALOG_MONTHLY_BUDGET_EXCEEDED", status: 429,
         });
         expect(azureRequests).toBe(1);
@@ -291,7 +292,7 @@ describe("knowledge retrieval cache", () => {
         ? new WorkspaceModelBudgetError("AI_BUDGET_EXCEEDED", "Synthetic workspace budget refusal.")
         : new CatalogBudgetError(kind === "daily" ? "CATALOG_DAILY_LIMIT_EXCEEDED" : "CATALOG_MONTHLY_BUDGET_EXCEEDED", "Synthetic catalog budget refusal.");
       modelGatewayMock.embed.mockRejectedValueOnce(error);
-      await expect(searchIndexedKnowledge({ ...scope, query: "travel policy" })).rejects.toBe(error);
+      await expect(searchIndexedKnowledge({ ...searchScope, query: "travel policy" })).rejects.toBe(error);
       expect(modelGatewayMock.embed).toHaveBeenCalledOnce();
       expect(modelGatewayMock.rerank).not.toHaveBeenCalled();
       expect(prismaMock.knowledgeChunk.findMany).not.toHaveBeenCalled();
