@@ -25,6 +25,7 @@ import { prisma } from "@corgtex/shared";
 const { prismaMock, appendEventsMock, recordAuditMock, requireWorkspaceMembershipMock, readableArtifactIdsMock, currentArtifactInputRootsMock, recordArtifactInputLineageMock, resolveKnowledgeAccessDomainsMock } = vi.hoisted(() => {
   const prismaMock = {
     $queryRaw: vi.fn().mockResolvedValue([]),
+    $executeRaw: vi.fn().mockResolvedValue(0),
     $transaction: vi.fn(async (callback: (tx: any) => Promise<unknown>) => callback(prismaMock)),
     artifactInputLineage: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn() },
     brainSource: { findFirst: vi.fn() },
