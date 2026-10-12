@@ -58,6 +58,8 @@ describe("interactive agent knowledge", () => {
     expect(resolveKnowledgeAccessDomainsMock).toHaveBeenCalledWith(actor, "workspace-1");
     expect(searchIndexedKnowledgeMock).toHaveBeenCalledWith({
       workspaceId: "workspace-1",
+      catalogItemId: undefined,
+      agentCredentialId: undefined,
       query: "revenue",
       limit: 10,
       sourceTypes: INTERACTIVE_KNOWLEDGE_SOURCE_TYPES,
@@ -76,6 +78,17 @@ describe("interactive agent knowledge", () => {
       accessDomains: ["WORKSPACE"],
       sourceTypes: INTERACTIVE_KNOWLEDGE_SOURCE_TYPES,
     }));
+  });
+
+  it("forwards server-supplied catalog accounting without widening access", async () => {
+    await searchBrain(actor, "workspace-1", "policy", 5, {
+      catalogItemId: "catalog-1", agentCredentialId: "credential-1",
+    });
+    expect(searchIndexedKnowledgeMock).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: "workspace-1", catalogItemId: "catalog-1", agentCredentialId: "credential-1",
+      accessDomains: ["WORKSPACE"], sourceTypes: INTERACTIVE_KNOWLEDGE_SOURCE_TYPES,
+    }));
+    expect(resolveKnowledgeAccessDomainsMock).toHaveBeenCalledWith(actor, "workspace-1");
   });
 
   it("does not search when actor authorization fails", async () => {

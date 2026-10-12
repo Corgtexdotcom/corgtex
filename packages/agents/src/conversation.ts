@@ -1,6 +1,6 @@
 import { getSupportAuthorizationContext, prisma } from "@corgtex/shared";
 import { searchIndexedKnowledge } from "@corgtex/knowledge";
-import { assertCatalogModelBudget, defaultModelGateway, IncrementalJsonStringDecoder } from "@corgtex/models";
+import { assertCatalogModelBudget, CatalogBudgetError, defaultModelGateway, IncrementalJsonStringDecoder, WorkspaceModelBudgetError } from "@corgtex/models";
 import { AppError, buildRoleOnboardingContextForConversation, checkBudget, loadRelevantMemories, requireWorkspaceMembership, storeAgentMemory, supportCapabilityVersion } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import type { ChatMessage, ModelTool, ToolCall } from "@corgtex/models";
@@ -324,6 +324,7 @@ async function loadKnowledgeForConversation(params: {
     );
     const results = await searchIndexedKnowledge({
       workspaceId: params.ctx.workspaceId,
+      ...catalogUsageContext(params.ctx),
       query,
       limit: params.limit,
       sourceTypes,
@@ -339,6 +340,7 @@ async function loadKnowledgeForConversation(params: {
       },
     };
   } catch (error) {
+    if (error instanceof CatalogBudgetError || error instanceof WorkspaceModelBudgetError) throw error;
     return {
       results: [] as unknown[],
       search: {
@@ -368,7 +370,7 @@ const TOOL_HANDLERS: Partial<Record<string, (actor: AppActor, ctx: ConversationC
   schedule_meeting: async (actor, ctx, args) => scheduleMeeting(ctx.userId, ctx.workspaceId, args.title, args.description, args.startTime, args.endTime, args.attendeeEmails),
   create_corgtex_scheduled_meeting: async (actor, ctx, args) => createCorgtexScheduledMeeting(actor, ctx.workspaceId, args),
   upload_meeting_transcript: async (actor, ctx, args) => uploadMeetingTranscriptFromTool(actor, ctx.workspaceId, args),
-  search_brain: async (actor, ctx, args) => searchBrain(actor, ctx.workspaceId, args.query, args.limit),
+  search_brain: async (actor, ctx, args) => searchBrain(actor, ctx.workspaceId, args.query, args.limit, catalogUsageContext(ctx)),
   get_workspace_overview: async (actor, ctx) => getWorkspaceOverview(ctx.workspaceId, actor),
   query_tensions: async (actor, ctx, args) => queryTensions(ctx.workspaceId, args.status, args.assigneeId, args.tensionId, actor),
   query_actions: async (actor, ctx, args) => queryActions(ctx.workspaceId, args.status, args.assigneeId, args.actionId, actor),
@@ -853,8 +855,9 @@ function validBrainReadBatch(calls: ToolCall[], priorIds = new Set<string>()) {
   });
 }
 
-function isBrainAuthorizationError(error: unknown) {
-  return error instanceof AppError && (error.status === 401 || error.status === 403);
+function isBrainReadBlockingError(error: unknown) {
+  return error instanceof CatalogBudgetError || error instanceof WorkspaceModelBudgetError
+    || (error instanceof AppError && (error.status === 401 || error.status === 403));
 }
 
 async function createBrainReadAuthorization(actor: AppActor, ctx: ConversationContext, eagerAccessDomains?: KnowledgeAccessDomain[]) {
@@ -923,7 +926,7 @@ async function continueBrainReads(
       }
     } catch (error) {
       throwIfConversationCanceled(ctx, error);
-      if (isBrainAuthorizationError(error)) throw error;
+      if (isBrainReadBlockingError(error)) throw error;
     }
     await authorize();
     return response;
@@ -950,7 +953,7 @@ async function continueBrainReads(
       result = await TOOL_HANDLERS.search_brain!(actor, ctx, args);
     } catch (error) {
       throwIfConversationCanceled(ctx, error);
-      if (isBrainAuthorizationError(error)) throw error;
+      if (isBrainReadBlockingError(error)) throw error;
       failedRead = true;
     }
     await authorize();
@@ -1230,7 +1233,7 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
           executedToolResults.push({ toolName: call.function.name, args: toolArgs, result: outcome.result });
           messages.push({ role: "tool", content: JSON.stringify(outcome.result), name: call.function.name, tool_call_id: call.id });
         } catch (err: any) {
-          if (authorizeBrainRead) { throwIfConversationCanceled(ctx, err); if (isBrainAuthorizationError(err)) throw err; }
+          if (authorizeBrainRead) { throwIfConversationCanceled(ctx, err); if (isBrainReadBlockingError(err)) throw err; }
           const error = err instanceof Error ? err.message : String(err);
           failedToolResults.push({ toolName: call.function.name, args: toolArgs, error });
           messages.push({ role: "tool", content: JSON.stringify({ error }), name: call.function.name, tool_call_id: call.id });
@@ -1518,7 +1521,7 @@ async function* processConversationTurnStreamContent(ctx: ConversationContext): 
           executedToolResults.push({ toolName: call.function.name, args: toolArgs, result: outcome.result });
           messages.push({ role: "tool", content: JSON.stringify(outcome.result), name: call.function.name, tool_call_id: call.id });
         } catch (err: any) {
-          if (authorizeBrainRead) { throwIfConversationCanceled(ctx, err); if (isBrainAuthorizationError(err)) throw err; }
+          if (authorizeBrainRead) { throwIfConversationCanceled(ctx, err); if (isBrainReadBlockingError(err)) throw err; }
           const error = err instanceof Error ? err.message : String(err);
           failedToolResults.push({ toolName: call.function.name, args: toolArgs, error });
           messages.push({ role: "tool", content: JSON.stringify({ error }), name: call.function.name, tool_call_id: call.id });

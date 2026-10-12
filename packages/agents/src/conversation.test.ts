@@ -472,14 +472,15 @@ describe("processConversationTurn", () => {
       const actor = { kind: "agent", authProvider: "credential", credentialId: "credential-1", catalogItemId: "catalog-1", workspaceIds: ["ws-1"], scopes: ["brain:read"] } as any;
       script([
         { content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] },
-        { content: "", tool_calls: [toolCall("second", "search_brain", { query: "details", workspaceId: "foreign", actor: { kind: "system" }, userId: "other" })] },
+        { content: "", tool_calls: [toolCall("second", "search_brain", { query: "details", workspaceId: "foreign", actor: { kind: "system" }, userId: "other", catalogItemId: "forged-catalog", agentCredentialId: "forged-credential" })] },
         { content: "Grounded answer." },
       ]);
       await run({ ...turnContext(), actor });
       const { requireWorkspaceMembership } = await import("@corgtex/domain");
       expect(vi.mocked(requireWorkspaceMembership).mock.calls.every(([args]) => args.actor === actor && args.workspaceId === "ws-1")).toBe(true);
       expect(resolveKnowledgeAccessDomainsMock.mock.calls.every(([caller, workspaceId]) => caller === actor && workspaceId === "ws-1")).toBe(true);
-      expect(vi.mocked(searchIndexedKnowledge).mock.calls.every(([args]) => args.workspaceId === "ws-1")).toBe(true);
+      expect(searchIndexedKnowledge).toHaveBeenCalledTimes(3);
+      for (const [request] of vi.mocked(searchIndexedKnowledge).mock.calls) expect(request).toMatchObject({ workspaceId: "ws-1", catalogItemId: "catalog-1", agentCredentialId: "credential-1" });
       for (const [request] of (streaming ? chatStreamMock : chatMock).mock.calls) expect(request).toMatchObject({ workspaceId: "ws-1", catalogItemId: "catalog-1", agentCredentialId: "credential-1", model: "chat-model", taskType: "AGENT" });
     });
 
@@ -552,6 +553,36 @@ describe("processConversationTurn", () => {
       expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(1);
       expect(searchIndexedKnowledge).toHaveBeenCalledTimes(1);
       expect(storeAgentMemoryMock).not.toHaveBeenCalled();
+    });
+
+    it.each(["eager read", "initial read", "followup", "added read", "synthesis"].flatMap((stage) =>
+      ["daily", "monthly", "workspace"].map((kind) => [stage, kind] as const),
+    ))("preserves the canonical %s %s budget error", async (stage, kind) => {
+      const { CatalogBudgetError, WorkspaceModelBudgetError } = await import("@corgtex/models");
+      const error = kind === "workspace"
+        ? new WorkspaceModelBudgetError("BUDGET_EXCEEDED", "Workspace model budget reached.")
+        : new CatalogBudgetError(kind === "daily" ? "CATALOG_DAILY_LIMIT_EXCEEDED" : "CATALOG_MONTHLY_BUDGET_EXCEEDED", "Credential model budget reached.");
+      script([{ content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] }]);
+      if (stage === "added read" || stage === "synthesis") {
+        script([{ content: "", tool_calls: [toolCall("second", "search_brain", { query: "details" })] }]);
+      }
+      const closed = vi.fn();
+      if (stage === "eager read" || stage === "initial read" || stage === "added read") {
+        if (stage !== "eager read") vi.mocked(searchIndexedKnowledge).mockResolvedValueOnce([]);
+        if (stage === "added read") vi.mocked(searchIndexedKnowledge).mockResolvedValueOnce([]);
+        vi.mocked(searchIndexedKnowledge).mockRejectedValueOnce(error);
+      } else if (streaming) {
+        chatStreamMock.mockReturnValueOnce((async function* () {
+          try { yield "Unverified partial answer."; throw error; }
+          finally { closed(); }
+        })());
+      } else chatMock.mockRejectedValueOnce(error);
+      const actor = { kind: "agent", authProvider: "credential", credentialId: "credential-1", catalogItemId: "catalog-1", workspaceIds: ["ws-1"], scopes: ["brain:read"] } as any;
+      await expect(run({ ...turnContext(), actor })).rejects.toBe(error);
+      expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(stage === "eager read" ? 0 : stage === "initial read" ? 1 : stage === "synthesis" ? 3 : 2);
+      expect(searchIndexedKnowledge).toHaveBeenCalledTimes(stage === "eager read" ? 1 : stage === "initial read" || stage === "followup" ? 2 : 3);
+      expect(storeAgentMemoryMock).not.toHaveBeenCalled();
+      if (streaming && (stage === "followup" || stage === "synthesis")) expect(closed).toHaveBeenCalledOnce();
     });
 
     it.each(["daily", "monthly"])("uses the canonical credential %s gate when chat 2 spends the remaining allowance", async (kind) => {
