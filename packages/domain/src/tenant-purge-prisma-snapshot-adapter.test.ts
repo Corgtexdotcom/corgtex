@@ -38,7 +38,8 @@ function strict(name: string, methods: Values, accesses: string[]) {
     return GET(target, property, receiver);
   } });
 }
-type FixtureOptions = { linkedAccount?: boolean; missingRun?: boolean; rejectAt?: number };
+type FixtureOptions = { linkedAccount?: boolean; missingRun?: boolean; rejectAt?: number;
+  resultAt?: { index: number; replace: (value: unknown) => unknown } };
 function fixture(changes: Values = {}, workspace: unknown = { id: WORKSPACE }, trialMode = false,
   options: FixtureOptions = {}) {
   const ledger: string[] = [];
@@ -48,7 +49,7 @@ function fixture(changes: Values = {}, workspace: unknown = { id: WORKSPACE }, t
   const method = (name: string, value: unknown) => async (args: unknown) => {
     ledger.push(name); queries.push({ method: name, args });
     if (queries.length - 1 === options.rejectAt) throw rejection;
-    return value;
+    return queries.length - 1 === options.resultAt?.index ? options.resultAt.replace(value) : value;
   };
   const mode = trialMode ? TRIAL_MODE : MODE;
   const canonical = `${mode}:${trialMode ? TRIAL : ACCOUNT}:${DEPLOYMENT}:${WORKSPACE}`;
@@ -153,6 +154,63 @@ const REJECTIONS = [false, true].flatMap((trialMode) => {
   return [{ label: "$transaction", trialMode, rejectAt: -1 },
     ...queries.map((query, rejectAt) => ({ label: `${rejectAt}: ${query.method}`, trialMode, rejectAt }))];
 });
+type IngressCase = { label: string; bad: unknown; good: unknown; argument: number };
+const INGRESS: IngressCase[] = [
+  { label: "malformed run UUID", argument: 2, bad: "BAD", good: RUN },
+  { label: "noncanonical run UUID", argument: 2, bad: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA", good: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+  ...[31, 65].map((length) => ({ label: `${length}-byte key`, argument: 3,
+    bad: owned(new Array(length).fill(7)), good: owned(new Array(length === 31 ? 32 : 64).fill(7)) })),
+  ...[-1, 256, 1.5, NaN, "7"].map((byte) => ({ label: `invalid byte ${String(byte)}`, argument: 3,
+    bad: owned([...new Array(31).fill(7), byte]), good: owned([...new Array(31).fill(7), byte === 256 ? 255 : 0]) })),
+  ...[["pageSize", 4, 1, 1_000], ["maxPagesPerModel", 5, 1, 1_000],
+    ["maxEvidenceItems", 6, 1, 100_000], ["cacheMaxTtlSeconds", 7, 0, 31_536_000]].flatMap(
+    ([name, position, minimum, maximum]) => [
+      { label: `${name} below minimum`, argument: position as number, bad: (minimum as number) - 1, good: minimum },
+      { label: `${name} above maximum`, argument: position as number, bad: (maximum as number) + 1, good: maximum },
+      { label: `${name} fractional`, argument: position as number, bad: (minimum as number) + 0.5, good: minimum },
+      { label: `${name} nonnumber`, argument: position as number, bad: String(minimum), good: minimum },
+    ]),
+];
+type MalformedResult = { label: string; trialMode?: boolean; index: number;
+  replace: (value: unknown) => unknown; control?: (value: unknown) => unknown; controlDenied?: boolean };
+const field = (name: string, value: unknown) => (row: unknown) => ({ ...(row as Values), [name]: value });
+const MALFORMED_RESULTS: MalformedResult[] = [
+  { label: "run UUID", index: 0, replace: field("id", "BAD") },
+  { label: "run capability SHA", index: 0, replace: field("capabilitySha", "BAD") },
+  { label: "run terminal Date", index: 0, replace: field("terminalAt", new Date(NaN)),
+    control: field("terminalAt", new Date(0)), controlDenied: true },
+  { label: "deployment UUID", index: 2, replace: field("id", "BAD") },
+  { label: "deployment workspace UUID", index: 2, replace: field("managedWorkspaceId", "BAD") },
+  { label: "deployment account UUID", index: 2, replace: field("customerAccountId", "BAD") },
+  { label: "missing selected deployment field", index: 2, replace: (row) => {
+    const result = { ...(row as Values) }; delete result.releaseLeaseError; return result;
+  } },
+  { label: "account UUID", index: 3, replace: field("id", "BAD") },
+  { label: "account primary deployment UUID", index: 3, replace: field("primaryDeploymentId", "BAD"),
+    control: field("primaryDeploymentId", DEPLOYMENT) },
+  { label: "trial UUID", trialMode: true, index: 3, replace: field("id", "BAD") },
+  { label: "trial workspace UUID", trialMode: true, index: 3, replace: field("workspaceId", "BAD") },
+  { label: "trial expiration Date", trialMode: true, index: 3, replace: field("trialExpiresAt", new Date(NaN)) },
+  { label: "non-Date trial expiration", trialMode: true, index: 3, replace: field("trialExpiresAt", 0),
+    control: field("trialExpiresAt", new Date(0)) },
+  ...[4, 5, 6, 7].map((index) => ({ label: `ordered UUID result at account query ${index}`, index,
+    replace: () => [{ id: "BAD" }], control: () => [{ id: DEPLOYMENT }] })),
+  { label: "nonarray ordered UUID result", index: 4, replace: () => ({ id: DEPLOYMENT }) },
+  { label: "duplicate ordered UUID result", index: 4, replace: () => [{ id: DEPLOYMENT }, { id: DEPLOYMENT }],
+    control: () => [{ id: ACCOUNT }, { id: DEPLOYMENT }] },
+  { label: "descending ordered UUID result", index: 4, replace: () => [{ id: DEPLOYMENT }, { id: ACCOUNT }],
+    control: () => [{ id: ACCOUNT }, { id: DEPLOYMENT }] },
+  { label: "sparse ordered UUID result", index: 4, replace: () => new Array(1),
+    control: () => [{ id: DEPLOYMENT }] },
+  { label: "overflow sentinel ordered UUID result", index: 4,
+    replace: () => Array.from({ length: 1_001 }, (_, index) => ({ id: `123e4567-e89b-12d3-a456-${String(index).padStart(12, "0")}` })),
+    control: () => Array.from({ length: 1_000 }, (_, index) => ({ id: `123e4567-e89b-12d3-a456-${String(index).padStart(12, "0")}` })) },
+];
+function invalidError(error: unknown) {
+  fixed(error, 400);
+  expect(error).toMatchObject({ message: "Invalid tenant purge contract input." });
+  expect(Object.isFrozen(error)).toBe(true); return true;
+}
 describe("tenant purge Prisma snapshot adapter", () => {
   it("denies before hostile later values or a transaction", async () => {
     let traps = 0; let transactions = 0;
@@ -188,6 +246,47 @@ describe("tenant purge Prisma snapshot adapter", () => {
     expect(calls).toBe(1); release(false); await expect(first).resolves.toBe(false);
     await expect(operation()).rejects.toSatisfy((error) => { fixed(error, 400); return true; });
     expect(calls).toBe(1);
+  });
+  it.each(INGRESS)("validates factory ingress $label against a valid control before a transaction", ({ argument, bad, good }) => {
+    let transactions = 0;
+    shared.prisma.$transaction = async () => { transactions += 1; return false; };
+    const args: unknown[] = [true, MODE, RUN, key(), 100, 10, 1_000, 60];
+    args[argument] = good;
+    const make = () => (create as (...values: unknown[]) => ReturnType<typeof create>)(...args);
+    expect(make()).toHaveLength(0);
+    args[argument] = bad;
+    let error: unknown;
+    try { make(); } catch (caught) { error = caught; }
+    invalidError(error);
+    expect(transactions).toBe(0);
+  });
+  it("captures maximum policies and a 64-byte key with endpoint bytes", async () => {
+    fixture(); const bytes = owned(new Array(64).fill(0).map((_value, index) => index % 2 === 0 ? 0 : 255));
+    const operation = create(true, MODE, RUN, bytes, 1_000, 1_000, 100_000, 31_536_000);
+    const result = await captureAuthorizedTenantPurgeManifestValues(true, MODE, operation);
+    expect(result.redactionKeyBytes).toEqual(new Array(64).fill(0).map((_value, index) => index % 2 === 0 ? 0 : 255));
+    expect(result.policies).toEqual({ pageSize: 1_000, maxPagesPerModel: 1_000,
+      maxEvidenceItems: 100_000, cacheMaxTtlSeconds: 31_536_000 });
+  });
+  it.each(MALFORMED_RESULTS)("rejects malformed $label, stops reads and rejects replay", async ({ trialMode = false, index, replace, control, controlDenied = false }) => {
+    const mode = trialMode ? TRIAL_MODE : MODE;
+    const make = () => create(true, mode, RUN, key(), 100, 10, 1_000, 60);
+    const valid = fixture({}, { id: WORKSPACE }, trialMode, { resultAt: { index, replace: control ?? ((value) => value) } });
+    if (controlDenied) await expect(make()()).resolves.toBe(false);
+    else await expect(make()()).resolves.not.toBe(false);
+    expect(valid.queries).toEqual(controlDenied ? expectedQueries(trialMode).slice(0, index + 1) : expectedQueries(trialMode));
+    const state = fixture({}, { id: WORKSPACE }, trialMode, { resultAt: { index, replace } });
+    const operation = make();
+    await expect(operation()).rejects.toSatisfy(invalidError);
+    const queries = expectedQueries(trialMode).slice(0, index + 1);
+    expect(state.queries).toEqual(queries);
+    expect(state.ledger).toEqual(["$transaction", ...queries.map((query) => query.method)]);
+    const accesses = state.accesses.slice();
+    expect(accesses).toHaveLength(queries.length * 2);
+    await expect(operation()).rejects.toSatisfy(invalidError);
+    expect(state.queries).toEqual(queries);
+    expect(state.ledger).toEqual(["$transaction", ...queries.map((query) => query.method)]);
+    expect(state.accesses).toEqual(accesses);
   });
   it("captures one exact account transaction into detached owned output", async () => {
     const state = fixture(); const operation = callback();
