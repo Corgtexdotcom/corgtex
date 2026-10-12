@@ -6,7 +6,7 @@ import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, isGlobalOperator, requireWorkspaceMembership } from "./auth";
 import { getApprovalPolicy, ensureApprovalFlow, withdrawActiveApprovalFlowForSubject } from "./approvals";
 import { invariant } from "./errors";
-import { currentArtifactInputRoots, readableArtifactIds, recordArtifactInputLineage, type LineageInput, type LineageRoot } from "./source-lineage";
+import { advanceHumanArtifactInputLineage, currentArtifactInputRoots, readableArtifactIds, recordArtifactInputLineage, type LineageInput, type LineageRoot } from "./source-lineage";
 import { privacyFilter } from "./privacy";
 import { archiveFilterWhere, type ArchiveFilter } from "./archive";
 import { requireDraftManager } from "./draft-permissions";
@@ -1049,6 +1049,8 @@ async function runUpdateProposalTransaction(
     });
 
     invariant(proposal && proposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
+    invariant((await readableArtifactIds(actor, params.workspaceId, "Proposal", [proposal], tx)).has(proposal.id),
+      404, "NOT_FOUND", "Proposal not found.");
     const priorRoots = await currentArtifactInputRoots(tx, params.workspaceId,
       { kind: "Proposal", id: proposal.id }, proposal);
     if (aiAdmission) {
@@ -1193,6 +1195,8 @@ export async function updateProposal(actor: AppActor, params: UpdateProposalPara
     });
 
     invariant(admissionProposal && admissionProposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
+    invariant((await readableArtifactIds(actor, params.workspaceId, "Proposal", [admissionProposal])).has(admissionProposal.id),
+      404, "NOT_FOUND", "Proposal not found.");
     requireUpdateProposalEditable(actor, membership, admissionProposal);
     requireExpectedVersionForProposalContent(params, admissionProposal.version);
 
@@ -1261,6 +1265,8 @@ async function archiveProposalArtifactWithLock(
       where: { id: params.proposalId, workspaceId: params.workspaceId },
     });
     invariant(record, 404, "NOT_FOUND", "Proposal not found.");
+    invariant((await readableArtifactIds(actor, params.workspaceId, "Proposal", [record], tx)).has(record.id),
+      404, "NOT_FOUND", "Proposal not found.");
     if (record.archivedAt) {
       return record;
     }
@@ -1356,6 +1362,8 @@ export async function submitProposal(actor: AppActor, params: { workspaceId: str
     });
 
     invariant(proposal && proposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
+    invariant((await readableArtifactIds(actor, params.workspaceId, "Proposal", [proposal], tx)).has(proposal.id),
+      404, "NOT_FOUND", "Proposal not found.");
     invariant(proposal.status === "DRAFT", 400, "INVALID_STATE", "Only draft proposals can be opened.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: proposal, resolvedMembership: membership });
 
@@ -1368,7 +1376,7 @@ export async function submitProposal(actor: AppActor, params: { workspaceId: str
       openedAt,
     });
 
-    await tx.proposal.update({
+    const openedProposal = await tx.proposal.update({
       where: { id: proposal.id },
       data: {
         status: "OPEN",
@@ -1377,6 +1385,8 @@ export async function submitProposal(actor: AppActor, params: { workspaceId: str
         autoApproveAt: null,
       },
     });
+    await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Proposal", id: proposal.id }, before: proposal, after: openedProposal });
 
     await recordProposalOpened(tx, actor, {
       workspaceId: params.workspaceId,
@@ -1410,6 +1420,8 @@ export async function returnProposalToDraft(actor: AppActor, params: {
     });
 
     invariant(proposal && proposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
+    invariant((await readableArtifactIds(actor, params.workspaceId, "Proposal", [proposal], tx)).has(proposal.id),
+      404, "NOT_FOUND", "Proposal not found.");
     invariant(proposal.status === "OPEN" || proposal.status === "RESOLVED", 400, "INVALID_STATE", "Only open or resolved proposals can be returned to draft.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: proposal, resolvedMembership: membership });
 
@@ -1465,6 +1477,8 @@ export async function returnProposalToDraft(actor: AppActor, params: {
         autoApproveAt: null,
       },
     });
+    await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Proposal", id: proposal.id }, before: proposal, after: updated });
 
     await tx.auditLog.create({
       data: {
@@ -1511,6 +1525,8 @@ export async function reopenProposal(actor: AppActor, params: {
     });
 
     invariant(proposal && proposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
+    invariant((await readableArtifactIds(actor, params.workspaceId, "Proposal", [proposal], tx)).has(proposal.id),
+      404, "NOT_FOUND", "Proposal not found.");
     invariant(!proposal.archivedAt, 400, "INVALID_STATE", "Archived proposals cannot be reopened.");
     invariant(proposal.status === "RESOLVED", 400, "INVALID_STATE", "Only resolved proposals can be reopened.");
 
@@ -1559,6 +1575,8 @@ export async function reopenProposal(actor: AppActor, params: {
         publishedAt: proposal.publishedAt ?? now,
       },
     });
+    await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Proposal", id: proposal.id }, before: proposal, after: updated });
 
     await tx.auditLog.create({
       data: {
@@ -1628,19 +1646,8 @@ export async function supportReopenResolvedProposals(actor: AppActor, params: {
         id: { in: proposalIds },
         workspaceId: params.workspaceId,
       },
-      select: {
-        id: true,
-        workspaceId: true,
-        title: true,
-        authorUserId: true,
-        status: true,
-        resolutionOutcome: true,
-        decisionMd: true,
-        decidedAt: true,
-        publishedAt: true,
-        archivedAt: true,
-      },
     });
+    const readableProposalIds = await readableArtifactIds(actor, params.workspaceId, "Proposal", proposals, tx);
     const proposalById = new Map(proposals.map((proposal) => [proposal.id, proposal]));
     const missingIds = proposalIds.filter((proposalId) => !proposalById.has(proposalId));
     invariant(missingIds.length === 0, 404, "NOT_FOUND", `Proposal not found: ${missingIds.join(", ")}.`);
@@ -1651,6 +1658,7 @@ export async function supportReopenResolvedProposals(actor: AppActor, params: {
     for (const proposalId of proposalIds) {
       const proposal = proposalById.get(proposalId);
       invariant(proposal, 404, "NOT_FOUND", "Proposal not found.");
+      invariant(readableProposalIds.has(proposal.id), 404, "NOT_FOUND", "Proposal not found.");
       invariant(!proposal.archivedAt, 400, "INVALID_STATE", `Archived proposal cannot be reopened: ${proposal.id}.`);
       invariant(proposal.status === "RESOLVED", 400, "INVALID_STATE", `Only resolved proposals can be reopened: ${proposal.id}.`);
 
@@ -1700,6 +1708,9 @@ export async function supportReopenResolvedProposals(actor: AppActor, params: {
           publishedAt: proposal.publishedAt ?? now,
         },
       });
+      await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "Proposal", id: proposal.id }, before: proposal, after: updated,
+        allowSystemTransition: true });
 
       await tx.auditLog.create({
         data: {
@@ -1772,6 +1783,8 @@ export async function publishProposal(actor: AppActor, params: {
     });
 
     invariant(proposal && proposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
+    invariant((await readableArtifactIds(actor, params.workspaceId, "Proposal", [proposal], tx)).has(proposal.id),
+      404, "NOT_FOUND", "Proposal not found.");
     invariant(proposal.isPrivate, 400, "INVALID_STATE", "Proposal is already public.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: proposal, resolvedMembership: membership });
 
@@ -1779,6 +1792,8 @@ export async function publishProposal(actor: AppActor, params: {
       where: { id: params.proposalId },
       data: { isPrivate: false, publishedAt: new Date() },
     });
+    await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Proposal", id: proposal.id }, before: proposal, after: updated });
 
     await tx.auditLog.create({
       data: {
@@ -1834,6 +1849,8 @@ export async function resolveProposal(actor: AppActor, params: {
     });
 
     invariant(proposal && proposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
+    invariant((await readableArtifactIds(actor, params.workspaceId, "Proposal", [proposal], tx)).has(proposal.id),
+      404, "NOT_FOUND", "Proposal not found.");
     invariant(proposal.status === "DRAFT" || proposal.status === "OPEN", 400, "INVALID_STATE", "Only draft or open proposals can be resolved.");
     if (proposal.status === "DRAFT") {
       await requireDraftManager({ actor, workspaceId: params.workspaceId, record: proposal, resolvedMembership: membership });
@@ -1860,6 +1877,8 @@ export async function resolveProposal(actor: AppActor, params: {
         publishedAt: proposal.publishedAt || now,
       },
     });
+    await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Proposal", id: proposal.id }, before: proposal, after: updated });
 
     const evidenceDocumentIds = await createWorkItemEvidenceLinks(tx, {
       workspaceId: params.workspaceId,

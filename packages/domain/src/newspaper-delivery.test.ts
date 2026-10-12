@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   prismaMock,
   requireWorkspaceMembershipMock,
+  readableArtifactIdsMock,
   trackedLinks,
 } = vi.hoisted(() => ({
   trackedLinks: [] as any[],
@@ -78,6 +79,8 @@ const {
     },
   },
   requireWorkspaceMembershipMock: vi.fn(),
+  readableArtifactIdsMock: vi.fn(async (_actor: unknown, _workspaceId: string, _kind: string,
+    rows: Array<{ id: string }>) => new Set(rows.map((row) => row.id))),
 }));
 
 function testHash(value: string) {
@@ -97,6 +100,8 @@ vi.mock("@corgtex/shared", () => ({
 vi.mock("./auth", () => ({
   requireWorkspaceMembership: requireWorkspaceMembershipMock,
 }));
+
+vi.mock("./source-lineage", () => ({ readableArtifactIds: readableArtifactIdsMock }));
 
 describe("newspaper delivery", () => {
   beforeEach(() => {
@@ -425,12 +430,22 @@ describe("newspaper delivery", () => {
     expect(prismaMock.newspaperEdition.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: { workspaceId: "ws-1" },
       orderBy: { generatedAt: "desc" },
-      take: 5,
     }));
     expect(rows[0]).toEqual(expect.objectContaining({
       id: "edition-1",
       cadence: "WEEKLY",
     }));
+  });
+
+  it("withholds editions without a current complete input manifest", async () => {
+    const { listNewspaperEditions } = await import("./newspaper-delivery");
+    prismaMock.newspaperEdition.findMany.mockResolvedValueOnce([
+      { id: "old-edition", workspaceId: "ws-1", title: "Restricted payroll", digestJson: {}, bodyMd: "Secret" },
+    ]);
+    readableArtifactIdsMock.mockResolvedValueOnce(new Set());
+
+    expect(await listNewspaperEditions({ kind: "user", user: { id: "u-1" } } as any, "ws-1"))
+      .toEqual([]);
   });
 
   it("returns newspaper diagnostics with effective recipients, next runs, jobs, deliveries, and source counts", async () => {

@@ -11,6 +11,7 @@ import {
 } from "./check-ins";
 import { prisma } from "@corgtex/shared";
 import { appendEvents } from "./events";
+import { readableArtifactIds } from "./source-lineage";
 
 vi.mock("@corgtex/shared", () => ({
   prisma: {
@@ -46,6 +47,12 @@ vi.mock("./auth", () => ({
 
 vi.mock("./events", () => ({
   appendEvents: vi.fn().mockResolvedValue(true),
+}));
+
+vi.mock("./source-lineage", () => ({
+  recordArtifactInputLineage: vi.fn(),
+  readableArtifactIds: vi.fn(async (_actor: unknown, _workspaceId: string, _kind: string, records: Array<{ id: string }>) =>
+    new Set(records.map((record) => record.id))),
 }));
 
 describe("getOverwhelmSignals", () => {
@@ -165,8 +172,11 @@ describe("getOverwhelmSignals", () => {
   });
 
   it("does not create daily questions after the same-day cap is reached", async () => {
-    vi.mocked((prisma as any).checkIn.count).mockResolvedValueOnce(3);
-    vi.mocked(prisma.checkIn.findMany).mockResolvedValueOnce([]);
+    vi.mocked(prisma.checkIn.findMany).mockResolvedValueOnce([1, 2, 3].map((number) => ({
+      id: `question-${number}`,
+      questionText: `Existing ${number}`,
+      createdAt: new Date("2026-06-09T09:00:00.000Z"),
+    })) as any);
 
     const result = await createDailyCompanyUnderstandingQuestions(actor, {
       workspaceId,
@@ -193,6 +203,17 @@ describe("getOverwhelmSignals", () => {
       }),
       orderBy: [{ priority: "desc" }, { createdAt: "desc" }],
     }));
+  });
+
+  it("filters restricted questions before applying the daily limit", async () => {
+    vi.mocked(prisma.checkIn.findMany).mockResolvedValueOnce([
+      { id: "restricted", questionText: "Restricted" },
+      { id: "safe", questionText: "Safe" },
+    ] as any);
+    vi.mocked(readableArtifactIds).mockResolvedValueOnce(new Set(["safe"]));
+    const questions = await listCompanyUnderstandingQuestions(actor, { workspaceId, take: 1 });
+    expect(questions.map((question) => question.id)).toEqual(["safe"]);
+    expect(prisma.checkIn.findMany).toHaveBeenCalledWith(expect.not.objectContaining({ take: 1 }));
   });
 
   it("marks regular check-ins answered when a member responds", async () => {

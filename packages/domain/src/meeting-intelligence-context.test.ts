@@ -58,8 +58,15 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
   };
 });
 
+vi.mock("./source-lineage", () => ({
+  lineageContentFingerprint: vi.fn(() => "safehash"),
+  readableArtifactIds: vi.fn(async (_actor: unknown, _workspaceId: string, _kind: string, records: Array<{ id: string }>) =>
+    new Set(records.map((record) => record.id))),
+}));
+
 import { prisma } from "@corgtex/shared";
 import { buildMeetingIntelligenceContext } from "./meeting-intelligence-context";
+import { readableArtifactIds } from "./source-lineage";
 
 describe("meeting-intelligence-context", () => {
   beforeEach(() => {
@@ -201,6 +208,7 @@ describe("meeting-intelligence-context", () => {
         chunkIndex: 0,
         content: "Previous weekly summary mentioned onboarding and pricing.",
         sensitivity: "PUBLIC",
+        metadata: { sourceContentHash: "safehash" },
       },
       {
         id: "chunk-2",
@@ -271,7 +279,6 @@ describe("meeting-intelligence-context", () => {
     }));
     expect(prisma.proposal.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ status: { in: ["DRAFT", "OPEN"] }, isPrivate: false }),
-      take: 50,
     }));
     expect(context.followUps).toEqual([
       expect.objectContaining({ id: "follow-up-1", owner: "Alice" }),
@@ -294,7 +301,6 @@ describe("meeting-intelligence-context", () => {
         OR: expect.arrayContaining([
           expect.objectContaining({ sourceType: "MEETING", sourceId: { in: expect.arrayContaining(["meeting-1", "meeting-2"]) } }),
           expect.objectContaining({ sourceType: "PROPOSAL", sourceId: { in: ["proposal-1"] } }),
-          expect.objectContaining({ sourceType: "SLACK", sourceId: { in: ["slack-1"] } }),
         ]),
       }),
     }));
@@ -352,7 +358,14 @@ describe("meeting-intelligence-context", () => {
         status: { in: ["OPEN"] },
         publishedAt: { not: null },
       }),
-      take: 8,
     }));
+  });
+
+  it("withholds a proposal from model context when its input lineage is not readable", async () => {
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, kind, records) =>
+      kind === "Proposal" ? new Set() : new Set(records.map((record) => record.id)));
+    const context = await buildMeetingIntelligenceContext({ workspaceId: "ws-1", meetingId: "meeting-2", mode: "insights" });
+    expect(context.proposals).toEqual([]);
+    expect(context.knowledge.every((item) => item.sourceType !== "PROPOSAL")).toBe(true);
   });
 });

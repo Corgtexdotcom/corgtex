@@ -830,15 +830,15 @@ async function updateRelationshipWithTx(
       sourceEntityId: input.sourceEntityId !== undefined ? input.sourceEntityId?.trim() || null : relationship.sourceEntityId,
     });
   }
-  await captureGraphLineage(tx, actor, workspaceId, { kind: "ContextGraphRelationship", id: relationship.id },
-    { ...relationship, ...update.data }, capture, relationship, [
-      { kind: "ContextGraphObject", id: normalizedSourceObjectId ?? relationship.sourceObjectId },
-      { kind: "ContextGraphObject", id: normalizedTargetObjectId ?? relationship.targetObjectId },
-    ]);
   const updated = await tx.contextGraphRelationship.update({
     where: { id: update.id },
     data: update.data,
   });
+  await captureGraphLineage(tx, actor, workspaceId, { kind: "ContextGraphRelationship", id: relationship.id },
+    updated, capture, relationship, [
+      { kind: "ContextGraphObject", id: normalizedSourceObjectId ?? relationship.sourceObjectId },
+      { kind: "ContextGraphObject", id: normalizedTargetObjectId ?? relationship.targetObjectId },
+    ]);
   return updated;
 }
 
@@ -989,7 +989,7 @@ async function applyMapLayoutUpdateWithTx(
   tx: Prisma.TransactionClient,
   workspaceId: string,
   update: ContextMapLayoutUpdateInput,
-  options?: { actor?: AppActor; requireMasterOrOwner?: boolean; refToObjectId?: Map<string, string> },
+  options?: { actor?: AppActor; requireMasterOrOwner?: boolean; refToObjectId?: Map<string, string>; capture?: GraphLineageCapture },
 ) {
   invariant(update.mapViewId.trim().length > 0, 400, "INVALID_INPUT", "Map view id is required.");
   invariant(update.items.length > 0, 400, "INVALID_INPUT", "At least one layout item is required.");
@@ -1011,7 +1011,7 @@ async function applyMapLayoutUpdateWithTx(
   for (const rawItem of update.items) {
     const item = layoutItemFromProposed(rawItem, options?.refToObjectId ?? new Map());
     await resolveObjectId(tx, workspaceId, item.objectId);
-    await tx.contextMapLayoutItem.upsert({
+    const saved = await tx.contextMapLayoutItem.upsert({
       where: {
         mapViewId_objectId: {
           mapViewId: update.mapViewId,
@@ -1035,6 +1035,15 @@ async function applyMapLayoutUpdateWithTx(
         visualState: item.visualState,
       },
     });
+    if (options?.actor) {
+      await captureGraphLineage(tx, options.actor, workspaceId,
+        { kind: "ContextMapLayoutItem", id: saved.id }, saved,
+        options.capture ?? { humanOriginal: options.actor.kind === "user", lineageInputs: options.actor.kind === "user" ? [] : undefined },
+        null, [{ kind: "ContextGraphObject", id: saved.objectId }], true);
+    } else {
+      await invalidateArtifactInputLineage({ tx, workspaceId,
+        artifact: { kind: "ContextMapLayoutItem", id: saved.id }, content: saved });
+    }
   }
 
   return { mapViewId: update.mapViewId, updated: update.items.length };
@@ -1130,6 +1139,8 @@ export async function importContextGraphMap(actor: AppActor, params: ContextGrap
           createdByUserId: null,
         },
       });
+    await captureGraphLineage(tx, actor, params.workspaceId,
+      { kind: "ContextMapView", id: mapView.id }, mapView, params, null, [], true);
 
     const refToObjectId = new Map<string, string>();
     const refToRelationshipId = new Map<string, string>();
@@ -1173,6 +1184,7 @@ export async function importContextGraphMap(actor: AppActor, params: ContextGrap
       }, {
         actor,
         requireMasterOrOwner: true,
+        capture: params,
       });
     }
 
@@ -1295,9 +1307,23 @@ async function ensureDefaultContextMapViewsForWorkspace(workspaceId: string) {
   return views;
 }
 
+function isStaticDefaultMapView(view: { name: string; viewType: string; query: Prisma.JsonValue; createdByUserId: string | null }) {
+  return view.createdByUserId === null && DEFAULT_CONTEXT_MAP_VIEW_CONFIGS.some((config) =>
+    config.name === view.name && config.viewType === view.viewType
+    && JSON.stringify(config.query) === JSON.stringify(view.query));
+}
+
+async function readableMapViews<T extends { id: string; name: string; viewType: string; query: Prisma.JsonValue; createdByUserId: string | null }>(
+  actor: AppActor, workspaceId: string, views: T[], db: Prisma.TransactionClient | typeof prisma = prisma,
+) {
+  const derived = views.filter((view) => !isStaticDefaultMapView(view));
+  const ids = await readableArtifactIds(actor, workspaceId, "ContextMapView", derived, db);
+  return views.filter((view) => isStaticDefaultMapView(view) || ids.has(view.id));
+}
+
 export async function ensureDefaultContextMapView(actor: AppActor, workspaceId: string) {
   await requireGraphRead(actor, workspaceId);
-  const views = await ensureDefaultContextMapViewsForWorkspace(workspaceId);
+  const views = await readableMapViews(actor, workspaceId, await ensureDefaultContextMapViewsForWorkspace(workspaceId));
   return views.find((view) => view.viewType === "process") ?? views[0];
 }
 
@@ -1305,10 +1331,11 @@ export async function listContextMapViews(actor: AppActor, workspaceId: string) 
   await requireGraphRead(actor, workspaceId);
   const userId = actorUserId(actor);
   await ensureDefaultContextMapViewsForWorkspace(workspaceId);
-  return prisma.contextMapView.findMany({
+  const views = await prisma.contextMapView.findMany({
     where: visibleMapViewWhere(workspaceId, userId),
     orderBy: [{ createdByUserId: "asc" }, { viewType: "asc" }, { createdAt: "asc" }],
   });
+  return readableMapViews(actor, workspaceId, views);
 }
 
 export const DEFAULT_CONTEXT_GRAPH_STALE_AFTER_DAYS = 45;
@@ -1358,8 +1385,11 @@ export async function getContextMapData(actor: AppActor, params: {
   const defaultViews = await ensureDefaultContextMapViewsForWorkspace(params.workspaceId);
   const mapView = params.mapViewId
     ? await prisma.contextMapView.findFirst({ where: { id: params.mapViewId, ...visibleMapViewWhere(params.workspaceId, userId) } })
-    : defaultViews.find((view) => view.viewType === "process") ?? defaultViews[0];
+    : (await readableMapViews(actor, params.workspaceId, defaultViews)).find((view) => view.viewType === "process")
+      ?? (await readableMapViews(actor, params.workspaceId, defaultViews))[0];
   invariant(mapView, 404, "NOT_FOUND", "Context map not found.");
+  invariant((await readableMapViews(actor, params.workspaceId, [mapView])).length,
+    404, "NOT_FOUND", "Context map not found.");
 
   const candidateObjects = await prisma.contextGraphObject.findMany({
     where: objectWhereForMapView(params.workspaceId, mapView, params.includeStale),
@@ -1414,11 +1444,12 @@ export async function getContextMapData(actor: AppActor, params: {
     && visibleObjectIds.has(relationship.targetObjectId)).slice(0, 300).map((relationship) => ({ ...relationship,
     evidenceRefs: relationship.evidenceRefs.filter((ref) => relationshipEvidenceIds.has(ref.id)).slice(0, 5),
   }));
-  const layoutItems = candidateLayoutItems.filter((item) => visibleObjectIds.has(item.objectId));
+  const layoutItems = (await readableGraphRecords(actor, params.workspaceId, "ContextMapLayoutItem",
+    candidateLayoutItems.filter((item) => visibleObjectIds.has(item.objectId))));
   const proposedDiffs = (await readableGraphRecords(actor, params.workspaceId, "ContextGraphProposedDiff", candidateDiffs)).slice(0, 20);
   return {
     mapView,
-    mapViews,
+    mapViews: await readableMapViews(actor, params.workspaceId, mapViews),
     objects,
     relationships,
     layoutItems,
@@ -1444,9 +1475,10 @@ export async function updateContextMapLayout(actor: AppActor, params: {
   const userId = actorUserId(actor);
   const mapView = await prisma.contextMapView.findFirst({
     where: { id: params.mapViewId, ...visibleMapViewWhere(params.workspaceId, userId) },
-    select: { id: true, name: true, createdByUserId: true },
   });
   invariant(mapView, 404, "NOT_FOUND", "Context map not found.");
+  invariant((await readableMapViews(actor, params.workspaceId, [mapView])).length,
+    404, "NOT_FOUND", "Context map not found.");
 
   const isPersonalOwner = Boolean(userId && mapView.createdByUserId === userId);
   const isMaster = mapView.createdByUserId === null;
@@ -1476,7 +1508,7 @@ export async function updateContextMapLayout(actor: AppActor, params: {
     await applyMapLayoutUpdateWithTx(tx, params.workspaceId, {
       mapViewId: params.mapViewId,
       items: params.items,
-    });
+    }, { actor, capture: { humanOriginal: actor.kind === "user", lineageInputs: actor.kind === "user" ? [] : undefined } });
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
       action: "context-map.layout.updated",
@@ -1503,17 +1535,26 @@ export async function createPersonalContextMapView(actor: AppActor, params: {
     where: { id: params.sourceMapViewId, ...visibleMapViewWhere(params.workspaceId, actor.user.id) },
   });
   invariant(sourceMapView, 404, "NOT_FOUND", "Context map not found.");
+  invariant((await readableMapViews(actor, params.workspaceId, [sourceMapView])).length,
+    404, "NOT_FOUND", "Context map not found.");
+  const sourceRoots = isStaticDefaultMapView(sourceMapView) ? []
+    : await currentArtifactInputRoots(prisma, params.workspaceId,
+      { kind: "ContextMapView", id: sourceMapView.id }, sourceMapView);
+  invariant(sourceRoots, 404, "NOT_FOUND", "Context map not found.");
 
   const query = (sourceMapView.query && typeof sourceMapView.query === "object" && !Array.isArray(sourceMapView.query))
     ? { ...(sourceMapView.query as JsonRecord) }
     : {};
   const name = params.name?.trim() || `${sourceMapView.name} - personal`;
+  const sourceLayoutRows = params.items?.length ? [] : await prisma.contextMapLayoutItem.findMany({
+    where: { mapViewId: sourceMapView.id },
+  });
+  const readableSourceLayoutIds = await readableArtifactIds(actor, params.workspaceId,
+    "ContextMapLayoutItem", sourceLayoutRows);
   const sourceLayoutItems = params.items?.length
-    ? params.items.map(normalizeLayoutItem)
-    : await prisma.contextMapLayoutItem.findMany({
-      where: { mapViewId: sourceMapView.id },
-      select: { objectId: true, x: true, y: true, width: true, height: true, visualState: true },
-    }).then((items) => items.map((item) => normalizeLayoutItem({
+    ? params.items.map((item) => ({ item: normalizeLayoutItem(item), sourceId: null }))
+    : sourceLayoutRows.filter((item) => readableSourceLayoutIds.has(item.id)).map((item) => ({
+      sourceId: item.id, item: normalizeLayoutItem({
       objectId: item.objectId,
       x: item.x,
       y: item.y,
@@ -1522,10 +1563,10 @@ export async function createPersonalContextMapView(actor: AppActor, params: {
       visualState: item.visualState && typeof item.visualState === "object" && !Array.isArray(item.visualState)
         ? item.visualState as JsonRecord
         : undefined,
-    })));
+    }) }));
 
   return prisma.$transaction(async (tx) => {
-    for (const normalized of sourceLayoutItems) {
+    for (const { item: normalized } of sourceLayoutItems) {
       await resolveObjectId(tx, params.workspaceId, normalized.objectId);
     }
 
@@ -1544,9 +1585,12 @@ export async function createPersonalContextMapView(actor: AppActor, params: {
         createdByUserId: actor.user.id,
       },
     });
+    await captureGraphLineage(tx, actor, params.workspaceId,
+      { kind: "ContextMapView", id: mapView.id }, mapView,
+      { humanOriginal: true, lineageInputs: [], lineageRoots: sourceRoots });
 
-    for (const normalized of sourceLayoutItems) {
-      await tx.contextMapLayoutItem.create({
+    for (const { item: normalized, sourceId } of sourceLayoutItems) {
+      const saved = await tx.contextMapLayoutItem.create({
         data: {
           mapViewId: mapView.id,
           objectId: normalized.objectId,
@@ -1557,6 +1601,10 @@ export async function createPersonalContextMapView(actor: AppActor, params: {
           visualState: normalized.visualState,
         },
       });
+      await captureGraphLineage(tx, actor, params.workspaceId,
+        { kind: "ContextMapLayoutItem", id: saved.id }, saved,
+        { humanOriginal: true, lineageInputs: sourceId ? [{ kind: "ContextMapLayoutItem", id: sourceId }] : [] },
+        null, [{ kind: "ContextGraphObject", id: saved.objectId }]);
     }
 
     await recordAudit(tx, actor, {
@@ -1855,6 +1903,7 @@ export async function applyContextGraphProposedDiff(actor: AppActor, params: {
         actor,
         requireMasterOrOwner: true,
         refToObjectId,
+        capture,
       }));
     }
 
@@ -2991,6 +3040,7 @@ export async function syncContextGraphForMeeting(actor: AppActor, params: { work
 
   return prisma.$transaction(async (tx) => {
     const meetingObject = await upsertObjectWithTx(tx, actor, params.workspaceId, {
+      lineageInputs: [{ kind: "Meeting", id: meeting.id }],
       objectType: "Meeting",
       title: meeting.title ?? "Untitled meeting",
       summary: meeting.summaryMd,
@@ -3020,6 +3070,7 @@ export async function syncContextGraphForMeeting(actor: AppActor, params: { work
                 : "Decision";
       const status: ContextGraphStatus = insight.status === "SUGGESTED" ? "proposed" : "approved";
       const object = await upsertObjectWithTx(tx, actor, params.workspaceId, {
+        lineageInputs: [{ kind: "Meeting", id: meeting.id }],
         objectType,
         title: insight.title,
         summary: insight.bodyMd,
@@ -3041,6 +3092,7 @@ export async function syncContextGraphForMeeting(actor: AppActor, params: { work
         },
       });
       const relationship = await upsertRelationshipWithTx(tx, actor, params.workspaceId, {
+        lineageInputs: [{ kind: "Meeting", id: meeting.id }],
         sourceObjectId: object.id,
         targetObjectId: meetingObject.id,
         relationshipType: insight.type === "DECISION" ? "decided_in" : "created_in",
@@ -3050,6 +3102,7 @@ export async function syncContextGraphForMeeting(actor: AppActor, params: { work
         sourceEntityId: insight.id,
       }, new Map());
       await attachEvidenceWithTx(tx, actor, params.workspaceId, {
+        lineageInputs: [{ kind: "Meeting", id: meeting.id }],
         objectId: object.id,
         sourceType: "MEETING",
         sourceId: meeting.id,
@@ -3058,6 +3111,7 @@ export async function syncContextGraphForMeeting(actor: AppActor, params: { work
         metadata: { meetingInsightId: insight.id },
       }, new Map(), new Map());
       await attachEvidenceWithTx(tx, actor, params.workspaceId, {
+        lineageInputs: [{ kind: "Meeting", id: meeting.id }],
         relationshipId: relationship.id,
         sourceType: "MEETING",
         sourceId: meeting.id,

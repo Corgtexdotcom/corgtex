@@ -6,6 +6,7 @@ import {
   deleteGoal,
   getGoal,
   getMyGoalSlice,
+  listGoals,
   listCompanyDirectionFromBrain,
   postGoalUpdate,
   recomputeGoalProgress,
@@ -14,6 +15,7 @@ import {
   updateGoal,
 } from "./goals";
 import { prisma } from "@corgtex/shared";
+import { readableArtifactIds } from "./source-lineage";
 
 vi.mock("@corgtex/shared", () => ({
   prisma: {
@@ -83,6 +85,17 @@ vi.mock("./auth", () => ({
     role: "MEMBER",
     isActive: true,
   }),
+}));
+
+vi.mock("./source-lineage", () => ({
+  advanceHumanArtifactInputLineage: vi.fn(),
+  recordArtifactInputLineage: vi.fn(),
+  readableArtifactIds: vi.fn(async (_actor: unknown, _workspaceId: string, _kind: string, records: Array<{ id: string }>) =>
+    new Set(records.map((record) => record.id))),
+}));
+
+vi.mock("./brain-access", () => ({
+  resolveKnowledgeAccessDomains: vi.fn(async () => ["WORKSPACE"]),
 }));
 
 vi.mock("./events", () => ({
@@ -700,6 +713,18 @@ describe("Goals Domain", () => {
   });
 
   describe("updateGoal", () => {
+    it("does not return a revoked derived goal through a no-op update", async () => {
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
+        id: "goal-1", workspaceId: "ws-1", archivedAt: null, title: "Sensitive goal",
+        authorUserId: "user-1", status: "ACTIVE", isPrivate: false, version: 1,
+      } as any);
+      vi.mocked(readableArtifactIds).mockResolvedValueOnce(new Set());
+
+      await expect(updateGoal(actor, { workspaceId: "ws-1", goalId: "goal-1", title: "Sensitive goal", expectedVersion: 1 }))
+        .rejects.toMatchObject({ code: "NOT_FOUND" });
+      expect(prisma.goal.update).not.toHaveBeenCalled();
+    });
+
     it("rejects using itself as the parent goal", async () => {
       vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
         id: "goal-1",
@@ -2327,4 +2352,16 @@ describe("Goals Domain", () => {
       expect(lockOrder5).toBeLessThan(updateOrder5);
     });
   });
+});
+
+it("filters source-restricted goals before pagination", async () => {
+  vi.mocked(prisma.goal.findMany).mockResolvedValueOnce([
+    { id: "restricted", title: "Restricted" },
+    { id: "permitted", title: "Permitted" },
+  ] as any);
+  vi.mocked(readableArtifactIds).mockResolvedValueOnce(new Set(["permitted"]));
+  const actor = { kind: "user", user: { id: "user-1", email: "user@example.com" } } as any;
+  const goals = await listGoals(actor, { workspaceId: "ws-1", take: 1 });
+  expect(goals.map((goal) => goal.id)).toEqual(["permitted"]);
+  expect(prisma.goal.findMany).toHaveBeenCalledWith(expect.not.objectContaining({ take: 1 }));
 });

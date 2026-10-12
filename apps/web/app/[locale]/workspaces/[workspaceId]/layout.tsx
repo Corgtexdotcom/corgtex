@@ -1,5 +1,7 @@
-import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations, listDailyCompanyUnderstandingQuestions, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig, getUserWorkspaceOnboardingState, getAiWorkspaceSelectionState, resolveWorkspaceModuleAccess, SELF_SERVE_WORKSPACE_TOUR_KEY, SELF_SERVE_WORKSPACE_TOUR_VERSION } from "@corgtex/domain";
+import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations, listDailyCompanyUnderstandingQuestions, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig, getUserWorkspaceOnboardingState, getAiWorkspaceSelectionState, resolveWorkspaceModuleAccess, resolveKnowledgeAccessDomains, SELF_SERVE_WORKSPACE_TOUR_KEY, SELF_SERVE_WORKSPACE_TOUR_VERSION } from "@corgtex/domain";
 import { workspaceBranding, prisma } from "@corgtex/shared";
+import type { AppActor } from "@corgtex/shared";
+import { countReadableKnowledgeChunks } from "@corgtex/knowledge";
 import type { Metadata } from "next";
 import { logoutAction, requirePageActor } from "@/lib/auth";
 import { filterWorkspacesForDeploymentScope } from "@/lib/deployment-workspace-scope";
@@ -39,15 +41,17 @@ function localizedPath(path: string, locale: string) {
   return `/${locale}${path}`;
 }
 
-async function hasWorkspaceInitialKnowledge(workspaceId: string) {
+async function hasWorkspaceInitialKnowledge(actor: AppActor, workspaceId: string) {
+  const domains = await resolveKnowledgeAccessDomains(actor, workspaceId);
   const [documentCount, brainSourceCount, meetingCount, knowledgeChunkCount] = await Promise.all([
     prisma.document.count({
-      where: { workspaceId, archivedAt: null },
+      where: { workspaceId, archivedAt: null, accessDomain: { in: domains } },
     }),
     prisma.brainSource.count({
       where: {
         workspaceId,
         archivedAt: null,
+        accessDomain: { in: domains },
         sourceType: { in: ["FILE_UPLOAD", "DOC", "ARTICLE", "MEETING", "EXTERNAL_CONTENT"] },
       },
     }),
@@ -61,12 +65,7 @@ async function hasWorkspaceInitialKnowledge(workspaceId: string) {
         ],
       },
     }),
-    prisma.knowledgeChunk.count({
-      where: {
-        workspaceId,
-        sourceType: { in: ["DOCUMENT", "MEETING"] },
-      },
-    }),
+    countReadableKnowledgeChunks(actor, workspaceId, ["DOCUMENT", "MEETING"]),
   ]);
   return documentCount + brainSourceCount + meetingCount + knowledgeChunkCount > 0;
 }
@@ -120,7 +119,7 @@ export default async function WorkspaceLayout({
       tourKey: SELF_SERVE_WORKSPACE_TOUR_KEY,
       tourVersion: SELF_SERVE_WORKSPACE_TOUR_VERSION,
     }).catch(() => null) : Promise.resolve(null),
-    hasWorkspaceInitialKnowledge(workspaceId).catch(() => false),
+    hasWorkspaceInitialKnowledge(actor, workspaceId).catch(() => false),
     userId ? prisma.oAuthConnection.findFirst({
       where: {
         userId,

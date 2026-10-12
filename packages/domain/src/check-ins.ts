@@ -134,7 +134,7 @@ export async function listCompanyUnderstandingQuestions(actor: AppActor, params:
   const memberId = params.memberId?.trim() || membership?.id;
   invariant(memberId, 400, "INVALID_INPUT", "Member id is required for company understanding questions.");
 
-  return prisma.checkIn.findMany({
+  const questions = await prisma.checkIn.findMany({
     where: {
       workspaceId: params.workspaceId,
       memberId,
@@ -142,8 +142,9 @@ export async function listCompanyUnderstandingQuestions(actor: AppActor, params:
       status: params.status?.trim() || "OPEN",
     },
     orderBy: [{ priority: "desc" }, { createdAt: "desc" }],
-    take: Math.min(Math.max(params.take ?? 20, 1), 50),
   });
+  const visible = await readableArtifactIds(actor, params.workspaceId, "CheckIn", questions);
+  return questions.filter((question) => visible.has(question.id)).slice(0, Math.min(Math.max(params.take ?? 20, 1), 50));
 }
 
 export async function listDailyCompanyUnderstandingQuestions(actor: AppActor, params: {
@@ -153,7 +154,7 @@ export async function listDailyCompanyUnderstandingQuestions(actor: AppActor, pa
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   invariant(membership, 401, "AUTH_REQUIRED", "Company understanding questions require a member.");
 
-  return prisma.checkIn.findMany({
+  const questions = await prisma.checkIn.findMany({
     where: {
       workspaceId: params.workspaceId,
       memberId: membership.id,
@@ -161,8 +162,10 @@ export async function listDailyCompanyUnderstandingQuestions(actor: AppActor, pa
       status: "OPEN",
     },
     orderBy: [{ priority: "desc" }, { createdAt: "desc" }],
-    take: Math.min(Math.max(params.take ?? DAILY_COMPANY_QUESTION_CAP, 1), DAILY_COMPANY_QUESTION_CAP),
   });
+  const visible = await readableArtifactIds(actor, params.workspaceId, "CheckIn", questions);
+  return questions.filter((question) => visible.has(question.id))
+    .slice(0, Math.min(Math.max(params.take ?? DAILY_COMPANY_QUESTION_CAP, 1), DAILY_COMPANY_QUESTION_CAP));
 }
 
 export async function createDailyCompanyUnderstandingQuestions(actor: AppActor, params: {
@@ -179,30 +182,22 @@ export async function createDailyCompanyUnderstandingQuestions(actor: AppActor, 
   invariant(member?.isActive && member.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Member not found.");
 
   const todayStart = startOfUtcDay(params.now);
-  const [createdToday, existingQuestions] = await Promise.all([
-    prisma.checkIn.count({
-      where: {
-        workspaceId: params.workspaceId,
-        memberId: params.memberId,
-        questionType: COMPANY_UNDERSTANDING_TYPE,
-        createdAt: { gte: todayStart },
-      },
-    }),
-    prisma.checkIn.findMany({
-      where: {
-        workspaceId: params.workspaceId,
-        memberId: params.memberId,
-        questionType: COMPANY_UNDERSTANDING_TYPE,
-        OR: [{ status: "OPEN" }, { createdAt: { gte: todayStart } }],
-      },
-      select: { questionText: true },
-    }),
-  ]);
+  const existingQuestions = await prisma.checkIn.findMany({
+    where: {
+      workspaceId: params.workspaceId,
+      memberId: params.memberId,
+      questionType: COMPANY_UNDERSTANDING_TYPE,
+      OR: [{ status: "OPEN" }, { createdAt: { gte: todayStart } }],
+    },
+  });
+  const visible = await readableArtifactIds(actor, params.workspaceId, "CheckIn", existingQuestions);
+  const safeQuestions = existingQuestions.filter((question) => visible.has(question.id));
+  const createdToday = safeQuestions.filter((question) => question.createdAt >= todayStart).length;
 
   const remaining = Math.max(DAILY_COMPANY_QUESTION_CAP - createdToday, 0);
   if (remaining === 0) return { created: 0, cap: DAILY_COMPANY_QUESTION_CAP };
 
-  const existingText = new Set(existingQuestions.map((question) => question.questionText.trim().toLowerCase()));
+  const existingText = new Set(safeQuestions.map((question) => question.questionText.trim().toLowerCase()));
   const candidates = DAILY_COMPANY_QUESTION_TEMPLATES.filter((template) => !existingText.has(template.questionText.toLowerCase()));
   const created = [];
   for (const template of candidates.slice(0, remaining)) {
@@ -230,6 +225,8 @@ export async function startCompanyUnderstandingQuestionConversation(actor: AppAc
   return prisma.$transaction(async (tx) => {
     const checkIn = await tx.checkIn.findUnique({ where: { id: params.checkInId } });
     invariant(checkIn && checkIn.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Question not found.");
+    invariant((await readableArtifactIds(actor, params.workspaceId, "CheckIn", [checkIn], tx)).has(checkIn.id),
+      404, "NOT_FOUND", "Question not found.");
     invariant(checkIn.memberId === membership.id, 403, "FORBIDDEN", "You can only open your own questions.");
     invariant(checkIn.questionType === COMPANY_UNDERSTANDING_TYPE, 400, "INVALID_INPUT", "Only company understanding questions can open a linked chat.");
     invariant(checkIn.status === "OPEN", 400, "INVALID_STATE", "Only open questions can open a linked chat.");
@@ -290,6 +287,10 @@ export async function respondToCheckIn(actor: AppActor, params: {
     });
 
     invariant(checkIn && checkIn.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Check-in not found.");
+    if (checkIn.questionType === COMPANY_UNDERSTANDING_TYPE) {
+      invariant((await readableArtifactIds(actor, params.workspaceId, "CheckIn", [checkIn], tx)).has(checkIn.id),
+        404, "NOT_FOUND", "Check-in not found.");
+    }
     invariant(membership && checkIn.memberId === membership.id, 403, "FORBIDDEN", "You can only respond to your own check-ins.");
     if (checkIn.questionType === COMPANY_UNDERSTANDING_TYPE) {
       invariant(checkIn.status === "OPEN", 400, "INVALID_STATE", "Only open company understanding questions can be answered.");
@@ -371,6 +372,8 @@ export async function skipCompanyUnderstandingQuestion(actor: AppActor, params: 
     });
 
     invariant(checkIn && checkIn.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Check-in not found.");
+    invariant((await readableArtifactIds(actor, params.workspaceId, "CheckIn", [checkIn], tx)).has(checkIn.id),
+      404, "NOT_FOUND", "Check-in not found.");
     invariant(checkIn.questionType === COMPANY_UNDERSTANDING_TYPE, 400, "INVALID_INPUT", "Only company understanding questions can be skipped.");
     invariant(membership && checkIn.memberId === membership.id, 403, "FORBIDDEN", "You can only skip your own company understanding questions.");
     invariant(checkIn.status === "OPEN", 400, "INVALID_STATE", "Only open questions can be skipped.");

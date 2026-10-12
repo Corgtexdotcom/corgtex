@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { prismaMock, syncContextGraphForMeetingMock, upsertContextGraphObjectMock, upsertContextGraphRelationshipMock } = vi.hoisted(() => ({
+const { prismaMock, syncContextGraphForMeetingMock, upsertContextGraphObjectMock, upsertContextGraphRelationshipMock, readableArtifactIdsMock } = vi.hoisted(() => ({
   prismaMock: {
     action: { findFirst: vi.fn() },
     brainArticle: { findFirst: vi.fn() },
@@ -14,6 +14,7 @@ const { prismaMock, syncContextGraphForMeetingMock, upsertContextGraphObjectMock
   syncContextGraphForMeetingMock: vi.fn(),
   upsertContextGraphObjectMock: vi.fn(),
   upsertContextGraphRelationshipMock: vi.fn(),
+  readableArtifactIdsMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -26,11 +27,14 @@ vi.mock("@corgtex/domain", () => ({
   attachContextGraphEvidence: vi.fn(),
   upsertContextGraphObject: upsertContextGraphObjectMock,
   upsertContextGraphRelationship: upsertContextGraphRelationshipMock,
+  readableArtifactIds: readableArtifactIdsMock,
 }));
 
 describe("handleContextGraphSync", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    readableArtifactIdsMock.mockImplementation(async (_actor: unknown, _workspaceId: string, _kind: string, records: Array<{ id: string }>) =>
+      new Set(records.map((record) => record.id)));
   });
 
   it("delegates meeting sync to the domain meeting graph sync", async () => {

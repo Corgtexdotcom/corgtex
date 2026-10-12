@@ -19,6 +19,7 @@ const {
   upsertNewspaperEditionMock,
   collectWorkspaceBriefingCandidatesMock,
   upsertWorkspaceBriefingMock,
+  readableArtifactIdsMock,
 } = vi.hoisted(() => ({
   txMock: {
     demoLead: {
@@ -102,6 +103,7 @@ const {
   upsertNewspaperEditionMock: vi.fn(),
   collectWorkspaceBriefingCandidatesMock: vi.fn(),
   upsertWorkspaceBriefingMock: vi.fn(),
+  readableArtifactIdsMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -144,6 +146,7 @@ vi.mock("@corgtex/domain", async () => ({
     { id: "otherUpdates", title: "Other Updates", aliases: ["misc", "other", "brainUpdates", "documentUpdates"] },
   ],
   getAgentModelOverride: vi.fn().mockResolvedValue(undefined),
+  readableArtifactIds: readableArtifactIdsMock,
   getWorkspaceNewspaperCadence: getWorkspaceNewspaperCadenceMock,
   isHumanNewspaperRecipientIdentity: (identity: { kind?: string | null; user?: { email?: string | null; displayName?: string | null } | null; email?: string | null; displayName?: string | null }) => {
     const user = identity.user ?? identity;
@@ -398,6 +401,8 @@ function mockRecentBuildArtifact() {
 describe("runDailyDigest", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    readableArtifactIdsMock.mockImplementation(async (_actor: unknown, _workspaceId: string, _kind: string,
+      rows: Array<{ id: string }>) => new Set(rows.map((row) => row.id)));
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof txMock) => Promise<unknown>) => callback(txMock));
     batchIngestDailyConversationsMock.mockResolvedValue(undefined);
     prismaMock.conversationSession.findMany.mockResolvedValue([]);
@@ -493,6 +498,18 @@ describe("runDailyDigest", () => {
           pullRequestNumber: null,
         },
       }),
+    }));
+  });
+
+  it("skips email delivery when the stored briefing's complete inputs cannot be verified", async () => {
+    readableArtifactIdsMock.mockResolvedValue(new Set());
+    const { runDailyDigest } = await import("./daily-digest");
+    const result = await runDailyDigest({ workspaceId: "workspace-1", dateISO: "2026-04-30T12:00:00.000Z" });
+
+    expect(sendEmailMock).not.toHaveBeenCalled();
+    expect(result.skippedEmails).toBeGreaterThan(0);
+    expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      status: "SKIPPED", subject: "Workspace briefing",
     }));
   });
 

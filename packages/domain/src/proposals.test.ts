@@ -86,6 +86,7 @@ vi.mock("@corgtex/shared", () => ({
 }));
 
 vi.mock("./source-lineage", () => ({
+  advanceHumanArtifactInputLineage: vi.fn(),
   recordArtifactInputLineage: vi.fn(),
   currentArtifactInputRoots: vi.fn().mockResolvedValue([]),
   readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) => new Set(records.map((record: { id: string }) => record.id))),
@@ -1423,6 +1424,18 @@ describe("updateProposal AI-summary transaction scope", () => {
     expect((prisma as any).workItemVersion.create).not.toHaveBeenCalled();
     expect(prisma.auditLog.create).not.toHaveBeenCalled();
     expect(appendEvents).not.toHaveBeenCalled();
+  });
+
+  it("does not return a proposal whose input permissions were revoked through a no-op update", async () => {
+    const { updateProposal } = await import("./proposals");
+    const { readableArtifactIds } = await import("./source-lineage");
+    vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(baseProposal() as any);
+    vi.mocked(readableArtifactIds).mockResolvedValueOnce(new Set());
+
+    await expect(updateProposal(actor, {
+      workspaceId: "ws-1", proposalId: "p-scope", title: "Scope title", expectedVersion: 1,
+    })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(prisma.proposal.update).not.toHaveBeenCalled();
   });
 
   it("rejects missing versions for same-value content and summary intent without effects", async () => {

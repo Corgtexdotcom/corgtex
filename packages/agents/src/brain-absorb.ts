@@ -287,7 +287,7 @@ Rules:
   // Step 3: Create new article if needed
   if (createNew && createNew.title && createNew.slug) {
     // Check it doesn't already exist
-    const existingSlug = articles.find((a) => a.slug === createNew.slug);
+    const existingSlug = activeArticles.find((a) => a.slug === createNew.slug);
     if (!existingSlug && updateSlugs.length === 0) {
       const drafted = await defaultModelGateway.chat({
         model,
@@ -333,7 +333,7 @@ Rules:
 
   if (documentLikeSource && initialWritePlans.length === 0) {
     const fallbackTitle = source.title?.trim() || createNew?.title?.trim() || "Uploaded knowledge source";
-    const existingSlugs = new Set(articles.map((article) => article.slug));
+    const existingSlugs = new Set(activeArticles.map((article) => article.slug));
     const baseSlug = slugify(createNew?.slug || fallbackTitle, "uploaded-knowledge-source");
     const slug = uniqueSlug(baseSlug, existingSlugs);
     const drafted = await defaultModelGateway.chat({

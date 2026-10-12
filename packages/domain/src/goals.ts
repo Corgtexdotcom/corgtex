@@ -6,8 +6,9 @@ import { recordAudit } from "./audit-trail";
 import { archiveFilterWhere, type ArchiveFilter } from "./archive";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import { invariant } from "./errors";
-import { recordArtifactInputLineage, type LineageInput, type LineageRoot } from "./source-lineage";
+import { advanceHumanArtifactInputLineage, recordArtifactInputLineage, readableArtifactIds, type LineageInput, type LineageRoot } from "./source-lineage";
 import { privacyFilter } from "./privacy";
+import { resolveKnowledgeAccessDomains } from "./brain-access";
 import {
   requireCollaborativeWorkItemEditor,
   requirePrivateDraftEditor,
@@ -678,6 +679,8 @@ export async function updateGoal(
   return prisma.$transaction(async (tx) => {
     await acquireWorkItemAdvisoryLock(tx, "Goal", params.goalId);
     const goal = await assertGoalInWorkspace(tx, params.workspaceId, params.goalId);
+    invariant((await readableArtifactIds(actor, params.workspaceId, "Goal", [goal], tx)).has(goal.id),
+      404, "NOT_FOUND", "Goal not found.");
     const parentGoalIdsToRecompute = new Set<string>();
     if (
       params.parentGoalId !== undefined
@@ -816,6 +819,10 @@ export async function updateGoal(
       }
       throw error;
     }
+    await advanceHumanArtifactInputLineage({
+      tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Goal", id: goal.id }, before: goal, after: updated,
+    });
     if (
       changedUpdateFields.includes("parentGoalId")
       || changedUpdateFields.includes("progressPercent")
@@ -1010,7 +1017,11 @@ export async function getGoal(
   });
 
   invariant(goal, 404, "NOT_FOUND", "Goal not found.");
-  return goal;
+  invariant((await readableArtifactIds(actor, params.workspaceId, "Goal", [goal])).has(goal.id),
+    404, "NOT_FOUND", "Goal not found.");
+  const children = goal.childGoals ?? [];
+  const visibleChildren = await readableArtifactIds(actor, params.workspaceId, "Goal", children);
+  return { ...goal, childGoals: children.filter((child) => visibleChildren.has(child.id)) };
 }
 
 export async function listGoals(
@@ -1043,10 +1054,8 @@ export async function listGoals(
   if (params.status !== undefined) query.status = params.status;
   if (params.parentGoalId !== undefined) query.parentGoalId = params.parentGoalId;
 
-  return prisma.goal.findMany({
+  const goals = await prisma.goal.findMany({
     where: query,
-    take: params.take,
-    skip: params.skip,
     orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }],
     include: {
       ownerMember: {
@@ -1058,6 +1067,9 @@ export async function listGoals(
       circle: true,
     },
   });
+  const visible = await readableArtifactIds(actor, params.workspaceId, "Goal", goals);
+  return goals.filter((goal) => visible.has(goal.id)).slice(params.skip ?? 0,
+    params.take == null ? undefined : (params.skip ?? 0) + params.take);
 }
 
 export async function listCompanyDirectionFromBrain(
@@ -1090,7 +1102,6 @@ export async function listCompanyDirectionFromBrain(
         },
       },
       orderBy: [{ updatedAt: "desc" }],
-      take,
       include: {
         links: {
           where: {
@@ -1109,24 +1120,34 @@ export async function listCompanyDirectionFromBrain(
             status: "OPEN",
           },
           orderBy: [{ priority: "desc" }, { createdAt: "desc" }],
-          take: questionTake,
         })
       : Promise.resolve([]),
   ]);
 
+  const [visibleGoalIds, visibleQuestionIds] = await Promise.all([
+    readableArtifactIds(actor, params.workspaceId, "Goal", goals),
+    readableArtifactIds(actor, params.workspaceId, "CheckIn", questions),
+  ]);
+  const visibleGoals = goals.filter((goal) => visibleGoalIds.has(goal.id)).slice(0, take);
+  const visibleQuestions = questions.filter((question) => visibleQuestionIds.has(question.id)).slice(0, questionTake);
+  const allLinks = visibleGoals.flatMap((goal) => goal.links);
+  const visibleLinkIds = await readableArtifactIds(actor, params.workspaceId, "GoalLink", allLinks);
+  for (const goal of visibleGoals) goal.links = goal.links.filter((link) => visibleLinkIds.has(link.id));
+
   const brainSourceIds = new Set<string>();
   const brainArticleIds = new Set<string>();
-  for (const goal of goals) {
+  for (const goal of visibleGoals) {
     for (const link of goal.links) {
       if (link.entityType === "BrainSource") brainSourceIds.add(link.entityId);
       if (link.entityType === "BrainArticle") brainArticleIds.add(link.entityId);
     }
   }
-  for (const question of questions) {
+  for (const question of visibleQuestions) {
     if (question.relatedEntityType === "BrainSource" && question.relatedEntityId) brainSourceIds.add(question.relatedEntityId);
     if (question.relatedEntityType === "BrainArticle" && question.relatedEntityId) brainArticleIds.add(question.relatedEntityId);
   }
 
+  const domains = await resolveKnowledgeAccessDomains(actor, params.workspaceId);
   const [brainSources, brainArticles] = await Promise.all([
     brainSourceIds.size > 0
       ? prisma.brainSource.findMany({
@@ -1134,14 +1155,7 @@ export async function listCompanyDirectionFromBrain(
             workspaceId: params.workspaceId,
             id: { in: Array.from(brainSourceIds) },
             archivedAt: null,
-          },
-          select: {
-            id: true,
-            sourceType: true,
-            title: true,
-            fileName: true,
-            channel: true,
-            createdAt: true,
+            accessDomain: { in: domains },
           },
         })
       : Promise.resolve([]),
@@ -1152,19 +1166,17 @@ export async function listCompanyDirectionFromBrain(
             id: { in: Array.from(brainArticleIds) },
             archivedAt: null,
           },
-          select: {
-            id: true,
-            slug: true,
-            title: true,
-            type: true,
-            authority: true,
-          },
         })
       : Promise.resolve([]),
   ]);
 
   const sourceById = new Map(brainSources.map((source) => [source.id, source]));
-  const articleById = new Map(brainArticles.map((article) => [article.id, article]));
+  const visibleArticleIds = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", brainArticles);
+  const articleById = new Map(brainArticles.filter((article) => visibleArticleIds.has(article.id)).map((article) => [article.id, article]));
+  const evidenceVisible = (entityType: string, entityId: string) =>
+    entityType === "BrainSource" ? sourceById.has(entityId)
+      : entityType === "BrainArticle" ? articleById.has(entityId) : false;
+  for (const goal of visibleGoals) goal.links = goal.links.filter((link) => evidenceVisible(link.entityType, link.entityId));
 
   const evidenceDisplay = (entityType: string, entityId: string) => {
     if (entityType === "BrainSource") {
@@ -1204,7 +1216,7 @@ export async function listCompanyDirectionFromBrain(
     };
   };
 
-  const mappedGoals = goals.map((goal): CompanyDirectionGoal => {
+  const mappedGoals = visibleGoals.map((goal): CompanyDirectionGoal => {
     const evidenceLinks = goal.links.map(mapEvidenceLink);
     const confidence = evidenceLinks.length > 0
       ? Math.max(...evidenceLinks.map((link) => link.confidence))
@@ -1221,8 +1233,9 @@ export async function listCompanyDirectionFromBrain(
     };
   });
 
-  const mappedQuestions = questions.map((question): CompanyDirectionQuestion => {
+  const mappedQuestions = visibleQuestions.map((question): CompanyDirectionQuestion => {
     const relatedEvidence = question.relatedEntityType && question.relatedEntityId
+      && evidenceVisible(question.relatedEntityType, question.relatedEntityId)
       ? {
           entityType: question.relatedEntityType,
           entityId: question.relatedEntityId,
@@ -1859,12 +1872,13 @@ export async function getGoalTree(actor: AppActor, workspaceId: string, opts?: {
   });
 
   const goalsById = new Map<string, any>();
-  for (const g of allGoals) {
+  const visibleIds = await readableArtifactIds(actor, workspaceId, "Goal", allGoals);
+  for (const g of allGoals.filter((goal) => visibleIds.has(goal.id))) {
     goalsById.set(g.id, { ...g, childGoals: [] });
   }
 
   const rootGoals: any[] = [];
-  for (const g of allGoals) {
+  for (const g of allGoals.filter((goal) => visibleIds.has(goal.id))) {
     const mapped = goalsById.get(g.id);
     if (g.parentGoalId && goalsById.has(g.parentGoalId)) {
       goalsById.get(g.parentGoalId).childGoals.push(mapped);
@@ -1904,7 +1918,9 @@ export async function getMyGoalSlice(actor: AppActor, memberId: string, workspac
     ],
   });
 
-  return myGoals.map((goal) => stripInvisibleGoalParents(actor, membership, goal));
+  const visibleIds = await readableArtifactIds(actor, workspaceId, "Goal", myGoals);
+  return myGoals.filter((goal) => visibleIds.has(goal.id))
+    .map((goal) => stripInvisibleGoalParents(actor, membership, goal));
 }
 
 export async function createRecognition(

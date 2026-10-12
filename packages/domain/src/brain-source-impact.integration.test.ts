@@ -29,13 +29,15 @@ describe("Brain source archive impact", () => {
       sourceIds: [source.id], derivation: { sourceId: source.id,
         sourceFingerprint: brainSourceContentFingerprint(source), agentRunId: "synthetic-run" },
     });
-    const legacyArticle = await createArticle(editor, {
-      workspaceId: workspace.id, title: "Legacy linked article", type: "PROJECT", bodyMd: "Human body", sourceIds: [source.id],
-    });
+    const legacyArticle = await prisma.brainArticle.create({ data: {
+      workspaceId: workspace.id, slug: `legacy-${randomUUID()}`, title: "Legacy linked article",
+      type: "PROJECT", bodyMd: "Human body", sourceIds: [source.id],
+    } });
 
     const [impact] = await listBrainSourceArchiveImpacts(editor, { workspaceId: workspace.id, sourceIds: [source.id] });
     expect(impact).toMatchObject({ sourceId: source.id, blocked: true });
-    expect(impact.visibleArticles.map((article) => article.kind).sort()).toEqual(["derived", "unclassified"]);
+    expect(impact.visibleArticles.map((article) => article.kind)).toEqual(["derived"]);
+    expect(impact.hasHiddenArticles).toBe(true);
 
     const viewerUser = await prisma.user.create({ data: { email: `impact-viewer-${randomUUID()}@example.test`, passwordHash: "fixture" } });
     await prisma.member.create({ data: { workspaceId: workspace.id, userId: viewerUser.id, role: "CONTRIBUTOR" } });

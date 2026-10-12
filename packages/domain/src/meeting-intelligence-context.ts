@@ -1,6 +1,8 @@
 import { Prisma, type ActionStatus, type KnowledgeSourceType, type ProposalStatus, type SensitivityLabel, type TensionStatus } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
+import type { AppActor } from "@corgtex/shared";
 import { invariant } from "./errors";
+import { lineageContentFingerprint, readableArtifactIds } from "./source-lineage";
 import { normalizeActionWorkItem, normalizeProposalWorkItem, normalizeTensionWorkItem } from "./work-item-normalization";
 
 export type MeetingIntelligenceContextMode = "summary" | "insights" | "agenda";
@@ -8,16 +10,13 @@ export type MeetingIntelligenceContextMode = "summary" | "insights" | "agenda";
 const CONTEXT_KNOWLEDGE_SOURCE_TYPES: KnowledgeSourceType[] = [
   "MEETING",
   "PROPOSAL",
-  "TENSION",
-  "ACTION",
   "DOCUMENT",
   "BRAIN_ARTICLE",
-  "EXTERNAL_CONTENT",
-  "EVENT",
-  "SLACK",
-  "CIRCLE",
-  "ROLE",
 ];
+
+function contextActor(workspaceId: string): AppActor {
+  return { kind: "agent", authProvider: "bootstrap", label: "meeting-intelligence-context", workspaceIds: [workspaceId] };
+}
 
 type ContextMeetingRecord = {
   id: string;
@@ -135,6 +134,7 @@ type ContextKnowledgeChunkRecord = {
   chunkIndex: number;
   content: string;
   sensitivity: SensitivityLabel;
+  metadata: Prisma.JsonValue | null;
 };
 
 type ContextKnowledgeResult = {
@@ -349,11 +349,11 @@ async function searchContextKnowledge(params: {
     where: {
       workspaceId: params.workspaceId,
       sensitivity: "PUBLIC",
+      accessDomain: "WORKSPACE",
       sourceType: { in: CONTEXT_KNOWLEDGE_SOURCE_TYPES },
       ...knowledgeSourceWhere(allowedSources),
     },
     orderBy: [{ createdAt: "desc" }, { chunkIndex: "asc" }],
-    take: 300,
     select: {
       id: true,
       sourceType: true,
@@ -362,11 +362,41 @@ async function searchContextKnowledge(params: {
       chunkIndex: true,
       content: true,
       sensitivity: true,
+      metadata: true,
     },
   }) as ContextKnowledgeChunkRecord[];
 
+  const actor = contextActor(params.workspaceId);
+  const ids = (type: KnowledgeSourceType) => [...new Set(chunks.filter((chunk) => chunk.sourceType === type)
+    .map((chunk) => chunk.sourceId))];
+  const [articles, documents, meetings, proposals] = await Promise.all([
+    prisma.brainArticle.findMany({ where: { workspaceId: params.workspaceId, id: { in: ids("BRAIN_ARTICLE") },
+      archivedAt: null, isPrivate: false } }),
+    prisma.document.findMany({ where: { workspaceId: params.workspaceId, id: { in: ids("DOCUMENT") },
+      archivedAt: null, accessDomain: "WORKSPACE" } }),
+    prisma.meeting.findMany({ where: { workspaceId: params.workspaceId, id: { in: ids("MEETING") }, archivedAt: null } }),
+    prisma.proposal.findMany({ where: { workspaceId: params.workspaceId, id: { in: ids("PROPOSAL") }, archivedAt: null } }),
+  ]);
+  const [articleIds, documentIds, meetingIds, proposalIds] = await Promise.all([
+    readableArtifactIds(actor, params.workspaceId, "BrainArticle", articles),
+    readableArtifactIds(actor, params.workspaceId, "Document", documents),
+    readableArtifactIds(actor, params.workspaceId, "Meeting", meetings),
+    readableArtifactIds(actor, params.workspaceId, "Proposal", proposals),
+  ]);
+  const hashes = new Map<string, string>();
+  for (const [type, kind, rows, readable] of [
+    ["BRAIN_ARTICLE", "BrainArticle", articles, articleIds],
+    ["DOCUMENT", "Document", documents, documentIds],
+    ["MEETING", "Meeting", meetings, meetingIds],
+    ["PROPOSAL", "Proposal", proposals, proposalIds],
+  ] as const) {
+    for (const row of rows) if (readable.has(row.id))
+      hashes.set(`${type}:${row.id}`, lineageContentFingerprint(kind, row));
+  }
+
   return chunks
-    .filter((chunk) => isAllowedKnowledgeChunk(chunk, allowedSources))
+    .filter((chunk) => isAllowedKnowledgeChunk(chunk, allowedSources)
+      && (chunk.metadata as Record<string, unknown> | null)?.sourceContentHash === hashes.get(`${chunk.sourceType}:${chunk.sourceId}`))
     .map((chunk) => ({
       chunk,
       score: lexicalScore(tokens, chunk.content, chunk.sourceTitle),
@@ -659,7 +689,7 @@ export async function buildMeetingIntelligenceContext(params: {
   const proposalStatuses: ProposalStatus[] = params.mode === "agenda" ? ["OPEN"] : ["DRAFT", "OPEN"];
   const publishedFilter = params.mode === "agenda" ? { publishedAt: { not: null } } : {};
 
-  const [tensions, actions, proposals, previousMeetings] = await Promise.all([
+  const [tensions, actions, candidateProposals, previousMeetings] = await Promise.all([
     prisma.tension.findMany({
       where: {
         workspaceId: params.workspaceId,
@@ -717,7 +747,6 @@ export async function buildMeetingIntelligenceContext(params: {
         actions: { select: { id: true, title: true, status: true } },
       },
       orderBy: { updatedAt: "desc" },
-      take: targetRecordLimit,
     }),
     previousMeetingOr.length > 0
       ? prisma.meeting.findMany({
@@ -741,6 +770,9 @@ export async function buildMeetingIntelligenceContext(params: {
       })
       : Promise.resolve([]),
   ]) as [ContextTensionRecord[], ContextActionRecord[], ContextProposalRecord[], ContextPreviousMeetingRecord[]];
+  const visibleProposalIds = await readableArtifactIds(contextActor(params.workspaceId), params.workspaceId,
+    "Proposal", candidateProposals);
+  const proposals = candidateProposals.filter((proposal) => visibleProposalIds.has(proposal.id)).slice(0, targetRecordLimit);
 
   const previousMeetingIds = previousMeetings.map((previousMeeting) => previousMeeting.id);
   const targetIds = [...proposals.map((proposal) => proposal.id), ...tensions.map((tension) => tension.id)];

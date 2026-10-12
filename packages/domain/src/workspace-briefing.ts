@@ -2,6 +2,7 @@ import { prisma, toInputJson } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import type { NewspaperCadence, WorkspaceBriefingPeriod, WorkspaceBriefingStatus } from "@prisma/client";
 import { requireWorkspaceMembership } from "./auth";
+import { readableArtifactIds } from "./source-lineage";
 import {
   type NewspaperEmailSectionId,
   type NormalizedNewspaperDigest,
@@ -2073,38 +2074,20 @@ export async function upsertWorkspaceBriefing(params: {
 export async function getLatestWorkspaceBriefing(params: {
   workspaceId: string;
   period?: WorkspaceBriefingPeriod;
-  actor?: AppActor;
+  actor: AppActor;
 }) {
-  if (params.actor) {
-    await requireWorkspaceMembership({ actor: params.actor, workspaceId: params.workspaceId });
-  }
+  await requireWorkspaceMembership({ actor: params.actor, workspaceId: params.workspaceId });
 
-  return prisma.workspaceBriefing.findFirst({
+  const candidates = await prisma.workspaceBriefing.findMany({
     where: {
       workspaceId: params.workspaceId,
       status: "GENERATED",
       ...(params.period ? { period: params.period } : {}),
     },
     orderBy: { generatedAt: "desc" },
-    select: {
-      id: true,
-      workflowJobId: true,
-      period: true,
-      dateKey: true,
-      runKey: true,
-      title: true,
-      status: true,
-      modelUsed: true,
-      introMd: true,
-      bodyMd: true,
-      briefingJson: true,
-      sourceRefsJson: true,
-      sourceCounts: true,
-      generatedAt: true,
-      createdAt: true,
-      updatedAt: true,
-    },
   });
+  const readable = await readableArtifactIds(params.actor, params.workspaceId, "WorkspaceBriefing", candidates);
+  return candidates.find((candidate) => readable.has(candidate.id)) ?? null;
 }
 
 export async function generateWorkspaceBriefing(params: {

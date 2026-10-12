@@ -175,6 +175,21 @@ describe("Brain article draft lifecycle", () => {
     expect(prismaMock.brainArticle.update).not.toHaveBeenCalled();
   });
 
+  it("does not return a hidden article through an empty PATCH", async () => {
+    const { updateArticle } = await import("./brain");
+    const { readableArtifactIds } = await import("./source-lineage");
+    prismaMock.brainArticle.findUnique.mockResolvedValue({
+      id: "article-hidden", workspaceId: "ws-1", slug: "hidden", title: "Private",
+      bodyMd: "Restricted", authority: "DRAFT", isPrivate: true, ownerMemberId: "mem-2",
+      archivedAt: null, sourceIds: [], updatedAt: new Date("2026-04-01T00:00:00.000Z"),
+    });
+    vi.mocked(readableArtifactIds).mockResolvedValueOnce(new Set());
+
+    await expect(updateArticle(ownerActor, { workspaceId: "ws-1", slug: "hidden" }))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(prismaMock.brainArticle.update).not.toHaveBeenCalled();
+  });
+
   it("keeps draft authorization on the supplied transaction client when updating draft articles", async () => {
     const { updateArticle } = await import("./brain");
 

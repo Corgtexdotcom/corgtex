@@ -9,7 +9,9 @@ import { invariant } from "./errors";
 export type LineageKind =
   | "BrainSource" | "BrainArticle" | "BrainArticleVersion" | "Document" | "Meeting"
   | "Proposal" | "Goal" | "GoalLink" | "CheckIn" | "ContextGraphObject"
-  | "ContextGraphRelationship" | "ContextGraphEvidenceRef" | "ContextGraphProposedDiff";
+  | "ContextGraphRelationship" | "ContextGraphEvidenceRef" | "ContextGraphProposedDiff"
+  | "ContextMapView" | "ContextMapLayoutItem"
+  | "WorkspaceBriefing" | "NewspaperEdition";
 
 export type LineageInput = { kind: LineageKind; id: string };
 export type LineageRoot = LineageInput & { fingerprint: string };
@@ -25,10 +27,14 @@ const CONTENT_FIELDS: Record<LineageKind, string[]> = {
   Goal: ["title", "descriptionMd", "level", "cadence", "parentGoalId", "circleId", "ownerMemberId", "status", "isPrivate", "authorUserId", "archivedAt"],
   GoalLink: ["goalId", "entityType", "entityId", "confidence", "linkedBy", "source", "metadata"],
   CheckIn: ["questionText", "questionSource", "metadata", "relatedEntityType", "relatedEntityId"],
-  ContextGraphObject: ["objectType", "title", "summary", "properties", "status", "sourceEntityType", "sourceEntityId"],
-  ContextGraphRelationship: ["sourceObjectId", "targetObjectId", "relationshipType", "properties", "status", "sourceEntityType", "sourceEntityId"],
+  ContextGraphObject: ["objectType", "title", "summary", "properties", "sourceEntityType", "sourceEntityId"],
+  ContextGraphRelationship: ["sourceObjectId", "targetObjectId", "relationshipType", "properties", "sourceEntityType", "sourceEntityId"],
   ContextGraphEvidenceRef: ["objectId", "relationshipId", "sourceType", "sourceId", "knowledgeChunkId", "quote", "metadata"],
   ContextGraphProposedDiff: ["diffJson", "reason", "evidenceJson"],
+  ContextMapView: ["name", "viewType", "query"],
+  ContextMapLayoutItem: ["mapViewId", "objectId", "visualState"],
+  WorkspaceBriefing: ["title", "introMd", "bodyMd", "briefingJson", "sourceRefsJson", "sourceCounts", "status"],
+  NewspaperEdition: ["title", "slug", "digestJson", "bodyMd", "sourceCounts"],
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -70,6 +76,10 @@ async function loadArtifact(db: LineageClient, workspaceId: string, input: Linea
     case "ContextGraphRelationship": return db.contextGraphRelationship.findFirst({ where });
     case "ContextGraphEvidenceRef": return db.contextGraphEvidenceRef.findFirst({ where });
     case "ContextGraphProposedDiff": return db.contextGraphProposedDiff.findFirst({ where });
+    case "ContextMapView": return db.contextMapView.findFirst({ where });
+    case "ContextMapLayoutItem": return db.contextMapLayoutItem.findFirst({ where: { id: input.id, mapView: { workspaceId } } });
+    case "WorkspaceBriefing": return db.workspaceBriefing.findFirst({ where });
+    case "NewspaperEdition": return db.newspaperEdition.findFirst({ where });
   }
 }
 
@@ -86,6 +96,9 @@ function actorCanReadRecord(actor: AppActor, membership: { id: string; role: str
       || (actor.kind === "user" && row.authorUserId === actor.user.id));
   }
   if (kind === "CheckIn") return actor.kind === "agent" || membership?.id === row.memberId;
+  if (kind === "ContextMapView" && row.createdByUserId != null) {
+    return actor.kind === "user" && actor.user.id === row.createdByUserId;
+  }
   return true;
 }
 
@@ -104,6 +117,12 @@ async function rootIsReadable(db: LineageClient, actor: AppActor, workspaceId: s
       id: String((row as Record<string, unknown>).goalId), workspaceId,
     } });
     if (!isRecord(parent) || isArchived(parent) || !actorCanReadRecord(actor, membership, "Goal", parent)) return false;
+  }
+  if (root.kind === "ContextMapLayoutItem") {
+    const parent = await db.contextMapView.findFirst({ where: {
+      id: String((row as Record<string, unknown>).mapViewId), workspaceId,
+    } });
+    if (!isRecord(parent) || !actorCanReadRecord(actor, membership, "ContextMapView", parent)) return false;
   }
   if ((root.kind === "BrainSource" || root.kind === "Document")
     && !domains.includes(String((row as Record<string, unknown>).accessDomain))) return false;
@@ -215,6 +234,40 @@ export async function copyArtifactInputLineage(params: {
   return true;
 }
 
+/** Carry verified input permissions across a direct human edit of the same artifact. */
+export async function advanceHumanArtifactInputLineage(params: {
+  tx: Prisma.TransactionClient;
+  actor: AppActor;
+  workspaceId: string;
+  artifact: LineageInput;
+  before: unknown;
+  after: unknown;
+  /** Only for a deterministic workflow transition with no new permission-bearing input. */
+  allowSystemTransition?: boolean;
+}) {
+  const { tx, actor, workspaceId, artifact, before, after } = params;
+  const previous = await latestManifest(tx, workspaceId, artifact);
+  const roots = await currentArtifactInputRoots(tx, workspaceId, artifact, before);
+  if ((actor.kind !== "user" && !params.allowSystemTransition) || !previous || !roots) {
+    await invalidateArtifactInputLineage({ tx, workspaceId, artifact, content: after });
+    return false;
+  }
+  const membership = await requireWorkspaceMembership({ actor, workspaceId, tx });
+  const domains = await resolveKnowledgeAccessDomains(actor, workspaceId);
+  for (const root of roots) {
+    invariant(await rootIsReadable(tx, actor, workspaceId, membership, domains, root),
+      409, "SOURCE_RESTRICTED", "An earlier input is no longer accessible.");
+  }
+  await tx.artifactInputLineage.create({ data: {
+    workspaceId, artifactType: artifact.kind, artifactId: artifact.id,
+    revision: previous.revision + 1, origin: previous.origin,
+    contentHash: lineageContentFingerprint(artifact.kind, after),
+    inputsJson: previous.inputsJson as Prisma.InputJsonValue,
+    rootsJson: previous.rootsJson as Prisma.InputJsonValue,
+  } });
+  return true;
+}
+
 /** Explicitly remove any old proof after a writer cannot attest its complete inputs. */
 export async function invalidateArtifactInputLineage(params: {
   tx: Prisma.TransactionClient;
@@ -262,9 +315,19 @@ export async function readableArtifactIds(actor: AppActor, workspaceId: string,
   const rootCache = new Map<string, boolean>();
   const visible = new Set<string>();
   for (const record of records) {
+    if ("workspaceId" in record && record.workspaceId !== workspaceId) continue;
+    if ((kind === "Document" || kind === "Meeting") && !isArchived(record)
+      && actorCanReadRecord(actor, membership, kind, record)
+      && (kind !== "Document" || domains.some((domain) => domain === record.accessDomain))) {
+      visible.add(record.id);
+      continue;
+    }
     const manifest = latest.get(record.id);
     if (!manifest || manifest.contentHash !== lineageContentFingerprint(kind, record)
       || isArchived(record) || !actorCanReadRecord(actor, membership, kind, record)) continue;
+    if ((kind === "ContextMapLayoutItem" || kind === "GoalLink" || kind === "BrainArticleVersion")
+      && !await rootIsReadable(db, actor, workspaceId, membership, domains,
+        { kind, id: record.id, fingerprint: manifest.contentHash })) continue;
     const roots = parseRoots(manifest.rootsJson);
     if (!roots) continue;
     let allowed = true;

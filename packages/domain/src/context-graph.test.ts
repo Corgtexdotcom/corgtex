@@ -2019,11 +2019,11 @@ describe("context graph domain", () => {
       { id: "finance-edge", sourceObjectId: "public", targetObjectId: "public-2", evidenceRefs: [] },
     ]);
     prismaMock.contextGraphProposedDiff.findMany.mockResolvedValue([{ id: "finance-diff" }, { id: "public-diff" }]);
-    prismaMock.contextMapLayoutItem.findMany.mockResolvedValue([{ objectId: "finance", visualState: { title: "Payroll" } }, { objectId: "public" }]);
+    prismaMock.contextMapLayoutItem.findMany.mockResolvedValue([{ id: "finance-layout", objectId: "finance", visualState: { title: "Payroll" } }, { id: "public-layout", objectId: "public" }]);
     prismaMock.contextMapView.findMany.mockResolvedValue([]);
     readableArtifactIdsMock.mockImplementation(async (_actor: unknown, workspaceId: string, _kind: string, rows: Array<{ id: string }>) => {
       expect(workspaceId).toBe("ws-1");
-      return new Set(rows.filter((row) => row.id.startsWith("public") || row.id === "orphan-edge").map((row) => row.id));
+      return new Set(rows.filter((row) => row.id.startsWith("public") || row.id === "orphan-edge" || row.id === "map-1").map((row) => row.id));
     });
 
     const map = await getContextMapData(actor, { workspaceId: "ws-1", mapViewId: "map-1" });
@@ -2031,12 +2031,24 @@ describe("context graph domain", () => {
     expect(map.objects.map((row) => row.id)).toEqual(["public", "public-2"]);
     expect(map.objects[0].evidenceRefs.map((row) => row.id)).toEqual(["public-evidence"]);
     expect(map.relationships.map((row) => row.id)).toEqual(["public-edge"]);
-    expect(map.layoutItems).toEqual([{ objectId: "public" }]);
+    expect(map.layoutItems).toEqual([{ id: "public-layout", objectId: "public" }]);
     expect(map.proposedDiffs.map((row) => row.id)).toEqual(["public-diff"]);
     expect(prismaMock.contextGraphObject.findMany.mock.calls[0][0]).not.toHaveProperty("take");
     expect(prismaMock.contextGraphProposedDiff.findMany.mock.calls[0][0]).not.toHaveProperty("take");
     expect(JSON.stringify(map)).not.toContain("Payroll");
     expect(JSON.stringify(map)).not.toContain("Finance");
+  });
+
+  it("withholds imported map names and queries without complete lineage", async () => {
+    const { listContextMapViews } = await import("./context-graph");
+    prismaMock.contextMapView.findMany.mockResolvedValueOnce([{
+      id: "unproven-map", workspaceId: "ws-1", name: "Payroll plan",
+      viewType: "process", query: { note: "Confidential payroll" }, createdByUserId: null,
+    }]);
+    readableArtifactIdsMock.mockResolvedValue(new Set());
+
+    const views = await listContextMapViews(actor, "ws-1");
+    expect(views).toEqual([]);
   });
 
   it("rejects an unknown selected object before traversal or evidence queries", async () => {
@@ -2092,14 +2104,12 @@ describe("context graph domain", () => {
     }));
   });
 
-  it("preserves previous roots and both endpoint inputs for relationship upserts", async () => {
+  it("replaces stale roots on complete relationship upserts and captures both endpoints", async () => {
     prismaMock.contextGraphRelationship.findFirst.mockResolvedValue({ id: "existing", workspaceId: "ws-1", relationshipType: "supports" });
     prismaMock.contextGraphRelationship.upsert.mockResolvedValue({ id: "existing", workspaceId: "ws-1", relationshipType: "supports" });
-    const roots = [{ kind: "BrainSource" as const, id: "old-source", fingerprint: "b".repeat(64) }];
-    currentArtifactInputRootsMock.mockResolvedValueOnce(roots);
     await upsertContextGraphRelationship(actor, { workspaceId: "ws-1", sourceObjectId: "left", targetObjectId: "right",
       relationshipType: "supports", lineageInputs: [{ kind: "BrainSource", id: "new-source" }] });
-    expect(recordArtifactInputLineageMock).toHaveBeenCalledWith(expect.objectContaining({ inheritedRoots: roots,
+    expect(recordArtifactInputLineageMock).toHaveBeenCalledWith(expect.objectContaining({ inheritedRoots: [],
       inputs: [{ kind: "BrainSource", id: "new-source" }, { kind: "ContextGraphObject", id: "left" }, { kind: "ContextGraphObject", id: "right" }],
     }));
   });

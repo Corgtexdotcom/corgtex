@@ -263,6 +263,8 @@ export async function updateArticle(actor: AppActor, params: {
     await tx.$queryRaw`SELECT id FROM "BrainArticle" WHERE id = ${preliminary.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const article = await tx.brainArticle.findUnique({ where: { id: preliminary.id } });
     invariant(article && !article.archivedAt, 409, "ARTICLE_CHANGED", "Article was archived or changed. Refresh and try again.");
+    invariant((await readableArtifactIds(actor, params.workspaceId, "BrainArticle", [article], tx)).has(article.id),
+      404, "NOT_FOUND", "Article not found.");
     invariant(article.updatedAt.getTime() === preliminary.updatedAt.getTime()
       && JSON.stringify(article) === JSON.stringify(preliminary)
       && (!params.expectedUpdatedAt || article.updatedAt.getTime() === params.expectedUpdatedAt.getTime()),
@@ -282,6 +284,7 @@ export async function updateArticle(actor: AppActor, params: {
       || params.staleAfterDays !== undefined
       || params.sourceIds !== undefined
       || params.absorbedSource !== undefined;
+    invariant(editsDraftContent, 400, "INVALID_INPUT", "An article change is required.");
     if (editsDraftContent) {
       invariant(article.authority === "DRAFT", 400, "INVALID_STATE", "Only draft Brain articles can be edited.");
       await requireDraftManager({ actor, workspaceId: params.workspaceId, record: article, resolvedMembership: membership, tx });
@@ -837,10 +840,9 @@ export async function rebuildBacklinks(actor: AppActor, params: {
   });
 
   const db = params.tx ?? prisma;
-  const articles = await db.brainArticle.findMany({
-    where: { workspaceId: params.workspaceId },
-    select: { id: true, slug: true, title: true, bodyMd: true, frontmatterJson: true },
-  });
+  const candidates = await db.brainArticle.findMany({ where: { workspaceId: params.workspaceId, archivedAt: null } });
+  const readableIds = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", candidates, db);
+  const articles = candidates.filter((article) => readableIds.has(article.id));
 
   const slugToId = new Map<string, string>();
   const titleToId = new Map<string, string>();
@@ -876,9 +878,11 @@ export async function rebuildBacklinks(actor: AppActor, params: {
   }
 
   const run = async (tx: Prisma.TransactionClient) => {
-    await tx.brainBacklink.deleteMany({
-      where: { workspaceId: params.workspaceId },
-    });
+    if (articles.length > 0) {
+      await tx.brainBacklink.deleteMany({
+        where: { workspaceId: params.workspaceId, fromArticleId: { in: articles.map((article) => article.id) } },
+      });
+    }
 
     if (links.length > 0) {
       await tx.brainBacklink.createMany({

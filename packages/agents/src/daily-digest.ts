@@ -13,6 +13,7 @@ import {
   rankPersonalNewspaperItems,
   recordNewspaperDelivery,
   recordDemoWelcomeCrmActivity,
+  readableArtifactIds,
   buildWorkspaceBriefingFromCandidates,
   buildWorkspaceBriefingFromDigest,
   collectWorkspaceBriefingCandidates,
@@ -1753,6 +1754,25 @@ Rules:
   const sharedBriefing = normalizeWorkspaceBriefingPayload(storedBriefing.briefingJson);
 
   for (const member of recipientMembers) {
+    const recipientActor: AppActor = { kind: "user", user: member.user };
+    const readableBriefing = await readableArtifactIds(recipientActor, params.workspaceId,
+      "WorkspaceBriefing", [storedBriefing]);
+    if (!readableBriefing.has(storedBriefing.id)) {
+      skippedEmails++;
+      await recordNewspaperDelivery({
+        workspaceId: params.workspaceId,
+        workflowJobId: params.workflowJobId ?? null,
+        memberId: member.id,
+        kind: "MEMBER_NEWSPAPER",
+        cadence,
+        runKey,
+        recipientEmail: member.user.email,
+        subject: "Workspace briefing",
+        status: "SKIPPED",
+        error: "Briefing inputs cannot be verified for this recipient.",
+      });
+      continue;
+    }
     const personalItems = personalItemsByMemberId.get(member.id) ?? [];
     const activeRoles = (member.roleAssignments ?? []).filter((assignment) => (
       assignment.role?.archivedAt === null

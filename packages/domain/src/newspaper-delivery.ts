@@ -4,6 +4,7 @@ import type { NewspaperCadence, NewspaperDeliveryKind, NewspaperDeliveryStatus }
 import { createHmac } from "node:crypto";
 import { AppError } from "./errors";
 import { requireWorkspaceMembership } from "./auth";
+import { readableArtifactIds } from "./source-lineage";
 import {
   getNextNewspaperRunISO,
   isHumanNewspaperRecipientIdentity,
@@ -118,26 +119,12 @@ export async function upsertNewspaperEdition(params: {
 export async function listNewspaperEditions(actor: AppActor, workspaceId: string, opts?: { take?: number }) {
   await requireWorkspaceMembership({ actor, workspaceId });
 
-  return prisma.newspaperEdition.findMany({
+  const candidates = await prisma.newspaperEdition.findMany({
     where: { workspaceId },
     orderBy: { generatedAt: "desc" },
-    take: opts?.take ?? 20,
-    select: {
-      id: true,
-      workflowJobId: true,
-      cadence: true,
-      dateKey: true,
-      runKey: true,
-      title: true,
-      slug: true,
-      digestJson: true,
-      bodyMd: true,
-      sourceCounts: true,
-      generatedAt: true,
-      createdAt: true,
-      updatedAt: true,
-    },
   });
+  const readable = await readableArtifactIds(actor, workspaceId, "NewspaperEdition", candidates);
+  return candidates.filter((candidate) => readable.has(candidate.id)).slice(0, opts?.take ?? 20);
 }
 
 async function getTrackingUrl(params: {

@@ -1,6 +1,6 @@
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
-import { rebuildBacklinks, markThreadAbsorbed, WIKILINK_RE } from "@corgtex/domain";
+import { rebuildBacklinks, markThreadAbsorbed, readableArtifactIds, WIKILINK_RE } from "@corgtex/domain";
 
 const STALE_THREAD_DAYS = 30;
 const TIER3_MAX_AGE_MS = 6 * 30 * 24 * 60 * 60 * 1000; // ~6 months
@@ -27,22 +27,11 @@ export async function runBrainMaintenance(params: {
     workspaceIds: [params.workspaceId],
   };
 
-  const articles = await prisma.brainArticle.findMany({
+  const candidates = await prisma.brainArticle.findMany({
     where: { workspaceId: params.workspaceId },
-    select: {
-      id: true,
-      slug: true,
-      title: true,
-      type: true,
-      authority: true,
-      bodyMd: true,
-      ownerMemberId: true,
-      lastVerifiedAt: true,
-      staleAfterDays: true,
-      createdAt: true,
-      frontmatterJson: true,
-    },
   });
+  const readableIds = await readableArtifactIds(agentActor, params.workspaceId, "BrainArticle", candidates);
+  const articles = candidates.filter((article) => readableIds.has(article.id));
 
   // --- Step 1: Freshness scan ---
   const now = Date.now();
