@@ -15,7 +15,7 @@ CREATE TABLE "ArtifactInputLineage" (
 
 CREATE UNIQUE INDEX "ArtifactInputLineage_workspaceId_artifactType_artifactId_re_key"
     ON "ArtifactInputLineage"("workspaceId", "artifactType", "artifactId", "revision");
-CREATE INDEX "ArtifactInputLineage_workspaceId_artifactType_artifactId_r_idx"
+CREATE INDEX "ArtifactInputLineage_workspaceId_artifactType_artifactId_re_idx"
     ON "ArtifactInputLineage"("workspaceId", "artifactType", "artifactId", "recordedAt");
 
 ALTER TABLE "ArtifactInputLineage" ADD CONSTRAINT "ArtifactInputLineage_workspaceId_fkey"
