@@ -1,6 +1,6 @@
 import { getSupportAuthorizationContext, prisma } from "@corgtex/shared";
 import { searchIndexedKnowledge } from "@corgtex/knowledge";
-import { defaultModelGateway, IncrementalJsonStringDecoder } from "@corgtex/models";
+import { assertCatalogModelBudget, defaultModelGateway, IncrementalJsonStringDecoder } from "@corgtex/models";
 import { AppError, buildRoleOnboardingContextForConversation, checkBudget, loadRelevantMemories, requireWorkspaceMembership, storeAgentMemory, supportCapabilityVersion } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import type { ChatMessage, ModelTool, ToolCall } from "@corgtex/models";
@@ -74,7 +74,7 @@ import {
 } from "./pending-crm-operations";
 import { formatConversationPageContextForModel, type ConversationPageContext } from "./page-context";
 import type { AppActor } from "@corgtex/shared";
-import type { KnowledgeSourceType } from "@prisma/client";
+import type { KnowledgeAccessDomain, KnowledgeSourceType } from "@prisma/client";
 
 const MAX_HISTORY_TURNS = 20;
 const KNOWLEDGE_SEARCH_LIMIT = 4;
@@ -331,6 +331,7 @@ async function loadKnowledgeForConversation(params: {
     });
     return {
       results: Array.isArray(results) ? results : [],
+      accessDomains,
       search: {
         query,
         sourceTypes,
@@ -856,10 +857,12 @@ function isBrainAuthorizationError(error: unknown) {
   return error instanceof AppError && (error.status === 401 || error.status === 403);
 }
 
-async function createBrainReadAuthorization(actor: AppActor, ctx: ConversationContext) {
+async function createBrainReadAuthorization(actor: AppActor, ctx: ConversationContext, eagerAccessDomains?: KnowledgeAccessDomain[]) {
   const origin = getSupportAuthorizationContext()?.origin;
   throwIfConversationCanceled(ctx);
-  let domains = await resolveInteractiveKnowledgeAccessDomains(actor, ctx.workspaceId);
+  // Preserve the authorization used before eager retrieval, even when it changed
+  // while the initial model was running. A later snapshot could bless stale context.
+  let domains = eagerAccessDomains ?? await resolveInteractiveKnowledgeAccessDomains(actor, ctx.workspaceId);
   return async () => {
     throwIfConversationCanceled(ctx);
     await requireWorkspaceMembership({ actor, workspaceId: ctx.workspaceId });
@@ -936,6 +939,8 @@ async function continueBrainReads(
   messages.push({ role: "assistant", content: "", tool_calls: calls });
   for (const call of calls) {
     if (!await budgetAllows()) return toolBudgetFallback(executed, failed);
+    await assertCatalogModelBudget({ workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx) });
+    await authorize();
     const args = JSON.parse(call.function.arguments) as Record<string, unknown>;
     let result: unknown;
     let failedRead = false;
@@ -1201,7 +1206,7 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
   if (response.tool_calls && response.tool_calls.length > 0) {
     messages.push({ role: "assistant", content: response.content || "", tool_calls: response.tool_calls });
     const actor = requireConversationToolActor(ctx);
-    const authorizeBrainRead = validBrainReadBatch(response.tool_calls) ? await createBrainReadAuthorization(actor, ctx) : null;
+    const authorizeBrainRead = validBrainReadBatch(response.tool_calls) ? await createBrainReadAuthorization(actor, ctx, loadedKnowledge.accessDomains) : null;
 
     for (const call of response.tool_calls) {
       await authorizeBrainRead?.();
@@ -1489,7 +1494,7 @@ async function* processConversationTurnStreamContent(ctx: ConversationContext): 
     const actor = requireConversationToolActor(ctx);
     const versionReadPending = initialCalls.some(({ function: tool }) => tool.name === "query_actions" || tool.name === "query_tensions");
     const initialMutationRejected = initialCalls.some(({ function: tool }) => isVersionedUpdateTool(tool.name));
-    const authorizeBrainRead = validBrainReadBatch(initialCalls) ? await createBrainReadAuthorization(actor, ctx) : null;
+    const authorizeBrainRead = validBrainReadBatch(initialCalls) ? await createBrainReadAuthorization(actor, ctx, loadedKnowledge.accessDomains) : null;
 
     for (const call of initialCalls) {
       await authorizeBrainRead?.();
