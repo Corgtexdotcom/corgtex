@@ -1,6 +1,6 @@
 import type { KnowledgeAccessDomain, KnowledgeSourceType } from "@prisma/client";
 import { resolveKnowledgeAccessDomains } from "@corgtex/domain";
-import type { ModelTool } from "@corgtex/models";
+import type { ModelTool, ModelUsageInput } from "@corgtex/models";
 import type { AppActor } from "@corgtex/shared";
 import { searchIndexedKnowledge } from "@corgtex/knowledge";
 
@@ -36,12 +36,17 @@ export async function resolveInteractiveKnowledgeAccessDomains(
   return resolveKnowledgeAccessDomains(actor, workspaceId);
 }
 
-export async function searchBrain(actor: AppActor, workspaceId: string, query: string, limit: number = 5) {
+export async function searchBrain(
+  actor: AppActor, workspaceId: string, query: string, limit: number = 5,
+  usageContext: Pick<ModelUsageInput, "catalogItemId" | "agentCredentialId"> = {},
+) {
   const safeLimit = Math.min(limit || 5, 10);
   const accessDomains = await resolveInteractiveKnowledgeAccessDomains(actor, workspaceId);
   const chunks = await searchIndexedKnowledge({
     actor,
     workspaceId,
+    catalogItemId: usageContext.catalogItemId,
+    agentCredentialId: usageContext.agentCredentialId,
     query,
     limit: safeLimit,
     sourceTypes: INTERACTIVE_KNOWLEDGE_SOURCE_TYPES,

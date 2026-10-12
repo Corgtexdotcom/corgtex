@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { KnowledgeAccessDomain, KnowledgeSourceType, Prisma } from "@prisma/client";
 import { getCacheJson, getCacheVersion, incrementCacheVersion, prisma, cosineSimilarity, logger, setCacheJson } from "@corgtex/shared";
-import { defaultModelGateway, ModelProviderHttpError } from "@corgtex/models";
+import { CatalogBudgetError, defaultModelGateway, ModelProviderHttpError, WorkspaceModelBudgetError } from "@corgtex/models";
 import type { AppActor } from "@corgtex/shared";
 import { lineageContentFingerprint, readableArtifactIds, resolveKnowledgeAccessDomains, type LineageKind } from "@corgtex/domain";
 import type { SensitivityLabel } from "./sensitivity";
@@ -271,6 +271,8 @@ export async function searchIndexedKnowledge(params: {
   accessDomains?: KnowledgeAccessDomain[];
   workflowJobId?: string;
   agentRunId?: string;
+  catalogItemId?: string;
+  agentCredentialId?: string;
 }) {
   const query = params.query.trim();
   if (!query) {
@@ -327,6 +329,8 @@ async function executeKnowledgeSearch(params: {
   accessDomains: KnowledgeAccessDomain[];
   workflowJobId?: string;
   agentRunId?: string;
+  catalogItemId?: string;
+  agentCredentialId?: string;
   provider: "postgres" | "azure" | "dual_compare";
   configuredProvider: "postgres" | "azure" | "dual_compare";
 }) {
@@ -339,6 +343,8 @@ async function executeKnowledgeSearch(params: {
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId,
       agentRunId: params.agentRunId,
+      catalogItemId: params.catalogItemId,
+      agentCredentialId: params.agentCredentialId,
       input: params.query,
     });
     const azureResults = await searchAzureKnowledge({
@@ -359,6 +365,7 @@ async function executeKnowledgeSearch(params: {
 
     return azureResults;
   } catch (error) {
+    if (error instanceof CatalogBudgetError || error instanceof WorkspaceModelBudgetError) throw error;
     logger.warn("Azure Search retrieval failed; falling back to Postgres knowledge retrieval", {
       workspaceId: params.workspaceId,
       configuredProvider: params.configuredProvider,
@@ -397,6 +404,8 @@ async function searchIndexedKnowledgePostgres(params: {
   accessDomains: KnowledgeAccessDomain[];
   workflowJobId?: string;
   agentRunId?: string;
+  catalogItemId?: string;
+  agentCredentialId?: string;
 }, queryEmbeddingOverride?: number[]) {
   const query = params.query;
 
@@ -492,6 +501,8 @@ async function searchIndexedKnowledgePostgres(params: {
         workspaceId: params.workspaceId,
         workflowJobId: params.workflowJobId,
         agentRunId: params.agentRunId,
+        catalogItemId: params.catalogItemId,
+        agentCredentialId: params.agentCredentialId,
         input: query,
         failFastOnRateLimit: true,
       });
@@ -532,6 +543,8 @@ async function searchIndexedKnowledgePostgres(params: {
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId,
       agentRunId: params.agentRunId,
+      catalogItemId: params.catalogItemId,
+      agentCredentialId: params.agentCredentialId,
       query,
       documents: scored.map((entry) => `${entry.chunk.sourceTitle ?? ""}\n${entry.chunk.content}`.trim()),
       topK: resultLimit,
