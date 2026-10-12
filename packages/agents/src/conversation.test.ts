@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
+  assertCatalogModelBudgetMock,
   applyContextGraphProposedDiffMock,
   buildSelectedRegionContextMock,
   buildRoleOnboardingContextForConversationMock,
@@ -33,6 +34,7 @@ const {
   storeAgentMemoryMock,
   workspaceFeatureFlagFindManyMock,
 } = vi.hoisted(() => ({
+  assertCatalogModelBudgetMock: vi.fn(),
   applyContextGraphProposedDiffMock: vi.fn(),
   buildSelectedRegionContextMock: vi.fn(),
   buildRoleOnboardingContextForConversationMock: vi.fn(),
@@ -73,6 +75,8 @@ vi.mock("@corgtex/shared", () => ({
     MODEL_PROVIDER: "openai_compatible",
   },
   prisma: {
+    agentCredential: { findFirst: vi.fn() },
+    modelUsage: { count: vi.fn(), findMany: vi.fn() },
     conversationTurn: {
       findMany: conversationTurnFindManyMock,
     },
@@ -109,6 +113,7 @@ vi.mock("@corgtex/knowledge", () => ({
 
 vi.mock("@corgtex/models", async (importOriginal) => ({
   ...await importOriginal<typeof import("@corgtex/models")>(),
+  assertCatalogModelBudget: assertCatalogModelBudgetMock,
   defaultModelGateway: { chat: chatMock, chatEventStream: chatEventStreamMock, chatStream: chatStreamMock },
 }));
 
@@ -202,6 +207,7 @@ describe("processConversationTurn", () => {
     chatEventStreamMock.mockImplementation((request: any) => (async function* () { const stream = chatStreamMock(request)[Symbol.asyncIterator](); let message = ""; let terminal: any; while (true) { const next = await stream.next(); if (next.done) { terminal = next.value; break; } message += next.value; } const calls = terminal?.tool_calls ?? []; const name = calls.length ? "route_conversation_tools" : "respond_conversation"; const args = calls.length ? { calls: calls.map((call: any) => { try { return { name: call.function.name, arguments: JSON.parse(call.function.arguments) }; } catch { return { name: call.function.name, arguments: null }; } }) } : { answer: message || terminal?.content || "" }; const wrapper = { id: "route-test", type: "function", function: { name, arguments: JSON.stringify(args) } }; yield { type: "tool_call_delta", index: 0, idDelta: wrapper.id, nameDelta: name, argumentsDelta: wrapper.function.arguments }; return { ...terminal, content: "", tool_calls: [wrapper] }; })());
     vi.mocked(searchIndexedKnowledge).mockReset().mockResolvedValue([]);
     checkBudgetMock.mockReset().mockResolvedValue({ allowed: true, usedPct: 0, usedUsd: 0, capUsd: 5 });
+    assertCatalogModelBudgetMock.mockReset().mockResolvedValue(undefined);
     conversationTurnFindManyMock.mockResolvedValue([]);
     resolveKnowledgeAccessDomainsMock.mockResolvedValue(["WORKSPACE"]);
     conversationPendingOperationStore.length = 0;
@@ -388,6 +394,438 @@ describe("processConversationTurn", () => {
       chunks.push(value);
     }
   }
+
+  describe.each([false, true])("bounded Brain continuation (stream=%s)", (streaming) => {
+    function script(responses: Record<string, any>[]) {
+      for (const response of responses) {
+        chatMock.mockResolvedValueOnce(response);
+        chatStreamMock.mockReturnValueOnce(streamResponse([response.content || ""], response));
+      }
+    }
+
+    async function run(ctx: Parameters<typeof import("./conversation").processConversationTurn>[0] = turnContext()) {
+      const { processConversationTurn, processConversationTurnStream } = await import("./conversation");
+      if (!streaming) return processConversationTurn(ctx);
+      const { chunks, result } = await collectConversationStream(processConversationTurnStream(ctx));
+      expect(chunks.join("")).toBe(result.assistantMessage);
+      return result;
+    }
+
+    it("executes the second ordinary Brain read round and returns its final answer", async () => {
+      script([
+        { content: "", tool_calls: [toolCall("first", "search_brain", { query: "launch overview" })] },
+        { content: "I already finished.", tool_calls: [toolCall("second", "search_brain", { query: "launch dependencies" })] },
+        { content: "The launch depends on the approval recorded in Brain." },
+      ]);
+      const result = await run();
+      expect(vi.mocked(searchIndexedKnowledge).mock.calls.map(([args]) => args.query)).toEqual([
+        "Update it.", "launch overview", "launch dependencies",
+      ]);
+      expect(result.assistantMessage).toBe("The launch depends on the approval recorded in Brain.");
+      const gateway = streaming ? chatStreamMock : chatMock;
+      expect(gateway).toHaveBeenCalledTimes(3);
+      expect(gateway.mock.calls[1][0].tools.map((tool: any) => tool.function.name)).toEqual(["search_brain"]);
+      expect(gateway.mock.calls[2][0]).toMatchObject({ tool_choice: "none" });
+      expect(gateway.mock.calls[2][0].tools).toBeUndefined();
+    });
+
+    it.each([
+      ["malformed JSON", () => [{ id: "bad", function: { name: "search_brain", arguments: "{" } }]],
+      ["nonobject arguments", () => [{ id: "bad", function: { name: "search_brain", arguments: "null" } }]],
+      ["wrong query type", () => [toolCall("bad", "search_brain", { query: 4 })]],
+      ["wrong limit type", () => [toolCall("bad", "search_brain", { query: "x", limit: "4" })]],
+      ["missing query", () => [toolCall("bad", "search_brain")]],
+      ["duplicate IDs", () => [toolCall("same", "search_brain", { query: "x" }), toolCall("same", "search_brain", { query: "y" })]],
+      ["reused initial ID", () => [toolCall(streaming ? "route-test:0" : "first", "search_brain", { query: "x" })]],
+      ["empty ID", () => [toolCall(" ", "search_brain", { query: "x" })]],
+      ["five calls", () => Array.from({ length: 5 }, (_, i) => toolCall(`extra-${i}`, "search_brain", { query: "x" }))],
+      ...["create_action", "update_action", "update_tension", "record_relationship_activity", "apply_context_map_diff", "update_member", "execute_external_tool", "query_actions", "toString", "unknown_tool"]
+        .map((name) => [name, () => [toolCall("good", "search_brain", { query: "valid but must not run" }), toolCall("bad", name)]] as const),
+    ] as const)("rejects %s atomically without emitting attached success text", async (_label, calls) => {
+      script([
+        { content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] },
+        { content: "Done: I changed the workspace.", tool_calls: calls() },
+      ]);
+      const result = await run();
+      expect(result.assistantMessage).toBe("I could not safely run the additional Brain search batch. No calls in that batch were executed.");
+      expect(searchIndexedKnowledge).toHaveBeenCalledTimes(2);
+      expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(2);
+      const { createAction, updateAction, updateTension, updateMember } = await import("@corgtex/domain");
+      for (const handler of [createAction, updateAction, updateTension, updateMember, conversationPendingOperationCreateMock, createActivityMock, executeExternalMcpToolMock, applyContextGraphProposedDiffMock]) expect(handler).not.toHaveBeenCalled();
+    });
+
+    it("bounds two batches of four even when queries repeat and the final model asks for more", async () => {
+      script([
+        { content: "", tool_calls: Array.from({ length: 4 }, (_, i) => toolCall(`first-${i}`, "search_brain", { query: "same query" })) },
+        { content: "Already done.", tool_calls: Array.from({ length: 4 }, (_, i) => toolCall(`second-${i}`, "search_brain", { query: "same query" })) },
+        { content: "Saved it to Brain.", tool_calls: [toolCall("third", "save_to_brain", { content: "do not save" })] },
+      ]);
+      const result = await run();
+      expect(searchIndexedKnowledge).toHaveBeenCalledTimes(9); // Eager context plus eight requested reads.
+      expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(3);
+      expect(result.assistantMessage).toBe("Brain searches completed: 8; failed: 0. I could not complete a final answer from the Brain search results. Please retry or narrow the question.");
+      const { ingestConversationOnDemand } = await import("@corgtex/domain");
+      expect(ingestConversationOnDemand).not.toHaveBeenCalled();
+    });
+
+    it("propagates the authenticated caller and catalog usage context despite model identity arguments", async () => {
+      const actor = { kind: "agent", authProvider: "credential", credentialId: "credential-1", catalogItemId: "catalog-1", workspaceIds: ["ws-1"], scopes: ["brain:read"] } as any;
+      script([
+        { content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] },
+        { content: "", tool_calls: [toolCall("second", "search_brain", { query: "details", workspaceId: "foreign", actor: { kind: "system" }, userId: "other", catalogItemId: "forged-catalog", agentCredentialId: "forged-credential" })] },
+        { content: "Grounded answer." },
+      ]);
+      await run({ ...turnContext(), actor });
+      const { requireWorkspaceMembership } = await import("@corgtex/domain");
+      expect(vi.mocked(requireWorkspaceMembership).mock.calls.every(([args]) => args.actor === actor && args.workspaceId === "ws-1")).toBe(true);
+      expect(resolveKnowledgeAccessDomainsMock.mock.calls.every(([caller, workspaceId]) => caller === actor && workspaceId === "ws-1")).toBe(true);
+      expect(searchIndexedKnowledge).toHaveBeenCalledTimes(3);
+      for (const [request] of vi.mocked(searchIndexedKnowledge).mock.calls) expect(request).toMatchObject({ workspaceId: "ws-1", catalogItemId: "catalog-1", agentCredentialId: "credential-1" });
+      for (const [request] of (streaming ? chatStreamMock : chatMock).mock.calls) expect(request).toMatchObject({ workspaceId: "ws-1", catalogItemId: "catalog-1", agentCredentialId: "credential-1", model: "chat-model", taskType: "AGENT" });
+    });
+
+    it.each(["empty", "error"])("does not replay reads after an %s final synthesis", async (kind) => {
+      script([
+        { content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] },
+        { content: "Premature answer.", tool_calls: [toolCall("second", "search_brain", { query: "details" })] },
+      ]);
+      if (kind === "empty") script([{ content: "   " }]);
+      else if (streaming) chatStreamMock.mockReturnValueOnce(throwingStream());
+      else chatMock.mockRejectedValueOnce(new Error("private model failure"));
+      expect((await run()).assistantMessage).toBe("Brain searches completed: 2; failed: 0. I could not complete a final answer from the Brain search results. Please retry or narrow the question.");
+      expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(3);
+      expect(searchIndexedKnowledge).toHaveBeenCalledTimes(3);
+    });
+
+    it("sanitizes retrieval failures and uses only the remaining answer-only synthesis", async () => {
+      vi.mocked(searchIndexedKnowledge).mockResolvedValueOnce([]).mockResolvedValueOnce([]).mockRejectedValueOnce(new Error("private backend address and secret"));
+      script([
+        { content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] },
+        { content: "I found everything.", tool_calls: [toolCall("second", "search_brain", { query: "details" })] },
+        { content: "The additional search failed; I cannot establish the details." },
+      ]);
+      expect((await run()).assistantMessage).toBe("The additional search failed; I cannot establish the details.");
+      const request = (streaming ? chatStreamMock : chatMock).mock.calls[2][0];
+      expect(JSON.stringify(request.messages)).not.toContain("private backend");
+      expect(request.messages.at(-1)).toMatchObject({ role: "tool", tool_call_id: "second", content: expect.stringContaining("Brain search could not be completed") });
+    });
+
+    it("reports partial read outcomes when final synthesis is unavailable", async () => {
+      vi.mocked(searchIndexedKnowledge).mockResolvedValueOnce([]).mockResolvedValueOnce([]).mockRejectedValueOnce(new Error("private retrieval failure")).mockResolvedValueOnce([]);
+      script([
+        { content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] },
+        { content: "", tool_calls: [toolCall("second", "search_brain", { query: "fails" }), toolCall("third", "search_brain", { query: "works" })] },
+        { content: "" },
+      ]);
+      expect((await run()).assistantMessage).toBe("Brain searches completed: 2; failed: 1. I could not complete a final answer from the Brain search results. Please retry or narrow the question.");
+      expect(searchIndexedKnowledge).toHaveBeenCalledTimes(4);
+      expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(3);
+    });
+
+    it.each(["before continuation", "before added read", "before synthesis"])("stops at the monetary budget %s", async (stage) => {
+      const allowed = stage === "before continuation" ? 1 : stage === "before added read" ? 2 : 3;
+      checkBudgetMock.mockReset();
+      for (let i = 0; i < allowed; i++) checkBudgetMock.mockResolvedValueOnce({ allowed: true });
+      checkBudgetMock.mockResolvedValue({ allowed: false });
+      script([
+        { content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] },
+        { content: "", tool_calls: [toolCall("second", "search_brain", { query: "details" })] },
+      ]);
+      const result = await run();
+      expect(result.assistantMessage).toContain("workspace model budget was reached");
+      expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(stage === "before continuation" ? 1 : 2);
+      expect(searchIndexedKnowledge).toHaveBeenCalledTimes(stage === "before synthesis" ? 3 : 2);
+    });
+
+    it("rejects eager Finance context revoked during the initial model before any tool or continuation", async () => {
+      resolveKnowledgeAccessDomainsMock.mockResolvedValue(["WORKSPACE", "FINANCE"]);
+      vi.mocked(searchIndexedKnowledge).mockResolvedValueOnce([{ snippet: "SYNTHETIC_FINANCE_MARKER" }] as any);
+      conversationTurnFindManyMock.mockResolvedValue(Array.from({ length: 5 }, (_, index) => ({ sequenceNumber: index + 1, userMessage: "prior", assistantMessage: "answer" })));
+      const initial = { content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] };
+      const revoke = () => { resolveKnowledgeAccessDomainsMock.mockResolvedValue(["WORKSPACE"]); return initial; };
+      if (streaming) chatStreamMock.mockReturnValueOnce((async function* () { yield ""; return revoke(); })());
+      else chatMock.mockImplementationOnce(async () => revoke());
+      script([
+        { content: "", tool_calls: [toolCall("second", "search_brain", { query: "details" })] },
+        { content: "SYNTHETIC_FINANCE_MARKER" },
+      ]);
+      await expect(run()).rejects.toMatchObject({ code: "KNOWLEDGE_ACCESS_CHANGED" });
+      expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(1);
+      expect(searchIndexedKnowledge).toHaveBeenCalledTimes(1);
+      expect(storeAgentMemoryMock).not.toHaveBeenCalled();
+    });
+
+    it.each(["daily", "monthly"])("preserves initial model %s denial after eager retrieval spends the last credential allowance", async (kind) => {
+      const { prisma } = await import("@corgtex/shared");
+      const { assertCatalogModelBudget, CatalogBudgetError } = await vi.importActual<typeof import("@corgtex/models")>("@corgtex/models");
+      const scope = { workspaceId: "ws-1", catalogItemId: "catalog-1", agentCredentialId: "credential-1" };
+      const actor = { kind: "agent", authProvider: "credential", credentialId: scope.agentCredentialId, catalogItemId: scope.catalogItemId, workspaceIds: [scope.workspaceId], scopes: ["brain:read"] } as any;
+      const usage: Array<{ estimatedCostUsd: string; billableCostUsd: string }> = [];
+      vi.mocked(prisma.agentCredential.findFirst).mockResolvedValue({
+        catalogItemId: scope.catalogItemId, isActive: true, catalogItem: null,
+        dailyCallLimit: kind === "daily" ? 1 : null, monthlyBudgetCents: kind === "monthly" ? 1 : null,
+      } as any);
+      vi.mocked(prisma.modelUsage.count).mockResolvedValue(0);
+      vi.mocked(prisma.modelUsage.findMany).mockResolvedValue([]);
+      await assertCatalogModelBudget(scope); // The turn starts with remaining allowance.
+      vi.mocked(searchIndexedKnowledge).mockImplementationOnce(async (request) => {
+        expect(request).toMatchObject(scope);
+        usage.push({ estimatedCostUsd: "0.01", billableCostUsd: "0.01" });
+        vi.mocked(prisma.modelUsage.count).mockResolvedValue(usage.length);
+        vi.mocked(prisma.modelUsage.findMany).mockResolvedValue(usage as any);
+        return [{ chunkId: "eager-chunk", sourceId: "doc-1", sourceType: "DOCUMENT", title: "Policy", chunkIndex: 0, snippet: "Synthetic policy evidence.", score: 1 }];
+      });
+      conversationTurnFindManyMock.mockResolvedValue(Array.from({ length: 5 }, (_, index) => ({ sequenceNumber: index + 1, userMessage: "prior", assistantMessage: "answer" })));
+      let budgetError: unknown;
+      const denyInitialModel = async (request: Record<string, any>) => {
+        expect(request).toMatchObject(scope);
+        expect(usage).toHaveLength(1);
+        expect(JSON.stringify(request.messages)).toContain("Synthetic policy evidence.");
+        try { await assertCatalogModelBudget(request as typeof scope); }
+        catch (error) { budgetError = error; throw error; }
+        throw new Error("Expected the initial model budget gate to deny the request.");
+      };
+      const closeRoute = vi.fn(async () => ({ done: true as const, value: undefined }));
+      if (streaming) chatEventStreamMock.mockImplementationOnce((request) => ({
+        next: () => denyInitialModel(request), return: closeRoute, [Symbol.asyncIterator]() { return this; },
+      }));
+      else chatMock.mockImplementationOnce(denyInitialModel);
+      const emitted: string[] = [];
+      const { processConversationTurn, processConversationTurnStream } = await import("./conversation");
+      const ctx = { ...turnContext(), actor };
+      const result = streaming ? (async () => {
+        for await (const chunk of processConversationTurnStream(ctx)) emitted.push(chunk);
+      })() : processConversationTurn(ctx);
+      const caught = await result.then(() => null, (error: unknown) => error);
+      expect(emitted).toEqual([]);
+      expect(caught).toMatchObject({ code: kind === "daily" ? "CATALOG_DAILY_LIMIT_EXCEEDED" : "CATALOG_MONTHLY_BUDGET_EXCEEDED", status: 429 });
+      expect(caught).toBe(budgetError);
+      expect(budgetError).toBeInstanceOf(CatalogBudgetError);
+      expect(searchIndexedKnowledge).toHaveBeenCalledOnce();
+      expect(streaming ? chatEventStreamMock : chatMock).toHaveBeenCalledOnce();
+      expect(chatStreamMock).not.toHaveBeenCalled();
+      if (streaming) expect(closeRoute).toHaveBeenCalledOnce();
+      expect(storeAgentMemoryMock).not.toHaveBeenCalled();
+      expect(conversationPendingOperationCreateMock).not.toHaveBeenCalled();
+      expect(createActivityMock).not.toHaveBeenCalled();
+    });
+
+    it.each(["eager read", "initial model", "initial read", "followup", "added read", "synthesis"].flatMap((stage) =>
+      ["daily", "monthly", "workspace"].map((kind) => [stage, kind] as const),
+    ))("preserves the canonical %s %s budget error", async (stage, kind) => {
+      const { CatalogBudgetError, WorkspaceModelBudgetError } = await import("@corgtex/models");
+      const error = kind === "workspace"
+        ? new WorkspaceModelBudgetError("BUDGET_EXCEEDED", "Workspace model budget reached.")
+        : new CatalogBudgetError(kind === "daily" ? "CATALOG_DAILY_LIMIT_EXCEEDED" : "CATALOG_MONTHLY_BUDGET_EXCEEDED", "Credential model budget reached.");
+      if (stage !== "initial model") script([{ content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] }]);
+      if (stage === "added read" || stage === "synthesis") {
+        script([{ content: "", tool_calls: [toolCall("second", "search_brain", { query: "details" })] }]);
+      }
+      const closed = vi.fn();
+      if (stage === "eager read" || stage === "initial read" || stage === "added read") {
+        if (stage !== "eager read") vi.mocked(searchIndexedKnowledge).mockResolvedValueOnce([]);
+        if (stage === "added read") vi.mocked(searchIndexedKnowledge).mockResolvedValueOnce([]);
+        vi.mocked(searchIndexedKnowledge).mockRejectedValueOnce(error);
+      } else if (streaming) {
+        chatStreamMock.mockReturnValueOnce((async function* () {
+          try { yield "Unverified partial answer."; throw error; }
+          finally { closed(); }
+        })());
+      } else chatMock.mockRejectedValueOnce(error);
+      const actor = { kind: "agent", authProvider: "credential", credentialId: "credential-1", catalogItemId: "catalog-1", workspaceIds: ["ws-1"], scopes: ["brain:read"] } as any;
+      await expect(run({ ...turnContext(), actor })).rejects.toBe(error);
+      expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(stage === "eager read" ? 0 : stage === "initial model" || stage === "initial read" ? 1 : stage === "synthesis" ? 3 : 2);
+      expect(searchIndexedKnowledge).toHaveBeenCalledTimes(stage === "eager read" || stage === "initial model" ? 1 : stage === "initial read" || stage === "followup" ? 2 : 3);
+      expect(storeAgentMemoryMock).not.toHaveBeenCalled();
+      if (streaming && (stage === "initial model" || stage === "followup" || stage === "synthesis")) expect(closed).toHaveBeenCalledOnce();
+    });
+
+    it.each(["daily", "monthly"])("uses the canonical credential %s gate when chat 2 spends the remaining allowance", async (kind) => {
+      const { prisma } = await import("@corgtex/shared");
+      const { assertCatalogModelBudget } = await vi.importActual<typeof import("@corgtex/models")>("@corgtex/models");
+      assertCatalogModelBudgetMock.mockImplementation(assertCatalogModelBudget);
+      vi.mocked(prisma.agentCredential.findFirst).mockResolvedValue({
+        catalogItemId: "catalog-1", isActive: true,
+        dailyCallLimit: kind === "daily" ? 2 : null,
+        monthlyBudgetCents: kind === "monthly" ? 2 : null,
+        catalogItem: null,
+      } as any);
+      vi.mocked(prisma.modelUsage.count).mockResolvedValue(1);
+      vi.mocked(prisma.modelUsage.findMany).mockResolvedValue([{ estimatedCostUsd: "0.01", billableCostUsd: "0.01" }] as any);
+      script([{ content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] }]);
+      const spend = () => {
+        vi.mocked(prisma.modelUsage.count).mockResolvedValue(2);
+        vi.mocked(prisma.modelUsage.findMany).mockResolvedValue(Array.from({ length: 2 }, () => ({ estimatedCostUsd: "0.01", billableCostUsd: "0.01" })) as any);
+        return { content: "Unverified result.", tool_calls: [toolCall("second", "search_brain", { query: "must not run" })] };
+      };
+      if (streaming) chatStreamMock.mockReturnValueOnce((async function* () { yield "Unverified result."; return spend(); })());
+      else chatMock.mockImplementationOnce(async () => spend());
+      const actor = { kind: "agent", authProvider: "credential", credentialId: "credential-1", catalogItemId: "catalog-1", workspaceIds: ["ws-1"], scopes: ["brain:read"] } as any;
+      await expect(run({ ...turnContext(), actor })).rejects.toMatchObject({ code: kind === "daily" ? "CATALOG_DAILY_LIMIT_EXCEEDED" : "CATALOG_MONTHLY_BUDGET_EXCEEDED" });
+      expect(assertCatalogModelBudgetMock).toHaveBeenCalledWith({ workspaceId: "ws-1", catalogItemId: "catalog-1", agentCredentialId: "credential-1" });
+      expect(searchIndexedKnowledge).toHaveBeenCalledTimes(2);
+      expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(2);
+      expect(storeAgentMemoryMock).not.toHaveBeenCalled();
+      const usage = kind === "daily" ? prisma.modelUsage.count : prisma.modelUsage.findMany;
+      expect(usage).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ workspaceId: "ws-1", agentCredentialId: "credential-1" }) }));
+    });
+
+    it("rechecks the canonical credential allowance between added reads", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { assertCatalogModelBudget } = await vi.importActual<typeof import("@corgtex/models")>("@corgtex/models");
+      assertCatalogModelBudgetMock.mockImplementation(assertCatalogModelBudget);
+      vi.mocked(prisma.agentCredential.findFirst).mockResolvedValue({ catalogItemId: "catalog-1", isActive: true, dailyCallLimit: 2, monthlyBudgetCents: null, catalogItem: null } as any);
+      // Another request can consume the remaining allowance between read boundaries.
+      vi.mocked(prisma.modelUsage.count).mockReset().mockResolvedValueOnce(1).mockResolvedValueOnce(2);
+      script([
+        { content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] },
+        { content: "", tool_calls: [toolCall("second", "search_brain", { query: "permitted" }), toolCall("third", "search_brain", { query: "must not run" })] },
+      ]);
+      const actor = { kind: "agent", authProvider: "credential", credentialId: "credential-1", catalogItemId: "catalog-1", workspaceIds: ["ws-1"], scopes: ["brain:read"] } as any;
+      await expect(run({ ...turnContext(), actor })).rejects.toMatchObject({ code: "CATALOG_DAILY_LIMIT_EXCEEDED" });
+      expect(assertCatalogModelBudgetMock).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(searchIndexedKnowledge).mock.calls.map(([args]) => args.query)).toEqual(["Update it.", "overview", "permitted"]);
+      expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(2);
+    });
+
+    it.each(["membership", "support", "finance"])("stops after an added read revokes %s access, before synthesis or memory", async (kind) => {
+      const { AppError, requireWorkspaceMembership, supportCapabilityVersion } = await import("@corgtex/domain");
+      const { getSupportAuthorizationContext } = await import("@corgtex/shared");
+      const membership = vi.mocked(requireWorkspaceMembership);
+      const support = vi.mocked(supportCapabilityVersion);
+      const origin = vi.mocked(getSupportAuthorizationContext);
+      conversationTurnFindManyMock.mockResolvedValue(Array.from({ length: 5 }, (_, index) => ({ sequenceNumber: index + 1, userMessage: "prior", assistantMessage: "answer", createdAt: new Date() })));
+      if (kind === "support") origin.mockReturnValue({ origin: { userId: "user-1", workspaceId: "ws-1", version: 1 } } as any);
+      resolveKnowledgeAccessDomainsMock.mockResolvedValue(["WORKSPACE", "FINANCE"]);
+      vi.mocked(searchIndexedKnowledge).mockImplementation(async ({ query }) => {
+        if (query === "details") {
+          if (kind === "membership") membership.mockRejectedValue(new AppError(403, "NOT_A_MEMBER", "access revoked"));
+          if (kind === "support") support.mockRejectedValue(new AppError(403, "SUPPORT_AUTHORIZATION_REVOKED", "access revoked"));
+          if (kind === "finance") resolveKnowledgeAccessDomainsMock.mockResolvedValue(["WORKSPACE"]);
+        }
+        return [];
+      });
+      script([
+        { content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] },
+        { content: "", tool_calls: [toolCall("second", "search_brain", { query: "details" }), toolCall("third", "search_brain", { query: "must not run" })] },
+      ]);
+      try {
+        await expect(run()).rejects.toThrow(kind === "finance" ? "Knowledge access changed" : "access revoked");
+        expect(searchIndexedKnowledge).toHaveBeenCalledTimes(3);
+        expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(2);
+        expect(storeAgentMemoryMock).not.toHaveBeenCalled();
+      } finally {
+        membership.mockResolvedValue({ id: "membership-1" } as any);
+        support.mockResolvedValue(1);
+        origin.mockReturnValue(undefined);
+      }
+    });
+
+    it("stops after in-flight retrieval settles on cancellation without another read or memory", async () => {
+      const controller = new AbortController();
+      conversationTurnFindManyMock.mockResolvedValue(Array.from({ length: 5 }, (_, index) => ({ sequenceNumber: index + 1, userMessage: "prior", assistantMessage: "answer", createdAt: new Date() })));
+      vi.mocked(searchIndexedKnowledge).mockImplementation(async ({ query }) => {
+        if (query === "details") controller.abort(new Error("user canceled"));
+        return [];
+      });
+      script([
+        { content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] },
+        { content: "", tool_calls: [toolCall("second", "search_brain", { query: "details" }), toolCall("third", "search_brain", { query: "must not run" })] },
+      ]);
+      await expect(run({ ...turnContext(), signal: controller.signal })).rejects.toThrow("user canceled");
+      expect(searchIndexedKnowledge).toHaveBeenCalledTimes(3);
+      expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(2);
+      expect(storeAgentMemoryMock).not.toHaveBeenCalled();
+    });
+
+    it.each(["continuation", "synthesis"])("revalidates after the %s model before using its response", async (stage) => {
+      const { AppError, requireWorkspaceMembership } = await import("@corgtex/domain");
+      const membership = vi.mocked(requireWorkspaceMembership);
+      script([{ content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] }]);
+      if (stage === "synthesis") script([{ content: "", tool_calls: [toolCall("second", "search_brain", { query: "details" })] }]);
+      const revoke = () => {
+        membership.mockRejectedValue(new AppError(403, "NOT_A_MEMBER", "access revoked during model"));
+        return stage === "continuation"
+          ? { content: "Do not deliver.", tool_calls: [toolCall("second", "search_brain", { query: "must not run" })] }
+          : { content: "Do not deliver." };
+      };
+      if (streaming) chatStreamMock.mockReturnValueOnce((async function* () { yield "Do not deliver."; return revoke(); })());
+      else chatMock.mockImplementationOnce(async () => revoke());
+      try {
+        await expect(run()).rejects.toThrow("access revoked during model");
+        expect(searchIndexedKnowledge).toHaveBeenCalledTimes(stage === "continuation" ? 2 : 3);
+        expect(storeAgentMemoryMock).not.toHaveBeenCalled();
+      } finally {
+        membership.mockResolvedValue({ id: "membership-1" } as any);
+      }
+    });
+
+    it("does not offer a continuation after a failed initial read", async () => {
+      vi.mocked(searchIndexedKnowledge).mockResolvedValueOnce([]).mockRejectedValueOnce(new Error("initial read failed"));
+      script([
+        { content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] },
+        { content: "I could not read Brain.", tool_calls: [toolCall("second", "search_brain", { query: "must not run" })] },
+      ]);
+      expect((await run()).assistantMessage).toBe("I could not read Brain.");
+      expect(searchIndexedKnowledge).toHaveBeenCalledTimes(2);
+      expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(2);
+      expect((streaming ? chatStreamMock : chatMock).mock.calls[1][0].tools.length).toBeGreaterThan(1);
+    });
+
+    it("preserves a mixed initial batch and does not continue its ordinary reads", async () => {
+      script([
+        { content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" }), toolCall("actions", "query_actions")] },
+        { content: "Existing mixed-batch summary.", tool_calls: [toolCall("second", "search_brain", { query: "must not run" })] },
+      ]);
+      expect((await run()).assistantMessage).toBe("Existing mixed-batch summary.");
+      expect(searchIndexedKnowledge).toHaveBeenCalledTimes(2);
+      expect((streaming ? chatStreamMock : chatMock).mock.calls[1][0].tools.length).toBeGreaterThan(1);
+    });
+
+    if (streaming) {
+      it("revalidates after the consumer pauses at the answer before storing memory", async () => {
+        const { AppError, requireWorkspaceMembership } = await import("@corgtex/domain");
+        const membership = vi.mocked(requireWorkspaceMembership);
+        conversationTurnFindManyMock.mockResolvedValue(Array.from({ length: 5 }, (_, index) => ({ sequenceNumber: index + 1, userMessage: "prior", assistantMessage: "answer", createdAt: new Date() })));
+        script([
+          { content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] },
+          { content: "", tool_calls: [toolCall("second", "search_brain", { query: "details" })] },
+          { content: "Grounded answer." },
+        ]);
+        const { processConversationTurnStream } = await import("./conversation");
+        const stream = processConversationTurnStream(turnContext());
+        await expect(stream.next()).resolves.toEqual({ done: false, value: "Grounded answer." });
+        membership.mockRejectedValue(new AppError(403, "NOT_A_MEMBER", "access revoked after yield"));
+        try {
+          await expect(stream.next()).rejects.toThrow("access revoked after yield");
+          expect(storeAgentMemoryMock).not.toHaveBeenCalled();
+        } finally {
+          membership.mockResolvedValue({ id: "membership-1" } as any);
+        }
+      });
+
+      it.each(["followup", "synthesis"])("closes a canceled %s iterator and drops partial prose", async (stage) => {
+        const controller = new AbortController();
+        const closed = vi.fn();
+        script([{ content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] }]);
+        if (stage === "synthesis") script([{ content: "", tool_calls: [toolCall("second", "search_brain", { query: "details" })] }]);
+        chatStreamMock.mockReturnValueOnce((async function* () {
+          try { controller.abort(new Error("stream canceled")); yield "Unverified success."; return { content: "Unverified success." }; }
+          finally { closed(); }
+        })());
+        await expect(run({ ...turnContext(), signal: controller.signal })).rejects.toThrow("stream canceled");
+        expect(closed).toHaveBeenCalledOnce();
+        expect(storeAgentMemoryMock).not.toHaveBeenCalled();
+      });
+
+      it.each(["followup", "synthesis"])("drops partial prose from a failed %s stream", async (stage) => {
+        script([{ content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] }]);
+        if (stage === "synthesis") script([{ content: "", tool_calls: [toolCall("second", "search_brain", { query: "details" })] }]);
+        chatStreamMock.mockReturnValueOnce(throwingStream(["Unverified success."]));
+        expect((await run()).assistantMessage).toBe(`Brain searches completed: ${stage === "followup" ? 1 : 2}; failed: 0. I could not complete a final answer from the Brain search results. Please retry or narrow the question.`);
+      });
+    }
+  });
 
   function crmPageContext() {
     return {
@@ -2516,7 +2954,7 @@ describe("processConversationTurn", () => {
     expect(updateTension).not.toHaveBeenCalled(); expect(prisma.tension.findMany).not.toHaveBeenCalled(); expect(chunks.join("")).toContain("could not safely complete"); expect(chunks.join("")).not.toContain("Unverified");
   });
   it("preserves ordinary follow-ups and incrementally streams no-tool chat", async () => {
-    const actor = testUserActor(); chatMock.mockResolvedValueOnce({ content: "", tool_calls: [toolCall("s1", "search_brain", { query: "actions" })] }).mockResolvedValueOnce({ content: "Useful list response.", tool_calls: [toolCall("q1", "query_actions")] }); const { processConversationTurn, processConversationTurnStream } = await import("./conversation"); expect((await processConversationTurn({ ...turnContext(actor), userMessage: "Show actions." })).assistantMessage).toBe("Useful list response."); chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("search", "search_brain", { query: "actions" })] })).mockReturnValueOnce(streamResponse(["Useful streamed response."], { content: "Useful streamed response.", tool_calls: [toolCall("q2", "query_actions")] })); const { chunks, result } = await collectConversationStream(processConversationTurnStream({ ...turnContext(actor), userMessage: "Show actions." })); expect(chunks.join("")).toBe("Useful streamed response."); expect(result.assistantMessage).toBe("Useful streamed response.");
+    const actor = testUserActor(); chatMock.mockResolvedValueOnce({ content: "", tool_calls: [toolCall("s1", "search_brain", { query: "actions" })] }).mockResolvedValueOnce({ content: "Useful list response." }); const { processConversationTurn, processConversationTurnStream } = await import("./conversation"); expect((await processConversationTurn({ ...turnContext(actor), userMessage: "Show actions." })).assistantMessage).toBe("Useful list response."); chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("search", "search_brain", { query: "actions" })] })).mockReturnValueOnce(streamResponse(["Useful streamed response."], { content: "Useful streamed response." })); const { chunks, result } = await collectConversationStream(processConversationTurnStream({ ...turnContext(actor), userMessage: "Show actions." })); expect(chunks.join("")).toBe("Useful streamed response."); expect(result.assistantMessage).toBe("Useful streamed response.");
     const answer = answerCall("answer", "Hello world."); chatEventStreamMock.mockReturnValueOnce(eventResponse([{ type: "tool_call_delta", index: 0, idDelta: "answer", nameDelta: "respond_conversation", argumentsDelta: "{\"answer\":\"Hello" }, { type: "tool_call_delta", index: 0, argumentsDelta: " world.\"}" }], { content: "", tool_calls: [answer] })); const priorLegacyCalls = chatStreamMock.mock.calls.length; const stream = processConversationTurnStream({ ...turnContext(), userMessage: "Say hello." }); await expect(stream.next()).resolves.toEqual({ done: false, value: "Hello" }); await expect(stream.next()).resolves.toEqual({ done: false, value: " world." }); await expect(stream.next()).resolves.toMatchObject({ done: true, value: { assistantMessage: "Hello world." } }); expect(chatStreamMock).toHaveBeenCalledTimes(priorLegacyCalls); expect(chatEventStreamMock).toHaveBeenLastCalledWith(expect.objectContaining({ tool_choice: "required", tools: expect.arrayContaining([expect.objectContaining({ function: expect.objectContaining({ name: "respond_conversation" }) }), expect.objectContaining({ function: expect.objectContaining({ name: "route_conversation_tools" }) })]) }));
     checkBudgetMock.mockReset().mockResolvedValueOnce({ allowed: true }).mockResolvedValueOnce({ allowed: false }); chatEventStreamMock.mockReturnValueOnce(eventResponse([{ type: "tool_call_delta", index: 0, idDelta: "budget", nameDelta: "respond_conversation", argumentsDelta: "{\"answer\":\"Still answered.\"}" }], { content: "", tool_calls: [answerCall("budget", "Still answered.")] })); const budget = await collectConversationStream(processConversationTurnStream({ ...turnContext(), userMessage: "Explain it." })); expect(budget.chunks.join("")).toBe("Still answered."); expect(budget.result.assistantMessage).toBe(budget.chunks.join("")); expect(checkBudgetMock).toHaveBeenCalledOnce(); checkBudgetMock.mockReset().mockResolvedValue({ allowed: true }); chatEventStreamMock.mockReturnValueOnce((async function* () { yield { type: "tool_call_delta", index: 0, idDelta: "failed", nameDelta: "respond_conversation", argumentsDelta: "{\"answer\":\"Partial" }; throw new Error("private stream failure"); })()); const failed = await collectConversationStream(processConversationTurnStream(turnContext())); expect(failed.chunks.join("")).toBe("Partial\n\nI could not safely complete that response. Please retry."); expect(failed.result.assistantMessage).toBe(failed.chunks.join(""));
   });

@@ -1,3 +1,4 @@
+import type { ModelGateway } from "@corgtex/models";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { prismaMock, modelGatewayMock } = vi.hoisted(() => {
@@ -10,11 +11,15 @@ const { prismaMock, modelGatewayMock } = vi.hoisted(() => {
     prismaMock: {
       $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({ knowledgeChunk: knowledgeChunkMock })),
       knowledgeChunk: knowledgeChunkMock,
+      workspace: { findUnique: vi.fn() },
+      agentCredential: { findFirst: vi.fn() },
+      modelUsage: { create: vi.fn(), count: vi.fn(), findMany: vi.fn() },
+      aiUsageLedgerEntry: { create: vi.fn() },
       brainArticle: { findMany: vi.fn() },
       document: { findMany: vi.fn() },
     },
     modelGatewayMock: {
-      embed: vi.fn(async ({ input }: { input: string | string[] }) => {
+      embed: vi.fn<ModelGateway["embed"]>(async ({ input }) => {
         const values = Array.isArray(input) ? input : [input];
         return {
           embeddings: values.map(() => [1, 0]),
@@ -24,12 +29,14 @@ const { prismaMock, modelGatewayMock } = vi.hoisted(() => {
           },
         };
       }),
-      rerank: vi.fn(async ({ documents, topK }: { documents: string[]; topK: number }) => ({
-        results: documents.slice(0, topK).map((_, index) => ({
+      rerank: vi.fn<ModelGateway["rerank"]>(async ({ documents, topK }) => ({
+        results: documents.slice(0, topK).map((document, index) => ({
           index,
+          document,
           score: 0.9 - (index * 0.1),
         })),
         usage: {
+          provider: "test",
           model: "fake-rerank",
         },
       })),
@@ -48,15 +55,25 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
   return {
     ...actual,
     prisma: prismaMock,
+    env: new Proxy(actual.env, {
+      get(target, key) {
+        const fixture = { MODEL_PROVIDER: "openai", MODEL_BASE_URL: "https://model.fixture.invalid/v1",
+          MODEL_API_KEY: "synthetic-test-key", MODEL_PROVIDER_ROUTES_JSON: undefined,
+          MODEL_EMBEDDING_DEFAULT: "text-embedding-3-small" };
+        return Object.hasOwn(fixture, key) ? fixture[key as keyof typeof fixture] : Reflect.get(target, key);
+      },
+    }),
   };
 });
 
-vi.mock("@corgtex/models", async () => ({
-  ...await import("../../models/src/provider-errors"),
+vi.mock("@corgtex/models", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@corgtex/models")>(),
   defaultModelGateway: modelGatewayMock,
   resolveModel: vi.fn().mockReturnValue("fake-model"),
 }));
 
+import { openAICompatibleModelGateway } from "../../models/src/openai-compatible-gateway";
+import { CatalogBudgetError, WorkspaceModelBudgetError } from "../../models/src/usage";
 import { syncKnowledgeForSource } from "./chunks";
 import { ModelProviderHttpError } from "../../models/src/provider-errors";
 import { logger, resetLocalCacheStore } from "@corgtex/shared";
@@ -90,6 +107,175 @@ describe("knowledge retrieval cache", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  describe("credential accounting through the real gateway", () => {
+    const scope = { workspaceId: "ws-1", catalogItemId: "catalog-1", agentCredentialId: "credential-1" };
+    const chunk = { id: "ledger-chunk", sourceType: "DOCUMENT", sourceId: "doc-ledger", sourceTitle: "Travel policy",
+      chunkIndex: 0, content: "Travel approval policy.", embedding: [1, 0], createdAt: new Date("2026-04-03T09:00:00Z") };
+    let ledger: Array<Record<string, any>>;
+    let modelRequests: number;
+    let azureRequests: number;
+    let azureStatus: number;
+    let azureHits: Array<Record<string, unknown>>;
+
+    beforeEach(() => {
+      ledger = [];
+      modelRequests = 0;
+      azureRequests = 0;
+      azureStatus = 200;
+      azureHits = [{ ...chunk, "@search.score": 1 }];
+      vi.stubEnv("MODEL_PRICE_OVERRIDES_JSON", "");
+      prismaMock.knowledgeChunk.findMany.mockResolvedValue([chunk]);
+      prismaMock.workspace.findUnique.mockReset().mockResolvedValue({ plan: "PRO", modelUsageBudget: null });
+      prismaMock.agentCredential.findFirst.mockReset().mockResolvedValue({
+        catalogItemId: scope.catalogItemId, isActive: true, dailyCallLimit: null, monthlyBudgetCents: null, catalogItem: null,
+      });
+      // Only the real gateway writes this ledger. The real budget gate reads it
+      // back with credential/workspace/time filters on each subsequent operation.
+      const matching = (where: Record<string, any>) => ledger.filter((row) =>
+        row.workspaceId === where.workspaceId
+        && (!where.agentCredentialId || row.agentCredentialId === where.agentCredentialId)
+        && (!where.catalogItemId || row.catalogItemId === where.catalogItemId)
+        && (!where.createdAt?.gte || row.createdAt >= where.createdAt.gte));
+      prismaMock.modelUsage.create.mockReset().mockImplementation(async ({ data }) => {
+        const row = { ...data, id: `usage-${ledger.length + 1}`, createdAt: new Date() };
+        ledger.push(row);
+        return row;
+      });
+      prismaMock.modelUsage.count.mockReset().mockImplementation(async ({ where }) => matching(where).length);
+      prismaMock.modelUsage.findMany.mockReset().mockImplementation(async ({ where }) => matching(where));
+      prismaMock.aiUsageLedgerEntry.create.mockReset().mockResolvedValue({});
+      vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+        if (String(url) === "https://model.fixture.invalid/v1/embeddings") {
+          modelRequests++;
+          const { input } = JSON.parse(String(init?.body));
+          return new Response(JSON.stringify({ data: input.map(() => ({ embedding: [1, 0] })), usage: { prompt_tokens: 1_000_000 } }), { status: 200 });
+        }
+        if (String(url).startsWith("https://search.fixture.invalid/")) {
+          azureRequests++;
+          return new Response(JSON.stringify({ value: azureHits }), { status: azureStatus });
+        }
+        throw new Error(`Unexpected network request blocked: ${url}`);
+      }));
+    });
+
+    function useAzure(provider = "azure") {
+      vi.stubEnv("KNOWLEDGE_SEARCH_PROVIDER", provider);
+      vi.stubEnv("AZURE_SEARCH_ENDPOINT", "https://search.fixture.invalid");
+      vi.stubEnv("AZURE_SEARCH_INDEX_NAME", "synthetic-knowledge");
+      vi.stubEnv("AZURE_SEARCH_QUERY_KEY", "synthetic-test-key");
+      vi.stubEnv("AZURE_SEARCH_VECTOR_DIMENSIONS", "2");
+    }
+
+    async function withRealGateway(run: () => Promise<void>) {
+      const embed = modelGatewayMock.embed.getMockImplementation()!;
+      const rerank = modelGatewayMock.rerank.getMockImplementation()!;
+      try {
+        modelGatewayMock.embed.mockImplementation(openAICompatibleModelGateway.embed);
+        modelGatewayMock.rerank.mockImplementation(openAICompatibleModelGateway.rerank);
+        await run();
+      } finally {
+        modelGatewayMock.embed.mockImplementation(embed);
+        modelGatewayMock.rerank.mockImplementation(rerank);
+      }
+    }
+
+    function expectUsage(tasks: string[]) {
+      expect(ledger.map((row) => row.taskType)).toEqual(tasks);
+      expect(modelRequests).toBe(tasks.length);
+      expect(prismaMock.aiUsageLedgerEntry.create).toHaveBeenCalledTimes(tasks.length);
+      for (const row of ledger) expect(row).toMatchObject({
+        ...scope, provider: "openai", model: "text-embedding-3-small", inputTokens: 1_000_000,
+        rawProviderCostUsd: "0.020000", billableCostUsd: "0.040000",
+      });
+      for (const [index, [{ data }]] of prismaMock.aiUsageLedgerEntry.create.mock.calls.entries()) {
+        expect(data).toMatchObject({ workspaceId: scope.workspaceId, modelUsageId: ledger[index].id, taskType: tasks[index], billableCostUsd: "0.040000" });
+      }
+    }
+
+    it.each(["daily", "monthly"].flatMap((kind) => [2, 3, 4].map((allowance) => [kind, allowance] as const)))(
+      "consumes the real %s ledger across distinct uncached reads (allowance=%s) and blocks synthesis",
+      async (kind, allowance) => {
+        prismaMock.agentCredential.findFirst.mockResolvedValue({
+          catalogItemId: scope.catalogItemId, isActive: true, catalogItem: null,
+          dailyCallLimit: kind === "daily" ? allowance : null,
+          monthlyBudgetCents: kind === "monthly" ? allowance * 4 : null,
+        });
+        const failure = { code: kind === "daily" ? "CATALOG_DAILY_LIMIT_EXCEEDED" : "CATALOG_MONTHLY_BUDGET_EXCEEDED", status: 429 };
+        await withRealGateway(async () => {
+          const first = await searchIndexedKnowledge({ ...scope, query: "travel policy" });
+          expect(first).toHaveLength(1);
+          expectUsage(["EMBEDDING", "RERANK"]);
+          expect(await searchIndexedKnowledge({ ...scope, query: "travel policy" })).toEqual(first);
+          expectUsage(["EMBEDDING", "RERANK"]); // A cache hit invents no model usage.
+          if (allowance === 4) {
+            expect(await searchIndexedKnowledge({ ...scope, query: "approval policy" })).toHaveLength(1);
+            await expect(searchIndexedKnowledge({ ...scope, query: "another travel policy" })).rejects.toMatchObject(failure);
+          } else {
+            // At two calls, the next embed is blocked. At three, its rerank is blocked.
+            await expect(searchIndexedKnowledge({ ...scope, query: "approval policy" })).rejects.toMatchObject(failure);
+          }
+          await expect(openAICompatibleModelGateway.chat({ ...scope, model: "gpt-4o-mini", taskType: "AGENT",
+            messages: [{ role: "user", content: "Synthesize the policy." }],
+          })).rejects.toMatchObject(failure);
+          expectUsage(["EMBEDDING", "RERANK", "EMBEDDING", "RERANK"].slice(0, allowance));
+          expect(prismaMock.agentCredential.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { id: scope.agentCredentialId, workspaceId: scope.workspaceId } }));
+        });
+      },
+    );
+
+    it.each(["azure", "dual_compare", "provider fallback", "stale refill", "cache refill"])(
+      "attributes every model operation on the %s path", async (path) => {
+        useAzure(path === "dual_compare" ? "dual_compare" : "azure");
+        if (path === "provider fallback") azureStatus = 503;
+        if (path === "stale refill") azureHits = [{ ...chunk, id: "stale-chunk", "@search.score": 1 }];
+        await withRealGateway(async () => {
+          expect(await searchIndexedKnowledge({ ...scope, query: "travel policy" })).toHaveLength(1);
+          if (path === "cache refill") {
+            prismaMock.knowledgeChunk.findMany.mockResolvedValue([{ ...chunk, id: "replacement-chunk" }]);
+            expect(await searchIndexedKnowledge({ ...scope, query: "travel policy" })).toEqual([
+              expect.objectContaining({ chunkId: "replacement-chunk" }),
+            ]);
+          }
+          expect(azureRequests).toBe(1);
+          expectUsage(path === "azure" ? ["EMBEDDING"] : path === "dual_compare"
+            ? ["EMBEDDING", "RERANK"] : ["EMBEDDING", "EMBEDDING", "RERANK"]);
+        });
+      },
+    );
+
+    it.each(["daily", "monthly"])("does not restart dual comparison when reranking exhausts the real %s allowance", async (kind) => {
+      useAzure("dual_compare");
+      prismaMock.agentCredential.findFirst.mockResolvedValue({
+        catalogItemId: scope.catalogItemId, isActive: true, catalogItem: null,
+        dailyCallLimit: kind === "daily" ? 1 : null, monthlyBudgetCents: kind === "monthly" ? 4 : null,
+      });
+      await withRealGateway(async () => {
+        await expect(searchIndexedKnowledge({ ...scope, query: "travel policy" })).rejects.toMatchObject({
+          code: kind === "daily" ? "CATALOG_DAILY_LIMIT_EXCEEDED" : "CATALOG_MONTHLY_BUDGET_EXCEEDED", status: 429,
+        });
+        expect(azureRequests).toBe(1);
+        expectUsage(["EMBEDDING"]);
+        expect(modelGatewayMock.embed).toHaveBeenCalledOnce();
+        expect(modelGatewayMock.rerank).toHaveBeenCalledOnce();
+      });
+    });
+
+    it.each(["daily", "monthly", "workspace"])("does not retry Azure retrieval after a canonical %s refusal", async (kind) => {
+      useAzure();
+      const error = kind === "workspace"
+        ? new WorkspaceModelBudgetError("AI_BUDGET_EXCEEDED", "Synthetic workspace budget refusal.")
+        : new CatalogBudgetError(kind === "daily" ? "CATALOG_DAILY_LIMIT_EXCEEDED" : "CATALOG_MONTHLY_BUDGET_EXCEEDED", "Synthetic catalog budget refusal.");
+      modelGatewayMock.embed.mockRejectedValueOnce(error);
+      await expect(searchIndexedKnowledge({ ...scope, query: "travel policy" })).rejects.toBe(error);
+      expect(modelGatewayMock.embed).toHaveBeenCalledOnce();
+      expect(modelGatewayMock.rerank).not.toHaveBeenCalled();
+      expect(prismaMock.knowledgeChunk.findMany).not.toHaveBeenCalled();
+      expectUsage([]);
+      expect(azureRequests).toBe(0);
+    });
   });
 
   it("reuses cached search results for repeated queries", async () => {
@@ -175,7 +361,7 @@ describe("knowledge retrieval cache", () => {
     modelGatewayMock.rerank.mockImplementationOnce(async () => {
       rerankEntered();
       await holdRerank;
-      return { results: [{ index: 0, score: 0.9 }], usage: { model: "fake-rerank" } };
+      return { results: [{ index: 0, score: 0.9, document: "Withdrawn source claim" }], usage: { provider: "test", model: "fake-rerank" } };
     });
     const query = "Withdrawn source claim";
     const inFlightSearch = searchIndexedKnowledge({ workspaceId: "ws-1", query });
