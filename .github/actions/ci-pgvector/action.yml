@@ -1,0 +1,45 @@
+name: Verified CI pgvector
+description: Restore or fetch public upstream blobs, verify their pinned hashes, then start an isolated database
+inputs:
+  database:
+    description: Isolated database name (corgtex_test or corgtex_ci)
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Select pinned platform and cache key
+      id: image
+      shell: bash
+      env:
+        CI_IMAGE_ARCH: ${{ runner.arch }}
+      run: node scripts/ci-pgvector-image.mjs metadata
+    - name: Restore public upstream image blobs
+      id: restore
+      uses: actions/cache/restore@v4
+      continue-on-error: true
+      with:
+        path: ${{ steps.image.outputs.path }}
+        key: ${{ steps.image.outputs.key }}
+    - name: Install registry transport
+      shell: bash
+      run: sudo apt-get update -qq && sudo apt-get install -y skopeo
+    - name: Verify or fetch pinned image and import into Docker
+      shell: bash
+      env:
+        CI_IMAGE_ARCH: ${{ runner.arch }}
+      run: node scripts/ci-pgvector-image.mjs prepare
+    # Cache only the original upstream blobs, before a database exists. Fork PRs
+    # can restore main's cache and cold-fetch without any registry credentials.
+    - name: Save public upstream blobs from trusted main CI
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      continue-on-error: true
+      with:
+        path: ${{ steps.image.outputs.path }}
+        key: ${{ steps.image.outputs.key }}
+    - name: Start and smoke PostgreSQL with pgvector
+      shell: bash
+      env:
+        CI_IMAGE_ARCH: ${{ runner.arch }}
+        CI_PG_DATABASE: ${{ inputs.database }}
+      run: node scripts/ci-pgvector-image.mjs start

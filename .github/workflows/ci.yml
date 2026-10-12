@@ -117,20 +117,6 @@ jobs:
   check:
     name: Lint, Typecheck & Test
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: corgtex_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d corgtex_test"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corgtex_test?schema=public
 
@@ -141,6 +127,12 @@ jobs:
         with:
           node-version: 22
           cache: npm
+
+      - name: Prepare verified upstream PostgreSQL fixture
+        uses: ./.github/actions/ci-pgvector
+        timeout-minutes: 15
+        with:
+          database: corgtex_test
 
       - run: npm ci
 
@@ -190,23 +182,13 @@ jobs:
       - name: Test isolated tenant transfer
         run: npm run test:tenant-transfer
 
+      - name: Remove isolated PostgreSQL fixture
+        if: always()
+        run: docker rm --force --volumes corgtex-ci-postgres || true
+
   db-sync:
     name: Database Sync
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: corgtex_ci
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d corgtex_ci"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corgtex_ci?schema=public
       SHADOW_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres?schema=public
@@ -221,6 +203,12 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Prepare verified upstream PostgreSQL fixture
+        uses: ./.github/actions/ci-pgvector
+        timeout-minutes: 15
+        with:
+          database: corgtex_ci
+
       - run: npm ci
 
       - run: npx prisma generate
@@ -232,6 +220,10 @@ jobs:
       - run: npm run check:migration-fixtures
 
       - run: npm run check:seed-fixtures
+
+      - name: Remove isolated PostgreSQL fixture
+        if: always()
+        run: docker rm --force --volumes corgtex-ci-postgres || true
 
   build:
     name: Build
