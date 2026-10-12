@@ -1,14 +1,15 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CONTAINER, LOCAL_IMAGE, PG16_MANIFESTS, imageArchitecture, prepareImage, startDatabase, verifyImage } from "./ci-pgvector-image.mjs";
+import ts from "typescript";
+import { CONTAINER, LOCAL_IMAGE, PG16_MANIFESTS, PG_MAJORS, imageArchitecture, prepareImage, prepareImages, smokeWarmImages, startDatabase, verifyImage } from "./ci-pgvector-image.mjs";
 
 const directories = [];
 afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
 
-function fixture(architecture = "amd64") {
+function fixture(architecture = "amd64", major = 16) {
   const directory = mkdtempSync(join(tmpdir(), "ci-pgvector-test-"));
   directories.push(directory);
   const hash = (bytes) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
@@ -17,7 +18,7 @@ function fixture(architecture = "amd64") {
     writeFileSync(join(directory, descriptor.digest.slice(7)), bytes);
     return descriptor;
   };
-  const config = blob(Buffer.from(JSON.stringify({ os: "linux", architecture, config: { Env: ["PG_MAJOR=16"] } })));
+  const config = blob(Buffer.from(JSON.stringify({ os: "linux", architecture, config: { Env: [`PG_MAJOR=${major}`] } })));
   const layer = blob(Buffer.from("public upstream fixture layer"));
   const manifest = Buffer.from(JSON.stringify({ schemaVersion: 2, config, layers: [layer] }));
   writeFileSync(join(directory, "manifest.json"), manifest);
@@ -58,6 +59,8 @@ describe("pinned public CI image supply", () => {
     expect(run.mock.calls).toEqual([
       ["skopeo", ["copy", `dir:${f.directory}`, `docker-daemon:${LOCAL_IMAGE}`]],
       ["docker", ["image", "inspect", LOCAL_IMAGE]],
+      ["docker", ["tag", f.config.digest, "pgvector/pgvector:pg16"]],
+      ["docker", ["image", "inspect", "pgvector/pgvector:pg16"]],
     ]);
   });
 
@@ -86,8 +89,24 @@ describe("pinned public CI image supply", () => {
 
   it("rejects an imported Docker identity mismatch", async () => {
     const f = fixture();
-    await expect(prepareImage(f.directory, "amd64", { run: transport("sha256:" + "0".repeat(64)), verify: () => f.config.digest }))
+    const run = transport("sha256:" + "0".repeat(64));
+    await expect(prepareImage(f.directory, "amd64", { run, verify: () => f.config.digest }))
       .rejects.toThrow("identity mismatch");
+    expect(run.mock.calls.some(([, args]) => args[0] === "tag")).toBe(false);
+  });
+
+  it("rejects a mismatched legacy alias before downstream consumers run", async () => {
+    const f = fixture();
+    const run = transport(f.config.digest);
+    run.mockImplementation((program, args) => program === "docker" && args[0] === "image"
+      ? JSON.stringify([{ Id: args[2] === LOCAL_IMAGE ? f.config.digest : "sha256:" + "0".repeat(64), Os: "linux", Architecture: "amd64" }]) : "");
+    await expect(prepareImage(f.directory, "amd64", { run, verify: () => f.config.digest })).rejects.toThrow("identity mismatch");
+  });
+
+  it.each(PG_MAJORS)("checks major %s and refuses a mismatched cache", (major) => {
+    const f = fixture("amd64", major);
+    expect(verifyImage(f.directory, "amd64", f.pins, major)).toBe(f.config.digest);
+    expect(() => verifyImage(f.directory, "amd64", f.pins, major === 16 ? 17 : 16)).toThrow("major mismatch");
   });
 
   it("starts only a loopback fixture with pull disabled and exercises pgvector", async () => {
@@ -114,5 +133,94 @@ describe("pinned public CI image supply", () => {
     expect(action).toContain("github.event_name == 'push' && github.ref == 'refs/heads/main'");
     expect(action).not.toMatch(/restore-keys:|secrets\.|packages:|docker\/build-push-action/);
     expect(action.indexOf("actions/cache/save@v4")).toBeLessThan(action.indexOf("ci-pgvector-image.mjs start"));
+    expect(action).toContain("ci-pgvector-image.mjs warm-smoke");
+    const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+    const check = workflow.slice(workflow.indexOf("  check:\n"), workflow.indexOf("  db-sync:\n"));
+    const dbSync = workflow.slice(workflow.indexOf("  db-sync:\n"), workflow.indexOf("  build:\n"));
+    expect(check).toContain('tenant-transfer: "true"');
+    expect(dbSync).not.toContain('tenant-transfer: "true"');
+  });
+
+  // Parse the real downstream docker run arguments so the inventory cannot
+  // silently drift into testing a second handwritten copy of the consumers.
+  function consumerArguments(path, major) {
+    const file = ts.createSourceFile(path, readFileSync(new URL(path, import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
+    const runs = [];
+    const argument = (node) => {
+      if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+      if (ts.isIdentifier(node) && node.text === "name") return "owned-test-id";
+      if (ts.isTemplateExpression(node)) return node.head.text + node.templateSpans.map((span) => {
+        const expression = span.expression.getText(file);
+        if (["major", "postgresMajor"].includes(expression)) return major + span.literal.text;
+        if (expression === "randomUUID()") return "owned-test-id" + span.literal.text;
+        throw new Error(`Unrecognized consumer template ${expression}`);
+      }).join("");
+      throw new Error(`Unrecognized consumer argument ${node.getText(file)}`);
+    };
+    const walk = (node) => {
+      if (ts.isCallExpression(node) && ["command", "execFileSync"].includes(node.expression.getText(file))) {
+        for (const array of node.arguments.filter(ts.isArrayLiteralExpression)) {
+          if (array.elements[0]?.getText(file) === '"run"') runs.push(array.elements.map(argument));
+        }
+      }
+      ts.forEachChild(node, walk);
+    };
+    walk(file);
+    expect(runs).toHaveLength(1);
+    return runs[0];
+  }
+
+  it("supplies every real tenant fixture and converter alias from warm blobs with registry access denied", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ci-pgvector-consumers-"));
+    directories.push(root);
+    const fixtures = new Map(PG_MAJORS.map((major) => [major, fixture("amd64", major)]));
+    for (const [major, f] of fixtures) cpSync(f.directory, join(root, `pg${major}`), { recursive: true });
+    const images = new Map([["pgvector/pgvector:pg16", "old-unverified-image"]]);
+    const run = vi.fn((program, args) => {
+      if (program === "skopeo") {
+        if (!args[1].startsWith("dir:")) throw new Error("Registry access denied");
+        const major = Number(args[2].match(/pg(\d+)$/)[1]);
+        images.set(args[2].slice("docker-daemon:".length), fixtures.get(major).config.digest);
+      } else if (program === "docker" && args[0] === "image") {
+        if (!images.has(args[2])) throw new Error("Image not present");
+        return JSON.stringify([{ Id: images.get(args[2]), Os: "linux", Architecture: "amd64" }]);
+      } else if (program === "docker" && args[0] === "tag") {
+        expect([...images.values()]).toContain(args[1]);
+        images.set(args[2], args[1]);
+      } else if (program === "docker" && args[0] === "run") {
+        const image = args.find((arg) => /^pgvector\/pgvector:pg\d+$/.test(arg));
+        // Docker's missing/default policy would pull here if preparation failed
+        // to assign the consumer's actual reference. The simulated daemon denies
+        // every such registry fallback rather than returning fabricated success.
+        if (!images.has(image)) throw new Error("Mutable registry fallback denied");
+        return images.get(image);
+      } else throw new Error("Unexpected image transport operation");
+      return "";
+    });
+    const verify = (directory, arch, _pins, major) => verifyImage(directory, arch, fixtures.get(major).pins, major);
+    const ids = await prepareImages(root, "amd64", { run, verify });
+    await smokeWarmImages(root, "amd64", { run, verify });
+    const consumers = [
+      ["./migration/shared-tenant-export.integration.test.ts", [16]],
+      ["./migration/shared-tenant-import.integration.test.ts", [16]],
+      ["./migration/shared-tenant-source-copy.integration.test.ts", PG_MAJORS],
+      ["./migration/shared-tenant-source-copy.ts", PG_MAJORS],
+    ];
+    const tenantCommand = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).scripts["test:tenant-transfer"];
+    const scheduledSuites = [...tenantCommand.matchAll(/scripts\/migration\/[^\s]+\.integration\.test\.ts/g)].map(([path]) => path).sort();
+    expect(scheduledSuites).toEqual(consumers.slice(0, 3).map(([path]) => `scripts/${path.slice(2)}`).sort());
+    for (const [path, majors] of consumers) {
+      for (const major of majors) expect(run("docker", consumerArguments(path, major))).toBe(ids.get(major));
+    }
+    expect(run.mock.calls.some(([program, args]) => program === "skopeo" && args[1].startsWith("docker://"))).toBe(false);
+    images.delete("pgvector/pgvector:pg16");
+    expect(() => run("docker", consumerArguments(consumers[0][0], 16))).toThrow("Mutable registry fallback denied");
+  });
+
+  it("fails warm proof instead of pulling when a required cache entry disappears", async () => {
+    const f = fixture();
+    const run = vi.fn();
+    await expect(smokeWarmImages(f.directory, "amd64", { run, wait: vi.fn(), warn: vi.fn() })).rejects.toThrow("must not contact a registry");
+    expect(run).not.toHaveBeenCalled();
   });
 });

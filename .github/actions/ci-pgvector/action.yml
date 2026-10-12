@@ -1,6 +1,9 @@
 name: Verified CI pgvector
 description: Restore or fetch public upstream blobs, verify their pinned hashes, then start an isolated database
 inputs:
+  tenant-transfer:
+    description: Include pinned PostgreSQL 17 and 18 consumer aliases for the tenant-transfer suite
+    default: "false"
   database:
     description: Isolated database name (corgtex_test or corgtex_ci)
     required: true
@@ -12,6 +15,7 @@ runs:
       shell: bash
       env:
         CI_IMAGE_ARCH: ${{ runner.arch }}
+        CI_TENANT_TRANSFER: ${{ inputs.tenant-transfer }}
       run: node scripts/ci-pgvector-image.mjs metadata
     - name: Restore public upstream image blobs
       id: restore
@@ -27,7 +31,14 @@ runs:
       shell: bash
       env:
         CI_IMAGE_ARCH: ${{ runner.arch }}
+        CI_TENANT_TRANSFER: ${{ inputs.tenant-transfer }}
       run: node scripts/ci-pgvector-image.mjs prepare
+    - name: Prove selected consumer aliases work from warm verified blobs without pulls
+      shell: bash
+      env:
+        CI_IMAGE_ARCH: ${{ runner.arch }}
+        CI_TENANT_TRANSFER: ${{ inputs.tenant-transfer }}
+      run: node scripts/ci-pgvector-image.mjs warm-smoke
     # Cache only the original upstream blobs, before a database exists. Fork PRs
     # can restore main's cache and cold-fetch without any registry credentials.
     - name: Save public upstream blobs from trusted main CI

@@ -28,8 +28,9 @@ The `check` and `db-sync` jobs start PostgreSQL after cache restoration, rather
 than in pre-step service initialization. Their required check names, database
 URLs, migration checks and integration tests are retained. The composite action:
 
-1. Selects a committed Linux AMD64 or ARM64 PG16 child digest and an exact
-   platform/digest/format cache key. It has no broad restore keys.
+1. Selects committed Linux AMD64 or ARM64 child digests: PG16 for `db-sync`, and
+   PG16/17/18 for `check`'s tenant-transfer suite. The exact platform/digest-set/format
+   cache key distinguishes both sets. It has no broad restore keys.
 2. Restores only original upstream files from Skopeo's `dir` transport.
 3. Verifies the manifest against the committed digest, then the config and all
    compressed layer hashes and sizes. Checks Linux, architecture and PG major;
@@ -37,8 +38,13 @@ URLs, migration checks and integration tests are retained. The composite action:
 4. On a missing/invalid cache, clears that runner-local blob directory and copies
    the same pinned public upstream child with `--preserve-digests`. Three attempts
    have bounded command timeouts and 5/10 second retry delays; exhaustion fails CI.
-5. Imports verified blobs to Docker and checks the image config ID and platform.
-   Saves upstream blobs only on main pushes, before a database exists. Cache
+5. Imports verified blobs to Docker and checks each image config ID and platform.
+   Only then assigns `pgvector/pgvector:pg16`, `:pg17` and `:pg18` as local
+   compatibility aliases from the verified config IDs, and verifies every alias.
+   This is a local Docker tag operation, not registry publication. The action
+   reruns preparation against warm blobs with registry transport forbidden, then
+   executes every selected alias with `--pull=never`. Saves upstream blobs only on
+   main pushes, before a database exists. Cache
    restore/save service failures are optional; image verification is mandatory.
 6. Starts the imported image with `--pull=never`, fixture credentials, loopback
    port 5432 and a new disposable database. Waits for readiness and exercises an
@@ -57,21 +63,46 @@ after retries, rerun after recovery. Never fall back to a mutable tag, different
 digest, unverified archive or an application/production image. The cache reduces
 repeat pulls; it does **not** guarantee cold-run availability.
 
+The corrected consumer inventory for `ci.yml` is:
+
+| Consumer | Local image references supplied |
+| --- | --- |
+| `check` and `db-sync` main fixture | `corgtex-ci-pgvector:pg16` |
+| `shared-tenant-export.integration.test.ts` | `pgvector/pgvector:pg16` |
+| `shared-tenant-import.integration.test.ts` | `pgvector/pgvector:pg16` |
+| `shared-tenant-source-copy.integration.test.ts` fixtures | `pgvector/pgvector:pg16`, `:pg17`, `:pg18` |
+| `shared-tenant-source-copy.ts` conversion helper invoked by those tests | `pgvector/pgvector:pg16`, `:pg17`, `:pg18` |
+
+Tenant consumers retain their existing default/`missing` Docker pull policy;
+preparation supplies their exact local references before they run. The regression
+test extracts the real Docker argument arrays from all four files and executes
+them against a daemon model that refuses every missing-image registry fallback.
+It checks that an old alias is overwritten with the verified ID, imported/alias
+identity failures stop preparation, and missing warm blobs cannot cold-fetch.
+The hosted warm proof exercises all actual aliases with pulls disabled before the
+real tenant-transfer suite. Other workflows with their own service initialization
+(`nightly-quality.yml`, `fleet-release.yml`) are outside this `ci.yml` change and
+do not inherit its runner-local aliases. Their release/access behavior is unchanged.
+
 ## Pins and upstream provenance
 
 Read-only registry inspection on 2026-10-12 verified the original PR1510 indexes
-and the hashes of their two runnable child manifests/configs. PG16 is PostgreSQL
-16.15 / pgvector 0.8.7, PG18 is PostgreSQL 18.6 / pgvector 0.8.6. This change uses
-PG16 only; it does not move any PG18 rehearsal or production consumers.
+and the hashes of their two runnable child manifests/configs. A further PG17 audit
+on the same date verifies its index and both runnable platform/config hashes.
+PG16 is PostgreSQL 16.15 / pgvector 0.8.7, PG17 is PostgreSQL 17.11 / pgvector 0.8.7,
+and PG18 is PostgreSQL 18.6 / pgvector 0.8.6. This change supplies all three majors
+to the existing required CI tenant-transfer suite; no rehearsal or production
+consumer is moved.
 
 | Image | Pinned index |
 | --- | --- |
 | `docker.io/pgvector/pgvector` PG16 | `sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a` |
+| `docker.io/pgvector/pgvector` PG17 | `sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d` |
 | `docker.io/pgvector/pgvector` PG18 | `sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a` |
 
 PG16 runnable children are `sha256:a97d77306ff47cc1d8add4d000cec2207da2e110746318df3137ce53c337ca30`
 (AMD64) and `sha256:a45475a5bc7882f19e9ca17d49b67f665fa04d500350de2c47af325662445aec`
-(ARM64). Both indexes also reference two non-runnable `unknown/unknown` manifests;
+(ARM64). All three indexes also reference two non-runnable `unknown/unknown` manifests;
 a full mirror must retain them. Pinning verifies byte identity to the reviewed
 upstream artifact. It is not independent verification of the upstream publisher's
 build identity or a signature claim. Any signature/attestation verification needs

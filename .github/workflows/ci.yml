@@ -133,6 +133,7 @@ jobs:
         timeout-minutes: 15
         with:
           database: corgtex_test
+          tenant-transfer: "true"
 
       - run: npm ci
 
