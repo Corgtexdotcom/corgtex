@@ -129,6 +129,7 @@ jobs:
           cache: npm
 
       - name: Prepare verified upstream PostgreSQL fixture
+        id: pgvector
         uses: ./.github/actions/ci-pgvector
         timeout-minutes: 15
         with:
@@ -176,6 +177,8 @@ jobs:
       - name: Test Ops and Core migration custody, fences and retained restore
         timeout-minutes: 15
         run: npm run test:migration:ops-core
+        env:
+          CI_PGVECTOR_PG18_CONFIG_ID: ${{ steps.pgvector.outputs.pg18-config-id }}
 
       - name: Install PostgreSQL capture client
         run: sudo apt-get update -qq && sudo apt-get install -y postgresql-client-16

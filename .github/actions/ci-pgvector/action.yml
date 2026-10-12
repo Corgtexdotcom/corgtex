@@ -7,6 +7,10 @@ inputs:
   database:
     description: Isolated database name (corgtex_test or corgtex_ci)
     required: true
+outputs:
+  pg18-config-id:
+    description: Exact verified local PostgreSQL 18 config ID for CI rehearsal consumers
+    value: ${{ steps.prepare.outputs.pg18-config-id }}
 runs:
   using: composite
   steps:
@@ -28,6 +32,7 @@ runs:
       shell: bash
       run: sudo apt-get update -qq && sudo apt-get install -y skopeo
     - name: Verify or fetch pinned image and import into Docker
+      id: prepare
       shell: bash
       env:
         CI_IMAGE_ARCH: ${{ runner.arch }}

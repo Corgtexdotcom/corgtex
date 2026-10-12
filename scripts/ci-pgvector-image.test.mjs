@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ts from "typescript";
-import { CONTAINER, LOCAL_IMAGE, PG16_MANIFESTS, PG_MAJORS, imageArchitecture, prepareImage, prepareImages, smokeWarmImages, startDatabase, verifyImage } from "./ci-pgvector-image.mjs";
+import { CONTAINER, LOCAL_IMAGE, PG16_MANIFESTS, PG_MAJORS, imageArchitecture, pg18RehearsalImage, prepareImage, prepareImages, smokeWarmImages, startDatabase, verifyImage } from "./ci-pgvector-image.mjs";
 
 const directories = [];
 afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
@@ -222,5 +222,40 @@ describe("pinned public CI image supply", () => {
     const run = vi.fn();
     await expect(smokeWarmImages(f.directory, "amd64", { run, wait: vi.fn(), warn: vi.fn() })).rejects.toThrow("must not contact a registry");
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it("hands only the verified local PG18 config ID to both actual rehearsal containers with no pull fallback", () => {
+    const digest = `sha256:${"a".repeat(64)}`;
+    expect(pg18RehearsalImage(digest)).toEqual({ image: digest, pullArgs: ["--pull=never"] });
+    expect(pg18RehearsalImage()).toEqual({ image: "pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a", pullArgs: [] });
+    for (const invalid of ["", "pgvector/pgvector:pg18", "sha256:bad", "sha256:" + "A".repeat(64)]) {
+      expect(() => pg18RehearsalImage(invalid)).toThrow("Invalid verified");
+    }
+    const source = readFileSync(new URL("./migration/postgres-restore-rehearsal-smoke.mjs", import.meta.url), "utf8");
+    expect(source).toContain("pg18RehearsalImage(process.env.CI_PGVECTOR_PG18_CONFIG_ID)");
+    const file = ts.createSourceFile("rehearsal.mjs", source, ts.ScriptTarget.Latest, true);
+    const runs = [];
+    const walk = (node) => {
+      if (ts.isCallExpression(node) && ["run", "runDockerSourceStart"].includes(node.expression.getText(file))) {
+        for (const args of node.arguments.filter(ts.isArrayLiteralExpression)) {
+          if (args.elements[0]?.getText(file) === '"run"') runs.push(args.elements.map((argument) => argument.getText(file)));
+        }
+      }
+      ts.forEachChild(node, walk);
+    };
+    walk(file);
+    expect(runs).toHaveLength(2);
+    for (const args of runs) {
+      expect(args).toContain("...REHEARSAL_PULL_ARGS");
+      expect(args).toContain("SERVER_IMAGE");
+      expect(args.filter((arg) => /pull/i.test(arg))).toEqual(["...REHEARSAL_PULL_ARGS"]);
+    }
+    const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+    expect(workflow).toContain("CI_PGVECTOR_PG18_CONFIG_ID: ${{ steps.pgvector.outputs.pg18-config-id }}");
+    const action = readFileSync(new URL("../.github/actions/ci-pgvector/action.yml", import.meta.url), "utf8");
+    expect(action).toContain("value: ${{ steps.prepare.outputs.pg18-config-id }}");
+    const scripts = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).scripts;
+    expect(scripts["test:migration:ops-core"]).toContain("npm run test:migration:postgres-smoke");
+    expect(scripts["test:migration:postgres-smoke"]).toContain("postgres-restore-rehearsal-smoke.mjs");
   });
 });

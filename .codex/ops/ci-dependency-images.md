@@ -72,6 +72,7 @@ The corrected consumer inventory for `ci.yml` is:
 | `shared-tenant-import.integration.test.ts` | `pgvector/pgvector:pg16` |
 | `shared-tenant-source-copy.integration.test.ts` fixtures | `pgvector/pgvector:pg16`, `:pg17`, `:pg18` |
 | `shared-tenant-source-copy.ts` conversion helper invoked by those tests | `pgvector/pgvector:pg16`, `:pg17`, `:pg18` |
+| `postgres-restore-rehearsal-smoke.mjs` source and target containers reached through `test:migration:ops-core` | Verified PG18 config ID, with `--pull=never` |
 
 Tenant consumers retain their existing default/`missing` Docker pull policy;
 preparation supplies their exact local references before they run. The regression
@@ -84,6 +85,15 @@ real tenant-transfer suite. Other workflows with their own service initializatio
 (`nightly-quality.yml`, `fleet-release.yml`) are outside this `ci.yml` change and
 do not inherit its runner-local aliases. Their release/access behavior is unchanged.
 
+The synthetic rehearsal normally uses the PG18 index-digest reference. A local
+tag does not supply that registry RepoDigest, so required CI passes preparation's
+verified PG18 config ID only to the custody/rehearsal test step. Both source and
+target starts use the exact local ID with `--pull=never`; a missing local image
+fails rather than pulling. Empty/malformed supplied IDs are rejected. Outside this
+CI handoff the smoke fixture retains its pinned default. Actual rehearsal/deploy
+operation scripts are unchanged. ECR PostgreSQL and Azurite remain separate,
+explicitly prepared dependencies outside the pgvector supply path.
+
 ## Pins and upstream provenance
 
 Read-only registry inspection on 2026-10-12 verified the original PR1510 indexes
@@ -91,8 +101,8 @@ and the hashes of their two runnable child manifests/configs. A further PG17 aud
 on the same date verifies its index and both runnable platform/config hashes.
 PG16 is PostgreSQL 16.15 / pgvector 0.8.7, PG17 is PostgreSQL 17.11 / pgvector 0.8.7,
 and PG18 is PostgreSQL 18.6 / pgvector 0.8.6. This change supplies all three majors
-to the existing required CI tenant-transfer suite; no rehearsal or production
-consumer is moved.
+to the existing required CI tenant-transfer suite and the exact pinned PG18 bytes
+to its synthetic custody/rehearsal fixture. No production consumer is moved.
 
 | Image | Pinned index |
 | --- | --- |

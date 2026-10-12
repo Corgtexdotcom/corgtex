@@ -32,6 +32,12 @@ export const PG_MAJORS = [16, 17, 18];
 export const LOCAL_IMAGE = "corgtex-ci-pgvector:pg16";
 export const CONTAINER = "corgtex-ci-postgres";
 
+export function pg18RehearsalImage(configId) {
+  if (configId === undefined) return { image: `pgvector/pgvector:pg18@${PG_IMAGES[18].index}`, pullArgs: [] };
+  if (!/^sha256:[a-f0-9]{64}$/.test(configId)) throw new Error("Invalid verified CI PostgreSQL 18 config ID");
+  return { image: configId, pullArgs: ["--pull=never"] };
+}
+
 export function imageArchitecture(value) {
   const architecture = { X64: "amd64", ARM64: "arm64", amd64: "amd64", arm64: "arm64" }[value];
   if (!architecture) throw new Error(`Unsupported CI image architecture: ${value}`);
@@ -163,7 +169,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
       appendFileSync(process.env.GITHUB_OUTPUT, `path=${directory}\nkey=ci-pgvector-dir-v2-linux-${architecture}-${createHash("sha256").update(majors.map((major) => PG_IMAGES[major].manifests[architecture]).join("\n")).digest("hex")}\n`);
       break;
     case "prepare":
-      await prepareImages(directory, architecture, { majors });
+      {
+        const identities = await prepareImages(directory, architecture, { majors });
+        appendFileSync(process.env.GITHUB_OUTPUT, `pg18-config-id=${identities.get(18) ?? ""}\n`);
+      }
       break;
     case "warm-smoke":
       await smokeWarmImages(directory, architecture, { majors });
