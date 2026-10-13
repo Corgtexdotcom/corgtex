@@ -1,4 +1,5 @@
 import { prisma } from "@corgtex/shared";
+import { authorizeConversationTool } from "../conversation-capabilities";
 import type { ModelTool } from "@corgtex/models";
 import type { AppActor } from "@corgtex/shared";
 import { AppError, listGoals, privacyFilter, requireWorkspaceMembership } from "@corgtex/domain";
@@ -99,6 +100,7 @@ async function workspaceReaderWhere(workspaceId: string, actor?: AppActor) {
 }
 
 export async function getWorkspaceOverview(workspaceId: string, actor?: AppActor) {
+  if (actor) await authorizeConversationTool(actor, workspaceId, "get_workspace_overview");
   const where = await workspaceReaderWhere(workspaceId, actor);
   const [memberCount, circleCount, openTensions, openActions, activeProposals, activeGoals] = await Promise.all([
     prisma.member.count({ where: { workspaceId, isActive: true } }),
@@ -113,6 +115,7 @@ export async function getWorkspaceOverview(workspaceId: string, actor?: AppActor
 }
 
 export async function queryTensions(workspaceId: string, status?: TensionStatus, assigneeId?: string, tensionId?: string, actor?: AppActor) {
+  if (actor) await authorizeConversationTool(actor, workspaceId, "query_tensions");
   const where: Prisma.TensionWhereInput = await workspaceReaderWhere(workspaceId, actor);
   if (tensionId) where.id = tensionId;
   if (status) where.status = status;
@@ -151,6 +154,7 @@ export async function queryTensions(workspaceId: string, status?: TensionStatus,
 }
 
 export async function queryActions(workspaceId: string, status?: ActionStatus, assigneeId?: string, actionId?: string, actor?: AppActor) {
+  if (actor) await authorizeConversationTool(actor, workspaceId, "query_actions");
   const where: Prisma.ActionWhereInput = await workspaceReaderWhere(workspaceId, actor);
   if (actionId) where.id = actionId;
   if (status) where.status = status;
@@ -187,6 +191,7 @@ export async function queryActions(workspaceId: string, status?: ActionStatus, a
 }
 
 export async function queryProposals(workspaceId: string, status?: ProposalStatus, actor?: AppActor) {
+  if (actor) await authorizeConversationTool(actor, workspaceId, "query_proposals");
   const where: Prisma.ProposalWhereInput = await workspaceReaderWhere(workspaceId, actor);
   if (status) where.status = status;
 
@@ -240,6 +245,7 @@ export async function queryOrgStructure(workspaceId: string) {
 }
 
 export async function queryGoals(actor: AppActor, workspaceId: string, cadence?: GoalCadence, level?: GoalLevel, status?: GoalStatus) {
+  if (actor) await authorizeConversationTool(actor, workspaceId, "query_goals");
   const goals = await listGoals(actor, {
     workspaceId,
     cadence,

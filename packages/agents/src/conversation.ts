@@ -76,6 +76,15 @@ import { formatConversationPageContextForModel, type ConversationPageContext } f
 import type { AppActor } from "@corgtex/shared";
 import type { KnowledgeAccessDomain, KnowledgeSourceType } from "@prisma/client";
 
+import {
+  authorizeConversationKnowledge,
+  authorizeConversationPageContext,
+  authorizeConversationTool,
+  authorizeConversationTurn,
+  canUseConversationTool,
+  guardConversationToolHandlers,
+} from "./conversation-capabilities";
+
 const MAX_HISTORY_TURNS = 20;
 const KNOWLEDGE_SEARCH_LIMIT = 4;
 
@@ -171,6 +180,7 @@ type ConversationContext = {
   userMessage: string;
   systemPrompt?: string | null;
   actor?: AppActor;
+  operationScopes?: readonly string[];
   pageContext?: ConversationPageContext | null;
   signal?: AbortSignal;
 };
@@ -226,10 +236,11 @@ const BASE_TOOLS = [
 
 function isVersionedUpdateTool(toolName: string) { return toolName === "update_tension" || toolName === "update_action"; }
 async function toolsForContext(ctx: ConversationContext) {
-  if (await isContextMapAiAvailable(ctx.workspaceId)) {
-    return [...BASE_TOOLS, ...contextMapTools];
-  }
-  return BASE_TOOLS;
+  const tools = await isContextMapAiAvailable(ctx.workspaceId)
+    ? [...BASE_TOOLS, ...contextMapTools]
+    : BASE_TOOLS;
+  const actor = requireConversationToolActor(ctx);
+  return tools.filter(tool => canUseConversationTool(actor, tool.function.name, ctx.operationScopes));
 }
 
 const CONTEXT_MAP_MUTATION_TOOLS = new Set(["create_context_map_diff", "apply_context_map_diff"]);
@@ -321,6 +332,7 @@ async function loadKnowledgeForConversation(params: {
     const accessDomains = await resolveInteractiveKnowledgeAccessDomains(
       params.ctx.actor,
       params.ctx.workspaceId,
+      params.ctx.operationScopes,
     );
     const results = await searchIndexedKnowledge({
       workspaceId: params.ctx.workspaceId,
@@ -340,7 +352,7 @@ async function loadKnowledgeForConversation(params: {
       },
     };
   } catch (error) {
-    if (error instanceof CatalogBudgetError || error instanceof WorkspaceModelBudgetError) throw error;
+    if (isBrainReadBlockingError(error)) throw error;
     return {
       results: [] as unknown[],
       search: {
@@ -365,12 +377,12 @@ function knowledgeSearchInstruction(search: ConversationContextUsed["knowledgeSe
   return `Knowledge retrieval already searched ${sourceLabel} for this turn. Use the supplied results when answering from workspace context, cite them when relevant, and do not claim to have checked any other source unless a tool result is present.`;
 }
 
-const TOOL_HANDLERS: Partial<Record<string, (actor: AppActor, ctx: ConversationContext, args: any) => Promise<unknown>>> = {
+const TOOL_HANDLERS = guardConversationToolHandlers<ConversationContext>({
   check_calendar_availability: async (actor, ctx, args) => checkCalendarAvailability(ctx.userId, ctx.workspaceId, args.emails, args.timeMin, args.timeMax),
   schedule_meeting: async (actor, ctx, args) => scheduleMeeting(ctx.userId, ctx.workspaceId, args.title, args.description, args.startTime, args.endTime, args.attendeeEmails),
   create_corgtex_scheduled_meeting: async (actor, ctx, args) => createCorgtexScheduledMeeting(actor, ctx.workspaceId, args),
   upload_meeting_transcript: async (actor, ctx, args) => uploadMeetingTranscriptFromTool(actor, ctx.workspaceId, args),
-  search_brain: async (actor, ctx, args) => searchBrain(actor, ctx.workspaceId, args.query, args.limit, catalogUsageContext(ctx)),
+  search_brain: async (actor, ctx, args) => searchBrain(actor, ctx.workspaceId, args.query, args.limit, catalogUsageContext(ctx), ctx.operationScopes),
   get_workspace_overview: async (actor, ctx) => getWorkspaceOverview(ctx.workspaceId, actor),
   query_tensions: async (actor, ctx, args) => queryTensions(ctx.workspaceId, args.status, args.assigneeId, args.tensionId, actor),
   query_actions: async (actor, ctx, args) => queryActions(ctx.workspaceId, args.status, args.assigneeId, args.actionId, actor),
@@ -402,7 +414,7 @@ const TOOL_HANDLERS: Partial<Record<string, (actor: AppActor, ctx: ConversationC
   complete_relationship_activity: async (actor, ctx, args) => completeRelationshipActivityAction(actor, ctx, args),
   create_communication_suggestion: async (actor, ctx, args) => createCommunicationSuggestionAction(actor, ctx, args),
   ...contextMapToolHandlers,
-};
+});
 
 function isCrmWriteTool(toolName: string) {
   return CRM_WRITE_TOOL_NAMES.has(toolName);
@@ -617,6 +629,7 @@ async function handleExplicitCrmToolCommand(ctx: ConversationContext) {
   if (!toolName) return null;
 
   const actor = requireConversationToolActor(ctx);
+  await authorizeConversationTool(actor, ctx.workspaceId, toolName, undefined, ctx.operationScopes);
   if (toolName === "list_due_relationship_work") {
     const args = explicitDueWorkArgs(ctx);
     const result = await listDueRelationshipWorkAction(actor, ctx, args);
@@ -754,8 +767,11 @@ async function handleCrmPendingOperationIntent(ctx: ConversationContext) {
   const intent = crmPendingOperationIntent(ctx.userMessage);
   if (!intent) return null;
 
+  const actor = requireConversationToolActor(ctx);
+  await authorizeConversationTool(actor, ctx.workspaceId, "record_relationship_activity", undefined, ctx.operationScopes);
   const operation = await findCrmPendingOperationForIntent(ctx, intent);
   if (!operation) return null;
+  await authorizeConversationTool(actor, ctx.workspaceId, operation.toolName, operation.argsJson, ctx.operationScopes);
 
   if (intent.kind === "cancel") {
     const canceled = await cancelCrmPendingOperation(operation);
@@ -764,7 +780,6 @@ async function handleCrmPendingOperationIntent(ctx: ConversationContext) {
       : crmPendingOperationFailedNotice(canceled);
   }
 
-  const actor = requireConversationToolActor(ctx);
   const begin = await beginCrmPendingOperationExecution(operation);
   if (begin.state === "expired") return crmPendingOperationExpiredNotice(begin.operation);
   if (begin.state === "already-executed") return crmPendingOperationResultNotice(begin.operation, begin.operation.resultJson);
@@ -800,6 +815,7 @@ async function executeConversationToolCall({
   handler: (actor: AppActor, ctx: ConversationContext, args: any) => Promise<unknown>;
 }) {
   const args = rawArguments ? JSON.parse(rawArguments) : {};
+  await authorizeConversationTool(actor, ctx.workspaceId, toolName, args, ctx.operationScopes);
   if (isVersionedUpdateTool(toolName)) throw new Error("Versioned updates require a preceding query result from this turn.");
   if (isCrmWriteTool(toolName)) {
     const normalizedArgs = normalizeCrmWriteToolArgs(toolName, ctx, args);
@@ -863,16 +879,18 @@ function isBrainReadBlockingError(error: unknown) {
 async function createBrainReadAuthorization(actor: AppActor, ctx: ConversationContext, eagerAccessDomains?: KnowledgeAccessDomain[]) {
   const origin = getSupportAuthorizationContext()?.origin;
   throwIfConversationCanceled(ctx);
+  await authorizeConversationTool(actor, ctx.workspaceId, "search_brain", undefined, ctx.operationScopes);
   // Preserve the authorization used before eager retrieval, even when it changed
   // while the initial model was running. A later snapshot could bless stale context.
-  let domains = eagerAccessDomains ?? await resolveInteractiveKnowledgeAccessDomains(actor, ctx.workspaceId);
+  let domains = eagerAccessDomains ?? await resolveInteractiveKnowledgeAccessDomains(actor, ctx.workspaceId, ctx.operationScopes);
   return async () => {
     throwIfConversationCanceled(ctx);
+    await authorizeConversationTool(actor, ctx.workspaceId, "search_brain", undefined, ctx.operationScopes);
     await requireWorkspaceMembership({ actor, workspaceId: ctx.workspaceId });
     throwIfConversationCanceled(ctx);
     if (origin) await supportCapabilityVersion(origin.userId, origin.workspaceId, origin.version);
     throwIfConversationCanceled(ctx);
-    const currentDomains = await resolveInteractiveKnowledgeAccessDomains(actor, ctx.workspaceId);
+    const currentDomains = await resolveInteractiveKnowledgeAccessDomains(actor, ctx.workspaceId, ctx.operationScopes);
     if (domains.some((domain) => !currentDomains.includes(domain))) {
       throw new AppError(403, "KNOWLEDGE_ACCESS_CHANGED", "Knowledge access changed during this conversation. Please retry.");
     }
@@ -1013,7 +1031,10 @@ function throwIfConversationCanceled(ctx: ConversationContext, error?: unknown) 
 }
 
 export async function processConversationTurn(ctx: ConversationContext) {
-  await requireWorkspaceMembership({ actor: requireConversationToolActor(ctx), workspaceId: ctx.workspaceId });
+  const actor = requireConversationToolActor(ctx);
+  await authorizeConversationTurn(actor, ctx.workspaceId, ctx.operationScopes);
+  await requireWorkspaceMembership({ actor, workspaceId: ctx.workspaceId });
+  if (ctx.pageContext) await authorizeConversationPageContext(actor, ctx.workspaceId, ctx.pageContext.surface, ctx.operationScopes);
   const origin = getSupportAuthorizationContext()?.origin;
   const result = await processConversationTurnContent(ctx);
   if (origin) await supportCapabilityVersion(origin.userId, origin.workspaceId, origin.version);
@@ -1074,17 +1095,18 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
   let knowledgeResults: unknown[] = [];
   let knowledgeSearch: ConversationContextUsed["knowledgeSearch"] | undefined;
   const effectiveKnowledgeLimit = ctx.userMessage.length > 10_000 ? 2 : KNOWLEDGE_SEARCH_LIMIT;
-  const loadedKnowledge = await loadKnowledgeForConversation({
+  const canReadKnowledge = await authorizeConversationKnowledge(requireConversationToolActor(ctx), ctx.workspaceId, ctx.operationScopes);
+  const loadedKnowledge = canReadKnowledge ? await loadKnowledgeForConversation({
     ctx,
     priorTurns,
     limit: effectiveKnowledgeLimit,
-  });
+  }) : { results: [], search: undefined, accessDomains: [] };
   knowledgeResults = loadedKnowledge.results;
   knowledgeSearch = loadedKnowledge.search;
 
   // Load agent memories for context
   let memories: unknown[] = [];
-  try {
+  if (canReadKnowledge) try {
     memories = await loadRelevantMemories({
       workspaceId: ctx.workspaceId,
       agentKey: ctx.agentKey,
@@ -1096,7 +1118,7 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
 
   // Load user's personal profile for personalization
   let userProfile: string | null = null;
-  try {
+  if (canReadKnowledge) try {
     const profileArticle = await prisma.brainArticle.findUnique({
       where: {
         workspaceId_slug: {
@@ -1161,7 +1183,7 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
   }
 
   let roleOnboardingContext: string | null = null;
-  if (ctx.agentKey === "role-onboarding") {
+  if (canReadKnowledge && ctx.agentKey === "role-onboarding") {
     roleOnboardingContext = await buildRoleOnboardingContextForConversation({
       workspaceId: ctx.workspaceId,
       conversationId: ctx.sessionId,
@@ -1317,7 +1339,10 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
 }
 
 export async function* processConversationTurnStream(ctx: ConversationContext) {
-  await requireWorkspaceMembership({ actor: requireConversationToolActor(ctx), workspaceId: ctx.workspaceId });
+  const actor = requireConversationToolActor(ctx);
+  await authorizeConversationTurn(actor, ctx.workspaceId, ctx.operationScopes);
+  await requireWorkspaceMembership({ actor, workspaceId: ctx.workspaceId });
+  if (ctx.pageContext) await authorizeConversationPageContext(actor, ctx.workspaceId, ctx.pageContext.surface, ctx.operationScopes);
   const origin = getSupportAuthorizationContext()?.origin;
   const iterator = processConversationTurnStreamContent(ctx);
   try {
@@ -1389,16 +1414,17 @@ async function* processConversationTurnStreamContent(ctx: ConversationContext): 
   let knowledgeResults: unknown[] = [];
   let knowledgeSearch: ConversationContextUsed["knowledgeSearch"] | undefined;
   const effectiveKnowledgeLimit = ctx.userMessage.length > 10_000 ? 2 : KNOWLEDGE_SEARCH_LIMIT;
-  const loadedKnowledge = await loadKnowledgeForConversation({
+  const canReadKnowledge = await authorizeConversationKnowledge(requireConversationToolActor(ctx), ctx.workspaceId, ctx.operationScopes);
+  const loadedKnowledge = canReadKnowledge ? await loadKnowledgeForConversation({
     ctx,
     priorTurns,
     limit: effectiveKnowledgeLimit,
-  });
+  }) : { results: [], search: undefined, accessDomains: [] };
   knowledgeResults = loadedKnowledge.results;
   knowledgeSearch = loadedKnowledge.search;
 
   let memories: unknown[] = [];
-  try {
+  if (canReadKnowledge) try {
     memories = await loadRelevantMemories({
       workspaceId: ctx.workspaceId,
       agentKey: ctx.agentKey,
@@ -1444,7 +1470,7 @@ async function* processConversationTurnStreamContent(ctx: ConversationContext): 
   }
 
   let roleOnboardingContext: string | null = null;
-  if (ctx.agentKey === "role-onboarding") {
+  if (canReadKnowledge && ctx.agentKey === "role-onboarding") {
     roleOnboardingContext = await buildRoleOnboardingContextForConversation({
       workspaceId: ctx.workspaceId,
       conversationId: ctx.sessionId,

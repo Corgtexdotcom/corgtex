@@ -793,6 +793,9 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         agentKey: "assistant",
         userMessage: message,
         actor,
+        operationScopes: actor.kind === "agent" && actor.authProvider === "bootstrap"
+          ? undefined
+          : Object.freeze([...(sessionCtx.scopes ?? [])]),
       });
       return jsonResult({ assistantMessage: result.assistantMessage });
     },

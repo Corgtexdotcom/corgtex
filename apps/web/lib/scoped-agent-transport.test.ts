@@ -177,6 +177,11 @@ describe("actual registered MCP callback parity", () => {
     expect(mocks.audit).not.toHaveBeenCalled();
   });
 
+  it.each([undefined, [], ["tools:credentials:read"]])("keeps parameter-dependent version read scope checks with grants %j", async scopes => {
+    await expect(actualMcpTools(scopes).list_work_item_versions.handler({ entityType: "ACTION", entityId: "synthetic-action" })).rejects.toMatchObject({ status: 403 });
+    expect(mocks.store.action.findMany).not.toHaveBeenCalled();
+  });
+
   it("allows explicit sensitive grant through the actual domain operation", async () => {
     const result = await actualMcpTools(["tools:credentials:read"]).reveal_tool_link_credential.handler({ toolLinkId: "synthetic-tool" });
     expect(JSON.stringify(result)).toContain("synthetic-output");

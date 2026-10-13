@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AppActor } from "@corgtex/shared";
-import { AGENT_OPERATION_CAPABILITIES, agentHasOperation, getAgentOperationCapability, requireAgentOperation } from "./agent-operation-capabilities";
+import { AGENT_OPERATION_CAPABILITIES, agentHasOperation, getAgentOperationCapability, requireAgentOperation, requireScopedOperation, scopedHasOperation } from "./agent-operation-capabilities";
 import { MCP_TOOL_CAPABILITIES } from "./mcp-tool-capabilities";
 
 const credential = (scopes?: string[]): AppActor => ({
@@ -9,6 +9,12 @@ const credential = (scopes?: string[]): AppActor => ({
 });
 
 describe("canonical agent operation authority", () => {
+  it("applies explicit transport grants independently of principal role", () => {
+    expect(() => requireScopedOperation("reveal_tool_link_credential", [])).toThrow(expect.objectContaining({ status: 403 }));
+    expect(scopedHasOperation("reveal_tool_link_credential", ["tools:read"])).toBe(false);
+    expect(scopedHasOperation("reveal_tool_link_credential", ["tools:credentials:read"])).toBe(true);
+    expect(scopedHasOperation("constructor", ["tools:credentials:read"])).toBe(false);
+  });
   it("shares the actual MCP registry across transports", () => {
     expect(AGENT_OPERATION_CAPABILITIES).toBe(MCP_TOOL_CAPABILITIES);
     expect(getAgentOperationCapability("reveal_tool_link_credential")).toEqual({

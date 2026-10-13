@@ -622,7 +622,7 @@ async function applyActionDuplicateUpdate(
   updateParams.expectedVersion = existing.version;
   updateParams._membership = membership;
   updateParams._tx = tx;
-  return updateAction(actor, updateParams);
+  return updateActionRecord(actor, updateParams);
 }
 
 export async function createAction(actor: AppActor, params: CreateActionParams) {
@@ -813,7 +813,7 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
 
     const duplicateDecision = await duplicateDecisionForCreate(tx);
     const action = duplicateDecision?.resolution === "use_existing"
-      ? await getAction(actor, { workspaceId: params.workspaceId, actionId: duplicateDecision.match.entityId })
+      ? await readAction(actor, { workspaceId: params.workspaceId, actionId: duplicateDecision.match.entityId })
       : duplicateDecision?.resolution === "update_existing"
         ? await applyActionDuplicateUpdate(actor, params, duplicateDecision.match.entityId, membership, tx)
         : await create(tx, duplicateDecision);
@@ -837,7 +837,8 @@ export async function completeAction(actor: AppActor, params: {
   workspaceId: string; actionId: string; completedVia: string;
 }) {
   await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "complete_action" });
-  return updateActionRecord(actor, { ...params, status: "COMPLETED" });
+  return updateActionRecord(actor, { workspaceId: params.workspaceId, actionId: params.actionId,
+    completedVia: params.completedVia, status: "COMPLETED" });
 }
 
 async function updateActionRecord(actor: AppActor, params: {
