@@ -1,7 +1,7 @@
 # PUN-68 implementing checkpoint
 
 This draft extends c9ffa7d35ead059bf5cd50e93780e8768c62650e and composes main
-fcdb20ef087ef2db8cfec8796a93bf457fd754b6 (PUN76 operation guards). Full acceptance
+8e484c4216b8217879ac64aa46042b32fe715501 (PUN76 guards and PUN78 sensitivity fix). Full acceptance
 is INCOMPLETE. Keep PR1517 draft; do not merge or deploy.
 
 ## Architecture and migration/backfill
@@ -70,6 +70,8 @@ The separate release task's branch/browser/Azure CLI/lease/runtime were untouche
 | --- | --- | --- |
 | Aggregate unit, after fixture and asset repairs | 11459 pass, 7 fail, 24 skipped; 681 passing files | /tmp/pun68-current-final-aggregate-unit.log |
 | Full repository TypeScript | pass | /tmp/pun68-current-final-types.log |
+| PUN78 sensitivity/chunks/ranking/cache composition | 80/80 pass | /tmp/pun68-pun78-composition-unit.log |
+| Public docs and private boundary | pass | /tmp/pun68-current-public-docs.log; /tmp/pun68-current-private-boundary.log |
 | Root changed-file lint and diff | pass | /tmp/pun68-root-final-lint.log |
 | Remaining static/script/native-dispatch cohort | 549/549 pass | /tmp/pun68-materialized-static-native-cohort.log |
 | Lifecycle/route/archive fixtures | 267 pass, one old registry count then repaired | /tmp/pun68-archive-inventory-fixtures-final-unit.log |
@@ -77,7 +79,7 @@ The separate release task's branch/browser/Azure CLI/lease/runtime were untouche
 | Linked Document retirement/restore races | 3/3 local PG pass | /tmp/pun68-linked-document-retirement-new-integration.log |
 | Document rebuild/removal cohorts | 29/29 local PG, 4 unit pass | /tmp/pun68-document-source-rebuild-final-integration.log |
 | Native external MCP receipt | 29 unit, final3/3 local PG pass | /tmp/pun68-external-mcp-response-final-integration.log |
-| OAuth epochs and workspace/pending CRM | 113 unit, 20 local PG pass | /tmp/pun68-oauth-routing-final.log; /tmp/pun68-oauth-fixtures-final.log |
+| OAuth epochs and workspace/pending CRM | current unit coverage included in aggregate; 20/20 local PG pass | /tmp/pun68-oauth-current-checkpoint-integration.log |
 | Source history/archive/native control | 72/72 units pass | /tmp/pun68-linked-removal-control-unit.log |
 | Native Action completion | 31 units, 7/9 local PG pass; two public-reader tests RED | /tmp/pun68-action-completion-* |
 | Fresh183 migrations/schema | all183 replayed, zero difference | /tmp/pun68-fresh183-migration-replay.log; /tmp/pun68-fresh183-migrations-schema-diff.log |
@@ -85,7 +87,8 @@ The separate release task's branch/browser/Azure CLI/lease/runtime were untouche
 Focused cohorts overlap and ran on successive local revisions. Do not add their
 counts or claim them as a single final acceptance run. Missing tracked test assets
 were restored from exact Git index blobs. Site next-intl4.12.0 was restored only to
-this checkout's ignored node_modules; manifests and package-lock were unchanged.
+this checkout's ignored node_modules; manifests and package-lock were unchanged. Sparse checkout is now disabled only in
+this isolated repository so future merges retain tracked validation assets.
 
 ### Genuine behavior/integration gaps
 
