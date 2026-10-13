@@ -1,5 +1,5 @@
 import { nativeTranscriptPrincipalUserId } from "./native-transcript-principal";
-import { artifactPermissionEpochIdentities, capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, mergePermissionEpochProofs, parsePermissionEpochProof, type PermissionEpochProof } from "./source-permission-epochs";
+import { artifactPermissionEpochIdentities, capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, mergePermissionEpochProofs, parsePermissionEpochProof, withSourceCommitPermissionReadPass, type PermissionEpochProof } from "./source-permission-epochs";
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Prisma } from "@prisma/client";
@@ -1425,16 +1425,21 @@ export async function isArtifactInputProofReadable(actor: AppActor, workspaceId:
     const localMemo = new Map<string, boolean>();
     localReadAdmissionMemos.set(memo, localMemo);
     if (db === prisma) readHeadMemos.set(localMemo, readHeadBinding(memo));
-    const locallyAdmitted = await localCommitAdmission.run(true, async () => {
-      for (const root of roots) if (!await rootIsReadable(db, actor, workspaceId,
-        membership, domains, root, new Set(), localMemo)) return false;
-      return roots.length > 0;
-    });
+    const locallyAdmitted = await withSourceCommitPermissionReadPass(db, workspaceId,
+      () => localCommitAdmission.run(true, async () => {
+        for (const root of roots) if (!await rootIsReadable(db, actor, workspaceId,
+          membership, domains, root, new Set(), localMemo)) return false;
+        return roots.length > 0;
+      }));
     if (!locallyAdmitted) return false;
   }
-  for (const root of roots) {
-    if (!await rootIsReadable(db, actor, workspaceId, membership, domains, root, new Set(), memo)) return false;
-  }
+  const readable = await withSourceCommitPermissionReadPass(db, workspaceId, async () => {
+    for (const root of roots) {
+      if (!await rootIsReadable(db, actor, workspaceId, membership, domains, root, new Set(), memo)) return false;
+    }
+    return roots.length > 0;
+  });
+  if (!readable) return false;
   // A provider await may outlive another contributor's permission. Discard the
   // earlier memo and recheck the complete local closure before releasing proof.
   // This second pass never contacts a provider or creates a serving capability.
@@ -1810,7 +1815,64 @@ export async function recordArtifactInputLineage(params: {
   return recorded;
 }
 
-/** Preserve the prior body's exact permissions when saving article history. */
+type HistoryVersionBirth = { tx: Prisma.TransactionClient; workspaceId: string; articleId: string;
+  sourceFingerprint: string; versionId: string; versionFingerprint: string };
+const historyVersionBirths = new WeakMap<object, HistoryVersionBirth>();
+
+/** Trusted ORM-create boundary. This constructor never promotes an existing
+ * Version or accepts a caller's birth flag. Known copies retain all old evidence;
+ * an unproved/stale copy is preserved as UNKNOWN without serving authority. */
+export async function createBrainArticleHistoryVersion(params: {
+  tx: Prisma.TransactionClient; workspaceId: string; article: Record<string, unknown>;
+  version: number; preserveKnownHistory: boolean;
+  reason: "BODY_EDIT" | "REVIEWED_SOURCE_REGENERATION";
+  /** Active source plans require the preallocated, declared output identity. */
+  id?: string;
+}) {
+  // Keep the actual transaction capability while sealing caller-owned content
+  // and creation options before the first asynchronous fence or row read.
+  params = {...structuredClone({workspaceId: params.workspaceId, article: params.article,
+    version: params.version, preserveKnownHistory: params.preserveKnownHistory,
+    reason: params.reason, id: params.id}), tx: params.tx};
+  const {tx, workspaceId, article} = params;
+  assertSourceCommitTransactionCompatible(tx);
+  invariant(typeof article.id === "string" && article.workspaceId === workspaceId
+    && typeof article.bodyMd === "string" && typeof article.isPrivate === "boolean"
+    && ["BODY_EDIT", "REVIEWED_SOURCE_REGENERATION"].includes(params.reason)
+    && Number.isSafeInteger(params.version) && params.version > 0,
+  409, "SOURCE_CHANGED", "History source or version is unavailable.");
+  if (hasActiveSourceCommitLockPlan(tx)) {
+    invariant(typeof params.id === "string" && params.id.length > 0, 409, "SOURCE_LOCK_UNCOVERED",
+      "History output must be preallocated before the source commit.");
+    await assertPlannedArtifactPublication(tx, workspaceId, {kind: "BrainArticleVersion", id: params.id});
+  }
+  await assertArtifactInputWriteFence(tx);
+  const current = await loadArtifact(tx, workspaceId, {kind: "BrainArticle", id: article.id});
+  invariant(current && lineageContentFingerprint("BrainArticle", current) === lineageContentFingerprint("BrainArticle", article),
+    409, "SOURCE_CHANGED", "History source changed before preservation.");
+  const version = await tx.brainArticleVersion.create({data: {
+    ...(params.id ? {id: params.id} : {}), articleId: article.id, version: params.version,
+    bodyMd: String(article.bodyMd),
+    accessEnvelopeJson: {isPrivate: article.isPrivate as boolean, ownerMemberId: article.ownerMemberId as string | null},
+    changeSummary: params.reason === "BODY_EDIT" ? null : "Previous body before reviewed source regeneration.",
+    agentRunId: null,
+  }});
+  const birth = Object.freeze({});
+  historyVersionBirths.set(birth, {tx, workspaceId, articleId: article.id,
+    sourceFingerprint: lineageContentFingerprint("BrainArticle", article), versionId: version.id,
+    versionFingerprint: lineageContentFingerprint("BrainArticleVersion", version)});
+  try {
+    const preserved = params.preserveKnownHistory && await copyArtifactInputLineage({tx, workspaceId,
+      from: {kind: "BrainArticle", id: article.id}, fromContent: article,
+      to: {kind: "BrainArticleVersion", id: version.id}, toContent: version, birth});
+    if (!preserved) await invalidateArtifactInputLineage({tx, workspaceId,
+      artifact: {kind: "BrainArticleVersion", id: version.id}, content: version});
+    return {version, preserved};
+  } finally {historyVersionBirths.delete(birth);}
+}
+
+/** Preserve exact old vectors and add only a genuinely newborn Version's own
+ * identity. The opaque birth receipt is private to the trusted constructor. */
 export async function copyArtifactInputLineage(params: {
   tx: Prisma.TransactionClient;
   workspaceId: string;
@@ -1818,21 +1880,47 @@ export async function copyArtifactInputLineage(params: {
   fromContent: unknown;
   to: LineageInput;
   toContent: unknown;
+  birth?: object;
 }) {
   await assertArtifactInputWriteFence(params.tx);
   await assertPlannedArtifactPublication(params.tx, params.workspaceId, params.to);
+  const born = params.birth ? historyVersionBirths.get(params.birth) : undefined;
+  if (!born || born.tx !== params.tx || born.workspaceId !== params.workspaceId
+    || params.from.kind !== "BrainArticle" || params.to.kind !== "BrainArticleVersion"
+    || born.articleId !== params.from.id || born.versionId !== params.to.id
+    || born.sourceFingerprint !== lineageContentFingerprint(params.from.kind, params.fromContent)
+    || born.versionFingerprint !== lineageContentFingerprint(params.to.kind, params.toContent)) return false;
+  historyVersionBirths.delete(params.birth!);
   if (hasActiveSourceCommitLockPlan(params.tx)) assertSourceCommitSemanticRootCovered(params.tx, params.workspaceId,
     { ...params.from, fingerprint: lineageContentFingerprint(params.from.kind, params.fromContent) });
   const prior = await latestManifest(params.tx, params.workspaceId, params.from);
   if (!prior || prior.contentHash !== lineageContentFingerprint(params.from.kind, params.fromContent)
     || !parseRoots(prior.rootsJson)) return false;
+  const saved = prior.epochProofVersion === 1 ? parsePermissionEpochProof(prior.permissionEpochsJson) : null;
+  if (!saved || !["HUMAN_ORIGINAL", "DERIVED"].includes(prior.origin)) return false;
+  if (prior.origin === "HUMAN_ORIGINAL") {
+    if (parseRoots(prior.rootsJson)!.length || !Array.isArray(prior.inputsJson) || prior.inputsJson.length
+      || !saved.entries.some(entry => entry.kind === "BrainArticle" && entry.id === params.from.id)
+      || !saved.entries.some(entry => entry.kind === "Workspace" && entry.id === params.workspaceId)) return false;
+  } else {
+    if (!parseRoots(prior.rootsJson)!.length || !await isArtifactPermissionEpochProofCurrent(params.workspaceId, saved, params.tx)) return false;
+    const {isArtifactInputPermissionEpochCoverageComplete} = await import("./source-permission-coverage");
+    if (!await isArtifactInputPermissionEpochCoverageComplete({workspaceId: params.workspaceId,
+      artifact: params.from, content: params.fromContent as Record<string, unknown>, roots: parseRoots(prior.rootsJson)!,
+      permissionEpochs: saved, db: params.tx})) return false;
+  }
+  const actual = await loadArtifact(params.tx, params.workspaceId, params.to);
+  if (!actual || lineageContentFingerprint(params.to.kind, actual) !== born.versionFingerprint
+    || await latestManifest(params.tx, params.workspaceId, params.to)) return false;
+  const own = await capturePermissionEpochs(params.tx, params.workspaceId, [{kind: params.to.kind, id: params.to.id}]);
+  const copiedEpochs = mergePermissionEpochProofs(saved, own)!;
   await params.tx.artifactInputLineage.create({ data: {
     workspaceId: params.workspaceId,
     artifactType: params.to.kind,
     artifactId: params.to.id,
     revision: 1,
     origin: prior.origin, epochProofVersion: prior.epochProofVersion,
-    permissionEpochsJson: prior.permissionEpochsJson ?? Prisma.JsonNull,
+    permissionEpochsJson: copiedEpochs as unknown as Prisma.InputJsonValue,
     contentHash: lineageContentFingerprint(params.to.kind, params.toContent),
     inputsJson: prior.inputsJson as Prisma.InputJsonValue,
     rootsJson: prior.rootsJson as Prisma.InputJsonValue,

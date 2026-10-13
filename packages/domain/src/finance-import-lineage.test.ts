@@ -119,6 +119,7 @@ vi.mock("@corgtex/knowledge", async () => ({ ...await import("../../knowledge/sr
 import { createFinanceReportImportUpload } from "./finance-import-upload";
 import { claimFinanceReportImportExtraction, completeFinanceReportImportExtraction } from "./finance-import-extraction";
 import { captureArtifactInputProof, isArtifactInputProofReadable, recordArtifactInputLineage } from "./source-lineage";
+import { isArtifactInputPermissionEpochCoverageComplete } from "./source-permission-coverage";
 import { runFinanceReportImportExtractionJob } from "../../workflows/src/handlers/finance-report-import";
 import { extractFinanceReportFile } from "../../knowledge/src/finance-file-extraction";
 const ws = "ws-crm";
@@ -366,6 +367,9 @@ describe("Finance canonical application with actual lineage helpers", () => {
   });
   it("restates a proven current fact from a separately proven upload and keeps the old value immutable", async () => {
     await approveAndApply(await modelClaim());
+    const oldFact = structuredClone(fixture.tables.financeReportFact[0]);
+    const oldFactManifest = structuredClone([...fixture.tables.artifactInputLineage].reverse().find((row: any) =>
+      row.artifactType === "FinanceReportFact" && row.artifactId === oldFact.id));
     const second = await modelClaim(alice, ws, Buffer.from(bytes.toString().replace("100", "200")));
     second.persist.candidates = [{ ...proposed, amountCents: 20_000 }];
     const saved = await persistFinanceReportImportProposal(second.persist);
@@ -377,7 +381,43 @@ describe("Finance canonical application with actual lineage helpers", () => {
       candidateVersions: [{ id: candidate.id, expectedVersion: candidate.version }] });
     expect(applied.receipts[0]?.outcome).toBe("UPDATED");
     expect(fixture.tables.financeReportFact).toHaveLength(1); expect(fixture.tables.financeReportFact[0].amountCents).toBe(20_000);
-    expect(fixture.tables.artifactInputSnapshot.some(row => row.sourceKind === "FinanceReportFact" && row.contentJson.amountCents === 10_000)).toBe(true);
+    const factSnapshots = fixture.tables.artifactInputSnapshot.filter(row => row.sourceKind === "FinanceReportFact"
+      && row.sourceId === oldFact.id);
+    const currentBatch = fixture.tables.financeImportBatch.find(row => row.id === saved.batchId);
+    const currentBatchManifest = [...fixture.tables.artifactInputLineage].reverse().find((row: any) => row.artifactType === "FinanceImportBatch"
+      && row.artifactId === saved.batchId);
+    const reachable = new Set<string>();
+    const pending = [...currentBatchManifest.rootsJson];
+    while (pending.length) {
+      const root = pending.pop();
+      if (root.kind !== "ArtifactInputSnapshot" || reachable.has(root.id)) continue;
+      reachable.add(root.id);
+      const snapshot = fixture.tables.artifactInputSnapshot.find(row => row.id === root.id);
+      if (snapshot) pending.push(...snapshot.rootsJson);
+    }
+    const prior = factSnapshots.find(row => row.contentJson.amountCents === 10_000 && reachable.has(row.id));
+    expect(prior).toBeDefined();
+    expect(prior.contentJson).toMatchObject({amountCents: 10_000, reportId: oldFact.reportId,
+      sourceBatchId: oldFact.sourceBatchId, sourceCandidateId: oldFact.sourceCandidateId});
+    expect(fixture.tables.artifactInputLineage.find(row => row.id === oldFactManifest.id)).toEqual(oldFactManifest);
+    const params = {workspaceId: ws, artifact: {kind: "FinanceImportBatch" as const, id: saved.batchId},
+      content: currentBatch, roots: currentBatchManifest.rootsJson,
+      permissionEpochs: currentBatchManifest.permissionEpochsJson, db: fixture.prisma};
+    expect(await isArtifactInputPermissionEpochCoverageComplete(params)).toBe(true);
+    expect(new Set(factSnapshots.filter(row => reachable.has(row.id)).map(row => row.sourceFingerprint)).size).toBeGreaterThanOrEqual(2);
+    const exactOldSnapshot = structuredClone(prior);
+    prior.contentJson.amountCents = 999_999;
+    expect(await isArtifactInputPermissionEpochCoverageComplete(params)).toBe(false);
+    Object.assign(prior, exactOldSnapshot);
+    expect(await isArtifactInputPermissionEpochCoverageComplete(params)).toBe(true);
+    await expect(getFinanceReportImport(bob, {workspaceId: ws, batchId: saved.batchId})).resolves.toBeDefined();
+    fixture.revoked.add("bob");
+    await expect(getFinanceReportImport(bob, {workspaceId: ws, batchId: saved.batchId})).rejects.toThrow();
+    fixture.revoked.delete("bob");
+    expect(await isArtifactInputPermissionEpochCoverageComplete(params)).toBe(true);
+    const oldReportEpoch = JSON.stringify([ws, "FinanceReport", oldFact.reportId]);
+    fixture.permissionEpochs.set(oldReportEpoch, (fixture.permissionEpochs.get(oldReportEpoch) ?? 0n) + 1n);
+    expect(await isArtifactInputPermissionEpochCoverageComplete(params)).toBe(false);
   });
   it("preserves partial applications and derives a narrowed report on rejection", async () => {
     const state = await modelClaim();

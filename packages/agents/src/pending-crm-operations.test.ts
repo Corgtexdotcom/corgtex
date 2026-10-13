@@ -85,7 +85,7 @@ vi.mock("@corgtex/domain", async () => ({
 }));
 
 import { AppError } from "../../domain/src/errors";
-import { captureArtifactInputProof, captureArtifactInputSnapshotProof, captureImmutableArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint,
+import { advanceHumanArtifactInputLineage, captureArtifactInputProof, captureArtifactInputSnapshotProof, captureImmutableArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint,
   recordArtifactInputLineage, withArtifactInputWriteFence } from "../../domain/src/source-lineage";
 import { beginCrmPendingOperationExecution, cancelCrmPendingOperation, createPendingCrmOperation, crmPendingOperationFailedNotice,
   crmPendingOperationIntent, crmPendingOperationNotice, crmPendingOperationResultNotice, findCrmPendingOperationForIntent,
@@ -99,6 +99,7 @@ const args = { title: "Synthetic follow up", bodyMd: "Synthetic permitted body",
 const toolName = "record_relationship_activity";
 const confirm = (id: string) => ({ kind: "confirm" as const, pendingOperationId: id });
 const tx = fixture.tx as any;
+let permissionEpochs: ReturnType<typeof installSourcePermissionEpochFixture>;
 function insert(delegate: string, value: { id: string; [key: string]: unknown }) {
   const row: { id: string; [key: string]: any } = { createdAt: new Date(), updatedAt: new Date(), ...value };
   if (!fixture.tables.has(delegate)) fixture.tables.set(delegate, new Map());
@@ -162,7 +163,7 @@ beforeEach(async () => {
   insert("conversationPromptInput", { id: "prompt-alice", workspaceId, sessionId: ctx.sessionId, userId: ctx.userId, content: ctx.userMessage });
   fixture.bases.tx.$executeRaw.mockReset().mockResolvedValue(1);
   fixture.bases.tx.$queryRaw.mockReset().mockResolvedValue([]);
-  installSourcePermissionEpochFixture(tx);
+  permissionEpochs = installSourcePermissionEpochFixture(tx);
   fixture.base.$executeRaw.mockImplementation((...args) => fixture.bases.tx.$executeRaw(...args));
   fixture.base.$queryRaw.mockImplementation((...args) => fixture.bases.tx.$queryRaw(...args));
   await original("CrmAccount", "crmAccount", { id: "account-public", workspaceId, name: "Synthetic public account", archivedAt: null });
@@ -302,7 +303,7 @@ describe("pending CRM operation permission receipts and execution capabilities",
     const originals = structuredClone([...fixture.tables.get("artifactInputSnapshot")!.values()]);
     const frozen = await captureImmutableArtifactInputProof(alice, workspaceId, chunkReceipt, tx);
     expect(frozen.every((root) => root.kind === "ArtifactInputSnapshot")).toBe(true);
-    const preserved = [...fixture.tables.get("artifactInputSnapshot")!.values()];
+    const preserved = structuredClone([...fixture.tables.get("artifactInputSnapshot")!.values()]);
     expect(preserved.some((row) => row.sourceKind === "KnowledgeChunk" && row.origin === "DERIVED" && row.contentJson.content === "Original extracted bytes")).toBe(true);
     expect(preserved.some((row) => row.sourceKind === "BrainArticle" && row.contentJson.bodyMd === "Original parent bytes")).toBe(true);
     article.bodyMd = "Current edited parent bytes"; article.updatedAt = new Date(article.updatedAt.getTime() + 1);
@@ -311,9 +312,22 @@ describe("pending CRM operation permission receipts and execution capabilities",
     expect(await isArtifactInputProofReadable(alice, workspaceId, frozen, tx)).toBe(true);
     expect(await isArtifactInputProofReadable(bob, workspaceId, frozen, tx)).toBe(true);
     for (const snapshot of originals) expect(fixture.tables.get("artifactInputSnapshot")!.get(snapshot.id)).toEqual(snapshot);
+    const beforePrivacy = structuredClone(article);
     article.isPrivate = true; article.ownerMemberId = "member-bob";
+    // In-memory DML must model the real SQL privacy governor transition.
+    permissionEpochs.bump(workspaceId, "BrainArticle", article.id);
     expect(await isArtifactInputProofReadable(alice, workspaceId, frozen, tx)).toBe(false);
-    expect(await isArtifactInputProofReadable(bob, workspaceId, frozen, tx)).toBe(true);
+    expect(await isArtifactInputProofReadable(bob, workspaceId, frozen, tx)).toBe(false);
+    await advanceHumanArtifactInputLineage({tx, actor: alice, workspaceId,
+      artifact: {kind: "BrainArticle", id: article.id}, before: beforePrivacy, after: article});
+    // Its independent current original remains readable to the new owner. This
+    // fresh capture never repairs the older generated chunk or its snapshots.
+    const freshOriginal = await captureArtifactInputProof(bob, workspaceId, [{kind: "BrainArticle", id: article.id}], tx);
+    expect(await isArtifactInputProofReadable(bob, workspaceId, freshOriginal, tx)).toBe(true);
+    expect(await isArtifactInputProofReadable(alice, workspaceId, freshOriginal, tx)).toBe(false);
+    expect(article.bodyMd).toBe("Current edited parent bytes");
+    for (const snapshot of preserved) expect(fixture.tables.get("artifactInputSnapshot")!.get(snapshot.id)).toEqual(snapshot);
+    expect(await isArtifactInputProofReadable(bob, workspaceId, frozen, tx)).toBe(false);
     fixture.tables.get("brainArticle")!.delete(article.id);
     expect(await isArtifactInputProofReadable(bob, workspaceId, frozen, tx)).toBe(false);
   });

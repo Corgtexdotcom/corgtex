@@ -3,8 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
 import { prisma, encryptSecret, mcpCredentialVersion, mcpScopesHash, runWithMcpOrigin, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
-import { captureArtifactInputSnapshotProof, captureArtifactInputProof, recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
-import { capturePermissionEpochs } from "./source-permission-epochs";
+import { captureArtifactInputSnapshotProof, captureArtifactInputProof, isArtifactInputProofReadable, recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
+import { capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, withSourceCommitPermissionReadPass } from "./source-permission-epochs";
 import { assertSourceCommitSnapshotInputCovered, prepareSourceCommitAmbientFences, prepareSourceCommitLockPlan, prepareSourceCommitOwnerAttestation, sourceCommitHeadAdvisoryKey,
   withSourceCommitLockPlan, type SourceCommitLockPlan } from "./source-commit-lock-plan";
 
@@ -191,6 +191,50 @@ describe("closed source commit plan PostgreSQL races",()=>{
     expect(await prisma.brainArticle.findUnique({where:{id:outputId}})).toBeNull();
     expect((await prisma.brainArticle.findUniqueOrThrow({where:{id:f.source.id}})).isPrivate).toBe(false);
   });
+  it("fences same-transaction privacy changes during a delayed nested permission read",async()=>{
+    const f=await fixture(),plan=await prepare(f),entered=deferred(),changed=deferred();
+    await expect(run(f,plan,async tx=>{
+      const reader=withSourceCommitPermissionReadPass(tx,f.workspace.id,async()=>{
+        const admitted=await isArtifactInputProofReadable(f.actor,f.workspace.id,f.roots,tx);
+        expect(admitted).toBe(true);entered.resolve();await changed.promise;return admitted;
+      });
+      await entered.promise;
+      try {await tx.brainArticle.update({where:{id:f.source.id},data:{isPrivate:true,ownerMemberId:f.member.id}});}
+      finally {changed.resolve();}
+      expect(await reader).toBe(false);
+      expect(await isArtifactInputProofReadable(f.actor,f.workspace.id,f.roots,tx)).toBe(false);
+      return "must-roll-back";
+    })).rejects.toMatchObject({code:"SOURCE_CHANGED"});
+    expect((await prisma.brainArticle.findUniqueOrThrow({where:{id:f.source.id}})).isPrivate).toBe(false);
+    expect(provider.callsInTransaction).toBe(0);
+  });
+  it("reads newborn own epochs afresh and fences a delayed referenced newborn change",async()=>{
+    const f=await fixture(),outputId=randomUUID(),targets=[{kind:"BrainArticle" as const,id:outputId,projectedAuthority:{isPrivate:false}}];
+    const plan=await prepareSourceCommitLockPlan(f.actor,f.workspace.id,f.roots,{writeTargets:targets,ownerBinding:f.binding});
+    await expect(prisma.$transaction(async tx=>{
+      return withSourceCommitLockPlan(f.actor,f.workspace.id,tx,f.roots,targets,f.binding,plan,await owner(f,tx,plan),async()=>{
+        // An unused reserved output need not have an epoch before construction.
+        expect(await isArtifactInputProofReadable(f.actor,f.workspace.id,f.roots,tx)).toBe(true);
+        await tx.brainArticle.create({data:{id:outputId,workspaceId:f.workspace.id,slug:"read-pass-newborn",type:"STRATEGY",title:"Synthetic",bodyMd:"Synthetic"}});
+        const saved=await capturePermissionEpochs(tx,f.workspace.id,[{kind:"BrainArticle",id:outputId}]);
+        expect(await withSourceCommitPermissionReadPass(tx,f.workspace.id,()=>isArtifactPermissionEpochProofCurrent(f.workspace.id,saved,tx))).toBe(true);
+        const entered=deferred(),changed=deferred();
+        const reader=withSourceCommitPermissionReadPass(tx,f.workspace.id,async()=>{
+          const admitted=await isArtifactPermissionEpochProofCurrent(f.workspace.id,saved,tx);
+          expect(admitted).toBe(true);entered.resolve();await changed.promise;return admitted;
+        });
+        await entered.promise;
+        try {await tx.brainArticle.update({where:{id:outputId},data:{isPrivate:true,ownerMemberId:f.member.id}});}
+        finally {changed.resolve();}
+        expect(await reader).toBe(false);
+        expect(await withSourceCommitPermissionReadPass(tx,f.workspace.id,()=>isArtifactPermissionEpochProofCurrent(f.workspace.id,saved,tx))).toBe(false);
+        // This tests epoch fencing only, not an authenticated producer recipe.
+        throw Object.assign(new Error("Synthetic epoch fixture rollback"),{code:"SYNTHETIC_ROLLBACK"});
+      });
+    },{timeout:20000})).rejects.toMatchObject({code:"SYNTHETIC_ROLLBACK"});
+    expect(await prisma.brainArticle.findUnique({where:{id:outputId}})).toBeNull();
+    expect(provider.callsInTransaction).toBe(0);
+  });
   it("binds the capability to the real transaction connection and consumes it once",async()=>{
     const f=await fixture(),plan=await prepare(f);
     let attested:Awaited<ReturnType<typeof owner>>;
@@ -201,6 +245,25 @@ describe("closed source commit plan PostgreSQL races",()=>{
     const replacement=await prepare(f);
     expect(await run(f,replacement,async()=>"same-tx")).toBe("same-tx");
     await expect(run(f,replacement,async()=>"replayed")).rejects.toMatchObject({code:"SOURCE_OWNER_UNAVAILABLE"});
+  });
+  it("blocks detached standalone fallback while the actual transaction is still open",async()=>{
+    const f=await fixture(),plan=await prepare(f),barrier=deferred(),unplannedId=randomUUID();
+    await prisma.$transaction(async tx=>{
+      let detached!:Promise<void>;
+      const attested=await owner(f,tx,plan);
+      await withSourceCommitLockPlan(f.actor,f.workspace.id,tx,f.roots,[],f.binding,plan,attested,async()=>{
+        detached=barrier.promise.then(async()=>{
+          await expect(capturePermissionEpochs(tx,f.workspace.id,[{kind:"BrainArticle",id:unplannedId}]))
+            .rejects.toMatchObject({code:"SOURCE_LOCK_UNCOVERED"});
+          await expect(captureArtifactInputProof(f.actor,f.workspace.id,[{kind:"BrainArticle",id:f.source.id}],tx))
+            .rejects.toMatchObject({code:"SOURCE_LOCK_UNCOVERED"});
+        });
+        return "source-scope-finished";
+      });
+      barrier.resolve();await detached;
+      expect(await tx.sourcePermissionEpoch.findMany({where:{workspaceId:f.workspace.id,sourceKind:"BrainArticle",sourceId:unplannedId}})).toEqual([]);
+    },{timeout:20000});
+    expect(provider.callsInTransaction).toBe(0);
   });
   it("serializes two consumed-only Box native scopes using initial UPDATE without provider calls inside SQL",async()=>{
     const f=await fixture();

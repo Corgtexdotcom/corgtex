@@ -100,4 +100,38 @@ describe("complete saved consumption permission coverage", () => {
     expect(await isArtifactInputPermissionEpochCoverageComplete({ ...params,
       permissionEpochs: { ...proof, entries: proof.entries.filter(entry => entry.kind !== "FinanceReportUploadInput") } })).toBe(false);
   });
+
+  it("requires a saved credential snapshot's exact ToolLink parent identity", async () => {
+    const document = await source(), action = output();
+    fixture.rows.workspaceToolLink = [];
+    const link = fixture.add("workspaceToolLink", { id: "synthetic-tool-link", workspaceId,
+      createdByUserId: alpha.kind === "user" ? alpha.user.id : null, credentialLabel: "Synthetic credential",
+      credentialSecretEnc: "encrypted-test-value", archivedAt: null });
+    fixture.prisma.workspaceToolLink = { findFirst: vi.fn(async ({ where, select }: any) => {
+      if (where.id !== link.id || where.workspaceId !== workspaceId) return null;
+      return select ? Object.fromEntries(Object.keys(select).map(field => [field, link[field]])) : link;
+    }) };
+    const documentRoot = (await captureArtifactInputProof(alpha, workspaceId,
+      [{ kind: "Document", id: document.id }], fixture.prisma))[0]!;
+    const credentialRoot = { kind: "WorkspaceToolLinkCredential" as const, id: link.id,
+      fingerprint: lineageContentFingerprint("WorkspaceToolLinkCredential", link) };
+    const saved = await captureArtifactPermissionEpochs(alpha, workspaceId,
+      [credentialRoot, documentRoot], fixture.prisma);
+    expect(saved.entries).toContainEqual(expect.objectContaining({ kind: "WorkspaceToolLink", id: link.id }));
+    // A malformed historical receipt declares an unrelated root and omits the
+    // credential's real parent. It cannot borrow a fresh ToolLink epoch.
+    const snapshot = fixture.add("artifactInputSnapshot", { id: "incomplete-credential-snapshot", workspaceId,
+      sourceKind: credentialRoot.kind, sourceId: link.id, sourceFingerprint: credentialRoot.fingerprint,
+      origin: "DERIVED", contentJson: Object.fromEntries(Object.entries(link).filter(([key]) => key !== "id")),
+      accessEnvelopeJson: { createdByUserId: link.createdByUserId },
+      rootsJson: [documentRoot], epochProofVersion: 1,
+      permissionEpochsJson: { ...saved, entries: saved.entries.filter(entry => entry.kind !== "WorkspaceToolLink") } });
+    const snapshotRoot = { kind: "ArtifactInputSnapshot" as const, id: snapshot.id,
+      fingerprint: lineageContentFingerprint("ArtifactInputSnapshot", snapshot) };
+    const outputProof = await captureArtifactPermissionEpochs(alpha, workspaceId,
+      [{ kind: "Action", id: action.id, fingerprint: lineageContentFingerprint("Action", action) }], fixture.prisma);
+    expect(await isArtifactInputPermissionEpochCoverageComplete({ workspaceId,
+      artifact: { kind: "Action", id: action.id }, content: action, roots: [snapshotRoot],
+      permissionEpochs: outputProof, db: fixture.prisma })).toBe(false);
+  });
 });

@@ -6,6 +6,54 @@ is INCOMPLETE. Keep PR1517 draft; do not merge or deploy.
 
 ## October13 source commit and standing-note checkpoint
 
+### Next repair checkpoint after020a8997
+
+Published020a89977ca19bc90a4f8a023793e5672f5912e9 exact-head CI
+[38460491798](https://github.com/Corgtexdotcom/corgtex/actions/runs/38460491798)
+finished red:12266pass/14fail/2skip and one import-suite failure. Build,
+DatabaseSync/seed/schema, lint/types, docs/policy and scans passed. Failure groups:
+Recall7 genuine authenticated intake/audience gaps; Brain2 actual missing newborn
+history-Version epoch defects; Finance1 historical snapshot coverage defect;
+Build2, frozen CRM1 and Meeting context1 faithful fixture repairs; and a local-only
+database guard that rejected the verified Actions database before importing tests.
+
+The next bounded checkpoint fixes those non-Recall groups. Its final composed
+units pass314/314 across15 files, domain types and changed-file lint pass.
+Actual PostgreSQL: existing Brain/digest8/8, new history constructor4/4, retained
+Execution7/7, affected source-plan3/3 and expired-source-context1/1. Cohorts
+overlap earlier evidence and are not full acceptance. Independent GPT-6 Sol xhigh
+review cleared the bounded history constructor, historical coverage and epoch
+read-pass/lifetime corrections. Required exact-new-head CI remains outstanding.
+
+The trusted history constructor creates the Version itself and consumes a private
+one-shot birth receipt bound to exact transaction/workspace/source/output hashes.
+It keeps every original source epoch unchanged and adds only the newborn Version
+own epoch. Original history remains valid under its saved envelope; stale or
+unproved derived history is preserved as UNKNOWN. No existing Version can be
+promoted by an `isNew` flag or refreshed old permission vector.
+
+Historical coverage now walks hash-bound immutable snapshot preimages, preserving
+their original parent/governor identities instead of borrowing mutable later Fact
+metadata. This fixes the unit regression, but REAL Finance restatement remains
+open: its Fact parent-binding trigger advances the Fact own epoch, so the earlier
+immutable Fact snapshot still correctly fails current proof. A trusted immutable
+Fact revision or independently authenticated original-value recipe is required;
+restamping the historical epoch or dropping the source is forbidden.
+
+Bounded proof passes batch fresh covered epoch observations at entry/exit and
+still validate every original vector and referenced newborn key. Expired inherited
+source contexts now deny before standalone fallback. In one synthetic mixed
+Execution sample, preparation operations fell1367→1044 and publication2236→2008;
+elapsed times worsened1403→2632ms and2474→7833ms. These are Prisma operation
+counts, not SQL statement counts; lock metrics are lower bounds. Query fanout,
+actual lock duration, latency and scaling acceptance remain open.
+
+Bloop retains PUN85 as well as PUN94/95. The published Knowledge fence callbacks
+are available, but durable source-run generation and EXTERNAL_DATABASE native
+authority remain unimplemented. Bloop must propose narrow shared Knowledge hunks
+and claim persistence before edits; PUN68 source-authority files remain reserved.
+The release task and all production resources remain untouched.
+
 This candidate extends published aef530642100e8e41dc555517fef193316e3d2bb.
 The bounded architecture/ownership contract is [source commit contract](pun68-source-commit-contract.md).
 It implements complete discovered source/governor/predicate locks, original

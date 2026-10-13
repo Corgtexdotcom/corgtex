@@ -15,9 +15,9 @@ import { lockActiveArticleSources, lockBrainSourceLink } from "./brain-source-li
 import { requestBrainSourceRemoval } from "./brain-source-removal";
 import { brainSourceContentFingerprint, type BrainArticleDerivationV1 } from "./brain-derivation";
 import { readBrainArticleDerivation, sourceIdsInDerivation } from "./brain-source-impact";
-import { copyArtifactInputLineage, currentArtifactInputRoots, lineageContentFingerprint, readableArtifactIds, readableBrainSourceIds,
+import { createBrainArticleHistoryVersion, currentArtifactInputRoots, lineageContentFingerprint, readableArtifactIds, readableBrainSourceIds,
   assertArtifactInputWriteFence, isArtifactInputProofReadable,
-  recordArtifactInputLineage, invalidateArtifactInputLineage, type LineageRoot } from "./source-lineage";
+  recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
 import { invariant } from "./errors";
 import { persistedMemberId } from "./membership";
 import { requireDraftManager, requireCreationInputRoots } from "./draft-permissions";
@@ -382,30 +382,10 @@ export async function updateArticle(actor: AppActor, params: {
         select: { version: true },
       });
 
-      const previousVersion = await tx.brainArticleVersion.create({
-        data: {
-          articleId: article.id,
-          version: (lastVersion?.version ?? 0) + 1,
-          bodyMd: article.bodyMd,
-          accessEnvelopeJson: { isPrivate: article.isPrivate, ownerMemberId: article.ownerMemberId },
-          // This row preserves the prior body. Details of the new edit cannot
-          // add new source dependencies to an independently written original.
-          changeSummary: null,
-          agentRunId: null,
-        },
-      });
-      if (canPreserveKnownHistory) {
-        invariant(await copyArtifactInputLineage({ tx, workspaceId: params.workspaceId,
-          from: { kind: "BrainArticle", id: article.id }, fromContent: article,
-          to: { kind: "BrainArticleVersion", id: previousVersion.id }, toContent: previousVersion }),
-        409, "UNKNOWN_LINEAGE", "The previous body could not be preserved.");
-        previousVersionId = previousVersion.id;
-      } else {
-        // Preserve the old bytes without making them a generation input or a
-        // readable historical copy when their current source grants are gone.
-        await invalidateArtifactInputLineage({ tx, workspaceId: params.workspaceId,
-          artifact: { kind: "BrainArticleVersion", id: previousVersion.id }, content: previousVersion });
-      }
+      const history = await createBrainArticleHistoryVersion({tx, workspaceId: params.workspaceId,
+        article, version: (lastVersion?.version ?? 0) + 1, reason: "BODY_EDIT",
+        preserveKnownHistory: canPreserveKnownHistory});
+      if (history.preserved) previousVersionId = history.version.id;
     }
 
     const data: Record<string, unknown> = {};

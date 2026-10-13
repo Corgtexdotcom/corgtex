@@ -3,7 +3,7 @@
 This is the candidate contract for draft PR1517. It describes the implemented
 source plan and the retained Execution COMMENT/existing-target composition.
 It is not full PUN-68 acceptance or authorization to activate Bloop's held patch.
-Current published baseline: aef530642100e8e41dc555517fef193316e3d2bb.
+Current published baseline:020a89977ca19bc90a4f8a023793e5672f5912e9.
 
 ## Inputs and ownership
 
@@ -66,6 +66,16 @@ snapshot ancestry against original inputs or declared verified conversions.
 An immutable receipt UUID does not need a fabricated mutable source epoch.
 Previously stored epoch entries remain mandatory and unchanged.
 
+Article history uses a trusted ORM-create constructor with a private, one-shot
+birth receipt bound to exact transaction, workspace, source and output hashes.
+It seals caller content before awaits and accepts only the preallocated Version
+ID under an active source plan. The copied vector retains all original values
+and adds only the genuinely newborn Version own epoch. Existing rows, arbitrary
+birth flags and JSON receipts cannot acquire this authority. Stale/unproved
+derived history is preserved as UNKNOWN without blocking an independently
+authorized source regeneration. H0 history retains its original saved envelope;
+its creation vector is not required to match a later privacy/restore epoch.
+
 Every Generic graph variant source in `scopeJson.sources` must match original
 semantic evidence, independently of target structure. Current structural fences
 are restricted to an absent, new owner-private variant. They bind target body
@@ -80,6 +90,17 @@ Discovery of current dependencies supplies required identities only. Fresh proof
 cannot be harvested through later unpinned same-body manifests to fill an old
 hole. Actual saved root vectors and hash-bound immutable snapshot ancestry remain
 usable. H0 creation proof is not substitute consumption evidence.
+
+Inside an exact active source plan, each read-only local/serving proof pass reads
+the covered epoch union once before traversal and again before a positive return.
+Every saved vector still parses, checks exact coverage and compares its original
+values. Nested pure validators share only that pass; unused newborn own keys may
+be absent, while any referenced absent key denies. Captures stay outside the pass.
+The final SQL also detects a concurrent same-transaction epoch mutation. Maps
+expire on return/throw; later reads query afresh. Outside-plan reads keep fresh SQL.
+Inherited expired source-plan contexts deny before any standalone read/write
+fallback, including physical locks, Finance, snapshots and epoch initialization.
+These checks grant no serving capability or public cache bypass option.
 
 Typed nested readers share admission heads and propagate provider-await state to
 every enclosing read. Final checks use sealed copies and fresh DB-only traversal

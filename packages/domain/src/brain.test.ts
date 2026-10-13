@@ -92,6 +92,12 @@ vi.mock("./source-lineage", async (original) => ({
       || ["chat-demand", "daily-batch", "daily-digest", "daily-question"].includes(source.channel ?? ""),
   recordArtifactInputLineage: vi.fn(),
   copyArtifactInputLineage: vi.fn().mockResolvedValue(true),
+  createBrainArticleHistoryVersion: vi.fn(async ({tx, article, version, reason, preserveKnownHistory}) => ({
+    version: await tx.brainArticleVersion.create({data: {articleId: article.id, version, bodyMd: article.bodyMd,
+      accessEnvelopeJson: {isPrivate: article.isPrivate, ownerMemberId: article.ownerMemberId},
+      changeSummary: reason === "BODY_EDIT" ? null : "Previous body before reviewed source regeneration.", agentRunId: null}}),
+    preserved: preserveKnownHistory,
+  })),
   captureArtifactInputSnapshotProof: vi.fn().mockResolvedValue([{kind: "ArtifactInputSnapshot", id: "old-body-receipt", fingerprint: "1".repeat(64)}]),
   currentArtifactInputRoots: vi.fn().mockResolvedValue([]),
   readableArtifactIds,
@@ -988,7 +994,7 @@ describe("Brain discussions with actual complete lineage receipts", () => {
     vi.clearAllMocks();
     source = await vi.importActual<typeof import("./source-lineage")>("./source-lineage");
     const mocked = await import("./source-lineage");
-    for (const name of ["readableArtifactIds", "recordArtifactInputLineage", "copyArtifactInputLineage", "currentArtifactInputRoots", "captureArtifactInputSnapshotProof"] as const) vi.mocked(mocked[name]).mockImplementation(source[name] as any);
+    for (const name of ["readableArtifactIds", "recordArtifactInputLineage", "copyArtifactInputLineage", "createBrainArticleHistoryVersion", "currentArtifactInputRoots", "captureArtifactInputSnapshotProof"] as const) vi.mocked(mocked[name]).mockImplementation(source[name] as any);
     for (const name of ["brainArticle", "brainArticleVersion", "auditLog", "brainSource", "brainDiscussionThread", "brainDiscussionComment", "member", "user", "action", "artifactInputLineage", "artifactInputSnapshot"]) {
       rows[name] = [];
       const delegate: any = (prismaMock as any)[name];

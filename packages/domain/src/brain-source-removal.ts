@@ -9,7 +9,7 @@ import { sourceIdsInDerivation } from "./brain-source-impact";
 import { lockActiveArticleSources, lockBrainSourceLink } from "./brain-source-links";
 import { AppError, invariant } from "./errors";
 import { appendEvents } from "./events";
-import { advanceHumanArtifactInputLineage, assertArtifactInputWriteFence, captureArtifactInputProof, copyArtifactInputLineage, currentArtifactInputRoots,
+import { advanceHumanArtifactInputLineage, assertArtifactInputWriteFence, captureArtifactInputProof, createBrainArticleHistoryVersion, currentArtifactInputRoots,
   inspectStoredArtifactInputDependencies, isArtifactInputProofReadable, readableArtifactIds,
   readableBrainSourceIds, recordArtifactInputLineage, sealArtifactInputActor, type LineageRoot } from "./source-lineage";
 import { commitBrainSourceRemovalCompletion, consumeArchivedBrainSourceRetirement, findBrainSourceRemovalCompletion,
@@ -658,15 +658,9 @@ export async function resolveBrainSourceRemoval(actor: AppActor, params: {
       const record = await tx.brainArticle.findFirst({ where: { id: article.id, workspaceId: params.workspaceId, archivedAt: null } });
       invariant(record, 409, "SOURCE_CHANGED", "Article changed before review.");
       const prior = await tx.brainArticleVersion.findFirst({ where: { articleId: record.id }, orderBy: { version: "desc" }, select: { version: true } });
-      const previousVersion = await tx.brainArticleVersion.create({ data: {
-        articleId: record.id, version: (prior?.version ?? 0) + 1, bodyMd: record.bodyMd,
-        accessEnvelopeJson: { isPrivate: record.isPrivate, ownerMemberId: record.ownerMemberId },
-        changeSummary: "Previous body before reviewed source regeneration.",
-      } });
-      await copyArtifactInputLineage({ tx, workspaceId: params.workspaceId,
-        from: { kind: "BrainArticle", id: record.id }, fromContent: record,
-        to: { kind: "BrainArticleVersion", id: previousVersion.id }, toContent: previousVersion,
-      });
+      await createBrainArticleHistoryVersion({tx, workspaceId: params.workspaceId,
+        article: record, version: (prior?.version ?? 0) + 1,
+        reason: "REVIEWED_SOURCE_REGENERATION", preserveKnownHistory: true});
       const slug = `regenerated-${record.id}`;
       const updated = await tx.brainArticle.update({ where: { id: record.id }, data: {
         title, slug, bodyMd, type: "PROJECT", frontmatterJson: Prisma.DbNull,

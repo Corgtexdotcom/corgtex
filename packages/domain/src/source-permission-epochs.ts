@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import { invariant } from "./errors";
 import { assertSourceCommitEpochCaptureCovered, assertSourceCommitPermissionReadCovered,
   assertSourceCommitTransactionCompatible,
-  hasActiveSourceCommitLockPlan } from "./source-commit-lock-plan";
+  hasActiveSourceCommitLockPlan, sourceCommitPermissionReadIdentities,
+  isSourceCommitHeldPermissionUnionCurrent } from "./source-commit-lock-plan";
 
 export const SOURCE_PERMISSION_POLICY_VERSION = "pun68-permissions-v3";
 export type PermissionEpochIdentity = { kind: string; id: string };
@@ -12,6 +14,55 @@ export type PermissionEpochProof = { version: 1; policyVersion: typeof SOURCE_PE
   entries: Array<PermissionEpochIdentity & { epoch: string }> };
 type EpochClient = Prisma.TransactionClient | typeof prisma;
 const MAX_EPOCH_IDENTITIES = 10000;
+
+type PermissionReadPass = { db: EpochClient; workspaceId: string; active: boolean;
+  observed: Map<string, string>; checked: Map<string, string> };
+const permissionReadPass = new AsyncLocalStorage<PermissionReadPass>();
+const epochKey = (identity: PermissionEpochIdentity) => JSON.stringify([identity.kind, identity.id]);
+
+async function readCoveredEpochUnion(db: EpochClient, workspaceId: string,
+  identities: readonly PermissionEpochIdentity[]) {
+  const rows = await db.$queryRaw<Array<{ sourceKind: string; sourceId: string; epoch: bigint }>>(Prisma.sql`
+    SELECT "sourceKind", "sourceId", "epoch" FROM "SourcePermissionEpoch" WHERE "workspaceId" = ${workspaceId}
+    AND ("sourceKind", "sourceId") IN (${Prisma.join(identities.map(identity => Prisma.sql`(${identity.kind}, ${identity.id})`))})
+    ORDER BY "sourceKind" COLLATE "C", "sourceId" COLLATE "C"`);
+  return rows.map(row => ({kind: row.sourceKind, id: row.sourceId, epoch: row.epoch.toString()}));
+}
+
+/** Internal read-only proof invocation, never a writer callback or serving receipt.
+ * Only an exact held source plan may batch checks. Nested pure validators share
+ * one map; every new invocation reads afresh. Final SQL catches interleaved DML
+ * on this same transaction, including a referenced newborn own epoch. */
+export async function withSourceCommitPermissionReadPass(db: EpochClient, workspaceId: string,
+  read: () => Promise<boolean>): Promise<boolean> {
+  assertSourceCommitTransactionCompatible(db);
+  const inherited = permissionReadPass.getStore();
+  if (inherited) {
+    invariant(inherited.active && inherited.db === db && inherited.workspaceId === workspaceId,
+      409, "SOURCE_LOCK_UNCOVERED", "Permission read pass belongs to another client or expired scope.");
+    return read();
+  }
+  if (!hasActiveSourceCommitLockPlan(db)) return read();
+  const identities = sourceCommitPermissionReadIdentities(db, workspaceId);
+  // The plan budget and reserved outputs bound the union independently of
+  // repeated roots. Optional unborn own keys can be absent until construction.
+  invariant(identities.length > 0 && identities.length <= MAX_EPOCH_IDENTITIES * 2,
+    409, "PERMISSION_PROOF_LIMIT", "Permission read union requires a bounded rebuild.");
+  const rows = await readCoveredEpochUnion(db, workspaceId, identities);
+  if (!isSourceCommitHeldPermissionUnionCurrent(db, workspaceId, rows)) return false;
+  const pass: PermissionReadPass = {db, workspaceId, active: true,
+    observed: new Map(rows.map(entry => [epochKey(entry), entry.epoch])), checked: new Map()};
+  return permissionReadPass.run(pass, async () => {
+    try {
+      if (!await read()) return false;
+      assertSourceCommitTransactionCompatible(db);
+      const currentRows = await readCoveredEpochUnion(db, workspaceId, identities);
+      if (!isSourceCommitHeldPermissionUnionCurrent(db, workspaceId, currentRows)) return false;
+      const current = new Map(currentRows.map(entry => [epochKey(entry), entry.epoch]));
+      return [...pass.checked].every(([key, epoch]) => current.get(key) === epoch);
+    } finally { pass.active = false; }
+  });
+}
 
 export function parsePermissionEpochProof(value: unknown): PermissionEpochProof | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -81,6 +132,8 @@ export function artifactPermissionEpochIdentities(kind: string, row: Record<stri
 export async function capturePermissionEpochs(tx: Prisma.TransactionClient, workspaceId: string,
   identities: readonly PermissionEpochIdentity[]): Promise<PermissionEpochProof> {
   assertSourceCommitTransactionCompatible(tx);
+  invariant(!permissionReadPass.getStore(), 409, "SOURCE_LOCK_UNCOVERED",
+    "Epoch capture cannot mutate a read-only permission proof pass.");
   const sorted = [...new Map(identities.map((identity) => [JSON.stringify([identity.kind, identity.id]), identity])).entries()]
     .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0).map(([, identity]) => identity);
   invariant(sorted.length > 0 && sorted.length <= MAX_EPOCH_IDENTITIES, 409, "PERMISSION_PROOF_LIMIT", "Source permission proof requires a bounded rebuild.");
@@ -106,6 +159,17 @@ export async function isArtifactPermissionEpochProofCurrent(workspaceId: string,
   if (!proof) return false;
   const planned = hasActiveSourceCommitLockPlan(db);
   if (planned) assertSourceCommitPermissionReadCovered(db, workspaceId, proof);
+  const pass = permissionReadPass.getStore();
+  if (pass) {
+    invariant(pass.active && planned && pass.db === db && pass.workspaceId === workspaceId,
+      409, "SOURCE_LOCK_UNCOVERED", "Permission read pass belongs to another client or expired scope.");
+    for (const entry of proof.entries) {
+      const key = epochKey(entry);
+      if (pass.observed.get(key) !== entry.epoch) return false;
+      pass.checked.set(key, entry.epoch);
+    }
+    return true;
+  }
   const query = Prisma.sql`SELECT "sourceKind", "sourceId", "epoch" FROM "SourcePermissionEpoch" WHERE "workspaceId" = ${workspaceId}
     AND ("sourceKind", "sourceId") IN (${Prisma.join(proof.entries.map((entry) => Prisma.sql`(${entry.kind}, ${entry.id})`))})
     ORDER BY "sourceKind" COLLATE "C", "sourceId" COLLATE "C"`;

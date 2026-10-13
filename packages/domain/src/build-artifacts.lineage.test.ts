@@ -5,7 +5,7 @@ import { fixture, workspaceId, alpha, beta, resetFixture, known } from "../../ag
 import type { AppActor } from "@corgtex/shared";
 
 const storage = vi.hoisted(() => ({ put: vi.fn(), get: vi.fn(), getSignedUrl: vi.fn() }));
-vi.mock("@corgtex/shared", () => ({ prisma: fixture.prisma, encryptSecret: (v: string) => `enc:${v}`,
+vi.mock("@corgtex/shared", async () => ({ ...await import("../../shared/src/mcp-context"), prisma: fixture.prisma, encryptSecret: (v: string) => `enc:${v}`,
   decryptSecret: (v: string) => v.slice(4), randomOpaqueToken: () => "synthetic-bearer", sha256: (v: string) => `sha:${v}`,
   env: { APP_URL: "https://synthetic.example.test" } }));
 vi.mock("@corgtex/storage", () => ({ defaultStorage: storage }));
@@ -65,11 +65,25 @@ function transport(name: string) {
 beforeEach(async () => {
   await resetFixture(); revision = 0; files.clear();
   for (const name of ["buildArtifact", "buildArtifactAsset", "workspaceFeatureFlag", "auditLog", "executionRequest", "executionResult"]) transport(name);
-  fixture.prisma.$queryRaw = vi.fn(async (sql: any, ...values: any[]) => sql.join?.("").includes('SELECT * FROM "ExecutionRequest"')
-    ? fixture.rows.executionRequest.filter((r) => r.id === values[0] && r.workspaceId === values[1] && r.writebackTargetType === "BUILD_ARTIFACT").map((r) => ({ ...r })) : []);
+  fixture.prisma.$queryRaw = vi.fn(async (sql: any, ...values: any[]) => {
+    const text = typeof sql?.sql === "string" ? sql.sql : Array.isArray(sql) ? sql.join("?") : "";
+    const bound = Array.isArray(sql?.values) ? sql.values : values;
+    const table = text.match(/FROM "([A-Za-z]+)"/)?.[1];
+    if (!table) return [];
+    const name = table[0].toLowerCase() + table.slice(1);
+    const predicates = [...text.matchAll(/(?:"([A-Za-z]+)"|\b(id)\b)\s*=\s*\?/g)];
+    return (fixture.rows[name] ?? []).filter(row => predicates.every((predicate, index) => row[predicate[1] ?? predicate[2]] === bound[index])
+      && (!text.includes("'FINANCE'") || row.flag === "FINANCE")
+      && (!text.includes("'BUILD_ARTIFACT'") || row.writebackTargetType === "BUILD_ARTIFACT"))
+      .map(row => ({ ...row }));
+  });
   fixture.prisma.$transaction.mockImplementation(async (run: any) => {
     const before = structuredClone(fixture.rows);
-    try { return await run(fixture.prisma); }
+    const tx = new Proxy(fixture.prisma, { get(target, key) {
+      const value = Reflect.get(target, key, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
+    try { return await run(tx); }
     catch (error) { for (const name of Object.keys(before)) fixture.rows[name] = before[name]; throw error; }
   });
   storage.put.mockImplementation(async (key, data) => { files.set(key, data); });

@@ -4,6 +4,18 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { encryptSecret, prisma,
   type AppActor } from "@corgtex/shared";
 
+type LockMetric = { startedMs: number; acquiredMs: number; roundTripMs: number };
+type TransactionMetric = {
+  durationMs: number; prismaOperations: number;
+  phase: "preparation" | "publication";
+  delegateOperations: Record<string, number>; rawSqlClasses: Record<string, number>;
+  transactionStartDelayMs: number; transactionReturnedMs: number; transactionSucceeded: boolean;
+  firstAdvisoryLock: LockMetric | null; firstPhysicalLock: LockMetric | null; firstEpochLock: LockMetric | null;
+  firstDmlStartedMs: number | null; callbackReturnedMs: number;
+  lockHeldLowerBoundMs: number | null;
+  actualSqlStatementCount: null;
+};
+
 const remote = vi.hoisted(() => ({
   box: { text: "Synthetic selected Box bytes" } as unknown,
   mcp: { structuredContent: { results: [{ id: "synthetic-hit" }] } } as unknown,
@@ -12,7 +24,7 @@ const remote = vi.hoisted(() => ({
   requestReadBarrier: null as null | { requestId: string; count: number; ready: Promise<void>; release: () => void },
   slackWorkspaceId: "",
   measureTransactions: false,
-  transactions: [] as Array<{ durationMs: number; prismaOperations: number }>,
+  transactions: [] as TransactionMetric[],
   slack: [{ type: "message", ts: "1700000000.000001", user: "U_PUBLIC", text: "Synthetic public Slack input" }],
   slackRead: vi.fn(),
 }));
@@ -50,30 +62,87 @@ vi.mock("@corgtex/shared", async importOriginal => {
       const original = target.$transaction.bind(target) as (...args: any[]) => Promise<any>;
       if (typeof args[0] !== "function") return original(...args);
       const callback = args[0];
-      return original(async (tx: any) => {
+      const invoked = performance.now();
+      let metric: TransactionMetric | undefined;
+      let callbackStarted = 0;
+      let succeeded = false;
+      try { const result = await original(async (tx: any) => {
         const started = performance.now();
+        callbackStarted = started;
         let prismaOperations = 0;
+        const timed = remote.measureTransactions && args[1]?.timeout === 120_000;
+        const rounded = (value: number) => Math.round(value * 100) / 100;
+        if (timed) metric = { phase: remote.transactions.length === 0 ? "preparation" : "publication",
+          durationMs: 0, prismaOperations: 0, delegateOperations: {}, rawSqlClasses: {},
+          transactionStartDelayMs: rounded(started - invoked), transactionReturnedMs: 0, transactionSucceeded: false,
+          firstAdvisoryLock: null, firstPhysicalLock: null, firstEpochLock: null, firstDmlStartedMs: null,
+          callbackReturnedMs: 0, lockHeldLowerBoundMs: null, actualSqlStatementCount: null };
+        // Inspect static SQL fragments only. Never retain SQL text, arguments, identifiers or values in metrics.
+        const classifyRaw = (values: any[]): { label: string; lock?: "advisory" | "physical" | "epoch"; dml: boolean } => {
+          const input = values[0];
+          const fragments = Array.isArray(input) ? input : input?.strings;
+          const sql = Array.isArray(fragments) ? fragments.join(" ? ") : typeof input === "string" ? input : "";
+          const dml = /\b(INSERT|UPDATE|DELETE)\s+(INTO|FROM|"|[A-Za-z])/i.test(sql) && !/\bFOR\s+UPDATE\b/i.test(sql);
+          if (/pg_advisory_xact_lock/i.test(sql)) return { label: /pg_advisory_xact_lock_shared/i.test(sql)
+            ? "advisory_lock_shared" : "advisory_lock_update", lock: "advisory", dml: false };
+          if (/"SourcePermissionEpoch"/.test(sql)) return { label: dml ? "epoch_write" : /\bFOR\s+SHARE\b/i.test(sql)
+            ? "epoch_lock_share" : "epoch_read", ...(/\bFOR\s+SHARE\b/i.test(sql) ? { lock: "epoch" as const } : {}), dml };
+          if (/\bFOR\s+(SHARE|UPDATE)\b/i.test(sql)) return { label: /\bFOR\s+UPDATE\b/i.test(sql)
+            ? "physical_lock_update" : "physical_lock_share", lock: "physical", dml: false };
+          if (/pg_backend_pid|txid_current/i.test(sql)) return { label: "transaction_identity", dml: false };
+          return { label: dml ? "dml" : /\bSELECT\b/i.test(sql) ? "select" : "other", dml };
+        };
+        const count = (histogram: Record<string, number>, key: string) => { histogram[key] = (histogram[key] ?? 0) + 1; };
         const measured = new Proxy(tx, { get(connection, property) {
           const value = Reflect.get(connection, property, connection);
-          if (typeof value === "function") return (...values: any[]) => {
-            if (["$queryRaw", "$queryRawUnsafe", "$executeRaw", "$executeRawUnsafe"].includes(String(property))) prismaOperations++;
-            return value.apply(connection, values);
+          if (typeof value === "function") return async (...values: any[]) => {
+            const raw = ["$queryRaw", "$queryRawUnsafe", "$executeRaw", "$executeRawUnsafe"].includes(String(property));
+            const classification = raw && metric ? classifyRaw(values) : undefined;
+            const operationStarted = performance.now();
+            if (raw) prismaOperations++;
+            if (metric && classification) {
+              count(metric.rawSqlClasses, classification.label);
+              if (classification.dml && metric.firstDmlStartedMs === null) metric.firstDmlStartedMs = rounded(operationStarted - started);
+            }
+            const result = await value.apply(connection, values);
+            if (metric && classification?.lock && (classification.lock === "advisory" || Array.isArray(result) && result.length > 0)) {
+              const field = classification.lock === "advisory" ? "firstAdvisoryLock"
+                : classification.lock === "epoch" ? "firstEpochLock" : "firstPhysicalLock";
+              if (metric[field] === null) metric[field] = { startedMs: rounded(operationStarted - started),
+                acquiredMs: rounded(performance.now() - started), roundTripMs: rounded(performance.now() - operationStarted) };
+            }
+            return result;
           };
           if (!value || typeof value !== "object") return value;
           return new Proxy(value, { get(delegate, operation) {
             const method = Reflect.get(delegate, operation, delegate);
             return typeof method === "function" ? (...values: any[]) => {
-              prismaOperations++; return method.apply(delegate, values);
+              prismaOperations++;
+              if (metric) {
+                count(metric.delegateOperations, `${String(property)}.${String(operation)}`);
+                if (/^(create|update|upsert|delete)/.test(String(operation)) && metric.firstDmlStartedMs === null)
+                  metric.firstDmlStartedMs = rounded(performance.now() - started);
+              }
+              return method.apply(delegate, values);
             } : method;
           } });
         } });
         remote.inTransaction++;
         try { return await transactionScope.run(true, () => callback(measured)); } finally {
           remote.inTransaction--;
-          if (remote.measureTransactions && args[1]?.timeout === 120_000)
-            remote.transactions.push({ durationMs: Math.round(performance.now() - started), prismaOperations });
+          if (metric) { metric.durationMs = rounded(performance.now() - started); metric.prismaOperations = prismaOperations;
+            metric.callbackReturnedMs = metric.durationMs; }
         }
-      }, ...args.slice(1));
+      }, ...args.slice(1)); succeeded = true; return result; } finally {
+        if (metric) {
+          metric.transactionReturnedMs = Math.round((performance.now() - callbackStarted) * 100) / 100;
+          metric.transactionSucceeded = succeeded;
+          const acquired = [metric.firstAdvisoryLock, metric.firstPhysicalLock, metric.firstEpochLock]
+            .filter((entry): entry is LockMetric => entry !== null).map(entry => entry.acquiredMs);
+          metric.lockHeldLowerBoundMs = acquired.length ? Math.round((metric.transactionReturnedMs - Math.min(...acquired)) * 100) / 100 : null;
+          remote.transactions.push(metric);
+        }
+      }
     };
   } });
   return { ...actual, prisma: instrumented };
@@ -99,8 +168,13 @@ import { defaultModelGateway } from "@corgtex/models";
 import { AppError } from "./errors";
 
 const database = new URL(process.env.DATABASE_URL ?? "postgresql://invalid/invalid");
-if (database.hostname !== "127.0.0.1" || database.port !== "55468" || database.pathname !== "/corgtex_test"
-  || database.searchParams.get("schema") !== "public") throw new Error("Native caller tests require the assigned synthetic localhost55468/corgtex_test database.");
+const assignedLocalFixture = database.hostname === "127.0.0.1" && database.port === "55468";
+const assignedCiFixture = process.env.GITHUB_ACTIONS === "true"
+  && database.hostname === "localhost" && database.port === "5432";
+if (!["postgres:", "postgresql:"].includes(database.protocol) || (!assignedLocalFixture && !assignedCiFixture)
+  || database.pathname !== "/corgtex_test" || database.searchParams.get("schema") !== "public") {
+  throw new Error("Native caller tests require the assigned disposable local or GitHub Actions PostgreSQL fixture.");
+}
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 let current: Fixture | null = null;
 async function fixture() {
@@ -199,8 +273,18 @@ describe("actual native outer caller commit scopes", () => {
     const result = await submitExecutionResult(f.actor, { workspaceId: f.workspace.id, requestId: f.request.id,
       idempotencyKey: "native-mixed", output: { bodyMd: "Native copied result canary" }, lineageRoots: f.allRoots });
     remote.measureTransactions = false;
-    console.info("Synthetic native caller preparation/publication metrics (Prisma operations are a SQL lower bound):", remote.transactions);
+    console.info("Synthetic native caller metrics (Prisma operations, not SQL statement counts; lock-held time is a lower bound):", remote.transactions);
     expect(remote.transactions).toHaveLength(2);
+    for (const metric of remote.transactions) {
+      expect(Object.values(metric.delegateOperations).reduce((sum, count) => sum + count, 0)
+        + Object.values(metric.rawSqlClasses).reduce((sum, count) => sum + count, 0)).toBe(metric.prismaOperations);
+      expect(metric.transactionSucceeded).toBe(true);
+      expect(metric.firstAdvisoryLock).not.toBeNull(); expect(metric.firstPhysicalLock).not.toBeNull(); expect(metric.firstEpochLock).not.toBeNull();
+      expect(metric.firstDmlStartedMs).not.toBeNull();
+      expect(metric.transactionReturnedMs).toBeGreaterThanOrEqual(metric.callbackReturnedMs);
+      expect(metric.lockHeldLowerBoundMs).toBeGreaterThan(0);
+      expect(metric.lockHeldLowerBoundMs).toBeLessThanOrEqual(metric.transactionReturnedMs);
+    }
     if (process.env.PUN68_NATIVE_CALLER_METRICS_PATH)
       await writeFile(process.env.PUN68_NATIVE_CALLER_METRICS_PATH, JSON.stringify(remote.transactions, null, 2));
     expect(result).toMatchObject({ status: "ACCEPTED", output: { bodyMd: "Native copied result canary" } });

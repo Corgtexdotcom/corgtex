@@ -7,7 +7,7 @@ import { isArtifactInputProofReadable, recordArtifactInputLineage, captureArtifa
 import { mergePermissionEpochProofs, capturePermissionEpochs, isArtifactPermissionEpochProofCurrent } from "./source-permission-epochs";
 import { assertOutsideArtifactNativeCommitPhase } from "./artifact-native-commit-phase";
 import { SOURCE_AUTHORITY_TABLES } from "./source-authority-edges";
-import { registerSourceCommitPublishedOutput, assertSourceCommitSemanticRootCovered, assertSourceCommitSnapshotInputCovered, assertSourceCommitTransactionCompatible, assertSourceCommitPermissionReadCovered, assertSourceCommitEpochCaptureCovered, assertSourceCommitPredicateRowsCovered, prepareSourceCommitAmbientFences, assertSourceCommitEpochCovered, assertSourceCommitNewbornEpochAllowed, assertSourceCommitOutputHeadReserved, assertSourceCommitRowCovered,
+import { isSourceCommitHeldPermissionUnionCurrent, sourceCommitPermissionReadIdentities, registerSourceCommitPublishedOutput, assertSourceCommitSemanticRootCovered, assertSourceCommitSnapshotInputCovered, assertSourceCommitTransactionCompatible, assertSourceCommitPermissionReadCovered, assertSourceCommitEpochCaptureCovered, assertSourceCommitPredicateRowsCovered, prepareSourceCommitAmbientFences, assertSourceCommitEpochCovered, assertSourceCommitNewbornEpochAllowed, assertSourceCommitOutputHeadReserved, assertSourceCommitRowCovered,
   hasActiveSourceCommitLockPlan, prepareSourceCommitLockPlan, prepareSourceCommitOwnerAttestation, withSourceCommitLockPlan,
   type SourceCommitLockPlan, type SourceCommitWriteTarget } from "./source-commit-lock-plan";
 
@@ -91,6 +91,7 @@ describe("private variant structural fence composition",()=>{
   it("creates a new private variant of an unknown canonical body without adopting its old ancestry",async()=>{
     const row=canonical(),outputs=targets(row),original=structuredClone(proof),plan=await planned(row,outputs);
     await run(plan,async()=>{
+      expect(sourceCommitPermissionReadIdentities(tx,workspaceId)).toContainEqual({kind:"BrainArticle",id:row.id});
       const capture=await capturePermissionEpochs(tx,workspaceId,[{kind:"BrainArticle",id:row.id},{kind:"BrainArticle",id:"private-variant"}]);
       expect(await isArtifactPermissionEpochProofCurrent(workspaceId,capture,tx)).toBe(true);
       expect(()=>assertSourceCommitEpochCovered(tx,workspaceId,capture)).toThrow();
@@ -175,6 +176,48 @@ describe("private variant structural fence composition",()=>{
 });
 
 describe("complete source commit lock plan",()=>{
+  it("requires every held epoch at fresh comparison while allowing absent unused newborn metadata",async()=>{
+    const targets:SourceCommitWriteTarget[]=[{kind:"BrainArticle",id:"new-output",projectedAuthority:{isPrivate:false}}],plan=await prepare(targets);
+    await run(plan,async()=>{
+      const identities=sourceCommitPermissionReadIdentities(tx,workspaceId),observed:Array<{kind:string;id:string;epoch:string}>=[];
+      for(const identity of identities) {
+        if(identity.kind==="BrainArticle"&&identity.id==="new-output")continue;
+        const actual=await capturePermissionEpochs(tx,workspaceId,[identity]);observed.push(actual.entries[0]);
+      }
+      expect(isSourceCommitHeldPermissionUnionCurrent(tx,workspaceId,observed)).toBe(true);
+      expect(isSourceCommitHeldPermissionUnionCurrent(tx,workspaceId,observed.slice(1))).toBe(false);
+      expect(isSourceCommitHeldPermissionUnionCurrent(tx,workspaceId,observed.map((entry,index)=>index?entry:{...entry,epoch:String(BigInt(entry.epoch)+1n)}))).toBe(false);
+      expect(isSourceCommitHeldPermissionUnionCurrent(tx,workspaceId,[...observed,{kind:"BrainArticle",id:"new-output",epoch:"1"}])).toBe(true);
+      expect(isSourceCommitHeldPermissionUnionCurrent(tx,workspaceId,[...observed,{kind:"BrainArticle",id:"unplanned",epoch:"1"}])).toBe(false);
+      expect(isSourceCommitHeldPermissionUnionCurrent(tx,workspaceId,[...observed,observed[0]])).toBe(false);
+      expect(()=>isSourceCommitHeldPermissionUnionCurrent(cloneTx(),workspaceId,observed)).toThrow();
+      expect(()=>isSourceCommitHeldPermissionUnionCurrent(tx,"foreign-workspace",observed)).toThrow();
+      return "fresh-held-comparison";
+    },targets);
+  });
+  it("exposes only immutable covered permission identities without values, initialization or a detached scope",async()=>{
+    const targets:SourceCommitWriteTarget[]=[{kind:"BrainArticle",id:"new-output",projectedAuthority:{isPrivate:false}}],plan=await prepare(targets);
+    let retained:readonly {kind:string;id:string}[]=[];
+    await run(plan,async()=>{
+      const before=sqlLog.length;retained=sourceCommitPermissionReadIdentities(tx,workspaceId);
+      expect(sqlLog.length).toBe(before);
+      expect(retained).toContainEqual({kind:"BrainArticle",id:"new-output"});
+      expect(retained).toContainEqual({kind:"Action",id:"source"});
+      expect(retained).toContainEqual({kind:"ModulePolicy",id:"finance"});
+      expect(retained).not.toContainEqual({kind:"BrainArticle",id:"unplanned-output"});
+      expect(retained.every(identity=>Object.keys(identity).sort().join(",")==="id,kind")).toBe(true);
+      const keys=retained.map(identity=>JSON.stringify([identity.kind,identity.id]));
+      expect(keys).toEqual([...new Set(keys)].sort());
+      expect(Object.isFrozen(retained)).toBe(true);expect(retained.every(Object.isFrozen)).toBe(true);
+      expect(()=>{(retained[0] as {id:string}).id="changed";}).toThrow();
+      expect(()=>sourceCommitPermissionReadIdentities(cloneTx(),workspaceId)).toThrow();
+      expect(()=>sourceCommitPermissionReadIdentities(tx,"foreign-workspace")).toThrow();
+      expect(fixture.rows.brainArticle.some(row=>row.id==="new-output")).toBe(false);
+      return "identities-only";
+    },targets);
+    expect(retained).toContainEqual({kind:"BrainArticle",id:"new-output"});
+    expect(()=>sourceCommitPermissionReadIdentities(tx,workspaceId)).toThrow();
+  });
   it("fences actual lineage reader base and foreign clients before any membership or source query",async()=>{
     const outputs:SourceCommitWriteTarget[]=[{kind:"BrainArticle",id:"new-output",projectedAuthority:{isPrivate:false}}],plan=await prepare(outputs);
     await run(plan,async()=>{
@@ -488,6 +531,23 @@ describe("complete source commit lock plan",()=>{
   it("rejects new governing metadata during work and expires coverage after failure",async()=>{
     const plan=await prepare();await expect(run(plan,async()=>{source().authorUserId="beta";return "bad";})).rejects.toMatchObject({code:"SOURCE_CHANGED"});
     expect(hasActiveSourceCommitLockPlan(tx)).toBe(false);expect(()=>assertSourceCommitRowCovered(tx,"Action","source")).toThrow();
+  });
+  it("denies expired detached source contexts before standalone SQL or proof fallback",async()=>{
+    const plan=await prepare();let release!:()=>void;
+    const barrier=new Promise<void>(resolve=>{release=resolve;});
+    let detached!:Promise<void>;
+    await run(plan,async()=>{
+      detached=barrier.then(async()=>{
+        const before=sqlLog.length;
+        await expect(capturePermissionEpochs(tx,workspaceId,[{kind:"Action",id:"unplanned-late-source"}]))
+          .rejects.toMatchObject({code:"SOURCE_LOCK_UNCOVERED"});
+        await expect(captureArtifactInputProof(alpha,workspaceId,[{kind:"Action",id:"source"}],tx))
+          .rejects.toMatchObject({code:"SOURCE_LOCK_UNCOVERED"});
+        expect(sqlLog.length).toBe(before);
+      });
+      return "completed";
+    });
+    release();await detached;
   });
   it("does not allow output declassification merely because it adds no new ancestry",async()=>{
     const output=fixture.add("brainArticle",{id:"existing-output",workspaceId,isPrivate:true,ownerMemberId:null,archivedAt:null,title:"Private",bodyMd:"Original private body"});

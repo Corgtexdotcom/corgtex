@@ -194,6 +194,10 @@ export { createCheckInGenerationActor, createBudgetAlertActor } from "./internal
 
 export * from "./derived-artifact-variants";
 export * from "./permitted-derivation-inputs";
-export * from "./source-permission-epochs";
+export { SOURCE_PERMISSION_POLICY_VERSION, parsePermissionEpochProof,
+  artifactPermissionEpochIdentities, capturePermissionEpochs,
+  isArtifactPermissionEpochProofCurrent, permissionEpochProofHash,
+  mergePermissionEpochProofs } from "./source-permission-epochs";
+export type { PermissionEpochIdentity, PermissionEpochProof } from "./source-permission-epochs";
 
 export * from "./native-transcript-input";

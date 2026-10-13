@@ -1,5 +1,16 @@
 # PUN-68 / conversation foundation transaction contract
 
+## Current source composition
+
+This document retains the earlier native foundation interfaces. For new source
+publication, use [the bounded source commit contract](pun68-source-commit-contract.md)
+and `prepareArtifactSourceCommit` / `withArtifactSourceCommit`. The complete sorted
+source/head union is held BEFORE the durable owner callback locks its control
+rows. The historical owner-first proposal below is not an instruction to compose
+new writers literally. Existing conversation locks and Bloop controls still need
+coordinated joint acceptance. Its subsequent PR1523 patch publication remains held
+for the parent's exact approval; this route grants none.
+
 ## Publication status
 
 This document accompanies implementing code after published682c8da3.

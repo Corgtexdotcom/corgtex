@@ -665,9 +665,12 @@ export function assertSourceCommitOutputHeadReserved(tx:Prisma.TransactionClient
 /** A helper cannot escape an active union by supplying another connection/client. */
 export function assertSourceCommitTransactionCompatible(tx:Prisma.TransactionClient) {
   const scope=activePlans.getStore();
-  invariant(!scope?.active||scope.tx===tx,409,"SOURCE_LOCK_UNCOVERED","Commit helper moved to an unplanned transaction.");
+  invariant(!scope||(scope.active&&scope.tx===tx),409,"SOURCE_LOCK_UNCOVERED","Commit helper moved to an unplanned transaction or expired source scope.");
 }
-export function hasActiveSourceCommitLockPlan(tx:Prisma.TransactionClient) { const scope=activePlans.getStore();return Boolean(scope?.active&&scope.tx===tx); }
+export function hasActiveSourceCommitLockPlan(tx:Prisma.TransactionClient) {
+  assertSourceCommitTransactionCompatible(tx);
+  const scope=activePlans.getStore();return Boolean(scope?.active&&scope.tx===tx);
+}
 
 /** Snapshot allocation proves source-content coverage, independently of output head coverage. */
 export function assertSourceCommitSnapshotInputCovered(tx:Prisma.TransactionClient,workspaceId:string,outputId:string,input:LineageRoot) {
@@ -695,4 +698,44 @@ export function registerSourceCommitPublishedOutput(tx:Prisma.TransactionClient,
   const scope=currentScope(tx);roots([root]);
   assertSourceCommitOutputHeadReserved(tx,workspaceId,root);
   scope.published.set(logicalKey(root),{kind:root.kind,id:root.id,fingerprint:root.fingerprint});
+}
+
+/** Internal read-only batching seam. Identity coverage is not a permission proof,
+ * current epoch value, serving grant or instruction to initialize missing rows. */
+export function sourceCommitPermissionReadIdentities(tx:Prisma.TransactionClient,workspaceId:string):readonly PermissionEpochIdentity[] {
+  const scope=currentScope(tx);
+  invariant(scope.state.workspaceId===workspaceId,409,"SOURCE_LOCK_UNCOVERED","Permission batch workspace is unplanned.");
+  const identities=new Map<string,PermissionEpochIdentity>();
+  const add=(identity:PermissionEpochIdentity)=>{
+    const key=JSON.stringify([identity.kind,identity.id]);
+    identities.set(key,{kind:identity.kind,id:identity.id});
+    invariant(identities.size<=scope.state.maxNodes,409,"SOURCE_LOCK_LIMIT","Permission batch exceeds the closed source budget.");
+  };
+  for(const entry of [...scope.state.discovered.originalEpochs!.entries,...(scope.state.discovered.structuralEpochs?.entries??[]),...scope.state.discovered.ambientEpochs])add(entry);
+  for(const target of scope.state.writeTargets) if(scope.state.discovered.newborns.includes(logicalKey(target))) {
+    assertSourceCommitOutputHeadReserved(tx,workspaceId,target);
+    const own=artifactPermissionEpochIdentities(target.kind,{id:target.id})[0];
+    if(own)add(own);
+  }
+  return deepFreeze([...identities.entries()].sort(([a],[b])=>compare(a,b)).map(([,identity])=>identity));
+}
+
+/** Internal pure fence comparison. Observations MUST come from a fresh same-TX
+ * read; this returns no replacement saved vector or semantic serving authority.
+ * Unused newborn rows may be absent, but every originally held key is required. */
+export function isSourceCommitHeldPermissionUnionCurrent(tx:Prisma.TransactionClient,workspaceId:string,
+  observed:readonly (PermissionEpochIdentity & {epoch:string})[]):boolean {
+  const scope=currentScope(tx);
+  invariant(scope.state.workspaceId===workspaceId,409,"SOURCE_LOCK_UNCOVERED","Permission batch workspace is unplanned.");
+  if(!Array.isArray(observed)||observed.length>scope.state.maxNodes)return false;
+  const allowed=new Set(sourceCommitPermissionReadIdentities(tx,workspaceId).map(identity=>JSON.stringify([identity.kind,identity.id])));
+  const current=new Map<string,string>();
+  for(const entry of observed) {
+    if(!entry||typeof entry.kind!=="string"||typeof entry.id!=="string"||typeof entry.epoch!=="string"||!/^(0|[1-9][0-9]*)$/.test(entry.epoch))return false;
+    const key=JSON.stringify([entry.kind,entry.id]);
+    if(!allowed.has(key)||current.has(key))return false;
+    current.set(key,entry.epoch);
+  }
+  const held=[...scope.state.discovered.originalEpochs!.entries,...(scope.state.discovered.structuralEpochs?.entries??[]),...scope.state.discovered.ambientEpochs];
+  return held.every(entry=>current.get(JSON.stringify([entry.kind,entry.id]))===entry.epoch);
 }

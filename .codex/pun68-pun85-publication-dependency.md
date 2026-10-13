@@ -12,10 +12,20 @@ run-end cursor CAS. Matching checkpoint text cannot fence status generations.
   lineage and source-plan adapters. The existing `ArtifactInputWriteFence` callback
   runs on the Knowledge transaction; without a trusted durable owner adapter it
   proves no cross-process ownership.
-- Bloop owns PUN-85 connector-local puller/cursor files. The ingestion orchestrator
+- Bloop retains PUN-85 ownership alongside PUN94/95, including the coordinated
+  narrow Knowledge publication integration. Before edits, propose exact shared
+  hunks and claim persistence to PUN68/parent. PUN68 source-authority files remain
+  reserved. The ingestion orchestrator
   must own durable attempt/configuration identity and serialize or fence source
   ingestion across processes. The parent must assign that integration explicitly;
-  a new claim schema or runtime orchestration is not authorized by this mapping.
+  a new claim schema or runtime orchestration must be coordinated with its owner.
+- Already published in020a8997: `withArtifactInputWriteFence(fence, work)` and
+  `assertArtifactInputWriteFence(tx)` in `packages/domain/src/source-lineage.ts`,
+  exported by `packages/domain/src/index.ts`. `packages/knowledge/src/chunks.ts`
+  checks the callback on the same transaction before replacement and before
+  commit. `ArtifactInputWriteFence` is `(tx: Prisma.TransactionClient) =>
+  Promise<void>`. The source-scoped durable run claim is proposed, not implemented
+  by these APIs; it must reject old generations even when cursor text matches.
 - Current source-plan code supplies exact connection/generation attestation and
   whole source/output locking, but has no ExternalDataSource/EXTERNAL_DATABASE
   authority adapter. The current PUN-68 Knowledge writer deliberately admits only

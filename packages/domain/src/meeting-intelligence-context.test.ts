@@ -74,7 +74,8 @@ vi.mock("./brain-access", () => ({ resolveKnowledgeAccessDomains: vi.fn(async ()
 
 vi.mock("./auth", () => ({ requireWorkspaceMembership: vi.fn().mockResolvedValue({ id: "member-1", role: "ADMIN" }) }));
 
-vi.mock("./source-lineage", () => ({
+vi.mock("./source-lineage", async importOriginal => ({
+  inspectStoredArtifactInputDependencies: (await importOriginal<typeof import("./source-lineage")>()).inspectStoredArtifactInputDependencies,
   advanceHumanArtifactInputLineage: vi.fn(),
   captureArtifactInputProof: vi.fn(async (_actor: unknown, _workspace: string, inputs: Array<{ kind: string; id: string }>) =>
     inputs.map((input) => ({ kind: input.kind, id: input.id, fingerprint: "a".repeat(64) }))),
