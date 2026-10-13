@@ -3,44 +3,57 @@ title: "Architecture"
 description: "Understand the Corgtex monorepo structure, runtime split, and tech stack."
 ---
 
-Corgtex is built as an enterprise-grade monorepo using Next.js, React, TypeScript, and Prisma. The architecture strictly separates business logic from presentation, and request-response cycles from heavy background processing.
+Corgtex is built as an enterprise-grade monorepo using Next.js, React, TypeScript, and Prisma. Shared packages provide business logic and infrastructure services, while the worker handles queued background processing separately from web requests.
 
 ## The runtime split
 
-Corgtex divides its execution into two main applications (inside `apps/`):
+Corgtex has three applications (inside `apps/`):
 
-1. **`apps/web` (Next.js)**: Serves the user interface and API routes. Handles all synchronous user requests, Next.js App Router rendering, and immediate data mutations.
-2. **`apps/worker` (Node.js daemon)**: Runs the background workflows using a transactional outbox pattern. This isolated worker prevents long-running AI agent tasks or complex document ingestions from blocking the web server.
+1. **`apps/web` (Next.js)**: Serves the user interface, API routes, and MCP endpoints. Handles synchronous user requests, Next.js App Router rendering, immediate data mutations, and interactive agent conversations.
+2. **`apps/worker` (Node.js)**: Dispatches transactional outbox events and processes queued jobs through `@corgtex/workflows`, including document indexing and background agents. Supports continuous, queue-only, and one-shot scheduler modes.
+3. **`apps/site` (Next.js)**: Serves the public marketing website and forwards demo requests to the web API.
+
+The diagram shows selected package imports:
 
 ```mermaid
 graph TB
   APP_WEB[apps/web<br/>Next.js UI & API]
-  APP_SITE[apps/site<br/>Marketing Domain]
+  APP_SITE[apps/site<br/>Public Site]
   APP_WORKER[apps/worker<br/>Background Jobs]
 
   PKG_DOMAIN[packages/domain<br/>Business Logic]
   PKG_AGENTS[packages/agents<br/>Agent Runtime]
-  PKG_SHARED[packages/shared<br/>DB / Auth / Config]
+  PKG_WORKFLOWS[packages/workflows<br/>Outbox & Jobs]
+  PKG_MCP[packages/mcp<br/>MCP Server]
+  PKG_SHARED[packages/shared<br/>DB / Config / Utilities]
 
   APP_WEB --> PKG_DOMAIN
+  APP_WEB --> PKG_AGENTS
+  APP_WEB --> PKG_MCP
   APP_WORKER --> PKG_DOMAIN
   PKG_DOMAIN --> PKG_SHARED
   PKG_AGENTS --> PKG_SHARED
-  APP_WORKER --> PKG_AGENTS
+  APP_WORKER --> PKG_WORKFLOWS
+  PKG_WORKFLOWS --> PKG_DOMAIN
+  PKG_WORKFLOWS --> PKG_AGENTS
+  PKG_MCP --> PKG_DOMAIN
+  PKG_MCP --> PKG_AGENTS
+  PKG_AGENTS --> PKG_DOMAIN
 ```
 
 ## Packages
 
 The core logic resides in `packages/`. This allows both the Web app and Worker app to safely share implementations.
 
-*   **`@corgtex/shared`**: Database generation via Prisma, centralized environment variable parsing, authentication types, and standard errors. Let's keep the lowest-level generic dependencies here.
-*   **`@corgtex/domain`**: The beating heart of the platform. All business logic—governance policies, finance approvals, and core access control—lives here, totally agnostic to Next.js or the worker implementation.
-*   **`@corgtex/agents`**: The orchestration and runtime for AI agents. Holds the logic for taking a task, fetching tools, and querying the LLM loop.
-*   **`@corgtex/knowledge`**: Manages the Organization Brain. Handles ingestion, OCR, chunking, semantic matching, embeddings, and interacting with `pgvector`.
+*   **`@corgtex/shared`**: Shared Prisma client access, centralized environment variable parsing, actor and membership types, and common infrastructure utilities.
+*   **`@corgtex/domain`**: Core business rules for governance, workspace data, authentication, and access control, plus application errors. Shared by the web app and background workflows without importing Next.js.
+*   **`@corgtex/agents`**: Application-specific agents and interactive conversations, with tool execution and agent run tracking. Uses the domain, knowledge, and model gateway packages.
+*   **`@corgtex/knowledge`**: Manages Organization Brain file ingestion, text extraction, chunking, embeddings, and retrieval. Supports PostgreSQL-backed lexical and semantic ranking and optional Azure AI Search.
 *   **`@corgtex/models`**: A neutral gateway layer for LLM providers (OpenAI, OpenRouter, etc.). Keeps the rest of the application decoupled from specific vendor SDKs.
-*   **`@corgtex/workflows`**: The event and job orchestration system. Defines the event bus boundaries and job scheduling patterns used primarily by `apps/worker`.
-*   **`@corgtex/connectors-sql`**: Specialized connectors for ingesting relational databases (e.g., PostgreSQL remote replicas) directly into the knowledge graph.
-*   **`@corgtex/storage`**: File abstraction layer for handling standard uploads (local disk for dev, S3 for cloud).
+*   **`@corgtex/workflows`**: Transactional outbox dispatch, queued job processing, retries, handler routing, and scheduling used by `apps/worker`.
+*   **`@corgtex/connectors-sql`**: Read-only PostgreSQL connections and cursor-based row ingestion into knowledge indexing.
+*   **`@corgtex/storage`**: File abstraction layer for uploads, downloads, and signed URLs using S3-compatible storage or Azure Blob Storage.
+*   **`@corgtex/mcp`**: Authenticated MCP server exposing Corgtex tools and resources through the web app, backed by domain, knowledge, and agent implementations.
 
 ## Tech Stack
 
@@ -49,4 +62,4 @@ The core logic resides in `packages/`. This allows both the Web app and Worker a
 *   **Styling**: Tailwind CSS 3
 *   **Database**: PostgreSQL
 *   **ORM**: Prisma
-*   **Vector Search**: `pgvector`
+*   **Knowledge Search**: PostgreSQL-backed lexical and semantic ranking, or Azure AI Search. The schema includes a `pgvector` column prepared for vector queries.
