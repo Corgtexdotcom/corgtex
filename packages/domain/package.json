@@ -12,6 +12,9 @@
   },
   "exports": {
     ".": "./src/index.ts",
+    "./artifact-input-write-fence": "./src/artifact-input-write-fence.ts",
+    "./sql-ingestion-contract": "./src/sql-ingestion-contract.ts",
+    "./sql-native-driver": "./src/sql-native-driver.ts",
     "./exact-target-inventory": "./src/exact-target-inventory.ts",
     "./modules": "./src/modules/index.ts"
   }
