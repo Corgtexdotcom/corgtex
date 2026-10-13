@@ -29,6 +29,7 @@ import {
   createAction,
   actionRequestSource,
   updateAction,
+  completeAction,
   returnActionToDraft,
   deleteAction,
   listTensions,
@@ -738,7 +739,8 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     }
   };
   const tool = (name: string, description: string, inputSchema: Record<string, unknown>, handler: unknown) => {
-    const guardedHandler = typeof handler === "function" && hasToolCapability(name)
+    if (!hasToolCapability(name)) throw new AppError(403, "AGENT_OPERATION_UNDECLARED", "This operation is unavailable to agent credentials.");
+    const guardedHandler = typeof handler === "function"
       ? async (...args: unknown[]) => {
         requireToolCapability(name);
         try {
@@ -2962,7 +2964,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
     async ({ actionId, completedVia }: { actionId: string; completedVia: string }) => {
       requireScope(sessionCtx, "actions:write");
-      const updated = await updateAction(actor, { workspaceId, actionId, status: "COMPLETED", completedVia });
+      const updated = await completeAction(actor, { workspaceId, actionId, completedVia });
       return jsonResult({
         id: updated.id,
         status: updated.status,

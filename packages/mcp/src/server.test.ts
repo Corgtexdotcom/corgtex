@@ -177,6 +177,7 @@ vi.mock("@corgtex/domain", async () => {
   createArticle: createArticleMock,
   createMeeting: createMeetingMock,
   updateAction: updateActionMock,
+  completeAction: updateActionMock,
   listTensions: listTensionsMock,
   createTension: createTensionMock,
   updateTension: updateTensionMock,
