@@ -21,8 +21,13 @@ vi.mock("@corgtex/models", () => ({ defaultModelGateway: { extract: vi.fn(async 
 }) } }));
 
 const database = new URL(process.env.DATABASE_URL ?? "postgresql://invalid/invalid");
-if (database.hostname !== "127.0.0.1" || database.port !== "55468" || database.pathname !== "/corgtex_test"
-  || database.searchParams.get("schema") !== "public") throw new Error("Meeting resolution requires the assigned disposable localhost55468/corgtex_test database.");
+const assignedLocalFixture = database.hostname === "127.0.0.1" && database.port === "55468";
+const assignedCiFixture = process.env.GITHUB_ACTIONS === "true"
+  && database.hostname === "localhost" && database.port === "5432";
+if (!["postgres:", "postgresql:"].includes(database.protocol) || (!assignedLocalFixture && !assignedCiFixture)
+  || database.pathname !== "/corgtex_test" || database.searchParams.get("schema") !== "public") {
+  throw new Error("Meeting resolution requires the assigned disposable local or GitHub Actions PostgreSQL fixture.");
+}
 
 type Kind = "Action" | "Tension" | "Proposal";
 async function fixture(kind: Kind, privateOriginal = false) {

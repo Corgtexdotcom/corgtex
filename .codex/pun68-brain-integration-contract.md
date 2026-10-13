@@ -2,11 +2,12 @@
 
 ## Pins and authority
 
-Verified PUN-68 baseline: a4be4f9b80411bad1667a6d93ee2bf2e53fa2775,
-draft PR1517. The next reviewed PUN-68 commit will additionally seal turn
-submissions before awaits and support safe Slack/Box/MCP commit mixtures. No
-schema changes are needed for those corrections. Pin that exact commit before
-joint tests; do not test a moving checkout.
+Published PUN-68 implementing checkpoint: bcc9031bf3221d1e29afc03050c6b16051dae6ec,
+draft PR1517, extending a4be4f9b80411bad1667a6d93ee2bf2e53fa2775. It seals turn
+submissions before awaits and supports safe Slack/Box/MCP commit mixtures. These
+corrections have no schema changes. Pin the exact joint code/schema head before
+tests; do not test a moving checkout. A follow-up test database guard correction
+does not change these publication interfaces.
 
 Bloop reports local 8bbfa306db9133be6c334bb08087a20710f434fb, default-off,
 with no remote branch/PR. That implementation is not in this checkout and has
