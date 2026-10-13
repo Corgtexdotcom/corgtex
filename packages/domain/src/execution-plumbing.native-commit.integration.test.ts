@@ -310,7 +310,7 @@ describe("actual native outer caller commit scopes", () => {
         throw new AppError(409, "SOURCE_CHANGED", "Synthetic final caller fence failed");
       }
     }, () => submitExecutionResult(f.actor, { workspaceId: f.workspace.id, requestId: f.request.id,
-      idempotencyKey: "native-rollback", output: { bodyMd: "Never committed" }, lineageRoots: f.allRoots }))).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+      idempotencyKey: "native-rollback", output: { bodyMd: "Never committed" }, lineageRoots: f.allRoots }))).rejects.toMatchObject({ code: "ARTIFACT_INPUT_WRITE_FENCE_LOST" });
     expect((await prisma.executionRequest.findUniqueOrThrow({ where: { id: f.request.id } })).status).toBe("PENDING");
     expect(await prisma.executionResult.count({ where: { executionRequestId: f.request.id } })).toBe(0);
     expect(await prisma.auditLog.count({ where: { workspaceId: f.workspace.id } })).toBe(beforeAudit);

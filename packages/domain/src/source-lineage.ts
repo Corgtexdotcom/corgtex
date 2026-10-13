@@ -2,6 +2,9 @@ import { nativeTranscriptPrincipalUserId } from "./native-transcript-principal";
 import { artifactPermissionEpochIdentities, capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, mergePermissionEpochProofs, parsePermissionEpochProof, withSourceCommitPermissionReadPass, type PermissionEpochProof } from "./source-permission-epochs";
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { assertArtifactInputWriteFence } from "./artifact-input-write-fence";
+export { assertArtifactInputWriteFence, withArtifactInputWriteFence, withAdditionalArtifactInputWriteFence,
+  type ArtifactInputWriteFence } from "./artifact-input-write-fence";
 import { Prisma } from "@prisma/client";
 import { prisma, mcpCredentialVersion, mcpScopesHash, type AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
@@ -57,21 +60,6 @@ export async function withArtifactInputReadCapture<T>(actor: AppActor, workspace
   });
   observeArtifactRead(actor, workspaceId, result.roots);
   return result;
-}
-
-export type ArtifactInputWriteFence = (tx: Prisma.TransactionClient) => Promise<void>;
-const artifactInputWriteFence = new AsyncLocalStorage<ArtifactInputWriteFence>();
-/** Worker-owned execution supplies its atomic lease/checkpoint guard here; never serialized or model supplied. */
-export function withArtifactInputWriteFence<T>(fence: ArtifactInputWriteFence | undefined, work: () => Promise<T>) {
-  return fence ? artifactInputWriteFence.run(fence, work) : work();
-}
-/** Retain an enclosing worker fence when a native effect adds its own owner fence. */
-export function withAdditionalArtifactInputWriteFence<T>(fence: ArtifactInputWriteFence, work: () => Promise<T>) {
-  const prior = artifactInputWriteFence.getStore();
-  return artifactInputWriteFence.run(async tx => { await prior?.(tx); await fence(tx); }, work);
-}
-export async function assertArtifactInputWriteFence(tx: Prisma.TransactionClient) {
-  await artifactInputWriteFence.getStore()?.(tx);
 }
 
 async function assertPlannedArtifactPublication(tx: Prisma.TransactionClient, workspaceId: string,

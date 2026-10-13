@@ -8,6 +8,26 @@ is INCOMPLETE. Keep PR1517 draft; do not merge or deploy.
 
 ### Next repair checkpoint after020a8997
 
+Published repair1a844d52f80a45454d6b046ad75318d6c831b8a8 exact-head
+[CI38471741937](https://github.com/Corgtexdotcom/corgtex/actions/runs/38471741937)
+finished with12323pass/7fail/2skip, one failed file and755passed files. All earlier
+non-Recall repair groups pass. Remaining seven cases are authenticated recorder
+intake, recovery/duplicates/late callbacks and transaction rollback; no CI rerun
+can replace actual native receipt integration. Build/schema/policy/scans pass.
+
+The additive fence/type prerequisite9bfe757d is independently reviewed by
+GPT-6.1 Sol xhigh. Affected units172/172 and final pure/alias8/8 pass; domain
+types/scoped lint exit0. Actual mixed native publication passed; final-fence
+rollback passed after its expected error was updated to the deliberately distinct
+ARTIFACT_INPUT_WRITE_FENCE_LOST (Request/Result/audit/original snapshot assertions
+remain unchanged). The compatible alias shares one storage; prerequisite
+types/registration are dependency-only, no durable SQL runtime. The Finance
+historical actual trigger/full saved-row rollback probe passes1/1 in55510ms;
+successful restatement remains missing. Current runtime/schema ownership and
+company policy contracts are in `pun68-pun85-shared-contract.md` and
+`pun68-policy-integration-contract.md`. Local batch Astra connector worker owns
+orchestration/tests; PUN68 owns additive shared schema. PR1523 has no schema edits.
+
 Published020a89977ca19bc90a4f8a023793e5672f5912e9 exact-head CI
 [38460491798](https://github.com/Corgtexdotcom/corgtex/actions/runs/38460491798)
 finished red:12266pass/14fail/2skip and one import-suite failure. Build,

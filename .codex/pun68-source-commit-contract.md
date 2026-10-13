@@ -3,7 +3,14 @@
 This is the candidate contract for draft PR1517. It describes the implemented
 source plan and the retained Execution COMMENT/existing-target composition.
 It is not full PUN-68 acceptance or authorization to activate Bloop's held patch.
-Current published baseline:020a89977ca19bc90a4f8a023793e5672f5912e9.
+Current published baseline:1a844d52f80a45454d6b046ad75318d6c831b8a8.
+
+The shared write fence is extracted to `artifact-input-write-fence.ts`: exactly
+one ALS instance, additive nested owners, lifetime rechecks and distinct
+ARTIFACT_INPUT_WRITE_FENCE_LOST for source-denial callback failures. A missing
+optional fence retains its parent; it does not itself prove durable ownership.
+Source-lineage compatibility exports use the same instance. The SQL type/driver
+registration prerequisite grants no native input or committed publication receipt.
 
 ## Inputs and ownership
 
