@@ -13,15 +13,22 @@ const lineage = vi.hoisted(() => ({
   lineageContentFingerprint: vi.fn().mockReturnValue("c".repeat(64)),
 }));
 vi.mock("./source-lineage", () => lineage);
+const plan = vi.hoisted(() => ({activeTx: null as unknown, outputs: new Set<string>(), compatible: vi.fn(), covered: vi.fn()}));
+vi.mock("./source-commit-lock-plan", async importOriginal => ({
+  ...await importOriginal<typeof import("./source-commit-lock-plan")>(),
+  assertSourceCommitTransactionCompatible: plan.compatible,
+  hasActiveSourceCommitLockPlan: (tx: unknown) => plan.activeTx !== null && plan.activeTx === tx,
+  assertSourceCommitOutputHeadReserved: plan.covered,
+}));
 import { prepareProducerLineage, finishProducerLineage } from "./producer-lineage";
 
-const tx = {} as Prisma.TransactionClient;
+let tx: Prisma.TransactionClient;
 const user = { kind: "user", user: { id: "user-1" } } as AppActor;
 const agent = { kind: "agent", authProvider: "credential", workspaceIds: ["workspace-1"] } as AppActor;
 const root = { kind: "BrainSource" as const, id: "source-1", fingerprint: "a".repeat(64) };
 const snapshot = { kind: "ArtifactInputSnapshot" as const, id: "snapshot-1", fingerprint: "b".repeat(64) };
 const artifact = { kind: "Action" as const, id: "action-1" };
-const base = { tx, workspaceId: "workspace-1" };
+const base = { get tx() {return tx;}, workspaceId: "workspace-1" };
 
 function persist(actor: AppActor, receipt: Awaited<ReturnType<typeof prepareProducerLineage>>) {
   return finishProducerLineage({ ...base, actor, artifact, content: { id: artifact.id, title: "Synthetic content" }, receipt });
@@ -30,6 +37,16 @@ function persist(actor: AppActor, receipt: Awaited<ReturnType<typeof prepareProd
 describe("producer lineage receipts", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    tx = { $executeRaw: vi.fn(async () => 1) } as unknown as Prisma.TransactionClient;
+    plan.activeTx = null; plan.outputs.clear();
+    plan.compatible.mockImplementation((supplied: unknown) => {
+      if (plan.activeTx !== null && supplied !== plan.activeTx) throw Object.assign(new Error("foreign transaction"), {code: "SOURCE_LOCK_UNCOVERED"});
+    });
+    plan.covered.mockImplementation((supplied: unknown, workspaceId: string, output: {kind: string; id: string}) => {
+      if (supplied !== plan.activeTx || workspaceId !== base.workspaceId || !plan.outputs.has(JSON.stringify([output.kind, output.id]))) {
+        throw Object.assign(new Error("unreserved output"), {code: "SOURCE_LOCK_UNCOVERED"});
+      }
+    });
     lineage.lineageContentFingerprint.mockReturnValue("c".repeat(64));
     lineage.currentArtifactInputRoots.mockResolvedValue([root]);
     lineage.captureArtifactInputProof.mockResolvedValue([root]);
@@ -103,6 +120,41 @@ describe("producer lineage receipts", () => {
     await expect(prepareProducerLineage({ ...base, actor: user,
       capture: { lineageInputs: [{ kind: "Goal", id: "legacy-goal" }], lineageRoots: [root] } }))
       .rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+  });
+
+  it("adds no late standalone head lock before UNKNOWN or ADVANCE returns", async () => {
+    const before = {id: artifact.id, title: "Original"};
+    expect((await prepareProducerLineage({...base, actor: user, artifact, before})).mode).toBe("ADVANCE");
+    expect((await prepareProducerLineage({...base, actor: user, artifact, before, copied: true})).mode).toBe("UNKNOWN");
+    expect(tx.$executeRaw).not.toHaveBeenCalled();
+    expect(plan.covered).not.toHaveBeenCalled();
+  });
+
+  it("asserts active-plan output coverage before UNKNOWN and ADVANCE early returns without SQL", async () => {
+    plan.activeTx = tx; plan.outputs.add(JSON.stringify([artifact.kind, artifact.id]));
+    const before = {id: artifact.id, title: "Original"};
+    expect((await prepareProducerLineage({...base, actor: user, artifact, before})).mode).toBe("ADVANCE");
+    expect((await prepareProducerLineage({...base, actor: user, artifact, before, copied: true})).mode).toBe("UNKNOWN");
+    expect(plan.covered).toHaveBeenCalledTimes(2);
+    expect(tx.$executeRaw).not.toHaveBeenCalled();
+    expect(lineage.advanceHumanArtifactInputLineage).not.toHaveBeenCalled();
+  });
+
+  it("rejects unreserved active-plan outputs before lineage checks or early returns", async () => {
+    plan.activeTx = tx;
+    for (const actor of [user, agent]) await expect(prepareProducerLineage({...base, actor, artifact,
+      before: {id: artifact.id}})).rejects.toMatchObject({code: "SOURCE_LOCK_UNCOVERED"});
+    expect(tx.$executeRaw).not.toHaveBeenCalled();
+    expect(lineage.isArtifactInputProofReadable).not.toHaveBeenCalled();
+    expect(lineage.currentArtifactInputRoots).not.toHaveBeenCalled();
+  });
+
+  it("rejects a foreign client even when creation has no supplied artifact", async () => {
+    plan.activeTx = tx;
+    const foreign = {$executeRaw: vi.fn(async () => 1)} as unknown as Prisma.TransactionClient;
+    await expect(prepareProducerLineage({...base, tx: foreign, actor: user})).rejects.toMatchObject({code: "SOURCE_LOCK_UNCOVERED"});
+    expect(foreign.$executeRaw).not.toHaveBeenCalled();
+    expect(lineage.recordArtifactInputLineage).not.toHaveBeenCalled();
   });
 
   it("does not launder copied content through a direct human partial edit", async () => {

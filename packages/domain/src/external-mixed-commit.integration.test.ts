@@ -49,6 +49,7 @@ import { captureExternalMcpResponseInput, isExternalMcpResponseInputCurrent, pre
 import { prepareExternalMixedCommitPreflight, withExternalMixedCommitPreflight } from "./external-mixed-commit";
 import { savedEnclosingNativeEpochs } from "./native-commit-original-vector";
 import { prepareArtifactCommitPreflight, withArtifactCommitPreflight, lockArtifactReadAuthorityRows } from "./artifact-commit-preflight";
+import { prepareArtifactSourceCommit, withArtifactSourceCommit } from "./artifact-source-commit";
 import { captureSlackNativeMessageFetch, isCommunicationMessageNativeInputCurrent,
   claimSlackNativeCommitPreflight, inspectSlackNativeCommitClaim, prepareSlackNativeCommitPreflight,
   withClaimedSlackNativeCommitPreflight, withSlackNativeCommitPreflight, withSlackNativeCommitReceipt } from "./communication-native-authority";
@@ -61,6 +62,7 @@ import { lineageContentFingerprint } from "./source-lineage";
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 let current: Fixture | null = null;
 const oauthClients = new Set<string>();
+const sourceWriterJobs = new Set<string>();
 async function fixture() {
   const suffix = randomUUID();
   const user = await prisma.user.create({ data: { email: `mixed-owner-${suffix}@synthetic.test`, passwordHash: "synthetic" } });
@@ -134,6 +136,10 @@ async function addSlack(f: Fixture, index = 0, priorInstallation?: Awaited<Retur
 afterEach(async () => {
   const f = current; current = null;
   if (f) {
+    if (sourceWriterJobs.size) {
+      await prisma.workflowJob.deleteMany({ where: { id: { in: [...sourceWriterJobs] } } });
+      sourceWriterJobs.clear();
+    }
     await prisma.workspace.delete({ where: { id: f.workspace.id } });
     await prisma.user.deleteMany({ where: { id: { in: [f.user.id, f.other.id] } } });
   }
@@ -428,6 +434,73 @@ describe("complete Slack native commit closure", () => {
     await expect(prisma.$transaction(tx => withArtifactCommitPreflight(f.actor, f.workspace.id,
       tx, roots, token, async () => "reused"))).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
   });
+
+  it.each(["box", "mcp", "box+mcp", "slack", "box+slack", "mcp+slack", "box+mcp+slack"])(
+    "composes the full source plan with actual %s adapters and a preallocated derived writer", async combination => {
+      const f = current = await fixture();
+      const slack = combination.includes("slack") ? await addSlack(f) : undefined;
+      const roots = [
+        ...(combination.includes("box") ? [f.roots[0]!] : []),
+        ...(combination.includes("mcp") ? [f.roots[1]!] : []),
+        ...(slack?.roots ?? []),
+      ];
+      const originalRoots = structuredClone(roots);
+      const job = await prisma.workflowJob.create({ data: { workspaceId: f.workspace.id,
+        type: "synthetic.source-writer", payload: { requesterUserId: f.user.id }, status: "RUNNING",
+        attempts: 1, lockedAt: new Date(), lockedBy: "synthetic-local-owner" } });
+      sourceWriterJobs.add(job.id);
+      const outputId = randomUUID();
+      const options = { writeTargets: [{ kind: "BrainSource" as const, id: outputId,
+        projectedAuthority: { sourceType: "EXTERNAL_CONTENT", accessDomain: "WORKSPACE" } }],
+      ownerBinding: { kind: "WORKFLOW_JOB" as const, id: job.id, generation: 1,
+        lockedBy: job.lockedBy, lockedAt: job.lockedAt!.toISOString(), requesterUserId: f.user.id } };
+      const token = await prepareArtifactSourceCommit(f.actor, f.workspace.id, roots, options);
+      remote.boxRead.mockClear(); remote.mcpRead.mockClear(); remote.slackRead.mockClear();
+      const queries: string[] = [];
+      const output = await prisma.$transaction(async connection => {
+        const tx = new Proxy(connection, { get(target, key) {
+          if (key !== "$queryRaw") return Reflect.get(target, key, target);
+          return (...args: any[]) => {
+            const sql = typeof args[0]?.sql === "string" ? args[0].sql : Array.isArray(args[0]) ? args[0].join("?") : "";
+            queries.push(sql);
+            return (target.$queryRaw as (...args: any[]) => Promise<any>)(...args);
+          };
+        } });
+        return withArtifactSourceCommit(f.actor, f.workspace.id, tx, roots, options, token, async (bound, binding) => {
+          const [current] = await bound.$queryRaw<Array<{ status: string; attempts: number; lockedBy: string; lockedAt: Date; payload: { requesterUserId: string } }>>`
+            SELECT "status", "attempts", "lockedBy", "lockedAt", "payload" FROM "WorkflowJob"
+            WHERE "id" = ${job.id} AND "workspaceId" = ${f.workspace.id} FOR UPDATE`;
+          expect(binding).toEqual(options.ownerBinding);
+          expect(current?.status).toBe("RUNNING"); expect(current?.attempts).toBe(1);
+          expect(current?.lockedBy).toBe(options.ownerBinding.lockedBy);
+          expect(current?.lockedAt.toISOString()).toBe(options.ownerBinding.lockedAt);
+          expect(current?.payload.requesterUserId).toBe(f.user.id);
+        }, async () => {
+          const row = await tx.brainSource.create({ data: { id: outputId, workspaceId: f.workspace.id,
+            sourceType: "EXTERNAL_CONTENT", tier: 2, title: "Synthetic complete planned output", content: "Combined permitted inputs" } });
+          await recordArtifactInputLineage({ tx, actor: f.actor, workspaceId: f.workspace.id,
+            artifact: { kind: "BrainSource", id: row.id }, content: row, origin: "DERIVED", inputs: [], inheritedRoots: roots });
+          expect((await readableArtifactIds(f.actor, f.workspace.id, "BrainSource", [row], tx)).has(row.id)).toBe(true);
+          return row;
+        });
+      }, { timeout: 30_000 });
+      expect(output.id).toBe(outputId); expect(roots).toEqual(originalRoots);
+      const firstUnion = queries.findIndex(query => query.includes('FROM "SourcePermissionEpoch"') && query.includes("FOR SHARE"));
+      expect(firstUnion).toBeGreaterThan(0);
+      expect(queries.filter(query => query.includes('FROM "SourcePermissionEpoch"') && query.includes("FOR SHARE"))).toHaveLength(1);
+      expect(queries.slice(firstUnion + 1).filter(query => /FROM "(ExternalContentSource|ExternalProviderFetchInput|ExternalMcpResponseInput|CommunicationMessageNativeInput|Workspace|Member|User)"/.test(query)
+        && /FOR (SHARE|UPDATE)/.test(query))).toEqual([]);
+      expect(remote.boxRead).not.toHaveBeenCalled(); expect(remote.mcpRead).not.toHaveBeenCalled(); expect(remote.slackRead).not.toHaveBeenCalled();
+      const manifest = await prisma.artifactInputLineage.findFirst({ where: { workspaceId: f.workspace.id,
+        artifactType: "BrainSource", artifactId: outputId }, orderBy: { revision: "desc" } });
+      expect(manifest?.rootsJson).toEqual(roots);
+      // A public Slack channel is shared inside its workspace. Owner-bound Box
+      // and MCP inputs still restrict every mixture that consumes them.
+      expect((await readableArtifactIds(f.otherActor, f.workspace.id, "BrainSource", [output])).size)
+        .toBe(combination === "slack" ? 1 : 0);
+      await expect(prisma.$transaction(tx => withArtifactSourceCommit(f.actor, f.workspace.id, tx,
+        roots, options, token, async () => {}, async () => "reused"))).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    });
 
   it("denies a restored local channel epoch and a changed remote message without copying", async () => {
     const f = current = await fixture();

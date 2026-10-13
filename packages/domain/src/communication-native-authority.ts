@@ -9,6 +9,7 @@ import { assertOutsideArtifactNativeCommitPhase, isArtifactNativeCommitPhase, wi
 import { communicationCanonicalJson, communicationNativeHash, freezeCommunicationPayload, isStoredSlackIngressSignatureCurrent } from "./communication-native-ingress";
 import { isArtifactPermissionEpochProofCurrent, parsePermissionEpochProof } from "./source-permission-epochs";
 import { savedEnclosingNativeEpochs, savedNativeVectorKey } from "./native-commit-original-vector";
+import { lockSourceAuthorityPredicate, sourceAuthorityRowAlreadyLocked } from "./source-commit-row-locks";
 import { getMcpOrigin } from "../../shared/src/mcp-context";
 import type { LineageRoot } from "./source-lineage";
 import { sealArtifactInputActor } from "./artifact-input-actor";
@@ -367,7 +368,8 @@ export function inspectSlackNativeCommitClaim(claim: SlackNativeCommitClaim) {
 export async function lockSlackNativeInputRows(tx: Prisma.TransactionClient, workspaceId: string,
   inputIds: readonly string[]) {
   for (const id of [...new Set(inputIds)].sort()) {
-    await tx.$queryRaw`SELECT "id" FROM "CommunicationMessageNativeInput" WHERE "id" = ${id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+    if (!sourceAuthorityRowAlreadyLocked(tx, "CommunicationMessageNativeInput", id))
+      await tx.$queryRaw`SELECT "id" FROM "CommunicationMessageNativeInput" WHERE "id" = ${id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
   }
 }
 
@@ -381,27 +383,37 @@ export async function lockSlackNativeGoverningRows(tx: Prisma.TransactionClient,
       messageId: input.communicationMessageId });
   }
   for (const id of [...new Set(rows.map(row => row.installationId))].sort())
-    await tx.$queryRaw`SELECT "id" FROM "CommunicationInstallation" WHERE "id" = ${id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+    if (!sourceAuthorityRowAlreadyLocked(tx, "CommunicationInstallation", id))
+      await tx.$queryRaw`SELECT "id" FROM "CommunicationInstallation" WHERE "id" = ${id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
   for (const key of [...new Set(rows.map(row => JSON.stringify([row.installationId, row.channelId])))].sort()) {
     const [installationId, channelId] = JSON.parse(key) as [string, string];
-    await tx.$queryRaw`SELECT "id" FROM "CommunicationChannel" WHERE "installationId" = ${installationId} AND "externalChannelId" = ${channelId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+    await lockSourceAuthorityPredicate(tx, "CommunicationChannel", { workspaceId, installationId, externalChannelId: channelId },
+      () => tx.$queryRaw`SELECT "id" FROM "CommunicationChannel" WHERE "installationId" = ${installationId} AND "externalChannelId" = ${channelId} AND "workspaceId" = ${workspaceId} FOR SHARE`);
   }
   for (const id of [...new Set(rows.map(row => row.messageId))].sort())
-    await tx.$queryRaw`SELECT "id" FROM "CommunicationMessage" WHERE "id" = ${id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
-  await tx.$queryRaw`SELECT "workspaceId" FROM "WorkspaceIntegrationBinding" WHERE "workspaceId" = ${workspaceId} AND "provider" = 'SLACK' FOR SHARE`;
+    if (!sourceAuthorityRowAlreadyLocked(tx, "CommunicationMessage", id))
+      await tx.$queryRaw`SELECT "id" FROM "CommunicationMessage" WHERE "id" = ${id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+  await lockSourceAuthorityPredicate(tx, "WorkspaceIntegrationBinding", { workspaceId, provider: "SLACK" },
+    () => tx.$queryRaw`SELECT "workspaceId" FROM "WorkspaceIntegrationBinding" WHERE "workspaceId" = ${workspaceId} AND "provider" = 'SLACK' FOR SHARE`);
   if (actor.kind === "user") {
-    await tx.$queryRaw`SELECT "id" FROM "Member" WHERE "workspaceId" = ${workspaceId} AND "userId" = ${actor.user.id} FOR SHARE`;
-    await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${actor.user.id} FOR SHARE`;
+    await lockSourceAuthorityPredicate(tx, "Member", { workspaceId, userId: actor.user.id },
+      () => tx.$queryRaw`SELECT "id" FROM "Member" WHERE "workspaceId" = ${workspaceId} AND "userId" = ${actor.user.id} FOR SHARE`);
+    if (!sourceAuthorityRowAlreadyLocked(tx, "User", actor.user.id))
+      await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${actor.user.id} FOR SHARE`;
   } else {
-    if (actor.credentialId) await tx.$queryRaw`SELECT "id" FROM "AgentCredential" WHERE "id" = ${actor.credentialId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
-    if (actor.agentIdentityId) await tx.$queryRaw`SELECT "id" FROM "AgentIdentity" WHERE "id" = ${actor.agentIdentityId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+    if (actor.credentialId && !sourceAuthorityRowAlreadyLocked(tx, "AgentCredential", actor.credentialId))
+      await tx.$queryRaw`SELECT "id" FROM "AgentCredential" WHERE "id" = ${actor.credentialId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+    if (actor.agentIdentityId && !sourceAuthorityRowAlreadyLocked(tx, "AgentIdentity", actor.agentIdentityId))
+      await tx.$queryRaw`SELECT "id" FROM "AgentIdentity" WHERE "id" = ${actor.agentIdentityId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
   }
   const origin = getMcpOrigin();
   if (origin?.workspaceId === workspaceId && origin.kind === "oauth") {
-    await tx.$queryRaw`SELECT "id" FROM "McpOAuthAccessToken" WHERE "id" = ${origin.id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+    if (!sourceAuthorityRowAlreadyLocked(tx, "McpOAuthAccessToken", origin.id))
+      await tx.$queryRaw`SELECT "id" FROM "McpOAuthAccessToken" WHERE "id" = ${origin.id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
     const token = await tx.mcpOAuthAccessToken.findFirst({ where: { id: origin.id, workspaceId }, select: { clientId: true } });
     invariant(token, 409, "SOURCE_CHANGED", "The serving OAuth grant changed.");
-    await tx.$queryRaw`SELECT "id" FROM "McpOAuthClient" WHERE "id" = ${token.clientId} FOR SHARE`;
+    if (!sourceAuthorityRowAlreadyLocked(tx, "McpOAuthClient", token.clientId))
+      await tx.$queryRaw`SELECT "id" FROM "McpOAuthClient" WHERE "id" = ${token.clientId} FOR SHARE`;
   }
 }
 

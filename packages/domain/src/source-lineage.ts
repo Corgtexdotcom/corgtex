@@ -15,6 +15,13 @@ import { getExternalProviderPrincipalUserId } from "./external-provider-principa
 import { artifactPermissionParents, loadArtifactPermissionMetadata } from "./source-permission-parents";
 import { loadExternalMcpConnectionSetInput } from "./external-mcp-connection-set";
 import { assertMcpOriginActive, getMcpOrigin } from "../../shared/src/mcp-context";
+import { assertSourceCommitRowCovered, assertSourceCommitTransactionCompatible,
+  assertSourceCommitSemanticRootCovered, registerSourceCommitPublishedOutput,
+  hasActiveSourceCommitLockPlan, sourceCommitCanonical } from "./source-commit-lock-plan";
+import { sourceAuthorityPhysicalRow } from "./source-authority-edges";
+import { assertSourceCommitMcpOriginCovered } from "./source-commit-row-locks";
+import { allocateArtifactInputSnapshotId } from "./artifact-input-snapshot-allocations";
+import { reserveArtifactWriteHeads } from "./artifact-write-heads";
 export { sealArtifactInputActor } from "./artifact-input-actor";
 
 type ArtifactReadCapture = { actor: AppActor; workspaceId: string; roots: Map<string, LineageRoot>; preserveConsumedRevisions: boolean };
@@ -65,6 +72,12 @@ export function withAdditionalArtifactInputWriteFence<T>(fence: ArtifactInputWri
 }
 export async function assertArtifactInputWriteFence(tx: Prisma.TransactionClient) {
   await artifactInputWriteFence.getStore()?.(tx);
+}
+
+async function assertPlannedArtifactPublication(tx: Prisma.TransactionClient, workspaceId: string,
+  artifact: LineageInput) {
+  assertSourceCommitTransactionCompatible(tx);
+  if (hasActiveSourceCommitLockPlan(tx)) await reserveArtifactWriteHeads(tx, workspaceId, [artifact]);
 }
 
 export type LineageKind =
@@ -266,6 +279,11 @@ function parseRoots(value: Prisma.JsonValue): LineageRoot[] | null {
 }
 
 async function loadArtifact(db: LineageClient, workspaceId: string, input: LineageInput): Promise<Record<string, unknown> | null> {
+  assertSourceCommitTransactionCompatible(db);
+  if (hasActiveSourceCommitLockPlan(db)) {
+    const physical = sourceAuthorityPhysicalRow(input);
+    if (physical) assertSourceCommitRowCovered(db, physical.table, physical.id);
+  }
   const where = { id: input.id, workspaceId };
   switch (input.kind) {
     case "MeetingAudioAsset": return db.meetingAudioAsset.findFirst({ where });
@@ -413,7 +431,7 @@ const IMPLICIT_HUMAN_ORIGINAL_SNAPSHOT_KINDS = new Set<LineageKind>([
 ]);
 
 function isNativeControlOutcome(row: Record<string, unknown>) {
-  return ["BRAIN_SOURCE_REMOVAL_COMPLETED", "ACTION_COMPLETED"].includes(String(row.operation))
+  return ["BRAIN_SOURCE_REMOVAL_COMPLETED", "ACTION_COMPLETED", "ACTION_COMPLETION_PUBLIC_NOTE"].includes(String(row.operation))
     && isRecord(row.controlJson) && row.controlJson.version === 1;
 }
 
@@ -422,6 +440,10 @@ function isArchived(row: unknown) {
 }
 
 function actorCanReadRecord(actor: AppActor, workspaceId: string, membership: { id: string; role: string } | null, kind: LineageKind, row: Record<string, unknown>) {
+  if (kind === "ConversationOperationOutcome" && row.operation === "ACTION_COMPLETION_PUBLIC_NOTE")
+    return row.actorKind === "public" && row.userId == null && row.credentialId == null
+      && row.credentialVersion == null && row.scopeHash == null
+      && Array.isArray(row.requiredScopes) && row.requiredScopes.length === 0;
   if (kind === "MeetingAudioAsset") return nativeTranscriptPrincipalUserId(actor, workspaceId) === row.uploadedByUserId;
   if (kind === "NativeTranscriptInput") return nativeTranscriptPrincipalUserId(actor, workspaceId) === row.submittedByUserId;
   if (kind === "GenericDerivedArtifactVariant") return actor.kind === "user" && membership?.id === row.ownerMemberId;
@@ -517,7 +539,10 @@ async function currentCredentialCanRead(db: LineageClient, actor: AppActor, work
     // contributing source, including a snapshot's original kind, needs its own
     // data scope under the same authenticated subject and live grant.
     if (actor.kind !== "user" || origin.workspaceId !== workspaceId) return false;
-    try { await assertMcpOriginActive(db, origin, workspaceId); } catch { return false; }
+    try {
+      await assertSourceCommitMcpOriginCovered(db, workspaceId, origin);
+      await assertMcpOriginActive(db, origin, workspaceId);
+    } catch { return false; }
     const token = await db.mcpOAuthAccessToken.findUnique({ where: { id: origin.id } });
     if (!token || token.userId !== actor.user.id || token.workspaceId !== workspaceId
       || mcpScopesHash(token.scopes) !== origin.scopeHash) return false;
@@ -547,6 +572,8 @@ function credentialPurposeSnapshot(row: Record<string, unknown>) {
 async function rootIsReadable(db: LineageClient, actor: AppActor, workspaceId: string,
   membership: { id: string; role: string } | null, domains: readonly string[], root: LineageRoot,
   visited = new Set<string>(), memo = new Map<string, boolean>(), purpose?: InternalReadPurpose): Promise<boolean> {
+  assertSourceCommitTransactionCompatible(db);
+  if (hasActiveSourceCommitLockPlan(db)) assertSourceCommitSemanticRootCovered(db, workspaceId, root);
   // Admit the whole stored closure before any remote validator can replay a
   // request containing another contributor's text. Local results never enter
   // the serving memo; the complete remote validation still runs afterwards.
@@ -562,7 +589,12 @@ async function rootIsReadable(db: LineageClient, actor: AppActor, workspaceId: s
   if (visited.has(key)) return false;
   const cached = memo.get(key);
   if (cached !== undefined) return cached;
-  const result = await evaluateRoot(db, actor, workspaceId, membership, domains, root, new Set(visited).add(key), memo, false, false, purpose);
+  const evaluate = () => evaluateRoot(db, actor, workspaceId, membership, domains, root,
+    new Set(visited).add(key), memo, false, false, purpose);
+  // Typed validators may recursively check an immutable contributor. Those
+  // nested checks must join this exact admission ledger, including its sealed
+  // final fence, instead of introducing an independent unrecorded head set.
+  const result = db === prisma ? await expectedReadHeads.run(readHeadBinding(memo), evaluate) : await evaluate();
   memo.set(key, result);
   return result;
 }
@@ -573,13 +605,26 @@ async function rootIsReadable(db: LineageClient, actor: AppActor, workspaceId: s
 const localCommitAdmission = new AsyncLocalStorage<boolean>();
 const localReadAdmissionMemos = new WeakMap<Map<string, boolean>, Map<string, boolean>>();
 const nativeReplayMemos = new WeakSet<Map<string, boolean>>();
-type ReadHeadBinding = { heads: Map<string, string>; sealed: boolean };
+type ReadHeadBinding = { heads: Map<string, string>; sealed: boolean; nativeReplay?: boolean };
 const readHeadMemos = new WeakMap<Map<string, boolean>, ReadHeadBinding>();
 const expectedReadHeads = new AsyncLocalStorage<ReadHeadBinding>();
 function readHeadBinding(memo: Map<string, boolean>) {
   let binding = readHeadMemos.get(memo);
   if (!binding) { binding = expectedReadHeads.getStore() ?? { heads: new Map(), sealed: false }; readHeadMemos.set(memo, binding); }
   return binding;
+}
+function observeNativeReplay(memo: Map<string, boolean>) {
+  nativeReplayMemos.add(memo);
+  // An inner typed validator may await the provider. Every enclosing complete
+  // read must then recheck its own whole union, including earlier independent
+  // contributors, before returning bytes or registering a collector receipt.
+  readHeadBinding(memo).nativeReplay = true;
+}
+function sealedReadHeadBinding(memo: Map<string, boolean>): ReadHeadBinding {
+  const binding = readHeadBinding(memo);
+  // An inner validator seals its own final check. The enclosing list/read may
+  // still be admitting independent records and must retain its open ledger.
+  return { heads: new Map(binding.heads), sealed: true, nativeReplay: binding.nativeReplay };
 }
 function bindReadHead(memo: Map<string, boolean>, input: LineageInput, manifest: Awaited<ReturnType<typeof latestManifest>>) {
   const binding = readHeadBinding(memo);
@@ -643,6 +688,13 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
     if (!upstream || !knownSnapshotOrigin(row)
       || (sourceKind === "WorkspaceToolLinkCredential" && (row.origin !== "DERIVED" || !credentialPurposeSnapshot(row)))
       || (row.origin === "DERIVED" && !upstream.length)) return false;
+    if (row.origin === "DERIVED") {
+      const { isArtifactInputPermissionEpochCoverageComplete } = await import("./source-permission-coverage");
+      if (!await isArtifactInputPermissionEpochCoverageComplete({ workspaceId,
+        artifact: { kind: sourceKind, id: String(row.sourceId) },
+        content: { ...row.contentJson, ...row.accessEnvelopeJson }, roots: upstream,
+        permissionEpochs: row.permissionEpochsJson, db })) return false;
+    }
     if (row.origin === "HUMAN_ORIGINAL") {
       if (upstream.length !== 0) return false;
       const originalEnvelope = row.accessEnvelopeJson as Record<string, unknown>;
@@ -705,7 +757,7 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
     if (!await isNativeTranscriptInputCurrent(actor, workspaceId, row as unknown as Parameters<typeof isNativeTranscriptInputCurrent>[2], db)) return false;
   }
   if (root.kind === "CommunicationMessageNativeInput") {
-    if (db === prisma && !localCommitAdmission.getStore()) nativeReplayMemos.add(memo);
+    if (db === prisma && !localCommitAdmission.getStore()) observeNativeReplay(memo);
     const authority = await import("./communication-native-authority");
     const current = localCommitAdmission.getStore()
       ? authority.isCommunicationMessageNativeInputLocallyCurrent
@@ -714,7 +766,7 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
       row as unknown as import("./communication-native-authority").CommunicationMessageNativeInputRecord, db)) return false;
   }
   if (root.kind === "ExternalProviderFetchInput") {
-    if (db === prisma && !localCommitAdmission.getStore()) nativeReplayMemos.add(memo);
+    if (db === prisma && !localCommitAdmission.getStore()) observeNativeReplay(memo);
     const authority = await import("./external-provider-authority");
     const current = localCommitAdmission.getStore()
       ? authority.isExternalProviderFetchInputLocallyCurrent
@@ -722,7 +774,7 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
     if (!await current(actor, workspaceId, row as unknown as import("@prisma/client").ExternalProviderFetchInput, db)) return false;
   }
   if (root.kind === "ExternalMcpResponseInput") {
-    if (db === prisma && !localCommitAdmission.getStore()) nativeReplayMemos.add(memo);
+    if (db === prisma && !localCommitAdmission.getStore()) observeNativeReplay(memo);
     const authority = await import("./external-mcp-response-input");
     const current = localCommitAdmission.getStore()
       ? authority.isExternalMcpResponseInputLocallyCurrent
@@ -744,6 +796,10 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
       const { isActionCompletionOutcomeReadable } = await import("./action-completion");
       if (!await isActionCompletionOutcomeReadable(actor, workspaceId,
         row as unknown as Parameters<typeof isActionCompletionOutcomeReadable>[2], db)) return false;
+    } else if (row.operation === "ACTION_COMPLETION_PUBLIC_NOTE") {
+      const { isActionCompletionPublicNoteReadable } = await import("./action-completion");
+      if (!await isActionCompletionPublicNoteReadable(actor, workspaceId,
+        row as unknown as Parameters<typeof isActionCompletionPublicNoteReadable>[2], db)) return false;
     } else if (row.operation !== "TOOL_LINK_ARCHIVED"
       || typeof row.requestKey !== "string" || !/^[a-f0-9]{64}$/.test(row.requestKey)
       || !Array.isArray(row.requiredScopes) || row.requiredScopes.length !== 1 || row.requiredScopes[0] !== "tools:write") return false;
@@ -1072,6 +1128,9 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
       && upstream?.length === 0 && Array.isArray(manifest.inputsJson) && manifest.inputsJson.length === 0;
     if (manifest.origin !== "DERIVED" || !upstream?.length || manifest.epochProofVersion !== 1
       || !await isArtifactPermissionEpochProofCurrent(workspaceId, manifest.permissionEpochsJson, db)) return false;
+    const { isArtifactInputPermissionEpochCoverageComplete } = await import("./source-permission-coverage");
+    if (!await isArtifactInputPermissionEpochCoverageComplete({ workspaceId, artifact: root,
+      content: row, roots: upstream, permissionEpochs: manifest.permissionEpochsJson, db })) return false;
     // Earlier direct secret roots did not bind the full parent revision that
     // contributed the value. Persisted derivations now require its typed snapshot.
     if (upstream.some(input => input.kind === "WorkspaceToolLinkCredential")) return false;
@@ -1080,6 +1139,28 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
     }
   }
   return true;
+}
+
+async function saveAllocatedInputSnapshot(actor: AppActor, tx: Prisma.TransactionClient, workspaceId: string,
+  root: LineageRoot, data: Prisma.ArtifactInputSnapshotUncheckedCreateInput) {
+  const id = allocateArtifactInputSnapshotId(actor, workspaceId, tx, root);
+  if (id) {
+    const retained = await tx.artifactInputSnapshot.findFirst({ where: { id, workspaceId } });
+    if (retained) {
+      invariant(lineageContentFingerprint("ArtifactInputSnapshot", retained)
+        === lineageContentFingerprint("ArtifactInputSnapshot", { ...data,
+          createdAt: data.createdAt ?? retained.createdAt,
+          updatedAt: (retained as unknown as Record<string, unknown>).updatedAt }),
+      409, "SOURCE_CHANGED", "Preallocated snapshot contains a different consumed revision.");
+      if (hasActiveSourceCommitLockPlan(tx)) registerSourceCommitPublishedOutput(tx, workspaceId,
+        { kind: "ArtifactInputSnapshot", id: retained.id, fingerprint: lineageContentFingerprint("ArtifactInputSnapshot", retained) });
+      return retained;
+    }
+  }
+  const snapshot = await tx.artifactInputSnapshot.create({ data: { ...data, ...(id ? { id } : {}) } });
+  if (hasActiveSourceCommitLockPlan(tx)) registerSourceCommitPublishedOutput(tx, workspaceId,
+    { kind: "ArtifactInputSnapshot", id: snapshot.id, fingerprint: lineageContentFingerprint("ArtifactInputSnapshot", snapshot) });
+  return snapshot;
 }
 
 async function snapshotInput(actor: AppActor, tx: Prisma.TransactionClient, workspaceId: string, root: LineageRoot,
@@ -1110,14 +1191,14 @@ async function snapshotInput(actor: AppActor, tx: Prisma.TransactionClient, work
     // Already frozen ancestry can retain its capability identity. Mutable
     // ancestors force a new receipt; no existing historical row is rewritten.
     if (signature(roots) === signature(inputs)) return { root, roots: credentialSnapshot ? [] : roots };
-    const snapshot = await tx.artifactInputSnapshot.create({ data: {
+    const snapshot = await saveAllocatedInputSnapshot(actor, tx, workspaceId, root, {
       epochProofVersion: content.epochProofVersion as number, permissionEpochsJson: content.permissionEpochsJson as Prisma.InputJsonValue,
       workspaceId, sourceKind: content.sourceKind, sourceId: String(content.sourceId),
       sourceFingerprint: String(content.sourceFingerprint), origin: String(content.origin),
       contentJson: content.contentJson as Prisma.InputJsonValue,
       accessEnvelopeJson: content.accessEnvelopeJson as Prisma.InputJsonValue,
       rootsJson: roots as Prisma.InputJsonArray,
-    } });
+    });
     return { root: { kind: "ArtifactInputSnapshot" as const, id: snapshot.id,
       fingerprint: lineageContentFingerprint("ArtifactInputSnapshot", snapshot) }, roots: credentialSnapshot ? [] : roots };
   }
@@ -1131,14 +1212,14 @@ async function snapshotInput(actor: AppActor, tx: Prisma.TransactionClient, work
     const permissionEpochs = await captureArtifactPermissionEpochs(actor, workspaceId, [root, parentReceipt.root], tx);
     const accessEnvelope = Object.fromEntries(["workspaceId", "createdByUserId", "archivedAt", "archivedByUserId"]
       .map(field => [field, content[field] ?? null]));
-    const snapshot = await tx.artifactInputSnapshot.create({ data: {
+    const snapshot = await saveAllocatedInputSnapshot(actor, tx, workspaceId, root, {
       workspaceId, sourceKind: root.kind, sourceId: root.id, sourceFingerprint: root.fingerprint, origin: "DERIVED",
       epochProofVersion: 1, permissionEpochsJson: permissionEpochs as unknown as Prisma.InputJsonValue,
       contentJson: JSON.parse(JSON.stringify(Object.fromEntries(snapshotContentFields(root.kind)
         .map(field => [field, content[field] ?? null])))) as Prisma.InputJsonValue,
       accessEnvelopeJson: { ...accessEnvelope, credentialParentPurposeVersion: 1 } as Prisma.InputJsonObject,
       rootsJson: [parentReceipt.root] as Prisma.InputJsonArray,
-    } });
+    });
     return { root: { kind: "ArtifactInputSnapshot" as const, id: snapshot.id,
       fingerprint: lineageContentFingerprint("ArtifactInputSnapshot", snapshot) }, roots: [] as LineageRoot[] };
   }
@@ -1173,13 +1254,13 @@ async function snapshotInput(actor: AppActor, tx: Prisma.TransactionClient, work
     accessEnvelope.humanOriginalManifestRevision = manifest.revision;
   }
   const permissionEpochs = await captureArtifactPermissionEpochs(actor, workspaceId, [root, ...snapshotRoots], tx);
-  const snapshot = await tx.artifactInputSnapshot.create({ data: {
+  const snapshot = await saveAllocatedInputSnapshot(actor, tx, workspaceId, root, {
     epochProofVersion: 1, permissionEpochsJson: permissionEpochs as unknown as Prisma.InputJsonValue,
     workspaceId, sourceKind: root.kind, sourceId: root.id, sourceFingerprint: root.fingerprint,
     origin: manifest.origin, contentJson: JSON.parse(JSON.stringify(contentJson)) as Prisma.InputJsonValue,
     accessEnvelopeJson: JSON.parse(JSON.stringify(accessEnvelope)) as Prisma.InputJsonValue,
     rootsJson: snapshotRoots as Prisma.InputJsonArray,
-  } });
+  });
   return { root: { kind: "ArtifactInputSnapshot" as const, id: snapshot.id,
     fingerprint: lineageContentFingerprint("ArtifactInputSnapshot", snapshot) }, roots: snapshotRoots };
 }
@@ -1265,6 +1346,7 @@ function snapshotMatches(snapshot: unknown, current: unknown): boolean {
 /** Capture the complete verified prompt inputs before generation, including their exact revisions. */
 export async function captureArtifactInputProof(actor: AppActor, workspaceId: string,
   inputs: Array<LineageInput & { snapshot?: Record<string, unknown> }>, db: LineageClient = prisma) {
+  assertSourceCommitTransactionCompatible(db);
   const membership = await requireWorkspaceMembership({ actor, workspaceId, tx: db });
   const domains = await resolveKnowledgeAccessDomains(actor, workspaceId, db);
   if (!inputs.length) return [];
@@ -1323,8 +1405,7 @@ export async function captureArtifactInputProof(actor: AppActor, workspaceId: st
   };
   const proof = db === prisma ? await prisma.$transaction(bindEpochs) : await bindEpochs(db);
   const readable = db === prisma ? await (() => {
-    const binding = readHeadBinding(memo);
-    binding.sealed = true;
+    const binding = sealedReadHeadBinding(memo);
     return expectedReadHeads.run(binding, () => isArtifactInputProofReadable(actor, workspaceId, proof, db));
   })() : await isArtifactInputProofReadable(actor, workspaceId, proof, db);
   invariant(readable,
@@ -1336,6 +1417,7 @@ export async function captureArtifactInputProof(actor: AppActor, workspaceId: st
 /** Revalidate a captured receipt for the current reader, without returning source metadata. */
 export async function isArtifactInputProofReadable(actor: AppActor, workspaceId: string,
   roots: readonly LineageRoot[], db: LineageClient = prisma): Promise<boolean> {
+  assertSourceCommitTransactionCompatible(db);
   const membership = await requireWorkspaceMembership({ actor, workspaceId, tx: db });
   const domains = await resolveKnowledgeAccessDomains(actor, workspaceId, db);
   const memo = new Map<string, boolean>();
@@ -1356,9 +1438,9 @@ export async function isArtifactInputProofReadable(actor: AppActor, workspaceId:
   // A provider await may outlive another contributor's permission. Discard the
   // earlier memo and recheck the complete local closure before releasing proof.
   // This second pass never contacts a provider or creates a serving capability.
-  if (db === prisma && nativeReplayMemos.has(memo)) {
-    const binding = readHeadBinding(memo);
-    binding.sealed = true;
+  if (db === prisma && !localCommitAdmission.getStore()
+    && (nativeReplayMemos.has(memo) || readHeadBinding(memo).nativeReplay)) {
+    const binding = sealedReadHeadBinding(memo);
     return expectedReadHeads.run(binding, () => localCommitAdmission.run(true,
       () => isArtifactInputProofReadable(actor, workspaceId, roots, db)));
   }
@@ -1374,6 +1456,29 @@ export async function assertArtifactInputClosureLocallyAdmissible(actor: AppActo
     invariant(await isArtifactInputProofReadable(actor, workspaceId, roots), 409, "SOURCE_CHANGED",
       "Commit caller cannot access the complete input closure.");
   });
+}
+
+/** Internal structural-variant constructor observation. This does not admit the
+ * target body, ancestry or metadata to a caller, model or read collector. */
+export async function inspectArtifactStructuralVariantTarget(actor: AppActor, workspaceId: string,
+  target: LineageInput) {
+  invariant(actor.kind === "user" && ["BrainArticle", "ContextGraphObject", "ContextGraphRelationship",
+    "ContextGraphEvidenceRef", "ContextGraphProposedDiff"].includes(target.kind),
+  409, "SOURCE_RESTRICTED", "Structural authority is limited to fresh owner-private variants.");
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  invariant(membership?.isActive, 403, "NOT_A_MEMBER", "Active membership is required.");
+  const domains = await resolveKnowledgeAccessDomains(actor, workspaceId);
+  const row = await loadArtifact(prisma, workspaceId, target);
+  invariant(row && !isArchived(row) && !(target.kind === "BrainArticle" && row.variantOfArticleId != null),
+    409, "SOURCE_RESTRICTED", "Canonical target structure is unavailable.");
+  const fingerprint = lineageContentFingerprint(target.kind, row);
+  const permitted = await localCommitAdmission.run(true, () => evaluateRoot(prisma, actor, workspaceId,
+    membership, domains, { ...target, fingerprint }, new Set(), new Map(), true));
+  invariant(permitted, 409, "SOURCE_RESTRICTED", "Canonical target structure is unavailable.");
+  const metadata = await loadArtifactPermissionMetadata(prisma, workspaceId, target);
+  const head = await latestManifest(prisma, workspaceId, target);
+  const stamp = (value: unknown) => createHash("sha256").update(sourceCommitCanonical(value)).digest("hex");
+  return { fingerprint, envelopeStamp: stamp(metadata), headStamp: stamp(head), ownerMemberId: membership.id };
 }
 
 /** After a trusted writer preserves an input revision, retain the exact bytes through its immutable receipt. */
@@ -1462,6 +1567,7 @@ export async function isArtifactInputProofPubliclyShareable(actor: AppActor, wor
 }
 
 async function latestManifest(db: LineageClient, workspaceId: string, input: LineageInput) {
+  assertSourceCommitTransactionCompatible(db);
   return db.artifactInputLineage.findFirst({ where: {
     workspaceId, artifactType: input.kind, artifactId: input.id,
   }, orderBy: { revision: "desc" } });
@@ -1470,8 +1576,19 @@ async function latestManifest(db: LineageClient, workspaceId: string, input: Lin
 /** Internal dependency discovery grants no read access and returns no source content. */
 export async function inspectStoredArtifactInputDependencies(db: LineageClient, workspaceId: string,
   inputs: readonly LineageRoot[], options?: { maxNodes: number }) {
+  assertSourceCommitTransactionCompatible(db);
   const dependencies = new Map<string, LineageRoot>();
   const memo = new Map<string, boolean>();
+  const publicNoteDependency = (value: unknown): LineageRoot | null | undefined => {
+    if (!isRecord(value) || value.operation !== "ACTION_COMPLETION_PUBLIC_NOTE") return undefined;
+    const control = value.controlJson;
+    if (!isRecord(control) || control.version !== 1 || control.publicationPolicyVersion !== 1
+      || control.audience !== "ACTION_READERS" || typeof control.oldActionSnapshotId !== "string"
+      || !control.oldActionSnapshotId || typeof control.oldActionSnapshotFingerprint !== "string"
+      || !/^[a-f0-9]{64}$/.test(control.oldActionSnapshotFingerprint)) return null;
+    return { kind: "ArtifactInputSnapshot", id: control.oldActionSnapshotId,
+      fingerprint: control.oldActionSnapshotFingerprint };
+  };
   const visit = async (root: LineageRoot, visiting = new Set<string>()): Promise<boolean> => {
     const key = `${root.kind}:${root.id}:${root.fingerprint}`;
     if (visiting.has(key)) return false;
@@ -1490,6 +1607,11 @@ export async function inspectStoredArtifactInputDependencies(db: LineageClient, 
       upstream = parseRoots(row.rootsJson as Prisma.JsonValue);
       if (!upstream || !knownSnapshotOrigin(row)
         || (row.origin === "DERIVED" && !upstream.length)) return false;
+      if (row.sourceKind === "ConversationOperationOutcome") {
+        const dependency = publicNoteDependency(row.contentJson);
+        if (dependency === null) return false;
+        if (dependency) upstream.push(dependency);
+      }
     } else {
       // Follow the revision that was actually consumed, including preserved
       // historical manifests. A newer revision cannot redefine old ancestry.
@@ -1505,6 +1627,11 @@ export async function inspectStoredArtifactInputDependencies(db: LineageClient, 
           || (manifest.origin === "DERIVED" && (!upstream.length || manifest.epochProofVersion !== 1
             || !parsePermissionEpochProof(manifest.permissionEpochsJson)))) return false;
       } else if (needsManifest(root.kind, row)) return false;
+      if (root.kind === "ConversationOperationOutcome") {
+        const dependency = publicNoteDependency(row);
+        if (dependency === null) return false;
+        if (dependency) upstream = [...(upstream ?? []), dependency];
+      }
       if (root.kind === "KnowledgeChunk") {
         const kinds: Record<string, LineageKind> = { BRAIN_ARTICLE: "BrainArticle", DOCUMENT: "Document", MEETING: "Meeting", PROPOSAL: "Proposal", EXTERNAL_CONTENT: "ExternalContentSource" };
         if (!kinds[String(row.sourceType)] || !isRecord(row.metadata) || typeof row.metadata.sourceContentHash !== "string") return false;
@@ -1552,7 +1679,8 @@ export async function captureArtifactPermissionEpochs(actor: AppActor, workspace
     const loaded = root.kind === "ArtifactInputSnapshot" ? await loadArtifact(tx, workspaceId, root)
       : await loadArtifactPermissionMetadata(tx, workspaceId, root);
     invariant(isRecord(loaded), 409, "SOURCE_CHANGED", "A permission-bearing input is unavailable.");
-    identities.push(...artifactPermissionEpochIdentities(root.kind, { ...loaded, id: root.id, workspaceId }));
+    identities.push(...artifactPermissionEpochIdentities(root.kind, { ...loaded, id: root.id, workspaceId })
+      .filter(identity => root.kind !== "ArtifactInputSnapshot" || identity.kind !== root.kind || identity.id !== root.id));
     pending.push(...artifactPermissionParents(root.kind, { ...loaded, id: root.id }));
     if (root.kind === "FinanceImportBatch") {
       const upload = await tx.financeReportUploadInput.findFirst({ where: { workspaceId, batchId: root.id }, select: { id: true } });
@@ -1587,6 +1715,7 @@ export async function recordArtifactInputLineage(params: {
   transitiveOnlyKinds?: LineageKind[];
 }) {
   await assertArtifactInputWriteFence(params.tx);
+  await assertPlannedArtifactPublication(params.tx, params.workspaceId, params.artifact);
   const submissionRoots = getMcpToolInputRoots(params.actor, params.workspaceId);
   if (submissionRoots.length) params = { ...params, origin: "DERIVED", inheritedRoots: [...(params.inheritedRoots ?? []), ...submissionRoots] };
   const { tx, actor, workspaceId, artifact, content } = params;
@@ -1668,7 +1797,7 @@ export async function recordArtifactInputLineage(params: {
   const previous = await latestManifest(tx, workspaceId, artifact);
   const permissionEpochs = await captureArtifactPermissionEpochs(actor, workspaceId,
     [{...artifact, fingerprint: lineageContentFingerprint(artifact.kind, content)}, ...roots.values()], tx);
-  return tx.artifactInputLineage.create({ data: {
+  const recorded = await tx.artifactInputLineage.create({ data: {
     epochProofVersion: 1, permissionEpochsJson: permissionEpochs as unknown as Prisma.InputJsonValue,
     workspaceId, artifactType: artifact.kind, artifactId: artifact.id,
     revision: (previous?.revision ?? 0) + 1, origin: params.origin,
@@ -1676,6 +1805,9 @@ export async function recordArtifactInputLineage(params: {
     inputsJson: params.inputs as Prisma.InputJsonArray,
     rootsJson: [...roots.values()] as Prisma.InputJsonArray,
   } });
+  if (hasActiveSourceCommitLockPlan(tx)) registerSourceCommitPublishedOutput(tx, workspaceId,
+    { ...artifact, fingerprint: recorded.contentHash });
+  return recorded;
 }
 
 /** Preserve the prior body's exact permissions when saving article history. */
@@ -1688,6 +1820,9 @@ export async function copyArtifactInputLineage(params: {
   toContent: unknown;
 }) {
   await assertArtifactInputWriteFence(params.tx);
+  await assertPlannedArtifactPublication(params.tx, params.workspaceId, params.to);
+  if (hasActiveSourceCommitLockPlan(params.tx)) assertSourceCommitSemanticRootCovered(params.tx, params.workspaceId,
+    { ...params.from, fingerprint: lineageContentFingerprint(params.from.kind, params.fromContent) });
   const prior = await latestManifest(params.tx, params.workspaceId, params.from);
   if (!prior || prior.contentHash !== lineageContentFingerprint(params.from.kind, params.fromContent)
     || !parseRoots(prior.rootsJson)) return false;
@@ -1702,6 +1837,8 @@ export async function copyArtifactInputLineage(params: {
     inputsJson: prior.inputsJson as Prisma.InputJsonValue,
     rootsJson: prior.rootsJson as Prisma.InputJsonValue,
   } });
+  if (hasActiveSourceCommitLockPlan(params.tx)) registerSourceCommitPublishedOutput(params.tx, params.workspaceId,
+    { ...params.to, fingerprint: lineageContentFingerprint(params.to.kind, params.toContent) });
   return true;
 }
 
@@ -1717,7 +1854,10 @@ export async function advanceHumanArtifactInputLineage(params: {
   allowSystemTransition?: boolean;
 }) {
   await assertArtifactInputWriteFence(params.tx);
+  await assertPlannedArtifactPublication(params.tx, params.workspaceId, params.artifact);
   const { tx, actor, workspaceId, artifact, before, after } = params;
+  if (hasActiveSourceCommitLockPlan(tx)) assertSourceCommitSemanticRootCovered(tx, workspaceId,
+    { ...artifact, fingerprint: lineageContentFingerprint(artifact.kind, before) });
   const previous = await latestManifest(tx, workspaceId, artifact);
   const roots = await currentArtifactInputRoots(tx, workspaceId, artifact, before);
   if ((actor.kind !== "user" && !params.allowSystemTransition) || !previous || !roots) {
@@ -1755,6 +1895,8 @@ export async function advanceHumanArtifactInputLineage(params: {
     inputsJson: previous.inputsJson as Prisma.InputJsonValue,
     rootsJson: previous.rootsJson as Prisma.InputJsonValue,
   } });
+  if (hasActiveSourceCommitLockPlan(tx)) registerSourceCommitPublishedOutput(tx, workspaceId,
+    { ...artifact, fingerprint: lineageContentFingerprint(artifact.kind, after) });
   return true;
 }
 
@@ -1766,6 +1908,7 @@ export async function advanceArchivedArtifactEnvelopeLineage(params: {
   before: unknown; after: unknown;
 }) {
   await assertArtifactInputWriteFence(params.tx);
+  await assertPlannedArtifactPublication(params.tx, params.workspaceId, params.artifact);
   const { tx, workspaceId, artifact, before, after } = params;
   if (!isRecord(before) || !isRecord(after)) return false;
   const prior = await latestManifest(tx, workspaceId, artifact);
@@ -1801,6 +1944,7 @@ export async function invalidateArtifactInputLineage(params: {
   content: unknown;
 }) {
   await assertArtifactInputWriteFence(params.tx);
+  await assertPlannedArtifactPublication(params.tx, params.workspaceId, params.artifact);
   const previous = await latestManifest(params.tx, params.workspaceId, params.artifact);
   return params.tx.artifactInputLineage.create({ data: {
     workspaceId: params.workspaceId,
@@ -1832,6 +1976,7 @@ export async function currentArtifactInputRoots(db: LineageClient, workspaceId: 
  * returns no body and never admits an archived input to a model or copy writer. */
 export async function isArtifactArchiveMetadataReadable(actor: AppActor, workspaceId: string,
   artifact: LineageInput, db: LineageClient = prisma) {
+  assertSourceCommitTransactionCompatible(db);
   const membership = await requireWorkspaceMembership({ actor, workspaceId, tx: db });
   const domains = await resolveKnowledgeAccessDomains(actor, workspaceId, db);
   const row = await loadArtifact(db, workspaceId, artifact);
@@ -1851,6 +1996,7 @@ export async function isArtifactArchiveMetadataReadable(actor: AppActor, workspa
 /** Returns only ids whose current content and every permission-bearing input are provably safe. */
 export async function readableArtifactIds(actor: AppActor, workspaceId: string,
   kind: LineageKind, records: Array<{ id: string; [key: string]: unknown }>, db: LineageClient = prisma) {
+  assertSourceCommitTransactionCompatible(db);
   const membership = await requireWorkspaceMembership({ actor, workspaceId, tx: db });
   const domains = await resolveKnowledgeAccessDomains(actor, workspaceId, db);
   const manifests = await db.artifactInputLineage.findMany({ where: {
@@ -1884,12 +2030,12 @@ export async function readableArtifactIds(actor: AppActor, workspaceId: string,
     }
     if (allowed) visible.add(record.id);
   }
-  if (db === prisma && nativeReplayMemos.has(rootCache) && visible.size) {
+  if (db === prisma && !localCommitAdmission.getStore() && visible.size
+    && (nativeReplayMemos.has(rootCache) || readHeadBinding(rootCache).nativeReplay)) {
     const currentMembership = await requireWorkspaceMembership({ actor, workspaceId, tx: db });
     const currentDomains = await resolveKnowledgeAccessDomains(actor, workspaceId, db);
     const finalMemo = new Map<string, boolean>();
-    const binding = readHeadBinding(rootCache);
-    binding.sealed = true;
+    const binding = sealedReadHeadBinding(rootCache);
     readHeadMemos.set(finalMemo, binding);
     await localCommitAdmission.run(true, async () => {
       for (const record of records) if (visible.has(record.id)

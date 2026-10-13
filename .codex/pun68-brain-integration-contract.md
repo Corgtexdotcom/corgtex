@@ -2,18 +2,20 @@
 
 ## Pins and authority
 
-Published PUN-68 implementing checkpoint: bcc9031bf3221d1e29afc03050c6b16051dae6ec,
-draft PR1517, extending a4be4f9b80411bad1667a6d93ee2bf2e53fa2775. It seals turn
-submissions before awaits and supports safe Slack/Box/MCP commit mixtures. These
-corrections have no schema changes. Pin the exact joint code/schema head before
-tests; do not test a moving checkout. A follow-up test database guard correction
-does not change these publication interfaces.
+This candidate extends published PUN-68 checkpoint
+aef530642100e8e41dc555517fef193316e3d2bb in draft PR1517. The implemented
+source composer, complete source lock union, semantic guards and allocation
+contract are in [the bounded source commit contract](pun68-source-commit-contract.md).
+That contract supersedes the earlier proposed source interfaces and ordering
+below. No schema changes are included in this candidate. Pin the exact joint
+code/schema head before tests; do not test a moving checkout.
 
 Bloop's default-off foundation is published in draft PR1523 at
 9050c76d7794c74cd68253965e73083cda0e0801. This isolated checkout fetched that
 read-only reference and verified tree514d9f4cb97531bf8b879e448bacb7cdc1115122,
-matching the reviewed8bbfa306 tree reported by the PR. Publication is authorized;
-merge, activation and deployment remain unauthorized. The foundation explicitly
+matching the reviewed8bbfa306 tree reported by the PR. Its subsequent patch
+publication remains held by the parent for exact approval. This route does not
+authorize that publication, merge, activation or deployment. The foundation explicitly
 defers SQL saver, lifecycle schema, registered worker and actual composition.
 Its earlier caller-tx review of0c00c554 is not current composition evidence.
 
@@ -52,6 +54,12 @@ where appropriate; do not introduce a second independent effect queue.
 ## Existing interfaces and required composition
 
 These are implemented PUN-68 interfaces, not replacements for Bloop's lifecycle:
+
+- `prepareArtifactSourceCommit` and `withArtifactSourceCommit` now compose the
+  complete source plan with native replay and the trusted owner adapter. Use this
+  wrapper for new composition, with every output/snapshot ID preallocated and
+  exact original semantic inputs. The following lower-level native preflight
+  remains available but does not provide the complete source/target lock union.
 
 - createConversationPromptInput(actor,{workspaceId,conversationId,content,tx})
   and createConversationIngressInput(actor,{workspaceId,content,tx}) join native
@@ -126,7 +134,11 @@ restricted bytes or regenerate from old output.
 
 ## Proposed exact lock order for joint implementation
 
-Use this order in every Bloop transition, retry, cancellation and terminalizer:
+The historical proposal below is superseded for source commits by the implemented
+contract: the entire sorted source advisory union is held BEFORE the owner
+callback locks its durable control rows. Bloop must coordinate earlier request,
+claim and conversation locks against that order; joint lifecycle acceptance is
+still open. Do not implement the historical sequence literally.
 
 1. Request/admission idempotency advisory key scoped by tenant/principal/request.
 2. Existing WorkflowJob claim row, then AgentRun row, then continuation request,
@@ -145,12 +157,11 @@ Use this order in every Bloop transition, retry, cancellation and terminalizer:
    actual content, lineage, saver, receipt and outbox writes. Repeat claim/source
    checks without acquiring an earlier class of lock after this point.
 
-This is a proposed shared order, not a claim that8bb or PUN-68 already implements
-it globally. Current PUN-68 epoch checks lock each proof's sorted entries during
-traversal; addConversationTurn does not currently prelock ConversationSession.
-PUN-68 must supply a complete bounded lock-plan interface (native/governing/local
-row union plus saved epoch union), and Bloop must prelock the session/control rows
-on its bound TX before invoking helpers. Locking a saved union is not permission
+This was a proposed shared order, not a claim that8bb implemented it globally.
+PUN-68 now supplies the bounded lock-plan interface (native/governing/local rows,
+head union and saved epochs). Earlier legacy locks, including conversation
+sequencing/session and Bloop lifecycle controls, still require actual coordinated
+composition. Locking a saved union is not permission
 to capture/restamp a fresh proof. Joint concurrent-writer tests must establish the
 actual combined order. Bloop compares its held saver/claim order before coding.
 Existing CRM confirmation
@@ -243,18 +254,19 @@ The mapping is compatible with this contract subject to these corrections:
   existing CRM/source wrappers remain PUN-68-owned. Named hunk ownership must be
   confirmed before any edit in a shared file; this response reserves no whole file.
 
-The bounded full lock-plan API above is still a proposal. Existing native scope
-tokens do not prove the complete row/epoch union or Bloop owner/connection binding.
-The shared implementation must use a closed authority-edge/physical-lock registry,
-reject changed ancestry without late locks, and serialize manifest appends with
-source head changes. No schema, SQL saver or actual lifecycle acceptance is
+The bounded source composer now uses the closed authority-edge/physical registry,
+rejects changed ancestry without late locks and requires whole-head reservation.
+Existing native scope tokens alone do not prove Bloop owner/connection binding.
+No schema, SQL saver or actual canonical lifecycle acceptance is
 established by the current foundation mapping. The foundation is now published
 as described above; this response does not authorize its live composition.
 
 ## Bounded source-plan API for the staging-barrier integration
 
-These new modules are under implementation and review, not yet a published or
-accepted joint ABI. PUN-68 owns them and the existing source/authority adapters.
+These modules have bounded independent review and synthetic PostgreSQL evidence
+in the current candidate. They are not an accepted joint lifecycle ABI. PUN-68
+owns them and the existing source/authority adapters. Prefer the composed API
+in the bounded source contract; these are its lower-level internal interfaces.
 
 ```ts
 prepareSourceCommitLockPlan(actor, workspaceId, immutableRoots, {
@@ -313,4 +325,4 @@ withSourceCommitLockPlan(
   claim-race, revocation and SDK equivalence tests are still required.
 
 There are no source-plan schema changes in this foundation. Complete existing
-writer migration and independent review precede describing this API as ready.
+writer migration and actual Bloop composition still precede full acceptance.

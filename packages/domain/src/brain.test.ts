@@ -52,6 +52,11 @@ const resolveKnowledgeAccessDomains = vi.fn();
 const archiveWorkspaceArtifact = vi.fn();
 const requestBrainSourceRemoval = vi.fn();
 const readableArtifactIds = vi.fn(async (_actor, _workspaceId, _kind, records) => new Set(records.map((record: { id: string }) => record.id)));
+const prepareArtifactCommitPreflight = vi.fn(async () => Object.freeze({}));
+const withArtifactCommitPreflight = vi.fn(async (_actor: unknown, _workspaceId: string, _tx: unknown,
+  _roots: unknown, _token: unknown, work: () => Promise<unknown>) => work());
+
+vi.mock("./artifact-commit-preflight", () => ({ prepareArtifactCommitPreflight, withArtifactCommitPreflight }));
 
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
@@ -399,7 +404,7 @@ describe("Brain article draft lifecycle", () => {
     prismaMock.brainSource.findFirst.mockResolvedValue(source);
     prismaMock.brainSource.findMany.mockResolvedValue([source]);
     prismaMock.artifactInputLineage.findFirst.mockResolvedValue({ workspaceId: "ws-1", artifactType: "BrainSource", artifactId: source.id,
-      contentHash: lineageContentFingerprint("BrainSource", source), revision: 1, origin: "HUMAN_ORIGINAL", rootsJson: [] });
+      contentHash: lineageContentFingerprint("BrainSource", source), revision: 1, origin: "HUMAN_ORIGINAL", rootsJson: [], inputsJson: [] });
     prismaMock.brainArticle.create.mockResolvedValue({ id: "article-1", slug: "notes", title: "Notes", type: "PROJECT" });
 
     await createArticle({ kind: "agent", label: "brain-absorb", workspaceIds: ["ws-1"] } as any, {
@@ -407,6 +412,11 @@ describe("Brain article draft lifecycle", () => {
       sourceIds: [source.id], isPrivate: false, completeInputRoots: [{kind: "BrainSource", id: source.id, fingerprint: lineageContentFingerprint("BrainSource", source)}],
       derivation: { sourceId: source.id, sourceFingerprint: brainSourceContentFingerprint(source as any), agentRunId: "run-1" },
     });
+
+    expect(prepareArtifactCommitPreflight).toHaveBeenCalledWith(expect.anything(), "ws-1",
+      [expect.objectContaining({ kind: "BrainSource", id: source.id })]);
+    expect(withArtifactCommitPreflight).toHaveBeenCalledWith(expect.anything(), "ws-1", prismaMock,
+      [expect.objectContaining({ kind: "BrainSource", id: source.id })], expect.anything(), expect.any(Function));
 
     expect(prismaMock.brainSource.findFirst).toHaveBeenCalledWith({
       where: { id: "source-1", workspaceId: "ws-1", archivedAt: null },

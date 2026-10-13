@@ -73,15 +73,22 @@ vi.mock("../../shared/src/env", () => ({ env: { ENCRYPTION_KEY: "a".repeat(64) }
 vi.mock("@corgtex/shared", async () => ({ ...await import("../../shared/src/mcp-context"), ...await import("../../shared/src/crypto"), prisma: fixture.prisma, toInputJson: (value: unknown) => value }));
 vi.mock("./auth", () => ({ requireWorkspaceMembership: fixture.membership }));
 vi.mock("./brain-access", () => ({ resolveKnowledgeAccessDomains: vi.fn(async () => ["WORKSPACE"]) }));
+const nativeReplay = vi.hoisted(() => ({sdk: vi.fn(async () => ({structuredContent: {results: []}}))}));
+vi.mock("./external-mcp", async original => ({...await original(), readExternalMcpNativeToolResult: nativeReplay.sdk}));
 
 import { assertMcpOriginActive, getMcpOrigin, mcpCredentialVersion, mcpScopesHash, runWithMcpOrigin } from "../../shared/src/mcp-context";
 import { AppError } from "./errors";
-import { decryptSecret } from "../../shared/src/crypto";
+import { decryptSecret, encryptSecret } from "../../shared/src/crypto";
 import { withMcpToolInput } from "./mcp-tool-input";
-import { completeActionWithNativeRequest, getActionCompletionOutcomeInputRoots, isActionCompletionOutcomeReadable } from "./action-completion";
+import { completeActionWithNativeRequest, getActionCompletionOutcomeInputRoots, isActionCompletionOutcomeReadable,
+  isActionCompletionPublicNoteReadable, ACTION_COMPLETION_PUBLIC_NOTE } from "./action-completion";
 import { prepareActionCompletionLineage } from "./action-completion-lineage";
 
-import { captureArtifactInputProof, isArtifactInputProofReadable, recordArtifactInputLineage } from "./source-lineage";
+import { captureArtifactInputProof, captureArtifactPermissionEpochs, isArtifactInputProofReadable,
+  lineageContentFingerprint, readableArtifactIds, recordArtifactInputLineage, withArtifactInputReadCapture } from "./source-lineage";
+import { externalMcpConnectionGrantHash, externalMcpNativeReadRequest } from "./external-mcp";
+import { externalMcpResponseHash } from "./external-mcp-response-input";
+import { capturePermissionEpochs } from "./source-permission-epochs";
 vi.mock("./audit-trail", () => ({recordAudit: vi.fn(async () => undefined)}));
 vi.mock("./events", () => ({appendEvents: vi.fn(async () => undefined)}));
 
@@ -158,10 +165,81 @@ describe("native Action completion control", () => {
     expect(snapshot.permissionEpochsJson).toEqual(old.permissionEpochsJson);
     const latest = manifests().at(-1);
     expect(latest.origin).toBe("DERIVED");
-    expect(latest.rootsJson).toEqual(expect.arrayContaining([expect.objectContaining({kind: "ArtifactInputSnapshot"}), expect.objectContaining({kind: "McpToolInput"})]));
+    expect(latest.rootsJson).toEqual(expect.arrayContaining([expect.objectContaining({kind: "ArtifactInputSnapshot"}),
+      expect.objectContaining({kind: "ConversationOperationOutcome"})]));
+    expect(latest.rootsJson).not.toEqual(expect.arrayContaining([expect.objectContaining({kind: "McpToolInput"})]));
+    const publicNote = [...fixture.tables.get("conversationOperationOutcome")!.values()]
+      .find(row => row.operation === ACTION_COMPLETION_PUBLIC_NOTE);
+    expect(publicNote).toMatchObject({actorKind: "public", userId: null, credentialId: null, requiredScopes: [],
+      controlJson: {completedVia: payload.completedVia.trim(), audience: "ACTION_READERS", publicationPolicyVersion: 1}});
+    expect(publicNote.controlJson).not.toHaveProperty("bodyMd");
     expect(decryptSecret(inputs()[0].argumentsJson)).toBe(JSON.stringify(payload));
     await expect(getActionCompletionOutcomeInputRoots(principal.actor, workspaceId, result)).resolves.toEqual(expect.arrayContaining([expect.objectContaining({kind: "ConversationOperationOutcome"})]));
     await expect(getActionCompletionOutcomeInputRoots(principal.actor, workspaceId, {...result})).rejects.toMatchObject({code: "UNKNOWN_LINEAGE"});
+  });
+
+  it("publishes the typed note to current Action readers without binding its visibility to the editor credential", async () => {
+    await originalAction(); const principal = credential();
+    await complete(principal.actor, principal.origin);
+    const note = [...fixture.tables.get("conversationOperationOutcome")!.values()]
+      .find(row => row.operation === ACTION_COMPLETION_PUBLIC_NOTE);
+    const bob: AppActor = {kind: "user", user: {id: "synthetic-bob", email: "bob@example.test", displayName: null}};
+    expect(await isActionCompletionPublicNoteReadable(bob, workspaceId, note, tx)).toBe(true);
+    expect(await isActionCompletionPublicNoteReadable(bob, "synthetic-ws-b", note, tx)).toBe(false);
+    principal.row.isActive = false;
+    expect(await isActionCompletionPublicNoteReadable(bob, workspaceId, note, tx)).toBe(true);
+    const action = fixture.tables.get("action")!.get(payload.actionId);
+    action.isPrivate = true; oauthEpochs.bump(workspaceId, "Action", action.id);
+    expect(await isActionCompletionPublicNoteReadable(bob, workspaceId, note, tx)).toBe(false);
+    action.isPrivate = false; oauthEpochs.bump(workspaceId, "Action", action.id);
+    expect(await isActionCompletionPublicNoteReadable(bob, workspaceId, note, tx)).toBe(false);
+  });
+
+  it("preserves the existing brain:read Action source alternative for OAuth and agent readers", async () => {
+    await originalAction(); const editor = credential();
+    await complete(editor.actor, editor.origin);
+    const note = [...fixture.tables.get("conversationOperationOutcome")!.values()]
+      .find(row => row.operation === ACTION_COMPLETION_PUBLIC_NOTE);
+    const bob: AppActor = {kind: "user", user: {id: "synthetic-bob", email: "bob@example.test", displayName: null}};
+    const delegated = oauth(bob, workspaceId, "oauth-bob-reader");
+    delegated.row.scopes = ["brain:read"];
+    delegated.origin.scopeHash = mcpScopesHash(delegated.row.scopes);
+    expect(await runWithMcpOrigin(delegated.origin,
+      () => isActionCompletionPublicNoteReadable(bob, workspaceId, note, tx))).toBe(true);
+    const agent = credential("credential-reader");
+    agent.row.scopes = ["brain:read"];
+    agent.actor.scopes = [...agent.row.scopes];
+    agent.origin.scopeHash = mcpScopesHash(agent.row.scopes);
+    expect(await runWithMcpOrigin(agent.origin,
+      () => isActionCompletionPublicNoteReadable(agent.actor, workspaceId, note, tx))).toBe(true);
+    delegated.row.scopes = [];
+    expect(await runWithMcpOrigin(delegated.origin,
+      () => isActionCompletionPublicNoteReadable(bob, workspaceId, note, tx))).toBe(false);
+  });
+
+  it("withholds the public projection if its exact private submitted bytes or note control change", async () => {
+    await originalAction(); const principal = credential();
+    await complete(principal.actor, principal.origin);
+    const note = [...fixture.tables.get("conversationOperationOutcome")!.values()]
+      .find(row => row.operation === ACTION_COMPLETION_PUBLIC_NOTE);
+    const bob: AppActor = {kind: "user", user: {id: "synthetic-bob", email: "bob@example.test", displayName: null}};
+    expect(await isActionCompletionPublicNoteReadable(bob, workspaceId, note, tx)).toBe(true);
+    note.controlJson.completedVia = "Forged public note";
+    expect(await isActionCompletionPublicNoteReadable(bob, workspaceId, note, tx)).toBe(false);
+    note.controlJson.completedVia = payload.completedVia.trim();
+    const originalSnapshotId = note.controlJson.oldActionSnapshotId;
+    note.controlJson.oldActionSnapshotId = "different-old-revision";
+    expect(await isActionCompletionPublicNoteReadable(bob, workspaceId, note, tx)).toBe(false);
+    note.controlJson.oldActionSnapshotId = originalSnapshotId;
+    const noteManifest = [...fixture.tables.get("artifactInputLineage")!.values()]
+      .find(row => row.artifactType === "ConversationOperationOutcome" && row.artifactId === note.id);
+    const originalProof = structuredClone(noteManifest.permissionEpochsJson);
+    noteManifest.permissionEpochsJson.entries = noteManifest.permissionEpochsJson.entries.filter((entry: {kind: string}) => entry.kind !== "Action");
+    expect(await isActionCompletionPublicNoteReadable(bob, workspaceId, note, tx)).toBe(false);
+    noteManifest.permissionEpochsJson = originalProof;
+    const input = inputs()[0];
+    input.toolName = "read_private_chat";
+    expect(await isActionCompletionPublicNoteReadable(bob, workspaceId, note, tx)).toBe(false);
   });
 
   it.each([false, true])("keeps unknown or previously revoked body withheld while completing native status (stale=%j)", async stale => {
@@ -174,7 +252,50 @@ describe("native Action completion control", () => {
     expect([...fixture.tables.get("artifactInputSnapshot")!.values()][0].contentJson.bodyMd).toBe("Original body canary");
   });
 
+  it.each([false, true])("requires an original Document epoch in copied Action history (leaf proof=%j)", async leafProof => {
+    const action = await originalAction();
+    const document = insert("document", {id: "copied-document", workspaceId, title: "Copied document",
+      textContent: "Copied body canary", accessDomain: "WORKSPACE", source: "SYNTHETIC",
+      storageKey: "synthetic", archivedAt: null});
+    await recordArtifactInputLineage({tx, actor: alice, workspaceId, artifact: {kind: "Document", id: document.id},
+      content: document, origin: "HUMAN_ORIGINAL", inputs: []});
+    action.bodyMd = document.textContent;
+    await recordArtifactInputLineage({tx, actor: alice, workspaceId, artifact: {kind: "Action", id: action.id},
+      content: action, origin: "DERIVED", inputs: [{kind: "Document", id: document.id}]});
+    const copied = manifests().at(-1);
+    expect(copied.permissionEpochsJson.entries).toEqual(expect.arrayContaining([expect.objectContaining({kind: "Document", id: document.id})]));
+    if (leafProof) copied.rootsJson[0].permissionEpochs = structuredClone(copied.permissionEpochsJson);
+    copied.permissionEpochsJson.entries = copied.permissionEpochsJson.entries.filter((entry: {kind: string}) => entry.kind !== "Document");
+    const principal = credential();
+    await expect(complete(principal.actor, principal.origin)).resolves.toEqual({id: action.id, status: "COMPLETED"});
+    expect(manifests().at(-1).origin).toBe(leafProof ? "DERIVED" : "UNKNOWN");
+    document.accessDomain = "FINANCE"; oauthEpochs.bump(workspaceId, "Document", document.id);
+    document.accessDomain = "WORKSPACE"; oauthEpochs.bump(workspaceId, "Document", document.id);
+    const note = [...fixture.tables.get("conversationOperationOutcome")!.values()]
+      .find(row => row.operation === ACTION_COMPLETION_PUBLIC_NOTE);
+    const bob: AppActor = {kind: "user", user: {id: "synthetic-bob", email: "bob@example.test", displayName: null}};
+    expect(await isActionCompletionPublicNoteReadable(bob, workspaceId, note, tx)).toBe(false);
+  });
+
+  it("binds a newly proven original revision without redeeming an older ambiguous same-body receipt", async () => {
+    const action = await originalAction();
+    manifests()[0].inputsJson = [{kind: "Document", id: "legacy-malformed-original"}];
+    await recordArtifactInputLineage({tx, actor: alice, workspaceId, artifact: {kind: "Action", id: action.id},
+      content: action, origin: "HUMAN_ORIGINAL", inputs: []});
+    const valid = manifests().at(-1);
+    const principal = credential();
+    await complete(principal.actor, principal.origin);
+    const snapshot = [...fixture.tables.get("artifactInputSnapshot")!.values()][0];
+    expect(snapshot.accessEnvelopeJson).toMatchObject({humanOriginalManifestId: valid.id,
+      humanOriginalManifestRevision: valid.revision});
+    const note = [...fixture.tables.get("conversationOperationOutcome")!.values()]
+      .find(row => row.operation === ACTION_COMPLETION_PUBLIC_NOTE);
+    const bob: AppActor = {kind: "user", user: {id: "synthetic-bob", email: "bob@example.test", displayName: null}};
+    expect(await isActionCompletionPublicNoteReadable(bob, workspaceId, note, tx)).toBe(true);
+  });
+
   it.each([{toolName: "update_action", args: payload}, {toolName: "complete_action", args: {...payload, actionId: "other-action"}},
+    {toolName: "complete_action", args: {...payload, privateDraft: "Private chat canary"}},
     {toolName: "complete_action", args: {...payload, completedVia: "Different original note"}}])("rejects a different native tool/id/note before changing status", async supplied => {
     await originalAction(); const principal = credential();
     await expect(runWithMcpOrigin(principal.origin, () => withMcpToolInput(principal.actor, {...params, ...supplied},
@@ -297,4 +418,69 @@ describe("native Action completion control", () => {
     expect(await isArtifactInputProofReadable(principal.actor, workspaceId, bodyProof, tx)).toBe(false);
   });
 
+});
+
+describe("public note nested native read fence", () => {
+  it.each(["proof", "capture", "list"] as const)("rechecks the entire closure after nested MCP replay in %s", async api => {
+    const response = {structuredContent: {results: []}};
+    nativeReplay.sdk.mockResolvedValue(response);
+    const action = await originalAction();
+    const connection = insert("externalMcpConnection", {id: "note-connection", workspaceId, userId: alice.user.id,
+      status: "ACTIVE", providerKey: "notion", serverUrl: "https://mcp.notion.com/mcp", providerAccountId: null,
+      scopes: ["read"], accessTokenEnc: "synthetic-unused", updatedAt: now});
+    const request = externalMcpNativeReadRequest("notion", "SEARCH", {query: "SYNTHETIC_PUBLIC_NOTE_CONTEXT", limit: 1});
+    const originalLocalEpochsJson = await capturePermissionEpochs(tx, workspaceId, [
+      {kind: "Workspace", id: workspaceId}, {kind: "MemberUserPolicy", id: alice.user.id},
+      {kind: "WorkspaceSupportPolicy", id: alice.user.id}, {kind: "ExternalMcpConnection", id: connection.id},
+      {kind: "ExternalMcpConnectionSetPolicy", id: alice.user.id}, {kind: "ExternalMcpResponseInput", id: "note-native"}]);
+    const native = insert("externalMcpResponseInput", {id: "note-native", workspaceId, connectionId: connection.id,
+      localUserId: alice.user.id, providerKey: "notion", serverUrl: request.serverUrl, providerAccountId: null,
+      mode: "SEARCH", toolName: request.toolName, requestJson: request.arguments,
+      encryptedResponseJson: encryptSecret(JSON.stringify(response)), responseHash: externalMcpResponseHash(response),
+      connectionGrantHash: externalMcpConnectionGrantHash(connection as any), originalLocalEpochsJson, fetchedAt: now});
+    const nativeRoot = {kind: "ExternalMcpResponseInput" as const, id: native.id,
+      fingerprint: lineageContentFingerprint("ExternalMcpResponseInput", native), permissionEpochs: originalLocalEpochsJson};
+    const actionProof = await captureArtifactPermissionEpochs(alice, workspaceId,
+      [{kind: "Action", id: action.id, fingerprint: lineageContentFingerprint("Action", action)}, nativeRoot], tx);
+    await tx.artifactInputLineage.create({data: {workspaceId, artifactType: "Action", artifactId: action.id,
+      revision: 2, origin: "DERIVED", contentHash: lineageContentFingerprint("Action", action), inputsJson: [],
+      rootsJson: [nativeRoot], epochProofVersion: 1, permissionEpochsJson: actionProof}});
+    const editor = credential();
+    await complete(editor.actor, editor.origin);
+    const note = [...fixture.tables.get("conversationOperationOutcome")!.values()]
+      .find(row => row.operation === ACTION_COMPLETION_PUBLIC_NOTE);
+    const document = insert("document", {id: "independent-note-document", workspaceId, title: "Independent",
+      textContent: "Independent body", accessDomain: "WORKSPACE", archivedAt: null});
+    await recordArtifactInputLineage({tx, actor: alice, workspaceId, artifact: {kind: "Document", id: document.id},
+      content: document, origin: "HUMAN_ORIGINAL", inputs: []});
+    const roots = [{kind: "Document" as const, id: document.id, fingerprint: lineageContentFingerprint("Document", document)},
+      {kind: "ConversationOperationOutcome" as const, id: note.id,
+        fingerprint: lineageContentFingerprint("ConversationOperationOutcome", note)}];
+    const account = insert("crmAccount", {id: "note-union-account", workspaceId, name: "Synthetic union", archivedAt: null});
+    const unionProof = await captureArtifactPermissionEpochs(alice, workspaceId,
+      [{kind: "CrmAccount", id: account.id, fingerprint: lineageContentFingerprint("CrmAccount", account)}, ...roots], tx);
+    await tx.artifactInputLineage.create({data: {workspaceId, artifactType: "CrmAccount", artifactId: account.id,
+      revision: 1, origin: "DERIVED", contentHash: lineageContentFingerprint("CrmAccount", account),
+      inputsJson: [], rootsJson: roots, epochProofVersion: 1, permissionEpochsJson: unionProof}});
+    expect(await isArtifactInputProofReadable(alice, workspaceId, roots, fixture.prisma)).toBe(true);
+    nativeReplay.sdk.mockClear();
+    nativeReplay.sdk.mockImplementationOnce(async () => {
+      document.accessDomain = "FINANCE";
+      oauthEpochs.bump(workspaceId, "Document", document.id);
+      return response;
+    });
+    if (api === "proof") expect(await isArtifactInputProofReadable(alice, workspaceId, roots, fixture.prisma)).toBe(false);
+    else if (api === "capture") await expect(captureArtifactInputProof(alice, workspaceId, roots, fixture.prisma))
+      .rejects.toMatchObject({code: "SOURCE_CHANGED"});
+    else {
+      const survivor = insert("crmAccount", {id: "independent-survivor", workspaceId, name: "Survivor", archivedAt: null});
+      await recordArtifactInputLineage({tx, actor: alice, workspaceId, artifact: {kind: "CrmAccount", id: survivor.id},
+        content: survivor, origin: "HUMAN_ORIGINAL", inputs: []});
+      const observed = await withArtifactInputReadCapture(alice, workspaceId, async () =>
+        readableArtifactIds(alice, workspaceId, "CrmAccount", [account, survivor], fixture.prisma));
+      expect(observed.value).toEqual(new Set([survivor.id]));
+      expect(observed.roots).toEqual([expect.objectContaining({kind: "CrmAccount", id: survivor.id})]);
+    }
+    expect(nativeReplay.sdk).toHaveBeenCalled();
+  });
 });

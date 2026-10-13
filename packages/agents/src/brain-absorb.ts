@@ -4,6 +4,11 @@ import { defaultModelGateway, resolveModel } from "@corgtex/models";
 import { AGENT_REGISTRY } from "@corgtex/domain";
 import {
   createArticle,
+  assertArtifactInputWriteFence,
+  sealArtifactInputActor,
+  prepareArtifactCommitPreflight,
+  withArtifactCommitPreflight,
+  lockArtifactReadAuthorityRows,
   markSourceAbsorbed,
   rebuildBacklinks,
   lockWorkspaceArchiveArtifact,
@@ -22,6 +27,7 @@ import {
 import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
 import type { AppActor } from "@corgtex/shared";
 import type { BrainArticleAuthority, BrainArticleType, Prisma } from "@prisma/client";
+import { getMcpToolInputRoots } from "../../domain/src/mcp-tool-input-context";
 
 function isDocumentLikeSource(sourceType: string) {
   return sourceType === "DOC" || sourceType === "FILE_UPLOAD";
@@ -84,8 +90,14 @@ export async function absorbSource(params: {
   agentRunId: string;
   model?: string;
   expectedSourceIdentity?: string;
+  /** Trusted server principal; never reconstructed from a source's author. */
+  actor?: AppActor;
 }) {
   params = {...params};
+  const agentActor = sealArtifactInputActor(params.actor ?? {
+    kind: "agent", authProvider: "bootstrap", label: "brain-absorb", workspaceIds: [params.workspaceId],
+  });
+  const submissionRoots = getMcpToolInputRoots(agentActor, params.workspaceId);
   const loadedSource = await prisma.brainSource.findUnique({
     where: { id: params.sourceId },
   });
@@ -108,13 +120,6 @@ export async function absorbSource(params: {
   }
   const sourceId = source.id;
   const initialSourceIdentity = brainSourceRecoveryIdentity(source);
-
-  const agentActor: AppActor = {
-    kind: "agent",
-    authProvider: "bootstrap",
-    label: "brain-absorb",
-    workspaceIds: [params.workspaceId],
-  };
 
   let liveRoots: LineageRoot[] = [];
   let immutableRoots: LineageRoot[] = [];
@@ -146,16 +151,25 @@ export async function absorbSource(params: {
     return reason ? { skipped: true, reason, sourceId } : null;
   }
 
+  async function lockSource(tx: Prisma.TransactionClient) {
+    await lockWorkspaceArchiveArtifact(tx, "BrainSource", sourceId);
+    await tx.$queryRaw`SELECT id FROM "BrainSource" WHERE id = ${sourceId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+  }
+
   async function runSourceWritePhase<T>(operation: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T | SourceSkipResult> {
+    const preflight = await prepareArtifactCommitPreflight(agentActor, params.workspaceId, immutableRoots);
     return prisma.$transaction(async (tx) => {
-      await lockWorkspaceArchiveArtifact(tx, "BrainSource", sourceId);
-      await tx.$queryRaw`SELECT id FROM "BrainSource" WHERE id = ${sourceId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
-      const reason = await currentSkipReason(tx);
-      if (reason) return { skipped: true, reason, sourceId };
-      await assertInputsCurrent(tx);
-      const value = await operation(tx);
-      await assertInputsCurrent(tx);
-      return value;
+      await assertArtifactInputWriteFence(tx);
+      await lockArtifactReadAuthorityRows(agentActor, params.workspaceId, tx);
+      return withArtifactCommitPreflight(agentActor, params.workspaceId, tx, immutableRoots, preflight, async () => {
+        const reason = await currentSkipReason(tx);
+        if (reason) return { skipped: true, reason, sourceId };
+        await assertInputsCurrent(tx);
+        const value = await operation(tx);
+        await assertInputsCurrent(tx);
+        await assertArtifactInputWriteFence(tx);
+        return value;
+      }, { beforeSourceEpochs: () => lockSource(tx) });
     }, { maxWait: 5_000, timeout: 120_000 });
   }
 
@@ -174,11 +188,21 @@ export async function absorbSource(params: {
       where: { workspaceId: params.workspaceId, archivedAt: null, variantOfArticleId: null, isPrivate: false,
         ...(afterId ? {id: {gt: afterId}} : {}) }, orderBy: {id: "asc"}, take,
     }) });
-  liveRoots = await captureArtifactInputProof(agentActor, params.workspaceId, [
+  liveRoots = [...submissionRoots, ...await captureArtifactInputProof(agentActor, params.workspaceId, [
     {kind: "BrainSource", id: sourceId, snapshot: source},
     ...activeArticles.map(snapshot => ({kind: "BrainArticle" as const, id: snapshot.id, snapshot})),
-  ]);
-  immutableRoots = await prisma.$transaction(tx => captureImmutableArtifactInputProof(agentActor, params.workspaceId, liveRoots, tx));
+  ])];
+  const preparation = await prepareArtifactCommitPreflight(agentActor, params.workspaceId, liveRoots);
+  immutableRoots = await prisma.$transaction(async tx => {
+    await assertArtifactInputWriteFence(tx);
+    await lockArtifactReadAuthorityRows(agentActor, params.workspaceId, tx);
+    return withArtifactCommitPreflight(agentActor, params.workspaceId, tx, liveRoots, preparation, async () => {
+      invariant(await currentSkipReason(tx) === null, 409, "SOURCE_CHANGED", "Absorption source changed before input capture.");
+      const roots = await captureImmutableArtifactInputProof(agentActor, params.workspaceId, liveRoots, tx);
+      await assertArtifactInputWriteFence(tx);
+      return roots;
+    }, { beforeSourceEpochs: () => lockSource(tx) });
+  }, { maxWait: 5_000, timeout: 120_000 });
   await assertInputsCurrent();
   const articleIndex = activeArticles.map((a) => ({
     slug: a.slug,

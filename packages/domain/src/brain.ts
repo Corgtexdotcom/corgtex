@@ -21,6 +21,7 @@ import { copyArtifactInputLineage, currentArtifactInputRoots, lineageContentFing
 import { invariant } from "./errors";
 import { persistedMemberId } from "./membership";
 import { requireDraftManager, requireCreationInputRoots } from "./draft-permissions";
+import { prepareArtifactCommitPreflight, withArtifactCommitPreflight } from "./artifact-commit-preflight";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import {
   checkWorkspaceDuplicateGuard,
@@ -254,7 +255,16 @@ export async function createArticle(actor: AppActor, params: {
     return article;
   };
 
-  return params.tx ? run(params.tx) : prisma.$transaction(run);
+  if (params.tx) return run(params.tx);
+  // Native contributors must be replayed before opening the writer transaction.
+  // The one-use receipt then makes their exact original proof readable within
+  // that transaction without permitting provider I/O there.
+  const roots = params.completeInputRoots;
+  const commitPreflight = roots?.length
+    ? await prepareArtifactCommitPreflight(actor, params.workspaceId, roots) : undefined;
+  return prisma.$transaction(tx => commitPreflight
+    ? withArtifactCommitPreflight(actor, params.workspaceId, tx, roots!, commitPreflight, () => run(tx))
+    : run(tx));
 }
 
 export async function updateArticle(actor: AppActor, params: {

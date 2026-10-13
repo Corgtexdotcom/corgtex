@@ -99,15 +99,20 @@ vi.mock("@corgtex/shared", () => ({
 
 vi.mock("./mcp-tool-input-context", () => ({ getMcpToolInputRoots: mcpRootsMock }));
 
-vi.mock("./source-lineage", () => ({
+vi.mock("./source-lineage", async importOriginal => {
+  const actual = await importOriginal<typeof import("./source-lineage")>();
+  return {
   captureArtifactInputProof: captureProofMock, captureImmutableArtifactInputProof: immutableProofMock,
   advanceHumanArtifactInputLineage: advanceLineageMock, preserveUnknownArtifactInputSnapshot: preserveUnknownMock, isArtifactInputProofReadable: proofReadableMock,
   readableArtifactIds: readableArtifactIdsMock,
   currentArtifactInputRoots: currentArtifactInputRootsMock,
   recordArtifactInputLineage: recordArtifactInputLineageMock,
   invalidateArtifactInputLineage: vi.fn(),
-  lineageContentFingerprint: vi.fn(() => "a".repeat(64)),
-}));
+  inspectStoredArtifactInputDependencies: actual.inspectStoredArtifactInputDependencies,
+  lineageContentFingerprint: vi.fn((kind, row) => kind === "ArtifactInputSnapshot"
+    ? actual.lineageContentFingerprint(kind, row) : "a".repeat(64)),
+  };
+});
 
 vi.mock("./brain-access", () => ({ resolveKnowledgeAccessDomains: resolveKnowledgeAccessDomainsMock }));
 

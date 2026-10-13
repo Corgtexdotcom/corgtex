@@ -1,6 +1,8 @@
 import type { Prisma } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
 import { invariant } from "./errors";
+import { reserveArtifactWriteHeads } from "./artifact-write-heads";
+import { assertSourceCommitTransactionCompatible, hasActiveSourceCommitLockPlan } from "./source-commit-lock-plan";
 import { getMcpToolInputRoots } from "./mcp-tool-input-context";
 import {
   advanceHumanArtifactInputLineage,
@@ -40,7 +42,12 @@ export async function prepareProducerLineage(params: {
   snapshotDependencies?: LineageInput[];
   allowSystemTransition?: boolean;
 }): Promise<ProducerReceipt> {
-  const { tx, actor, workspaceId, artifact, before } = params;
+  const { tx, actor, workspaceId, before } = params;
+  const artifact = params.artifact ? Object.freeze({kind: params.artifact.kind, id: params.artifact.id}) : undefined;
+  assertSourceCommitTransactionCompatible(tx);
+  // Active plans already reserved outputs before any row locks: only assert coverage.
+  // Standalone callers must use the explicit batch helper at their earlier lock seam.
+  if (artifact && hasActiveSourceCommitLockPlan(tx)) await reserveArtifactWriteHeads(tx, workspaceId, [artifact]);
   const submissionRoots = getMcpToolInputRoots(actor, workspaceId);
   const capture = { ...params.capture, lineageRoots: [...(params.capture?.lineageRoots ?? []), ...submissionRoots] };
   const explicit = Boolean(capture.lineageInputs?.length || capture.lineageRoots?.length);

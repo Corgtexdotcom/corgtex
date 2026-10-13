@@ -10,12 +10,23 @@ import { assertArtifactInputWriteFence, currentArtifactInputRoots, isArtifactInp
   lineageContentFingerprint, type LineageRoot } from "./source-lineage";
 import { isArtifactPermissionEpochProofCurrent, mergePermissionEpochProofs, parsePermissionEpochProof,
   type PermissionEpochProof } from "./source-permission-epochs";
+import { isArtifactInputPermissionEpochCoverageComplete } from "./source-permission-coverage";
 
 export type ActionCompletionRequest = Readonly<{ workspaceId: string; actionId: string; completedVia: string }>;
 export type ActionCompletionLineageReceipt = Readonly<{ purpose: "ACTION_COMPLETION" }>;
 const receipts = new WeakMap<ActionCompletionLineageReceipt, { tx: Prisma.TransactionClient; actor: AppActor; actorIdentity: string;
   params: ActionCompletionRequest; before: Action; snapshotRoot: LineageRoot; oldRoots: LineageRoot[];
   oldProof: PermissionEpochProof | null; nativeRoot: LineageRoot; revision: number; known: boolean }>();
+
+/** Returns only the immutable pre-completion Action revision captured by this
+ * exact transaction and authenticated principal. The receipt remains opaque. */
+export function actionCompletionPublicationContext(actor: AppActor, params: ActionCompletionRequest,
+  receipt: ActionCompletionLineageReceipt, tx: Prisma.TransactionClient): {oldSnapshot: LineageRoot; revision: number} {
+  const state = receipts.get(receipt);
+  invariant(state && state.tx === tx && state.actor === actor && state.actorIdentity === mcpToolInputActorIdentity(actor)
+    && isDeepStrictEqual(state.params, params), 409, "UNKNOWN_LINEAGE", "Action completion receipt is unavailable.");
+  return {oldSnapshot: {...state.snapshotRoot}, revision: state.revision};
+}
 
 /** Only the current trusted TLS tool submission may drive this control operation. */
 export async function assertActionCompletionNativeRequest(actor: AppActor, params: ActionCompletionRequest, tx: Prisma.TransactionClient) {
@@ -66,11 +77,17 @@ export async function prepareActionCompletionLineage(actor: AppActor, params: Ac
     && ((manifest.origin === "HUMAN_ORIGINAL" && oldRoots.length === 0 && manifest.inputsJson.length === 0)
       || (manifest.origin === "DERIVED" && oldRoots.length > 0));
   const oldProof = structural && manifest.epochProofVersion === 1 ? parsePermissionEpochProof(manifest.permissionEpochsJson) : null;
+  const completeOldProof = Boolean(oldProof && await isArtifactInputPermissionEpochCoverageComplete({
+    workspaceId: params.workspaceId, artifact: {kind: "Action", id: before.id}, content: before,
+    roots: oldRoots ?? [], permissionEpochs: oldProof, db: tx,
+  }));
   const snapshot = await tx.artifactInputSnapshot.create({data: {
     workspaceId: params.workspaceId, sourceKind: "Action", sourceId: before.id, sourceFingerprint: fingerprint,
-    origin: structural ? manifest.origin : "UNKNOWN", contentJson: JSON.parse(JSON.stringify(before)),
+    origin: structural && completeOldProof ? manifest.origin : "UNKNOWN", contentJson: JSON.parse(JSON.stringify(before)),
     accessEnvelopeJson: {isPrivate: before.isPrivate, authorUserId: before.authorUserId, status: before.status,
-      archivedAt: null, ownerMemberId: null},
+      archivedAt: null, ownerMemberId: null,
+      ...(structural && completeOldProof && manifest.origin === "HUMAN_ORIGINAL"
+        ? {humanOriginalManifestId: manifest.id, humanOriginalManifestRevision: manifest.revision} : {})},
     rootsJson: manifest?.rootsJson != null ? manifest.rootsJson as Prisma.InputJsonValue : manifest ? Prisma.JsonNull : [],
     epochProofVersion: manifest?.epochProofVersion ?? null,
     permissionEpochsJson: manifest?.permissionEpochsJson != null ? manifest.permissionEpochsJson as Prisma.InputJsonValue : Prisma.DbNull,
@@ -79,12 +96,12 @@ export async function prepareActionCompletionLineage(actor: AppActor, params: Ac
   receipts.set(receipt, {tx, actor, actorIdentity: mcpToolInputActorIdentity(actor), params, before: structuredClone(before),
     snapshotRoot: {kind: "ArtifactInputSnapshot", id: snapshot.id, fingerprint: lineageContentFingerprint("ArtifactInputSnapshot", snapshot)},
     oldRoots: oldRoots ?? [], oldProof, nativeRoot, revision: (manifest?.revision ?? 0) + 1,
-    known: Boolean(oldProof && await isArtifactPermissionEpochProofCurrent(params.workspaceId, oldProof, tx))});
+    known: Boolean(completeOldProof && oldProof && await isArtifactPermissionEpochProofCurrent(params.workspaceId, oldProof, tx))});
   return receipt;
 }
 
 export async function finishActionCompletionLineage(actor: AppActor, params: ActionCompletionRequest,
-  receipt: ActionCompletionLineageReceipt, after: Action, tx: Prisma.TransactionClient) {
+  receipt: ActionCompletionLineageReceipt, after: Action, tx: Prisma.TransactionClient, publicNoteRoot: LineageRoot) {
   params = Object.freeze({...params});
   after = structuredClone(after);
   const state = receipts.get(receipt);
@@ -100,17 +117,33 @@ export async function finishActionCompletionLineage(actor: AppActor, params: Act
   invariant(changes.every(field => ["status", "completedVia", "updatedAt"].includes(field))
     && after.status === "COMPLETED" && after.completedVia === params.completedVia.trim(),
   409, "SOURCE_CHANGED", "Action completion cannot change source content or permissions.");
+  const note = publicNoteRoot.kind === "ConversationOperationOutcome"
+    ? await tx.conversationOperationOutcome.findFirst({where: {id: publicNoteRoot.id, workspaceId: params.workspaceId}}) : null;
+  const control = note?.controlJson as Record<string, unknown> | null | undefined;
+  invariant(note?.operation === "ACTION_COMPLETION_PUBLIC_NOTE" && note.actorKind === "public"
+    && lineageContentFingerprint("ConversationOperationOutcome", note) === publicNoteRoot.fingerprint
+    && control?.actionId === after.id && control.actionVersion === after.version
+    && control.inputId === state.nativeRoot.id && control.inputFingerprint === state.nativeRoot.fingerprint
+    && control.oldActionSnapshotId === state.snapshotRoot.id
+    && control.oldActionSnapshotFingerprint === state.snapshotRoot.fingerprint
+    && control.publishedActionRevision === state.revision
+    && control.completedActionFingerprint === lineageContentFingerprint("Action", after)
+    && control.completedVia === after.completedVia && control.publicationPolicyVersion === 1
+    && control.audience === "ACTION_READERS" && parsePermissionEpochProof(publicNoteRoot.permissionEpochs)
+    && await isArtifactPermissionEpochProofCurrent(params.workspaceId,
+      parsePermissionEpochProof(publicNoteRoot.permissionEpochs)!, tx),
+  409, "SOURCE_CHANGED", "Action completion public note changed.");
   let proof: PermissionEpochProof | undefined;
   let known = state.known && state.oldProof !== null
     && await isArtifactPermissionEpochProofCurrent(params.workspaceId, state.oldProof, tx);
   if (known) {
-    try { proof = mergePermissionEpochProofs(state.oldProof!, state.nativeRoot.permissionEpochs); }
+    try { proof = mergePermissionEpochProofs(state.oldProof!, publicNoteRoot.permissionEpochs); }
     catch { known = false; }
   }
   await tx.artifactInputLineage.create({data: {
     workspaceId: params.workspaceId, artifactType: "Action", artifactId: after.id, revision: state.revision,
     origin: known ? "DERIVED" : "UNKNOWN", contentHash: lineageContentFingerprint("Action", after), inputsJson: [],
-    rootsJson: known ? [state.snapshotRoot, ...state.oldRoots, state.nativeRoot] as unknown as Prisma.InputJsonValue : [],
+    rootsJson: known ? [state.snapshotRoot, ...state.oldRoots, publicNoteRoot] as unknown as Prisma.InputJsonValue : [],
     epochProofVersion: known ? 1 : null, permissionEpochsJson: known && proof ? proof as unknown as Prisma.InputJsonValue : Prisma.DbNull,
   }});
   await assertArtifactInputWriteFence(tx);

@@ -47,6 +47,14 @@ vi.mock("@corgtex/models", () => ({
 }));
 
 vi.mock("@corgtex/domain", () => ({
+  sealArtifactInputActor: (actor: unknown) => actor,
+  assertArtifactInputWriteFence: vi.fn(async () => undefined),
+  lockArtifactReadAuthorityRows: vi.fn(async () => undefined),
+  prepareArtifactCommitPreflight: vi.fn(async () => ({})),
+  withArtifactCommitPreflight: vi.fn(async (_actor, _workspaceId, _tx, _roots, _token, work, options) => {
+    await options?.beforeSourceEpochs();
+    return work();
+  }),
   AGENT_REGISTRY: {
     "brain-absorb": { defaultModelTier: "fast" },
   },
@@ -207,6 +215,19 @@ describe("absorbSource", () => {
         archivedAt: null,
       })
       .mockResolvedValueOnce({
+        id: "source-1",
+        workspaceId: "workspace-1",
+        sourceType: "DOC",
+        tier: 1,
+        title: "Launch notes",
+        channel: "text-paste",
+        content: "Launch content",
+        ingestionGuidanceMd: null,
+        accessDomain: "WORKSPACE",
+        absorbedAt: null,
+        archivedAt: null,
+      })
+      .mockResolvedValueOnce({
         workspaceId: "workspace-1",
         absorbedAt: null,
         archivedAt: new Date("2026-08-20T10:00:00.000Z"),
@@ -228,6 +249,19 @@ describe("absorbSource", () => {
 
   it("skips article creation when a source is archived after drafting", async () => {
     prismaMock.brainSource.findUnique
+      .mockResolvedValueOnce({
+        id: "source-1",
+        workspaceId: "workspace-1",
+        sourceType: "DOC",
+        tier: 1,
+        title: "Launch notes",
+        channel: "text-paste",
+        content: "Launch content",
+        ingestionGuidanceMd: null,
+        accessDomain: "WORKSPACE",
+        absorbedAt: null,
+        archivedAt: null,
+      })
       .mockResolvedValueOnce({
         id: "source-1",
         workspaceId: "workspace-1",
@@ -348,7 +382,7 @@ describe("absorbSource", () => {
       sourceIds: ["source-1"],
       derivation: { sourceId: "source-1", sourceFingerprint: "source-fingerprint", agentRunId: "run-1" },
     }));
-    expect(lockWorkspaceArchiveArtifactMock).toHaveBeenCalledTimes(1);
+    expect(lockWorkspaceArchiveArtifactMock).toHaveBeenCalledTimes(2);
     expect(lockWorkspaceArchiveArtifactMock).toHaveBeenCalledWith(prismaMock, "BrainSource", "source-1");
     expect(lockWorkspaceArchiveArtifactMock.mock.invocationCallOrder[0]).toBeLessThan(createArticleMock.mock.invocationCallOrder[0]);
     expect(lockWorkspaceArchiveArtifactMock.mock.invocationCallOrder[0]).toBeLessThan(rebuildBacklinksMock.mock.invocationCallOrder[0]);

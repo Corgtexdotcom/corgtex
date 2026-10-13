@@ -4,9 +4,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { captureMcpOAuthGrantEpoch, decryptSecret, mcpCredentialVersion, mcpScopesHash, prisma,
   runWithMcpOrigin, type AppActor, type McpOrigin } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
-import { completeAction, createAction, getAction } from "./actions";
-import { getActionCompletionOutcomeInputRoots } from "./action-completion";
+import { completeAction, createAction, getAction, updateAction } from "./actions";
+import { ACTION_COMPLETION_PUBLIC_NOTE, getActionCompletionOutcomeInputRoots,
+  isActionCompletionPublicNoteReadable } from "./action-completion";
 import { createArticle } from "./brain";
+import { createDocument } from "./documents";
 import { withMcpToolInput } from "./mcp-tool-input";
 import { captureArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, recordArtifactInputLineage } from "./source-lineage";
 
@@ -28,17 +30,22 @@ function deferred() {
   return {promise, resolve};
 }
 
-async function fixture(kind: "agent" | "oauth" = "agent") {
+async function fixture(kind: "agent" | "oauth" = "agent", separateAssignee = false) {
   const suffix = randomUUID();
   const workspace = await prisma.workspace.create({data: {name: "Synthetic Action completion", slug: `action-completion-${suffix}`}});
   const user = await prisma.user.create({data: {email: `action-completion-${suffix}@example.test`, displayName: "Synthetic action human", passwordHash: "synthetic"}});
   const member = await prisma.member.create({data: {workspaceId: workspace.id, userId: user.id, role: "CONTRIBUTOR", kind: "HUMAN"}});
+  const separateAssigneeUser = separateAssignee ? await prisma.user.create({data: {
+    email: `action-assignee-${suffix}@example.test`, displayName: "Synthetic assignee", passwordHash: "synthetic"}}) : null;
+  const assignee = separateAssigneeUser
+    ? await prisma.member.create({data: {workspaceId: workspace.id, userId: separateAssigneeUser.id,
+      role: "CONTRIBUTOR", kind: "HUMAN"}}) : member;
   const secondUser = await prisma.user.create({data: {email: `action-reader-${suffix}@example.test`, displayName: "Synthetic action reader", passwordHash: "synthetic"}});
   await prisma.member.create({data: {workspaceId: workspace.id, userId: secondUser.id, role: "CONTRIBUTOR", kind: "HUMAN"}});
   const reader: AppActor = {kind: "user", user: {id: secondUser.id, email: secondUser.email, displayName: secondUser.displayName}};
   const human: AppActor = {kind: "user", user: {id: user.id, email: user.email, displayName: user.displayName}};
   const action = await createAction(human, {workspaceId: workspace.id, title: "Synthetic original title canary",
-    bodyMd: "Synthetic original body canary", isPrivate: false, assigneeMemberId: member.id});
+    bodyMd: "Synthetic original body canary", isPrivate: false, assigneeMemberId: assignee.id});
   let actor: AppActor;
   let origin: McpOrigin;
   let grantId: string;
@@ -66,7 +73,7 @@ async function fixture(kind: "agent" | "oauth" = "agent") {
   const complete = () => runWithMcpOrigin(origin, () => withMcpToolInput(actor,
     {workspaceId: workspace.id, toolName: "complete_action", args, requiredScopes: ["actions:write"]},
     supplied => completeAction(actor, {workspaceId: workspace.id, ...supplied})));
-  return {workspace, action, actor, human, reader, member, args, origin, grantId, complete};
+  return {workspace, action, actor, human, reader, member, assignee, args, origin, grantId, complete};
 }
 
 beforeEach(async () => { await truncateAllTables(); });
@@ -90,9 +97,21 @@ describe("native Action completion transaction", () => {
     expect(preserved.rootsJson).toEqual(prior.rootsJson);
     const latest = await prisma.artifactInputLineage.findFirstOrThrow({where: {artifactType: "Action", artifactId: f.action.id}, orderBy: {revision: "desc"}});
     expect(latest.origin).toBe("DERIVED");
-    expect(latest.rootsJson).toEqual(expect.arrayContaining([expect.objectContaining({kind: "ArtifactInputSnapshot"}), expect.objectContaining({kind: "McpToolInput"})]));
+    expect(latest.rootsJson).toEqual(expect.arrayContaining([expect.objectContaining({kind: "ArtifactInputSnapshot"}),
+      expect.objectContaining({kind: "ConversationOperationOutcome"})]));
+    expect(JSON.stringify(latest.rootsJson)).not.toContain('"kind":"McpToolInput"');
+    const publicNote = await prisma.conversationOperationOutcome.findFirstOrThrow({where: {workspaceId: f.workspace.id,
+      operation: ACTION_COMPLETION_PUBLIC_NOTE}});
+    expect(publicNote).toMatchObject({actorKind: "public", userId: null, credentialId: null, requiredScopes: [],
+      controlJson: {completedVia: f.args.completedVia.trim(), audience: "ACTION_READERS", publicationPolicyVersion: 1}});
+    expect(await isActionCompletionPublicNoteReadable(f.reader, f.workspace.id, publicNote)).toBe(true);
     const input = await prisma.mcpToolInput.findFirstOrThrow({where: {workspaceId: f.workspace.id, toolName: "complete_action"}});
     expect(decryptSecret(input.argumentsJson as string)).toBe(JSON.stringify(f.args));
+    const publicView = await getAction(f.reader, {workspaceId: f.workspace.id, actionId: f.action.id});
+    expect(publicView).toMatchObject({completedVia: f.args.completedVia.trim()});
+    expect(JSON.stringify(publicView)).not.toContain(input.id);
+    expect(JSON.stringify(publicView)).not.toContain(publicNote.controlJson && typeof publicNote.controlJson === "object"
+      && !Array.isArray(publicNote.controlJson) ? String(publicNote.controlJson.controlHash) : "private-control-hash");
     const fact = await prisma.conversationOperationOutcome.findFirstOrThrow({where: {workspaceId: f.workspace.id, operation: "ACTION_COMPLETED"}});
     const factManifest = await prisma.artifactInputLineage.findFirstOrThrow({where: {artifactType: "ConversationOperationOutcome", artifactId: fact.id}});
     expect(factManifest).toMatchObject({origin: "NATIVE_ORIGINAL", rootsJson: [], inputsJson: []});
@@ -140,8 +159,10 @@ describe("native Action completion transaction", () => {
     const f = await fixture(); const result = await f.complete();
     await prisma.action.update({where: {id: f.action.id}, data: {isPrivate: true}});
     await expect(getActionCompletionOutcomeInputRoots(f.actor, f.workspace.id, result)).rejects.toBeDefined();
+    await expect(getAction(f.reader, {workspaceId: f.workspace.id, actionId: f.action.id})).rejects.toMatchObject({code: "NOT_FOUND"});
     await prisma.action.update({where: {id: f.action.id}, data: {isPrivate: false}});
     await expect(getActionCompletionOutcomeInputRoots(f.actor, f.workspace.id, result)).rejects.toBeDefined();
+    await expect(getAction(f.reader, {workspaceId: f.workspace.id, actionId: f.action.id})).rejects.toMatchObject({code: "NOT_FOUND"});
   });
 
   it("holds the actual OAuth command epoch through its status effect while concurrent scope revocation waits", async () => {
@@ -185,7 +206,7 @@ describe("native Action completion transaction", () => {
       if (finished[0].status === "fulfilled") expect(finished[0].value).toEqual({id: f.action.id, status: "COMPLETED"});
       else expect(String(finished[0].reason)).toMatch(/MCP_AUTHORIZATION_REVOKED|SOURCE_CHANGED|SOURCE_RESTRICTED|revoked|changed/i);
       await expect(f.complete()).rejects.toBeDefined();
-      expect(await independent.conversationOperationOutcome.count({where: {workspaceId: f.workspace.id}})).toBe(1);
+      expect(await independent.conversationOperationOutcome.count({where: {workspaceId: f.workspace.id}})).toBe(2);
     } finally {
       resume.resolve();
       await Promise.allSettled([completion, ...(revocation ? [revocation] : [])]);
@@ -198,12 +219,80 @@ describe("native Action completion transaction", () => {
       await expect(getAction(reader, {workspaceId: f.workspace.id, actionId: f.action.id})).resolves.toMatchObject({bodyMd: f.action.bodyMd, status: "OPEN"});
     }
     await f.complete();
-    // This positive remains a product blocker until the public contribution
-    // audience is expressly approved; never substitute a denial assertion.
     for (const reader of [f.human, f.reader]) {
       await expect(getAction(reader, {workspaceId: f.workspace.id, actionId: f.action.id})).resolves.toMatchObject({
         bodyMd: f.action.bodyMd, completedVia: f.args.completedVia.trim(), status: "COMPLETED"});
     }
+    if (kind === "agent") await prisma.agentCredential.update({where: {id: f.grantId}, data: {isActive: false}});
+    else await prisma.mcpOAuthAccessToken.update({where: {id: f.grantId}, data: {scopes: []}});
+    for (const reader of [f.human, f.reader]) {
+      await expect(getAction(reader, {workspaceId: f.workspace.id, actionId: f.action.id})).resolves.toMatchObject({
+        bodyMd: f.action.bodyMd, completedVia: f.args.completedVia.trim(), status: "COMPLETED"});
+    }
+  });
+
+  it("admits brain:read OAuth and credential principals to the published note's original Action audience", async () => {
+    const f = await fixture();
+    await f.complete();
+    const note = await prisma.conversationOperationOutcome.findFirstOrThrow({where: {workspaceId: f.workspace.id,
+      operation: ACTION_COMPLETION_PUBLIC_NOTE}});
+    const client = await prisma.mcpOAuthClient.create({data: {clientId: `action-brain-reader-${randomUUID()}`,
+      name: "Synthetic brain reader", redirectUris: ["https://synthetic.example.test/callback"], scopes: ["brain:read"]}});
+    const token = await prisma.mcpOAuthAccessToken.create({data: {workspaceId: f.workspace.id, userId: f.reader.user.id,
+      clientId: client.id, instanceSlug: "selfserve", tokenHash: `synthetic-reader-${randomUUID()}`, scopes: ["brain:read"],
+      expiresAt: new Date(Date.now() + 60_000), refreshExpiresAt: new Date(Date.now() + 3_600_000)}});
+    const grantEpoch = await prisma.$transaction(tx => captureMcpOAuthGrantEpoch(tx, f.workspace.id, token.id));
+    const readerOrigin: McpOrigin = {kind: "oauth", id: token.id, workspaceId: f.workspace.id,
+      scopeHash: mcpScopesHash(token.scopes), grantEpoch, requiredScopes: []};
+    expect(await runWithMcpOrigin(readerOrigin,
+      () => isActionCompletionPublicNoteReadable(f.reader, f.workspace.id, note))).toBe(true);
+    const credential = await prisma.agentCredential.create({data: {workspaceId: f.workspace.id,
+      label: "Synthetic brain reader", tokenHash: `synthetic-reader-${randomUUID()}`, scopes: ["brain:read"]}});
+    const agent: AppActor = {kind: "agent", authProvider: "credential", label: credential.label,
+      workspaceIds: [f.workspace.id], credentialId: credential.id,
+      credentialVersion: mcpCredentialVersion(credential.tokenHash), scopes: ["brain:read"]};
+    const agentOrigin: McpOrigin = {kind: "agent", id: credential.id, workspaceId: f.workspace.id,
+      credentialVersion: mcpCredentialVersion(credential.tokenHash), scopeHash: mcpScopesHash(credential.scopes),
+      requiredScopes: []};
+    expect(await runWithMcpOrigin(agentOrigin,
+      () => isActionCompletionPublicNoteReadable(agent, f.workspace.id, note))).toBe(true);
+    await prisma.mcpOAuthAccessToken.update({where: {id: token.id}, data: {scopes: []}});
+    expect(await runWithMcpOrigin(readerOrigin,
+      () => isActionCompletionPublicNoteReadable(f.reader, f.workspace.id, note))).toBe(false);
+  });
+
+  it("retains an authenticated historical public note when its Action is reopened", async () => {
+    const f = await fixture();
+    await f.complete();
+    const note = await prisma.conversationOperationOutcome.findFirstOrThrow({where: {workspaceId: f.workspace.id,
+      operation: ACTION_COMPLETION_PUBLIC_NOTE}});
+    const published = note.controlJson as {publishedActionRevision: number; completedActionFingerprint: string};
+    expect(await isActionCompletionPublicNoteReadable(f.reader, f.workspace.id, note)).toBe(true);
+    const reopened = await updateAction(f.human, {workspaceId: f.workspace.id, actionId: f.action.id, status: "OPEN"});
+    expect(reopened).toMatchObject({status: "OPEN", completedVia: null});
+    expect(await isActionCompletionPublicNoteReadable(f.reader, f.workspace.id, note)).toBe(true);
+    await prisma.agentCredential.update({where: {id: f.grantId}, data: {isActive: false}});
+    expect(await isActionCompletionPublicNoteReadable(f.reader, f.workspace.id, note)).toBe(true);
+    await expect(captureArtifactInputProof(f.reader, f.workspace.id,
+      [{kind: "ConversationOperationOutcome", id: note.id}])).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({kind: "ConversationOperationOutcome", id: note.id})]));
+    await expect(getAction(f.reader, {workspaceId: f.workspace.id, actionId: f.action.id})).resolves.toMatchObject({
+      bodyMd: f.action.bodyMd, status: "OPEN"});
+    const historic = await prisma.artifactInputLineage.findFirstOrThrow({where: {workspaceId: f.workspace.id,
+      artifactType: "Action", artifactId: f.action.id, revision: published.publishedActionRevision}});
+    expect(historic).toMatchObject({origin: "DERIVED", contentHash: published.completedActionFingerprint});
+  });
+
+  it("keeps the standing note readable when its former assignee leaves but current readers remain", async () => {
+    const f = await fixture("agent", true);
+    await f.complete();
+    const note = await prisma.conversationOperationOutcome.findFirstOrThrow({where: {workspaceId: f.workspace.id,
+      operation: ACTION_COMPLETION_PUBLIC_NOTE}});
+    expect(await isActionCompletionPublicNoteReadable(f.reader, f.workspace.id, note)).toBe(true);
+    await prisma.member.update({where: {id: f.assignee.id}, data: {isActive: false}});
+    expect(await isActionCompletionPublicNoteReadable(f.reader, f.workspace.id, note)).toBe(true);
+    await expect(getAction(f.reader, {workspaceId: f.workspace.id, actionId: f.action.id})).resolves.toMatchObject({
+      bodyMd: f.action.bodyMd, completedVia: f.args.completedVia.trim()});
   });
 
   it("retains a pre-existing public Action's genuine private copied ancestry before and after native completion", async () => {
@@ -223,6 +312,41 @@ describe("native Action completion transaction", () => {
     await expect(getAction(f.reader, {workspaceId: f.workspace.id, actionId: f.action.id})).rejects.toMatchObject({code: "NOT_FOUND"});
     const manifest = await prisma.artifactInputLineage.findFirstOrThrow({where: {artifactType: "Action", artifactId: f.action.id}, orderBy: {revision: "desc"}});
     expect(manifest.rootsJson).toEqual(expect.arrayContaining([expect.objectContaining({kind: "BrainArticle", id: privateOriginal.id})]));
+    const note = await prisma.conversationOperationOutcome.findFirstOrThrow({where: {workspaceId: f.workspace.id,
+      operation: ACTION_COMPLETION_PUBLIC_NOTE}});
+    expect(await isActionCompletionPublicNoteReadable(f.reader, f.workspace.id, note)).toBe(false);
+  });
+
+  it("withholds a copied body and note if a historical Action proof omitted its Document epoch", async () => {
+    const f = await fixture();
+    const document = await createDocument(f.human, {workspaceId: f.workspace.id, title: "Synthetic copied document",
+      textContent: "Synthetic copied document body", source: "SYNTHETIC", storageKey: `synthetic/${randomUUID()}`});
+    await prisma.$transaction(async tx => {
+      const copied = await tx.action.update({where: {id: f.action.id}, data: {bodyMd: document.textContent}});
+      await recordArtifactInputLineage({tx, actor: f.human, workspaceId: f.workspace.id,
+        artifact: {kind: "Action", id: copied.id}, content: copied, origin: "DERIVED",
+        inputs: [{kind: "Document", id: document.id}]});
+    });
+    const valid = await prisma.artifactInputLineage.findFirstOrThrow({where: {workspaceId: f.workspace.id,
+      artifactType: "Action", artifactId: f.action.id}, orderBy: {revision: "desc"}});
+    const entries = (valid.permissionEpochsJson as {entries: Array<{kind: string; id: string; epoch: string}>}).entries;
+    expect(entries.some(entry => entry.kind === "Document" && entry.id === document.id)).toBe(true);
+    const malformedProof = {...valid.permissionEpochsJson as object,
+      entries: entries.filter(entry => !(entry.kind === "Document" && entry.id === document.id))};
+    await prisma.artifactInputLineage.create({data: {workspaceId: f.workspace.id, artifactType: "Action",
+      artifactId: f.action.id, revision: valid.revision + 1, origin: "DERIVED", contentHash: valid.contentHash,
+      inputsJson: valid.inputsJson as Prisma.InputJsonValue, rootsJson: valid.rootsJson as Prisma.InputJsonValue,
+      epochProofVersion: 1, permissionEpochsJson: malformedProof}});
+    await expect(f.complete()).resolves.toEqual({id: f.action.id, status: "COMPLETED"});
+    const final = await prisma.artifactInputLineage.findFirstOrThrow({where: {workspaceId: f.workspace.id,
+      artifactType: "Action", artifactId: f.action.id}, orderBy: {revision: "desc"}});
+    expect(final).toMatchObject({origin: "UNKNOWN", rootsJson: []});
+    const note = await prisma.conversationOperationOutcome.findFirstOrThrow({where: {workspaceId: f.workspace.id,
+      operation: ACTION_COMPLETION_PUBLIC_NOTE}});
+    await prisma.document.update({where: {id: document.id}, data: {accessDomain: "FINANCE"}});
+    await prisma.document.update({where: {id: document.id}, data: {accessDomain: "WORKSPACE"}});
+    expect(await isActionCompletionPublicNoteReadable(f.reader, f.workspace.id, note)).toBe(false);
+    await expect(getAction(f.reader, {workspaceId: f.workspace.id, actionId: f.action.id})).rejects.toMatchObject({code: "NOT_FOUND"});
   });
 
 });

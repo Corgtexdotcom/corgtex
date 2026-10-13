@@ -30,7 +30,26 @@ export { getExternalMcpResponseInputRoots } from "./external-mcp-response-input"
 export { getActionCompletionOutcomeInputReceipt, getActionCompletionOutcomeInputRoots } from "./action-completion";
 export * from "./brain-article-removal";
 export * from "./brain-access";
-export * from "./source-lineage";
+export {
+  sealArtifactInputActor, assertDirectArtifactReadOutsideCapture, withArtifactInputReadCapture,
+  withArtifactInputWriteFence, withAdditionalArtifactInputWriteFence, assertArtifactInputWriteFence,
+  mergeLineageInputRoot, brainSourceNeedsLineage, lineageContentFingerprint, isLineageKind,
+  captureArtifactInputSnapshotProof, captureImmutableArtifactInputProof, preserveUnknownArtifactInputSnapshot,
+  captureArtifactInputProof, isArtifactInputProofReadable, assertArtifactInputClosureLocallyAdmissible,
+  rebaseArtifactInputProofToSnapshots, isArtifactInputProofPubliclyShareable, inspectStoredArtifactInputDependencies,
+  captureArtifactPermissionEpochs, recordArtifactInputLineage, copyArtifactInputLineage,
+  advanceHumanArtifactInputLineage, advanceArchivedArtifactEnvelopeLineage, invalidateArtifactInputLineage,
+  hasCurrentArtifactInputLineage, currentArtifactInputRoots, isArtifactArchiveMetadataReadable,
+  readableArtifactIds, readableBrainSourceIds,
+} from "./source-lineage";
+export type { ArtifactInputWriteFence, LineageKind, LineageInput, LineageRoot } from "./source-lineage";
+export { prepareArtifactSourceCommit, withArtifactSourceCommit } from "./artifact-source-commit";
+export type { ArtifactSourceCommit, ArtifactSourceCommitOptions } from "./artifact-source-commit";
+export { withArtifactInputSnapshotAllocations } from "./artifact-input-snapshot-allocations";
+export type { ArtifactInputSnapshotAllocation } from "./artifact-input-snapshot-allocations";
+export { prepareArtifactStructuralAuthority } from "./artifact-structural-authority";
+export type { ArtifactStructuralAuthority, ArtifactStructuralAuthorityBinding } from "./artifact-structural-authority";
+export type { SourceCommitOwnerBinding, SourceCommitWriteTarget } from "./source-commit-lock-plan";
 export { prepareArtifactCommitPreflight, withArtifactCommitPreflight, lockArtifactReadAuthorityRows, type ArtifactCommitPreflight } from "./artifact-commit-preflight";
 export * from "./digest-lineage";
 export * from "./brain-source-recovery";

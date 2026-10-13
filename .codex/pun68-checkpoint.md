@@ -4,6 +4,39 @@ This draft extends c9ffa7d35ead059bf5cd50e93780e8768c62650e and composes main
 8e484c4216b8217879ac64aa46042b32fe715501 (PUN76 guards and PUN78 sensitivity fix). Full acceptance
 is INCOMPLETE. Keep PR1517 draft; do not merge or deploy.
 
+## October13 source commit and standing-note checkpoint
+
+This candidate extends published aef530642100e8e41dc555517fef193316e3d2bb.
+The bounded architecture/ownership contract is [source commit contract](pun68-source-commit-contract.md).
+It implements complete discovered source/governor/predicate locks, original
+semantic fingerprints, separately tagged current ambient/structural fences,
+preallocated immutable snapshots, actual retained Execution ownership, and the
+explicitly approved standing public Action note. Internal read/output registration
+cannot be restored from JSON or borrowed from a permission-only governor.
+
+Current composed focused units: 477/477 across19 files. Domain types, scoped
+owner lint, public docs and private boundary checks passed. Source foundation:
+58/58 units and21/21 actual PostgreSQL. Execution:69 focused units,6 actual PG,
+then2 affected PG positives under the final semantic guard. Action:34 units,
+13 actual PG, and2 earlier standing-note capture cases. Final shared mixed/Action
+PG passed48/48 across2 files, with type/lint/diff checks clean. The final
+post-review client-compatibility/semantic gate units passed191/191. Independent GPT-6 Sol
+xhigh reviews cleared these bounded corrections after concrete repros/fixes;
+that clearance does not mean global acceptance.
+
+At aef5306 exact-head CI38440156622 finished red:12122pass/13fail/2skip.
+The unpublished corrections address its Action2 and Brain4 failure groups;
+Recall7 remains a genuine intake/audience gate. New exact-head CI is required.
+Legacy writer ordering/owner migration, canonical Bloop lifecycle/HTTP, native
+audience/intake and private graph review/regeneration, archived DERIVED CRM
+partition, backfill/rollback and latency/concurrency remain open. Request/Result
+transactions still perform thousands of Prisma operations on synthetic mixtures.
+
+Bloop retains conversation.ts/tests, its held PR1523 patch and the single
+docs/architecture.mdx PUN46 correction. PUN72 createActionAction and PUN85
+connector-local cursor work remain reserved as coordinated. This checkout has
+not touched their release branch, browser, Azure CLI, lease, runtime or patch.
+
 ## October13 current read-boundary correction
 
 Hosted CI at67e1b956849ef8d15dc26cf2f8e75ee83f84ad60 finished FAILURE
@@ -217,11 +250,13 @@ this isolated repository so future merges retain tracked validation assets.
    provider input, live recording/lease/grant proof and an approved audience. They
    are denied with UNKNOWN_LINEAGE before model/writer use. These are product gaps,
    not stale fixtures to relax. Automatic/historical recordings have no human owner.
-2. Two native Action PG public-reader assertions remain RED. The whole private
-   MCP submission currently becomes an ancestor of the changed Action, hiding its
-   body from another member. Existing Action body/status must retain its prior
-   lineage while only the note and its derivatives use a separate audience proof.
-   Dropping the input ancestor or broadening private note access is not a fix.
+2. The Action-note audience decision is resolved and its current partition passes
+   34 unit and 13 PostgreSQL cases. A separate standing public note preserves the
+   exact old Action ancestry; private raw MCP integrity evidence is not a public
+   input or editor grant. Reopen, former-assignee departure, current read families,
+   incomplete old vectors and revocation/restore have regression coverage. Current
+   central nested-provider fences and derivative composition remain separately
+   recorded acceptance evidence; these results do not close the global writer gate.
 3. Bloop's actual canonical Brain admission/checkpoint saver/run/job/approval,
    publication receipt and finalization composition remains UNVERIFIED. Source
    helpers and mock provider dispatch do not establish canonical lifecycle acceptance.
@@ -282,21 +317,19 @@ were corrected without weakening private-source or revocation assertions. All th
 unit failures now pass. Missing public test docs and pinned TLS fixtures caused static
 script failures and were materialized from Git; no live migration runner was executed.
 
-## Pending completion-note question for the parent to present
+## Completion-note audience decision — resolved October13
 
-Exact question: “When MCP completes an already public Action, who should be able to
-read the newly submitted completion note?”
+Jan selected public visibility to current Action readers at18:09:43 UTC:
+“Note needs to be public.” This authorizes a separately typed publication of only
+the new completion note, preserving the existing Action/body/status audience.
+It does not publish raw MCP requests, unrelated private chat or earlier private
+sources. Security owns the Action completion files; root owns the central lineage
+dispatch and coordinated source authority registration. Implementation and actual
+PostgreSQL validation passed for the bounded Action partition. The full source
+approach remains incomplete; see the source commit contract and current evidence.
 
-Options:
-- “Only the submitting principal” (recommended conservative default until sharing is
-  explicit): retain existing Action body/status visibility; show the note only to its
-  authenticated owner and restrict all derivatives that consume it.
-- “All current Action readers”: record this explicit command as authority to share
-  only the newly submitted note with members currently permitted to read the Action.
-  Do not widen any earlier private sources or the raw MCP request.
-
-This choice is still unresolved. The implementation needs independent native
-body/status and note projections either way. Preserving the public Action while
-withholding the private note is feasible; it has not yet been implemented or proved.
+The implementation uses independent native body/status and note projections.
+Private caller acknowledgment remains separate from the standing public note
+projection. Old copied/unknown Action body ancestry must stay restricted.
 Other pending choices cover Box audience, private prompt contribution publishing,
 uploaded/automatic transcripts, and graph reapproval.

@@ -20,6 +20,7 @@ import { createArticle, getArticle, listArticles, publishArticle, updateArticle 
 import { archiveWorkspaceArtifact, restoreWorkspaceArtifact } from "./archive";
 import { brainSourceContentFingerprint } from "./brain-derivation";
 import { captureArtifactInputProof, captureImmutableArtifactInputProof, readableArtifactIds, recordArtifactInputLineage, type LineageKind } from "./source-lineage";
+import { prepareArtifactCommitPreflight, withArtifactCommitPreflight } from "./artifact-commit-preflight";
 import { BRAIN_ARTICLE_VARIANT_JOB_TYPE, generateBrainArticleVariant, getReadableBrainArticleVariant,
   requestBrainArticleVariant, type PermittedVariantSource } from "./brain-article-variants";
 
@@ -139,6 +140,61 @@ async function mixedFixture() {
   return { ...f, canonical, document, meeting, message, transcriptSource, original, circle, role, action, tension, goal, prompt, ingress, request };
 }
 
+/** Append a new, complete native parent after the canonical saved its roots.
+ * The copied bytes deliberately match the existing source: a new manifest can
+ * have the same content fingerprint while its actual ancestry has changed. */
+async function appendCurrentSlackParent(f: Awaited<ReturnType<typeof fixture>>,
+  additionalSources: Array<typeof f.publicSource> = []) {
+  const installation = await prisma.communicationInstallation.findFirst({ where: { workspaceId: f.workspace.id } })
+    ?? await prisma.communicationInstallation.create({ data: { workspaceId: f.workspace.id, provider: "SLACK",
+      externalWorkspaceId: "T_SYNTHETIC", appId: "APP_SYNTHETIC", botUserId: "U_BOT",
+      botTokenEnc: encryptSecret("synthetic-token"), scopes: ["channels:read", "channels:history"], status: "ACTIVE" } });
+  const channel = await prisma.communicationChannel.findFirst({ where: { installationId: installation.id } })
+    ?? await prisma.communicationChannel.create({ data: { workspaceId: f.workspace.id, installationId: installation.id,
+      provider: "SLACK", externalChannelId: "synthetic-public", name: "Synthetic public channel", kind: "PUBLIC",
+      isIngestEnabled: true } });
+  slack.original = { type: "message", ts: "1700000000.000002", user: "U_AUTHOR", text: f.publicSource.content };
+  const fetched = await captureSlackNativeMessageFetch({ workspaceId: f.workspace.id, installationId: installation.id,
+    channelId: channel.externalChannelId, messageTs: slack.original.ts });
+  const message = await prisma.$transaction(async tx => {
+    const stamp = new Date(Math.trunc(Number(slack.original.ts) * 1000));
+    const message = await tx.communicationMessage.create({ data: { workspaceId: f.workspace.id, installationId: installation.id,
+      provider: "SLACK", externalChannelId: channel.externalChannelId, externalMessageId: slack.original.ts,
+      externalUserId: slack.original.user, text: String(fetched.projected.text), raw: fetched.projected as any,
+      messageTs: stamp, receivedAt: stamp, expiresRawAt: new Date(Date.now() + 300000), permalink: null } });
+    const permissionEpochsJson = await capturePermissionEpochs(tx, f.workspace.id,
+      artifactPermissionEpochIdentities("CommunicationMessage", message));
+    const input = await tx.communicationMessageNativeInput.create({ data: { workspaceId: f.workspace.id,
+      installationId: installation.id, communicationMessageId: message.id, provider: "SLACK",
+      externalWorkspaceId: installation.externalWorkspaceId, appId: installation.appId,
+      providerPrincipalId: fetched.providerPrincipalId, externalChannelId: channel.externalChannelId,
+      externalMessageId: message.externalMessageId, externalUserId: message.externalUserId, threadExternalId: null,
+      mode: "AUTHENTICATED_FETCH", ingressInputId: null,
+      requestJson: { ...fetched.request, messageContentFingerprint: lineageContentFingerprint("CommunicationMessage", message) } as any,
+      encryptedPayloadJson: encryptSecret(communicationCanonicalJson(fetched.payload)),
+      projectedContentJson: fetched.projected as any,
+      projectionHash: communicationNativeHash(communicationCanonicalJson(fetched.projected)),
+      installationGrantHash: fetched.installationGrantHash, channelGrantHash: fetched.channelGrantHash,
+      permissionEpochsJson: permissionEpochsJson as any, epochProofVersion: 1,
+      expiresRawAt: message.expiresRawAt!, fetchedAt: new Date(fetched.capturedAtMs) } });
+    await withSlackNativeCommitReceipt(f.ownerActor, f.workspace.id, input.id, tx, fetched,
+      () => recordArtifactInputLineage({ tx, actor: f.ownerActor, workspaceId: f.workspace.id,
+        artifact: { kind: "CommunicationMessage", id: message.id }, content: message, origin: "DERIVED",
+        inputs: [{ kind: "CommunicationMessageNativeInput", id: input.id }] }));
+    return message;
+  });
+  const roots = await captureArtifactInputProof(f.ownerActor, f.workspace.id,
+    [{ kind: "CommunicationMessage", id: message.id }]);
+  const preflight = await prepareArtifactCommitPreflight(f.ownerActor, f.workspace.id, roots);
+  await prisma.$transaction(tx => withArtifactCommitPreflight(f.ownerActor, f.workspace.id, tx, roots, preflight,
+    async () => {
+      for (const source of [f.publicSource, ...additionalSources]) await recordArtifactInputLineage({ tx,
+        actor: f.ownerActor, workspaceId: f.workspace.id, artifact: { kind: "BrainSource", id: source.id },
+        content: source, origin: "DERIVED", inputs: [], inheritedRoots: roots });
+    }));
+  return message;
+}
+
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 const previousEncryptionKey = process.env.ENCRYPTION_KEY;
 
@@ -181,6 +237,7 @@ describe("permitted article variants across real read/write boundaries", () => {
   beforeEach(async () => {
     // A synthetic key enables disposable cache fixtures without external credentials.
     process.env.ENCRYPTION_KEY ??= "1".repeat(64);
+    slack.original = { type: "message", ts: "1700000000.000001", user: "U_AUTHOR", text: "Public original communication facts" };
     await truncateAllTables();
   });
   afterEach(() => {
@@ -297,6 +354,105 @@ describe("permitted article variants across real read/write boundaries", () => {
     await expect(getArticle(f.ownerActor, { workspaceId: f.workspace.id, slug: variant.slug })).rejects.toMatchObject({ status: 404 });
     expect((await getArticle(f.ownerActor, { workspaceId: f.workspace.id, slug: f.canonical.slug })).id).toBe(f.canonical.id);
     expect(await prisma.brainArticle.findUniqueOrThrow({ where: { id: f.canonical.id } })).toMatchObject({ title: f.canonical.title, bodyMd: f.canonical.bodyMd, sourceIds: [f.publicSource.id] });
+  });
+
+  it("includes a new native parent on a current candidate after the canonical saved its older roots", async () => {
+    const f = await mixedFixture();
+    const newMessage = await appendCurrentSlackParent(f);
+    const currentSource = await prisma.brainSource.findUniqueOrThrow({ where: { id: f.publicSource.id } });
+    expect((await readableArtifactIds(f.readerActor, f.workspace.id, "BrainSource", [currentSource]))
+      .has(currentSource.id)).toBe(true);
+    const currentProof = await captureArtifactInputProof(f.readerActor, f.workspace.id,
+      [{ kind: "BrainSource", id: currentSource.id }]);
+    expect(currentProof).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "CommunicationMessage", id: newMessage.id }),
+    ]));
+    const lease = await claim(f);
+    const generate = vi.fn(async (sources: PermittedVariantSource[]) => {
+      expect(sources).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: "CommunicationMessage", id: newMessage.id, content: f.publicSource.content }),
+        expect.objectContaining({ kind: "BrainSource", id: f.publicSource.id, content: f.publicSource.content }),
+      ]));
+      expect(JSON.stringify(sources)).not.toContain("PRIVATE");
+      return { title: "Current native facts", bodyMd: f.publicSource.content };
+    });
+    const result = await generateBrainArticleVariant({ ...lease, generate });
+    expect(result.phase).toBe("APPLIED");
+    expect(generate).toHaveBeenCalledOnce();
+    if (result.phase !== "APPLIED") throw new Error("Expected a current native variant");
+    const manifest = await prisma.artifactInputLineage.findFirstOrThrow({ where: {
+      workspaceId: f.workspace.id, artifactType: "BrainArticle", artifactId: result.articleId,
+    }, orderBy: { revision: "desc" } });
+    expect(manifest.rootsJson).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "CommunicationMessage", id: newMessage.id }),
+    ]));
+    expect((await getArticle(f.readerActor, { workspaceId: f.workspace.id, slug: f.canonical.slug })).id).toBe(result.articleId);
+    // The original remote bytes are part of this source's saved proof. A later
+    // provider edit cannot resurrect this immutable variant with the old hash.
+    slack.original.text = "Changed provider bytes after publication";
+    await expect(getArticle(f.readerActor, { workspaceId: f.workspace.id, slug: f.canonical.slug }))
+      .rejects.toMatchObject({ status: 404 });
+    expect(await prisma.brainArticle.findUniqueOrThrow({ where: { id: result.articleId } }))
+      .toMatchObject({ bodyMd: f.publicSource.content, archivedAt: null });
+  });
+
+  it("prepares the first native parent of a current source whose canonical had no native ancestry", async () => {
+    const f = await fixture();
+    const message = await appendCurrentSlackParent(f);
+    const lease = await claim(f);
+    const generate = vi.fn(async (sources: PermittedVariantSource[]) => {
+      expect(sources).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: "CommunicationMessage", id: message.id, content: f.publicSource.content }),
+        expect.objectContaining({ kind: "BrainSource", id: f.publicSource.id }),
+      ]));
+      expect(JSON.stringify(sources)).not.toContain("PRIVATE");
+      return { title: "New native source", bodyMd: f.publicSource.content };
+    });
+    const result = await generateBrainArticleVariant({ ...lease, generate });
+    expect(result.phase).toBe("APPLIED");
+    expect(generate).toHaveBeenCalledOnce();
+    if (result.phase !== "APPLIED") throw new Error("Expected a new-native variant");
+    const variant = await prisma.brainArticle.findUniqueOrThrow({ where: { id: result.articleId } });
+    expect(variant.bodyMd).toBe(f.publicSource.content);
+    const manifest = await prisma.artifactInputLineage.findFirstOrThrow({ where: {
+      workspaceId: f.workspace.id, artifactType: "BrainArticle", artifactId: variant.id,
+    }, orderBy: { revision: "desc" } });
+    expect(manifest.rootsJson).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "CommunicationMessage", id: message.id }),
+    ]));
+  });
+
+  it("uses a remaining candidate's own saved native vector when another enclosing source was revoked", async () => {
+    const f = await fixture();
+    const remainingSource = await prisma.brainSource.create({ data: { workspaceId: f.workspace.id,
+      sourceType: "DOC", tier: 1, accessDomain: "WORKSPACE", title: "Independent remaining facts",
+      content: f.publicSource.content } });
+    await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: f.ownerActor, workspaceId: f.workspace.id,
+      artifact: { kind: "BrainSource", id: remainingSource.id }, content: remainingSource,
+      origin: "HUMAN_ORIGINAL", inputs: [] }));
+    const canonical = await createArticle(f.ownerActor, { workspaceId: f.workspace.id,
+      slug: "two-independent-native-candidates", title: "PRIVATE TWO SOURCE CANONICAL", type: "PROJECT",
+      authority: "REFERENCE", isPrivate: false, bodyMd: `PRIVATE CANONICAL FACTS\n\n${remainingSource.content}`,
+      sourceIds: [f.publicSource.id, remainingSource.id, f.financeSource.id] });
+    const message = await appendCurrentSlackParent(f, [remainingSource]);
+    await archiveAndRestoreSource(f);
+    const staleRow = await prisma.brainSource.findUniqueOrThrow({ where: { id: f.publicSource.id } });
+    expect((await readableArtifactIds(f.readerActor, f.workspace.id, "BrainSource", [staleRow])).has(staleRow.id)).toBe(false);
+    const remainingRow = await prisma.brainSource.findUniqueOrThrow({ where: { id: remainingSource.id } });
+    expect((await readableArtifactIds(f.readerActor, f.workspace.id, "BrainSource", [remainingRow])).has(remainingRow.id)).toBe(true);
+    const lease = await claim({ ...f, canonical });
+    const generate = vi.fn(async (sources: PermittedVariantSource[]) => {
+      expect(sources).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: "BrainSource", id: remainingSource.id }),
+        expect.objectContaining({ kind: "CommunicationMessage", id: message.id }),
+      ]));
+      expect(sources.some(source => source.id === f.publicSource.id)).toBe(false);
+      expect(JSON.stringify(sources)).not.toContain("PRIVATE");
+      return { title: "Remaining native facts", bodyMd: remainingSource.content };
+    });
+    const result = await generateBrainArticleVariant({ ...lease, generate });
+    expect(result.phase).toBe("APPLIED");
+    expect(generate).toHaveBeenCalledOnce();
   });
 
   it("regenerates separate member variants from remaining native inputs after Document removal and restoration", async () => {

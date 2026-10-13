@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import { getMcpOrigin, prisma, type AppActor } from "@corgtex/shared";
 import { invariant } from "./errors";
+import { lockSourceAuthorityPredicate, sourceAuthorityRowAlreadyLocked } from "./source-commit-row-locks";
 
 /** Reserve ambient physical read-authority rows before any source or OAuth epoch
  * checks in a bounded caller transaction. This grants no source access, captures
@@ -13,21 +14,30 @@ export async function lockArtifactReadAuthorityRows(actor: AppActor, workspaceId
   if (actor.kind === "user") {
     const { lockFinanceReadAuthority } = await import("./finance");
     await lockFinanceReadAuthority(tx, workspaceId, actor.user.id);
-    await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${actor.user.id} FOR SHARE`;
+    if (!sourceAuthorityRowAlreadyLocked(tx, "User", actor.user.id))
+      await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${actor.user.id} FOR SHARE`;
   } else {
-    if (actor.credentialId) await tx.$queryRaw`SELECT "id" FROM "AgentCredential" WHERE "id" = ${actor.credentialId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
-    if (actor.agentIdentityId) await tx.$queryRaw`SELECT "id" FROM "AgentIdentity" WHERE "id" = ${actor.agentIdentityId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+    if (actor.credentialId && !sourceAuthorityRowAlreadyLocked(tx, "AgentCredential", actor.credentialId))
+      await tx.$queryRaw`SELECT "id" FROM "AgentCredential" WHERE "id" = ${actor.credentialId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+    if (actor.agentIdentityId && !sourceAuthorityRowAlreadyLocked(tx, "AgentIdentity", actor.agentIdentityId))
+      await tx.$queryRaw`SELECT "id" FROM "AgentIdentity" WHERE "id" = ${actor.agentIdentityId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
     if (actor.supportOrigin) {
-      await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${actor.supportOrigin.userId} FOR SHARE`;
-      await tx.$queryRaw`SELECT "id" FROM "WorkspaceSupportGrant" WHERE "workspaceId" = ${workspaceId} AND "userId" = ${actor.supportOrigin.userId} FOR SHARE`;
+      const supportUserId = actor.supportOrigin.userId;
+      if (!sourceAuthorityRowAlreadyLocked(tx, "User", supportUserId))
+        await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${supportUserId} FOR SHARE`;
+      await lockSourceAuthorityPredicate(tx, "WorkspaceSupportGrant", { workspaceId, userId: supportUserId },
+        () => tx.$queryRaw`SELECT "id" FROM "WorkspaceSupportGrant" WHERE "workspaceId" = ${workspaceId} AND "userId" = ${supportUserId} FOR SHARE`);
     }
   }
   if (origin?.kind === "oauth") {
-    await tx.$queryRaw`SELECT "id" FROM "McpOAuthAccessToken" WHERE "id" = ${origin.id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+    if (!sourceAuthorityRowAlreadyLocked(tx, "McpOAuthAccessToken", origin.id))
+      await tx.$queryRaw`SELECT "id" FROM "McpOAuthAccessToken" WHERE "id" = ${origin.id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
     const token = await tx.mcpOAuthAccessToken.findFirst({ where: { id: origin.id, workspaceId }, select: { clientId: true } });
     invariant(token, 409, "SOURCE_CHANGED", "The serving OAuth grant changed.");
-    await tx.$queryRaw`SELECT "id" FROM "McpOAuthClient" WHERE "id" = ${token.clientId} FOR SHARE`;
+    if (!sourceAuthorityRowAlreadyLocked(tx, "McpOAuthClient", token.clientId))
+      await tx.$queryRaw`SELECT "id" FROM "McpOAuthClient" WHERE "id" = ${token.clientId} FOR SHARE`;
   } else if (origin?.kind === "agent") {
-    await tx.$queryRaw`SELECT "id" FROM "AgentCredential" WHERE "id" = ${origin.id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+    if (!sourceAuthorityRowAlreadyLocked(tx, "AgentCredential", origin.id))
+      await tx.$queryRaw`SELECT "id" FROM "AgentCredential" WHERE "id" = ${origin.id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
   }
 }

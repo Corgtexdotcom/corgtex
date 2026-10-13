@@ -1,6 +1,8 @@
 import { Prisma } from "@prisma/client";
 import type { LineageInput, LineageKind } from "./source-lineage";
 import { loadExternalMcpConnectionSetInput } from "./external-mcp-connection-set";
+import { assertSourceCommitRowCovered, assertSourceCommitTransactionCompatible, hasActiveSourceCommitLockPlan } from "./source-commit-lock-plan";
+import { sourceAuthorityPhysicalRow } from "./source-authority-edges";
 
 /** These edges supply live permission envelopes, independently of consumed body
  * ancestry. Keep this table aligned with source-lineage's parent authorization. */
@@ -28,6 +30,10 @@ export function artifactPermissionParents(kind: LineageKind, row: Record<string,
       add("BrainSource", control.sourceId); add("Document", control.documentId); add("BrainSource", control.pendingSourceId);
     } else if (control.version === 1 && row.operation === "ACTION_COMPLETED") {
       add("Action", control.actionId); add("McpToolInput", control.inputId); add("Member", control.assigneeMemberId);
+    } else if (control.version === 1 && row.operation === "ACTION_COMPLETION_PUBLIC_NOTE") {
+      // The public projection inherits the exact old Action body. Its raw
+      // command and publishing principal remain private control evidence.
+      add("ArtifactInputSnapshot", control.oldActionSnapshotId);
     }
   }
   if (["MeetingInsight", "MeetingFollowUpReview"].includes(kind)) field("Meeting", "meetingId");
@@ -114,6 +120,11 @@ function scopeRelations(value: object, workspaceId: string): Record<string, unkn
  * lineage nor demands a read scope from the principal writing a new output. */
 export async function loadArtifactPermissionMetadata(tx: Prisma.TransactionClient, workspaceId: string,
   input: LineageInput): Promise<Record<string, unknown> | null> {
+  assertSourceCommitTransactionCompatible(tx);
+  if (hasActiveSourceCommitLockPlan(tx)) {
+    const physical = sourceAuthorityPhysicalRow(input);
+    if (physical) assertSourceCommitRowCovered(tx, physical.table, physical.id);
+  }
   if (input.kind === "ExternalMcpConnectionSet") return loadExternalMcpConnectionSetInput(workspaceId, input.id, tx);
   const modelName = MODEL_ALIASES[input.kind] ?? input.kind;
   const model = Prisma.dmmf.datamodel.models.find(candidate => candidate.name === modelName);
@@ -140,7 +151,9 @@ export async function loadArtifactPermissionMetadata(tx: Prisma.TransactionClien
   }
   if (result?.controlJson && typeof result.controlJson === "object" && !Array.isArray(result.controlJson)) {
     const control = result.controlJson as Record<string, unknown>;
-    result.controlJson = Object.fromEntries(["version", "sourceId", "documentId", "pendingSourceId", "actionId", "inputId", "assigneeMemberId"]
+    result.controlJson = Object.fromEntries(["version", "sourceId", "documentId", "pendingSourceId", "actionId", "inputId", "assigneeMemberId",
+      "publicationPolicyVersion", "audience", "publishedActionRevision", "completedActionFingerprint",
+      "oldActionSnapshotId", "oldActionSnapshotFingerprint"]
       .map(field => [field, control[field]]));
   }
   return result;

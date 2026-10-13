@@ -7,6 +7,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 import { assertOutsideArtifactNativeCommitPhase, isArtifactNativeCommitPhase, withArtifactNativeCommitPhase } from "./artifact-native-commit-phase";
 import { savedEnclosingNativeEpochs, savedNativeVectorKey } from "./native-commit-original-vector";
+import { lockSourceAuthorityPredicate, sourceAuthorityRowAlreadyLocked } from "./source-commit-row-locks";
 import { externalMcpConnectionGrantHash, externalMcpNativeReadRequest, loadExternalMcpNativeConnection,
   readExternalMcpNativeToolResult, assertExternalMcpNativeReadOrigin, type ExternalMcpConnectionRecord } from "./external-mcp";
 import { capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, parsePermissionEpochProof,
@@ -278,11 +279,14 @@ export async function withExternalMcpResponseCommitPreflight<T>(actor: AppActor,
   const claim = claimExternalMcpResponseCommitPreflight(actor, workspaceId, tx, token);
   const state = claims.get(claim)!;
   for (const id of [...state.inputs.keys()].sort()) {
-    await tx.$queryRaw`SELECT "id" FROM "ExternalMcpResponseInput" WHERE "id" = ${id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+    if (!sourceAuthorityRowAlreadyLocked(tx, "ExternalMcpResponseInput", id))
+      await tx.$queryRaw`SELECT "id" FROM "ExternalMcpResponseInput" WHERE "id" = ${id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
     const input = await tx.externalMcpResponseInput.findFirst({ where: { id, workspaceId } });
     invariant(input, 409, "SOURCE_CHANGED", "External MCP native input changed during commit.");
-    await tx.$queryRaw`SELECT "id" FROM "ExternalMcpConnection" WHERE "id" = ${input.connectionId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
-    await tx.$queryRaw`SELECT "id" FROM "Member" WHERE "userId" = ${input.localUserId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+    if (!sourceAuthorityRowAlreadyLocked(tx, "ExternalMcpConnection", input.connectionId))
+      await tx.$queryRaw`SELECT "id" FROM "ExternalMcpConnection" WHERE "id" = ${input.connectionId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+    await lockSourceAuthorityPredicate(tx, "Member", { workspaceId, userId: input.localUserId },
+      () => tx.$queryRaw`SELECT "id" FROM "Member" WHERE "userId" = ${input.localUserId} AND "workspaceId" = ${workspaceId} FOR SHARE`);
   }
   if (beforeSourceEpochs) await withArtifactNativeCommitPhase(beforeSourceEpochs);
   const { isArtifactInputProofReadable } = await import("./source-lineage");
@@ -322,15 +326,19 @@ export async function withExternalMcpAndSlackCommitPreflights<T>(actor: AppActor
     ...slack.inputIds.map(id => ({ kind: "CommunicationMessageNativeInput", id })),
   ].sort((a, b) => a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
   for (const row of native) {
-    if (row.kind === "ExternalMcpResponseInput")
-      await tx.$queryRaw`SELECT "id" FROM "ExternalMcpResponseInput" WHERE "id" = ${row.id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
-    else await tx.$queryRaw`SELECT "id" FROM "CommunicationMessageNativeInput" WHERE "id" = ${row.id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+    if (row.kind === "ExternalMcpResponseInput") {
+      if (!sourceAuthorityRowAlreadyLocked(tx, "ExternalMcpResponseInput", row.id))
+        await tx.$queryRaw`SELECT "id" FROM "ExternalMcpResponseInput" WHERE "id" = ${row.id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+    } else if (!sourceAuthorityRowAlreadyLocked(tx, "CommunicationMessageNativeInput", row.id))
+      await tx.$queryRaw`SELECT "id" FROM "CommunicationMessageNativeInput" WHERE "id" = ${row.id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
   }
   for (const id of [...mcp.inputs.keys()].sort()) {
     const input = await tx.externalMcpResponseInput.findFirst({ where: { id, workspaceId } });
     invariant(input, 409, "SOURCE_CHANGED", "External MCP native input changed during commit.");
-    await tx.$queryRaw`SELECT "id" FROM "ExternalMcpConnection" WHERE "id" = ${input.connectionId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
-    await tx.$queryRaw`SELECT "id" FROM "Member" WHERE "userId" = ${input.localUserId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+    if (!sourceAuthorityRowAlreadyLocked(tx, "ExternalMcpConnection", input.connectionId))
+      await tx.$queryRaw`SELECT "id" FROM "ExternalMcpConnection" WHERE "id" = ${input.connectionId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+    await lockSourceAuthorityPredicate(tx, "Member", { workspaceId, userId: input.localUserId },
+      () => tx.$queryRaw`SELECT "id" FROM "Member" WHERE "userId" = ${input.localUserId} AND "workspaceId" = ${workspaceId} FOR SHARE`);
   }
   await lockSlackNativeGoverningRows(tx, workspaceId, slack.inputIds, actor);
   await lockSlackNativeCommitClaimRows(actor, workspaceId, tx, slackClaim);

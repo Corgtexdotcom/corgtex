@@ -2,6 +2,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import { invariant } from "./errors";
+import { assertSourceCommitEpochCaptureCovered, assertSourceCommitPermissionReadCovered,
+  assertSourceCommitTransactionCompatible,
+  hasActiveSourceCommitLockPlan } from "./source-commit-lock-plan";
 
 export const SOURCE_PERMISSION_POLICY_VERSION = "pun68-permissions-v3";
 export type PermissionEpochIdentity = { kind: string; id: string };
@@ -77,16 +80,19 @@ export function artifactPermissionEpochIdentities(kind: string, row: Record<stri
 
 export async function capturePermissionEpochs(tx: Prisma.TransactionClient, workspaceId: string,
   identities: readonly PermissionEpochIdentity[]): Promise<PermissionEpochProof> {
+  assertSourceCommitTransactionCompatible(tx);
   const sorted = [...new Map(identities.map((identity) => [JSON.stringify([identity.kind, identity.id]), identity])).entries()]
     .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0).map(([, identity]) => identity);
   invariant(sorted.length > 0 && sorted.length <= MAX_EPOCH_IDENTITIES, 409, "PERMISSION_PROOF_LIMIT", "Source permission proof requires a bounded rebuild.");
-  await tx.$executeRaw(Prisma.sql`INSERT INTO "SourcePermissionEpoch" ("id", "workspaceId", "sourceKind", "sourceId", "epoch")
-    VALUES ${Prisma.join(sorted.map((identity) => Prisma.sql`(${randomUUID()}, ${workspaceId}, ${identity.kind}, ${identity.id}, 0)`))}
+  const planned = hasActiveSourceCommitLockPlan(tx);
+  const insert = planned ? assertSourceCommitEpochCaptureCovered(tx, workspaceId, sorted) : sorted;
+  if (insert.length) await tx.$executeRaw(Prisma.sql`INSERT INTO "SourcePermissionEpoch" ("id", "workspaceId", "sourceKind", "sourceId", "epoch")
+    VALUES ${Prisma.join(insert.map((identity) => Prisma.sql`(${randomUUID()}, ${workspaceId}, ${identity.kind}, ${identity.id}, 0)`))}
     ON CONFLICT ("workspaceId", "sourceKind", "sourceId") DO NOTHING`);
   const rows = await tx.$queryRaw<Array<{ sourceKind: string; sourceId: string; epoch: bigint }>>(Prisma.sql`
     SELECT "sourceKind", "sourceId", "epoch" FROM "SourcePermissionEpoch" WHERE "workspaceId" = ${workspaceId}
     AND ("sourceKind", "sourceId") IN (${Prisma.join(sorted.map((identity) => Prisma.sql`(${identity.kind}, ${identity.id})`))})
-    ORDER BY "sourceKind" COLLATE "C", "sourceId" COLLATE "C" FOR SHARE`);
+    ORDER BY "sourceKind" COLLATE "C", "sourceId" COLLATE "C" ${planned ? Prisma.empty : Prisma.raw("FOR SHARE")}`);
   const epochs = new Map(rows.map((row) => [JSON.stringify([row.sourceKind, row.sourceId]), row.epoch.toString()]));
   invariant(rows.length === sorted.length, 409, "PERMISSION_CHANGED", "A source permission epoch is unavailable.");
   return { version: 1, policyVersion: SOURCE_PERMISSION_POLICY_VERSION,
@@ -95,12 +101,16 @@ export async function capturePermissionEpochs(tx: Prisma.TransactionClient, work
 
 export async function isArtifactPermissionEpochProofCurrent(workspaceId: string, value: unknown,
   db: EpochClient = prisma): Promise<boolean> {
+  assertSourceCommitTransactionCompatible(db);
   const proof = parsePermissionEpochProof(value);
   if (!proof) return false;
+  const planned = hasActiveSourceCommitLockPlan(db);
+  if (planned) assertSourceCommitPermissionReadCovered(db, workspaceId, proof);
   const query = Prisma.sql`SELECT "sourceKind", "sourceId", "epoch" FROM "SourcePermissionEpoch" WHERE "workspaceId" = ${workspaceId}
     AND ("sourceKind", "sourceId") IN (${Prisma.join(proof.entries.map((entry) => Prisma.sql`(${entry.kind}, ${entry.id})`))})
     ORDER BY "sourceKind" COLLATE "C", "sourceId" COLLATE "C"`;
-  const rows = await db.$queryRaw<Array<{ sourceKind: string; sourceId: string; epoch: bigint }>>(db === prisma ? query : Prisma.sql`${query} FOR SHARE`);
+  const rows = await db.$queryRaw<Array<{ sourceKind: string; sourceId: string; epoch: bigint }>>(
+    db === prisma || planned ? query : Prisma.sql`${query} FOR SHARE`);
   const epochs = new Map(rows.map((row) => [JSON.stringify([row.sourceKind, row.sourceId]), row.epoch.toString()]));
   return rows.length === proof.entries.length && proof.entries.every((entry) => epochs.get(JSON.stringify([entry.kind, entry.id])) === entry.epoch);
 }

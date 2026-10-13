@@ -35,6 +35,11 @@ function transport(name: string) {
   fixture.prisma[name] = {
     findFirst: vi.fn(async (args: any) => project(fixture.rows[name].find((row) => matches(row, args.where)), args)),
     findUnique: vi.fn(async (args: any) => project(fixture.rows[name].find((row) => matches(row, args.where)), args)),
+    findUniqueOrThrow: vi.fn(async (args: any) => {
+      const row = fixture.rows[name].find((record) => matches(record, args.where));
+      if (!row) throw new Error(`Missing synthetic ${name}`);
+      return project(row, args);
+    }),
     findMany: vi.fn(async (args: any) => fixture.rows[name].filter((row) => matches(row, args.where)).sort((a, b) => a.id.localeCompare(b.id)).slice(0, args.take).map((r) => project(r, args))),
     create: vi.fn(async ({ data }: any) => {
       const row = { id: `${name}-${++revision}`, createdAt: fixture.timestamp, updatedAt: new Date(fixture.timestamp.getTime() + revision),
@@ -55,7 +60,8 @@ function transport(name: string) {
 }
 beforeEach(async () => {
   await resetFixture(); revision = 0;
-  for (const name of ["executionRequest", "executionResult", "actionCreationSource", "agentCredential"]) transport(name);
+  for (const name of ["executionRequest", "executionResult", "actionCreationSource", "agentCredential",
+    "workspaceSupportGrant", "workspaceFeatureFlag", "workspaceModuleGrant", "roleAssignment", "role", "circle"]) transport(name);
   const epochs = new Map<string, bigint>();
   fixture.prisma.$executeRaw = vi.fn(async (sql: any) => {
     if (sql.sql?.includes('INSERT INTO "SourcePermissionEpoch"')) for (let i = 0; i < sql.values.length; i += 4) {
@@ -64,7 +70,12 @@ beforeEach(async () => {
     }
     return 1;
   });
+  let connectionId = 0;
+  let activeConnectionId = 0;
   fixture.prisma.$queryRaw = vi.fn(async (sql: any, ...values: any[]) => {
+    const text = sql.sql ?? sql.join?.("") ?? "";
+    const bindings = Array.isArray(sql) ? values : sql.values ?? values;
+    if (text.includes("pg_backend_pid()")) return [{ pid: 101, transactionId: String(activeConnectionId) }];
     if (sql.sql?.includes('FROM "SourcePermissionEpoch"')) {
       const [ws, ...pairs] = sql.values; const result = [];
       for (let i = 0; i < pairs.length; i += 2) {
@@ -73,16 +84,24 @@ beforeEach(async () => {
       }
       return result;
     }
-    return sql.join?.("").includes('SELECT * FROM "ExecutionRequest"')
-      ? fixture.rows.executionRequest.filter((r) => r.id === values[0] && r.workspaceId === values[1]).map((r) => ({ ...r })) : [];
+    const table = text.match(/FROM "([A-Za-z]+)"/)?.[1];
+    if (table) {
+      const name = table[0]!.toLowerCase() + table.slice(1);
+      return (fixture.rows[name] ?? []).filter(row => row.id === bindings[0]
+        && (table !== "ExecutionRequest" || bindings.length < 2 || row.workspaceId === bindings[1])).map(row => ({ ...row }));
+    }
+    return [];
   });
   fixture.prisma.$transaction.mockImplementation(async (run: any) => {
     const before = structuredClone(fixture.rows); const beforeEpochs = new Map(epochs);
-    try { return await run(fixture.prisma); }
+    const previousConnectionId = activeConnectionId;
+    activeConnectionId = ++connectionId;
+    const tx = new Proxy(fixture.prisma, { get(target, key) { return key === "$transaction" ? undefined : Reflect.get(target, key); } });
+    try { return await run(tx); }
     catch (error) {
       for (const name of Object.keys(before)) fixture.rows[name] = before[name];
       epochs.clear(); beforeEpochs.forEach((value, key) => epochs.set(key, value)); throw error;
-    }
+    } finally { activeConnectionId = previousConnectionId; }
   });
 });
 const addInput = async (id = "input", privateInput = false) => {
@@ -164,7 +183,13 @@ describe("execution lineage closure with real current permissions", () => {
     expect((await submitExecutionResult(beta, { workspaceId, requestId: created.id, idempotencyKey: "once", output: { bodyMd: "Replay cannot replace" } })).output).toEqual({ bodyMd: "Actual copied note" });
     await expect(submitExecutionResult(alpha, { workspaceId, requestId: created.id, idempotencyKey: "once" })).rejects.toMatchObject({ code: "NOT_FOUND" });
     fixture.rows.brainArticle.find((r) => r.id === input.id).archivedAt = fixture.timestamp;
-    expect((await getExecutionRequest(beta, { workspaceId, requestId: created.id })).results).toEqual([]);
+    // Completion is a new derived current revision. Preserve the independent
+    // original request rather than exposing a now-restricted completion state.
+    await expect(getExecutionRequest(beta, { workspaceId, requestId: created.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    const original = fixture.rows.artifactInputSnapshot.find(row => row.sourceKind === "ExecutionRequest"
+      && row.sourceId === created.id && row.contentJson.status === "PENDING");
+    expect(original.contentJson).toMatchObject({ goal: "Fresh requested task", status: "PENDING", contextJson: {} });
+    expect(await readableArtifactIds(beta, workspaceId, "ArtifactInputSnapshot", [original])).toEqual(new Set([original.id]));
     await expect(submitExecutionResult(beta, { workspaceId, requestId: created.id, idempotencyKey: "once" })).rejects.toMatchObject({ code: "NOT_FOUND" });
     const failedRequest = await request({ writebackTargetType: null });
     const freshInput = await addInput("failure-input");

@@ -7,6 +7,8 @@ import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
 import { resolveSingleModuleAccess } from "./module-access";
 import { defaultWorkspaceFeatureFlags, getModuleByKey, isAtLeast, type MemberRoleKey, type ModuleAccessLevel } from "./modules";
+import { assertSourceCommitPredicateRowsCovered, assertSourceCommitRowCovered, assertSourceCommitTransactionCompatible,
+  hasActiveSourceCommitLockPlan } from "./source-commit-lock-plan";
 
 export const FINANCE_PARENT_FLAG = "FINANCE";
 export const FINANCE_ALL_MEMBER_WRITE_CONFIG_KEY = "financeAllMemberWrite";
@@ -341,6 +343,36 @@ async function resolveFinanceModuleAccess(workspaceId: string, membership: Membe
  */
 /** Physical authorization locks only; callers must still validate current policy. */
 export async function lockFinanceReadAuthority(tx: Prisma.TransactionClient, workspaceId: string, userId: string) {
+  if (hasActiveSourceCommitLockPlan(tx)) {
+    assertSourceCommitRowCovered(tx, "Workspace", workspaceId);
+    const covered = async (table: string, where: Record<string, unknown>, rows: Array<{ id: string }>) => {
+      assertSourceCommitPredicateRowsCovered(tx, table, where, rows.map(row => row.id));
+      for (const row of rows) assertSourceCommitRowCovered(tx, table, row.id);
+    };
+    const flags = await tx.workspaceFeatureFlag.findMany({ where: { workspaceId }, select: { id: true } });
+    await covered("WorkspaceFeatureFlag", { workspaceId }, flags);
+    const grants = await tx.workspaceModuleGrant.findMany({ where: { workspaceId }, select: { id: true } });
+    await covered("WorkspaceModuleGrant", { workspaceId }, grants);
+    const circles = await tx.circle.findMany({ where: { workspaceId }, select: { id: true } });
+    await covered("Circle", { workspaceId }, circles);
+    if (userId) {
+      const members = await tx.member.findMany({ where: { workspaceId, userId }, select: { id: true } });
+      await covered("Member", { workspaceId, userId }, members);
+      const support = await tx.workspaceSupportGrant.findMany({ where: { workspaceId, userId }, select: { id: true } });
+      await covered("WorkspaceSupportGrant", { workspaceId, userId }, support);
+      for (const member of members) {
+        const assignments = await tx.roleAssignment.findMany({ where: { memberId: member.id }, select: { id: true, roleId: true } });
+        await covered("RoleAssignment", { memberId: member.id }, assignments);
+        for (const assignment of assignments) {
+          const where = { id: assignment.roleId, circle: { workspaceId } };
+          await covered("Role", where, await tx.role.findMany({ where, select: { id: true } }));
+        }
+      }
+    }
+    // The full plan already holds the exact current rows and durable absence
+    // policies. A late Workspace UPDATE upgrade would invert that lock union.
+    return;
+  }
   const flags = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
     SELECT "id" FROM "WorkspaceFeatureFlag"
     WHERE "workspaceId" = ${workspaceId} AND "flag" = 'FINANCE'
@@ -401,6 +433,7 @@ export async function lockFinanceReadAuthority(tx: Prisma.TransactionClient, wor
 }
 
 export async function getFinanceAccessPolicy(actor: AppActor, workspaceId: string, db: Prisma.TransactionClient = prisma) {
+  assertSourceCommitTransactionCompatible(db);
   if (actor.kind === "agent") {
     requireAgentScope(actor, "finance:read");
   }
