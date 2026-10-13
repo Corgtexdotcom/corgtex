@@ -1,0 +1,114 @@
+# Personal conversation runtime foundation
+
+This is a default-off, production-intended execution library. It does not admit live
+requests, register an outbox handler, connect a checkpoint database, or enable a product
+experience. The existing conversation route is unchanged. No task or artifact is required
+to finish a conversation. Shared Slack/team authority is outside this personal runtime.
+
+`createAssistantHarness` calls the existing `ModelGateway` directly. Gateway routing,
+credentials, quotas and `ModelUsage` remain authoritative. The harness adds no provider
+wrapper or usage writer. `workflowJobId` and `agentRunId` are passed through the current
+gateway contract. The runtime accepts only an authenticated human actor bound to the
+personal run. Future lineage integration must consume the domain owner's exports.
+
+The only read capability names are `read_brain` and `read_meeting`; the application supplies
+their permission-enforcing implementations. They must return source references, which are
+reauthorized before reuse, including resume. Retrieved text stays in a tool message as
+untrusted evidence. Web and personal connector tools are excluded. A separately supplied
+publication port can propose exactly a selected result and optional context summary for
+approval. It cannot publish conversation history implicitly.
+
+## Invocation and application responsibilities
+
+Use the supported `@corgtex/agents/assistant-harness` package export. Construct a fresh runner
+for each claimed job segment. Pass `env.ASSISTANT_HARNESS_ENABLED` and the server-controlled
+workspace opt-in explicitly; both are off by default. Disabling the gate holds existing runs;
+it must never send their continuations through the legacy loop. Scope, actor, AbortSignal,
+ports and callbacks remain outside checkpoints. The runtime exposes no raw SDK Command or
+checkpoint selector to clients. Initial input permits user/assistant messages only.
+
+`AssistantRuntime.authorize` must verify current membership, personal session ownership,
+source permissions, cancellation, budget, support/MCP revocation context where applicable,
+and the job claim. `reserveDispatch` must atomically fence and count every actual model/tool
+dispatch against a run-wide limit. This covers a call repeated after a checkpoint crash;
+checkpoint counters alone cannot guarantee that bound. A repeated actual provider dispatch
+can be billed again by the gateway. There is no exactly-once provider billing claim.
+
+`ClaimedCheckpointPort` is a required app integration boundary, not an implemented PostgreSQL
+saver. `AssistantCheckpointStore` bounds SDK access and uses the official patched base
+saver/serializer. It does not make the supplied port atomic. In particular, checking a lease
+before calling stock `PostgresSaver.put` on a separate transaction is unsafe. No `pg` is
+imported, no extra pool is created, and no DDL or runtime `setup()` is present.
+
+Minimum proposed transaction contract for the domain/queue owner:
+
+- Bind immutable run/request identity, workspace, user, conversation and versioned policy.
+- Check the current job owner/attempt and expected checkpoint lineage inside every
+  checkpoint/write transaction. Reject stale writers even after connection loss.
+- For local publication, reauthorize and validate exact selection/decision/expiry, then
+  commit the effect, unique canonical receipt and existing outbox event atomically.
+- COMMITTED returns that canonical receipt without another effect. UNKNOWN requires
+  authoritative reconciliation and must not be converted into a retry or success.
+- Admission, approval wakeup, cancellation, final turn and job completion use the same
+  claim/generation rules. An approval arriving before the interrupt must retain a retryable
+  wakeup. New wakeup generations need distinct dedupe keys in the existing queue.
+
+The publication interfaces expose semantic views and opaque receipt/approval IDs. They do
+not define a second storage format. A decision is reloaded after interruption and before a
+new effect. Application commit still must check authority and deduplication atomically;
+the graph's read-before-write is not that guarantee.
+
+`handleConversationTurn` and `recoverConversationTurns` are callable integration functions,
+not a registered worker path. Their ports must be supplied by domain admission/receipt and
+the existing outbox. The recovery sweep is bounded and classifies early decisions, runnable
+work, missing final results, cancellation and UNKNOWN. It creates no queue or timer itself.
+The worker drain signal must cancel cooperative calls; browser disconnect only detaches an
+ephemeral subscriber. User cancellation is a durable domain decision.
+
+## Validation and outstanding gates
+
+Unit fixtures exercise the real graph and gateway contract with `MemorySaver` and explicit
+fake app ports. They do not prove PostgreSQL fencing, process-crash durability, automatic
+`runPendingJobs` recovery, or production receipt integration. A new runner in these tests
+is not a fresh process. Run with Node 22.22:
+
+```
+npx vitest run --project unit packages/agents/src/assistant-harness/graph.test.ts packages/shared/src/env.test.ts
+npm run check
+env -u DATABASE_URL npm run build
+```
+
+The database URL required by Prisma schema validation may point at an unused disposable
+local database; this foundation does not require connecting to it. Builds stay DB-independent.
+
+Before enablement: agree/implement the atomic port, admission and lineage seam; release
+the held outbox/barrel integration paths; test real claim loss, crash/restart and duplicate
+completion; migrate official checkpoint tables through the reviewed release path; integrate
+tenant/user deletion, retention and rollback version policy; consume PUN-68 privacy work;
+verify the actual worker image and bounded pool/TLS settings. No lifecycle coverage, private
+memory implementation, team memory, live voice or launch readiness is claimed here.
+
+Graph version `personal-conversation-v1`, state version 1, configuration digest and domain
+policy version reject incompatible resumes. Interrupted node names must stay stable. The
+owner must review any future policy/schema change against persisted checkpoints before
+enabling it. No public graph values/debug streams are exposed.
+
+The pinned SDK can re-enable environment tracing during async iterator setup. Its configure
+hooks also inject handlers independently of runnable callbacks or a tracing-enabled RunTree.
+The runner therefore refuses any inherited LangChain/LangSmith async context, including an
+empty or tracing-disabled context, before compilation or state access. It uses the exported
+storage interface and never clears or changes the caller's context. Tracing flags and verbose
+mode are also refused. Invoke this private runner outside SDK instrumentation context with
+tracing disabled; unrelated concurrent instrumented runs retain their callbacks. Tests block
+fetch and cover context-only custom handlers, LangChainTracer and environment handler factories.
+
+Dependencies are exactly pinned: LangGraph 1.4.21, core 1.2.17 and checkpoint 1.1.6.
+LangSmith 0.10.11 is also pinned as a test dependency for the inherited-context negative
+control (core brings the same version transitively). The graph-input
+control-directive advisory is patched in 1.4.21. The serializer pin is newer than the
+deserialization fix. See the maintainers' advisories and durable execution/interrupt docs:
+
+- https://github.com/langchain-ai/langgraphjs/security/advisories/GHSA-wp87-994x-j95x
+- https://github.com/langchain-ai/langgraphjs/security/advisories/GHSA-j87f-x5h5-gr75
+- https://docs.langchain.com/oss/javascript/langgraph/durable-execution
+- https://docs.langchain.com/oss/javascript/langgraph/interrupts

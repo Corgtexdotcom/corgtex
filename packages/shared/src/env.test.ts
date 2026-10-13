@@ -15,6 +15,17 @@ afterEach(() => {
 });
 
 describe("env", () => {
+  it("defaults the assistant harness gate off without requiring a database", async () => {
+    delete process.env.ASSISTANT_HARNESS_ENABLED;
+    delete process.env.DATABASE_URL;
+    const { env } = await import("./env");
+    expect(env.ASSISTANT_HARNESS_ENABLED).toBe(false);
+    process.env.ASSISTANT_HARNESS_ENABLED = "true";
+    expect(env.ASSISTANT_HARNESS_ENABLED).toBe(true);
+    process.env.ASSISTANT_HARNESS_ENABLED = "unexpected";
+    expect(env.ASSISTANT_HARNESS_ENABLED).toBe(false);
+  });
+
   it("derives deployment workspace scope only for dedicated hosts", async () => {
     restoreEnv();
     Object.assign(process.env, {
