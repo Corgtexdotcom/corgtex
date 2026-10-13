@@ -39,8 +39,9 @@ export const CONVERSATION_TOOL_CAPABILITIES = {
   archive_tool_link: ["archive_tool_link"],
   reveal_tool_link_credential: ["reveal_tool_link_credential"],
   list_connected_tools: ["list_connected_tools"],
-  // The native handler searches Corgtex Brain as well as connected providers.
-  search_connected_context: ["search_connected_context", "search_knowledge"],
+  // Provider-only search is available without Brain authority. Argument-time
+  // authorization adds Brain read when the handler includes Corgtex content.
+  search_connected_context: ["search_connected_context"],
   fetch_connected_context: ["fetch_connected_context"],
   execute_external_tool: ["execute_external_tool"],
   list_due_relationship_work: ["list_due_relationship_work"],
@@ -119,6 +120,11 @@ export async function authorizeConversationTool(actor: AppActor, workspaceId: st
     return;
   }
   const operations: McpToolName[] = [...declared];
+  if (toolName === "search_connected_context") {
+    const providerOnly = args && typeof args === "object" && !Array.isArray(args)
+      && (args as Record<string, unknown>).includeCorgtex === false;
+    if (!providerOnly) operations.push("search_knowledge");
+  }
   if (toolName === "create_proposal" && args && typeof args === "object" && !Array.isArray(args)) {
     const proposalArgs = args as Record<string, unknown>;
     if (typeof proposalArgs.sourceTensionId === "string" && proposalArgs.sourceTensionId.trim()) operations.push("list_tensions");

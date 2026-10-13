@@ -7,7 +7,7 @@ const m = vi.hoisted(() => ({
   membership: vi.fn(), credential: vi.fn(), grant: vi.fn(),
   chat: vi.fn(), events: vi.fn(), stream: vi.fn(), search: vi.fn(), memories: vi.fn(), profile: vi.fn(), onboarding: vi.fn(),
   reveal: vi.fn(), pending: vi.fn(), pendingFind: vi.fn(), pendingFindUnique: vi.fn(), pendingUpdate: vi.fn(), pendingUpdateMany: vi.fn(),
-  activity: vi.fn(), actions: vi.fn(), storeMemory: vi.fn(), accessDomains: vi.fn(),
+  activity: vi.fn(), actions: vi.fn(), storeMemory: vi.fn(), accessDomains: vi.fn(), externalSearch: vi.fn(),
 }));
 vi.mock("@corgtex/shared", () => ({
   getSupportAuthorizationContext: () => undefined,
@@ -53,7 +53,7 @@ vi.mock("@corgtex/domain", async () => ({
   revealWorkspaceToolLinkCredential: m.reveal, createActivity: m.activity,
   archiveWorkspaceToolLink: vi.fn(), upsertWorkspaceToolLink: vi.fn(), listWorkspaceToolLinks: vi.fn().mockResolvedValue([]),
   listExternalMcpConnections: vi.fn().mockResolvedValue([]), executeExternalMcpTool: vi.fn(),
-  fetchConnectedExternalMcpContext: vi.fn(), searchConnectedExternalMcpContext: vi.fn(),
+  fetchConnectedExternalMcpContext: vi.fn(), searchConnectedExternalMcpContext: m.externalSearch,
   applyContextGraphProposedDiff: vi.fn(), createContextGraphProposedDiff: vi.fn(), buildSelectedRegionContext: vi.fn(), getContextMapData: vi.fn(),
   assignRole: vi.fn(), unassignRole: vi.fn(), listMembersEnriched: vi.fn(), getMemberProfile: vi.fn(), updateMember: vi.fn(),
   createAction: vi.fn(), updateAction: vi.fn(), createTension: vi.fn(), updateTension: vi.fn(),
@@ -126,6 +126,7 @@ beforeEach(() => {
   m.reveal.mockResolvedValue({ credentialLabel: "synthetic-label", credentialSecret: "synthetic-secret" });
   m.pending.mockImplementation(({ data }) => ({ ...data, id: "synthetic-pending", expiresAt: new Date(Date.now() + 60_000) }));
   m.actions.mockResolvedValue([]);
+  m.externalSearch.mockResolvedValue({ results: [], errors: [] });
   script(response());
 });
 
@@ -179,6 +180,35 @@ describe.each([false, true])("conversation scope enforcement (streaming=%s)", st
     await run(streaming, context(agent(["conversations:write"])));
     expect(m.pending).not.toHaveBeenCalled();
     expect(m.activity).not.toHaveBeenCalled();
+  });
+
+  it.each(["credential", "oauth-human"] as const)("offers and allows provider-only search without Brain authority for %s", async principal => {
+    script(response([toolCall("search_connected_context", { query: "synthetic-provider-query", includeCorgtex: false })]));
+    const scopes = ["conversations:write", "external-tools:read"];
+    const actor = principal === "credential" ? agent(scopes) : oauthHuman;
+    await run(streaming, context(actor, principal === "oauth-human" ? scopes : undefined));
+    const request = (streaming ? m.events : m.chat).mock.calls[0][0];
+    expect(JSON.stringify(request.tools)).toContain("search_connected_context");
+    expect(m.externalSearch).toHaveBeenCalledOnce();
+    expect(m.externalSearch).toHaveBeenCalledWith(actor, expect.objectContaining({ workspaceId, query: "synthetic-provider-query" }));
+    expect(m.accessDomains).not.toHaveBeenCalled();
+    expect(m.search).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["credential", undefined], ["credential", true], ["oauth-human", undefined], ["oauth-human", true],
+  ] as const)("enforces argument-time Brain authority for %s combined search with includeCorgtex=%s", async (principal, includeCorgtex) => {
+    script(response([toolCall("search_connected_context", {
+      query: "synthetic-combined-query", ...(includeCorgtex === undefined ? {} : { includeCorgtex }),
+    })]));
+    const scopes = ["conversations:write", "external-tools:read"];
+    const actor = principal === "credential" ? agent(scopes) : oauthHuman;
+    await run(streaming, context(actor, principal === "oauth-human" ? scopes : undefined));
+    const request = (streaming ? m.events : m.chat).mock.calls[0][0];
+    expect(JSON.stringify(request.tools)).toContain("search_connected_context");
+    expect(m.externalSearch).not.toHaveBeenCalled();
+    expect(m.accessDomains).not.toHaveBeenCalled();
+    expect(m.search).not.toHaveBeenCalled();
   });
 
   it.each(["confirm", "cancel"])("blocks chat-only pending CRM %s before lookup or stored-result delivery", async intent => {

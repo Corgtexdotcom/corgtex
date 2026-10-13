@@ -380,3 +380,80 @@ describe("Finance knowledge-domain scope filtering", () => {
     expect(mocks.credential).not.toHaveBeenCalled();
   });
 });
+
+describe("conditional Brain authority for connected-context search", () => {
+  const oauthHuman = trustedActors[0];
+
+  it("offers provider search with external read alone for credentials and scoped humans", () => {
+    expect(canUseConversationTool(credential(["external-tools:read"]), "search_connected_context")).toBe(true);
+    expect(canUseConversationTool(oauthHuman, "search_connected_context", ["external-tools:read"])).toBe(true);
+    expect(canUseConversationTool(credential(["brain:read"]), "search_connected_context")).toBe(false);
+    expect(canUseConversationTool(oauthHuman, "search_connected_context", ["brain:read"])).toBe(false);
+  });
+
+  it("permits explicit provider-only credential search without Brain authority", async () => {
+    mocks.credential.mockResolvedValue(currentCredential({ scopes: ["external-tools:read"] }));
+    const handler = vi.fn().mockResolvedValue("synthetic-provider-result");
+    const guarded = guardConversationToolHandlers({ search_connected_context: handler });
+    await expect(guarded.search_connected_context(credential(["external-tools:read"]), { workspaceId }, {
+      query: "synthetic-query", includeCorgtex: false,
+    })).resolves.toBe("synthetic-provider-result");
+    expect(handler).toHaveBeenCalledOnce();
+    expect(mocks.credential).toHaveBeenCalledOnce();
+  });
+
+  it("permits explicit provider-only scoped human search without Brain authority", async () => {
+    const handler = vi.fn().mockResolvedValue("synthetic-provider-result");
+    const guarded = guardConversationToolHandlers({ search_connected_context: handler });
+    await expect(guarded.search_connected_context(oauthHuman, { workspaceId, operationScopes: ["external-tools:read"] }, {
+      query: "synthetic-query", includeCorgtex: false,
+    })).resolves.toBe("synthetic-provider-result");
+    expect(handler).toHaveBeenCalledOnce();
+    expect(mocks.credential).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    undefined, null, {}, { includeCorgtex: true }, { includeCorgtex: null }, { includeCorgtex: 0 }, { includeCorgtex: "false" }, [], "synthetic-args",
+  ].map(args => ({ args })))("requires Brain read for every non-false includeCorgtex argument %j", async ({ args }) => {
+    const handler = vi.fn();
+    const guarded = guardConversationToolHandlers({ search_connected_context: handler });
+    await expect(guarded.search_connected_context(credential(["external-tools:read"]), { workspaceId }, args)).rejects.toMatchObject({ status: 403 });
+    await expect(guarded.search_connected_context(oauthHuman, { workspaceId, operationScopes: ["external-tools:read"] }, args)).rejects.toMatchObject({ status: 403 });
+    expect(handler).not.toHaveBeenCalled();
+    expect(mocks.membership).not.toHaveBeenCalled();
+    expect(mocks.credential).not.toHaveBeenCalled();
+  });
+
+  it("requires actor and transport grants independently at argument time", async () => {
+    const handler = vi.fn();
+    const guarded = guardConversationToolHandlers({ search_connected_context: handler });
+    const both = ["external-tools:read", "brain:read"];
+    await expect(guarded.search_connected_context(credential(both), { workspaceId, operationScopes: ["external-tools:read"] }, {})).rejects.toMatchObject({ status: 403 });
+    await expect(guarded.search_connected_context(credential(["external-tools:read"]), { workspaceId, operationScopes: both }, {})).rejects.toMatchObject({ status: 403 });
+    await expect(guarded.search_connected_context(credential(both), { workspaceId, operationScopes: ["brain:read"] }, { includeCorgtex: false })).rejects.toMatchObject({ status: 403 });
+    expect(handler).not.toHaveBeenCalled();
+    expect(mocks.credential).not.toHaveBeenCalled();
+    await expect(guarded.search_connected_context(credential(["external-tools:read"]), { workspaceId, operationScopes: ["external-tools:read"] }, { includeCorgtex: false })).resolves.toBeUndefined();
+  });
+
+  it.each([{ scopes: ["brain:read"] }, { isActive: false }, { tokenHash: "rotated-hash" }])("rechecks current external authority for provider-only search %j", async overrides => {
+    mocks.credential.mockResolvedValue(currentCredential(overrides));
+    const handler = vi.fn();
+    const guarded = guardConversationToolHandlers({ search_connected_context: handler });
+    await expect(guarded.search_connected_context(credential(["external-tools:read"]), { workspaceId }, { includeCorgtex: false })).rejects.toMatchObject({ code: "AGENT_AUTHORIZATION_REVOKED" });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("requires a current Brain grant for default combined search", async () => {
+    mocks.credential.mockResolvedValue(currentCredential({ scopes: ["external-tools:read"] }));
+    const handler = vi.fn();
+    const guarded = guardConversationToolHandlers({ search_connected_context: handler });
+    await expect(guarded.search_connected_context(credential(["external-tools:read", "brain:read"]), { workspaceId }, {})).rejects.toMatchObject({ code: "AGENT_AUTHORIZATION_REVOKED" });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("permits scoped human combined search with both explicit read categories", async () => {
+    await expect(authorizeConversationTool(oauthHuman, workspaceId, "search_connected_context", {}, ["external-tools:read", "brain:read"])).resolves.toBeUndefined();
+    expect(mocks.credential).not.toHaveBeenCalled();
+  });
+});

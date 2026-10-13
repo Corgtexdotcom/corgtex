@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
     action: { findMany: vi.fn(), count: vi.fn(), create: vi.fn() },
   },
   decrypt: vi.fn(() => "synthetic-output"), audit: vi.fn(), archive: vi.fn(),
+  externalSearch: vi.fn(), knowledgeSearch: vi.fn(),
 }));
 vi.mock("@corgtex/shared", () => ({
   prisma: mocks.store,
@@ -54,10 +55,11 @@ vi.mock("@corgtex/domain", async () => ({
   resolveMcpOAuthAccessToken: vi.fn(async () => null),
   requireTrialMcpAccess: vi.fn(), requireWorkspaceMcpActivation: vi.fn(),
   describeScope: (scope: string) => scope,
+  searchConnectedExternalMcpContext: mocks.externalSearch,
 }));
 
 vi.mock("@corgtex/agents", () => ({ processConversationTurn: vi.fn() }));
-vi.mock("@corgtex/knowledge", () => ({ searchIndexedKnowledge: vi.fn() }));
+vi.mock("@corgtex/knowledge", () => ({ searchIndexedKnowledge: mocks.knowledgeSearch }));
 
 import { createCorgtexMcpServer } from "../../../packages/mcp/src/server";
 import { withWorkspaceRoute } from "./route-handler";
@@ -86,6 +88,7 @@ beforeEach(() => {
   mocks.store.member.findUnique.mockResolvedValue({ id: "synthetic-member", role: "ADMIN", isActive: true });
   mocks.store.member.findFirst.mockResolvedValue({ userId: "synthetic-system-user" });
   mocks.archive.mockResolvedValue({ id: "synthetic-action" });
+  mocks.externalSearch.mockResolvedValue({ results: [], errors: [] });
   mocks.store.agentCredential.findUnique.mockResolvedValue({ workspaceId, isActive: true, tokenHash: "synthetic-hash", scopes: ["tools:credentials:read", "actions:read", "actions:write"] });
   mocks.store.workspaceToolLink.findFirst.mockResolvedValue({ id: "synthetic-tool", title: "Synthetic tool", createdByUserId: "synthetic-creator", credentialLabel: "Synthetic label", credentialSecretEnc: "synthetic-ciphertext" });
   mocks.store.action.findMany.mockResolvedValue([]);
@@ -170,6 +173,21 @@ function actualMcpTools(scopes?: string[]) {
 }
 
 describe("actual registered MCP callback parity", () => {
+  it.each(["credential", "oauth-human"] as const)("allows provider-only connected search without Brain for %s", async principal => {
+    const scopes = ["external-tools:read"];
+    const actor: AppActor = principal === "credential" ? credential(scopes) : {
+      kind: "user", user: { id: "synthetic-user", email: "synthetic@example.test", displayName: null },
+    };
+    const server = createCorgtexMcpServer({ actor, workspaceId, authKind: principal === "credential" ? "agent" : "oauth", scopes });
+    const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: Record<string, unknown>) => Promise<unknown> }> })._registeredTools;
+    await expect(tools.search_connected_context.handler({ query: "synthetic-provider-query", includeCorgtex: false })).resolves.toBeDefined();
+    expect(mocks.externalSearch).toHaveBeenCalledOnce();
+    expect(mocks.knowledgeSearch).not.toHaveBeenCalled();
+    await expect(tools.search_connected_context.handler({ query: "synthetic-combined-query" })).rejects.toMatchObject({ status: 403 });
+    await expect(tools.search_connected_context.handler({ query: "synthetic-combined-query", includeCorgtex: true })).rejects.toMatchObject({ status: 403 });
+    expect(mocks.externalSearch).toHaveBeenCalledOnce();
+    expect(mocks.knowledgeSearch).not.toHaveBeenCalled();
+  });
   it.each([undefined, [], ["tools:read"], ["tools:write"]])("denies reveal with insufficient scope %j before domain secret access", async scopes => {
     await expect(actualMcpTools(scopes).reveal_tool_link_credential.handler({ toolLinkId: "synthetic-tool" })).rejects.toMatchObject({ status: 403 });
     expect(mocks.store.workspaceToolLink.findFirst).not.toHaveBeenCalled();
