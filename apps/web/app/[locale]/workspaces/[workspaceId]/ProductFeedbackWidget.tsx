@@ -46,6 +46,7 @@ export function ProductFeedbackWidget({
   const { addToast } = useToast();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const triedAutoCaptureRef = useRef(false);
+  const pendingAutoCaptureRef = useRef<number | null>(null);
   const activeCaptureRef = useRef<object | null>(null);
   const screenshotsRef = useRef<ScreenshotDraft[]>([]);
   const [open, setOpen] = useState(false);
@@ -74,6 +75,12 @@ export function ProductFeedbackWidget({
   useEffect(() => {
     setIsCapturing(false);
     return () => {
+      const frame = pendingAutoCaptureRef.current;
+      if (frame !== null) {
+        window.cancelAnimationFrame(frame);
+        pendingAutoCaptureRef.current = null;
+        triedAutoCaptureRef.current = true;
+      }
       // A late module, canvas or blob belongs to the feedback session that started it.
       activeCaptureRef.current = null;
     };
@@ -159,10 +166,16 @@ export function ProductFeedbackWidget({
     }
     if (triedAutoCaptureRef.current) return;
     const frame = window.requestAnimationFrame(() => {
+      if (pendingAutoCaptureRef.current !== frame) return;
+      pendingAutoCaptureRef.current = null;
       triedAutoCaptureRef.current = true;
       void captureScreenshot();
     });
-    return () => window.cancelAnimationFrame(frame);
+    pendingAutoCaptureRef.current = frame;
+    return () => {
+      window.cancelAnimationFrame(frame);
+      if (pendingAutoCaptureRef.current === frame) pendingAutoCaptureRef.current = null;
+    };
   }, [captureScreenshot, open]);
 
   function removeScreenshot(id: string) {

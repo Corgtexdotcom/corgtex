@@ -31,6 +31,11 @@ type Fixture = {
   resolvePreviousCapture: () => void;
   navigate: (pathname: string, search?: string, workspaceId?: string) => void;
   unmount: () => void;
+  queuedFrames: Array<{ id: number; callback: FrameRequestCallback; canceled: boolean }>;
+  holdFrames: () => void;
+  runQueuedFrames: () => boolean[];
+  restoreFrames: () => void;
+  settle: () => Promise<void>;
 };
 type CaptureResolver = "resolveCanvas" | "resolveBlob";
 
@@ -100,6 +105,32 @@ describe.runIf(process.env.PRODUCT_FEEDBACK_BROWSER_QA === "1")("ProductFeedback
             Object.assign(fixture, {pathname, search, workspaceId}); render();
           };
           fixture.unmount = () => root.unmount();
+          const nativeFrame = window.requestAnimationFrame.bind(window);
+          const nativeCancelFrame = window.cancelAnimationFrame.bind(window);
+          fixture.queuedFrames = [];
+          fixture.holdFrames = () => {
+            window.requestAnimationFrame = callback => {
+              const id = nativeFrame(() => {});
+              fixture.queuedFrames.push({id, callback, canceled: false});
+              return id;
+            };
+            window.cancelAnimationFrame = id => {
+              const frame = fixture.queuedFrames.find(frame => frame.id === id);
+              if (frame) frame.canceled = true;
+              nativeCancelFrame(id);
+            };
+          };
+          fixture.runQueuedFrames = () => {
+            const frames = fixture.queuedFrames.splice(0);
+            // Deliberately invoke canceled callbacks to exercise the session guard too.
+            frames.forEach(frame => frame.callback(performance.now()));
+            return frames.map(frame => frame.canceled);
+          };
+          fixture.restoreFrames = () => {
+            window.requestAnimationFrame = nativeFrame;
+            window.cancelAnimationFrame = nativeCancelFrame;
+          };
+          fixture.settle = () => new Promise(resolve => nativeFrame(() => nativeFrame(resolve)));
           render();`,
         resolveDir: process.cwd(), loader: "tsx",
       },
@@ -169,7 +200,7 @@ describe.runIf(process.env.PRODUCT_FEEDBACK_BROWSER_QA === "1")("ProductFeedback
   }
 
   async function settle() {
-    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    await page.evaluate(() => window.__feedbackFixture.settle());
   }
 
   async function attach(count = 1) {
@@ -257,6 +288,39 @@ describe.runIf(process.env.PRODUCT_FEEDBACK_BROWSER_QA === "1")("ProductFeedback
     expect(await page.evaluate(() => window.__feedbackFixture.captures.length)).toBe(1);
     expect(importRequests).toBe(1);
     expect(await page.getByRole("button", { name: "capture", exact: true }).isEnabled()).toBe(true);
+  });
+
+  it.each([
+    ["pathname", "/en/workspaces/demo/meetings", "", "demo"],
+    ["search parameters", "/en/workspaces/demo", "tab=other", "demo"],
+    ["workspace", "/en/workspaces/other", "", "other"],
+  ])("discards queued automatic capture after a change to %s and preserves recovery", async (_name, pathname, search, workspaceId) => {
+    await page.evaluate(() => window.__feedbackFixture.holdFrames());
+    await page.getByRole("button", { name: "open", exact: true }).click();
+    await page.getByRole("textbox").fill("Keep draft through navigation");
+    await attach();
+    await settle();
+    expect(await page.evaluate(() => window.__feedbackFixture.queuedFrames.length)).toBeGreaterThan(0);
+    expect(importRequests).toBe(0);
+    await page.evaluate(([path, query, id]) => window.__feedbackFixture.navigate(path, query, id), [pathname, search, workspaceId]);
+    await settle();
+    const canceled = await page.evaluate(() => window.__feedbackFixture.runQueuedFrames());
+    await settle();
+    expect(importRequests).toBe(0);
+    expect(await page.evaluate(() => window.__feedbackFixture.captures.length)).toBe(0);
+    expect(canceled.every(Boolean)).toBe(true);
+    expect(await page.getByRole("textbox").inputValue()).toBe("Keep draft through navigation");
+    expect(await page.getByRole("img").count()).toBe(1);
+    await page.evaluate(() => window.__feedbackFixture.restoreFrames());
+    await page.getByRole("button", { name: "capture", exact: true }).click();
+    await expect.poll(() => importRequests).toBe(1);
+    await releaseModule();
+    await expect.poll(() => page.getByRole("img").count()).toBe(2);
+    await page.getByRole("button", { name: "cancel", exact: true }).click();
+    await page.getByRole("button", { name: "open", exact: true }).click();
+    await expect.poll(() => page.getByRole("img").count()).toBe(3);
+    expect(await page.getByRole("textbox").inputValue()).toBe("Keep draft through navigation");
+    expect(importRequests).toBe(1);
   });
 
   it.each([
