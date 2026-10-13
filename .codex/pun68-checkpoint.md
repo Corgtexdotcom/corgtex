@@ -1,7 +1,7 @@
 # PUN-68 implementing checkpoint
 
 This draft contains implementing code after published code23cbd5b2 and documentation
-correction5ddf50e2. Full acceptance is INCOMPLETE; keep PR1517 draft.
+correction5ddf50e2 and implementing head71c31c98. Full acceptance is INCOMPLETE; keep PR1517 draft.
 All database operations used synthetic local PostgreSQL on port55468. No production
 migration, deployment, customer mutation, credential/grant change or purge occurred.
 
@@ -21,7 +21,7 @@ migration, deployment, customer mutation, credential/grant change or purge occur
 - Unknown legacy lineage/epoch proofs remain stored and withheld. Never fill an old
   proof with current counters or infer complete input lineage from citations.
   Rebuild only through verified producer recipes.
-- Additive migrations through20261013100000_external_selection_permission_policy were
+- Additive migrations through20261013120000_permission_rebuild_events were
   applied only locally. Provider progress is a content revision; archive and stable
   principal/source binding changes advance permission epochs.
 - Production rollout requires authorization and availability/backfill planning.
@@ -35,6 +35,19 @@ chat transaction/pending/memory38 units; conversation fixtures290; conversation 
 Slack153; native transcript/audio40 +DB1; Finance concurrencyDB5; epoch triggersDB12;
 graph variants29 +DB8; graph auto reads/retirement139; chunks177; execution/outbox100;
 residual jobs/run/audit40. Counts overlap and must not be added together.
+Additional verified corrections: historical targets require structurally valid epoch
+proofs; v2 covers communication, role, Advice, Build and Finance governors; CRM uses
+the caller transaction for nested membership; pending CRM locks its exact authority
+row before execution; MCP uses its real conversation session key; Box sync uses an
+opaque preflight outside the copy transaction. Caller-owned Brain publication is
+available through ingestConversationOnDemandInTransaction.
+
+Focused additional evidence:175 legacy/producer tests;102 Box authority tests;35
+conversation/pending units;27 epoch/governor DB tests;10 publication transaction DB
+tests;3 pending lock DB tests;1 actual registered MCP DB test;6 durable rebuild
+event DB tests (coalescing, rollback and feedback-loop prevention). Canonical publication
+saver proof remains unverified. Counts overlap and are not aggregate acceptance.
+
 Current typecheck, schema validation, public-docs and private-boundary checks passed
 on local revisions. Logs are in /tmp/pun68-* and are not committed production proof.
 
@@ -45,7 +58,12 @@ independent review are NOT claimed.
 
 ## Prior remote findings
 
-The prior reproductions on5ddf50e2 remain open pending recheck at this code head.
+Remote synthetic checks at71c31c98 passed58/61 assertions with zero harness errors.
+The remaining MCP session, nested CRM membership and authority-row-lock findings
+have local fixes and regression evidence in this checkpoint; remote repin is pending.
+Independent Sol review retracted its epoch-sort finding and identified real legacy,
+governor, rebuild, lifecycle and provider-transaction gaps. Legacy/governor and Box
+sync corrections are present; remaining integration/provider gaps stay open.
 Implementing changes include supplied-tx membership/Finance reads; exact prompt and
 native human/agent MCP ingress; original proposal principal/arguments/input roots;
 pending execution fences and uncertainty blocking repeat effects; fifth-turn memory
@@ -63,7 +81,7 @@ Helper tests do not establish Bloop's combined lifecycle.
 3. Native edit/review/publication of private graph bundles is incomplete. Canonical
    regeneration cannot invent requester authority from attribution. Graph reapproval
    and transcript/prompt/provider audience decisions remain pending.
-4. Remove provider transport from bounded Box/graph preparation transactions using
+4. Remove provider transport from remaining graph preparation transactions using
    exact opaque preflight capabilities. Ordinary reads retain live provider checks.
    Local epochs cannot detect an unobserved remote revoke/restore cycle.
 5. Finish remaining fixtures, aggregate checks, running UI evidence for Finance

@@ -66,7 +66,7 @@ const { prismaMock, tx, requireWorkspaceMembershipMock } = vi.hoisted(() => {
 });
 
 vi.mock("@corgtex/shared", () => ({
-  prisma: prismaMock,
+  prisma: prismaMock, env: { MODEL_REQUEST_TIMEOUT_MS: 60000 },
 }));
 
 vi.mock("./auth", () => ({

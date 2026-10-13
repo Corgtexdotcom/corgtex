@@ -932,6 +932,7 @@ describe("brain source ingestion", () => {
 
 
 describe("Brain discussions with actual complete lineage receipts", () => {
+  const epochs = new Map<string, bigint>();
   const rows: Record<string, any[]> = {};
   const timestamp = new Date("2026-10-12T10:00:00Z");
   let source: typeof import("./source-lineage");
@@ -997,7 +998,23 @@ describe("Brain discussions with actual complete lineage receipts", () => {
       if (delegate.count) delegate.count.mockImplementation(async (args: any) => rows[name].filter((row) => matches(row, args.where)).length);
     }
     prismaMock.$transaction.mockImplementation(async (run: any) => run(prismaMock));
-    prismaMock.$executeRaw.mockResolvedValue(1);
+    epochs.clear();
+    prismaMock.$executeRaw.mockImplementation(async (query: any) => {
+      if (query.strings?.join("").includes('INSERT INTO "SourcePermissionEpoch"')) for (let index = 0; index < query.values.length; index += 4) {
+        const [, workspaceId, kind, id] = query.values.slice(index, index + 4); const key = JSON.stringify([workspaceId, kind, id]);
+        if (!epochs.has(key)) epochs.set(key, 0n);
+      }
+      return 1;
+    });
+    prismaMock.$queryRaw.mockImplementation(async (query: any) => {
+      if (!query.strings?.join("").includes('FROM "SourcePermissionEpoch"')) return [];
+      const [workspaceId, ...pairs] = query.values; const result = [];
+      for (let index = 0; index < pairs.length; index += 2) {
+        const [sourceKind, sourceId] = pairs.slice(index, index + 2); const epoch = epochs.get(JSON.stringify([workspaceId, sourceKind, sourceId]));
+        if (epoch !== undefined) result.push({ sourceKind, sourceId, epoch });
+      }
+      return result;
+    });
     prismaMock.brainBacklink.findMany.mockResolvedValue([]); prismaMock.brainBacklink.groupBy.mockResolvedValue([]);
     resolveKnowledgeAccessDomains.mockResolvedValue(["WORKSPACE"]);
     requireWorkspaceMembership.mockImplementation(async ({ actor, workspaceId }: any) => {

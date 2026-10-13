@@ -8,6 +8,7 @@ import { appendEvents } from "./events";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import { mergeArtifactInputProofs } from "./digest-lineage";
 import { meetingTranscriptInputProjection } from "./meeting-intelligence-context";
+import { parsePermissionEpochProof } from "./source-permission-epochs";
 import { lockWorkspaceMembership } from "./workspace-support-access";
 import {
   assertArtifactInputWriteFence,
@@ -202,7 +203,8 @@ async function prepareVariant(tx: Prisma.TransactionClient, actor: UserActor, wo
   // Empty legacy/UNKNOWN receipts do not establish original authorship.
   if (!manifest || manifest.contentHash !== targetFingerprint || !Array.isArray(manifest.rootsJson)) return { unavailable: true };
   if (manifest.origin === "HUMAN_ORIGINAL" && manifest.rootsJson.length === 0) return { original: true };
-  if (manifest.origin !== "DERIVED" || !manifest.rootsJson.length) return { unavailable: true };
+  if (manifest.origin !== "DERIVED" || !manifest.rootsJson.length || manifest.epochProofVersion !== 1
+    || !parsePermissionEpochProof(manifest.permissionEpochsJson)) return { unavailable: true };
   const priorRoots = await currentArtifactInputRoots(tx, workspaceId, { kind: "BrainArticle", id: articleId }, target);
   if (!priorRoots?.length) return { unavailable: true };
   if ((await readableArtifactIds(actor, workspaceId, "BrainArticle", [target], tx)).has(target.id)) return { original: true };

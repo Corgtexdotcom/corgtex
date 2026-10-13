@@ -377,6 +377,29 @@ describe("pending CRM operation permission receipts and execution capabilities",
     await expect(begin.executionFence(tx)).rejects.toMatchObject({ code: "NOT_A_MEMBER" });
   });
 
+  it("locks the exact pending authority row after the worker fence and before lease reads", async () => {
+    const current = await context(); const begin = await ready(current, await propose(current));
+    const order: string[] = [];
+    const query = fixture.bases.tx.$queryRaw.getMockImplementation()! as (...args: any[]) => Promise<any[]>;
+    fixture.bases.tx.$queryRaw.mockImplementation(async (...parameters: any[]) => {
+      const text = Array.isArray(parameters[0]) ? parameters[0].join("?") : parameters[0]?.sql ?? "";
+      if (text.includes('FROM "ConversationPendingOperation"') && text.includes("FOR UPDATE")) {
+        order.push("pending-lock");
+        expect(parameters.slice(1)).toEqual([begin.operation.id, workspaceId, current.sessionId, current.userId, current.agentKey]);
+      }
+      return query(...parameters);
+    });
+    const find = fixture.tx.conversationPendingOperation.findFirst.getMockImplementation()!;
+    fixture.tx.conversationPendingOperation.findFirst.mockImplementation(async (...parameters: any[]) => {
+      order.push("lease-read"); return find(...parameters);
+    });
+    const composed = async (mutationTx: any) => {
+      expect(mutationTx).toBe(tx); order.push("worker-fence"); await begin.executionFence(mutationTx);
+    };
+    await composed(tx);
+    expect(order.slice(0, 3)).toEqual(["worker-fence", "pending-lock", "lease-read"]);
+  });
+
   it("composes the minted lease fence through final result and receipt writes", async () => {
     const current = await context(); const begin = await ready(current, await propose(current)); const valid = await resultFor(begin, current);
     const fenced = { ...valid.current, persistenceFence: begin.executionFence };

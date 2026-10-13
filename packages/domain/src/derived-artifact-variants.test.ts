@@ -137,6 +137,21 @@ function generated(sources: any[]) {
     evidenceRefs: [{ objectRef: "new-team", sourceKind: "Document" as const, sourceId: "document", quote: "product team" }] };
 }
 describe("graph bundle generation with actual lineage and worker lease", () => {
+  it.each(["target", "historical-derived", "obsolete-policy"])("does not queue regeneration from a legacy %s receipt", async location => {
+    const f = await setup();
+    const legacy = location === "historical-derived" ? fixture.manifest("Document", f.doc.id)
+      : fixture.manifest("ContextGraphObject", f.request.target.id);
+    expect(legacy.origin).toBe("DERIVED"); expect(legacy.rootsJson.length).toBeGreaterThan(0);
+    const originals = structuredClone(fixture.rows.contextGraphObject);
+    if (location === "obsolete-policy") legacy.permissionEpochsJson = { ...legacy.permissionEpochsJson, policyVersion: "pun68-permissions-legacy" };
+    else { legacy.epochProofVersion = null; legacy.permissionEpochsJson = null; }
+    expect(await requestGraphSourceVariant(alpha, f.request)).toMatchObject({ status: "UNAVAILABLE" });
+    expect(fixture.rows.workflowJob).toEqual([]);
+    expect(fixture.rows.genericDerivedArtifactVariant).toEqual([]);
+    expect(fixture.rows.contextGraphObject).toEqual(originals);
+    expect(legacy.permissionEpochsJson === null || legacy.permissionEpochsJson.policyVersion === "pun68-permissions-legacy").toBe(true);
+  });
+
   it("stores one complete private pending bundle with all cohort targets, preserves broad originals and gates owner/scope", async () => {
     const f = await setup(); const before = structuredClone(f.targets);
     const lease = await claimRequest(f.request); const generate = vi.fn(async (sources: any[]) => generated(sources));

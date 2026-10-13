@@ -4,6 +4,7 @@ import type { AppActor } from "@corgtex/shared";
 
 const fixture = vi.hoisted(() => {
   const tables: Record<string, any[]> = {};
+  const state = { transactionDepth: 0 };
   const time = new Date("2026-10-12T09:00:00Z");
   const match = (row: any, where: any): boolean => Object.entries(where ?? {}).every(([key, value]: [string, any]) => {
     if (key === "AND") return value.every((clause: any) => match(row, clause));
@@ -29,7 +30,7 @@ const fixture = vi.hoisted(() => {
     return result;
   };
   const names = ["crmAccount", "crmContact", "crmDeal", "crmActivity", "crmDealStageTransition", "crmConversation", "crmConversationMessage",
-    "crmProspectWorkspace", "crmCommunicationSuggestion", "document", "meeting", "meetingInsight", "artifactInputLineage", "artifactInputSnapshot", "workspace", "executionRequest", "executionResult", "demoLead", "crmQualification", "workflowJob", "brainSource", "mcpToolInput", "member", "user", "knowledgeChunk", "externalMcpConnection", "externalContentSource", "externalContentSyncLog", "externalProviderFetchInput"];
+    "crmProspectWorkspace", "crmCommunicationSuggestion", "document", "meeting", "meetingInsight", "artifactInputLineage", "artifactInputSnapshot", "workspace", "executionRequest", "executionResult", "demoLead", "crmQualification", "workflowJob", "brainSource", "mcpToolInput", "member", "user", "knowledgeChunk", "externalMcpConnection", "externalContentSource", "externalContentSyncLog", "externalProviderFetchInput", "communicationMessageNativeInput"];
   const prisma: any = { $queryRaw: vi.fn(async () => []), $executeRaw: vi.fn(async () => 1),
     auditLog: { create: vi.fn(async () => ({})) }, event: { createMany: vi.fn(async () => ({ count: 1 })) } };
   for (const name of names) {
@@ -71,9 +72,12 @@ const fixture = vi.hoisted(() => {
   }
   prisma.$transaction = vi.fn(async (run: (tx: any) => Promise<any>) => {
     const before = Object.fromEntries(names.map((name) => [name, tables[name].map((row) => ({ ...row }))]));
-    try { return await run(prisma); } catch (error) { for (const name of names) tables[name] = before[name]; throw error; }
+    const tx = new Proxy(prisma, { get(target, key) { return key === "$transaction" ? undefined : Reflect.get(target, key); } });
+    state.transactionDepth++;
+    try { return await run(tx); } catch (error) { for (const name of names) tables[name] = before[name]; throw error; }
+    finally { state.transactionDepth--; }
   });
-  return { prisma, tables, time, revoked: new Set<string>(), departed: new Set<string>() };
+  return { prisma, tables, time, state, revoked: new Set<string>(), departed: new Set<string>() };
 });
 vi.mock("../../shared/src/env", () => ({ env: { ENCRYPTION_KEY: "a".repeat(64) } }));
 vi.mock("@corgtex/shared", async () => ({ ...await import("../../shared/src/crypto"), prisma: fixture.prisma, env: { APP_URL: "https://synthetic.test" }, toInputJson: (value: unknown) => value }));
@@ -98,10 +102,12 @@ vi.mock("./external-mcp", async importOriginal => ({ ...await importOriginal<typ
 import { selectExternalContentSource, syncExternalContentSource, listExternalContentSources, enqueueExternalContentSourceSync } from "./external-content-sources";
 import { captureExternalProviderFetchInput, createExternalProviderSyncActor, externalProviderResponseHash,
   getExternalProviderPrincipalUserId, isExternalProviderCapturedResponse, isExternalProviderFetchInputCurrent, assertExternalProviderCapturedResponseCurrent } from "./external-provider-authority";
+import { prepareExternalProviderCommitPreflight, withExternalProviderCommitPreflight, type ExternalProviderCommitPreflight } from "./external-provider-authority";
 import { captureArtifactInputProof, captureImmutableArtifactInputProof, recordArtifactInputLineage, isArtifactInputProofReadable, readableArtifactIds, isArtifactInputProofPubliclyShareable } from "./source-lineage";
 const owner = { kind: "user", user: { id: "general", email: "general@synthetic.test" } } as AppActor;
 const other = { kind: "user", user: { id: "finance", email: "finance@synthetic.test" } } as AppActor;
 const ws = "ws-crm";
+let epochs: ReturnType<typeof installSourcePermissionEpochFixture>;
 async function setup() {
   await fixture.prisma.member.create({ data: { id: "owner-member", workspaceId: ws, userId: "general", isActive: true } });
   await fixture.prisma.member.create({ data: { id: "other-member", workspaceId: ws, userId: "finance", isActive: true } });
@@ -124,9 +130,11 @@ describe("External provider live authority and copied lineage with real helpers"
     fixture.revoked.clear(); fixture.departed.clear(); vi.clearAllMocks();
     fixture.prisma.$queryRaw.mockReset().mockResolvedValue([]);
     fixture.prisma.$executeRaw.mockReset().mockResolvedValue(1);
-    installSourcePermissionEpochFixture(fixture.prisma);
+    epochs = installSourcePermissionEpochFixture(fixture.prisma);
     remote.details = { id: "file", name: "Original Box title", etag: "v1" }; remote.content = { text: "Original Box bytes" }; remote.fail = false;
-    remote.transport.mockImplementation(async ({ toolName }: any) => { if (remote.fail) throw new Error("Restricted provider payload");
+    remote.transport.mockImplementation(async ({ toolName }: any) => {
+      if (fixture.state.transactionDepth) throw new Error("Provider called inside a database transaction");
+      if (remote.fail) throw new Error("Restricted provider payload");
       return structuredClone(toolName === "get_file_details" ? remote.details : remote.content); });
   });
   it("captures encrypted exact responses with opaque runtime identity and checks every live read", async () => {
@@ -213,6 +221,116 @@ describe("External provider live authority and copied lineage with real helpers"
     expect(await isExternalProviderFetchInputCurrent(owner, ws, receipt.input)).toBe(false);
     expect(fixture.tables.workflowJob).toHaveLength(jobs);
   });
+  it("uses a single-use exact transaction capability without provider calls and leaves ordinary reads live", async () => {
+    const source = await setup(); const receipt = await capture(source.id); const unrelated = await capture(source.id);
+    const roots = [(source.metadata as any).selectionInputRoot, ...await captureArtifactInputProof(owner, ws,
+      [{ kind: "ExternalProviderFetchInput", id: receipt.input.id }])];
+    const preflight = await prepareExternalProviderCommitPreflight(owner, ws, { roots, receipts: [receipt] });
+    remote.transport.mockClear();
+    await fixture.prisma.$transaction(async (tx: any) => {
+      await withExternalProviderCommitPreflight(owner, ws, tx, preflight, async () => {
+        expect(await isExternalProviderFetchInputCurrent(owner, ws, receipt.input, tx)).toBe(true);
+        expect(await isExternalProviderFetchInputCurrent({ ...owner }, ws, receipt.input, tx)).toBe(false);
+        expect(await isExternalProviderFetchInputCurrent(owner, "ws-other", receipt.input, tx)).toBe(false);
+        expect(await isExternalProviderFetchInputCurrent(owner, ws, receipt.input, { ...tx })).toBe(false);
+        expect(await isExternalProviderFetchInputCurrent(owner, ws, unrelated.input, tx)).toBe(false);
+        expect(await isExternalProviderFetchInputCurrent(owner, ws, { ...receipt.input, responseHash: "uncaptured" }, tx)).toBe(false);
+        expect(await isExternalProviderFetchInputCurrent(owner, ws, receipt.input)).toBe(false);
+        expect(remote.transport).not.toHaveBeenCalled();
+      });
+      await expect(withExternalProviderCommitPreflight(owner, ws, tx, preflight, async () => undefined)).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    });
+    expect(remote.transport).not.toHaveBeenCalled();
+    expect(await isExternalProviderFetchInputCurrent(owner, ws, receipt.input)).toBe(true);
+    expect(await isExternalProviderFetchInputCurrent(owner, ws, receipt.input)).toBe(true);
+    expect(remote.transport).toHaveBeenCalledTimes(2);
+  });
+  it("rejects forged capabilities, cloned fetch receipts, omitted epochs and different actors before copying", async () => {
+    const source = await setup(); const receipt = await capture(source.id);
+    const roots = [(source.metadata as any).selectionInputRoot, ...await captureArtifactInputProof(owner, ws,
+      [{ kind: "ExternalProviderFetchInput", id: receipt.input.id }])];
+    await expect(prepareExternalProviderCommitPreflight(owner, ws, { roots, receipts: [{ ...receipt }] })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    await expect(prepareExternalProviderCommitPreflight(owner, ws, { roots: roots.map(root => ({ ...root, permissionEpochs: undefined })), receipts: [receipt] })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    const preflight = await prepareExternalProviderCommitPreflight(owner, ws, { roots, receipts: [receipt] });
+    const copy = vi.fn(async () => undefined); remote.transport.mockClear();
+    await fixture.prisma.$transaction(async (tx: any) => {
+      await expect(withExternalProviderCommitPreflight(owner, ws, tx, {} as ExternalProviderCommitPreflight, copy)).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+      await expect(withExternalProviderCommitPreflight(owner, ws, tx, { ...preflight }, copy)).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+      await expect(withExternalProviderCommitPreflight({ ...owner }, ws, tx, preflight, copy)).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+      await expect(withExternalProviderCommitPreflight(owner, "ws-other", tx, preflight, copy)).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+      await expect(withExternalProviderCommitPreflight(owner, ws, fixture.prisma, preflight, copy)).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    });
+    expect(copy).not.toHaveBeenCalled(); expect(remote.transport).not.toHaveBeenCalled();
+  });
+  it.each(["disconnect", "scopes", "token-rotation", "membership", "rebind", "native-bytes"])(
+    "rejects local %s changes after preflight without network fallback", async change => {
+      const source = await setup(); const receipt = await capture(source.id);
+      const roots = [(source.metadata as any).selectionInputRoot, ...await captureArtifactInputProof(owner, ws,
+        [{ kind: "ExternalProviderFetchInput", id: receipt.input.id }])];
+      const preflight = await prepareExternalProviderCommitPreflight(owner, ws, { roots, receipts: [receipt] });
+      if (change === "disconnect") fixture.tables.externalMcpConnection[0].status = "DISCONNECTED";
+      if (change === "scopes") fixture.tables.externalMcpConnection[0].scopes = [];
+      if (change === "token-rotation") {
+        fixture.tables.externalMcpConnection[0].accessTokenEnc = "rotated-synthetic-token";
+        epochs.bump(ws, "ExternalMcpConnection", "connection");
+      }
+      if (change === "membership") fixture.tables.member[0].isActive = false;
+      if (change === "rebind") fixture.tables.externalContentSource[0].externalId = "new-file";
+      if (change === "native-bytes") fixture.tables.externalProviderFetchInput[0].encryptedResponseJson = "changed-native-ciphertext";
+      remote.transport.mockClear(); const copy = vi.fn(async () => undefined);
+      await expect(fixture.prisma.$transaction((tx: any) => withExternalProviderCommitPreflight(owner, ws, tx, preflight, copy)))
+        .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+      expect(copy).not.toHaveBeenCalled(); expect(remote.transport).not.toHaveBeenCalled();
+    });
+  it("does not refresh a revoked-and-restored original epoch proof at preflight", async () => {
+    const source = await setup(); const receipt = await capture(source.id);
+    const roots = [(source.metadata as any).selectionInputRoot, ...await captureArtifactInputProof(owner, ws,
+      [{ kind: "ExternalProviderFetchInput", id: receipt.input.id }])];
+    epochs.bump(ws, "ExternalContentSource", source.id);
+    await expect(prepareExternalProviderCommitPreflight(owner, ws, { roots, receipts: [receipt] })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+  });
+  it("rejects unadapted cross-provider ancestors before opening a copy transaction", async () => {
+    const source = await setup(); const receipt = await capture(source.id);
+    const roots = [(source.metadata as any).selectionInputRoot, ...await captureArtifactInputProof(owner, ws,
+      [{ kind: "ExternalProviderFetchInput", id: receipt.input.id }])];
+    await fixture.prisma.communicationMessageNativeInput.create({ data: { id: "unsupported-slack-input", workspaceId: ws } });
+    remote.transport.mockClear();
+    await expect(prepareExternalProviderCommitPreflight(owner, ws, { receipts: [receipt], roots: [...roots,
+      { kind: "CommunicationMessageNativeInput", id: "unsupported-slack-input", fingerprint: "unproven" }] }))
+      .rejects.toMatchObject({ code: "UNSUPPORTED_PROVIDER_INPUT" });
+    expect(remote.transport).not.toHaveBeenCalled();
+  });
+  it("revalidates the original proof after copying and rejects a changed local grant atomically", async () => {
+    const source = await setup(); const receipt = await capture(source.id);
+    const roots = [(source.metadata as any).selectionInputRoot, ...await captureArtifactInputProof(owner, ws,
+      [{ kind: "ExternalProviderFetchInput", id: receipt.input.id }])];
+    const preflight = await prepareExternalProviderCommitPreflight(owner, ws, { roots, receipts: [receipt] });
+    remote.transport.mockClear();
+    await expect(fixture.prisma.$transaction((tx: any) => withExternalProviderCommitPreflight(owner, ws, tx, preflight, async () => {
+      await tx.brainSource.create({ data: { workspaceId: ws, sourceType: "EXTERNAL_CONTENT", content: "Synthetic copy" } });
+      fixture.tables.externalMcpConnection[0].scopes = [];
+    }))).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(fixture.tables.brainSource).toHaveLength(0); expect(remote.transport).not.toHaveBeenCalled();
+  });
+  it.each(["lease", "job-manifest", "job-payload"])("rejects changed exact worker %s after live preflight", async change => {
+    const source = await setup(); const job = claimJob(); const recipe = (source.metadata as any).selectionInputRoot;
+    let jobRoots: Awaited<ReturnType<typeof captureArtifactInputProof>> = [];
+    const actor = await createExternalProviderSyncActor({ workspaceId: ws, sourceId: source.id, workflowJobId: job.id,
+      validateInputs: async (cap, db) => { jobRoots = await captureArtifactInputProof(cap, ws, [{ kind: "WorkflowJobInput", id: job.id }], db); return isArtifactInputProofReadable(cap, ws, [recipe], db); } });
+    const receipt = await captureExternalProviderFetchInput(actor, { workspaceId: ws, externalContentSourceId: source.id, connectionId: "connection",
+      sourceKind: "FILE", externalId: "file", toolName: "get_file_content", arguments: { file_id: "file" } });
+    const roots = [recipe, ...jobRoots, ...await captureArtifactInputProof(actor, ws, [{ kind: "ExternalProviderFetchInput", id: receipt.input.id }])];
+    await expect(prepareExternalProviderCommitPreflight(actor, ws, { roots: roots.filter(root => root.kind !== "WorkflowJobInput"), receipts: [receipt] }))
+      .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    const preflight = await prepareExternalProviderCommitPreflight(actor, ws, { roots, receipts: [receipt] });
+    if (change === "lease") job.lockedBy = "new-worker";
+    if (change === "job-manifest") fixture.tables.artifactInputLineage = fixture.tables.artifactInputLineage.filter(row => row.artifactType !== "WorkflowJobInput");
+    if (change === "job-payload") job.payload = { ...job.payload, copiedUnknownValue: "Uncaptured job data" };
+    remote.transport.mockClear(); const copy = vi.fn(async () => undefined);
+    await expect(fixture.prisma.$transaction((tx: any) => withExternalProviderCommitPreflight(actor, ws, tx, preflight, copy)))
+      .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(copy).not.toHaveBeenCalled(); expect(remote.transport).not.toHaveBeenCalled();
+  });
   it("issues only a proven exact job capability, rejecting copied actors and changed leases", async () => {
     const source = await setup(); const job = claimJob(); const root = (source.metadata as any).selectionInputRoot;
     const actor = await createExternalProviderSyncActor({ workspaceId: ws, sourceId: source.id, workflowJobId: job.id,
@@ -262,6 +380,19 @@ describe("External provider live authority and copied lineage with real helpers"
     const visible = await listExternalContentSources(owner, { workspaceId: ws }); expect(visible).toHaveLength(1); expect(visible[0].syncLogs).toEqual([]);
     expect(await readableArtifactIds(other, ws, "BrainSource", fixture.tables.brainSource)).toEqual(new Set());
     expect(fixture.tables.externalProviderFetchInput).toHaveLength(2);
+  });
+  it("checks live provider authority after the copy transaction before releasing content to indexing", async () => {
+    const source = await setup(); const job = claimJob(); const syncKnowledge = vi.fn();
+    const update = fixture.prisma.externalContentSource.update.getMockImplementation();
+    fixture.prisma.externalContentSource.update.mockImplementationOnce(async (params: any) => {
+      const saved = await update(params);
+      remote.content.text = "Provider content changed after bounded copying";
+      return saved;
+    });
+    await expect(syncExternalContentSource({ workspaceId: ws, sourceId: source.id, workflowJobId: job.id, syncKnowledge }))
+      .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(syncKnowledge).not.toHaveBeenCalled();
+    expect(await readableArtifactIds(owner, ws, "BrainSource", fixture.tables.brainSource)).toEqual(new Set());
   });
   it("refetches changed bytes with stable etag from original selection while retaining history", async () => {
     const source = await setup(); const job = claimJob();

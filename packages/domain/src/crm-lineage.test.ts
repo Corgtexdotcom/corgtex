@@ -3,6 +3,7 @@ import type { AppActor } from "@corgtex/shared";
 
 const fixture = vi.hoisted(() => {
   const tables: Record<string, any[]> = {};
+  const epochs = new Map<string, bigint>();
   const time = new Date("2026-10-12T09:00:00Z");
   const match = (row: any, where: any): boolean => Object.entries(where ?? {}).every(([key, value]: [string, any]) => {
     if (key === "AND" || key === "conversation" || key === "member" || key === "account" || key === "contact" || key === "deal") return true;
@@ -25,7 +26,21 @@ const fixture = vi.hoisted(() => {
   };
   const names = ["crmAccount", "crmContact", "crmDeal", "crmActivity", "crmDealStageTransition", "crmConversation", "crmConversationMessage",
     "crmProspectWorkspace", "crmCommunicationSuggestion", "document", "meeting", "meetingInsight", "artifactInputLineage", "artifactInputSnapshot", "workspace", "executionRequest", "executionResult"];
-  const prisma: any = { $queryRaw: vi.fn(async () => []), $executeRaw: vi.fn(async () => 1),
+  const prisma: any = { $queryRaw: vi.fn(async (query: any) => {
+    if (!query.strings?.join("").includes('FROM "SourcePermissionEpoch"')) return [];
+    const [workspaceId, ...pairs] = query.values; const result = [];
+    for (let index = 0; index < pairs.length; index += 2) {
+      const [sourceKind, sourceId] = pairs.slice(index, index + 2); const epoch = epochs.get(JSON.stringify([workspaceId, sourceKind, sourceId]));
+      if (epoch !== undefined) result.push({ sourceKind, sourceId, epoch });
+    }
+    return result;
+  }), $executeRaw: vi.fn(async (query: any) => {
+    if (query.strings?.join("").includes('INSERT INTO "SourcePermissionEpoch"')) for (let index = 0; index < query.values.length; index += 4) {
+      const [, workspaceId, kind, id] = query.values.slice(index, index + 4); const key = JSON.stringify([workspaceId, kind, id]);
+      if (!epochs.has(key)) epochs.set(key, 0n);
+    }
+    return 1;
+  }),
     auditLog: { create: vi.fn(async () => ({})) }, event: { createMany: vi.fn(async () => ({ count: 1 })) } };
   for (const name of names) {
     tables[name] = [];
@@ -62,15 +77,15 @@ const fixture = vi.hoisted(() => {
     const before = Object.fromEntries(names.map((name) => [name, tables[name].map((row) => ({ ...row }))]));
     try { return await run(prisma); } catch (error) { for (const name of names) tables[name] = before[name]; throw error; }
   });
-  return { prisma, tables, time, revoked: new Set<string>(), departed: new Set<string>() };
+  return { prisma, tables, time, epochs, revoked: new Set<string>(), departed: new Set<string>() };
 });
 vi.mock("@corgtex/shared", () => ({ prisma: fixture.prisma, env: { APP_URL: "https://synthetic.test" }, toInputJson: (value: unknown) => value }));
 vi.mock("./auth", () => ({ requireWorkspaceMembership: vi.fn(async ({ actor, workspaceId }) => {
   if (workspaceId !== "ws-crm" || fixture.departed.has(actor.user.id)) throw Object.assign(new Error("Membership revoked"), { status: 403 });
-  return { id: `member-${actor.user.id}`, role: "MEMBER" };
+  return { id: `member-${actor.user.id}`, role: "CONTRIBUTOR" };
 }), requireGlobalOperator: vi.fn() }));
 vi.mock("./brain-access", () => ({ resolveKnowledgeAccessDomains: vi.fn(async (actor) => actor.user.id === "finance" && !fixture.revoked.has("finance")
-  ? ["PUBLIC", "FINANCE"] : ["PUBLIC"]) }));
+  ? ["WORKSPACE", "FINANCE"] : ["WORKSPACE"]) }));
 vi.mock("./crm-archive-guards", () => ({
   lockCrmLinks: vi.fn(), lockCrmLinkClosure: vi.fn(), lockCrmProspectProvisioning: vi.fn(),
   activeCrmParentWhere: () => ({}),
@@ -96,12 +111,14 @@ const general = { kind: "user", user: { id: "general", email: "general@synthetic
 describe("CRM input receipts", () => {
   beforeEach(() => {
     for (const name of Object.keys(fixture.tables)) fixture.tables[name] = [];
-    fixture.revoked.clear(); fixture.departed.clear(); vi.clearAllMocks();
+    fixture.revoked.clear(); fixture.departed.clear(); fixture.epochs.clear(); vi.clearAllMocks();
+    fixture.tables.workspace.push({ id: "ws-crm", name: "Synthetic CRM workspace", slug: "synthetic-crm", description: null, plan: "FREE", createdAt: fixture.time, updatedAt: fixture.time });
   });
 
   it("carries meeting ancestry into companies, contacts, leads and tasks and gates bodies, counts and paths", async () => {
     const source = await fixture.prisma.document.create({ data: { id: "finance-source", workspaceId: "ws-crm", title: "Finance source",
       textContent: "Restricted buyer context", accessDomain: "FINANCE" } });
+    await recordArtifactInputLineage({ tx: fixture.prisma, actor: finance, workspaceId: "ws-crm", artifact: { kind: "Document", id: source.id }, content: source, origin: "HUMAN_ORIGINAL", inputs: [] });
     const meeting = await fixture.prisma.meeting.create({ data: { id: "meeting", workspaceId: "ws-crm", title: "Original meeting", transcript: "Original transcript" } });
     await recordArtifactInputLineage({ tx: fixture.prisma, actor: finance, workspaceId: "ws-crm", artifact: { kind: "Meeting", id: meeting.id },
       content: meeting, origin: "HUMAN_ORIGINAL", inputs: [] });
@@ -132,8 +149,10 @@ describe("CRM input receipts", () => {
     fixture.revoked.add("finance");
     expect(await listContacts(finance, "ws-crm")).toMatchObject({ total: 1 });
     fixture.revoked.clear(); fixture.tables.document[0] = { ...source, archivedAt: fixture.time };
+    fixture.epochs.set(JSON.stringify(["ws-crm", "Document", source.id]), 1n);
     expect(await readableArtifactIds(finance, "ws-crm", "CrmActivity", [task], fixture.prisma)).toEqual(new Set());
     fixture.tables.document[0] = { ...source, textContent: "Changed on restore" };
+    fixture.epochs.set(JSON.stringify(["ws-crm", "Document", source.id]), 2n);
     expect(await readableArtifactIds(finance, "ws-crm", "CrmContact", [contact], fixture.prisma)).toEqual(new Set());
     fixture.departed.add("finance");
     await expect(listCrmActivities(finance, "ws-crm")).rejects.toThrow("Membership revoked");
@@ -150,7 +169,7 @@ describe("CRM input receipts", () => {
   });
 
   it("rejects stale captured inputs before CRM outputs persist", async () => {
-    const source = await fixture.prisma.document.create({ data: { id: "source", workspaceId: "ws-crm", title: "Original", accessDomain: "PUBLIC", textContent: "Original" } });
+    const source = await fixture.prisma.document.create({ data: { id: "source", workspaceId: "ws-crm", title: "Original", accessDomain: "WORKSPACE", textContent: "Original" } });
     const { lineageContentFingerprint } = await import("./source-lineage");
     const lineageRoots = [{ kind: "Document" as const, id: source.id, fingerprint: lineageContentFingerprint("Document", source) }];
     fixture.tables.document[0].textContent = "Changed";
@@ -162,8 +181,10 @@ describe("CRM input receipts", () => {
     const rows = Array.from({ length: 102 }, (_, index) => ({ id: `raw-${index}` }));
     const fetch = vi.fn(async (page) => { const start = page.cursor ? rows.findIndex((row) => row.id === page.cursor.id) + page.skip : 0;
       return rows.slice(start, start + page.take); });
-    // Raw documents supply an intrinsic current receipt; only the final two are accessible.
-    fixture.tables.document = rows.map((row, index) => ({ ...row, workspaceId: "ws-crm", accessDomain: index < 100 ? "FINANCE" : "PUBLIC" }));
+    // Fresh synthetic human originals have explicit receipts; only the final two are accessible.
+    fixture.tables.document = rows.map((row, index) => ({ ...row, workspaceId: "ws-crm", accessDomain: index < 100 ? "FINANCE" : "WORKSPACE" }));
+    for (const document of fixture.tables.document) await recordArtifactInputLineage({ tx: fixture.prisma, actor: finance, workspaceId: "ws-crm",
+      artifact: { kind: "Document", id: document.id }, content: document, origin: "HUMAN_ORIGINAL", inputs: [] });
     const admitted = await readCrmRows(general, "ws-crm", "Document", async (page) => {
       const ids = await fetch(page); return ids.map((row) => fixture.tables.document.find((entry) => entry.id === row.id));
     });
@@ -179,6 +200,7 @@ describe("CRM input receipts", () => {
     const account = await createCrmAccount(finance, { workspaceId: "ws-crm", name: "Public account" });
     const contact = await createContact(finance, { workspaceId: "ws-crm", accountId: account.id, email: "recipient@public.test", name: "Recipient" });
     const document = await fixture.prisma.document.create({ data: { workspaceId: "ws-crm", title: "Full prompt context", textContent: "Private drafting facts", accessDomain: "FINANCE" } });
+    await recordArtifactInputLineage({ tx: fixture.prisma, actor: finance, workspaceId: "ws-crm", artifact: { kind: "Document", id: document.id }, content: document, origin: "HUMAN_ORIGINAL", inputs: [] });
     const lineageRoots = await captureArtifactInputProof(finance, "ws-crm", [{ kind: "Document", id: document.id }], fixture.prisma);
     const result = await createCommunicationSuggestion(finance, { workspaceId: "ws-crm", contactId: contact.id,
       title: "Draft", subject: "Recap", bodyMd: "Private drafted body", source: "workspace-chat", lineageRoots });
@@ -222,6 +244,7 @@ describe("CRM input receipts", () => {
     expect(fixture.tables.crmActivity).toHaveLength(0);
     expect(await declineCommunicationSuggestion(finance, { workspaceId: "ws-crm", suggestionId: unknown.id })).toMatchObject({ contentWithheld: true, status: "DECLINED" });
     const document = await fixture.prisma.document.create({ data: { workspaceId: "ws-crm", title: "Private prompt", textContent: "Restricted input", accessDomain: "FINANCE" } });
+    await recordArtifactInputLineage({ tx: fixture.prisma, actor: finance, workspaceId: "ws-crm", artifact: { kind: "Document", id: document.id }, content: document, origin: "HUMAN_ORIGINAL", inputs: [] });
     const lineageRoots = await captureArtifactInputProof(finance, "ws-crm", [{ kind: "Document", id: document.id }], fixture.prisma);
     const restricted = await createContact(finance, { workspaceId: "ws-crm", accountId: account.id, email: "restricted@public.test", name: "Restricted recipient", lineageRoots });
     await expect(createCommunicationSuggestion(general, { workspaceId: "ws-crm", contactId: restricted.id, title: "Rejected", bodyMd: "New body" })).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
@@ -233,24 +256,27 @@ describe("CRM input receipts", () => {
 
   it("exports only public CRM source receipts, keeps status changes current and revokes stored packets live", async () => {
     const { createExecutionRequest, getExecutionPacket, getExecutionRequest } = await import("./execution-plumbing");
-    await fixture.prisma.workspace.create({ data: { id: "ws-crm", slug: "synthetic", name: "Synthetic workspace", description: "Public workspace context" } });
+    await fixture.prisma.workspace.update({ where: { id: "ws-crm" }, data: { slug: "synthetic", name: "Synthetic workspace", description: "Public workspace context" } });
     const account = await createCrmAccount(finance, { workspaceId: "ws-crm", name: "Public recipient company" });
     const contact = await createContact(finance, { workspaceId: "ws-crm", accountId: account.id, email: "recipient@public.test", name: "Public recipient" });
     const suggestion = await createCommunicationSuggestion(finance, { workspaceId: "ws-crm", contactId: contact.id, title: "Reviewed public draft", bodyMd: "Native public draft" });
-    const request = await createExecutionRequest(finance, { workspaceId: "ws-crm", goal: "Send the reviewed public draft", writebackTargetType: "CRM_COMMUNICATION", writebackTargetId: suggestion.id });
+    const request = await createExecutionRequest(general, { workspaceId: "ws-crm", goal: "Send the reviewed public draft", writebackTargetType: "CRM_COMMUNICATION", writebackTargetId: suggestion.id });
     expect(fixture.tables.crmCommunicationSuggestion[0].status).toBe("REQUESTED");
     expect(await readableArtifactIds(finance, "ws-crm", "CrmCommunicationSuggestion", [fixture.tables.crmCommunicationSuggestion[0]], fixture.prisma)).toEqual(new Set([suggestion.id]));
+    await expect(getExecutionPacket(finance, { workspaceId: "ws-crm", requestId: request.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
     const packet = await getExecutionPacket(general, { workspaceId: "ws-crm", requestId: request.id });
     expect(packet).toMatchObject({ relevantContext: { relationshipCommunication: { bodyMd: "Native public draft" } } });
     expect(JSON.stringify(packet)).not.toContain("__crmInputReceipt");
     const source = await fixture.prisma.document.create({ data: { workspaceId: "ws-crm", title: "Finance-only source", textContent: "Restricted prompt", accessDomain: "FINANCE" } });
+    await recordArtifactInputLineage({ tx: fixture.prisma, actor: finance, workspaceId: "ws-crm", artifact: { kind: "Document", id: source.id }, content: source, origin: "HUMAN_ORIGINAL", inputs: [] });
     const lineageRoots = await captureArtifactInputProof(finance, "ws-crm", [{ kind: "Document", id: source.id }], fixture.prisma);
     const privateDraft = await createCommunicationSuggestion(finance, { workspaceId: "ws-crm", contactId: contact.id, title: "Private draft", bodyMd: "Private prompt output", source: "workspace-chat", lineageRoots });
     await expect(createExecutionRequest(finance, { workspaceId: "ws-crm", goal: "Do not export restricted context", writebackTargetType: "CRM_COMMUNICATION", writebackTargetId: privateDraft.id })).rejects.toMatchObject({ code: "SOURCE_RESTRICTED" });
     expect(fixture.tables.executionRequest).toHaveLength(1);
     expect(fixture.tables.crmCommunicationSuggestion.find((row) => row.id === privateDraft.id).status).toBe("SUGGESTED");
     fixture.tables.crmContact.find((row) => row.id === contact.id).archivedAt = fixture.time;
-    await expect(getExecutionPacket(finance, { workspaceId: "ws-crm", requestId: request.id })).rejects.toMatchObject({ code: "SOURCE_RESTRICTED" });
+    fixture.epochs.set(JSON.stringify(["ws-crm", "CrmContact", contact.id]), 1n);
+    await expect(getExecutionPacket(general, { workspaceId: "ws-crm", requestId: request.id })).rejects.toMatchObject({ code: "SOURCE_RESTRICTED" });
     await expect(getExecutionRequest(general, { workspaceId: "ws-crm", requestId: request.id })).rejects.toMatchObject({ code: "SOURCE_RESTRICTED" });
     expect(fixture.tables.crmCommunicationSuggestion[0].bodyMd).toBe("Native public draft");
   });

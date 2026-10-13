@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 import { AppError } from "./errors";
 import { generateBrainArticleVariant, getReadableBrainArticleVariant, requestBrainArticleVariant } from "./brain-article-variants";
+import { SOURCE_PERMISSION_POLICY_VERSION } from "./source-permission-epochs";
 
 const { db, state, lineage, requireMembership } = vi.hoisted(() => {
   const state = {
@@ -61,7 +62,12 @@ beforeEach(() => {
   state.sources = [source("public-2"), source("finance"), source("public-1")];
   state.readableSources = new Set(["public-1", "public-2"]);
   state.manifest = { id: "manifest-1", origin: "DERIVED", contentHash: fingerprint("BrainArticle", state.target), rootsJson:
-    state.sources.map((row) => ({ kind: "BrainSource", id: row.id, fingerprint: fingerprint("BrainSource", row) })) };
+    state.sources.map((row) => ({ kind: "BrainSource", id: row.id, fingerprint: fingerprint("BrainSource", row) })),
+    epochProofVersion: 1, permissionEpochsJson: { version: 1, policyVersion: SOURCE_PERMISSION_POLICY_VERSION,
+      entries: [{ kind: "BrainArticle", id: state.target.id, epoch: "0" },
+        ...state.sources.map(row => ({ kind: "BrainSource", id: row.id, epoch: "0" })),
+        { kind: "Workspace", id: "ws-1", epoch: "0" }].sort((left, right) =>
+          JSON.stringify([left.kind, left.id]) < JSON.stringify([right.kind, right.id]) ? -1 : 1) } };
   state.member = { id: "member-1", workspaceId: "ws-1", userId: "user-1", role: "CONTRIBUTOR", isActive: true,
     user: actor.kind === "user" ? actor.user : null };
   state.variant = null; state.job = null; state.histories = {}; state.upstream = null;
@@ -313,6 +319,22 @@ describe("permitted-source article variants", () => {
     expect(db.workflowJob.create).not.toHaveBeenCalled();
     expect(db.brainArticle.update).not.toHaveBeenCalled();
     expect(lineage.captureArtifactInputProof).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing-version", "null-proof", "empty-vector", "malformed-vector", "obsolete-policy"])("withholds a legacy derived recipe with %s before source capture", async kind => {
+    const oldTarget = structuredClone(state.target);
+    if (kind === "missing-version") state.manifest.epochProofVersion = null;
+    if (kind === "null-proof") state.manifest.permissionEpochsJson = null;
+    if (kind === "empty-vector") state.manifest.permissionEpochsJson.entries = [];
+    if (kind === "malformed-vector") state.manifest.permissionEpochsJson.entries[0].epoch = "new-current-counter";
+    if (kind === "obsolete-policy") state.manifest.permissionEpochsJson.policyVersion = "pun68-permissions-legacy";
+    expect(state.manifest.rootsJson.length).toBeGreaterThan(0);
+    expect(await requestBrainArticleVariant(actor, params)).toEqual({ status: "unavailable" });
+    expect(lineage.inspectStoredArtifactInputDependencies).not.toHaveBeenCalled();
+    expect(lineage.captureArtifactInputProof).not.toHaveBeenCalled();
+    expect(db.workflowJob.create).not.toHaveBeenCalled();
+    expect(db.brainArticle.update).not.toHaveBeenCalled();
+    expect(state.target).toEqual(oldTarget);
   });
 
   it("does not rebuild a certified independent human original with citation-only links", async () => {

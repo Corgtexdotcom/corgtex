@@ -3164,7 +3164,7 @@ describe("createCorgtexMcpServer", () => {
       workspaceId: "ws-1",
       sessionId: "stored-mcp-session",
       requestSource: "MCP",
-      agentKey: "assistant",
+      agentKey: "mcp-assistant",
       userId: "user-1",
       userMessage: "show tools",
       actor,

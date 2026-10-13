@@ -2,7 +2,7 @@
 
 ## Publication status
 
-This document now accompanies the implementing code checkpoint after5ddf50e2.
+This document accompanies implementing code after71c31c98.
 Earlier documentation-only headdecd8ae5 did not contain these APIs. The draft now
 includes the transaction/native-input interfaces below. Their presence and focused
 tests do not establish Bloop's actual saver/route/worker lifecycle, which remains
@@ -17,11 +17,18 @@ prepareConversationInputs validates and reuses server-supplied promptInputId or
 ingressInputId after admission commit. It does not read uncommitted admission rows
 through an independent connection.
 
-LOCAL test evidence, absent from the published code: disposable PostgreSQL tests passed 5/5: native web/MCP input plus request/job
-enqueue rollback; final turn/manifest plus generic job completion commit; failure
-and mid-turn ownership-fence rollback. Unit transaction/terminal/provenance
-boundaries passed 77 tests. This evidence does not cover Bloop's actual saver,
-route/worker/recovery adapter or combined lifecycle.
+Disposable PostgreSQL tests pass10/10 for native admission/turn and caller-owned
+Brain transaction commit/rollback, immutable submission, write failure and ownership
+fence expiry. Three pending authority-lock tests and one actual registered MCP
+confirmation test also pass. Unit conversation/pending tests pass35/35. These tests
+do not cover Bloop's actual saver, canonical publication receipt or combined lifecycle.
+
+Caller-owned Brain publication API:
+- ingestConversationOnDemandInTransaction(tx, actor, submission) requires the supplied Prisma.TransactionClient and joins BrainSource, complete manifest, audit and outbox writes to it.
+- Submission is ConversationBrainIngestParams: workspaceId, title, content, optional sourceType, lineageInputs and lineageRoots. Inputs are copied before the first await.
+- Membership and write-fence callbacks use this same tx before and after writes.
+- ingestConversationOnDemand(actor, {...submission, tx}) forwards to the same primitive; omitting tx retains the existing standalone transaction API.
+- A canonical receipt written by Bloop in this transaction must remain its authoritative publication identity; synthetic marker tests prove atomicity only.
 
 Current PUN-68 write-fence API:
 - ArtifactInputWriteFence = (tx: Prisma.TransactionClient) => Promise<void>
@@ -51,7 +58,7 @@ Smallest lifecycle/schema ownership split:
 - Bloop: conversation request/run/job/approval/checkpoint/effect/publication lifecycle and bound-tx checkpoint adapter; dedicated assistant-harness export and its route/worker/recovery files.
 - PUN-68: source lineage/snapshot tables and helpers, native input/outcome definitions, actual model-input collector, Brain producer/read permissions and domain receipt/fence hooks. Agent index is released. CRM native job enqueue and Finance exact lease adapters are now wired in outbox; conversation lifecycle sections remain with Bloop/parent integration.
 
-Current migrations through170 are developed and applied ONLY to the disposable
+Current migrations through177 are developed and applied ONLY to the disposable
 local database at 127.0.0.1:55468/corgtex_test. Added native rows include immutable
 CrmQualificationFormInput, FinanceReportUploadInput and encrypted
 ExternalProviderFetchInput. Parent retains schema/lifecycle integration ownership.

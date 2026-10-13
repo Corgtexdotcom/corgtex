@@ -133,6 +133,35 @@ describe("independently permitted derivation input capture with real source gate
     expect(derivationHash({ b: { z: 1, a: 2 }, a: 3 })).toBe(derivationHash({ a: 3, b: { a: 2, z: 1 } }));
     expect(derivationHash([1, 2])).not.toBe(derivationHash([2, 1]));
   });
+  it.each(["target", "historical-derived", "immutable-snapshot"])("rejects a legacy %s missing captured epochs without recertifying its ancestry", async location => {
+    const doc = await document("legacy-document");
+    const graph = fixture.add("contextGraphObject", { id: "legacy-derived-graph", workspaceId, title: "Preserved old derived title", properties: {} });
+    if (location === "immutable-snapshot") {
+      const proof = await captureArtifactInputProof(alpha, workspaceId, [{ kind: "Document", id: doc.id }], fixture.prisma);
+      const immutable = await captureImmutableArtifactInputProof(alpha, workspaceId, proof, fixture.prisma);
+      await recordArtifactInputLineage({ tx: fixture.prisma, actor: alpha, workspaceId, artifact: { kind: "ContextGraphObject", id: graph.id },
+        content: graph, origin: "DERIVED", inputs: [], inheritedRoots: immutable });
+    } else await known("ContextGraphObject", graph, [{ kind: "Document", id: doc.id }], alpha);
+    const identity = { kind: "ContextGraphObject" as const, id: graph.id };
+    expect((await inspectStoredArtifactInputDependencyIdentities(fixture.prisma, workspaceId, identity)).complete).toBe(true);
+    const legacy = location === "target" ? fixture.manifest("ContextGraphObject", graph.id)
+      : location === "historical-derived" ? fixture.manifest("Document", doc.id)
+        : fixture.rows.artifactInputSnapshot.find(row => row.sourceKind === "Document" && row.sourceId === doc.id);
+    expect(legacy.rootsJson.length).toBeGreaterThan(0);
+    const originalProof = { epochProofVersion: legacy.epochProofVersion, permissionEpochsJson: legacy.permissionEpochsJson };
+    const beforeRows = fixture.rows.artifactInputLineage.length;
+    const beforeEpochs = [...epochs.entries()];
+    legacy.epochProofVersion = null; legacy.permissionEpochsJson = null;
+    expect((await inspectStoredArtifactInputDependencyIdentities(fixture.prisma, workspaceId, identity)).complete).toBe(false);
+    expect(fixture.rows.artifactInputLineage).toHaveLength(beforeRows);
+    expect([...epochs.entries()]).toEqual(beforeEpochs);
+    expect(graph.title).toBe("Preserved old derived title");
+    Object.assign(legacy, originalProof);
+    // Historical identity discovery may use a proven old receipt after privacy
+    // changes. Current model input admission still performs its own live gates.
+    epochs.set(JSON.stringify([workspaceId, "Document", doc.id]), 2n);
+    expect((await inspectStoredArtifactInputDependencyIdentities(fixture.prisma, workspaceId, identity)).complete).toBe(true);
+  });
   it("recognizes known immutable native transcript snapshots, admitting only the actual current owner", async () => {
     const submission = { workspaceId, transcript: "Owner's exact native transcript", title: "Native meeting" };
     const receipt = await captureDirectMemberTranscriptInput(alpha, { workspaceId, submission });

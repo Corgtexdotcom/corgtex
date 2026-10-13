@@ -5,19 +5,27 @@ const { db, fence } = vi.hoisted(() => ({
     $transaction: vi.fn(), $queryRaw: vi.fn(), workflowJob: { findFirst: vi.fn() }, event: { findFirst: vi.fn() },
     derivedArtifactRebuildState: { upsert: vi.fn() },
     artifactInputLineage: { findFirst: vi.fn(), create: vi.fn() }, artifactInputSnapshot: { findFirst: vi.fn() },
+    nativeTranscriptInput: { findFirst: vi.fn() }, communicationMessageNativeInput: { findFirst: vi.fn() },
     contextGraphObject: { findMany: vi.fn(), update: vi.fn() }, contextGraphRelationship: { findMany: vi.fn(), update: vi.fn() },
     contextGraphEvidenceRef: { findMany: vi.fn() }, contextGraphProposedDiff: { findMany: vi.fn(), update: vi.fn() },
   },
 }));
 vi.mock("@corgtex/shared", () => ({ prisma: db }));
-vi.mock("./source-permission-epochs", () => ({ capturePermissionEpochs: vi.fn(async () => ({ version: 1, policyVersion: "pun68-permissions-v1", entries: [{ kind: "Document", id: "document-a", epoch: "2" }] })) }));
+vi.mock("./source-permission-epochs", async importOriginal => {
+  const actual = await importOriginal<typeof import("./source-permission-epochs")>();
+  return { ...actual, capturePermissionEpochs: vi.fn(async () => ({ version: 1, policyVersion: actual.SOURCE_PERMISSION_POLICY_VERSION,
+    entries: [{ kind: "Document", id: "document-a", epoch: "2" }] })) };
+});
 vi.mock("./source-lineage", async () => ({ assertArtifactInputWriteFence: fence, isLineageKind: (await vi.importActual<typeof import("./source-lineage")>("./source-lineage")).isLineageKind }));
 import { inspectStoredArtifactInputDependencyIdentities, retireContextGraphSourceDescendants, retireContextGraphChangedSourceDescendants } from "./context-graph-retirement";
 import type { Prisma } from "@prisma/client";
+import { SOURCE_PERMISSION_POLICY_VERSION } from "./source-permission-epochs";
 const tx = db as unknown as Prisma.TransactionClient;
 const lease = { lockedBy: "worker-a", lockedAt: new Date("2026-10-13T10:00:00Z") };
 const identity = { workspaceId: "ws-a", workflowJobId: "job-a", sourceType: "DOCUMENT", sourceId: "document-a", attempts: 2, expectedLease: lease };
-const manifest = { id: "manifest-graph", revision: 3, origin: "DERIVED", contentHash: "a".repeat(64), rootsJson: [
+const capturedEpochs = { epochProofVersion: 1, permissionEpochsJson: { version: 1, policyVersion: SOURCE_PERMISSION_POLICY_VERSION,
+  entries: [{ kind: "Document", id: "document-a", epoch: "2" }] } };
+const manifest = { ...capturedEpochs, id: "manifest-graph", revision: 3, origin: "DERIVED", contentHash: "a".repeat(64), rootsJson: [
   { kind: "ArtifactInputSnapshot", id: "snapshot-a", fingerprint: "b".repeat(64) },
 ] };
 beforeEach(() => {
@@ -33,7 +41,9 @@ beforeEach(() => {
   db.contextGraphEvidenceRef.findMany.mockResolvedValue([]);
   db.contextGraphProposedDiff.findMany.mockResolvedValue([]);
   db.artifactInputLineage.findFirst.mockResolvedValue(manifest);
-  db.artifactInputSnapshot.findFirst.mockResolvedValue({ sourceKind: "Document", sourceId: "document-a", sourceFingerprint: "c".repeat(64), origin: "HUMAN_ORIGINAL", rootsJson: [] });
+  db.nativeTranscriptInput.findFirst.mockResolvedValue(null);
+  db.communicationMessageNativeInput.findFirst.mockResolvedValue(null);
+  db.artifactInputSnapshot.findFirst.mockResolvedValue({ ...capturedEpochs, sourceKind: "Document", sourceId: "document-a", sourceFingerprint: "c".repeat(64), origin: "HUMAN_ORIGINAL", rootsJson: [] });
 });
 describe("source-bound graph retirement", () => {
   it("retires an unreadable historical snapshot descendant without selecting any body", async () => {
@@ -58,7 +68,7 @@ describe("source-bound graph retirement", () => {
       await retireContextGraphSourceDescendants(identity);
     }
     db.artifactInputLineage.findFirst.mockResolvedValue(manifest);
-    db.artifactInputSnapshot.findFirst.mockResolvedValueOnce(null).mockResolvedValue({ sourceKind: "Document", sourceId: "other", sourceFingerprint: "e".repeat(64), origin: "HUMAN_ORIGINAL", rootsJson: [] });
+    db.artifactInputSnapshot.findFirst.mockResolvedValueOnce(null).mockResolvedValue({ ...capturedEpochs, sourceKind: "Document", sourceId: "other", sourceFingerprint: "e".repeat(64), origin: "HUMAN_ORIGINAL", rootsJson: [] });
     await retireContextGraphSourceDescendants(identity);
     await retireContextGraphSourceDescendants(identity);
     expect(db.contextGraphObject.update).not.toHaveBeenCalled();
@@ -113,7 +123,7 @@ describe("source-bound graph retirement", () => {
       ...lease, eventId: "event-a", dedupeKey: "ws-a:source-lineage-rebuild:event-a:native-graph", payload: { dateISO: "rebuild:event-a" } });
     db.event.findFirst.mockResolvedValue({ id: "event-a", type: "source-lineage.changed", aggregateType: "BrainSource", aggregateId: "deleted",
       payload: { kind: "BrainSource", id: "deleted", change: "purged" } });
-    db.artifactInputSnapshot.findFirst.mockResolvedValue({ sourceKind: "BrainSource", sourceId: "deleted", sourceFingerprint: "e".repeat(64), origin: "HUMAN_ORIGINAL", rootsJson: [] });
+    db.artifactInputSnapshot.findFirst.mockResolvedValue({ ...capturedEpochs, sourceKind: "BrainSource", sourceId: "deleted", sourceFingerprint: "e".repeat(64), origin: "HUMAN_ORIGINAL", rootsJson: [] });
     await retireContextGraphChangedSourceDescendants(identity);
     expect(db.artifactInputLineage.create).toHaveBeenCalledOnce();
     expect(db.contextGraphObject.update).not.toHaveBeenCalled();
@@ -129,6 +139,19 @@ describe("source-bound graph retirement", () => {
   });
 });
 describe("metadata-only complete ancestry", () => {
+  it.each(["version", "null", "empty", "malformed", "obsolete-policy"])("rejects a nonempty legacy derived target with %s captured proof", async kind => {
+    const legacy = structuredClone(manifest);
+    if (kind === "version") legacy.epochProofVersion = null as any;
+    if (kind === "null") legacy.permissionEpochsJson = null as any;
+    if (kind === "empty") legacy.permissionEpochsJson.entries = [];
+    if (kind === "malformed") legacy.permissionEpochsJson.entries[0].epoch = "new-counter";
+    if (kind === "obsolete-policy") legacy.permissionEpochsJson.policyVersion = "pun68-permissions-legacy";
+    db.artifactInputLineage.findFirst.mockResolvedValue(legacy);
+    expect((await inspectStoredArtifactInputDependencyIdentities(tx, "ws-a", { kind: "ContextGraphObject", id: "graph-a" })).complete).toBe(false);
+    expect(db.artifactInputSnapshot.findFirst).not.toHaveBeenCalled();
+    expect(db.artifactInputLineage.create).not.toHaveBeenCalled();
+  });
+
   it("can follow exact historical receipts after a source is physically deleted", async () => {
     db.artifactInputLineage.findFirst.mockResolvedValueOnce({ ...manifest, rootsJson: [{ kind: "Document", id: "deleted", fingerprint: "d".repeat(64) }] })
       .mockResolvedValueOnce({ id: "old", revision: 1, contentHash: "d".repeat(64), origin: "HUMAN_ORIGINAL", rootsJson: [] });
@@ -141,24 +164,24 @@ describe("metadata-only complete ancestry", () => {
     db.artifactInputLineage.findFirst.mockResolvedValueOnce({ ...manifest, rootsJson: [{ kind: "Unregistered", id: "x", fingerprint: "f".repeat(64) }] });
     expect((await inspectStoredArtifactInputDependencyIdentities(tx, "ws-a", { kind: "ContextGraphObject", id: "graph-a" })).complete).toBe(false);
     db.artifactInputLineage.findFirst.mockResolvedValue(manifest);
-    db.artifactInputSnapshot.findFirst.mockResolvedValue({ sourceKind: "KnowledgeChunk", sourceId: "chunk", sourceFingerprint: "f".repeat(64), origin: "HUMAN_ORIGINAL", rootsJson: [] });
+    db.artifactInputSnapshot.findFirst.mockResolvedValue({ ...capturedEpochs, sourceKind: "KnowledgeChunk", sourceId: "chunk", sourceFingerprint: "f".repeat(64), origin: "HUMAN_ORIGINAL", rootsJson: [] });
     expect((await inspectStoredArtifactInputDependencyIdentities(tx, "ws-a", { kind: "ContextGraphObject", id: "graph-a" })).complete).toBe(false);
   });
 
   it.each(["CommunicationMessageNativeInput", "NativeTranscriptInput"])("accepts only immutable native constructor snapshot ancestry for %s", async kind => {
-    db.artifactInputSnapshot.findFirst.mockResolvedValue({ sourceKind: kind, sourceId: "native-input", sourceFingerprint: "c".repeat(64), origin: "NATIVE_ORIGINAL", rootsJson: [] });
+    db.artifactInputSnapshot.findFirst.mockResolvedValue({ ...capturedEpochs, sourceKind: kind, sourceId: "native-input", sourceFingerprint: "c".repeat(64), origin: "NATIVE_ORIGINAL", rootsJson: [] });
     expect((await inspectStoredArtifactInputDependencyIdentities(tx, "ws-a", { kind: "ContextGraphObject", id: "graph-a" })).complete).toBe(true);
     db.artifactInputLineage.findFirst.mockResolvedValueOnce({ ...manifest, rootsJson: [{ kind, id: "native-input", fingerprint: "c".repeat(64) }] }).mockResolvedValue(null);
     expect((await inspectStoredArtifactInputDependencyIdentities(tx, "ws-a", { kind: "ContextGraphObject", id: "graph-a" })).complete).toBe(false);
     db.artifactInputLineage.findFirst.mockResolvedValue(manifest);
-    db.artifactInputSnapshot.findFirst.mockResolvedValue({ sourceKind: kind, sourceId: "native-input", sourceFingerprint: "c".repeat(64), origin: "UNKNOWN", rootsJson: [] });
+    db.artifactInputSnapshot.findFirst.mockResolvedValue({ ...capturedEpochs, sourceKind: kind, sourceId: "native-input", sourceFingerprint: "c".repeat(64), origin: "UNKNOWN", rootsJson: [] });
     expect((await inspectStoredArtifactInputDependencyIdentities(tx, "ws-a", { kind: "ContextGraphObject", id: "graph-a" })).complete).toBe(false);
   });
   it("does not treat citations or missing native receipts as complete and detects cycles", async () => {
     db.artifactInputLineage.findFirst.mockResolvedValueOnce({ ...manifest, rootsJson: [{ kind: "Document", id: "raw", fingerprint: "e".repeat(64) }] }).mockResolvedValueOnce(null);
     expect((await inspectStoredArtifactInputDependencyIdentities(tx, "ws-a", { kind: "ContextGraphObject", id: "graph-a" })).complete).toBe(false);
     db.artifactInputLineage.findFirst.mockResolvedValue(manifest);
-    db.artifactInputSnapshot.findFirst.mockResolvedValue({ sourceKind: "Document", sourceId: "a", sourceFingerprint: "e".repeat(64), origin: "DERIVED", rootsJson: manifest.rootsJson });
+    db.artifactInputSnapshot.findFirst.mockResolvedValue({ ...capturedEpochs, sourceKind: "Document", sourceId: "a", sourceFingerprint: "e".repeat(64), origin: "DERIVED", rootsJson: manifest.rootsJson });
     expect((await inspectStoredArtifactInputDependencyIdentities(tx, "ws-a", { kind: "ContextGraphObject", id: "graph-a" })).complete).toBe(false);
   });
 });

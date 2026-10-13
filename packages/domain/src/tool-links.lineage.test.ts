@@ -235,7 +235,8 @@ describe("ToolLink complete native lineage with synthetic SQL", () => {
   });
 
   it("captures model/MCP raw credential parameters as ciphertext with actual submission roots", async () => {
-    const granted = credential();
+    // The response includes the workspace identity as an independently proved input.
+    const granted = credential(["workspace:read", "tools:read", "tools:write", "tools:credentials:read"]);
     const origin = { kind: "agent" as const, id: granted.row.id, workspaceId,
       credentialVersion: granted.actor.kind === "agent" ? granted.actor.credentialVersion : "",
       scopeHash: mcpScopesHash(granted.row.scopes), requiredScopes: [] };

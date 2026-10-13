@@ -4,6 +4,7 @@ import { prisma, type AppActor } from "@corgtex/shared";
 import { getPrismaClient } from "../../shared/src/db";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { createConversation, createConversationPromptInput, addConversationTurn } from "../../domain/src/conversations";
+import { ingestConversationOnDemand, ingestConversationOnDemandInTransaction } from "../../domain/src/conversation-brain";
 import { createConversationIngressInput } from "../../domain/src/conversation-ingress";
 import { captureArtifactInputProof, isArtifactInputProofReadable, withArtifactInputWriteFence } from "../../domain/src/source-lineage";
 import { AppError } from "../../domain/src/errors";
@@ -17,6 +18,31 @@ async function fixture() {
   const actor: AppActor = { kind: "user", user: { id: user.id, email: user.email, displayName: null } };
   const session = await createConversation(actor, { workspaceId: workspace.id });
   return { workspace, user, actor, session };
+}
+
+function forbidPrimaryDatabaseCalls(tx: any) {
+  const primaryClient = getPrismaClient();
+  const guards: Array<{ mockRestore(): void }> = [];
+  const delegates = ["workspace", "user", "member", "workspaceSupportGrant", "workspaceFeatureFlag", "agentCredential",
+    "conversationSession", "conversationPromptInput", "conversationIngressInput", "conversationTurn", "brainSource", "auditLog", "event",
+    "artifactInputLineage", "artifactInputSnapshot", "sourcePermissionEpoch"] as const;
+  const methods = ["findFirst", "findFirstOrThrow", "findUnique", "findUniqueOrThrow", "findMany", "count", "aggregate",
+    "create", "createMany", "update", "updateMany", "upsert", "delete", "deleteMany"] as const;
+  for (const name of delegates) {
+    const delegate = (prisma as any)[name];
+    for (const method of methods) if (typeof delegate?.[method] === "function") guards.push(vi.spyOn(delegate, method).mockImplementation(() => {
+      throw new Error(`Global ${name}.${method} is forbidden in the caller transaction`);
+    }));
+  }
+  // Raw SQL descriptors are shared by Prisma proxies; permit only this exact receiver.
+  for (const name of ["$executeRaw", "$queryRaw"] as const) {
+    const raw = primaryClient[name] as (...args: any[]) => any;
+    guards.push(vi.spyOn(primaryClient, name).mockImplementation(function (this: unknown, ...args: any[]) {
+      if (this !== tx) throw new Error(`Global ${name} is forbidden in the caller transaction`);
+      return raw.apply(this, args);
+    }));
+  }
+  return () => { for (const guard of guards.reverse()) guard.mockRestore(); };
 }
 
 describe("native conversation transactions on the explicitly disposable local database", () => {
@@ -38,32 +64,8 @@ describe("native conversation transactions on the explicitly disposable local da
       expect(tx === prisma || tx === primaryClient).toBe(false);
       expect(tx.conversationPromptInput === prisma.conversationPromptInput).toBe(false);
       expect(tx.member === prisma.member).toBe(false);
-      const guards: Array<{ mockRestore(): void }> = [];
-      // Guard the actual Prisma primary delegates, including membership, domain
-      // policy, native source constructors, manifests, snapshots and epoch SQL.
-      const delegates = ["workspace", "user", "member", "workspaceSupportGrant", "workspaceFeatureFlag", "agentCredential",
-        "conversationSession", "conversationPromptInput", "conversationIngressInput", "conversationTurn",
-        "artifactInputLineage", "artifactInputSnapshot", "sourcePermissionEpoch"] as const;
-      const methods = ["findFirst", "findFirstOrThrow", "findUnique", "findUniqueOrThrow", "findMany", "count", "aggregate",
-        "create", "createMany", "update", "updateMany", "upsert", "delete", "deleteMany"] as const;
+      const restore = forbidPrimaryDatabaseCalls(tx);
       try {
-        for (const name of delegates) {
-          const primaryDelegate = (prisma as any)[name];
-          for (const method of methods) {
-            if (typeof primaryDelegate?.[method] === "function") guards.push(vi.spyOn(primaryDelegate, method).mockImplementation(() => {
-              throw new Error(`Global ${name}.${method} is forbidden in the caller transaction`);
-            }));
-          }
-        }
-        // Prisma transaction proxies share raw-method descriptors with the
-        // primary client. Gate their receiver, preserving the exact tx method.
-        for (const name of ["$executeRaw", "$queryRaw"] as const) {
-          const raw = primaryClient[name] as (...args: any[]) => any;
-          guards.push(vi.spyOn(primaryClient, name).mockImplementation(function (this: unknown, ...args: any[]) {
-            if (this !== tx) throw new Error(`Global ${name} is forbidden in the caller transaction`);
-            return raw.apply(this, args);
-          }));
-        }
         const prompt = await createConversationPromptInput(f.actor, { workspaceId: f.workspace.id, conversationId: f.session.id, content: request, tx });
         const ingress = await createConversationIngressInput(f.actor, { workspaceId: f.workspace.id, content: request, tx });
         const lineageRoots = await captureArtifactInputProof(f.actor, f.workspace.id, [
@@ -74,11 +76,65 @@ describe("native conversation transactions on the explicitly disposable local da
         const turnRoots = await captureArtifactInputProof(f.actor, f.workspace.id, [{ kind: "ConversationTurn", id: turn.id }], tx);
         expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, turnRoots, tx)).toBe(true);
         expect(turn.userMessage).toBe(request);
-      } finally { for (const guard of guards.reverse()) guard.mockRestore(); }
+      } finally { restore(); }
     });
     expect(await prisma.conversationPromptInput.count()).toBe(1);
     expect(await prisma.conversationIngressInput.count()).toBe(1);
     expect(await prisma.conversationTurn.count()).toBe(1);
+  });
+
+  it.each(["primitive", "wrapper"] as const)("commits %s publication, complete source proof and static test marker only in the supplied transaction", async (entry) => {
+    const f = await fixture();
+    const prompt = await createConversationPromptInput(f.actor, { workspaceId: f.workspace.id, conversationId: f.session.id, content: request });
+    const lineageRoots = await captureArtifactInputProof(f.actor, f.workspace.id, [{ kind: "ConversationPromptInput", id: prompt.id }]);
+    const source = await prisma.$transaction(async (tx) => {
+      expect(tx === getPrismaClient()).toBe(false);
+      const restore = forbidPrimaryDatabaseCalls(tx);
+      try {
+        const params = { workspaceId: f.workspace.id, title: "Synthetic derived publication", content: "Synthetic derived conversation body", lineageRoots };
+        const value = entry === "primitive" ? await ingestConversationOnDemandInTransaction(tx, f.actor, params)
+          : await ingestConversationOnDemand(f.actor, { ...params, tx });
+        // This static marker proves caller atomicity only; it is not a canonical saver receipt.
+        await tx.event.create({ data: { workspaceId: f.workspace.id, type: "synthetic.publication-marker", aggregateId: value.id, payload: { recorded: true } } });
+        const proof = await captureArtifactInputProof(f.actor, f.workspace.id, [{ kind: "BrainSource", id: value.id }], tx);
+        expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, proof, tx)).toBe(true);
+        return value;
+      } finally { restore(); }
+    });
+    expect(source).toMatchObject({ title: "Synthetic derived publication", content: "Synthetic derived conversation body" });
+    expect(await prisma.brainSource.count()).toBe(1);
+    expect(await prisma.artifactInputLineage.count({ where: { artifactType: "BrainSource", artifactId: source.id } })).toBe(1);
+    expect(await prisma.auditLog.count({ where: { entityType: "BrainSource", entityId: source.id } })).toBe(1);
+    expect(await prisma.event.count({ where: { type: "brain-source.created", aggregateId: source.id } })).toBe(1);
+    expect(await prisma.event.count({ where: { type: "synthetic.publication-marker", aggregateId: source.id } })).toBe(1);
+  });
+
+  it.each(["marker", "owner"] as const)("rolls back publication content, proof, audit and both outbox markers on %s failure", async (failure) => {
+    const f = await fixture();
+    const prompt = await createConversationPromptInput(f.actor, { workspaceId: f.workspace.id, conversationId: f.session.id, content: request });
+    const lineageRoots = await captureArtifactInputProof(f.actor, f.workspace.id, [{ kind: "ConversationPromptInput", id: prompt.id }]);
+    await expect(prisma.$transaction(async (tx) => {
+      const restore = forbidPrimaryDatabaseCalls(tx);
+      try {
+        await withArtifactInputWriteFence(async (usedTx) => {
+          expect(usedTx === tx).toBe(true);
+          if (failure === "owner" && await tx.event.count({ where: { workspaceId: f.workspace.id, type: "brain-source.created" } })) {
+            throw new AppError(409, "OWNER_STALE", "Synthetic publication owner expired");
+          }
+        }, async () => {
+          const source = await ingestConversationOnDemandInTransaction(tx, f.actor, {
+            workspaceId: f.workspace.id, title: "Uncommitted synthetic publication", content: "Uncommitted synthetic body", lineageRoots,
+          });
+          await tx.event.create({ data: { workspaceId: f.workspace.id, type: "synthetic.publication-marker", aggregateId: source.id, payload: { recorded: true } } });
+          throw new Error("Synthetic publication marker commit rejected");
+        });
+      } finally { restore(); }
+    })).rejects.toThrow(failure === "owner" ? "Synthetic publication owner expired" : "Synthetic publication marker commit rejected");
+    expect(await prisma.brainSource.count()).toBe(0);
+    expect(await prisma.artifactInputLineage.count({ where: { artifactType: "BrainSource" } })).toBe(0);
+    expect(await prisma.auditLog.count({ where: { entityType: "BrainSource" } })).toBe(0);
+    expect(await prisma.event.count({ where: { type: { in: ["brain-source.created", "synthetic.publication-marker"] } } })).toBe(0);
+    expect(await prisma.conversationPromptInput.count()).toBe(1);
   });
 
   it.each(["web", "mcp"] as const)("rolls back the exact %s native input together with its request and queued job", async (source) => {

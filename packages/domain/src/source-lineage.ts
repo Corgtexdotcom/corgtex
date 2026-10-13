@@ -717,7 +717,7 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
     }
   }
   if (root.kind === "CrmProspectWorkspace") {
-    try { await requireWorkspaceMembership({ actor, workspaceId: String(row.targetWorkspaceId) }); }
+    try { await requireWorkspaceMembership({ actor, workspaceId: String(row.targetWorkspaceId), tx: db }); }
     catch { return false; }
   }
   if (root.kind.startsWith("Crm")) {
@@ -1217,6 +1217,7 @@ export async function inspectStoredArtifactInputDependencies(db: LineageClient, 
     if (root.kind === "ArtifactInputSnapshot") {
       if (lineageContentFingerprint(root.kind, row) !== root.fingerprint || typeof row.sourceKind !== "string"
         || !(row.sourceKind in CONTENT_FIELDS) || row.sourceKind === "ArtifactInputSnapshot") return false;
+      if (row.epochProofVersion !== 1 || !parsePermissionEpochProof(row.permissionEpochsJson)) return false;
       const source = { kind: row.sourceKind as LineageKind, id: String(row.sourceId), fingerprint: String(row.sourceFingerprint) };
       dependencies.set(`${source.kind}:${source.id}:${source.fingerprint}`, source);
       upstream = parseRoots(row.rootsJson as Prisma.JsonValue);
@@ -1230,7 +1231,8 @@ export async function inspectStoredArtifactInputDependencies(db: LineageClient, 
       if (manifest) {
         upstream = parseRoots(manifest.rootsJson);
         if (!upstream || !["HUMAN_ORIGINAL", "DERIVED"].includes(manifest.origin)
-          || (manifest.origin === "DERIVED" && !upstream.length)) return false;
+          || (manifest.origin === "DERIVED" && (!upstream.length || manifest.epochProofVersion !== 1
+            || !parsePermissionEpochProof(manifest.permissionEpochsJson)))) return false;
       } else if (needsManifest(root.kind, row)) return false;
       if (root.kind === "KnowledgeChunk") {
         const kinds: Record<string, LineageKind> = { BRAIN_ARTICLE: "BrainArticle", DOCUMENT: "Document", MEETING: "Meeting", PROPOSAL: "Proposal", EXTERNAL_CONTENT: "ExternalContentSource" };

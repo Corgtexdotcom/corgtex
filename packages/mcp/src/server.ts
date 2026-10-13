@@ -805,7 +805,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         sessionId: session?.id ?? "",
         requestSource: "MCP",
         userId: actor.kind === "user" ? actor.user.id : "",
-        agentKey: "assistant",
+        agentKey: "mcp-assistant",
         userMessage: message,
         actor,
       });

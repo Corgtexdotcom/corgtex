@@ -35,6 +35,11 @@ function roots(value: unknown): LineageRoot[] | null {
 /** Dependency discovery only: this never grants access to an artifact's content. */
 export async function inspectStoredArtifactInputDependencyIdentities(db: Prisma.TransactionClient, workspaceId: string,
   root: { kind: LineageKind; id: string }, expectedManifestId?: string) {
+  const hasCapturedEpochs = async (row: { epochProofVersion: number | null; permissionEpochsJson: unknown }) => {
+    if (row.epochProofVersion !== 1) return false;
+    const { parsePermissionEpochProof } = await import("./source-permission-epochs");
+    return Boolean(parsePermissionEpochProof(row.permissionEpochsJson));
+  };
   const proofSelect = { ...manifestSelect, epochProofVersion: true, permissionEpochsJson: true } as const;
   const manifest = await db.artifactInputLineage.findFirst({ where: { workspaceId, artifactType: root.kind, artifactId: root.id, ...(expectedManifestId ? { id: expectedManifestId } : {}) },
     orderBy: { revision: "desc" }, select: proofSelect });
@@ -50,9 +55,9 @@ export async function inspectStoredArtifactInputDependencyIdentities(db: Prisma.
       // Immutable snapshot metadata is system-written. Reading it proves ancestry only,
       // never the body, its current permission, or the content fingerprint of a DTO.
       const snapshot = await db.artifactInputSnapshot.findFirst({ where: { id: input.id, workspaceId }, select: {
-        sourceKind: true, sourceId: true, sourceFingerprint: true, origin: true, rootsJson: true,
+        sourceKind: true, sourceId: true, sourceFingerprint: true, origin: true, rootsJson: true, epochProofVersion: true, permissionEpochsJson: true,
       } });
-      if (!snapshot || !isLineageKind(snapshot.sourceKind) || snapshot.sourceKind === "ArtifactInputSnapshot"
+      if (!snapshot || !await hasCapturedEpochs(snapshot) || !isLineageKind(snapshot.sourceKind) || snapshot.sourceKind === "ArtifactInputSnapshot"
         || !/^[a-f0-9]{64}$/.test(snapshot.sourceFingerprint)) return false;
       dependencies.set(`${snapshot.sourceKind}:${snapshot.sourceId}`, { kind: snapshot.sourceKind as LineageKind, id: snapshot.sourceId });
       if (["MeetingTranscript", "MeetingAgenda"].includes(snapshot.sourceKind)) dependencies.set(`Meeting:${snapshot.sourceId}`, { kind: "Meeting", id: snapshot.sourceId });
@@ -88,7 +93,7 @@ export async function inspectStoredArtifactInputDependencyIdentities(db: Prisma.
         if (lineageContentFingerprint(input.kind, native) !== input.fingerprint) return false;
         visited.add(key); return true;
       }
-      if (!historical || historical.origin === "NATIVE_ORIGINAL") return false;
+      if (!historical || historical.origin === "NATIVE_ORIGINAL" || (historical.origin === "DERIVED" && !await hasCapturedEpochs(historical))) return false;
       origin = historical.origin; inputs = roots(historical.rootsJson);
       consumedEpochs = historical.epochProofVersion === 1 ? historical.permissionEpochsJson : null;
     }
@@ -98,7 +103,8 @@ export async function inspectStoredArtifactInputDependencyIdentities(db: Prisma.
     visited.add(key); return true;
   };
   const inputs = manifest && roots(manifest.rootsJson);
-  let complete = Boolean(manifest && /^[a-f0-9]{64}$/.test(manifest.contentHash) && inputs && manifest.origin === "DERIVED" && inputs.length);
+  let complete = Boolean(manifest && /^[a-f0-9]{64}$/.test(manifest.contentHash) && inputs && manifest.origin === "DERIVED" && inputs.length
+    && await hasCapturedEpochs(manifest));
   if (complete) for (const input of inputs!) if (!await visit(input, new Set(), manifest?.epochProofVersion === 1 ? manifest.permissionEpochsJson : null)) { complete = false; break; }
   return { complete, dependencies: [...dependencies.values()], manifestIdentity: manifest ? {
     id: manifest.id, revision: manifest.revision, contentHash: manifest.contentHash, origin: manifest.origin,

@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import { invariant } from "./errors";
 
-export const SOURCE_PERMISSION_POLICY_VERSION = "pun68-permissions-v1";
+export const SOURCE_PERMISSION_POLICY_VERSION = "pun68-permissions-v2";
 export type PermissionEpochIdentity = { kind: string; id: string };
 export type PermissionEpochProof = { version: 1; policyVersion: typeof SOURCE_PERMISSION_POLICY_VERSION;
   entries: Array<PermissionEpochIdentity & { epoch: string }> };
@@ -37,13 +37,17 @@ export function artifactPermissionEpochIdentities(kind: string, row: Record<stri
   if (kind === "WorkflowJobInput") add("WorkflowJobInput", row.id);
   add("Workspace", row.workspaceId);
   for (const key of ["ownerMemberId", "memberId", "authorMemberId", "recipientMemberId"]) add("Member", row[key]);
-  for (const key of ["userId", "authorUserId", "createdByUserId", "submittedByUserId", "requesterUserId", "localUserId", "selectedByUserId", "uploadedByUserId"]) {
+  for (const key of ["userId", "authorUserId", "createdByUserId", "submittedByUserId", "requesterUserId", "requestedByUserId", "localUserId", "selectedByUserId", "uploadedByUserId"]) {
     add("MemberUserPolicy", row[key]);
     add("WorkspaceSupportPolicy", row[key]);
   }
   if (kind === "Member") add("MemberUserPolicy", row.userId);
   if (kind === "RoleAssignment") { add("Member", row.memberId); add("MemberRolePolicy", row.memberId); add("Role", row.roleId); }
-  for (const key of ["circleId", "parentCircleId"]) add("Circle", row[key]);
+  for (const key of ["circleId", "parentCircleId", "targetCircleId"]) add("Circle", row[key]);
+  if (kind === "AdviceRequest") {
+    add("AdviceRequestRecipientsPolicy", row.id);
+    if (row.audienceType === "CIRCLE") add("CircleRolePolicy", row.targetCircleId);
+  }
   if (kind === "CircleAgentAssignment") add("AgentIdentity", row.agentIdentityId);
   for (const key of ["credentialId", "agentCredentialId"]) add("AgentCredential", row[key]);
   if (kind.startsWith("Finance") || row.accessDomain === "FINANCE") {
@@ -52,6 +56,7 @@ export function artifactPermissionEpochIdentities(kind: string, row: Record<stri
   if (kind.startsWith("Communication")) {
     add("CommunicationInstallation", row.installationId);
     add("CommunicationMessage", row.communicationMessageId);
+    if (kind === "CommunicationEntityLink") add("CommunicationMessage", row.messageId);
     add("IntegrationPolicy", "SLACK");
     if (typeof row.installationId === "string" && typeof row.externalChannelId === "string") {
       add("CommunicationChannelPolicy", JSON.stringify([row.installationId, row.externalChannelId]));

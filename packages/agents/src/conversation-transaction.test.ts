@@ -38,8 +38,16 @@ const fixture = vi.hoisted(() => {
         delegates.set(key, {
           findFirst: vi.fn(async (args) => find(args)[0] ?? null), findUnique: vi.fn(async (args) => find(args)[0] ?? null), findMany: vi.fn(async (args) => find(args)),
           create: vi.fn(async ({ data }) => {
-            const row = { id: `${table}-${++serial}`, createdAt: new Date("2026-10-13T12:00:00Z"), ...structuredClone(data) };
+            const row = { id: `${table}-${++serial}`, createdAt: new Date("2026-10-13T12:00:00Z"), ...(table === "brainSource" ? { accessDomain: "WORKSPACE" } : {}), ...structuredClone(data) };
             if (!tables.has(table)) tables.set(table, new Map()); tables.get(table)!.set(row.id, row); return structuredClone(row);
+          }),
+          createMany: vi.fn(async ({ data }) => {
+            if (!tables.has(table)) tables.set(table, new Map());
+            for (const input of data) {
+              const row = { id: `${table}-${++serial}`, createdAt: new Date("2026-10-13T12:00:00Z"), ...structuredClone(input) };
+              tables.get(table)!.set(row.id, row);
+            }
+            return { count: data.length };
           }),
           update: vi.fn(async ({ where, data }) => {
             const row = rows().find((entry) => matches(entry, where)); if (!row) throw new Error("Synthetic row unavailable");
@@ -68,8 +76,9 @@ vi.mock("@corgtex/domain", async () => ({ ...await import("../../domain/src/sour
 
 import { AppError } from "../../domain/src/errors";
 import { createConversationPromptInput, addConversationTurn } from "../../domain/src/conversations";
+import { ingestConversationOnDemandInTransaction } from "../../domain/src/conversation-brain";
 import { createConversationIngressInput } from "../../domain/src/conversation-ingress";
-import { captureArtifactInputProof, isArtifactInputProofReadable, withArtifactInputWriteFence } from "../../domain/src/source-lineage";
+import { captureArtifactInputProof, isArtifactInputProofReadable, recordArtifactInputLineage, withArtifactInputWriteFence } from "../../domain/src/source-lineage";
 import { mcpCredentialVersion } from "../../shared/src/mcp-context";
 import { prepareConversationInputs } from "./conversation-inputs";
 
@@ -116,6 +125,41 @@ describe("conversation native inputs and turns in caller-owned transactions", ()
       const turnRoots = await captureArtifactInputProof(alice, workspaceId, [{ kind: "ConversationTurn", id: turn.id }], tx);
       expect(await isArtifactInputProofReadable(alice, workspaceId, turnRoots, tx)).toBe(true);
       expect(fixture.membership.mock.calls.every(([params]) => params.tx === tx)).toBe(true);
+    } finally { fixture.boundary.rejectGlobal = false; }
+    expect(fixture.bases.primary.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("uses the caller transaction for nested prospect target membership with every global read forbidden", async () => {
+    const account = insert("crmAccount", { id: "synthetic-prospect-account", workspaceId, name: "Synthetic independent account", archivedAt: null });
+    await recordArtifactInputLineage({ tx, actor: alice, workspaceId, artifact: { kind: "CrmAccount", id: account.id }, content: account, origin: "HUMAN_ORIGINAL", inputs: [] });
+    const prospect = insert("crmProspectWorkspace", { id: "synthetic-prospect", crmWorkspaceId: workspaceId, accountId: account.id,
+      demoLeadId: null, targetWorkspaceId: "synthetic-ws-b", adminEmail: "alice@example.test", status: "PROVISIONED", provisionedAt: new Date() });
+    await recordArtifactInputLineage({ tx, actor: alice, workspaceId, artifact: { kind: "CrmProspectWorkspace", id: prospect.id }, content: prospect, origin: "HUMAN_ORIGINAL", inputs: [] });
+    fixture.membership.mockClear(); fixture.boundary.rejectGlobal = true;
+    try {
+      const roots = await captureArtifactInputProof(alice, workspaceId, [{ kind: "CrmProspectWorkspace", id: prospect.id }], tx);
+      expect(await isArtifactInputProofReadable(alice, workspaceId, roots, tx)).toBe(true);
+      expect(fixture.membership.mock.calls.some(([params]) => params.workspaceId === "synthetic-ws-b" && params.tx === tx)).toBe(true);
+      expect(fixture.membership.mock.calls.every(([params]) => params.tx === tx)).toBe(true);
+      fixture.memberships.delete("synthetic-ws-b:synthetic-alice");
+      expect(await isArtifactInputProofReadable(alice, workspaceId, roots, tx)).toBe(false);
+    } finally { fixture.boundary.rejectGlobal = false; }
+  });
+
+  it("captures publication title, body and complete roots before the first await without any global DB access", async () => {
+    const prompt = await createConversationPromptInput(alice, { workspaceId, conversationId: base.sessionId, content: base.userMessage, tx });
+    const lineageRoots = await captureArtifactInputProof(alice, workspaceId, [{ kind: "ConversationPromptInput", id: prompt.id }], tx);
+    const params = { workspaceId, title: "Exact synthetic title", content: "Exact synthetic body", lineageRoots: structuredClone(lineageRoots) };
+    fixture.boundary.rejectGlobal = true;
+    try {
+      const pending = ingestConversationOnDemandInTransaction(tx, alice, params);
+      params.title = "Mutated later title"; params.content = "Mutated later body"; params.lineageRoots[0].fingerprint = "stale";
+      const source = await pending;
+      expect(source).toMatchObject({ title: "Exact synthetic title", content: "Exact synthetic body" });
+      const roots = await captureArtifactInputProof(alice, workspaceId, [{ kind: "BrainSource", id: source.id }], tx);
+      expect(await isArtifactInputProofReadable(alice, workspaceId, roots, tx)).toBe(true);
+      expect(roots).toEqual(expect.arrayContaining(lineageRoots));
+      expect(size("auditLog")).toBe(1); expect(size("event")).toBe(1);
     } finally { fixture.boundary.rejectGlobal = false; }
     expect(fixture.bases.primary.$transaction).not.toHaveBeenCalled();
   });

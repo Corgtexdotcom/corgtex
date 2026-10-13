@@ -397,6 +397,13 @@ async function assertExecution(ctx: PendingOperationContext, operation: PendingO
     || state.owner.userId !== actor.user.id || operation.id !== state.operation.id || operationArgsHash(operation.toolName, operation.argsJson) !== state.argsHash) {
     throw new AppError(409, "CRM_EXECUTION_STALE", "CRM execution ownership changed.");
   }
+  // The earlier begin transaction cannot fence an effect transaction. Retain
+  // this exact owner's row lock through the effect/receipt commit so refresh,
+  // cancellation and competing finalization cannot replace its checked lease.
+  await tx.$queryRaw`SELECT id FROM "ConversationPendingOperation"
+    WHERE id = ${operation.id} AND "workspaceId" = ${state.owner.workspaceId}
+    AND "conversationId" = ${state.owner.sessionId} AND "userId" = ${state.owner.userId}
+    AND "agentKey" = ${state.owner.agentKey} FOR UPDATE`;
   const row = await scopedRow(ctx, operation.id, tx);
   const finishing = state.finalizing?.tx === tx ? state.finalizing : undefined;
   if (!row || !validArgs(row) || row.argsHash !== state.argsHash || (finishing
