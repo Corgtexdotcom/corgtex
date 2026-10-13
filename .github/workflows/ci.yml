@@ -186,6 +186,12 @@ jobs:
       - name: Test isolated tenant transfer
         run: npm run test:tenant-transfer
 
+      - name: Test PostgreSQL 18 to 16 NOT NULL compatibility
+        timeout-minutes: 10
+        run: npm run test:migration:pg18-pg16-notnull
+        env:
+          CI_PGVECTOR_PG18_CONFIG_ID: ${{ steps.pgvector.outputs.pg18-config-id }}
+
       - name: Remove isolated PostgreSQL fixture
         if: always()
         run: docker rm --force --volumes corgtex-ci-postgres || true
