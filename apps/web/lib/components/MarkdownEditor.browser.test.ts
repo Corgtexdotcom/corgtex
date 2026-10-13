@@ -10,8 +10,11 @@ type FixtureProps = {
   value?: string;
   resetKey?: string;
   disabled?: boolean;
+  required?: boolean;
   ariaLabel?: string;
   refKind?: "object";
+  otherRequired?: boolean;
+  secondEditor?: boolean;
 };
 type FixtureWindow = typeof window & {
   fixture: {
@@ -21,6 +24,7 @@ type FixtureWindow = typeof window & {
     refNodes: Array<HTMLTextAreaElement | null>;
     textarea: HTMLTextAreaElement | null;
     objectRef: { current: HTMLTextAreaElement | null };
+    submissions: Array<FormDataEntryValue | null>;
     configure: (props: FixtureProps) => void;
   };
 };
@@ -51,7 +55,7 @@ describe.runIf(process.env.MARKDOWN_EDITOR_BROWSER_QA === "1")("MarkdownEditor c
           import { NextIntlClientProvider } from "next-intl";
           import { marked } from "marked";
           import { MarkdownEditor } from "./lib/components/MarkdownEditor";
-          const fixture = window.fixture = { calls: [], changes: [], events: [], refNodes: [], objectRef: React.createRef() };
+          const fixture = window.fixture = { calls: [], changes: [], events: [], refNodes: [], submissions: [], objectRef: React.createRef() };
           const parse = marked.parse.bind(marked);
           marked.parse = (...args) => {
             const start = performance.now();
@@ -64,7 +68,8 @@ describe.runIf(process.env.MARKDOWN_EDITOR_BROWSER_QA === "1")("MarkdownEditor c
             const [props, setProps] = useState({ defaultValue: "Synthetic default", resetKey: "one" });
             fixture.configure = patch => setProps(current => ({ ...current, ...patch }));
             return <NextIntlClientProvider locale="en" timeZone="UTC" messages={${JSON.stringify({ shared: { markdownEditor: messages } })}}>
-              <form onSubmit={event => event.preventDefault()}>
+              <form onSubmit={event => { event.preventDefault(); fixture.submissions.push(new FormData(event.currentTarget).get("bodyMd")); }}>
+                {props.otherRequired && <label>Synthetic title<input name="title" required /></label>}
                 <label htmlFor="body">Synthetic body</label>
                 <MarkdownEditor id="body" name="bodyMd" required rows={8}
                   ariaAutocomplete="list" ariaControls="mentions" ariaActivedescendant="mention-1"
@@ -76,6 +81,8 @@ describe.runIf(process.env.MARKDOWN_EDITOR_BROWSER_QA === "1")("MarkdownEditor c
                     fixture.changes.push({ value, eventType: event?.type });
                     if (props.value !== undefined) setProps(current => ({ ...current, value }));
                   }} />
+                {props.secondEditor && <><label htmlFor="second-body">Second synthetic body</label><MarkdownEditor id="second-body" name="secondBodyMd" defaultValue="" required /></>}
+                <button type="submit">Save synthetic draft</button>
               </form>
             </NextIntlClientProvider>;
           }
@@ -112,6 +119,7 @@ describe.runIf(process.env.MARKDOWN_EDITOR_BROWSER_QA === "1")("MarkdownEditor c
     page = await context.newPage();
     page.setDefaultTimeout(15_000);
     page.on("pageerror", (error) => errors.push(error.message));
+    page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
   });
 
   beforeEach(async () => {
@@ -253,6 +261,108 @@ describe.runIf(process.env.MARKDOWN_EDITOR_BROWSER_QA === "1")("MarkdownEditor c
     await configure({ disabled: true, ariaLabel: "Disabled draft" });
     expect(await page.getByRole("textbox", { name: "Disabled draft" }).isDisabled()).toBe(true);
     expect(await page.evaluate(() => new FormData(document.querySelector("form")!).has("bodyMd"))).toBe(false);
+  });
+
+  for (const controlled of [false, true]) {
+    it(`prevents disabled ${controlled ? "controlled" : "uncontrolled"} toolbar and paste edits, then supports re-enabling`, async () => {
+      await configure(controlled ? { value: "abc", disabled: true } : { defaultValue: "abc", resetKey: "disabled", disabled: true });
+      const buttons = page.locator(".md-editor-toolbar button");
+      expect(await buttons.count()).toBe(9);
+      await page.locator("textarea").evaluate((node) => (node as HTMLTextAreaElement).setSelectionRange(0, 3));
+      for (const button of await buttons.all()) {
+        await button.evaluate((node) => (node as HTMLButtonElement).click());
+        await page.evaluate(() => new Promise(requestAnimationFrame));
+      }
+      const pastePrevented = await page.locator("textarea").evaluate((node) => {
+        const clipboardData = new DataTransfer();
+        clipboardData.setData("text/html", "<strong>Disabled paste</strong>");
+        const event = new ClipboardEvent("paste", { clipboardData, bubbles: true, cancelable: true });
+        node.dispatchEvent(event);
+        return event.defaultPrevented;
+      });
+      await page.evaluate(() => new Promise(requestAnimationFrame));
+      const snapshot = await page.evaluate(() => {
+        const fixture = (window as FixtureWindow).fixture;
+        return { value: document.querySelector("textarea")!.value, changes: fixture.changes.length,
+          disabledButtons: [...document.querySelectorAll<HTMLButtonElement>(".md-editor-toolbar button")].filter((button) => button.disabled).length };
+      });
+      measurements.push({ kind: "disabled", controlled, ...snapshot, pastePrevented });
+      expect(snapshot).toEqual({ value: "abc", changes: 0, disabledButtons: 9 });
+      expect(pastePrevented).toBe(false);
+      expect(await takeCalls()).toEqual([]);
+      await page.screenshot({ path: fileURLToPath(new URL(`disabled-${controlled ? "controlled" : "uncontrolled"}.png`, output)) });
+      await preview();
+      expect(await page.locator(".md-editor-preview").innerText()).toBe("abc");
+      await write();
+      await configure({ disabled: false });
+      expect(await page.getByRole("button", { name: "Bold", exact: true }).isEnabled()).toBe(true);
+      await page.getByRole("button", { name: "Bold", exact: true }).click();
+      await page.evaluate(() => new Promise(requestAnimationFrame));
+      expect(await page.locator("textarea").inputValue()).toBe("**abc**");
+      expect(await page.evaluate(() => (window as FixtureWindow).fixture.changes.length)).toBe(1);
+    });
+
+    it(`reveals an invalid required ${controlled ? "controlled" : "uncontrolled"} draft from Preview for native correction and submission`, async () => {
+      await configure(controlled ? { value: "", resetKey: "validation" } : { defaultValue: "", resetKey: "validation" });
+      await preview();
+      await page.getByRole("button", { name: "Save synthetic draft" }).click();
+      await page.evaluate(() => new Promise(requestAnimationFrame));
+      const snapshot = {
+        visible: await page.locator("textarea").isVisible(),
+        ...await page.evaluate(() => {
+          const fixture = (window as FixtureWindow).fixture;
+          const textarea = document.querySelector("textarea")!;
+          return { value: textarea.value, focused: document.activeElement === textarea, invalid: textarea.validity.valueMissing,
+            message: textarea.validationMessage, changes: fixture.changes.length, submissions: fixture.submissions.length,
+            sameNode: fixture.textarea === textarea, refCount: fixture.refNodes.length };
+        }),
+      };
+      measurements.push({ kind: "required-preview", controlled, ...snapshot });
+      expect(snapshot).toMatchObject({ visible: true, value: "", focused: true, invalid: true, changes: 0, submissions: 0, sameNode: true, refCount: 1 });
+      expect(snapshot.message).not.toBe("");
+      expect(await page.locator(".md-editor-preview").count()).toBe(0);
+      expect(await takeCalls()).toEqual([]);
+      await page.screenshot({ path: fileURLToPath(new URL(`required-invalid-${controlled ? "controlled" : "uncontrolled"}.png`, output)) });
+      await input("Ready synthetic draft");
+      await preview();
+      await page.getByRole("button", { name: "Save synthetic draft" }).click();
+      expect(await page.evaluate(() => (window as FixtureWindow).fixture.submissions)).toEqual(["Ready synthetic draft"]);
+      await page.evaluate(() => document.querySelector("form")!.reset());
+      await page.evaluate(() => new Promise(requestAnimationFrame));
+      expect(await page.locator("textarea").inputValue()).toBe(controlled ? "Ready synthetic draft" : "");
+      expect(await page.locator(".md-editor-preview").count()).toBe(controlled ? 1 : 0);
+    });
+  }
+
+  it("submits an optional empty draft from Preview without exposing validation", async () => {
+    await configure({ defaultValue: "", resetKey: "optional", required: false });
+    await preview();
+    await page.getByRole("button", { name: "Save synthetic draft" }).click();
+    expect(await page.evaluate(() => (window as FixtureWindow).fixture.submissions)).toEqual([""]);
+    expect(await page.locator(".md-editor-preview").count()).toBe(1);
+    expect(await page.locator("textarea").isVisible()).toBe(false);
+  });
+
+  it("preserves native first-invalid-field focus while revealing the required draft", async () => {
+    await configure({ defaultValue: "", resetKey: "first-invalid", otherRequired: true });
+    await preview();
+    await page.getByRole("button", { name: "Save synthetic draft" }).click();
+    await page.evaluate(() => new Promise(requestAnimationFrame));
+    expect(await page.locator("textarea").isVisible()).toBe(true);
+    expect(await page.getByRole("textbox", { name: "Synthetic title" }).evaluate((node) => document.activeElement === node)).toBe(true);
+    expect(await page.evaluate(() => (window as FixtureWindow).fixture.submissions)).toEqual([]);
+  });
+
+  it("reveals two invalid previews and focuses the first required editor", async () => {
+    await configure({ defaultValue: "", resetKey: "two-editors", secondEditor: true });
+    for (const button of await page.getByRole("button", { name: "Review", exact: true }).all()) await button.click();
+    await page.getByRole("button", { name: "Save synthetic draft" }).click();
+    await page.evaluate(() => new Promise(requestAnimationFrame));
+    expect(await page.locator(".md-editor-preview").count()).toBe(0);
+    expect(await page.locator("#body").isVisible()).toBe(true);
+    expect(await page.locator("#second-body").isVisible()).toBe(true);
+    expect(await page.locator("#body").evaluate((node) => document.activeElement === node)).toBe(true);
+    expect(await page.evaluate(() => (window as FixtureWindow).fixture.submissions)).toEqual([]);
   });
 
   it("preserves formatting selection, focus and fallback text without hidden parsing", async () => {

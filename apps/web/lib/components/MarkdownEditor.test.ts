@@ -58,4 +58,11 @@ describe("MarkdownEditor Write rendering", () => {
     expect(html).toContain('aria-label="bold"');
     expect(html).not.toContain("Unused default");
   });
+
+  it("exposes all formatting actions as disabled when editing is disabled", () => {
+    const html = renderToStaticMarkup(createElement(MarkdownEditor, { name: "bodyMd", defaultValue: "Synthetic draft", disabled: true }));
+    const formattingButtons = [...html.matchAll(/<button\b[^>]*aria-label=[^>]*>/g)].map((match) => match[0]);
+    expect(formattingButtons).toHaveLength(9);
+    expect(formattingButtons.every((button) => button.includes(" disabled"))).toBe(true);
+  });
 });
