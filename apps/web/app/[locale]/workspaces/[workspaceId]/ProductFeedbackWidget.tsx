@@ -1,6 +1,5 @@
 "use client";
 
-import html2canvas from "html2canvas";
 import { Camera, ImagePlus, MessageSquareText, Trash2 } from "lucide-react";
 import { usePathname, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
@@ -42,10 +41,13 @@ export function ProductFeedbackWidget({
 }) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const search = searchParams?.toString() ?? "";
   const t = useTranslations("productFeedback");
   const { addToast } = useToast();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const triedAutoCaptureRef = useRef(false);
+  const pendingAutoCaptureRef = useRef<number | null>(null);
+  const activeCaptureRef = useRef<object | null>(null);
   const screenshotsRef = useRef<ScreenshotDraft[]>([]);
   const [open, setOpen] = useState(false);
   const [message, setMessage] = useState("");
@@ -69,6 +71,20 @@ export function ProductFeedbackWidget({
   useEffect(() => () => {
     screenshotsRef.current.forEach((item) => URL.revokeObjectURL(item.previewUrl));
   }, []);
+
+  useEffect(() => {
+    setIsCapturing(false);
+    return () => {
+      const frame = pendingAutoCaptureRef.current;
+      if (frame !== null) {
+        window.cancelAnimationFrame(frame);
+        pendingAutoCaptureRef.current = null;
+        triedAutoCaptureRef.current = true;
+      }
+      // A late module, canvas or blob belongs to the feedback session that started it.
+      activeCaptureRef.current = null;
+    };
+  }, [open, pathname, search, workspaceId]);
 
   const addScreenshots = useCallback((files: File[]) => {
     setError(null);
@@ -102,10 +118,15 @@ export function ProductFeedbackWidget({
   }, [t]);
 
   const captureScreenshot = useCallback(async () => {
-    if (screenshots.length >= MAX_SCREENSHOTS || typeof window === "undefined") return;
+    if (!open || activeCaptureRef.current || screenshots.length >= MAX_SCREENSHOTS || typeof window === "undefined") return;
+    const request = {};
+    activeCaptureRef.current = request;
+    const isCurrentCapture = () => activeCaptureRef.current === request;
     setError(null);
     setIsCapturing(true);
     try {
+      const { default: html2canvas } = await import("html2canvas");
+      if (!isCurrentCapture()) return;
       const canvas = await html2canvas(document.body, {
         backgroundColor: null,
         height: window.innerHeight,
@@ -119,7 +140,9 @@ export function ProductFeedbackWidget({
         x: window.scrollX,
         y: window.scrollY,
       });
+      if (!isCurrentCapture()) return;
       const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png", 0.92));
+      if (!isCurrentCapture()) return;
       if (!blob) {
         setError(t("captureFailed"));
         return;
@@ -127,11 +150,14 @@ export function ProductFeedbackWidget({
       const file = new File([blob], `corgtex-feedback-${Date.now()}.png`, { type: "image/png" });
       addScreenshots([file]);
     } catch {
-      setError(t("captureFailed"));
+      if (isCurrentCapture()) setError(t("captureFailed"));
     } finally {
-      setIsCapturing(false);
+      if (isCurrentCapture()) {
+        activeCaptureRef.current = null;
+        setIsCapturing(false);
+      }
     }
-  }, [addScreenshots, screenshots.length, t]);
+  }, [addScreenshots, open, screenshots.length, t]);
 
   useEffect(() => {
     if (!open) {
@@ -139,10 +165,17 @@ export function ProductFeedbackWidget({
       return;
     }
     if (triedAutoCaptureRef.current) return;
-    triedAutoCaptureRef.current = true;
-    window.requestAnimationFrame(() => {
+    const frame = window.requestAnimationFrame(() => {
+      if (pendingAutoCaptureRef.current !== frame) return;
+      pendingAutoCaptureRef.current = null;
+      triedAutoCaptureRef.current = true;
       void captureScreenshot();
     });
+    pendingAutoCaptureRef.current = frame;
+    return () => {
+      window.cancelAnimationFrame(frame);
+      if (pendingAutoCaptureRef.current === frame) pendingAutoCaptureRef.current = null;
+    };
   }, [captureScreenshot, open]);
 
   function removeScreenshot(id: string) {
