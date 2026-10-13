@@ -184,13 +184,15 @@ export function MarkdownEditor({
           <button type="button" title={t("code")} aria-label={t("code")} onClick={() => wrapSelection("`")}>{"{}"}</button>
         </div>
       )}
-      <div className="md-editor-preview" style={{ display: preview ? "block" : "none" }}>
-        {editorValue ? (
-          <MarkdownRenderer markdown={editorValue} variant="document" />
-        ) : (
-          <span className="muted">{t("emptyPreview")}</span>
-        )}
-      </div>
+      {preview && (
+        <div className="md-editor-preview">
+          {editorValue ? (
+            <MarkdownRenderer markdown={editorValue} variant="document" />
+          ) : (
+            <span className="muted">{t("emptyPreview")}</span>
+          )}
+        </div>
+      )}
       <textarea
         id={id}
         ref={setTextareaRef}
