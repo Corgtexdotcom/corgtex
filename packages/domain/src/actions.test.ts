@@ -82,6 +82,7 @@ vi.mock("./events", () => ({
 }));
 
 vi.mock("./source-lineage", () => ({
+  isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
   captureArtifactInputProof: vi.fn().mockResolvedValue([]),
   readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) =>
     new Set(records.map((record: { id: string }) => record.id))),
@@ -98,6 +99,32 @@ const actor: AppActor = {
 };
 
 describe("action domain lifecycle", () => {
+  it.each(["credential-a", "credential-b"])("rejects private creation by %s before duplicate reads or writes", async credentialId => {
+    const {createAction} = await import("./actions");
+    const credential = {kind: "agent", authProvider: "credential", credentialId, workspaceIds: ["workspace-1"], scopes: ["support:write"]} as any;
+    await expect(createAction(credential, {workspaceId: "workspace-1", title: "Private", authorMemberId: "member-owner"})).rejects.toMatchObject({code: "PRIVATE_AGENT_ARTIFACT_UNSUPPORTED"});
+    expect(prismaMock.action.create).not.toHaveBeenCalled();
+    expect(prismaMock.action.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.action.findFirst).not.toHaveBeenCalled();
+  });
+  it("rejects public agent creation without complete inputs before looking for duplicates", async () => {
+    const {createAction} = await import("./actions");
+    await expect(createAction({kind: "agent", workspaceIds: ["workspace-1"]} as any, {...{workspaceId: "workspace-1", title: "Private", authorMemberId: "member-owner"}, isPrivate: false}))
+      .rejects.toMatchObject({code: "UNKNOWN_LINEAGE"});
+    expect(prismaMock.action.create).not.toHaveBeenCalled();
+    expect(prismaMock.action.findMany).not.toHaveBeenCalled();
+  });
+
+  it.each(["credential-a", "credential-b"])("does not return a hidden private action through a no-op update by %s", async credentialId => {
+    const {updateAction} = await import("./actions");
+    const credential = {kind: "agent", authProvider: "credential", credentialId, workspaceIds: ["workspace-1"], scopes: ["actions:write"]} as any;
+    prismaMock.action.findUnique.mockResolvedValue({id: "private", workspaceId: "workspace-1", status: "DRAFT", isPrivate: true,
+      title: "Private title", bodyMd: "Private text", lineageDenied: true, archivedAt: null});
+    await expect(updateAction(credential, {workspaceId: "workspace-1", actionId: "private"})).rejects.toMatchObject({code: "NOT_FOUND"});
+    expect(prismaMock.action.update).not.toHaveBeenCalled();
+    expect(readableArtifactIds).toHaveBeenCalledWith(credential, "workspace-1", "Action", [expect.objectContaining({id: "private"})], prismaMock);
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(captureArtifactInputProof).mockReset().mockResolvedValue([]);
@@ -166,11 +193,11 @@ describe("action domain lifecycle", () => {
     const agent: AppActor = { kind: "agent", authProvider: "credential", label: "Test agent", workspaceIds: ["workspace-1"] };
     prismaMock.member.findFirst.mockResolvedValueOnce({ id: "member-1", userId: "author-1" });
     const source = actionRequestSource("MCP_REQUEST", "agent-1", "call-1");
-    await createAction(agent, { workspaceId: "workspace-1", title: "Follow up", authorMemberId: "member-1", source });
+    await createAction(agent, { workspaceId: "workspace-1", title: "Follow up", authorMemberId: "member-1", source, isPrivate: false, assigneeMemberId: "member-2", lineageRoots: [{kind: "BrainSource", id: "source-1", fingerprint: "current"}] });
     const claim = prismaMock.actionCreationSource.create.mock.calls[0][0].data;
     prismaMock.actionCreationSource.findUnique.mockResolvedValueOnce({ actionId: "action-1", payloadHash: claim.payloadHash });
 
-    await expect(createAction(agent, { workspaceId: "workspace-1", title: "Follow up", authorMemberId: "member-2", source }))
+    await expect(createAction(agent, { workspaceId: "workspace-1", title: "Follow up", authorMemberId: "member-2", source, isPrivate: false, assigneeMemberId: "member-2", lineageRoots: [{kind: "BrainSource", id: "source-1", fingerprint: "current"}] }))
       .rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT", status: 409 });
     expect(prismaMock.action.create).toHaveBeenCalledTimes(1);
   });
@@ -1988,6 +2015,19 @@ describe("action domain lifecycle", () => {
     await expect(attachActionReferenceDocument(actor, { workspaceId: "workspace-1", actionId: "action-1", documentId: "doc-1" }))
       .rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
     expect(prismaMock.workItemEvidence.createMany).not.toHaveBeenCalled();
+  });
+
+  it("rechecks the admitted public receipt inside the creation transaction", async () => {
+    const {isArtifactInputProofReadable} = await import("./source-lineage");
+    vi.mocked(isArtifactInputProofReadable).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    const {createAction} = await import("./actions");
+    const agent = {kind: "agent", workspaceIds: ["workspace-1"]} as any;
+    await expect(createAction(agent, {workspaceId: "workspace-1", title: "Public", isPrivate: false,
+      assigneeMemberId: "member-2", lineageRoots: [{kind: "BrainSource", id: "input", fingerprint: "current"}]}))
+      .rejects.toMatchObject({code: "SOURCE_CHANGED"});
+    expect(isArtifactInputProofReadable).toHaveBeenLastCalledWith(agent, "workspace-1", expect.any(Array), prismaMock);
+    expect(prismaMock.action.create).not.toHaveBeenCalled();
+    expect(appendEvents).not.toHaveBeenCalled();
   });
 
   it("records a supplied creation receipt before publishing side effects in the same transaction", async () => {

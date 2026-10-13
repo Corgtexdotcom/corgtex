@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { installSourcePermissionEpochFixture } from "../../domain/src/source-permission-epochs.test-fixture";
 import type { AppActor } from "@corgtex/shared";
 
 const fixture = vi.hoisted(() => {
@@ -79,7 +80,7 @@ vi.mock("../../domain/src/auth", () => ({ requireWorkspaceMembership: vi.fn(asyn
 vi.mock("../../domain/src/brain-access", () => ({ resolveKnowledgeAccessDomains: vi.fn(async (actor: any) => actor.user.id === "beta" ? ["PUBLIC", "FINANCE"] : ["PUBLIC"]) }));
 vi.mock("../../domain/src/role-onboarding", () => ({ closeRoleLifecycleForMember: vi.fn(), closeRoleLifecycleForCircleTree: vi.fn() }));
 vi.mock("../../domain/src/self-serve-ops", () => ({ maybeCaptureSelfServeSetupEmail: vi.fn() }));
-import { captureArtifactInputProof, recordArtifactInputLineage, readableArtifactIds, type LineageKind } from "../../domain/src/source-lineage";
+import { recordArtifactInputLineage, type LineageKind } from "../../domain/src/source-lineage";
 
 const alpha = { kind: "user", user: { id: "alpha", email: "alpha@example.test", displayName: "Alpha" } } as AppActor;
 const beta = { kind: "user", user: { id: "beta", email: "beta@example.test", displayName: "Beta" } } as AppActor;
@@ -117,7 +118,13 @@ async function seed() {
   add("action", { ...publicAction, id: "foreign-action", workspaceId: "ws-b", title: "Foreign workspace body" });
   return { privateSource, publicAction, derivedAction, publicCircle, privateCircle, publicRole, privateRole };
 }
-beforeEach(() => { for (const kind of Object.keys(fixture.rows)) fixture.rows[kind] = []; vi.clearAllMocks(); });
+beforeEach(() => {
+  for (const kind of Object.keys(fixture.rows)) fixture.rows[kind] = [];
+  vi.clearAllMocks();
+  fixture.prisma.$executeRaw.mockReset().mockResolvedValue(1);
+  fixture.prisma.$queryRaw.mockReset().mockResolvedValue([]);
+  installSourcePermissionEpochFixture(fixture.prisma);
+});
 vi.mock("@corgtex/domain", async () => ({
   ...await import("../../domain/src/errors"), ...await import("../../domain/src/auth"),
   ...await import("../../domain/src/privacy"), ...await import("../../domain/src/source-scoped-read"),

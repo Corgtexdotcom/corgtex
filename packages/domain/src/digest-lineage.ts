@@ -1,6 +1,7 @@
 import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { captureArtifactInputProof, isArtifactInputProofReadable, type LineageInput, type LineageKind, type LineageRoot } from "./source-lineage";
+import { mergePermissionEpochProofs } from "./source-permission-epochs";
 
 export function mergeArtifactInputProofs(...proofs: ReadonlyArray<readonly LineageRoot[]>): LineageRoot[] {
   const roots = new Map<string, LineageRoot>();
@@ -8,7 +9,8 @@ export function mergeArtifactInputProofs(...proofs: ReadonlyArray<readonly Linea
     const key = `${root.kind}:${root.id}`;
     const previous = roots.get(key);
     invariant(!previous || previous.fingerprint === root.fingerprint, 409, "SOURCE_CHANGED", "Digest inputs changed during collection.");
-    roots.set(key, root);
+    const permissionEpochs = mergePermissionEpochProofs(previous?.permissionEpochs, root.permissionEpochs);
+    roots.set(key, permissionEpochs ? { ...root, permissionEpochs } : root);
   }
   return [...roots.values()];
 }

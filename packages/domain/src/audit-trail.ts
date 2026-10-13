@@ -3,6 +3,8 @@ import type { AppActor } from "@corgtex/shared";
 import { Prisma } from "@prisma/client";
 import { redactAgentRunContent } from "./agent-runs";
 import { requireWorkspaceMembership } from "./auth";
+import { invariant } from "./errors";
+import { readableArtifactIds } from "./source-lineage";
 
 export async function recordAudit(
   tx: Prisma.TransactionClient,
@@ -134,17 +136,21 @@ export async function getAgentRunTrace(actor: AppActor, workspaceId: string, age
 export async function getModelUsageSummary(actor: AppActor, workspaceId: string, opts?: {
   periodDays?: number;
 }) {
-  await requireWorkspaceMembership({ actor, workspaceId });
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  invariant(actor.kind === "user" && membership?.role === "ADMIN", 403, "FORBIDDEN", "Model usage costs require a current workspace administrator.");
 
   const periodDays = opts?.periodDays ?? 30;
   const since = new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000);
 
-  const usages = await prisma.modelUsage.findMany({
+  const candidates = await prisma.modelUsage.findMany({
     where: {
       workspaceId,
       createdAt: { gte: since },
     },
     select: {
+      id: true,
+      workspaceId: true,
+      agentRunId: true,
       provider: true,
       model: true,
       taskType: true,
@@ -154,14 +160,19 @@ export async function getModelUsageSummary(actor: AppActor, workspaceId: string,
       estimatedCostUsd: true,
       billableCostUsd: true,
       createdAt: true,
-      agentRun: {
-        select: {
-          agentKey: true,
-        },
-      },
+      agentRun: true,
     },
     orderBy: { createdAt: "desc" },
+    take: 5001,
   });
+  invariant(candidates.length <= 5000, 409, "SOURCE_READ_SCAN_LIMIT", "Model usage period exceeds the safe scan limit; choose a shorter period.");
+  const costRows = candidates.map(({ id, workspaceId: rowWorkspaceId, estimatedCostUsd, billableCostUsd, createdAt }) =>
+    ({ id, workspaceId: rowWorkspaceId, estimatedCostUsd, billableCostUsd, createdAt }));
+  const readableCosts = await readableArtifactIds(actor, workspaceId, "ModelUsageCost", costRows);
+  const runs = [...new Map(candidates.flatMap(row => row.agentRun ? [[row.agentRun.id, row.agentRun] as const] : [])).values()];
+  const readableRuns = await readableArtifactIds(actor, workspaceId, "AgentRun", runs);
+  const usages = candidates.filter(row => readableCosts.has(row.id)
+    && (!row.agentRunId || (row.agentRun?.id === row.agentRunId && readableRuns.has(row.agentRunId))));
 
   // Aggregate by model
   const byModel = new Map<string, {

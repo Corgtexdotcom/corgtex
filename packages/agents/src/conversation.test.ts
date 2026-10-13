@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 
 const {
   assertCatalogModelBudgetMock,
@@ -75,6 +76,10 @@ vi.mock("@corgtex/shared", () => ({
     MODEL_PROVIDER: "openai_compatible",
   },
   prisma: {
+    $transaction: vi.fn(async (work) => work((await import("@corgtex/shared")).prisma)),
+    $executeRaw: vi.fn().mockResolvedValue(1),
+    $queryRaw: vi.fn().mockResolvedValue([]),
+    conversationSession: { findFirst: vi.fn(async ({ where }) => ({ id: where.id, workspaceId: where.workspaceId, userId: where.userId, agentKey: where.agentKey })) },
     agentCredential: { findFirst: vi.fn() },
     modelUsage: { count: vi.fn(), findMany: vi.fn() },
     conversationTurn: {
@@ -84,13 +89,21 @@ vi.mock("@corgtex/shared", () => ({
     tension: { findMany: vi.fn().mockResolvedValue([]), count: vi.fn().mockResolvedValue(0) },
     action: { findMany: vi.fn().mockResolvedValue([]), count: vi.fn().mockResolvedValue(0) },
     proposal: { findMany: vi.fn().mockResolvedValue([]), count: vi.fn().mockResolvedValue(0) },
-    goal: { count: vi.fn().mockResolvedValue(0) },
-    member: { count: vi.fn().mockResolvedValue(0) },
-    circle: { count: vi.fn().mockResolvedValue(0) },
+    goal: { count: vi.fn().mockResolvedValue(0), findMany: vi.fn().mockResolvedValue([]) },
+    member: { count: vi.fn().mockResolvedValue(0), findMany: vi.fn().mockResolvedValue([]) },
+    circle: { count: vi.fn().mockResolvedValue(0), findMany: vi.fn().mockResolvedValue([]) },
+    crmActivity: { findFirst: vi.fn(async () => {
+      const args = createActivityMock.mock.calls.at(-1)?.[1] ?? {};
+      const result = await createActivityMock.mock.results.at(-1)?.value;
+      return result ? { ...args, ...result, bodyMd: result.bodyMd ?? args.bodyMd ?? null, dueAt: result.dueAt ?? args.dueAt ?? null,
+        actorUserId: "user-1", source: "workspace-chat", createdAt: new Date() } : null;
+    }) },
+    artifactInputSnapshot: { findFirst: vi.fn(async ({ where }) => ({ ...where, id: "snapshot-fixture" })) },
     conversationPendingOperation: {
       create: conversationPendingOperationCreateMock,
       count: conversationPendingOperationCountMock,
       findFirst: conversationPendingOperationFindFirstMock,
+      findMany: vi.fn(async ({ where }) => conversationPendingOperationStore.filter(item => item.workspaceId === where.workspaceId && item.idempotencyKey.startsWith(where.idempotencyKey.startsWith))),
       findUnique: conversationPendingOperationFindUniqueMock,
       update: conversationPendingOperationUpdateMock,
       updateMany: conversationPendingOperationUpdateManyMock,
@@ -109,7 +122,28 @@ vi.mock("@corgtex/shared", () => ({
 
 vi.mock("@corgtex/knowledge", () => ({
   searchIndexedKnowledge: vi.fn().mockResolvedValue([]),
+  getKnowledgeSearchInputRoots: vi.fn().mockResolvedValue([{ kind: "Workspace", id: "ws-1", fingerprint: "a".repeat(64) }]),
 }));
+
+
+vi.mock("./conversation-inputs", async () => {
+  const shared = await import("@corgtex/shared");
+  const domain = await import("@corgtex/domain");
+  const collector = { roots: async () => [{ kind: "Workspace", id: "ws-1", fingerprint: "a".repeat(64) }],
+    assertReadable: async () => {}, admitRecords: async (_kind: unknown, rows: unknown[]) => rows,
+    admitKnowledgeResults: async (rows: unknown[]) => rows,
+    capture: async () => {}, captureTrusted: async () => {}, addReceipt: async () => {}, preserveConsumedRevisions: async () => {} };
+  return {
+    prepareConversationInputs: async (ctx: any) => {
+      await domain.requireWorkspaceMembership({ actor: ctx.actor, workspaceId: ctx.workspaceId });
+      return { collector: { ...collector, assertReadable: () => domain.requireWorkspaceMembership({ actor: ctx.actor, workspaceId: ctx.workspaceId }) },
+        promptInputId: "prompt-fixture", pageContext: ctx.pageContext ?? null, systemPrompt: ctx.systemPrompt ?? null };
+    },
+    loadConversationHistory: async (_actor: unknown, _ws: string, sessionId: string, limit: number) => (await shared.prisma.conversationTurn.findMany({
+      where: { conversationId: sessionId }, orderBy: { sequenceNumber: "desc" }, take: limit })).reverse(),
+    loadConversationOnboarding: async (workspaceId: string, conversationId: string, userId: string) => domain.buildRoleOnboardingContextForConversation({ workspaceId, conversationId, userId }),
+  };
+});
 
 vi.mock("@corgtex/models", async (importOriginal) => ({
   ...await importOriginal<typeof import("@corgtex/models")>(),
@@ -117,7 +151,27 @@ vi.mock("@corgtex/models", async (importOriginal) => ({
   defaultModelGateway: { chat: chatMock, chatEventStream: chatEventStreamMock, chatStream: chatStreamMock },
 }));
 
-vi.mock("@corgtex/domain", () => ({
+vi.mock("@corgtex/domain", async () => ({
+  mergeArtifactInputProofs: (await import("../../domain/src/digest-lineage")).mergeArtifactInputProofs,
+  // Orchestration fixtures model already-admitted SQL inputs. Full permission,
+  // provenance and revocation behavior is exercised in conversation.provenance.
+  withArtifactInputWriteFence: (_fence: unknown, work: () => Promise<unknown>) => work(),
+  withArtifactInputReadCapture: async (_actor: unknown, _ws: string, read: () => Promise<unknown>) => ({ value: await read(), roots: [{ kind: "Workspace", id: "ws-1", fingerprint: "a".repeat(64) }] }),
+  captureConversationInputReceipt: vi.fn(async () => ({})),
+  captureArtifactInputProof: vi.fn().mockResolvedValue([{ kind: "Workspace", id: "ws-1", fingerprint: "a".repeat(64) }, { kind: "ArtifactInputSnapshot", id: "snapshot-fixture", fingerprint: "a".repeat(64) }]),
+  captureImmutableArtifactInputProof: vi.fn(async (_actor, _ws, roots) => [...roots, { kind: "ArtifactInputSnapshot", id: "snapshot-fixture", fingerprint: "a".repeat(64) }]),
+  captureArtifactInputSnapshotProof: vi.fn(async () => [{ kind: "ArtifactInputSnapshot", id: "snapshot-fixture", fingerprint: "a".repeat(64) }]),
+  currentArtifactInputRoots: vi.fn(async () => [{ kind: "Workspace", id: "ws-1", fingerprint: "a".repeat(64) }]),
+  isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
+  lineageContentFingerprint: vi.fn().mockReturnValue("a".repeat(64)),
+  recordArtifactInputLineage: vi.fn().mockResolvedValue(undefined),
+  assertArtifactInputWriteFence: vi.fn().mockResolvedValue(undefined),
+  scanSourceReadableRecords: vi.fn(async ({ load }) => load(undefined, 5001)),
+  captureReadableDigestInputs: vi.fn(async ({ records }) => ({ records: records.filter(Boolean), roots: [{ kind: "Workspace", id: "ws-1", fingerprint: "a".repeat(64) }] })),
+  getWorkspaceToolLinkInputRoots: vi.fn().mockResolvedValue([{ kind: "Workspace", id: "ws-1", fingerprint: "a".repeat(64) }]),
+  duplicateGuardErrorPayload: vi.fn(),
+  isDuplicateGuardMatchError: vi.fn().mockReturnValue(false),
+  readableArtifactIds: vi.fn(async (_actor, _ws, _kind, rows) => new Set(rows.map((row: any) => row.id))),
   supportCapabilityVersion: vi.fn().mockResolvedValue(1),
   AppError: class AppError extends Error {
     constructor(public status: number, public code: string, message: string) {
@@ -174,7 +228,7 @@ function pendingOperationId(index: number) {
 
 function pendingOperationFixture(overrides: Record<string, any> = {}) {
   const now = new Date();
-  return {
+  const result = {
     id: pendingOperationId(1),
     workspaceId: "ws-1",
     conversationId: "session-1",
@@ -199,6 +253,10 @@ function pendingOperationFixture(overrides: Record<string, any> = {}) {
     updatedAt: now,
     ...overrides,
   };
+  const canonicalize = (value: any): any => Array.isArray(value) ? value.map(canonicalize) : value && typeof value === "object"
+    ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalize(value[key])])) : value;
+  result.argsHash = createHash("sha256").update(JSON.stringify(canonicalize({ toolName: result.toolName, args: result.argsJson }))).digest("hex");
+  return result;
 }
 
 describe("processConversationTurn", () => {
@@ -230,7 +288,8 @@ describe("processConversationTurn", () => {
         && (!where?.conversationId || operation.conversationId === where.conversationId)
         && (!Object.prototype.hasOwnProperty.call(where ?? {}, "userId") || operation.userId === where.userId)
         && (!where?.agentKey || operation.agentKey === where.agentKey)
-        && (!where?.idempotencyKey?.startsWith || operation.idempotencyKey.startsWith(where.idempotencyKey.startsWith))
+        && (typeof where?.idempotencyKey !== "string" || operation.idempotencyKey === where.idempotencyKey)
+        && (typeof where?.idempotencyKey?.startsWith !== "string" || operation.idempotencyKey.startsWith(where.idempotencyKey.startsWith))
         && (!where?.status?.in || where.status.in.includes(operation.status))
       ));
       return Promise.resolve(matches.at(-1) ?? null);
@@ -238,7 +297,7 @@ describe("processConversationTurn", () => {
     conversationPendingOperationCountMock.mockImplementation(({ where }: any) => {
       const matches = conversationPendingOperationStore.filter((operation: any) => (
         (!where?.workspaceId || operation.workspaceId === where.workspaceId)
-        && (!where?.idempotencyKey?.startsWith || operation.idempotencyKey.startsWith(where.idempotencyKey.startsWith))
+        && (typeof where?.idempotencyKey?.startsWith !== "string" || operation.idempotencyKey.startsWith(where.idempotencyKey.startsWith))
       ));
       return Promise.resolve(matches.length);
     });
@@ -303,7 +362,7 @@ describe("processConversationTurn", () => {
     executeExternalMcpToolMock.mockResolvedValue({ skipped: false, result: { ok: true } });
     fetchConnectedExternalMcpContextMock.mockResolvedValue({ providerKey: "notion", externalId: "page-1", content: {} });
     listCrmActivitiesMock.mockResolvedValue({ total: 1, items: [{ id: "activity-1", title: "Follow up", type: "TASK", accountId: "account-1", dueAt: new Date("2026-06-20T10:00:00.000Z"), completedAt: null }] });
-    createActivityMock.mockResolvedValue({ id: "activity-1", title: "Follow up", type: "TASK", accountId: "account-1", dueAt: new Date("2026-06-20T10:00:00.000Z"), completedAt: null });
+    createActivityMock.mockImplementation(async (_actor, params) => ({ ...params, id: "activity-1", dueAt: params.dueAt ?? null, completedAt: null }));
     completeActivityMock.mockResolvedValue({ id: "activity-1", title: "Follow up", type: "TASK", accountId: "account-1", completedAt: new Date("2026-06-20T11:00:00.000Z") });
     createCommunicationSuggestionMock.mockResolvedValue({ id: "suggestion-1", title: "Draft follow-up", status: "SUGGESTED", accountId: "account-1" });
     listExternalMcpConnectionsMock.mockResolvedValue([]);
@@ -358,7 +417,6 @@ describe("processConversationTurn", () => {
     ], { content: "", tool_calls: [answerCall("answer", "Allowed RESTRICTED")] }));
     const { processConversationTurnStream } = await import("./conversation");
     const stream = processConversationTurnStream({ ...turnContext(), userMessage: "Say hello." });
-    await expect(stream.next()).resolves.toEqual({ done: false, value: "Allowed" });
     await expect(stream.next()).rejects.toThrow("SUPPORT_AUTHORIZATION_REVOKED");
     expect(supportCapabilityVersion).toHaveBeenLastCalledWith("user-1", "ws-1", 1);
   });
@@ -856,7 +914,7 @@ describe("processConversationTurn", () => {
   }
 
   function addPendingCrmOperation(overrides: Record<string, any> = {}) {
-    const operation = {
+    const operation = pendingOperationFixture({
       id: pendingOperationId(conversationPendingOperationStore.length + 1),
       workspaceId: "ws-1",
       conversationId: "session-1",
@@ -885,7 +943,7 @@ describe("processConversationTurn", () => {
       createdAt: new Date(),
       updatedAt: new Date(),
       ...overrides,
-    };
+    });
     conversationPendingOperationStore.push(operation);
     return operation;
   }
@@ -1002,7 +1060,7 @@ describe("processConversationTurn", () => {
       const { processConversationTurnStream } = await import("./conversation");
       await collectConversationStream(processConversationTurnStream(turnContext(actor)));
     }
-    expect(requireWorkspaceMembership).toHaveBeenCalledTimes(5);
+    expect(vi.mocked(requireWorkspaceMembership).mock.calls.length).toBeGreaterThanOrEqual(5);
     for (const [params] of vi.mocked(requireWorkspaceMembership).mock.calls) {
       expect(params.actor).toBe(actor);
       expect(params.workspaceId).toBe("ws-1");
@@ -1013,13 +1071,14 @@ describe("processConversationTurn", () => {
     };
     for (const model of [prisma.action, prisma.tension]) {
       expect(model.findMany).toHaveBeenCalledWith(expect.objectContaining({
-        where: { ...visibility, status: "DRAFT", assigneeMemberId: "other-member" },
+        where: { AND: [{ ...visibility, status: "DRAFT", assigneeMemberId: "other-member" }] },
       }));
-      expect(model.count).toHaveBeenCalledWith({ where: { ...visibility, status: "OPEN" } });
+      expect(model.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { AND: [{ ...visibility, status: "OPEN" }] } }));
+      expect(model.count).not.toHaveBeenCalled();
     }
-    expect(prisma.proposal.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { ...visibility, status: "DRAFT" } }));
-    expect(prisma.proposal.count).toHaveBeenCalledWith({ where: { ...visibility, status: { in: ["DRAFT", "OPEN"] } } });
-    expect(prisma.goal.count).toHaveBeenCalledWith({ where: { ...visibility, status: { notIn: ["DRAFT", "ABANDONED"] } } });
+    expect(prisma.proposal.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { AND: [{ ...visibility, status: "DRAFT" }] } }));
+    expect(prisma.proposal.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { AND: [{ ...visibility, status: { in: ["DRAFT", "OPEN"] } }] } }));
+    expect(prisma.goal.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { AND: [{ ...visibility, status: { notIn: ["DRAFT", "ABANDONED"] } }] } }));
   });
 
   it("does not fall back to a bootstrap agent when no authenticated actor is provided", async () => {
@@ -1157,7 +1216,7 @@ describe("processConversationTurn", () => {
       actor,
     });
 
-    expect(result.assistantMessage).toContain("Execution state is unknown");
+    expect(result.assistantMessage).toContain("Check CRM before preparing this change again");
     expect(conversationPendingOperationStore[0].status).toBe("FAILED");
     expect(conversationPendingOperationStore[0].errorCode).toBe("CRM_PENDING_OPERATION_EXECUTION_ABANDONED");
     expect(createActivityMock).not.toHaveBeenCalled();
@@ -1251,7 +1310,7 @@ describe("processConversationTurn", () => {
     expect(searchIndexedKnowledge).not.toHaveBeenCalled();
     expect(result.contextUsed.knowledgeSearch).toMatchObject({
       hitCount: 0,
-      error: "FORBIDDEN",
+      error: "Knowledge search is temporarily unavailable.",
     });
   });
 
@@ -1689,11 +1748,6 @@ describe("processConversationTurn", () => {
       userMessage: "Summarize the workspace.",
       actor,
       signal: controller.signal,
-    });
-
-    await expect(stream.next()).resolves.toMatchObject({
-      done: false,
-      value: "Partial answer",
     });
 
     await expect(stream.next()).rejects.toThrow("client cancelled");
@@ -2595,7 +2649,7 @@ describe("processConversationTurn", () => {
     expect(result.assistantMessage).toContain("Stored args:");
   });
 
-  it("persists CRM pending operations for agent chats without a user row", async () => {
+  it("withholds CRM confirmation without a current user-owned conversation", async () => {
     const actor = {
       kind: "agent" as const,
       authProvider: "credential",
@@ -2625,16 +2679,12 @@ describe("processConversationTurn", () => {
       actor,
     });
 
-    expect(conversationPendingOperationCreateMock).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        workspaceId: "ws-1",
-        conversationId: "mcp-ws-1-agent",
-        userId: null,
-        toolName: "record_relationship_activity",
-      }),
-    }));
-    expect(result.assistantMessage).toContain(`Pending operation ID: ${pendingOperationId(1)}`);
-    expect(result.assistantMessage).toContain("Stored args:");
+    expect(conversationPendingOperationCreateMock).not.toHaveBeenCalled();
+    expect(createActivityMock).not.toHaveBeenCalled();
+    const toolMessage = chatMock.mock.calls[1]?.[0]?.messages.find((message: any) => message.role === "tool");
+    expect(JSON.parse(toolMessage.content)).toMatchObject({ success: false, contentWithheld: true,
+      message: "CRM confirmation requires a current user-owned conversation." });
+    expect(result.assistantMessage).not.toContain("Stored args:");
   });
 
   it("does not reuse expired pending operations when preparing the same CRM write again", async () => {

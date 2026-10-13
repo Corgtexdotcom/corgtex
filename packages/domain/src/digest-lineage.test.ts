@@ -3,10 +3,22 @@ import { AppError } from "./errors";
 
 const { capture, readable } = vi.hoisted(() => ({ capture: vi.fn(), readable: vi.fn() }));
 vi.mock("./source-lineage", () => ({ captureArtifactInputProof: capture, isArtifactInputProofReadable: readable }));
-import { isDigestInputProofShared, loadReadableDigestQuery } from "./digest-lineage";
+import { isDigestInputProofShared, loadReadableDigestQuery, mergeArtifactInputProofs } from "./digest-lineage";
+import { SOURCE_PERMISSION_POLICY_VERSION, type PermissionEpochProof } from "./source-permission-epochs";
 
 describe("digest permission selection", () => {
   beforeEach(() => { vi.resetAllMocks(); });
+
+  it("retains pre-generation permission epochs when a later receipt omits them", () => {
+    const permissionEpochs: PermissionEpochProof = { version: 1, policyVersion: SOURCE_PERMISSION_POLICY_VERSION,
+      entries: [{ kind: "BrainSource", id: "source", epoch: "4" }] };
+    const root = { kind: "BrainSource" as const, id: "source", fingerprint: "a".repeat(64) };
+    expect(mergeArtifactInputProofs([{ ...root, permissionEpochs }], [root])).toEqual([{ ...root, permissionEpochs }]);
+    expect(mergeArtifactInputProofs([root], [{ ...root, permissionEpochs }])).toEqual([{ ...root, permissionEpochs }]);
+    expect(() => mergeArtifactInputProofs([{ ...root, permissionEpochs }], [{ ...root,
+      permissionEpochs: { ...permissionEpochs, entries: [{ kind: "BrainSource", id: "source", epoch: "6" }] } }]))
+      .toThrow(expect.objectContaining({ code: "SOURCE_CHANGED" }));
+  });
 
   it("keeps collecting past unauthorized rows before applying the requested page size", async () => {
     const rows = Array.from({ length: 60 }, (_, index) => ({ id: String(index) }));

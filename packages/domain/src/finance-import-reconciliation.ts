@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import type { AppActor } from "@corgtex/shared";
 import { prisma } from "@corgtex/shared";
-import type { FinanceAccountingBasis, FinanceImportCandidateAction, FinanceImportCandidateReviewState, FinanceReportType, Prisma } from "@prisma/client";
-import { invariant } from "./errors";
+import type { FinanceAccountingBasis, FinanceImportCandidateAction, FinanceImportCandidateReviewState, FinanceReportType, FinanceReportFact, Prisma } from "@prisma/client";
+import { captureArtifactInputProof, captureImmutableArtifactInputProof, recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
+import { AppError, invariant } from "./errors";
 import { requireFinanceReportImportHumanWriteAccess } from "./finance";
 import { parseFinanceImportInterpretationV1 } from "./finance-import-interpretation";
 import { normalizeFinanceImportIsoCurrency } from "./finance-imports";
@@ -80,6 +81,25 @@ export function reconcileFinanceImportCandidates(params: { workspaceId: string; 
   return { decisions, counts };
 }
 
+/** Matching unknown facts withhold reconciliation; absence must never be fabricated. */
+export async function captureFinanceCurrentFactProof(tx: Prisma.TransactionClient, actor: AppActor, workspaceId: string,
+  facts: FinanceReportFact[]): Promise<LineageRoot[]> {
+  invariant(facts.length <= 5000, 413, "FINANCE_READ_BUDGET", "Narrow the Finance import selection.");
+  if (!facts.length) return [];
+  try {
+    const reportIds = [...new Set(facts.map(row => row.reportId))];
+    const reports = await tx.financeReport.findMany({ where: { workspaceId, id: { in: reportIds } }, orderBy: { id: "asc" }, take: 5001 });
+    invariant(reports.length === reportIds.length, 409, "FINANCE_REPORT_SOURCE_NOT_READY", "Finance reconciliation is unavailable.");
+    return await captureArtifactInputProof(actor, workspaceId, [
+      ...facts.map(row => ({ kind: "FinanceReportFact" as const, id: row.id, snapshot: row })),
+      ...reports.map(row => ({ kind: "FinanceReport" as const, id: row.id, snapshot: row })),
+    ], tx);
+  } catch (error) {
+    if (error instanceof AppError && ["SOURCE_CHANGED", "UNKNOWN_LINEAGE", "FORBIDDEN", "FINANCE_REPORT_SOURCE_NOT_READY"].includes(error.code))
+      throw new AppError(409, "FINANCE_REPORT_SOURCE_NOT_READY", "Finance reconciliation is unavailable.");
+    throw error;
+  }
+}
 export async function rerunFinanceReportImportReconciliation(actor: AppActor, params: { workspaceId: string; batchId: string;
   expectedVersion: number; candidateVersions: Array<{ id: string; expectedVersion: number }>; confirmedCurrency: string; confirmedAmountScale: number }) {
   await requireFinanceReportImportHumanWriteAccess(actor, params.workspaceId);
@@ -87,15 +107,16 @@ export async function rerunFinanceReportImportReconciliation(actor: AppActor, pa
   const currency = normalizeFinanceImportIsoCurrency(params.confirmedCurrency, "Confirmed currency");
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`finance-report-import:${params.workspaceId}:${params.batchId}`}, 0))`;
-    const batch = await tx.financeImportBatch.findUnique({ where: { id_workspaceId: { id: params.batchId, workspaceId: params.workspaceId } }, include: { candidates: true } });
+    const batch = await tx.financeImportBatch.findUnique({ where: { id_workspaceId: { id: params.batchId, workspaceId: params.workspaceId } }, include: { candidates: { orderBy: { id: "asc" }, take: 5001 } } });
     invariant(batch, 404, "FINANCE_REPORT_IMPORT_NOT_FOUND", "The Finance report import was not found.");
+    invariant(batch.candidates.length <= 5000, 413, "FINANCE_READ_BUDGET", "Narrow the Finance import selection.");
+    await requireFinanceReportImportHumanWriteAccess(actor, params.workspaceId);
+    const roots = await captureArtifactInputProof(actor, params.workspaceId, [
+      { kind: "FinanceImportBatch", id: batch.id, snapshot: batch },
+      ...batch.candidates.map(row => ({ kind: "FinanceImportCandidate" as const, id: row.id, snapshot: row })),
+    ], tx);
     invariant(batch.version === params.expectedVersion && ["RECONCILING", "READY_FOR_REVIEW", "NEEDS_INPUT"].includes(batch.stage),
       409, "FINANCE_REPORT_RECONCILIATION_CONFLICT", "The Finance report import changed. Refresh and try again.");
-    const proposalEvent = await tx.event.findFirst({ where: { workspaceId: batch.workspaceId, type: "finance-report-import.proposed",
-      aggregateType: "FinanceImportBatch", aggregateId: batch.id }, orderBy: { createdAt: "desc" }, select: { payload: true } });
-    const payload = proposalEvent?.payload;
-    const legacySnapshot = batch.stage === "RECONCILING" && payload !== null && payload !== undefined && typeof payload === "object" && !Array.isArray(payload)
-      && payload.version === batch.version && payload.stage === "RECONCILING" && payload.candidateCount === batch.candidates.length;
     const interpretation = parseFinanceImportInterpretationV1(batch.interpretationJson);
     const numericFormat = interpretation.numericFormat.status === "RESOLVED" ? { version: interpretation.numericFormat.version, decimalSeparator: interpretation.numericFormat.decimalSeparator,
       groupingSeparator: interpretation.numericFormat.groupingSeparator,
@@ -103,7 +124,7 @@ export async function rerunFinanceReportImportReconciliation(actor: AppActor, pa
     invariant(numericFormat && numericFormat.amountScale === params.confirmedAmountScale
       && !interpretation.exceptions.some(({ severity }) => severity === "BLOCKER") && batch.candidates.length > 0
       && batch.candidates.every(({ proposalJson }) => proposalJson && typeof proposalJson === "object" && !Array.isArray(proposalJson)
-        && ("numericFormat" in proposalJson ? canonicalJson((proposalJson as Record<string, Prisma.JsonValue>).numericFormat ?? null) === canonicalJson(numericFormat) : legacySnapshot)),
+        && ("numericFormat" in proposalJson && canonicalJson((proposalJson as Record<string, Prisma.JsonValue>).numericFormat ?? null) === canonicalJson(numericFormat))),
     409, "FINANCE_REPORT_CLARIFICATION_REQUIRED", "Resolve the report structure, numeric format, scale, and candidate amounts before reconciliation.");
     const versions = new Map(params.candidateVersions.map(({ id, expectedVersion }) => [id, expectedVersion]));
     invariant(params.candidateVersions.length === batch.candidates.length && versions.size === batch.candidates.length
@@ -115,7 +136,10 @@ export async function rerunFinanceReportImportReconciliation(actor: AppActor, pa
     const preliminary = reconcileFinanceImportCandidates({ ...identity, candidates: batch.candidates, currentFacts: [] });
     const keys = preliminary.decisions.flatMap(({ semanticKey }) => semanticKey ? [semanticKey] : []);
     const currentFacts = await tx.financeReportFact.findMany({ where: { workspaceId: batch.workspaceId, semanticKey: { in: keys } },
-      select: { id: true, semanticKey: true, kind: true, amountCents: true } });
+      orderBy: { id: "asc" }, take: 5001 });
+    invariant(currentFacts.length <= 5000, 413, "FINANCE_READ_BUDGET", "Narrow the Finance import selection.");
+    const factRoots = await captureFinanceCurrentFactProof(tx, actor, params.workspaceId, currentFacts);
+    const frozenRoots = await captureImmutableArtifactInputProof(actor, params.workspaceId, [...roots, ...factRoots], tx);
     const result = reconcileFinanceImportCandidates({ ...identity, candidates: batch.candidates, currentFacts });
     for (const decision of result.decisions) {
       const updated = await tx.financeImportCandidate.updateMany({ where: { id: decision.candidate.id!, workspaceId: batch.workspaceId,
@@ -132,6 +156,16 @@ export async function rerunFinanceReportImportReconciliation(actor: AppActor, pa
       currencyConfirmedByUserId: actor.user.id, currencyConfirmedAt: new Date(), ...result.counts, blockerCount: result.counts.conflictCount,
       approvedByUserId: null, approvedAt: null, safeErrorCode: null, safeErrorMessage: null, version: { increment: 1 } } });
     invariant(updated.count === 1, 409, "FINANCE_REPORT_RECONCILIATION_CONFLICT", "The Finance report import changed. Refresh and try again.");
+    const currentCandidates = await tx.financeImportCandidate.findMany({ where: { workspaceId: params.workspaceId, batchId: batch.id }, orderBy: { id: "asc" }, take: 5001 });
+    invariant(currentCandidates.length === batch.candidates.length && currentCandidates.every(row => batch.candidates.some(prior => prior.id === row.id)),
+      409, "FINANCE_REPORT_RECONCILIATION_CONFLICT", "The Finance report candidates changed.");
+    for (const row of currentCandidates) await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "FinanceImportCandidate", id: row.id }, content: row, origin: "DERIVED", inputs: [], inheritedRoots: frozenRoots });
+    const currentRoots = await captureArtifactInputProof(actor, params.workspaceId,
+      currentCandidates.map(row => ({ kind: "FinanceImportCandidate" as const, id: row.id, snapshot: row })), tx);
+    const currentBatch = await tx.financeImportBatch.findUniqueOrThrow({ where: { id_workspaceId: { id: batch.id, workspaceId: params.workspaceId } } });
+    await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId, artifact: { kind: "FinanceImportBatch", id: batch.id },
+      content: currentBatch, origin: "DERIVED", inputs: [], inheritedRoots: [...frozenRoots, ...currentRoots] });
     await tx.event.create({ data: { workspaceId: batch.workspaceId, type: "finance-report-import.reconciled", aggregateType: "FinanceImportBatch",
       aggregateId: batch.id, payload: { batchId: batch.id, version: batch.version + 1, ...result.counts } } });
     await tx.auditLog.create({ data: { workspaceId: batch.workspaceId, actorUserId: actor.user.id, action: "finance-report-import.reconciled",

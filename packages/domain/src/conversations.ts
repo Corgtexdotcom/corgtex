@@ -5,15 +5,30 @@ import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 import { updateRoleOnboardingStatusByConversation } from "./role-onboarding";
 
-export async function createConversationPromptInput(actor: AppActor, params: { workspaceId: string; conversationId: string; content: string }) {
+export async function createConversationPromptInput(actor: AppActor, params: { workspaceId: string; conversationId: string; content: string;
+  tx?: import("@prisma/client").Prisma.TransactionClient }) {
   invariant(actor.kind === "user", 401, "AUTH_REQUIRED", "Conversations require a user actor.");
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  return prisma.$transaction(async (tx) => {
+  const { workspaceId, conversationId, content, tx: suppliedTx } = params;
+  const userId = actor.user.id;
+  invariant(typeof content === "string", 400, "INVALID_INPUT", "Conversation input must be text.");
+  const assertPrincipal = () => invariant(actor.kind === "user" && actor.user.id === userId,
+    403, "AUTHORIZATION_CHANGED", "Conversation principal changed.");
+  await requireWorkspaceMembership({ actor, workspaceId, tx: suppliedTx });
+  assertPrincipal();
+  const persist = async (tx: import("@prisma/client").Prisma.TransactionClient) => {
     await assertArtifactInputWriteFence(tx);
-    const session = await tx.conversationSession.findFirst({ where: { id: params.conversationId, workspaceId: params.workspaceId, userId: actor.user.id } });
+    await requireWorkspaceMembership({ actor, workspaceId, tx });
+    assertPrincipal();
+    const session = await tx.conversationSession.findFirst({ where: { id: conversationId, workspaceId, userId } });
     invariant(session, 404, "NOT_FOUND", "Conversation not found.");
-    return tx.conversationPromptInput.create({ data: { workspaceId: params.workspaceId, sessionId: session.id, userId: actor.user.id, content: params.content } });
-  });
+    assertPrincipal();
+    await assertArtifactInputWriteFence(tx);
+    const prompt = await tx.conversationPromptInput.create({ data: { workspaceId, sessionId: session.id, userId, content } });
+    await assertArtifactInputWriteFence(tx);
+    assertPrincipal();
+    return prompt;
+  };
+  return suppliedTx ? persist(suppliedTx) : prisma.$transaction(persist);
 }
 
 async function redactConversationTurns(actor: AppActor, workspaceId: string, turns: Array<import("@prisma/client").ConversationTurn>) {
@@ -124,7 +139,7 @@ export async function addConversationTurn(actor: AppActor, params: {
 }) {
   const userId = actor.kind === "user" ? actor.user.id : null;
   invariant(userId, 401, "AUTH_REQUIRED", "Conversations require a user actor.");
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx: params.tx });
 
   const persist = async (tx: import("@prisma/client").Prisma.TransactionClient) => {
     await assertArtifactInputWriteFence(tx);

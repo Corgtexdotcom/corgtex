@@ -57,7 +57,7 @@ vi.mock("./source-lineage", () => ({
   recordArtifactInputLineage: fixture.record, invalidateArtifactInputLineage: fixture.invalidate,
   lineageContentFingerprint: (kind: string, row: unknown) => hash(kind, row),
 }));
-import { assertDisposableSourceLineageBackfillDatabaseUrl, inspectSourceLineageBackfill, runSourceLineageBackfill } from "./source-lineage-backfill";
+import { assertDisposableSourceLineageBackfillDatabaseUrl, inspectSourceLineageBackfill, runSourceLineageBackfill, SOURCE_LINEAGE_BACKFILL_KINDS } from "./source-lineage-backfill";
 
 const actor = { kind: "user", user: { id: "synthetic-a", email: "a@example.test", displayName: null } } as AppActor;
 const workspaceId = "synthetic-ws-a";
@@ -125,6 +125,17 @@ beforeEach(() => {
 });
 
 describe("strict source lineage backfill", () => {
+  it("scans generated legacy chunks but never recovers an original from matching parent metadata", async () => {
+    const chunk = seed("knowledgeChunk", { id: "legacy-chunk", workspaceId, title: "Unproved generated body", bodyMd: "",
+      sourceIds: [], sourceType: "DOCUMENT", sourceId: "source", content: "Arbitrary historical text", embedding: [99, 99],
+      metadata: { sourceContentHash: "a".repeat(64) } });
+    snapshot(chunk, "HUMAN_ORIGINAL", "KnowledgeChunk");
+    expect(SOURCE_LINEAGE_BACKFILL_KINDS).toContain("KnowledgeChunk");
+    const result = await runSourceLineageBackfill({ ...base, artifacts: [{ kind: "KnowledgeChunk", id: chunk.id }], mode: "apply" });
+    expect(result.certified).toBe(0); expect(result.counts.WITHHELD).toBe(1);
+    expect(fixture.record).not.toHaveBeenCalled(); expect(fixture.state.rows.get("knowledgeChunk")).toEqual([chunk]);
+  });
+
   it("defaults to a dry run, reports incomplete history, and never certifies citations or audit guesses", async () => {
     seed();
     const result = await runSourceLineageBackfill({ ...base, artifacts: [input] });

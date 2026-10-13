@@ -46,6 +46,7 @@ const prismaMock = {
     update: vi.fn(),
     updateMany: vi.fn(),
   },
+  meetingInsight: { findMany: vi.fn() },
   policyCorpus: {
     findUnique: vi.fn(),
   },
@@ -95,12 +96,25 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
   };
 });
 
+// Audited context helpers share the same primitive receipt boundary as the runtime.
+// Keep the scanner real; context collection below consumes these same captured primitive proofs.
+vi.mock("../../domain/src/source-lineage", async importOriginal => ({ ...await importOriginal<any>(),
+  captureArtifactInputProof: lineage.capture, readableArtifactIds: lineage.readableIds,
+  isArtifactInputProofReadable: lineage.readable,
+}));
+
 vi.mock("@corgtex/domain", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@corgtex/domain")>();
   return {
     ...actual,
     loadAgentRequestInput: lineage.request, loadAgentFeedbackContinuation: lineage.feedback,
+    captureReadableDigestInputs: async ({ actor, workspaceId, kind, records }: any) => {
+      const proofs = new Map<string, any[]>();
+      for (const record of records) proofs.set(record.id, await lineage.capture(actor, workspaceId, [{ kind, id: record.id, snapshot: record }]));
+      return { records, proofs, roots: [...proofs.values()].flat() };
+    },
     captureArtifactInputProof: lineage.capture, readableArtifactIds: lineage.readableIds, persistMeetingSummaryWithLineage: lineage.persistMeeting, captureArtifactInputSnapshotProof: lineage.snapshot,
+    captureImmutableArtifactInputProof: async (actor: any, ws: string, roots: any[], tx: any) => (await Promise.all(roots.map(root => root.kind === "ArtifactInputSnapshot" ? [root] : lineage.snapshot(actor, ws, root, tx)))).flat(),
     isArtifactInputProofReadable: lineage.readable, recordArtifactInputLineage: lineage.record,
     invalidateArtifactInputLineage: lineage.invalidate, withArtifactInputReadCapture: lineage.observe,
     isAgentEnabled: vi.fn().mockResolvedValue(true),
@@ -172,6 +186,8 @@ describe("agent runtime", () => {
     prismaMock.proposal.count.mockReset().mockResolvedValue(3);
     prismaMock.proposal.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.meeting.findUnique.mockReset().mockResolvedValue(null);
+    prismaMock.meeting.findFirst.mockReset().mockImplementation(args => prismaMock.meeting.findUnique(args));
+    prismaMock.meetingInsight.findMany.mockReset().mockImplementation(async () => (await prismaMock.meeting.findUnique({}))?.insights ?? []);
     prismaMock.meeting.update.mockReset().mockResolvedValue({});
     prismaMock.meeting.updateMany.mockReset().mockResolvedValue({ count: 1 });
     buildMeetingIntelligenceContextMock.mockReset().mockImplementation(async ({ workspaceId, meetingId }: { workspaceId: string; meetingId: string }) => {
@@ -228,6 +244,7 @@ describe("agent runtime", () => {
   });
 
   it("keeps replayed meeting insights reviewable by default", async () => {
+    lineage.readableIds.mockImplementation(async (_actor, _workspaceId, kind, rows) => new Set(kind === "MeetingInsight" ? rows.map((row: {id: string}) => row.id) : []));
     const fixture = operationsTacticalReplayFixture;
     const meetingRecord = meetingRecordFromReplayFixture(fixture);
     prismaMock.meeting.findUnique.mockResolvedValue(meetingRecord);
@@ -287,6 +304,7 @@ describe("agent runtime", () => {
   });
 
   it("keeps uploaded transcript insights reviewable without auto-creating Actions or tensions", async () => {
+    lineage.readableIds.mockImplementation(async (_actor, _workspaceId, kind, rows) => new Set(kind === "MeetingInsight" ? rows.map((row: {id: string}) => row.id) : []));
     prismaMock.meeting.findUnique.mockResolvedValue({
       id: "meeting-upload",
       workspaceId: "ws-1",

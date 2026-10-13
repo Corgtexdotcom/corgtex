@@ -14,8 +14,9 @@ import { CrmDealStage, CrmActivityType } from "@prisma/client";
 import type { CustomerAccountStatus, CustomerDeploymentStatus, Prisma } from "@prisma/client";
 import { registerCustomerDeployment } from "./customer-lifecycle";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
-import { captureArtifactInputProof, currentArtifactInputRoots, preserveUnknownArtifactInputSnapshot, readableArtifactIds, type LineageInput } from "./source-lineage";
+import { captureArtifactInputProof, captureImmutableArtifactInputProof, currentArtifactInputRoots, preserveUnknownArtifactInputSnapshot, readableArtifactIds, type LineageInput } from "./source-lineage";
 import { crmPage, readCrmRows } from "./crm-lineage";
+import { crmIngressActor, createFreshFormQualification, recordFreshDemoLeadLineage, recordFreshEmailQualificationLineage } from "./crm-ingress-lineage";
 
 const DEFAULT_DEMO_WORKSPACE = {
   slug: "corgtex",
@@ -567,6 +568,7 @@ export async function captureDemoLead(params: {
 
     await requirePublicCrmWrites(tx, workspace.id);
 
+    const createdLeadId = randomUUID();
     const demoLead = await tx.demoLead.upsert({
       where: {
         workspaceId_email: {
@@ -579,12 +581,17 @@ export async function captureDemoLead(params: {
         visitCount: { increment: 1 },
       },
       create: {
+        id: createdLeadId,
         workspaceId: workspace.id,
         email,
         source,
         qualifyToken: randomUUID(),
       },
     });
+
+    const lineageRoots = await recordFreshDemoLeadLineage(tx, demoLead, { createdId: createdLeadId, email, source });
+    const lineageActor = crmIngressActor(workspace.id);
+    const capture = { lineageRoots };
 
     const contactLinks = await tx.crmContact.findUnique({ where: { workspaceId_email: { workspaceId: workspace.id, email } } });
     const candidate = crmAccountCandidate({ email, source });
@@ -605,9 +612,26 @@ export async function captureDemoLead(params: {
     const account = await ensureCrmAccount(tx, workspace.id, {
       email,
       source,
-    }, { allocatedAccountId, lockedAccountIds: [contactLinks?.accountId, matchedAccount?.id, allocatedAccountId]
+    }, { allocatedAccountId, lineage: { actor: lineageActor, capture }, lockedAccountIds: [contactLinks?.accountId, matchedAccount?.id, allocatedAccountId]
       .filter((id): id is string => Boolean(id)) });
 
+    let contactCapture = capture;
+    let accountProven = true;
+    if (account) {
+      try {
+        const accountRoots = await captureArtifactInputProof(lineageActor, workspace.id,
+          [{ kind: "CrmAccount", id: account.id, snapshot: account }], tx);
+        contactCapture = { lineageRoots: [...lineageRoots,
+          ...await captureImmutableArtifactInputProof(lineageActor, workspace.id, accountRoots, tx)] };
+      } catch (error) {
+        if (error instanceof AppError && error.code === "UNKNOWN_LINEAGE") accountProven = false;
+        else throw error;
+      }
+    }
+    const contactReceipt = accountProven ? await prepareProducerLineage({ tx, actor: lineageActor,
+      workspaceId: workspace.id, capture: contactCapture, copied: true,
+      ...(existingContact ? { artifact: { kind: "CrmContact" as const, id: existingContact.id }, before: existingContact } : {}) })
+      : { mode: "UNKNOWN" as const };
     const contact = existingContact
       ? await tx.crmContact.update({ where: { id: existingContact.id }, data: {
         lastSeenAt: new Date(),
@@ -621,6 +645,9 @@ export async function captureDemoLead(params: {
         company: domainPart,
         source,
       } });
+
+    await finishProducerLineage({ tx, actor: lineageActor, workspaceId: workspace.id,
+      artifact: { kind: "CrmContact", id: contact.id }, content: contact, receipt: contactReceipt });
 
     if (!demoLead.welcomeEmailSentAt) {
       await appendEvents(tx, [
@@ -2526,12 +2553,12 @@ export async function requestCommunicationSuggestionExecution(actor: AppActor, p
   });
 }
 
-export async function markCommunicationSuggestionSent(actor: AppActor, params: {
+export async function markCommunicationSuggestionSent(actor: AppActor, params: ProducerLineageParams & {
   workspaceId: string;
   suggestionId: string;
   sentAt?: Date | null;
 }, transaction?: Prisma.TransactionClient) {
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx: transaction });
 
   const operation = async (tx: Prisma.TransactionClient) => {
     const suggestion = await requireCommunicationSuggestion(tx, params.workspaceId, params.suggestionId);
@@ -2548,9 +2575,9 @@ export async function markCommunicationSuggestionSent(actor: AppActor, params: {
       ...communicationSuggestionInputs(suggestion)];
     await captureArtifactInputProof(actor, params.workspaceId, dependencies, tx);
     const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
-      artifact: { kind: "CrmCommunicationSuggestion", id: suggestion.id }, before: suggestion, allowSystemTransition: true });
+      artifact: { kind: "CrmCommunicationSuggestion", id: suggestion.id }, before: suggestion, capture: params, allowSystemTransition: true });
     const activityReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
-      copied: true, completeCopy: true, dependencies,
+      copied: true, completeCopy: true, capture: params, dependencies,
       snapshotDependencies: [{ kind: "CrmCommunicationSuggestion", id: suggestion.id }],
     });
     const updated = await tx.crmCommunicationSuggestion.update({
@@ -2707,18 +2734,8 @@ export async function submitQualification(params: {
 
   return prisma.$transaction(async (tx) => {
     await requirePublicCrmWrites(tx, lead.workspaceId);
-    const qualification = await tx.crmQualification.create({
-      data: {
-        workspaceId: lead.workspaceId,
-        demoLeadId: lead.id,
-        responseChannel: "form",
-        companyName: params.companyName.trim(),
-        website: params.website.trim(),
-        roleTitle: params.roleTitle?.trim() || null,
-        aiExperience: params.aiExperience.trim(),
-        helpNeeded: params.helpNeeded.trim(),
-        status: "PENDING_REVIEW",
-      },
+    const { qualification, lead: currentLead } = await createFreshFormQualification(tx, {
+      ...params, workspaceId: lead.workspaceId, demoLeadId: lead.id,
     });
 
     await appendEvents(tx, [
@@ -2727,7 +2744,7 @@ export async function submitQualification(params: {
         type: "crm.qualification.submitted",
         aggregateType: "CrmQualification",
         aggregateId: qualification.id,
-        payload: { qualificationId: qualification.id, email: lead.email },
+        payload: { qualificationId: qualification.id, email: currentLead.email },
       },
     ]);
 
@@ -2752,8 +2769,10 @@ export async function receiveEmailReply(params: {
 
   const operation = async (tx: Prisma.TransactionClient) => {
     await requirePublicCrmWrites(tx, lead.workspaceId);
+    const createdId = randomUUID();
     const qualification = await tx.crmQualification.create({
       data: {
+        id: createdId,
         workspaceId: lead.workspaceId,
         demoLeadId: lead.id,
         responseChannel: "email_reply",
@@ -2762,6 +2781,9 @@ export async function receiveEmailReply(params: {
         status: "PENDING_REVIEW",
       },
     });
+
+    await recordFreshEmailQualificationLineage(tx, qualification, { createdId, workspaceId: lead.workspaceId,
+      demoLeadId: lead.id, bodyText: params.bodyText.trim(), subject: params.subject.trim() });
 
     await appendEvents(tx, [
       {
@@ -2789,22 +2811,22 @@ export async function listQualifications(actor: AppActor, workspaceId: string, o
     where.status = opts.status;
   }
 
-  const [items, total] = await Promise.all([
+  const rows = await readCrmRows(actor, workspaceId, "CrmQualification", page =>
     prisma.crmQualification.findMany({
       where,
-      include: {
-        demoLead: {
-          select: { email: true, source: true, createdAt: true },
-        },
-      },
-      orderBy: { createdAt: "desc" },
-      take,
-      skip,
-    }),
-    prisma.crmQualification.count({ where }),
-  ]);
-  
-  return { items, total, take, skip };
+      include: { demoLead: { select: { id: true, workspaceId: true, email: true, source: true, createdAt: true } } },
+      orderBy: [{ createdAt: "desc" }, { id: "asc" }],
+      ...page,
+    }));
+  const readableLeads = await readableArtifactIds(actor, workspaceId, "DemoLeadIntakeInput",
+    rows.map(row => row.demoLead));
+  const admitted = rows.filter(row => readableLeads.has(row.demoLead.id));
+  // Bind every counted row and displayed related label to the exact current input.
+  await captureArtifactInputProof(actor, workspaceId, admitted.flatMap(row => [
+    { kind: "CrmQualification" as const, id: row.id, snapshot: row },
+    { kind: "DemoLeadIntakeInput" as const, id: row.demoLead.id, snapshot: row.demoLead },
+  ]));
+  return crmPage(admitted, take, skip);
 }
 
 export async function approveQualification(actor: AppActor, params: { workspaceId: string; qualificationId: string }) {
@@ -2818,6 +2840,14 @@ export async function approveQualification(actor: AppActor, params: { workspaceI
   invariant(qual.status === "PENDING_REVIEW", 400, "INVALID_STATE", "Qualification is not pending review.");
 
   return withCrmLinkSyncRetry(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "CrmQualification" WHERE id = ${qual.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    const inputRoots = await captureArtifactInputProof(actor, params.workspaceId, [
+      { kind: "CrmQualification", id: qual.id, snapshot: qual },
+      { kind: "DemoLeadIntakeInput", id: qual.demoLead.id, snapshot: qual.demoLead },
+    ], tx);
+    const capture = { lineageRoots: await captureImmutableArtifactInputProof(actor, params.workspaceId, inputRoots, tx) };
+    const qualificationReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmQualification", id: qual.id }, before: qual, copied: actor.kind !== "user" });
     const accountParams = { email: qual.demoLead.email, company: qual.companyName,
       website: qual.website, source: "qualification" };
     const candidate = crmAccountCandidate(accountParams);
@@ -2826,13 +2856,12 @@ export async function approveQualification(actor: AppActor, params: { workspaceI
     const contacts = qual.companyName || candidate ? await tx.crmContact.findMany({
         where: { workspaceId: params.workspaceId, email: qual.demoLead.email,
           ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]) },
-        select: { id: true, email: true, accountId: true },
       }) : [];
     const activityIds = await prepareCrmAccountLinkSync(tx, {
       workspaceId: params.workspaceId, contacts, accountIds: [beforeAccount?.id, allocatedAccountId],
     });
     const account = await ensureCrmAccount(tx, params.workspaceId, accountParams, {
-      allocatedAccountId, lockedAccountIds: [beforeAccount?.id, allocatedAccountId].filter((id): id is string => Boolean(id)),
+      allocatedAccountId, lineage: { actor, capture }, lockedAccountIds: [beforeAccount?.id, allocatedAccountId].filter((id): id is string => Boolean(id)),
     });
     const updated = await tx.crmQualification.update({
       where: { id: qual.id },
@@ -2843,15 +2872,20 @@ export async function approveQualification(actor: AppActor, params: { workspaceI
       },
     });
 
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmQualification", id: qual.id }, content: updated, receipt: qualificationReceipt });
+
     if (qual.companyName || account) {
       const contactData: any = {};
       if (qual.companyName) contactData.company = qual.companyName;
       if (account) contactData.accountId = account.id;
-      await tx.crmContact.updateMany({
-        where: { workspaceId: params.workspaceId, email: qual.demoLead.email,
-          ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]) },
-        data: contactData,
-      });
+      for (const contact of contacts) {
+        const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+          artifact: { kind: "CrmContact", id: contact.id }, before: contact, capture, copied: true });
+        const revised = await tx.crmContact.update({ where: { id: contact.id }, data: contactData });
+        await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+          artifact: { kind: "CrmContact", id: contact.id }, content: revised, receipt });
+      }
 
       if (account) {
         await tx.crmConversation.updateMany({
@@ -2893,6 +2927,13 @@ export async function rejectQualification(actor: AppActor, params: { workspaceId
   invariant(qual && qual.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Qualification not found.");
 
   return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "CrmQualification" WHERE id = ${qual.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    await captureArtifactInputProof(actor, params.workspaceId, [
+      { kind: "CrmQualification", id: qual.id, snapshot: qual },
+      { kind: "DemoLeadIntakeInput", id: qual.demoLead.id, snapshot: qual.demoLead },
+    ], tx);
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmQualification", id: qual.id }, before: qual, copied: actor.kind !== "user" });
     const updated = await tx.crmQualification.update({
       where: { id: qual.id },
       data: {
@@ -2903,6 +2944,8 @@ export async function rejectQualification(actor: AppActor, params: { workspaceId
       },
     });
 
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmQualification", id: qual.id }, content: updated, receipt });
     await appendEvents(tx, [
       {
         workspaceId: params.workspaceId,
@@ -2917,19 +2960,20 @@ export async function rejectQualification(actor: AppActor, params: { workspaceId
   });
 }
 
-export async function sendSchedulingLinkEmail(qualificationId: string) {
-  const qual = await prisma.crmQualification.findUnique({
-    where: { id: qualificationId },
-    include: { demoLead: true },
-  });
-  invariant(qual, 404, "NOT_FOUND", "Qualification not found");
-  invariant(qual.status === "APPROVED", 400, "INVALID_STATE", "Qualification must be approved to send scheduling link.");
-  if (qual.schedulingEmailSentAt) return;
-
-  // assume valid usage
-  await prisma.crmQualification.update({
-    where: { id: qual.id },
-    data: { schedulingEmailSentAt: new Date() },
+export async function sendSchedulingLinkEmail(actor: AppActor, params: { workspaceId: string; qualificationId: string }) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  return prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM "CrmQualification" WHERE id = ${params.qualificationId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    const qual = await tx.crmQualification.findFirst({ where: { id: params.qualificationId, workspaceId: params.workspaceId } });
+    invariant(qual, 404, "NOT_FOUND", "Qualification not found");
+    await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "CrmQualification", id: qual.id, snapshot: qual }], tx);
+    invariant(qual.status === "APPROVED", 400, "INVALID_STATE", "Qualification must be approved to send scheduling link.");
+    if (qual.schedulingEmailSentAt) return;
+    const artifact = { kind: "CrmQualification" as const, id: qual.id };
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact, before: qual, allowSystemTransition: true });
+    const updated = await tx.crmQualification.update({ where: { id: qual.id }, data: { schedulingEmailSentAt: new Date() } });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId, artifact, content: updated, receipt });
   });
 }
 
@@ -3002,20 +3046,26 @@ export async function recordInboundEmailReply(params: {
   });
 }
 
-export async function createConversationMessage(actor: AppActor, params: {
+export async function createConversationMessage(actor: AppActor, params: ProducerLineageParams & {
+  copied?: boolean;
   workspaceId: string;
   conversationId: string;
   bodyMd: string;
   senderType: "LEAD" | "ADMIN" | "SYSTEM";
   senderEmail?: string;
 }, transaction?: Prisma.TransactionClient) {
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx: transaction });
 
   const operation = async (tx: Prisma.TransactionClient) => {
     const links = await tx.crmConversation.findUnique({ where: { id: params.conversationId } });
     invariant(links && links.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Conversation not found.");
     const conversation = await lockAndFindActiveCrmConversation(tx, params.workspaceId, links);
     invariant(conversation, 404, "NOT_FOUND", "Conversation not found.");
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      capture: params, copied: params.copied || actor.kind === "agent", dependencies: [{ kind: "CrmConversation", id: conversation.id, snapshot: conversation }] });
+    invariant(receipt.mode !== "UNKNOWN", 409, "UNKNOWN_LINEAGE", "Conversation message requires its complete input receipt.");
+    const conversationReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmConversation", id: conversation.id }, before: conversation, capture: params, allowSystemTransition: true });
     const message = await tx.crmConversationMessage.create({
       data: {
         conversationId: conversation.id,
@@ -3026,11 +3076,15 @@ export async function createConversationMessage(actor: AppActor, params: {
         isRead: params.senderType === "ADMIN",
       },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmConversationMessage", id: message.id }, content: message, receipt });
 
-    await tx.crmConversation.update({
+    const updated = await tx.crmConversation.update({
       where: { id: conversation.id },
       data: { updatedAt: new Date() },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmConversation", id: updated.id }, content: updated, receipt: conversationReceipt });
 
     return message;
   };

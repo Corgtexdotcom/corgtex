@@ -28,10 +28,20 @@ const {
       findUnique: vi.fn(),
       upsert: vi.fn(),
     },
+    communicationIngressInput: { create: vi.fn(), findFirst: vi.fn() },
+    communicationMessageNativeInput: { create: vi.fn(async ({data}: any)=>({id:"native-1",...data})) },
+    communicationInboundEvent: { findUnique: vi.fn(), create: vi.fn() },
     workflowJob: { upsert: vi.fn() },
     communicationEntityLink: { create: vi.fn() },
+    $queryRaw: vi.fn(),
+    agentRequestInput: { create: vi.fn() },
+    member: { findFirst: vi.fn() },
+    communicationChannel: { findFirst: vi.fn(), updateMany: vi.fn() },
+    communicationExternalUser: { findFirst: vi.fn() },
+    communicationMessage: { findFirst: vi.fn(), upsert: vi.fn() },
   };
   const webClient = {
+    auth: { test: vi.fn() },
     conversations: {
       list: vi.fn(),
       join: vi.fn(),
@@ -61,12 +71,14 @@ const {
     txMock: tx,
     prismaMock: {
       $transaction: vi.fn(async (callback: (tx: any) => Promise<unknown>) => callback(tx)),
+      communicationIngressInput: { create: vi.fn(), findFirst: vi.fn() },
       communicationInboundEvent: {
         findUnique: vi.fn(),
         create: vi.fn(),
         update: vi.fn(),
       },
       communicationInstallation: {
+        findMany: vi.fn(),
         findFirst: vi.fn(),
         findUnique: vi.fn(),
         update: vi.fn(),
@@ -76,7 +88,11 @@ const {
         findUnique: vi.fn(),
         upsert: vi.fn(),
       },
+      member: { findFirst: vi.fn() },
+      agentRequestInput: { create: vi.fn() },
       communicationChannel: {
+        findFirst: vi.fn(),
+        updateMany: vi.fn(),
         findMany: vi.fn(),
         upsert: vi.fn(),
       },
@@ -86,6 +102,7 @@ const {
         upsert: vi.fn(),
       },
       communicationMessage: {
+        findFirst: vi.fn(),
         findUnique: vi.fn(),
         findMany: vi.fn(),
         upsert: vi.fn(),
@@ -163,8 +180,12 @@ vi.mock("./brain", () => ({
   ingestSource: vi.fn(),
 }));
 
-vi.mock("./source-lineage", () => ({
+vi.mock("./source-permission-epochs", () => ({ artifactPermissionEpochIdentities:()=>[{kind:"Workspace",id:"workspace-1"}],
+  capturePermissionEpochs:vi.fn(async()=>({version:1})),isArtifactPermissionEpochProofCurrent:vi.fn(async()=>true) }));
+vi.mock("./source-lineage", () => ({ recordArtifactInputLineage:vi.fn(), preserveUnknownArtifactInputSnapshot:vi.fn(),
   captureArtifactInputProof: captureDigestProofMock,
+  captureArtifactInputSnapshotProof: vi.fn(async () => []),
+  lineageContentFingerprint: (_kind: string, row: unknown) => JSON.stringify(row),
   isArtifactInputProofReadable: digestProofReadableMock,
 }));
 
@@ -202,6 +223,67 @@ function signedHeaders(body: string, timestamp = Math.floor(Date.now() / 1000)) 
   });
 }
 
+/** Real HMAC ingress and current provider fixtures replace the old raw-row shortcuts. */
+async function authenticatedCommunicationFixture() {
+  const domain = await import("./communication");
+  const authority = await import("./communication-native-authority");
+  const defaults = (row: any) => ({ externalWorkspaceId:"T1",appId:"A1",botUserId:"UBOT",botTokenEnc:"enc:token",provider:"SLACK",
+    scopes:[],optionalScopes:[],disconnectedAt:null,settings:{}, ...row });
+  const signed = (payload: Record<string,unknown>) => { const raw=JSON.stringify(payload); return domain.captureSlackSignedIngress(raw,signedHeaders(raw)); };
+  return { ...domain,
+    syncSlackPublicArchiveForWorkspace: async (workspaceId: string) => {
+      const installation=defaults(await prismaMock.communicationInstallation.findFirst({where:{workspaceId}}));
+      prismaMock.communicationInstallation.findFirst.mockResolvedValue(installation);
+      txMock.communicationInstallation.findUnique.mockResolvedValue(installation);
+      slackWebClientMock.conversations.history.mockImplementation(async()=>({ok:true,messages:[{ts:"1714320000.000100",user:"U1",text:"Public update"}]}));
+      return domain.syncSlackPublicArchiveForWorkspace(workspaceId);
+    },
+    handleSlackCommand: async (payload: URLSearchParams) => {
+      const installation=defaults(await prismaMock.communicationInstallation.findUnique({where:{id:"install-1"}}));
+      prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce(installation);
+      payload=new URLSearchParams(payload);payload.set("api_app_id","A1");
+      return domain.handleSlackCommand(payload,signed(Object.fromEntries(payload)));
+    },
+    handleSlackInteraction: async (payload: Record<string,unknown>) => {
+      const installation=defaults(await prismaMock.communicationInstallation.findUnique({where:{id:"install-1"}}));
+      prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce(installation);
+      payload={...payload,api_app_id:"A1"};
+      return domain.handleSlackInteraction(payload,signed(payload));
+    },
+    ingestCommunicationEvent: async (provider: any,payload: Record<string,unknown>) => {
+      const installation=defaults(await prismaMock.communicationInstallation.findUnique({where:{id:"install-1"}}));
+      prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce(installation);
+      txMock.communicationInstallation.findUnique.mockResolvedValue(installation);
+      txMock.communicationInboundEvent.findUnique.mockImplementation(prismaMock.communicationInboundEvent.findUnique);
+      txMock.communicationInboundEvent.create.mockImplementation(prismaMock.communicationInboundEvent.create);
+      txMock.communicationIngressInput.create.mockImplementation(async ({data}:any)=>({id:"ingress-1",...data}));
+      const body={...payload,api_app_id:"A1"};
+      return domain.ingestCommunicationEvent(provider,body,signed(body));
+    },
+    processSlackInboundEvent: async (id: string) => {
+      const inbound:any = await prismaMock.communicationInboundEvent.findUnique({where:{id}});
+      if (!inbound?.installation) return;
+      inbound.installation=defaults(inbound.installation);
+      inbound.payload={...inbound.payload,team_id:"T1",api_app_id:"A1"};
+      inbound.ingressInputId="signed-ingress-1";
+      const proof=signed(inbound.payload);
+      const ingress={id:inbound.ingressInputId,workspaceId:inbound.installation.workspaceId,installationId:inbound.installation.id,provider:"SLACK",
+        externalWorkspaceId:"T1",appId:"A1",requestTimestamp:proof.requestTimestamp,signature:proof.signature,signingBindingHash:proof.signingBindingHash,
+        installationGrantHash:authority.communicationInstallationGrantHash(inbound.installation),encryptedRawBody:`enc:${proof.rawBody}`,bodyHash:proof.bodyHash,
+        epochProofVersion:1,permissionEpochsJson:{version:1},expiresRawAt:new Date(Date.now()+86400000)};
+      prismaMock.communicationIngressInput.findFirst.mockResolvedValue(ingress);
+      prismaMock.communicationInstallation.findFirst.mockResolvedValue(inbound.installation);
+      txMock.communicationInstallation.findUnique.mockResolvedValue(inbound.installation);
+      prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce(inbound);
+      const event=inbound.payload.event, raw=event?.message??event;
+      const native={ts:raw?.ts,user:raw?.user,text:raw?.text,thread_ts:raw?.thread_ts};
+      slackWebClientMock.conversations.history.mockResolvedValue({ok:true,messages:[native]});
+      slackWebClientMock.conversations.replies.mockResolvedValue({ok:true,messages:[native]});
+      return domain.processSlackInboundEvent(id);
+    },
+  };
+}
+
 function slackMessageRow(overrides: Record<string, unknown> = {}) {
   return {
     id: "message-1",
@@ -214,9 +296,46 @@ function slackMessageRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function stubAuthoredSlackScope() {
+  const installation = { externalWorkspaceId:"T1",appId:"A1",botUserId:"UBOT",scopes:[],optionalScopes:[], id: "install-1", workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE", disconnectedAt: null, botTokenEnc: "enc:bot-token", settings: {} };
+  const channel = { id: "channel-1", workspaceId: "workspace-1", installationId: "install-1", provider: "SLACK", externalChannelId: "C1", kind: "PUBLIC", isIngestEnabled: true, isArchived: false };
+  const member = { id: "member-1", workspaceId: "workspace-1", userId: "user-1", isActive: true,
+    user: { id: "user-1", email: "user@example.test", displayName: "User" } };
+  const mapping = { id: "external-user-1", workspaceId: "workspace-1", installationId: "install-1", provider: "SLACK", externalUserId: "U1", userId: "user-1", memberId: "member-1", isBot: false, isDeleted: false };
+  prismaMock.communicationInstallation.findFirst.mockResolvedValue(installation);
+  prismaMock.communicationInstallation.findUnique.mockResolvedValue(installation);
+  prismaMock.communicationChannel.findFirst.mockResolvedValue(channel);
+  prismaMock.member.findFirst.mockResolvedValue(member);
+  prismaMock.communicationExternalUser.findFirst.mockResolvedValue(mapping);
+  prismaMock.agentRequestInput.create.mockImplementation(async ({ data }: any) => ({ id: "request-1", ...data }));
+  prismaMock.communicationMessage.findFirst.mockResolvedValue(null);
+  prismaMock.communicationMessage.findMany.mockResolvedValue([]);
+  txMock.communicationInstallation.findUnique.mockResolvedValue(installation);
+  txMock.communicationInstallation.findFirst.mockResolvedValue(installation);
+  txMock.communicationChannel.findFirst.mockResolvedValue(channel);
+  txMock.member.findFirst.mockResolvedValue(member);
+  txMock.communicationExternalUser.findFirst.mockResolvedValue(mapping);
+  txMock.agentRequestInput.create.mockImplementation(async ({ data }: any) => ({ id: "request-1", ...data }));
+  txMock.communicationMessage.findFirst.mockResolvedValue(null);
+  txMock.communicationMessage.upsert.mockImplementation(async ({ create }: any) => slackMessageRow({ id: "message-1", ...create }));
+  txMock.$queryRaw.mockResolvedValue([]);
+  slackWebClientMock.conversations.info.mockResolvedValue({ ok: true, channel: { id: "C1", is_private: false, is_member: true, is_archived: false } });
+}
+
 describe("communication Slack integration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    prismaMock.communicationInboundEvent.findUnique.mockReset();
+    prismaMock.communicationInstallation.findUnique.mockReset();
+    prismaMock.communicationIngressInput.findFirst.mockReset();
+    txMock.communicationMessageNativeInput.create.mockImplementation(async ({data}:any)=>({id:"native-1",...data}));
+    slackWebClientMock.auth.test.mockResolvedValue({ok:true,team_id:"T1",user_id:"UBOT"});
+    prismaMock.communicationInstallation.findFirst.mockReset();
+    txMock.communicationMessage.findFirst.mockReset().mockResolvedValue(null);
+    txMock.communicationMessage.upsert.mockImplementation(async ({create}:any)=>slackMessageRow({expiresRawAt:new Date(Date.now()+86400000),...create}));
+    txMock.communicationChannel.findFirst.mockResolvedValue({id:"channel-1",workspaceId:"workspace-1",installationId:"install-1",provider:"SLACK",externalChannelId:"C1",kind:"PUBLIC",isIngestEnabled:true,isArchived:false});
+    prismaMock.communicationChannel.findFirst.mockResolvedValue({id:"channel-1",workspaceId:"workspace-1",installationId:"install-1",provider:"SLACK",externalChannelId:"C1",kind:"PUBLIC",isIngestEnabled:true,isArchived:false});
+    slackWebClientMock.conversations.info.mockResolvedValue({ok:true,channel:{id:"C1",is_private:false,is_archived:false,is_member:true}});
     requireMembershipMock.mockReset().mockResolvedValue(undefined);
     reviewPublicationMock.mockReset().mockImplementation(async (actor, params) => {
       await requireMembershipMock({ actor, workspaceId: params.workspaceId });
@@ -261,9 +380,12 @@ describe("communication Slack integration", () => {
     txMock.communicationEntityLink.create.mockReset().mockResolvedValue({});
     slackWebClientMock.conversations.list.mockReset();
     slackWebClientMock.conversations.join.mockReset();
-    slackWebClientMock.conversations.history.mockReset();
+    slackWebClientMock.conversations.history.mockReset().mockImplementation(async (args:any) => {
+      const responses=await Promise.all(slackWebClientMock.conversations.replies.mock.results.map(result=>result.value));
+      return {ok:true,messages:responses.flatMap(response=>response?.messages??[]).filter((row:any)=>row.ts===args.oldest).slice(0,1)};
+    });
     slackWebClientMock.conversations.replies.mockReset();
-    slackWebClientMock.conversations.info.mockReset();
+    slackWebClientMock.conversations.info.mockReset().mockResolvedValue({ok:true,channel:{id:"C1",is_private:false,is_archived:false,is_member:true}});
     slackWebClientMock.chat.update.mockReset();
     slackWebClientMock.chat.getPermalink.mockReset();
     slackWebClientMock.users.lookupByEmail.mockReset();
@@ -298,7 +420,7 @@ describe("communication Slack integration", () => {
   });
 
   it("uses Slack's canonical workspace permalink for a source message", async () => {
-    const { slackSourceLink } = await import("./communication");
+    const { slackSourceLink } = await authenticatedCommunicationFixture();
     prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce({ botTokenEnc: "enc:bot-token", externalWorkspaceId: "T1" });
     slackWebClientMock.chat.getPermalink.mockResolvedValueOnce({ ok: true, permalink: "https://customer.slack.com/archives/C1/p1714320000000100" });
 
@@ -307,7 +429,7 @@ describe("communication Slack integration", () => {
   });
 
   it("falls back to the installation-qualified channel when Slack cannot return a permalink", async () => {
-    const { slackSourceLink } = await import("./communication");
+    const { slackSourceLink } = await authenticatedCommunicationFixture();
     prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce({ botTokenEnc: "enc:bot-token", externalWorkspaceId: "T1" });
     slackWebClientMock.chat.getPermalink.mockRejectedValueOnce(new Error("temporary Slack error"));
 
@@ -315,14 +437,29 @@ describe("communication Slack integration", () => {
   });
 
   it("verifies Slack request signatures", async () => {
-    const { verifySlackRequest } = await import("./communication");
+    const { verifySlackRequest } = await authenticatedCommunicationFixture();
     const body = JSON.stringify({ type: "event_callback" });
 
     expect(verifySlackRequest(body, signedHeaders(body))).toBe(true);
   });
 
+  it("counts only current complete Message inputs across unknown crowding before returning installation totals", async () => {
+    const {listCommunicationInstallations} = await import("./communication");
+    prismaMock.communicationInstallation.findMany.mockResolvedValue([{id:"install-1",_count:{channels:1,externalUsers:1}}]);
+    const rows=Array.from({length:205},(_,index)=>({id:`row-${String(index).padStart(4,"0")}`,workspaceId:"workspace-1",installationId:"install-1"}));
+    prismaMock.communicationMessage.findMany.mockImplementation(async({where,take}:any)=>rows.filter(row=>!where.id?.gt||row.id>where.id.gt).slice(0,take));
+    captureDigestProofMock.mockImplementation(async(_actor,_ws,inputs:any[])=>{
+      if(inputs.some(input=>Number(input.id.slice(4))<202))throw new AppError(409,"UNKNOWN_LINEAGE","Synthetic unknown message");
+      return inputs.map(input=>({kind:input.kind,id:input.id,fingerprint:"a".repeat(64)}));
+    });
+    const result=await listCommunicationInstallations({kind:"user",user:{id:"admin",email:"admin@example.test",displayName:"Admin"}},"workspace-1");
+    expect(result[0]._count.messages).toBe(3);
+    expect(prismaMock.communicationMessage.findMany).toHaveBeenCalledTimes(3);
+    expect(prismaMock.communicationInstallation.findMany.mock.calls[0][0].select._count.select).toEqual({channels:true,externalUsers:true});
+  });
+
   it("bounds Slack digest messages by an optional upper cutoff", async () => {
-    const { listSlackMessagesForDigest } = await import("./communication");
+    const { listSlackMessagesForDigest } = await authenticatedCommunicationFixture();
     const since = new Date("2026-04-29T12:00:00.000Z");
     const until = new Date("2026-04-30T12:00:00.000Z");
 
@@ -342,7 +479,7 @@ describe("communication Slack integration", () => {
   });
 
   it("fills the 500-message digest sample after discarding earlier unauthorized snapshots", async () => {
-    const { listSlackMessagesForDigest } = await import("./communication");
+    const { listSlackMessagesForDigest } = await authenticatedCommunicationFixture();
     const actor = { kind: "agent" as const, authProvider: "bootstrap" as const, label: "Digest test", workspaceIds: ["workspace-1"] };
     const since = new Date("2026-04-29T12:00:00Z");
     const rows = Array.from({ length: 1070 }, (_, index) => ({
@@ -374,7 +511,7 @@ describe("communication Slack integration", () => {
   });
 
   it("applies the shared audience gate before the Slack digest sample cap", async () => {
-    const { listSlackMessagesForDigest } = await import("./communication");
+    const { listSlackMessagesForDigest } = await authenticatedCommunicationFixture();
     const actor = { kind: "agent" as const, authProvider: "bootstrap" as const, label: "Digest test", workspaceIds: ["workspace-1"] };
     const audience = [{ kind: "user" as const, user: { id: "synthetic-user", email: "synthetic@example.test", displayName: "Synthetic user" } }];
     const rows = [{ id: "revoked-for-reader", receivedAt: new Date("2026-04-29T12:00:00Z") }, { id: "shared", receivedAt: new Date("2026-04-29T13:00:00Z") }];
@@ -386,7 +523,7 @@ describe("communication Slack integration", () => {
   });
 
   it("prefilters live public channels and installs before loading digest messages", async () => {
-    const { listSlackMessagesForDigest } = await import("./communication");
+    const { listSlackMessagesForDigest } = await authenticatedCommunicationFixture();
     const actor = { kind: "agent" as const, authProvider: "bootstrap" as const, label: "Digest test", workspaceIds: ["workspace-1"] };
     await listSlackMessagesForDigest(actor, "workspace-1", new Date("2026-04-29T00:00:00Z"));
     expect(prismaMock.communicationChannel.findMany).toHaveBeenCalledWith({
@@ -405,7 +542,7 @@ describe("communication Slack integration", () => {
   });
 
   it("rejects stale Slack request timestamps", async () => {
-    const { verifySlackRequest } = await import("./communication");
+    const { verifySlackRequest } = await authenticatedCommunicationFixture();
     const body = "{}";
     const staleTimestamp = Math.floor(Date.now() / 1000) - 600;
 
@@ -421,7 +558,7 @@ describe("communication Slack integration", () => {
   }
 
   it("authenticates scoped envelopes and rejects signed wrong-team or wrong-app payloads", async () => {
-    const { verifySlackRequest } = await import("./communication");
+    const { verifySlackRequest } = await authenticatedCommunicationFixture();
     configureScopedSlack();
     const envelope = JSON.stringify({team_id: "T1", api_app_id: "A1", event: {type: "message"}});
     expect(verifySlackRequest(envelope, signedHeaders(envelope), scopedWorkspace)).toBe(true);
@@ -441,7 +578,7 @@ describe("communication Slack integration", () => {
   });
 
   it("rejects scoped delivery when persisted installation belongs to another workspace", async () => {
-    const { verifySlackWorkspaceInstallation } = await import("./communication");
+    const { verifySlackWorkspaceInstallation } = await authenticatedCommunicationFixture();
     configureScopedSlack();
     prismaMock.communicationInstallation.findUnique.mockResolvedValue({id: "install-1", workspaceId: "other", appId: "A1"});
     await expect(verifySlackWorkspaceInstallation(scopedWorkspace, {team_id: "T1", api_app_id: "A1"})).rejects.toThrow("does not match");
@@ -451,7 +588,7 @@ describe("communication Slack integration", () => {
   });
 
   it("exchanges OAuth with scoped credentials and rejects another app response", async () => {
-    const { exchangeSlackOAuthCode } = await import("./communication");
+    const { exchangeSlackOAuthCode } = await authenticatedCommunicationFixture();
     configureScopedSlack();
     slackWebClientMock.oauth.v2.access.mockResolvedValue({ok: true, team: {id: "T1"}, app_id: "A1", access_token: "synthetic-token"});
     await exchangeSlackOAuthCode("code", "https://example.test/callback", scopedWorkspace);
@@ -461,7 +598,7 @@ describe("communication Slack integration", () => {
   });
 
   it("preserves reconnect settings and selected channel policy for a scoped app", async () => {
-    const { saveSlackInstallationForWorkspace } = await import("./communication");
+    const { saveSlackInstallationForWorkspace } = await authenticatedCommunicationFixture();
     configureScopedSlack();
     txMock.communicationInstallation.findUnique.mockResolvedValue({workspaceId: scopedWorkspace, settings: {
       mutedChannelIds: ["C-muted"], proactiveEnabled: false, lastPublicArchiveSyncAt: "2026-09-01T00:00:00Z", rawRetentionDays: 90,
@@ -477,7 +614,7 @@ describe("communication Slack integration", () => {
   });
 
   it.each([{ scopes: ["channels:history", "channels:join"] }, { scopes: [] }])("holds queued archive jobs with scopes $scopes", async ({ scopes }) => {
-    const { syncSlackPublicArchiveForWorkspace, slackPublicArchiveEnabled } = await import("./communication");
+    const { syncSlackPublicArchiveForWorkspace, slackPublicArchiveEnabled } = await authenticatedCommunicationFixture();
     for (const settings of [{publicArchiveSyncEnabled: false}, {publicIngestionEnabled: false}, {channelAdmissionMode: "selected"}, {broadPublicIngestion: false}]) {
       expect(slackPublicArchiveEnabled(settings)).toBe(false);
       prismaMock.communicationInstallation.findFirst.mockResolvedValue({id: "install-1", workspaceId: "ws-1", scopes, settings, botTokenEnc: null});
@@ -490,7 +627,7 @@ describe("communication Slack integration", () => {
   });
 
   it("checks a durable workspace team before the configured OAuth fallback", async () => {
-    const { getSlackExpectedTeamIdForWorkspace } = await import("./communication");
+    const { getSlackExpectedTeamIdForWorkspace } = await authenticatedCommunicationFixture();
     configureScopedSlack();
     prismaMock.workspaceIntegrationBinding.findUnique.mockResolvedValueOnce({ externalWorkspaceId: "TDURABLE" });
     await expect(getSlackExpectedTeamIdForWorkspace(scopedWorkspace)).resolves.toBe("TDURABLE");
@@ -498,7 +635,7 @@ describe("communication Slack integration", () => {
   });
 
   it("uses the configured team before dormant installation history when no durable binding exists", async () => {
-    const { getSlackExpectedTeamIdForWorkspace } = await import("./communication");
+    const { getSlackExpectedTeamIdForWorkspace } = await authenticatedCommunicationFixture();
     configureScopedSlack();
     prismaMock.workspaceIntegrationBinding.findUnique.mockResolvedValueOnce(null);
     prismaMock.communicationInstallation.findFirst.mockResolvedValue({ externalWorkspaceId: "TDORMANT" });
@@ -507,7 +644,7 @@ describe("communication Slack integration", () => {
   });
 
   it("requests public channel history and join scopes for archive installs", async () => {
-    const { slackOAuthScopes } = await import("./communication");
+    const { slackOAuthScopes } = await authenticatedCommunicationFixture();
 
     expect(slackOAuthScopes().split(",")).toEqual(expect.arrayContaining([
       "channels:history",
@@ -516,7 +653,7 @@ describe("communication Slack integration", () => {
   });
 
   it("round-trips versioned Slack OAuth state with expected team and flow metadata", async () => {
-    const { createSlackOAuthState, readSlackOAuthState } = await import("./communication");
+    const { createSlackOAuthState, readSlackOAuthState } = await authenticatedCommunicationFixture();
 
     const state = createSlackOAuthState("workspace-1", {
       expectedTeamId: "T1",
@@ -541,7 +678,7 @@ describe("communication Slack integration", () => {
   });
 
   it("keeps reading legacy Slack OAuth state while callbacks roll over", async () => {
-    const { readSlackOAuthState } = await import("./communication");
+    const { readSlackOAuthState } = await authenticatedCommunicationFixture();
     const legacyState = Buffer.from(JSON.stringify({
       workspaceId: "workspace-1",
       nonce: "nonce",
@@ -557,7 +694,7 @@ describe("communication Slack integration", () => {
   });
 
   it("stores archive settings with long retention when public history is granted", async () => {
-    const { saveSlackInstallation } = await import("./communication");
+    const { saveSlackInstallation } = await authenticatedCommunicationFixture();
     txMock.communicationInstallation.upsert.mockResolvedValueOnce({ id: "install-1" });
 
     await saveSlackInstallation({ kind: "system" } as any, {
@@ -605,7 +742,7 @@ describe("communication Slack integration", () => {
   });
 
   it("stores Slack installations for a target workspace without workspace membership checks", async () => {
-    const { saveSlackInstallationForWorkspace } = await import("./communication");
+    const { saveSlackInstallationForWorkspace } = await authenticatedCommunicationFixture();
     txMock.communicationInstallation.upsert.mockResolvedValueOnce({ id: "install-1" });
 
     await saveSlackInstallationForWorkspace({
@@ -663,7 +800,7 @@ describe("communication Slack integration", () => {
   });
 
   it("rejects Slack OAuth when the selected team does not match the workspace binding", async () => {
-    const { saveSlackInstallationForWorkspace } = await import("./communication");
+    const { saveSlackInstallationForWorkspace } = await authenticatedCommunicationFixture();
     txMock.workspaceIntegrationBinding.findUnique.mockResolvedValueOnce({ externalWorkspaceId: "T1" });
 
     await expect(saveSlackInstallationForWorkspace({
@@ -684,7 +821,7 @@ describe("communication Slack integration", () => {
   });
 
   it("rejects Slack OAuth when that team is already connected to another Corgtex workspace", async () => {
-    const { saveSlackInstallationForWorkspace } = await import("./communication");
+    const { saveSlackInstallationForWorkspace } = await authenticatedCommunicationFixture();
     txMock.communicationInstallation.findUnique.mockResolvedValueOnce({ workspaceId: "workspace-2" });
 
     await expect(saveSlackInstallationForWorkspace({
@@ -704,7 +841,7 @@ describe("communication Slack integration", () => {
   });
 
   it("sanitizes concurrent Slack binding uniqueness conflicts", async () => {
-    const { saveSlackInstallationForWorkspace } = await import("./communication");
+    const { saveSlackInstallationForWorkspace } = await authenticatedCommunicationFixture();
     txMock.workspaceIntegrationBinding.upsert.mockRejectedValueOnce(Object.assign(new Error("Unique constraint failed"), {
       code: "P2002",
     }));
@@ -725,7 +862,7 @@ describe("communication Slack integration", () => {
   });
 
   it("rejects same-workspace Slack binding races before saving the losing team installation", async () => {
-    const { saveSlackInstallationForWorkspace } = await import("./communication");
+    const { saveSlackInstallationForWorkspace } = await authenticatedCommunicationFixture();
     txMock.workspaceIntegrationBinding.upsert.mockResolvedValueOnce({ externalWorkspaceId: "T2" });
 
     await expect(saveSlackInstallationForWorkspace({
@@ -744,7 +881,7 @@ describe("communication Slack integration", () => {
   });
 
   it("does not sanitize unrelated Slack binding database errors as tenant conflicts", async () => {
-    const { saveSlackInstallationForWorkspace } = await import("./communication");
+    const { saveSlackInstallationForWorkspace } = await authenticatedCommunicationFixture();
     txMock.workspaceIntegrationBinding.upsert.mockRejectedValueOnce(Object.assign(new Error("Record not found"), {
       code: "P2025",
     }));
@@ -765,7 +902,7 @@ describe("communication Slack integration", () => {
   });
 
   it("resolves notification recipients from cached Slack user mappings before API lookup", async () => {
-    const { resolveSlackNotificationRecipient } = await import("./communication");
+    const { resolveSlackNotificationRecipient } = await authenticatedCommunicationFixture();
     prismaMock.communicationInstallation.findFirst.mockResolvedValueOnce({
       id: "install-1",
       workspaceId: "workspace-1",
@@ -788,7 +925,7 @@ describe("communication Slack integration", () => {
   });
 
   it("looks up notification recipients by email and caches the Slack mapping", async () => {
-    const { resolveSlackNotificationRecipient } = await import("./communication");
+    const { resolveSlackNotificationRecipient } = await authenticatedCommunicationFixture();
     prismaMock.communicationInstallation.findFirst.mockResolvedValueOnce({
       id: "install-1",
       workspaceId: "workspace-1",
@@ -839,7 +976,7 @@ describe("communication Slack integration", () => {
   });
 
   it("syncs accessible public Slack channel history without storing bot messages", async () => {
-    const { syncSlackPublicArchiveForWorkspace } = await import("./communication");
+    const { syncSlackPublicArchiveForWorkspace } = await authenticatedCommunicationFixture();
     prismaMock.communicationInstallation.findFirst.mockResolvedValueOnce({
       id: "install-1",
       workspaceId: "workspace-1",
@@ -875,21 +1012,14 @@ describe("communication Slack integration", () => {
       messagesUpserted: 1,
       retentionDays: 3650,
     });
-    expect(prismaMock.communicationMessage.upsert).toHaveBeenCalledTimes(1);
+    expect(txMock.communicationMessage.upsert).toHaveBeenCalledTimes(1);
     expect(prismaMock.communicationInstallation.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        settings: expect.objectContaining({
-          broadPublicIngestion: true,
-          autoJoinPublicChannels: true,
-          rawRetentionDays: 3650,
-        }),
-        lastError: null,
-      }),
+      data: { lastError: null },
     }));
   });
 
   it("deduplicates Slack events and enqueues new events", async () => {
-    const { ingestCommunicationEvent } = await import("./communication");
+    const { ingestCommunicationEvent } = await authenticatedCommunicationFixture();
     prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce(null);
     prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce({
       id: "install-1",
@@ -916,7 +1046,7 @@ describe("communication Slack integration", () => {
   });
 
   it("ignores Slack events for disconnected installations without enqueueing jobs", async () => {
-    const { ingestCommunicationEvent } = await import("./communication");
+    const { ingestCommunicationEvent } = await authenticatedCommunicationFixture();
     prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce(null);
     prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce({
       id: "install-1",
@@ -927,27 +1057,18 @@ describe("communication Slack integration", () => {
       id: "inbound-ignored",
     });
 
-    const result = await ingestCommunicationEvent("SLACK", {
+    await expect(ingestCommunicationEvent("SLACK", {
       team_id: "T1",
       event_id: "EvDisconnected",
       event: { type: "message", text: "do not retain this text" },
-    });
-
-    expect(result).toEqual({ inboundEventId: "inbound-ignored", duplicate: false, ignored: true });
-    expect(prismaMock.communicationInboundEvent.create).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        installationId: "install-1",
-        workspaceId: "workspace-1",
-        status: "IGNORED",
-        error: "Slack installation is not active.",
-      }),
-    }));
+    })).rejects.toMatchObject({code:"SLACK_TENANT_MISMATCH"});
+    expect(prismaMock.communicationInboundEvent.create).not.toHaveBeenCalled();
     expect(txMock.workflowJob.upsert).not.toHaveBeenCalled();
     expect(txMock.communicationInstallation.update).not.toHaveBeenCalled();
   });
 
   it("ignores Slack events when the team no longer matches the workspace binding", async () => {
-    const { ingestCommunicationEvent } = await import("./communication");
+    const { ingestCommunicationEvent } = await authenticatedCommunicationFixture();
     prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce(null);
     prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce({
       id: "install-legacy",
@@ -959,27 +1080,18 @@ describe("communication Slack integration", () => {
       id: "inbound-ignored",
     });
 
-    const result = await ingestCommunicationEvent("SLACK", {
+    await expect(ingestCommunicationEvent("SLACK", {
       team_id: "T1",
       event_id: "EvLegacy",
       event: { type: "message" },
-    });
-
-    expect(result).toEqual({ inboundEventId: "inbound-ignored", duplicate: false, ignored: true });
-    expect(prismaMock.communicationInboundEvent.create).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        installationId: null,
-        workspaceId: null,
-        status: "IGNORED",
-        error: "No Corgtex Slack installation matched this event.",
-      }),
-    }));
+    })).rejects.toMatchObject({code:"SLACK_TENANT_MISMATCH"});
+    expect(prismaMock.communicationInboundEvent.create).not.toHaveBeenCalled();
     expect(txMock.workflowJob.upsert).not.toHaveBeenCalled();
     expect(txMock.communicationInstallation.update).not.toHaveBeenCalled();
   });
 
   it("does not process stale queued Slack events after installation disconnect", async () => {
-    const { processSlackInboundEvent } = await import("./communication");
+    const { processSlackInboundEvent } = await authenticatedCommunicationFixture();
     prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
       id: "inbound-1",
       provider: "SLACK",
@@ -1007,11 +1119,11 @@ describe("communication Slack integration", () => {
         error: "Slack installation is not active.",
       }),
     }));
-    expect(prismaMock.communicationMessage.upsert).not.toHaveBeenCalled();
+    expect(txMock.communicationMessage.upsert).not.toHaveBeenCalled();
   });
 
   it("keeps unseen public channels disabled after selected-channel reconnect", async () => {
-    const { processSlackInboundEvent } = await import("./communication");
+    const { processSlackInboundEvent } = await authenticatedCommunicationFixture();
     prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
       id: "inbound-new-channel", provider: "SLACK",
       payload: {event: {type: "message", channel: "C-new", channel_type: "channel", user: "U1", ts: "1714320000.000100", text: "outside selected channels"}},
@@ -1023,11 +1135,11 @@ describe("communication Slack integration", () => {
       update: expect.not.objectContaining({isIngestEnabled: true}),
       create: expect.objectContaining({externalChannelId: "C-new", isIngestEnabled: false}),
     }));
-    expect(prismaMock.communicationMessage.upsert).not.toHaveBeenCalled();
+    expect(txMock.communicationMessage.upsert).not.toHaveBeenCalled();
   });
 
   it("stores public Slack message events and queues Brain indexing plus summaries", async () => {
-    const { processSlackInboundEvent } = await import("./communication");
+    const { processSlackInboundEvent } = await authenticatedCommunicationFixture();
     prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
       id: "inbound-message",
       provider: "SLACK",
@@ -1054,7 +1166,7 @@ describe("communication Slack integration", () => {
 
     await processSlackInboundEvent("inbound-message");
 
-    expect(prismaMock.communicationMessage.upsert).toHaveBeenCalledWith(expect.objectContaining({
+    expect(txMock.communicationMessage.upsert).toHaveBeenCalledWith(expect.objectContaining({
       update: expect.objectContaining({
         text: "Public launch detail is ready.",
         textRedactedAt: null,
@@ -1085,14 +1197,14 @@ describe("communication Slack integration", () => {
   });
 
   it.each(["STOP", "Stop. Do nothing", "ack"])("persists an unmatched human '%s' reply against its Slack thread", async (text) => {
-    const { processSlackInboundEvent } = await import("./communication");
+    const { processSlackInboundEvent } = await authenticatedCommunicationFixture();
     prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
       id: "inbound-stop", provider: "SLACK",
       payload: { event: { type: "message", channel: "C1", channel_type: "channel", user: "U-unmatched", ts: "1788896184.791699", thread_ts: "1788205758.060039", text } },
       installation: { id: "install-1", workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE", settings: {} },
     });
     prismaMock.communicationChannel.upsert.mockResolvedValueOnce({ id: "channel-1", kind: "PUBLIC", isIngestEnabled: true });
-    prismaMock.communicationMessage.upsert.mockResolvedValueOnce(slackMessageRow({ id: "stop-message" }));
+    txMock.communicationMessage.upsert.mockImplementationOnce(async ({create}:any)=>slackMessageRow({...create,id:"stop-message"}));
 
     await processSlackInboundEvent("inbound-stop");
     expect(prismaMock.communicationEntityLink.upsert).toHaveBeenCalledWith(expect.objectContaining({
@@ -1101,14 +1213,14 @@ describe("communication Slack integration", () => {
   });
 
   it("removes thread suppression when the originating Slack reply is edited to non-stop text", async () => {
-    const { processSlackInboundEvent } = await import("./communication");
+    const { processSlackInboundEvent } = await authenticatedCommunicationFixture();
     prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
       id: "inbound-corrected-stop", provider: "SLACK",
       payload: { event: { type: "message", subtype: "message_changed", channel: "C1", message: { type: "message", user: "U1", ts: "1788896184.791699", thread_ts: "1788205758.060039", text: "Got it, but keep reminding me" } } },
       installation: { id: "install-1", workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE", settings: {} },
     });
     prismaMock.communicationChannel.upsert.mockResolvedValueOnce({ id: "channel-1", kind: "PUBLIC", isIngestEnabled: true });
-    prismaMock.communicationMessage.upsert.mockResolvedValueOnce(slackMessageRow({ id: "stop-message" }));
+    txMock.communicationMessage.upsert.mockImplementationOnce(async ({create}:any)=>slackMessageRow({...create,id:"stop-message"}));
     prismaMock.communicationEntityLink.findFirst.mockResolvedValueOnce({ id: "marker-1", messageId: "stop-message" });
 
     await processSlackInboundEvent("inbound-corrected-stop");
@@ -1119,7 +1231,7 @@ describe("communication Slack integration", () => {
     { settings: { publicIngestionEnabled: false }, channelEnabled: true },
     { settings: { publicIngestionEnabled: true, channelAdmissionMode: "selected" }, channelEnabled: false },
   ])("reconciles a stored stop edit while ingestion is held: %j", async ({ settings, channelEnabled }) => {
-    const { processSlackInboundEvent } = await import("./communication");
+    const { processSlackInboundEvent } = await authenticatedCommunicationFixture();
     prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
       id: "inbound-held-edit", provider: "SLACK",
       payload: { event: { type: "message", subtype: "message_changed", channel: "C1", message: { type: "message", user: "U1", ts: "1788896184.791699", thread_ts: "1788205758.060039", text: "Please keep reminding me" } } },
@@ -1137,7 +1249,7 @@ describe("communication Slack integration", () => {
     }));
     expect(prismaMock.knowledgeChunk.deleteMany).toHaveBeenCalledWith({ where: { sourceType: "SLACK", sourceId: "stop-message" } });
     expect(prismaMock.communicationEntityLink.deleteMany).toHaveBeenCalledWith({ where: { id: "marker-1", messageId: "stop-message" } });
-    expect(prismaMock.communicationMessage.upsert).not.toHaveBeenCalled();
+    expect(txMock.communicationMessage.upsert).not.toHaveBeenCalled();
     expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalled();
   });
 
@@ -1146,7 +1258,7 @@ describe("communication Slack integration", () => {
     { publicIngestionEnabled: false, channelAdmissionMode: "selected" },
     { publicIngestionEnabled: true, channelAdmissionMode: "selected" },
   ])("redacts existing deleted messages even when ingestion is held: %j", async (settings) => {
-    const { processSlackInboundEvent } = await import("./communication");
+    const { processSlackInboundEvent } = await authenticatedCommunicationFixture();
     prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
       id: "inbound-delete",
       provider: "SLACK",
@@ -1181,7 +1293,7 @@ describe("communication Slack integration", () => {
     await processSlackInboundEvent("inbound-delete");
 
     expect(prismaMock.communicationChannel.upsert).not.toHaveBeenCalled();
-    expect(prismaMock.communicationMessage.upsert).not.toHaveBeenCalled();
+    expect(txMock.communicationMessage.upsert).not.toHaveBeenCalled();
     expect(prismaMock.communicationMessage.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
         installationId: "install-1",
@@ -1219,7 +1331,7 @@ describe("communication Slack integration", () => {
   });
 
   it("does not create channels or history for a deletion without a stored message", async () => {
-    const { processSlackInboundEvent } = await import("./communication");
+    const { processSlackInboundEvent } = await authenticatedCommunicationFixture();
     prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
       id: "inbound-unknown-delete",
       provider: "SLACK",
@@ -1234,13 +1346,13 @@ describe("communication Slack integration", () => {
     await processSlackInboundEvent("inbound-unknown-delete");
 
     expect(prismaMock.communicationChannel.upsert).not.toHaveBeenCalled();
-    expect(prismaMock.communicationMessage.upsert).not.toHaveBeenCalled();
+    expect(txMock.communicationMessage.upsert).not.toHaveBeenCalled();
     expect(prismaMock.knowledgeChunk.deleteMany).not.toHaveBeenCalled();
     expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalled();
   });
 
   it("creates private action drafts from Slack slash commands", async () => {
-    const { handleSlackCommand } = await import("./communication");
+    const { handleSlackCommand } = await authenticatedCommunicationFixture();
     prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce({
       id: "install-1",
       workspaceId: "workspace-1",
@@ -1274,7 +1386,7 @@ describe("communication Slack integration", () => {
   });
 
   it("atomically creates an open Action and final source link for a claim key", async () => {
-    const { createWorkItemFromCommunicationSource } = await import("./communication");
+    const { createWorkItemFromCommunicationSource } = await authenticatedCommunicationFixture();
 
     await expect(createWorkItemFromCommunicationSource({
       kind: "user",
@@ -1324,7 +1436,7 @@ describe("communication Slack integration", () => {
       action: "create_action",
       claimKey: "slack:proactive-action:message-1",
     });
-    const { createWorkItemFromCommunicationSource } = await import("./communication");
+    const { createWorkItemFromCommunicationSource } = await authenticatedCommunicationFixture();
 
     await expect(createWorkItemFromCommunicationSource({
       kind: "user",
@@ -1349,7 +1461,7 @@ describe("communication Slack integration", () => {
   it("leaves no pre-claim when Action creation fails inside the transaction", async () => {
     const createError = new Error("Action creation failed");
     createActionMock.mockRejectedValueOnce(createError);
-    const { createWorkItemFromCommunicationSource } = await import("./communication");
+    const { createWorkItemFromCommunicationSource } = await authenticatedCommunicationFixture();
 
     await expect(createWorkItemFromCommunicationSource({
       kind: "user",
@@ -1373,7 +1485,7 @@ describe("communication Slack integration", () => {
   it("does not mask unrelated unique failures or allow claim keys on non-open Actions", async () => {
     const uniqueError = Object.assign(new Error("Unrelated unique constraint failed"), { code: "P2002" });
     txMock.communicationEntityLink.create.mockRejectedValueOnce(uniqueError);
-    const { createWorkItemFromCommunicationSource } = await import("./communication");
+    const { createWorkItemFromCommunicationSource } = await authenticatedCommunicationFixture();
     const actor = {
       kind: "user" as const,
       user: { id: "user-1", email: "user@example.test", displayName: "User", globalRole: "USER" as const },
@@ -1422,7 +1534,8 @@ describe("communication Slack integration", () => {
   });
 
   it("enqueues plain Slack slash command text for the Slack agent", async () => {
-    const { handleSlackCommand } = await import("./communication");
+    stubAuthoredSlackScope();
+    const { handleSlackCommand } = await authenticatedCommunicationFixture();
     prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce({
       id: "install-1",
       workspaceId: "workspace-1",
@@ -1464,7 +1577,7 @@ describe("communication Slack integration", () => {
   });
 
   it("enqueues app mentions with the bot mention stripped", async () => {
-    const { processSlackInboundEvent } = await import("./communication");
+    const { processSlackInboundEvent } = await authenticatedCommunicationFixture();
     prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
       id: "inbound-1",
       provider: "SLACK",
@@ -1514,7 +1627,7 @@ describe("communication Slack integration", () => {
   });
 
   it.each(["<@UBOT> STOP", "<@UBOT> STOP ALL FOLLOW UP"])("honors an unmatched Slack mention '%s' without running the agent", async (text) => {
-    const { processSlackInboundEvent } = await import("./communication");
+    const { processSlackInboundEvent } = await authenticatedCommunicationFixture();
     prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
       id: "inbound-unmatched-stop", provider: "SLACK",
       payload: { event: { type: "app_mention", channel: "C1", user: "U-unmatched", ts: "1788896184.791699", thread_ts: "1788205758.060039", text } },
@@ -1522,7 +1635,7 @@ describe("communication Slack integration", () => {
     });
     prismaMock.communicationExternalUser.findUnique.mockResolvedValueOnce(null);
     prismaMock.communicationChannel.upsert.mockResolvedValueOnce({ id: "channel-1", kind: "PUBLIC", isIngestEnabled: true });
-    prismaMock.communicationMessage.upsert.mockResolvedValueOnce(slackMessageRow({ id: "stop-message" }));
+    txMock.communicationMessage.upsert.mockImplementationOnce(async ({create}:any)=>slackMessageRow({...create,id:"stop-message"}));
     prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce({ id: "install-1", botTokenEnc: "enc:bot-token" });
     slackWebClientMock.chat.postMessage.mockResolvedValueOnce({ ok: true, ts: "1788896185.000001" });
 
@@ -1536,7 +1649,7 @@ describe("communication Slack integration", () => {
   });
 
   it("routes app mentions in agenda threads to agenda editing", async () => {
-    const { processSlackInboundEvent } = await import("./communication");
+    const { processSlackInboundEvent } = await authenticatedCommunicationFixture();
     prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
       id: "inbound-agenda",
       provider: "SLACK",
@@ -1592,7 +1705,7 @@ describe("communication Slack integration", () => {
   });
 
   it("validates Slack agenda channels before saving", async () => {
-    const { validateSlackPostTarget } = await import("./communication");
+    const { validateSlackPostTarget } = await authenticatedCommunicationFixture();
     prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce({
       id: "install-1",
       botTokenEnc: "enc:bot-token",
@@ -1614,7 +1727,7 @@ describe("communication Slack integration", () => {
   });
 
   it("rejects Slack agenda channels where the bot is not a member", async () => {
-    const { validateSlackPostTarget } = await import("./communication");
+    const { validateSlackPostTarget } = await authenticatedCommunicationFixture();
     prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce({
       id: "install-1",
       botTokenEnc: "enc:bot-token",
@@ -1635,7 +1748,9 @@ describe("communication Slack integration", () => {
   });
 
   it("runs the Slack agent for message shortcuts instead of opening the legacy modal", async () => {
-    const { handleSlackInteraction } = await import("./communication");
+    stubAuthoredSlackScope();
+    slackWebClientMock.conversations.replies.mockResolvedValue({ ok: true, messages: [{ user: "U2", ts: "1710000000.000100", text: "We need clearer ownership for onboarding." }] });
+    const { handleSlackInteraction } = await authenticatedCommunicationFixture();
     prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce({
       id: "install-1",
       workspaceId: "workspace-1",
@@ -1672,7 +1787,8 @@ describe("communication Slack integration", () => {
         type: "communication.slack.agent",
         payload: expect.objectContaining({
           source: "message_shortcut",
-          prompt: "Act on this Slack message:\nWe need clearer ownership for onboarding.",
+          requestInputId: "request-1",
+          prompt: "Act on the selected Slack message.",
           sourceMessageId: "message-1",
           responseUrlEnc: "enc:https://hooks.slack.test/response",
         }),
@@ -1682,14 +1798,14 @@ describe("communication Slack integration", () => {
   });
 
   it.each([true, undefined])("withholds a required public destination when Slack reports privacy %s", async (isPrivate) => {
-    const { validateSlackPostTarget } = await import("./communication");
+    const { validateSlackPostTarget } = await authenticatedCommunicationFixture();
     prismaMock.communicationInstallation.findUnique.mockResolvedValue({ id: "install-1", botTokenEnc: "enc:bot-token" });
     slackWebClientMock.conversations.info.mockResolvedValue({ ok: true, channel: { id: "C1", name: "synthetic-target", is_private: isPrivate, is_member: true, is_archived: false } });
     expect(await validateSlackPostTarget("install-1", "C1", { requirePublic: true })).toMatchObject({ ok: false, code: "SLACK_CHANNEL_NOT_PUBLIC" });
   });
 
   it("accepts an expressly public provider destination while preserving other private agenda validation", async () => {
-    const { validateSlackPostTarget } = await import("./communication");
+    const { validateSlackPostTarget } = await authenticatedCommunicationFixture();
     prismaMock.communicationInstallation.findUnique.mockResolvedValue({ id: "install-1", botTokenEnc: "enc:bot-token" });
     slackWebClientMock.conversations.info.mockResolvedValueOnce({ ok: true, channel: { id: "C1", name: "synthetic-public", is_private: false, is_member: true, is_archived: false } });
     expect(await validateSlackPostTarget("install-1", "C1", { requirePublic: true })).toMatchObject({ ok: true });
@@ -1698,7 +1814,7 @@ describe("communication Slack integration", () => {
   });
 
   it("routes signed meeting-review confirm block actions through Corgtex-side authorization", async () => {
-    const { handleSlackInteraction } = await import("./communication");
+    const { handleSlackInteraction } = await authenticatedCommunicationFixture();
     const installation = {
       id: "install-1",
       workspaceId: "workspace-1",
@@ -1745,7 +1861,7 @@ describe("communication Slack integration", () => {
   });
 
   it("opens the meeting-review edit modal from signed block actions", async () => {
-    const { handleSlackInteraction } = await import("./communication");
+    const { handleSlackInteraction } = await authenticatedCommunicationFixture();
     const installation = {
       id: "install-1",
       workspaceId: "workspace-1",
@@ -1786,7 +1902,7 @@ describe("communication Slack integration", () => {
   });
 
   it("updates the meeting-review Slack post after modal submissions", async () => {
-    const { handleSlackInteraction } = await import("./communication");
+    const { handleSlackInteraction } = await authenticatedCommunicationFixture();
     const installation = {
       id: "install-1",
       workspaceId: "workspace-1",
@@ -1827,7 +1943,7 @@ describe("communication Slack integration", () => {
   });
 
   it("forwards the current web requester and complete rendered receipt before updating Slack", async () => {
-    const { syncSlackMeetingActionReviewAfterWebApply } = await import("./communication");
+    const { syncSlackMeetingActionReviewAfterWebApply } = await authenticatedCommunicationFixture();
     const actor = { kind: "user" as const, user: { id: "user-1", email: "user@example.test", displayName: "User" } };
     const params = { workspaceId: "workspace-1", insightId: "insight-1" };
     const update = { channelId: "C1", messageTs: "1714320000.000100", blocks: [],
@@ -1847,7 +1963,7 @@ describe("communication Slack integration", () => {
   });
 
   it.each(["interaction", "modal", "web"] as const)("blocks the %s Slack review update when its publication proof is revoked", async (path) => {
-    const { handleSlackInteraction, syncSlackMeetingActionReviewAfterWebApply } = await import("./communication");
+    const { handleSlackInteraction, syncSlackMeetingActionReviewAfterWebApply } = await authenticatedCommunicationFixture();
     const user = { id: "user-1", email: "user@example.test", displayName: "User", globalRole: "USER" as const };
     const actor = { kind: "user" as const, user };
     prismaMock.communicationInstallation.findUnique.mockResolvedValue({ id: "install-1", workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE", botTokenEnc: "enc:bot-token", externalWorkspaceId: "T1" });
@@ -1869,7 +1985,7 @@ describe("communication Slack integration", () => {
   });
 
   it.each(["interaction", "modal", "web"] as const)("blocks the %s Slack review update when legacy lineage is unknown", async (path) => {
-    const { handleSlackInteraction, syncSlackMeetingActionReviewAfterWebApply } = await import("./communication");
+    const { handleSlackInteraction, syncSlackMeetingActionReviewAfterWebApply } = await authenticatedCommunicationFixture();
     const user = { id: "user-1", email: "user@example.test", displayName: "User" };
     const actor = { kind: "user" as const, user };
     prismaMock.communicationInstallation.findUnique.mockResolvedValue({ id: "install-1", workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE", botTokenEnc: "enc:bot-token", externalWorkspaceId: "T1" });
@@ -1889,7 +2005,7 @@ describe("communication Slack integration", () => {
   });
 
   it("rejects a Slack review sender whose membership was revoked after rendering", async () => {
-    const { handleSlackInteraction } = await import("./communication");
+    const { handleSlackInteraction } = await authenticatedCommunicationFixture();
     prismaMock.communicationInstallation.findUnique.mockResolvedValue({ id: "install-1", workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE", botTokenEnc: "enc:bot-token", externalWorkspaceId: "T1" });
     prismaMock.communicationExternalUser.findUnique.mockResolvedValue({ userId: "user-1" });
     prismaMock.user.findUnique.mockResolvedValue({ id: "user-1", email: "user@example.test", displayName: "User" });
@@ -1906,7 +2022,7 @@ describe("communication Slack integration", () => {
   });
 
   it.each(["missing", "deleted", "bot", "departed"] as const)("does not substitute an actor for a %s Slack review requester", async (condition) => {
-    const { handleSlackInteraction } = await import("./communication");
+    const { handleSlackInteraction } = await authenticatedCommunicationFixture();
     prismaMock.communicationInstallation.findUnique.mockResolvedValue({ id: "install-1", workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE", botTokenEnc: "enc:bot-token", externalWorkspaceId: "T1" });
     prismaMock.communicationExternalUser.findUnique.mockResolvedValue({ userId: "user-1", isDeleted: condition === "deleted", isBot: condition === "bot" });
     prismaMock.user.findUnique.mockResolvedValue({ id: "user-1", email: "user@example.test", displayName: "User" });
@@ -1920,7 +2036,7 @@ describe("communication Slack integration", () => {
   });
 
   it("purges expired raw message content while preserving rows", async () => {
-    const { purgeExpiredCommunicationMessages } = await import("./communication");
+    const { purgeExpiredCommunicationMessages } = await authenticatedCommunicationFixture();
     prismaMock.communicationMessage.findMany.mockResolvedValueOnce([
       { id: "message-1" },
       { id: "message-2" },
@@ -1954,7 +2070,7 @@ describe("communication Slack integration", () => {
   });
 
   it("reconciles a pending nudge across Slack thread pages", async () => {
-    const { checkSlackThreadNudge } = await import("./communication");
+    const { checkSlackThreadNudge } = await authenticatedCommunicationFixture();
     prismaMock.communicationInstallation.findUnique.mockResolvedValue({ botUserId: "UBOT", appId: "A1", botTokenEnc: "enc:bot-token" });
     slackWebClientMock.conversations.replies
       .mockResolvedValueOnce({ ok: true, messages: [{ user: "U1", text: "Question?", ts: "1777492800.000100" }], has_more: true, response_metadata: { next_cursor: "next" } })
@@ -1966,7 +2082,7 @@ describe("communication Slack integration", () => {
   });
 
   it("does not treat another author's matching text as a delivered nudge", async () => {
-    const { checkSlackThreadNudge } = await import("./communication");
+    const { checkSlackThreadNudge } = await authenticatedCommunicationFixture();
     prismaMock.communicationInstallation.findUnique.mockResolvedValue({ botUserId: "UBOT", appId: "A1", botTokenEnc: "enc:bot-token" });
     slackWebClientMock.conversations.replies.mockResolvedValueOnce({
       ok: true, messages: [{ user: "UOTHER", text: "Bringing this back into view.", ts: "1777493100.000100" }], has_more: false,
@@ -1977,7 +2093,7 @@ describe("communication Slack integration", () => {
   });
 
   it("keeps a pending nudge when Slack history is incomplete", async () => {
-    const { checkSlackThreadNudge } = await import("./communication");
+    const { checkSlackThreadNudge } = await authenticatedCommunicationFixture();
     prismaMock.communicationInstallation.findUnique.mockResolvedValue({ botUserId: "UBOT", botTokenEnc: "enc:bot-token" });
     slackWebClientMock.conversations.replies.mockResolvedValueOnce({ ok: true, messages: [{ user: "U1", text: "Question?", ts: "1777492800.000100" }], has_more: true });
     await expect(checkSlackThreadNudge("install-1", {
@@ -1986,7 +2102,7 @@ describe("communication Slack integration", () => {
   });
 
   it("reports a complete thread without a matching bot nudge, and fails closed on Slack errors", async () => {
-    const { checkSlackThreadNudge } = await import("./communication");
+    const { checkSlackThreadNudge } = await authenticatedCommunicationFixture();
     prismaMock.communicationInstallation.findUnique.mockResolvedValue({ botUserId: "UBOT", botTokenEnc: "enc:bot-token" });
     const query = { channelId: "C1", threadTs: "1777492800.000100", createdAt: new Date("2026-04-29T20:00:00Z"), text: "Bringing this back into view." };
     slackWebClientMock.conversations.replies.mockResolvedValueOnce({ ok: true, messages: [{ user: "U1", text: "Question?", ts: "1777492800.000100" }], has_more: false });

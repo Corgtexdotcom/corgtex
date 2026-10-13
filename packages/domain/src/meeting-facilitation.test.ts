@@ -561,7 +561,7 @@ describe("meeting facilitation", () => {
       }),
     }));
     expect(prismaMock.meeting.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      orderBy: { recordedAt: "desc" },
+      orderBy: [{ recordedAt: "desc" }, { id: "asc" }],
     }));
     expect(prismaMock.member.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({

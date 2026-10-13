@@ -1,5 +1,5 @@
 import { prisma, type AppActor } from "@corgtex/shared";
-import { captureArtifactInputProof, createDailyCompanyUnderstandingQuestions, invariant,
+import { captureArtifactInputProof, createCheckInGenerationActor, createDailyCompanyUnderstandingQuestions, invariant,
   isArtifactInputProofReadable, mergeArtifactInputProofs, type LineageRoot } from "@corgtex/domain";
 import { executeAgentRun } from "../runtime";
 
@@ -12,7 +12,7 @@ export async function runDailyCheckInAgent(params: {
   triggerType: "SCHEDULE" | "EVENT" | "MANUAL";
   lineageActor?: AppActor;
 }) {
-  const actor: AppActor = params.lineageActor ?? { kind: "agent", authProvider: "bootstrap", label: "daily-check-in", workspaceIds: [params.workspaceId] };
+  const actor: AppActor = params.lineageActor ?? createCheckInGenerationActor(params.workspaceId, params.memberId);
   const member = await prisma.member.findFirst({ where: { id: params.memberId, workspaceId: params.workspaceId, isActive: true },
     include: { user: { select: { id: true, email: true, displayName: true } } } });
   invariant(member, 404, "NOT_FOUND", "Member not found.");

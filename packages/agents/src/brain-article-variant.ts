@@ -12,7 +12,8 @@ export async function runBrainArticleVariantJob(params: {
 Choose a title supported by those sources. Use a neutral wiki style and include only supported claims.
 Do not refer to an older article, infer hidden facts, or invent citations. Return a title and Markdown body.`,
         schemaHint: "{ title: string, bodyMd: string }",
-        input: JSON.stringify({ sources: sources.map((source) => ({ ...source,
+        input: JSON.stringify({ sources: sources.map((source) => ({ kind: source.kind, id: source.id, title: source.title,
+          ...(source.kind === "BrainSource" ? { sourceType: source.sourceType, tier: source.tier } : {}),
           content: source.content.slice(0, 12_000), ingestionGuidanceMd: source.ingestionGuidanceMd?.slice(0, 4_000) ?? null,
         })) }),
       });

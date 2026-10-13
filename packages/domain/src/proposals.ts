@@ -9,9 +9,9 @@ import { AppError, invariant } from "./errors";
 import { advanceHumanArtifactInputLineage, captureArtifactInputProof, captureArtifactInputSnapshotProof, invalidateArtifactInputLineage, lineageContentFingerprint, preserveUnknownArtifactInputSnapshot, currentArtifactInputRoots, readableArtifactIds, recordArtifactInputLineage, type LineageInput, type LineageRoot } from "./source-lineage";
 import { privacyFilter } from "./privacy";
 import { archiveFilterWhere, type ArchiveFilter } from "./archive";
-import { requireDraftManager } from "./draft-permissions";
+import { requireDraftManager, requireCreationInputRoots } from "./draft-permissions";
 import { requireProposalContentEditor } from "./collaborative-permissions";
-import { humanMemberIdentityWhere } from "./member-identity";
+import { humanMemberIdentityWhere, systemActorMemberIdentityWhere } from "./member-identity";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
 import { acquireConstitutionCorpusAdvisoryLock } from "./constitutions";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
@@ -399,53 +399,6 @@ function listFilterValues(values?: readonly (string | null | undefined)[] | null
   return [...new Set((values ?? []).map((value) => value?.trim()).filter((value): value is string => Boolean(value)))];
 }
 
-function memberRelatedProposalWhere(workspaceId: string, memberIds: string[]): Prisma.ProposalWhereInput[] {
-  const authorMembershipWhere = {
-    memberships: {
-      some: {
-        id: { in: memberIds },
-        workspaceId,
-        isActive: true,
-      },
-    },
-  };
-  return [
-    { author: authorMembershipWhere },
-    { ownerMemberId: { in: memberIds } },
-    {
-      actions: {
-        some: {
-          OR: [
-            { assigneeMemberId: { in: memberIds } },
-            { author: authorMembershipWhere },
-          ],
-        },
-      },
-    },
-    {
-      tensions: {
-        some: {
-          OR: [
-            { assigneeMemberId: { in: memberIds } },
-            { raisedByMemberId: { in: memberIds } },
-            { author: authorMembershipWhere },
-          ],
-        },
-      },
-    },
-  ];
-}
-
-function appendProposalWhereAnd(where: Prisma.ProposalWhereInput, condition: Prisma.ProposalWhereInput) {
-  const and = Array.isArray(where.AND) ? [...where.AND] : where.AND ? [where.AND] : [];
-  if (where.OR) {
-    and.push({ OR: where.OR });
-    delete where.OR;
-  }
-  and.push(condition);
-  where.AND = and;
-}
-
 function workItemOrderBy(sort: WorkItemSort | undefined): Prisma.ProposalOrderByWithRelationInput[] {
   if (sort === "alpha") {
     return [{ title: "asc" }, { createdAt: "desc" }, { id: "desc" }];
@@ -456,22 +409,53 @@ function workItemOrderBy(sort: WorkItemSort | undefined): Prisma.ProposalOrderBy
   return [{ priority: "desc" }, { createdAt: "desc" }, { id: "desc" }];
 }
 
-async function readableProposalRelations<T extends { tensions: Array<{ id: string; title: string; status: unknown }>; actions: Array<{ id: string; title: string; status: unknown }>; adviceProcess: { requests: Array<{ id: string; status: unknown }> } | null }>(actor: AppActor, workspaceId: string, proposal: T) {
-  const [tensions, actions, requests] = await Promise.all([
+async function readableProposalRelations<T extends {
+  circleId: string | null; ownerMemberId: string | null; authorUserId: string; meetingId: string | null;
+  circle: ({ id: string; workspaceId: string; name: string } & Record<string, unknown>) | null;
+  ownerMember: ({ id: string; workspaceId: string; isActive: boolean; user: { id: string; email: string; displayName: string | null } } & Record<string, unknown>) | null;
+  author: ({ id: string; email: string; displayName: string | null } & Record<string, unknown>) | null;
+  tensions: Array<{ id: string; title: string; status: unknown }>;
+  actions: Array<{ id: string; title: string; status: unknown }>;
+  adviceProcess: { requests: Array<{ id: string; status: unknown }> } | null;
+}>(actor: AppActor, workspaceId: string, proposal: T) {
+  invariant((proposal.tensions?.length ?? 0) <= 5000 && (proposal.actions?.length ?? 0) <= 5000
+    && (proposal.adviceProcess?.requests?.length ?? 0) <= 5000,
+  503, "SOURCE_READ_SCAN_LIMIT", "Proposal relation permission scan exceeds its supported size.");
+  const meeting = proposal.meetingId ? await prisma.meeting.findFirst({ where: { id: proposal.meetingId, workspaceId } }) : null;
+  const [tensions, actions, requests, circles, owners, authors, ownerUsers, meetings] = await Promise.all([
     readableArtifactIds(actor, workspaceId, "Tension", (proposal.tensions ?? []) as Array<{ id: string; [key: string]: unknown }>),
     readableArtifactIds(actor, workspaceId, "Action", (proposal.actions ?? []) as Array<{ id: string; [key: string]: unknown }>),
     readableArtifactIds(actor, workspaceId, "AdviceRequest", (proposal.adviceProcess?.requests ?? []) as Array<{ id: string; [key: string]: unknown }>),
+    readableArtifactIds(actor, workspaceId, "Circle", proposal.circle && proposal.circle.workspaceId === workspaceId ? [proposal.circle] : []),
+    readableArtifactIds(actor, workspaceId, "Member", proposal.ownerMember && proposal.ownerMember.workspaceId === workspaceId && proposal.ownerMember.isActive ? [proposal.ownerMember] : []),
+    readableArtifactIds(actor, workspaceId, "User", proposal.author ? [proposal.author] : []),
+    readableArtifactIds(actor, workspaceId, "User", proposal.ownerMember?.user ? [proposal.ownerMember.user] : []),
+    readableArtifactIds(actor, workspaceId, "Meeting", meeting ? [meeting] : []),
   ]);
+  const circle = proposal.circle && circles.has(proposal.circle.id) ? { id: proposal.circle.id, name: proposal.circle.name } : null;
+  const ownerMember = proposal.ownerMember && owners.has(proposal.ownerMember.id) && ownerUsers.has(proposal.ownerMember.user.id)
+    ? { id: proposal.ownerMember.id, user: { id: proposal.ownerMember.user.id,
+      email: proposal.ownerMember.user.email, displayName: proposal.ownerMember.user.displayName } } : null;
+  const author = proposal.author && authors.has(proposal.author.id)
+    ? { id: proposal.author.id, email: proposal.author.email, displayName: proposal.author.displayName }
+    : { id: "", email: "", displayName: null };
   return { ...proposal,
+    circleId: circle ? proposal.circleId : null,
+    ownerMemberId: ownerMember ? proposal.ownerMemberId : null,
+    authorUserId: author.id,
+    meetingId: meeting && meetings.has(meeting.id) ? proposal.meetingId : null,
+    circle, ownerMember, author,
     tensions: (proposal.tensions ?? []).filter((row) => tensions.has(row.id)).map((row) => ({ id: row.id, title: row.title, status: row.status })),
     actions: (proposal.actions ?? []).filter((row) => actions.has(row.id)).map((row) => ({ id: row.id, title: row.title, status: row.status })),
-    adviceProcess: proposal.adviceProcess ? { ...proposal.adviceProcess, requests: (proposal.adviceProcess.requests ?? []).filter((row) => requests.has(row.id)).map((row) => ({ status: row.status })) } : null,
+    adviceProcess: { requests: (proposal.adviceProcess?.requests ?? []).filter((row) => requests.has(row.id)).map((row) => ({ status: row.status })) },
   };
 }
 
 export async function listProposals(actor: AppActor, workspaceId: string, opts?: ListProposalsOptions) {
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
+  invariant(Number.isInteger(take) && take >= 0 && take <= 5000 && Number.isInteger(skip) && skip >= 0,
+    400, "INVALID_INPUT", "Proposal pagination is invalid.");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const where: Prisma.ProposalWhereInput = {
     workspaceId,
@@ -486,34 +470,41 @@ export async function listProposals(actor: AppActor, workspaceId: string, opts?:
   }
   if (opts?.status) where.status = opts.status;
   const memberIds = listFilterValues([...(opts?.memberIds ?? []), opts?.memberId]);
-  if (memberIds.length > 0) {
-    appendProposalWhereAnd(where, { OR: memberRelatedProposalWhere(workspaceId, memberIds) });
-  }
-
-  const candidates = await prisma.proposal.findMany({ where });
-  const visibleIds = await readableArtifactIds(actor, workspaceId, "Proposal", candidates);
-  appendProposalWhereAnd(where, { id: { in: [...visibleIds] } });
-  const [items, total] = await Promise.all([
-    prisma.proposal.findMany({
+  invariant(memberIds.length <= 5000, 400, "INVALID_INPUT", "Too many proposal member filters.");
+  const candidates = await prisma.proposal.findMany({
       where,
       include: {
         author: {
           select: {
+            id: true,
             displayName: true,
             email: true,
+            bio: true,
+            avatarUrl: true,
+            linkedinUrl: true,
+            websiteUrl: true,
+            createdAt: true,
+            updatedAt: true,
           },
         },
         ownerMember: {
           include: {
             user: {
               select: {
+                id: true,
                 displayName: true,
                 email: true,
+                bio: true,
+                avatarUrl: true,
+                linkedinUrl: true,
+                websiteUrl: true,
+                createdAt: true,
+                updatedAt: true,
               },
             },
           },
         },
-        circle: { select: { id: true, name: true } },
+        circle: true,
         tensions: { where: privacyFilter(actor, membership) },
         actions: { where: privacyFilter(actor, membership) },
         adviceProcess: {
@@ -523,12 +514,44 @@ export async function listProposals(actor: AppActor, workspaceId: string, opts?:
         },
       },
       orderBy: workItemOrderBy(opts?.sort),
-      take,
-      skip,
-    }),
-    prisma.proposal.count({ where }),
-  ]);
-  return { items: await Promise.all(items.map((proposal) => readableProposalRelations(actor, workspaceId, proposal))), total, take, skip };
+      take: 5001,
+    });
+  invariant(candidates.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Proposal permission scan exceeds its supported size.");
+  const visibleIds = await readableArtifactIds(actor, workspaceId, "Proposal", candidates);
+  const admitted = candidates.filter((candidate) => visibleIds.has(candidate.id));
+  let related = admitted;
+  if (circleIds.length > 0 || opts?.circleId) {
+    const requestedCircles = related.flatMap((candidate) => candidate.circle ? [candidate.circle] : []);
+    const visibleCircles = await readableArtifactIds(actor, workspaceId, "Circle", requestedCircles);
+    related = related.filter((candidate) => candidate.circle && visibleCircles.has(candidate.circle.id));
+  }
+  if (memberIds.length > 0 && related.length > 0) {
+    const members = await prisma.member.findMany({ where: { id: { in: memberIds }, workspaceId, isActive: true },
+      include: { user: { select: { id: true, email: true, displayName: true, bio: true, avatarUrl: true,
+        linkedinUrl: true, websiteUrl: true, createdAt: true, updatedAt: true } } } });
+    const [visibleMembers, visibleUsers] = await Promise.all([
+      readableArtifactIds(actor, workspaceId, "Member", members),
+      readableArtifactIds(actor, workspaceId, "User", members.map((member) => member.user)),
+    ]);
+    const permittedMembers = members.filter((member) => visibleMembers.has(member.id) && visibleUsers.has(member.userId));
+    const memberSet = new Set(permittedMembers.map((member) => member.id));
+    const authorUsers = new Set(permittedMembers.map((member) => member.userId));
+    const actionRows = related.flatMap((candidate) => candidate.actions);
+    const tensionRows = related.flatMap((candidate) => candidate.tensions);
+    invariant(actionRows.length <= 5000 && tensionRows.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Proposal relation permission scan exceeds its supported size.");
+    const [visibleActions, visibleTensions] = await Promise.all([
+      readableArtifactIds(actor, workspaceId, "Action", actionRows),
+      readableArtifactIds(actor, workspaceId, "Tension", tensionRows),
+    ]);
+    related = related.filter((candidate) =>
+      memberSet.has(candidate.ownerMemberId ?? "") || authorUsers.has(candidate.authorUserId)
+      || candidate.actions.some((action) => visibleActions.has(action.id)
+        && (memberSet.has(action.assigneeMemberId ?? "") || authorUsers.has(action.authorUserId)))
+      || candidate.tensions.some((tension) => visibleTensions.has(tension.id)
+        && (memberSet.has(tension.assigneeMemberId ?? "") || memberSet.has(tension.raisedByMemberId ?? "") || authorUsers.has(tension.authorUserId))));
+  }
+  const total = related.length;
+  return { items: await Promise.all(related.slice(skip, skip + take).map((proposal) => readableProposalRelations(actor, workspaceId, proposal))), total, take, skip };
 }
 
 export async function getProposal(actor: AppActor, params: {
@@ -545,15 +568,15 @@ export async function getProposal(actor: AppActor, params: {
       ...(params.includeArchived ? {} : { archivedAt: null }),
     },
     include: {
-      author: { select: { id: true, displayName: true, email: true } },
+      author: { select: { id: true, displayName: true, email: true, bio: true, avatarUrl: true, linkedinUrl: true, websiteUrl: true, createdAt: true, updatedAt: true } },
       ownerMember: {
         include: {
           user: {
-            select: { displayName: true, email: true },
+            select: { id: true, displayName: true, email: true, bio: true, avatarUrl: true, linkedinUrl: true, websiteUrl: true, createdAt: true, updatedAt: true },
           },
         },
       },
-      circle: { select: { id: true, name: true } },
+      circle: true,
       tensions: { where: privacyFilter(actor, membership) },
       actions: { where: privacyFilter(actor, membership) },
       adviceProcess: {
@@ -723,33 +746,36 @@ async function applyProposalDuplicateUpdate(actor: AppActor, params: CreatePropo
   return proposal;
 }
 
-async function readableProposalSourceIds(actor: AppActor, workspaceId: string, params: { sourceTensionId?: string | null; relatedActionIds?: string[] | null }, sourceTension?: { id: string; [key: string]: unknown }) {
+async function readableProposalSourceIds(actor: AppActor, workspaceId: string, params: { sourceTensionId?: string | null; relatedActionIds?: string[] | null }, sourceTension?: { id: string; [key: string]: unknown }, tx?: Prisma.TransactionClient) {
+  const client = (tx ?? prisma) as Prisma.TransactionClient;
   const actionIds = normalizeIds(params.relatedActionIds);
   const tensionId = params.sourceTensionId?.trim();
   const [actions, tension] = await Promise.all([
-    actionIds.length ? prisma.action.findMany({ where: { workspaceId, id: { in: actionIds }, archivedAt: null } }) : [],
-    sourceTension ?? (tensionId ? prisma.tension.findFirst({ where: { workspaceId, id: tensionId, archivedAt: null } }) : null),
+    actionIds.length ? client.action.findMany({ where: { workspaceId, id: { in: actionIds }, archivedAt: null } }) : [],
+    sourceTension ?? (tensionId ? client.tension.findFirst({ where: { workspaceId, id: tensionId, archivedAt: null } }) : null),
   ]);
   const [actionProof, tensionProof] = await Promise.all([
-    readableArtifactIds(actor, workspaceId, "Action", actions),
-    readableArtifactIds(actor, workspaceId, "Tension", tension ? [tension] : []),
+    tx ? readableArtifactIds(actor, workspaceId, "Action", actions, tx) : readableArtifactIds(actor, workspaceId, "Action", actions),
+    tx ? readableArtifactIds(actor, workspaceId, "Tension", tension ? [tension] : [], tx) : readableArtifactIds(actor, workspaceId, "Tension", tension ? [tension] : []),
   ]);
   return [...(tension && tensionProof.has(tension.id) ? [tension.id] : []), ...actions.filter((row) => actionProof.has(row.id)).map((row) => row.id)];
 }
 
-async function readableProposalDuplicateRows(actor: AppActor, workspaceId: string, rows: unknown[]) {
+async function readableProposalDuplicateRows(actor: AppActor, workspaceId: string, rows: unknown[], tx?: Prisma.TransactionClient) {
+  const client = (tx ?? prisma) as Prisma.TransactionClient;
   const records = rows as Array<{ id: string; [key: string]: unknown }>;
-  const ids = await readableArtifactIds(actor, workspaceId, "Proposal", records);
+  const ids = await (tx ? readableArtifactIds(actor, workspaceId, "Proposal", records, tx)
+    : readableArtifactIds(actor, workspaceId, "Proposal", records));
   const visible = records.filter((row) => ids.has(row.id));
   const actionIds = visible.flatMap((row) => (row.actions as Array<{ id: string }> | undefined)?.map((action) => action.id) ?? []);
   const tensionIds = visible.flatMap((row) => (row.tensions as Array<{ id: string }> | undefined)?.map((tension) => tension.id) ?? []);
   const [actions, tensions] = await Promise.all([
-    actionIds.length ? prisma.action.findMany({ where: { workspaceId, id: { in: actionIds }, archivedAt: null } }) : [],
-    tensionIds.length ? prisma.tension.findMany({ where: { workspaceId, id: { in: tensionIds }, archivedAt: null } }) : [],
+    actionIds.length ? client.action.findMany({ where: { workspaceId, id: { in: actionIds }, archivedAt: null } }) : [],
+    tensionIds.length ? client.tension.findMany({ where: { workspaceId, id: { in: tensionIds }, archivedAt: null } }) : [],
   ]);
   const [permittedActions, permittedTensions] = await Promise.all([
-    readableArtifactIds(actor, workspaceId, "Action", actions),
-    readableArtifactIds(actor, workspaceId, "Tension", tensions),
+    tx ? readableArtifactIds(actor, workspaceId, "Action", actions, tx) : readableArtifactIds(actor, workspaceId, "Action", actions),
+    tx ? readableArtifactIds(actor, workspaceId, "Tension", tensions, tx) : readableArtifactIds(actor, workspaceId, "Tension", tensions),
   ]);
   return visible.map((row) => ({ ...row,
     actions: (row.actions as Array<{ id: string }> | undefined)?.filter((action) => permittedActions.has(action.id)),
@@ -757,11 +783,19 @@ async function readableProposalDuplicateRows(actor: AppActor, workspaceId: strin
   }));
 }
 
-export async function createProposal(actor: AppActor, params: CreateProposalParams) {
+export async function createProposal(actor: AppActor, params: CreateProposalParams, transaction?: Prisma.TransactionClient) {
   const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
+    tx: transaction,
   });
+  params = { ...params, lineageRoots: await requireCreationInputRoots({ actor, workspaceId: params.workspaceId,
+    isPrivate: params.isPrivate ?? true, roots: params.lineageRoots, tx: transaction }) };
+
+  invariant(!transaction || !["use_existing", "update_existing"].includes(params.duplicateGuard?.resolution ?? ""),
+    400, "DUPLICATE_GUARD_TRANSACTION_UNSUPPORTED", "This duplicate resolution cannot join the supplied transaction.");
+  invariant(!transaction || params.includeAiSummary !== true, 400, "AI_SUMMARY_TRANSACTION_UNSUPPORTED",
+    "AI summary generation cannot run inside a supplied transaction.");
 
   const title = params.title.trim();
   const bodyMd = params.bodyMd.trim();
@@ -775,11 +809,13 @@ export async function createProposal(actor: AppActor, params: CreateProposalPara
     circleId: params.circleId,
     ownerMemberId: params.ownerMemberId,
     meetingId: params.meetingId,
-    sourceIds: params.duplicateGuard ? await readableProposalSourceIds(actor, params.workspaceId, params) : [],
+    sourceIds: params.duplicateGuard ? await readableProposalSourceIds(actor, params.workspaceId, params, undefined, transaction) : [],
     actorUserId: actor.kind === "user" ? actor.user.id : null,
     membershipId: membership?.id ?? null,
-    includePrivate: actor.kind === "agent" || membership?.role === "ADMIN",
-  }, params.duplicateGuard, undefined, (rows) => readableProposalDuplicateRows(actor, params.workspaceId, rows));
+    includePrivate: actor.kind === "user" && membership?.role === "ADMIN",
+  }, params.duplicateGuard, transaction, (rows) => readableProposalDuplicateRows(actor, params.workspaceId, rows, transaction));
+  invariant(!transaction || !duplicateDecision || duplicateDecision.resolution === "create_new",
+    400, "DUPLICATE_GUARD_TRANSACTION_UNSUPPORTED", "This duplicate resolution cannot join the supplied transaction.");
   if (duplicateDecision?.resolution === "use_existing") {
     return getProposal(actor, { workspaceId: params.workspaceId, proposalId: duplicateDecision.match.entityId });
   }
@@ -791,15 +827,28 @@ export async function createProposal(actor: AppActor, params: CreateProposalPara
     : params.summary?.trim() || null;
   const isPrivate = params.isPrivate ?? true;
   const openedAt = isPrivate ? null : new Date();
-  const policy = isPrivate ? null : await getApprovalPolicy(params.workspaceId, "PROPOSAL");
+  const policy = isPrivate ? null : transaction
+    ? await transaction.approvalPolicy.findUnique({ where: { workspaceId_subjectType: { workspaceId: params.workspaceId, subjectType: "PROPOSAL" } } })
+    : await getApprovalPolicy(params.workspaceId, "PROPOSAL");
+  if (!isPrivate) invariant(policy, 404, "NOT_FOUND", "Missing approval policy for PROPOSAL.");
 
-  return prisma.$transaction(async (tx) => {
+  const create = async (tx: Prisma.TransactionClient) => {
+    await requireCreationInputRoots({ actor, workspaceId: params.workspaceId, isPrivate: params.isPrivate ?? true, roots: params.lineageRoots, tx });
     const sourceTension = await loadVisibleSourceTension(tx, actor, membership, params.workspaceId, params.sourceTensionId);
     const relatedActions = await validateRelatedActions(tx, actor, membership, params.workspaceId, params.relatedActionIds);
     const relatedActionIds = relatedActions.map((action) => action.id);
-    let authorUserId = actor.kind === "user"
-      ? actor.user.id
-      : await actorUserIdForWorkspace(actor, params.workspaceId);
+    let authorUserId: string;
+    if (actor.kind === "user") authorUserId = actor.user.id;
+    else if (transaction) {
+      const systemMember = await tx.member.findFirst({ where: {
+        workspaceId: params.workspaceId, isActive: true, role: "ADMIN", ...systemActorMemberIdentityWhere(),
+      }, select: { userId: true } });
+      const adminMember = systemMember ?? await tx.member.findFirst({ where: {
+        workspaceId: params.workspaceId, isActive: true, role: "ADMIN",
+      }, select: { userId: true } });
+      invariant(adminMember, 500, "CONFIG_ERROR", "Workspace has no admin member available for system actions.");
+      authorUserId = adminMember.userId;
+    } else authorUserId = await actorUserIdForWorkspace(actor, params.workspaceId);
     if (actor.kind === "agent" && params.authorMemberId) {
       authorUserId = await resolveWorkspaceMemberUserId(tx, params.workspaceId, params.authorMemberId, "Proposal author must be an active member of this workspace.");
     }
@@ -895,7 +944,8 @@ export async function createProposal(actor: AppActor, params: CreateProposalPara
     }
 
     return proposal;
-  });
+  };
+  return transaction ? create(transaction) : prisma.$transaction(create);
 }
 
 export async function createProposalFromTension(actor: AppActor, params: CreateProposalFromTensionParams) {
@@ -903,6 +953,8 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
     actor,
     workspaceId: params.workspaceId,
   });
+  params = { ...params, lineageRoots: await requireCreationInputRoots({ actor, workspaceId: params.workspaceId,
+    isPrivate: params.isPrivate ?? true, roots: params.lineageRoots }) };
 
   let duplicateDecision: Awaited<ReturnType<typeof checkWorkspaceDuplicateGuard>> = null;
   if (params.duplicateGuard != null) {
@@ -920,7 +972,7 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
       sourceIds: await readableProposalSourceIds(actor, params.workspaceId, params, sourceTensionForGuard),
       actorUserId: actor.kind === "user" ? actor.user.id : null,
       membershipId: membership?.id ?? null,
-      includePrivate: actor.kind === "agent" || membership?.role === "ADMIN",
+      includePrivate: actor.kind === "user" && membership?.role === "ADMIN",
     }, params.duplicateGuard, undefined, (rows) => readableProposalDuplicateRows(actor, params.workspaceId, rows));
     if (duplicateDecision?.resolution === "use_existing") {
       return getProposal(actor, { workspaceId: params.workspaceId, proposalId: duplicateDecision.match.entityId });
@@ -941,6 +993,7 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
   const policy = isPrivate ? null : await getApprovalPolicy(params.workspaceId, "PROPOSAL");
 
   return prisma.$transaction(async (tx) => {
+    await requireCreationInputRoots({ actor, workspaceId: params.workspaceId, isPrivate: params.isPrivate ?? true, roots: params.lineageRoots, tx });
     const sourceTension = await loadVisibleSourceTension(tx, actor, membership, params.workspaceId, params.sourceTensionId);
     invariant(sourceTension, 404, "NOT_FOUND", "Source tension not found.");
     const relatedActions = await validateRelatedActions(tx, actor, membership, params.workspaceId, params.relatedActionIds);

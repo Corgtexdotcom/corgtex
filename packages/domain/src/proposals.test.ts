@@ -88,6 +88,7 @@ vi.mock("@corgtex/shared", () => ({
 }));
 
 vi.mock("./source-lineage", () => ({
+  isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
   advanceHumanArtifactInputLineage: vi.fn(),
   captureArtifactInputProof: vi.fn().mockResolvedValue([]),
   captureArtifactInputSnapshotProof: vi.fn().mockResolvedValue([]),
@@ -364,6 +365,29 @@ describe("proposal AI summaries", () => {
 });
 
 describe("proposal creation visibility", () => {
+  it("rejects private agent conversion before reading the source tension or generating a summary", async () => {
+    const {createProposalFromTension} = await import("./proposals");
+    await expect(createProposalFromTension({kind: "agent", workspaceIds: ["ws-1"]} as any,
+      {workspaceId: "ws-1", sourceTensionId: "private-parent"})).rejects.toMatchObject({code: "PRIVATE_AGENT_ARTIFACT_UNSUPPORTED"});
+    expect(prisma.tension.findFirst).not.toHaveBeenCalled();
+    expect(prisma.proposal.create).not.toHaveBeenCalled();
+  });
+  it.each(["credential-a", "credential-b"])("rejects private creation by %s before duplicate reads or writes", async credentialId => {
+    const {createProposal} = await import("./proposals");
+    const credential = {kind: "agent", authProvider: "credential", credentialId, workspaceIds: ["ws-1"], scopes: ["support:write"]} as any;
+    await expect(createProposal(credential, {workspaceId: "ws-1", title: "Private", bodyMd: "Private", authorMemberId: "member-owner"})).rejects.toMatchObject({code: "PRIVATE_AGENT_ARTIFACT_UNSUPPORTED"});
+    expect(prisma.proposal.create).not.toHaveBeenCalled();
+    expect(prisma.proposal.findMany).not.toHaveBeenCalled();
+    expect(prisma.proposal.findFirst).not.toHaveBeenCalled();
+  });
+  it("rejects public agent creation without complete inputs before looking for duplicates", async () => {
+    const {createProposal} = await import("./proposals");
+    await expect(createProposal({kind: "agent", workspaceIds: ["ws-1"]} as any, {...{workspaceId: "ws-1", title: "Private", bodyMd: "Private", authorMemberId: "member-owner"}, isPrivate: false}))
+      .rejects.toMatchObject({code: "UNKNOWN_LINEAGE"});
+    expect(prisma.proposal.create).not.toHaveBeenCalled();
+    expect(prisma.proposal.findMany).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => { vi.clearAllMocks(); });
 
   it("creates private draft proposals by default", async () => {
@@ -1486,32 +1510,10 @@ describe("listProposals", () => {
       where: expect.objectContaining({
         workspaceId: "ws-1",
         circleId: "circle-1",
-        AND: expect.arrayContaining([
-          {
-            OR: [
-              { isPrivate: false },
-              { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
-            ],
-          },
-          expect.objectContaining({
-            OR: expect.arrayContaining([
-              expect.objectContaining({
-                author: expect.objectContaining({
-                  memberships: {
-                    some: {
-                      id: { in: ["mem-1"] },
-                      workspaceId: "ws-1",
-                      isActive: true,
-                    },
-                  },
-                }),
-              }),
-              { ownerMemberId: { in: ["mem-1"] } },
-              expect.objectContaining({ actions: expect.any(Object) }),
-              expect.objectContaining({ tensions: expect.any(Object) }),
-            ]),
-          }),
-        ]),
+        OR: [
+          { isPrivate: false },
+          { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
+        ],
       }),
       orderBy: [
         { createdAt: "desc" },
@@ -1532,7 +1534,9 @@ describe("listProposals", () => {
           },
         },
       }),
+      take: 5001,
     }));
+    expect(prisma.proposal.count).not.toHaveBeenCalled();
   });
 });
 
@@ -3059,6 +3063,48 @@ describe("submitProposal event payload", () => {
 describe("proposal lineage integration", () => {
   beforeEach(() => { vi.clearAllMocks(); });
   const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+  it("keeps public agent input proof, duplicate scan, policy, authorship and native write on the supplied transaction", async () => {
+    const { createProposal } = await import("./proposals");
+    const { requireWorkspaceMembership, actorUserIdForWorkspace } = await import("./auth");
+    const { isArtifactInputProofReadable, recordArtifactInputLineage } = await import("./source-lineage");
+    const txFindMany = vi.fn().mockResolvedValue([]);
+    const txCreate = vi.fn().mockResolvedValue(makeProposal("tx-proposal", { title: "Native proposal", isPrivate: false, status: "OPEN" }));
+    const txMemberFindFirst = vi.fn(async ({ where }: any) => where.userId ? null : { userId: "system-user" });
+    const txPolicyFindUnique = vi.fn().mockResolvedValue({ mode: "CONSENT", decisionWindowHours: 168, requireProposalLink: false });
+    const tx = { ...prisma, proposal: { ...prisma.proposal, findMany: txFindMany, create: txCreate },
+      member: { ...prisma.member, findFirst: txMemberFindFirst }, approvalPolicy: { findUnique: txPolicyFindUnique } } as any;
+    const nativeActor = { kind: "agent", label: "system", authProvider: "bootstrap", workspaceIds: ["ws-1"] } as any;
+    const root = { kind: "ExecutionResult", id: "result-1", fingerprint: "a".repeat(64) } as any;
+    const result = await createProposal(nativeActor, { workspaceId: "ws-1", title: "Native proposal",
+      bodyMd: "Native proposal body", isPrivate: false, summary: "Native summary",
+      lineageRoots: [root], duplicateGuard: {} }, tx);
+    expect(result.id).toBe("tx-proposal");
+    expect(requireWorkspaceMembership).toHaveBeenCalledWith(expect.objectContaining({ tx }));
+    expect(isArtifactInputProofReadable).toHaveBeenCalledWith(nativeActor, "ws-1", [root], tx);
+    expect(txFindMany).toHaveBeenCalled();
+    expect(txPolicyFindUnique).toHaveBeenCalled();
+    expect(txCreate).toHaveBeenCalledWith({ data: expect.objectContaining({ authorUserId: "system-user" }) });
+    expect(recordArtifactInputLineage).toHaveBeenCalledWith(expect.objectContaining({ tx,
+      artifact: { kind: "Proposal", id: "tx-proposal" }, inheritedRoots: [root] }));
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.proposal.findMany).not.toHaveBeenCalled();
+    expect(prisma.proposal.create).not.toHaveBeenCalled();
+    expect(actorUserIdForWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("rejects duplicate update in a supplied transaction before lookup or writes", async () => {
+    const { createProposal } = await import("./proposals");
+    const txFindMany = vi.fn();
+    const txCreate = vi.fn();
+    const tx = { ...prisma, proposal: { ...prisma.proposal, findMany: txFindMany, create: txCreate } } as any;
+    await expect(createProposal(actor, { workspaceId: "ws-1", title: "Duplicate", bodyMd: "Body",
+      duplicateGuard: { resolution: "update_existing", targetEntityId: "p-old" } }, tx))
+      .rejects.toMatchObject({ code: "DUPLICATE_GUARD_TRANSACTION_UNSUPPORTED" });
+    expect(txFindMany).not.toHaveBeenCalled();
+    expect(txCreate).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
 
   it("withholds denied duplicate candidates before any title or snippet reaches the result", async () => {
     const { createProposal } = await import("./proposals");

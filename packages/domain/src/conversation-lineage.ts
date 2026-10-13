@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { Prisma } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
 import { invariant } from "./errors";
+import { mergePermissionEpochProofs } from "./source-permission-epochs";
 import {
   captureArtifactInputProof,
   isArtifactInputProofReadable,
@@ -66,7 +67,8 @@ function mergeRoots(proofs: readonly LineageRoot[][]) {
     const key = `${root.kind}:${root.id}`;
     const earlier = merged.get(key);
     invariant(!earlier || earlier.fingerprint === root.fingerprint, 409, "SOURCE_CHANGED", "Conversation inputs changed during collection.");
-    merged.set(key, { ...root });
+    const permissionEpochs = mergePermissionEpochProofs(earlier?.permissionEpochs, root.permissionEpochs);
+    merged.set(key, permissionEpochs ? { ...root, permissionEpochs } : { ...root });
   }
   return [...merged.values()];
 }
@@ -116,7 +118,7 @@ export async function validateConversationInputReceipt(params: {
   invariant(await isArtifactInputProofReadable(params.actor, params.workspaceId, state.roots, params.db),
     409, "SOURCE_CHANGED", "Conversation source access changed. Please retry.");
   invariant(state.payloadHash === payloadHash(params.value), 409, "SOURCE_CHANGED", "Conversation input changed during validation.");
-  return state.roots.map((root) => ({ ...root }));
+  return structuredClone(state.roots);
 }
 
 /** The union is all actual admitted context, independently of the model's citations. */
@@ -145,5 +147,5 @@ export async function rebaseConversationInputReceipt(params: { actor: AppActor; 
   const state = checkedState(params);
   const roots = await rebaseArtifactInputProofToSnapshots(params.actor, params.workspaceId, state.roots);
   invariant(state.payloadHash === payloadHash(params.value), 409, "SOURCE_CHANGED", "Conversation input changed during preservation.");
-  state.roots = roots;
+  state.roots = structuredClone(roots);
 }

@@ -37,13 +37,14 @@ vi.mock("@corgtex/shared", () => ({
     conversationTurn: {
       create: vi.fn(),
     },
+    conversationPromptInput: { create: vi.fn() },
     $transaction: vi.fn((fn) => fn(prisma)),
   },
   AppActor: {},
 }));
 
 vi.mock("./auth", () => ({
-  requireWorkspaceMembership: vi.fn().mockResolvedValue({ id: "member-1" }),
+  requireWorkspaceMembership: vi.fn().mockResolvedValue({ id: "member-1", userId: "user-1" }),
 }));
 
 vi.mock("./events", () => ({
@@ -54,6 +55,9 @@ vi.mock("./source-lineage", () => ({
   assertArtifactInputWriteFence: vi.fn(),
   captureArtifactInputProof: vi.fn(async (_actor, _ws, inputs) => inputs.map((input: { kind: string; id: string }) => ({ kind: input.kind, id: input.id, fingerprint: "a".repeat(64) }))),
   captureArtifactInputSnapshotProof: vi.fn(async (_actor, _ws, input) => [{ kind: "ArtifactInputSnapshot", id: `snapshot-${input.id}`, fingerprint: "a".repeat(64) }]),
+  captureImmutableArtifactInputProof: vi.fn(async (_actor, _ws, roots) => roots),
+  advanceHumanArtifactInputLineage: vi.fn(),
+  invalidateArtifactInputLineage: vi.fn(),
   isArtifactInputProofReadable: vi.fn(async () => true),
   recordArtifactInputLineage: vi.fn(),
   currentArtifactInputRoots: vi.fn(async () => []),
@@ -311,8 +315,11 @@ describe("getOverwhelmSignals", () => {
       relatedConversationId: null,
     } as any);
     vi.mocked((prisma as any).conversationSession.create).mockResolvedValueOnce({ id: "conversation-1" });
-    vi.mocked((prisma as any).conversationSession.findUniqueOrThrow).mockResolvedValueOnce({
-      id: "conversation-1",
+    vi.mocked((prisma as any).conversationPromptInput.create).mockResolvedValueOnce({ id: "prompt-1", content: "Open company understanding question" });
+    vi.mocked((prisma as any).conversationTurn.create).mockResolvedValueOnce({ id: "turn-1" });
+    vi.mocked(prisma.checkIn.update).mockResolvedValueOnce({ id: "checkin-1" } as any);
+    vi.mocked((prisma as any).conversationSession.findUnique).mockResolvedValueOnce({
+      id: "conversation-1", workspaceId, userId: "user-1",
       turns: [{ id: "turn-1" }],
     });
 

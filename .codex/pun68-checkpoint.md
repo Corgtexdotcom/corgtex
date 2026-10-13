@@ -1,82 +1,74 @@
-# PUN-68 implementation checkpoint
+# PUN-68 implementing checkpoint
 
-This is a dependency-complete snapshot of the code written so far on
-`codex/pun-68-source-permissions`, based on `37f9ba00` (main after PR1516).
-It is an unfinished draft, not release approval or a claim of full acceptance.
-No production migration, deployment, customer mutation or data purge was performed.
+This draft contains implementing code after published code23cbd5b2 and documentation
+correction5ddf50e2. Full acceptance is INCOMPLETE; keep PR1517 draft.
+All database operations used synthetic local PostgreSQL on port55468. No production
+migration, deployment, customer mutation, credential/grant change or purge occurred.
 
-## Frozen integration seams
+## Architecture and migration/backfill
 
-Preserve these four diffs while integrating the separate conversation-job path:
+- Full actual-input saved-row hashes, immutable snapshots and transitive manifests
+  capture every source independently of citations. Preserve originals.
+- Current membership, credential scope/version, artifact envelopes, Finance policies
+  and every contributing source gate content, counts, ranking, traversal, evidence,
+  proposals, model context, cached results and copied writes.
+- Capture durable permission epochs before generation; save exact vectors in proofs
+  and snapshots, recheck current grants and epochs in publication transactions.
+  Triggers retain tombstones across restoration/deletion/recreation. Receipt merges
+  preserve captured permission revisions and reject conflicts.
+- Separate permitted-source Article variants and private graph bundles regenerate
+  from independently permitted originals, excluding old restricted semantic content.
+- Unknown legacy lineage/epoch proofs remain stored and withheld. Never fill an old
+  proof with current counters or infer complete input lineage from citations.
+  Rebuild only through verified producer recipes.
+- Additive migrations through20261013100000_external_selection_permission_policy were
+  applied only locally. Provider progress is a content revision; archive and stable
+  principal/source binding changes advance permission epochs.
+- Production rollout requires authorization and availability/backfill planning.
+  Rollback must retain permission enforcement or disable affected serving; an older
+  unprotected reader must not reactivate restricted content.
 
-- `packages/agents/src/index.ts`: variant and conversation receipt/input/tool exports.
-- `packages/workflows/src/handlers/index.ts`: source-lineage rebuild export.
-- `packages/workflows/src/outbox.ts`: proof-aware notifications, rebuild dispatch,
-  digest regeneration flags, and existing lease/attempt dispatch for article variants.
-- `packages/workflows/src/outbox.test.ts`: real notification receipt/current-text fixtures.
+## Evidence and limits
 
-The other requested manifest, lockfile, workflow index, shared environment and worker
-entrypoint files have no changes in this checkpoint. The owner has frozen the four
-seams above until coordinated integration.
+Focused cohorts ran on successive local revisions, not one final acceptance head:
+chat transaction/pending/memory38 units; conversation fixtures290; conversation DB6;
+Slack153; native transcript/audio40 +DB1; Finance concurrencyDB5; epoch triggersDB12;
+graph variants29 +DB8; graph auto reads/retirement139; chunks177; execution/outbox100;
+residual jobs/run/audit40. Counts overlap and must not be added together.
+Current typecheck, schema validation, public-docs and private-boundary checks passed
+on local revisions. Logs are in /tmp/pun68-* and are not committed production proof.
 
-## Architecture and current implementation
+The first full repo unit run completed with424 failures/10117 passes and15 environment
+errors. Many lineage fixtures have since been repaired; sandbox socket/process/file
+errors also affected unrelated scripts. A green aggregate, exact-head CI and final
+independent review are NOT claimed.
 
-The design uses complete actual-input manifests and immutable snapshots to connect generated artifacts
-to contributing sources. The required read contract gates current membership, artifact
-envelopes and every ancestor before content, counts, ranks, paths or context. Remaining
-reader/producer gaps are listed below; full acceptance is unverified. Original records
-are preserved. Incomplete historical evidence is withheld individually, never inferred
-from model citations or audit creation events. Separate permitted-source article
-variants preserve the canonical article. Caches carry full local ranking input proof;
-Azure result ordering and snippets do not determine the returned authorized ranking.
+## Prior remote findings
 
-Conversation input capabilities are process-local and payload/actor/workspace bound.
-Trusted persisted roots are checked again in write transactions. The worker-facing
-write fence runs inside that same transaction; a precheck cannot replace the atomic
-lease/checkpoint/effect/final-write assertion. Disabled admission must not fall back to
-legacy chat for pending runs.
+The prior reproductions on5ddf50e2 remain open pending recheck at this code head.
+Implementing changes include supplied-tx membership/Finance reads; exact prompt and
+native human/agent MCP ingress; original proposal principal/arguments/input roots;
+pending execution fences and uncertainty blocking repeat effects; fifth-turn memory
+inside caller ownership fences; and epochs preventing local revoke/restore replay.
+Helper tests do not establish Bloop's combined lifecycle.
 
-## Validation evidence and limits
+## Open blockers
 
-Checkpoint `npm run typecheck` passed. Focused suites were run on successive local
-revisions, not as one aggregate check:
+1. Compose Bloop's actual admission, checkpoint saver, run/job/approval, canonical
+   effect/publication receipt and finalization transactions. Existing web streaming
+   route still follows its earlier lifecycle; helper-only tests are insufficient.
+2. Recall/provider/recorder intake needs immutable authenticated fetch inputs and
+   live connection/recording/lease authority. Seven provider success tests stay red;
+   the current intake denies unverified calls before model/writer use.
+3. Native edit/review/publication of private graph bundles is incomplete. Canonical
+   regeneration cannot invent requester authority from attribution. Graph reapproval
+   and transcript/prompt/provider audience decisions remain pending.
+4. Remove provider transport from bounded Box/graph preparation transactions using
+   exact opaque preflight capabilities. Ordinary reads retain live provider checks.
+   Local epochs cannot detect an unobserved remote revoke/restore cycle.
+5. Finish remaining fixtures, aggregate checks, running UI evidence for Finance
+   visibility, independent GPT-6 Sol xhigh review and exact-head CI. Compose PUN76's
+   independent operation guards while preserving PUN68's source receipts and fences.
 
-- Retrieval/ranking/cache: 68 tests passed before the Slack wrapper expansion.
-- Conversation receipt/memory/input/backfill helpers: 103 tests passed.
-- Runtime/proposal/constitution receipt sector: 66 units and 4 disposable DB tests passed
-  before the new exact-feedback-snapshot binding was fully integrated.
-- Actions/Tensions/CRM packet sector: 252 tests passed across seven suites.
-- Brain discussions/identity: 58 tests passed.
-- Notification/outbox integration: 116 tests passed.
-- Separate article variants: 38 units and 6 disposable DB tests passed earlier.
-
-Migrations through `20261013003000_feedback_snapshot_binding` were generated and
-applied only to the disposable local test database. Full schema-diff and registry
-validation still need an integrated rerun. The chat orchestration suite currently
-fails because its old mocks do not implement the new receipt/fence/input contracts;
-this checkpoint does not claim that suite passed. New standalone helper tests do
-not replace end-to-end chat verification. Final aggregate checks, independent full
-review and exact-head CI are outstanding.
-
-## Remaining implementation and acceptance
-
-- Complete and test chat orchestration, ephemeral MCP chat requests and agent-credential
-  permission envelopes; existing MCP pseudo sessions currently do not satisfy the
-  newly persisted user-session prompt contract.
-- Finish exact feedback snapshot binding, pending CRM operation execution/replay
-  capabilities, recursive immutable input capture and stale-owner transaction tests.
-- Finish Slack signed ingress request receipts, persisted remote-thread inputs and
-  atomic Brain-note lineage. The generated Brain-note path is withheld until its
-  atomic input receipt exists. Stored-only thread context is temporary.
-- Complete remaining CRM model/outbound producers and other delegated runtime logs.
-- Extend loop-safe rebuild events to mutable Document/Meeting source changes, and
-  provide safe rebuild paths for the remaining legacy generated kinds. Unsupported
-  backfill recipes remain explicit blockers; originals are not overwritten.
-- Verify counts, edges, evidence, proposals, caches, search, MCP, chat, membership/
-  privacy revocation, removal/restoration, retry and rollback across two users/workspaces.
-- Resolve the product decision for publishing chat-derived output: whether the exact
-  requester-private prompt may be contributed as a shared source, or whether publishing
-  must regenerate from shared inputs. The prompt root must never be silently dropped.
-
-Do not merge or deploy this checkpoint. Keep draft metadata and test claims accurate
-as the remaining implementation proceeds.
+Unsupported recipes are blocked capabilities, not complete backfills. A partial
+filter is not the completed source-permission solution. Do not merge or deploy.

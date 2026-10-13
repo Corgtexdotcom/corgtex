@@ -1,10 +1,11 @@
 import type { AppActor } from "@corgtex/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ write: vi.fn(), prisma: { $transaction: vi.fn(), $executeRaw: vi.fn(),
-  financeImportBatch: { findUnique: vi.fn(), updateMany: vi.fn() }, financeReport: { upsert: vi.fn() },
-  financeReportFact: { findUnique: vi.fn(), create: vi.fn(), updateMany: vi.fn() }, financeImportApplication: { create: vi.fn(), count: vi.fn() },
-  financeImportCandidate: { updateMany: vi.fn() }, auditLog: { create: vi.fn() }, financeTransaction: { create: vi.fn() } } }));
+  financeImportBatch: { findUniqueOrThrow: vi.fn(), findUnique: vi.fn(), updateMany: vi.fn() }, financeReport: { findMany: vi.fn(), upsert: vi.fn() },
+  financeReportFact: { findMany: vi.fn(), findUniqueOrThrow: vi.fn(), findUnique: vi.fn(), create: vi.fn(), updateMany: vi.fn() }, financeImportApplication: { findMany: vi.fn(), create: vi.fn(), count: vi.fn() },
+  financeImportCandidate: { findMany: vi.fn(), findUniqueOrThrow: vi.fn(), updateMany: vi.fn() }, auditLog: { create: vi.fn() }, financeTransaction: { create: vi.fn() } } }));
 vi.mock("@corgtex/shared", () => ({ prisma: mocks.prisma }));
+vi.mock("./source-lineage", () => ({ captureArtifactInputProof: vi.fn(async () => []), captureImmutableArtifactInputProof: vi.fn(async () => []), recordArtifactInputLineage: vi.fn() }));
 vi.mock("./finance", () => ({ requireFinanceReportImportHumanWriteAccess: mocks.write }));
 import { applyFinanceReportImport } from "./finance-import-application";
 import { buildFinanceReportFactSemanticKey } from "./finance-import-reconciliation";
@@ -28,10 +29,27 @@ const input = (rows: ReturnType<typeof candidate>[], expectedVersion = 4) => ({ 
   candidateVersions: rows.map(({ id, version }) => ({ id, expectedVersion: version })) });
 describe("Finance report application", () => {
   beforeEach(() => { vi.clearAllMocks(); mocks.prisma.$transaction.mockImplementation((work) => work(mocks.prisma)); mocks.prisma.$executeRaw.mockResolvedValue(1);
+    mocks.prisma.financeReportFact.findMany.mockResolvedValue([]);
+    mocks.prisma.financeReport.findMany.mockImplementation(async ({ where }) => where.id.in.map((id: string) => ({ id })));
+    mocks.prisma.financeImportBatch.findUniqueOrThrow.mockImplementation(async () => await mocks.prisma.financeImportBatch.findUnique.mock.results.at(-1)?.value);
+    mocks.prisma.financeImportCandidate.findMany.mockImplementation(async () => (await mocks.prisma.financeImportBatch.findUnique.mock.results.at(-1)?.value)?.candidates ?? []);
+    mocks.prisma.financeImportCandidate.findUniqueOrThrow.mockImplementation(async ({ where }) => (await mocks.prisma.financeImportBatch.findUnique.mock.results.at(-1)?.value)?.candidates.find((row: { id: string }) => row.id === where.id_workspaceId.id));
+    mocks.prisma.financeReportFact.findUniqueOrThrow.mockImplementation(async ({ where }) => {
+      const rows = await mocks.prisma.financeReportFact.findMany.mock.results.at(-1)?.value;
+      const prior = rows.find((row: { id: string }) => row.id === where.id_workspaceId.id);
+      const data = mocks.prisma.financeReportFact.updateMany.mock.calls.at(-1)?.[0].data;
+      return { ...prior, ...data, version: prior.version + 1 };
+    });
+    mocks.prisma.financeImportApplication.findMany.mockImplementation(async () => {
+      const current = await mocks.prisma.financeImportBatch.findUnique.mock.results.at(-1)?.value;
+      const existing = current.candidates.flatMap((row: { application?: object }) => row.application ? [row.application] : []);
+      const created = await Promise.all(mocks.prisma.financeImportApplication.create.mock.results.map(result => result.value));
+      return [...new Map([...existing, ...created.filter(row => current.candidates.some((candidate: { id: string }) => candidate.id === row.candidateId))].map(row => [row.id, row])).values()];
+    });
     mocks.prisma.financeReport.upsert.mockResolvedValue({ id: "report-1" }); mocks.prisma.financeReportFact.findUnique.mockResolvedValue(null);
     mocks.prisma.financeReportFact.create.mockImplementation(({ data }) => Promise.resolve(fact("fact-new", { ...data, id: "fact-new", version: 1 })));
     mocks.prisma.financeReportFact.updateMany.mockResolvedValue({ count: 1 }); mocks.prisma.financeImportCandidate.updateMany.mockResolvedValue({ count: 1 });
-    mocks.prisma.financeImportApplication.create.mockImplementation(({ data }) => Promise.resolve({ id: `receipt-${data.candidateId}`, outcome: data.outcome,
+    mocks.prisma.financeImportApplication.create.mockImplementation(({ data }) => Promise.resolve({ ...data, id: `receipt-${data.candidateId}`, outcome: data.outcome,
       targetFactId: data.targetFactId, idempotencyKey: data.idempotencyKey })); mocks.prisma.financeImportApplication.count.mockResolvedValue(1);
     mocks.prisma.financeImportBatch.updateMany.mockResolvedValue({ count: 1 }); mocks.prisma.auditLog.create.mockResolvedValue({}); });
   it("requires a human Finance writer and exact approved versions before canonical writes", async () => {
@@ -63,8 +81,7 @@ describe("Finance report application", () => {
     const update = candidate("update", { action: "UPDATE", currentFactId: "fact-u", currentAmountCents: 50 });
     const unchanged = candidate("same", { action: "UNCHANGED", currentFactId: "fact-s", currentAmountCents: 100 });
     const oldUpdate = fact("fact-u", { semanticKey: update.semanticKey, amountCents: 50 }); const oldSame = fact("fact-s", { semanticKey: unchanged.semanticKey });
-    mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([update, unchanged])); mocks.prisma.financeReportFact.findUnique
-      .mockResolvedValueOnce(oldUpdate).mockResolvedValueOnce(oldSame); mocks.prisma.financeImportApplication.count.mockResolvedValue(2);
+    mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([update, unchanged])); mocks.prisma.financeReportFact.findMany.mockResolvedValue([oldUpdate, oldSame]); mocks.prisma.financeImportApplication.count.mockResolvedValue(2);
     const result = await applyFinanceReportImport(actor, input([update, unchanged]));
     expect(result.receipts.map(({ outcome }) => outcome)).toEqual(["UPDATED", "UNCHANGED"]);
     expect(mocks.prisma.financeReportFact.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: "fact-u", version: 3,
@@ -84,7 +101,7 @@ describe("Finance report application", () => {
   });
   it("rolls back the wave when the optimistic current-fact write loses", async () => {
     const update = candidate("update", { action: "UPDATE", currentFactId: "fact-u", currentAmountCents: 50 });
-    mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([update])); mocks.prisma.financeReportFact.findUnique.mockResolvedValue(fact("fact-u", { semanticKey: update.semanticKey, amountCents: 50 }));
+    mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([update])); mocks.prisma.financeReportFact.findMany.mockResolvedValue([fact("fact-u", { semanticKey: update.semanticKey, amountCents: 50 })]);
     mocks.prisma.financeReportFact.updateMany.mockResolvedValue({ count: 0 });
     await expect(applyFinanceReportImport(actor, input([update]))).rejects.toMatchObject({ code: "FINANCE_REPORT_APPLICATION_CONFLICT" });
     expect(mocks.prisma.financeImportApplication.create).not.toHaveBeenCalled(); expect(mocks.prisma.financeImportCandidate.updateMany).not.toHaveBeenCalled();

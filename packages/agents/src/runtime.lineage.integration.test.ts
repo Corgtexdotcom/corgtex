@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
-import { captureArtifactInputProof, isArtifactInputProofReadable, readableArtifactIds, recordArtifactInputLineage,
+import { captureArtifactInputSnapshotProof, captureArtifactInputProof, isArtifactInputProofReadable, readableArtifactIds, recordArtifactInputLineage,
   loadAgentRequestInput, loadAgentFeedbackContinuation, triggerAgentRun, submitAgentFeedback, meetingTranscriptInputProjection, type LineageRoot } from "@corgtex/domain";
 import { executeAgentRun } from "./runtime";
 
@@ -86,9 +86,22 @@ describe("runtime input receipts with real persistence", () => {
     await provenRun(f, true);
     const run = await prisma.agentRun.findFirstOrThrow({ where: { workspaceId: f.workspace.id } });
     const step = await prisma.agentStep.findFirstOrThrow({ where: { agentRunId: run.id, name: "approval-checkpoint" } });
+    const alternativeRoots = await prisma.$transaction(tx => captureArtifactInputSnapshotProof(f.actor, f.workspace.id, { kind: "AgentRun", id: run.id }, tx));
+    const alternativeSnapshotId = alternativeRoots.find(root => root.kind === "ArtifactInputSnapshot")!.id;
     const submitted = await submitAgentFeedback(f.actor, { workspaceId: f.workspace.id, agentRunId: run.id, stepId: step.id, feedback: "Clarify the original evidence" });
     const job = await prisma.workflowJob.findUniqueOrThrow({ where: { id: submitted.continuationJobId } });
     const payload = job.payload as { feedbackInputId: string; priorRunSnapshotId: string };
+    const feedbackInput = await prisma.agentFeedbackInput.findUniqueOrThrow({ where: { id: payload.feedbackInputId } });
+    expect(feedbackInput.priorRunSnapshotId).toBe(payload.priorRunSnapshotId);
+    expect(alternativeSnapshotId).not.toBe(payload.priorRunSnapshotId);
+    expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, alternativeRoots)).toBe(true);
+    // Another valid snapshot of the very same run is still not the draft this reply bound to.
+    await expect(loadAgentFeedbackContinuation({ workspaceId: f.workspace.id, agentKey: "proposal-drafting", ...payload,
+      priorRunSnapshotId: alternativeSnapshotId })).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    const legacyFeedback = await prisma.agentFeedbackInput.create({ data: { workspaceId: f.workspace.id, agentRunId: run.id,
+      stepId: step.id, userId: f.user.id, content: "Legacy unbound feedback" } });
+    await expect(loadAgentFeedbackContinuation({ workspaceId: f.workspace.id, agentKey: "proposal-drafting", ...payload,
+      feedbackInputId: legacyFeedback.id })).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
     expect(job.payload).not.toHaveProperty("previousAdvice");
     expect(job.payload).not.toHaveProperty("reviewFeedback");
     const continuation = await loadAgentFeedbackContinuation({ workspaceId: f.workspace.id, agentKey: "proposal-drafting", ...payload });

@@ -97,6 +97,7 @@ vi.mock("./auth", () => ({
 }));
 
 vi.mock("./source-lineage", () => ({
+  isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
   advanceHumanArtifactInputLineage: vi.fn(),
   recordArtifactInputLineage: vi.fn(),
   readableArtifactIds: vi.fn(async (_actor: unknown, _workspaceId: string, _kind: string, records: Array<{ id: string }>) =>
@@ -174,6 +175,30 @@ describe("Goals Domain", () => {
   });
 
   describe("createGoal", () => {
+  it.each(["credential-a", "credential-b"])("rejects private creation by %s before duplicate reads or writes", async credentialId => {
+    const {createGoal} = await import("./goals");
+    const credential = {kind: "agent", authProvider: "credential", credentialId, workspaceIds: ["ws-1"], scopes: ["support:write"]} as any;
+    await expect(createGoal(credential, {workspaceId: "ws-1", title: "Private", isPrivate: true})).rejects.toMatchObject({code: "PRIVATE_AGENT_ARTIFACT_UNSUPPORTED"});
+    expect(prisma.goal.create).not.toHaveBeenCalled();
+    expect(prisma.goal.findMany).not.toHaveBeenCalled();
+    expect(prisma.goal.findFirst).not.toHaveBeenCalled();
+  });
+  it("rejects public agent creation without complete inputs before looking for duplicates", async () => {
+    const {createGoal} = await import("./goals");
+    await expect(createGoal({kind: "agent", workspaceIds: ["ws-1"]} as any, {...{workspaceId: "ws-1", title: "Private", isPrivate: true}, isPrivate: false}))
+      .rejects.toMatchObject({code: "UNKNOWN_LINEAGE"});
+    expect(prisma.goal.create).not.toHaveBeenCalled();
+    expect(prisma.goal.findMany).not.toHaveBeenCalled();
+  });
+
+    it.each(["credential-a", "credential-b"])("does not let %s use a human-attributed private parent", async credentialId => {
+      const credential = {kind: "agent", authProvider: "credential", credentialId, workspaceIds: ["ws-1"], scopes: ["goals:write"]} as any;
+      vi.mocked(prisma.goal.findUnique).mockResolvedValue({id: "private-parent", workspaceId: "ws-1", status: "DRAFT", isPrivate: true,
+        archivedAt: null, authorUserId: "user-1"} as any);
+      await expect(createGoal(credential, {workspaceId: "ws-1", title: "Child", parentGoalId: "private-parent", lineageRoots: [{kind: "BrainSource", id: "source-1", fingerprint: "current"}]}))
+        .rejects.toMatchObject({code: "INVALID_INPUT"});
+      expect(prisma.goal.create).not.toHaveBeenCalled();
+    });
     it("creates a goal successfully", async () => {
       vi.mocked(prisma.goal.create).mockResolvedValueOnce({
         id: "goal-1",
@@ -213,6 +238,7 @@ describe("Goals Domain", () => {
       await createGoal(agentActor, {
         workspaceId: "ws-1",
         title: "Agent Goal",
+        lineageRoots: [{kind: "BrainSource", id: "source-1", fingerprint: "current"}],
       });
 
       expect(prisma.goal.create).toHaveBeenCalledWith(
@@ -725,6 +751,14 @@ describe("Goals Domain", () => {
   });
 
   describe("updateGoal", () => {
+    it("denies a credential draft edit even when an earlier read gate admitted the candidate", async () => {
+      const credential = {kind: "agent", authProvider: "credential", credentialId: "credential-a", workspaceIds: ["ws-1"], scopes: ["goals:write"]} as any;
+      vi.mocked(prisma.goal.findUnique).mockResolvedValue({id: "private", workspaceId: "ws-1", status: "DRAFT", isPrivate: true,
+        archivedAt: null, authorUserId: "user-1", version: 1} as any);
+      await expect(updateGoal(credential, {workspaceId: "ws-1", goalId: "private", title: "Replacement", expectedVersion: 1}))
+        .rejects.toMatchObject({code: "FORBIDDEN"});
+      expect(prisma.goal.update).not.toHaveBeenCalled();
+    });
     it("does not return a revoked derived goal through a no-op update", async () => {
       vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
         id: "goal-1", workspaceId: "ws-1", archivedAt: null, title: "Sensitive goal",

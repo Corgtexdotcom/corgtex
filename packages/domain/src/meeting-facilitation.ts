@@ -746,7 +746,7 @@ export async function runMeetingAgendaThreadEdit(params: {
     channelId: params.channelId,
     threadTs: params.threadTs,
     limit: 20,
-  });
+  }, actor);
 
   // Remote text is not an entitlement receipt. Every supplied Slack message
   // must match a currently readable, persisted message before it enters the prompt.

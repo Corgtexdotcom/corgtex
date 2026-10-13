@@ -6,6 +6,7 @@ const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => {
   const prisma = {
     $transaction: vi.fn(),
     $executeRaw: vi.fn(),
+    $queryRaw: vi.fn(),
     meeting: {
       findMany: vi.fn(),
       findFirst: vi.fn(),
@@ -74,8 +75,16 @@ vi.mock("@corgtex/shared", () => ({
 }));
 
 vi.mock("./source-lineage", () => ({
+  advanceHumanArtifactInputLineage: vi.fn().mockResolvedValue(true),
+  captureArtifactInputProof: vi.fn(async (_actor: unknown, _workspace: string, inputs: Array<{ kind: string; id: string }>) =>
+    inputs.map((input) => ({ ...input, fingerprint: "a".repeat(64) }))),
+  captureArtifactInputSnapshotProof: vi.fn().mockResolvedValue([{ kind: "ArtifactInputSnapshot", id: "meeting-prior-snapshot", fingerprint: "b".repeat(64) }]),
+  captureImmutableArtifactInputProof: vi.fn().mockResolvedValue([{ kind: "ArtifactInputSnapshot", id: "frozen-prior", fingerprint: "c".repeat(64) }]),
   currentArtifactInputRoots: vi.fn(async () => [{ kind: "MeetingTranscript", id: "meeting-1", fingerprint: "a".repeat(64) }]),
   invalidateArtifactInputLineage: vi.fn(),
+  isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
+  lineageContentFingerprint: vi.fn().mockReturnValue("a".repeat(64)),
+  preserveUnknownArtifactInputSnapshot: vi.fn(),
   recordArtifactInputLineage: vi.fn(),
   readableArtifactIds: vi.fn(async (_actor: unknown, _workspace: string, _kind: string, records: Array<{ id: string }>) => new Set(records.map((record) => record.id))),
 }));
@@ -99,6 +108,7 @@ describe("meetings domain", () => {
     vi.clearAllMocks();
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
     prismaMock.$executeRaw.mockResolvedValue(1);
+    prismaMock.$queryRaw.mockResolvedValue([{ id: "locked-series" }]);
     prismaMock.auditLog.create.mockResolvedValue({});
     prismaMock.event.createMany.mockResolvedValue({ count: 1 });
     prismaMock.meetingInsight.deleteMany.mockResolvedValue({ count: 0 });
@@ -110,8 +120,9 @@ describe("meetings domain", () => {
     prismaMock.meetingTranscriptProcessingProgress.upsert.mockResolvedValue({ id: "progress-1" });
     prismaMock.workspacePermalink.upsert.mockResolvedValue({});
     prismaMock.meetingSeries.findMany.mockResolvedValue([]);
-    prismaMock.meetingSeries.findFirst.mockResolvedValue(null);
+    prismaMock.meetingSeries.findFirst.mockImplementation(async () => (await prismaMock.meetingSeries.findMany())[0] ?? null);
     prismaMock.meetingSeries.findUnique.mockResolvedValue(null);
+    prismaMock.meeting.findMany.mockResolvedValue([]);
     prismaMock.meetingSeries.update.mockResolvedValue({});
     prismaMock.meeting.updateMany.mockResolvedValue({ count: 0 });
     prismaMock.workflowJob.upsert.mockResolvedValue({ id: "job-1" });
@@ -254,6 +265,39 @@ describe("meetings domain", () => {
     });
   });
 
+  it("rejects copied meeting content before duplicate reads when no input receipt exists", async () => {
+    const { createMeeting } = await import("./meetings");
+    const copiedActor = { kind: "agent", label: "execution", authProvider: "bootstrap", workspaceIds: ["workspace-1"] } as AppActor;
+    await expect(createMeeting(copiedActor, { workspaceId: "workspace-1", source: "external-execution",
+      recordedAt: new Date("2026-04-30T17:00:00.000Z"), transcript: "Copied output", duplicateGuard: {} }))
+      .rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    expect(prismaMock.meeting.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.meeting.create).not.toHaveBeenCalled();
+  });
+
+  it("uses a supplied transaction for copied meeting duplicate scan, records, and receipts", async () => {
+    const { createMeeting } = await import("./meetings");
+    const { recordArtifactInputLineage, isArtifactInputProofReadable } = await import("./source-lineage");
+    const copiedActor = { kind: "agent", label: "execution", authProvider: "bootstrap", workspaceIds: ["workspace-1"] } as AppActor;
+    const root = { kind: "ExecutionResult" as const, id: "result-1", fingerprint: "a".repeat(64) };
+    const txFindMany = vi.fn().mockResolvedValue([]);
+    const txCreate = vi.fn().mockResolvedValue({ id: "tx-meeting", workspaceId: "workspace-1", title: "Copied meeting",
+      source: "external-execution", recordedAt: new Date("2026-04-30T17:00:00.000Z"), transcript: "Copied output" });
+    const tx = { ...prismaMock, meeting: { ...prismaMock.meeting, findMany: txFindMany, create: txCreate } } as any;
+    const meeting = await createMeeting(copiedActor, { workspaceId: "workspace-1", title: "Copied meeting",
+      source: "external-execution", recordedAt: new Date("2026-04-30T17:00:00.000Z"), transcript: "Copied output",
+      lineageRoots: [root], duplicateGuard: {}, tx });
+    expect(meeting.id).toBe("tx-meeting");
+    expect(isArtifactInputProofReadable).toHaveBeenCalledWith(copiedActor, "workspace-1", [root], tx);
+    expect(txFindMany).toHaveBeenCalled();
+    expect(txCreate).toHaveBeenCalled();
+    expect(recordArtifactInputLineage).toHaveBeenCalledWith(expect.objectContaining({ tx,
+      artifact: { kind: "MeetingTranscript", id: "tx-meeting" }, inheritedRoots: [root] }));
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(prismaMock.meeting.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.meeting.create).not.toHaveBeenCalled();
+  });
+
   it("createMeeting marks summary-only duplicate updates as completed", async () => {
     const recordedAt = new Date("2026-04-30T17:10:00.000Z");
     const scheduledAt = new Date("2026-04-30T17:00:00.000Z");
@@ -372,6 +416,10 @@ describe("meetings domain", () => {
         participantEmails: ["member@example.com"],
       }),
     });
+    const { recordArtifactInputLineage } = await import("./source-lineage");
+    expect(recordArtifactInputLineage).toHaveBeenCalledWith(expect.objectContaining({
+      artifact: { kind: "Meeting", id: "meeting-1" }, origin: "HUMAN_ORIGINAL", inputs: [],
+    }));
   });
 
   it("createMeetingSeries materializes recurring scheduled meetings", async () => {
@@ -559,6 +607,10 @@ describe("meetings domain", () => {
 
   it("setMeetingSeriesRecorderUrl updates only future empty scheduled occurrences", async () => {
     const now = new Date("2026-04-30T16:00:00.000Z");
+    const children = ["future-1", "future-2", "past-1"].map((id, index) => ({ id, workspaceId: "workspace-1",
+      seriesId: "series-1", title: "Weekly Tactical", status: "SCHEDULED", transcript: null, summaryMd: null,
+      meetingUrl: null, meetingUrlHash: null, recordedAt: new Date(index < 2 ? "2026-05-01T17:00:00.000Z" : "2026-04-01T17:00:00.000Z"),
+      updatedAt: new Date("2026-04-01T00:00:00.000Z") }));
     prismaMock.meetingSeries.findFirst.mockResolvedValue({
       id: "series-1",
       title: "Weekly Tactical",
@@ -569,7 +621,9 @@ describe("meetings domain", () => {
       meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
       meetingUrlHash: "new-hash",
     });
-    prismaMock.meeting.updateMany.mockResolvedValue({ count: 2 });
+    prismaMock.meeting.findMany.mockResolvedValue(children);
+    prismaMock.meeting.findFirst.mockImplementation(async (args: any) => children.find((child) => child.id === args.where.id));
+    prismaMock.meeting.update.mockImplementation(async (args: any) => ({ ...children.find((child) => child.id === args.where.id), ...args.data }));
 
     const { setMeetingSeriesRecorderUrl } = await import("./meetings");
     await expect(setMeetingSeriesRecorderUrl(actor, {
@@ -581,22 +635,34 @@ describe("meetings domain", () => {
       updatedFutureScheduledMeetings: 2,
     });
 
-    expect(prismaMock.meeting.updateMany).toHaveBeenCalledWith({
-      where: expect.objectContaining({
-        workspaceId: "workspace-1",
-        seriesId: "series-1",
-        status: "SCHEDULED",
-        archivedAt: null,
-        recordedAt: { gte: now },
-        transcript: null,
-        summaryMd: null,
-        OR: [{ meetingUrl: null }, { meetingUrlHash: "old-hash" }],
-      }),
-      data: expect.objectContaining({
-        meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
-        meetingUrlHash: expect.any(String),
-      }),
-    });
+    expect(prismaMock.meeting.update).toHaveBeenCalledTimes(2);
+    expect(prismaMock.meeting.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "future-1", updatedAt: children[0].updatedAt },
+      data: expect.objectContaining({ meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
+        meetingUrlHash: expect.any(String) }),
+    }));
+    const { recordArtifactInputLineage } = await import("./source-lineage");
+    expect(recordArtifactInputLineage).toHaveBeenCalledWith(expect.objectContaining({
+      artifact: { kind: "Meeting", id: "past-1" }, origin: "DERIVED",
+      inheritedRoots: expect.arrayContaining([{ kind: "ArtifactInputSnapshot", id: "frozen-prior", fingerprint: "c".repeat(64) }]),
+    }));
+  });
+
+  it("does not change a series when an old child cannot be frozen", async () => {
+    const { captureImmutableArtifactInputProof } = await import("./source-lineage");
+    prismaMock.meetingSeries.findFirst.mockResolvedValue({ id: "series-1", workspaceId: "workspace-1",
+      title: "Planning", meetingUrlHash: "old-hash" });
+    prismaMock.meeting.findMany.mockResolvedValue([{ id: "child-1", workspaceId: "workspace-1",
+      seriesId: "series-1", status: "SCHEDULED", transcript: null,
+      recordedAt: new Date("2026-05-01T17:00:00.000Z") }]);
+    vi.mocked(captureImmutableArtifactInputProof).mockResolvedValueOnce([{ kind: "ArtifactInputSnapshot",
+      id: "series-old", fingerprint: "a".repeat(64) }]).mockRejectedValueOnce({ code: "SOURCE_CHANGED" });
+    const { setMeetingSeriesRecorderUrl } = await import("./meetings");
+    await expect(setMeetingSeriesRecorderUrl(actor, { workspaceId: "workspace-1", seriesId: "series-1",
+      meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=abc",
+      now: new Date("2026-04-30T16:00:00.000Z") })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(prismaMock.meetingSeries.update).not.toHaveBeenCalled();
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
   });
 
   it("importMeetingInvite parses .ics attendees and dedupes by external IDs", async () => {
@@ -657,7 +723,7 @@ describe("meetings domain", () => {
   });
 
   it("importMeetingInvite refreshes future inherited occurrences when an ICS link changes", async () => {
-    prismaMock.meetingSeries.findUnique.mockResolvedValue({ meetingUrlHash: "old-hash" });
+    prismaMock.meetingSeries.findUnique.mockResolvedValue({ id: "series-ics", workspaceId: "workspace-1", meetingUrlHash: "old-hash" });
     prismaMock.meetingSeries.upsert.mockResolvedValue({
       id: "series-ics",
       workspaceId: "workspace-1",
@@ -673,7 +739,13 @@ describe("meetings domain", () => {
       participantIds: [],
       participantEmails: [],
     });
-    prismaMock.meeting.updateMany.mockResolvedValue({ count: 1 });
+    const oldOccurrence = { id: "old-occurrence", workspaceId: "workspace-1", seriesId: "series-ics",
+      status: "SCHEDULED", title: "Imported Tactical", transcript: null, summaryMd: null,
+      meetingUrl: null, meetingUrlHash: null, recordedAt: new Date(Date.now() + 86_400_000),
+      updatedAt: new Date("2026-04-01T00:00:00.000Z") };
+    prismaMock.meeting.findMany.mockResolvedValue([oldOccurrence]);
+    prismaMock.meeting.findFirst.mockResolvedValue(oldOccurrence);
+    prismaMock.meeting.update.mockImplementation(async (args: any) => ({ ...oldOccurrence, ...args.data }));
     prismaMock.meeting.findUnique.mockImplementation(async (args: any) => ({
       id: "meeting-ics",
       workspaceId: "workspace-1",
@@ -705,22 +777,15 @@ describe("meetings domain", () => {
       icsText,
     });
 
-    expect(prismaMock.meeting.updateMany).toHaveBeenCalledWith({
-      where: expect.objectContaining({
-        workspaceId: "workspace-1",
-        seriesId: "series-ics",
-        status: "SCHEDULED",
-        archivedAt: null,
-        recordedAt: { gte: expect.any(Date) },
-        transcript: null,
-        summaryMd: null,
-        OR: [{ meetingUrl: null }, { meetingUrlHash: "old-hash" }],
-      }),
-      data: expect.objectContaining({
-        meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=newcode",
-        meetingUrlHash: expect.any(String),
-      }),
-    });
+    expect(prismaMock.meeting.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "old-occurrence", updatedAt: oldOccurrence.updatedAt },
+      data: expect.objectContaining({ meetingUrl: "https://teams.microsoft.com/meet/12345678901234?p=newcode",
+        meetingUrlHash: expect.any(String) }),
+    }));
+    const { invalidateArtifactInputLineage } = await import("./source-lineage");
+    expect(invalidateArtifactInputLineage).toHaveBeenCalledWith(expect.objectContaining({
+      artifact: { kind: "Meeting", id: "old-occurrence" },
+    }));
   });
 
   it("ensureMeetingSeriesOccurrences creates missing weekly occurrences in the repair window", async () => {
@@ -949,6 +1014,28 @@ describe("meetings domain", () => {
         failedAt: null,
       }),
     }));
+  });
+
+  it("filters unproved scheduled candidates before its match limit and member lookups", async () => {
+    const { readableArtifactIds } = await import("./source-lineage");
+    const hidden = Array.from({ length: 100 }, (_, index) => ({ id: `hidden-${index}`, workspaceId: "workspace-1",
+      title: "Hidden schedule", source: "ics", status: "SCHEDULED", transcript: null,
+      recordedAt: new Date("2026-04-30T17:00:00.000Z"), participantIds: ["hidden-person"], participantEmails: [] }));
+    const visible = { id: "visible-1", workspaceId: "workspace-1", title: "Visible schedule", source: "manual",
+      status: "SCHEDULED", transcript: null, recordedAt: new Date("2026-04-30T17:10:00.000Z"),
+      participantIds: [], participantEmails: [] };
+    prismaMock.meeting.findMany.mockResolvedValueOnce(hidden).mockResolvedValueOnce([visible]);
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _ws, kind, rows) => new Set(rows
+      .filter((row) => kind !== "Meeting" || row.id === "visible-1").map((row) => row.id)));
+    try {
+      const { findTranscriptMeetingCandidates } = await import("./meetings");
+      await expect(findTranscriptMeetingCandidates(actor, { workspaceId: "workspace-1",
+        recordedAt: visible.recordedAt, title: visible.title })).resolves.toMatchObject([{ meetingId: "visible-1" }]);
+      expect(prismaMock.meeting.findMany).toHaveBeenCalledTimes(2);
+      expect(prismaMock.member.findMany).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _ws, _kind, rows) => new Set(rows.map((row) => row.id)));
+    }
   });
 
   it("scores transcript candidate attendee overlap from scheduled workspace member ids", async () => {
@@ -1188,6 +1275,38 @@ describe("meetings domain", () => {
     }));
   });
 
+  it("does not certify a first transcript by copying an unproved scheduled meeting", async () => {
+    const { captureArtifactInputProof } = await import("./source-lineage");
+    prismaMock.meeting.findFirst.mockResolvedValue({ id: "legacy-schedule", workspaceId: "workspace-1",
+      title: "Unproved calendar title", transcript: null, participantIds: [], participantEmails: [] });
+    vi.mocked(captureArtifactInputProof).mockRejectedValueOnce({ code: "UNKNOWN_LINEAGE" });
+    const { uploadMeetingTranscript } = await import("./meetings");
+    await expect(uploadMeetingTranscript(actor, { workspaceId: "workspace-1", meetingId: "legacy-schedule",
+      title: "New title", source: "manual", recordedAt: new Date("2026-04-30T17:00:00.000Z"),
+      transcript: "New human transcript" })).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    expect(prismaMock.meetingTranscriptSourceRecord.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("joins a supplied intake transaction for matched transcript and source receipt", async () => {
+    const txUpdate = vi.fn().mockResolvedValue({ id: "scheduled-1", workspaceId: "workspace-1", title: "Meeting",
+      source: "recorder:recall", status: "COMPLETED", transcript: "Provider text",
+      recordedAt: new Date("2026-04-30T17:00:00.000Z") });
+    const tx = { ...prismaMock, meeting: { ...prismaMock.meeting,
+      findFirst: vi.fn().mockResolvedValue({ id: "scheduled-1", workspaceId: "workspace-1", title: "Meeting",
+        source: "manual-recorder", transcript: null, participantIds: [], participantEmails: [] }),
+      update: txUpdate } } as any;
+    const { uploadMeetingTranscript } = await import("./meetings");
+    await expect(uploadMeetingTranscript(actor, { workspaceId: "workspace-1", meetingId: "scheduled-1", tx,
+      source: "recorder:recall", sourceRecordId: "record-1", transcript: "Provider text",
+      recordedAt: new Date("2026-04-30T17:00:00.000Z"),
+      lineageRoots: [{ kind: "ArtifactInputSnapshot", id: "provider-input", fingerprint: "a".repeat(64) }] }))
+      .resolves.toMatchObject({ status: "matched", meeting: { id: "scheduled-1" } });
+    expect(txUpdate).toHaveBeenCalled();
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+  });
+
   it("uploadMeetingTranscript rejects replacing an existing source transcript", async () => {
     const recordedAt = new Date("2026-04-30T17:10:00.000Z");
     prismaMock.meeting.findFirst
@@ -1219,7 +1338,18 @@ describe("meetings domain", () => {
     expect(prismaMock.meeting.update).not.toHaveBeenCalled();
   });
 
-  it("uploadMeetingTranscript links source records before transcript processing is queued", async () => {
+  it("uploadMeetingTranscript rejects unproved provider content before matching", async () => {
+    const { uploadMeetingTranscript } = await import("./meetings");
+    await expect(uploadMeetingTranscript(actor, { workspaceId: "workspace-1", meetingId: "meeting-1",
+      source: "meeting-transcript:fireflies", recordedAt: new Date("2026-04-30T17:10:00.000Z"),
+      transcript: "Provider transcript", sourceRecordId: "source-record-1" }))
+      .rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    expect(prismaMock.meeting.findFirst).not.toHaveBeenCalled();
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    expect(prismaMock.meetingTranscriptSourceRecord.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("uploadMeetingTranscript links proved source records before transcript processing is queued", async () => {
     const recordedAt = new Date("2026-04-30T17:10:00.000Z");
     prismaMock.meeting.findFirst
       .mockResolvedValueOnce({ id: "completed-1" })
@@ -1256,6 +1386,7 @@ describe("meetings domain", () => {
       recordedAt,
       transcript: "Transcript text",
       sourceRecordId: "source-record-1",
+      lineageRoots: [{ kind: "ArtifactInputSnapshot", id: "synthetic-provider-receipt", fingerprint: "a".repeat(64) }],
     })).resolves.toMatchObject({
       status: "matched",
       meeting: { id: "completed-1" },
@@ -1273,6 +1404,11 @@ describe("meetings domain", () => {
     expect(prismaMock.meetingTranscriptSourceRecord.updateMany.mock.invocationCallOrder[0]).toBeLessThan(
       prismaMock.event.createMany.mock.invocationCallOrder[0],
     );
+    const { recordArtifactInputLineage } = await import("./source-lineage");
+    expect(recordArtifactInputLineage).toHaveBeenCalledWith(expect.objectContaining({
+      artifact: { kind: "MeetingTranscript", id: "completed-1" },
+      inheritedRoots: expect.arrayContaining([{ kind: "ArtifactInputSnapshot", id: "synthetic-provider-receipt", fingerprint: "a".repeat(64) }]),
+    }));
   });
 
   it("uploadMeetingTranscript scopes transcript source external IDs on new meetings", async () => {

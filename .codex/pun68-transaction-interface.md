@@ -2,15 +2,13 @@
 
 ## Publication status
 
-**Implementation is LOCAL and UNPUBLISHED as of published code head
-23cbd5b256288ab0e5fb1bc8d69b977e910b144c.** The documentation-only head
-decd8ae52ec258165cd1131717dedc1ead4d6899 did not contain the implementations
-or tests described below. Treat this document as a proposed integration contract,
-not evidence that the published branch implements it. The owner is integrating
-and testing the local cohort before publishing its implementing checkpoint.
-Bloop's actual saver/route/worker lifecycle remains unverified.
+This document now accompanies the implementing code checkpoint after5ddf50e2.
+Earlier documentation-only headdecd8ae5 did not contain these APIs. The draft now
+includes the transaction/native-input interfaces below. Their presence and focused
+tests do not establish Bloop's actual saver/route/worker lifecycle, which remains
+unverified and blocks full acceptance.
 
-## Locally implemented interface (not published evidence)
+## Implementing checkpoint interface
 
 The optional caller transaction is implemented in createConversationPromptInput,
 createConversationIngressInput, and addConversationTurn. Constructors capture the

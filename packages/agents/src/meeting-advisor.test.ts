@@ -8,7 +8,7 @@ const { buildMeetingIntelligenceContextMock, syncKnowledgeForSourceMock, isArtif
   persistMeetingSummaryWithLineageMock: vi.fn(),
 }));
 
-const runtimeLineage = vi.hoisted(() => ({ capture: vi.fn(), snapshot: vi.fn(), record: vi.fn(), invalidate: vi.fn(), observe: vi.fn() }));
+const runtimeLineage = vi.hoisted(() => ({ capture: vi.fn(), snapshot: vi.fn(), immutable: vi.fn(), record: vi.fn(), invalidate: vi.fn(), observe: vi.fn() }));
 const prismaMock = {
   agentRun: {
     findFirst: vi.fn(),
@@ -66,6 +66,7 @@ vi.mock("@corgtex/domain", async (importOriginal) => {
   return {
     ...actual,
     captureArtifactInputProof: runtimeLineage.capture, captureArtifactInputSnapshotProof: runtimeLineage.snapshot,
+    captureImmutableArtifactInputProof: runtimeLineage.immutable,
     recordArtifactInputLineage: runtimeLineage.record, invalidateArtifactInputLineage: runtimeLineage.invalidate,
     withArtifactInputReadCapture: runtimeLineage.observe,
     buildMeetingIntelligenceContext: buildMeetingIntelligenceContextMock,
@@ -100,6 +101,7 @@ describe("runMeetingSummaryAgent", () => {
   beforeEach(() => {
     runtimeLineage.capture.mockReset().mockImplementation(async (_actor, _workspaceId, inputs) => inputs.map((input: { kind: string; id: string }) => ({ kind: input.kind, id: input.id, fingerprint: "a".repeat(64) })));
     runtimeLineage.snapshot.mockReset().mockImplementation(async (_actor, _workspaceId, input) => [{ kind: "ArtifactInputSnapshot", id: `snapshot-${input.kind}-${input.id}`, fingerprint: input.fingerprint }]);
+    runtimeLineage.immutable.mockReset().mockImplementation(async (_actor, _workspaceId, roots) => structuredClone(roots));
     runtimeLineage.record.mockReset().mockResolvedValue({}); runtimeLineage.invalidate.mockReset().mockResolvedValue({});
     runtimeLineage.observe.mockReset().mockImplementation(async (_actor, _workspaceId, work) => ({ value: await work(), roots: [{ kind: "Workspace", id: "ws-1", fingerprint: "a".repeat(64) }] }));
     envMock.AGENT_KILL_SWITCH = false;

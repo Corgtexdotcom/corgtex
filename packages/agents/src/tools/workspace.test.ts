@@ -220,19 +220,19 @@ describe("authenticated workspace readers", () => {
     }
   });
 
-  it.each(["admin", "agent"] as const)("preserves authorized %s private-draft access without exposing private non-drafts", async (kind) => {
+  it.each(["admin", "agent"] as const)("applies the current %s draft authority without exposing private non-drafts", async (kind) => {
     const { queryActions, queryTensions, queryProposals, getWorkspaceOverview } = await import("./workspace");
     const caller = kind === "agent" ? agent : actor;
     if (kind === "admin") membershipMock.mockResolvedValue({ id: "member-1", role: "ADMIN", isActive: true });
     for (const query of [queryActions, queryTensions]) {
       expect((await query("ws-1", undefined, undefined, undefined, caller)).map(item => item.id))
-        .toEqual(["public-open", "own-draft", "other-draft", "public-draft"]);
-      expect((await query("ws-1", "DRAFT", "member-2", "other-draft", caller))[0]?.id).toBe("other-draft");
+        .toEqual(kind === "admin" ? ["public-open", "own-draft", "other-draft", "public-draft"] : ["public-open", "public-draft"]);
+      expect((await query("ws-1", "DRAFT", "member-2", "other-draft", caller))[0]?.id).toBe(kind === "admin" ? "other-draft" : undefined);
       expect(await query("ws-1", undefined, undefined, "other-private-open", caller)).toEqual([]);
       expect(await query("ws-1", undefined, undefined, "foreign-draft", caller)).toEqual([]);
     }
     const proposals = await queryProposals("ws-1", undefined, caller);
-    expect(proposals).toHaveLength(4);
+    expect(proposals).toHaveLength(kind === "admin" ? 4 : 2);
     expect(await getWorkspaceOverview("ws-1", caller)).toMatchObject({ activeProposals: proposals.length, openActions: 1 });
   });
 

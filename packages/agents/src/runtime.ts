@@ -5,7 +5,7 @@ import { env, prisma, toInputJson, type AppActor } from "@corgtex/shared";
 import { resolveModel } from "@corgtex/models";
 import { isAgentEnabled, getAgentModelOverride, AGENT_REGISTRY, type RegisteredAgentKey } from "@corgtex/domain";
 import {
-  resolveAgentIdentityLimits, captureArtifactInputProof, captureArtifactInputSnapshotProof,
+  resolveAgentIdentityLimits, captureArtifactInputProof, captureImmutableArtifactInputProof,
   isArtifactInputProofReadable, readableArtifactIds, recordArtifactInputLineage, invalidateArtifactInputLineage,
   withArtifactInputReadCapture, mergeArtifactInputProofs, invariant, type LineageRoot,
 } from "@corgtex/domain";
@@ -200,12 +200,7 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
     invariant(roots.length > 0, 409, "UNKNOWN_LINEAGE", "Agent inputs need a complete current receipt.");
     invariant(await isArtifactInputProofReadable(actor, params.workspaceId, roots),
       409, "SOURCE_CHANGED", "Agent inputs changed before their receipt was captured.");
-    return prisma.$transaction(async tx => {
-      const frozen: LineageRoot[][] = [];
-      for (const root of roots) frozen.push(root.kind === "ArtifactInputSnapshot" ? [root]
-        : await captureArtifactInputSnapshotProof(actor, params.workspaceId, root, tx));
-      return mergeArtifactInputProofs(...frozen);
-    });
+    return prisma.$transaction(tx => captureImmutableArtifactInputProof(actor, params.workspaceId, roots, tx));
   };
   const initialRoots = params.lineageActor && params.lineageRoots?.length ? await freezeRoots(params.lineageRoots) : null;
   const plannedInputReceipt: AgentInputReceipt | undefined = initialRoots ? Object.freeze({ kind: "agent-input-receipt" }) : undefined;
@@ -320,9 +315,6 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
     // Inject behavioral context into payload so agents can reference it in system prompts
     if (behaviorContext) {
       (context as Record<string, unknown>).__behaviorMd = behaviorContext;
-    }
-    if (identityLimits?.maxSpendPerRunCents != null) {
-      (context as Record<string, unknown>).__maxSpendPerRunCents = identityLimits.maxSpendPerRunCents;
     }
 
     const outcome = await params.execute(context, helpers, run.id, model);

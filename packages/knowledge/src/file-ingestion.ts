@@ -18,7 +18,17 @@ import {
   findSourceArticleImpacts,
   isGlobalOperator,
   type DuplicateGuardOptions,
+  captureArtifactInputProof,
+  isArtifactInputProofReadable,
+  mergeArtifactInputProofs,
+  captureImmutableArtifactInputProof,
+  filterReadableDocuments,
+  getDocument,
+  preserveUnknownArtifactInputSnapshot,
+  readableArtifactIds,
 } from "@corgtex/domain";
+import { getMcpToolInputRoots } from "../../domain/src/mcp-tool-input-context";
+import { finishProducerLineage, prepareProducerLineage, type ProducerLineageParams } from "../../domain/src/producer-lineage";
 import { invalidateKnowledgeCache } from "./retrieval";
 import mammoth from "mammoth";
 import {
@@ -160,13 +170,8 @@ function buildBrainSourceContent(params: {
   ].join("\n");
 }
 
-async function loadDocumentWithSource(workspaceId: string, documentId: string) {
-  const document = await prisma.document.findFirst({
-    where: { id: documentId, workspaceId },
-  });
-  if (!document) {
-    throw new AppError(404, "NOT_FOUND", "Document not found.");
-  }
+async function loadDocumentWithSource(actor: AppActor, workspaceId: string, documentId: string) {
+  const document = await getDocument(actor, workspaceId, documentId);
 
   const source = await prisma.brainSource.findFirst({
     where: {
@@ -175,10 +180,11 @@ async function loadDocumentWithSource(workspaceId: string, documentId: string) {
       metadata: { path: ["documentId"], equals: document.id },
     },
   });
-  return { document, source };
+  const ids = source ? await readableArtifactIds(actor, workspaceId, "BrainSource", [source]) : new Set<string>();
+  return { document, source: source && ids.has(source.id) ? source : null };
 }
 
-async function updateDuplicateUploadedDocument(actor: AppActor, params: {
+async function updateDuplicateUploadedDocument(actor: AppActor, params: ProducerLineageParams & {
   workspaceId: string;
   documentId: string;
   documentTitle: string;
@@ -233,6 +239,16 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
     }
     // Updating a file replaces its extracted snapshot as well as its blob.
     // Merging old text would keep superseded content searchable under the new file.
+    const priorRoots = await captureImmutableArtifactInputProof(actor, params.workspaceId,
+      await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "Document", id: existing.id, snapshot: existing }], tx), tx);
+    const incoming = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId, capture: params });
+    if (incoming.mode === "UNKNOWN") throw new AppError(409, "UNKNOWN_LINEAGE", "File inputs need a complete producer receipt.");
+    const documentReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      capture: { lineageRoots: [...priorRoots, ...(incoming.mode === "DERIVED" || incoming.mode === "HUMAN_ORIGINAL" ? incoming.roots : [])] }, copied: true });
+    const readableSource = existingSource && (await readableArtifactIds(actor, params.workspaceId, "BrainSource", [existingSource], tx)).has(existingSource.id);
+    const priorSourceRoots = readableSource ? await captureImmutableArtifactInputProof(actor, params.workspaceId,
+      await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "BrainSource", id: existingSource!.id, snapshot: existingSource! }], tx), tx) : [];
+    if (existingSource && !readableSource) await preserveUnknownArtifactInputSnapshot(tx, params.workspaceId, { kind: "BrainSource", id: existingSource.id }, existingSource);
     const replacementText = params.textContent;
     const replacementSourceContent = params.brainSourceContent;
     const contentHash = params.contentHash;
@@ -248,6 +264,9 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
             ? existing.metadata as Record<string, unknown>
             : {}),
           ...params.metadata,
+          authorMemberId: params.authorMemberId ?? null,
+          requestedTitle: params.documentTitle,
+          uploadSource: params.source,
           fileName: params.fileName,
           size: params.size,
           storageKey: params.storageKey,
@@ -258,21 +277,26 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
       },
     });
 
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId, artifact: { kind: "Document", id: document.id }, content: document, receipt: documentReceipt });
+    const sourceReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      capture: { lineageRoots: priorSourceRoots }, copied: true, completeCopy: true,
+      dependencies: [{ kind: "Document", id: document.id, snapshot: document }] });
     const source = existingSource
       ? await tx.brainSource.update({
         where: { id: existingSource.id },
         data: {
           content: replacementSourceContent,
-          title: existingSource.title || params.documentTitle,
-          channel: existingSource.channel || params.source,
-          ingestionGuidanceMd: params.ingestionGuidanceMd ?? existingSource.ingestionGuidanceMd,
+          title: readableSource ? existingSource.title || params.documentTitle : params.documentTitle,
+          channel: readableSource ? existingSource.channel || params.source : params.source,
+          ingestionGuidanceMd: params.ingestionGuidanceMd ?? (readableSource ? existingSource.ingestionGuidanceMd : null),
+          authorMemberId: params.authorMemberId ?? (readableSource ? existingSource.authorMemberId : null),
           fileStorageKey: params.storageKey,
           fileName: params.fileName,
           fileMimeType: params.mimeType,
           fileSizeBytes: params.size,
           absorbedAt: null,
           metadata: {
-            ...(typeof existingSource.metadata === "object" && existingSource.metadata !== null && !Array.isArray(existingSource.metadata)
+            ...(readableSource && typeof existingSource.metadata === "object" && existingSource.metadata !== null && !Array.isArray(existingSource.metadata)
               ? existingSource.metadata as Record<string, unknown>
               : {}),
             documentId: document.id,
@@ -280,6 +304,7 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
             fileName: params.fileName,
             mimeType: params.mimeType,
             size: params.size,
+            fileContentHash: params.metadata.fileContentHash as string,
             ...(params.metadata.extraction ? { extraction: params.metadata.extraction } : {}),
             ...(contentHash ? { contentHash } : {}),
             duplicateGuardUpdatedAt: new Date().toISOString(),
@@ -303,12 +328,14 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
           metadata: {
             documentId: document.id,
             storageKey: params.storageKey,
+            fileContentHash: params.metadata.fileContentHash as string,
             ...(params.metadata.extraction ? { extraction: params.metadata.extraction } : {}),
             ...(contentHash ? { contentHash } : {}),
           } as Prisma.InputJsonValue,
         },
       });
 
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId, artifact: { kind: "BrainSource", id: source.id }, content: source, receipt: sourceReceipt });
     await tx.knowledgeChunk.deleteMany({
       where: {
         workspaceId: params.workspaceId,
@@ -346,7 +373,7 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
 
     ]);
 
-    return { document, source };
+    return { document, source: (await readableArtifactIds(actor, params.workspaceId, "BrainSource", [source], tx)).has(source.id) ? source : null };
   }, { maxWait: 5_000, timeout: 60_000 });
   // Redis/local cache invalidation cannot share the database transaction. A
   // live chunk check at retrieval still rejects any old cached search result.
@@ -479,7 +506,7 @@ export async function extractTextFromFileBuffer(params: {
   };
 }
 
-export async function ingestFile(actor: AppActor, params: {
+export async function ingestFile(actor: AppActor, params: ProducerLineageParams & {
   workspaceId: string;
   fileBuffer: Buffer;
   fileName: string;
@@ -491,17 +518,29 @@ export async function ingestFile(actor: AppActor, params: {
   ingestionGuidanceMd?: string;
   duplicateGuard?: DuplicateGuardOptions | null;
 }) {
+  params = { ...params, documentMetadata: params.documentMetadata ? structuredClone(params.documentMetadata) : undefined,
+    lineageInputs: params.lineageInputs?.map(input => ({ ...input })), lineageRoots: params.lineageRoots?.map(root => ({ ...root })) };
   const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });
 
+  // The parser and persisted blob must consume the same native bytes even if the caller mutates its buffer.
+  const fileBuffer = Buffer.from(params.fileBuffer);
+  const submissionRoots = getMcpToolInputRoots(actor, params.workspaceId);
+  if (actor.kind !== "user" && !params.lineageRoots?.length && !submissionRoots.length) throw new AppError(409, "UNKNOWN_LINEAGE", "File inputs need a complete producer receipt.");
+  const incomingRoots = mergeArtifactInputProofs(params.lineageRoots ?? [], submissionRoots,
+    params.lineageInputs?.length ? await captureArtifactInputProof(actor, params.workspaceId, params.lineageInputs) : []);
+  params = { ...params, lineageRoots: incomingRoots.map(root => ({ ...root })) };
+  if (incomingRoots.length && !await isArtifactInputProofReadable(actor, params.workspaceId, incomingRoots)) {
+    throw new AppError(409, "SOURCE_CHANGED", "File inputs changed before upload.");
+  }
   const authorMemberId = params.authorMemberId || (actor.kind === "user" && !isGlobalOperator(actor) ? membership?.id : undefined);
   const fileName = params.fileName.trim().replace(/[^A-Za-z0-9._-]+/g, "-") || "upload.bin";
   const source = params.uploadSource?.trim() || "upload";
   const documentTitle = params.documentTitle?.trim() || fileName;
   const ingestionGuidanceMd = optionalTrimmed(params.ingestionGuidanceMd);
-  const size = params.fileBuffer.byteLength;
+  const size = fileBuffer.byteLength;
   const documentMetadata = asRecord(params.documentMetadata) ?? {};
   const sourceUrl = stringFromRecord(documentMetadata, "sourceUrl")
     ?? stringFromRecord(documentMetadata, "url")
@@ -515,7 +554,7 @@ export async function ingestFile(actor: AppActor, params: {
 
   // 1. Extract text before writing the blob so duplicate stops do not create orphaned storage.
   const { textContent, supported, extraction, contentHash: authoritativeContentHash } = await extractTextFromFileBuffer({
-    fileBuffer: params.fileBuffer,
+    fileBuffer,
     fileName,
     mimeType: params.mimeType,
   });
@@ -528,7 +567,7 @@ export async function ingestFile(actor: AppActor, params: {
     extractionSupported: supported,
     ingestionGuidanceMd,
   });
-  const contentHash = uploadedContentHash(params.fileBuffer, textContent, authoritativeContentHash);
+  const contentHash = uploadedContentHash(fileBuffer, textContent, authoritativeContentHash);
   const duplicateDecision = await checkWorkspaceDuplicateGuard({
     workspaceId: params.workspaceId,
     entityType: "Document",
@@ -538,9 +577,9 @@ export async function ingestFile(actor: AppActor, params: {
     source,
     sourceUrl,
     contentHash,
-  }, params.duplicateGuard);
+  }, params.duplicateGuard, undefined, rows => filterReadableDocuments(actor, params.workspaceId, rows));
   if (duplicateDecision?.resolution === "use_existing") {
-    return loadDocumentWithSource(params.workspaceId, duplicateDecision.match.entityId);
+    return loadDocumentWithSource(actor, params.workspaceId, duplicateDecision.match.entityId);
   }
   if (duplicateDecision?.resolution === "update_existing") {
     const existing = await prisma.document.findFirst({
@@ -559,10 +598,11 @@ export async function ingestFile(actor: AppActor, params: {
       Math.max(0, size - sizeFromMetadata(existing.metadata)),
     );
     const storageKey = `workspaces/${params.workspaceId}/uploads/${randomUUID()}/${fileName}`;
-    await defaultStorage.put(storageKey, params.fileBuffer, { contentType: params.mimeType });
+    await defaultStorage.put(storageKey, fileBuffer, { contentType: params.mimeType });
     try {
       return await updateDuplicateUploadedDocument(actor, {
         workspaceId: params.workspaceId,
+        lineageInputs: params.lineageInputs, lineageRoots: params.lineageRoots,
         documentId: duplicateDecision.match.entityId,
         documentTitle,
         source,
@@ -577,6 +617,7 @@ export async function ingestFile(actor: AppActor, params: {
         authorMemberId,
         metadata: {
           ...documentMetadata,
+          fileContentHash: createHash("sha256").update(fileBuffer).digest("hex"),
           extraction,
         },
       });
@@ -590,12 +631,14 @@ export async function ingestFile(actor: AppActor, params: {
 
   // 2. Upload to Blob Storage
   const storageKey = `workspaces/${params.workspaceId}/uploads/${randomUUID()}/${fileName}`;
-  await defaultStorage.put(storageKey, params.fileBuffer, { contentType: params.mimeType });
+  await defaultStorage.put(storageKey, fileBuffer, { contentType: params.mimeType });
 
   try {
     return await prisma.$transaction(async (tx) => {
       await lockAndAssertTrialStorageCapacity(tx, params.workspaceId, size);
       // 3. Create Document mapping
+      const documentReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId, capture: params });
+      if (documentReceipt.mode === "UNKNOWN") throw new AppError(409, "UNKNOWN_LINEAGE", "File inputs need a complete producer receipt.");
       const document = await tx.document.create({
         data: {
           workspaceId: params.workspaceId,
@@ -606,6 +649,10 @@ export async function ingestFile(actor: AppActor, params: {
           textContent,
           metadata: {
             ...documentMetadata,
+            authorMemberId: authorMemberId ?? null,
+            fileContentHash: createHash("sha256").update(fileBuffer).digest("hex"),
+            requestedTitle: documentTitle,
+            uploadSource: source,
             fileName,
             size,
             ...(contentHash ? { contentHash } : {}),
@@ -615,6 +662,7 @@ export async function ingestFile(actor: AppActor, params: {
         },
       });
 
+      await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId, artifact: { kind: "Document", id: document.id }, content: document, receipt: documentReceipt });
       await tx.auditLog.create({
         data: {
           workspaceId: params.workspaceId,
@@ -637,6 +685,8 @@ export async function ingestFile(actor: AppActor, params: {
       ]);
 
       // 4. Ingest to Brain. Non-extractable files get a metadata stub instead of body text.
+      const sourceReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId, copied: true, completeCopy: true,
+        dependencies: [{ kind: "Document", id: document.id, snapshot: document }] });
       const brainSource = await tx.brainSource.create({
         data: {
           workspaceId: params.workspaceId,
@@ -653,12 +703,14 @@ export async function ingestFile(actor: AppActor, params: {
           fileSizeBytes: size,
           metadata: {
             documentId: document.id,
+            fileContentHash: createHash("sha256").update(fileBuffer).digest("hex"),
             ...(contentHash ? { contentHash } : {}),
             extraction,
           } as Prisma.InputJsonValue,
         },
       });
 
+      await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId, artifact: { kind: "BrainSource", id: brainSource.id }, content: brainSource, receipt: sourceReceipt });
       await tx.auditLog.create({
         data: {
           workspaceId: params.workspaceId,

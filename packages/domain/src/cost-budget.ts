@@ -1,3 +1,4 @@
+import { createBudgetAlertActor } from "./internal-source-principal";
 import { prisma } from "@corgtex/shared";
 import { Prisma } from "@prisma/client";
 import { currentUsagePeriodStart, getWorkspaceMonthlyUsage } from "./agent-run-usage";
@@ -168,7 +169,7 @@ export async function checkBudget(workspaceId: string): Promise<{
           orderBy: { id: "asc" }, take: 5001,
         });
         if (usages.length > 5000) throw new AppError(503, "INPUT_SCAN_LIMIT", "Budget alert input collection exceeds its complete scan limit.");
-        const lineageActor: AppActor = { kind: "agent", authProvider: "bootstrap", label: "budget-alerts", workspaceIds: [workspaceId] };
+        const lineageActor = createBudgetAlertActor(workspaceId);
         const lineageRoots = await captureArtifactInputProof(lineageActor, workspaceId, [
           { kind: "ModelUsageBudget", id: currentBudget.id, snapshot: currentBudget },
           ...usages.map((usage) => ({ kind: "ModelUsageCost" as const, id: usage.id, snapshot: usage })),
@@ -177,19 +178,24 @@ export async function checkBudget(workspaceId: string): Promise<{
         const currentPct = currentUsed.div(currentBudget.monthlyCostCapUsd).times(100);
         if (currentPct.lessThan(currentBudget.alertThresholdPct)) return;
         const admins = await tx.member.findMany({
-          where: { workspaceId, role: "ADMIN", isActive: true }, select: { userId: true },
+          where: { workspaceId, role: "ADMIN", isActive: true }, include: { user: { select: { id: true, email: true, displayName: true } } },
         });
         if (!admins.length) return;
-        await createNotificationIntent(tx, {
-          workspaceId, lineageActor, lineageRoots,
+        for (const admin of admins) {
+          const audienceRoots = await captureArtifactInputProof(lineageActor, workspaceId, [
+            { kind: "Member", id: admin.id, snapshot: admin }, { kind: "User", id: admin.userId, snapshot: admin.user },
+          ], tx);
+          await createNotificationIntent(tx, {
+          workspaceId, lineageActor, lineageRoots: [...lineageRoots, ...audienceRoots],
           type: "budget.threshold_reached",
-          recipientUserIds: admins.map((admin) => admin.userId),
+          recipientUserIds: [admin.userId],
           entityType: "ModelUsageBudget", entityId: currentBudget.id,
           title: "Budget Alert",
           bodyMd: `Workspace agent usage has reached ${currentPct.toFixed(1)}% of your monthly budget. ($${currentUsed.toFixed(2)} of $${currentCap})`,
           priority: "HIGH",
-          dedupeKey: `budget.threshold:${currentBudget.id}:${currentPeriod.toISOString()}`,
+          dedupeKey: `budget.threshold:${currentBudget.id}:${currentPeriod.toISOString()}:${admin.id}`,
         });
+        }
         await tx.modelUsageBudget.update({ where: { id: currentBudget.id }, data: { alertSentAt: new Date() } });
       });
     }

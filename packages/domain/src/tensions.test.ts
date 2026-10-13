@@ -1,7 +1,7 @@
 import { prepareProducerLineage, finishProducerLineage } from "./producer-lineage";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createNotificationIntent } from "./notifications";
-import { captureArtifactInputProof } from "./source-lineage";
+import { captureArtifactInputProof, readableArtifactIds } from "./source-lineage";
 import { AppError } from "./errors";
 
 vi.mock("./producer-lineage", () => ({
@@ -72,6 +72,7 @@ vi.mock("./auth", () => ({
 }));
 
 vi.mock("./source-lineage", () => ({
+  isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
   captureArtifactInputProof: vi.fn().mockResolvedValue([]),
   readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) =>
     new Set(records.map((record: { id: string }) => record.id))),
@@ -80,6 +81,32 @@ vi.mock("./source-lineage", () => ({
 const actor = { kind: "user", user: { id: "u-1" } } as any;
 
 describe("tensions domain", () => {
+  it.each(["credential-a", "credential-b"])("rejects private creation by %s before duplicate reads or writes", async credentialId => {
+    const {createTension} = await import("./tensions");
+    const credential = {kind: "agent", authProvider: "credential", credentialId, workspaceIds: ["ws-1"], scopes: ["support:write"]} as any;
+    await expect(createTension(credential, {workspaceId: "ws-1", title: "Private"})).rejects.toMatchObject({code: "PRIVATE_AGENT_ARTIFACT_UNSUPPORTED"});
+    expect(prismaMock.tension.create).not.toHaveBeenCalled();
+    expect(prismaMock.tension.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.tension.findFirst).not.toHaveBeenCalled();
+  });
+  it("rejects public agent creation without complete inputs before looking for duplicates", async () => {
+    const {createTension} = await import("./tensions");
+    await expect(createTension({kind: "agent", workspaceIds: ["ws-1"]} as any, {...{workspaceId: "ws-1", title: "Private"}, isPrivate: false}))
+      .rejects.toMatchObject({code: "UNKNOWN_LINEAGE"});
+    expect(prismaMock.tension.create).not.toHaveBeenCalled();
+    expect(prismaMock.tension.findMany).not.toHaveBeenCalled();
+  });
+
+  it.each(["credential-a", "credential-b"])("does not return a hidden private tension through a no-op update by %s", async credentialId => {
+    const {updateTension} = await import("./tensions");
+    const credential = {kind: "agent", authProvider: "credential", credentialId, workspaceIds: ["ws-1"], scopes: ["tensions:write"]} as any;
+    prismaMock.tension.findUnique.mockResolvedValue({id: "private", workspaceId: "ws-1", status: "DRAFT", isPrivate: true, title: "Private", bodyMd: "Hidden", archivedAt: null});
+    vi.mocked(readableArtifactIds).mockResolvedValueOnce(new Set());
+    await expect(updateTension(credential, {workspaceId: "ws-1", tensionId: "private"})).rejects.toMatchObject({code: "NOT_FOUND"});
+    expect(prismaMock.tension.update).not.toHaveBeenCalled();
+    expect(readableArtifactIds).toHaveBeenCalledWith(credential, "ws-1", "Tension", [expect.objectContaining({id: "private"})], prismaMock);
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(captureArtifactInputProof).mockReset().mockResolvedValue([]);
@@ -1500,6 +1527,45 @@ describe("tensions domain", () => {
     expect(prepareProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ tx: prismaMock, copied: false }));
     expect(finishProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ tx: prismaMock,
       artifact: { kind: "Tension", id: "t-1" } }));
+  });
+
+  it("keeps agent input proof, duplicate scan, authorship and native write on the supplied transaction", async () => {
+    const { createTension } = await import("./tensions");
+    const { requireWorkspaceMembership, actorUserIdForWorkspace } = await import("./auth");
+    const { isArtifactInputProofReadable } = await import("./source-lineage");
+    const txFindMany = vi.fn().mockResolvedValue([]);
+    const txCreate = vi.fn().mockResolvedValue({ id: "tx-tension", workspaceId: "ws-1", title: "Native tension" });
+    const txMemberFindFirst = vi.fn().mockResolvedValue({ userId: "system-user" });
+    const tx = { ...prismaMock, tension: { ...prismaMock.tension, findMany: txFindMany, create: txCreate },
+      member: { ...prismaMock.member, findFirst: txMemberFindFirst } } as any;
+    const nativeActor = { kind: "agent", label: "system", authProvider: "bootstrap", workspaceIds: ["ws-1"] } as any;
+    const root = { kind: "ExecutionResult", id: "result-1", fingerprint: "a".repeat(64) } as any;
+    const result = await createTension(nativeActor, { workspaceId: "ws-1", title: "Native tension",
+      isPrivate: false, lineageRoots: [root], duplicateGuard: {} }, tx);
+    expect(result.id).toBe("tx-tension");
+    expect(requireWorkspaceMembership).toHaveBeenCalledWith(expect.objectContaining({ tx }));
+    expect(isArtifactInputProofReadable).toHaveBeenCalledWith(nativeActor, "ws-1", [root], tx);
+    expect(txFindMany).toHaveBeenCalled();
+    expect(txCreate).toHaveBeenCalledWith({ data: expect.objectContaining({ authorUserId: "system-user" }) });
+    expect(prepareProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ tx }));
+    expect(finishProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ tx }));
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(prismaMock.tension.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.tension.create).not.toHaveBeenCalled();
+    expect(actorUserIdForWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("rejects duplicate update in a supplied transaction before lookup or writes", async () => {
+    const { createTension } = await import("./tensions");
+    const txFindMany = vi.fn();
+    const txCreate = vi.fn();
+    const tx = { ...prismaMock, tension: { ...prismaMock.tension, findMany: txFindMany, create: txCreate } } as any;
+    await expect(createTension(actor, { workspaceId: "ws-1", title: "Duplicate",
+      duplicateGuard: { resolution: "update_existing", targetEntityId: "t-old" } }, tx))
+      .rejects.toMatchObject({ code: "DUPLICATE_GUARD_TRANSACTION_UNSUPPORTED" });
+    expect(txFindMany).not.toHaveBeenCalled();
+    expect(txCreate).not.toHaveBeenCalled();
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
   });
 
   it.each(["list", "detail"] as const)("withholds revoked tension %s labels without hiding the independently public body", async (surface) => {

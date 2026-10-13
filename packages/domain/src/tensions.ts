@@ -1,4 +1,3 @@
-import { scanSourceReadableRecords } from "./source-scoped-read";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
@@ -8,9 +7,9 @@ import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { loadAdviceRequestCountSummaries } from "./advice-requests";
 import { invariant } from "./errors";
-import { humanMemberIdentityWhere } from "./member-identity";
+import { humanMemberIdentityWhere, systemActorMemberIdentityWhere } from "./member-identity";
 import { createNotificationIntent } from "./notifications";
-import { requireDraftManager } from "./draft-permissions";
+import { requireDraftManager, requireCreationInputRoots } from "./draft-permissions";
 import { requireCollaborativeWorkItemEditor } from "./collaborative-permissions";
 import { resolveWorkspaceProposalLink } from "./proposal-links";
 import { captureArtifactInputProof, readableArtifactIds, type LineageRoot } from "./source-lineage";
@@ -303,11 +302,17 @@ async function applyTensionDuplicateUpdate(actor: AppActor, params: CreateTensio
   return updateTension(actor, updateParams);
 }
 
-export async function createTension(actor: AppActor, params: CreateTensionParams) {
+export async function createTension(actor: AppActor, params: CreateTensionParams, transaction?: Prisma.TransactionClient) {
   const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
+    tx: transaction,
   });
+  params = { ...params, lineageRoots: await requireCreationInputRoots({ actor, workspaceId: params.workspaceId,
+    isPrivate: params.isPrivate ?? true, roots: params.lineageRoots, tx: transaction }) };
+
+  invariant(!transaction || !["use_existing", "update_existing"].includes(params.duplicateGuard?.resolution ?? ""),
+    400, "DUPLICATE_GUARD_TRANSACTION_UNSUPPORTED", "This duplicate resolution cannot join the supplied transaction.");
 
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Tension title is required.");
@@ -323,12 +328,16 @@ export async function createTension(actor: AppActor, params: CreateTensionParams
     meetingId: params.meetingId,
     actorUserId: actor.kind === "user" ? actor.user.id : null,
     membershipId: membership?.id ?? null,
-    includePrivate: actor.kind === "agent" || membership?.role === "ADMIN",
-  }, params.duplicateGuard, undefined, async (rows) => {
+    includePrivate: actor.kind === "user" && membership?.role === "ADMIN",
+  }, params.duplicateGuard, transaction, async (rows) => {
     const records = rows as Array<{ id: string; [key: string]: unknown }>;
-    const visible = await readableArtifactIds(actor, params.workspaceId, "Tension", records);
+    const visible = await (transaction
+      ? readableArtifactIds(actor, params.workspaceId, "Tension", records, transaction)
+      : readableArtifactIds(actor, params.workspaceId, "Tension", records));
     return records.filter((record) => visible.has(record.id));
   });
+  invariant(!transaction || !duplicateDecision || duplicateDecision.resolution === "create_new",
+    400, "DUPLICATE_GUARD_TRANSACTION_UNSUPPORTED", "This duplicate resolution cannot join the supplied transaction.");
   if (duplicateDecision?.resolution === "use_existing") {
     return getTension(actor, { workspaceId: params.workspaceId, tensionId: duplicateDecision.match.entityId });
   }
@@ -338,13 +347,23 @@ export async function createTension(actor: AppActor, params: CreateTensionParams
   const isPrivate = params.isPrivate ?? true;
   const publishedAt = isPrivate ? null : new Date();
 
-  return prisma.$transaction(async (tx) => {
+  const create = async (tx: Prisma.TransactionClient) => {
+    await requireCreationInputRoots({ actor, workspaceId: params.workspaceId, isPrivate: params.isPrivate ?? true, roots: params.lineageRoots, tx });
     const raisedByMemberId = await resolveRaisedByMemberId(tx, params.workspaceId, params.raisedByMemberId);
     const assigneeMemberId = await resolveResponsibleMemberId(tx, params.workspaceId, params.assigneeMemberId);
     const proposalId = await resolveWorkspaceProposalLink(tx, actor, membership, params.workspaceId, params.proposalId);
-    let authorUserId = actor.kind === "user"
-      ? actor.user.id
-      : await actorUserIdForWorkspace(actor, params.workspaceId);
+    let authorUserId: string;
+    if (actor.kind === "user") authorUserId = actor.user.id;
+    else if (transaction) {
+      const systemMember = await tx.member.findFirst({ where: {
+        workspaceId: params.workspaceId, isActive: true, role: "ADMIN", ...systemActorMemberIdentityWhere(),
+      }, select: { userId: true } });
+      const adminMember = systemMember ?? await tx.member.findFirst({ where: {
+        workspaceId: params.workspaceId, isActive: true, role: "ADMIN",
+      }, select: { userId: true } });
+      invariant(adminMember, 500, "CONFIG_ERROR", "Workspace has no admin member available for system actions.");
+      authorUserId = adminMember.userId;
+    } else authorUserId = await actorUserIdForWorkspace(actor, params.workspaceId);
     const attributedMemberId = params.authorMemberId || raisedByMemberId;
     if (actor.kind === "agent" && attributedMemberId) {
       authorUserId = await resolveWorkspaceMemberUserId(tx, params.workspaceId, attributedMemberId, "Tension author must be an active member of this workspace.");
@@ -436,7 +455,8 @@ export async function createTension(actor: AppActor, params: CreateTensionParams
     }
 
     return tension;
-  });
+  };
+  return transaction ? create(transaction) : prisma.$transaction(create);
 }
 
 export async function updateTension(actor: AppActor, params: ProducerLineageParams & {
@@ -468,6 +488,8 @@ export async function updateTension(actor: AppActor, params: ProducerLineagePara
     });
 
     invariant(tension && tension.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Tension not found.");
+    invariant((await readableArtifactIds(actor, params.workspaceId, "Tension", [tension], tx)).has(tension.id),
+      404, "NOT_FOUND", "Tension not found.");
 
     invariant(!tension.archivedAt, 400, "INVALID_STATE", "Archived tensions cannot be edited.");
 

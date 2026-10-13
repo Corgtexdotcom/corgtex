@@ -22,7 +22,8 @@ vi.mock("@corgtex/domain", () => {
   };
 });
 
-vi.mock("@corgtex/shared", () => ({
+vi.mock("@corgtex/shared", async () => ({
+  ...await import("../../shared/src/mcp-context"),
   env: { APP_URL: "https://app.test" },
 }));
 

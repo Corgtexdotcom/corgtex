@@ -115,8 +115,8 @@ describe("listWorkspaceAgreements", () => {
       id: "constitution-current",
       version: 3,
       sourceReferences: [
-        { pointOrder: 1, sourceOrder: 1, sourceKind: "PROPOSAL", proposalId: "public-proposal", tensionId: null, labelSnapshot: "Old public title" },
-        { pointOrder: 1, sourceOrder: 2, sourceKind: "TENSION", proposalId: null, tensionId: "private-tension", labelSnapshot: "Do not disclose" },
+        { id: "reference-public", pointOrder: 1, sourceOrder: 1, sourceKind: "PROPOSAL", proposalId: "public-proposal", tensionId: null, labelSnapshot: "Old public title" },
+        { id: "reference-private", pointOrder: 1, sourceOrder: 2, sourceKind: "TENSION", proposalId: null, tensionId: "private-tension", labelSnapshot: "Do not disclose" },
       ],
     }]);
     prismaMock.proposal.findMany.mockResolvedValue([{ id: "public-proposal", title: "Current proposal title" }]);
@@ -140,11 +140,32 @@ describe("listWorkspaceAgreements", () => {
     expect(JSON.stringify(result.currentConstitution)).not.toContain("Old public title");
   });
 
+  it("gates complete reference rows before resolving target identities or exposing positions", async () => {
+    const { AppError } = await import("./errors");
+    const denied = { id: "denied-reference", constitutionId: "constitution-current", pointOrder: 1, sourceOrder: 1, sourceKind: "TENSION", tensionId: "secret-tension", proposalId: null, labelSnapshot: "Hidden label" };
+    const allowed = { id: "allowed-reference", constitutionId: "constitution-current", pointOrder: 1, sourceOrder: 2, sourceKind: "PROPOSAL", proposalId: "public-proposal", tensionId: null, labelSnapshot: "Permitted old label" };
+    prismaMock.constitution.findMany.mockResolvedValue([{ id: "constitution-current", version: 3, sourceReferences: [denied, allowed] }]);
+    lineage.capture.mockImplementation(async (_actor, _ws, inputs) => {
+      if (inputs.some((input: { id: string }) => input.id === denied.id)) throw new AppError(409, "SOURCE_RESTRICTED", "Reference source revoked");
+      return inputs.map((input: { kind: string; id: string }) => ({ kind: input.kind, id: input.id, fingerprint: "a".repeat(64) }));
+    });
+    try {
+      const result = await listWorkspaceAgreements(actor, { workspaceId: "ws-1" });
+      expect(lineage.capture).toHaveBeenCalledWith(actor, "ws-1", [{ kind: "ConstitutionSourceReference", id: denied.id, snapshot: denied }]);
+      expect(prismaMock.tension.findMany).not.toHaveBeenCalled();
+      expect(result.currentConstitution?.sourceReferences).toEqual([{ pointOrder: 1, sourceOrder: 1, sourceKind: "PROPOSAL", targetId: "public-proposal", title: "Current proposal title" }]);
+      expect(JSON.stringify(result)).not.toContain("secret-tension");
+      expect(JSON.stringify(result)).not.toContain("Hidden label");
+    } finally {
+      lineage.capture.mockImplementation(async (_actor, _ws, inputs) => inputs.map((input: { kind: string; id: string }) => ({ kind: input.kind, id: input.id, fingerprint: "a".repeat(64) })));
+    }
+  });
+
   it("hides unpublished private origins for both members and admins", async () => {
     prismaMock.constitution.findMany.mockResolvedValue([{
       id: "constitution-current",
       version: 3,
-      sourceReferences: [{ pointOrder: 2, sourceOrder: 1, sourceKind: "TENSION", proposalId: null, tensionId: "private-tension", labelSnapshot: "Old private title" }],
+      sourceReferences: [{ id: "reference-private", pointOrder: 2, sourceOrder: 1, sourceKind: "TENSION", proposalId: null, tensionId: "private-tension", labelSnapshot: "Old private title" }],
     }]);
     const memberResult = await listWorkspaceAgreements(actor, { workspaceId: "ws-1" });
     const memberFilter = prismaMock.tension.findMany.mock.calls[0]?.[0]?.where;

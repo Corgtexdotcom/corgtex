@@ -3,7 +3,7 @@ import type { Prisma } from "@prisma/client";
 // Generated artifact updates are deliberately excluded: rebuild outputs must not
 // recursively schedule another synthesis. Permission writers emit changed.
 const REBUILD_EVENTS = new Set([
-  "source-lineage.changed", "brain-source.created",
+  "source-lineage.changed", "brain-source.created", "document.updated", "meeting.processed-content-updated",
   "member.created", "member.updated", "member.deactivated", "member.reactivated",
   "role.assigned", "role.unassigned", "role.assignment.updated",
 ]);

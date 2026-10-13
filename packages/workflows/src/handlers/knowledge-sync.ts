@@ -1,4 +1,4 @@
-import { prisma } from "@corgtex/shared";
+import { prisma, type AppActor } from "@corgtex/shared";
 import { syncDocumentKnowledge, syncKnowledgeForSource } from "@corgtex/knowledge";
 import {
   fetchCalendarEvents,
@@ -89,11 +89,11 @@ export async function handleMeetingKnowledgeSync(jobId: string, payload: { meeti
 }
 
 
-export async function handleDocumentKnowledgeSync(jobId: string, payload: { documentId?: string }, workspaceId: string) {
+export async function handleDocumentKnowledgeSync(jobId: string, payload: { documentId?: string }, workspaceId: string, lineageActor?: AppActor) {
   if (!payload.documentId) {
     return;
   }
-  return syncDocumentKnowledge({ workspaceId, documentId: payload.documentId, workflowJobId: jobId });
+  return syncDocumentKnowledge({ workspaceId, documentId: payload.documentId, workflowJobId: jobId, ...(lineageActor ? { lineageActor } : {}) });
 }
 
 export async function handleExternalResourceKnowledgeSync(jobId: string, payload: { resourceId?: string }, workspaceId: string) {

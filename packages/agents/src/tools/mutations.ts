@@ -3,6 +3,8 @@ import type { AppActor } from "@corgtex/shared";
 import type { ModelTool } from "@corgtex/models";
 import {
   AppError,
+  assertArtifactInputWriteFence,
+  isArtifactInputProofReadable,
   createTension,
   updateTension,
   createAction,
@@ -187,14 +189,20 @@ export const createGoalTool: ModelTool = {
 };
 
 async function appendAuditMeta(
+  actor: AppActor, ctx: any,
   entityType: string,
   entityId: string,
   actionName: string,
   metaToAdd: Prisma.InputJsonObject,
   notBefore?: Date,
 ) {
-  const log = await prisma.auditLog.findFirst({
+  return prisma.$transaction(async (tx) => {
+  await assertArtifactInputWriteFence(tx);
+  await ctx.persistenceFence?.(tx);
+  if (!ctx.lineageRoots?.length || !await isArtifactInputProofReadable(actor, ctx.workspaceId, ctx.lineageRoots, tx)) throw new AppError(409, "SOURCE_CHANGED", "Mutation inputs changed before audit persistence.");
+  const log = await tx.auditLog.findFirst({
     where: {
+      workspaceId: ctx.workspaceId,
       entityType,
       entityId,
       action: actionName,
@@ -203,13 +211,14 @@ async function appendAuditMeta(
     orderBy: { createdAt: "desc" },
   });
   if (log) {
-    await prisma.auditLog.update({
+    await tx.auditLog.update({
       where: { id: log.id },
       data: {
-        meta: { ...(log.meta as Record<string, unknown>), ...metaToAdd } as any,
+        meta: { ...(log.meta as Record<string, unknown>), conversationSessionId: metaToAdd.conversationSessionId } as Prisma.InputJsonObject,
       },
     });
   }
+  });
 }
 
 function duplicateGuardOptionsFromArgs(args: any): DuplicateGuardOptions {
@@ -250,9 +259,8 @@ export async function createTensionAction(actor: AppActor, ctx: any, args: any) 
     return duplicateGuardToolResponse(error);
   }
 
-  await appendAuditMeta("Tension", result.id, "tension.created", {
+  await appendAuditMeta(actor, ctx, "Tension", result.id, "tension.created", {
     conversationSessionId: ctx.sessionId,
-    toolCallInput: args,
   }, writeStartedAt);
 
   return { success: true, tensionId: result.id };
@@ -287,9 +295,8 @@ export async function updateTensionAction(actor: AppActor, ctx: any, args: any) 
     throw error;
   }
 
-  await appendAuditMeta("Tension", result.id, "tension.updated", {
+  await appendAuditMeta(actor, ctx, "Tension", result.id, "tension.updated", {
     conversationSessionId: ctx.sessionId,
-    toolCallInput: args,
   });
 
   return { success: true, tensionId: result.id, version: result.version };
@@ -314,9 +321,8 @@ export async function createActionItemAction(actor: AppActor, ctx: any, args: an
     return duplicateGuardToolResponse(error);
   }
 
-  await appendAuditMeta("Action", result.id, "action.created", {
+  await appendAuditMeta(actor, ctx, "Action", result.id, "action.created", {
     conversationSessionId: ctx.sessionId,
-    toolCallInput: args,
   }, writeStartedAt);
 
   return { success: true, actionId: result.id };
@@ -350,9 +356,8 @@ export async function updateActionItemAction(actor: AppActor, ctx: any, args: an
     throw error;
   }
 
-  await appendAuditMeta("Action", result.id, "action.updated", {
+  await appendAuditMeta(actor, ctx, "Action", result.id, "action.updated", {
     conversationSessionId: ctx.sessionId,
-    toolCallInput: args,
   });
 
   return { success: true, actionId: result.id, version: result.version };
@@ -399,9 +404,8 @@ export async function createProposalAction(actor: AppActor, ctx: any, args: any)
     return duplicateGuardToolResponse(error);
   }
 
-  await appendAuditMeta("Proposal", result.id, "proposal.created", {
+  await appendAuditMeta(actor, ctx, "Proposal", result.id, "proposal.created", {
     conversationSessionId: ctx.sessionId,
-    toolCallInput: args,
   }, writeStartedAt);
 
   return { success: true, proposalId: result.id };
@@ -431,9 +435,8 @@ export async function createGoalAction(actor: AppActor, ctx: any, args: any) {
     return duplicateGuardToolResponse(error);
   }
 
-  await appendAuditMeta("Goal", result.id, "goal.created", {
+  await appendAuditMeta(actor, ctx, "Goal", result.id, "goal.created", {
     conversationSessionId: ctx.sessionId,
-    toolCallInput: args,
   }, writeStartedAt);
 
   return { success: true, goalId: result.id };

@@ -16,3 +16,5 @@ export * from "./brain-article-variant";
 export * from "./conversation-lineage";
 export * from "./conversation-inputs";
 export * from "./conversation-tool-lineage";
+
+export * from "./graph-source-variant";

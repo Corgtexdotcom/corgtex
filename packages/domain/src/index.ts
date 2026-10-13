@@ -133,6 +133,7 @@ export * from "./meeting-evidence-state";
 export * from "./meeting-transcript-chunks";
 export * from "./meeting-transcript-processing";
 export * from "./meeting-transcript-intake";
+export { captureDirectMemberTranscriptInput } from "./native-transcript-input";
 export * from "./meeting-transcript-sources";
 export * from "./meeting-audio-assets";
 export * from "./meeting-recorders";
@@ -156,5 +157,18 @@ export * from "./source-scoped-read";
 export * from "./brain-article-variants";
 
 export * from "./conversation-lineage";
+export * from "./conversation-ingress";
+export * from "./mcp-tool-input";
+export { readConversationToolLinkArchiveOutcome, getConversationOperationOutcomeInputReceipt,
+  getConversationOperationOutcomeInputRoots } from "./conversation-operation-outcome";
+export type { ConversationToolLinkArchiveResult, ConversationToolLinkArchiveRequest } from "./conversation-operation-outcome";
 export * from "./source-lineage-rebuild";
 export * from "./source-lineage-backfill";
+
+export { createCheckInGenerationActor, createBudgetAlertActor } from "./internal-source-principal";
+
+export * from "./derived-artifact-variants";
+export * from "./permitted-derivation-inputs";
+export * from "./source-permission-epochs";
+
+export * from "./native-transcript-input";

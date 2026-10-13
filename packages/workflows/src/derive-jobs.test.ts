@@ -225,6 +225,10 @@ describe("deriveJobsForEvent", () => {
         dedupeKey: "event-meeting-processed-1:context-graph-sync:MEETING:meeting-1",
         dependsOnDedupeKey: undefined,
       },
+      {
+        workspaceId: "ws-1", eventId: "event-meeting-processed-1", type: "source-lineage.rebuild",
+        payload: { eventId: "event-meeting-processed-1" }, dedupeKey: "event-meeting-processed-1:source-lineage-rebuild",
+      },
     ]);
   });
 });

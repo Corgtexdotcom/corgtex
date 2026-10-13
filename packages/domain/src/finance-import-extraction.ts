@@ -1,6 +1,9 @@
-import type { FinanceImportBatch, Prisma } from "@prisma/client";
+import type { BrainSource, Document, FinanceImportBatch, Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import { invariant } from "./errors";
+import { assertFinanceExtractionLease, createFinanceExtractionReceipt, resolveFinanceUploadInputs, validateFinanceExtractionReceipt,
+  type FinanceExtractionLease, type FinanceExtractionReceipt } from "./finance-import-lineage";
+import { advanceHumanArtifactInputLineage, captureArtifactInputProof, captureImmutableArtifactInputProof, recordArtifactInputLineage } from "./source-lineage";
 import { lockFinanceImportArtifactLinkTargets } from "./finance-import-artifact-ownership";
 
 const MAX_EXTRACTED_TEXT_CHARS = 2_000_000;
@@ -22,25 +25,7 @@ const SAFE_EXTRACTION_FAILURES = {
 
 export type FinanceReportExtractionFailureCode = keyof typeof SAFE_EXTRACTION_FAILURES;
 
-type LockedBatch = FinanceImportBatch & {
-  document: {
-    id: string;
-    accessDomain: string;
-    archivedAt: Date | null;
-    storageKey: string;
-    mimeType: string;
-    metadata: Prisma.JsonValue | null;
-  } | null;
-  brainSource: {
-    id: string;
-    accessDomain: string;
-    archivedAt: Date | null;
-    fileStorageKey: string | null;
-    fileMimeType: string | null;
-    fileSizeBytes: number | null;
-    metadata: Prisma.JsonValue | null;
-  } | null;
-};
+type LockedBatch = FinanceImportBatch & { document: Document | null; brainSource: BrainSource | null };
 
 function jsonObject(value: Prisma.JsonValue | null): Prisma.InputJsonObject {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -88,10 +73,14 @@ export async function claimFinanceReportImportExtraction(params: {
   batchId: string;
   workflowJobId: string;
   retryCount: number;
+  expectedLease?: FinanceExtractionLease;
 }) {
   invariant(Number.isSafeInteger(params.retryCount) && params.retryCount >= 0, 400, "INVALID_INPUT", "Retry count is invalid.");
   return prisma.$transaction(async (tx) => {
+    await assertFinanceExtractionLease(tx, { ...params, attempts: params.retryCount });
     const batch = await loadLockedBatch(tx, params.workspaceId, params.batchId);
+    const captured = await resolveFinanceUploadInputs(batch, tx);
+    await captureArtifactInputProof(captured.actor, params.workspaceId, [{ kind: "FinanceImportBatch", id: batch.id, snapshot: batch }], tx);
     if (batch.stage !== "UPLOADED" && batch.stage !== "EXTRACTING") {
       return { skipped: true as const, batchId: batch.id, version: batch.version };
     }
@@ -112,6 +101,8 @@ export async function claimFinanceReportImportExtraction(params: {
         fileSizeBytes: batch.fileSizeBytes,
         fileName: batch.originalFilename,
         mimeType: batch.mimeType,
+        receipt: await createFinanceExtractionReceipt(tx, {
+          ...params, version: batch.version, attempts: params.retryCount, expectedLease: params.expectedLease! }),
       };
     }
     const result = await tx.financeImportBatch.updateMany({
@@ -132,6 +123,9 @@ export async function claimFinanceReportImportExtraction(params: {
       },
     });
     invariant(result.count === 1, 409, "FINANCE_REPORT_EXTRACTION_CONFLICT", "The Finance report extraction changed. Please retry.");
+    const after = await tx.financeImportBatch.findUniqueOrThrow({ where: { id_workspaceId: { id: batch.id, workspaceId: batch.workspaceId } } });
+    await advanceHumanArtifactInputLineage({ tx, actor: captured.actor, workspaceId: params.workspaceId,
+      artifact: { kind: "FinanceImportBatch", id: batch.id }, before: batch, after, allowSystemTransition: true });
     return {
       skipped: false as const,
       batchId: batch.id,
@@ -141,6 +135,8 @@ export async function claimFinanceReportImportExtraction(params: {
       fileSizeBytes: batch.fileSizeBytes,
       fileName: batch.originalFilename,
       mimeType: batch.mimeType,
+      receipt: await createFinanceExtractionReceipt(tx, {
+        ...params, version: batch.version + 1, attempts: params.retryCount, expectedLease: params.expectedLease! }),
     };
   });
 }
@@ -150,6 +146,7 @@ export async function completeFinanceReportImportExtraction(params: {
   batchId: string;
   workflowJobId: string;
   expectedVersion: number;
+  receipt?: FinanceExtractionReceipt;
   extraction: {
     fileHash: string;
     fileSizeBytes: number;
@@ -160,6 +157,7 @@ export async function completeFinanceReportImportExtraction(params: {
   };
 }) {
   return prisma.$transaction(async (tx) => {
+    const authority = await validateFinanceExtractionReceipt(params.receipt, params, tx);
     const batch = await loadLockedBatch(tx, params.workspaceId, params.batchId);
     if (COMPLETED_EXTRACTION_STAGES.has(batch.stage) && batch.workflowJobId === params.workflowJobId) {
       return { skipped: true as const, batchId: batch.id, version: batch.version };
@@ -194,6 +192,9 @@ export async function completeFinanceReportImportExtraction(params: {
       format: params.extraction.format,
       workflowJobId: params.workflowJobId,
     } satisfies Prisma.InputJsonObject;
+    // Preserve the exact upload and existing source metadata before either mutable body changes.
+    const batchRoots = await captureArtifactInputProof(authority.actor, params.workspaceId, [{ kind: "FinanceImportBatch", id: batch.id, snapshot: batch }], tx);
+    const frozenRoots = await captureImmutableArtifactInputProof(authority.actor, params.workspaceId, [...authority.roots, ...batchRoots], tx);
     const result = await tx.financeImportBatch.updateMany({
       where: {
         id: batch.id,
@@ -205,14 +206,27 @@ export async function completeFinanceReportImportExtraction(params: {
       data: { stage: "CLASSIFYING", safeErrorCode: null, safeErrorMessage: null, version: { increment: 1 } },
     });
     invariant(result.count === 1, 409, "FINANCE_REPORT_EXTRACTION_CONFLICT", "The Finance report extraction changed. Please retry.");
-    await tx.document.update({
+    const document = await tx.document.update({
       where: { id_workspaceId: { id: batch.document!.id, workspaceId: batch.workspaceId } },
       data: { textContent: text, metadata: { ...jsonObject(batch.document!.metadata), extraction } },
     });
-    await tx.brainSource.update({
+    await recordArtifactInputLineage({ tx, actor: authority.actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Document", id: document.id }, content: document, origin: "DERIVED", inputs: [], inheritedRoots: frozenRoots });
+    const documentRoots = await captureArtifactInputProof(authority.actor, params.workspaceId,
+      [{ kind: "Document", id: document.id, snapshot: document }], tx);
+    const source = await tx.brainSource.update({
       where: { id_workspaceId: { id: batch.brainSource!.id, workspaceId: batch.workspaceId } },
       data: { content: text, metadata: { ...jsonObject(batch.brainSource!.metadata), extraction } },
     });
+    await recordArtifactInputLineage({ tx, actor: authority.actor, workspaceId: params.workspaceId,
+      artifact: { kind: "BrainSource", id: source.id }, content: source, origin: "DERIVED", inputs: [],
+      inheritedRoots: [...frozenRoots, ...documentRoots] });
+    const current = await tx.financeImportBatch.findUniqueOrThrow({ where: { id_workspaceId: { id: batch.id, workspaceId: batch.workspaceId } } });
+    const sourceRoots = await captureArtifactInputProof(authority.actor, params.workspaceId,
+      [{ kind: "BrainSource", id: source.id, snapshot: source }], tx);
+    await recordArtifactInputLineage({ tx, actor: authority.actor, workspaceId: params.workspaceId,
+      artifact: { kind: "FinanceImportBatch", id: current.id }, content: current, origin: "DERIVED", inputs: [],
+      inheritedRoots: [...frozenRoots, ...documentRoots, ...sourceRoots] });
     await tx.event.create({ data: {
       workspaceId: batch.workspaceId, type: "finance-report-import.extracted", aggregateType: "FinanceImportBatch",
       aggregateId: batch.id, payload: { batchId: batch.id, expectedVersion: batch.version + 1 },
@@ -235,10 +249,13 @@ export async function completeFinanceReportImportExtraction(params: {
 export async function failFinanceReportImportExtraction(params: {
   workspaceId: string; batchId: string; workflowJobId: string; expectedVersion: number;
   failureCode: FinanceReportExtractionFailureCode;
+  receipt?: FinanceExtractionReceipt;
 }) {
   invariant(Object.hasOwn(SAFE_EXTRACTION_FAILURES, params.failureCode), 400, "INVALID_INPUT", "Extraction failure code is invalid.");
   return prisma.$transaction(async (tx) => {
+    const authority = await validateFinanceExtractionReceipt(params.receipt, params, tx);
     const batch = await loadLockedBatch(tx, params.workspaceId, params.batchId);
+    await captureArtifactInputProof(authority.actor, params.workspaceId, [{ kind: "FinanceImportBatch", id: batch.id, snapshot: batch }], tx);
     const owned = batch.workflowJobId === params.workflowJobId;
     if (batch.stage === "FAILED" && owned) return { skipped: true as const, batchId: batch.id, version: batch.version };
     invariant(batch.stage === "EXTRACTING" && owned && batch.version === params.expectedVersion,
@@ -249,10 +266,25 @@ export async function failFinanceReportImportExtraction(params: {
         safeErrorMessage: SAFE_EXTRACTION_FAILURES[params.failureCode], version: { increment: 1 } },
     });
     invariant(result.count === 1, 409, "FINANCE_REPORT_EXTRACTION_CONFLICT", "The Finance report extraction changed. Please retry.");
+    const after = await tx.financeImportBatch.findUniqueOrThrow({ where: { id_workspaceId: { id: batch.id, workspaceId: batch.workspaceId } } });
+    await advanceHumanArtifactInputLineage({ tx, actor: authority.actor, workspaceId: params.workspaceId,
+      artifact: { kind: "FinanceImportBatch", id: batch.id }, before: batch, after, allowSystemTransition: true });
     await tx.auditLog.create({ data: {
       workspaceId: batch.workspaceId, action: "finance-report-import.extraction-failed", entityType: "FinanceImportBatch",
       entityId: batch.id, meta: { failureCode: params.failureCode },
     } });
     return { skipped: false as const, batchId: batch.id, version: batch.version + 1 };
+  });
+}
+
+/** Recheck the opaque claim before and after any storage/parser work. */
+export async function assertFinanceReportImportExtractionCurrent(params: {
+  workspaceId: string; batchId: string; workflowJobId: string; expectedVersion: number; receipt: FinanceExtractionReceipt;
+}) {
+  await prisma.$transaction(async tx => {
+    await validateFinanceExtractionReceipt(params.receipt, params, tx);
+    const batch = await loadLockedBatch(tx, params.workspaceId, params.batchId);
+    invariant(batch.stage === "EXTRACTING" && batch.workflowJobId === params.workflowJobId && batch.version === params.expectedVersion,
+      409, "FINANCE_REPORT_EXTRACTION_CONFLICT", "The Finance report extraction changed. Please retry.");
   });
 }

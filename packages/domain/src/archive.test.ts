@@ -64,7 +64,8 @@ const { prismaMock, storageDeleteMock, appendEventsMock } = vi.hoisted(() => {
       delete: vi.fn(),
     },
     brainArticle: { findFirst: vi.fn(), findMany: vi.fn(), update: vi.fn() },
-    artifactInputLineage: { findFirst: vi.fn().mockResolvedValue(null), findMany: vi.fn().mockResolvedValue([]) },
+    artifactInputLineage: { findFirst: vi.fn().mockResolvedValue(null), findMany: vi.fn().mockResolvedValue([]), create: vi.fn() },
+    artifactInputSnapshot: { create: vi.fn() },
     financeImportBatch: {
       findFirst: vi.fn(),
     },
@@ -126,6 +127,8 @@ describe("workspace archive domain", () => {
     prismaMock.approvalFlow.findFirst.mockResolvedValue(null);
     prismaMock.approvalFlow.update.mockResolvedValue({});
     prismaMock.approvalFlow.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.artifactInputSnapshot.create.mockImplementation(async ({ data }) => ({ id: "snapshot-1", ...data }));
+    prismaMock.artifactInputLineage.create.mockImplementation(async ({ data }) => ({ id: "manifest-1", ...data }));
     prismaMock.goal.findFirst.mockResolvedValue(null);
     prismaMock.goal.findUnique.mockResolvedValue(null);
     prismaMock.goal.update.mockResolvedValue({});
@@ -528,11 +531,13 @@ describe("workspace archive domain", () => {
     };
     prismaMock.proposal.findFirst.mockResolvedValue(proposal);
     prismaMock.proposal.update.mockResolvedValue({ ...proposal, archivedAt: new Date("2026-04-25T12:00:00.000Z") });
-    prismaMock.approvalFlow.findFirst.mockResolvedValue({
-      id: "flow-1",
-      workspaceId: "workspace-1",
-      subjectType: "PROPOSAL",
-      subjectId: "proposal-1",
+    let flow = {
+      id: "flow-1", workspaceId: "workspace-1", subjectType: "PROPOSAL", subjectId: "proposal-1", status: "ACTIVE",
+    };
+    prismaMock.approvalFlow.findFirst.mockImplementation(async () => ({ ...flow }));
+    prismaMock.approvalFlow.updateMany.mockImplementation(async ({ data }) => {
+      flow = { ...flow, ...data };
+      return { count: 1 };
     });
 
     const { archiveWorkspaceArtifact } = await import("./archive");
@@ -543,6 +548,14 @@ describe("workspace archive domain", () => {
       reason: "obsolete",
     })).resolves.toMatchObject({ id: "proposal-1" });
 
+    expect(prismaMock.artifactInputSnapshot.create).toHaveBeenCalledWith({ data: expect.objectContaining({
+      sourceKind: "ApprovalFlow", sourceId: "flow-1", origin: "UNKNOWN", rootsJson: [],
+      contentJson: expect.objectContaining({ status: "ACTIVE" }),
+    }) });
+    expect(prismaMock.artifactInputLineage.create).toHaveBeenCalledWith({ data: expect.objectContaining({
+      artifactType: "ApprovalFlow", artifactId: "flow-1", origin: "UNKNOWN",
+    }) });
+    expect(prismaMock.artifactInputSnapshot.create.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.approvalFlow.updateMany.mock.invocationCallOrder[0]);
     expect(prismaMock.approvalFlow.updateMany).toHaveBeenCalledWith({
       where: { id: "flow-1", status: "ACTIVE" },
       data: expect.objectContaining({

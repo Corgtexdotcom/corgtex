@@ -3,7 +3,7 @@ import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { privacyFilter } from "./privacy";
-import { loadReadableDigestQuery } from "./digest-lineage";
+import { captureReadableDigestInputs, loadReadableDigestQuery } from "./digest-lineage";
 import { readableArtifactIds } from "./source-lineage";
 
 export const AGREEMENT_BRAIN_ARTICLE_TYPES = [
@@ -52,7 +52,7 @@ export async function listWorkspaceAgreements(actor: AppActor, params: {
         orderBy: [{ acceptedAt: "desc" }, { id: "desc" }], take,
       }),
     }),
-    loadReadableDigestQuery<BrainArticle & { ownerMember: { id: string; user: { displayName: string | null; email: string }; [key: string]: unknown } | null }>({
+    loadReadableDigestQuery<BrainArticle & { ownerMember: { id: string; user: { id: string; displayName: string | null; email: string }; [key: string]: unknown } | null }>({
       actor, workspaceId: params.workspaceId, kind: "BrainArticle", keyset: true, limit: Math.max(0, brainArticleTake),
       loadBatch: ({ take, after }) => prisma.brainArticle.findMany({
         where: { workspaceId: params.workspaceId, archivedAt: null, isPrivate: false,
@@ -71,9 +71,19 @@ export async function listWorkspaceAgreements(actor: AppActor, params: {
 
   const [circleIdsReadable, ownerIdsReadable] = await Promise.all([
     readableArtifactIds(actor, params.workspaceId, "Circle", policyCorpus.flatMap((row) => row.circle ? [row.circle] : [])),
-    readableArtifactIds(actor, params.workspaceId, "Member", brainArticles.flatMap((row) => row.ownerMember ? [row.ownerMember] : [])),
+    captureReadableDigestInputs({ actor, workspaceId: params.workspaceId, kind: "Member",
+      records: brainArticles.flatMap((row) => row.ownerMember ? [{ id: row.ownerMember.id,
+        userId: row.ownerMember.user.id, user: { id: row.ownerMember.user.id,
+          email: row.ownerMember.user.email, displayName: row.ownerMember.user.displayName } }] : []),
+    }).then((capture) => new Set(capture.records.map((row) => row.id))),
   ]);
-  const references = currentConstitution?.sourceReferences ?? [];
+  const capturedReferences = await captureReadableDigestInputs({ actor, workspaceId: params.workspaceId,
+    kind: "ConstitutionSourceReference", records: currentConstitution?.sourceReferences ?? [] });
+  const references = capturedReferences.records;
+  const ownerUsers = await captureReadableDigestInputs({ actor, workspaceId: params.workspaceId, kind: "User",
+    records: brainArticles.flatMap((row) => row.ownerMember && ownerIdsReadable.has(row.ownerMember.id) ? [{ id: row.ownerMember.user.id, email: row.ownerMember.user.email, displayName: row.ownerMember.user.displayName }] : []),
+  });
+  const ownerUserIdsReadable = new Set(ownerUsers.records.map((user) => user.id));
   const proposalIds = [...new Set([
     ...policyCorpus.map((policy) => policy.proposalId),
     ...references.flatMap((reference) => reference.sourceKind === "PROPOSAL" && reference.proposalId ? [reference.proposalId] : []),
@@ -93,18 +103,22 @@ export async function listWorkspaceAgreements(actor: AppActor, params: {
   ]);
   const visibleProposalTitles = new Map(visibleProposals.filter((row) => proposalIdsReadable.has(row.id)).map((proposal) => [proposal.id, proposal.title]));
   const visibleTensionTitles = new Map(visibleTensions.filter((row) => tensionIdsReadable.has(row.id)).map((tension) => [tension.id, tension.title]));
+  const visibleSourceOrders = new Map<number, number>();
   const visibleReferences = references.flatMap((reference) => {
     const targetId = reference.sourceKind === "PROPOSAL" ? reference.proposalId : reference.tensionId;
     const title = reference.sourceKind === "PROPOSAL"
       ? visibleProposalTitles.get(targetId ?? "")
       : visibleTensionTitles.get(targetId ?? "");
-    return targetId && title?.trim() ? [{
+    if (!targetId || !title?.trim()) return [];
+    const sourceOrder = (visibleSourceOrders.get(reference.pointOrder) ?? 0) + 1;
+    visibleSourceOrders.set(reference.pointOrder, sourceOrder);
+    return [{
       pointOrder: reference.pointOrder,
-      sourceOrder: reference.sourceOrder,
+      sourceOrder,
       sourceKind: reference.sourceKind,
       targetId,
       title,
-    }] : [];
+    }];
   });
   const visiblePolicies = policyCorpus.map((policy) => {
     const proposalTitle = visibleProposalTitles.get(policy.proposalId);
@@ -117,7 +131,7 @@ export async function listWorkspaceAgreements(actor: AppActor, params: {
   const visibleBrainArticles = brainArticles.map((row) => ({
     id: row.id, slug: row.slug, title: row.title, type: row.type, authority: row.authority,
     bodyMd: row.bodyMd, frontmatterJson: row.frontmatterJson, updatedAt: row.updatedAt, lastVerifiedAt: row.lastVerifiedAt,
-    ownerMember: row.ownerMember && ownerIdsReadable.has(row.ownerMember.id)
+    ownerMember: row.ownerMember && ownerIdsReadable.has(row.ownerMember.id) && ownerUserIdsReadable.has(row.ownerMember.user.id)
       ? { user: { displayName: row.ownerMember.user.displayName, email: row.ownerMember.user.email } } : null,
   }));
 

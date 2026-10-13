@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { installSourcePermissionEpochFixture } from "../../../domain/src/source-permission-epochs.test-fixture";
 import type { AppActor } from "@corgtex/shared";
 
 const fixture = vi.hoisted(() => {
@@ -84,7 +85,8 @@ const workspaceId = "ws-a";
 
 async function known(kind: LineageKind, row: any, inputs: Array<{ kind: LineageKind; id: string }> = []) {
   await recordArtifactInputLineage({ tx: fixture.prisma, actor: beta, workspaceId: row.workspaceId ?? workspaceId,
-    artifact: { kind, id: row.id }, content: row, origin: inputs.length ? "DERIVED" : "HUMAN_ORIGINAL", inputs });
+    artifact: { kind, id: row.id }, content: row, origin: inputs.length ? "DERIVED" : "HUMAN_ORIGINAL", inputs,
+    inheritedRoots: inputs.length ? await captureArtifactInputProof(beta, row.workspaceId ?? workspaceId, inputs, fixture.prisma) : undefined });
 }
 function add(kind: string, values: any) {
   const row = { archivedAt: null, createdAt: fixture.timestamp, updatedAt: fixture.timestamp, ...values }; fixture.rows[kind].push(row); return row;
@@ -114,7 +116,11 @@ async function seed() {
   add("action", { ...publicAction, id: "foreign-action", workspaceId: "ws-b", title: "Foreign workspace body" });
   return { privateSource, publicAction, derivedAction, publicCircle, privateCircle, publicRole, privateRole };
 }
-beforeEach(() => { for (const kind of Object.keys(fixture.rows)) fixture.rows[kind] = []; vi.clearAllMocks(); });
+beforeEach(() => { for (const kind of Object.keys(fixture.rows)) fixture.rows[kind] = []; vi.clearAllMocks();
+  fixture.prisma.$queryRaw.mockReset().mockResolvedValue([]);
+  fixture.prisma.$executeRaw.mockReset().mockResolvedValue(1);
+  installSourcePermissionEpochFixture(fixture.prisma);
+});
 vi.mock("@corgtex/domain", async () => ({
   ...await import("../../../domain/src/errors"), ...await import("../../../domain/src/auth"),
   ...await import("../../../domain/src/privacy"), ...await import("../../../domain/src/source-scoped-read"),

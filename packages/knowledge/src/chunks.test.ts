@@ -11,7 +11,8 @@ const sourceSnapshots = new Map<string, any>();
 async function syncKnowledgeForSource(params: Parameters<typeof syncKnowledgeForSourceImpl>[0]) {
   sourceSnapshots.set(params.sourceId, { id: params.sourceId, workspaceId: params.workspaceId,
     title: params.sourceTitle?.trim() || null, textContent: params.content, bodyMd: params.content,
-    accessDomain: params.accessDomain, archivedAt: null, isPrivate: false });
+    accessDomain: params.accessDomain, archivedAt: null, isPrivate: false, storageKey: params.metadata?.storageKey,
+    metadata: { materializedContent: params.content, ...params.metadata } });
   return syncKnowledgeForSourceImpl(params);
 }
 
@@ -28,7 +29,8 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
       $queryRaw: vi.fn(),
       $executeRaw: vi.fn(),
       brainArticle: { findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn() },
-      brainSource: { count: vi.fn() },
+      brainSource: { count: vi.fn(), findMany: vi.fn() },
+      externalContentSource: { findFirst: vi.fn() },
       document: { count: vi.fn(), findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn() },
       knowledgeChunk: { count: vi.fn(), findMany: vi.fn(), deleteMany: vi.fn(), createMany: vi.fn() },
       workflowJob: { findMany: vi.fn() },
@@ -56,6 +58,18 @@ vi.mock("./azure-search", async (importOriginal) => {
   };
 });
 
+vi.mock("@corgtex/domain", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@corgtex/domain")>();
+  return { ...actual, recordArtifactInputLineage: vi.fn(async () => {}), assertArtifactInputWriteFence: vi.fn(async () => {}), requireWorkspaceMembership: vi.fn(async () => ({ id: "member" })),
+    captureArtifactInputProof: vi.fn(async (_actor, _ws, inputs) => inputs.map((input: any) => ({ kind: input.kind, id: input.id, fingerprint: "fixture" }))),
+    captureImmutableArtifactInputProof: vi.fn(async (_actor, _workspaceId, roots) => roots),
+    isArtifactInputProofReadable: vi.fn(async () => true),
+    readableArtifactIds: vi.fn(async (_actor, _ws, _kind, rows) => new Set(rows.map((row: any) => row.id))),
+    scanSourceReadableRecords: vi.fn(async (params) => await params.load(undefined, 100) ?? []),
+  };
+});
+vi.mock("./counts", () => ({ countReadableKnowledgeChunks: vi.fn(async () => (prisma as any).knowledgeChunk.count()) }));
+
 describe("Workspace Indexing Health", () => {
   beforeEach(() => {
     delete process.env.KNOWLEDGE_SEARCH_PROVIDER;
@@ -69,12 +83,12 @@ describe("Workspace Indexing Health", () => {
     vi.mocked(prisma.brainArticle.findMany).mockResolvedValue([
       { id: "a1", title: "Article 1", slug: "a-1" } as any,
     ]);
-    vi.mocked(prisma.brainSource.count).mockResolvedValue(1);
+    vi.mocked(prisma.brainSource.findMany).mockResolvedValue([{ id: "source" } as any]);
     vi.mocked(prisma.document.count).mockResolvedValue(0);
     vi.mocked(prisma.knowledgeChunk.count).mockResolvedValue(5);
     vi.mocked(prisma.workflowJob.findMany).mockResolvedValue([]);
     vi.mocked(prisma.knowledgeChunk.findMany).mockResolvedValue([
-      { sourceId: "a1" } as any,
+      { id: "chunk-a1", sourceId: "a1" } as any,
     ]);
 
     const health = await getWorkspaceIndexingHealth("ws_1");
@@ -90,12 +104,12 @@ describe("Workspace Indexing Health", () => {
       { id: "a1", title: "Article 1", slug: "a-1" } as any,
       { id: "a2", title: "Article 2", slug: "a-2" } as any,
     ]);
-    vi.mocked(prisma.brainSource.count).mockResolvedValue(2);
+    vi.mocked(prisma.brainSource.findMany).mockResolvedValue([{ id: "source1" }, { id: "source2" }] as any);
     vi.mocked(prisma.document.count).mockResolvedValue(0);
     vi.mocked(prisma.knowledgeChunk.count).mockResolvedValue(2);
     vi.mocked(prisma.workflowJob.findMany).mockResolvedValue([]);
     vi.mocked(prisma.knowledgeChunk.findMany).mockResolvedValue([
-      { sourceId: "a1" } as any,
+      { id: "chunk-a1", sourceId: "a1" } as any,
     ]);
 
     const health = await getWorkspaceIndexingHealth("ws_1");
@@ -109,11 +123,11 @@ describe("Workspace Indexing Health", () => {
     vi.mocked(prisma.brainArticle.findMany).mockResolvedValue([
       { id: "a1", title: "Article 1", slug: "a-1" } as any,
     ]);
-    vi.mocked(prisma.brainSource.count).mockResolvedValue(1);
+    vi.mocked(prisma.brainSource.findMany).mockResolvedValue([{ id: "source" } as any]);
     vi.mocked(prisma.document.count).mockResolvedValue(0);
     vi.mocked(prisma.knowledgeChunk.count).mockResolvedValue(0);
     vi.mocked(prisma.workflowJob.findMany).mockResolvedValue([
-      { type: "knowledge.sync.brain-article", error: "OpenAI error", createdAt: new Date() } as any,
+      { id: "job", type: "knowledge.sync.brain-article", error: "OpenAI error", createdAt: new Date() } as any,
     ]);
     vi.mocked(prisma.knowledgeChunk.findMany).mockResolvedValue([]);
 
@@ -122,7 +136,8 @@ describe("Workspace Indexing Health", () => {
     expect(health.status).toBe("unhealthy");
     expect(health.unchunkedArticles).toHaveLength(1);
     expect(health.recentErrors).toHaveLength(1);
-    expect(health.recentErrors[0]).toContain("OpenAI error");
+    expect(health.recentErrors[0]).toContain("Indexing failed.");
+    expect(health.recentErrors[0]).not.toContain("OpenAI error");
   });
 });
 
@@ -132,6 +147,7 @@ describe("syncKnowledgeForSource", () => {
     vi.mocked(defaultModelGateway.embed).mockResolvedValue({ embeddings: [[1, 0]], usage: { provider: "test", model: "fake-embed" } });
     vi.mocked(prisma.brainArticle.findFirst).mockImplementation((async (query: any) => sourceSnapshots.get(query.where.id) ?? null) as any);
     vi.mocked(prisma.document.findFirst).mockImplementation((async (query: any) => sourceSnapshots.get(query.where.id) ?? null) as any);
+    vi.mocked(prisma.externalContentSource.findFirst).mockImplementation((async (query: any) => sourceSnapshots.get(query.where.id) ?? null) as any);
   });
 
   it("does not delete prior chunks when embedding fails", async () => {
@@ -296,6 +312,7 @@ describe("Brain article archive indexing", () => {
       id: "article-1", workspaceId: "ws-1", isPrivate: false, archivedAt: new Date(), updatedAt: new Date("2026-10-05T00:00:00Z"),
     } as any);
     vi.mocked(prisma.brainArticle.findFirst).mockResolvedValue({ id: "current" } as any);
+    vi.mocked(prisma.knowledgeChunk.findMany).mockReset().mockResolvedValue([]);
     await expect(syncBrainArticleKnowledge({ workspaceId: "ws-1", articleId: "article-1" })).resolves.toBe(0);
     expect(prisma.knowledgeChunk.deleteMany).toHaveBeenCalledWith({ where: {
       workspaceId: "ws-1", sourceType: "BRAIN_ARTICLE", sourceId: "article-1",
@@ -344,11 +361,12 @@ describe("Workspace Reindex", () => {
       return []; // No documents chunked
     }) as any);
 
-    sourceSnapshots.set("a2", { id: "a2", title: "Article 2", bodyMd: "Body 2" });
-    sourceSnapshots.set("d1", { id: "d1", title: "Doc 1", textContent: "Text 1" });
+    sourceSnapshots.set("a2", { id: "a2", workspaceId: "ws_1", title: "Article 2", bodyMd: "Body 2", type: "PROCESS", authority: "DRAFT", slug: "a-2" });
+    sourceSnapshots.set("d1", { id: "d1", workspaceId: "ws_1", title: "Doc 1", textContent: "Text 1", accessDomain: "FINANCE", source: "API", mimeType: "text/plain", storageKey: "d1.txt" });
     vi.mocked(prisma.brainArticle.findFirst).mockImplementation((async (query: any) => sourceSnapshots.get(query.where.id) ?? null) as any);
     vi.mocked(prisma.document.findFirst).mockImplementation((async (query: any) => sourceSnapshots.get(query.where.id) ?? null) as any);
-    const result = await reindexWorkspace("ws_1");
+    vi.mocked(prisma.externalContentSource.findFirst).mockImplementation((async (query: any) => sourceSnapshots.get(query.where.id) ?? null) as any);
+    const result = await reindexWorkspace("ws_1", { kind: "user", user: { id: "finance" } } as any);
     if (result.errors.length > 0) {
       console.error(result.errors);
     }
@@ -434,6 +452,7 @@ describe("PostgreSQL knowledge cache transaction", () => {
     vi.stubEnv("KNOWLEDGE_SEARCH_PROVIDER", "postgres");
     vi.mocked(invalidateKnowledgeCache).mockResolvedValue(undefined);
     vi.mocked(prisma.document.findFirst).mockImplementation((async (query: any) => sourceSnapshots.get(query.where.id) ?? null) as any);
+    vi.mocked(prisma.externalContentSource.findFirst).mockImplementation((async (query: any) => sourceSnapshots.get(query.where.id) ?? null) as any);
     vi.mocked(defaultModelGateway.embed).mockResolvedValue({ embeddings: [[1, 0]], usage: { provider: "test", model: "fake-embed" } });
   });
   afterEach(() => {
@@ -462,6 +481,7 @@ describe("knowledge indexing source revision receipts", () => {
     delete process.env.KNOWLEDGE_SEARCH_PROVIDER;
     vi.mocked(prisma.brainArticle.findFirst).mockImplementation((async (query: any) => sourceSnapshots.get(query.where.id) ?? null) as any);
     vi.mocked(prisma.document.findFirst).mockImplementation((async (query: any) => sourceSnapshots.get(query.where.id) ?? null) as any);
+    vi.mocked(prisma.externalContentSource.findFirst).mockImplementation((async (query: any) => sourceSnapshots.get(query.where.id) ?? null) as any);
     vi.mocked(defaultModelGateway.embed).mockResolvedValue({ embeddings: [[1, 0]], usage: { provider: "test", model: "fake-embed" } });
   });
 

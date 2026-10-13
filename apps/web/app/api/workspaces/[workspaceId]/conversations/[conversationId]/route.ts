@@ -10,7 +10,7 @@ const STREAM_KEEPALIVE_INTERVAL_MS = 10_000;
 const EMPTY_ASSISTANT_STREAM_MESSAGE = "The assistant did not return a response. Please retry or ask a more specific question.";
 
 type ConversationStreamResult = {
-  promptInputId: string;
+  promptInputId?: string;
   lineageRoots: LineageRoot[];
   assistantMessage: string;
   contextUsed: {

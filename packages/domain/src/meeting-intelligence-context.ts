@@ -32,7 +32,8 @@ export function meetingIntelligenceActor(workspaceId: string): AppActor {
 
 
 export function meetingTranscriptInputProjection(meeting: Record<string, unknown>) {
-  return Object.fromEntries(["id", "workspaceId", "title", "source", "transcript", "ingestionGuidanceMd", "recordedAt",
+  return Object.fromEntries(["id", "workspaceId", "title", "source", "externalId", "calendarExternalId",
+    "meetingUrl", "meetingUrlHash", "transcript", "ingestionGuidanceMd", "recordedAt",
     "scheduledEndAt", "seriesId", "participantIds", "participantEmails", "archivedAt", "createdAt"]
     .map((field) => [field, meeting[field]]));
 }

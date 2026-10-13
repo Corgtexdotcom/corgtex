@@ -1,6 +1,6 @@
 import type { AppActor } from "@corgtex/shared";
 import type { ModelTool } from "@corgtex/models";
-import { type LineageRoot, completeActivity, createActivity, createCommunicationSuggestion, listCrmActivities } from "@corgtex/domain";
+import { AppError, type LineageRoot, completeActivity, createActivity, createCommunicationSuggestion, listCrmActivities } from "@corgtex/domain";
 
 type CrmToolContext = {
   workspaceId: string;
@@ -121,44 +121,44 @@ function hasAnyNonEmptyString(args: Record<string, unknown>, keys: string[]) {
 function validateOptionalIsoDate(value: unknown, label: string) {
   if (value == null) return;
   if (typeof value !== "string" || !value.trim() || Number.isNaN(new Date(value).getTime())) {
-    throw new Error(`${label} must be a valid date before preparing a pending CRM operation.`);
+    throw new AppError(400, "INVALID_INPUT", `${label} must be a valid date before preparing a pending CRM operation.`);
   }
 }
 
 export function validateCrmWriteToolArgs(toolName: string, args: Record<string, unknown>) {
   if (toolName === "record_relationship_activity" && !hasNonEmptyString(args.title)) {
-    throw new Error("A CRM activity title is required to prepare a pending CRM activity.");
+    throw new AppError(400, "INVALID_INPUT", "A CRM activity title is required to prepare a pending CRM activity.");
   }
   if (toolName === "record_relationship_activity") {
     if (!hasAnyNonEmptyString(args, ["accountId", "contactId", "dealId"])) {
-      throw new Error("A CRM activity must be linked to an account, contact, or deal before preparing a pending CRM activity.");
+      throw new AppError(400, "INVALID_INPUT", "A CRM activity must be linked to an account, contact, or deal before preparing a pending CRM activity.");
     }
     if (args.type !== undefined && (typeof args.type !== "string" || !CRM_ACTIVITY_TYPES.has(args.type))) {
-      throw new Error("Unsupported CRM activity type. Use NOTE, EMAIL, CALL, MEETING, or TASK.");
+      throw new AppError(400, "INVALID_INPUT", "Unsupported CRM activity type. Use NOTE, EMAIL, CALL, MEETING, or TASK.");
     }
     validateOptionalIsoDate(args.dueAt, "CRM activity due date");
   }
   if (toolName === "complete_relationship_activity" && !hasNonEmptyString(args.activityId)) {
-    throw new Error("A CRM activity ID is required to prepare a pending CRM activity completion.");
+    throw new AppError(400, "INVALID_INPUT", "A CRM activity ID is required to prepare a pending CRM activity completion.");
   }
   if (toolName === "complete_relationship_activity") {
     validateOptionalIsoDate(args.completedAt, "CRM activity completion date");
   }
   if (toolName === "create_communication_suggestion") {
     if (!hasNonEmptyString(args.title)) {
-      throw new Error("A CRM communication suggestion title is required to prepare a pending CRM suggestion.");
+      throw new AppError(400, "INVALID_INPUT", "A CRM communication suggestion title is required to prepare a pending CRM suggestion.");
     }
     if (!hasNonEmptyString(args.bodyMd)) {
-      throw new Error("CRM communication suggestion body text is required to prepare a pending CRM suggestion.");
+      throw new AppError(400, "INVALID_INPUT", "CRM communication suggestion body text is required to prepare a pending CRM suggestion.");
     }
     if (!hasAnyNonEmptyString(args, ["accountId", "contactId", "dealId", "activityId"])) {
-      throw new Error("A CRM communication suggestion must be linked to an account, contact, deal, or activity before preparing a pending CRM suggestion.");
+      throw new AppError(400, "INVALID_INPUT", "A CRM communication suggestion must be linked to an account, contact, deal, or activity before preparing a pending CRM suggestion.");
     }
     if (
       args.channel !== undefined
       && (typeof args.channel !== "string" || !CRM_COMMUNICATION_CHANNEL_PATTERN.test(args.channel))
     ) {
-      throw new Error("CRM communication suggestion channel must be an uppercase code.");
+      throw new AppError(400, "INVALID_INPUT", "CRM communication suggestion channel must be an uppercase code.");
     }
   }
 }
@@ -276,7 +276,7 @@ export async function recordRelationshipActivityAction(actor: AppActor, ctx: Crm
 
 export async function completeRelationshipActivityAction(actor: AppActor, ctx: CrmToolContext, args: any) {
   const activityId = selectedActivityId(ctx, args.activityId);
-  if (!activityId) throw new Error("A CRM activity ID is required.");
+  if (!activityId) throw new AppError(400, "INVALID_INPUT", "A CRM activity ID is required.");
   const activity = await completeActivity(actor, {
     workspaceId: ctx.workspaceId,
     lineageRoots: ctx.lineageRoots,

@@ -246,10 +246,10 @@ function isPrismaUniqueConstraintError(error: unknown, fields: string[]) {
   return typeof target !== "string" || fields.every((field) => target.includes(field));
 }
 
-async function financeFlagState(workspaceId: string) {
+async function financeFlagState(workspaceId: string, db: Prisma.TransactionClient = prisma) {
   const [defaults, records] = await Promise.all([
     Promise.resolve(defaultWorkspaceFeatureFlags()),
-    prisma.workspaceFeatureFlag.findMany({
+    db.workspaceFeatureFlag.findMany({
       where: { workspaceId, flag: { in: FINANCE_FLAG_KEYS } },
       select: { flag: true, enabled: true, config: true, updatedAt: true },
     }),
@@ -320,7 +320,8 @@ async function requireFinanceContributorUserInWorkspace(workspaceId: string, con
   return userId;
 }
 
-async function resolveFinanceModuleAccess(workspaceId: string, membership: MembershipSummary | null, financeEnabled: boolean): Promise<ModuleAccessLevel> {
+async function resolveFinanceModuleAccess(workspaceId: string, membership: MembershipSummary | null,
+  financeEnabled: boolean, db: Prisma.TransactionClient = prisma): Promise<ModuleAccessLevel> {
   if (!financeEnabled) return "none";
   if (!membership) return "read";
   const financeModule = getModuleByKey("finance");
@@ -330,21 +331,89 @@ async function resolveFinanceModuleAccess(workspaceId: string, membership: Membe
     memberId: membership.id,
     role: membership.role as MemberRoleKey,
     module: financeModule,
+    db,
   });
 }
 
-export async function getFinanceAccessPolicy(actor: AppActor, workspaceId: string) {
+/** Lock existing Finance authority edges before the transaction reads them.
+ * When a disabling flag or support restriction could be inserted into an
+ * absent row, the Workspace lock fences its foreign-key KEY SHARE until commit.
+ */
+async function lockFinanceReadAuthority(tx: Prisma.TransactionClient, workspaceId: string, userId: string) {
+  const flags = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+    SELECT "id" FROM "WorkspaceFeatureFlag"
+    WHERE "workspaceId" = ${workspaceId} AND "flag" = 'FINANCE'
+    ORDER BY "id" FOR SHARE
+  `);
+  const supportGrants = userId ? await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+    SELECT "id" FROM "WorkspaceSupportGrant"
+    WHERE "workspaceId" = ${workspaceId} AND "userId" = ${userId}
+    ORDER BY "id" FOR SHARE
+  `) : [];
+  if (flags.length === 0 || (userId && supportGrants.length === 0)) {
+    const workspace = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+      SELECT "id" FROM "Workspace" WHERE "id" = ${workspaceId} FOR UPDATE
+    `);
+    invariant(workspace.length === 1, 403, "NOT_A_MEMBER", "Workspace is unavailable.");
+    // Re-read after the insertion fence: a writer may have committed while
+    // the Workspace lock was waiting on its foreign-key KEY SHARE lock.
+    await tx.$queryRaw(Prisma.sql`
+      SELECT "id" FROM "WorkspaceFeatureFlag"
+      WHERE "workspaceId" = ${workspaceId} AND "flag" = 'FINANCE'
+      ORDER BY "id" FOR SHARE
+    `);
+    if (userId) {
+      await tx.$queryRaw(Prisma.sql`
+        SELECT "id" FROM "WorkspaceSupportGrant"
+        WHERE "workspaceId" = ${workspaceId} AND "userId" = ${userId}
+        ORDER BY "id" FOR SHARE
+      `);
+    }
+  }
+  await tx.$queryRaw(Prisma.sql`
+    SELECT "id" FROM "Member"
+    WHERE "workspaceId" = ${workspaceId} AND "userId" = ${userId}
+    ORDER BY "id" FOR SHARE
+  `);
+  await tx.$queryRaw(Prisma.sql`
+    SELECT "id" FROM "WorkspaceModuleGrant"
+    WHERE "workspaceId" = ${workspaceId} AND "moduleKey" = 'finance'
+    ORDER BY "id" FOR SHARE
+  `);
+  await tx.$queryRaw(Prisma.sql`
+    SELECT ra."id" FROM "RoleAssignment" ra
+    JOIN "Member" m ON m."id" = ra."memberId"
+    WHERE m."workspaceId" = ${workspaceId} AND m."userId" = ${userId}
+    ORDER BY ra."id" FOR SHARE OF ra
+  `);
+  await tx.$queryRaw(Prisma.sql`
+    SELECT r."id" FROM "Role" r
+    JOIN "RoleAssignment" ra ON ra."roleId" = r."id"
+    JOIN "Member" m ON m."id" = ra."memberId"
+    WHERE m."workspaceId" = ${workspaceId} AND m."userId" = ${userId}
+    ORDER BY r."id" FOR SHARE OF r
+  `);
+  await tx.$queryRaw(Prisma.sql`
+    SELECT "id" FROM "Circle" WHERE "workspaceId" = ${workspaceId}
+    ORDER BY "id" FOR SHARE
+  `);
+}
+
+export async function getFinanceAccessPolicy(actor: AppActor, workspaceId: string, db: Prisma.TransactionClient = prisma) {
   if (actor.kind === "agent") {
     requireAgentScope(actor, "finance:read");
   }
+  if (db !== prisma) {
+    await lockFinanceReadAuthority(db, workspaceId, actor.kind === "user" ? actor.user.id : "");
+  }
   const [membership, flagState] = await Promise.all([
-    requireWorkspaceMembership({ actor, workspaceId }),
-    financeFlagState(workspaceId),
+    requireWorkspaceMembership({ actor, workspaceId, tx: db }),
+    financeFlagState(workspaceId, db),
   ]);
   const financeEnabled = Boolean(flagState.flags[FINANCE_PARENT_FLAG]);
   const financeAllMemberWrite = financeEnabled && financeAllMemberWriteFromConfig(flagState.financeConfig);
   const memberRole = membership?.role ?? (actor.kind === "agent" ? null : null);
-  const accessLevel = await resolveFinanceModuleAccess(workspaceId, membership, financeEnabled);
+  const accessLevel = await resolveFinanceModuleAccess(workspaceId, membership, financeEnabled, db);
   const canRead = financeEnabled && isAtLeast(accessLevel, "read");
   const canWrite = financeEnabled && (isAtLeast(accessLevel, "write") || Boolean(membership && financeAllMemberWrite));
 

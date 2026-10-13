@@ -15,6 +15,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
+  withMcpToolInput,
+  createConversation,
   listProposals,
   getProposal,
   readableArtifactIds,
@@ -174,7 +176,7 @@ import {
 import type { AgentScope } from "@corgtex/domain";
 import { fetchReadableKnowledgeChunk, searchIndexedKnowledge } from "@corgtex/knowledge";
 import { processConversationTurn } from "@corgtex/agents";
-import { prisma, env, toInputJson } from "@corgtex/shared";
+import { prisma, env, toInputJson, withMcpRequiredScopes } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import type { McpSessionContext } from "./auth";
 import { requireScope } from "./auth";
@@ -726,7 +728,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
             confidence: null,
             inputSummary: summarizeForExecutionAudit(input),
             resultSummary: error ? null : summarizeForExecutionAudit(result),
-            error: error instanceof Error ? error.message : error ? String(error) : null,
+            error: error ? "Tool execution failed." : null,
           },
         });
       });
@@ -735,22 +737,35 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       // must not fail because audit storage had a transient problem.
     }
   };
+  const withLiveMcpScopes = <T,>(scopes: readonly string[], work: () => PromiseLike<T>) => {
+    if (!sessionCtx.mcpOrigin && (sessionCtx.authKind === "oauth"
+      || (actor.kind === "agent" && actor.authProvider === "credential"))) {
+      throw new Error("MCP_AUTHORIZATION_REVOKED");
+    }
+    return withMcpRequiredScopes(prisma, sessionCtx.mcpOrigin, scopes, work);
+  };
   const tool = (name: string, description: string, inputSchema: Record<string, unknown>, handler: unknown) => {
-    const guardedHandler = typeof handler === "function" && hasToolCapability(name)
+    if (!hasToolCapability(name)) throw new Error("MCP_UNKNOWN_TOOL_CAPABILITY");
+    const guardedHandler = typeof handler === "function"
       ? async (...args: unknown[]) => {
-        requireToolCapability(name);
-        try {
-          const result = await handler(...args);
-          if (isVersionConflictResult(result)) {
-            await auditToolExecution(name, args[0], null, new Error("VERSION_CONFLICT"));
-          } else {
-            await auditToolExecution(name, args[0], result);
+        return withLiveMcpScopes(TOOL_CAPABILITIES[name].scopes, async () => {
+          requireToolCapability(name);
+          try {
+            const capability = TOOL_CAPABILITIES[name];
+            const writesContent = name !== "chat" && (capability.destructive || capability.scopes.some(scope => /:(write|propose|approve)$/.test(scope)));
+            const result = writesContent ? await withMcpToolInput(actor, { workspaceId, toolName: name,
+              args: args[0] ?? {}, requiredScopes: capability.scopes }, submitted => handler(submitted, ...args.slice(1))) : await handler(...args);
+            if (isVersionConflictResult(result)) {
+              await auditToolExecution(name, args[0], null, new Error("VERSION_CONFLICT"));
+            } else {
+              await auditToolExecution(name, args[0], result);
+            }
+            return name === "archive_tool_link" ? jsonResult(result) : result;
+          } catch (error) {
+            await auditToolExecution(name, args[0], null, error);
+            throw error;
           }
-          return result;
-        } catch (error) {
-          await auditToolExecution(name, args[0], null, error);
-          throw error;
-        }
+        });
       }
       : handler;
     return server.tool(name, description, inputSchema, annotationsForTool(name), guardedHandler);
@@ -782,9 +797,13 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
     async ({ message }: { message: string }) => {
       requireScope(sessionCtx, "conversations:write");
+      const session = actor.kind === "user" ? await prisma.conversationSession.findFirst({
+        where: { workspaceId, userId: actor.user.id, agentKey: "mcp-assistant", status: "ACTIVE" }, select: { id: true }, orderBy: { createdAt: "asc" },
+      }) ?? await createConversation(actor, { workspaceId, agentKey: "mcp-assistant" }) : null;
       const result = await processConversationTurn({
         workspaceId,
-        sessionId: `mcp-${workspaceId}-${sessionActorId}`,
+        sessionId: session?.id ?? "",
+        requestSource: "MCP",
         userId: actor.kind === "user" ? actor.user.id : "",
         agentKey: "assistant",
         userMessage: message,
@@ -2126,8 +2145,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
     async ({ toolLinkId, reason }: { toolLinkId: string; reason?: string | null }) => {
       requireToolCapability("archive_tool_link");
-      await archiveWorkspaceToolLink(actor, { workspaceId, toolLinkId, reason });
-      return jsonResult({ id: toolLinkId, archived: true, webUrl: webUrl(workspaceId, `/audit?tab=archive`) });
+      return archiveWorkspaceToolLink(actor, { workspaceId, toolLinkId, reason });
     },
   );
 
@@ -4642,7 +4660,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     "constitution",
     "corgtex://workspace/constitution",
     { description: "The current version of the workspace constitution", mimeType: "text/markdown" },
-    async () => {
+    async () => withLiveMcpScopes(["governance:read"], async () => {
       requireScope(sessionCtx, "governance:read");
       const constitution = await getCurrentConstitution(actor, workspaceId);
       return {
@@ -4652,14 +4670,14 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           text: constitution?.bodyMd ?? "No constitution has been generated yet.",
         }],
       };
-    },
+    }),
   );
 
   server.resource(
     "policies",
     "corgtex://workspace/policies",
     { description: "Active policy corpus for the workspace", mimeType: "application/json" },
-    async () => {
+    async () => withLiveMcpScopes(["governance:read"], async () => {
       requireScope(sessionCtx, "governance:read");
       const policies = await listPolicyCorpus(actor, workspaceId);
       const simplified = policies.map((p) => ({
@@ -4677,14 +4695,14 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           text: JSON.stringify(simplified, null, 2),
         }],
       };
-    },
+    }),
   );
 
   server.resource(
     "context-map",
     "corgtex://map/process/current",
     { description: "Current living process context map for the workspace", mimeType: "application/json" },
-    async () => {
+    async () => withLiveMcpScopes(["context-graph:read"], async () => {
       requireScope(sessionCtx, "context-graph:read");
       const data = await getContextMapData(actor, { workspaceId });
       return {
@@ -4694,7 +4712,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           text: JSON.stringify(data, null, 2),
         }],
       };
-    },
+    }),
   );
 
   return server;

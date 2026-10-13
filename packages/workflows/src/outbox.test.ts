@@ -18,6 +18,34 @@ function lineageStore(action: ReturnType<typeof actionSource>) {
   };
 }
 
+/** Synthetic SQL storage only; current permission and receipt helpers remain real. */
+function epochTransport(lockRow = vi.fn().mockResolvedValue([])) {
+  const epochs = new Map<string, bigint>();
+  return {
+    $executeRaw: vi.fn(async (query: Prisma.Sql) => {
+      if (query.sql?.includes('INSERT INTO "SourcePermissionEpoch"')) {
+        for (let index = 0; index < query.values.length; index += 4) {
+          const [, workspaceId, kind, id] = query.values.slice(index, index + 4);
+          const key = JSON.stringify([workspaceId, kind, id]);
+          if (!epochs.has(key)) epochs.set(key, 0n);
+        }
+      }
+      return 1;
+    }),
+    $queryRaw: vi.fn(async (query: Prisma.Sql, ...values: unknown[]) => {
+      if (!query.sql?.includes('FROM "SourcePermissionEpoch"')) return lockRow(query, ...values);
+      const [workspaceId, ...identities] = query.values;
+      const rows = [];
+      for (let index = 0; index < identities.length; index += 2) {
+        const [sourceKind, sourceId] = identities.slice(index, index + 2);
+        const epoch = epochs.get(JSON.stringify([workspaceId, sourceKind, sourceId]));
+        if (epoch !== undefined) rows.push({ sourceKind, sourceId, epoch });
+      }
+      return rows;
+    }),
+  };
+}
+
 describe("deriveJobsForEvent", () => {
   it("creates a knowledge sync job for approved proposals", () => {
     const jobs = deriveJobsForEvent({
@@ -425,7 +453,7 @@ describe("deriveNotificationsForEvent", () => {
     const tensionFindFirst = vi.fn().mockResolvedValue(null);
     const lockRow = vi.fn().mockResolvedValue([]);
     const tx = {
-      $queryRaw: lockRow,
+      ...epochTransport(lockRow),
       artifactInputLineage: lineageStore(action),
       action: { findFirst: actionFindFirst },
       tension: { findFirst: tensionFindFirst },
@@ -438,7 +466,11 @@ describe("deriveNotificationsForEvent", () => {
       type: "action.created", entityType: "Action", entityId: "action-1",
       title: "New action: Visible action", bodyMd: "An action item was added to the workspace.",
       lineageActor: expect.objectContaining({ workspaceIds: ["workspace-1"] }),
-      lineageRoots: [{ kind: "Action", id: action.id, fingerprint: lineageContentFingerprint("Action", action) }],
+      lineageRoots: [expect.objectContaining({ kind: "Action", id: action.id, fingerprint: lineageContentFingerprint("Action", action),
+        permissionEpochs: expect.objectContaining({ version: 1, entries: expect.arrayContaining([
+          { kind: "Action", id: action.id, epoch: "0" }, { kind: "Workspace", id: action.workspaceId, epoch: "0" },
+        ]) }),
+      })],
     }]);
     expect(actionFindFirst).toHaveBeenCalledWith({
       where: {
@@ -457,6 +489,7 @@ describe("deriveNotificationsForEvent", () => {
         status: { not: "DRAFT" }, archivedAt: null,
       },
     });
+    const readsBeforeIgnoredEvents = actionFindFirst.mock.calls.length;
     expect(await deriveDispatchNotifications(tx, {
       type: "action.published", workspaceId: "workspace-1", aggregateId: null,
       aggregateType: "Action", payload: {},
@@ -465,7 +498,7 @@ describe("deriveNotificationsForEvent", () => {
       type: "action.published", workspaceId: "workspace-1", aggregateId: "action-1",
       aggregateType: "Action", payload: { runtimeMeta: { replayOfEventId: "original" } },
     })).toEqual([]);
-    expect(actionFindFirst).toHaveBeenCalledTimes(3);
+    expect(actionFindFirst).toHaveBeenCalledTimes(readsBeforeIgnoredEvents);
     expect(lockRow).toHaveBeenCalledTimes(2);
     expect(lockRow.mock.invocationCallOrder[0]).toBeLessThan(actionFindFirst.mock.invocationCallOrder[0]);
     expect(lockRow.mock.invocationCallOrder[1]).toBeLessThan(tensionFindFirst.mock.invocationCallOrder[0]);
@@ -495,11 +528,14 @@ describe("Action assignment dispatch", () => {
       { userId: "user-3", user: { email: "other@example.com" } },
     ];
     const action = actionSource();
-    const create = vi.fn().mockImplementation(async ({ data }) => ({ id: `notification-${data.userId}-${data.type}`, ...data }));
+    const notifications = new Map<string, any>();
+    const create = vi.fn().mockImplementation(async ({ data }) => {
+      const row = { id: `notification-${data.userId}-${data.type}`, ...data }; notifications.set(row.id, row); return row;
+    });
     const preferences = vi.fn().mockResolvedValue([]);
     const manifests = lineageStore(action);
     const tx = {
-      $queryRaw: vi.fn().mockResolvedValue([]), $executeRaw: vi.fn().mockResolvedValue(1),
+      ...epochTransport(),
       artifactInputLineage: manifests,
       action: { findFirst: vi.fn().mockResolvedValue(action) },
       member: {
@@ -511,7 +547,7 @@ describe("Action assignment dispatch", () => {
         )),
       },
       notificationPreference: { findMany: preferences },
-      notification: { create, findUnique: vi.fn().mockResolvedValue(null) },
+      notification: { create, findUnique: vi.fn().mockResolvedValue(null), findFirst: vi.fn(async ({ where }) => notifications.get(where.id) ?? null) },
     } as unknown as Prisma.TransactionClient;
     const event = {
       id: "event-publication", type: "action.published", workspaceId: "workspace-1",
@@ -574,15 +610,18 @@ describe("current advice notification dispatch", () => {
     await manifests.create({ data: { artifactType: "AdviceRequest", artifactId: request.id, revision: 1,
       origin: "HUMAN_ORIGINAL", rootsJson: [], contentHash: lineageContentFingerprint("AdviceRequest", request) } });
     manifests.create.mockClear();
-    const create = vi.fn(async ({ data }) => ({ id: "notification-advice", ...data }));
+    const notifications = new Map<string, any>();
+    const create = vi.fn(async ({ data }) => {
+      const row = { id: "notification-advice", ...data }; notifications.set(row.id, row); return row;
+    });
     const findTargets = vi.fn().mockResolvedValue(request);
     const tx = {
-      $queryRaw: vi.fn().mockResolvedValue([]), artifactInputLineage: manifests,
+      ...epochTransport(), artifactInputLineage: manifests,
       adviceRequest: { findFirst: vi.fn().mockResolvedValue(request), findUnique: findTargets },
       adviceProcess: { findFirst: vi.fn().mockResolvedValue({ id: request.processId, workspaceId: action.workspaceId, subjectType: "ACTION", subjectId: action.id }) },
       action: { findFirst: vi.fn().mockResolvedValue(action) },
       member: { findMany: vi.fn().mockResolvedValue([{ id: "member-2", userId: "user-2" }]) },
-      notificationPreference: { findMany: vi.fn().mockResolvedValue([]) }, notification: { create },
+      notificationPreference: { findMany: vi.fn().mockResolvedValue([]) }, notification: { create, findFirst: vi.fn(async ({ where }) => notifications.get(where.id) ?? null) },
     } as unknown as Prisma.TransactionClient;
     const event = { id: "advice-event", workspaceId: action.workspaceId, type: "advice.requested", aggregateType: "AdviceRequest", aggregateId: request.id,
       payload: { adviceRequestId: request.id, subjectTitle: "Old revoked title", messageMd: "Old revoked message", deadlineAt: "old deadline", requestedByUserId: "old-requester" },

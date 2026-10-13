@@ -25,6 +25,8 @@ vi.mock("./agent-run-usage", async (importOriginal) => ({
 }));
 
 const budget = { id: "budget-1", workspaceId: "workspace-1", monthlyCostCapUsd: "100", alertThresholdPct: 80, periodStartDay: 1, alertSentAt: null };
+const admin = { id: "admin-member", workspaceId: "workspace-1", userId: "admin-user", role: "ADMIN", isActive: true,
+  user: { id: "admin-user", email: "admin@example.test", displayName: "Admin" } };
 const usages = [
   { id: "usage-1", workspaceId: "workspace-1", estimatedCostUsd: "10", billableCostUsd: "40", createdAt: new Date(2026, 9, 2) },
   { id: "usage-2", workspaceId: "workspace-1", estimatedCostUsd: "45", billableCostUsd: null, createdAt: new Date(2026, 9, 3) },
@@ -42,7 +44,7 @@ describe("cost budget notifications", () => {
     prismaMock.modelUsageBudget.findUnique.mockResolvedValue(budget);
     txMock.modelUsageBudget.findUnique.mockResolvedValue(budget);
     txMock.modelUsage.findMany.mockResolvedValue(usages);
-    txMock.member.findMany.mockResolvedValue([{ userId: "admin-user" }]);
+    txMock.member.findMany.mockResolvedValue([admin]);
     getWorkspaceMonthlyUsageMock.mockResolvedValue(85);
     captureArtifactInputProofMock.mockImplementation(async (_actor, _workspaceId, inputs) => inputs.map((input: { kind: string; id: string }) => ({ kind: input.kind, id: input.id, fingerprint: "a".repeat(64) })));
   });
@@ -52,7 +54,9 @@ describe("cost budget notifications", () => {
     // Authorization/cached decision stays unchanged; notification uses the fresh rows.
     getWorkspaceMonthlyUsageMock.mockResolvedValue(90);
     await expect(checkBudget("workspace-1")).resolves.toMatchObject({ allowed: true, usedPct: 90, usedUsd: 90, capUsd: 100 });
-    const actor = { kind: "agent", authProvider: "bootstrap", label: "budget-alerts", workspaceIds: ["workspace-1"] };
+    const actor = captureArtifactInputProofMock.mock.calls[0][0];
+    expect(actor).toMatchObject({ kind: "agent", authProvider: "bootstrap", label: "BUDGET_ALERT", workspaceIds: ["workspace-1"] });
+    expect(Object.isFrozen(actor)).toBe(true);
     expect(captureArtifactInputProofMock).toHaveBeenCalledWith(actor, "workspace-1", [
       { kind: "ModelUsageBudget", id: budget.id, snapshot: budget },
       ...usages.map((usage) => ({ kind: "ModelUsageCost", id: usage.id, snapshot: usage })),
@@ -67,13 +71,31 @@ describe("cost budget notifications", () => {
       lineageRoots: [
         { kind: "ModelUsageBudget", id: "budget-1", fingerprint: "a".repeat(64) },
         ...usages.map((usage) => ({ kind: "ModelUsageCost", id: usage.id, fingerprint: "a".repeat(64) })),
+        { kind: "Member", id: admin.id, fingerprint: "a".repeat(64) },
+        { kind: "User", id: admin.userId, fingerprint: "a".repeat(64) },
       ],
       type: "budget.threshold_reached", entityType: "ModelUsageBudget", entityId: "budget-1", title: "Budget Alert",
       bodyMd: "Workspace agent usage has reached 85.0% of your monthly budget. ($85.00 of $100)",
-      dedupeKey: `budget.threshold:budget-1:${new Date(2026, 9, 1).toISOString()}`,
+      dedupeKey: `budget.threshold:budget-1:${new Date(2026, 9, 1).toISOString()}:${admin.id}`,
     }));
-    expect(txMock.member.findMany).toHaveBeenCalledWith({ where: { workspaceId: "workspace-1", role: "ADMIN", isActive: true }, select: { userId: true } });
+    expect(txMock.member.findMany).toHaveBeenCalledWith({ where: { workspaceId: "workspace-1", role: "ADMIN", isActive: true }, include: { user: { select: { id: true, email: true, displayName: true } } } });
     expect(txMock.modelUsageBudget.update).toHaveBeenCalledWith({ where: { id: "budget-1" }, data: { alertSentAt: expect.any(Date) } });
+  });
+
+  it("captures each admin independently and does not tie another recipient to its departure", async () => {
+    const second = { ...admin, id: "second-admin-member", userId: "second-admin-user", user: { id: "second-admin-user", email: "second@example.test", displayName: "Second" } };
+    txMock.member.findMany.mockResolvedValue([admin, second]);
+    const { checkBudget } = await import("./cost-budget");
+    await checkBudget("workspace-1");
+    expect(createNotificationIntentMock).toHaveBeenCalledTimes(2);
+    const notifications = createNotificationIntentMock.mock.calls.map((call) => call[1]);
+    expect(notifications.map((notification) => notification.recipientUserIds)).toEqual([[admin.userId], [second.userId]]);
+    expect(notifications[0].lineageRoots).toContainEqual({ kind: "Member", id: admin.id, fingerprint: "a".repeat(64) });
+    expect(notifications[1].lineageRoots).toContainEqual({ kind: "Member", id: second.id, fingerprint: "a".repeat(64) });
+    expect(notifications[1].lineageRoots.some((root: { kind: string; id: string }) => root.kind === "Member" && root.id === admin.id)).toBe(false);
+    expect(captureArtifactInputProofMock).toHaveBeenCalledWith(notifications[1].lineageActor, "workspace-1", [
+      { kind: "Member", id: second.id, snapshot: second }, { kind: "User", id: second.userId, snapshot: second.user },
+    ], txMock);
   });
 
   it("does not send an alert already recorded in the current period", async () => {

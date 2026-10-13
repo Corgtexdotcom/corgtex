@@ -21,6 +21,7 @@ const { prismaMock, modelGatewayMock } = vi.hoisted(() => {
       document: { findMany: vi.fn(), findFirst: vi.fn() },
       meeting: { findMany: vi.fn() },
       proposal: { findMany: vi.fn() },
+      externalContentSource: { findFirst: vi.fn() },
     },
     modelGatewayMock: {
       embed: vi.fn<ModelGateway["embed"]>(async ({ input }) => {
@@ -77,10 +78,13 @@ vi.mock("@corgtex/models", async (importOriginal) => ({
 }));
 
 vi.mock("@corgtex/domain", () => ({
+  assertArtifactInputWriteFence: vi.fn().mockResolvedValue(undefined),
+  recordArtifactInputLineage: vi.fn().mockResolvedValue(undefined),
   resolveKnowledgeAccessDomains: vi.fn(async () => ["WORKSPACE", "FINANCE"]),
   readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map((row: any) => row.id))),
   lineageContentFingerprint: (kind: string, row: any) => `${kind}:${row.id}`,
   captureArtifactInputProof: vi.fn(async (_actor, _workspaceId, inputs) => inputs.map((input: any) => ({ kind: input.kind, id: input.id, fingerprint: `${input.kind}:${input.id}` }))),
+  captureImmutableArtifactInputProof: vi.fn(async (_actor, _workspaceId, roots) => roots),
   isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
 }));
 
@@ -91,7 +95,7 @@ const sourceKinds: Record<string, string> = { DOCUMENT: "Document", BRAIN_ARTICL
 const allSourceIds = ["doc-1", "doc-2", "doc-5", "doc-allowed", "doc-error", "doc-other", "doc-domain", "doc-answer-domain", "doc-ledger", "article-1", "old-article", "archived-article", "proposal-1"];
 function certifyRows(rows: any[]) {
   return rows.map((row) => row.sourceType && row.sourceId ? {
-    ...row, metadata: { ...row.metadata, sourceContentHash: `${sourceKinds[row.sourceType]}:${row.sourceId}` },
+    createdAt: new Date("2026-04-03T09:00:00Z"), ...row, metadata: { ...row.metadata, sourceContentHash: `${sourceKinds[row.sourceType]}:${row.sourceId}` },
   } : row);
 }
 import { openAICompatibleModelGateway } from "../../models/src/openai-compatible-gateway";
@@ -100,6 +104,7 @@ import { syncKnowledgeForSource } from "./chunks";
 import { ModelProviderHttpError } from "../../models/src/provider-errors";
 import { logger, resetLocalCacheStore } from "@corgtex/shared";
 import { answerKnowledgeQuestion, searchIndexedKnowledge, invalidateKnowledgeCache } from "./retrieval";
+import { readableArtifactIds } from "@corgtex/domain";
 
 describe("knowledge retrieval cache", () => {
   beforeEach(async () => {
@@ -124,6 +129,7 @@ describe("knowledge retrieval cache", () => {
       (query.where.id?.in ?? allSourceIds).map((id: string) => ({ id })));
     prismaMock.meeting.findMany.mockReset().mockImplementation(async (query) => (query.where.id?.in ?? allSourceIds).map((id: string) => ({ id })));
     prismaMock.proposal.findMany.mockReset().mockImplementation(async (query) => (query.where.id?.in ?? allSourceIds).map((id: string) => ({ id })));
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map(row => row.id)));
     modelGatewayMock.embed.mockClear();
     modelGatewayMock.rerank.mockClear();
     modelGatewayMock.chat.mockClear();
@@ -353,10 +359,9 @@ describe("knowledge retrieval cache", () => {
 
   it("drops cached active-article snippets and answers when their SQL chunk receipt is removed", async () => {
     const chunk = { id: "old-article-chunk", sourceType: "BRAIN_ARTICLE", sourceId: "article-1",
-      sourceTitle: "Synthetic article", chunkIndex: 0, content: "Withdrawn source claim", createdAt: new Date() };
+      sourceTitle: "Synthetic article", chunkIndex: 0, content: "Withdrawn source claim", embedding: [1, 0], createdAt: new Date() };
     let current = true;
     prismaMock.knowledgeChunk.findMany.mockImplementation(async (query) => {
-      if (query.select?.embedding) return [{ id: chunk.id, embedding: [1, 0] }];
       if (query.select?.content) return certifyRows(current ? [chunk] : []);
       return certifyRows([chunk]);
     });
@@ -372,10 +377,9 @@ describe("knowledge retrieval cache", () => {
 
   it("discards an article result when reviewed regeneration commits during reranking or answering", async () => {
     const chunk = { id: "in-flight-article", sourceType: "BRAIN_ARTICLE", sourceId: "article-1",
-      sourceTitle: "Synthetic article", chunkIndex: 0, content: "Withdrawn source claim", createdAt: new Date() };
+      sourceTitle: "Synthetic article", chunkIndex: 0, content: "Withdrawn source claim", embedding: [1, 0], createdAt: new Date() };
     let current = true;
     prismaMock.knowledgeChunk.findMany.mockImplementation(async (query) => {
-      if (query.select?.embedding) return [{ id: chunk.id, embedding: [1, 0] }];
       if (query.select?.content) return certifyRows(current ? [chunk] : []);
       return certifyRows([chunk]);
     });
@@ -457,18 +461,18 @@ describe("knowledge retrieval cache", () => {
     prismaMock.brainArticle.findMany.mockResolvedValue(certifyRows([]));
 
     expect(await searchIndexedKnowledge({ actor, workspaceId: "ws-1", query: "Withdrawn claim" })).toEqual([]);
-    expect(prismaMock.brainArticle.findMany).toHaveBeenCalledWith({ where: {
+    expect(prismaMock.brainArticle.findMany).toHaveBeenCalledWith({ take: 5001, where: {
       workspaceId: "ws-1", archivedAt: null, OR: [{ isPrivate: false }, { variantOfArticleId: { not: null }, isPrivate: true }],
     } });
     expect(prismaMock.knowledgeChunk.findMany).not.toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ sourceType: "BRAIN_ARTICLE" }) }));
   });
 
   it("returns authorized positive lexical matches when query embedding is rate limited", async () => {
-    const chunk = { id: "allowed", sourceType: "DOCUMENT", sourceId: "doc-allowed", sourceTitle: "Travel policy", chunkIndex: 0, content: "Travel reimbursement policy.", createdAt: new Date("2026-04-03T09:00:00Z") };
+    const chunk = { id: "allowed", sourceType: "DOCUMENT", sourceId: "doc-allowed", sourceTitle: "Travel policy", chunkIndex: 0, content: "Travel reimbursement policy.", embedding: [1, 0], createdAt: new Date("2026-04-03T09:00:00Z") };
     prismaMock.knowledgeChunk.findMany
       .mockResolvedValue(certifyRows([chunk]))
-      .mockResolvedValueOnce(certifyRows([{ ...chunk, id: "withdrawn" }, chunk, { ...chunk, id: "unrelated", sourceTitle: "Other", content: "Bananas and pears" }]))
-      .mockResolvedValueOnce(certifyRows([{ id: "allowed", embedding: [1, 0] }, { id: "unrelated", embedding: [1, 0] }]));
+      .mockResolvedValueOnce(certifyRows([{ ...chunk, id: "withdrawn" }, chunk, { ...chunk, id: "unrelated", sourceTitle: "Other", content: "Bananas and pears" }]));
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, _kind, rows) => new Set(rows.filter(row => row.id !== "withdrawn").map(row => row.id)));
     modelGatewayMock.embed.mockRejectedValueOnce(new ModelProviderHttpError(429, "provider fixture throttled"));
 
     const result = await searchIndexedKnowledge({ actor, workspaceId: "ws-1", query: "travel policy", limit: 1, sourceTypes: ["DOCUMENT"], accessDomains: ["WORKSPACE"], maxSensitivity: "INTERNAL" });
@@ -477,17 +481,16 @@ describe("knowledge retrieval cache", () => {
     expect(modelGatewayMock.rerank).not.toHaveBeenCalled();
     expect(modelGatewayMock.embed).toHaveBeenCalledWith(expect.objectContaining({ failFastOnRateLimit: true }));
     expect(prismaMock.knowledgeChunk.findMany.mock.calls[0][0]).toMatchObject({ where: { workspaceId: "ws-1", sourceType: "DOCUMENT", accessDomain: { in: ["WORKSPACE"] }, sensitivity: { in: ["PUBLIC", "INTERNAL"] } } });
-    expect(prismaMock.knowledgeChunk.findMany.mock.calls[1][0]).toMatchObject({ where: { workspaceId: "ws-1", accessDomain: { in: ["WORKSPACE"] }, sourceType: { in: ["DOCUMENT"] }, sensitivity: { in: ["PUBLIC", "INTERNAL"] } } });
+    expect(prismaMock.knowledgeChunk.findMany.mock.calls.every(([query]) => query.select?.embedding && query.select?.content)).toBe(true);
     expect(await searchIndexedKnowledge({ actor, workspaceId: "ws-1", query: "travel policy", limit: 1, sourceTypes: ["DOCUMENT"], accessDomains: ["WORKSPACE"], maxSensitivity: "INTERNAL" })).toEqual(result);
     expect(modelGatewayMock.embed).toHaveBeenCalledTimes(1);
   });
 
   it("returns the combined ranking when reranking is rate limited", async () => {
-    const chunk = { id: "lexical", sourceType: "DOCUMENT", sourceId: "doc-1", sourceTitle: "Policy", chunkIndex: 0, content: "travel policy", createdAt: new Date("2026-04-03T09:00:00Z") };
+    const chunk = { id: "lexical", sourceType: "DOCUMENT", sourceId: "doc-1", sourceTitle: "Policy", chunkIndex: 0, content: "travel policy", embedding: [-1, 0], createdAt: new Date("2026-04-03T09:00:00Z") };
     prismaMock.knowledgeChunk.findMany
-      .mockResolvedValue(certifyRows([{ ...chunk, id: "semantic", content: "travel" }]))
-      .mockResolvedValueOnce(certifyRows([chunk, { ...chunk, id: "semantic", content: "travel" }]))
-      .mockResolvedValueOnce(certifyRows([{ id: "lexical", embedding: [-1, 0] }, { id: "semantic", embedding: [1, 0] }]));
+      .mockResolvedValue(certifyRows([{ ...chunk, id: "semantic", content: "travel", embedding: [1, 0] }]))
+      .mockResolvedValueOnce(certifyRows([chunk, { ...chunk, id: "semantic", content: "travel", embedding: [1, 0] }]));
     modelGatewayMock.rerank.mockRejectedValueOnce(new ModelProviderHttpError(429, "provider fixture throttled"));
     const result = await searchIndexedKnowledge({ actor, workspaceId: "ws-1", query: "travel policy", limit: 1 });
     expect(result).toEqual([expect.objectContaining({ chunkId: "semantic", score: expect.any(Number) })]);
@@ -835,7 +838,7 @@ describe("knowledge retrieval cache", () => {
     modelGatewayMock.embed.mockClear();
     modelGatewayMock.rerank.mockClear();
 
-    prismaMock.document.findFirst.mockResolvedValue({ id: "doc-2", title: "Updated policy", textContent: "New policy language with clarified approval steps." });
+    prismaMock.document.findFirst.mockResolvedValue({ id: "doc-2", workspaceId: "ws-1", accessDomain: "WORKSPACE", archivedAt: null, title: "Updated policy", textContent: "New policy language with clarified approval steps." });
     await syncKnowledgeForSource({
       workspaceId: "ws-1",
       sourceType: "DOCUMENT",
@@ -871,6 +874,8 @@ describe("knowledge retrieval cache", () => {
   });
 
   it("preserves reserved chunk metadata when syncing a source", async () => {
+    prismaMock.externalContentSource.findFirst.mockResolvedValue({ id: "doc-3", workspaceId: "ws-1",
+      title: "Policy", metadata: { materializedContent: "Chunk me", custom: "value" }, archivedAt: null });
     await syncKnowledgeForSource({
       workspaceId: "ws-1",
       sourceType: "EXTERNAL_CONTENT",

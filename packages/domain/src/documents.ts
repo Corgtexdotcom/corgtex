@@ -18,23 +18,25 @@ import {
   type DuplicateGuardOptions,
 } from "./duplicate-guard";
 import { resolveKnowledgeAccessDomains } from "./brain-access";
+import { scanSourceReadableRecords } from "./source-scoped-read";
+import { finishProducerLineage, prepareProducerLineage, type ProducerLineageParams } from "./producer-lineage";
+import { captureArtifactInputProof, captureImmutableArtifactInputProof,
+  preserveUnknownArtifactInputSnapshot, readableArtifactIds } from "./source-lineage";
+import { lockWorkspaceArchiveArtifact } from "./archive";
 
 export async function listDocuments(actor: AppActor, workspaceId: string, opts?: {
   archiveFilter?: ArchiveFilter;
 }) {
   const accessDomains: KnowledgeAccessDomain[] = await resolveKnowledgeAccessDomains(actor, workspaceId);
 
-  return prisma.document.findMany({
-    where: {
-      workspaceId,
-      accessDomain: { in: accessDomains },
-      ...archiveFilterWhere(opts?.archiveFilter),
-    },
-    orderBy: { createdAt: "desc" },
-  });
+  const documents = await scanSourceReadableRecords({ actor, workspaceId, kind: "Document", load: (afterId, take) => prisma.document.findMany({
+    where: { workspaceId, accessDomain: { in: accessDomains }, ...archiveFilterWhere(opts?.archiveFilter),
+      ...(afterId ? { id: { gt: afterId } } : {}) }, orderBy: { id: "asc" }, take,
+  }) });
+  return documents.sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime() || left.id.localeCompare(right.id));
 }
 
-type CreateDocumentParams = {
+type CreateDocumentParams = ProducerLineageParams & {
   workspaceId: string;
   title: string;
   source: string;
@@ -59,20 +61,52 @@ function metadataSize(value: Prisma.InputJsonValue | Prisma.JsonValue | null | u
   return typeof size === "number" && Number.isFinite(size) && size > 0 ? size : 0;
 }
 
-async function getActiveDocument(workspaceId: string, documentId: string) {
-  const document = await prisma.document.findFirst({
-    where: { id: documentId, workspaceId, archivedAt: null },
-  });
+export async function filterReadableDocuments(actor: AppActor, workspaceId: string, rows: unknown[]) {
+  const candidates = rows.filter((row): row is { id: string; [key: string]: unknown } => typeof row === "object" && row !== null && "id" in row && typeof row.id === "string");
+  const ids = await readableArtifactIds(actor, workspaceId, "Document", candidates);
+  return candidates.filter(row => ids.has(row.id));
+}
+
+export async function getDocument(actor: AppActor, workspaceId: string, documentId: string) {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const document = await prisma.document.findFirst({ where: { id: documentId, workspaceId, archivedAt: null } });
   invariant(document, 404, "NOT_FOUND", "Document not found.");
+  await captureArtifactInputProof(actor, workspaceId, [{ kind: "Document", id: documentId, snapshot: document }]);
   return document;
 }
 
 async function applyDocumentDuplicateUpdate(actor: AppActor, params: CreateDocumentParams, documentId: string) {
   return prisma.$transaction(async (tx) => {
+    const sourceWhere = { workspaceId: params.workspaceId, sourceType: { in: ["DOC", "FILE_UPLOAD"] as ("DOC" | "FILE_UPLOAD")[] },
+      metadata: { path: ["documentId"], equals: documentId } };
+    const sourceRows = await tx.brainSource.findMany({ where: sourceWhere });
+    for (const source of [...sourceRows].sort((left, right) => left.id.localeCompare(right.id))) {
+      await lockWorkspaceArchiveArtifact(tx, "BrainSource", source.id);
+      await tx.$queryRaw`SELECT id FROM "BrainSource" WHERE id = ${source.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    }
+    await tx.$queryRaw`SELECT id FROM "Document" WHERE id = ${documentId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const existing = await tx.document.findFirst({
       where: { id: documentId, workspaceId: params.workspaceId, archivedAt: null },
     });
     invariant(existing, 404, "NOT_FOUND", "Document not found.");
+    const prior = await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "Document", id: existing.id, snapshot: existing }], tx);
+    const priorRoots = await captureImmutableArtifactInputProof(actor, params.workspaceId, prior, tx);
+    const incoming = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId, capture: params });
+    invariant(incoming.mode !== "UNKNOWN", 409, "UNKNOWN_LINEAGE", "Document inputs need a complete producer receipt.");
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      capture: { lineageRoots: [...priorRoots, ...(incoming.mode === "DERIVED" || incoming.mode === "HUMAN_ORIGINAL" ? incoming.roots : [])] }, copied: true });
+    const currentSources = await tx.brainSource.findMany({ where: sourceWhere });
+    invariant(currentSources.every(source => sourceRows.some(priorSource => priorSource.id === source.id)),
+      409, "SOURCE_CHANGED", "Document source links changed before the update.");
+    const priorSources = new Map<string, { roots: Awaited<ReturnType<typeof captureArtifactInputProof>>; row: typeof currentSources[number] }>();
+    const readableSources = await readableArtifactIds(actor, params.workspaceId, "BrainSource", currentSources, tx);
+    for (const source of currentSources) {
+      if (readableSources.has(source.id)) {
+        const roots = await captureImmutableArtifactInputProof(actor, params.workspaceId, await captureArtifactInputProof(actor, params.workspaceId,
+          [{ kind: "BrainSource", id: source.id, snapshot: source }], tx), tx);
+        priorSources.set(source.id, { roots, row: source });
+      } else await preserveUnknownArtifactInputSnapshot(tx, params.workspaceId, { kind: "BrainSource", id: source.id }, source);
+    }
     const mergedText = duplicateGuardMergeText(existing.textContent, params.textContent);
     const metadata = {
       ...metadataObject(existing.metadata),
@@ -95,30 +129,26 @@ async function applyDocumentDuplicateUpdate(actor: AppActor, params: CreateDocum
       },
     });
 
-    const sourceRequeueRows = mergedText ? await tx.brainSource.findMany({
-      where: {
-        workspaceId: params.workspaceId,
-        sourceType: { in: ["DOC", "FILE_UPLOAD"] },
-        metadata: { path: ["documentId"], equals: existing.id },
-      },
-      select: { id: true },
-    }) : [];
-
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId, artifact: { kind: "Document", id: updated.id }, content: updated, receipt });
+    const sourceRequeueRows = mergedText ? currentSources : [];
     if (mergedText) {
       for (const sourceRow of sourceRequeueRows) {
-        await tx.brainSource.update({
-          where: { id: sourceRow.id },
-          data: {
-            content: [updated.title, mergedText].join("\n\n"),
-            absorbedAt: null,
-            metadata: {
-              documentId: updated.id,
-              storageKey: updated.storageKey,
-              mimeType: updated.mimeType,
-              duplicateGuardUpdatedAt: new Date().toISOString(),
-            } as Prisma.InputJsonValue,
-          },
-        });
+        const priorSource = priorSources.get(sourceRow.id);
+        const sourceReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId, completeCopy: true, copied: true,
+          capture: { lineageRoots: priorSource?.roots ?? [] },
+          dependencies: [{ kind: "Document", id: updated.id, snapshot: updated }] });
+        const source = await tx.brainSource.update({ where: { id: sourceRow.id }, data: {
+          content: [updated.title, mergedText].join("\n\n"), title: updated.title, channel: updated.source,
+          ingestionGuidanceMd: metadataString(metadataObject(updated.metadata), "ingestionGuidanceMd"),
+          fileStorageKey: priorSource?.row.fileStorageKey ?? null, fileMimeType: priorSource?.row.fileMimeType ?? null,
+          fileName: priorSource?.row.fileName ?? null, fileSizeBytes: priorSource?.row.fileSizeBytes ?? null,
+          authorMemberId: metadataString(metadataObject(updated.metadata), "authorMemberId"), absorbedAt: null,
+          metadata: { documentId: updated.id, storageKey: updated.storageKey, mimeType: updated.mimeType,
+            ...(priorSource && metadataString(metadataObject(priorSource.row.metadata), "fileContentHash")
+              ? { fileContentHash: metadataString(metadataObject(priorSource.row.metadata), "fileContentHash") } : {}),
+            duplicateGuardUpdatedAt: new Date().toISOString() } as Prisma.InputJsonValue,
+        } });
+        await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId, artifact: { kind: "BrainSource", id: source.id }, content: source, receipt: sourceReceipt });
       }
     }
 
@@ -155,6 +185,8 @@ async function applyDocumentDuplicateUpdate(actor: AppActor, params: CreateDocum
 }
 
 export async function createDocument(actor: AppActor, params: CreateDocumentParams) {
+  params = { ...params, metadata: params.metadata === undefined ? undefined : structuredClone(params.metadata),
+    lineageInputs: params.lineageInputs?.map(input => ({ ...input })), lineageRoots: params.lineageRoots?.map(root => ({ ...root })) };
   const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
@@ -182,9 +214,9 @@ export async function createDocument(actor: AppActor, params: CreateDocumentPara
     sourceUrl,
     contentHash,
     content: textContent,
-  }, params.duplicateGuard);
+  }, params.duplicateGuard, undefined, rows => filterReadableDocuments(actor, params.workspaceId, rows));
   if (duplicateDecision?.resolution === "use_existing") {
-    return getActiveDocument(params.workspaceId, duplicateDecision.match.entityId);
+    return getDocument(actor, params.workspaceId, duplicateDecision.match.entityId);
   }
   if (duplicateDecision?.resolution === "update_existing") {
     return applyDocumentDuplicateUpdate(actor, params, duplicateDecision.match.entityId);
@@ -192,6 +224,7 @@ export async function createDocument(actor: AppActor, params: CreateDocumentPara
   const metadata = params.metadata;
   const createMetadata = {
     ...metadataObject(metadata),
+    authorMemberId: actor.kind === "user" ? persistedMemberId(membership) : null,
     ...(contentHash ? { contentHash } : {}),
   };
   const size = metadataSize(metadata);
@@ -199,6 +232,8 @@ export async function createDocument(actor: AppActor, params: CreateDocumentPara
 
   return prisma.$transaction(async (tx) => {
     await lockAndAssertTrialStorageCapacity(tx, params.workspaceId, size);
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId, capture: params });
+    invariant(receipt.mode !== "UNKNOWN", 409, "UNKNOWN_LINEAGE", "Document inputs need a complete producer receipt.");
     const document = await tx.document.create({
       data: {
         workspaceId: params.workspaceId,
@@ -211,6 +246,7 @@ export async function createDocument(actor: AppActor, params: CreateDocumentPara
       },
     });
 
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId, artifact: { kind: "Document", id: document.id }, content: document, receipt });
     await tx.auditLog.create({
       data: {
         workspaceId: params.workspaceId,
@@ -241,6 +277,8 @@ export async function createDocument(actor: AppActor, params: CreateDocumentPara
     ];
 
     if (textContent) {
+      const sourceReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId, copied: true, completeCopy: true,
+        dependencies: [{ kind: "Document", id: document.id, snapshot: document }] });
       const brainSource = await tx.brainSource.create({
         data: {
           workspaceId: params.workspaceId,
@@ -260,6 +298,7 @@ export async function createDocument(actor: AppActor, params: CreateDocumentPara
         },
       });
 
+      await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId, artifact: { kind: "BrainSource", id: brainSource.id }, content: brainSource, receipt: sourceReceipt });
       await tx.auditLog.create({
         data: {
           workspaceId: params.workspaceId,

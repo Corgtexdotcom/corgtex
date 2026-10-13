@@ -181,7 +181,7 @@ describe("agent-runs", () => {
       }) });
       expect(prisma.auditLog.create).toHaveBeenCalledWith({ data: expect.objectContaining({ action: "agentRun.feedbackSubmitted", entityId: "run-1" }) });
       expect(result).toEqual({ id: "step-1", continuationJobId: "job-2" });
-      expect(prisma.agentFeedbackInput.create).toHaveBeenCalledWith({ data: expect.objectContaining({ content: "Please clarify", userId: "u-1", agentRunId: "run-1", stepId: "step-1" }) });
+      expect(prisma.agentFeedbackInput.create).toHaveBeenCalledWith({ data: expect.objectContaining({ content: "Please clarify", userId: "u-1", agentRunId: "run-1", stepId: "step-1", priorRunSnapshotId: "snapshot-1" }) });
       expect(prisma.agentRun.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.not.objectContaining({ resultJson: expect.anything() }) }));
       expect(prisma.proposal.create).not.toHaveBeenCalled();
       expect(prisma.proposal.update).not.toHaveBeenCalled();

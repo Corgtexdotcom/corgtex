@@ -25,14 +25,36 @@ const child = (kind: string, delegate: string, relation: string): Descriptor => 
 
 /** Explicit inventory scope. New kinds require a reviewed loader instead of an unscoped generic table scan. */
 const LOADERS: Record<LineageKind, Descriptor> = {
+  MeetingAudioAsset: direct("MeetingAudioAsset", "meetingAudioAsset"),
+  NativeTranscriptInput: direct("NativeTranscriptInput", "nativeTranscriptInput"),
+  CommunicationMessageNativeInput: direct("CommunicationMessageNativeInput", "communicationMessageNativeInput"),
+  GenericDerivedArtifactVariant: direct("GenericDerivedArtifactVariant", "genericDerivedArtifactVariant"),
+  ExternalProviderFetchInput: direct("ExternalProviderFetchInput", "externalProviderFetchInput"), ExternalContentSource: direct("ExternalContentSource", "externalContentSource"),
+  FinanceReport: direct("FinanceReport", "financeReport"),
+  FinanceReportFact: direct("FinanceReportFact", "financeReportFact"),
+  FinanceImportApplication: direct("FinanceImportApplication", "financeImportApplication"),
+
+  FinanceImportBatch: direct("FinanceImportBatch", "financeImportBatch"), FinanceImportCandidate: direct("FinanceImportCandidate", "financeImportCandidate"),
+  FinanceReportUploadInput: direct("FinanceReportUploadInput", "financeReportUploadInput"),
+  CrmQualificationFormInput: direct("CrmQualificationFormInput", "crmQualificationFormInput"),
+  ExecutionRequest: direct("ExecutionRequest", "executionRequest"), ExecutionResult: direct("ExecutionResult", "executionResult"),
+  ConversationOperationOutcome: direct("ConversationOperationOutcome", "conversationOperationOutcome"),
+  WorkspaceToolLink: { ...direct("WorkspaceToolLink", "workspaceToolLink"), include: { circleTags: { orderBy: [{ createdAt: "asc" }, { id: "asc" }] } } },
+  WorkspaceToolLinkCredential: direct("WorkspaceToolLink", "workspaceToolLink"),
+  McpToolInput: direct("McpToolInput", "mcpToolInput"),
+  ConversationIngressInput: direct("ConversationIngressInput", "conversationIngressInput"),
+  DemoLeadIntakeInput: { ...direct("DemoLead", "demoLead"), select: { id: true, workspaceId: true, email: true, source: true, createdAt: true } },
+  CrmQualificationEmailInput: { ...direct("CrmQualification", "crmQualification"), scope: (workspaceId) => ({ workspaceId, responseChannel: "email_reply" }), select: { id: true, workspaceId: true, demoLeadId: true, responseChannel: true, rawEmailReply: true, rawEmailSubject: true, createdAt: true } },
+  DemoLead: direct("DemoLead", "demoLead"), CrmQualification: direct("CrmQualification", "crmQualification"),
+  WorkflowJobInput: { ...direct("WorkflowJob", "workflowJob"), select: { id: true, workspaceId: true, eventId: true, type: true, payload: true, createdAt: true } },
   AgentRequestInput: direct("AgentRequestInput", "agentRequestInput"), AgentFeedbackInput: direct("AgentFeedbackInput", "agentFeedbackInput"),
   ConversationPendingOperation: direct("ConversationPendingOperation", "conversationPendingOperation"),
   BrainDiscussionThread: child("BrainDiscussionThread", "brainDiscussionThread", "article"),
   BrainDiscussionComment: { delegate: "brainDiscussionComment", table: "BrainDiscussionComment", scope: (workspaceId) => ({ thread: { article: { workspaceId } } }) },
   AgentRun: direct("AgentRun", "agentRun"), AgentStep: child("AgentStep", "agentStep", "agentRun"), AgentToolCall: child("AgentToolCall", "agentToolCall", "agentRun"),
-  Workspace: { delegate: "workspace", table: "Workspace", scope: (workspaceId) => ({ id: workspaceId }), select: { id: true, name: true } },
+  Workspace: { delegate: "workspace", table: "Workspace", scope: (workspaceId) => ({ id: workspaceId }), select: { id: true, name: true, slug: true, description: true, plan: true, createdAt: true, updatedAt: true } },
   User: { delegate: "user", table: "User", scope: (workspaceId) => ({ memberships: { some: { workspaceId, isActive: true } } }),
-    select: { id: true, email: true, displayName: true, bio: true, avatarUrl: true, linkedinUrl: true, websiteUrl: true } },
+    select: { id: true, email: true, displayName: true, bio: true, avatarUrl: true, linkedinUrl: true, websiteUrl: true, createdAt: true, updatedAt: true } },
   Member: { ...direct("Member", "member"), include: { user: { select: { id: true, email: true, displayName: true } } } },
   AgentIdentity: { ...direct("AgentIdentity", "agentIdentity"), select: { id: true, workspaceId: true, agentKey: true, memberType: true,
     displayName: true, purposeMd: true, behaviorMd: true, isActive: true, archivedAt: true, createdAt: true, updatedAt: true } },
@@ -69,12 +91,13 @@ const LOADERS: Record<LineageKind, Descriptor> = {
   ArtifactInputSnapshot: direct("ArtifactInputSnapshot", "artifactInputSnapshot"),
 };
 
-const NATIVE_INPUTS = new Set<LineageKind>(["Workspace", "Member", "User", "RoleAssignment", "CircleAgentAssignment", "Document", "MeetingTranscript",
-  "CommunicationChannel", "CommunicationMessage", "ConversationPromptInput", "AgentRequestInput", "AgentFeedbackInput", "ModelUsageBudget", "ModelUsageCost", "ApprovalPolicy", "CrmDealStageTransition",
-  "KnowledgeChunk", "TensionUpvote", "BuildArtifact", "BuildArtifactAsset", "ArtifactInputSnapshot"]);
+const NATIVE_INPUTS = new Set<LineageKind>(["NativeTranscriptInput", "CommunicationMessageNativeInput", "ExternalProviderFetchInput", "FinanceReportUploadInput", "CrmQualificationFormInput", "McpToolInput", "Workspace", "Member", "User", "RoleAssignment", "CircleAgentAssignment",
+  "ConversationIngressInput", "DemoLeadIntakeInput", "CrmQualificationEmailInput", "CommunicationChannel", "ConversationPromptInput", "AgentRequestInput", "AgentFeedbackInput", "ModelUsageBudget", "ModelUsageCost", "ApprovalPolicy", "CrmDealStageTransition",
+  "TensionUpvote", "ArtifactInputSnapshot"]);
 export const SOURCE_LINEAGE_BACKFILL_KINDS = (Object.keys(LOADERS) as LineageKind[]).filter((kind) => !NATIVE_INPUTS.has(kind));
-const GENERATED_ONLY = new Set<LineageKind>(["AgentMemory", "ConversationTurn", "CommunicationContextSummary", "WorkspaceBriefing",
-  "NewspaperEdition", "NewspaperDelivery", "NewspaperTrackedLink", "Notification", "AgentRun", "AgentStep", "AgentToolCall", "ConversationPendingOperation"]);
+const GENERATED_ONLY = new Set<LineageKind>(["MeetingAudioAsset", "GenericDerivedArtifactVariant", "CommunicationMessage", "AgentMemory", "ConversationTurn", "CommunicationContextSummary", "WorkspaceBriefing",
+  "FinanceReport", "FinanceReportFact", "FinanceImportApplication", "FinanceImportBatch", "FinanceImportCandidate",
+  "NewspaperEdition", "NewspaperDelivery", "NewspaperTrackedLink", "Notification", "AgentRun", "AgentStep", "AgentToolCall", "ConversationPendingOperation", "ConversationOperationOutcome", "ExecutionResult", "KnowledgeChunk"]);
 
 export type SourceLineageBackfillStatus = "VERIFIED_CURRENT" | "RECOVERABLE_SNAPSHOT" | "WITHHELD" | "MISSING" | "UNSUPPORTED";
 export type SourceLineageBackfillEntry = LineageInput & {
@@ -101,7 +124,7 @@ function recipeTypes(kind: LineageKind, row: Row) {
   if (kind === "CheckIn" && row.questionSource === "company-understanding") return ["agent.company-understanding"];
   if (kind === "ContextGraphProposedDiff" && typeof row.reason === "string" && row.reason.startsWith("Company understanding proposal: ")) return ["agent.company-understanding"];
   if (["ContextGraphObject", "ContextGraphRelationship"].includes(kind)
-    && typeof row.sourceEntityId === "string" && ["Member", "Goal", "AgentIdentity", "BrainArticle", "Proposal", "Action", "Tension", "Circle", "Role", "Document"].includes(String(row.sourceEntityType))) {
+    && typeof row.sourceEntityId === "string" && ["Member", "Goal", "AgentIdentity", "BrainArticle", "Proposal", "Action", "Tension", "Circle", "Role", "Document", "Meeting", "MeetingInsight"].includes(String(row.sourceEntityType))) {
     return ["context-graph.reconcile"];
   }
   return [];

@@ -10,16 +10,21 @@ const { db, state, lineage, requireMembership } = vi.hoisted(() => {
     sources: [] as any[], readableSources: new Set<string>(), histories: {} as Record<string, any[]>,
     member: null as any, membershipActive: true, dependenciesComplete: true, variantReadable: true,
     canonicalReadable: false, upstream: null as any,
+    versionParents: {} as Record<string, string>, nativeSources: {} as Record<string, any[]>, readableTypedSources: new Set<string>(), originalManifests: {} as Record<string, any>,
   };
   const db = {
-    $transaction: vi.fn(), $queryRaw: vi.fn(),
-    brainArticle: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
+    $transaction: vi.fn(), $queryRaw: vi.fn(), $executeRaw: vi.fn(),
+    brainArticle: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn() },
+    brainArticleVersion: { findMany: vi.fn() },
+    document: { findMany: vi.fn() }, meeting: { findMany: vi.fn() }, communicationMessage: { findMany: vi.fn() },
+    conversationPromptInput: { findMany: vi.fn() }, conversationIngressInput: { findMany: vi.fn() }, agentRequestInput: { findMany: vi.fn() },
+    role: { findMany: vi.fn() }, circle: { findMany: vi.fn() }, action: { findMany: vi.fn() }, tension: { findMany: vi.fn() }, goal: { findMany: vi.fn() },
     brainSource: { findMany: vi.fn() }, artifactInputLineage: { findFirst: vi.fn() },
     workflowJob: { findUnique: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
     member: { findFirst: vi.fn() }, workspaceArchiveRecord: { findMany: vi.fn() }, auditLog: { create: vi.fn() },
   };
   const lineage = {
-    captureArtifactInputProof: vi.fn(), currentArtifactInputRoots: vi.fn(), inspectStoredArtifactInputDependencies: vi.fn(),
+    assertArtifactInputWriteFence: vi.fn(), captureArtifactInputProof: vi.fn(), currentArtifactInputRoots: vi.fn(), inspectStoredArtifactInputDependencies: vi.fn(),
     isArtifactInputProofReadable: vi.fn(), lineageContentFingerprint: vi.fn(), readableArtifactIds: vi.fn(),
     readableBrainSourceIds: vi.fn(), recordArtifactInputLineage: vi.fn(),
   };
@@ -39,7 +44,7 @@ const params = { workspaceId: "ws-1", articleId: "canonical" };
 const lease = { workspaceId: "ws-1", jobId: "job-1", expectedAttempt: 1, expectedOwner: "worker-1" };
 
 function fingerprint(kind: string, row: any) {
-  return createHash("sha256").update(JSON.stringify([kind, row.id, row.title, row.content, row.bodyMd, row.updatedAt])).digest("hex");
+  return createHash("sha256").update(JSON.stringify([kind, row.id, row.title, row.content, row.bodyMd, row.textContent, row.transcript, row.text, row.prompt, row.purposeMd, row.domainMd, row.accountabilities, row.artifacts, row.updatedAt])).digest("hex");
 }
 
 function source(id: string, title = `Source ${id}`) {
@@ -49,6 +54,7 @@ function source(id: string, title = `Source ${id}`) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  lineage.assertArtifactInputWriteFence.mockReset().mockResolvedValue(undefined);
   state.target = { id: "canonical", workspaceId: "ws-1", title: "SECRET CANONICAL TITLE", bodyMd: "SECRET CANONICAL BODY",
     slug: "secret-canonical-slug", frontmatterJson: { secret: "SECRET ALIAS" }, type: "STRATEGY", isPrivate: false,
     ownerMemberId: null, variantOfArticleId: null, archivedAt: null, updatedAt: "2026-10-01" };
@@ -59,9 +65,10 @@ beforeEach(() => {
   state.member = { id: "member-1", workspaceId: "ws-1", userId: "user-1", role: "CONTRIBUTOR", isActive: true,
     user: actor.kind === "user" ? actor.user : null };
   state.variant = null; state.job = null; state.histories = {}; state.upstream = null;
+  state.versionParents = {}; state.nativeSources = {}; state.readableTypedSources = new Set(); state.originalManifests = {};
   state.membershipActive = true; state.dependenciesComplete = true; state.variantReadable = true; state.canonicalReadable = false;
   db.$transaction.mockImplementation(async (callback) => callback(db));
-  db.$queryRaw.mockResolvedValue([]);
+  db.$queryRaw.mockResolvedValue([]); db.$executeRaw.mockResolvedValue(1);
   db.auditLog.create.mockResolvedValue({});
   requireMembership.mockImplementation(async ({ actor: currentActor, workspaceId }) => {
     if (!state.membershipActive || workspaceId !== state.member.workspaceId || currentActor.kind !== "user"
@@ -79,7 +86,15 @@ beforeEach(() => {
   });
   db.brainSource.findMany.mockImplementation(async ({ where }) => state.sources
     .filter((row) => row.workspaceId === where.workspaceId && where.id.in.includes(row.id) && !row.archivedAt).map((row) => ({ ...row })));
-  db.artifactInputLineage.findFirst.mockImplementation(async () => state.manifest);
+  for (const [kind, delegate] of [["Document", db.document], ["MeetingTranscript", db.meeting], ["CommunicationMessage", db.communicationMessage],
+    ["ConversationPromptInput", db.conversationPromptInput], ["ConversationIngressInput", db.conversationIngressInput], ["AgentRequestInput", db.agentRequestInput],
+    ["BrainArticle", db.brainArticle], ["Role", db.role], ["Circle", db.circle], ["Action", db.action], ["Tension", db.tension], ["Goal", db.goal]] as const) {
+    delegate.findMany.mockImplementation(async ({ where }) => (state.nativeSources[kind] ?? []).filter((row) =>
+      row.workspaceId === (where.workspaceId ?? where.circle?.workspaceId) && where.id.in.includes(row.id) && !row.archivedAt && !row.variantOfArticleId));
+  }
+  db.brainArticleVersion.findMany.mockImplementation(async ({ where }) => where.id.in.flatMap((id: string) => state.versionParents[id] ? [{ id, articleId: state.versionParents[id] }] : []));
+  db.artifactInputLineage.findFirst.mockImplementation(async ({ where }) => where.artifactId === state.target?.id && where.artifactType === "BrainArticle"
+    ? state.manifest : state.originalManifests[`${where.artifactType}:${where.artifactId}`] ?? null);
   db.workspaceArchiveRecord.findMany.mockImplementation(async ({ where }) => state.histories[where.entityId] ?? []);
   lineage.lineageContentFingerprint.mockImplementation(fingerprint);
   lineage.currentArtifactInputRoots.mockImplementation(async () => state.manifest?.rootsJson ?? null);
@@ -92,13 +107,18 @@ beforeEach(() => {
       && currentActor.kind === "user" && currentActor.user.id === state.member.userId && row.ownerMemberId === state.member.id
       : state.canonicalReadable).map((row: any) => row.id)));
   lineage.captureArtifactInputProof.mockImplementation(async (_actor, _workspaceId, inputs) => {
+    if (inputs.some((input: any) => input.kind === "BrainSource" ? !state.readableSources.has(input.id) : !state.readableTypedSources.has(`${input.kind}:${input.id}`))) {
+      throw new AppError(409, "UNKNOWN_LINEAGE", "Current source is not independently permitted.");
+    }
     const roots = inputs.map((input: any) => ({ kind: input.kind, id: input.id, fingerprint: fingerprint(input.kind, input.snapshot) }));
     return state.upstream ? [...roots, { ...state.upstream }] : roots;
   });
   lineage.isArtifactInputProofReadable.mockImplementation(async (_actor, _workspaceId, roots) => state.membershipActive
     && roots.every((root: any) => root.kind === "BrainSource" ? state.readableSources.has(root.id)
       && state.sources.some((row) => !row.archivedAt && row.id === root.id && root.fingerprint === fingerprint(root.kind, row))
-      : state.upstream && root.fingerprint === state.upstream.fingerprint));
+      : root.kind === "ArtifactInputSnapshot" ? state.upstream && root.fingerprint === state.upstream.fingerprint
+        : state.readableTypedSources.has(`${root.kind}:${root.id}`) && (state.nativeSources[root.kind] ?? []).some((row) =>
+          !row.archivedAt && row.id === root.id && root.fingerprint === fingerprint(root.kind, row))));
   lineage.recordArtifactInputLineage.mockResolvedValue({});
   db.brainArticle.create.mockImplementation(async ({ data }) => {
     state.variant = { id: "variant-1", archivedAt: null, createdAt: new Date(), updatedAt: new Date(), ...data };
@@ -114,6 +134,16 @@ beforeEach(() => {
   db.workflowJob.update.mockImplementation(async ({ data }) => { state.job = { ...state.job, ...data }; return { ...state.job }; });
 });
 
+function addNative(kind: string, row: any, original = false) {
+  const full = { workspaceId: "ws-1", archivedAt: null, ...row };
+  (state.nativeSources[kind] ??= []).push(full);
+  state.readableTypedSources.add(`${kind}:${full.id}`);
+  state.manifest.rootsJson.push({ kind, id: full.id, fingerprint: fingerprint(kind, full) });
+  if (original) state.originalManifests[`${kind}:${full.id}`] = { id: `original-${full.id}`, origin: "HUMAN_ORIGINAL",
+    rootsJson: [], contentHash: fingerprint(kind, full) };
+  return full;
+}
+
 async function queuedJob() {
   expect(await requestBrainArticleVariant(actor, params)).toEqual({ status: "pending", jobId: "job-1" });
   state.job = { ...state.job, status: "RUNNING", attempts: 1, lockedBy: "worker-1" };
@@ -127,10 +157,151 @@ describe("permitted-source article variants", () => {
     expect(state.job.payload).toMatchObject({ memberId: "member-1", userId: "user-1", articleId: "canonical", phase: "REQUESTED" });
     expect(JSON.stringify(state.job.payload)).not.toContain("SECRET");
     expect(JSON.stringify(state.job.payload)).not.toContain("finance");
-    expect(lineage.captureArtifactInputProof).toHaveBeenCalledWith(actor, "ws-1", [
-      expect.objectContaining({ kind: "BrainSource", id: "public-1", snapshot: expect.objectContaining({ content: "Permitted facts from public-1" }) }),
-      expect.objectContaining({ kind: "BrainSource", id: "public-2", snapshot: expect.objectContaining({ content: "Permitted facts from public-2" }) }),
+    for (const id of ["public-1", "public-2"]) expect(lineage.captureArtifactInputProof).toHaveBeenCalledWith(actor, "ws-1", [
+      expect.objectContaining({ kind: "BrainSource", id, snapshot: expect.objectContaining({ content: `Permitted facts from ${id}` }) }),
     ], db);
+    expect(state.job.payload.version).toBe(2);
+    expect(state.job.payload.sources.every((input: any) => input.kind === "BrainSource")).toBe(true);
+  });
+
+  it("rebuilds from all supported independently permitted source families without canonical or private context", async () => {
+    state.sources = [];
+    state.manifest.rootsJson = [];
+    addNative("Document", { id: "doc", title: "Document facts", textContent: "Public document facts", storageKey: "DO NOT PROMPT STORAGE", metadata: { secret: "DO NOT PROMPT METADATA" } });
+    addNative("MeetingTranscript", { id: "meeting", title: "Meeting", transcript: "Actual transcript", summaryMd: "DO NOT PROMPT OLD SUMMARY", source: "UPLOAD" });
+    addNative("CommunicationMessage", { id: "message", text: "Public channel message", permalink: "DO NOT PROMPT LINK", raw: { secret: "DO NOT PROMPT RAW" } });
+    addNative("ConversationPromptInput", { id: "prompt", content: "Owner's actual request", sessionId: "DO NOT PROMPT SESSION", userId: "user-1" });
+    addNative("ConversationIngressInput", { id: "ingress", content: "Owner's authenticated request", userId: "user-1", actorKind: "user" });
+    addNative("AgentRequestInput", { id: "request", prompt: "Owner's agent request", userId: "user-1", meetingId: "DO NOT PROMPT RELATED ID" });
+    for (const [kind, row] of [["BrainArticle", { id: "original-article", title: "Original article", bodyMd: "Original human facts" }],
+      ["Role", { id: "role", name: "Steward", purposeMd: "Human role purpose", accountabilities: ["Review public plans"] }],
+      ["Circle", { id: "circle", name: "Operations", purposeMd: "Human circle purpose", domainMd: "Human circle domain" }],
+      ["Action", { id: "action", title: "Original action", bodyMd: "Human action facts" }],
+      ["Tension", { id: "tension", title: "Original tension", bodyMd: "Human tension facts" }],
+      ["Goal", { id: "goal", title: "Original goal", descriptionMd: "Human goal facts" }]] as const) addNative(kind, row, true);
+    const privateArticle = addNative("BrainArticle", { id: "private-article", title: "PRIVATE ARTICLE TITLE", bodyMd: "PRIVATE ARTICLE BODY", isPrivate: true, ownerMemberId: "other-member" }, true);
+    state.readableTypedSources.delete(`BrainArticle:${privateArticle.id}`);
+    // A historical self snapshot never admits the old canonical body as a source.
+    state.manifest.rootsJson.push({ kind: "BrainArticle", id: "canonical", fingerprint: "b".repeat(64) });
+    await queuedJob();
+    const generate = vi.fn(async (sources) => {
+      expect(sources).toHaveLength(12);
+      expect(sources.map((entry: any) => entry.kind)).toEqual(expect.arrayContaining(["Document", "MeetingTranscript", "CommunicationMessage", "ConversationPromptInput", "ConversationIngressInput", "AgentRequestInput", "BrainArticle", "Role", "Circle", "Action", "Tension", "Goal"]));
+      expect(JSON.stringify(sources)).not.toContain("PRIVATE");
+      expect(JSON.stringify(sources)).not.toContain("SECRET");
+      expect(JSON.stringify(sources)).not.toContain("DO NOT PROMPT");
+      return { title: "Permitted facts", bodyMd: "Independent native facts." };
+    });
+    expect(await generateBrainArticleVariant({ ...lease, generate })).toEqual({ phase: "APPLIED", articleId: "variant-1" });
+    expect(state.job.payload.version).toBe(2);
+    expect(state.variant.sourceIds).toEqual([]);
+    expect(lineage.recordArtifactInputLineage).toHaveBeenCalledWith(expect.objectContaining({ inheritedRoots: expect.arrayContaining([
+      expect.objectContaining({ kind: "Document", id: "doc" }), expect.objectContaining({ kind: "ConversationPromptInput", id: "prompt" }),
+      expect.objectContaining({ kind: "Goal", id: "goal" }),
+    ]) }));
+    expect(state.job.payload.sourceState[JSON.stringify(["Meeting", "meeting"])]).toBeTypeOf("string");
+    expect(state.target.bodyMd).toBe("SECRET CANONICAL BODY");
+  });
+
+  it.each(["snapshot", "version"])("excludes a readable wrapper of the canonical's old %s body", async (kind) => {
+    const wrapper = source("self-wrapper", "OLD CANONICAL WRAPPER");
+    wrapper.content = "SECRET CANONICAL BODY";
+    state.sources.push(wrapper); state.readableSources.add(wrapper.id);
+    state.manifest.rootsJson.push({ kind: "BrainSource", id: wrapper.id, fingerprint: fingerprint("BrainSource", wrapper) });
+    if (kind === "version") state.versionParents["canonical-version"] = "canonical";
+    lineage.inspectStoredArtifactInputDependencies.mockImplementation(async (_db, _ws, roots) => ({ complete: true,
+      roots: roots.some((root: any) => root.id === wrapper.id) ? [...roots, { kind: kind === "version" ? "BrainArticleVersion" : "BrainArticle", id: kind === "version" ? "canonical-version" : "canonical", fingerprint: "a".repeat(64) }] : roots,
+    }));
+    await queuedJob();
+    const generate = vi.fn(async (sources) => {
+      expect(sources.map((entry: any) => entry.id)).toEqual(["public-1", "public-2"]);
+      expect(JSON.stringify(sources)).not.toContain("CANONICAL");
+      return { title: "Independent facts", bodyMd: "Independent sources only." };
+    });
+    expect(await generateBrainArticleVariant({ ...lease, generate })).toEqual({ phase: "APPLIED", articleId: "variant-1" });
+    if (kind === "version") expect(db.brainArticleVersion.findMany).toHaveBeenCalledWith({ where: { article: { workspaceId: "ws-1" }, id: { in: ["canonical-version"] } }, select: { id: true, articleId: true } });
+  });
+
+  it("tracks other original version parents' restore epochs without reading their body", async () => {
+    state.upstream = { kind: "BrainArticleVersion", id: "other-version", fingerprint: "b".repeat(64) };
+    state.versionParents["other-version"] = "other-original-article";
+    state.readableTypedSources.add("BrainArticleVersion:other-version");
+    state.nativeSources.BrainArticleVersion = [{ id: "other-version", title: undefined }];
+    lineage.isArtifactInputProofReadable.mockResolvedValue(true);
+    await queuedJob();
+    expect(state.job.payload.sourceState[JSON.stringify(["BrainArticle", "other-original-article"])]).toBeTypeOf("string");
+    expect(db.$executeRaw.mock.calls.some((args) => args.includes("workspace_archive:BrainArticle:other-original-article"))).toBe(true);
+    expect(db.$queryRaw.mock.calls.some(([sql]) => sql?.values?.includes("other-original-article")
+      && sql.strings.join("").includes('"BrainArticle"'))).toBe(true);
+    expect(await generateBrainArticleVariant({ ...lease, generate: async () => {
+      state.histories["other-original-article"] = [{ id: "restore", archivedAt: "old", restoredAt: "new", purgedAt: null }];
+      return { title: "Candidate", bodyMd: "Never accepted." };
+    } })).toEqual({ phase: "STALE" });
+    expect(db.brainArticleVersion.findMany.mock.calls.every(([args]) => JSON.stringify(args.select) === JSON.stringify({ id: true, articleId: true }))).toBe(true);
+  });
+
+  it("takes the shared write fence after native/canonical locks and rejects changed original authorship", async () => {
+    addNative("Role", { id: "original-role", name: "Role", purposeMd: "Human role facts" }, true);
+    lineage.assertArtifactInputWriteFence.mockImplementationOnce(async () => {
+      state.originalManifests["Role:original-role"].origin = "DERIVED";
+    });
+    expect(await requestBrainArticleVariant(actor, params)).toEqual({ status: "unavailable" });
+    expect(db.$queryRaw.mock.invocationCallOrder.at(-1)).toBeLessThan(lineage.assertArtifactInputWriteFence.mock.invocationCallOrder[0]);
+    expect(db.workflowJob.create).not.toHaveBeenCalled();
+  });
+
+  it("excludes unknown/derived structured originals and empty native text without citation guesses", async () => {
+    addNative("Role", { id: "legacy-role", name: "LEGACY ROLE", purposeMd: "Unknown history" });
+    addNative("BrainArticle", { id: "derived-article", title: "DERIVED TITLE", bodyMd: "Previously generated facts" }, true);
+    state.originalManifests["BrainArticle:derived-article"].origin = "DERIVED";
+    addNative("Document", { id: "empty-doc", title: "Empty document", textContent: null });
+    await requestBrainArticleVariant(actor, params);
+    expect(state.job.payload.sources.map((entry: any) => entry.id)).toEqual(["public-1", "public-2"]);
+  });
+
+  it.each(["REQUESTED", "GENERATING", "APPLIED"])("marks queued v1 %s recipes stale before any model call", async (phase) => {
+    await queuedJob();
+    state.job.payload = { ...state.job.payload, version: 1, phase,
+      sources: state.job.payload.sources.map(({ id, fingerprint }: { id: string; fingerprint: string }) => ({ id, fingerprint })) };
+    const generate = vi.fn();
+    expect(await generateBrainArticleVariant({ ...lease, generate })).toEqual({ phase: "STALE" });
+    expect(state.job.payload.phase).toBe("STALE");
+    expect(generate).not.toHaveBeenCalled();
+    expect(db.brainArticle.create).not.toHaveBeenCalled();
+    expect(db.brainArticle.update).not.toHaveBeenCalled();
+  });
+
+  it.each(["body", "permission", "restore"])("rejects an uncited native Document %s change before acceptance", async (change) => {
+    const doc = addNative("Document", { id: "native-doc", title: "Doc", textContent: "Independent facts" });
+    await queuedJob();
+    const generate = vi.fn(async () => {
+      if (change === "body") doc.textContent = "Changed uncited facts";
+      if (change === "permission") state.readableTypedSources.delete("Document:native-doc");
+      if (change === "restore") state.histories[doc.id] = [{ id: "restore", archivedAt: "old", restoredAt: "new", purgedAt: null }];
+      return { title: "Candidate", bodyMd: "Never accepted." };
+    });
+    expect(await generateBrainArticleVariant({ ...lease, generate })).toEqual({ phase: "STALE" });
+    expect(db.brainArticle.create).not.toHaveBeenCalled();
+  });
+
+  it("uses a fresh recipe for independently remaining native inputs while preserving the old canonical and variant", async () => {
+    const doc = addNative("Document", { id: "native-doc", title: "Doc", textContent: "Independent facts" });
+    await queuedJob();
+    await generateBrainArticleVariant({ ...lease, generate: async () => ({ title: "Initial variant", bodyMd: "Source plus document facts." }) });
+    const oldVariant = { ...state.variant };
+    doc.archivedAt = new Date();
+    expect(await getReadableBrainArticleVariant(actor, params)).toBeNull();
+    await queuedJob();
+    const generate = vi.fn(async (sources) => {
+      expect(sources.map((entry: any) => entry.kind)).toEqual(["BrainSource", "BrainSource"]);
+      expect(sources.map((entry: any) => entry.id)).toEqual(["public-1", "public-2"]);
+      return { title: "Remaining facts", bodyMd: "Only permitted remaining sources." };
+    });
+    expect(await generateBrainArticleVariant({ ...lease, generate })).toEqual({ phase: "APPLIED", articleId: "variant-1" });
+    expect(state.variant.variantInputSetHash).not.toBe(oldVariant.variantInputSetHash);
+    expect(oldVariant.bodyMd).toBe("Source plus document facts.");
+    expect(state.target.bodyMd).toBe("SECRET CANONICAL BODY");
+    expect(db.brainArticle.update).not.toHaveBeenCalled();
   });
 
   it.each(["missing", "unknown", "malformed"])("preserves an unprovable canonical (%s) without using citation guesses", async (kind) => {
@@ -181,6 +352,17 @@ describe("permitted-source article variants", () => {
     state.dependenciesComplete = true; state.readableSources.clear();
     expect(await requestBrainArticleVariant(actor, params)).toEqual({ status: "unavailable" });
     expect(db.workflowJob.create).not.toHaveBeenCalled();
+  });
+
+  it("fails before generation when newly captured current ancestry exceeds the bounded complete scan", async () => {
+    state.upstream = { kind: "ArtifactInputSnapshot", id: "new-current-ancestry", fingerprint: "c".repeat(64) };
+    lineage.inspectStoredArtifactInputDependencies.mockImplementation(async (_db, _ws, roots) => ({ complete: true,
+      roots: roots.some((root: any) => root.id === "new-current-ancestry")
+        ? [...roots, ...Array.from({ length: 5001 }, (_, index) => ({ kind: "Document", id: `ancestor-${index}`, fingerprint: "a".repeat(64) }))] : roots,
+    }));
+    await expect(requestBrainArticleVariant(actor, params)).rejects.toMatchObject({ code: "INPUT_SCAN_LIMIT" });
+    expect(db.workflowJob.create).not.toHaveBeenCalled();
+    expect(db.brainArticle.create).not.toHaveBeenCalled();
   });
 
   it("deduplicates pending recipes and retries failed workers without copying candidate bodies", async () => {
@@ -313,7 +495,7 @@ describe("permitted-source article variants", () => {
   it("accepts unchanged recipes when JSON storage reorders map and source object keys", async () => {
     await queuedJob();
     state.job.payload.sourceState = Object.fromEntries(Object.entries(state.job.payload.sourceState).reverse());
-    state.job.payload.sources = state.job.payload.sources.map(({ id, fingerprint }: { id: string; fingerprint: string }) => ({ fingerprint, id }));
+    state.job.payload.sources = state.job.payload.sources.map(({ kind, id, fingerprint }: { kind: string; id: string; fingerprint: string }) => ({ fingerprint, id, kind }));
     expect(await generateBrainArticleVariant({ ...lease, generate: async () => ({ title: "Variant", bodyMd: "Facts." }) }))
       .toEqual({ phase: "APPLIED", articleId: "variant-1" });
     state.variant.variantSourceStateJson = Object.fromEntries(Object.entries(state.variant.variantSourceStateJson).reverse());
@@ -330,7 +512,7 @@ describe("permitted-source article variants", () => {
         ? [...roots, { kind: "BrainSource", id: ancestor.id, fingerprint: fingerprint("BrainSource", ancestor) }] : roots,
     }));
     await queuedJob();
-    expect(state.job.payload.sourceState).toHaveProperty("public-ancestor");
+    expect(state.job.payload.sourceState[JSON.stringify(["BrainSource", "public-ancestor"])]).toBeTypeOf("string");
     const generate = vi.fn(async (sources) => {
       expect(sources.map((row: any) => row.id)).toEqual(["public-1", "public-2"]);
       state.histories[ancestor.id] = [{ id: "ancestor-archive", archivedAt: "old", restoredAt: "new", purgedAt: null }];

@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { prismaMock, syncContextGraphForMeetingMock, upsertContextGraphObjectMock, upsertContextGraphRelationshipMock, captureArtifactInputProofMock } = vi.hoisted(() => ({
+const { retireDescendantsMock, retireContextGraphFactsMock, prismaMock, syncContextGraphForMeetingMock, upsertContextGraphObjectMock, upsertContextGraphRelationshipMock, captureArtifactInputProofMock } = vi.hoisted(() => ({
+  retireDescendantsMock: vi.fn(),
+  retireContextGraphFactsMock: vi.fn(),
   prismaMock: {
     action: { findFirst: vi.fn() },
     tension: { findFirst: vi.fn() },
@@ -21,11 +23,14 @@ const { prismaMock, syncContextGraphForMeetingMock, upsertContextGraphObjectMock
   captureArtifactInputProofMock: vi.fn(),
 }));
 
+vi.mock("../../../domain/src/context-graph-retirement", () => ({ retireContextGraphSourceDescendants: retireDescendantsMock }));
+
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
 }));
 
 vi.mock("@corgtex/domain", () => ({
+  retireContextGraphFacts: retireContextGraphFactsMock,
   contextGraphSystemActor: vi.fn(() => ({ kind: "agent", authProvider: "control-plane", label: "context-graph-sync" })),
   syncContextGraphForMeeting: syncContextGraphForMeetingMock,
   attachContextGraphEvidence: vi.fn(),
@@ -50,6 +55,17 @@ describe("handleContextGraphSync", () => {
       workspaceId: "ws-1",
       meetingId: "meeting-1",
     });
+  });
+
+  it("passes the exact claimed lease for retirement of deleted or denied primary sources", async () => {
+    const { handleContextGraphSync } = await import("./context-graph-sync");
+    const execution = { attempts: 2, expectedLease: { lockedBy: "worker", lockedAt: new Date() } };
+    prismaMock.action.findFirst.mockResolvedValueOnce(null);
+    await handleContextGraphSync("job-1", { sourceType: "ACTION", sourceId: "action-1" }, "ws-1", execution);
+    expect(retireDescendantsMock).toHaveBeenCalledWith({ workflowJobId: "job-1", workspaceId: "ws-1",
+      sourceType: "ACTION", sourceId: "action-1", ...execution });
+    expect(upsertContextGraphObjectMock).not.toHaveBeenCalled();
+    expect(retireContextGraphFactsMock).not.toHaveBeenCalled();
   });
 
   it("maps actions to task objects and circle relationships", async () => {
@@ -87,7 +103,7 @@ describe("handleContextGraphSync", () => {
     }));
   });
 
-  it("archives unknown primary facts without copying the old body", async () => {
+  it("delegates unknown primary retirement to the permission-gated helper without copying the old body", async () => {
     const { handleContextGraphSync } = await import("./context-graph-sync");
     const action = { id: "action-unknown", title: "Hidden legacy title", bodyMd: "Unknown legacy body" };
     prismaMock.action.findFirst.mockResolvedValue(action);
@@ -97,12 +113,10 @@ describe("handleContextGraphSync", () => {
 
     expect(upsertContextGraphObjectMock).not.toHaveBeenCalled();
     expect(upsertContextGraphRelationshipMock).not.toHaveBeenCalled();
-    for (const model of [prismaMock.contextGraphObject, prismaMock.contextGraphRelationship]) {
-      expect(model.updateMany).toHaveBeenCalledWith({
-        where: { workspaceId: "ws-1", sourceEntityType: "Action", sourceEntityId: action.id, status: { not: "archived" } },
-        data: { status: "archived" },
-      });
-    }
+    expect(retireContextGraphFactsMock).toHaveBeenCalledWith(expect.anything(), {
+      workspaceId: "ws-1", objectWhere: { sourceEntityType: "Action", sourceEntityId: action.id },
+      relationshipWhere: { sourceEntityType: "Action", sourceEntityId: action.id },
+    });
   });
 
   it("omits restricted nested labels while retaining a proven primary object", async () => {
@@ -225,11 +239,11 @@ describe("handleContextGraphSync", () => {
       relationshipType: "member_of",
       status: "approved",
     }));
-    expect(prismaMock.contextGraphRelationship.updateMany).toHaveBeenCalledWith({ where: expect.objectContaining({
+    expect(retireContextGraphFactsMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ relationshipWhere: expect.objectContaining({
       sourceObjectId: "person-1",
       targetObjectId: "stale-role-object",
       relationshipType: "assigned_to",
-    }), data: { status: "archived" } });
+    }),  }));
   });
 
   it("archives person objects and their edges when a member is deactivated", async () => {
@@ -268,12 +282,12 @@ describe("handleContextGraphSync", () => {
       status: "archived",
     }));
     expect(upsertContextGraphRelationshipMock).not.toHaveBeenCalled();
-    expect(prismaMock.contextGraphRelationship.updateMany).toHaveBeenCalledWith({
-      where: expect.objectContaining({
+    expect(retireContextGraphFactsMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      relationshipWhere: expect.objectContaining({
       targetObjectId: "circle-object-1",
       relationshipType: "member_of",
-      }), data: { status: "archived" },
-    });
+      }),
+    }));
   });
 
   it("maps goals to goal objects with parent, circle, and owner relationships", async () => {
@@ -432,12 +446,12 @@ describe("handleContextGraphSync", () => {
       status: "archived",
     }));
     expect(upsertContextGraphRelationshipMock).not.toHaveBeenCalled();
-    expect(prismaMock.contextGraphRelationship.updateMany).toHaveBeenCalledWith({
-      where: expect.objectContaining({
+    expect(retireContextGraphFactsMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      relationshipWhere: expect.objectContaining({
       targetObjectId: "circle-object-1",
       relationshipType: "member_of",
-      }), data: { status: "archived" },
-    });
+      }),
+    }));
   });
 
   it("marks public draft goals as proposed graph facts", async () => {
@@ -501,24 +515,20 @@ describe("handleContextGraphSync", () => {
 
     expect(upsertContextGraphObjectMock).not.toHaveBeenCalled();
     expect(upsertContextGraphRelationshipMock).not.toHaveBeenCalled();
-    expect(prismaMock.contextGraphObject.updateMany).toHaveBeenCalledWith({
-      where: expect.objectContaining({
-        workspaceId: "ws-1",
+    expect(retireContextGraphFactsMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      objectWhere: expect.objectContaining({
         sourceEntityType: "Goal",
         sourceEntityId: "goal-private",
-        status: { not: "archived" },
       }),
-      data: { status: "archived" },
-    });
-    expect(prismaMock.contextGraphRelationship.updateMany).toHaveBeenCalledWith({
-      where: expect.objectContaining({
-        workspaceId: "ws-1",
+
+    }));
+    expect(retireContextGraphFactsMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      relationshipWhere: expect.objectContaining({
         sourceEntityType: "Goal",
         sourceEntityId: "goal-private",
-        status: { not: "archived" },
       }),
-      data: { status: "archived" },
-    });
+
+    }));
   });
 
   it("does not upsert private draft parent goals for visible child goals", async () => {

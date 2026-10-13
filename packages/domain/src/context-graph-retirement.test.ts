@@ -1,0 +1,164 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+const { db, fence } = vi.hoisted(() => ({
+  fence: vi.fn(),
+  db: {
+    $transaction: vi.fn(), $queryRaw: vi.fn(), workflowJob: { findFirst: vi.fn() }, event: { findFirst: vi.fn() },
+    derivedArtifactRebuildState: { upsert: vi.fn() },
+    artifactInputLineage: { findFirst: vi.fn(), create: vi.fn() }, artifactInputSnapshot: { findFirst: vi.fn() },
+    contextGraphObject: { findMany: vi.fn(), update: vi.fn() }, contextGraphRelationship: { findMany: vi.fn(), update: vi.fn() },
+    contextGraphEvidenceRef: { findMany: vi.fn() }, contextGraphProposedDiff: { findMany: vi.fn(), update: vi.fn() },
+  },
+}));
+vi.mock("@corgtex/shared", () => ({ prisma: db }));
+vi.mock("./source-permission-epochs", () => ({ capturePermissionEpochs: vi.fn(async () => ({ version: 1, policyVersion: "pun68-permissions-v1", entries: [{ kind: "Document", id: "document-a", epoch: "2" }] })) }));
+vi.mock("./source-lineage", async () => ({ assertArtifactInputWriteFence: fence, isLineageKind: (await vi.importActual<typeof import("./source-lineage")>("./source-lineage")).isLineageKind }));
+import { inspectStoredArtifactInputDependencyIdentities, retireContextGraphSourceDescendants, retireContextGraphChangedSourceDescendants } from "./context-graph-retirement";
+import type { Prisma } from "@prisma/client";
+const tx = db as unknown as Prisma.TransactionClient;
+const lease = { lockedBy: "worker-a", lockedAt: new Date("2026-10-13T10:00:00Z") };
+const identity = { workspaceId: "ws-a", workflowJobId: "job-a", sourceType: "DOCUMENT", sourceId: "document-a", attempts: 2, expectedLease: lease };
+const manifest = { id: "manifest-graph", revision: 3, origin: "DERIVED", contentHash: "a".repeat(64), rootsJson: [
+  { kind: "ArtifactInputSnapshot", id: "snapshot-a", fingerprint: "b".repeat(64) },
+] };
+beforeEach(() => {
+  vi.resetAllMocks();
+  db.$transaction.mockImplementation(async cb => cb(db));
+  db.$queryRaw.mockResolvedValue([{ id: "locked" }]);
+  db.workflowJob.findFirst.mockResolvedValue({ id: "job-a", workspaceId: "ws-a", type: "context-graph.sync", status: "RUNNING",
+    attempts: 2, ...lease, eventId: "event-a", dependsOnJobId: null, dedupeKey: "event-a:context-graph-sync:DOCUMENT:document-a",
+    payload: { sourceType: "DOCUMENT", sourceId: "document-a" } });
+  db.event.findFirst.mockResolvedValue({ id: "event-a", type: "document.updated", aggregateType: "Document", aggregateId: "document-a", payload: { documentId: "document-a" } });
+  db.contextGraphObject.findMany.mockResolvedValue([{ id: "graph-a" }]);
+  db.contextGraphRelationship.findMany.mockResolvedValue([]);
+  db.contextGraphEvidenceRef.findMany.mockResolvedValue([]);
+  db.contextGraphProposedDiff.findMany.mockResolvedValue([]);
+  db.artifactInputLineage.findFirst.mockResolvedValue(manifest);
+  db.artifactInputSnapshot.findFirst.mockResolvedValue({ sourceKind: "Document", sourceId: "document-a", sourceFingerprint: "c".repeat(64), origin: "HUMAN_ORIGINAL", rootsJson: [] });
+});
+describe("source-bound graph retirement", () => {
+  it("retires an unreadable historical snapshot descendant without selecting any body", async () => {
+    await retireContextGraphSourceDescendants(identity);
+    expect(db.contextGraphObject.update).not.toHaveBeenCalled();
+    expect(db.artifactInputLineage.create).toHaveBeenCalledWith({ data: {
+      workspaceId: "ws-a", artifactType: "ContextGraphObject", artifactId: "graph-a", revision: 4,
+      origin: "UNKNOWN", contentHash: "a".repeat(64), inputsJson: [], rootsJson: [],
+    } });
+    expect(db.contextGraphObject.findMany.mock.calls[0][0].select).toEqual({ id: true });
+    expect(db.artifactInputSnapshot.findFirst.mock.calls[0][0].select).not.toHaveProperty("contentJson");
+    expect(db.artifactInputSnapshot.findFirst.mock.calls[0][0].select).not.toHaveProperty("accessEnvelopeJson");
+    expect(fence).toHaveBeenCalledWith(db);
+    expect(db.derivedArtifactRebuildState.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({
+      targetManifestId: "manifest-graph", targetFingerprint: "a".repeat(64), state: "REBUILD_REQUIRED", eventId: "event-a",
+      sourceStateJson: { permissionEpochs: expect.objectContaining({ entries: [{ kind: "Document", id: "document-a", epoch: "2" }] }) },
+    }) }));
+  });
+  it("preserves human originals, unknown manifests, unsupported roots and other-source composites", async () => {
+    for (const origin of ["HUMAN_ORIGINAL", "UNKNOWN"]) {
+      db.artifactInputLineage.findFirst.mockResolvedValue({ ...manifest, origin, rootsJson: [] });
+      await retireContextGraphSourceDescendants(identity);
+    }
+    db.artifactInputLineage.findFirst.mockResolvedValue(manifest);
+    db.artifactInputSnapshot.findFirst.mockResolvedValueOnce(null).mockResolvedValue({ sourceKind: "Document", sourceId: "other", sourceFingerprint: "e".repeat(64), origin: "HUMAN_ORIGINAL", rootsJson: [] });
+    await retireContextGraphSourceDescendants(identity);
+    await retireContextGraphSourceDescendants(identity);
+    expect(db.contextGraphObject.update).not.toHaveBeenCalled();
+    expect(db.artifactInputLineage.create).not.toHaveBeenCalled();
+  });
+  it.each([
+    { attempts: 1 }, { expectedLease: { ...lease, lockedBy: "old-worker" } },
+    { expectedLease: { ...lease, lockedAt: new Date(0) } }, { sourceId: "unrelated" }, { workspaceId: "ws-b" },
+  ])("rejects changed job scope before effects: %j", async change => {
+    // Real tenant-scoped lookup has no result for another workspace.
+    if ("workspaceId" in change) db.workflowJob.findFirst.mockResolvedValue(null);
+    await expect(retireContextGraphSourceDescendants({ ...identity, ...change })).rejects.toThrow();
+    expect(db.contextGraphObject.findMany).not.toHaveBeenCalled();
+    expect(db.artifactInputLineage.create).not.toHaveBeenCalled();
+  });
+  it("rechecks the lease before effects and the manifest revision under the graph lock", async () => {
+    const job = await db.workflowJob.findFirst();
+    db.workflowJob.findFirst.mockResolvedValueOnce(job).mockResolvedValueOnce({ ...job, lockedBy: "replacement" });
+    await expect(retireContextGraphSourceDescendants(identity)).rejects.toThrow("lease changed");
+    expect(db.contextGraphObject.update).not.toHaveBeenCalled();
+    db.workflowJob.findFirst.mockResolvedValue(job);
+    db.artifactInputLineage.findFirst.mockResolvedValueOnce(manifest).mockResolvedValueOnce({ ...manifest, id: "new", revision: 4 });
+    await expect(retireContextGraphSourceDescendants(identity)).rejects.toThrow("provenance changed");
+    expect(db.contextGraphObject.update).not.toHaveBeenCalled();
+  });
+  it("accepts only a completed, matching durable reconcile parent", async () => {
+    const child = { id: "job-a", workspaceId: "ws-a", type: "context-graph.sync", status: "RUNNING", attempts: 2, ...lease,
+      eventId: "event-a", dependsOnJobId: "parent", dedupeKey: "ws-a:context-graph-reconcile:DOCUMENT:document-a:rebuild:event-a",
+      payload: { sourceType: "DOCUMENT", sourceId: "document-a" } };
+    const parent = { id: "parent", type: "context-graph.reconcile", status: "COMPLETED", eventId: "event-a", payload: { dateISO: "rebuild:event-a" } };
+    db.workflowJob.findFirst.mockImplementation(async args => args.where.id === "parent" ? parent : child);
+    await retireContextGraphSourceDescendants(identity);
+    expect(db.artifactInputLineage.create).toHaveBeenCalledOnce();
+    db.contextGraphObject.update.mockClear(); parent.status = "RUNNING";
+    await expect(retireContextGraphSourceDescendants(identity)).rejects.toThrow("reconciliation scope changed");
+    expect(db.contextGraphObject.update).not.toHaveBeenCalled();
+  });
+  it("withholds evidence and prior approvals while preserving every original field", async () => {
+    db.contextGraphEvidenceRef.findMany.mockResolvedValue([{ id: "evidence-a" }]);
+    db.contextGraphProposedDiff.findMany.mockResolvedValue([{ id: "diff-a" }]);
+    await retireContextGraphSourceDescendants(identity);
+    expect(db.contextGraphProposedDiff.update).not.toHaveBeenCalled();
+    expect(db.artifactInputLineage.create).toHaveBeenCalledTimes(3);
+    db.artifactInputLineage.findFirst.mockResolvedValue({ ...manifest, revision: 4, origin: "UNKNOWN", rootsJson: [] });
+    db.artifactInputLineage.create.mockClear(); db.contextGraphObject.update.mockClear();
+    await retireContextGraphSourceDescendants(identity);
+    expect(db.artifactInputLineage.create).not.toHaveBeenCalled();
+    expect(db.contextGraphObject.update).not.toHaveBeenCalled();
+  });
+  it("retires deleted-source descendants from the actual reconcile event before native enumeration", async () => {
+    db.workflowJob.findFirst.mockResolvedValue({ id: "job-a", type: "context-graph.reconcile", status: "RUNNING", attempts: 2,
+      ...lease, eventId: "event-a", dedupeKey: "ws-a:source-lineage-rebuild:event-a:native-graph", payload: { dateISO: "rebuild:event-a" } });
+    db.event.findFirst.mockResolvedValue({ id: "event-a", type: "source-lineage.changed", aggregateType: "BrainSource", aggregateId: "deleted",
+      payload: { kind: "BrainSource", id: "deleted", change: "purged" } });
+    db.artifactInputSnapshot.findFirst.mockResolvedValue({ sourceKind: "BrainSource", sourceId: "deleted", sourceFingerprint: "e".repeat(64), origin: "HUMAN_ORIGINAL", rootsJson: [] });
+    await retireContextGraphChangedSourceDescendants(identity);
+    expect(db.artifactInputLineage.create).toHaveBeenCalledOnce();
+    expect(db.contextGraphObject.update).not.toHaveBeenCalled();
+    db.event.findFirst.mockResolvedValue({ id: "event-a", type: "source-lineage.changed", aggregateType: "BrainSource", aggregateId: "deleted",
+      payload: { kind: "BrainSource", id: "swapped" } });
+    await expect(retireContextGraphChangedSourceDescendants(identity)).rejects.toThrow("event scope changed");
+  });
+
+  it("rejects oversized scans before partial retirement", async () => {
+    db.contextGraphObject.findMany.mockResolvedValue(Array.from({ length: 5001 }, (_, index) => ({ id: String(index) })));
+    await expect(retireContextGraphSourceDescendants(identity)).rejects.toThrow("bounded reconciliation");
+    expect(db.contextGraphObject.update).not.toHaveBeenCalled();
+  });
+});
+describe("metadata-only complete ancestry", () => {
+  it("can follow exact historical receipts after a source is physically deleted", async () => {
+    db.artifactInputLineage.findFirst.mockResolvedValueOnce({ ...manifest, rootsJson: [{ kind: "Document", id: "deleted", fingerprint: "d".repeat(64) }] })
+      .mockResolvedValueOnce({ id: "old", revision: 1, contentHash: "d".repeat(64), origin: "HUMAN_ORIGINAL", rootsJson: [] });
+    const result = await inspectStoredArtifactInputDependencyIdentities(tx, "ws-a", { kind: "ContextGraphObject", id: "graph-a" });
+    expect(result.complete).toBe(true);
+    expect(result.dependencies).toContainEqual({ kind: "Document", id: "deleted" });
+    expect(db.artifactInputLineage.findFirst.mock.calls[1][0].where.contentHash).toBe("d".repeat(64));
+  });
+  it("rejects unknown kind tags and copied-only snapshot originals without loading content", async () => {
+    db.artifactInputLineage.findFirst.mockResolvedValueOnce({ ...manifest, rootsJson: [{ kind: "Unregistered", id: "x", fingerprint: "f".repeat(64) }] });
+    expect((await inspectStoredArtifactInputDependencyIdentities(tx, "ws-a", { kind: "ContextGraphObject", id: "graph-a" })).complete).toBe(false);
+    db.artifactInputLineage.findFirst.mockResolvedValue(manifest);
+    db.artifactInputSnapshot.findFirst.mockResolvedValue({ sourceKind: "KnowledgeChunk", sourceId: "chunk", sourceFingerprint: "f".repeat(64), origin: "HUMAN_ORIGINAL", rootsJson: [] });
+    expect((await inspectStoredArtifactInputDependencyIdentities(tx, "ws-a", { kind: "ContextGraphObject", id: "graph-a" })).complete).toBe(false);
+  });
+
+  it.each(["CommunicationMessageNativeInput", "NativeTranscriptInput"])("accepts only immutable native constructor snapshot ancestry for %s", async kind => {
+    db.artifactInputSnapshot.findFirst.mockResolvedValue({ sourceKind: kind, sourceId: "native-input", sourceFingerprint: "c".repeat(64), origin: "NATIVE_ORIGINAL", rootsJson: [] });
+    expect((await inspectStoredArtifactInputDependencyIdentities(tx, "ws-a", { kind: "ContextGraphObject", id: "graph-a" })).complete).toBe(true);
+    db.artifactInputLineage.findFirst.mockResolvedValueOnce({ ...manifest, rootsJson: [{ kind, id: "native-input", fingerprint: "c".repeat(64) }] }).mockResolvedValue(null);
+    expect((await inspectStoredArtifactInputDependencyIdentities(tx, "ws-a", { kind: "ContextGraphObject", id: "graph-a" })).complete).toBe(false);
+    db.artifactInputLineage.findFirst.mockResolvedValue(manifest);
+    db.artifactInputSnapshot.findFirst.mockResolvedValue({ sourceKind: kind, sourceId: "native-input", sourceFingerprint: "c".repeat(64), origin: "UNKNOWN", rootsJson: [] });
+    expect((await inspectStoredArtifactInputDependencyIdentities(tx, "ws-a", { kind: "ContextGraphObject", id: "graph-a" })).complete).toBe(false);
+  });
+  it("does not treat citations or missing native receipts as complete and detects cycles", async () => {
+    db.artifactInputLineage.findFirst.mockResolvedValueOnce({ ...manifest, rootsJson: [{ kind: "Document", id: "raw", fingerprint: "e".repeat(64) }] }).mockResolvedValueOnce(null);
+    expect((await inspectStoredArtifactInputDependencyIdentities(tx, "ws-a", { kind: "ContextGraphObject", id: "graph-a" })).complete).toBe(false);
+    db.artifactInputLineage.findFirst.mockResolvedValue(manifest);
+    db.artifactInputSnapshot.findFirst.mockResolvedValue({ sourceKind: "Document", sourceId: "a", sourceFingerprint: "e".repeat(64), origin: "DERIVED", rootsJson: manifest.rootsJson });
+    expect((await inspectStoredArtifactInputDependencyIdentities(tx, "ws-a", { kind: "ContextGraphObject", id: "graph-a" })).complete).toBe(false);
+  });
+});

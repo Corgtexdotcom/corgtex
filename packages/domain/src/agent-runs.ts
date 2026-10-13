@@ -294,7 +294,7 @@ export async function submitAgentFeedback(actor: AppActor, params: {
     const priorRoots = await captureArtifactInputSnapshotProof(actor, params.workspaceId, { kind: "AgentRun", id: run.id, fingerprint: lineageContentFingerprint("AgentRun", run) }, tx);
     const priorRunSnapshotId = priorRoots.find(root => root.kind === "ArtifactInputSnapshot")!.id;
     const input = await tx.agentFeedbackInput.create({ data: {
-      workspaceId: params.workspaceId, agentRunId: run.id, stepId: step.id, userId: actor.user.id, content: feedback,
+      workspaceId: params.workspaceId, agentRunId: run.id, stepId: step.id, userId: actor.user.id, content: feedback, priorRunSnapshotId,
     } });
     const feedbackRoots = await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "AgentFeedbackInput", id: input.id, snapshot: input }], tx);
     const stepRoots = await captureArtifactInputSnapshotProof(actor, params.workspaceId, { kind: "AgentStep", id: step.id, fingerprint: lineageContentFingerprint("AgentStep", step) }, tx);
@@ -397,7 +397,7 @@ export async function loadAgentFeedbackContinuation(params: { workspaceId: strin
   return prisma.$transaction(async tx => {
     const input = await tx.agentFeedbackInput.findFirst({ where: { id: params.feedbackInputId, workspaceId: params.workspaceId } });
     const snapshot = await tx.artifactInputSnapshot.findFirst({ where: { id: params.priorRunSnapshotId, workspaceId: params.workspaceId, sourceKind: "AgentRun" } });
-    invariant(input && snapshot && snapshot.sourceId === input.agentRunId, 409, "UNKNOWN_LINEAGE", "The feedback continuation receipt is unavailable.");
+    invariant(input && snapshot && input.priorRunSnapshotId === snapshot.id && snapshot.sourceId === input.agentRunId, 409, "UNKNOWN_LINEAGE", "The feedback continuation receipt is unavailable.");
     const run = await tx.agentRun.findFirst({ where: { id: input.agentRunId, workspaceId: params.workspaceId, agentKey: params.agentKey } });
     invariant(run, 409, "UNKNOWN_LINEAGE", "The feedback run is unavailable.");
     const actor = await inputAuthor(tx, params.workspaceId, input.userId);

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { installSourcePermissionEpochFixture } from "./source-permission-epochs.test-fixture";
 import type { AppActor } from "@corgtex/shared";
 
 const fixture = vi.hoisted(() => {
@@ -119,7 +120,13 @@ async function seed() {
   add("action", { ...publicAction, id: "foreign-action", workspaceId: "ws-b", title: "Foreign workspace body" });
   return { privateSource, publicAction, derivedAction, publicCircle, privateCircle, publicRole, privateRole };
 }
-beforeEach(() => { for (const kind of Object.keys(fixture.rows)) fixture.rows[kind] = []; vi.clearAllMocks(); });
+beforeEach(() => {
+  for (const kind of Object.keys(fixture.rows)) fixture.rows[kind] = [];
+  vi.clearAllMocks();
+  fixture.prisma.$executeRaw.mockReset().mockResolvedValue(1);
+  fixture.prisma.$queryRaw.mockReset().mockResolvedValue([]);
+  installSourcePermissionEpochFixture(fixture.prisma);
+});
 import { getMemberProfile, listMembersEnriched } from "./members";
 
 describe("member readers with current source receipts", () => {

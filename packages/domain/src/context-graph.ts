@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { Prisma } from "@prisma/client";
+import { Prisma, type ContextGraphObject, type ContextGraphRelationship, type ContextGraphEvidenceRef, type ContextGraphProposedDiff } from "@prisma/client";
+import { getReadableGraphSourceVariants, requestGraphSourceVariant, revalidateGraphSourceVariants, type GraphTargetKind, type GraphVariantScope } from "./derived-artifact-variants";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
@@ -7,8 +8,14 @@ import { requireAgentScope } from "./agent-auth";
 import { requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
 import { invariant } from "./errors";
+import { getMcpToolInputRoots } from "./mcp-tool-input-context";
 import {
   currentArtifactInputRoots,
+  captureArtifactInputProof,
+  captureImmutableArtifactInputProof,
+  advanceHumanArtifactInputLineage,
+  isArtifactInputProofReadable,
+  preserveUnknownArtifactInputSnapshot,
   invalidateArtifactInputLineage,
   lineageContentFingerprint,
   readableArtifactIds,
@@ -29,9 +36,16 @@ async function readableGraphRecords<T extends { id: string }>(actor: AppActor, w
   return records.filter((record) => ids.has(record.id));
 }
 
+function graphSubmissionCapture(actor: AppActor, workspaceId: string, capture: GraphLineageCapture): GraphLineageCapture {
+  const submissionRoots = getMcpToolInputRoots(actor, workspaceId);
+  return submissionRoots.length ? { ...capture, lineageInputs: capture.lineageInputs ?? [],
+    lineageRoots: [...(capture.lineageRoots ?? []), ...submissionRoots] } : capture;
+}
+
 async function captureGraphLineage(tx: Prisma.TransactionClient, actor: AppActor, workspaceId: string,
   artifact: LineageInput, content: unknown, capture: GraphLineageCapture,
   previous: unknown | null = null, requiredInputs: LineageInput[] = [], replacesContent = false) {
+  capture = graphSubmissionCapture(actor, workspaceId, capture);
   // Absence of an explicit complete input set is unknown, never an empty proof.
   if (capture.lineageInputs === undefined && !capture.humanOriginal) {
     await invalidateArtifactInputLineage({ tx, workspaceId, artifact, content });
@@ -52,8 +66,28 @@ async function captureGraphLineage(tx: Prisma.TransactionClient, actor: AppActor
   });
 }
 
+async function preserveGraphHistory(tx: Prisma.TransactionClient, actor: AppActor, workspaceId: string,
+  artifact: LineageInput, previous: { id: string }) {
+  if ((await readableGraphRecords(actor, workspaceId, artifact.kind, [previous], tx)).length) {
+    const roots = await captureArtifactInputProof(actor, workspaceId, [{ ...artifact, snapshot: previous }], tx);
+    await captureImmutableArtifactInputProof(actor, workspaceId, roots, tx);
+  } else await preserveUnknownArtifactInputSnapshot(tx, workspaceId, artifact, previous);
+}
+
+/** Freeze consumed revisions before a graph mutation, then attest the actual saved row. */
+async function prepareGraphLineage(tx: Prisma.TransactionClient, actor: AppActor, workspaceId: string,
+  capture: GraphLineageCapture, previous?: LineageInput, requiredInputs: LineageInput[] = []) {
+  capture = graphSubmissionCapture(actor, workspaceId, capture);
+  if (capture.lineageInputs === undefined && !capture.humanOriginal) return capture;
+  const roots = await captureArtifactInputProof(actor, workspaceId,
+    [...(capture.lineageInputs ?? []), ...requiredInputs, ...(previous ? [previous] : [])], tx);
+  const immutable = await captureImmutableArtifactInputProof(actor, workspaceId,
+    [...roots, ...(capture.lineageRoots ?? [])], tx);
+  return { lineageInputs: [], lineageRoots: immutable, humanOriginal: capture.humanOriginal } satisfies GraphLineageCapture;
+}
+
 function graphEvidenceSource(input: ContextGraphEvidenceInput): LineageInput | null {
-  const supported = ["BrainSource", "BrainArticle", "Document", "Meeting", "Proposal", "Goal", "CheckIn"] as const;
+  const supported = ["BrainSource", "BrainArticle", "Document", "Meeting", "Proposal", "Goal", "CheckIn", "ContextGraphObject", "ContextGraphRelationship"] as const;
   const legacyNames: Record<string, typeof supported[number]> = {
     BRAIN_SOURCE: "BrainSource",
     BRAIN_ARTICLE: "BrainArticle",
@@ -84,6 +118,7 @@ function graphDiffInputs(diff: ContextGraphDiffInput): LineageInput[] | null {
     if (evidence.relationshipId) inputs.push({ kind: "ContextGraphRelationship", id: evidence.relationshipId });
   }
   for (const layout of diff.mapLayoutUpdates ?? []) {
+    inputs.push({ kind: "ContextMapView", id: layout.mapViewId });
     for (const item of layout.items) if (item.objectId) inputs.push({ kind: "ContextGraphObject", id: item.objectId });
   }
   return [...new Map(inputs.map((input) => [`${input.kind}:${input.id}`, input])).values()];
@@ -654,6 +689,9 @@ async function upsertObjectWithTx(
   const writeData = {
     ...data,
     ...creatorData(actor, agentRunId),
+    recordedAt: new Date(),
+    createdAt: new Date(),
+    supersededByObjectId: null,
   };
 
   const dedupeKey = data.dedupeKey ?? objectDedupeKey(workspaceId, data.sourceEntityType, data.sourceEntityId);
@@ -665,9 +703,9 @@ async function upsertObjectWithTx(
     await tx.$queryRaw`SELECT id FROM "ContextGraphObject" WHERE id = ${previous.id} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
     previous = await tx.contextGraphObject.findFirst({ where: { id: previous.id, workspaceId } });
     invariant(previous, 409, "SOURCE_CHANGED", "Context graph object changed.");
-    await captureGraphLineage(tx, actor, workspaceId, { kind: "ContextGraphObject", id: previous.id },
-      { ...previous, ...writeData, dedupeKey }, input, previous, [], true);
+    await preserveGraphHistory(tx, actor, workspaceId, { kind: "ContextGraphObject", id: previous.id }, previous);
   }
+  const prepared = await prepareGraphLineage(tx, actor, workspaceId, input);
   const object = dedupeKey ? await tx.contextGraphObject.upsert({
     where: { dedupeKey },
     update: { ...writeData, dedupeKey },
@@ -679,7 +717,7 @@ async function upsertObjectWithTx(
   }) : await tx.contextGraphObject.create({
     data: { workspaceId, ...writeData },
   });
-  if (!previous) await captureGraphLineage(tx, actor, workspaceId, { kind: "ContextGraphObject", id: object.id }, object, input);
+  await captureGraphLineage(tx, actor, workspaceId, { kind: "ContextGraphObject", id: object.id }, object, prepared);
   return object;
 }
 
@@ -715,12 +753,12 @@ async function updateObjectWithTx(
       input.sourceEntityId !== undefined ? input.sourceEntityId?.trim() || null : object.sourceEntityId,
     );
   }
-  await captureGraphLineage(tx, actor, workspaceId, { kind: "ContextGraphObject", id: object.id },
-    { ...object, ...update.data }, capture, object);
+  const prepared = await prepareGraphLineage(tx, actor, workspaceId, capture, { kind: "ContextGraphObject", id: object.id });
   const updated = await tx.contextGraphObject.update({
     where: { id: update.id },
     data: update.data,
   });
+  await captureGraphLineage(tx, actor, workspaceId, { kind: "ContextGraphObject", id: updated.id }, updated, prepared);
   return updated;
 }
 
@@ -759,6 +797,9 @@ async function upsertRelationshipWithTx(
     sourceObjectId,
     targetObjectId,
     ...creatorData(actor, agentRunId),
+    recordedAt: new Date(),
+    createdAt: new Date(),
+    supersededByRelationshipId: null,
   };
 
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`context-graph-relationship:${dedupeKey}`}, 0))`;
@@ -768,11 +809,10 @@ async function upsertRelationshipWithTx(
     await tx.$queryRaw`SELECT id FROM "ContextGraphRelationship" WHERE id = ${previous.id} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
     previous = await tx.contextGraphRelationship.findFirst({ where: { id: previous.id, workspaceId } });
     invariant(previous, 409, "SOURCE_CHANGED", "Context graph relationship changed.");
-    await captureGraphLineage(tx, actor, workspaceId, { kind: "ContextGraphRelationship", id: previous.id },
-      { ...previous, ...writeData }, input, previous, [
-        { kind: "ContextGraphObject", id: sourceObjectId }, { kind: "ContextGraphObject", id: targetObjectId },
-      ], true);
+    await preserveGraphHistory(tx, actor, workspaceId, { kind: "ContextGraphRelationship", id: previous.id }, previous);
   }
+  const endpoints: LineageInput[] = [{ kind: "ContextGraphObject", id: sourceObjectId }, { kind: "ContextGraphObject", id: targetObjectId }];
+  const prepared = await prepareGraphLineage(tx, actor, workspaceId, input, undefined, endpoints);
   const relationship = await tx.contextGraphRelationship.upsert({
     where: { dedupeKey },
     update: writeData,
@@ -781,9 +821,7 @@ async function upsertRelationshipWithTx(
       ...writeData,
     },
   });
-  if (!previous) await captureGraphLineage(tx, actor, workspaceId, { kind: "ContextGraphRelationship", id: relationship.id }, relationship, input, null, [
-    { kind: "ContextGraphObject", id: sourceObjectId }, { kind: "ContextGraphObject", id: targetObjectId },
-  ]);
+  await captureGraphLineage(tx, actor, workspaceId, { kind: "ContextGraphRelationship", id: relationship.id }, relationship, prepared);
   return relationship;
 }
 
@@ -830,15 +868,16 @@ async function updateRelationshipWithTx(
       sourceEntityId: input.sourceEntityId !== undefined ? input.sourceEntityId?.trim() || null : relationship.sourceEntityId,
     });
   }
+  const prepared = await prepareGraphLineage(tx, actor, workspaceId, capture,
+    { kind: "ContextGraphRelationship", id: relationship.id }, [
+      { kind: "ContextGraphObject", id: normalizedSourceObjectId ?? relationship.sourceObjectId },
+      { kind: "ContextGraphObject", id: normalizedTargetObjectId ?? relationship.targetObjectId },
+    ]);
   const updated = await tx.contextGraphRelationship.update({
     where: { id: update.id },
     data: update.data,
   });
-  await captureGraphLineage(tx, actor, workspaceId, { kind: "ContextGraphRelationship", id: relationship.id },
-    updated, capture, relationship, [
-      { kind: "ContextGraphObject", id: normalizedSourceObjectId ?? relationship.sourceObjectId },
-      { kind: "ContextGraphObject", id: normalizedTargetObjectId ?? relationship.targetObjectId },
-    ]);
+  await captureGraphLineage(tx, actor, workspaceId, { kind: "ContextGraphRelationship", id: relationship.id }, updated, prepared);
   return updated;
 }
 
@@ -879,18 +918,15 @@ async function attachEvidenceWithTx(
     metadata: jsonObject(input.metadata),
   };
 
+  const source = graphEvidenceSource(input);
+  const prepared = source && !input.knowledgeChunkId ? await prepareGraphLineage(tx, actor, workspaceId, input, undefined, [
+    source, objectId ? { kind: "ContextGraphObject", id: objectId } : { kind: "ContextGraphRelationship", id: relationshipId! },
+  ]) : null;
   const evidence = existing
     ? await tx.contextGraphEvidenceRef.update({ where: { id: existing.id }, data })
     : await tx.contextGraphEvidenceRef.create({ data });
-  const source = graphEvidenceSource(input);
-  // Knowledge chunks need a committed receipt and immutable content snapshot; this helper cannot prove either.
-  if (source && !input.knowledgeChunkId) {
-    await captureGraphLineage(tx, actor, workspaceId, { kind: "ContextGraphEvidenceRef", id: evidence.id }, evidence, input, existing, [
-      source, objectId ? { kind: "ContextGraphObject", id: objectId } : { kind: "ContextGraphRelationship", id: relationshipId! },
-    ], true);
-  } else {
-    await invalidateArtifactInputLineage({ tx, workspaceId, artifact: { kind: "ContextGraphEvidenceRef", id: evidence.id }, content: evidence });
-  }
+  if (prepared) await captureGraphLineage(tx, actor, workspaceId, { kind: "ContextGraphEvidenceRef", id: evidence.id }, evidence, prepared);
+  else await invalidateArtifactInputLineage({ tx, workspaceId, artifact: { kind: "ContextGraphEvidenceRef", id: evidence.id }, content: evidence });
   return evidence;
 }
 
@@ -930,6 +966,110 @@ function objectWhereForMapView(workspaceId: string, mapView: { query: Prisma.Jso
     ...(objectTypes.length ? { objectType: { in: objectTypes } } : {}),
     ...(objectIds.length ? { id: { in: objectIds } } : {}),
   };
+}
+
+function rebuildScopeForMap(mapView?: { id: string; query: Prisma.JsonValue; createdByUserId?: string | null } | null): GraphVariantScope {
+  const key = mapView && stringProperty(mapView.query, "defaultMapKey");
+  if (!mapView) return { kind: "default", mapKey: "critical-path" };
+  return key && mapView.createdByUserId === null && ["critical-path", "org-structure", "agent-governance"].includes(key)
+    ? { kind: "default", mapKey: key as "critical-path" | "org-structure" | "agent-governance" }
+    : { kind: "view", mapViewId: mapView.id };
+}
+
+/** Queue only fresh recipes for denied server-discovered identities; no denied fields are forwarded. */
+function graphReadWithRebuild(actor: AppActor, workspaceId: string,
+  mapView?: { id: string; query: Prisma.JsonValue; createdByUserId?: string | null } | null) {
+  const attempted = new Set<string>();
+  const kinds = new Set<LineageInput["kind"]>(["ContextGraphObject", "ContextGraphRelationship", "ContextGraphEvidenceRef", "ContextGraphProposedDiff"]);
+  const scope = rebuildScopeForMap(mapView);
+  return async <T extends { id: string }>(kind: LineageInput["kind"], candidates: T[]): Promise<T[]> => {
+    const readable = await readableGraphRecords(actor, workspaceId, kind, candidates);
+    if (actor.kind !== "user" || !kinds.has(kind)) return readable;
+    const ids = new Set(readable.map(row => row.id));
+    const denied = candidates.filter(row => !ids.has(row.id));
+    invariant(denied.length <= 5000, 409, "SOURCE_READ_SCAN_LIMIT", "Graph rebuild discovery exceeds its scan limit.");
+    for (const row of denied) {
+      if (ids.has(row.id) || attempted.has(`${kind}:${row.id}`)) continue;
+      if (attempted.size >= 8) break;
+      const manifest = await prisma.artifactInputLineage.findFirst({
+        where: { workspaceId, artifactType: kind, artifactId: row.id }, orderBy: { revision: "desc" },
+        select: { id: true, origin: true },
+      });
+      if (manifest?.origin !== "DERIVED") {
+        if (manifest?.origin !== "UNKNOWN" || !await prisma.derivedArtifactRebuildState.findFirst({
+          where: { workspaceId, targetKind: kind, targetId: row.id, state: { in: ["REBUILD_REQUIRED", "CANDIDATE_READY"] } }, select: { id: true },
+        })) continue;
+      }
+      attempted.add(`${kind}:${row.id}`);
+      // The request API discovers complete stored ancestry and current independent
+      // inputs itself. Originals and unclassified legacy records cannot queue.
+      await requestGraphSourceVariant(actor, { workspaceId, target: { kind: kind as GraphTargetKind, id: row.id }, scope, mode: "MEMBER_VARIANT" });
+    }
+    return readable;
+  };
+}
+
+/** Whole owner-private bundles use their own receipt, never a fabricated native child receipt. */
+async function effectiveGraphVariantProjection(actor: AppActor, workspaceId: string,
+  mapView?: { id: string; query: Prisma.JsonValue; createdByUserId?: string | null } | null, asOf?: Date | null) {
+  const key = mapView && stringProperty(mapView.query, "defaultMapKey");
+  const scopes: GraphVariantScope[] = mapView
+    ? key && mapView.createdByUserId === null && ["critical-path", "org-structure", "agent-governance"].includes(key)
+      ? [{ kind: "default", mapKey: key as "critical-path" | "org-structure" | "agent-governance" }]
+      : [{ kind: "view", mapViewId: mapView.id }]
+    : ["critical-path", "org-structure", "agent-governance"].map(mapKey => ({ kind: "default", mapKey } as GraphVariantScope));
+  if (!mapView) {
+    const views = await readableMapViews(actor, workspaceId, await prisma.contextMapView.findMany({
+      where: visibleMapViewWhere(workspaceId, actorUserId(actor)),
+    }));
+    for (const view of views) if (view.createdByUserId !== null || !stringProperty(view.query, "defaultMapKey")) scopes.push({ kind: "view", mapViewId: view.id });
+  }
+  const variants = [...new Map((await Promise.all(scopes.map(scope => getReadableGraphSourceVariants(actor, { workspaceId, scope }))))
+    .flat().map(variant => [variant.id, variant])).values()];
+  const objects: ContextGraphObject[] = []; const relationships: ContextGraphRelationship[] = [];
+  const evidenceRefs: ContextGraphEvidenceRef[] = []; const proposedDiffs: ContextGraphProposedDiff[] = [];
+  const lineageRoots: NonNullable<GraphLineageCapture["lineageRoots"]> = [];
+  const variantIds: string[] = []; const virtualIds = new Set<string>();
+  const bundles = new Map<string, { childIds: Set<string>; roots: NonNullable<GraphLineageCapture["lineageRoots"]> }>();
+  const objectTypes = mapView ? stringArrayFromQuery(mapView.query, "objectTypes") : [];
+  const relationshipTypes = mapView ? stringArrayFromQuery(mapView.query, "relationshipTypes") : [];
+  for (const variant of variants) {
+    if (asOf && variant.createdAt > asOf) continue;
+    const bundle = variant.bundle;
+    const childIds = [...bundle.objects, ...bundle.relationships, ...bundle.evidenceRefs, bundle.proposedDiff].map(row => row.id);
+    // Reject collisions as a whole; do not silently substitute an old or other-bundle endpoint.
+    if (new Set(childIds).size !== childIds.length || childIds.some(id => virtualIds.has(id) || variant.targets.some(target => target.id === id))) continue;
+    const ownObjects = bundle.objects.filter(row => !objectTypes.length || objectTypes.includes(row.objectType));
+    const ownIds = new Set(ownObjects.map(row => row.id));
+    const ownRelationships = bundle.relationships.filter(row => ownIds.has(row.sourceObjectId) && ownIds.has(row.targetObjectId)
+      && (!relationshipTypes.length || relationshipTypes.includes(row.relationshipType)));
+    const ownRelationshipIds = new Set(ownRelationships.map(row => row.id));
+    if (!ownObjects.length || ownObjects.length !== bundle.objects.length || ownRelationships.length !== bundle.relationships.length
+      || bundle.evidenceRefs.some(row => (row.objectId !== null && !ownIds.has(row.objectId))
+        || (row.relationshipId !== null && !ownRelationshipIds.has(row.relationshipId)))) continue;
+    const common = { workspaceId, createdByType: "agent", createdByUserId: null, createdByAgentRunId: null,
+      sourceEntityType: null, sourceEntityId: null, dedupeKey: null, validFrom: null, validTo: null,
+      recordedAt: variant.createdAt, lastVerifiedAt: null, createdAt: variant.createdAt, updatedAt: variant.createdAt };
+    objects.push(...ownObjects.map(row => ({ ...common, ...row, properties: (row.properties ?? {}) as Prisma.JsonValue,
+      confidence: row.confidence ?? null, supersededByObjectId: null })));
+    relationships.push(...ownRelationships.map(row => ({ ...common, ...row, properties: (row.properties ?? {}) as Prisma.JsonValue,
+      confidence: row.confidence ?? null, supersededByRelationshipId: null })));
+    evidenceRefs.push(...bundle.evidenceRefs.filter(row => (row.objectId ? ownIds.has(row.objectId) : false)
+      || (row.relationshipId ? ownRelationshipIds.has(row.relationshipId) : false)).map(row => ({ ...row, workspaceId,
+      knowledgeChunkId: null, metadata: row.metadata as Prisma.JsonValue, createdAt: variant.createdAt })));
+    proposedDiffs.push({ ...bundle.proposedDiff, workspaceId, proposedByType: "agent", proposedByUserId: null,
+      proposedByAgentRunId: null, diffJson: bundle.proposedDiff.diffJson as Prisma.JsonValue, evidenceJson: null,
+      reviewedByUserId: null, reviewedAt: null, appliedAt: null, createdAt: variant.createdAt, updatedAt: variant.createdAt });
+    childIds.forEach(id => virtualIds.add(id)); variantIds.push(variant.id); lineageRoots.push(...variant.roots);
+    bundles.set(variant.id, { childIds: new Set(childIds), roots: variant.roots });
+  }
+  invariant(objects.length + relationships.length + evidenceRefs.length <= 5000, 409, "SOURCE_READ_SCAN_LIMIT", "The effective graph requires a bounded rebuild.");
+  return { objects, relationships, evidenceRefs, proposedDiffs, lineageRoots, variantIds, virtualIds, bundles };
+}
+async function assertEffectiveGraphVariantProjection(actor: AppActor, workspaceId: string,
+  projection: Awaited<ReturnType<typeof effectiveGraphVariantProjection>>) {
+  invariant(!projection.variantIds.length || await revalidateGraphSourceVariants(actor, { workspaceId, variantIds: projection.variantIds }),
+    409, "SOURCE_CHANGED", "Graph variants changed before release.");
 }
 
 function contextMapGuidance(mapView: { name: string; viewType: string; query: Prisma.JsonValue }, counts: {
@@ -1011,6 +1151,9 @@ async function applyMapLayoutUpdateWithTx(
   for (const rawItem of update.items) {
     const item = layoutItemFromProposed(rawItem, options?.refToObjectId ?? new Map());
     await resolveObjectId(tx, workspaceId, item.objectId);
+    const prepared = options?.actor ? await prepareGraphLineage(tx, options.actor, workspaceId,
+      options.capture ?? { humanOriginal: options.actor.kind === "user", lineageInputs: options.actor.kind === "user" ? [] : undefined },
+      undefined, [{ kind: "ContextMapView", id: update.mapViewId }, { kind: "ContextGraphObject", id: item.objectId }]) : null;
     const saved = await tx.contextMapLayoutItem.upsert({
       where: {
         mapViewId_objectId: {
@@ -1038,8 +1181,7 @@ async function applyMapLayoutUpdateWithTx(
     if (options?.actor) {
       await captureGraphLineage(tx, options.actor, workspaceId,
         { kind: "ContextMapLayoutItem", id: saved.id }, saved,
-        options.capture ?? { humanOriginal: options.actor.kind === "user", lineageInputs: options.actor.kind === "user" ? [] : undefined },
-        null, [{ kind: "ContextGraphObject", id: saved.objectId }], true);
+        prepared!);
     } else {
       await invalidateArtifactInputLineage({ tx, workspaceId,
         artifact: { kind: "ContextMapLayoutItem", id: saved.id }, content: saved });
@@ -1122,6 +1264,10 @@ export async function importContextGraphMap(actor: AppActor, params: ContextGrap
       where: { workspaceId: params.workspaceId, name: mapInput.name, createdByUserId: null },
       orderBy: { createdAt: "asc" },
     });
+    if (existingMapView) invariant((await readableMapViews(actor, params.workspaceId, [existingMapView], tx)).length,
+      404, "NOT_FOUND", "Context map not found.");
+    const mapCapture = await prepareGraphLineage(tx, actor, params.workspaceId, params,
+      existingMapView ? { kind: "ContextMapView", id: existingMapView.id } : undefined);
     const mapView = existingMapView
       ? await tx.contextMapView.update({
         where: { id: existingMapView.id },
@@ -1140,7 +1286,7 @@ export async function importContextGraphMap(actor: AppActor, params: ContextGrap
         },
       });
     await captureGraphLineage(tx, actor, params.workspaceId,
-      { kind: "ContextMapView", id: mapView.id }, mapView, params, null, [], true);
+      { kind: "ContextMapView", id: mapView.id }, mapView, mapCapture);
 
     const refToObjectId = new Map<string, string>();
     const refToRelationshipId = new Map<string, string>();
@@ -1269,68 +1415,57 @@ function sameStringArrays(left: string[], right: string[]) {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-async function ensureDefaultContextMapViewsForWorkspace(workspaceId: string) {
-  const views = [];
-  for (const config of DEFAULT_CONTEXT_MAP_VIEW_CONFIGS) {
-    const existing = await prisma.contextMapView.findFirst({
-      where: { workspaceId, viewType: config.viewType, createdByUserId: null },
-      orderBy: { createdAt: "asc" },
-    });
-    if (existing) {
-      const configQuery = config.query as Prisma.JsonValue;
-      const queryDrifted = stringProperty(existing.query, "defaultMapKey") === config.key && (
-        !sameStringArrays(stringArrayFromQuery(existing.query, "objectTypes"), stringArrayFromQuery(configQuery, "objectTypes"))
-        || !sameStringArrays(stringArrayFromQuery(existing.query, "relationshipTypes"), stringArrayFromQuery(configQuery, "relationshipTypes"))
-      );
-      if (queryDrifted) {
-        views.push(await prisma.contextMapView.update({
-          where: { id: existing.id },
-          data: { query: config.query },
-        }));
+async function ensureDefaultContextMapViewsForWorkspace(actor: AppActor, workspaceId: string) {
+  return prisma.$transaction(async (tx) => {
+    const views = [];
+    for (const config of DEFAULT_CONTEXT_MAP_VIEW_CONFIGS) {
+      const existing = await tx.contextMapView.findFirst({
+        where: { workspaceId, viewType: config.viewType, createdByUserId: null }, orderBy: { createdAt: "asc" },
+      });
+      if (existing) {
+        // Matching constants are not historical provenance. Unknown maps stay untouched.
+        if (!(await readableMapViews(actor, workspaceId, [existing], tx)).length) continue;
+        const configQuery = config.query as Prisma.JsonValue;
+        const queryDrifted = stringProperty(existing.query, "defaultMapKey") === config.key && (
+          !sameStringArrays(stringArrayFromQuery(existing.query, "objectTypes"), stringArrayFromQuery(configQuery, "objectTypes"))
+          || !sameStringArrays(stringArrayFromQuery(existing.query, "relationshipTypes"), stringArrayFromQuery(configQuery, "relationshipTypes"))
+        );
+        if (queryDrifted) {
+          const capture = await prepareGraphLineage(tx, actor, workspaceId,
+            { lineageInputs: [{ kind: "Workspace", id: workspaceId }] }, { kind: "ContextMapView", id: existing.id });
+          const updated = await tx.contextMapView.update({ where: { id: existing.id }, data: { query: config.query } });
+          await captureGraphLineage(tx, actor, workspaceId, { kind: "ContextMapView", id: updated.id }, updated, capture);
+          views.push(updated);
+        } else views.push(existing);
         continue;
       }
-      views.push(existing);
-      continue;
+      const capture = await prepareGraphLineage(tx, actor, workspaceId, { lineageInputs: [{ kind: "Workspace", id: workspaceId }] });
+      const created = await tx.contextMapView.create({ data: {
+        workspaceId, name: config.name, viewType: config.viewType, query: config.query, createdByUserId: null,
+      } });
+      await captureGraphLineage(tx, actor, workspaceId, { kind: "ContextMapView", id: created.id }, created, capture);
+      views.push(created);
     }
-
-    views.push(await prisma.contextMapView.create({
-      data: {
-        workspaceId,
-        name: config.name,
-        viewType: config.viewType,
-        query: config.query,
-        createdByUserId: null,
-      },
-    }));
-  }
-
-  return views;
+    return views;
+  });
 }
 
-function isStaticDefaultMapView(view: { name: string; viewType: string; query: Prisma.JsonValue; createdByUserId: string | null }) {
-  return view.createdByUserId === null && DEFAULT_CONTEXT_MAP_VIEW_CONFIGS.some((config) =>
-    config.name === view.name && config.viewType === view.viewType
-    && JSON.stringify(config.query) === JSON.stringify(view.query));
-}
-
-async function readableMapViews<T extends { id: string; name: string; viewType: string; query: Prisma.JsonValue; createdByUserId: string | null }>(
+async function readableMapViews<T extends { id: string }>(
   actor: AppActor, workspaceId: string, views: T[], db: Prisma.TransactionClient | typeof prisma = prisma,
 ) {
-  const derived = views.filter((view) => !isStaticDefaultMapView(view));
-  const ids = await readableArtifactIds(actor, workspaceId, "ContextMapView", derived, db);
-  return views.filter((view) => isStaticDefaultMapView(view) || ids.has(view.id));
+  return readableGraphRecords(actor, workspaceId, "ContextMapView", views, db);
 }
 
 export async function ensureDefaultContextMapView(actor: AppActor, workspaceId: string) {
   await requireGraphRead(actor, workspaceId);
-  const views = await readableMapViews(actor, workspaceId, await ensureDefaultContextMapViewsForWorkspace(workspaceId));
+  const views = await readableMapViews(actor, workspaceId, await ensureDefaultContextMapViewsForWorkspace(actor, workspaceId));
   return views.find((view) => view.viewType === "process") ?? views[0];
 }
 
 export async function listContextMapViews(actor: AppActor, workspaceId: string) {
   await requireGraphRead(actor, workspaceId);
   const userId = actorUserId(actor);
-  await ensureDefaultContextMapViewsForWorkspace(workspaceId);
+  await ensureDefaultContextMapViewsForWorkspace(actor, workspaceId);
   const views = await prisma.contextMapView.findMany({
     where: visibleMapViewWhere(workspaceId, userId),
     orderBy: [{ createdByUserId: "asc" }, { viewType: "asc" }, { createdAt: "asc" }],
@@ -1359,19 +1494,57 @@ export async function markStaleContextGraphFacts(actor: AppActor, params: {
   };
 
   return prisma.$transaction(async (tx) => {
-    const objects = await tx.contextGraphObject.updateMany({
-      where: staleWhere,
-      data: { status: "stale" },
-    });
-    const relationships = await tx.contextGraphRelationship.updateMany({
-      where: staleWhere,
-      data: { status: "stale" },
-    });
-    return {
-      staleObjects: objects.count,
-      staleRelationships: relationships.count,
-      cutoff,
-    };
+    const objectRows = await tx.contextGraphObject.findMany({ where: staleWhere, take: 5001 });
+    const relationshipRows = await tx.contextGraphRelationship.findMany({ where: staleWhere, take: 5001 });
+    invariant(objectRows.length <= 5000 && relationshipRows.length <= 5000, 409, "SOURCE_READ_SCAN_LIMIT", "Graph transition exceeds its scan limit.");
+    const objects = await readableGraphRecords(actor, params.workspaceId, "ContextGraphObject", objectRows, tx);
+    const relationships = await readableGraphRecords(actor, params.workspaceId, "ContextGraphRelationship", relationshipRows, tx);
+    for (const before of objects) {
+      await tx.$queryRaw`SELECT id FROM "ContextGraphObject" WHERE id = ${before.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+      await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "ContextGraphObject", id: before.id, snapshot: before }], tx);
+      const after = await tx.contextGraphObject.update({ where: { id: before.id }, data: { status: "stale" } });
+      await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "ContextGraphObject", id: before.id }, before, after, allowSystemTransition: true });
+    }
+    for (const before of relationships) {
+      await tx.$queryRaw`SELECT id FROM "ContextGraphRelationship" WHERE id = ${before.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+      await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "ContextGraphRelationship", id: before.id, snapshot: before }], tx);
+      const after = await tx.contextGraphRelationship.update({ where: { id: before.id }, data: { status: "stale" } });
+      await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "ContextGraphRelationship", id: before.id }, before, after, allowSystemTransition: true });
+    }
+    return { staleObjects: objects.length, staleRelationships: relationships.length, cutoff };
+  });
+}
+
+/** Retire obsolete projections without re-certifying their historical bodies. */
+export async function retireContextGraphFacts(actor: AppActor, params: {
+  workspaceId: string;
+  objectWhere?: Prisma.ContextGraphObjectWhereInput;
+  relationshipWhere?: Prisma.ContextGraphRelationshipWhereInput;
+}) {
+  await requireGraphApprove(actor, params.workspaceId);
+  await prisma.$transaction(async (tx) => {
+    if (params.objectWhere) {
+      const rows = await tx.contextGraphObject.findMany({ where: { AND: [params.objectWhere, { workspaceId: params.workspaceId, status: { not: "archived" } }] }, take: 5001 });
+      invariant(rows.length <= 5000, 409, "SOURCE_READ_SCAN_LIMIT", "Graph retirement exceeds its scan limit.");
+      for (const row of await readableGraphRecords(actor, params.workspaceId, "ContextGraphObject", rows, tx)) {
+        await tx.$queryRaw`SELECT id FROM "ContextGraphObject" WHERE id = ${row.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+        await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "ContextGraphObject", id: row.id, snapshot: row }], tx);
+        const updated = await tx.contextGraphObject.update({ where: { id: row.id }, data: { status: "archived" } });
+        await invalidateArtifactInputLineage({ tx, workspaceId: params.workspaceId, artifact: { kind: "ContextGraphObject", id: row.id }, content: updated });
+      }
+    }
+    if (params.relationshipWhere) {
+      const rows = await tx.contextGraphRelationship.findMany({ where: { AND: [params.relationshipWhere, { workspaceId: params.workspaceId, status: { not: "archived" } }] }, take: 5001 });
+      invariant(rows.length <= 5000, 409, "SOURCE_READ_SCAN_LIMIT", "Graph retirement exceeds its scan limit.");
+      for (const row of await readableGraphRecords(actor, params.workspaceId, "ContextGraphRelationship", rows, tx)) {
+        await tx.$queryRaw`SELECT id FROM "ContextGraphRelationship" WHERE id = ${row.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+        await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "ContextGraphRelationship", id: row.id, snapshot: row }], tx);
+        const updated = await tx.contextGraphRelationship.update({ where: { id: row.id }, data: { status: "archived" } });
+        await invalidateArtifactInputLineage({ tx, workspaceId: params.workspaceId, artifact: { kind: "ContextGraphRelationship", id: row.id }, content: updated });
+      }
+    }
   });
 }
 
@@ -1382,7 +1555,7 @@ export async function getContextMapData(actor: AppActor, params: {
 }) {
   const membership = await requireGraphRead(actor, params.workspaceId);
   const userId = actorUserId(actor);
-  const defaultViews = await ensureDefaultContextMapViewsForWorkspace(params.workspaceId);
+  const defaultViews = await ensureDefaultContextMapViewsForWorkspace(actor, params.workspaceId);
   const mapView = params.mapViewId
     ? await prisma.contextMapView.findFirst({ where: { id: params.mapViewId, ...visibleMapViewWhere(params.workspaceId, userId) } })
     : (await readableMapViews(actor, params.workspaceId, defaultViews)).find((view) => view.viewType === "process")
@@ -1391,6 +1564,7 @@ export async function getContextMapData(actor: AppActor, params: {
   invariant((await readableMapViews(actor, params.workspaceId, [mapView])).length,
     404, "NOT_FOUND", "Context map not found.");
 
+  const readGraph = graphReadWithRebuild(actor, params.workspaceId, mapView);
   const candidateObjects = await prisma.contextGraphObject.findMany({
     where: objectWhereForMapView(params.workspaceId, mapView, params.includeStale),
     include: {
@@ -1400,11 +1574,23 @@ export async function getContextMapData(actor: AppActor, params: {
     },
     orderBy: [{ objectType: "asc" }, { updatedAt: "desc" }],
   });
-  const readableObjects = await readableGraphRecords(actor, params.workspaceId, "ContextGraphObject", candidateObjects);
+  const readableObjects = await readGraph("ContextGraphObject", candidateObjects);
+  const variantProjection = await effectiveGraphVariantProjection(actor, params.workspaceId, mapView);
   const allEvidence = readableObjects.flatMap((object) => object.evidenceRefs).filter((ref) => !ref.knowledgeChunkId);
-  const readableEvidenceIds = new Set((await readableGraphRecords(actor, params.workspaceId, "ContextGraphEvidenceRef", allEvidence)).map((ref) => ref.id));
-  const objects = readableObjects.slice(0, 200).map((object) => ({ ...object,
-    evidenceRefs: object.evidenceRefs.filter((ref) => readableEvidenceIds.has(ref.id)).slice(0, 5),
+  const readableEvidenceIds = new Set((await readGraph("ContextGraphEvidenceRef", allEvidence)).map((ref) => ref.id));
+  // A display window can omit a bundle, but must never split its object dictionary.
+  let remainingVariantSlots = Math.max(0, 200 - readableObjects.length);
+  const admittedVariantObjectIds = new Set<string>();
+  for (const bundle of variantProjection.bundles.values()) {
+    const ids = variantProjection.objects.filter(object => bundle.childIds.has(object.id)).map(object => object.id);
+    if (ids.length > remainingVariantSlots) continue;
+    ids.forEach(id => admittedVariantObjectIds.add(id)); remainingVariantSlots -= ids.length;
+  }
+  const variantObjects = variantProjection.objects.filter(object => admittedVariantObjectIds.has(object.id)).map(object => ({ ...object,
+    evidenceRefs: variantProjection.evidenceRefs.filter(ref => ref.objectId === object.id),
+  }));
+  const objects = [...readableObjects, ...variantObjects].slice(0, 200).map((object) => ({ ...object,
+    evidenceRefs: object.evidenceRefs.filter((ref) => readableEvidenceIds.has(ref.id) || variantProjection.virtualIds.has(ref.id)).slice(0, 5),
   }));
   const objectIds = objects.map((object) => object.id);
   const relationshipTypes = stringArrayFromQuery(mapView.query, "relationshipTypes");
@@ -1436,20 +1622,36 @@ export async function getContextMapData(actor: AppActor, params: {
     }),
   ]);
 
-  const readableRelationships = await readableGraphRecords(actor, params.workspaceId, "ContextGraphRelationship", candidateRelationships);
-  const relationshipEvidenceIds = new Set((await readableGraphRecords(actor, params.workspaceId, "ContextGraphEvidenceRef",
+  const readableRelationships = await readGraph("ContextGraphRelationship", candidateRelationships);
+  const relationshipEvidenceIds = new Set((await readGraph("ContextGraphEvidenceRef",
     readableRelationships.flatMap((relationship) => relationship.evidenceRefs).filter((ref) => !ref.knowledgeChunkId))).map((ref) => ref.id));
   const visibleObjectIds = new Set(objectIds);
-  const relationships = readableRelationships.filter((relationship) => visibleObjectIds.has(relationship.sourceObjectId)
-    && visibleObjectIds.has(relationship.targetObjectId)).slice(0, 300).map((relationship) => ({ ...relationship,
-    evidenceRefs: relationship.evidenceRefs.filter((ref) => relationshipEvidenceIds.has(ref.id)).slice(0, 5),
+  const variantRelationships = variantProjection.relationships.map(relationship => ({ ...relationship,
+    evidenceRefs: variantProjection.evidenceRefs.filter(ref => ref.relationshipId === relationship.id),
   }));
-  const layoutItems = (await readableGraphRecords(actor, params.workspaceId, "ContextMapLayoutItem",
+  const relationships = [...readableRelationships, ...variantRelationships].filter((relationship) => visibleObjectIds.has(relationship.sourceObjectId)
+    && visibleObjectIds.has(relationship.targetObjectId)).slice(0, 300).map((relationship) => ({ ...relationship,
+    evidenceRefs: relationship.evidenceRefs.filter((ref) => relationshipEvidenceIds.has(ref.id) || variantProjection.virtualIds.has(ref.id)).slice(0, 5),
+  }));
+  const layoutItems = (await readGraph("ContextMapLayoutItem",
     candidateLayoutItems.filter((item) => visibleObjectIds.has(item.objectId))));
-  const proposedDiffs = (await readableGraphRecords(actor, params.workspaceId, "ContextGraphProposedDiff", candidateDiffs)).slice(0, 20);
+  const proposedDiffs = [...await readGraph("ContextGraphProposedDiff", candidateDiffs), ...variantProjection.proposedDiffs].slice(0, 20);
+  const visibleMapViews = await readableMapViews(actor, params.workspaceId, mapViews);
+  const releaseInputs = [
+    ...[mapView, ...visibleMapViews].map(row => ({ kind: "ContextMapView" as const, id: row.id, snapshot: row })),
+    ...readableObjects.map(row => ({ kind: "ContextGraphObject" as const, id: row.id, snapshot: row })),
+    ...readableRelationships.map(row => ({ kind: "ContextGraphRelationship" as const, id: row.id, snapshot: row })),
+    ...[...allEvidence.filter(row => readableEvidenceIds.has(row.id)), ...readableRelationships.flatMap(row => row.evidenceRefs).filter(row => relationshipEvidenceIds.has(row.id))]
+      .map(row => ({ kind: "ContextGraphEvidenceRef" as const, id: row.id, snapshot: row })),
+    ...layoutItems.map(row => ({ kind: "ContextMapLayoutItem" as const, id: row.id, snapshot: row })),
+    ...proposedDiffs.filter(row => !variantProjection.virtualIds.has(row.id)).map(row => ({ kind: "ContextGraphProposedDiff" as const, id: row.id, snapshot: row })),
+  ];
+  const releaseRoots = [...await captureArtifactInputProof(actor, params.workspaceId, releaseInputs), ...variantProjection.lineageRoots];
+  await assertEffectiveGraphVariantProjection(actor, params.workspaceId, variantProjection);
+  invariant(await isArtifactInputProofReadable(actor, params.workspaceId, releaseRoots), 409, "SOURCE_CHANGED", "Graph inputs changed before release.");
   return {
     mapView,
-    mapViews: await readableMapViews(actor, params.workspaceId, mapViews),
+    mapViews: visibleMapViews,
     objects,
     relationships,
     layoutItems,
@@ -1488,6 +1690,8 @@ export async function updateContextMapLayout(actor: AppActor, params: {
   if (!isPersonalOwner && !canUpdateMaster) {
     const proposedDiff = await createContextGraphProposedDiff(actor, {
       workspaceId: params.workspaceId,
+      lineageInputs: [{ kind: "ContextMapView", id: mapView.id }],
+      lineageRoots: await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "ContextMapView", id: mapView.id, snapshot: mapView }]),
       reason: `Request to update master map layout: ${mapView.name}`,
       evidence: {
         kind: "context-map-layout-update",
@@ -1537,9 +1741,8 @@ export async function createPersonalContextMapView(actor: AppActor, params: {
   invariant(sourceMapView, 404, "NOT_FOUND", "Context map not found.");
   invariant((await readableMapViews(actor, params.workspaceId, [sourceMapView])).length,
     404, "NOT_FOUND", "Context map not found.");
-  const sourceRoots = isStaticDefaultMapView(sourceMapView) ? []
-    : await currentArtifactInputRoots(prisma, params.workspaceId,
-      { kind: "ContextMapView", id: sourceMapView.id }, sourceMapView);
+  const sourceRoots = await captureArtifactInputProof(actor, params.workspaceId,
+    [{ kind: "ContextMapView", id: sourceMapView.id, snapshot: sourceMapView }]);
   invariant(sourceRoots, 404, "NOT_FOUND", "Context map not found.");
 
   const query = (sourceMapView.query && typeof sourceMapView.query === "object" && !Array.isArray(sourceMapView.query))
@@ -1551,6 +1754,11 @@ export async function createPersonalContextMapView(actor: AppActor, params: {
   });
   const readableSourceLayoutIds = await readableArtifactIds(actor, params.workspaceId,
     "ContextMapLayoutItem", sourceLayoutRows);
+  const layoutRoots = new Map<string, NonNullable<GraphLineageCapture["lineageRoots"]>>();
+  for (const row of sourceLayoutRows.filter(row => readableSourceLayoutIds.has(row.id))) {
+    layoutRoots.set(row.id, await captureArtifactInputProof(actor, params.workspaceId,
+      [{ kind: "ContextMapLayoutItem", id: row.id, snapshot: row }]));
+  }
   const sourceLayoutItems = params.items?.length
     ? params.items.map((item) => ({ item: normalizeLayoutItem(item), sourceId: null }))
     : sourceLayoutRows.filter((item) => readableSourceLayoutIds.has(item.id)).map((item) => ({
@@ -1603,7 +1811,7 @@ export async function createPersonalContextMapView(actor: AppActor, params: {
       });
       await captureGraphLineage(tx, actor, params.workspaceId,
         { kind: "ContextMapLayoutItem", id: saved.id }, saved,
-        { humanOriginal: true, lineageInputs: sourceId ? [{ kind: "ContextMapLayoutItem", id: sourceId }] : [] },
+        { humanOriginal: true, lineageInputs: [], lineageRoots: sourceId ? layoutRoots.get(sourceId) : [] },
         null, [{ kind: "ContextGraphObject", id: saved.objectId }]);
     }
 
@@ -1719,6 +1927,7 @@ export async function listContextGraphProposedDiffs(actor: AppActor, params: {
   take?: number;
 }) {
   await requireGraphRead(actor, params.workspaceId);
+  const readGraph = graphReadWithRebuild(actor, params.workspaceId);
   const candidates = await prisma.contextGraphProposedDiff.findMany({
     where: {
       workspaceId: params.workspaceId,
@@ -1726,7 +1935,17 @@ export async function listContextGraphProposedDiffs(actor: AppActor, params: {
     },
     orderBy: { createdAt: "desc" },
   });
-  return (await readableGraphRecords(actor, params.workspaceId, "ContextGraphProposedDiff", candidates)).slice(0, params.take ?? 50);
+  const canonical = await readGraph("ContextGraphProposedDiff", candidates);
+  const projection = await effectiveGraphVariantProjection(actor, params.workspaceId);
+  const output = [...canonical, ...projection.proposedDiffs.filter(row => !params.status?.length || params.status.includes(row.status))]
+    .sort((left, right) => right.createdAt.valueOf() - left.createdAt.valueOf());
+  const roots = [...await captureArtifactInputProof(actor, params.workspaceId, [
+    { kind: "Workspace", id: params.workspaceId },
+    ...canonical.map(row => ({ kind: "ContextGraphProposedDiff" as const, id: row.id, snapshot: row })),
+  ]), ...projection.lineageRoots];
+  await assertEffectiveGraphVariantProjection(actor, params.workspaceId, projection);
+  invariant(await isArtifactInputProofReadable(actor, params.workspaceId, roots), 409, "SOURCE_CHANGED", "Graph proposals changed before release.");
+  return output.slice(0, params.take ?? 50);
 }
 
 export async function updateContextGraphProposedDiff(actor: AppActor, params: GraphLineageCapture & {
@@ -1740,6 +1959,7 @@ export async function updateContextGraphProposedDiff(actor: AppActor, params: Gr
   validateDiff(params.diff);
 
   return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "ContextGraphProposedDiff" WHERE id = ${params.proposedDiffId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const proposedDiff = await tx.contextGraphProposedDiff.findFirst({
       where: { id: params.proposedDiffId, workspaceId: params.workspaceId },
     });
@@ -1748,8 +1968,9 @@ export async function updateContextGraphProposedDiff(actor: AppActor, params: Gr
       404, "NOT_FOUND", "Proposed graph diff not found.");
     invariant(proposedDiff.status === "pending", 409, "INVALID_STATE", "Only pending graph diffs can be edited.");
 
-    const priorRoots = await currentArtifactInputRoots(tx, params.workspaceId,
-      { kind: "ContextGraphProposedDiff", id: proposedDiff.id }, proposedDiff);
+    const referencedInputs = graphDiffInputs(params.diff);
+    const prepared = referencedInputs ? await prepareGraphLineage(tx, actor, params.workspaceId, params,
+      { kind: "ContextGraphProposedDiff", id: proposedDiff.id }, referencedInputs) : null;
     const updated = await tx.contextGraphProposedDiff.update({
       where: { id: proposedDiff.id },
       data: {
@@ -1760,10 +1981,8 @@ export async function updateContextGraphProposedDiff(actor: AppActor, params: Gr
         } : {}),
       },
     });
-    const referencedInputs = graphDiffInputs(params.diff);
-    if (referencedInputs && priorRoots) await captureGraphLineage(tx, actor, params.workspaceId,
-      { kind: "ContextGraphProposedDiff", id: updated.id }, updated,
-      { ...params, lineageRoots: [...priorRoots, ...(params.lineageRoots ?? [])] }, null, referencedInputs);
+    if (prepared) await captureGraphLineage(tx, actor, params.workspaceId,
+      { kind: "ContextGraphProposedDiff", id: updated.id }, updated, prepared);
     else await invalidateArtifactInputLineage({ tx, workspaceId: params.workspaceId, artifact: { kind: "ContextGraphProposedDiff", id: updated.id }, content: updated });
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
@@ -1791,6 +2010,7 @@ export async function reviewContextGraphProposedDiff(actor: AppActor, params: {
   await requireGraphApprove(actor, params.workspaceId);
   const reviewedByUserId = actor.kind === "user" ? actor.user.id : null;
   return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "ContextGraphProposedDiff" WHERE id = ${params.proposedDiffId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const proposedDiff = await tx.contextGraphProposedDiff.findFirst({
       where: { id: params.proposedDiffId, workspaceId: params.workspaceId },
     });
@@ -1806,6 +2026,8 @@ export async function reviewContextGraphProposedDiff(actor: AppActor, params: {
         reviewedAt: new Date(),
       },
     });
+    await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "ContextGraphProposedDiff", id: updated.id }, before: proposedDiff, after: updated });
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
       action: `context-graph.diff.${params.status}`,
@@ -1848,14 +2070,8 @@ export async function applyContextGraphProposedDiff(actor: AppActor, params: {
       409, "SOURCE_CHANGED", "Proposed graph diff inputs changed.");
     const diff = proposedDiff.diffJson as ContextGraphDiffInput;
     validateDiff(diff);
-    // Keep pending snapshots exact. Only the locked application snapshot may reduce mutable graph inputs to their ancestors.
-    await captureGraphLineage(tx, actor, params.workspaceId,
-      { kind: "ContextGraphProposedDiff", id: proposedDiff.id }, { ...proposedDiff, status: "applied" },
-      { lineageInputs: [{ kind: "ContextGraphProposedDiff", id: proposedDiff.id }], lineageRoots: priorRoots }, proposedDiff);
-    const lineageRoots = await currentArtifactInputRoots(tx, params.workspaceId,
-      { kind: "ContextGraphProposedDiff", id: proposedDiff.id }, proposedDiff);
-    invariant(lineageRoots, 409, "UNKNOWN_LINEAGE", "Applied graph diff has incomplete lineage.");
-    const capture: GraphLineageCapture = { lineageInputs: [{ kind: "ContextGraphProposedDiff", id: proposedDiff.id }], lineageRoots };
+    const capture = await prepareGraphLineage(tx, actor, params.workspaceId,
+      { lineageInputs: [{ kind: "ContextGraphProposedDiff", id: proposedDiff.id }], lineageRoots: priorRoots });
     const refToObjectId = new Map<string, string>();
     const refToRelationshipId = new Map<string, string>();
     const objectIds: string[] = [];
@@ -1917,6 +2133,8 @@ export async function applyContextGraphProposedDiff(actor: AppActor, params: {
       },
     });
 
+    await captureGraphLineage(tx, actor, params.workspaceId,
+      { kind: "ContextGraphProposedDiff", id: updated.id }, updated, capture);
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
       action: "context-graph.diff.applied",
@@ -1991,6 +2209,13 @@ export async function buildSelectedRegionContext(actor: AppActor, params: {
   invariant(selectedIds.length > 0, 400, "INVALID_INPUT", "Select at least one context graph object.");
 
   const asOf = normalizeDate(params.asOf);
+  const mapView = params.mapViewId ? await prisma.contextMapView.findFirst({ where: {
+    id: params.mapViewId, ...visibleMapViewWhere(params.workspaceId, actorUserId(actor)),
+  } }) : null;
+  if (params.mapViewId) invariant(mapView && (await readableMapViews(actor, params.workspaceId, [mapView])).length,
+    404, "NOT_FOUND", "Context map not found.");
+  const readGraph = graphReadWithRebuild(actor, params.workspaceId, mapView);
+  const variantProjection = await effectiveGraphVariantProjection(actor, params.workspaceId, mapView, asOf);
   const timeFilter = asOf
     ? {
       AND: [
@@ -2013,7 +2238,8 @@ export async function buildSelectedRegionContext(actor: AppActor, params: {
       ...timeFilter,
     },
   });
-  const readableSelectedObjects = (await readableGraphRecords(actor, params.workspaceId, "ContextGraphObject", selectedObjects)).filter((object) => isReadableStatus(object.status, params.includeStale));
+  const readableSelectedObjects = [...await readGraph("ContextGraphObject", selectedObjects),
+    ...variantProjection.objects.filter(object => selectedIds.includes(object.id))].filter((object) => isReadableStatus(object.status, params.includeStale));
   invariant(readableSelectedObjects.length === selectedIds.length, 404, "NOT_FOUND", "One or more selected objects were not found.");
   for (const object of readableSelectedObjects) {
     objectsById.set(object.id, object);
@@ -2033,7 +2259,8 @@ export async function buildSelectedRegionContext(actor: AppActor, params: {
       },
     });
     const nextFrontier = new Set<string>();
-    for (const relationship of await readableGraphRecords(actor, params.workspaceId, "ContextGraphRelationship", relationships)) {
+    for (const relationship of [...await readGraph("ContextGraphRelationship", relationships),
+      ...variantProjection.relationships.filter(row => frontier.has(row.sourceObjectId) || frontier.has(row.targetObjectId))]) {
       if (!isReadableStatus(relationship.status, params.includeStale)) continue;
       relationshipsById.set(relationship.id, relationship);
       relationshipDistanceById.set(
@@ -2055,7 +2282,8 @@ export async function buildSelectedRegionContext(actor: AppActor, params: {
       },
     });
     frontier = new Set();
-    for (const object of await readableGraphRecords(actor, params.workspaceId, "ContextGraphObject", neighbors)) {
+    for (const object of [...await readGraph("ContextGraphObject", neighbors),
+      ...variantProjection.objects.filter(row => nextFrontier.has(row.id))]) {
       if (!isReadableStatus(object.status, params.includeStale)) continue;
       objectsById.set(object.id, object);
       objectDistanceById.set(
@@ -2081,7 +2309,7 @@ export async function buildSelectedRegionContext(actor: AppActor, params: {
     },
     orderBy: { createdAt: "desc" },
   });
-  const evidenceRefs = (await readableGraphRecords(actor, params.workspaceId, "ContextGraphEvidenceRef", candidateEvidenceRefs))
+  const evidenceRefs = [...await readGraph("ContextGraphEvidenceRef", candidateEvidenceRefs), ...variantProjection.evidenceRefs]
     .filter((ref) => !ref.knowledgeChunkId && (ref.objectId ? objectsById.has(ref.objectId)
       : Boolean(ref.relationshipId && relationshipsById.has(ref.relationshipId)))).slice(0, 80);
   const maxSensitivity = params.maxSensitivity ?? (membership ? "INTERNAL" : "PUBLIC");
@@ -2317,7 +2545,21 @@ export async function buildSelectedRegionContext(actor: AppActor, params: {
     }),
   ].sort((left, right) => right.score - left.score || left.title.localeCompare(right.title)).slice(0, 24);
 
+  const lineageInputs: Array<LineageInput & { snapshot?: Record<string, unknown> }> = [
+    ...(mapView ? [{ kind: "ContextMapView" as const, id: mapView.id, snapshot: mapView }] : []),
+    ...[...objectsById.values()].filter(row => !variantProjection.virtualIds.has(row.id)).map((row) => ({ kind: "ContextGraphObject" as const, id: row.id, snapshot: row })),
+    ...[...relationshipsById.values()].filter(row => !variantProjection.virtualIds.has(row.id)).map((row) => ({ kind: "ContextGraphRelationship" as const, id: row.id, snapshot: row })),
+    ...evidenceRefs.filter(row => !variantProjection.virtualIds.has(row.id)).map((row) => ({ kind: "ContextGraphEvidenceRef" as const, id: row.id, snapshot: row })),
+  ];
+  const consumedIds = new Set([...objectsById.keys(), ...relationshipsById.keys(), ...evidenceRefs.map(row => row.id)]);
+  const consumedBundles = [...variantProjection.bundles].filter(([, bundle]) => [...bundle.childIds].some(id => consumedIds.has(id)));
+  const usedVariantProjection = { ...variantProjection, variantIds: consumedBundles.map(([id]) => id),
+    lineageRoots: consumedBundles.flatMap(([, bundle]) => bundle.roots) };
+  const lineageRoots = [...(lineageInputs.length ? await captureArtifactInputProof(actor, params.workspaceId, lineageInputs) : []), ...usedVariantProjection.lineageRoots];
+  await assertEffectiveGraphVariantProjection(actor, params.workspaceId, usedVariantProjection);
+  invariant(await isArtifactInputProofReadable(actor, params.workspaceId, lineageRoots), 409, "SOURCE_CHANGED", "Graph context changed before release.");
   return {
+    lineageInputs, lineageRoots,
     selectedObjectIds: selectedIds,
     mapViewId: params.mapViewId ?? null,
     temporalScope: { asOf: asOf?.toISOString() ?? "now", includeStale: Boolean(params.includeStale) },
@@ -2431,6 +2673,9 @@ export async function createContextMapChangeProposal(actor: AppActor, params: {
   });
   invariant(mapView, 404, "NOT_FOUND", "Context map not found.");
 
+  invariant((await readableMapViews(actor, params.workspaceId, [mapView])).length, 404, "NOT_FOUND", "Context map not found.");
+  const mapRoots = await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "ContextMapView", id: mapView.id, snapshot: mapView }]);
+  const readGraph = graphReadWithRebuild(actor, params.workspaceId, mapView);
   const selectedIds = [...new Set(params.selectedObjectIds ?? [])];
   const mapObjectWhere = objectWhereForMapView(params.workspaceId, mapView, false);
   const [candidateMapObjects, candidateSelectedObjects] = await Promise.all([
@@ -2443,8 +2688,9 @@ export async function createContextMapChangeProposal(actor: AppActor, params: {
       })
       : Promise.resolve([]),
   ]);
-  const mapObjects = await readableGraphRecords(actor, params.workspaceId, "ContextGraphObject", candidateMapObjects);
-  const explicitSelectedObjects = await readableGraphRecords(actor, params.workspaceId, "ContextGraphObject", candidateSelectedObjects);
+  const projection = await effectiveGraphVariantProjection(actor, params.workspaceId, mapView);
+  const mapObjects = [...await readGraph("ContextGraphObject", candidateMapObjects), ...projection.objects];
+  const explicitSelectedObjects = await readGraph("ContextGraphObject", candidateSelectedObjects);
   const objectById = new Map([...mapObjects, ...explicitSelectedObjects].map((object) => [object.id, object]));
   const scopedObjects = [...objectById.values()];
   const selectableObjects = scopedObjects.filter((object) => ["Process", "ProcessStep", "Team"].includes(object.objectType));
@@ -2471,6 +2717,9 @@ export async function createContextMapChangeProposal(actor: AppActor, params: {
     };
   }
 
+  await assertEffectiveGraphVariantProjection(actor, params.workspaceId, projection);
+  invariant(!targets.some(target => projection.virtualIds.has(target.id)), 409, "GRAPH_VARIANT_REVIEW_REQUIRED",
+    "A fresh graph bundle needs a separate review before native edits can be proposed.");
   const titleUpdate = extractInstructionValue(instruction, [
     /\brename(?: it)? to\s+(.+)$/i,
     /\btitle(?: should be| to| is)\s+(.+)$/i,
@@ -2588,9 +2837,9 @@ export async function createContextMapChangeProposal(actor: AppActor, params: {
 
   const proposedDiff = await createContextGraphProposedDiff(actor, {
     workspaceId: params.workspaceId,
-    lineageInputs: scopedObjects.map((object) => ({ kind: "ContextGraphObject" as const, id: object.id })),
-    lineageRoots: scopedObjects.map((object) => ({ kind: "ContextGraphObject" as const, id: object.id,
-      fingerprint: lineageContentFingerprint("ContextGraphObject", object) })),
+    lineageInputs: scopedObjects.filter(object => !projection.virtualIds.has(object.id)).map((object) => ({ kind: "ContextGraphObject" as const, id: object.id })),
+    lineageRoots: [...mapRoots, ...projection.lineageRoots, ...scopedObjects.filter(object => !projection.virtualIds.has(object.id)).map((object) => ({ kind: "ContextGraphObject" as const, id: object.id,
+      fingerprint: lineageContentFingerprint("ContextGraphObject", object) }))],
     reason: mapChangeReason(targets.map((target) => target.title), instruction),
     evidence,
     diff,
@@ -2684,14 +2933,15 @@ function manualRelationshipUpdateForVisual(
   };
 }
 
-async function requireVisibleMapObject(actor: AppActor, workspaceId: string, mapView: { query: Prisma.JsonValue }, objectId: string, includeStale = false) {
+async function requireVisibleMapObject(actor: AppActor, workspaceId: string, mapView: { id: string; query: Prisma.JsonValue; createdByUserId?: string | null }, objectId: string, includeStale = false, roots?: NonNullable<GraphLineageCapture["lineageRoots"]>, readGraph = graphReadWithRebuild(actor, workspaceId, mapView)) {
   const normalizedObjectId = requireStringField(objectId, "Context map object id is required.").trim();
   invariant(normalizedObjectId.length > 0, 400, "INVALID_INPUT", "Context map object id is required.");
   const object = await prisma.contextGraphObject.findFirst({
     where: { AND: [objectWhereForMapView(workspaceId, mapView, includeStale), { id: normalizedObjectId }] },
   });
-  invariant(object && (await readableGraphRecords(actor, workspaceId, "ContextGraphObject", [object])).length,
+  invariant(object && (await readGraph("ContextGraphObject", [object])).length,
     404, "NOT_FOUND", "Context graph object not found on this map.");
+  if (roots) roots.push(...await captureArtifactInputProof(actor, workspaceId, [{ kind: "ContextGraphObject", id: object.id, snapshot: object }]));
   return object;
 }
 
@@ -2720,6 +2970,15 @@ export async function createContextMapManualEditProposal(actor: AppActor, params
   });
   invariant(mapView, 404, "NOT_FOUND", "Context map not found.");
 
+  invariant((await readableMapViews(actor, params.workspaceId, [mapView])).length, 404, "NOT_FOUND", "Context map not found.");
+  const lineageRoots = await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "ContextMapView", id: mapView.id, snapshot: mapView }]);
+  const readGraph = graphReadWithRebuild(actor, params.workspaceId, mapView);
+  const variantProjection = await effectiveGraphVariantProjection(actor, params.workspaceId, mapView);
+  const requestedIds = Object.entries(params.edit).filter(([key]) => ["objectId", "sourceObjectId", "targetObjectId", "relationshipId"].includes(key))
+    .map(([, value]) => value).filter((value): value is string => typeof value === "string");
+  await assertEffectiveGraphVariantProjection(actor, params.workspaceId, variantProjection);
+  invariant(!requestedIds.some(id => variantProjection.virtualIds.has(id)), 409, "GRAPH_VARIANT_REVIEW_REQUIRED",
+    "A fresh graph bundle needs a separate review before native edits can be proposed.");
   const edit = params.edit;
   const diff: ContextGraphDiffInput = {};
   const evidence: JsonRecord = {
@@ -2771,7 +3030,7 @@ export async function createContextMapManualEditProposal(actor: AppActor, params
     }
 
     if (edit.sourceObjectId) {
-      await requireVisibleMapObject(actor, params.workspaceId, mapView, edit.sourceObjectId, params.includeStale);
+      await requireVisibleMapObject(actor, params.workspaceId, mapView, edit.sourceObjectId, params.includeStale, lineageRoots, readGraph);
       const intent = requireManualRelationIntent(edit.relationIntent ?? (edit.cardKind === "alert" ? "blocks" : "enables"));
       diff.relationships = [intent === "blocks"
         ? {
@@ -2790,15 +3049,15 @@ export async function createContextMapManualEditProposal(actor: AppActor, params
     }
   } else if (edit.action === "add-connection") {
     invariant(edit.sourceObjectId !== edit.targetObjectId, 400, "INVALID_INPUT", "Choose two different map cards to connect.");
-    await requireVisibleMapObject(actor, params.workspaceId, mapView, edit.sourceObjectId, params.includeStale);
-    await requireVisibleMapObject(actor, params.workspaceId, mapView, edit.targetObjectId, params.includeStale);
+    await requireVisibleMapObject(actor, params.workspaceId, mapView, edit.sourceObjectId, params.includeStale, lineageRoots, readGraph);
+    await requireVisibleMapObject(actor, params.workspaceId, mapView, edit.targetObjectId, params.includeStale, lineageRoots, readGraph);
     const intent = requireManualRelationIntent(edit.relationIntent);
     diff.relationships = [{
       ...manualRelationshipInputForVisual(intent, { objectId: edit.sourceObjectId }, { objectId: edit.targetObjectId }),
       sourceEntityId: params.mapViewId,
     }];
   } else if (edit.action === "archive-card") {
-    const object = await requireVisibleMapObject(actor, params.workspaceId, mapView, edit.objectId, params.includeStale);
+    const object = await requireVisibleMapObject(actor, params.workspaceId, mapView, edit.objectId, params.includeStale, lineageRoots, readGraph);
     titleForReason = object.title;
     diff.objectUpdates = [{ id: object.id, status: "archived" }];
   } else {
@@ -2807,10 +3066,11 @@ export async function createContextMapManualEditProposal(actor: AppActor, params
     const relationship = await prisma.contextGraphRelationship.findFirst({
       where: { id: relationshipId, workspaceId: params.workspaceId },
     });
-    invariant(relationship && (await readableGraphRecords(actor, params.workspaceId, "ContextGraphRelationship", [relationship])).length,
+    invariant(relationship && (await readGraph("ContextGraphRelationship", [relationship])).length,
       404, "NOT_FOUND", "Context graph relationship not found.");
-    await requireVisibleMapObject(actor, params.workspaceId, mapView, relationship.sourceObjectId, params.includeStale);
-    await requireVisibleMapObject(actor, params.workspaceId, mapView, relationship.targetObjectId, params.includeStale);
+    lineageRoots.push(...await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "ContextGraphRelationship", id: relationship.id, snapshot: relationship }]));
+    await requireVisibleMapObject(actor, params.workspaceId, mapView, relationship.sourceObjectId, params.includeStale, lineageRoots, readGraph);
+    await requireVisibleMapObject(actor, params.workspaceId, mapView, relationship.targetObjectId, params.includeStale, lineageRoots, readGraph);
 
     if (edit.archive) {
       diff.relationshipUpdates = [{ id: relationship.id, status: "archived" }];
@@ -2830,7 +3090,7 @@ export async function createContextMapManualEditProposal(actor: AppActor, params
 
   const proposedDiff = await createContextGraphProposedDiff(actor, {
     workspaceId: params.workspaceId,
-    lineageInputs: [],
+    lineageInputs: [], lineageRoots,
     humanOriginal: actor.kind === "user",
     reason: manualEditReason(edit, titleForReason),
     evidence,
@@ -2859,6 +3119,8 @@ export async function createMissingRegionFactsProposal(actor: AppActor, params: 
     depth: 2,
   });
 
+  invariant(!context.lineageRoots.some(root => root.kind === "GenericDerivedArtifactVariant"),
+    409, "GRAPH_VARIANT_REVIEW_REQUIRED", "A fresh graph bundle needs a separate review before native edits can be proposed.");
   const sourceId = selectedRegionSourceId(params.mapViewId, context.selectedObjectIds);
   const selectedObjectIds = [...context.selectedObjectIds].sort();
   const selectedObjectSegment = shortHash(selectedObjectIds.join(","));
@@ -2905,6 +3167,7 @@ export async function createMissingRegionFactsProposal(actor: AppActor, params: 
       properties: {
         proposalKind: "missing_region_fact",
         missingFactKind: input.kind,
+        regionContextId: sourceId,
         selectedObjectIds,
         nextAction: input.summary,
       },
@@ -2928,14 +3191,15 @@ export async function createMissingRegionFactsProposal(actor: AppActor, params: 
 
     evidenceRefs.push({
       objectRef: ref,
-      sourceType: "REGION_CONTEXT",
-      sourceId,
+      sourceType: "ContextGraphObject",
+      sourceId: input.targetObjectId ?? selectedObjectIds[0],
       quote: input.summary.slice(0, 600),
       relevanceScore: input.confidence ?? 0.72,
       metadata: {
         mapViewId: params.mapViewId,
         selectedObjectIds,
         missingFactKind: input.kind,
+        regionContextId: sourceId,
       },
     });
   }
@@ -2996,11 +3260,8 @@ export async function createMissingRegionFactsProposal(actor: AppActor, params: 
 
   return createContextGraphProposedDiff(actor, {
     workspaceId: params.workspaceId,
-    lineageInputs: [
-      ...context.objects.map((object) => ({ kind: "ContextGraphObject" as const, id: object.id })),
-      ...context.relationships.map((relationship) => ({ kind: "ContextGraphRelationship" as const, id: relationship.id })),
-      ...context.evidenceRefs.map((ref) => ({ kind: "ContextGraphEvidenceRef" as const, id: ref.id })),
-    ],
+    lineageInputs: context.lineageInputs,
+    lineageRoots: context.lineageRoots,
     reason: "Propose missing tasks, risks, or owners from the selected map region.",
     evidence: {
       kind: "selected-region-missing-facts",
@@ -3030,17 +3291,13 @@ export function contextGraphSystemActor(workspaceId: string, label = "context-gr
 
 export async function syncContextGraphForMeeting(actor: AppActor, params: { workspaceId: string; meetingId: string }) {
   await requireGraphPropose(actor, params.workspaceId);
-  const meeting = await prisma.meeting.findFirst({
-    where: { id: params.meetingId, workspaceId: params.workspaceId },
-    include: {
-      insights: true,
-    },
-  });
-  if (!meeting) return null;
-
   return prisma.$transaction(async (tx) => {
+    const meeting = await tx.meeting.findFirst({ where: { id: params.meetingId, workspaceId: params.workspaceId }, include: { insights: true } });
+    if (!meeting || !(await readableGraphRecords(actor, params.workspaceId, "Meeting", [meeting], tx)).length) return null;
+    const meetingRoots = await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "Meeting", id: meeting.id, snapshot: meeting }], tx);
+    const insights = await readableGraphRecords(actor, params.workspaceId, "MeetingInsight", meeting.insights, tx);
     const meetingObject = await upsertObjectWithTx(tx, actor, params.workspaceId, {
-      lineageInputs: [{ kind: "Meeting", id: meeting.id }],
+      lineageInputs: [], lineageRoots: meetingRoots,
       objectType: "Meeting",
       title: meeting.title ?? "Untitled meeting",
       summary: meeting.summaryMd,
@@ -3055,8 +3312,10 @@ export async function syncContextGraphForMeeting(actor: AppActor, params: { work
       },
     });
 
-    for (const insight of meeting.insights) {
+    for (const insight of insights) {
       if (insight.status === "DISMISSED") continue;
+      const insightRoots = await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "MeetingInsight", id: insight.id, snapshot: insight }], tx);
+      const lineageRoots = [...meetingRoots, ...insightRoots];
       const objectType: ContextGraphObjectType = insight.type === "ACTION_ITEM"
         ? "Task"
         : insight.type === "FOLLOW_UP"
@@ -3070,7 +3329,7 @@ export async function syncContextGraphForMeeting(actor: AppActor, params: { work
                 : "Decision";
       const status: ContextGraphStatus = insight.status === "SUGGESTED" ? "proposed" : "approved";
       const object = await upsertObjectWithTx(tx, actor, params.workspaceId, {
-        lineageInputs: [{ kind: "Meeting", id: meeting.id }],
+        lineageInputs: [], lineageRoots,
         objectType,
         title: insight.title,
         summary: insight.bodyMd,
@@ -3092,7 +3351,7 @@ export async function syncContextGraphForMeeting(actor: AppActor, params: { work
         },
       });
       const relationship = await upsertRelationshipWithTx(tx, actor, params.workspaceId, {
-        lineageInputs: [{ kind: "Meeting", id: meeting.id }],
+        lineageInputs: [], lineageRoots,
         sourceObjectId: object.id,
         targetObjectId: meetingObject.id,
         relationshipType: insight.type === "DECISION" ? "decided_in" : "created_in",
@@ -3102,7 +3361,7 @@ export async function syncContextGraphForMeeting(actor: AppActor, params: { work
         sourceEntityId: insight.id,
       }, new Map());
       await attachEvidenceWithTx(tx, actor, params.workspaceId, {
-        lineageInputs: [{ kind: "Meeting", id: meeting.id }],
+        lineageInputs: [], lineageRoots,
         objectId: object.id,
         sourceType: "MEETING",
         sourceId: meeting.id,
@@ -3111,7 +3370,7 @@ export async function syncContextGraphForMeeting(actor: AppActor, params: { work
         metadata: { meetingInsightId: insight.id },
       }, new Map(), new Map());
       await attachEvidenceWithTx(tx, actor, params.workspaceId, {
-        lineageInputs: [{ kind: "Meeting", id: meeting.id }],
+        lineageInputs: [], lineageRoots,
         relationshipId: relationship.id,
         sourceType: "MEETING",
         sourceId: meeting.id,

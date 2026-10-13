@@ -32,6 +32,11 @@ const SEARCH_CACHE_TTL_MS = 2 * 60 * 1000;
 const DEFAULT_SEARCH_LIMIT = 5;
 const DEFAULT_ANSWER_LIMIT = 8;
 const POSTGRES_SEARCH_WINDOW = 500;
+const KNOWLEDGE_SCAN_LIMIT = 5_000;
+
+function scanLimitExceeded(): never {
+  throw Object.assign(new Error("Knowledge permission scan exceeded its safe limit."), { code: "KNOWLEDGE_SCAN_LIMIT", status: 409 });
+}
 const DEFAULT_LEXICAL_WEIGHT = 0.35;
 const DEFAULT_SEMANTIC_WEIGHT = 0.65;
 
@@ -237,19 +242,23 @@ async function currentAccessDomains(actor: AppActor, workspaceId: string, reques
 async function readableKnowledgeSources(params: RetrievalAccess, sourceIds?: Map<KnowledgeSourceType, string[]>) {
   const sources = new Map<string, ReadableSource>();
   const requested = params.sourceTypes?.length ? params.sourceTypes : Object.keys(knowledgeLineageKinds) as KnowledgeSourceType[];
+  let scanned = 0;
   for (const sourceType of [...new Set(requested)]) {
     const kind = knowledgeLineageKinds[sourceType];
     if (!kind) continue; // No complete input proof exists for this source type.
     const ids = sourceIds?.get(sourceType);
     if (sourceIds && !ids?.length) continue;
     const where = { workspaceId: params.workspaceId, ...(ids ? { id: { in: ids } } : {}), archivedAt: null };
+    const scan = { take: KNOWLEDGE_SCAN_LIMIT - scanned + 1 };
     const records = sourceType === "BRAIN_ARTICLE"
-      ? await prisma.brainArticle.findMany({ where: { ...where, OR: [{ isPrivate: false }, { variantOfArticleId: { not: null }, isPrivate: true }] } })
+      ? await prisma.brainArticle.findMany({ ...scan, where: { ...where, OR: [{ isPrivate: false }, { variantOfArticleId: { not: null }, isPrivate: true }] } })
       : sourceType === "DOCUMENT"
-        ? await prisma.document.findMany({ where: { ...where, accessDomain: { in: params.accessDomains } } })
+        ? await prisma.document.findMany({ ...scan, where: { ...where, accessDomain: { in: params.accessDomains } } })
         : sourceType === "MEETING"
-          ? await prisma.meeting.findMany({ where })
-          : await prisma.proposal.findMany({ where });
+          ? await prisma.meeting.findMany({ ...scan, where })
+          : await prisma.proposal.findMany({ ...scan, where });
+    scanned += records.length;
+    if (scanned > KNOWLEDGE_SCAN_LIMIT) scanLimitExceeded();
     const readable = await readableArtifactIds(params.actor, params.workspaceId, kind, records);
     for (const record of records) {
       if (readable.has(record.id)) sources.set(`${sourceType}:${record.id}`, {
@@ -258,6 +267,69 @@ async function readableKnowledgeSources(params: RetrievalAccess, sourceIds?: Map
     }
   }
   return sources;
+}
+
+const chunkProjection = {
+  id: true, workspaceId: true, sourceType: true, sourceId: true, sourceTitle: true,
+  chunkIndex: true, content: true, metadata: true, accessDomain: true, sensitivity: true, createdAt: true,
+  embedding: true, embeddingModel: true, tokenCount: true,
+} as const;
+type PermissionChunk = Prisma.KnowledgeChunkGetPayload<{ select: typeof chunkProjection }>;
+
+/** The child's own manifest can restrict it further than its readable parent. */
+async function admitKnowledgeChunks(params: RetrievalAccess, chunks: PermissionChunk[], sources: Map<string, ReadableSource>) {
+  const current = chunks.filter((chunk) => {
+    const source = sources.get(`${chunk.sourceType}:${chunk.sourceId}`);
+    return !!source && (chunk.metadata as Record<string, unknown> | null)?.sourceContentHash === source.contentHash;
+  });
+  const readable = await readableArtifactIds(params.actor, params.workspaceId, "KnowledgeChunk", current);
+  return current.filter((chunk) => readable.has(chunk.id));
+}
+
+/** Shared count/search admission. Raw rows never set a candidate cap or visible count. */
+export async function scanReadableKnowledgeChunks(params: RetrievalAccess, perTypeLimit?: number) {
+  const sources = await readableKnowledgeSources(params);
+  const sourceTypeWindows = params.sourceTypes?.length ? [...new Set(params.sourceTypes)] : [undefined];
+  const chunks: PermissionChunk[] = [];
+  let scanned = 0;
+  for (const sourceType of sourceTypeWindows) {
+    let cursor: PermissionChunk | undefined;
+    let admitted = 0;
+    while (perTypeLimit === undefined || admitted < perTypeLimit) {
+      const take = Math.min(POSTGRES_SEARCH_WINDOW, KNOWLEDGE_SCAN_LIMIT - scanned + 1);
+      const page: PermissionChunk[] = await prisma.knowledgeChunk.findMany({
+        where: {
+          workspaceId: params.workspaceId, accessDomain: { in: params.accessDomains }, sourceType,
+          OR: [...sources].filter(([key]) => !sourceType || key.startsWith(`${sourceType}:`)).map(([key, source]) => {
+            const separator = key.indexOf(":");
+            return { sourceType: key.slice(0, separator) as KnowledgeSourceType, sourceId: key.slice(separator + 1),
+              metadata: { path: ["sourceContentHash"], equals: source.contentHash } };
+          }),
+          sensitivity: params.maxSensitivity ? { in: levelsUpTo(params.maxSensitivity) } : undefined,
+          ...(cursor ? { AND: [{ OR: [
+            { createdAt: { lt: cursor.createdAt } },
+            { createdAt: cursor.createdAt, chunkIndex: { gt: cursor.chunkIndex } },
+            { createdAt: cursor.createdAt, chunkIndex: cursor.chunkIndex, id: { gt: cursor.id } },
+          ] }] } : {}),
+        },
+        orderBy: [{ createdAt: "desc" }, { chunkIndex: "asc" }, { id: "asc" }], take, select: chunkProjection,
+      });
+      scanned += page.length;
+      if (scanned > KNOWLEDGE_SCAN_LIMIT) scanLimitExceeded();
+      const permitted = await admitKnowledgeChunks(params, page, sources);
+      const selected = perTypeLimit === undefined ? permitted : permitted.slice(0, perTypeLimit - admitted);
+      chunks.push(...selected);
+      admitted += selected.length;
+      if (page.length < take) break;
+      cursor = page[page.length - 1];
+    }
+  }
+  chunks.sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime()
+    || left.chunkIndex - right.chunkIndex || left.id.localeCompare(right.id));
+  // Every admitted candidate contributes to ranking, including uncited candidates.
+  const roots = await captureKnowledgeInputs(params, chunks, sources);
+  if (!roots) throw Object.assign(new Error("Knowledge inputs changed during admission."), { code: "SOURCE_CHANGED", status: 409 });
+  return { chunks, roots };
 }
 
 // SQL receipts and live source inputs are authoritative over cached/Azure text.
@@ -272,12 +344,13 @@ async function currentKnowledgeCitations<T extends KnowledgeCitation>(params: Re
       sourceType: params.sourceTypes?.length ? { in: params.sourceTypes } : undefined,
       sensitivity: params.maxSensitivity ? { in: levelsUpTo(params.maxSensitivity) } : undefined,
     },
-    select: { id: true, sourceType: true, sourceId: true, sourceTitle: true, chunkIndex: true, content: true, metadata: true },
+    select: chunkProjection,
   });
   const sourceIds = new Map<KnowledgeSourceType, string[]>();
   for (const chunk of chunks) sourceIds.set(chunk.sourceType, [...(sourceIds.get(chunk.sourceType) ?? []), chunk.sourceId]);
   const sources = await readableKnowledgeSources({ ...params, accessDomains }, sourceIds);
-  const receipts = new Map(chunks.map((chunk) => [chunk.id, chunk]));
+  const permitted = await admitKnowledgeChunks({ ...params, accessDomains }, chunks, sources);
+  const receipts = new Map(permitted.map((chunk) => [chunk.id, chunk]));
   return citations.filter((citation) => {
     const chunk = receipts.get(citation.chunkId);
     if (!chunk || chunk.sourceType !== citation.sourceType || chunk.sourceId !== citation.sourceId
@@ -305,7 +378,10 @@ export async function fetchReadableKnowledgeChunk(actor: AppActor, workspaceId: 
     chunkIndex: chunk.chunkIndex,
     snippet: chunk.content.slice(0, 400),
   }]);
-  return citations.length === 1 ? chunk : null;
+  if (citations.length !== 1) return null;
+  const sources = await readableKnowledgeSources({ actor, workspaceId, accessDomains }, new Map([[chunk.sourceType, [chunk.sourceId]]]));
+  const roots = await captureKnowledgeInputs({ actor, workspaceId, accessDomains }, [chunk], sources);
+  return roots && await currentInputProof({ actor, workspaceId, accessDomains }, roots) ? chunk : null;
 }
 
 async function currentSearchResults(
@@ -463,57 +539,8 @@ async function searchIndexedKnowledgePostgres(params: {
 }, queryEmbeddingOverride?: number[]): Promise<SearchRun> {
   const query = params.query;
 
-  const sources = await readableKnowledgeSources(params);
-  const sourceTypeWindows = params.sourceTypes?.length
-    ? [...new Set(params.sourceTypes)]
-    : [undefined];
-  const chunkWindows = await Promise.all(sourceTypeWindows.map((sourceType) => prisma.knowledgeChunk.findMany({
-    where: {
-      workspaceId: params.workspaceId,
-      accessDomain: { in: params.accessDomains },
-      sourceType,
-      OR: [...sources].filter(([key]) => !sourceType || key.startsWith(`${sourceType}:`)).map(([key, source]) => {
-        const separator = key.indexOf(":");
-        return {
-          sourceType: key.slice(0, separator) as KnowledgeSourceType,
-          sourceId: key.slice(separator + 1),
-          metadata: { path: ["sourceContentHash"], equals: source.contentHash },
-        };
-      }),
-      sensitivity: params.maxSensitivity
-        ? { in: levelsUpTo(params.maxSensitivity) }
-        : undefined,
-    },
-    orderBy: [{ createdAt: "desc" }, { chunkIndex: "asc" }],
-    take: POSTGRES_SEARCH_WINDOW,
-    select: {
-      id: true,
-      sourceType: true,
-      sourceId: true,
-      sourceTitle: true,
-      chunkIndex: true,
-      content: true,
-      metadata: true,
-      accessDomain: true,
-      sensitivity: true,
-      createdAt: true,
-    },
-  })));
-  const chunks = chunkWindows.flat().filter((chunk) => {
-    const source = sources.get(`${chunk.sourceType}:${chunk.sourceId}`);
-    return !!source && (chunk.metadata as Record<string, unknown> | null)?.sourceContentHash === source.contentHash;
-  }).sort((left, right) =>
-    (right.createdAt?.getTime() ?? 0) - (left.createdAt?.getTime() ?? 0)
-    || left.chunkIndex - right.chunkIndex);
-
-  if (chunks.length === 0) {
-    return { results: [], roots: [] };
-  }
-
-  // Every inspected candidate can influence selection, even if it is omitted
-  // from the rerank prompt or final citations. Capture exact chunks and parents.
-  const roots = await captureKnowledgeInputs(params, chunks, sources);
-  if (!roots) return { results: [], roots: [] };
+  const { chunks, roots } = await scanReadableKnowledgeChunks(params, POSTGRES_SEARCH_WINDOW);
+  if (chunks.length === 0) return { results: [], roots: [] };
   if (!await currentInputProof(params, roots)) return { results: [], roots };
 
   // Pre-filter with lexical score
@@ -529,22 +556,9 @@ async function searchIndexedKnowledgePostgres(params: {
     return { results: [], roots };
   }
 
-  // Load embeddings only for the top lexical candidates
-  const chunkEmbeddings = await prisma.knowledgeChunk.findMany({
-    where: {
-      id: { in: lexicalCandidates.map((c) => c.chunk.id) },
-      workspaceId: params.workspaceId,
-      accessDomain: { in: params.accessDomains },
-      sourceType: params.sourceTypes?.length ? { in: params.sourceTypes } : undefined,
-      sensitivity: params.maxSensitivity
-        ? { in: levelsUpTo(params.maxSensitivity) }
-        : undefined,
-    },
-    select: { id: true, embedding: true },
-  });
-
-  const embeddingMap = new Map(chunkEmbeddings.map((c) => [c.id, c.embedding]));
-  const authorizedLexicalCandidates = lexicalCandidates.filter((candidate) => embeddingMap.has(candidate.chunk.id));
+  // Rank only with the embedding from the exact admitted, captured chunk row.
+  // A second projection could silently introduce a different vector revision.
+  const authorizedLexicalCandidates = lexicalCandidates;
   const resultLimit = Math.max(1, params.limit ?? DEFAULT_SEARCH_LIMIT);
   const toResult = (chunk: typeof chunks[number], score: number): KnowledgeSearchResult => ({
     chunkId: chunk.id,
@@ -583,8 +597,7 @@ async function searchIndexedKnowledgePostgres(params: {
 
   const scored = authorizedLexicalCandidates
     .map(({ chunk, lexical }) => {
-      const embedding = embeddingMap.get(chunk.id) ?? null;
-      const semantic = cosineSimilarity(queryEmbedding.embeddings[0] ?? [], asEmbedding(embedding));
+      const semantic = cosineSimilarity(queryEmbedding.embeddings[0] ?? [], asEmbedding(chunk.embedding));
       const score = Number((lexical * LEXICAL_WEIGHT + semantic * SEMANTIC_WEIGHT).toFixed(6));
 
       return {

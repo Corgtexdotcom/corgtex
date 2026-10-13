@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { installSourcePermissionEpochFixture } from "../../domain/src/source-permission-epochs.test-fixture";
 import type { AppActor } from "@corgtex/shared";
 import type { LineageKind, LineageRoot } from "../../domain/src/source-lineage";
 import type { ConversationPageContext } from "./page-context";
@@ -25,7 +26,7 @@ const fixture = vi.hoisted(() => {
   };
   const project = (row: any, select: any) => select ? Object.fromEntries(Object.keys(select).map((key) => [key, row[key]])) : structuredClone(row);
   const base = {
-    $transaction: vi.fn(), $executeRaw: vi.fn(),
+    $transaction: vi.fn(), $executeRaw: vi.fn(), $queryRaw: vi.fn(),
     artifactInputLineage: {
       findFirst: vi.fn(async ({ where }) => [...manifests].reverse().find((item) => Object.entries(where).every(([key, value]) => item[key] === value)) ?? null),
       findMany: vi.fn(async ({ where }) => [...manifests].reverse().filter((item) => item.workspaceId === where.workspaceId && item.artifactType === where.artifactType
@@ -57,7 +58,7 @@ const fixture = vi.hoisted(() => {
   return { tables, memberships, manifests, delegates, membership, onboarding, prisma, base };
 });
 
-vi.mock("@corgtex/shared", () => ({ prisma: fixture.prisma, toInputJson: (value: unknown) => value }));
+vi.mock("@corgtex/shared", () => ({ prisma: fixture.prisma, toInputJson: (value: unknown) => value, env: { MODEL_PROVIDER: "fake", MODEL_REQUEST_TIMEOUT_MS: 1000 } }));
 vi.mock("../../domain/src/auth", () => ({ requireWorkspaceMembership: fixture.membership }));
 vi.mock("../../domain/src/brain-access", () => ({ resolveKnowledgeAccessDomains: vi.fn(async () => ["WORKSPACE"]) }));
 vi.mock("../../domain/src/role-onboarding", () => ({ updateRoleOnboardingStatusByConversation: vi.fn() }));
@@ -124,14 +125,21 @@ beforeEach(() => {
   fixture.onboarding.mockResolvedValue(null);
   insert("conversationSession", { id: base.sessionId, workspaceId, userId: base.userId, agentKey: "assistant", topic: null, status: "ACTIVE", systemPrompt: null });
   insert("conversationSession", { id: "session-bob", workspaceId, userId: "synthetic-bob", agentKey: "assistant", topic: null, status: "ACTIVE", systemPrompt: null });
+  fixture.base.$executeRaw.mockReset().mockResolvedValue(1);
+  fixture.base.$queryRaw.mockReset().mockResolvedValue([]);
+  installSourcePermissionEpochFixture(fixture.prisma);
 });
 
 describe("conversation server context admission with actual source proofs", () => {
   it("creates an owned immutable prompt before context capture and binds the exact utterance", async () => {
     const prepared = await prepareConversationInputs(base);
     expect(prepared.promptInputId).toBe("conversationPromptInput-0");
-    expect(await prepared.collector.roots()).toEqual([{ kind: "ConversationPromptInput", id: prepared.promptInputId,
-      fingerprint: lineageContentFingerprint("ConversationPromptInput", fixture.tables.get("conversationPromptInput")!.get(prepared.promptInputId)) }]);
+    expect(await prepared.collector.roots()).toEqual([expect.objectContaining({ kind: "ConversationPromptInput", id: prepared.promptInputId,
+      fingerprint: lineageContentFingerprint("ConversationPromptInput", fixture.tables.get("conversationPromptInput")!.get(prepared.promptInputId!)),
+      permissionEpochs: expect.objectContaining({ version: 1, entries: expect.arrayContaining([
+        { kind: "ConversationPromptInput", id: prepared.promptInputId, epoch: "0" },
+        { kind: "MemberUserPolicy", id: base.userId, epoch: "0" }, { kind: "Workspace", id: workspaceId, epoch: "0" },
+      ]) }) })]);
     expect(fixture.delegates.get("conversationPromptInput").create).toHaveBeenCalledWith({ data: { workspaceId, sessionId: base.sessionId, userId: base.userId, content: base.userMessage } });
   });
 
@@ -146,7 +154,7 @@ describe("conversation server context admission with actual source proofs", () =
 
   it("honors a current UNKNOWN native-prompt receipt and live session ownership changes", async () => {
     const prepared = await prepareConversationInputs(base);
-    const prompt = fixture.tables.get("conversationPromptInput")!.get(prepared.promptInputId);
+    const prompt = fixture.tables.get("conversationPromptInput")!.get(prepared.promptInputId!);
     fixture.manifests.push({ id: "unknown-prompt", workspaceId, artifactType: "ConversationPromptInput", artifactId: prompt.id, revision: 1,
       origin: "UNKNOWN", contentHash: lineageContentFingerprint("ConversationPromptInput", prompt), rootsJson: null });
     await expect(prepared.collector.assertReadable()).rejects.toMatchObject({ code: "SOURCE_CHANGED" });

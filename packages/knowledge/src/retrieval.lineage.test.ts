@@ -6,9 +6,10 @@ const f = vi.hoisted(() => {
   const receipts: any[] = [];
   const domains = new Map<string, string[]>();
   const membership = new Set<string>();
+  const chunkInputs = new Map<string, { domain: string; current: boolean }[]>();
   const sourceInputs = new Map<string, { domain: string; current: boolean }[]>();
   const hash = (kind: string, row: any) => kind === "KnowledgeChunk"
-    ? JSON.stringify([kind, row.sourceType, row.sourceId, row.sourceTitle, row.chunkIndex, row.content, row.accessDomain, row.metadata, row.sensitivity])
+    ? JSON.stringify([kind, row.sourceType, row.sourceId, row.sourceTitle, row.chunkIndex, row.content, row.accessDomain, row.metadata, row.sensitivity, row.embedding, row.embeddingModel, row.tokenCount])
     : JSON.stringify([kind, row.title, row.bodyMd ?? row.textContent, row.archivedAt, row.accessDomain, row.isPrivate, row.ownerMemberId]);
   const rows = (args: any, type: string) => sources.filter((row) => row.type === type && row.workspaceId === args.where.workspaceId
     && (!args.where.id || args.where.id.in.includes(row.id)) && row.archivedAt === null
@@ -24,7 +25,12 @@ const f = vi.hoisted(() => {
       && (!args.where.sourceType || (typeof args.where.sourceType === "string" ? args.where.sourceType === row.sourceType : args.where.sourceType.in.includes(row.sourceType)))
       && (!args.where.sourceId || args.where.sourceId.in.includes(row.sourceId))
       && (!args.where.OR || args.where.OR.some((condition: any) => condition.sourceType === row.sourceType && (typeof condition.sourceId === "string" ? condition.sourceId === row.sourceId : condition.sourceId.in.includes(row.sourceId))))
-    ).slice(0, args.take ?? Infinity)) },
+      && (!args.where.AND || args.where.AND[0].OR.some((condition: any) =>
+        condition.createdAt?.lt ? row.createdAt < condition.createdAt.lt : row.createdAt.getTime() === condition.createdAt.getTime()
+          && (condition.chunkIndex?.gt !== undefined ? row.chunkIndex > condition.chunkIndex.gt
+            : row.chunkIndex === condition.chunkIndex && row.id > condition.id.gt)))
+    ).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || a.chunkIndex - b.chunkIndex || a.id.localeCompare(b.id))
+      .slice(0, args.take ?? Infinity)) },
   };
   const resolveDomains = vi.fn(async (actor: any, workspaceId: string) => {
     const key = `${actor.user.id}:${workspaceId}`;
@@ -34,7 +40,7 @@ const f = vi.hoisted(() => {
   const readable = vi.fn(async (actor: any, workspaceId: string, _kind: string, records: any[]) => {
     const currentDomains = await resolveDomains(actor, workspaceId);
     return new Set(records.filter((record) => {
-      const inputs = sourceInputs.get(`${workspaceId}:${record.id}`);
+      const inputs = _kind === "KnowledgeChunk" ? chunkInputs.get(`${workspaceId}:${record.id}`) ?? [] : sourceInputs.get(`${workspaceId}:${record.id}`);
       return (!record.isPrivate || record.ownerMemberId === actor.user.id) && inputs && inputs.every((input) => input.current && currentDomains.includes(input.domain));
     }).map((record) => record.id));
   });
@@ -47,7 +53,11 @@ const f = vi.hoisted(() => {
         throw Object.assign(new Error("Changed input"), { code: "SOURCE_CHANGED" });
       }
       if (input.kind === "KnowledgeChunk") {
-        if (!currentDomains.includes(row.accessDomain)) throw Object.assign(new Error("Restricted chunk"), { code: "SOURCE_RESTRICTED" });
+        if (!currentDomains.includes(row.accessDomain) || !(await readable(actor, workspaceId, input.kind, [row])).has(row.id))
+          throw Object.assign(new Error("Restricted chunk"), { code: "SOURCE_RESTRICTED" });
+        for (const [index, ancestor] of (chunkInputs.get(`${workspaceId}:${row.id}`) ?? []).entries()) {
+          roots.push({kind: "Document", id: `${row.id}:child-input:${index}`, fingerprint: JSON.stringify(ancestor)});
+        }
       } else {
         if (!(await readable(actor, workspaceId, input.kind, [row])).has(row.id)) throw Object.assign(new Error("Unknown source"), { code: "UNKNOWN_LINEAGE" });
         for (const [index, ancestor] of sourceInputs.get(`${workspaceId}:${row.id}`)!.entries()) {
@@ -61,7 +71,11 @@ const f = vi.hoisted(() => {
   const currentProof = vi.fn(async (actor: any, workspaceId: string, roots: any[]) => {
     const currentDomains = await resolveDomains(actor, workspaceId);
     for (const root of roots) {
-      if (root.id.includes(":input:")) {
+      if (root.id.includes(":child-input:")) {
+        const [chunkId, index] = root.id.split(":child-input:");
+        const ancestor = chunkInputs.get(`${workspaceId}:${chunkId}`)?.[Number(index)];
+        if (!ancestor || !ancestor.current || !currentDomains.includes(ancestor.domain) || JSON.stringify(ancestor) !== root.fingerprint) return false;
+      } else if (root.id.includes(":input:")) {
         const [sourceId, index] = root.id.split(":input:");
         const ancestor = sourceInputs.get(`${workspaceId}:${sourceId}`)?.[Number(index)];
         if (!ancestor || !ancestor.current || !currentDomains.includes(ancestor.domain) || JSON.stringify(ancestor) !== root.fingerprint) return false;
@@ -69,14 +83,14 @@ const f = vi.hoisted(() => {
         const row = (root.kind === "KnowledgeChunk" ? receipts : sources).find((entry) => entry.id === root.id && entry.workspaceId === workspaceId);
         if (!row || hash(root.kind, row) !== root.fingerprint) return false;
         if (root.kind === "KnowledgeChunk") {
-          if (!currentDomains.includes(row.accessDomain)) return false;
+          if (!currentDomains.includes(row.accessDomain) || !(await readable(actor, workspaceId, root.kind, [row])).has(row.id)) return false;
         } else if (!(await readable(actor, workspaceId, root.kind, [row])).has(row.id)) return false;
       }
     }
     return roots.length > 0;
   });
   const afterCacheWrite = vi.fn();
-  return { sources, receipts, domains, membership, sourceInputs, hash, prisma, resolveDomains, readable, capture, currentProof, afterCacheWrite,
+  return { sources, receipts, domains, membership, sourceInputs, chunkInputs, hash, prisma, resolveDomains, readable, capture, currentProof, afterCacheWrite,
     gateway: { embed: vi.fn(async () => ({ embeddings: [[1, 0]], usage: { model: "test" } })),
       rerank: vi.fn(async ({ documents, topK }) => ({ results: documents.slice(0, topK).map((_: string, index: number) => ({ index, score: 1 - index * 0.1 })) })),
       chat: vi.fn(async () => ({ content: "SYNTHETIC derived answer" })) } };
@@ -103,7 +117,7 @@ function article(id: string, inputs: { domain: string; current: boolean }[] | nu
   f.sources.push(row);
   if (inputs) f.sourceInputs.set(`${workspaceId}:${id}`, inputs.map((input) => ({ ...input })));
   f.receipts.push({ id: `chunk-${id}`, workspaceId, sourceType: "BRAIN_ARTICLE", sourceId: id, sourceTitle: row.title,
-    chunkIndex: 0, content: row.bodyMd, accessDomain: "WORKSPACE", metadata: { sourceContentHash: f.hash("BrainArticle", row) }, embedding: [1, 0], createdAt: new Date() });
+    chunkIndex: 0, content: row.bodyMd, accessDomain: "WORKSPACE", metadata: { sourceContentHash: f.hash("BrainArticle", row) }, embedding: [1, 0], createdAt: new Date(Date.UTC(2026, 9, 13) - f.receipts.length) });
   return row;
 }
 const publicInput = { domain: "WORKSPACE", current: true };
@@ -116,6 +130,7 @@ beforeEach(() => {
   f.sources.length = 0;
   f.receipts.length = 0;
   f.sourceInputs.clear();
+  f.chunkInputs.clear();
   f.domains.clear();
   f.membership.clear();
   for (const user of ["alice", "bob"]) for (const workspace of ["ws-1", "ws-2"]) f.membership.add(`${user}:${workspace}`);
@@ -421,4 +436,90 @@ describe("actor-aware knowledge lineage", () => {
     }
   });
 
+});
+
+function crowdedChildren(workspaceId: string, hiddenCount = 500) {
+  article(`safe-parent-${workspaceId}`, [publicInput], workspaceId);
+  const base = f.receipts.pop();
+  const chunks = Array.from({length: hiddenCount + 2}, (_, index) => ({...base,
+    id: `${workspaceId}-child-${String(index).padStart(5, "0")}`, chunkIndex: index,
+    createdAt: new Date("2026-10-13T00:00:00Z"),
+    content: index < hiddenCount ? "PRIVATE policy from a restricted child ancestor" : `Permitted policy ${index}`,
+  }));
+  f.receipts.push(...chunks);
+  for (const chunk of chunks.slice(0, hiddenCount)) f.chunkInputs.set(`${workspaceId}:${chunk.id}`, [{...financeInput}]);
+  return chunks;
+}
+
+describe("child lineage admission before retrieval windows", () => {
+  it.each([alice, bob].flatMap(actor => ["ws-1", "ws-2"].map(workspaceId => [actor, workspaceId] as const)))
+    ("replenishes search and answer caches for %j in %s past 500 restricted children", async (actor, workspaceId) => {
+      f.domains.set(`${actor.user.id}:${workspaceId}`, ["WORKSPACE"]);
+      const chunks = crowdedChildren(workspaceId);
+      const params = {actor, workspaceId, query: "policy", limit: 1};
+      const first = await searchIndexedKnowledge(params);
+      expect(first.map(row => row.chunkId)).toEqual([chunks[500].id]);
+      const roots = await getKnowledgeSearchInputRoots(actor, workspaceId, first);
+      expect(roots.filter(root => root.kind === "KnowledgeChunk").map(root => root.id)).toEqual(chunks.slice(500).map(row => row.id));
+      expect(f.prisma.knowledgeChunk.findMany.mock.calls.filter(([query]) => query.take === 500)).toHaveLength(2);
+      expect(f.prisma.knowledgeChunk.findMany.mock.calls[1][0]).toMatchObject({where: {workspaceId,
+        AND: [{OR: expect.arrayContaining([{createdAt: chunks[499].createdAt, chunkIndex: 499, id: {gt: chunks[499].id}}])}]},
+        orderBy: [{createdAt: "desc"}, {chunkIndex: "asc"}, {id: "asc"}]});
+      expect(await searchIndexedKnowledge(params)).toEqual(first);
+      expect(f.gateway.rerank).toHaveBeenCalledTimes(1);
+      const answer = await answerKnowledgeQuestion({actor, workspaceId, question: "policy", limit: 1});
+      expect(answer.citations.map(row => row.chunkId)).toEqual([chunks[500].id]);
+      expect(await answerKnowledgeQuestion({actor, workspaceId, question: "policy", limit: 1})).toEqual(answer);
+      expect(f.gateway.chat).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(f.gateway.rerank.mock.calls)).not.toContain("PRIVATE");
+      expect(JSON.stringify(f.gateway.chat.mock.calls)).not.toContain("PRIVATE");
+      expect(await fetchReadableKnowledgeChunk(actor, workspaceId, chunks[0].id)).toBeNull();
+      expect(await fetchReadableKnowledgeChunk(actor, workspaceId, chunks[500].id)).toMatchObject({id: chunks[500].id});
+      const {countReadableKnowledgeChunks} = await import("./counts");
+      expect(await countReadableKnowledgeChunks(actor, workspaceId)).toBe(2);
+    });
+
+  it.each(["search", "answer"] as const)("rebuilds %s after an uncited child's own ancestor is revoked", async kind => {
+    f.domains.set("bob:ws-1", ["WORKSPACE"]);
+    const chunks = crowdedChildren("ws-1", 501);
+    f.chunkInputs.set(`ws-1:${chunks[502].id}`, [{...publicInput}]);
+    const execute = () => kind === "search" ? searchIndexedKnowledge({actor: bob, workspaceId: "ws-1", query: "policy", limit: 1})
+      : answerKnowledgeQuestion({actor: bob, workspaceId: "ws-1", question: "policy", limit: 1});
+    await execute();
+    f.chunkInputs.get(`ws-1:${chunks[502].id}`)![0].current = false;
+    const rebuilt = await execute();
+    expect(kind === "search" ? (rebuilt as any[])[0].chunkId : (rebuilt as any).citations[0].chunkId).toBe(chunks[501].id);
+    expect(f.gateway.rerank).toHaveBeenCalledTimes(2);
+    expect(f.gateway.rerank.mock.calls[1][0].documents).toHaveLength(1);
+  });
+
+  it.each(["rerank", "answer", "cache"] as const)("withholds output when admitted child ancestry changes during %s", async phase => {
+    f.domains.set("bob:ws-1", ["WORKSPACE"]);
+    const chunks = crowdedChildren("ws-1");
+    const revoke = () => f.chunkInputs.set(`ws-1:${chunks[501].id}`, [{domain: "WORKSPACE", current: false}]);
+    if (phase === "rerank") f.gateway.rerank.mockImplementationOnce(async () => {revoke(); return {results: [{index: 0, score: 1}]};});
+    if (phase === "answer") f.gateway.chat.mockImplementationOnce(async () => {revoke(); return {content: "Must be withheld"};});
+    if (phase === "cache") f.afterCacheWrite.mockImplementation(revoke);
+    if (phase === "answer") expect(await answerKnowledgeQuestion({actor: bob, workspaceId: "ws-1", question: "policy", limit: 1})).toEqual({answer: "I could not find relevant indexed knowledge for that question.", citations: []});
+    else expect(await searchIndexedKnowledge({actor: bob, workspaceId: "ws-1", query: "policy", limit: 1})).toEqual([]);
+  });
+
+  it("fails explicitly on parent scan overflow before querying or scoring child bodies", async () => {
+    for (let index = 0; index < 5001; index++) article(`parent-${index}`, [publicInput]);
+    await expect(searchIndexedKnowledge({actor: bob, workspaceId: "ws-1", query: "policy"})).rejects.toMatchObject({code: "KNOWLEDGE_SCAN_LIMIT"});
+    expect(f.prisma.knowledgeChunk.findMany).not.toHaveBeenCalled();
+    expect(f.gateway.embed).not.toHaveBeenCalled();
+    expect(f.afterCacheWrite).not.toHaveBeenCalled();
+  });
+
+  it("fails explicitly at the raw scan bound before models, counts, or caches release partial results", async () => {
+    f.domains.set("bob:ws-1", ["WORKSPACE"]);
+    crowdedChildren("ws-1", 5001);
+    await expect(searchIndexedKnowledge({actor: bob, workspaceId: "ws-1", query: "policy"})).rejects.toMatchObject({code: "KNOWLEDGE_SCAN_LIMIT"});
+    const {countReadableKnowledgeChunks} = await import("./counts");
+    await expect(countReadableKnowledgeChunks(bob, "ws-1")).rejects.toMatchObject({code: "KNOWLEDGE_SCAN_LIMIT"});
+    expect(f.gateway.embed).not.toHaveBeenCalled();
+    expect(f.gateway.rerank).not.toHaveBeenCalled();
+    expect(f.afterCacheWrite).not.toHaveBeenCalled();
+  });
 });

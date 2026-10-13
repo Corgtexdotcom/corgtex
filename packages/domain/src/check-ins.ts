@@ -5,9 +5,10 @@ import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 import { appendEvents } from "./events";
 import { currentArtifactInputRoots, recordArtifactInputLineage, readableArtifactIds, type LineageInput, type LineageRoot,
-  assertArtifactInputWriteFence, captureArtifactInputProof, captureArtifactInputSnapshotProof, isArtifactInputProofReadable } from "./source-lineage";
+  assertArtifactInputWriteFence, captureArtifactInputProof, captureImmutableArtifactInputProof, isArtifactInputProofReadable } from "./source-lineage";
 import { AppError } from "./errors";
 import { mergeArtifactInputProofs } from "./digest-lineage";
+import { prepareProducerLineage, finishProducerLineage } from "./producer-lineage";
 
 const COMPANY_UNDERSTANDING_TYPE = "COMPANY_UNDERSTANDING";
 const COMPANY_KNOWLEDGE_POLICY = "COMPANY_KNOWLEDGE";
@@ -212,10 +213,7 @@ export async function createDailyCompanyUnderstandingQuestions(actor: AppActor, 
       }
     }
     const liveRoots = mergeArtifactInputProofs(baseRoots, ...quotaProofs);
-    const inheritedRoots: LineageRoot[][] = [baseRoots];
-    for (const question of safeQuestions) inheritedRoots.push(await captureArtifactInputSnapshotProof(actor, params.workspaceId,
-      { kind: "CheckIn", id: question.id }, tx));
-    const recipeRoots = mergeArtifactInputProofs(...inheritedRoots);
+    const recipeRoots = await captureImmutableArtifactInputProof(actor, params.workspaceId, liveRoots, tx);
     const createdToday = safeQuestions.filter((question) => question.createdAt >= todayStart).length;
     const remaining = Math.max(DAILY_COMPANY_QUESTION_CAP - createdToday, 0);
     const existingText = new Set(safeQuestions.map((question) => question.questionText.trim().toLowerCase()));
@@ -250,52 +248,58 @@ export async function startCompanyUnderstandingQuestionConversation(actor: AppAc
 }) {
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   invariant(membership, 401, "AUTH_REQUIRED", "Company understanding questions require a member.");
-
   return prisma.$transaction(async (tx) => {
+    await assertArtifactInputWriteFence(tx);
+    await tx.$executeRaw`SELECT "id" FROM "CheckIn" WHERE "id" = ${params.checkInId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const checkIn = await tx.checkIn.findUnique({ where: { id: params.checkInId } });
     invariant(checkIn && checkIn.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Question not found.");
-    invariant((await readableArtifactIds(actor, params.workspaceId, "CheckIn", [checkIn], tx)).has(checkIn.id),
-      404, "NOT_FOUND", "Question not found.");
+    invariant((await readableArtifactIds(actor, params.workspaceId, "CheckIn", [checkIn], tx)).has(checkIn.id), 404, "NOT_FOUND", "Question not found.");
     invariant(checkIn.memberId === membership.id, 403, "FORBIDDEN", "You can only open your own questions.");
     invariant(checkIn.questionType === COMPANY_UNDERSTANDING_TYPE, 400, "INVALID_INPUT", "Only company understanding questions can open a linked chat.");
     invariant(checkIn.status === "OPEN", 400, "INVALID_STATE", "Only open questions can open a linked chat.");
-
-    if (checkIn.relatedConversationId) {
-      const existing = await tx.conversationSession.findUnique({
-        where: { id: checkIn.relatedConversationId },
-        include: { turns: { orderBy: { sequenceNumber: "asc" } } },
-      });
-      invariant(existing && existing.workspaceId === params.workspaceId && existing.userId === membership.userId, 404, "NOT_FOUND", "Linked conversation not found.");
-      return existing;
-    }
-
+    const questionProof = await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "CheckIn", id: checkIn.id, snapshot: checkIn }], tx);
+    const readableConversation = async (id: string) => {
+      const session = await tx.conversationSession.findUnique({ where: { id }, include: { turns: { orderBy: { sequenceNumber: "asc" } } } });
+      invariant(session && session.workspaceId === params.workspaceId && session.userId === membership.userId,
+        404, "NOT_FOUND", "Linked conversation not found.");
+      invariant((await readableArtifactIds(actor, params.workspaceId, "ConversationSession", [session], tx)).has(session.id),
+        404, "NOT_FOUND", "Linked conversation not found.");
+      const turnIds = await readableArtifactIds(actor, params.workspaceId, "ConversationTurn", session.turns, tx);
+      const turns = session.turns.filter((turn) => turnIds.has(turn.id));
+      const proof = await captureArtifactInputProof(actor, params.workspaceId, [
+        { kind: "ConversationSession", id: session.id, snapshot: session },
+        ...turns.map((turn) => ({ kind: "ConversationTurn" as const, id: turn.id, snapshot: turn })),
+      ], tx);
+      invariant(await isArtifactInputProofReadable(actor, params.workspaceId, proof, tx), 409, "SOURCE_CHANGED", "Conversation inputs changed before reading.");
+      // Hidden legacy turns must not disclose their existence through sequence gaps.
+      return { ...session, turns: turns.map((turn, index) => ({ ...turn, sequenceNumber: index + 1 })) };
+    };
+    if (checkIn.relatedConversationId) return readableConversation(checkIn.relatedConversationId);
+    const immutableRoots = await captureImmutableArtifactInputProof(actor, params.workspaceId, questionProof, tx);
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CheckIn", id: checkIn.id }, before: checkIn });
     const policy = "Your answer is saved as company knowledge for this workspace.";
-    const conversation = await tx.conversationSession.create({
-      data: {
-        workspaceId: params.workspaceId,
-        userId: membership.userId,
-        agentKey: "company-understanding",
-        topic: checkIn.questionText.slice(0, 64),
-        systemPrompt: `Help the employee answer this company-understanding question. Treat their answer as company knowledge evidence, and do not ask for private journaling.\n\nQuestion: ${checkIn.questionText}`,
-      },
-    });
-    await tx.conversationTurn.create({
-      data: {
-        conversationId: conversation.id,
-        sequenceNumber: 1,
-        userMessage: "Open company understanding question",
-        assistantMessage: `${checkIn.questionText}\n\n${policy}`,
-      },
-    });
-    await tx.checkIn.update({
-      where: { id: checkIn.id },
-      data: { relatedConversationId: conversation.id },
-    });
-
-    return tx.conversationSession.findUniqueOrThrow({
-      where: { id: conversation.id },
-      include: { turns: { orderBy: { sequenceNumber: "asc" } } },
-    });
+    const conversation = await tx.conversationSession.create({ data: {
+      workspaceId: params.workspaceId, userId: membership.userId, agentKey: "company-understanding",
+      topic: checkIn.questionText.slice(0, 64),
+      systemPrompt: `Help the employee answer this company-understanding question. Treat their answer as company knowledge evidence, and do not ask for private journaling.\n\nQuestion: ${checkIn.questionText}`,
+    } });
+    await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "ConversationSession", id: conversation.id }, content: conversation, origin: "DERIVED", inputs: [], inheritedRoots: immutableRoots });
+    const prompt = await tx.conversationPromptInput.create({ data: { workspaceId: params.workspaceId, sessionId: conversation.id,
+      userId: membership.userId, content: "Open company understanding question" } });
+    await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "ConversationPromptInput", id: prompt.id }, content: prompt, origin: "DERIVED", inputs: [], inheritedRoots: immutableRoots });
+    const turn = await tx.conversationTurn.create({ data: { conversationId: conversation.id, sequenceNumber: 1, promptInputId: prompt.id,
+      userMessage: prompt.content, assistantMessage: `${checkIn.questionText}\n\n${policy}` } });
+    await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "ConversationTurn", id: turn.id }, content: turn, origin: "DERIVED", inputs: [], inheritedRoots: immutableRoots });
+    const updated = await tx.checkIn.update({ where: { id: checkIn.id }, data: { relatedConversationId: conversation.id } });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CheckIn", id: updated.id }, content: updated, receipt });
+    invariant(await isArtifactInputProofReadable(actor, params.workspaceId, immutableRoots, tx),
+      409, "SOURCE_CHANGED", "Question inputs changed before opening the conversation.");
+    return readableConversation(conversation.id);
   });
 }
 
@@ -311,6 +315,7 @@ export async function respondToCheckIn(actor: AppActor, params: {
   invariant(responseMd.length > 0, 400, "INVALID_INPUT", "Response is required.");
 
   return prisma.$transaction(async (tx) => {
+    await assertArtifactInputWriteFence(tx);
     const checkIn = await tx.checkIn.findUnique({
       where: { id: params.checkInId },
     });
@@ -325,6 +330,11 @@ export async function respondToCheckIn(actor: AppActor, params: {
       invariant(checkIn.status === "OPEN", 400, "INVALID_STATE", "Only open company understanding questions can be answered.");
     }
 
+    const questionRoots = checkIn.questionType === COMPANY_UNDERSTANDING_TYPE
+      ? await currentArtifactInputRoots(tx, params.workspaceId, { kind: "CheckIn", id: checkIn.id }, checkIn) : null;
+    if (checkIn.questionType === COMPANY_UNDERSTANDING_TYPE) invariant(questionRoots, 409, "UNKNOWN_LINEAGE", "Question inputs cannot be verified.");
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CheckIn", id: checkIn.id }, before: checkIn });
     const updated = await tx.checkIn.update({
       where: { id: checkIn.id },
       data: {
@@ -336,14 +346,14 @@ export async function respondToCheckIn(actor: AppActor, params: {
       },
     });
 
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CheckIn", id: updated.id }, content: updated, receipt });
     const events: Parameters<typeof appendEvents>[1] = [];
 
     if (checkIn.questionType === COMPANY_UNDERSTANDING_TYPE) {
       // The employee explicitly elects to contribute the answer as company knowledge.
       // Carry the question's permission-bearing inputs, not its recipient-only envelope.
-      const questionRoots = await currentArtifactInputRoots(tx, params.workspaceId,
-        { kind: "CheckIn", id: checkIn.id }, checkIn);
-      invariant(questionRoots, 409, "UNKNOWN_LINEAGE", "Question inputs cannot be verified.");
+
       const source = await tx.brainSource.create({
         data: {
           workspaceId: params.workspaceId,
@@ -371,8 +381,8 @@ export async function respondToCheckIn(actor: AppActor, params: {
       await recordArtifactInputLineage({
         tx, actor, workspaceId: params.workspaceId,
         artifact: { kind: "BrainSource", id: source.id }, content: source,
-        origin: questionRoots.length ? "DERIVED" : "HUMAN_ORIGINAL",
-        inputs: [], inheritedRoots: questionRoots,
+        origin: questionRoots!.length ? "DERIVED" : "HUMAN_ORIGINAL",
+        inputs: [], inheritedRoots: questionRoots!,
       });
 
       events.push({
@@ -396,7 +406,8 @@ export async function respondToCheckIn(actor: AppActor, params: {
 
     await appendEvents(tx, events);
 
-    return updated;
+    return (await readableArtifactIds(actor, params.workspaceId, "CheckIn", [updated], tx)).has(updated.id)
+      ? updated : { id: updated.id, status: updated.status, contentWithheld: true };
   });
 }
 
@@ -407,6 +418,7 @@ export async function skipCompanyUnderstandingQuestion(actor: AppActor, params: 
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   return prisma.$transaction(async (tx) => {
+    await assertArtifactInputWriteFence(tx);
     const checkIn = await tx.checkIn.findUnique({
       where: { id: params.checkInId },
     });
@@ -418,11 +430,15 @@ export async function skipCompanyUnderstandingQuestion(actor: AppActor, params: 
     invariant(membership && checkIn.memberId === membership.id, 403, "FORBIDDEN", "You can only skip your own company understanding questions.");
     invariant(checkIn.status === "OPEN", 400, "INVALID_STATE", "Only open questions can be skipped.");
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CheckIn", id: checkIn.id }, before: checkIn });
     const skipped = await tx.checkIn.update({
       where: { id: checkIn.id },
       data: { status: "SKIPPED" },
     });
 
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CheckIn", id: skipped.id }, content: skipped, receipt });
     await appendEvents(tx, [
       {
         workspaceId: params.workspaceId,

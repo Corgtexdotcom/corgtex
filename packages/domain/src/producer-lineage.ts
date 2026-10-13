@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
 import { invariant } from "./errors";
+import { getMcpToolInputRoots } from "./mcp-tool-input-context";
 import {
   advanceHumanArtifactInputLineage,
   captureArtifactInputProof,
@@ -40,7 +41,8 @@ export async function prepareProducerLineage(params: {
   allowSystemTransition?: boolean;
 }): Promise<ProducerReceipt> {
   const { tx, actor, workspaceId, artifact, before } = params;
-  const capture = params.capture ?? {};
+  const submissionRoots = getMcpToolInputRoots(actor, workspaceId);
+  const capture = { ...params.capture, lineageRoots: [...(params.capture?.lineageRoots ?? []), ...submissionRoots] };
   const explicit = Boolean(capture.lineageInputs?.length || capture.lineageRoots?.length);
   if (before !== undefined && !explicit && !params.completeCopy && !params.dependencies?.length) {
     if (params.copied) return { mode: "UNKNOWN" };
@@ -54,7 +56,10 @@ export async function prepareProducerLineage(params: {
     409, "SOURCE_CHANGED", "Producer inputs changed before persistence.");
   if (before !== undefined && artifact) {
     const prior = await currentArtifactInputRoots(tx, workspaceId, artifact, before);
-    if (!prior) return { mode: "UNKNOWN" };
+    if (!prior) {
+      invariant(!submissionRoots.length, 409, "UNKNOWN_LINEAGE", "A partial MCP edit cannot prove the existing content safe.");
+      return { mode: "UNKNOWN" };
+    }
     let snapshotRoots: LineageRoot[];
     try {
       snapshotRoots = await captureArtifactInputSnapshotProof(actor, workspaceId,

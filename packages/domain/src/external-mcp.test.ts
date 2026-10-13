@@ -34,6 +34,7 @@ vi.mock("@corgtex/shared", () => ({
   },
   prisma: {
     externalMcpConnection: externalMcpConnectionMock,
+    member: { findFirst: vi.fn(async () => ({ id: "member-1" })) },
     $transaction: prismaTransactionMock,
   },
 }));
@@ -510,12 +511,10 @@ describe("external MCP gateway", () => {
   });
 
   it("allows selected Box file content reads through the server-side connection helper", async () => {
-    externalMcpConnectionMock.findFirst.mockResolvedValueOnce(activeBoxConnection());
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+    externalMcpConnectionMock.findFirst.mockResolvedValue(activeBoxConnection());
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (_url: string, options: any) => new Response(JSON.stringify({
       result: {
-        structuredContent: {
-          text: "Selected file content",
-        },
+        structuredContent: JSON.parse(options.body).params.name === "who_am_i" ? { id: "box-user-1" } : { text: "Selected file content" },
       },
     }), { status: 200 })));
     const { callBoxExternalMcpReadToolForConnection } = await import("./external-mcp");
@@ -531,6 +530,7 @@ describe("external MCP gateway", () => {
     expect(externalMcpConnectionMock.findFirst).toHaveBeenCalledWith({
       where: {
         id: "box-connection-1",
+        userId: "user-1",
         workspaceId: "ws-1",
         providerKey: "box",
         status: "ACTIVE",
@@ -542,6 +542,32 @@ describe("external MCP gateway", () => {
     expect(JSON.stringify(recordAuditMock.mock.calls)).not.toContain("box-token");
   });
 
+  it("withholds another user's selected connection before a provider call", async () => {
+    externalMcpConnectionMock.findFirst.mockResolvedValue(activeBoxConnection({ userId: "other-user" }));
+    vi.stubGlobal("fetch", vi.fn());
+    const { callBoxExternalMcpReadToolForConnection } = await import("./external-mcp");
+    await expect(callBoxExternalMcpReadToolForConnection(actor, { workspaceId: "ws-1", connectionId: "box-connection-1",
+      toolName: "get_file_content", arguments: { file_id: "123" } })).rejects.toMatchObject({ code: "SOURCE_RESTRICTED" });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it("withholds content when the real provider principal changed under a stored connection", async () => {
+    externalMcpConnectionMock.findFirst.mockResolvedValue(activeBoxConnection());
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ result: { structuredContent: { id: "other-box-user" } } }), { status: 200 })));
+    const { callBoxExternalMcpReadToolForConnection } = await import("./external-mcp");
+    await expect(callBoxExternalMcpReadToolForConnection(actor, { workspaceId: "ws-1", connectionId: "box-connection-1",
+      toolName: "get_file_content", arguments: { file_id: "123" } })).rejects.toMatchObject({ code: "SOURCE_RESTRICTED" });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+  it("withholds MCP error payloads instead of materializing provider error text", async () => {
+    externalMcpConnectionMock.findFirst.mockResolvedValue(activeBoxConnection());
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (_url: string, options: any) => new Response(JSON.stringify({ result:
+      JSON.parse(options.body).params.name === "who_am_i" ? { structuredContent: { id: "box-user-1" } }
+        : { isError: true, content: [{ type: "text", text: "Restricted provider error bytes" }] } }), { status: 200 })));
+    const { callBoxExternalMcpReadToolForConnection } = await import("./external-mcp");
+    await expect(callBoxExternalMcpReadToolForConnection(actor, { workspaceId: "ws-1", connectionId: "box-connection-1",
+      toolName: "get_file_content", arguments: { file_id: "123" } })).rejects.toMatchObject({ code: "SOURCE_RESTRICTED" });
+    expect(JSON.stringify(recordAuditMock.mock.calls)).not.toContain("Restricted provider error bytes");
+  });
   it("rejects non-allowlisted Box write tools before loading the connection", async () => {
     vi.stubGlobal("fetch", vi.fn());
     const { callBoxExternalMcpReadToolForConnection } = await import("./external-mcp");

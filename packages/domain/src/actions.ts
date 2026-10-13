@@ -11,7 +11,7 @@ import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from
 import { loadAdviceRequestCountSummaries } from "./advice-requests";
 import { invariant } from "./errors";
 import { humanMemberIdentityWhere } from "./member-identity";
-import { requireDraftManager } from "./draft-permissions";
+import { requireDraftManager, requireCreationInputRoots } from "./draft-permissions";
 import { requireCollaborativeWorkItemEditor } from "./collaborative-permissions";
 import { resolveWorkspaceProposalLink } from "./proposal-links";
 import { readableArtifactIds } from "./source-lineage";
@@ -661,6 +661,8 @@ async function applyActionDuplicateUpdate(
     where: { id: actionId, workspaceId: params.workspaceId, archivedAt: null, duplicateOfActionId: null, ...privacyFilter(actor, membership) },
   });
   invariant(existing, 404, "NOT_FOUND", "Action duplicate target is no longer available.");
+  invariant((await readableArtifactIds(actor, params.workspaceId, "Action", [existing], tx)).has(existing.id),
+    404, "NOT_FOUND", "Action duplicate target is no longer available.");
   const mergedBody = duplicateGuardMergeText(existing.bodyMd, params.bodyMd);
   const updateParams: Parameters<typeof updateAction>[1] = {
     workspaceId: params.workspaceId,
@@ -688,6 +690,8 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
     workspaceId: params.workspaceId,
     resolvedMembership: params._membership,
   });
+  params = { ...params, lineageRoots: await requireCreationInputRoots({ actor, workspaceId: params.workspaceId,
+    isPrivate: params.isPrivate ?? true, roots: params.lineageRoots, tx: params._tx }) };
 
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Action title is required.");
@@ -736,7 +740,7 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
     meetingId: source?.type === "MEETING_INSIGHT" ? source.groupId : null,
     actorUserId: actor.kind === "user" ? actor.user.id : null,
     membershipId: membership?.id ?? null,
-    includePrivate: actor.kind === "agent" || membership?.role === "ADMIN",
+    includePrivate: actor.kind === "user" && membership?.role === "ADMIN",
   }, params.duplicateGuard, tx, async (rows) => {
     const records = rows as Array<{ id: string; [key: string]: unknown }>;
     const visible = await readableArtifactIds(actor, params.workspaceId, "Action", records, tx ?? prisma);
@@ -744,6 +748,7 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
   });
 
   const create = async (tx: Prisma.TransactionClient, duplicateDecision: Awaited<ReturnType<typeof duplicateDecisionForCreate>>) => {
+    await requireCreationInputRoots({ actor, workspaceId: params.workspaceId, isPrivate: params.isPrivate ?? true, roots: params.lineageRoots, tx });
     const assigneeMemberId = await resolveAssigneeMemberId(tx, params.workspaceId, params.assigneeMemberId);
     invariant(isPrivate || assigneeMemberId, 400, "INVALID_INPUT", "Assign an active human member before opening this Action.");
     const proposalId = await resolveWorkspaceProposalLink(tx, actor, membership, params.workspaceId, params.proposalId);
@@ -937,6 +942,8 @@ export async function updateAction(actor: AppActor, params: ProducerLineageParam
     });
 
     invariant(action && action.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Action not found.");
+    invariant((await readableArtifactIds(actor, params.workspaceId, "Action", [action], tx)).has(action.id),
+      404, "NOT_FOUND", "Action not found.");
 
     invariant(!action.archivedAt && !action.duplicateOfActionId, 400, "INVALID_STATE", "Archived or resolved duplicate actions cannot be edited.");
 

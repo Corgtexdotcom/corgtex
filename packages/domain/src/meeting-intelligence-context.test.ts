@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeEach, vi } from "vitest";
+import { installSourcePermissionEpochFixture } from "./source-permission-epochs.test-fixture";
 
 vi.mock("@corgtex/shared", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@corgtex/shared")>();
@@ -7,9 +8,11 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
     prisma: {
       $transaction: vi.fn(),
       $queryRaw: vi.fn(),
+      $executeRaw: vi.fn(),
       artifactInputLineage: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn() },
       artifactInputSnapshot: { findFirst: vi.fn(), create: vi.fn() },
       brainSource: { findFirst: vi.fn() },
+      nativeTranscriptInput: { create: vi.fn(), findFirst: vi.fn() },
       workspaceFeatureFlag: {
         findUnique: vi.fn(),
       },
@@ -43,6 +46,7 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
         findMany: vi.fn(),
       },
       member: {
+        findFirst: vi.fn(),
         findMany: vi.fn(),
       },
       tension: {
@@ -63,6 +67,8 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
     },
   };
 });
+
+vi.mock("../../shared/src/env", () => ({env:{ENCRYPTION_KEY:"a".repeat(64)}}));
 
 vi.mock("./brain-access", () => ({ resolveKnowledgeAccessDomains: vi.fn(async () => ["WORKSPACE", "FINANCE"]) }));
 
@@ -477,11 +483,15 @@ describe("meeting-intelligence-context", () => {
     const { resolveKnowledgeAccessDomains } = await import("./brain-access");
     const { captureArtifactInputSnapshotProof, preserveUnknownArtifactInputSnapshot } = await import("./source-lineage");
     const manifests: any[] = []; const snapshots: any[] = [];
+    (prisma.$executeRaw as ReturnType<typeof vi.fn>).mockReset().mockResolvedValue(1);
+    installSourcePermissionEpochFixture(prisma);
     let meeting: any = { id: "meeting-real", workspaceId: "ws-1", title: "Public original", source: "manual",
       transcript: "Public transcript", summaryMd: "Unknown legacy summary", blocksJson: { secret: "Unknown blocks" }, decisionsJson: { secret: "Unknown decisions" }, agendaJson: { secret: "Unknown agenda" },
       ingestionGuidanceMd: null, recordedAt: new Date("2026-05-01"), scheduledEndAt: null, seriesId: null,
       participantIds: [], participantEmails: [], archivedAt: null, createdAt: new Date("2026-05-01"), updatedAt: new Date("2026-05-01") };
-    const source: any = { id: "finance-source", workspaceId: "ws-1", accessDomain: "FINANCE", content: "Finance fact", sourceType: "UPLOAD", archivedAt: null };
+    const source: any = { id: "finance-source", workspaceId: "ws-1", accessDomain: "FINANCE", content: "Finance fact",
+      title: "Synthetic direct human finance original", sourceType: "RFC", archivedAt: null, authorMemberId: "member-1",
+      metadata: null, createdAt: new Date("2026-05-01"), updatedAt: new Date("2026-05-01") };
     (prisma.meeting.findFirst as ReturnType<typeof vi.fn>).mockImplementation(async ({ where, select }) => {
       if (where.id !== meeting.id || where.workspaceId !== meeting.workspaceId) return null;
       return select ? Object.fromEntries(Object.keys(select).map((field) => [field, meeting[field]])) : meeting;
@@ -505,7 +515,28 @@ describe("meeting-intelligence-context", () => {
     vi.mocked(recordArtifactInputLineage).mockImplementation(actual.recordArtifactInputLineage);
     vi.mocked(captureArtifactInputSnapshotProof).mockImplementation(actual.captureArtifactInputSnapshotProof);
     vi.mocked(preserveUnknownArtifactInputSnapshot).mockImplementation(actual.preserveUnknownArtifactInputSnapshot);
-    const actor: AppActor = { kind: "agent", authProvider: "bootstrap", label: "summary", workspaceIds: ["ws-1"] };
+    const actor: AppActor = { kind: "user", user: { id: "user-1", email: "alice@example.test", displayName: "Alice" } };
+    // This is a new explicit native human fixture. The unknown legacy Meeting remains unproven.
+    await actual.recordArtifactInputLineage({ tx: prisma, actor, workspaceId: "ws-1", artifact: { kind: "BrainSource", id: source.id },
+      content: source, origin: "HUMAN_ORIGINAL", inputs: [] });
+    const { requireWorkspaceMembership } = await import("./auth");
+    vi.mocked(requireWorkspaceMembership).mockResolvedValue({ id: "member-1", userId: "user-1", role: "ADMIN" } as any);
+    (prisma.member.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({ id: "member-1", userId: "user-1", workspaceId: "ws-1", isActive: true });
+    const nativeInputs: any[] = [];
+    (prisma.nativeTranscriptInput.create as ReturnType<typeof vi.fn>).mockImplementation(async ({data}) => {
+      const input = {id: `native-${nativeInputs.length+1}`,createdAt:new Date("2026-05-01"),...data};nativeInputs.push(input);return input;
+    });
+    (prisma.nativeTranscriptInput.findFirst as ReturnType<typeof vi.fn>).mockImplementation(async ({where}) => nativeInputs.find(input=>input.id===where.id&&input.workspaceId===where.workspaceId)??null);
+    vi.mocked(captureArtifactInputProof).mockImplementation(actual.captureArtifactInputProof);
+    const { captureDirectMemberTranscriptInput, directMemberTranscriptRoots } = await import("./native-transcript-input");
+    const submission = {workspaceId:"ws-1",title:"Public original",source:"manual",transcript:"Public transcript"};
+    const original = await captureDirectMemberTranscriptInput(actor,{workspaceId:"ws-1",submission});
+    const transcriptRoots = await directMemberTranscriptRoots(actor,"ws-1",submission,original);
+    const projection = Object.fromEntries(["id","workspaceId","title","source","externalId","calendarExternalId","meetingUrl","meetingUrlHash",
+      "transcript","ingestionGuidanceMd","recordedAt","scheduledEndAt","seriesId","participantIds","participantEmails","archivedAt","createdAt"]
+      .map(field=>[field,meeting[field]??null]));
+    await actual.recordArtifactInputLineage({tx:prisma,actor,workspaceId:"ws-1",artifact:{kind:"MeetingTranscript",id:meeting.id},content:projection,
+      origin:"DERIVED",inputs:[],inheritedRoots:transcriptRoots});
     const inputs = [{ kind: "MeetingTranscript" as const, id: meeting.id }, { kind: "BrainSource" as const, id: source.id }];
     const roots = await actual.captureArtifactInputProof(actor, "ws-1", inputs, prisma);
     await persistMeetingSummaryWithLineage(actor, { workspaceId: "ws-1", meetingId: meeting.id,

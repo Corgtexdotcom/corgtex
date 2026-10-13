@@ -11,6 +11,7 @@ import {
   ExecutionResultStatus,
   ExecutionWritebackTargetType,
   Prisma,
+  type ExecutionRequest,
 } from "@prisma/client";
 import { createAction } from "./actions";
 import { createArticle } from "./brain";
@@ -28,9 +29,10 @@ import { OPERATIONAL_ARTIFACT_FILTER } from "./operational-artifacts";
 import { privacyFilter } from "./privacy";
 import { formatWorkItemPriority } from "./work-item-priority";
 import { captureArtifactInputProof, captureArtifactInputSnapshotProof, isArtifactInputProofPubliclyShareable,
-  isArtifactInputProofReadable, type LineageRoot } from "./source-lineage";
+  captureImmutableArtifactInputProof, isArtifactInputProofReadable, readableArtifactIds, type LineageKind, type LineageRoot } from "./source-lineage";
 import { finishProducerLineage, prepareProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { captureReadableDigestInputs } from "./digest-lineage";
+import { getMcpToolInputRoots } from "./mcp-tool-input-context";
 
 const SECRET_KEY_PATTERN = /(token|secret|password|credential|api[_-]?key|access[_-]?key|refresh|authorization|bearer)/i;
 const SECRET_QUERY_VALUE_PATTERN = /([?&](?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|api[_-]?key|secret|signature|sig|authorization)=)[^&#\s]+/gi;
@@ -67,9 +69,10 @@ export type CreateExecutionRequestParams = ProducerLineageParams & {
   writebackTargetId?: string | null;
   writebackTargetLabel?: string | null;
   idempotencyKey?: string | null;
+  copied?: boolean;
 };
 
-export type SubmitExecutionResultParams = {
+export type SubmitExecutionResultParams = ProducerLineageParams & {
   workspaceId: string;
   requestId: string;
   idempotencyKey: string;
@@ -255,10 +258,6 @@ function enumValue<TEnum extends Record<string, string>>(
   return normalized as TEnum[keyof TEnum];
 }
 
-function titleMatches(query: string | null | undefined) {
-  const trimmed = query?.trim();
-  return trimmed ? { contains: trimmed, mode: "insensitive" as const } : undefined;
-}
 
 function crmCommunicationTargetContext(suggestion: {
   id: string;
@@ -418,21 +417,24 @@ async function loadExecutionRequest(actor: AppActor, workspaceId: string, reques
   });
   invariant(request, 404, "NOT_FOUND", "Execution request not found.");
   await requireCrmPacketProof(actor, workspaceId, request);
-  return request;
+  await requireExecutionRequestProof(actor, workspaceId, request);
+  const candidates = await prisma.executionResult.findMany({ where: { workspaceId, executionRequestId: request.id },
+    orderBy: { id: "asc" }, take: 5001 });
+  invariant(candidates.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Execution result permission scan exceeds its supported size.");
+  const allowed = await readableArtifactIds(actor, workspaceId, "ExecutionResult", candidates);
+  const results = candidates.filter((result) => allowed.has(result.id))
+    .sort((a, b) => b.submittedAt.getTime() - a.submittedAt.getTime() || a.id.localeCompare(b.id)).slice(0, 10);
+  await requireExecutionRequestProof(actor, workspaceId, request);
+  invariant((await readableArtifactIds(actor, workspaceId, "ExecutionResult", results)).size === results.length,
+    409, "SOURCE_CHANGED", "Execution result inputs changed during collection.");
+  return { ...request, results };
 }
 
-function requestOwnerActor(request: { createdByUserId: string | null }, fallback: AppActor): AppActor {
-  if (fallback.kind !== "agent") return fallback;
-  invariant(request.createdByUserId, 400, "INVALID_STATE", "Execution request owner is required for private write-back.");
-  return {
-    kind: "user",
-    user: {
-      id: request.createdByUserId,
-      email: "execution-requester@corgtex.local",
-      displayName: "Execution requester",
-      globalRole: "USER",
-    },
-  };
+async function requireExecutionRequestProof(actor: AppActor, workspaceId: string,
+  request: { id: string; writebackTargetType: ExecutionWritebackTargetType | null; [key: string]: unknown },
+  tx: Prisma.TransactionClient = prisma) {
+  invariant((await readableArtifactIds(actor, workspaceId, "ExecutionRequest", [request], tx)).has(request.id),
+    404, "NOT_FOUND", "Execution request not found.");
 }
 
 function serializeExecutionResult(result: {
@@ -523,31 +525,36 @@ async function validateWritebackTarget(
     case "ACTION": {
       const item = await client.action.findFirst({
         where: { id: targetId, workspaceId, archivedAt: null, ...(actor ? privacyFilter(actor, membership) : {}) },
-        select: { id: true, title: true, status: true },
       });
       invariant(item, 404, "NOT_FOUND", "Action write-back target not found.");
-      return { type, id: item.id, title: item.title, status: item.status, webPath: `/actions/${item.id}` };
+      invariant(actor, 403, "FORBIDDEN", "A current actor is required.");
+      const lineageRoots = await captureArtifactInputProof(actor, workspaceId, [{ kind: "Action", id: item.id, snapshot: item }], client);
+      return { type, id: item.id, title: item.title, status: item.status, webPath: `/actions/${item.id}`, lineageRoots };
     }
     case "TENSION": {
       const item = await client.tension.findFirst({
         where: { id: targetId, workspaceId, archivedAt: null, ...(actor ? privacyFilter(actor, membership) : {}) },
-        select: { id: true, title: true, status: true },
       });
       invariant(item, 404, "NOT_FOUND", "Tension write-back target not found.");
-      return { type, id: item.id, title: item.title, status: item.status, webPath: `/tensions/${item.id}` };
+      invariant(actor, 403, "FORBIDDEN", "A current actor is required.");
+      const lineageRoots = await captureArtifactInputProof(actor, workspaceId, [{ kind: "Tension", id: item.id, snapshot: item }], client);
+      return { type, id: item.id, title: item.title, status: item.status, webPath: `/tensions/${item.id}`, lineageRoots };
     }
     case "PROPOSAL": {
       const item = await client.proposal.findFirst({
         where: { id: targetId, workspaceId, archivedAt: null, ...(actor ? privacyFilter(actor, membership) : {}) },
-        select: { id: true, title: true, status: true },
       });
       invariant(item, 404, "NOT_FOUND", "Proposal write-back target not found.");
-      return { type, id: item.id, title: item.title, status: item.status, webPath: `/proposals/${item.id}` };
+      invariant(actor, 403, "FORBIDDEN", "A current actor is required.");
+      const lineageRoots = await captureArtifactInputProof(actor, workspaceId, [{ kind: "Proposal", id: item.id, snapshot: item }], client);
+      return { type, id: item.id, title: item.title, status: item.status, webPath: `/proposals/${item.id}`, lineageRoots };
     }
     case "MEETING": {
-      const item = await client.meeting.findFirst({ where: { id: targetId, workspaceId, archivedAt: null }, select: { id: true, title: true, status: true } });
+      const item = await client.meeting.findFirst({ where: { id: targetId, workspaceId, archivedAt: null } });
       invariant(item, 404, "NOT_FOUND", "Meeting write-back target not found.");
-      return { type, id: item.id, title: item.title ?? "Untitled meeting", status: item.status, webPath: `/meetings/${item.id}` };
+      invariant(actor, 403, "FORBIDDEN", "A current actor is required.");
+      const lineageRoots = await captureArtifactInputProof(actor, workspaceId, [{ kind: "Meeting", id: item.id, snapshot: item }], client);
+      return { type, id: item.id, title: item.title ?? "Untitled meeting", status: item.status, webPath: `/meetings/${item.id}`, lineageRoots };
     }
     case "BRAIN_ARTICLE": {
       const item = await client.brainArticle.findFirst({
@@ -557,18 +564,20 @@ async function validateWritebackTarget(
             ...(actor ? [{ OR: brainArticlePrivacyFilter(actor, membership) }] : []),
           ],
         },
-        select: { id: true, title: true, authority: true, slug: true },
       });
       invariant(item, 404, "NOT_FOUND", "Brain article write-back target not found.");
-      return { type, id: item.id, title: item.title, status: item.authority, webPath: `/brain/${item.slug}` };
+      invariant(actor, 403, "FORBIDDEN", "A current actor is required.");
+      const lineageRoots = await captureArtifactInputProof(actor, workspaceId, [{ kind: "BrainArticle", id: item.id, snapshot: item }], client);
+      return { type, id: item.id, title: item.title, status: item.authority, webPath: `/brain/${item.slug}`, lineageRoots };
     }
     case "BUILD_ARTIFACT": {
       const item = await client.buildArtifact.findFirst({
         where: { id: targetId, workspaceId, NOT: OPERATIONAL_ARTIFACT_FILTER },
-        select: { id: true, title: true, status: true },
       });
       invariant(item, 404, "NOT_FOUND", "Build artifact write-back target not found.");
-      return { type, id: item.id, title: item.title, status: item.status, webPath: `/build-artifacts/${item.id}` };
+      invariant(actor, 403, "FORBIDDEN", "Build artifact write-back target requires a current actor.");
+      const lineageRoots = await captureArtifactInputProof(actor, workspaceId, [{ kind: "BuildArtifact", id: item.id, snapshot: item }], client);
+      return { type, id: item.id, title: item.title, status: item.status, webPath: `/build-artifacts/${item.id}`, lineageRoots };
     }
     case "CRM_COMMUNICATION": {
       const item = await client.crmCommunicationSuggestion.findFirst({
@@ -632,8 +641,13 @@ async function validateWritebackTarget(
         lineageRoots,
       };
     }
-    case "COMMENT":
-      return { type, id: targetId, title: "Execution comment", status: null, webPath: "" };
+    case "COMMENT": {
+      invariant(actor, 403, "FORBIDDEN", "A current actor is required.");
+      const item = await client.executionRequest.findFirst({ where: executionRequestAccessWhere(actor, workspaceId, targetId) });
+      invariant(item, 404, "NOT_FOUND", "Execution comment target not found.");
+      const lineageRoots = await captureArtifactInputProof(actor, workspaceId, [{ kind: "ExecutionRequest", id: item.id, snapshot: item }], client);
+      return { type, id: targetId, title: "Execution comment", status: null, webPath: "", lineageRoots };
+    }
   }
 }
 
@@ -686,7 +700,9 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
 
   if (idempotencyKey) {
     const existing = await findExistingExecutionRequestByIdempotency(actor, params.workspaceId, idempotencyKey);
-    if (existing) { await requireCrmPacketProof(actor, params.workspaceId, existing); return serializeExecutionRequest(existing); }
+    if (existing) { await requireCrmPacketProof(actor, params.workspaceId, existing);
+      await requireExecutionRequestProof(actor, params.workspaceId, existing);
+      return serializeExecutionRequest(await loadExecutionRequest(actor, params.workspaceId, existing.id)); }
   }
 
   const goal = params.goal.trim();
@@ -703,6 +719,10 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
   if (targetType === "CRM_COMMUNICATION" && (params.context !== undefined || actor.kind !== "user")) {
     invariant(params.lineageRoots?.length, 409, "UNKNOWN_LINEAGE", "Custom CRM execution context requires its complete producer receipt.");
   }
+  if (params.context !== undefined || actor.kind !== "user" || params.copied) {
+    invariant(params.lineageRoots?.length || getMcpToolInputRoots(actor, params.workspaceId).length,
+      409, "UNKNOWN_LINEAGE", "Copied execution context requires its complete input receipt.");
+  }
 
   const workspace = await prisma.workspace.findUnique({
     where: { id: params.workspaceId },
@@ -714,6 +734,7 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
   try {
     request = await prisma.$transaction(async (tx) => {
       let packetContext = context;
+      let requestRoots = [...(params.lineageRoots ?? []), ...(target?.lineageRoots ?? [])];
       let suggestionReceipt: Awaited<ReturnType<typeof prepareProducerLineage>> | undefined;
       if (targetType === "CRM_COMMUNICATION" && target?.id) {
         const suggestion = await lockActiveCommunicationSuggestion(tx, {
@@ -736,11 +757,16 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
         if (params.lineageRoots?.length) invariant(await isArtifactInputProofReadable(actor, params.workspaceId, params.lineageRoots, tx),
           409, "SOURCE_CHANGED", "Custom execution context inputs changed before persistence.");
         const supplied = params.context === undefined ? lockedTarget?.context : params.context;
+        requestRoots = roots;
         packetContext = { ...(asRecord(supplied) ?? { providedContext: supplied }),
           [CRM_RECEIPT_KEY]: { version: 1, roots } };
         suggestionReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
           artifact: { kind: "CrmCommunicationSuggestion", id: suggestion.id }, before: suggestion, allowSystemTransition: true });
       }
+      const requestReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+        capture: { lineageInputs: targetType === "CRM_COMMUNICATION" ? params.lineageInputs?.filter((input) => input.kind !== "CrmCommunicationSuggestion" || input.id !== target?.id) : params.lineageInputs, lineageRoots: requestRoots },
+        copied: params.copied, dependencies: [{ kind: "Workspace", id: workspace.id, snapshot: workspace }] });
+      invariant(requestReceipt.mode !== "UNKNOWN", 409, "UNKNOWN_LINEAGE", "Execution inputs cannot be proven.");
       const created = await tx.executionRequest.create({
         data: {
           workspaceId: params.workspaceId,
@@ -768,6 +794,8 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
         data: { packetJson: packet as Prisma.InputJsonValue },
         include: { results: { orderBy: { submittedAt: "desc" }, take: 10 } },
       });
+      await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "ExecutionRequest", id: updated.id }, content: updated, receipt: requestReceipt });
       if (targetType === "CRM_COMMUNICATION" && target?.id) {
         const suggestion = await tx.crmCommunicationSuggestion.update({
           where: { id: target.id },
@@ -809,6 +837,7 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
         },
       });
 
+      await requireExecutionRequestProof(actor, params.workspaceId, updated, tx);
       return updated;
     });
   } catch (error) {
@@ -816,10 +845,10 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
     const existing = await findExistingExecutionRequestByIdempotency(actor, params.workspaceId, idempotencyKey);
     invariant(existing, 409, "CONFLICT", "Execution request idempotency conflict.");
     await requireCrmPacketProof(actor, params.workspaceId, existing);
-    return serializeExecutionRequest(existing);
+    return serializeExecutionRequest(await loadExecutionRequest(actor, params.workspaceId, existing.id));
   }
 
-  return serializeExecutionRequest(request);
+  return serializeExecutionRequest(await loadExecutionRequest(actor, params.workspaceId, request.id));
 }
 
 export async function getExecutionRequest(actor: AppActor, params: { workspaceId: string; requestId: string }) {
@@ -840,21 +869,29 @@ export async function listExecutionRequests(actor: AppActor, params: {
   const requests = await prisma.executionRequest.findMany({
     where: {
       ...executionRequestAccessWhere(actor, params.workspaceId),
-      ...(status ? { status: status as ExecutionRequestStatus } : {}),
     },
     include: executionRequestInclude,
-    orderBy: { createdAt: "desc" },
+    orderBy: { id: "asc" },
     take: 5001,
   });
   invariant(requests.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Execution source permission scan exceeds its supported size.");
   const visible: typeof requests = [];
   for (const request of requests) {
-    try { await requireCrmPacketProof(actor, params.workspaceId, request); visible.push(request); }
+    try { await requireCrmPacketProof(actor, params.workspaceId, request);
+      await requireExecutionRequestProof(actor, params.workspaceId, request);
+      if (!status || request.status === status) visible.push(await loadExecutionRequest(actor, params.workspaceId, request.id)); }
     catch (error) {
-      if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
+      if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED", "NOT_FOUND"].includes(error.code)) throw error;
     }
   }
-  return visible.slice(0, Math.min(Math.max(params.take ?? 20, 1), 100)).map(serializeExecutionRequest);
+  visible.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || a.id.localeCompare(b.id));
+  const selected = visible.slice(0, Math.min(Math.max(params.take ?? 20, 1), 100));
+  invariant((await readableArtifactIds(actor, params.workspaceId, "ExecutionRequest", selected)).size === selected.length,
+    409, "SOURCE_CHANGED", "Execution request inputs changed during collection.");
+  const results = selected.flatMap((request) => request.results);
+  invariant((await readableArtifactIds(actor, params.workspaceId, "ExecutionResult", results)).size === results.length,
+    409, "SOURCE_CHANGED", "Execution result inputs changed during collection.");
+  return selected.map(serializeExecutionRequest);
 }
 
 export async function getExecutionPacket(actor: AppActor, params: { workspaceId: string; requestId: string }) {
@@ -871,134 +908,104 @@ export async function getExecutionPacket(actor: AppActor, params: { workspaceId:
 
   let packetRequest = request;
   if (request.status === "PENDING") {
-    const claim = await prisma.executionRequest.updateMany({
-      where: { ...executionRequestAccessWhere(actor, params.workspaceId, request.id), status: "PENDING" },
-      data: { status: "IN_PROGRESS", claimedAt: new Date() },
+    packetRequest = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "ExecutionRequest" WHERE id = ${request.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+      const before = await tx.executionRequest.findFirst({ where: executionRequestAccessWhere(actor, params.workspaceId, request.id) });
+      invariant(before?.status === "PENDING", 409, "INVALID_STATE", "Execution packet is no longer available for claiming.");
+      await requireExecutionRequestProof(actor, params.workspaceId, before, tx);
+      const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "ExecutionRequest", id: before.id }, before, allowSystemTransition: true });
+      const after = await tx.executionRequest.update({ where: { id: before.id }, data: { status: "IN_PROGRESS", claimedAt: new Date() }, include: executionRequestInclude });
+      await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "ExecutionRequest", id: after.id }, content: after, receipt });
+      return { ...after, results: request.results };
     });
-    invariant(claim.count === 1, 409, "INVALID_STATE", "Execution packet is no longer available for claiming.");
-    packetRequest = await loadExecutionRequest(actor, params.workspaceId, params.requestId);
   }
 
+  await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "Workspace", id: workspace.id, snapshot: workspace }]);
+  await requireExecutionRequestProof(actor, params.workspaceId, packetRequest);
   const packet = buildExecutionPacket({ request: packetRequest, workspace });
   return packet;
 }
 
-export async function getCompanyContext(actor: AppActor, workspaceId: string) {
-  requireExecutionScope(actor, "execution:read");
-  requireExecutionScope(actor, "workspace:read");
-  requireExecutionScope(actor, "actions:read");
-  requireExecutionScope(actor, "tensions:read");
-  requireExecutionScope(actor, "proposals:read");
-  requireExecutionScope(actor, "meetings:read");
-  requireExecutionScope(actor, "brain:read");
-  await requireWorkspaceMembership({ actor, workspaceId });
+const SOURCE_SCAN_LIMIT = 5000;
+const SOURCE_SCAN = { orderBy: { id: "asc" as const }, take: SOURCE_SCAN_LIMIT + 1 };
 
-  const [workspace, actions, tensions, proposals, meetings, articles] = await Promise.all([
-    prisma.workspace.findUnique({
-      where: { id: workspaceId },
-      select: { id: true, slug: true, name: true, description: true, plan: true },
-    }),
-    prisma.action.findMany({
-      where: { workspaceId, archivedAt: null, isPrivate: false },
-      select: {
-        id: true,
-        title: true,
-        status: true,
-        priority: true,
-        assigneeMemberId: true,
-        assigneeMember: { select: { user: { select: { displayName: true, email: true } } } },
-        dueAt: true,
-        updatedAt: true,
-      },
-      orderBy: { updatedAt: "desc" },
-      take: MAX_CONTEXT_ITEMS,
-    }),
-    prisma.tension.findMany({
-      where: { workspaceId, archivedAt: null, isPrivate: false },
-      select: {
-        id: true,
-        title: true,
-        status: true,
-        priority: true,
-        assigneeMemberId: true,
-        assigneeMember: { select: { user: { select: { displayName: true, email: true } } } },
-        raisedByMemberId: true,
-        raisedByMember: { select: { user: { select: { displayName: true, email: true } } } },
-        updatedAt: true,
-      },
-      orderBy: { updatedAt: "desc" },
-      take: MAX_CONTEXT_ITEMS,
-    }),
-    prisma.proposal.findMany({
-      where: { workspaceId, archivedAt: null, isPrivate: false },
-      select: {
-        id: true,
-        title: true,
-        summary: true,
-        status: true,
-        priority: true,
-        ownerMemberId: true,
-        ownerMember: { select: { user: { select: { displayName: true, email: true } } } },
-        updatedAt: true,
-      },
-      orderBy: { updatedAt: "desc" },
-      take: MAX_CONTEXT_ITEMS,
-    }),
-    prisma.meeting.findMany({
-      where: { workspaceId, archivedAt: null },
-      select: { id: true, title: true, status: true, recordedAt: true, summaryMd: true },
-      orderBy: { recordedAt: "desc" },
-      take: 10,
-    }),
-    prisma.brainArticle.findMany({
-      where: { workspaceId, archivedAt: null, isPrivate: false },
-      select: { id: true, slug: true, title: true, type: true, authority: true, updatedAt: true },
-      orderBy: { updatedAt: "desc" },
-      take: MAX_CONTEXT_ITEMS,
-    }),
+async function readableExecutionRows<T extends { id: string }>(actor: AppActor, workspaceId: string, kind: LineageKind, candidates: T[]) {
+  invariant(candidates.length <= SOURCE_SCAN_LIMIT, 503, "SOURCE_READ_SCAN_LIMIT", "Execution input permission scan exceeds its supported size.");
+  return captureReadableDigestInputs({ actor, workspaceId, kind, records: candidates });
+}
+
+function recentRows<T extends { id: string; updatedAt?: Date; recordedAt?: Date | null }>(records: T[], take: number) {
+  return [...records].sort((a, b) => ((b.recordedAt ?? b.updatedAt)?.getTime() ?? 0) - ((a.recordedAt ?? a.updatedAt)?.getTime() ?? 0)
+    || a.id.localeCompare(b.id)).slice(0, take);
+}
+
+async function readableExecutionMember(actor: AppActor, workspaceId: string, memberId: string | null, roots: LineageRoot[]) {
+  if (!memberId) return { id: null, name: null };
+  const member = await prisma.member.findFirst({ where: { id: memberId, workspaceId, isActive: true },
+    include: { user: { select: { id: true, displayName: true, email: true } } } });
+  if (!member?.user) return { id: null, name: null };
+  try {
+    roots.push(...await captureArtifactInputProof(actor, workspaceId, [
+      { kind: "Member", id: member.id, snapshot: member },
+      { kind: "User", id: member.user.id, snapshot: member.user },
+    ]));
+    return { id: member.id, name: memberName(member) };
+  } catch (error) {
+    if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_RESTRICTED", "SOURCE_CHANGED"].includes(error.code)) throw error;
+    return { id: null, name: null };
+  }
+}
+
+export async function getCompanyContext(actor: AppActor, workspaceId: string) {
+  for (const scope of ["execution:read", "workspace:read", "actions:read", "tensions:read", "proposals:read", "meetings:read", "brain:read"] as const) requireExecutionScope(actor, scope);
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const [workspace, actionRows, tensionRows, proposalRows, meetingRows, articleRows] = await Promise.all([
+    prisma.workspace.findUnique({ where: { id: workspaceId } }),
+    prisma.action.findMany({ where: { workspaceId, archivedAt: null, isPrivate: false }, ...SOURCE_SCAN }),
+    prisma.tension.findMany({ where: { workspaceId, archivedAt: null, isPrivate: false }, ...SOURCE_SCAN }),
+    prisma.proposal.findMany({ where: { workspaceId, archivedAt: null, isPrivate: false }, ...SOURCE_SCAN }),
+    prisma.meeting.findMany({ where: { workspaceId, archivedAt: null }, ...SOURCE_SCAN }),
+    prisma.brainArticle.findMany({ where: { workspaceId, archivedAt: null, isPrivate: false }, ...SOURCE_SCAN }),
   ]);
   invariant(workspace, 404, "NOT_FOUND", "Workspace not found.");
-
-  const mappedActions = actions.map(({ assigneeMember, ...action }) => {
-    const assignee = memberName(assigneeMember);
-    return {
-      ...action,
-      priorityLabel: formatWorkItemPriority(action.priority),
-      assigneeMemberName: assignee,
-      assignee,
-    };
-  });
-  const mappedTensions = tensions.map(({ assigneeMember, raisedByMember, ...tension }) => {
-    const responsiblePerson = memberName(assigneeMember);
-    const raisedBy = memberName(raisedByMember);
-    return {
-      ...tension,
-      priorityLabel: formatWorkItemPriority(tension.priority),
-      responsibleMemberId: tension.assigneeMemberId,
-      responsibleMemberName: responsiblePerson,
-      responsiblePerson,
-      raisedByMemberName: raisedBy,
-      raisedBy,
-    };
-  });
-  const mappedProposals = proposals.map(({ ownerMember, ...proposal }) => {
-    const owner = memberName(ownerMember);
-    return {
-      ...proposal,
-      priorityLabel: formatWorkItemPriority(proposal.priority),
-      ownerMemberName: owner,
-      owner,
-    };
-  });
-
-  return redactJson({
-    workspace,
-    recent: { actions: mappedActions, tensions: mappedTensions, proposals: mappedProposals, meetings, articles },
-    policy: {
-      externalExecution: "External AI workspaces execute; Corgtex supplies scoped context, policy constraints, audit, and reviewable write-back.",
-      defaultWritebackMode: "draft_or_comment",
-    },
-  });
+  const roots = await captureArtifactInputProof(actor, workspaceId, [{ kind: "Workspace", id: workspaceId, snapshot: workspace }]);
+  const [actions, tensions, proposals, meetings, articles] = await Promise.all([
+    readableExecutionRows(actor, workspaceId, "Action", actionRows),
+    readableExecutionRows(actor, workspaceId, "Tension", tensionRows),
+    readableExecutionRows(actor, workspaceId, "Proposal", proposalRows),
+    readableExecutionRows(actor, workspaceId, "Meeting", meetingRows),
+    readableExecutionRows(actor, workspaceId, "BrainArticle", articleRows),
+  ]);
+  const select = <T extends { id: string; updatedAt?: Date; recordedAt?: Date | null }>(read: { records: T[]; proofs: Map<string, LineageRoot[]> }, take = MAX_CONTEXT_ITEMS) => {
+    const rows = recentRows(read.records, take);
+    for (const row of rows) roots.push(...(read.proofs.get(row.id) ?? []));
+    return rows;
+  };
+  const mappedActions = await Promise.all(select(actions).map(async (row) => {
+    const assignee = await readableExecutionMember(actor, workspaceId, row.assigneeMemberId, roots);
+    return { id: row.id, title: row.title, status: row.status, priority: row.priority, priorityLabel: formatWorkItemPriority(row.priority),
+      dueAt: row.dueAt, updatedAt: row.updatedAt, assigneeMemberId: assignee.id, assigneeMemberName: assignee.name, assignee: assignee.name };
+  }));
+  const mappedTensions = await Promise.all(select(tensions).map(async (row) => {
+    const [assignee, raisedBy] = await Promise.all([readableExecutionMember(actor, workspaceId, row.assigneeMemberId, roots),
+      readableExecutionMember(actor, workspaceId, row.raisedByMemberId, roots)]);
+    return { id: row.id, title: row.title, status: row.status, priority: row.priority, priorityLabel: formatWorkItemPriority(row.priority), updatedAt: row.updatedAt,
+      assigneeMemberId: assignee.id, responsibleMemberId: assignee.id, responsibleMemberName: assignee.name, responsiblePerson: assignee.name,
+      raisedByMemberId: raisedBy.id, raisedByMemberName: raisedBy.name, raisedBy: raisedBy.name };
+  }));
+  const mappedProposals = await Promise.all(select(proposals).map(async (row) => {
+    const owner = await readableExecutionMember(actor, workspaceId, row.ownerMemberId, roots);
+    return { id: row.id, title: row.title, summary: row.summary, status: row.status, priority: row.priority,
+      priorityLabel: formatWorkItemPriority(row.priority), updatedAt: row.updatedAt, ownerMemberId: owner.id, ownerMemberName: owner.name, owner: owner.name };
+  }));
+  const mappedMeetings = select(meetings, 10).map((row) => ({ id: row.id, title: row.title, status: row.status, recordedAt: row.recordedAt, summaryMd: row.summaryMd }));
+  const mappedArticles = select(articles).map((row) => ({ id: row.id, title: row.title, slug: row.slug, type: row.type, authority: row.authority, updatedAt: row.updatedAt }));
+  invariant(await isArtifactInputProofReadable(actor, workspaceId, roots), 409, "SOURCE_CHANGED", "Execution context inputs changed during collection.");
+  return redactJson({ workspace: { id: workspace.id, slug: workspace.slug, name: workspace.name, description: workspace.description, plan: workspace.plan },
+    recent: { actions: mappedActions, tensions: mappedTensions, proposals: mappedProposals, meetings: mappedMeetings, articles: mappedArticles },
+    policy: { externalExecution: "External AI workspaces execute; Corgtex supplies scoped context, policy constraints, audit, and reviewable write-back.", defaultWritebackMode: "draft_or_comment" } });
 }
 
 function targetTypeSet(targetTypes?: Array<string | ExecutionWritebackTargetType> | null) {
@@ -1011,116 +1018,63 @@ export async function listWritebackTargets(actor: AppActor, params: ListWritebac
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const selectedTypes = targetTypeSet(params.targetTypes);
   const take = Math.min(Math.max(params.take ?? 10, 1), 50);
-  const title = titleMatches(params.query);
+  const query = params.query?.trim().toLocaleLowerCase() ?? "";
   const items: WritebackTargetSummary[] = [];
-
+  const roots = await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "Workspace", id: params.workspaceId }]);
   const includeType = (type: ExecutionWritebackTargetType) => !selectedTypes || selectedTypes.has(type);
-  if (includeType("ACTION")) {
-    requireExecutionScope(actor, "actions:read");
-    const records = await prisma.action.findMany({
-      where: { workspaceId: params.workspaceId, archivedAt: null, ...privacyFilter(actor, membership), ...(title ? { title } : {}) },
-      select: { id: true, title: true, status: true },
-      orderBy: { updatedAt: "desc" },
-      take,
-    });
-    items.push(...records.map((record) => ({ type: "ACTION" as const, id: record.id, title: record.title, status: record.status, webPath: `/actions/${record.id}` })));
-  }
-  if (includeType("TENSION")) {
-    requireExecutionScope(actor, "tensions:read");
-    const records = await prisma.tension.findMany({
-      where: { workspaceId: params.workspaceId, archivedAt: null, ...privacyFilter(actor, membership), ...(title ? { title } : {}) },
-      select: { id: true, title: true, status: true },
-      orderBy: { updatedAt: "desc" },
-      take,
-    });
-    items.push(...records.map((record) => ({ type: "TENSION" as const, id: record.id, title: record.title, status: record.status, webPath: `/tensions/${record.id}` })));
-  }
-  if (includeType("PROPOSAL")) {
-    requireExecutionScope(actor, "proposals:read");
-    const records = await prisma.proposal.findMany({
-      where: { workspaceId: params.workspaceId, archivedAt: null, ...privacyFilter(actor, membership), ...(title ? { title } : {}) },
-      select: { id: true, title: true, status: true },
-      orderBy: { updatedAt: "desc" },
-      take,
-    });
-    items.push(...records.map((record) => ({ type: "PROPOSAL" as const, id: record.id, title: record.title, status: record.status, webPath: `/proposals/${record.id}` })));
-  }
-  if (includeType("MEETING")) {
-    requireExecutionScope(actor, "meetings:read");
-    const records = await prisma.meeting.findMany({
-      where: { workspaceId: params.workspaceId, archivedAt: null, ...(title ? { title } : {}) },
-      select: { id: true, title: true, status: true },
-      orderBy: { recordedAt: "desc" },
-      take,
-    });
-    items.push(...records.map((record) => ({ type: "MEETING" as const, id: record.id, title: record.title ?? "Untitled meeting", status: record.status, webPath: `/meetings/${record.id}` })));
-  }
-  if (includeType("BRAIN_ARTICLE")) {
-    requireExecutionScope(actor, "brain:read");
-    const records = await prisma.brainArticle.findMany({
-      where: {
-        AND: [
-          { workspaceId: params.workspaceId, archivedAt: null, ...(title ? { title } : {}) },
-          { OR: brainArticlePrivacyFilter(actor, membership) },
-        ],
-      },
-      select: { id: true, slug: true, title: true, authority: true },
-      orderBy: { updatedAt: "desc" },
-      take,
-    });
-    items.push(...records.map((record) => ({ type: "BRAIN_ARTICLE" as const, id: record.id, title: record.title, status: record.authority, webPath: `/brain/${record.slug}` })));
-  }
-  if (includeType("BUILD_ARTIFACT")) {
-    requireExecutionScope(actor, "workspace:read");
-    const records = await prisma.buildArtifact.findMany({
-      where: { workspaceId: params.workspaceId, ...(title ? { title } : {}), NOT: OPERATIONAL_ARTIFACT_FILTER },
-      select: { id: true, title: true, status: true },
-      orderBy: { updatedAt: "desc" },
-      take,
-    });
-    items.push(...records.map((record) => ({ type: "BUILD_ARTIFACT" as const, id: record.id, title: record.title, status: record.status, webPath: `/build-artifacts/${record.id}` })));
+  const native = [
+    ["ACTION", "Action", prisma.action, "/actions/"],
+    ["TENSION", "Tension", prisma.tension, "/tensions/"],
+    ["PROPOSAL", "Proposal", prisma.proposal, "/proposals/"],
+    ["MEETING", "Meeting", prisma.meeting, "/meetings/"],
+    ["BRAIN_ARTICLE", "BrainArticle", prisma.brainArticle, "/brain/"],
+    ["BUILD_ARTIFACT", "BuildArtifact", prisma.buildArtifact, "/build-artifacts/"],
+  ] as const;
+  for (const [type, kind, delegate, path] of native) {
+    if (!includeType(type)) continue;
+    requireExecutionScope(actor, targetReadScope(type));
+    const where = type === "BUILD_ARTIFACT" ? { workspaceId: params.workspaceId, NOT: OPERATIONAL_ARTIFACT_FILTER }
+      : type === "BRAIN_ARTICLE" ? { AND: [{ workspaceId: params.workspaceId, archivedAt: null }, { OR: brainArticlePrivacyFilter(actor, membership) }] }
+      : { workspaceId: params.workspaceId, archivedAt: null, ...(["ACTION", "TENSION", "PROPOSAL"].includes(type) ? privacyFilter(actor, membership) : {}) };
+    // All delegates share a scalar query boundary. Gate complete rows before title matches and samples.
+    const candidates = await (delegate.findMany as (args: unknown) => Promise<Array<{ id: string; title: string | null; status?: string; authority?: string; slug?: string; updatedAt: Date; recordedAt?: Date | null }>>)({ where, ...SOURCE_SCAN });
+    const readable = await readableExecutionRows(actor, params.workspaceId, kind, candidates);
+    const records = recentRows(readable.records.filter((row) => !query || row.title?.toLocaleLowerCase().includes(query)), take);
+    for (const row of records) roots.push(...(readable.proofs.get(row.id) ?? []));
+    items.push(...records.map((row) => ({ type, id: row.id, title: row.title ?? "Untitled meeting", status: row.status ?? row.authority ?? null, webPath: `${path}${type === "BRAIN_ARTICLE" ? row.slug : row.id}` })));
   }
   if (includeType("CRM_COMMUNICATION")) {
     requireExecutionScope(actor, "relationships:read");
-    const candidates = await prisma.crmCommunicationSuggestion.findMany({
-      where: {
-        workspaceId: params.workspaceId,
-        ...activeCrmParentWhere(["account", "contact", "deal", "activity"]),
-        ...(title
-          ? {
-            OR: [
-              { title },
-              { subject: title },
-              { recipientEmail: title },
-              { recipientName: title },
-            ],
-          }
-          : {}),
-      },
-      orderBy: { updatedAt: "desc" },
-      take: 5001,
-    });
-    invariant(candidates.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "CRM target permission scan exceeds its supported size.");
-    const readable = await captureReadableDigestInputs({ actor, workspaceId: params.workspaceId, kind: "CrmCommunicationSuggestion", records: candidates });
+    const candidates = await prisma.crmCommunicationSuggestion.findMany({ where: { workspaceId: params.workspaceId,
+      ...activeCrmParentWhere(["account", "contact", "deal", "activity"]) }, ...SOURCE_SCAN });
+    const readable = await readableExecutionRows(actor, params.workspaceId, "CrmCommunicationSuggestion", candidates);
     const records: typeof candidates = [];
-    for (const candidate of readable.records) if (await isArtifactInputProofPubliclyShareable(actor, params.workspaceId, readable.proofs.get(candidate.id) ?? [])) records.push(candidate);
-    const sampled = records.slice(0, take);
-    items.push(...sampled.map((record) => ({
-      type: "CRM_COMMUNICATION" as const,
-      id: record.id,
-      title: record.subject ?? record.title,
-      status: record.status,
-      webPath: record.accountId ? `/leads/accounts/${record.accountId}?view=review` : "/leads?view=review",
-    })));
+    for (const row of readable.records) {
+      if (!await isArtifactInputProofPubliclyShareable(actor, params.workspaceId, readable.proofs.get(row.id) ?? [])) continue;
+      // The affiliation path is an independent current input, even when the suggestion body is original.
+      if (row.accountId) {
+        try { roots.push(...await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "CrmAccount", id: row.accountId }])); }
+        catch (error) {
+          if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
+          continue;
+        }
+      }
+      if (!query || [row.title, row.subject, row.recipientEmail, row.recipientName].some((v) => v?.toLocaleLowerCase().includes(query))) records.push(row);
+    }
+    const sampled = recentRows(records, take);
+    for (const row of sampled) roots.push(...(readable.proofs.get(row.id) ?? []));
+    items.push(...sampled.map((row) => ({ type: "CRM_COMMUNICATION" as const, id: row.id,
+      title: row.subject ?? row.title, status: row.status, webPath: row.accountId ? `/leads/accounts/${row.accountId}?view=review` : "/leads?view=review" })));
   }
   if (includeType("COMMENT")) {
+    roots.push(...await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "Workspace", id: params.workspaceId }]));
     items.push({ type: "COMMENT", id: null, title: "Comment on execution request", status: null, webPath: "" });
   }
-
+  invariant(await isArtifactInputProofReadable(actor, params.workspaceId, roots), 409, "SOURCE_CHANGED", "Execution targets changed during collection.");
   return { items: items.slice(0, take * 6) };
 }
 
-async function validateCrmCommunicationResultOutput(workspaceId: string, targetId: string | null, output: JsonRecord,
+async function validateCrmCommunicationResultOutput(actor: AppActor, workspaceId: string, targetId: string | null, output: JsonRecord,
   client: Prisma.TransactionClient | typeof prisma = prisma) {
   invariant(targetId, 400, "INVALID_INPUT", "CRM communication result target id is required.");
   optionalDate(output.sentAt);
@@ -1129,10 +1083,11 @@ async function validateCrmCommunicationResultOutput(workspaceId: string, targetI
   if (conversationId) {
     const conversation = await client.crmConversation.findFirst({
       where: { id: conversationId, workspaceId, ...activeCrmParentWhere(["account", "contact", "deal"]) },
-      select: { id: true },
     });
     invariant(conversation, 404, "NOT_FOUND", "CRM conversation write-back target not found.");
+    return captureArtifactInputProof(actor, workspaceId, [{ kind: "CrmConversation", id: conversation.id, snapshot: conversation }], client);
   }
+  return [];
 }
 
 async function createCrmCommunicationWriteback(actor: AppActor, params: {
@@ -1140,10 +1095,10 @@ async function createCrmCommunicationWriteback(actor: AppActor, params: {
   targetId: string;
   output: JsonRecord;
   errorMessage: string | null;
-  requestCreatedByUserId: string | null;
+  lineageRoots?: LineageRoot[];
   transaction?: Prisma.TransactionClient;
 }) {
-  const writebackActor = requestOwnerActor({ createdByUserId: params.requestCreatedByUserId }, actor);
+  const writebackActor = actor;
   const conversationId = optionalString(params.output.conversationId);
   if (!params.errorMessage && params.transaction) {
     const conversation = conversationId ? await params.transaction.crmConversation.findUnique({ where: { id: conversationId } }) : null;
@@ -1160,6 +1115,7 @@ async function createCrmCommunicationWriteback(actor: AppActor, params: {
       workspaceId: params.workspaceId,
       suggestionId: params.targetId,
       failureReason: params.errorMessage,
+      lineageRoots: params.lineageRoots,
     }, params.transaction);
     return { entityType: "CrmCommunicationSuggestion", entityId: suggestion?.id ?? params.targetId };
   }
@@ -1168,13 +1124,15 @@ async function createCrmCommunicationWriteback(actor: AppActor, params: {
     workspaceId: params.workspaceId,
     suggestionId: params.targetId,
     sentAt: optionalDate(params.output.sentAt),
+    lineageRoots: params.lineageRoots,
   }, params.transaction);
 
   if (conversationId) {
     await createConversationMessage(writebackActor, {
       workspaceId: params.workspaceId,
       conversationId,
-      senderType: "ADMIN",
+      senderType: actor.kind === "user" ? "ADMIN" : "SYSTEM",
+      lineageRoots: params.lineageRoots, copied: true,
       senderEmail: optionalString(params.output.senderEmail) ?? undefined,
       bodyMd: optionalString(params.output.conversationBodyMd)
         ?? optionalString(params.output.messageBodyMd)
@@ -1194,7 +1152,8 @@ async function createNativeWriteback(actor: AppActor, params: {
   output: JsonRecord;
   requestId: string;
   resultId: string;
-  requestCreatedByUserId: string | null;
+  lineageRoots?: LineageRoot[];
+  transaction?: Prisma.TransactionClient;
 }) {
   if (params.type === "CRM_COMMUNICATION") {
     invariant(params.targetId, 400, "INVALID_INPUT", "CRM communication write-back target id is required.");
@@ -1203,13 +1162,13 @@ async function createNativeWriteback(actor: AppActor, params: {
       targetId: params.targetId,
       output: params.output,
       errorMessage: null,
-      requestCreatedByUserId: params.requestCreatedByUserId,
+      lineageRoots: params.lineageRoots, transaction: params.transaction,
     });
   }
   if (params.targetId || params.type === "COMMENT") {
     return { entityType: "ExecutionResult", entityId: params.resultId };
   }
-  const writebackActor = requestOwnerActor({ createdByUserId: params.requestCreatedByUserId }, actor);
+  const writebackActor = actor;
 
   switch (params.type) {
     case "ACTION": {
@@ -1218,8 +1177,10 @@ async function createNativeWriteback(actor: AppActor, params: {
         title: requiredString(params.output.title, "Action title"),
         bodyMd: optionalString(params.output.bodyMd) ?? optionalString(params.output.body) ?? null,
         isPrivate: true,
-        duplicateGuard: { onExact: "use_existing" },
+        lineageRoots: params.lineageRoots,
         source: { type: "EXECUTION_RESULT", id: params.resultId },
+        _tx: params.transaction,
+        _membership: await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx: params.transaction }),
       });
       return { entityType: "Action", entityId: action.id };
     }
@@ -1229,8 +1190,8 @@ async function createNativeWriteback(actor: AppActor, params: {
         title: requiredString(params.output.title, "Tension title"),
         bodyMd: optionalString(params.output.bodyMd) ?? optionalString(params.output.body) ?? null,
         isPrivate: true,
-        duplicateGuard: { onExact: "use_existing" },
-      });
+        lineageRoots: params.lineageRoots,
+      }, params.transaction);
       return { entityType: "Tension", entityId: tension.id };
     }
     case "PROPOSAL": {
@@ -1240,8 +1201,9 @@ async function createNativeWriteback(actor: AppActor, params: {
         summary: optionalString(params.output.summary),
         bodyMd: requiredString(params.output.bodyMd ?? params.output.body, "Proposal body"),
         isPrivate: true,
-        duplicateGuard: { onExact: "use_existing" },
-      });
+        lineageRoots: params.lineageRoots,
+        includeAiSummary: false,
+      }, params.transaction);
       return { entityType: "Proposal", entityId: proposal.id };
     }
     case "MEETING": {
@@ -1253,7 +1215,8 @@ async function createNativeWriteback(actor: AppActor, params: {
         recordedAt: optionalDate(params.output.recordedAt) ?? new Date(),
         transcript: optionalString(params.output.transcript),
         summaryMd: optionalString(params.output.summaryMd) ?? optionalString(params.output.summary),
-        duplicateGuard: { onExact: "use_existing" },
+        lineageRoots: params.lineageRoots,
+        copied: true, tx: params.transaction,
       });
       return { entityType: "Meeting", entityId: meeting.id };
     }
@@ -1266,7 +1229,8 @@ async function createNativeWriteback(actor: AppActor, params: {
         authority: enumValue(BrainArticleAuthority, params.output.authority, "DRAFT", "Brain article authority"),
         bodyMd: requiredString(params.output.bodyMd ?? params.output.body, "Brain article body"),
         isPrivate: true,
-        duplicateGuard: { onExact: "use_existing" },
+        completeInputRoots: params.lineageRoots,
+        tx: params.transaction,
       });
       return { entityType: "BrainArticle", entityId: article.id };
     }
@@ -1285,6 +1249,9 @@ async function createNativeWriteback(actor: AppActor, params: {
         status: enumValue(BuildArtifactStatus, params.output.status, "OPEN", "Build artifact status"),
         classification: enumValue(BuildArtifactClassification, params.output.classification, "INTERNAL", "Build artifact classification"),
         visibility: enumValue(BuildArtifactVisibility, params.output.visibility, "PRIVATE", "Build artifact visibility"),
+        copied: true,
+        lineageRoots: params.lineageRoots,
+        tx: params.transaction,
       });
       return { entityType: "BuildArtifact", entityId: artifact.id };
     }
@@ -1331,167 +1298,96 @@ function validateNativeWritebackOutput(type: ExecutionWritebackTargetType, targe
 export async function submitExecutionResult(actor: AppActor, params: SubmitExecutionResultParams) {
   requireExecutionScope(actor, "execution:write");
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-
   const idempotencyKey = params.idempotencyKey.trim();
   invariant(idempotencyKey.length > 0, 400, "INVALID_INPUT", "Result idempotency key is required.");
-
   const output = objectInput(params.output);
   const errorMessage = optionalString(params.errorMessage);
-  const transactionResult = await prisma.$transaction(async (tx) => {
-    const claim = await tx.executionRequest.updateMany({
-      where: { ...executionRequestAccessWhere(actor, params.workspaceId, params.requestId),
-        status: { in: ["PENDING", "IN_PROGRESS"] } },
-      data: { status: "RESULT_SUBMITTED" },
-    });
-    if (claim.count !== 1) {
-      const current = await tx.executionRequest.findFirst({ where:
-        executionRequestAccessWhere(actor, params.workspaceId, params.requestId) });
-      invariant(current, 404, "NOT_FOUND", "Execution request not found.");
-      const existing = await tx.executionResult.findUnique({
-        where: { executionRequestId_idempotencyKey: { executionRequestId: current.id, idempotencyKey } },
-      });
-      invariant(["COMPLETED", "FAILED"].includes(current.status) && existing
-        && ["ACCEPTED", "REJECTED"].includes(existing.status), 409, "CONFLICT",
-      "Execution request already has a different or incomplete result.");
-      return { kind: "complete" as const, result: existing };
+  const result = await prisma.$transaction(async (tx) => {
+    // The complete request, result and native writeback share one connection and rollback boundary.
+    const [before] = await tx.$queryRaw<ExecutionRequest[]>`SELECT * FROM "ExecutionRequest" WHERE id = ${params.requestId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    invariant(before, 404, "NOT_FOUND", "Execution request not found.");
+    await requireExecutionRequestProof(actor, params.workspaceId, before, tx);
+    if (!["PENDING", "IN_PROGRESS"].includes(before.status)) {
+      const existing = await tx.executionResult.findUnique({ where: { executionRequestId_idempotencyKey: { executionRequestId: before.id, idempotencyKey } } });
+      invariant(["COMPLETED", "FAILED"].includes(before.status) && existing && ["ACCEPTED", "REJECTED"].includes(existing.status),
+        409, "CONFLICT", "Execution request already has a different or incomplete result.");
+      invariant((await readableArtifactIds(actor, params.workspaceId, "ExecutionResult", [existing], tx)).has(existing.id),
+        404, "NOT_FOUND", "Execution result not found.");
+      return existing;
     }
-
-    const request = await tx.executionRequest.findFirst({ where:
-      executionRequestAccessWhere(actor, params.workspaceId, params.requestId) });
-    invariant(request, 404, "NOT_FOUND", "Execution request not found.");
-    const targetType = normalizeExecutionTargetType(params.targetType) ?? request.writebackTargetType;
-    const targetId = optionalString(params.targetId) ?? request.writebackTargetId;
-    if (request.writebackTargetType) {
-      invariant(targetType === request.writebackTargetType, 400, "INVALID_INPUT", "Result target type does not match the execution request.");
-    }
-    if (request.writebackTargetId) {
-      invariant(targetId === request.writebackTargetId, 400, "INVALID_INPUT", "Result target id does not match the execution request.");
-    }
-
-    if (targetType === "CRM_COMMUNICATION") {
-      invariant(targetId, 400, "INVALID_INPUT", "CRM communication result target id is required.");
-      const writeScope = targetWriteScope(targetType);
-      requireExecutionScope(actor, writeScope);
-      invariant(request.allowedScopes.includes(writeScope), 403, "FORBIDDEN", `Execution request does not allow the required scope: ${writeScope}.`);
-      await validateWritebackTarget(params.workspaceId, targetType, targetId, actor, membership, tx);
-      await validateCrmCommunicationResultOutput(params.workspaceId, targetId, output, tx);
-    } else if (!errorMessage) {
+    const submittedRoots = [...(params.lineageRoots ?? []), ...getMcpToolInputRoots(actor, params.workspaceId)];
+    invariant(submittedRoots.length, 409, "UNKNOWN_LINEAGE", "External results require their actual submitted input receipt.");
+    const targetType = normalizeExecutionTargetType(params.targetType) ?? before.writebackTargetType;
+    const targetId = optionalString(params.targetId) ?? before.writebackTargetId;
+    if (before.writebackTargetType) invariant(targetType === before.writebackTargetType, 400, "INVALID_INPUT", "Result target type does not match the execution request.");
+    if (before.writebackTargetId) invariant(targetId === before.writebackTargetId, 400, "INVALID_INPUT", "Result target id does not match the execution request.");
+    let targetRoots: LineageRoot[] = [];
+    if (targetType === "CRM_COMMUNICATION" || !errorMessage) {
       invariant(targetType, 400, "INVALID_INPUT", "Result target type is required.");
       const writeScope = targetWriteScope(targetType);
       requireExecutionScope(actor, writeScope);
-      invariant(request.allowedScopes.includes(writeScope), 403, "FORBIDDEN", `Execution request does not allow the required scope: ${writeScope}.`);
-      await validateWritebackTarget(params.workspaceId, targetType, targetId, actor, membership, tx);
-      validateNativeWritebackOutput(targetType, targetId ?? null, output);
+      invariant(before.allowedScopes.includes(writeScope), 403, "FORBIDDEN", `Execution request does not allow the required scope: ${writeScope}.`);
+      const target = await validateWritebackTarget(params.workspaceId, targetType, targetId, actor, membership, tx);
+      targetRoots = target?.lineageRoots ?? [];
+      if (targetType === "CRM_COMMUNICATION") targetRoots.push(...await validateCrmCommunicationResultOutput(actor, params.workspaceId, targetId, output, tx));
+      else validateNativeWritebackOutput(targetType, targetId ?? null, output);
     }
-
-    const atomicWriteback = targetType === "CRM_COMMUNICATION" && targetId
+    const requestRoots = await captureImmutableArtifactInputProof(actor, params.workspaceId,
+      await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "ExecutionRequest", id: before.id, snapshot: before }], tx), tx);
+    // Freeze every actual input before any status/body mutation, including CRM rows that the writeback advances.
+    const inputRoots = await captureImmutableArtifactInputProof(actor, params.workspaceId, [...submittedRoots, ...requestRoots, ...targetRoots], tx);
+    const requestReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "ExecutionRequest", id: before.id }, before, allowSystemTransition: true });
+    const claim = await tx.executionRequest.updateMany({ where: { ...executionRequestAccessWhere(actor, params.workspaceId, before.id),
+      status: { in: ["PENDING", "IN_PROGRESS"] } }, data: { status: "RESULT_SUBMITTED" } });
+    invariant(claim.count === 1, 409, "CONFLICT", "Execution request is no longer available for a result.");
+    const request = await tx.executionRequest.findFirst({ where: executionRequestAccessWhere(actor, params.workspaceId, before.id) });
+    invariant(request, 404, "NOT_FOUND", "Execution request not found.");
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "ExecutionRequest", id: request.id }, content: request, receipt: requestReceipt });
+    const resultReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId, copied: true,
+      capture: { lineageInputs: params.lineageInputs, lineageRoots: inputRoots } });
+    invariant(resultReceipt.mode !== "UNKNOWN", 409, "UNKNOWN_LINEAGE", "External result inputs cannot be proven.");
+    const created = await tx.executionResult.create({ data: {
+      workspaceId: params.workspaceId, executionRequestId: request.id,
+      submittedByUserId: actor.kind === "user" ? actor.user.id : null, agentCredentialId: actorCredentialId(actor),
+      status: "SUBMITTED", idempotencyKey, targetType, targetId: targetId ?? null,
+      outputJson: jsonInput(params.output ?? null), artifactJson: jsonInput(params.artifacts ?? null), errorMessage,
+      writebackEntityType: null, writebackEntityId: null, acceptedAt: null, rejectedAt: null,
+    } });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "ExecutionResult", id: created.id }, content: created, receipt: resultReceipt });
+    const writebackRoots = await captureImmutableArtifactInputProof(actor, params.workspaceId,
+      await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "ExecutionResult", id: created.id, snapshot: created }], tx), tx);
+    const writeback = targetType === "CRM_COMMUNICATION" && targetId
       ? await createCrmCommunicationWriteback(actor, { workspaceId: params.workspaceId, targetId, output, errorMessage,
-        requestCreatedByUserId: request.createdByUserId, transaction: tx }) : null;
-    const atomicCrm = targetType === "CRM_COMMUNICATION";
-    const finalizedAt = atomicCrm ? new Date() : null;
-    const created = await tx.executionResult.create({
-      data: {
-          workspaceId: params.workspaceId,
-          executionRequestId: request.id,
-          submittedByUserId: actor.kind === "user" ? actor.user.id : null,
-          agentCredentialId: actorCredentialId(actor),
-          status: atomicCrm ? (errorMessage ? "REJECTED" : "ACCEPTED") : "SUBMITTED",
-          idempotencyKey,
-          targetType,
-          targetId: targetId ?? null,
-          outputJson: jsonInput(params.output ?? null),
-          artifactJson: jsonInput(params.artifacts ?? null),
-          errorMessage,
-          writebackEntityType: atomicWriteback?.entityType ?? null,
-          writebackEntityId: atomicWriteback?.entityId ?? null,
-          acceptedAt: atomicCrm && !errorMessage ? finalizedAt : null,
-          rejectedAt: atomicCrm && errorMessage ? finalizedAt : null,
-      },
-    });
-
-    await tx.executionRequest.update({
-      where: { id: request.id },
-      data: atomicCrm ? { status: errorMessage ? "FAILED" : "COMPLETED",
-        completedAt: errorMessage ? null : finalizedAt, failedAt: errorMessage ? finalizedAt : null }
-        : { status: "RESULT_SUBMITTED" },
-    });
-
-    await recordAudit(tx, actor, {
-        workspaceId: params.workspaceId,
-        action: "execution_result.received",
-        entityType: "ExecutionRequest",
-        entityId: request.id,
-        meta: {
-          resultId: created.id,
-          targetType,
-          targetId: targetId ?? null,
-          outputSummary: redactJson({
-            keys: Object.keys(output).sort(),
-            artifactCount: Array.isArray(params.artifacts) ? params.artifacts.length : undefined,
-            hasError: Boolean(errorMessage),
-          }),
-        },
-    });
-
-    if (atomicCrm) await recordAudit(tx, actor, { workspaceId: params.workspaceId,
-      action: "execution_result.submitted", entityType: "ExecutionRequest", entityId: request.id,
-      meta: { resultId: created.id, targetType, targetId, status: created.status,
-        writebackEntityType: created.writebackEntityType, writebackEntityId: created.writebackEntityId } });
-    return atomicCrm
-      ? { kind: "complete" as const, result: created }
-      : { kind: "native" as const, result: created, request, targetType, targetId };
+        lineageRoots: writebackRoots, transaction: tx })
+      : !errorMessage && targetType ? await createNativeWriteback(actor, { workspaceId: params.workspaceId, type: targetType,
+        targetId: targetId ?? null, output, requestId: request.id, resultId: created.id,
+        lineageRoots: writebackRoots, transaction: tx }) : null;
+    const finalResultReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "ExecutionResult", id: created.id }, before: created, allowSystemTransition: true });
+    const finalRequestReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "ExecutionRequest", id: request.id }, before: request, allowSystemTransition: true });
+    const finalizedAt = new Date();
+    const completed = await tx.executionResult.update({ where: { id: created.id }, data: {
+      status: errorMessage ? "REJECTED" : "ACCEPTED", writebackEntityType: writeback?.entityType ?? null,
+      writebackEntityId: writeback?.entityId ?? null, acceptedAt: errorMessage ? null : finalizedAt, rejectedAt: errorMessage ? finalizedAt : null,
+    } });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "ExecutionResult", id: completed.id }, content: completed, receipt: finalResultReceipt });
+    const completedRequest = await tx.executionRequest.update({ where: { id: request.id }, data: {
+      status: errorMessage ? "FAILED" : "COMPLETED", completedAt: errorMessage ? null : finalizedAt, failedAt: errorMessage ? finalizedAt : null,
+    } });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "ExecutionRequest", id: completedRequest.id }, content: completedRequest, receipt: finalRequestReceipt });
+    invariant((await readableArtifactIds(actor, params.workspaceId, "ExecutionResult", [completed], tx)).has(completed.id),
+      409, "SOURCE_CHANGED", "Execution result inputs changed before acceptance.");
+    await recordAudit(tx, actor, { workspaceId: params.workspaceId, action: "execution_result.submitted", entityType: "ExecutionRequest", entityId: request.id,
+      meta: { resultId: completed.id, targetType, targetId, status: completed.status, writebackEntityType: completed.writebackEntityType, writebackEntityId: completed.writebackEntityId } });
+    return completed;
   });
-
-  if (transactionResult.kind === "complete") return serializeIdempotentExecutionResult(transactionResult.result);
-  const { result: resultShell, request, targetType, targetId } = transactionResult;
-  const writeback = errorMessage || !targetType ? null : await createNativeWriteback(actor, {
-      workspaceId: params.workspaceId,
-      type: targetType,
-      targetId: targetId ?? null,
-      output,
-      requestId: request.id,
-      resultId: resultShell.id,
-      requestCreatedByUserId: request.createdByUserId,
-    });
-
-  const result = await prisma.$transaction(async (tx) => {
-    const updated = await tx.executionResult.update({
-      where: { id: resultShell.id },
-      data: {
-        status: errorMessage ? "REJECTED" : "ACCEPTED",
-        writebackEntityType: writeback?.entityType ?? null,
-        writebackEntityId: writeback?.entityId ?? null,
-        acceptedAt: errorMessage ? null : new Date(),
-        rejectedAt: errorMessage ? new Date() : null,
-      },
-    });
-
-    await tx.executionRequest.update({
-      where: { id: request.id },
-      data: {
-        status: errorMessage ? "FAILED" : "COMPLETED",
-        completedAt: errorMessage ? null : new Date(),
-        failedAt: errorMessage ? new Date() : null,
-      },
-    });
-
-    await recordAudit(tx, actor, {
-      workspaceId: params.workspaceId,
-      action: "execution_result.submitted",
-      entityType: "ExecutionRequest",
-      entityId: request.id,
-      meta: {
-        resultId: updated.id,
-        targetType,
-        targetId: targetId ?? null,
-        status: updated.status,
-        writebackEntityType: updated.writebackEntityType,
-        writebackEntityId: updated.writebackEntityId,
-      },
-    });
-
-    return updated;
-  });
-
-  return serializeExecutionResult(result);
+  invariant((await readableArtifactIds(actor, params.workspaceId, "ExecutionResult", [result])).has(result.id),
+    404, "NOT_FOUND", "Execution result not found.");
+  return serializeIdempotentExecutionResult(result);
 }

@@ -1,4 +1,5 @@
 import { captureCurrentAdviceNotification } from "./notification-event-lineage";
+import { enqueueCrmLineageJob } from "./crm-job-lineage";
 import type { EventStatus, NewspaperCadence, Prisma, WorkflowJobStatus } from "@prisma/client";
 import { logger, prisma } from "@corgtex/shared";
 import { withWorkspaceSupportExecution, withMcpConnectionExecution } from "@corgtex/domain";
@@ -81,6 +82,8 @@ type ClaimedEvent = {
 };
 
 type ClaimedJob = {
+  lockedBy: string;
+  lockedAt: Date;
   mcpOrigin?: unknown;
   supportOriginUserId?: string | null;
   supportGrantVersion?: number | null;
@@ -214,11 +217,14 @@ function toWorkflowJobCreateInput(params: EnqueueJobParams): Prisma.WorkflowJobC
 }
 
 export async function enqueueJob(tx: Prisma.TransactionClient, params: EnqueueJobParams) {
+  const crm = await enqueueCrmLineageJob(tx, params);
+  if (crm.handled) return { scheduled: crm.scheduled };
   await tx.workflowJob.upsert({
     where: { dedupeKey: params.dedupeKey },
     update: {},
     create: toWorkflowJobCreateInput(params),
   });
+  return { scheduled: true };
 }
 
 async function enqueueJobBatch(tx: Prisma.TransactionClient, jobs: EnqueueJobParams[]) {
@@ -226,12 +232,20 @@ async function enqueueJobBatch(tx: Prisma.TransactionClient, jobs: EnqueueJobPar
     return 0;
   }
 
+  let scheduled = 0;
+  const remaining: EnqueueJobParams[] = [];
+  for (const job of jobs) {
+    const crm = await enqueueCrmLineageJob(tx, job);
+    if (crm.handled) scheduled += Number(crm.scheduled);
+    else remaining.push(job);
+  }
+  if (!remaining.length) return scheduled;
   const result = await tx.workflowJob.createMany({
-    data: jobs.map(toWorkflowJobCreateInput),
+    data: remaining.map(toWorkflowJobCreateInput),
     skipDuplicates: true,
   });
 
-  return result.count;
+  return scheduled + result.count;
 }
 
 async function resolveDedupeKeyToJobId(tx: Prisma.TransactionClient, dedupeKey: string): Promise<string | null> {
@@ -532,7 +546,9 @@ async function claimPendingJobs(workerId: string, batchSize: number) {
         job."workspaceId" AS "workspaceId",
         job.type,
         job.payload,
-        job.attempts
+        job.attempts,
+        job."lockedBy",
+        job."lockedAt"
     `;
   });
 }
@@ -642,12 +658,16 @@ async function handleJob(job: ClaimedJob, workerId: string) {
     if (!job.workspaceId || !isRecord(job.payload) || typeof job.payload.batchId !== "string" || !job.payload.batchId.trim()) {
       throw new Error("Finance report extraction job payload is invalid.");
     }
+    if (job.lockedBy !== workerId || !(job.lockedAt instanceof Date) || !Number.isFinite(job.lockedAt.getTime())) {
+      throw new Error("Finance report job claim is unavailable.");
+    }
     return runFinanceReportImportExtractionJob({
       workspaceId: job.workspaceId,
       batchId: job.payload.batchId,
       workflowJobId: job.id,
       attempts: job.attempts,
       isFinalAttempt: job.attempts >= MAX_ATTEMPTS,
+      expectedLease: { lockedBy: job.lockedBy, lockedAt: job.lockedAt },
     });
   }
 
@@ -656,8 +676,12 @@ async function handleJob(job: ClaimedJob, workerId: string) {
       || !Number.isSafeInteger(job.payload.expectedVersion) || Number(job.payload.expectedVersion) < 1) {
       throw new Error("Finance report interpretation job payload is invalid.");
     }
+    if (job.lockedBy !== workerId || !(job.lockedAt instanceof Date) || !Number.isFinite(job.lockedAt.getTime())) {
+      throw new Error("Finance report job claim is unavailable.");
+    }
     return runFinanceReportImportProposalJob({ workspaceId: job.workspaceId, batchId: job.payload.batchId,
-      expectedVersion: Number(job.payload.expectedVersion), workflowJobId: job.id, attempts: job.attempts, isFinalAttempt: job.attempts >= MAX_ATTEMPTS });
+      expectedVersion: Number(job.payload.expectedVersion), workflowJobId: job.id, attempts: job.attempts, isFinalAttempt: job.attempts >= MAX_ATTEMPTS,
+      expectedLease: { lockedBy: job.lockedBy, lockedAt: job.lockedAt } });
   }
 
   if (job.type === CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE) {
@@ -823,7 +847,8 @@ async function handleJob(job: ClaimedJob, workerId: string) {
   }
 
   if (job.type === "context-graph.sync") {
-    await handleContextGraphSync(job.id, payload as { sourceType?: string; sourceId?: string }, job.workspaceId);
+    await handleContextGraphSync(job.id, payload as { sourceType?: string; sourceId?: string }, job.workspaceId, { attempts: job.attempts,
+      expectedLease: {lockedBy: job.lockedBy!, lockedAt: job.lockedAt!} });
     return;
   }
 
@@ -833,7 +858,8 @@ async function handleJob(job: ClaimedJob, workerId: string) {
   }
 
   if (job.type === "context-graph.reconcile") {
-    await handleContextGraphReconcile(job.id, payload as { dateISO?: string }, job.workspaceId);
+    await handleContextGraphReconcile(job.id, payload as { dateISO?: string }, job.workspaceId, { attempts: job.attempts,
+      expectedLease: {lockedBy: job.lockedBy!, lockedAt: job.lockedAt!} });
     return;
   }
 
@@ -1040,6 +1066,7 @@ async function handleJob(job: ClaimedJob, workerId: string) {
         workspaceId: job.workspaceId,
         audioAssetId,
         workflowJobId: job.id,
+      expectedLease: {attempts: job.attempts, lockedBy: job.lockedBy!, lockedAt: job.lockedAt!},
       });
     }
     return;
@@ -1116,7 +1143,7 @@ async function handleJob(job: ClaimedJob, workerId: string) {
     return;
   }
 
-  if (job.type === "agent.brain-source-regenerate" || job.type === "agent.brain-article-variant") {
+  if (job.type === "agent.brain-source-regenerate" || job.type === "agent.brain-article-variant" || job.type === "agent.graph-source-variant") {
     return runAgentWorkflowJob(job, workerId);
   }
 
@@ -1327,7 +1354,7 @@ export async function scheduleDripCampaigns() {
 
   await prisma.$transaction(async (tx) => {
     for (const lead of pendingLeads) {
-      await enqueueJob(tx, {
+      const enqueue = await enqueueJob(tx, {
         workspaceId: lead.workspaceId,
         eventId: null,
         type: "agent.crm-drip-followup",
@@ -1337,7 +1364,7 @@ export async function scheduleDripCampaigns() {
         },
         dedupeKey: `${lead.workspaceId}:drip:${lead.id}:${todayISO}`,
       });
-      scheduledCount++;
+      scheduledCount += Number(enqueue.scheduled);
     }
   });
 

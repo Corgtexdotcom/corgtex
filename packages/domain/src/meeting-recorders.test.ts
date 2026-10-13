@@ -3,15 +3,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 
 const { prismaMock, fetchMock } = vi.hoisted(() => {
+  const permissionEpochs = new Map<string, bigint>();
+  const epochKey = (workspaceId: unknown, kind: unknown, id: unknown) => JSON.stringify([workspaceId, kind, id]);
+  const sqlText = (query: any) => Array.isArray(query?.strings) ? query.strings.join("?") : String(query);
   const prisma = {
+    permissionEpochs,
+    artifactInputLineage: { findFirst: vi.fn(), create: vi.fn() },
     workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },
     customerDeployment: {
       findUnique: vi.fn(),
     },
     workspaceFeatureFlag: {
+      findMany: vi.fn(),
       findUnique: vi.fn(),
       upsert: vi.fn(),
     },
+    workspaceModuleGrant: { findMany: vi.fn() },
+    roleAssignment: { findMany: vi.fn() },
+    circle: { findMany: vi.fn() },
     workspaceEnterpriseService: {
       upsert: vi.fn(),
     },
@@ -78,8 +87,27 @@ const { prismaMock, fetchMock } = vi.hoisted(() => {
     event: {
       createMany: vi.fn(),
     },
-    $executeRaw: vi.fn(),
-    $queryRaw: vi.fn(),
+    $executeRaw: vi.fn(async (query: any) => {
+      if (!sqlText(query).includes('INSERT INTO "SourcePermissionEpoch"')) return 1;
+      const values = query.values as unknown[];
+      for (let index = 0; index < values.length; index += 4) {
+        const key = epochKey(values[index + 1], values[index + 2], values[index + 3]);
+        if (!permissionEpochs.has(key)) permissionEpochs.set(key, 0n);
+      }
+      return 1;
+    }),
+    $queryRaw: vi.fn(async (query: any) => {
+      if (!sqlText(query).includes('FROM "SourcePermissionEpoch"')) return [];
+      const [workspaceId, ...identities] = query.values as unknown[];
+      const rows: Array<{ sourceKind: string; sourceId: string; epoch: bigint }> = [];
+      for (let index = 0; index < identities.length; index += 2) {
+        const sourceKind = identities[index] as string;
+        const sourceId = identities[index + 1] as string;
+        const epoch = permissionEpochs.get(epochKey(workspaceId, sourceKind, sourceId));
+        if (epoch !== undefined) rows.push({ sourceKind, sourceId, epoch });
+      }
+      return rows;
+    }),
     $transaction: vi.fn(),
   };
   return {
@@ -169,12 +197,38 @@ describe("meeting recorder domain", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-05T01:00:00.000Z"));
     resetMockTree(prismaMock);
+    prismaMock.permissionEpochs.clear();
     fetchMock.mockReset();
     global.fetch = fetchMock as unknown as typeof fetch;
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
-    prismaMock.$executeRaw.mockResolvedValue(0);
-    prismaMock.$queryRaw.mockResolvedValue([]);
+    prismaMock.$executeRaw.mockImplementation(async (query: any) => {
+      if (!Array.isArray(query?.strings) || !query.strings.join("?").includes('INSERT INTO "SourcePermissionEpoch"')) return 0;
+      const values = query.values as unknown[];
+      for (let index = 0; index < values.length; index += 4) {
+        const key = JSON.stringify([values[index + 1], values[index + 2], values[index + 3]]);
+        if (!prismaMock.permissionEpochs.has(key)) prismaMock.permissionEpochs.set(key, 0n);
+      }
+      return 1;
+    });
+    prismaMock.$queryRaw.mockImplementation(async (query: any) => {
+      if (!Array.isArray(query?.strings) || !query.strings.join("?").includes('FROM "SourcePermissionEpoch"')) return [];
+      const [workspaceId, ...identities] = query.values as unknown[];
+      const rows: Array<{ sourceKind: string; sourceId: string; epoch: bigint }> = [];
+      for (let index = 0; index < identities.length; index += 2) {
+        const sourceKind = identities[index] as string;
+        const sourceId = identities[index + 1] as string;
+        const epoch = prismaMock.permissionEpochs.get(JSON.stringify([workspaceId, sourceKind, sourceId]));
+        if (epoch !== undefined) rows.push({ sourceKind, sourceId, epoch });
+      }
+      return rows;
+    });
+    prismaMock.artifactInputLineage.findFirst.mockResolvedValue(null);
+    prismaMock.artifactInputLineage.create.mockImplementation(async ({ data }: any) => ({ id: "receipt-1", ...data }));
     prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({ enabled: true });
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([]);
+    prismaMock.workspaceModuleGrant.findMany.mockResolvedValue([]);
+    prismaMock.roleAssignment.findMany.mockResolvedValue([]);
+    prismaMock.circle.findMany.mockResolvedValue([]);
     prismaMock.customerDeployment.findUnique.mockResolvedValue(null);
     prismaMock.workspaceMeetingRecorderConfig.findUnique.mockResolvedValue({
       workspaceId: "workspace-1",

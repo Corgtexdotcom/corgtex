@@ -16,6 +16,16 @@ const createClient = () => {
     const params = { model, action: operation, args: args as Record<string, any> };
     const context = getSupportAuthorizationContext();
     const mcpOrigin = getMcpOrigin();
+    const guardedMutation = mcpOrigin && ["create", "createMany", "createManyAndReturn", "upsert", "update",
+      "updateMany", "updateManyAndReturn", "delete", "deleteMany"].includes(operation);
+    const runQuery = async () => {
+      // This is an immediate live check, not an authorization grant or a replacement
+      // for transactional writer fences. A postcheck cannot undo an autocommit write.
+      if (guardedMutation) await assertMcpOriginActive(client, mcpOrigin, mcpOrigin.workspaceId);
+      const result = await query(args);
+      if (guardedMutation) await assertMcpOriginActive(client, mcpOrigin, mcpOrigin.workspaceId);
+      return result;
+    };
     if (mcpOrigin && ["Event", "WorkflowJob"].includes(model)
       && ["create", "createMany", "upsert", "update", "updateMany"].includes(operation)) {
       if (["upsert", "update", "updateMany"].includes(operation)) {
@@ -34,7 +44,7 @@ const createClient = () => {
       }
     }
     if (!context?.supportUserId || !["Event", "WorkflowJob"].includes(params.model ?? "")
-      || !["create", "createMany", "upsert", "update", "updateMany"].includes(params.action)) return query(args);
+      || !["create", "createMany", "upsert", "update", "updateMany"].includes(params.action)) return runQuery();
     const rows = params.action === "upsert"
       ? [params.args.create, params.args.update]
       : Array.isArray(params.args.data) ? params.args.data : [params.args.data];
@@ -58,7 +68,7 @@ const createClient = () => {
       row.supportOriginUserId = context.supportUserId;
       row.supportGrantVersion = grant.version;
     }
-    return query(args);
+    return runQuery();
   } } } });
   return extended as unknown as PrismaClient;
 };

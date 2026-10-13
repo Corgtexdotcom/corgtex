@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { prismaMock, markStaleContextGraphFactsMock, enqueueJobMock } = vi.hoisted(() => ({
+const { leaseMock, prismaMock, markStaleContextGraphFactsMock, enqueueJobMock } = vi.hoisted(() => ({
+  leaseMock: vi.fn(),
   prismaMock: {
+    meeting: { findMany: vi.fn() },
     member: { findMany: vi.fn() },
     brainArticle: { findMany: vi.fn() },
     proposal: { findMany: vi.fn() },
@@ -19,6 +21,8 @@ const { prismaMock, markStaleContextGraphFactsMock, enqueueJobMock } = vi.hoiste
   enqueueJobMock: vi.fn(),
 }));
 
+vi.mock("../../../domain/src/context-graph-retirement", () => ({ assertContextGraphJobLease: leaseMock, retireContextGraphChangedSourceDescendants: vi.fn() }));
+
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
 }));
@@ -35,6 +39,7 @@ vi.mock("../outbox", () => ({
 describe("context graph maintenance handlers", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    prismaMock.meeting.findMany.mockReset().mockResolvedValue([]);
     prismaMock.member.findMany.mockReset().mockResolvedValue([]);
     prismaMock.goal.findMany.mockReset().mockResolvedValue([]);
     prismaMock.agentIdentity.findMany.mockReset().mockResolvedValue([]);
@@ -109,22 +114,34 @@ describe("context graph maintenance handlers", () => {
       dedupeKey: "ws-1:context-graph-reconcile:AGENT_IDENTITY:agent-1:2026-06-09",
     });
   });
+  it("binds child sync jobs to the exact live reconcile parent and its event", async () => {
+    const { handleContextGraphReconcile } = await import("./context-graph-maintenance");
+    const execution = { attempts: 3, expectedLease: { lockedBy: "worker", lockedAt: new Date() } };
+    prismaMock.document.findMany.mockResolvedValueOnce([{ id: "document-1" }]);
+    leaseMock.mockResolvedValue({ id: "parent", eventId: "event", payload: { dateISO: "rebuild:event" } });
+    await handleContextGraphReconcile("parent", { dateISO: "rebuild:event" }, "ws-1", execution);
+    expect(leaseMock).toHaveBeenCalledWith(prismaMock, { workflowJobId: "parent", workspaceId: "ws-1", type: "context-graph.reconcile", ...execution });
+    expect(enqueueJobMock).toHaveBeenCalledWith(prismaMock, expect.objectContaining({
+      eventId: "event", dependsOnJobId: "parent", payload: { sourceType: "DOCUMENT", sourceId: "document-1" },
+    }));
+  });
+
   it("reconciles subsequent keyset pages and every native content family", async () => {
     const first = Array.from({ length: 1000 }, (_, index) => ({ id: `m-${String(index).padStart(4, "0")}` }));
     prismaMock.member.findMany.mockResolvedValueOnce(first).mockResolvedValueOnce([{ id: "m-1000" }]);
-    for (const [kind, id] of [["brainArticle", "a"], ["proposal", "p"], ["action", "w"], ["tension", "t"], ["circle", "c"], ["role", "r"], ["document", "d"]] as const) {
+    for (const [kind, id] of [["meeting", "meeting"], ["brainArticle", "a"], ["proposal", "p"], ["action", "w"], ["tension", "t"], ["circle", "c"], ["role", "r"], ["document", "d"]] as const) {
       prismaMock[kind].findMany.mockResolvedValueOnce([{ id }]);
     }
     const { handleContextGraphReconcile } = await import("./context-graph-maintenance");
-    await expect(handleContextGraphReconcile("job", { dateISO: "2026-10-12" }, "ws-1")).resolves.toEqual({ enqueued: 1008 });
+    await expect(handleContextGraphReconcile("job", { dateISO: "2026-10-12" }, "ws-1")).resolves.toEqual({ enqueued: 1009 });
     expect(prismaMock.member.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
       where: { workspaceId: "ws-1", id: { gt: "m-0999" } }, orderBy: { id: "asc" }, take: 1000,
     }));
     expect(prismaMock.role.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { circle: { workspaceId: "ws-1" } } }));
     expect(enqueueJobMock.mock.calls.map((call) => call[1].payload.sourceType)).toEqual(expect.arrayContaining([
-      "BRAIN_ARTICLE", "PROPOSAL", "ACTION", "TENSION", "CIRCLE", "ROLE", "DOCUMENT",
+      "MEETING", "BRAIN_ARTICLE", "PROPOSAL", "ACTION", "TENSION", "CIRCLE", "ROLE", "DOCUMENT",
     ]));
-    expect(prismaMock.$transaction).toHaveBeenCalledTimes(9);
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(10);
   });
 
 });

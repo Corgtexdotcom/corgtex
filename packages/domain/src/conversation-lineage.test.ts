@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
+import { SOURCE_PERMISSION_POLICY_VERSION, type PermissionEpochProof } from "./source-permission-epochs";
 import type { Prisma } from "@prisma/client";
 import { AppError } from "./errors";
 
@@ -31,6 +32,24 @@ beforeEach(() => {
 });
 
 describe("conversation input receipts", () => {
+  it("refuses conflicting permission revisions even when source content is identical", async () => {
+    const proof: PermissionEpochProof = { version: 1, policyVersion: SOURCE_PERMISSION_POLICY_VERSION,
+      entries: [{ kind: root.kind, id: root.id, epoch: "2" }] };
+    const first = await captureConversationInputReceipt({ ...base, trustedRoots: [{ ...root, permissionEpochs: proof }] });
+    const second = await captureConversationInputReceipt({ ...base, trustedRoots: [{ ...root,
+      permissionEpochs: { ...proof, entries: [{ kind: root.kind, id: root.id, epoch: "4" }] } }] });
+    await expect(collectConversationInputReceipts({ ...base, fragments: [{ value, receipt: first }, { value, receipt: second }] }))
+      .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+  });
+
+  it("prevents returned permission vectors from mutating the stored receipt", async () => {
+    const permissionEpochs: PermissionEpochProof = { version: 1, policyVersion: SOURCE_PERMISSION_POLICY_VERSION,
+      entries: [{ kind: root.kind, id: root.id, epoch: "2" }] };
+    const receipt = await captureConversationInputReceipt({ ...base, trustedRoots: [{ ...root, permissionEpochs }] });
+    const returned = await validateConversationInputReceipt({ ...base, receipt });
+    returned[0]!.permissionEpochs!.entries[0]!.epoch = "99";
+    expect((await validateConversationInputReceipt({ ...base, receipt }))[0]!.permissionEpochs!.entries[0]!.epoch).toBe("2");
+  });
   it("captures all supplied dependencies before use, with exact scalar snapshots", async () => {
     const inputs = [{ kind: "BrainSource" as const, id: root.id, snapshot: { title: "Synthetic title", contentText: value.text } }];
     const receipt = await captureConversationInputReceipt({ ...base, inputs, trustedRoots: [otherRoot] });

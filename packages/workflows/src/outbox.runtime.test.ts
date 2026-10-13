@@ -382,11 +382,12 @@ describe("runPendingJobs", () => {
   });
 
   it("dispatches only a well-formed Finance report extraction job", async () => {
+    const lockedAt = new Date();
     txMock.$queryRaw.mockResolvedValueOnce([{ id: "job-1", workspaceId: "ws-1",
-      type: "finance-report-import.extract", payload: { batchId: "batch-1" }, attempts: 5 }]);
+      type: "finance-report-import.extract", payload: { batchId: "batch-1" }, attempts: 5, lockedBy: "worker-1", lockedAt }]);
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
     expect(runFinanceReportImportExtractionJobMock).toHaveBeenCalledWith({ workspaceId: "ws-1",
-      batchId: "batch-1", workflowJobId: "job-1", attempts: 5, isFinalAttempt: true });
+      batchId: "batch-1", workflowJobId: "job-1", attempts: 5, isFinalAttempt: true, expectedLease: { lockedBy: "worker-1", lockedAt } });
     expect(prismaMock.workflowJob.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "job-1" },
       data: expect.objectContaining({ status: "COMPLETED" }) }));
     vi.clearAllMocks();
@@ -400,11 +401,12 @@ describe("runPendingJobs", () => {
   });
 
   it("dispatches only a well-formed Finance report interpretation job", async () => {
+    const lockedAt = new Date();
     txMock.$queryRaw.mockResolvedValueOnce([{ id: "job-1", workspaceId: "ws-1", type: "finance-report-import.interpret",
-      payload: { batchId: "batch-1", expectedVersion: 3 }, attempts: 5 }]);
+      payload: { batchId: "batch-1", expectedVersion: 3 }, attempts: 5, lockedBy: "worker-1", lockedAt }]);
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
     expect(runFinanceReportImportProposalJobMock).toHaveBeenCalledWith({ workspaceId: "ws-1", batchId: "batch-1",
-      expectedVersion: 3, workflowJobId: "job-1", attempts: 5, isFinalAttempt: true });
+      expectedVersion: 3, workflowJobId: "job-1", attempts: 5, isFinalAttempt: true, expectedLease: { lockedBy: "worker-1", lockedAt } });
     vi.clearAllMocks(); prismaMock.workflowJob.update.mockResolvedValue({ id: "job-2" });
     txMock.$queryRaw.mockResolvedValueOnce([{ id: "job-2", workspaceId: "ws-1", type: "finance-report-import.interpret", payload: { batchId: "batch-1" }, attempts: 1 }]);
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
@@ -490,13 +492,14 @@ describe("runPendingJobs", () => {
   });
 
   it("dispatches meeting audio transcription jobs", async () => {
+    const lockedAt = new Date("2026-10-13T12:00:00Z");
     txMock.$queryRaw.mockResolvedValue([
       {
         id: "job-1",
         workspaceId: "ws-1",
         type: "meeting-audio.transcribe",
         payload: { audioAssetId: "audio-1" },
-        attempts: 1,
+        attempts: 1, lockedBy: "worker-1", lockedAt,
       },
     ]);
 
@@ -506,6 +509,7 @@ describe("runPendingJobs", () => {
       workspaceId: "ws-1",
       audioAssetId: "audio-1",
       workflowJobId: "job-1",
+      expectedLease: { attempts: 1, lockedBy: "worker-1", lockedAt },
     });
     expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
       where: { id: "job-1" },

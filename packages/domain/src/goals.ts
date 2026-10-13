@@ -1,3 +1,4 @@
+import { requireCreationInputRoots } from "./draft-permissions";
 import { randomUUID } from "node:crypto";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { prisma } from "@corgtex/shared";
@@ -371,10 +372,9 @@ function canReadGoalRecord(
     authorUserId?: string | null;
   },
 ) {
-  if (actor.kind === "user" && actor.user.globalRole === "OPERATOR") return true;
   if (goal.isPrivate !== true) return true;
   if (goal.status !== "DRAFT") return false;
-  if (actor.kind === "agent") return true;
+  if (actor.kind !== "user" || !membership?.isActive || membership.userId !== actor.user.id) return false;
   if (membership?.role === "ADMIN") return true;
   return actor.kind === "user" && goal.authorUserId === actor.user.id;
 }
@@ -531,6 +531,9 @@ export async function createGoal(
     workspaceId: params.workspaceId,
     resolvedMembership: params._membership,
   });
+  const requestedStatus = params.status ?? (actor.kind === "agent" ? "ACTIVE" : "DRAFT");
+  const isPrivate = params.isPrivate ?? (requestedStatus === "DRAFT");
+  params = { ...params, lineageRoots: await requireCreationInputRoots({ actor, workspaceId: params.workspaceId, isPrivate, roots: params.lineageRoots }) };
 
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Goal title is required.");
@@ -548,7 +551,7 @@ export async function createGoal(
     startDate: params.startDate,
     actorUserId: actor.kind === "user" ? actor.user.id : null,
     membershipId: membership?.id ?? null,
-    includePrivate: actor.kind === "agent" || membership?.role === "ADMIN",
+    includePrivate: actor.kind === "user" && membership?.role === "ADMIN",
   }, params.duplicateGuard, undefined, async (rows) => {
     const records = rows as Array<{ id: string; [key: string]: unknown }>;
     const visible = await readableArtifactIds(actor, params.workspaceId, "Goal", records);
@@ -588,13 +591,12 @@ export async function createGoal(
   }
 
   return prisma.$transaction(async (tx) => {
+    await requireCreationInputRoots({ actor, workspaceId: params.workspaceId, isPrivate, roots: params.lineageRoots, tx });
     await validateGoalReferences(tx, actor, membership, params);
     const keyResults = normalizeKeyResults(params.keyResults);
     const progressPercent = keyResults.length > 0
       ? Math.round(keyResults.reduce((total, keyResult) => total + keyResult.progressPercent, 0) / keyResults.length)
       : 0;
-    const requestedStatus = params.status ?? (actor.kind === "agent" ? "ACTIVE" : "DRAFT");
-    const isPrivate = params.isPrivate ?? (requestedStatus === "DRAFT");
     const status = isPrivate
       ? "DRAFT"
       : requestedStatus === "DRAFT"
