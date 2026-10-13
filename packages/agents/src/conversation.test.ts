@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { AppActor } from "@corgtex/shared";
 
 const {
   assertCatalogModelBudgetMock,
@@ -117,13 +118,15 @@ vi.mock("@corgtex/models", async (importOriginal) => ({
   defaultModelGateway: { chat: chatMock, chatEventStream: chatEventStreamMock, chatStream: chatStreamMock },
 }));
 
-vi.mock("@corgtex/domain", () => ({
+vi.mock("@corgtex/domain", async () => ({
+  ...await import("../../domain/src/agent-operation-capabilities"),
+  requireWorkspaceOperation: vi.fn(async (params: { actor: AppActor; operation: string }) => {
+    const { requireAgentOperation } = await import("../../domain/src/agent-operation-capabilities");
+    requireAgentOperation(params.actor, params.operation);
+    return null;
+  }),
   supportCapabilityVersion: vi.fn().mockResolvedValue(1),
-  AppError: class AppError extends Error {
-    constructor(public status: number, public code: string, message: string) {
-      super(message);
-    }
-  },
+  ...await import("../../domain/src/errors"),
   privacyFilter: (a: any) => a?.kind === "user" ? { OR: [{ isPrivate: false }, { isPrivate: true, status: "DRAFT", authorUserId: a.user.id }] } : { isPrivate: false },
   archiveWorkspaceToolLink: vi.fn(),
   applyContextGraphProposedDiff: applyContextGraphProposedDiffMock,
@@ -469,7 +472,7 @@ describe("processConversationTurn", () => {
     });
 
     it("propagates the authenticated caller and catalog usage context despite model identity arguments", async () => {
-      const actor = { kind: "agent", authProvider: "credential", credentialId: "credential-1", catalogItemId: "catalog-1", workspaceIds: ["ws-1"], scopes: ["brain:read"] } as any;
+      const actor = { kind: "agent", authProvider: "credential", credentialId: "credential-1", catalogItemId: "catalog-1", workspaceIds: ["ws-1"], scopes: ["conversations:write", "brain:read"] } as any;
       script([
         { content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] },
         { content: "", tool_calls: [toolCall("second", "search_brain", { query: "details", workspaceId: "foreign", actor: { kind: "system" }, userId: "other", catalogItemId: "forged-catalog", agentCredentialId: "forged-credential" })] },
@@ -559,7 +562,7 @@ describe("processConversationTurn", () => {
       const { prisma } = await import("@corgtex/shared");
       const { assertCatalogModelBudget, CatalogBudgetError } = await vi.importActual<typeof import("@corgtex/models")>("@corgtex/models");
       const scope = { workspaceId: "ws-1", catalogItemId: "catalog-1", agentCredentialId: "credential-1" };
-      const actor = { kind: "agent", authProvider: "credential", credentialId: scope.agentCredentialId, catalogItemId: scope.catalogItemId, workspaceIds: [scope.workspaceId], scopes: ["brain:read"] } as any;
+      const actor = { kind: "agent", authProvider: "credential", credentialId: scope.agentCredentialId, catalogItemId: scope.catalogItemId, workspaceIds: [scope.workspaceId], scopes: ["conversations:write", "brain:read"] } as any;
       const usage: Array<{ estimatedCostUsd: string; billableCostUsd: string }> = [];
       vi.mocked(prisma.agentCredential.findFirst).mockResolvedValue({
         catalogItemId: scope.catalogItemId, isActive: true, catalogItem: null,
@@ -632,7 +635,7 @@ describe("processConversationTurn", () => {
           finally { closed(); }
         })());
       } else chatMock.mockRejectedValueOnce(error);
-      const actor = { kind: "agent", authProvider: "credential", credentialId: "credential-1", catalogItemId: "catalog-1", workspaceIds: ["ws-1"], scopes: ["brain:read"] } as any;
+      const actor = { kind: "agent", authProvider: "credential", credentialId: "credential-1", catalogItemId: "catalog-1", workspaceIds: ["ws-1"], scopes: ["conversations:write", "brain:read"] } as any;
       await expect(run({ ...turnContext(), actor })).rejects.toBe(error);
       expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(stage === "eager read" ? 0 : stage === "initial model" || stage === "initial read" ? 1 : stage === "synthesis" ? 3 : 2);
       expect(searchIndexedKnowledge).toHaveBeenCalledTimes(stage === "eager read" || stage === "initial model" ? 1 : stage === "initial read" || stage === "followup" ? 2 : 3);
@@ -660,7 +663,7 @@ describe("processConversationTurn", () => {
       };
       if (streaming) chatStreamMock.mockReturnValueOnce((async function* () { yield "Unverified result."; return spend(); })());
       else chatMock.mockImplementationOnce(async () => spend());
-      const actor = { kind: "agent", authProvider: "credential", credentialId: "credential-1", catalogItemId: "catalog-1", workspaceIds: ["ws-1"], scopes: ["brain:read"] } as any;
+      const actor = { kind: "agent", authProvider: "credential", credentialId: "credential-1", catalogItemId: "catalog-1", workspaceIds: ["ws-1"], scopes: ["conversations:write", "brain:read"] } as any;
       await expect(run({ ...turnContext(), actor })).rejects.toMatchObject({ code: kind === "daily" ? "CATALOG_DAILY_LIMIT_EXCEEDED" : "CATALOG_MONTHLY_BUDGET_EXCEEDED" });
       expect(assertCatalogModelBudgetMock).toHaveBeenCalledWith({ workspaceId: "ws-1", catalogItemId: "catalog-1", agentCredentialId: "credential-1" });
       expect(searchIndexedKnowledge).toHaveBeenCalledTimes(2);
@@ -681,7 +684,7 @@ describe("processConversationTurn", () => {
         { content: "", tool_calls: [toolCall("first", "search_brain", { query: "overview" })] },
         { content: "", tool_calls: [toolCall("second", "search_brain", { query: "permitted" }), toolCall("third", "search_brain", { query: "must not run" })] },
       ]);
-      const actor = { kind: "agent", authProvider: "credential", credentialId: "credential-1", catalogItemId: "catalog-1", workspaceIds: ["ws-1"], scopes: ["brain:read"] } as any;
+      const actor = { kind: "agent", authProvider: "credential", credentialId: "credential-1", catalogItemId: "catalog-1", workspaceIds: ["ws-1"], scopes: ["conversations:write", "brain:read"] } as any;
       await expect(run({ ...turnContext(), actor })).rejects.toMatchObject({ code: "CATALOG_DAILY_LIMIT_EXCEEDED" });
       expect(assertCatalogModelBudgetMock).toHaveBeenCalledTimes(2);
       expect(vi.mocked(searchIndexedKnowledge).mock.calls.map(([args]) => args.query)).toEqual(["Update it.", "overview", "permitted"]);
@@ -2601,6 +2604,7 @@ describe("processConversationTurn", () => {
       authProvider: "credential",
       credentialId: "credential-1",
       catalogItemId: "catalog-1",
+      scopes: ["conversations:write", "relationships:write"],
     } as any;
     chatMock
       .mockResolvedValueOnce({

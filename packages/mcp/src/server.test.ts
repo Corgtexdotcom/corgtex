@@ -177,6 +177,7 @@ vi.mock("@corgtex/domain", async () => {
   createArticle: createArticleMock,
   createMeeting: createMeetingMock,
   updateAction: updateActionMock,
+  completeAction: updateActionMock,
   listTensions: listTensionsMock,
   createTension: createTensionMock,
   updateTension: updateTensionMock,
@@ -3127,7 +3128,37 @@ describe("createCorgtexMcpServer", () => {
       userId: "user-1",
       userMessage: "show tools",
       actor,
+      operationScopes: ["conversations:write"],
     }));
+    const context = vi.mocked(processConversationTurn).mock.calls.at(-1)![0];
+    expect(Object.isFrozen(context.operationScopes)).toBe(true);
+  });
+
+  it.each([undefined, []])("passes a restrictive ceiling for absent MCP OAuth grants %j", async scopes => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { processConversationTurn } = await import("@corgtex/agents");
+    vi.mocked(processConversationTurn).mockResolvedValueOnce({ assistantMessage: "done", contextUsed: {} } as any);
+    const server = createCorgtexMcpServer({
+      actor: { kind: "user", user: { id: "synthetic-user", email: "synthetic@example.test", displayName: null } },
+      workspaceId: "synthetic-workspace", authKind: "oauth", scopes,
+    });
+    // requireScope is mocked in this registration suite; the real auth suite
+    // rejects missing grants. This checks that a lost grant never becomes an
+    // unrestricted native context even when outer authorization is bypassed.
+    await (server as any)._registeredTools.chat.handler({ message: "synthetic message" });
+    expect(vi.mocked(processConversationTurn).mock.calls.at(-1)![0].operationScopes).toEqual([]);
+  });
+
+  it("preserves trusted bootstrap chat authority", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { processConversationTurn } = await import("@corgtex/agents");
+    vi.mocked(processConversationTurn).mockResolvedValueOnce({ assistantMessage: "done", contextUsed: {} } as any);
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap", label: "synthetic-bootstrap" },
+      workspaceId: "synthetic-workspace", authKind: "agent",
+    });
+    await (server as any)._registeredTools.chat.handler({ message: "synthetic message" });
+    expect(vi.mocked(processConversationTurn).mock.calls.at(-1)![0].operationScopes).toBeUndefined();
   });
 
   it("lists same-user connected external tools with external tool scope", async () => {

@@ -1,3 +1,5 @@
+export * from "./agent-operation-capabilities";
+export * from "./agent-operation-authorization";
 export * from "./actions";
 export * from "./action-duplicates";
 export * from "./agent-auth";

@@ -5,6 +5,7 @@ import type { ActionStatus, MeetingInsight, Prisma } from "@prisma/client";
 import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
+import { requireWorkspaceOperation } from "./agent-operation-authorization";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { loadAdviceRequestCountSummaries } from "./advice-requests";
 import { invariant } from "./errors";
@@ -302,7 +303,7 @@ function actionListWhere(actor: AppActor, membership: MembershipSummary | null, 
 }
 
 export async function countActionsByStatus(actor: AppActor, workspaceId: string, opts?: ListActionsOptions) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const membership = await requireWorkspaceOperation({ operation: "list_actions", actor, workspaceId });
   const where = actionListWhere(actor, membership, workspaceId, { ...opts, status: undefined, statuses: undefined });
   const groups = await prisma.action.groupBy({ by: ["status"], where, _count: { _all: true } });
   const counts = { DRAFT: 0, OPEN: 0, IN_PROGRESS: 0, COMPLETED: 0, ALL: 0 };
@@ -316,7 +317,7 @@ export async function countActionsByStatus(actor: AppActor, workspaceId: string,
 export async function listActions(actor: AppActor, workspaceId: string, opts?: ListActionsOptions) {
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
-  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const membership = await requireWorkspaceOperation({ operation: "list_actions", actor, workspaceId });
   const where = actionListWhere(actor, membership, workspaceId, opts);
 
   const [items, total] = await Promise.all([
@@ -371,7 +372,12 @@ export async function listActions(actor: AppActor, workspaceId: string, opts?: L
   };
 }
 
-export async function getAction(actor: AppActor, params: {
+export async function getAction(actor: AppActor, params: Parameters<typeof readAction>[1]) {
+  await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "list_actions" });
+  return readAction(actor, params);
+}
+
+async function readAction(actor: AppActor, params: {
   workspaceId: string;
   actionId: string;
   includeArchived?: boolean;
@@ -439,7 +445,7 @@ export async function createActionChecklistItem(actor: AppActor, params: {
   title: string;
   idempotencyId?: string;
 }) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const membership = await requireWorkspaceOperation({ operation: "update_action", actor, workspaceId: params.workspaceId });
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Checklist item title is required.");
 
@@ -496,7 +502,7 @@ export async function updateActionChecklistItem(actor: AppActor, params: {
   title?: string;
   completed?: boolean;
 }) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const membership = await requireWorkspaceOperation({ operation: "update_action", actor, workspaceId: params.workspaceId });
 
   return prisma.$transaction(async (tx) => {
     const existing = await tx.actionChecklistItem.findFirst({
@@ -557,7 +563,7 @@ export async function deleteActionChecklistItem(actor: AppActor, params: {
   workspaceId: string;
   checklistItemId: string;
 }) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const membership = await requireWorkspaceOperation({ operation: "update_action", actor, workspaceId: params.workspaceId });
 
   return prisma.$transaction(async (tx) => {
     const existing = await tx.actionChecklistItem.findFirst({
@@ -616,11 +622,11 @@ async function applyActionDuplicateUpdate(
   updateParams.expectedVersion = existing.version;
   updateParams._membership = membership;
   updateParams._tx = tx;
-  return updateAction(actor, updateParams);
+  return updateActionRecord(actor, updateParams);
 }
 
 export async function createAction(actor: AppActor, params: CreateActionParams) {
-  const membership = await requireWorkspaceMembership({
+  const membership = await requireWorkspaceOperation({ operation: "create_action", tx: params._tx,
     actor,
     workspaceId: params.workspaceId,
     resolvedMembership: params._membership,
@@ -762,7 +768,7 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
   if (!source) {
     const duplicateDecision = await duplicateDecisionForCreate();
     if (duplicateDecision?.resolution === "use_existing") {
-      return getAction(actor, { workspaceId: params.workspaceId, actionId: duplicateDecision.match.entityId });
+      return readAction(actor, { workspaceId: params.workspaceId, actionId: duplicateDecision.match.entityId });
     }
     if (duplicateDecision?.resolution === "update_existing") {
       return params._tx
@@ -807,7 +813,7 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
 
     const duplicateDecision = await duplicateDecisionForCreate(tx);
     const action = duplicateDecision?.resolution === "use_existing"
-      ? await getAction(actor, { workspaceId: params.workspaceId, actionId: duplicateDecision.match.entityId })
+      ? await readAction(actor, { workspaceId: params.workspaceId, actionId: duplicateDecision.match.entityId })
       : duplicateDecision?.resolution === "update_existing"
         ? await applyActionDuplicateUpdate(actor, params, duplicateDecision.match.entityId, membership, tx)
         : await create(tx, duplicateDecision);
@@ -820,7 +826,22 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
   return params._tx ? run(params._tx) : prisma.$transaction(run);
 }
 
-export async function updateAction(actor: AppActor, params: {
+export async function updateAction(actor: AppActor, params: Parameters<typeof updateActionRecord>[1]) {
+  await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "update_action", tx: params._tx });
+  return updateActionRecord(actor, params);
+}
+
+/** Completion has its own write-only canonical capability. Keep the shared
+ * mutation implementation private so callers cannot bypass operation authority. */
+export async function completeAction(actor: AppActor, params: {
+  workspaceId: string; actionId: string; completedVia: string;
+}) {
+  await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "complete_action" });
+  return updateActionRecord(actor, { workspaceId: params.workspaceId, actionId: params.actionId,
+    completedVia: params.completedVia, status: "COMPLETED" });
+}
+
+async function updateActionRecord(actor: AppActor, params: {
   workspaceId: string;
   actionId: string;
   title?: string;
@@ -1059,7 +1080,7 @@ export async function assertCanAttachActionReference(actor: AppActor, params: {
   workspaceId: string;
   actionId: string;
 }) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const membership = await requireWorkspaceOperation({ operation: "update_action", actor, workspaceId: params.workspaceId });
   const action = await prisma.action.findUnique({ where: { id: params.actionId } });
   invariant(action && action.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Action not found.");
   invariant(!action.archivedAt && !action.duplicateOfActionId, 400, "INVALID_STATE", "Archived actions cannot accept references.");
@@ -1077,7 +1098,7 @@ export async function attachActionReferenceDocument(actor: AppActor, params: {
   documentId: string;
 }) {
   await assertCanAttachActionReference(actor, params);
-  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const membership = await requireWorkspaceOperation({ operation: "update_action", actor, workspaceId: params.workspaceId });
   return prisma.$transaction(async (tx) => {
     await acquireWorkItemAdvisoryLock(tx, "Action", params.actionId);
     const action = await tx.action.findUnique({ where: { id: params.actionId } });
@@ -1104,7 +1125,7 @@ export async function deleteAction(actor: AppActor, params: {
   actionId: string;
   _membership?: import("@corgtex/shared").MembershipSummary | null;
 }) {
-  await requireWorkspaceMembership({
+  await requireWorkspaceOperation({ operation: "delete_action",
     actor,
     workspaceId: params.workspaceId,
     resolvedMembership: params._membership,
@@ -1125,7 +1146,7 @@ export async function publishAction(actor: AppActor, params: {
   actionId: string;
   _membership?: import("@corgtex/shared").MembershipSummary | null;
 }) {
-  const membership = await requireWorkspaceMembership({
+  const membership = await requireWorkspaceOperation({ operation: "create_action",
     actor,
     workspaceId: params.workspaceId,
     resolvedMembership: params._membership,
@@ -1185,7 +1206,7 @@ export async function returnActionToDraft(actor: AppActor, params: {
   actionId: string;
   _membership?: import("@corgtex/shared").MembershipSummary | null;
 }) {
-  const membership = await requireWorkspaceMembership({
+  const membership = await requireWorkspaceOperation({ operation: "return_action_to_draft",
     actor,
     workspaceId: params.workspaceId,
     resolvedMembership: params._membership,
