@@ -6,7 +6,8 @@ const remote = vi.hoisted(() => ({ embed: vi.fn(), azure: vi.fn() }));
 vi.mock("@corgtex/shared", async original => ({ ...await original<typeof import("@corgtex/shared")>(), prisma: fixture.prisma }));
 vi.mock("../../domain/src/auth", () => ({ requireWorkspaceMembership: fixture.membership, isGlobalOperator: () => false }));
 vi.mock("../../domain/src/brain-access", () => ({ resolveKnowledgeAccessDomains: async (actor: any) => actor.kind === "agent" ? ["WORKSPACE"] : fixture.domains.get(actor.user.id) ?? [] }));
-vi.mock("@corgtex/domain", async () => ({ ...await import("../../domain/src/source-lineage"), ...await import("../../domain/src/auth"), ...await import("../../domain/src/source-scoped-read") }));
+vi.mock("@corgtex/domain", async () => ({ ...await import("../../domain/src/source-lineage"), ...await import("../../domain/src/auth"),
+  ...await import("../../domain/src/source-scoped-read"), ...await import("../../domain/src/artifact-commit-preflight") }));
 vi.mock("@corgtex/models", () => ({ defaultModelGateway: { embed: remote.embed } }));
 vi.mock("./retrieval", () => ({ invalidateKnowledgeCache: vi.fn() }));
 vi.mock("./azure-search", () => ({ getKnowledgeSearchProvider: () => "postgres", isAzureKnowledgeSearchConfigured: () => false,
@@ -42,7 +43,7 @@ beforeEach(async () => {
     value instanceof Date ? row[field] instanceof Date && row[field].getTime() === value.getTime() : row[field] === value)) ?? null));
   fixture.prisma.$transaction.mockImplementation(async (work: any) => {
     const before = structuredClone(fixture.rows);
-    try { return await work(fixture.prisma); } catch (error) { for (const name of Object.keys(before)) fixture.rows[name] = before[name]; throw error; }
+    try { return await work({ ...fixture.prisma }); } catch (error) { for (const name of Object.keys(before)) fixture.rows[name] = before[name]; throw error; }
   });
   fixture.prisma.knowledgeChunk = {
     // Prisma returns independent row objects; metadata projection must not mutate

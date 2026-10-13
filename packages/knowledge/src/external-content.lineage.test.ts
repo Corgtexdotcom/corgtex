@@ -104,7 +104,8 @@ vi.mock("@corgtex/domain", async () => {
   const duplicate = await import("../../domain/src/duplicate-guard");
   const guards = await import("../../domain/src/trial-entitlements");
   const errors = await import("../../domain/src/errors");
-  return { ...lineage, ...documents, ...auth, ...duplicate, ...guards, ...errors,
+  const commit = await import("../../domain/src/artifact-commit-preflight");
+  return { ...lineage, ...documents, ...auth, ...duplicate, ...guards, ...errors, ...commit,
     mergeArtifactInputProofs: (await import("../../domain/src/digest-lineage")).mergeArtifactInputProofs,
     scanSourceReadableRecords: (await import("../../domain/src/source-scoped-read")).scanSourceReadableRecords,
     appendEvents: vi.fn(), isGlobalOperator: () => false, lockWorkspaceArchiveArtifact: vi.fn(),

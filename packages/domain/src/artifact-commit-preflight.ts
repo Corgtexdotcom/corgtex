@@ -10,7 +10,7 @@ import { prepareExternalMcpResponseCommitPreflight, withExternalMcpResponseCommi
   type ExternalMcpResponseCommitPreflight } from "./external-mcp-response-input";
 import { prepareExternalMixedCommitPreflight, withExternalMixedCommitPreflight,
   type ExternalMixedCommitPreflight } from "./external-mixed-commit";
-import { isArtifactPermissionEpochProofCurrent, parsePermissionEpochProof } from "./source-permission-epochs";
+import { artifactPermissionEpochIdentities, isArtifactPermissionEpochProofCurrent, parsePermissionEpochProof } from "./source-permission-epochs";
 
 declare const commitBrand: unique symbol;
 export type ArtifactCommitPreflight = { readonly [commitBrand]: true };
@@ -39,20 +39,40 @@ export async function prepareArtifactCommitPreflight(actor: AppActor, workspaceI
     409, "UNKNOWN_LINEAGE", "Slack native inputs require a transaction-safe commit adapter.");
   // Reject a locally revoked contributor before replaying a request whose query
   // may itself contain its text. These checks confer no remote/read capability.
+  const currentCaptures = new Set<string>();
+  const originals: LineageRoot[] = [];
   for (const root of dependencies.roots) {
     const saved = root.kind === "ArtifactInputSnapshot"
       ? await prisma.artifactInputSnapshot.findFirst({ where: { id: root.id, workspaceId },
         select: { epochProofVersion: true, permissionEpochsJson: true } })
       : await prisma.artifactInputLineage.findFirst({ where: { workspaceId, artifactType: root.kind,
         artifactId: root.id, contentHash: root.fingerprint }, orderBy: { revision: "desc" },
-      select: { epochProofVersion: true, permissionEpochsJson: true } });
-    for (const captured of [root.permissionEpochs, ...(saved ? [saved.permissionEpochsJson] : [])]) {
+      select: { origin: true, inputsJson: true, rootsJson: true, epochProofVersion: true, permissionEpochsJson: true } });
+    // A creation vector did not govern a newly consumed human original. Its
+    // current capture may regenerate output; all older consumed snapshots and
+    // derived/native vectors continue to govern the generations they produced.
+    const independentOriginal = root.kind !== "ArtifactInputSnapshot" && saved && "origin" in saved
+      && "rootsJson" in saved && "inputsJson" in saved
+      && saved.origin === "HUMAN_ORIGINAL" && Array.isArray(saved.rootsJson) && saved.rootsJson.length === 0
+      && Array.isArray(saved.inputsJson) && saved.inputsJson.length === 0;
+    if (independentOriginal) originals.push(root);
+    for (const captured of [root.permissionEpochs, ...(saved && !independentOriginal ? [saved.permissionEpochsJson] : [])]) {
       if (captured === undefined) continue;
       const proof = parsePermissionEpochProof(captured);
-      invariant(proof && (!saved || saved.epochProofVersion === 1)
+      invariant(proof && (!saved || independentOriginal || saved.epochProofVersion === 1)
         && await isArtifactPermissionEpochProofCurrent(workspaceId, proof, prisma),
       409, "SOURCE_CHANGED", "Commit local source permissions changed before replay.");
+      for (const entry of proof.entries) currentCaptures.add(JSON.stringify([entry.kind, entry.id]));
     }
+  }
+  // Synthesized source entries may use their enclosing snapshot/derived vector;
+  // a bare original with no capture cannot skip its only local authority check.
+  for (const original of originals) {
+    // The first identity is the artifact's own governor; transcript/agenda
+    // projections intentionally share their Meeting identity.
+    const self = artifactPermissionEpochIdentities(original.kind, { id: original.id })[0];
+    invariant(self && currentCaptures.has(JSON.stringify([self.kind, self.id])),
+      409, "UNKNOWN_LINEAGE", "Commit original has no current consumed permission capture.");
   }
   const box = dependencies.roots.some(root => root.kind === "ExternalProviderFetchInput");
   // A connection-set absence proof is local control data: its captured policy

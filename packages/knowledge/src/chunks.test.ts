@@ -71,9 +71,21 @@ vi.mock("./azure-search", async (importOriginal) => {
 
 vi.mock("@corgtex/domain", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@corgtex/domain")>();
+  // Routing and chunking cases use synthetic source proofs; the native commit
+  // dispatcher's real authority and single-use behavior have separate tests.
+  const preflights = new WeakMap<object, { actor: unknown; workspaceId: string; roots: unknown }>();
   return { ...actual, recordArtifactInputLineage: vi.fn(async () => {}), assertArtifactInputWriteFence: vi.fn(async () => {}), requireWorkspaceMembership: vi.fn(async () => ({ id: "member" })),
     captureArtifactInputProof: vi.fn(async (_actor, _ws, inputs) => inputs.map((input: any) => ({ kind: input.kind, id: input.id, fingerprint: "fixture" }))),
     captureImmutableArtifactInputProof: vi.fn(async (_actor, _workspaceId, roots) => roots),
+    prepareArtifactCommitPreflight: vi.fn(async (actor, workspaceId, roots) => {
+      const token = Object.freeze({}); preflights.set(token, { actor, workspaceId, roots: structuredClone(roots) }); return token;
+    }),
+    withArtifactCommitPreflight: vi.fn(async (actor, workspaceId, _tx, roots, token, work) => {
+      const saved = preflights.get(token);
+      if (!saved || saved.actor !== actor || saved.workspaceId !== workspaceId
+        || JSON.stringify(saved.roots) !== JSON.stringify(roots)) throw new Error("Synthetic commit binding changed.");
+      preflights.delete(token); return work();
+    }),
     isArtifactInputProofReadable: vi.fn(async () => true),
     readableArtifactIds: vi.fn(async (_actor, _ws, _kind, rows) => new Set(rows.map((row: any) => row.id))),
     scanSourceReadableRecords: vi.fn(async (params) => await params.load(undefined, 100) ?? []),

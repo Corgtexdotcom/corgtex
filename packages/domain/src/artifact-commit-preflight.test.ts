@@ -25,7 +25,8 @@ vi.mock("@corgtex/shared", () => ({ prisma: f.prisma }));
 vi.mock("./artifact-input-actor", () => ({ sealArtifactInputActor: vi.fn((actor: AppActor) => actor) }));
 vi.mock("./source-lineage", () => ({ inspectStoredArtifactInputDependencies: f.inspect,
   isArtifactInputProofReadable: f.read }));
-vi.mock("./source-permission-epochs", () => ({
+vi.mock("./source-permission-epochs", async importOriginal => ({
+  ...await importOriginal<typeof import("./source-permission-epochs")>(),
   parsePermissionEpochProof: (value: any) => value?.version === 1 && Array.isArray(value.entries) ? value : null,
   isArtifactPermissionEpochProofCurrent: vi.fn(async () => f.state.epochCurrent),
 }));
@@ -53,6 +54,8 @@ describe("artifact commit preflight dispatcher", () => {
     f.state.closure = []; f.state.complete = true; f.state.epochCurrent = true;
     f.state.readable = true; f.state.savedProof = null; f.state.events = [];
     f.prisma.artifactInputLineage.findFirst.mockImplementation(async () => f.state.savedProof);
+    f.prisma.artifactInputSnapshot.findFirst.mockImplementation(async () => null);
+    vi.mocked(isArtifactPermissionEpochProofCurrent).mockImplementation(async () => f.state.epochCurrent);
   });
 
   it("selects the safe mixed wrapper from the full stored closure and checks all original roots around work", async () => {
@@ -114,6 +117,64 @@ describe("artifact commit preflight dispatcher", () => {
     expect(isArtifactPermissionEpochProofCurrent).toHaveBeenCalled();
     expect(f.boxPrepare).not.toHaveBeenCalled(); expect(f.mcpPrepare).not.toHaveBeenCalled();
     expect(f.mixedPrepare).not.toHaveBeenCalled(); expect(f.read).not.toHaveBeenCalled();
+  });
+
+  it("permits a fresh independent original after restoration without redeeming its old captured vector", async () => {
+    const original = [root("Document", "original", true)];
+    const old = structuredClone(original[0].permissionEpochs);
+    original[0].permissionEpochs.entries[0].epoch = "2";
+    f.state.closure = original;
+    f.state.savedProof = { origin: "HUMAN_ORIGINAL", rootsJson: [], inputsJson: [],
+      epochProofVersion: 1, permissionEpochsJson: old };
+    vi.mocked(isArtifactPermissionEpochProofCurrent).mockImplementation(async (_ws, value: any) =>
+      value.entries.every((entry: any) => entry.epoch === "2"));
+    const capability = await prepareArtifactCommitPreflight(actor, workspaceId, original);
+    await expect(withArtifactCommitPreflight(actor, workspaceId, tx, original, capability, async () => "fresh generation"))
+      .resolves.toBe("fresh generation");
+    original[0].permissionEpochs = old;
+    await expect(prepareArtifactCommitPreflight(actor, workspaceId, original)).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+  });
+
+  it.each(["MeetingTranscript", "MeetingAgenda"])("uses the canonical Meeting governor for a fresh %s original", async kind => {
+    const original = [root(kind, "meeting", true)];
+    original[0].permissionEpochs.entries[0].kind = "Meeting";
+    original[0].permissionEpochs.entries[0].epoch = "2";
+    f.state.closure = original;
+    f.state.savedProof = { origin: "HUMAN_ORIGINAL", rootsJson: [], inputsJson: [], epochProofVersion: 1,
+      permissionEpochsJson: { ...original[0].permissionEpochs, entries: [{ kind: "Meeting", id: "meeting", epoch: "0" }] } };
+    vi.mocked(isArtifactPermissionEpochProofCurrent).mockImplementation(async (_ws, value: any) =>
+      value.entries.every((entry: any) => entry.epoch === "2"));
+    const capability = await prepareArtifactCommitPreflight(actor, workspaceId, original);
+    await expect(withArtifactCommitPreflight(actor, workspaceId, tx, original, capability, async () => "fresh meeting"))
+      .resolves.toBe("fresh meeting");
+  });
+
+  it.each([
+    ["DERIVED", [], []], ["NATIVE_ORIGINAL", [], []], ["HUMAN_ORIGINAL", [], [{ kind: "Document", id: "unproved" }]],
+    ["HUMAN_ORIGINAL", [], null], ["HUMAN_ORIGINAL", null, []],
+  ])("retains saved %s vectors when roots/inputs do not establish an independent original", async (origin, rootsJson, inputsJson) => {
+    const original = [root("Document", "original", true)];
+    const old = structuredClone(original[0].permissionEpochs);
+    original[0].permissionEpochs.entries[0].epoch = "2";
+    f.state.closure = original;
+    f.state.savedProof = { origin, rootsJson, inputsJson, epochProofVersion: 1, permissionEpochsJson: old };
+    vi.mocked(isArtifactPermissionEpochProofCurrent).mockImplementation(async (_ws, value: any) =>
+      value.entries.every((entry: any) => entry.epoch === "2"));
+    await expect(prepareArtifactCommitPreflight(actor, workspaceId, original)).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+  });
+
+  it("keeps an old human-original snapshot vector mandatory and rejects an uncaptured original", async () => {
+    const original = [root("ArtifactInputSnapshot", "old")];
+    f.state.closure = original;
+    f.prisma.artifactInputSnapshot.findFirst.mockResolvedValueOnce({ origin: "HUMAN_ORIGINAL", rootsJson: [], inputsJson: [],
+      epochProofVersion: 1, permissionEpochsJson: root("Document", "original", true).permissionEpochs } as any);
+    f.state.epochCurrent = false;
+    await expect(prepareArtifactCommitPreflight(actor, workspaceId, original)).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    f.state.epochCurrent = true;
+    f.state.closure = [root("Document", "original")];
+    f.state.savedProof = { origin: "HUMAN_ORIGINAL", rootsJson: [], inputsJson: [], epochProofVersion: 1,
+      permissionEpochsJson: root("Document", "original", true).permissionEpochs };
+    await expect(prepareArtifactCommitPreflight(actor, workspaceId, f.state.closure)).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
   });
 
   it("binds the exact actor, workspace and root vector, then consumes a successful capability once", async () => {

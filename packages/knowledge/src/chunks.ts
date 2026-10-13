@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { KnowledgeAccessDomain, KnowledgeSourceType, Prisma } from "@prisma/client";
 import { getSharedStateBackend, prisma, type AppActor } from "@corgtex/shared";
-import { assertArtifactInputWriteFence, captureArtifactInputProof, captureImmutableArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, readableArtifactIds, recordArtifactInputLineage, requireWorkspaceMembership, scanSourceReadableRecords, type LineageKind, type LineageRoot } from "@corgtex/domain";
+import { assertArtifactInputWriteFence, captureArtifactInputProof, captureImmutableArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, prepareArtifactCommitPreflight, readableArtifactIds, recordArtifactInputLineage, requireWorkspaceMembership, scanSourceReadableRecords, withArtifactCommitPreflight, type LineageKind, type LineageRoot } from "@corgtex/domain";
 import { defaultModelGateway } from "@corgtex/models";
 import { invalidateKnowledgeCache } from "./retrieval";
 import { getKnowledgeSearchProvider, isAzureKnowledgeSearchConfigured, logAzureKnowledgeIndexingWarning, syncAzureKnowledgeSource } from "./azure-search";
@@ -178,13 +178,19 @@ export async function syncKnowledgeForSource(params: {
   if (params.sourceUpdatedAt && (!(snapshot.record.updatedAt instanceof Date)
     || snapshot.record.updatedAt.getTime() !== params.sourceUpdatedAt.getTime())) return 0;
   const sourceActor: AppActor = params.lineageActor ?? { kind: "agent", authProvider: "bootstrap", label: "knowledge-source-sync", workspaceIds: [params.workspaceId] };
+  let sourceProof: LineageRoot[];
   let sourceRoots: LineageRoot[];
   try {
-    const sourceProof = await captureArtifactInputProof(sourceActor, params.workspaceId,
+    sourceProof = await captureArtifactInputProof(sourceActor, params.workspaceId,
       [{ kind: snapshot.kind, id: params.sourceId, snapshot: snapshot.record }]);
     // Freeze the generation-time permission vector as well as every source body.
     // A revoke/restore episode cannot certify an already running embedding job.
-    sourceRoots = await prisma.$transaction(tx => captureImmutableArtifactInputProof(sourceActor, params.workspaceId, sourceProof, tx));
+    const freezePreflight = await prepareArtifactCommitPreflight(sourceActor, params.workspaceId, sourceProof);
+    sourceRoots = await prisma.$transaction(async tx => {
+      await assertArtifactInputWriteFence(tx);
+      return withArtifactCommitPreflight(sourceActor, params.workspaceId, tx, sourceProof, freezePreflight,
+        () => captureImmutableArtifactInputProof(sourceActor, params.workspaceId, sourceProof, tx));
+    });
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && ["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(String(error.code))) return 0;
     throw error;
@@ -240,15 +246,31 @@ export async function syncKnowledgeForSource(params: {
     };
   });
 
-  const persisted = await prisma.$transaction(async (tx) => {
-    if (snapshot) {
-      // Serialize source edits with this receipt commit, then compare the exact
-      // revision captured before the embedding call. Restoration is a new revision.
-      if (snapshot.kind === "Meeting") await tx.$queryRaw`SELECT "id" FROM "Meeting" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
-      if (snapshot.kind === "Proposal") await tx.$queryRaw`SELECT "id" FROM "Proposal" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
-    }
+  // The worker lease remains a live commit authority, while the output keeps
+  // the frozen job receipt so completion does not invalidate indexed content.
+  const commitRoots = [...sourceRoots, ...sourceProof.filter(root => root.kind === "WorkflowJobInput")];
+  let commitPreflight: Awaited<ReturnType<typeof prepareArtifactCommitPreflight>>;
+  try {
+    commitPreflight = await prepareArtifactCommitPreflight(sourceActor, params.workspaceId, commitRoots);
+  } catch (error) {
+    // Regular source reindexing skips stale work. The external sync owner must
+    // receive the error so it can mark its provider copy as stale.
+    if (snapshot.kind !== "ExternalContentSource" && error && typeof error === "object" && "code" in error
+      && ["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(String(error.code))) return 0;
+    throw error;
+  }
+  const persisted = await prisma.$transaction(async tx => {
+    await assertArtifactInputWriteFence(tx);
+    // Privacy/archive writes take the source row before their epoch trigger.
+    // Match that order before the local proof takes shared epoch locks.
+    if (snapshot.kind === "Meeting") await tx.$queryRaw`SELECT "id" FROM "Meeting" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+    if (snapshot.kind === "Proposal") await tx.$queryRaw`SELECT "id" FROM "Proposal" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+    if (snapshot.kind === "BrainArticle") await tx.$queryRaw`SELECT "id" FROM "BrainArticle" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+    if (snapshot.kind === "Document") await tx.$queryRaw`SELECT "id" FROM "Document" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+    return withArtifactCommitPreflight(sourceActor, params.workspaceId, tx, commitRoots, commitPreflight, async () => {
+    // Compare the exact revision captured before embedding inside the complete
+    // source scope. Restoration is a new permission revision.
     if (params.sourceType === "BRAIN_ARTICLE") {
-      await tx.$queryRaw`SELECT "id" FROM "BrainArticle" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brain_article_index:${params.workspaceId}:${params.sourceId}`}, 0))`;
       const article = await tx.brainArticle.findFirst({
         where: { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null, OR: [{ isPrivate: false }, { variantOfArticleId: { not: null }, isPrivate: true }], bodyMd: params.content,
@@ -259,7 +281,6 @@ export async function syncKnowledgeForSource(params: {
     }
     const storageKey = params.sourceType === "DOCUMENT" ? params.metadata?.storageKey : null;
     if (typeof storageKey === "string") {
-      await tx.$queryRaw`SELECT "id" FROM "Document" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`document_index:${params.workspaceId}:${params.sourceId}`}, 0))`;
       const document = await tx.document.findFirst({
         where: { id: params.sourceId, workspaceId: params.workspaceId, storageKey,
@@ -272,9 +293,6 @@ export async function syncKnowledgeForSource(params: {
       await tx.$queryRaw`SELECT "id" FROM "ExternalContentSource" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
     }
     if (snapshot) {
-      if (snapshot.kind === "Document" && typeof storageKey !== "string") {
-        await tx.$queryRaw`SELECT "id" FROM "Document" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
-      }
       const current = await knowledgeSourceSnapshot(params, tx);
       if (!current || current.contentHash !== snapshot.contentHash) return false;
     }
@@ -310,6 +328,7 @@ export async function syncKnowledgeForSource(params: {
     // roll both back instead of leaving cached results after a committed change.
     if (getSharedStateBackend() === "postgres") await invalidateKnowledgeCache(params.workspaceId, tx);
     return captureArtifactInputProof(sourceActor, params.workspaceId, insertedRows.map(row => ({ kind: "KnowledgeChunk" as const, id: row.id, snapshot: row })), tx);
+    });
   });
   if (!persisted) return 0;
 

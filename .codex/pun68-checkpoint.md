@@ -34,6 +34,16 @@ is INCOMPLETE. Keep PR1517 draft; do not merge or deploy.
 
 ## Implemented corrections in this checkpoint
 
+- Knowledge indexing now uses distinct safe commit capabilities for freezing
+  inputs and publishing chunks; provider/embedding work stays outside both SQL
+  transactions. Worker ownership precedes direct local source-row locks and source
+  epoch locks. Exact native provider byte drift preserves older committed rows;
+  local archive races commit without row/epoch deadlock and withhold old chunks.
+- A fresh independent HUMAN_ORIGINAL with exactly empty inputs/roots may regenerate
+  using its current captured permissions after restore. Its creation vector is not
+  a consumed generation. Old snapshots, DERIVED and native-control vectors stay
+  mandatory; missing captures and malformed ancestry remain held. Meeting transcript
+  and agenda captures use their canonical Meeting governor. No stored vector is reset.
 - Actual CRM confirmation now commits the effect, complete producer lineage,
   applicable audit and canonical EXECUTED result on one exact caller transaction.
   Its independently guarded three-tool route retains PUN76 authorization and both
@@ -106,6 +116,11 @@ The separate release task's branch/browser/Azure CLI/lease/runtime were untouche
 | Mixed native providers, empty-search insertion revocation and private graph variants | 16/16 local PG pass | /tmp/pun68-native-provider-current-integration.log |
 | Existing native Box variant cohort | 3/3 local PG pass | /tmp/pun68-native-mcp-complete-inputs-box-integration.log (MCP assertion subsequently corrected to inspect immutable closure) |
 | Fresh seed lifecycle | 90 unit pass; actual seed retains521 epochs; existing refresh rolls back identical table/epoch hashes | /tmp/pun68-demo-seed-lifecycle-unit.log; /tmp/pun68-demo-seed-lifecycle-replay.log; /tmp/pun68-demo-seed-lifecycle-rollback.log |
+| All three CRM native tools | 15/15 local PG pass: registered MCP activity/suggestion/completion, rollback, applicable audit and finalizer races | /tmp/pun68-crm-all-three-native-final-integration.log |
+| Knowledge and fresh-original restoration | 74/74 units pass; rejects old snapshots/derived vectors/missing captures/malformed original inputs, permits fresh originals and Meeting aliases | /tmp/pun68-original-restore-knowledge-final-unit.log |
+| Actual Box-to-KnowledgeChunk caller | 2/2 local PG pass: complete owner-only receipt, no provider SDK in TX, post-embed drift preserves old chunks | /tmp/pun68-knowledge-box-caller-final-pg.log |
+| Local Document privacy/write race | 1/1 local PG pass: observed row wait, no deadlock, prior chunks preserved and unreadable after archive | /tmp/pun68-knowledge-document-lock-pg.log |
+| Running Finance visibility at503dd0e0 | two synthetic contributors each see1 permitted import; member revoke API403/UI markers withheld; restore API200/0 old imports | .artifacts/pun68-finance-ui/README.md and screenshots/result JSON (ignored local evidence; font fixture, no provider/model call) |
 
 Focused cohorts overlap and ran on successive local revisions. Do not add their
 counts or claim them as a single final acceptance run. Missing tracked test assets
@@ -135,11 +150,23 @@ this isolated repository so future merges retain tracked validation assets.
    projection, and Slack-native generic commit support remain incomplete. The mixed
    Box/MCP adapter and actual CRM atomic confirmation are now separately proved;
    neither proves canonical Brain lifecycle acceptance. Unsupported recipes are held.
-6. Independent GPT-6.1 Sol xhigh review found the raw runner, empty-set dispatcher
-   and unsupported Slack replay issues and verified their corrections, with24 focused
-   units. It found no additional defect in that reviewed delta and retained the
-   Action/Recall/Bloop/CRM archive gates. Exact-head CI and running evidence for
-   changed Finance visibility still remain gates. No ready/complete/ship claim is made.
+6. Independent GPT-6.1 Sol xhigh review found raw runner, empty-set dispatcher,
+   unsupported Slack replay, fresh-original creation-vector overreach, canonical
+   Meeting identity and indexed-source/epoch lock ordering issues. Their corrections
+   have focused evidence above. It retains Action/Recall/Bloop/CRM archive gates.
+   Exact-head CI remains a gate. Running Finance content visibility now has synthetic
+   evidence; that does not establish report regeneration or canonical Brain lifecycle.
+   No ready/complete/ship claim is made.
+
+### Hosted CI at503dd0e0
+
+Run38398138310 finished FAILURE:11982 passed/14 failed/2 skipped;735 passing
+files/4 failing/1 skipped. Build, DatabaseSync (including fresh seed), docs/policy,
+scans, lint/typecheck and migration/schema checks passed. Failures were7 genuine
+Recall gaps,2 Action public-reader gaps,1 archived CRM body-view gap, plus4 actual
+Box knowledge writer composition regressions introduced by the stricter supplied-TX
+provider scope. The latter are corrected and have actual caller PG evidence above;
+they were not dismissed as stale fixtures. Next head must run its own exact-head CI.
 
 ### Hosted CI at prior published682c8da3
 

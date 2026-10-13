@@ -10,7 +10,7 @@ import { captureArtifactInputProof, isArtifactInputProofReadable, withArtifactIn
 import { beginCrmPendingOperationExecution, createPendingCrmOperation,
   markCrmPendingOperationExecuted, markCrmPendingOperationFailed,
   commitCrmPendingOperationExecution } from "./pending-crm-operations";
-import { recordRelationshipActivityAction } from "./tools/crm";
+import { recordRelationshipActivityAction, completeRelationshipActivityAction, createCommunicationSuggestionAction } from "./tools/crm";
 
 function deferred() {
   let resolve!: () => void;
@@ -18,7 +18,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function fixture() {
+async function fixture(toolName = "record_relationship_activity") {
   const workspace = await prisma.workspace.create({ data: { name: "Synthetic pending CRM fence", slug: `pending-crm-${randomUUID()}` } });
   const user = await prisma.user.create({ data: { email: `pending-crm-${randomUUID()}@example.test`, passwordHash: "synthetic" } });
   await prisma.member.create({ data: { workspaceId: workspace.id, userId: user.id, role: "CONTRIBUTOR" } });
@@ -33,11 +33,14 @@ async function fixture() {
   const account = await createCrmAccount(actor, { workspaceId: workspace.id, name: "Synthetic account" });
   const lineageRoots = await captureArtifactInputProof(actor, workspace.id, [{ kind: "ConversationPromptInput", id: prompt.id }]);
   const ctx = { actor, workspaceId: workspace.id, sessionId: session.id, userId: user.id, agentKey: "assistant", userMessage, lineageRoots };
-  const args = { title: "Synthetic permitted effect", bodyMd: "Synthetic approved body", accountId: account.id };
-  const operation = await createPendingCrmOperation({ ctx, toolName: "record_relationship_activity", args });
+  const activity = toolName === "complete_relationship_activity" ? await createActivity(actor, {
+    workspaceId: workspace.id, title: "Synthetic original activity", bodyMd: "Synthetic original body", accountId: account.id,
+  }) : null;
+  const args: any = activity ? { activityId: activity.id } : { title: "Synthetic permitted effect", bodyMd: "Synthetic approved body", accountId: account.id };
+  const operation = await createPendingCrmOperation({ ctx, toolName, args });
   const begin = await beginCrmPendingOperationExecution(ctx, operation);
   if (begin.state !== "ready") throw new Error("Synthetic operation did not obtain an execution capability");
-  return { actor, workspace, ctx, args, operation, begin };
+  return { actor, workspace, ctx, args, operation, begin, activity };
 }
 
 async function heldEffect(f: Awaited<ReturnType<typeof fixture>>) {
@@ -86,6 +89,60 @@ describe("pending CRM effect transactions on the assigned disposable database", 
     await truncateAllTables();
   });
   afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+  it.each([
+    ["complete_relationship_activity", completeRelationshipActivityAction, "CrmActivity", "crm.activity.completed"],
+    ["create_communication_suggestion", createCommunicationSuggestionAction, "CrmCommunicationSuggestion", "crm.communication_suggestion.created"],
+  ] as const)("commits the native %s effect, complete receipt and applicable audit atomically", async (toolName, handler, kind, action) => runWithSupportOrigin(undefined, async () => {
+    const f = await fixture(toolName);
+    const committed = await commitCrmPendingOperationExecution(f.ctx, f.begin.operation, ({ tx, lineageRoots }) =>
+      handler(f.actor, { workspaceId: f.workspace.id, tx, lineageRoots: [...lineageRoots] }, f.args));
+    const effect = kind === "CrmActivity" ? await prisma.crmActivity.findUniqueOrThrow({ where: { id: f.activity!.id } })
+      : await prisma.crmCommunicationSuggestion.findFirstOrThrow({ where: { workspaceId: f.workspace.id } });
+    expect(committed.operation).toMatchObject({ status: "EXECUTED", resultJson: JSON.parse(JSON.stringify(committed.result)) });
+    expect(committed.result).toMatchObject(kind === "CrmActivity" ? { success: true, activity: { id: effect.id } }
+      : { success: true, emailSent: false, suggestion: { id: effect.id } });
+    if (kind === "CrmActivity") expect((effect as any).completedAt).toBeInstanceOf(Date);
+    const audit = await prisma.auditLog.findMany({ where: { workspaceId: f.workspace.id, action, entityId: effect.id } });
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ actorUserId: f.ctx.userId, entityType: kind });
+    for (const artifact of [{ kind, id: effect.id }, { kind: "ConversationPendingOperation" as const, id: committed.operation.id }]) {
+      const roots = await captureArtifactInputProof(f.actor, f.workspace.id, [artifact]);
+      expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, roots)).toBe(true);
+    }
+    await expect(commitCrmPendingOperationExecution(f.ctx, f.begin.operation, async () => { throw Error("Replayed effect"); }))
+      .rejects.toMatchObject({ code: "CRM_EXECUTION_STALE" });
+    expect(await prisma.auditLog.count({ where: { workspaceId: f.workspace.id, action, entityId: effect.id } })).toBe(1);
+  }));
+
+  it.each([
+    ["complete_relationship_activity", completeRelationshipActivityAction, "CrmActivity", "crm.activity.completed"],
+    ["create_communication_suggestion", createCommunicationSuggestionAction, "CrmCommunicationSuggestion", "crm.communication_suggestion.created"],
+  ] as const)("rolls native %s effect, lineage and audit back when canonical publication fails", async (toolName, handler, kind, action) => runWithSupportOrigin(undefined, async () => {
+    const f = await fixture(toolName);
+    const before = await prisma.artifactInputLineage.findMany({ where: { workspaceId: f.workspace.id, artifactType: kind }, orderBy: { id: "asc" } });
+    const client = getPrismaClient(); const original = client.$transaction.bind(client);
+    vi.spyOn(client, "$transaction").mockImplementation(((callback: any, options: any) => original(async tx => callback(new Proxy(tx, {
+      get(target, property) {
+        if (property !== "conversationPendingOperation") return Reflect.get(target, property);
+        return new Proxy(target.conversationPendingOperation, { get(delegate, method) {
+          if (method !== "update") return Reflect.get(delegate, method);
+          return async (args: any) => {
+            if (args.data.status === "EXECUTED") throw Error("Synthetic canonical terminal write failed");
+            return delegate.update(args);
+          };
+        } });
+      },
+    })), options)) as any);
+    await expect(commitCrmPendingOperationExecution(f.ctx, f.begin.operation, ({ tx, lineageRoots }) =>
+      handler(f.actor, { workspaceId: f.workspace.id, tx, lineageRoots: [...lineageRoots] }, f.args))).rejects.toThrow("Synthetic canonical terminal write failed");
+    if (kind === "CrmActivity") expect((await prisma.crmActivity.findUniqueOrThrow({ where: { id: f.activity!.id } })).completedAt).toBeNull();
+    else expect(await prisma.crmCommunicationSuggestion.count({ where: { workspaceId: f.workspace.id } })).toBe(0);
+    expect(await prisma.auditLog.count({ where: { workspaceId: f.workspace.id, action } })).toBe(0);
+    expect(await prisma.artifactInputLineage.findMany({ where: { workspaceId: f.workspace.id, artifactType: kind }, orderBy: { id: "asc" } })).toEqual(before);
+    expect(await prisma.conversationPendingOperation.findUniqueOrThrow({ where: { id: f.begin.operation.id } }))
+      .toMatchObject({ status: "EXECUTING", resultJson: null, executedAt: null });
+  }));
 
   it("commits the actual tool effect, complete lineage and canonical EXECUTED receipt on one transaction", async () => runWithSupportOrigin(undefined, async () => {
     const f = await fixture();

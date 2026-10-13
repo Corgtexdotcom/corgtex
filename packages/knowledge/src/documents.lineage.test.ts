@@ -71,7 +71,7 @@ const fixture = vi.hoisted(() => {
   }
   prisma.$transaction = vi.fn(async (run: (tx: any) => Promise<any>) => {
     const before = Object.fromEntries(names.map((name) => [name, tables[name].map((row) => ({ ...row }))]));
-    try { return await run(prisma); } catch (error) { for (const name of names) tables[name] = before[name]; throw error; }
+    try { return await run({ ...prisma }); } catch (error) { for (const name of names) tables[name] = before[name]; throw error; }
   });
   return { prisma, tables, time, revoked: new Set<string>(), departed: new Set<string>() };
 });
@@ -102,7 +102,8 @@ vi.mock("@corgtex/domain", async () => {
   const duplicate = await import("../../domain/src/duplicate-guard");
   const guards = await import("../../domain/src/trial-entitlements");
   const errors = await import("../../domain/src/errors");
-  return { ...lineage, ...documents, ...auth, ...duplicate, ...guards, ...errors,
+  const commit = await import("../../domain/src/artifact-commit-preflight");
+  return { ...lineage, ...documents, ...auth, ...duplicate, ...guards, ...errors, ...commit,
     mergeArtifactInputProofs: (await import("../../domain/src/digest-lineage")).mergeArtifactInputProofs,
     scanSourceReadableRecords: (await import("../../domain/src/source-scoped-read")).scanSourceReadableRecords,
     appendEvents: vi.fn(), isGlobalOperator: () => false, lockWorkspaceArchiveArtifact: vi.fn(),
