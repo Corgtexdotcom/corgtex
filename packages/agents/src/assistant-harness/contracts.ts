@@ -59,17 +59,38 @@ export type AssistantEvent =
   | { type: "tool_start"; name: AssistantReadTool["name"] | "publish_selection" }
   | { type: "tool_end"; name: AssistantReadTool["name"] | "publish_selection"; outcome: "ok" | "error" };
 
+export type AssistantDeliveryContext = Readonly<{
+  scope: AssistantScope;
+  actor: HumanActor;
+  signal: AbortSignal;
+  sources: readonly SourceReference[];
+}>;
+
+export type AssistantDeliveryPort = {
+  /** Bound by authenticated subscription setup to the ACTUAL personal connection. */
+  readonly audience: Readonly<Pick<AssistantScope, "workspaceId" | "userId" | "conversationId">>;
+  /** One guarded handoff: revalidate this recipient's session, ownership, claim,
+   * cancellation and exact source permissions at delivery. Serialize revocation
+   * against handoff; a separate check followed by an unguarded send is insufficient.
+   * DETACHED means no send and is not an authorization failure. DENIED means no send.
+   * Throw on unknown authorization failure; never downgrade it to DETACHED. */
+  deliver(context: AssistantDeliveryContext, event: AssistantEvent): Promise<"DELIVERED" | "DETACHED" | "DENIED">;
+};
+
 export type AssistantRuntime = {
   scope: AssistantScope;
   actor: HumanActor;
   signal: AbortSignal;
   /** Fresh app check: membership, claim, cancellation, budget and ALL saved source permissions. */
   authorize(operation: AssistantOperation, sources: readonly SourceReference[]): Promise<void>;
-  /** Durable app reservation for EACH actual dispatch, including retries after checkpoint loss.
-   * Atomically enforce the supplied run-wide maximum and claim. Not a billing write. */
+  /** Durable reservation for EACH harness gateway/read-tool invocation, including
+   * replays after checkpoint loss. Atomically enforce the run-wide maximum and claim.
+   * A later denial does not refund this reservation. Not billing or a reservation
+   * for each internal provider HTTP retry/fallback; those remain gateway-owned. */
   reserveDispatch(kind: "model" | "tool", maximum: number): Promise<void>;
-  /** Optional ephemeral subscriber; disconnect detaches it, never cancels the admitted turn. */
-  emit?: (event: AssistantEvent) => void;
+  /** Omit unless the app can provide the guarded delivery contract below.
+   * Disconnect detaches the subscription, never cancels the admitted turn. */
+  delivery?: AssistantDeliveryPort;
 };
 
 export type AssistantInput = {
@@ -107,7 +128,26 @@ export async function authorize(runtime: AssistantRuntime, operation: AssistantO
   checkCancellation(runtime);
 }
 
-export function emit(runtime: AssistantRuntime, event: AssistantEvent) {
-  // Subscriber failures must not restart billed work or undo a committed effect.
-  try { runtime.emit?.(event); } catch { /* detached subscriber */ }
+export async function deliver(runtime: AssistantRuntime, event: AssistantEvent, sources: readonly SourceReference[]) {
+  checkCancellation(runtime);
+  const port = runtime.delivery;
+  if (!port) return;
+  if (runtime.actor.kind !== "user" || runtime.actor.user.id !== runtime.scope.userId ||
+      port.audience.workspaceId !== runtime.scope.workspaceId || port.audience.userId !== runtime.scope.userId ||
+      port.audience.conversationId !== runtime.scope.conversationId) throw new AssistantHarnessError("SCOPE");
+  const context: AssistantDeliveryContext = Object.freeze({
+    scope: Object.freeze({ ...runtime.scope, job: Object.freeze({ ...runtime.scope.job }) }),
+    actor: Object.freeze({ ...runtime.actor, user: Object.freeze({ ...runtime.actor.user }) }),
+    signal: runtime.signal,
+    sources: Object.freeze(sources.map(source => Object.freeze({ ...source }))),
+  });
+  try {
+    const outcome = await port.deliver(context, Object.freeze({ ...event }));
+    checkCancellation(runtime);
+    if (outcome !== "DELIVERED" && outcome !== "DETACHED") throw new AssistantHarnessError("SCOPE");
+  } catch (error) {
+    checkCancellation(runtime);
+    if (error instanceof AssistantHarnessError) throw error;
+    throw new AssistantHarnessError("SCOPE");
+  }
 }

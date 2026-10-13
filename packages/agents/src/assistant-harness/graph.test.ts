@@ -12,7 +12,7 @@ import type { ChatCompletionRequest, ChatCompletionResponse, ToolCall } from "@c
 import { createAssistantHarness } from "./graph";
 import type { AssistantHarnessOptions } from "./graph";
 import { AssistantHarnessError } from "./contracts";
-import type { AssistantReadTool, AssistantRuntime, EffectKnowledge, PublicationPort } from "./contracts";
+import type { AssistantDeliveryPort, AssistantReadTool, AssistantRuntime, EffectKnowledge, PublicationPort } from "./contracts";
 import type { ClaimedCheckpointPort } from "./checkpoint-store";
 import { AssistantCheckpointStore } from "./checkpoint-store";
 import { handleConversationTurn } from "../../../workflows/src/handlers/conversation-turn";
@@ -46,7 +46,10 @@ function fixture(responses: ChatCompletionResponse[], overrides: Partial<Assista
       if (reservations[kind] >= max) throw new AssistantHarnessError("LIMIT");
       reservations[kind]++;
     }),
-    emit: vi.fn(),
+    delivery: {
+      audience: { workspaceId: "workspace-a", userId: "user-a", conversationId: "conversation-a" },
+      deliver: vi.fn(async (_context, _event) => "DELIVERED" as const),
+    },
   };
   const check = (scope: AssistantRuntime["scope"]) => {
     if (scope.job.owner !== owner || scope.workspaceId !== "workspace-a" || scope.userId !== "user-a") throw new AssistantHarnessError("SCOPE");
@@ -216,11 +219,84 @@ describe("assistant graph foundation", () => {
   it("maps only content deltas and isolates a detached subscriber", async () => {
     const f = fixture([response("Thinking together")], { stream: true });
     const events: unknown[] = [];
-    f.runtime.emit = event => { events.push(event); throw new Error("Browser disconnected"); };
+    f.runtime.delivery!.deliver = async (_context, event) => { events.push(event); return "DETACHED"; };
     expect(await f.run().run(input)).toMatchObject({ status: "completed" });
     expect(events).toEqual([{ type: "content_delta", content: "Thinking together" }]);
     expect(f.gateway.chat).not.toHaveBeenCalled();
     expect(f.reservations.model).toBe(1);
+  });
+
+  it.each((["reservation", "delivery"] as const).flatMap(boundary =>
+    (["signal", "durable-cancel", "claim", "source"] as const).map(mode => ({ boundary, mode })),
+  ))("blocks read dispatch on $mode during awaited $boundary", async ({ boundary, mode }) => {
+    const f = fixture([response("", [call("read_brain")]), response("", [call("read_brain", { query: "follow-up" }, "call-2")])]);
+    let entered!: () => void;
+    let release!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let authorityChanged = false;
+    const originalAuthorize = f.runtime.authorize;
+    f.runtime.authorize = vi.fn(async (operation, sources) => {
+      await originalAuthorize(operation, sources);
+      if (authorityChanged && mode === "claim") throw new AssistantHarnessError("SCOPE");
+    });
+    if (boundary === "reservation") {
+      delete f.runtime.delivery;
+      const reserve = f.runtime.reserveDispatch;
+      f.runtime.reserveDispatch = async (kind, maximum) => {
+        await reserve(kind, maximum);
+        if (kind === "tool" && f.reservations.tool === 2) { entered(); await gate; }
+      };
+    } else {
+      let starts = 0;
+      f.runtime.delivery!.deliver = async (_context, event) => {
+        // A permitted handoff can await its acknowledgement; it is not a read lease.
+        if (event.type === "tool_start" && ++starts === 2) { entered(); await gate; }
+        return "DELIVERED";
+      };
+    }
+    const run = f.run().run(input);
+    await waiting;
+    authorityChanged = true;
+    if (mode === "signal") f.controller.abort();
+    if (mode === "durable-cancel") f.cancel();
+    if (mode === "source") f.revoke();
+    release();
+    await expect(run).rejects.toThrow(mode === "signal" || mode === "durable-cancel" ? "CANCELLED" : "SCOPE");
+    expect(f.read.execute).toHaveBeenCalledTimes(1);
+    expect(f.reservations).toEqual({ model: 2, tool: 2 });
+    expect(f.requests).toHaveLength(2);
+    expect(f.runtime.authorize).toHaveBeenCalledWith("read", [{ kind: "brain", id: "source-a" }]);
+  });
+
+  it("passes accumulated read provenance to the guarded stream handoff", async () => {
+    const f = fixture([], { stream: true });
+    const events: unknown[] = [];
+    let dispatch = 0;
+    let closed = 0;
+    f.runtime.delivery!.deliver = vi.fn<AssistantDeliveryPort["deliver"]>(async (context, event) => {
+      // The app handoff uses the same current domain authority and exact sources.
+      // Synthetic fixture: no wait between successful check and local enqueue.
+      await f.runtime.authorize("result", context.sources);
+      events.push(event);
+      return "DELIVERED";
+    });
+    f.gateway.chatEventStream.mockImplementation(async function* () {
+      try {
+        if (++dispatch === 1) return response("", [call("read_brain")]);
+        f.revoke();
+        yield { type: "content_delta", content: "SYNTHETIC_PRIVATE_SOURCE_DERIVATIVE" };
+        return response("SYNTHETIC_PRIVATE_SOURCE_DERIVATIVE");
+      } finally { closed++; }
+    });
+    await expect(f.run().run(input)).rejects.toThrow("SCOPE");
+    expect(events).toEqual([{ type: "tool_start", name: "read_brain" }, { type: "tool_end", name: "read_brain", outcome: "ok" }]);
+    expect(f.runtime.delivery!.deliver).toHaveBeenLastCalledWith(
+      expect.objectContaining({ scope: f.runtime.scope, actor: f.runtime.actor, sources: [{ kind: "brain", id: "source-a" }] }),
+      { type: "content_delta", content: "SYNTHETIC_PRIVATE_SOURCE_DERIVATIVE" },
+    );
+    expect(closed).toBe(2);
+    expect(f.reservations).toEqual({ model: 2, tool: 1 });
   });
 
   it("returns bounded generic argument/tool errors and corrects them", async () => {
@@ -269,6 +345,27 @@ describe("assistant graph foundation", () => {
     expect(await f.run().run()).toEqual(completed);
     expect(p.port.commit).toHaveBeenCalledTimes(1);
     expect(p.port.commit).toHaveBeenCalledWith(f.runtime, "run-a:publication:1", { id: "approval-a", selectionDigest: "exact-selection-digest" }, { result: "Selected thought", approvedContextSummary: "Approved summary" });
+  });
+
+  it.each(["signal", "durable", "authority"])("does not return waiting after %s cancellation or revocation during an approval query", async change => {
+    const p = publicationFixture();
+    const f = fixture([response("", [call("publish_selection", { result: "Thought" })])], { capabilities: { reads: [], publication: p.port } });
+    await expect(f.run().run(input)).resolves.toEqual({ status: "waiting", approvalId: "approval-a" });
+    let entered!: () => void;
+    let release!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    vi.mocked(p.port.decision).mockImplementationOnce(async () => { entered(); await gate; return "PENDING"; });
+    const operation = f.run().run();
+    await waiting;
+    if (change === "signal") f.controller.abort();
+    else if (change === "durable") f.cancel();
+    else f.revoke();
+    release();
+    await expect(operation).rejects.toThrow(change === "authority" ? "SCOPE" : "CANCELLED");
+    expect(f.requests).toHaveLength(1);
+    expect(p.port.commit).not.toHaveBeenCalled();
+    expect(p.port.inspect).not.toHaveBeenCalled();
   });
 
   it("reconciles a committed effect after lost acknowledgement without another commit", async () => {
@@ -371,7 +468,7 @@ describe("assistant graph foundation", () => {
   it("bounds streamed output before sending it to a subscriber", async () => {
     const f = fixture([response("x".repeat(4000))], { stream: true, limits: { contentBytes: 2000 } });
     await expect(f.run().run(input)).rejects.toThrow("LIMIT");
-    expect(f.runtime.emit).not.toHaveBeenCalled();
+    expect(f.runtime.delivery!.deliver).not.toHaveBeenCalled();
   });
 
   it("reauthorizes resumed sources and denies revoked/cancelled callers before effects", async () => {
@@ -405,7 +502,7 @@ describe("assistant graph foundation", () => {
     });
     await expect(f.run().run(input)).rejects.toThrow("CANCELLED");
     expect(cleaned).toBe(true);
-    expect(f.runtime.emit).not.toHaveBeenCalled();
+    expect(f.runtime.delivery!.deliver).not.toHaveBeenCalled();
   });
 
   it("defaults off and rejects SDK control fields and injected system messages", async () => {

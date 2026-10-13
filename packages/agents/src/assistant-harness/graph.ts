@@ -3,7 +3,7 @@ import { Command, END, START, StateGraph, interrupt, isGraphInterrupt } from "@l
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons";
 import { z } from "zod";
 import type { ModelTool, ToolCall } from "@corgtex/models";
-import { ASSISTANT_GRAPH_VERSION, AssistantHarnessError, authorize, checkCancellation, emit } from "./contracts";
+import { ASSISTANT_GRAPH_VERSION, AssistantHarnessError, authorize, checkCancellation, deliver } from "./contracts";
 import type { AssistantCapabilities, AssistantGateway, AssistantInput, AssistantLimits, AssistantRuntime } from "./contracts";
 import { AssistantCheckpointStore } from "./checkpoint-store";
 import type { ClaimedCheckpointPort } from "./checkpoint-store";
@@ -132,18 +132,20 @@ export function createAssistantHarness(options: AssistantHarnessOptions, runtime
       if (!read) throw new AssistantHarnessError("INPUT");
       const parsed = read.arguments.safeParse(args);
       if (!parsed.success) return update(reply(next, call, '{"error":"INVALID_ARGUMENTS"}'));
-      emit(runtime, { type: "tool_start", name: read.name });
+      await deliver(runtime, { type: "tool_start", name: read.name }, data.sources);
+      // Neither the awaited reservation nor delivery acknowledgement is a read lease.
+      await authorize(runtime, "read", data.sources);
       let result: Awaited<ReturnType<typeof read.execute>>;
       try { result = await read.execute(parsed.data, runtime); } catch {
         checkCancellation(runtime);
-        emit(runtime, { type: "tool_end", name: read.name, outcome: "error" });
+        await deliver(runtime, { type: "tool_end", name: read.name, outcome: "error" }, data.sources);
         return update(reply(next, call, '{"error":"READ_FAILED"}'));
       }
       checkCancellation(runtime);
       const sources = [...next.sources, ...result.sources];
       // Exact returned sources are checked before being included in the next prompt.
       await authorize(runtime, "read", sources);
-      emit(runtime, { type: "tool_end", name: read.name, outcome: "ok" });
+      await deliver(runtime, { type: "tool_end", name: read.name, outcome: "ok" }, sources);
       return update(reply({ ...next, sources }, call, JSON.stringify({ untrustedEvidence: result.content })));
     }))
     .addNode("approval", safeNode(async ({ data: raw }) => {
@@ -153,6 +155,8 @@ export function createAssistantHarness(options: AssistantHarnessOptions, runtime
       const answer = interrupt({ approvalId: data.pending.reference.id }, { responseSchema: z.object({ approvalId: z.string() }).strict() });
       if (answer.approvalId !== data.pending.reference.id) throw new AssistantHarnessError("SCOPE");
       const decision = await publication.decision(runtime, data.pending.reference, data.pending.selection);
+      checkCancellation(runtime);
+      await authorize(runtime, "approval", data.sources);
       if (decision === "PENDING") throw new AssistantHarnessError("UNAVAILABLE");
       return update(decision === "APPROVED" ? { ...data, status: "effect" } : reply(data, data.pending.call, '{"publication":"DENIED"}'));
     }))
@@ -213,7 +217,10 @@ export function createAssistantHarness(options: AssistantHarnessOptions, runtime
           if (paused) {
             if (!publication || !data.pending) throw new AssistantHarnessError("INPUT");
             await authorize(runtime, "approval", data.sources);
-            if (await publication.decision(runtime, data.pending.reference, data.pending.selection) === "PENDING") return { status: "waiting", approvalId: data.pending.reference.id };
+            const decision = await publication.decision(runtime, data.pending.reference, data.pending.selection);
+            checkCancellation(runtime);
+            await authorize(runtime, "approval", data.sources);
+            if (decision === "PENDING") return { status: "waiting", approvalId: data.pending.reference.id };
             invocation = new Command({ resume: { approvalId: data.pending.reference.id } });
           } else invocation = null;
         } else if (snapshot.next.includes(START)) {

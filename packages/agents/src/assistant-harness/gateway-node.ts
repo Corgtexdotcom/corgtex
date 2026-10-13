@@ -1,5 +1,5 @@
 import type { ChatCompletionRequest, ChatCompletionResponse } from "@corgtex/models";
-import { AssistantHarnessError, authorize, checkCancellation, emit } from "./contracts";
+import { AssistantHarnessError, authorize, checkCancellation, deliver } from "./contracts";
 import type { AssistantGateway, AssistantRuntime, SourceReference } from "./contracts";
 
 /** The existing gateway remains the only ModelUsage writer and provider/budget owner. */
@@ -15,7 +15,9 @@ export async function callAssistantGateway(options: {
   const { runtime } = options;
   await authorize(runtime, "model", options.sources);
   await runtime.reserveDispatch("model", options.maximumCalls);
-  checkCancellation(runtime);
+  // The awaited reservation is not an authority lease: revalidate before invoking
+  // the gateway. Its internal provider attempts remain gateway-owned.
+  await authorize(runtime, "model", options.sources);
   const request: ChatCompletionRequest = {
     ...options.request,
     workspaceId: runtime.scope.workspaceId,
@@ -44,7 +46,7 @@ export async function callAssistantGateway(options: {
         streamedBytes += Buffer.byteLength(JSON.stringify(next.value), "utf8");
         if (streamedBytes > options.maximumBytes) throw new AssistantHarnessError("LIMIT");
         // Arguments and private graph/checkpoint values are never client events.
-        if (next.value.type === "content_delta") emit(runtime, next.value);
+        if (next.value.type === "content_delta") await deliver(runtime, next.value, options.sources);
       }
     } finally {
       // Closing the generator runs gateway cleanup/accounting even after cancellation.

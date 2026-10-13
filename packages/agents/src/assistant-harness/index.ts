@@ -4,7 +4,7 @@ export { AssistantCheckpointStore } from "./checkpoint-store";
 export type { ClaimedCheckpointPort } from "./checkpoint-store";
 export { ASSISTANT_GRAPH_VERSION, AssistantHarnessError } from "./contracts";
 export type {
-  AssistantCapabilities, AssistantEvent, AssistantGateway, AssistantInput, AssistantLimits,
+  AssistantCapabilities, AssistantDeliveryContext, AssistantDeliveryPort, AssistantEvent, AssistantGateway, AssistantInput, AssistantLimits,
   AssistantOperation, AssistantReadTool, AssistantRuntime, AssistantScope, ApprovalReference,
   EffectKnowledge, PublicationPort, PublicationSelection, SourceReference,
 } from "./contracts";

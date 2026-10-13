@@ -29,10 +29,46 @@ checkpoint selector to clients. Initial input permits user/assistant messages on
 
 `AssistantRuntime.authorize` must verify current membership, personal session ownership,
 source permissions, cancellation, budget, support/MCP revocation context where applicable,
-and the job claim. `reserveDispatch` must atomically fence and count every actual model/tool
-dispatch against a run-wide limit. This covers a call repeated after a checkpoint crash;
-checkpoint counters alone cannot guarantee that bound. A repeated actual provider dispatch
-can be billed again by the gateway. There is no exactly-once provider billing claim.
+and the job claim. `reserveDispatch` must atomically fence and count each harness gateway
+or read-tool invocation against a run-wide limit, including replay after checkpoint loss.
+After a model reservation resolves, the runner revalidates current authority and exact
+saved sources before invoking the gateway. A denial keeps the reservation consumed while
+preventing the gateway invocation; the harness neither refunds it nor writes usage.
+Read dispatch also revalidates authority after both reservation and the awaited tool-start
+delivery acknowledgement, immediately before calling the domain read implementation.
+Approval decisions also receive post-await cancellation and authority checks before a
+waiting/resume outcome. Checkpoint counters alone cannot guarantee the invocation bound.
+
+Gateway invocation is not an individual provider HTTP attempt. The current gateway has
+internal retries and OpenRouter fallback, with no request-level retry-disable option or
+per-attempt authorization hook. It also awaits budget/headers before its first HTTP send.
+This harness therefore cannot claim fresh authority or separate reservations for each
+downstream attempt. Before live enablement, gateway-owned integration must guard each
+actual attempt with current source/claim authority, propagate revocation cancellation and
+define the fallback policy. Gateway remains the sole usage writer; repeated provider work
+may be billed again. There is no exactly-once provider billing claim.
+
+Incremental output requires an `AssistantDeliveryPort` bound to the actual authenticated
+personal subscription. The runtime rejects an audience that differs from its workspace,
+user or conversation. Every content delta and tool event is awaited through that port with
+an immutable snapshot of the trusted scope, actor, signal and exact accumulated source
+references; raw provider tool arguments and graph values remain excluded.
+
+The port must revalidate the recipient's current session, personal ownership, source access,
+claim and cancellation at the transport handoff. It must serialize that handoff against
+revocation under the application's policy. A permission read followed by an unrestricted
+callback is not sufficient. No database/socket atomicity is supplied by this library.
+`DENIED` or an authorization exception stops the runner and closes the gateway generator;
+unknown errors are sanitized. A known transport disconnect returns `DETACHED`, which does
+not cancel the admitted turn or redispatch billed work. The port must keep that connection
+detached. Cancellation must be checked by the port immediately before handoff as well as
+by the runner before/after it. Already delivered authorized bytes cannot be retracted.
+
+There is deliberately no raw `emit` callback fallback. Omit `delivery` until this guarded
+transport integration exists: the gateway may stream internally, but no incremental events
+are released and the runner returns its final result after the existing result authorization.
+The future route must also authorize its actual recipient when delivering that final result.
+The port is an additional live-integration gate, not an implemented production transport.
 
 `ClaimedCheckpointPort` is a required app integration boundary, not an implemented PostgreSQL
 saver. `AssistantCheckpointStore` bounds SDK access and uses the official patched base
@@ -73,7 +109,7 @@ fake app ports. They do not prove PostgreSQL fencing, process-crash durability, 
 is not a fresh process. Run with Node 22.22:
 
 ```
-npx vitest run --project unit packages/agents/src/assistant-harness/graph.test.ts packages/shared/src/env.test.ts
+npx vitest run --project unit packages/agents/src/assistant-harness/gateway-node.test.ts packages/agents/src/assistant-harness/graph.test.ts packages/shared/src/env.test.ts
 npm run check
 env -u DATABASE_URL npm run build
 ```
