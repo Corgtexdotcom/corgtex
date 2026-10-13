@@ -51,6 +51,11 @@ const artifactInputWriteFence = new AsyncLocalStorage<ArtifactInputWriteFence>()
 export function withArtifactInputWriteFence<T>(fence: ArtifactInputWriteFence | undefined, work: () => Promise<T>) {
   return fence ? artifactInputWriteFence.run(fence, work) : work();
 }
+/** Retain an enclosing worker fence when a native effect adds its own owner fence. */
+export function withAdditionalArtifactInputWriteFence<T>(fence: ArtifactInputWriteFence, work: () => Promise<T>) {
+  const prior = artifactInputWriteFence.getStore();
+  return artifactInputWriteFence.run(async tx => { await prior?.(tx); await fence(tx); }, work);
+}
 export async function assertArtifactInputWriteFence(tx: Prisma.TransactionClient) {
   await artifactInputWriteFence.getStore()?.(tx);
 }
@@ -1323,13 +1328,14 @@ async function latestManifest(db: LineageClient, workspaceId: string, input: Lin
 
 /** Internal dependency discovery grants no read access and returns no source content. */
 export async function inspectStoredArtifactInputDependencies(db: LineageClient, workspaceId: string,
-  inputs: readonly LineageRoot[]) {
+  inputs: readonly LineageRoot[], options?: { maxNodes: number }) {
   const dependencies = new Map<string, LineageRoot>();
   const memo = new Map<string, boolean>();
   const visit = async (root: LineageRoot, visiting = new Set<string>()): Promise<boolean> => {
     const key = `${root.kind}:${root.id}:${root.fingerprint}`;
     if (visiting.has(key)) return false;
     if (memo.has(key)) return memo.get(key)!;
+    if (!dependencies.has(key) && options && dependencies.size >= options.maxNodes) return false;
     dependencies.set(key, root);
     const row = await loadArtifact(db, workspaceId, root);
     if (!row) return false;

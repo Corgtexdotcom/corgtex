@@ -10,6 +10,7 @@ vi.mock("./external-mcp", async importOriginal => ({ ...await importOriginal<typ
 import { captureExternalMcpResponseInput, getExternalMcpResponseInputRoots, isExternalMcpResponseInputCurrent,
   prepareExternalMcpResponseCommitPreflight, registerExternalMcpResponseOutput, withExternalMcpResponseCommitPreflight } from "./external-mcp-response-input";
 import { captureArtifactInputProof, isArtifactInputProofReadable } from "./source-lineage";
+import { prepareArtifactCommitPreflight, withArtifactCommitPreflight } from "./artifact-commit-preflight";
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 let current: Fixture | null = null;
@@ -37,6 +38,26 @@ afterEach(async () => {
 });
 
 describe("external MCP response native authority with real source helpers and PostgreSQL epochs", () => {
+  it("publishes an empty connection-set proof locally and rejects an insertion before work", async () => {
+    const f = current = await fixture();
+    const roots = await captureArtifactInputProof(f.otherActor, f.workspace.id,
+      [{ kind: "ExternalMcpConnectionSet", id: f.other.id }]);
+    const first = await prepareArtifactCommitPreflight(f.otherActor, f.workspace.id, roots);
+    const second = await prepareArtifactCommitPreflight(f.otherActor, f.workspace.id, roots);
+    const work = vi.fn(async () => "permitted empty result");
+    remote.read.mockClear();
+    await expect(prisma.$transaction(tx => withArtifactCommitPreflight(f.otherActor, f.workspace.id, tx, roots, first, work))).resolves.toBe("permitted empty result");
+    expect(work).toHaveBeenCalledOnce();
+    expect(remote.read).not.toHaveBeenCalled();
+    await prisma.externalMcpConnection.create({ data: { workspaceId: f.workspace.id, userId: f.other.id,
+      providerKey: "notion", displayName: "Synthetic later connection", serverUrl: "https://mcp.notion.com/mcp",
+      accessTokenEnc: encryptSecret("synthetic-token"), scopes: ["read"], status: "ACTIVE" } });
+    work.mockClear();
+    await expect(prisma.$transaction(tx => withArtifactCommitPreflight(f.otherActor, f.workspace.id, tx, roots, second, work))).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(work).not.toHaveBeenCalled();
+    expect(remote.read).not.toHaveBeenCalled();
+  });
+
   it("keeps the full pre-limit response, complete read roots, owner fencing, and exact live bytes", async () => {
     const f = current = await fixture();
     const receipt = await captureExternalMcpResponseInput(f.actor, { workspaceId: f.workspace.id,

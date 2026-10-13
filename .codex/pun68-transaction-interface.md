@@ -2,7 +2,7 @@
 
 ## Publication status
 
-This document accompanies implementing code after published0c00c554.
+This document accompanies implementing code after published682c8da3.
 Earlier documentation-only headdecd8ae5 did not contain these APIs. The draft now
 includes the transaction/native-input interfaces below. Their presence and focused
 tests do not establish Bloop's actual saver/route/worker lifecycle, which remains
@@ -36,6 +36,8 @@ Current PUN-68 write-fence API:
 - assertArtifactInputWriteFence(tx) invokes it with the SAME interactive transaction supplied by the domain writer.
 - captureImmutableArtifactInputProof(actor, workspaceId, completeRoots, tx), recordArtifactInputLineage({tx,...}), and addConversationTurn(actor,{tx,...}) use that caller transaction. addConversationTurn takes conversation advisory lock inside it.
 - Pending CRM returns immutable ready operation/input roots plus executionFence(tx); compose the worker and pending fences and perform both inside each effect/result write transaction.
+- withAdditionalArtifactInputWriteFence retains the enclosing worker fence while adding a native owner fence. commitCrmPendingOperationExecution accepts only the ready process-local capability, preflights all source roots outside its publication tx, locks the exact owner/lease first, then commits the actual effect/lineage/audit and EXECUTED result in that tx. The three CRM producers accept only server ctx.tx; model arguments cannot select a transaction. Success/failure terminalizers use the same owner lock. Actual registered MCP confirmation preserves both prepared and confirmation native inputs, and post-commit read failures never write FAILED over EXECUTED.
+- prepareArtifactCommitPreflight/withArtifactCommitPreflight select the safe Box/MCP/mixed adapter from the full bounded stored closure. Original local epoch vectors are checked before SDK replay; provider work occurs outside the publication tx. The sealed token binds exact actor/workspace/roots and one transaction. Empty connection sets use local epoch proof; unsupported Slack native inputs are rejected before provider replay. These APIs do not establish Bloop's canonical saver integration.
 
 Checkpoint store requirements:
 A stock Postgres saver on its own pg pool cannot join a Prisma interactive transaction. Implement put/putWrites SQL through tx.$executeRaw/tx.$queryRaw on the caller tx. The adapter must bind this exact tx and fail if a publication/admission/finalization checkpoint write has no bound tx. Do not start another transaction/pool connection or commit independently. Serialization/model execution happens before the bounded DB commit transaction. Gateway remains the sole usage/billing writer.
@@ -58,10 +60,12 @@ Smallest lifecycle/schema ownership split:
 - Bloop: conversation request/run/job/approval/checkpoint/effect/publication lifecycle and bound-tx checkpoint adapter; dedicated assistant-harness export and its route/worker/recovery files.
 - PUN-68: source lineage/snapshot tables and helpers, native input/outcome definitions, actual model-input collector, Brain producer/read permissions and domain receipt/fence hooks. Agent index is released. CRM native job enqueue and Finance exact lease adapters are now wired in outbox; conversation lifecycle sections remain with Bloop/parent integration.
 
-Current migrations through180 are developed and applied ONLY to the disposable
+Current migrations through183 are developed and applied ONLY to the disposable
 local database at 127.0.0.1:55468/corgtex_test. Added native rows include immutable
 CrmQualificationFormInput, FinanceReportUploadInput and encrypted
-ExternalProviderFetchInput. Parent retains schema/lifecycle integration ownership.
+ExternalProviderFetchInput, OAuth consent epochs, native source-retirement controls,
+and complete ExternalMcpResponseInput/connection-set epochs. Fresh183 replay has
+zero schema difference. Parent retains schema/lifecycle integration ownership.
 No production schema changes, deployment or live data mutation occurred.
 
 ## Product decision status

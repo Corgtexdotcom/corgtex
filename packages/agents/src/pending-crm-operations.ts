@@ -6,6 +6,8 @@ import {
   AppError, assertArtifactInputWriteFence, captureArtifactInputProof, captureArtifactInputSnapshotProof, captureImmutableArtifactInputProof,
   currentArtifactInputRoots, isArtifactInputProofReadable, lineageContentFingerprint, mergeArtifactInputProofs, recordArtifactInputLineage,
   requireWorkspaceMembership, type ArtifactInputWriteFence, type LineageInput, type LineageRoot,
+  prepareArtifactCommitPreflight, withArtifactCommitPreflight, withAdditionalArtifactInputWriteFence,
+  sealArtifactInputActor,
 } from "@corgtex/domain";
 
 const PENDING_OPERATION_TTL_MS = 15 * 60 * 1000;
@@ -404,7 +406,7 @@ export async function cancelCrmPendingOperation(ctx: PendingOperationContext, op
   });
 }
 
-async function assertExecution(ctx: PendingOperationContext, operation: PendingOperationRecord, state: ExecutionState, tx: Prisma.TransactionClient) {
+async function assertExecutionAuthority(ctx: PendingOperationContext, operation: PendingOperationRecord, state: ExecutionState, tx: Prisma.TransactionClient) {
   const actor = await requireContext(ctx, tx);
   if (state.owner.workspaceId !== ctx.workspaceId || state.owner.sessionId !== ctx.sessionId || state.owner.userId !== ctx.userId || state.owner.agentKey !== ctx.agentKey
     || state.owner.userId !== actor.user.id || operation.id !== state.operation.id || operationArgsHash(operation.toolName, operation.argsJson) !== state.argsHash) {
@@ -424,7 +426,12 @@ async function assertExecution(ctx: PendingOperationContext, operation: PendingO
     : row.status !== STATUS.EXECUTING || row.updatedAt.getTime() !== state.leaseAt || Date.now() - state.leaseAt >= EXECUTING_OPERATION_LEASE_MS)) {
     throw new AppError(409, "CRM_EXECUTION_STALE", "CRM execution lease is unavailable.");
   }
-  if (!await isArtifactInputProofReadable(actor, ctx.workspaceId, finishing?.roots ?? state.roots, tx)) throw new AppError(409, "SOURCE_CHANGED", "CRM input permissions changed.");
+  return { actor, roots: finishing?.roots ?? state.roots };
+}
+
+async function assertExecution(ctx: PendingOperationContext, operation: PendingOperationRecord, state: ExecutionState, tx: Prisma.TransactionClient) {
+  const { actor, roots } = await assertExecutionAuthority(ctx, operation, state, tx);
+  if (!await isArtifactInputProofReadable(actor, ctx.workspaceId, roots, tx)) throw new AppError(409, "SOURCE_CHANGED", "CRM input permissions changed.");
 }
 
 export async function beginCrmPendingOperationExecution(ctx: PendingOperationContext, operation: PendingOperationView) {
@@ -514,28 +521,66 @@ async function resultProof(ctx: PendingOperationContext, operation: PendingOpera
   return proof;
 }
 
+async function markCrmPendingOperationExecutedInTransaction(ctx: PendingOperationContext, operation: PendingOperationRecord,
+  result: unknown, state: ExecutionState, tx: Prisma.TransactionClient) {
+  await writeFence(ctx, tx); await assertExecution(ctx, operation, state, tx);
+  const actor = await requireContext(ctx, tx);
+  const current = await scopedRow(ctx, operation.id, tx);
+  if (!current) throw new AppError(404, "NOT_FOUND", "CRM operation not found.");
+  const supplied = await contextRoots(ctx, tx);
+  const snapshot = await captureArtifactInputSnapshotProof(actor, ctx.workspaceId,
+    { kind: "ConversationPendingOperation", id: current.id, fingerprint: lineageContentFingerprint("ConversationPendingOperation", current) }, tx);
+  const roots = mergeRoots(state.roots, snapshot,
+    supplied.filter((root) => root.kind !== "ConversationPendingOperation" || root.id !== current.id), await resultProof(ctx, current, state, result, tx));
+  const updated = await tx.conversationPendingOperation.update({ where: { id: current.id }, data: { status: STATUS.EXECUTED, resultJson: jsonSafe(result), executedAt: new Date(), errorCode: null, errorMessage: null } }) as PendingOperationRecord;
+  state.finalizing = { tx, row: updated, roots };
+  await writeFence(ctx, tx);
+  await recordArtifactInputLineage({ tx, actor, workspaceId: ctx.workspaceId, artifact: { kind: "ConversationPendingOperation", id: updated.id },
+    content: updated, origin: "DERIVED", inputs: [], inheritedRoots: roots });
+  return immutable(structuredClone(updated));
+}
+
 export async function markCrmPendingOperationExecuted(ctx: PendingOperationContext, operation: PendingOperationRecord, result: unknown) {
   const state = executions.get(operation);
   if (!state) throw new AppError(409, "CRM_EXECUTION_STALE", "CRM execution capability is unavailable.");
   try {
-    const executed = await prisma.$transaction(async (tx) => {
-      await writeFence(ctx, tx); await assertExecution(ctx, operation, state, tx);
-      const actor = await requireContext(ctx, tx);
-      const current = await scopedRow(ctx, operation.id, tx);
-      if (!current) throw new AppError(404, "NOT_FOUND", "CRM operation not found.");
-      const supplied = await contextRoots(ctx, tx);
-      const snapshot = await captureArtifactInputSnapshotProof(actor, ctx.workspaceId,
-        { kind: "ConversationPendingOperation", id: current.id, fingerprint: lineageContentFingerprint("ConversationPendingOperation", current) }, tx);
-      const roots = mergeRoots(state.roots, snapshot,
-        supplied.filter((root) => root.kind !== "ConversationPendingOperation" || root.id !== current.id), await resultProof(ctx, current, state, result, tx));
-      const updated = await tx.conversationPendingOperation.update({ where: { id: current.id }, data: { status: STATUS.EXECUTED, resultJson: jsonSafe(result), executedAt: new Date(), errorCode: null, errorMessage: null } }) as PendingOperationRecord;
-      state.finalizing = { tx, row: updated, roots };
-      await writeFence(ctx, tx);
-      await recordArtifactInputLineage({ tx, actor, workspaceId: ctx.workspaceId, artifact: { kind: "ConversationPendingOperation", id: updated.id },
-        content: updated, origin: "DERIVED", inputs: [], inheritedRoots: roots });
-      return immutable(structuredClone(updated));
-    });
+    const executed = await prisma.$transaction(tx => markCrmPendingOperationExecutedInTransaction(ctx, operation, result, state, tx));
     executions.delete(operation); return executed;
+  } finally { state.finalizing = undefined; }
+}
+
+/** The effect, complete manifest, audit and canonical EXECUTED result commit on
+ * one connection. Only the ready native capability can enter this callback. */
+export async function commitCrmPendingOperationExecution(ctx: PendingOperationContext, operation: PendingOperationRecord,
+  work: (execution: Readonly<{ tx: Prisma.TransactionClient; lineageRoots: readonly LineageRoot[];
+    persistenceFence: ArtifactInputWriteFence }>) => Promise<unknown>) {
+  const state = executions.get(operation);
+  if (!state || ctx.actor?.kind !== "user") throw new AppError(409, "CRM_EXECUTION_STALE", "CRM execution capability is unavailable.");
+  sealArtifactInputActor(ctx.actor);
+  ctx = Object.freeze({ ...ctx, lineageRoots: immutable(structuredClone([...(ctx.lineageRoots ?? [])])) });
+  const actor = ctx.actor!;
+  const roots = immutable(structuredClone(mergeRoots(state.roots, ctx.lineageRoots ?? [])));
+  const preflight = await prepareArtifactCommitPreflight(actor, ctx.workspaceId, roots);
+  try {
+    const committed = await prisma.$transaction(async tx => {
+      // Ownership locks precede native/source locks in the publication adapter.
+      await writeFence(ctx, tx); await assertExecutionAuthority(ctx, operation, state, tx);
+      return withArtifactCommitPreflight(actor, ctx.workspaceId, tx, roots, preflight, async () => {
+        await writeFence(ctx, tx); await assertExecution(ctx, operation, state, tx);
+        const persistenceFence: ArtifactInputWriteFence = async mutationTx => {
+          if (mutationTx !== tx) throw new AppError(409, "CRM_TRANSACTION_REQUIRED", "CRM effect must join its exact publication transaction.");
+          await ctx.persistenceFence?.(tx);
+          await assertExecution(ctx, operation, state, tx);
+        };
+        return withAdditionalArtifactInputWriteFence(persistenceFence, async () => {
+          const result = await work(Object.freeze({ tx, lineageRoots: roots, persistenceFence }));
+          const executed = await markCrmPendingOperationExecutedInTransaction(ctx, operation, result, state, tx);
+          return Object.freeze({ operation: executed, result });
+        });
+      });
+    }, { timeout: 15000 });
+    executions.delete(operation);
+    return committed;
   } finally { state.finalizing = undefined; }
 }
 
@@ -550,6 +595,12 @@ export async function markCrmPendingOperationFailed(ctx: PendingOperationContext
       || operationArgsHash(operation.toolName, operation.argsJson) !== state.argsHash) {
       throw new AppError(409, "CRM_EXECUTION_STALE", "CRM execution ownership changed.");
     }
+    // A standalone failure finalizer must serialize with success finalization too.
+    // Read status and the exact lease only after holding the same owner-bound lock.
+    await tx.$queryRaw`SELECT id FROM "ConversationPendingOperation"
+      WHERE id = ${operation.id} AND "workspaceId" = ${state.owner.workspaceId}
+      AND "conversationId" = ${state.owner.sessionId} AND "userId" = ${state.owner.userId}
+      AND "agentKey" = ${state.owner.agentKey} FOR UPDATE`;
     const current = await scopedRow(ctx, operation.id, tx);
     if (!current || !validArgs(current) || current.argsHash !== state.argsHash || current.status !== STATUS.EXECUTING || current.updatedAt.getTime() !== state.leaseAt) {
       throw new AppError(409, "CRM_EXECUTION_STALE", "CRM execution lease is unavailable.");

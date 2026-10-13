@@ -158,6 +158,11 @@ vi.mock("@corgtex/domain", async () => ({
   // Orchestration fixtures model already-admitted SQL inputs. Full permission,
   // provenance and revocation behavior is exercised in conversation.provenance.
   withArtifactInputWriteFence: (_fence: unknown, work: () => Promise<unknown>) => work(),
+  // This orchestration suite mocks source proofs; actual transaction/permission
+  // publication is covered by pending-crm-operations.integration.test.ts.
+  withAdditionalArtifactInputWriteFence: (_fence: unknown, work: () => Promise<unknown>) => work(),
+  prepareArtifactCommitPreflight: vi.fn().mockResolvedValue(Object.freeze({})),
+  withArtifactCommitPreflight: async (_actor: unknown, _ws: string, _tx: unknown, _roots: unknown, _token: unknown, work: () => Promise<unknown>) => work(),
   withArtifactInputReadCapture: async (_actor: unknown, _ws: string, read: () => Promise<unknown>) => ({ value: await read(), roots: [{ kind: "Workspace", id: "ws-1", fingerprint: "a".repeat(64) }] }),
   captureConversationInputReceipt: vi.fn(async () => ({})),
   captureArtifactInputProof: vi.fn().mockResolvedValue([{ kind: "Workspace", id: "ws-1", fingerprint: "a".repeat(64) }, { kind: "ArtifactInputSnapshot", id: "snapshot-fixture", fingerprint: "a".repeat(64) }]),

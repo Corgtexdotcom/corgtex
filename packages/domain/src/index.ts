@@ -31,6 +31,7 @@ export { getActionCompletionOutcomeInputReceipt, getActionCompletionOutcomeInput
 export * from "./brain-article-removal";
 export * from "./brain-access";
 export * from "./source-lineage";
+export { prepareArtifactCommitPreflight, withArtifactCommitPreflight, type ArtifactCommitPreflight } from "./artifact-commit-preflight";
 export * from "./digest-lineage";
 export * from "./brain-source-recovery";
 export * from "./audit-trail";

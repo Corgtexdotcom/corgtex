@@ -11,6 +11,7 @@ const fixture = vi.hoisted(() => {
   const chat = vi.fn(); const eventStream = vi.fn(); const chatStream = vi.fn();
   const embedding = vi.fn(); const rerank = vi.fn(); const cache = new Map<string, any>();
   const updateHook = { current: null as null | ((delegate: string, row: any) => void) };
+  const commitHook = { current: null as null | ((result: any) => void) };
   const transactionErrors: Error[] = [];
   let serial = 0;
   const matches = (row: any, where: any): boolean => {
@@ -80,7 +81,7 @@ const fixture = vi.hoisted(() => {
     }
     return delegates.get(name);
   } });
-  return { tables, memberships, delegates, membership, prisma, base, chat, eventStream, chatStream, embedding, rerank, cache, updateHook, transactionErrors };
+  return { tables, memberships, delegates, membership, prisma, base, chat, eventStream, chatStream, embedding, rerank, cache, updateHook, commitHook, transactionErrors };
 });
 
 vi.mock("@corgtex/shared", async () => ({
@@ -111,6 +112,7 @@ vi.mock("./pending-crm-operations", async (importOriginal) => {
   } };
 });
 vi.mock("@corgtex/domain", async () => ({
+  ...await import("../../domain/src/artifact-commit-preflight"),
   ...await import("../../domain/src/agent-operation-capabilities"),
   ...await import("../../domain/src/agent-operation-authorization"),
   ...await import("../../domain/src/source-lineage"), ...await import("../../domain/src/conversation-lineage"),
@@ -184,7 +186,7 @@ async function pendingCompletion() {
 }
 
 beforeEach(async () => {
-  vi.clearAllMocks(); fixture.tables.clear(); fixture.memberships.clear(); fixture.cache.clear(); fixture.updateHook.current = null; fixture.transactionErrors.length = 0;
+  vi.clearAllMocks(); fixture.tables.clear(); fixture.memberships.clear(); fixture.cache.clear(); fixture.updateHook.current = null; fixture.commitHook.current = null; fixture.transactionErrors.length = 0;
   fixture.memberships.set(`${workspaceId}:synthetic-alice`, { id: "member-alice", role: "CONTRIBUTOR" });
   fixture.memberships.set(`${workspaceId}:synthetic-bob`, { id: "member-bob", role: "CONTRIBUTOR" });
   fixture.memberships.set("synthetic-ws-b:synthetic-bob", { id: "member-bob-b", role: "CONTRIBUTOR" });
@@ -196,7 +198,10 @@ beforeEach(async () => {
   });
   fixture.base.$transaction.mockImplementation(async (callback) => {
     const prior = structuredClone(fixture.tables);
-    try { return await callback(new Proxy(fixture.prisma, { get(target, property) { return property === "$transaction" ? undefined : Reflect.get(target, property); } })); } catch (error) { fixture.transactionErrors.push(error as Error); fixture.tables.clear(); for (const [key, rows] of prior) fixture.tables.set(key, rows); throw error; }
+    let result;
+    try { result = await callback(new Proxy(fixture.prisma, { get(target, property) { return property === "$transaction" ? undefined : Reflect.get(target, property); } })); } catch (error) { fixture.transactionErrors.push(error as Error); fixture.tables.clear(); for (const [key, rows] of prior) fixture.tables.set(key, rows); throw error; }
+    fixture.commitHook.current?.(result);
+    return result;
   });
   fixture.base.$executeRaw.mockReset().mockResolvedValue(1);
   fixture.base.$queryRaw.mockReset().mockResolvedValue([]);
@@ -383,5 +388,16 @@ describe("conversation orchestration using actual provenance and permissions", (
     await expect(processConversationTurn({ ...base, userMessage: `confirm ${operation.id}`, signal: controller.signal, persistenceFence })).rejects.toThrow("Synthetic cancellation");
     expect(fixture.tables.get("crmActivity")!.get("activity-to-complete").completedAt).toBeNull();
     expect([...fixture.tables.get("artifactInputLineage")!.values()].filter((row) => row.artifactType === "CrmActivity")).toHaveLength(1);
+  });
+
+  it("withholds a result revoked after commit without overwriting its canonical EXECUTED state", async () => {
+    const source = await mixedKnowledge(); const { operation } = await pendingCompletion();
+    fixture.commitHook.current = (result) => {
+      if (result?.operation?.status === "EXECUTED") source.ownerMemberId = "member-bob";
+    };
+    await expect(processConversationTurn({ ...base, userMessage: `confirm ${operation.id}` })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(fixture.tables.get("conversationPendingOperation")!.get(operation.id).status).toBe("EXECUTED");
+    expect(fixture.tables.get("crmActivity")!.get("activity-to-complete").completedAt).toBeInstanceOf(Date);
+    expect(fixture.delegates.get("conversationPendingOperation").update.mock.calls.some(([args]: any[]) => args.data.status === "FAILED")).toBe(false);
   });
 });

@@ -41,13 +41,17 @@ describe("Brain article derivation provenance", () => {
     } });
     await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: editor, workspaceId: workspace.id,
       artifact: { kind: "BrainSource", id: secondSource.id }, content: secondSource, origin: "HUMAN_ORIGINAL", inputs: [] }));
-    const authoredUpdate = await updateArticle(agent, { workspaceId: workspace.id, slug: authored.slug,
+    await expect(updateArticle(agent, { workspaceId: workspace.id, slug: authored.slug,
       bodyMd: "Human notes with second source facts", absorbedSource: {
         sourceId: secondSource.id, sourceFingerprint: brainSourceContentFingerprint(secondSource), agentRunId: "second-run",
       },
-    });
+    })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect((await prisma.brainArticle.findUniqueOrThrow({ where: { id: authored.id } })).bodyMd).toBe("Human body");
+    const authoredUpdate = await updateArticle(editor, { workspaceId: workspace.id, slug: authored.slug,
+      bodyMd: "Human notes with second source facts", sourceIds: [source.id, secondSource.id] });
     expect(authoredUpdate.sourceIds).toEqual([source.id, secondSource.id]);
     expect(authoredUpdate.derivationJson).toBeNull();
+    expect((await prisma.brainArticleVersion.findFirstOrThrow({ where: { articleId: authored.id } })).bodyMd).toBe("Human body");
 
     await updateArticle(editor, { workspaceId: workspace.id, slug: generated.slug, bodyMd: "Human revision" });
     const revised = await prisma.brainArticle.findUniqueOrThrow({ where: { id: generated.id }, include: { versions: true } });

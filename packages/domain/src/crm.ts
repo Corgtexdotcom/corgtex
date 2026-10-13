@@ -14,7 +14,7 @@ import { CrmDealStage, CrmActivityType } from "@prisma/client";
 import type { CustomerAccountStatus, CustomerDeploymentStatus, Prisma } from "@prisma/client";
 import { registerCustomerDeployment } from "./customer-lifecycle";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
-import { captureArtifactInputProof, captureImmutableArtifactInputProof, currentArtifactInputRoots, preserveUnknownArtifactInputSnapshot, readableArtifactIds, type LineageInput } from "./source-lineage";
+import { assertArtifactInputWriteFence, sealArtifactInputActor, captureArtifactInputProof, captureImmutableArtifactInputProof, currentArtifactInputRoots, preserveUnknownArtifactInputSnapshot, readableArtifactIds, type LineageInput } from "./source-lineage";
 import { crmPage, readCrmRows } from "./crm-lineage";
 import { crmIngressActor, createFreshFormQualification, recordFreshDemoLeadLineage, recordFreshEmailQualificationLineage } from "./crm-ingress-lineage";
 
@@ -1981,7 +1981,7 @@ async function requireActiveCrmActivity(tx: any, workspaceId: string, activityId
   return activity;
 }
 
-export async function createActivity(actor: AppActor, params: {
+export async function createActivity(actor: AppActor, submission: {
   workspaceId: string;
   title: string;
   type?: CrmActivityType;
@@ -1993,8 +1993,12 @@ export async function createActivity(actor: AppActor, params: {
   source?: string | null;
   dueAt?: Date | null;
   completedAt?: Date | null;
+  /** Trusted server context only; never accepted from serialized tool arguments. */
+  tx?: Prisma.TransactionClient;
 } & ProducerLineageParams) {
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  sealArtifactInputActor(actor);
+  const { tx: callerTx, ...input } = submission;
+  const params = structuredClone(input);
 
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Activity title is required.");
@@ -2002,7 +2006,9 @@ export async function createActivity(actor: AppActor, params: {
   const completedAt = normalizeCrmActivityDate(params.completedAt, "Completed date");
   const ownerUserId = params.ownerUserId ?? null;
 
-  return prisma.$transaction(async (tx) => {
+  const run = async (tx: Prisma.TransactionClient) => {
+    await assertArtifactInputWriteFence(tx);
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
     await requireCrmActivityOwner(tx, params.workspaceId, ownerUserId);
     const links = await resolveCrmActivityLinks(tx, {
       workspaceId: params.workspaceId,
@@ -2035,8 +2041,10 @@ export async function createActivity(actor: AppActor, params: {
     await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
       artifact: { kind: "CrmActivity", id: activity.id }, content: activity, receipt });
 
+    await assertArtifactInputWriteFence(tx);
     return activity;
-  });
+  };
+  return callerTx ? run(callerTx) : prisma.$transaction(run);
 }
 
 export async function recordDemoWelcomeCrmActivity(params: {
@@ -2163,16 +2171,25 @@ export async function updateActivity(actor: AppActor, params: {
   });
 }
 
-export async function completeActivity(actor: AppActor, params: {
+export async function completeActivity(actor: AppActor, submission: {
   workspaceId: string;
   activityId: string;
   completedAt?: Date | null;
+  /** Trusted server context only; never accepted from serialized tool arguments. */
+  tx?: Prisma.TransactionClient;
 } & ProducerLineageParams) {
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  sealArtifactInputActor(actor);
+  const { tx: callerTx, ...input } = submission;
+  const params = structuredClone(input);
 
-  return prisma.$transaction(async (tx) => {
+  const run = async (tx: Prisma.TransactionClient) => {
+    await assertArtifactInputWriteFence(tx);
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
     const activity = await requireActiveCrmActivity(tx, params.workspaceId, params.activityId);
-    if (activity.completedAt) return activity;
+    if (activity.completedAt) {
+      await assertArtifactInputWriteFence(tx);
+      return activity;
+    }
 
     const completedAt = normalizeCrmActivityDate(params.completedAt, "Completed date") ?? new Date();
     const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
@@ -2200,8 +2217,10 @@ export async function completeActivity(actor: AppActor, params: {
       },
     });
 
+    await assertArtifactInputWriteFence(tx);
     return updated;
-  });
+  };
+  return callerTx ? run(callerTx) : prisma.$transaction(run);
 }
 
 export async function archiveCrmActivity(actor: AppActor, params: { workspaceId: string; activityId: string }) {
@@ -2334,7 +2353,7 @@ export async function listCommunicationSuggestions(actor: AppActor, workspaceId:
   }))) };
 }
 
-export async function createCommunicationSuggestion(actor: AppActor, params: {
+export async function createCommunicationSuggestion(actor: AppActor, submission: {
   workspaceId: string;
   title: string;
   bodyMd: string;
@@ -2348,8 +2367,12 @@ export async function createCommunicationSuggestion(actor: AppActor, params: {
   contactId?: string | null;
   dealId?: string | null;
   activityId?: string | null;
+  /** Trusted server context only; never accepted from serialized tool arguments. */
+  tx?: Prisma.TransactionClient;
 } & ProducerLineageParams) {
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  sealArtifactInputActor(actor);
+  const { tx: callerTx, ...input } = submission;
+  const params = structuredClone(input);
 
   const title = params.title.trim();
   const bodyMd = params.bodyMd.trim();
@@ -2357,7 +2380,9 @@ export async function createCommunicationSuggestion(actor: AppActor, params: {
   invariant(bodyMd.length > 0, 400, "INVALID_INPUT", "Suggestion body is required.");
   const ownerUserId = params.ownerUserId ?? null;
 
-  return prisma.$transaction(async (tx) => {
+  const run = async (tx: Prisma.TransactionClient) => {
+    await assertArtifactInputWriteFence(tx);
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
     await requireCrmActivityOwner(tx, params.workspaceId, ownerUserId);
     await lockCrmLinkClosure(tx, params.workspaceId, params);
     const links = await resolveCommunicationSuggestionLinks(tx, {
@@ -2415,8 +2440,11 @@ export async function createCommunicationSuggestion(actor: AppActor, params: {
       },
     });
 
-    return communicationSuggestionResult(tx, actor, params.workspaceId, suggestion);
-  });
+    const result = await communicationSuggestionResult(tx, actor, params.workspaceId, suggestion);
+    await assertArtifactInputWriteFence(tx);
+    return result;
+  };
+  return callerTx ? run(callerTx) : prisma.$transaction(run);
 }
 
 export async function updateCommunicationSuggestion(actor: AppActor, params: {

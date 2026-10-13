@@ -1,12 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
+import { getPrismaClient } from "../../shared/src/db";
 import { runWithSupportOrigin } from "../../shared/src/support-context";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { createConversation, createConversationPromptInput } from "../../domain/src/conversations";
 import { createActivity, createCrmAccount } from "../../domain/src/crm";
 import { captureArtifactInputProof, isArtifactInputProofReadable, withArtifactInputWriteFence } from "../../domain/src/source-lineage";
-import { beginCrmPendingOperationExecution, createPendingCrmOperation } from "./pending-crm-operations";
+import { beginCrmPendingOperationExecution, createPendingCrmOperation,
+  markCrmPendingOperationExecuted, markCrmPendingOperationFailed,
+  commitCrmPendingOperationExecution } from "./pending-crm-operations";
+import { recordRelationshipActivityAction } from "./tools/crm";
 
 function deferred() {
   let resolve!: () => void;
@@ -81,9 +85,109 @@ describe("pending CRM effect transactions on the assigned disposable database", 
     }
     await truncateAllTables();
   });
-  afterEach(() => { vi.useRealTimers(); });
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
-  it("blocks actual abandonment until the original effect commits and prevents uncertain replay", async () => runWithSupportOrigin(undefined, async () => {
+  it("commits the actual tool effect, complete lineage and canonical EXECUTED receipt on one transaction", async () => runWithSupportOrigin(undefined, async () => {
+    const f = await fixture();
+    const committed = await commitCrmPendingOperationExecution(f.ctx, f.begin.operation, ({ tx, lineageRoots }) =>
+      recordRelationshipActivityAction(f.actor, { workspaceId: f.workspace.id, tx, lineageRoots: [...lineageRoots] }, f.args));
+    expect(committed.operation.status).toBe("EXECUTED");
+    const activity = await prisma.crmActivity.findFirstOrThrow({ where: { workspaceId: f.workspace.id } });
+    expect(committed.operation.resultJson).toEqual(committed.result);
+    expect(committed.operation.resultJson).toMatchObject({ success: true, activity: { id: activity.id } });
+    expect(await prisma.artifactInputLineage.count({ where: { workspaceId: f.workspace.id, artifactType: "CrmActivity", artifactId: activity.id } })).toBe(1);
+    expect(await prisma.artifactInputLineage.count({ where: { workspaceId: f.workspace.id, artifactType: "ConversationPendingOperation", artifactId: f.begin.operation.id } })).toBeGreaterThan(1);
+    const roots = await captureArtifactInputProof(f.actor, f.workspace.id, [{ kind: "ConversationPendingOperation", id: committed.operation.id }]);
+    expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, roots)).toBe(true);
+    await expect(commitCrmPendingOperationExecution(f.ctx, f.begin.operation, async () => { throw new Error("Replayed callback"); }))
+      .rejects.toMatchObject({ code: "CRM_EXECUTION_STALE" });
+    expect(await prisma.crmActivity.count({ where: { workspaceId: f.workspace.id } })).toBe(1);
+  }));
+
+  it("rolls the actual effect and all receipts back when terminal publication fails", async () => runWithSupportOrigin(undefined, async () => {
+    const f = await fixture(); const client = getPrismaClient(); const original = client.$transaction.bind(client);
+    vi.spyOn(client, "$transaction").mockImplementation(((callback: any, options: any) => original(async tx => callback(new Proxy(tx, {
+      get(target, property) {
+        if (property !== "conversationPendingOperation") return Reflect.get(target, property);
+        return new Proxy(target.conversationPendingOperation, { get(delegate, method) {
+          if (method !== "update") return Reflect.get(delegate, method);
+          return async (args: any) => {
+            if (args.data.status === "EXECUTED") throw new Error("Synthetic canonical terminal write failed");
+            return delegate.update(args);
+          };
+        } });
+      },
+    })), options)) as any);
+    await expect(commitCrmPendingOperationExecution(f.ctx, f.begin.operation, ({ tx, lineageRoots }) =>
+      recordRelationshipActivityAction(f.actor, { workspaceId: f.workspace.id, tx, lineageRoots: [...lineageRoots] }, f.args)))
+      .rejects.toThrow("Synthetic canonical terminal write failed");
+    expect(await prisma.crmActivity.count({ where: { workspaceId: f.workspace.id } })).toBe(0);
+    expect(await prisma.artifactInputLineage.count({ where: { workspaceId: f.workspace.id, artifactType: "CrmActivity" } })).toBe(0);
+    expect(await prisma.conversationPendingOperation.findUniqueOrThrow({ where: { id: f.begin.operation.id } }))
+      .toMatchObject({ status: "EXECUTING", resultJson: null, executedAt: null });
+  }));
+
+  it("rejects a tool effect that starts another transaction and rolls it back", async () => runWithSupportOrigin(undefined, async () => {
+    const f = await fixture();
+    await expect(commitCrmPendingOperationExecution(f.ctx, f.begin.operation, () =>
+      recordRelationshipActivityAction(f.actor, { workspaceId: f.workspace.id, lineageRoots: [...f.begin.lineageRoots] }, f.args)))
+      .rejects.toMatchObject({ code: "CRM_TRANSACTION_REQUIRED" });
+    expect(await prisma.crmActivity.count({ where: { workspaceId: f.workspace.id } })).toBe(0);
+    expect(await prisma.conversationPendingOperation.findUniqueOrThrow({ where: { id: f.begin.operation.id } }))
+      .toMatchObject({ status: "EXECUTING", resultJson: null });
+  }));
+
+  it.each(["EXECUTED", "FAILED"] as const)("serializes standalone terminal finalizers when %s acquires the authority row first", async firstStatus => runWithSupportOrigin(undefined, async () => {
+    const f = await fixture();
+    const activity = await withArtifactInputWriteFence(f.begin.executionFence, () => createActivity(f.actor, {
+      workspaceId: f.workspace.id, ...f.args, source: "workspace-chat", lineageRoots: f.begin.lineageRoots,
+    }));
+    const result = { success: true, activity: { id: activity.id, title: activity.title, type: activity.type,
+      accountId: activity.accountId ?? null, dueAt: activity.dueAt ?? null, completedAt: activity.completedAt ?? null,
+      webUrl: `/workspaces/${f.workspace.id}/leads/accounts/${activity.accountId}?view=activity` } };
+    const entered = deferred(); const release = deferred();
+    let holderPid = 0; let holdFirst = true;
+    const client = getPrismaClient();
+    const originalTransaction = client.$transaction.bind(client);
+    vi.spyOn(client, "$transaction").mockImplementation(((callback: any, options: any) => originalTransaction(async tx => {
+      const wrapped = new Proxy(tx, { get(target, property) {
+        if (property !== "conversationPendingOperation") return Reflect.get(target, property);
+        return new Proxy(target.conversationPendingOperation, { get(delegate, method) {
+          if (method !== "update") return Reflect.get(delegate, method);
+          return async (args: any) => {
+            if (holdFirst && args.data.status === firstStatus) {
+              holdFirst = false;
+              const [identity] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+              holderPid = identity!.pid; entered.resolve(); await release.promise;
+            }
+            return delegate.update(args);
+          };
+        } });
+      } });
+      return callback(wrapped);
+    }, { ...options, timeout: 15000 })) as any);
+    const finalize = (status: typeof firstStatus) => status === "EXECUTED"
+      ? markCrmPendingOperationExecuted(f.ctx, f.begin.operation, result)
+      : markCrmPendingOperationFailed(f.ctx, f.begin.operation, new Error("Synthetic terminal race"));
+    const first = finalize(firstStatus).then(value => ({ value }), error => ({ error }));
+    await Promise.race([entered.promise, first.then(outcome => {
+      if ("error" in outcome) throw outcome.error;
+      throw new Error("Synthetic terminal finalizer missed its held write");
+    })]);
+    const second = finalize(firstStatus === "EXECUTED" ? "FAILED" : "EXECUTED")
+      .then(value => ({ value }), error => ({ error }));
+    let lockError: unknown;
+    try { await waitForPendingRowWait(holderPid, "SELECT"); } catch (error) { lockError = error; } finally { release.resolve(); }
+    const [firstOutcome, secondOutcome] = await Promise.all([first, second]);
+    expect(firstOutcome).toMatchObject({ value: { status: firstStatus } });
+    expect(secondOutcome).toMatchObject({ error: { code: "CRM_EXECUTION_STALE" } });
+    expect(await prisma.conversationPendingOperation.findUniqueOrThrow({ where: { id: f.begin.operation.id } }))
+      .toMatchObject({ status: firstStatus });
+    expect(await prisma.crmActivity.count({ where: { workspaceId: f.workspace.id } })).toBe(1);
+    if (lockError) throw lockError;
+  }));
+
+  it("blocks abandonment behind the owner lock and rolls an expired effect back before uncertain replay", async () => runWithSupportOrigin(undefined, async () => {
     const f = await fixture(); const effect = await heldEffect(f);
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(f.begin.operation.updatedAt.getTime() + 6 * 60 * 1000);
@@ -95,14 +199,14 @@ describe("pending CRM effect transactions on the assigned disposable database", 
       expect(await prisma.crmActivity.count({ where: { workspaceId: f.workspace.id } })).toBe(0);
     } finally { effect.release.resolve(); }
     const originalOwnerResult = await effect.result;
-    expect(originalOwnerResult).toHaveProperty("value");
+    expect(originalOwnerResult).toMatchObject({ error: { code: "CRM_EXECUTION_STALE" } });
     expect(await refresh).toMatchObject({ error: { code: "CRM_EXECUTION_UNCERTAIN" } });
-    expect(await prisma.crmActivity.count({ where: { workspaceId: f.workspace.id } })).toBe(1);
-    expect(await prisma.artifactInputLineage.count({ where: { workspaceId: f.workspace.id, artifactType: "CrmActivity" } })).toBe(1);
+    expect(await prisma.crmActivity.count({ where: { workspaceId: f.workspace.id } })).toBe(0);
+    expect(await prisma.artifactInputLineage.count({ where: { workspaceId: f.workspace.id, artifactType: "CrmActivity" } })).toBe(0);
     await expect(createPendingCrmOperation({ ctx: f.ctx, toolName: "record_relationship_activity", args: f.args }))
       .rejects.toMatchObject({ code: "CRM_EXECUTION_UNCERTAIN" });
     expect(await prisma.conversationPendingOperation.count({ where: { workspaceId: f.workspace.id } })).toBe(1);
-    expect(await prisma.crmActivity.count({ where: { workspaceId: f.workspace.id } })).toBe(1);
+    expect(await prisma.crmActivity.count({ where: { workspaceId: f.workspace.id } })).toBe(0);
   }));
 
   it("excludes a competing owner until the permitted effect and its complete receipt commit", async () => runWithSupportOrigin(undefined, async () => {

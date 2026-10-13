@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { Prisma } from "@prisma/client";
 import { decryptSecret, encryptSecret, prisma, type AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
@@ -137,17 +138,22 @@ export async function assertExternalMcpCapturedResponseCurrent(receipt: External
   409, "SOURCE_CHANGED", "External MCP stored response changed before use.");
 }
 
-type CommitState = { actor: AppActor; actorHash: string; workspaceId: string; userId: string; roots: LineageRoot[];
+type CommitState = { actor: AppActor; actorHash: string; workspaceId: string; userId: string;
+  submittedRoots: LineageRoot[]; roots: LineageRoot[];
   inputs: Map<string, { fingerprint: string; originalEpochs: PermissionEpochProof }> };
 declare const commitBrand: unique symbol;
 export type ExternalMcpResponseCommitPreflight = { readonly [commitBrand]: true };
 const preflights = new WeakMap<object, CommitState>();
 const commitScope = new AsyncLocalStorage<CommitState & { tx: Prisma.TransactionClient; active: boolean }>();
+declare const claimBrand: unique symbol;
+export type ExternalMcpResponseCommitClaim = { readonly [claimBrand]: true };
+const claims = new WeakMap<object, CommitState & { tx: Prisma.TransactionClient }>();
 
 /** Bounded provider replay happens before the writer transaction, using only original root proofs. */
 export async function prepareExternalMcpResponseCommitPreflight(actor: AppActor, workspaceId: string,
   originalRoots: readonly LineageRoot[]): Promise<ExternalMcpResponseCommitPreflight> {
   const roots = structuredClone([...originalRoots]);
+  const submittedRoots = structuredClone(roots);
   const userId = principal(actor, workspaceId);
   const actorHash = externalMcpResponseHash(actor);
   invariant(roots.length > 0 && roots.length <= MAX_ROOTS, 409, "SOURCE_CHANGED", "External MCP commit requires bounded original inputs.");
@@ -183,18 +189,50 @@ export async function prepareExternalMcpResponseCommitPreflight(actor: AppActor,
     && principal(actor, workspaceId) === userId && actorHash === externalMcpResponseHash(actor),
   409, "SOURCE_CHANGED", "External MCP original proof changed before commit.");
   const token = Object.freeze({}) as ExternalMcpResponseCommitPreflight;
-  preflights.set(token, { actor, actorHash, workspaceId, userId, roots: freezeJson(roots), inputs });
+  preflights.set(token, { actor, actorHash, workspaceId, userId,
+    submittedRoots: freezeJson(submittedRoots), roots: freezeJson(roots), inputs });
   return token;
+}
+
+/** Internal composite seam: consume an exact capability synchronously, before native row locks. */
+export function claimExternalMcpResponseCommitPreflight(actor: AppActor, workspaceId: string, tx: Prisma.TransactionClient,
+  token: ExternalMcpResponseCommitPreflight, submittedRoots?: readonly LineageRoot[]): ExternalMcpResponseCommitClaim {
+  const state = preflights.get(token);
+  invariant(state && state.actor === actor && state.workspaceId === workspaceId && tx !== prisma && !commitScope.getStore()
+    && state.userId === principal(actor, workspaceId) && state.actorHash === externalMcpResponseHash(actor)
+    && (!submittedRoots || isDeepStrictEqual(state.submittedRoots, submittedRoots)),
+  409, "SOURCE_CHANGED", "External MCP commit capability is unavailable.");
+  preflights.delete(token);
+  const claim = Object.freeze({}) as ExternalMcpResponseCommitClaim;
+  claims.set(claim, { ...state, tx });
+  return claim;
+}
+
+export function inspectExternalMcpResponseCommitClaim(claim: ExternalMcpResponseCommitClaim) {
+  const state = claims.get(claim);
+  invariant(state, 409, "SOURCE_CHANGED", "External MCP commit claim is unavailable.");
+  return { inputIds: [...state.inputs.keys()], roots: state.roots, actor: state.actor, workspaceId: state.workspaceId, tx: state.tx };
+}
+
+async function runExternalMcpResponseCommitClaim<T>(actor: AppActor, workspaceId: string, tx: Prisma.TransactionClient,
+  claim: ExternalMcpResponseCommitClaim, work: () => Promise<T>): Promise<T> {
+  const state = claims.get(claim);
+  invariant(state && state.actor === actor && state.workspaceId === workspaceId && state.tx === tx && !commitScope.getStore()
+    && state.userId === principal(actor, workspaceId) && state.actorHash === externalMcpResponseHash(actor),
+  409, "SOURCE_CHANGED", "External MCP commit claim is unavailable.");
+  claims.delete(claim);
+  const scope = { ...state, active: true };
+  return commitScope.run(scope, async () => {
+    try { return await work(); }
+    finally { scope.active = false; }
+  });
 }
 
 /** Supplied transactions cannot make network calls or adopt a newer grant revision. */
 export async function withExternalMcpResponseCommitPreflight<T>(actor: AppActor, workspaceId: string,
   tx: Prisma.TransactionClient, token: ExternalMcpResponseCommitPreflight, work: () => Promise<T>): Promise<T> {
-  const state = preflights.get(token);
-  invariant(state && state.actor === actor && state.workspaceId === workspaceId && tx !== prisma && !commitScope.getStore()
-    && state.userId === principal(actor, workspaceId) && state.actorHash === externalMcpResponseHash(actor),
-  409, "SOURCE_CHANGED", "External MCP commit capability is unavailable.");
-  preflights.delete(token);
+  const claim = claimExternalMcpResponseCommitPreflight(actor, workspaceId, tx, token);
+  const state = claims.get(claim)!;
   for (const id of [...state.inputs.keys()].sort()) {
     await tx.$queryRaw`SELECT "id" FROM "ExternalMcpResponseInput" WHERE "id" = ${id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
     const input = await tx.externalMcpResponseInput.findFirst({ where: { id, workspaceId } });
@@ -203,16 +241,13 @@ export async function withExternalMcpResponseCommitPreflight<T>(actor: AppActor,
     await tx.$queryRaw`SELECT "id" FROM "Member" WHERE "userId" = ${input.localUserId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
   }
   const { isArtifactInputProofReadable } = await import("./source-lineage");
-  const scope = { ...state, tx, active: true };
-  return commitScope.run(scope, async () => {
-    try {
+  return runExternalMcpResponseCommitClaim(actor, workspaceId, tx, claim, async () => {
       invariant(await isArtifactInputProofReadable(actor, workspaceId, state.roots, tx),
         409, "SOURCE_CHANGED", "External MCP original proof changed before writing.");
       const result = await work();
       invariant(await isArtifactInputProofReadable(actor, workspaceId, state.roots, tx),
         409, "SOURCE_CHANGED", "External MCP original proof changed during writing.");
       return result;
-    } finally { scope.active = false; }
   });
 }
 
@@ -240,7 +275,13 @@ export async function isExternalMcpResponseInputCurrent(actor: AppActor, workspa
       workspaceId_sourceKind_sourceId: { workspaceId, sourceKind: "ExternalMcpResponseInput", sourceId: input.id },
     }, select: { epoch: true } }) : null;
     if (db === prisma && !nativeEpoch) return false;
-    const scope = commitScope.getStore();
+    let scope = commitScope.getStore();
+    if (db !== prisma && !scope) {
+      const { getActiveExternalMcpPeerClaim } = await import("./external-provider-authority");
+      const peerClaim = getActiveExternalMcpPeerClaim(actor, workspaceId, db);
+      const peer = peerClaim && claims.get(peerClaim);
+      if (peer) scope = { ...peer, tx: db, active: true };
+    }
     if (db !== prisma) {
       if (!scope?.active || scope.tx !== db || scope.actor !== actor || scope.workspaceId !== workspaceId
         || scope.userId !== userId || scope.actorHash !== externalMcpResponseHash(actor)

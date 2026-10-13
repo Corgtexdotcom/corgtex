@@ -34,8 +34,9 @@ describe("digest input receipts", () => {
       ownerMemberId: readerMember.id, bodyMd: "New owner's independently supplied body" });
     expect(await readableArtifactIds(readerActor, workspace.id, "BrainArticle", [transferred])).toEqual(new Set([transferred.id]));
     expect(await listArticleVersions(readerActor, { workspaceId: workspace.id, slug: transferred.slug })).toEqual([]);
-    expect(await listArticleVersions(ownerActor, { workspaceId: workspace.id, slug: transferred.slug })).toEqual([]);
     const version = await prisma.brainArticleVersion.findFirstOrThrow({ where: { articleId: transferred.id } });
+    expect(await listArticleVersions(ownerActor, { workspaceId: workspace.id, slug: transferred.slug }))
+      .toEqual([expect.objectContaining({ id: version.id, bodyMd: "Former owner's private text" })]);
     expect(version.bodyMd).toBe("Former owner's private text");
     expect(version.accessEnvelopeJson).toMatchObject({ isPrivate: true, ownerMemberId: original.ownerMemberId });
     const currentRoots = await captureArtifactInputProof(readerActor, workspace.id, [{ kind: "BrainArticle", id: transferred.id }]);

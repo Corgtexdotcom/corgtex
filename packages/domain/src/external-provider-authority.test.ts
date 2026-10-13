@@ -152,6 +152,13 @@ describe("External provider live authority and copied lineage with real helpers"
     expect(await isExternalProviderFetchInputCurrent(owner, "ws-other", receipt.input)).toBe(false);
     expect(remote.transport).toHaveBeenCalledTimes(2);
   });
+  it("never replays Box inside an unclaimed supplied writer transaction", async () => {
+    const source = await setup(); const receipt = await capture(source.id);
+    remote.transport.mockClear();
+    const tx = { ...fixture.prisma } as any;
+    expect(await isExternalProviderFetchInputCurrent(owner, ws, receipt.input, tx)).toBe(false);
+    expect(remote.transport).not.toHaveBeenCalled();
+  });
   it("captures all request bindings synchronously when caller params mutate while the provider is awaited", async () => {
     const source = await setup();
     const params = { workspaceId: ws, externalContentSourceId: source.id, connectionId: "connection", sourceKind: "FILE", externalId: "file",

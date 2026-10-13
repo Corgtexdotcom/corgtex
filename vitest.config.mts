@@ -46,6 +46,9 @@ export default defineConfig({
           globalSetup: ["./vitest.globalSetup.ts"],
           env: {
             DATABASE_URL: integrationDatabaseUrl,
+            // Native source fixtures encrypt synthetic inputs. Keep test crypto
+            // independent of developer secrets and hosted production credentials.
+            ENCRYPTION_KEY: "a".repeat(64),
           },
         },
       },

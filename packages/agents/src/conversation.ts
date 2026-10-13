@@ -64,6 +64,7 @@ import {
   normalizeCrmWriteToolArgs,
   recordRelationshipActivityAction,
   validateCrmWriteToolArgs,
+  type CrmToolContext,
 } from "./tools/crm";
 import {
   beginCrmPendingOperationExecution,
@@ -77,7 +78,7 @@ import {
   crmPendingOperationResultNotice,
   findCrmPendingOperationForIntent,
   peekCrmPendingOperationForIntent,
-  markCrmPendingOperationExecuted,
+  commitCrmPendingOperationExecution,
   markCrmPendingOperationFailed,
 } from "./pending-crm-operations";
 import { formatConversationPageContextForModel, type ConversationPageContext } from "./page-context";
@@ -435,6 +436,15 @@ const RAW_TOOL_HANDLERS: Partial<Record<string, (actor: AppActor, ctx: Conversat
   create_communication_suggestion: async (actor, ctx, args) => createCommunicationSuggestionAction(actor, ctx, args),
   ...contextMapToolHandlers,
 };
+
+// These three audited producers accept the caller-owned transaction and persist
+// every actual linked/input dependency themselves. Confirmation uses its native
+// publication coordinator instead of the generic wrapper's separate transactions.
+const CONFIRMED_CRM_HANDLERS = guardConversationToolHandlers<CrmToolContext & Pick<ConversationContext, "operationScopes">>({
+  record_relationship_activity: recordRelationshipActivityAction,
+  complete_relationship_activity: completeRelationshipActivityAction,
+  create_communication_suggestion: createCommunicationSuggestionAction,
+});
 
 function conversationToolError(error: unknown) {
   if (error instanceof AppError && error.status === 400) return error.message;
@@ -911,25 +921,26 @@ async function handleCrmPendingOperationIntent(ctx: ConversationContext) {
   if (begin.state !== "ready") return crmPendingOperationFailedNotice(begin.operation);
   await authorizeConversationTool(actor, ctx.workspaceId, begin.operation.toolName, begin.operation.argsJson, ctx.operationScopes);
 
-  const handler = TOOL_HANDLERS[begin.operation.toolName];
+  const handler = CONFIRMED_CRM_HANDLERS[begin.operation.toolName];
   if (!handler) {
     const failed = await markCrmPendingOperationFailed(pendingCtx, begin.operation, new Error("CRM handler unavailable."), { noEffects: true });
     return crmPendingOperationFailedNotice(failed);
   }
 
+  let effectCommitted = false;
   try {
     await conversationCollector(ctx).captureTrusted(begin.operation, begin.lineageRoots);
-    const persistenceFence: ArtifactInputWriteFence = async (tx) => {
-      await ctx.persistenceFence?.(tx);
-      await begin.executionFence(tx);
-    };
-    const executionCtx = { ...pendingCtx, pageContext: null, lineageRoots: begin.lineageRoots, persistenceFence };
-    const result = await handler(actor, executionCtx, begin.operation.argsJson);
-    const executed = await markCrmPendingOperationExecuted(executionCtx, begin.operation, result);
+    const executionCtx = { ...pendingCtx, pageContext: null,
+      lineageRoots: [...await conversationCollector(ctx).roots(), ...begin.lineageRoots], persistenceFence: ctx.persistenceFence };
+    const committed = await commitCrmPendingOperationExecution(executionCtx, begin.operation, ({ tx, lineageRoots }) =>
+      handler(actor, { ...executionCtx, tx, lineageRoots: [...lineageRoots] }, begin.operation.argsJson));
+    effectCommitted = true;
+    const executed = committed.operation;
     await conversationCollector(ctx).preserveConsumedRevisions();
     await conversationCollector(ctx).capture(executed, [{ kind: "ConversationPendingOperation", id: executed.id, snapshot: executed }]);
     return crmPendingOperationResultNotice(pendingCtx, executed);
   } catch (error) {
+    if (effectCommitted) throw error;
     const failed = await markCrmPendingOperationFailed(pendingCtx, begin.operation, error);
     return crmPendingOperationFailedNotice(failed);
   }

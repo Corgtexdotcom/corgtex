@@ -288,7 +288,8 @@ vi.mock("@corgtex/shared", () => {
   };
 });
 
-vi.mock("./source-lineage", () => ({
+vi.mock("./source-lineage", async () => ({
+  sealArtifactInputActor: (await import("./artifact-input-actor")).sealArtifactInputActor,
   assertArtifactInputWriteFence: vi.fn(async () => {}),
   captureArtifactInputProof: vi.fn(async () => []),
   captureImmutableArtifactInputProof: vi.fn(async (_actor, _ws, roots) => roots),

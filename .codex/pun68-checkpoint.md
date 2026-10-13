@@ -34,6 +34,24 @@ is INCOMPLETE. Keep PR1517 draft; do not merge or deploy.
 
 ## Implemented corrections in this checkpoint
 
+- Actual CRM confirmation now commits the effect, complete producer lineage,
+  applicable audit and canonical EXECUTED result on one exact caller transaction.
+  Its independently guarded three-tool route retains PUN76 authorization and both
+  prepared and confirmation native inputs; it avoids nested generic collector writes.
+  Owner locks precede source/native locks. A wrong transaction rolls back the effect.
+  Success and failure finalizers serialize on the same exact owner/lease row; a
+  post-commit source-read failure cannot overwrite EXECUTED with FAILED.
+- Mixed Box/MCP publication uses one sealed, single-use capability and both safe
+  adapters on the same complete roots/actor/workspace/transaction. Raw scope runners
+  are private. Local epoch revocation is checked before SDK replay. Empty connection
+  sets use their local captured policy epoch; unsupported Slack-native publication
+  is withheld before provider replay until it has a safe commit adapter.
+- Fresh synthetic demo initialization settles only its own exact unclaimed native
+  event, in the still-open creation transaction before semantic data exists. All
+  permission epochs remain stored and protective pre/postflight guards stay intact.
+  Existing refreshes have no exemption and roll back when postflight rejects them.
+- Integration configuration supplies a fixed synthetic encryption key so hosted
+  fixtures do not require developer or production credentials.
 - PUN76 operation guards precede trusted source wrappers. Immutable actor identity,
   submission, scopes and roots remain sealed before awaits. Metadata-only pending
   CRM permission checks precede reading full stored arguments or calling mutators.
@@ -83,6 +101,11 @@ The separate release task's branch/browser/Azure CLI/lease/runtime were untouche
 | Source history/archive/native control | 72/72 units pass | /tmp/pun68-linked-removal-control-unit.log |
 | Native Action completion | 31 units, 7/9 local PG pass; two public-reader tests RED | /tmp/pun68-action-completion-* |
 | Fresh183 migrations/schema | all183 replayed, zero difference | /tmp/pun68-fresh183-migration-replay.log; /tmp/pun68-fresh183-migrations-schema-diff.log |
+| Current correction unit cohort | 468/468 pass across11 files; includes dispatcher7/7 and real provenance15/15 | /tmp/pun68-current-delta-units.log |
+| Native CRM atomicity/rollback/terminal races and registered MCP | 9/9 local PG pass; complete prepared/confirmation closure | /tmp/pun68-final-atomic-crm-native-integration.log |
+| Mixed native providers, empty-search insertion revocation and private graph variants | 16/16 local PG pass | /tmp/pun68-native-provider-current-integration.log |
+| Existing native Box variant cohort | 3/3 local PG pass | /tmp/pun68-native-mcp-complete-inputs-box-integration.log (MCP assertion subsequently corrected to inspect immutable closure) |
+| Fresh seed lifecycle | 90 unit pass; actual seed retains521 epochs; existing refresh rolls back identical table/epoch hashes | /tmp/pun68-demo-seed-lifecycle-unit.log; /tmp/pun68-demo-seed-lifecycle-replay.log; /tmp/pun68-demo-seed-lifecycle-rollback.log |
 
 Focused cohorts overlap and ran on successive local revisions. Do not add their
 counts or claim them as a single final acceptance run. Missing tracked test assets
@@ -108,11 +131,26 @@ this isolated repository so future merges retain tracked validation assets.
 4. Private graph native edit/review/publication and requester attribution remain
    incomplete. A regenerated approved fact currently requires a fresh proposed bundle;
    review inheritance is a pending product choice.
-5. Mixed selected-Box and new MCP-response publication scope composition, delegated
-   provider user authority for bare credentials, and mixed CRM archive body projection
-   are not proved. Unsupported recipes continue to be withheld.
-6. Final independent GPT-6 Sol xhigh review, exact-head CI and running evidence for
-   changed Finance visibility remain gates. No ready/complete/ship claim is made.
+5. Delegated provider user authority for bare credentials, mixed CRM archive body
+   projection, and Slack-native generic commit support remain incomplete. The mixed
+   Box/MCP adapter and actual CRM atomic confirmation are now separately proved;
+   neither proves canonical Brain lifecycle acceptance. Unsupported recipes are held.
+6. Independent GPT-6.1 Sol xhigh review found the raw runner, empty-set dispatcher
+   and unsupported Slack replay issues and verified their corrections, with24 focused
+   units. It found no additional defect in that reviewed delta and retained the
+   Action/Recall/Bloop/CRM archive gates. Exact-head CI and running evidence for
+   changed Finance visibility still remain gates. No ready/complete/ship claim is made.
+
+### Hosted CI at prior published682c8da3
+
+Run38387829094 failed. Build, policy/docs/secret/data scans and migration/schema
+checks passed. DatabaseSync failed the fresh seed fixture postflight; that cause
+is addressed by the strict native initialization transaction above. LTT had11908
+passes and29 failures:7 genuine Recall gaps;19 missing synthetic ENCRYPTION_KEY
+failures;2 stale Brain/digest archive fixtures corrected without source-policy
+relaxation;1 real archived CRM body-view regression. The missing crypto also masked
+the2 Action public-reader failures, which remain outstanding. Next published head
+must be checked independently; this prior run is not current-head acceptance.
 
 ### Repaired stale fixtures/environment issues
 

@@ -4,7 +4,7 @@ import { mcpScopesHash, prisma, sha256, type AppActor } from "@corgtex/shared";
 import { runWithSupportOrigin } from "../../shared/src/support-context";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { createCrmAccount } from "../../domain/src/crm";
-import { captureArtifactInputProof, isArtifactInputProofReadable } from "../../domain/src/source-lineage";
+import { captureArtifactInputProof, inspectStoredArtifactInputDependencies, isArtifactInputProofReadable } from "../../domain/src/source-lineage";
 import { listMcpConnectorInstances, resolveMcpOAuthAccessToken } from "../../domain/src/mcp-connector";
 
 const model = vi.hoisted(() => ({ chat: vi.fn(), embed: vi.fn(), rerank: vi.fn() }));
@@ -72,6 +72,19 @@ describe("registered MCP chat with native ingress and actual pending CRM executi
     expect(await prisma.conversationIngressInput.count({ where: { workspaceId: workspace.id } })).toBe(2);
     expect((await prisma.conversationPendingOperation.findUniqueOrThrow({ where: { id: pending.id } })).status).toBe("EXECUTED");
     expect(await prisma.crmActivity.count({ where: { workspaceId: workspace.id } })).toBe(1);
+    const confirmationInput = await prisma.conversationIngressInput.findFirstOrThrow({ where: { workspaceId: workspace.id, content: `confirm ${pending.id}` } });
+    const activity = await prisma.crmActivity.findFirstOrThrow({ where: { workspaceId: workspace.id } });
+    for (const artifact of [{ kind: "CrmActivity" as const, id: activity.id },
+      { kind: "ConversationPendingOperation" as const, id: pending.id }]) {
+      const committedRoots = await captureArtifactInputProof(actor, workspace.id, [artifact]);
+      // The prepared request is preserved as an immutable snapshot; inspect its
+      // full stored closure rather than requiring a mutable direct source root.
+      const closure = await inspectStoredArtifactInputDependencies(prisma, workspace.id, committedRoots);
+      expect(closure.complete).toBe(true);
+      expect(closure.roots).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "ConversationIngressInput", id: ingress.id }),
+        expect.objectContaining({ kind: "ConversationIngressInput", id: confirmationInput.id })]));
+      expect(await isArtifactInputProofReadable(actor, workspace.id, committedRoots)).toBe(true);
+    }
     expect(model.chat).toHaveBeenCalledTimes(2); // confirmation uses stored approved args without another model
     await prisma.mcpOAuthAccessToken.update({ where: { id: token.id }, data: { revokedAt: new Date() } });
     await expect(registeredChat({ message: `confirm ${pending.id}` })).rejects.toThrow("MCP_AUTHORIZATION_REVOKED");

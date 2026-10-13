@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { isDeepStrictEqual } from "node:util";
 import type { Prisma } from "@prisma/client";
 import { decryptSecret, encryptSecret, prisma, type AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
@@ -11,6 +12,8 @@ import { getExternalProviderPrincipalUserId, getExternalProviderWorkerPurpose, r
 export { getExternalProviderPrincipalUserId } from "./external-provider-principal";
 import { externalMcpConnectionGrantHash, isBoxNativeContentRequest, readBoxExternalMcpNativeResponse,
   type ExternalMcpConnectionRecord } from "./external-mcp";
+import { claimExternalMcpResponseCommitPreflight, inspectExternalMcpResponseCommitClaim,
+  type ExternalMcpResponseCommitClaim, type ExternalMcpResponseCommitPreflight } from "./external-mcp-response-input";
 
 type AuthorityDb = Prisma.TransactionClient | typeof prisma;
 export type ExternalProviderFetchInputRecord = {
@@ -26,11 +29,16 @@ declare const commitPreflightBrand: unique symbol;
 /** Process-local, single-use authority for the immediately following DB-only copy. */
 export type ExternalProviderCommitPreflight = { readonly [commitPreflightBrand]: true };
 type CommitState = {
-  actor: AppActor; actorHash: string; workspaceId: string; principal: string; purposeHash: string; roots: LineageRoot[];
+  actor: AppActor; actorHash: string; workspaceId: string; principal: string; purposeHash: string;
+  submittedRoots: LineageRoot[]; roots: LineageRoot[];
   inputs: Map<string, { fingerprint: string; binding: string }>;
 };
 const commitPreflights = new WeakMap<object, CommitState>();
-const commitScope = new AsyncLocalStorage<CommitState & { tx: Prisma.TransactionClient; active: boolean }>();
+const commitScope = new AsyncLocalStorage<CommitState & { tx: Prisma.TransactionClient; active: boolean;
+  mcpPeer?: ExternalMcpResponseCommitClaim }>();
+declare const commitClaimBrand: unique symbol;
+type ExternalProviderCommitClaim = { readonly [commitClaimBrand]: true };
+const commitClaims = new WeakMap<object, CommitState & { tx: Prisma.TransactionClient }>();
 const MAX_COMMIT_INPUTS = 128;
 
 function canonical(value: unknown): string {
@@ -129,6 +137,13 @@ function freezeExact<T>(value: T, frozen = new WeakMap<object, unknown>()): T {
   }
   return value;
 }
+function freezeComparable<T>(value: T): T {
+  if (value && typeof value === "object") {
+    for (const key of Object.keys(value)) freezeComparable((value as Record<string, unknown>)[key]);
+    Object.freeze(value);
+  }
+  return value;
+}
 export async function assertExternalProviderCapturedResponseCurrent(receipt: ExternalProviderCapturedResponse) {
   invariant(receipts.has(receipt) && externalProviderResponseHash(receipt.payload) === receipt.input.responseHash
     && externalProviderResponseHash(JSON.parse(decryptSecret(receipt.input.encryptedResponseJson))) === receipt.input.responseHash,
@@ -190,6 +205,7 @@ export function isExternalProviderCapturedResponse(value: unknown): value is Ext
 export async function prepareExternalProviderCommitPreflight(actor: AppActor, workspaceId: string,
   params: { roots: readonly LineageRoot[]; receipts: readonly ExternalProviderCapturedResponse[] }): Promise<ExternalProviderCommitPreflight> {
   const roots: LineageRoot[] = structuredClone([...params.roots]);
+  const submittedRoots = structuredClone(roots);
   const captured = [...params.receipts];
   const principal = getExternalProviderPrincipalUserId(actor, workspaceId);
   const actorHash = externalProviderResponseHash(actor);
@@ -226,7 +242,8 @@ export async function prepareExternalProviderCommitPreflight(actor: AppActor, wo
   409, "SOURCE_CHANGED", "External provider inputs changed before commit.");
   for (const receipt of captured) await assertExternalProviderCapturedResponseCurrent(receipt);
   const opaque = Object.freeze({}) as ExternalProviderCommitPreflight;
-  commitPreflights.set(opaque, { actor, actorHash, workspaceId, principal, purposeHash, roots: freezeExact(roots), inputs });
+  commitPreflights.set(opaque, { actor, actorHash, workspaceId, principal, purposeHash,
+    submittedRoots: freezeComparable(submittedRoots), roots: freezeExact(roots), inputs });
   return opaque;
 }
 
@@ -234,6 +251,7 @@ export async function prepareExternalProviderCommitPreflight(actor: AppActor, wo
 export async function prepareExternalProviderRootCommitPreflight(actor: AppActor, workspaceId: string,
   originalRoots: readonly LineageRoot[]): Promise<ExternalProviderCommitPreflight> {
   const roots: LineageRoot[] = structuredClone([...originalRoots]);
+  const submittedRoots = structuredClone(roots);
   const principal = getExternalProviderPrincipalUserId(actor, workspaceId);
   const actorHash = externalProviderResponseHash(actor);
   const purpose = getExternalProviderWorkerPurpose(actor);
@@ -280,20 +298,54 @@ export async function prepareExternalProviderRootCommitPreflight(actor: AppActor
     && purposeHash === externalProviderResponseHash(getExternalProviderWorkerPurpose(actor)),
   409, "SOURCE_CHANGED", "The original input proof changed before commit.");
   const opaque = Object.freeze({}) as ExternalProviderCommitPreflight;
-  commitPreflights.set(opaque, { actor, actorHash, workspaceId, principal, purposeHash, roots: freezeExact(roots), inputs });
+  commitPreflights.set(opaque, { actor, actorHash, workspaceId, principal, purposeHash,
+    submittedRoots: freezeComparable(submittedRoots), roots: freezeExact(roots), inputs });
   return opaque;
+}
+
+/** Internal composite seam: claims are opaque, exact and consumed before any commit await. */
+function claimExternalProviderCommitPreflight(actor: AppActor, workspaceId: string, tx: Prisma.TransactionClient,
+  preflight: ExternalProviderCommitPreflight, submittedRoots?: readonly LineageRoot[]): ExternalProviderCommitClaim {
+  const state = commitPreflights.get(preflight);
+  invariant(state && state.actor === actor && state.workspaceId === workspaceId && tx !== prisma && !commitScope.getStore()
+    && state.principal === getExternalProviderPrincipalUserId(actor, workspaceId) && state.actorHash === externalProviderResponseHash(actor)
+    && state.purposeHash === externalProviderResponseHash(getExternalProviderWorkerPurpose(actor))
+    && (!submittedRoots || isDeepStrictEqual(state.submittedRoots, submittedRoots)),
+  409, "SOURCE_CHANGED", "External provider commit capability is unavailable.");
+  commitPreflights.delete(preflight);
+  const claim = Object.freeze({}) as ExternalProviderCommitClaim;
+  commitClaims.set(claim, { ...state, tx });
+  return claim;
+}
+
+/** Read-only peer lookup; a claimed plan is inert unless the safe provider wrapper is active. */
+export function getActiveExternalMcpPeerClaim(actor: AppActor, workspaceId: string, tx: Prisma.TransactionClient) {
+  const scope = commitScope.getStore();
+  return scope?.active && scope.actor === actor && scope.workspaceId === workspaceId && scope.tx === tx
+    && scope.principal === getExternalProviderPrincipalUserId(actor, workspaceId)
+    && scope.actorHash === externalProviderResponseHash(actor) ? scope.mcpPeer ?? null : null;
+}
+
+async function runExternalProviderCommitClaim<T>(actor: AppActor, workspaceId: string, tx: Prisma.TransactionClient,
+  claim: ExternalProviderCommitClaim, work: () => Promise<T>, mcpPeer?: ExternalMcpResponseCommitClaim): Promise<T> {
+  const state = commitClaims.get(claim);
+  invariant(state && state.actor === actor && state.workspaceId === workspaceId && state.tx === tx && !commitScope.getStore()
+    && state.principal === getExternalProviderPrincipalUserId(actor, workspaceId) && state.actorHash === externalProviderResponseHash(actor)
+    && state.purposeHash === externalProviderResponseHash(getExternalProviderWorkerPurpose(actor)),
+  409, "SOURCE_CHANGED", "External provider commit claim is unavailable.");
+  commitClaims.delete(claim);
+  const scope = { ...state, active: true, mcpPeer };
+  return commitScope.run(scope, async () => {
+    try { return await work(); }
+    finally { scope.active = false; }
+  });
 }
 
 /** No model or provider operations belong in this bounded callback. This capability is never serialized. */
 export async function withExternalProviderCommitPreflight<T>(actor: AppActor, workspaceId: string,
   tx: Prisma.TransactionClient, preflight: ExternalProviderCommitPreflight, work: () => Promise<T>): Promise<T> {
-  const state = commitPreflights.get(preflight);
-  invariant(state && state.actor === actor && state.workspaceId === workspaceId && tx !== prisma && !commitScope.getStore()
-    && state.principal === getExternalProviderPrincipalUserId(actor, workspaceId) && state.actorHash === externalProviderResponseHash(actor)
-    && state.purposeHash === externalProviderResponseHash(getExternalProviderWorkerPurpose(actor)),
-  409, "SOURCE_CHANGED", "External provider commit capability is unavailable.");
-  // Consume before the first await; retries must perform a fresh live preflight.
-  commitPreflights.delete(preflight);
+  const claim = claimExternalProviderCommitPreflight(actor, workspaceId, tx, preflight);
+  const state = commitClaims.get(claim)!;
   for (const inputId of [...state.inputs.keys()].sort()) {
     await tx.$queryRaw`SELECT "id" FROM "ExternalProviderFetchInput" WHERE "id" = ${inputId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
     const input = await tx.externalProviderFetchInput.findFirst({ where: { id: inputId, workspaceId } });
@@ -305,9 +357,7 @@ export async function withExternalProviderCommitPreflight<T>(actor: AppActor, wo
   const purpose = getExternalProviderWorkerPurpose(actor);
   if (purpose) await tx.$queryRaw`SELECT "id" FROM "WorkflowJob" WHERE "id" = ${purpose.workflowJobId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
   const { isArtifactInputProofReadable } = await import("./source-lineage");
-  const scope = { ...state, tx, active: true };
-  return commitScope.run(scope, async () => {
-    try {
+  return runExternalProviderCommitClaim(actor, workspaceId, tx, claim, async () => {
       invariant(await isArtifactInputProofReadable(actor, workspaceId, state.roots, tx)
         && state.principal === getExternalProviderPrincipalUserId(actor, workspaceId) && state.actorHash === externalProviderResponseHash(actor),
       409, "SOURCE_CHANGED", "External provider original proof changed before copying.");
@@ -316,8 +366,65 @@ export async function withExternalProviderCommitPreflight<T>(actor: AppActor, wo
         && state.principal === getExternalProviderPrincipalUserId(actor, workspaceId) && state.actorHash === externalProviderResponseHash(actor),
       409, "SOURCE_CHANGED", "External provider original proof changed during copying.");
       return result;
-    } finally { scope.active = false; }
   });
+}
+
+/** Mixed commits acquire both native row sets before any governing row, avoiding cross-kind lock inversions. */
+async function lockMixedNativeRows(tx: Prisma.TransactionClient, workspaceId: string,
+  providerIds: readonly string[], mcpIds: readonly string[], actor: AppActor) {
+  const providers = [] as Array<{ connectionId: string; localUserId: string; externalContentSourceId: string }>;
+  const mcps = [] as Array<{ connectionId: string; localUserId: string }>;
+  const native = [
+    ...mcpIds.map(id => ({ kind: "ExternalMcpResponseInput" as const, id })),
+    ...providerIds.map(id => ({ kind: "ExternalProviderFetchInput" as const, id })),
+  ].sort((a, b) => a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
+  for (const row of native) {
+    if (row.kind === "ExternalMcpResponseInput") {
+      await tx.$queryRaw`SELECT "id" FROM "ExternalMcpResponseInput" WHERE "id" = ${row.id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+      const input = await tx.externalMcpResponseInput.findFirst({ where: { id: row.id, workspaceId } });
+      invariant(input, 409, "SOURCE_CHANGED", "External MCP native input changed during mixed commit.");
+      mcps.push(input);
+    } else {
+      await tx.$queryRaw`SELECT "id" FROM "ExternalProviderFetchInput" WHERE "id" = ${row.id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+      const input = await tx.externalProviderFetchInput.findFirst({ where: { id: row.id, workspaceId } });
+      invariant(input, 409, "SOURCE_CHANGED", "External provider native input changed during mixed commit.");
+      providers.push(input);
+    }
+  }
+  const connections = [...new Set([...providers, ...mcps].map(row => row.connectionId))].sort();
+  const members = [...new Set([...providers, ...mcps].map(row => row.localUserId))].sort();
+  const sources = [...new Set(providers.map(row => row.externalContentSourceId))].sort();
+  for (const id of connections) await tx.$queryRaw`SELECT "id" FROM "ExternalMcpConnection" WHERE "id" = ${id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+  for (const userId of members) await tx.$queryRaw`SELECT "id" FROM "Member" WHERE "userId" = ${userId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+  for (const id of sources) await tx.$queryRaw`SELECT "id" FROM "ExternalContentSource" WHERE "id" = ${id} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+  const purpose = getExternalProviderWorkerPurpose(actor);
+  if (purpose) await tx.$queryRaw`SELECT "id" FROM "WorkflowJob" WHERE "id" = ${purpose.workflowJobId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+}
+
+/** Executable mixed scope: both plans are consumed before the first await and the whole proof is checked twice. */
+export async function withExternalProviderAndMcpCommitPreflights<T>(actor: AppActor, workspaceId: string,
+  tx: Prisma.TransactionClient, submittedRoots: readonly LineageRoot[], providerToken: ExternalProviderCommitPreflight,
+  mcpToken: ExternalMcpResponseCommitPreflight, work: () => Promise<T>): Promise<T> {
+  const submitted = freezeComparable(structuredClone([...submittedRoots]));
+  const providerClaim = claimExternalProviderCommitPreflight(actor, workspaceId, tx, providerToken, submitted);
+  const mcpClaim = claimExternalMcpResponseCommitPreflight(actor, workspaceId, tx, mcpToken, submitted);
+  const provider = commitClaims.get(providerClaim)!;
+  const mcp = inspectExternalMcpResponseCommitClaim(mcpClaim);
+  invariant(mcp.actor === actor && mcp.workspaceId === workspaceId && mcp.tx === tx
+    && provider.roots.length >= submitted.length && mcp.roots.length >= submitted.length,
+  409, "SOURCE_CHANGED", "Mixed native commit plans disagree.");
+  const roots = [...submitted, ...provider.roots.slice(submitted.length), ...mcp.roots.slice(submitted.length)];
+  invariant(roots.length <= 10000, 409, "SOURCE_CHANGED", "Mixed native proof is unbounded.");
+  await lockMixedNativeRows(tx, workspaceId, [...provider.inputs.keys()], mcp.inputIds, actor);
+  const { isArtifactInputProofReadable } = await import("./source-lineage");
+  return runExternalProviderCommitClaim(actor, workspaceId, tx, providerClaim, async () => {
+    invariant(await isArtifactInputProofReadable(actor, workspaceId, roots, tx),
+      409, "SOURCE_CHANGED", "Mixed native original proof changed before writing.");
+    const result = await work();
+    invariant(await isArtifactInputProofReadable(actor, workspaceId, roots, tx),
+      409, "SOURCE_CHANGED", "Mixed native original proof changed during writing.");
+    return result;
+  }, mcpClaim);
 }
 
 type RefetchCallback = (request: { actor: AppActor; workspaceId: string; sourceId: string; consumedResponseHash: string }) => Promise<void>;
@@ -327,6 +434,8 @@ export function registerExternalProviderRefetchCallback(callback: RefetchCallbac
 /** Every invocation checks the provider. Errors, rate limits and changes never become a cached success. */
 export async function isExternalProviderFetchInputCurrent(actor: AppActor, workspaceId: string, input: ExternalProviderFetchInputRecord, db: AuthorityDb = prisma) {
   try {
+    // A supplied writer transaction must never fall through to the Box transport.
+    if (db !== prisma && !commitScope.getStore()) return false;
     input = { ...input, requestJson: structuredClone(input.requestJson) };
     const principal = getExternalProviderPrincipalUserId(actor, workspaceId);
     const assertPrincipal = () => invariant(principal && principal === getExternalProviderPrincipalUserId(actor, workspaceId),
