@@ -50,6 +50,7 @@ vi.mock("./source-lineage", () => ({ lineageContentFingerprint: (_kind: string, 
   row.mode, row.toolName, row.requestJson, row.encryptedResponseJson, row.responseHash, row.connectionGrantHash,
   row.originalLocalEpochsJson, row.fetchedAt]),
   inspectStoredArtifactInputDependencies: vi.fn(async (_db: unknown, _ws: string, roots: any[]) => ({ complete: true, roots })),
+  assertArtifactInputClosureLocallyAdmissible: vi.fn(async () => undefined),
   isArtifactInputProofReadable: vi.fn(async () => true),
   sealArtifactInputActor: (actor: AppActor) => actor,
 }));

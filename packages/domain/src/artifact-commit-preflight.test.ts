@@ -4,7 +4,7 @@ import type { AppActor } from "@corgtex/shared";
 const f = vi.hoisted(() => {
   const prisma = { artifactInputSnapshot: { findFirst: vi.fn(async () => null) },
     artifactInputLineage: { findFirst: vi.fn(async () => null) } };
-  const state = { closure: [] as any[], complete: true, epochCurrent: true, readable: true,
+  const state = { closure: [] as any[], complete: true, epochCurrent: true, readable: true, localAdmitted: true,
     savedProof: null as any, events: [] as string[] };
   return { prisma, state,
     inspect: vi.fn(async (_db: unknown, _ws: string, _roots: unknown[]) => ({ complete: state.complete, roots: state.closure })),
@@ -12,19 +12,25 @@ const f = vi.hoisted(() => {
       state.events.push(db === undefined || db === prisma ? "base-proof" : "tx-proof");
       return state.readable;
     }),
+    local: vi.fn(async () => {
+      if (!state.localAdmitted) throw Object.assign(new Error("Local authority denied"), { code: "SOURCE_CHANGED" });
+    }),
     boxPrepare: vi.fn(async () => Object.freeze({ backend: "box" })),
     mcpPrepare: vi.fn(async () => Object.freeze({ backend: "mcp" })),
     mixedPrepare: vi.fn(async () => Object.freeze({ backend: "mixed" })),
+    slackPrepare: vi.fn(async () => Object.freeze({ backend: "slack" })),
     boxWith: vi.fn(async (_actor: unknown, _ws: string, _tx: unknown, _token: unknown, work: () => Promise<unknown>) => work()),
     mcpWith: vi.fn(async (_actor: unknown, _ws: string, _tx: unknown, _token: unknown, work: () => Promise<unknown>) => work()),
     mixedWith: vi.fn(async (_actor: unknown, _ws: string, _tx: unknown, _roots: unknown[], _token: unknown,
+      work: () => Promise<unknown>) => work()),
+    slackWith: vi.fn(async (_actor: unknown, _ws: string, _tx: unknown, _roots: unknown[], _token: unknown,
       work: () => Promise<unknown>) => work()),
   };
 });
 vi.mock("@corgtex/shared", () => ({ prisma: f.prisma }));
 vi.mock("./artifact-input-actor", () => ({ sealArtifactInputActor: vi.fn((actor: AppActor) => actor) }));
 vi.mock("./source-lineage", () => ({ inspectStoredArtifactInputDependencies: f.inspect,
-  isArtifactInputProofReadable: f.read }));
+  isArtifactInputProofReadable: f.read, assertArtifactInputClosureLocallyAdmissible: f.local }));
 vi.mock("./source-permission-epochs", async importOriginal => ({
   ...await importOriginal<typeof import("./source-permission-epochs")>(),
   parsePermissionEpochProof: (value: any) => value?.version === 1 && Array.isArray(value.entries) ? value : null,
@@ -36,6 +42,8 @@ vi.mock("./external-mcp-response-input", () => ({ prepareExternalMcpResponseComm
   withExternalMcpResponseCommitPreflight: f.mcpWith }));
 vi.mock("./external-mixed-commit", () => ({ prepareExternalMixedCommitPreflight: f.mixedPrepare,
   withExternalMixedCommitPreflight: f.mixedWith }));
+vi.mock("./communication-native-authority", () => ({ prepareSlackNativeCommitPreflight: f.slackPrepare,
+  withSlackNativeCommitPreflight: f.slackWith }));
 
 import { prepareArtifactCommitPreflight, withArtifactCommitPreflight } from "./artifact-commit-preflight";
 import { isArtifactPermissionEpochProofCurrent } from "./source-permission-epochs";
@@ -52,7 +60,7 @@ describe("artifact commit preflight dispatcher", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     f.state.closure = []; f.state.complete = true; f.state.epochCurrent = true;
-    f.state.readable = true; f.state.savedProof = null; f.state.events = [];
+    f.state.readable = true; f.state.localAdmitted = true; f.state.savedProof = null; f.state.events = [];
     f.prisma.artifactInputLineage.findFirst.mockImplementation(async () => f.state.savedProof);
     f.prisma.artifactInputSnapshot.findFirst.mockImplementation(async () => null);
     vi.mocked(isArtifactPermissionEpochProofCurrent).mockImplementation(async () => f.state.epochCurrent);
@@ -97,13 +105,12 @@ describe("artifact commit preflight dispatcher", () => {
     expect(f.state.events).toEqual(["base-proof", "tx-proof", "tx-proof"]);
   });
 
-  it("rejects an unsupported Slack-native closure before a selected Box preflight can replay", async () => {
+  it("selects mixed preflight for a stored Slack and Box closure", async () => {
     const original = [root("ContextGraphObject", "derived")];
     f.state.closure = [root("ExternalProviderFetchInput", "box"), root("CommunicationMessageNativeInput", "slack")];
-    await expect(prepareArtifactCommitPreflight(actor, workspaceId, original))
-      .rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    await prepareArtifactCommitPreflight(actor, workspaceId, original);
     expect(f.boxPrepare).not.toHaveBeenCalled(); expect(f.mcpPrepare).not.toHaveBeenCalled();
-    expect(f.mixedPrepare).not.toHaveBeenCalled();
+    expect(f.mixedPrepare).toHaveBeenCalledWith(actor, workspaceId, original);
   });
 
   it("rejects a revoked stored contributor before any provider preflight can replay its query", async () => {

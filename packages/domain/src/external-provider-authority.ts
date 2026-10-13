@@ -5,6 +5,8 @@ import type { Prisma } from "@prisma/client";
 import { decryptSecret, encryptSecret, prisma, type AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
+import { assertOutsideArtifactNativeCommitPhase, isArtifactNativeCommitPhase, withArtifactNativeCommitPhase } from "./artifact-native-commit-phase";
+import { savedEnclosingNativeEpochs, savedNativeVectorKey } from "./native-commit-original-vector";
 import type { LineageRoot } from "./source-lineage";
 import { isArtifactPermissionEpochProofCurrent, parsePermissionEpochProof } from "./source-permission-epochs";
 import { getExternalProviderPrincipalUserId, getExternalProviderWorkerPurpose, registerExternalProviderWorkerPrincipal,
@@ -13,7 +15,12 @@ export { getExternalProviderPrincipalUserId } from "./external-provider-principa
 import { externalMcpConnectionGrantHash, isBoxNativeContentRequest, readBoxExternalMcpNativeResponse,
   type ExternalMcpConnectionRecord } from "./external-mcp";
 import { claimExternalMcpResponseCommitPreflight, inspectExternalMcpResponseCommitClaim,
+  discardExternalMcpResponseCommitPreflight,
   type ExternalMcpResponseCommitClaim, type ExternalMcpResponseCommitPreflight } from "./external-mcp-response-input";
+import { claimSlackNativeCommitPreflight, inspectSlackNativeCommitClaim,
+  discardSlackNativeCommitPreflight,
+  lockSlackNativeGoverningRows, withClaimedSlackNativeCommitPreflight,
+  type SlackNativeCommitPreflight } from "./communication-native-authority";
 
 type AuthorityDb = Prisma.TransactionClient | typeof prisma;
 export type ExternalProviderFetchInputRecord = {
@@ -39,6 +46,10 @@ const commitScope = new AsyncLocalStorage<CommitState & { tx: Prisma.Transaction
 declare const commitClaimBrand: unique symbol;
 type ExternalProviderCommitClaim = { readonly [commitClaimBrand]: true };
 const commitClaims = new WeakMap<object, CommitState & { tx: Prisma.TransactionClient }>();
+/** Cancellation confers no authority; an attempted owner commit burns every peer plan. */
+export function discardExternalProviderCommitPreflight(token: ExternalProviderCommitPreflight) {
+  commitPreflights.delete(token);
+}
 const MAX_COMMIT_INPUTS = 128;
 
 function canonical(value: unknown): string {
@@ -91,6 +102,30 @@ export async function isExternalProviderSelectionCurrent(actor: AppActor, worksp
       || (getExternalProviderWorkerPurpose(actor) && getExternalProviderWorkerPurpose(actor)!.sourceId !== source.id)) return false;
     const connection = await currentAuthority(actor, workspaceId, source.connectionId, db);
     return connection.userId === source.selectedByUserId;
+  } catch { return false; }
+}
+
+/** Preparatory local admission only; this does not establish current remote bytes. */
+export async function isExternalProviderFetchInputLocallyCurrent(actor: AppActor, workspaceId: string,
+  input: ExternalProviderFetchInputRecord, db: AuthorityDb = prisma) {
+  try {
+    if (input.workspaceId !== workspaceId || input.localUserId !== getExternalProviderPrincipalUserId(actor, workspaceId)
+      || input.providerKey !== "box" || input.serverUrl !== "https://mcp.box.com"
+      || (getExternalProviderWorkerPurpose(actor) && getExternalProviderWorkerPurpose(actor)!.sourceId !== input.externalContentSourceId)) return false;
+    const args = record(input.requestJson);
+    if (!args || !isBoxNativeContentRequest(input.sourceKind, input.externalId, input.toolName, args)
+      || externalProviderResponseHash(JSON.parse(decryptSecret(input.encryptedResponseJson))) !== input.responseHash) return false;
+    const connection = await currentAuthority(actor, workspaceId, input.connectionId, db);
+    const source = await db.externalContentSource.findFirst({ where: { id: input.externalContentSourceId, workspaceId, archivedAt: null } });
+    if (!source || source.status === "ARCHIVED" || source.connectionId !== input.connectionId
+      || source.selectedByUserId !== input.localUserId || source.sourceKind !== input.sourceKind
+      || source.externalId !== input.externalId || connection.providerAccountId !== input.providerAccountId
+      || externalMcpConnectionGrantHash(connection) !== input.connectionGrantHash
+      || !await isExternalProviderSelectionCurrent(actor, workspaceId, source, db)) return false;
+    const stored = await db.externalProviderFetchInput.findFirst({ where: { id: input.id, workspaceId } });
+    const { lineageContentFingerprint } = await import("./source-lineage");
+    return !!stored && lineageContentFingerprint("ExternalProviderFetchInput", stored)
+      === lineageContentFingerprint("ExternalProviderFetchInput", input);
   } catch { return false; }
 }
 
@@ -159,6 +194,7 @@ export async function assertExternalProviderCapturedResponseCurrent(receipt: Ext
 export type ExternalProviderCapturedResponse = Readonly<{ input: ExternalProviderFetchInputRecord; payload: unknown }>;
 export async function captureExternalProviderFetchInput(actor: AppActor, params: { workspaceId: string; externalContentSourceId: string;
   connectionId: string; sourceKind: string; externalId: string; toolName: string; arguments: Record<string, unknown> }): Promise<ExternalProviderCapturedResponse> {
+  assertOutsideArtifactNativeCommitPhase();
   params = Object.freeze(structuredClone(params));
   const principal = getExternalProviderPrincipalUserId(actor, params.workspaceId);
   const assertPrincipal = () => invariant(principal && getExternalProviderPrincipalUserId(actor, params.workspaceId) === principal,
@@ -250,6 +286,7 @@ export async function prepareExternalProviderCommitPreflight(actor: AppActor, wo
 /** Existing stored native inputs are verified live through their complete original source proofs. */
 export async function prepareExternalProviderRootCommitPreflight(actor: AppActor, workspaceId: string,
   originalRoots: readonly LineageRoot[]): Promise<ExternalProviderCommitPreflight> {
+  assertOutsideArtifactNativeCommitPhase();
   const roots: LineageRoot[] = structuredClone([...originalRoots]);
   const submittedRoots = structuredClone(roots);
   const principal = getExternalProviderPrincipalUserId(actor, workspaceId);
@@ -261,11 +298,13 @@ export async function prepareExternalProviderRootCommitPreflight(actor: AppActor
   409, "SOURCE_CHANGED", "External provider commit lacks its original input proof.");
   const { inspectStoredArtifactInputDependencies, isArtifactInputProofReadable, lineageContentFingerprint } = await import("./source-lineage");
   const dependencies = await inspectStoredArtifactInputDependencies(prisma, workspaceId, roots);
-  invariant(dependencies.complete && dependencies.roots.length <= 10000
-    && !dependencies.roots.some(root => root.kind === "CommunicationMessageNativeInput"),
+  invariant(dependencies.complete && dependencies.roots.length <= 10000,
   409, "UNSUPPORTED_PROVIDER_INPUT", "Every native provider input needs its bounded commit adapter.");
+  const { assertArtifactInputClosureLocallyAdmissible } = await import("./source-lineage");
+  await assertArtifactInputClosureLocallyAdmissible(actor, workspaceId, roots);
   const native = dependencies.roots.filter(root => root.kind === "ExternalProviderFetchInput");
   invariant(native.length <= MAX_COMMIT_INPUTS, 409, "SOURCE_CHANGED", "External provider commit requires bounded native inputs.");
+  let enclosingEpochs: Awaited<ReturnType<typeof savedEnclosingNativeEpochs>> | undefined;
   const inputs: CommitState["inputs"] = new Map();
   for (const root of native) {
     const direct = roots.find(input => input.kind === root.kind && input.id === root.id && input.fingerprint === root.fingerprint);
@@ -277,6 +316,10 @@ export async function prepareExternalProviderRootCommitPreflight(actor: AppActor
         if (snapshot?.sourceKind === root.kind && snapshot.sourceId === root.id && snapshot.sourceFingerprint === root.fingerprint
           && snapshot.epochProofVersion === 1) { originalEpochs = parsePermissionEpochProof(snapshot.permissionEpochsJson) ?? undefined; break; }
       }
+    }
+    if (!originalEpochs) {
+      enclosingEpochs ??= await savedEnclosingNativeEpochs(workspaceId, submittedRoots, "ExternalProviderFetchInput");
+      originalEpochs = enclosingEpochs.get(savedNativeVectorKey(root.kind, root.id, root.fingerprint));
     }
     const originalProof = parsePermissionEpochProof(originalEpochs);
     invariant(originalProof, 409, "SOURCE_CHANGED", "The original native permission proof is missing or changed.");
@@ -357,7 +400,7 @@ export async function withExternalProviderCommitPreflight<T>(actor: AppActor, wo
   const purpose = getExternalProviderWorkerPurpose(actor);
   if (purpose) await tx.$queryRaw`SELECT "id" FROM "WorkflowJob" WHERE "id" = ${purpose.workflowJobId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
   const { isArtifactInputProofReadable } = await import("./source-lineage");
-  return runExternalProviderCommitClaim(actor, workspaceId, tx, claim, async () => {
+  return withArtifactNativeCommitPhase(() => runExternalProviderCommitClaim(actor, workspaceId, tx, claim, async () => {
       invariant(await isArtifactInputProofReadable(actor, workspaceId, state.roots, tx)
         && state.principal === getExternalProviderPrincipalUserId(actor, workspaceId) && state.actorHash === externalProviderResponseHash(actor),
       409, "SOURCE_CHANGED", "External provider original proof changed before copying.");
@@ -366,20 +409,23 @@ export async function withExternalProviderCommitPreflight<T>(actor: AppActor, wo
         && state.principal === getExternalProviderPrincipalUserId(actor, workspaceId) && state.actorHash === externalProviderResponseHash(actor),
       409, "SOURCE_CHANGED", "External provider original proof changed during copying.");
       return result;
-  });
+  }));
 }
 
 /** Mixed commits acquire both native row sets before any governing row, avoiding cross-kind lock inversions. */
 async function lockMixedNativeRows(tx: Prisma.TransactionClient, workspaceId: string,
-  providerIds: readonly string[], mcpIds: readonly string[], actor: AppActor) {
+  providerIds: readonly string[], mcpIds: readonly string[], slackIds: readonly string[], actor: AppActor) {
   const providers = [] as Array<{ connectionId: string; localUserId: string; externalContentSourceId: string }>;
   const mcps = [] as Array<{ connectionId: string; localUserId: string }>;
   const native = [
     ...mcpIds.map(id => ({ kind: "ExternalMcpResponseInput" as const, id })),
     ...providerIds.map(id => ({ kind: "ExternalProviderFetchInput" as const, id })),
+    ...slackIds.map(id => ({ kind: "CommunicationMessageNativeInput" as const, id })),
   ].sort((a, b) => a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
   for (const row of native) {
-    if (row.kind === "ExternalMcpResponseInput") {
+    if (row.kind === "CommunicationMessageNativeInput") {
+      await tx.$queryRaw`SELECT "id" FROM "CommunicationMessageNativeInput" WHERE "id" = ${row.id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+    } else if (row.kind === "ExternalMcpResponseInput") {
       await tx.$queryRaw`SELECT "id" FROM "ExternalMcpResponseInput" WHERE "id" = ${row.id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
       const input = await tx.externalMcpResponseInput.findFirst({ where: { id: row.id, workspaceId } });
       invariant(input, 409, "SOURCE_CHANGED", "External MCP native input changed during mixed commit.");
@@ -399,32 +445,57 @@ async function lockMixedNativeRows(tx: Prisma.TransactionClient, workspaceId: st
   for (const id of sources) await tx.$queryRaw`SELECT "id" FROM "ExternalContentSource" WHERE "id" = ${id} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
   const purpose = getExternalProviderWorkerPurpose(actor);
   if (purpose) await tx.$queryRaw`SELECT "id" FROM "WorkflowJob" WHERE "id" = ${purpose.workflowJobId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+  if (slackIds.length) await lockSlackNativeGoverningRows(tx, workspaceId, slackIds, actor);
 }
 
 /** Executable mixed scope: both plans are consumed before the first await and the whole proof is checked twice. */
-export async function withExternalProviderAndMcpCommitPreflights<T>(actor: AppActor, workspaceId: string,
+export async function withExternalProviderNativeCommitPreflights<T>(actor: AppActor, workspaceId: string,
   tx: Prisma.TransactionClient, submittedRoots: readonly LineageRoot[], providerToken: ExternalProviderCommitPreflight,
-  mcpToken: ExternalMcpResponseCommitPreflight, work: () => Promise<T>): Promise<T> {
+  mcpToken: ExternalMcpResponseCommitPreflight | undefined, slackToken: SlackNativeCommitPreflight | undefined,
+  work: () => Promise<T>): Promise<T> {
   const submitted = freezeComparable(structuredClone([...submittedRoots]));
   const providerClaim = claimExternalProviderCommitPreflight(actor, workspaceId, tx, providerToken, submitted);
-  const mcpClaim = claimExternalMcpResponseCommitPreflight(actor, workspaceId, tx, mcpToken, submitted);
+  let mcpClaim: ExternalMcpResponseCommitClaim | undefined;
+  let slackClaim: ReturnType<typeof claimSlackNativeCommitPreflight> | undefined;
+  try {
+    mcpClaim = mcpToken ? claimExternalMcpResponseCommitPreflight(actor, workspaceId, tx, mcpToken, submitted) : undefined;
+    slackClaim = slackToken ? claimSlackNativeCommitPreflight(actor, workspaceId, tx, slackToken, submitted) : undefined;
+  } catch (error) {
+    commitClaims.delete(providerClaim);
+    if (mcpToken) discardExternalMcpResponseCommitPreflight(mcpToken, mcpClaim);
+    if (slackToken) discardSlackNativeCommitPreflight(slackToken, slackClaim);
+    throw error;
+  }
+  try {
   const provider = commitClaims.get(providerClaim)!;
-  const mcp = inspectExternalMcpResponseCommitClaim(mcpClaim);
-  invariant(mcp.actor === actor && mcp.workspaceId === workspaceId && mcp.tx === tx
-    && provider.roots.length >= submitted.length && mcp.roots.length >= submitted.length,
+  const mcp = mcpClaim ? inspectExternalMcpResponseCommitClaim(mcpClaim) : undefined;
+  const slack = slackClaim ? inspectSlackNativeCommitClaim(slackClaim) : undefined;
+  invariant((!mcp || (mcp.actor === actor && mcp.workspaceId === workspaceId && mcp.tx === tx))
+    && (!slack || (slack.actor === actor && slack.workspaceId === workspaceId && slack.tx === tx))
+    && provider.roots.length >= submitted.length && (!mcp || mcp.roots.length >= submitted.length)
+    && (!slack || slack.roots.length >= submitted.length),
   409, "SOURCE_CHANGED", "Mixed native commit plans disagree.");
-  const roots = [...submitted, ...provider.roots.slice(submitted.length), ...mcp.roots.slice(submitted.length)];
+  const roots = [...submitted, ...provider.roots.slice(submitted.length), ...(mcp?.roots.slice(submitted.length) ?? []),
+    ...(slack?.roots.slice(submitted.length) ?? [])];
   invariant(roots.length <= 10000, 409, "SOURCE_CHANGED", "Mixed native proof is unbounded.");
-  await lockMixedNativeRows(tx, workspaceId, [...provider.inputs.keys()], mcp.inputIds, actor);
+  await lockMixedNativeRows(tx, workspaceId, [...provider.inputs.keys()], mcp?.inputIds ?? [], slack?.inputIds ?? [], actor);
   const { isArtifactInputProofReadable } = await import("./source-lineage");
-  return runExternalProviderCommitClaim(actor, workspaceId, tx, providerClaim, async () => {
+  return await withArtifactNativeCommitPhase(() => runExternalProviderCommitClaim(actor, workspaceId, tx, providerClaim, async () => {
+    const verified = async () => {
     invariant(await isArtifactInputProofReadable(actor, workspaceId, roots, tx),
       409, "SOURCE_CHANGED", "Mixed native original proof changed before writing.");
     const result = await work();
     invariant(await isArtifactInputProofReadable(actor, workspaceId, roots, tx),
       409, "SOURCE_CHANGED", "Mixed native original proof changed during writing.");
     return result;
-  }, mcpClaim);
+    };
+    return slackClaim ? withClaimedSlackNativeCommitPreflight(actor, workspaceId, tx, slackClaim, verified) : verified();
+  }, mcpClaim));
+  } finally {
+    commitClaims.delete(providerClaim);
+    if (mcpToken) discardExternalMcpResponseCommitPreflight(mcpToken, mcpClaim);
+    if (slackToken) discardSlackNativeCommitPreflight(slackToken, slackClaim);
+  }
 }
 
 type RefetchCallback = (request: { actor: AppActor; workspaceId: string; sourceId: string; consumedResponseHash: string }) => Promise<void>;
@@ -434,6 +505,7 @@ export function registerExternalProviderRefetchCallback(callback: RefetchCallbac
 /** Every invocation checks the provider. Errors, rate limits and changes never become a cached success. */
 export async function isExternalProviderFetchInputCurrent(actor: AppActor, workspaceId: string, input: ExternalProviderFetchInputRecord, db: AuthorityDb = prisma) {
   try {
+    if (db === prisma && isArtifactNativeCommitPhase()) return false;
     // A supplied writer transaction must never fall through to the Box transport.
     if (db !== prisma && !commitScope.getStore()) return false;
     input = { ...input, requestJson: structuredClone(input.requestJson) };

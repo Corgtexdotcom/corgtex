@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
+import type { Prisma } from "@prisma/client";
 
 const { prismaMock } = vi.hoisted(() => {
   const prisma = {
@@ -31,7 +32,9 @@ const { prismaMock } = vi.hoisted(() => {
 
 const lineage = vi.hoisted(() => ({ assertArtifactInputWriteFence: vi.fn(), readableArtifactIds: vi.fn(), recordArtifactInputLineage: vi.fn(),
   advanceHumanArtifactInputLineage: vi.fn(), currentArtifactInputRoots: vi.fn(), captureArtifactInputProof: vi.fn() }));
-vi.mock("./source-lineage", () => lineage);
+vi.mock("./source-lineage", async () => ({ ...lineage,
+  sealArtifactInputActor: (await import("./artifact-input-actor")).sealArtifactInputActor,
+}));
 vi.mock("./role-onboarding", () => ({ updateRoleOnboardingStatusByConversation: vi.fn() }));
 
 vi.mock("./auth", async (importOriginal) => {
@@ -131,6 +134,40 @@ describe("conversations domain", () => {
       promptInputId: "prompt-1", lineageRoots: [{ kind: "BrainSource", id: "source-1", fingerprint: "b".repeat(64) }] })).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
     expect(prismaMock.conversationTurn.create).not.toHaveBeenCalled();
     expect(prismaMock.conversationPromptInput.findFirst).toHaveBeenCalledWith({ where: { id: "prompt-1", workspaceId: "workspace-1", sessionId: "conversation-1", userId: "user-1", content: "Changed utterance" } });
+  });
+
+  it("seals the exact principal and copies turn content and roots before its first await", async () => {
+    const principal = structuredClone(actor);
+    const suppliedTx = { ...prismaMock } as unknown as Prisma.TransactionClient;
+    const params = {
+      workspaceId: "workspace-1", conversationId: "conversation-1", userMessage: "What should I do first?",
+      assistantMessage: "Exact admitted answer", contextJson: { source: "exact admitted context" }, promptInputId: "prompt-1",
+      lineageRoots: [{ kind: "BrainSource" as const, id: "source-1", fingerprint: "b".repeat(64) }], tx: suppliedTx,
+    };
+    prismaMock.conversationSession.findUnique.mockResolvedValue({ id: "conversation-1", workspaceId: "workspace-1", userId: "user-1" });
+    prismaMock.conversationTurn.findFirst.mockResolvedValue(null);
+    prismaMock.conversationTurn.create.mockResolvedValue({ id: "turn-immutable", sequenceNumber: 1 });
+    const { addConversationTurn } = await import("./conversations");
+    const pending = addConversationTurn(principal, params);
+    expect(Object.isFrozen(principal)).toBe(true);
+    expect(Object.isFrozen(principal.user)).toBe(true);
+    expect(() => { principal.user.id = "other-user"; }).toThrow();
+    params.workspaceId = "other-workspace";
+    params.conversationId = "other-conversation";
+    params.assistantMessage = "Changed answer";
+    params.contextJson.source = "Changed context";
+    params.lineageRoots[0].fingerprint = "c".repeat(64);
+    params.tx = prismaMock as unknown as Prisma.TransactionClient;
+    await expect(pending).resolves.toMatchObject({ id: "turn-immutable" });
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(prismaMock.conversationTurn.create).toHaveBeenCalledWith({ data: expect.objectContaining({
+      conversationId: "conversation-1", assistantMessage: "Exact admitted answer", contextJson: { source: "exact admitted context" },
+    }) });
+    expect(lineage.recordArtifactInputLineage).toHaveBeenCalledWith(expect.objectContaining({ tx: suppliedTx,
+      actor: principal, workspaceId: "workspace-1", inheritedRoots: expect.arrayContaining([
+        { kind: "BrainSource", id: "source-1", fingerprint: "b".repeat(64) },
+      ]),
+    }));
   });
 
   it("creates an immutable prompt only in the requester's currently owned conversation", async () => {

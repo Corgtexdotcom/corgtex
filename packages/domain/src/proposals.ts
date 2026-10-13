@@ -6,7 +6,10 @@ import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, isGlobalOperator, requireWorkspaceMembership } from "./auth";
 import { getApprovalPolicy, ensureApprovalFlow, preserveApprovalFlowHistory, withdrawActiveApprovalFlowForSubject } from "./approvals";
 import { AppError, invariant } from "./errors";
-import { advanceHumanArtifactInputLineage, captureArtifactInputProof, captureArtifactInputSnapshotProof, invalidateArtifactInputLineage, lineageContentFingerprint, preserveUnknownArtifactInputSnapshot, currentArtifactInputRoots, readableArtifactIds, recordArtifactInputLineage, type LineageInput, type LineageRoot } from "./source-lineage";
+import { advanceHumanArtifactInputLineage, assertArtifactInputWriteFence, captureArtifactInputProof, captureArtifactInputSnapshotProof, captureImmutableArtifactInputProof, invalidateArtifactInputLineage, isArtifactInputProofReadable, lineageContentFingerprint, preserveUnknownArtifactInputSnapshot, currentArtifactInputRoots, readableArtifactIds, recordArtifactInputLineage, type LineageInput, type LineageRoot } from "./source-lineage";
+import type { ProducerLineageParams } from "./producer-lineage";
+import { getMcpToolInputRoots } from "./mcp-tool-input-context";
+import { parsePermissionEpochProof } from "./source-permission-epochs";
 import { privacyFilter } from "./privacy";
 import { archiveFilterWhere, type ArchiveFilter } from "./archive";
 import { requireDraftManager, requireCreationInputRoots } from "./draft-permissions";
@@ -1942,17 +1945,14 @@ export async function publishProposal(actor: AppActor, params: {
   });
 }
 
-export async function resolveProposal(actor: AppActor, params: {
+export async function resolveProposal(actor: AppActor, params: ProducerLineageParams & {
   workspaceId: string;
   proposalId: string;
   outcome: ProposalResolutionOutcome;
   decisionMd: string;
   evidenceDocumentIds?: string[] | null;
-}) {
-  const membership = await requireWorkspaceMembership({
-    actor,
-    workspaceId: params.workspaceId,
-  });
+  lineageCopied?: boolean;
+}, transaction?: Prisma.TransactionClient) {
 
   invariant(PROPOSAL_RESOLUTION_OUTCOMES.has(params.outcome), 400, "INVALID_INPUT", "Resolution outcome is required.");
   const decisionMd = params.decisionMd.trim();
@@ -1960,7 +1960,9 @@ export async function resolveProposal(actor: AppActor, params: {
 
   const now = new Date();
 
-  return prisma.$transaction(async (tx) => {
+  const run = async (tx: Prisma.TransactionClient) => {
+    await assertArtifactInputWriteFence(tx);
+    const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
     await acquireProposalAdvisoryLock(tx, params.proposalId);
     if (params.outcome === "ADOPTED") {
       await acquireConstitutionCorpusAdvisoryLock(tx, params.workspaceId);
@@ -1991,6 +1993,38 @@ export async function resolveProposal(actor: AppActor, params: {
     invariant(priorRoots, 409, "UNKNOWN_LINEAGE", "Proposal inputs cannot be verified.");
     const evidenceInputs = normalizeIds(params.evidenceDocumentIds).map((id) => ({ kind: "Document" as const, id }));
     const evidenceRoots = evidenceInputs.length ? await captureArtifactInputProof(actor, params.workspaceId, evidenceInputs, tx) : [];
+    const suppliedRoots = [
+      ...(params.lineageRoots ?? []),
+      ...getMcpToolInputRoots(actor, params.workspaceId),
+      ...await captureArtifactInputProof(actor, params.workspaceId, params.lineageInputs ?? [], tx),
+    ];
+    invariant(actor.kind === "user" || suppliedRoots.length > 0, 409, "UNKNOWN_LINEAGE", "Generated resolution requires its complete input receipt.");
+    invariant(!params.lineageCopied || suppliedRoots.length > 0, 409, "UNKNOWN_LINEAGE", "Copied resolution requires its complete input receipt.");
+    invariant(!suppliedRoots.length || await isArtifactInputProofReadable(actor, params.workspaceId, suppliedRoots, tx),
+      409, "SOURCE_CHANGED", "Resolution inputs changed before persistence.");
+    const priorManifest = await tx.artifactInputLineage.findFirst({ where: {
+      workspaceId: params.workspaceId, artifactType: "Proposal", artifactId: proposal.id,
+    }, orderBy: { revision: "desc" }, select: {
+      origin: true, contentHash: true, rootsJson: true, inputsJson: true, epochProofVersion: true, permissionEpochsJson: true,
+    } });
+    const originalEpochs = parsePermissionEpochProof(priorManifest?.permissionEpochsJson);
+    const nativeOriginal = actor.kind === "user" && !params.lineageCopied && !priorRoots.length
+      && !evidenceRoots.length && !suppliedRoots.length && !params.lineageInputs?.length
+      && priorManifest?.origin === "HUMAN_ORIGINAL" && priorManifest.contentHash === lineageContentFingerprint("Proposal", proposal)
+      && Array.isArray(priorManifest.rootsJson) && priorManifest.rootsJson.length === 0
+      && Array.isArray(priorManifest.inputsJson) && priorManifest.inputsJson.length === 0
+      && priorManifest.epochProofVersion === 1
+      && originalEpochs?.entries.some(entry => entry.kind === "Proposal" && entry.id === proposal.id)
+      && originalEpochs.entries.some(entry => entry.kind === "Workspace" && entry.id === params.workspaceId);
+    // A proven independent human original may be explicitly published by its
+    // draft manager. Retain its old private snapshot as history, never rebase
+    // that old vector or apply this distinction to copied/model/MCP inputs.
+    const priorSnapshots = await captureArtifactInputSnapshotProof(actor, params.workspaceId,
+      { kind: "Proposal", id: proposal.id, fingerprint: lineageContentFingerprint("Proposal", proposal) }, tx);
+    if (flow) priorSnapshots.push(...await captureArtifactInputSnapshotProof(actor, params.workspaceId,
+      { kind: "ApprovalFlow", id: flow.id, fingerprint: lineageContentFingerprint("ApprovalFlow", flow) }, tx));
+    const resolutionRoots = await captureImmutableArtifactInputProof(actor, params.workspaceId,
+      [...priorSnapshots, ...priorRoots, ...evidenceRoots, ...suppliedRoots], tx);
 
     const updated = await tx.proposal.update({
       where: { id: proposal.id },
@@ -2004,10 +2038,13 @@ export async function resolveProposal(actor: AppActor, params: {
         publishedAt: proposal.publishedAt || now,
       },
     });
+    const derived = !nativeOriginal;
     await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
       artifact: { kind: "Proposal", id: proposal.id }, content: updated,
-      origin: priorRoots.length || evidenceRoots.length ? "DERIVED" : "HUMAN_ORIGINAL",
-      inputs: [], inheritedRoots: [...priorRoots, ...evidenceRoots] });
+      origin: derived ? "DERIVED" : "HUMAN_ORIGINAL",
+      inputs: [], inheritedRoots: derived ? resolutionRoots : [] });
+    const proposalOutputRoots = await captureImmutableArtifactInputProof(actor, params.workspaceId,
+      await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "Proposal", id: updated.id }], tx), tx);
 
     const evidenceDocumentIds = await createWorkItemEvidenceLinks(tx, {
       workspaceId: params.workspaceId,
@@ -2018,7 +2055,7 @@ export async function resolveProposal(actor: AppActor, params: {
     });
 
     if (flow) {
-      await writeProposalApprovalFlow(tx, actor, params.workspaceId, flow, {
+      const updatedFlow = await tx.approvalFlow.update({ where: { id: flow.id }, data: {
           status: params.outcome === "ADOPTED" ? "APPROVED" : params.outcome === "WITHDRAWN" ? "WITHDRAWN" : "REJECTED",
           closedAt: now,
           resultJson: {
@@ -2026,7 +2063,10 @@ export async function resolveProposal(actor: AppActor, params: {
             outcome: params.outcome,
             decisionMd,
           } as Prisma.InputJsonValue,
-      });
+      } });
+      await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "ApprovalFlow", id: updatedFlow.id }, content: updatedFlow,
+        origin: "DERIVED", inputs: [], inheritedRoots: [...resolutionRoots, ...proposalOutputRoots] });
     }
 
     if (params.outcome === "ADOPTED") {
@@ -2049,7 +2089,7 @@ export async function resolveProposal(actor: AppActor, params: {
       });
       await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
         artifact: { kind: "PolicyCorpus", id: policy.id }, content: policy,
-        origin: "DERIVED", inputs: [{ kind: "Proposal", id: updated.id }] });
+        origin: "DERIVED", inputs: [], inheritedRoots: proposalOutputRoots });
     }
 
     await tx.auditLog.create({
@@ -2083,8 +2123,12 @@ export async function resolveProposal(actor: AppActor, params: {
       },
     ]);
 
+    await assertArtifactInputWriteFence(tx);
+    invariant(nativeOriginal || await isArtifactInputProofReadable(actor, params.workspaceId, resolutionRoots, tx),
+      409, "SOURCE_CHANGED", "Resolution input permissions changed during persistence.");
     return updated;
-  });
+  };
+  return transaction ? run(transaction) : prisma.$transaction(run);
 }
 
 export async function deleteProposal(actor: AppActor, params: { workspaceId: string; proposalId: string }) {

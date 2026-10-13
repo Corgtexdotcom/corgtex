@@ -43,6 +43,7 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
       workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },
       $transaction: vi.fn(),
       $queryRaw: vi.fn(),
+      $executeRaw: vi.fn(),
       member: {
         findMany: vi.fn(),
         findUnique: vi.fn().mockResolvedValue({ id: "member-123", workspaceId: "ws-1", userId: "user-123", role: "ADMIN", isActive: true }),
@@ -54,6 +55,7 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
         findUniqueOrThrow: vi.fn(),
       },
       action: {
+        findFirst: vi.fn(),
         findMany: vi.fn().mockResolvedValue([]),
       },
       tension: {
@@ -66,8 +68,10 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
         update: vi.fn(),
       },
       policyCorpus: {
+        findFirst: vi.fn().mockResolvedValue(null),
         upsert: vi.fn(),
       },
+      approvalFlow: { findFirst: vi.fn().mockResolvedValue(null) },
       auditLog: {
         create: vi.fn(),
       },
@@ -141,14 +145,23 @@ vi.mock("./deliberation", () => ({
 }));
 
 vi.mock("./source-lineage", () => ({
-  captureArtifactInputProof: vi.fn(async () => []),
+  captureArtifactInputProof: vi.fn(async (_actor, _workspace, inputs) => inputs.map(({kind, id}: {kind: string; id: string}) => ({kind, id, fingerprint: "fixture-state"}))),
   invalidateArtifactInputLineage: vi.fn(),
   captureArtifactInputSnapshotProof: vi.fn(async () => [{ kind: "ArtifactInputSnapshot", id: "snapshot-1", fingerprint: "a".repeat(64) }]),
+  captureImmutableArtifactInputProof: vi.fn(async () => [{ kind: "ArtifactInputSnapshot", id: "snapshot-1", fingerprint: "a".repeat(64) }]),
+  assertArtifactInputWriteFence: vi.fn(),
   currentArtifactInputRoots: vi.fn(async () => [{ kind: "MeetingTranscript", id: "meeting-1", fingerprint: "a".repeat(64) }]),
   isArtifactInputProofReadable: vi.fn(async () => true),
   lineageContentFingerprint: vi.fn(() => "fixture-state"),
   recordArtifactInputLineage: vi.fn(),
   readableArtifactIds: vi.fn(async (_actor: unknown, _workspace: string, _kind: string, records: Array<{ id: string }>) => new Set(records.map((record) => record.id))),
+}));
+
+// This suite exercises formatting/caller ABI; the separate actual-helper
+// resolution suite verifies preflight, immutable ancestry and live grants.
+vi.mock("./artifact-commit-preflight", () => ({
+  prepareArtifactCommitPreflight: vi.fn(async () => Object.freeze({})),
+  withArtifactCommitPreflight: vi.fn(async (_actor, _workspace, _tx, _roots, _token, work) => work()),
 }));
 
 vi.mock("./meeting-intelligence-context", async (importOriginal) => ({
@@ -181,6 +194,8 @@ describe("meeting-intelligence", () => {
     // Default mocks
     (prisma.$transaction as ReturnType<typeof vi.fn>).mockImplementation((cb) => cb(prisma));
     (prisma.$queryRaw as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    vi.mocked(prisma.action.findFirst).mockResolvedValue({id: "action-1", workspaceId: "ws-1", status: "OPEN", isPrivate: false, archivedAt: null} as never);
+    vi.mocked(prisma.proposal.findFirst).mockResolvedValue({id: "proposal-1", workspaceId: "ws-1", status: "OPEN", isPrivate: false, archivedAt: null} as never);
     buildMeetingIntelligenceContextMock.mockResolvedValue({
       lineageInputs: [{ kind: "MeetingTranscript", id: "meeting-1" }, { kind: "Meeting", id: "meeting-1" }],
       lineageRoots: [{ kind: "MeetingTranscript", id: "meeting-1", fingerprint: "a".repeat(64) }],
@@ -1335,10 +1350,11 @@ describe("meeting-intelligence", () => {
         return { id: "action-1" };
       });
       await applyInsight(mockActor, { workspaceId: "ws-1", insightId: "insight-resolve" });
-      expect(updateActionMock).toHaveBeenCalledWith(mockActor, {
+      expect(updateActionMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({
         workspaceId: "ws-1", actionId: "action-1", status: "COMPLETED",
         completedVia: "The owner confirmed the handoff was delivered.\n\n*Created from meeting:* [Weekly sync](/workspaces/ws-1/meetings/meeting-1)",
-      });
+        lineageCopied: true, lineageInputs: [], lineageRoots: [expect.objectContaining({kind: "ArtifactInputSnapshot"})], _tx: prisma,
+      }));
       expect(prisma.meetingInsight.update).toHaveBeenCalledWith(expect.objectContaining({
         data: expect.objectContaining({ status: "APPLIED", appliedEntityType: "Action", appliedEntityId: "action-1" }),
       }));
@@ -1459,7 +1475,8 @@ describe("meeting-intelligence", () => {
         proposalId: "proposal-1",
         outcome: "ADOPTED",
         decisionMd: expect.stringContaining("Created from meeting"),
-      }));
+        lineageCopied: true, lineageInputs: [], lineageRoots: [expect.objectContaining({kind: "ArtifactInputSnapshot"})],
+      }), prisma);
     });
 
     it("posts deliberation entries to validated proposal targets", async () => {

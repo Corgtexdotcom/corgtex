@@ -15,6 +15,7 @@ import type { CustomerAccountStatus, CustomerDeploymentStatus, Prisma } from "@p
 import { registerCustomerDeployment } from "./customer-lifecycle";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { assertArtifactInputWriteFence, sealArtifactInputActor, captureArtifactInputProof, captureImmutableArtifactInputProof, currentArtifactInputRoots, preserveUnknownArtifactInputSnapshot, readableArtifactIds, type LineageInput } from "./source-lineage";
+import { createCrmDirectReadSession, finalizeCrmDirectReadResult, renderCrmDirectAwareRow, captureCrmDirectReadContributors, isCrmDirectOriginalRow } from "./crm-direct-original-read";
 import { crmPage, readCrmRows } from "./crm-lineage";
 import { crmIngressActor, createFreshFormQualification, recordFreshDemoLeadLineage, recordFreshEmailQualificationLineage } from "./crm-ingress-lineage";
 
@@ -1087,7 +1088,7 @@ async function crmAccountCounts(actor: AppActor, workspaceId: string, accountId:
   return { contacts: contacts.length, deals: deals.length, activities: activities.length, crmConversations: conversations.length };
 }
 
-export async function listCrmAccounts(actor: AppActor, workspaceId: string, opts?: {
+type CrmAccountReadOptions = {
   take?: number;
   skip?: number;
   query?: string;
@@ -1096,7 +1097,14 @@ export async function listCrmAccounts(actor: AppActor, workspaceId: string, opts
   lifecycleStage?: string;
   lifecycleStages?: string[];
   archiveFilter?: ArchiveFilter;
-}) {
+};
+type CrmAccountActiveListRow = Prisma.CrmAccountGetPayload<{}> & { _count: Awaited<ReturnType<typeof crmAccountCounts>> };
+type CrmAccountDirectListRow = Prisma.CrmAccountGetPayload<{}> & { _count: null; countsWithheld: true };
+export function listCrmAccounts(actor: AppActor, workspaceId: string, opts?: Omit<CrmAccountReadOptions, "archiveFilter"> & {archiveFilter?: "active"}): Promise<{items: CrmAccountActiveListRow[]; total: number; take: number; skip: number}>;
+export function listCrmAccounts(actor: AppActor, workspaceId: string, opts?: CrmAccountReadOptions): Promise<{items: (CrmAccountActiveListRow | CrmAccountDirectListRow)[]; total: number; take: number; skip: number}>;
+export async function listCrmAccounts(actor: AppActor, workspaceId: string, opts?: CrmAccountReadOptions) {
+  opts = opts ? structuredClone(opts) : undefined;
+  const direct = opts?.archiveFilter && opts.archiveFilter !== "active" ? createCrmDirectReadSession(actor, workspaceId) : undefined;
   await requireWorkspaceMembership({ actor, workspaceId });
 
   const take = opts?.take ?? 50;
@@ -1129,11 +1137,15 @@ export async function listCrmAccounts(actor: AppActor, workspaceId: string, opts
 
   const admitted = await readCrmRows(actor, workspaceId, "CrmAccount", (page) => prisma.crmAccount.findMany({
     where, orderBy: [{ updatedAt: "desc" }, { id: "asc" }], ...page,
-  }));
+  }), prisma, direct);
   const result = crmPage(admitted, take, skip);
-  return { ...result, items: await Promise.all(result.items.map(async (row) => ({ ...row,
-    _count: await crmAccountCounts(actor, workspaceId, row.id),
-  }))) };
+  const output = { ...result, items: await Promise.all(result.items.map(async row => {
+    if (isCrmDirectOriginalRow(row)) return {...row, _count: null, countsWithheld: true as const};
+    return renderCrmDirectAwareRow(actor, workspaceId, direct, "CrmAccount", row, async () => ({...row,
+      _count: await crmAccountCounts(actor, workspaceId, row.id),
+    }));
+  })) };
+  return direct ? finalizeCrmDirectReadResult(direct, output) : output;
 }
 
 export async function getCrmAccount(actor: AppActor, params: { workspaceId: string; accountId: string }) {
@@ -1436,6 +1448,8 @@ export async function backfillCrmAccountsForWorkspace(actor: AppActor, params: {
 // --- CONTACTS ---
 
 export async function listContacts(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; query?: string; accountId?: string; archiveFilter?: ArchiveFilter }) {
+  opts = opts ? structuredClone(opts) : undefined;
+  const direct = opts?.archiveFilter && opts.archiveFilter !== "active" ? createCrmDirectReadSession(actor, workspaceId) : undefined;
   await requireWorkspaceMembership({ actor, workspaceId });
   
   const take = opts?.take ?? 50;
@@ -1462,9 +1476,11 @@ export async function listContacts(actor: AppActor, workspaceId: string, opts?: 
 
   const admitted = await readCrmRows(actor, workspaceId, "CrmContact", (page) => prisma.crmContact.findMany({
     where, include: { account: true }, orderBy: [{ lastSeenAt: "desc" }, { id: "asc" }], ...page,
-  }));
+  }), prisma, direct);
   const result = crmPage(admitted, take, skip);
-  return { ...result, items: await Promise.all(result.items.map(async (row) => {
+  const output = { ...result, items: await Promise.all(result.items.map(async (row) => {
+    if (isCrmDirectOriginalRow(row)) return row;
+    return renderCrmDirectAwareRow(actor, workspaceId, direct, "CrmContact", row, async () => {
     const [account, deals, activities] = await Promise.all([
       visibleCrmRelated(actor, workspaceId, "CrmAccount", row.account),
       readCrmRows(actor, workspaceId, "CrmDeal", (page) => prisma.crmDeal.findMany({ where: { workspaceId, contactId: row.id, archivedAt: null,
@@ -1473,7 +1489,9 @@ export async function listContacts(actor: AppActor, workspaceId: string, opts?: 
         ...activeCrmParentWhere(["account", "contact", "deal"]) }, orderBy: { id: "asc" }, ...page })),
     ]);
     return { ...row, account, _count: { deals: deals.length, activities: activities.length } };
+    });
   })) };
+  return direct ? finalizeCrmDirectReadResult(direct, output) : output;
 }
 
 export async function getContact(actor: AppActor, params: { workspaceId: string; contactId: string }) {
@@ -1674,7 +1692,14 @@ export async function deleteContact(actor: AppActor, params: { workspaceId: stri
 
 // --- DEALS ---
 
-export async function listDeals(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; stage?: CrmDealStage; stages?: CrmDealStage[]; accountId?: string; contactId?: string; archiveFilter?: ArchiveFilter }) {
+type CrmDealReadOptions = { take?: number; skip?: number; stage?: CrmDealStage; stages?: CrmDealStage[]; accountId?: string; contactId?: string; archiveFilter?: ArchiveFilter };
+type CrmDealActiveListRow = Prisma.CrmDealGetPayload<{include: {account: true; contact: true}}> & { activities: Prisma.CrmActivityGetPayload<{}>[]; stageTransitions: Prisma.CrmDealStageTransitionGetPayload<{}>[] };
+type CrmDealDirectListRow = Prisma.CrmDealGetPayload<{include: {account: true; contact: true}}>;
+export function listDeals(actor: AppActor, workspaceId: string, opts?: Omit<CrmDealReadOptions, "archiveFilter"> & {archiveFilter?: "active"}): Promise<{items: CrmDealActiveListRow[]; total: number; take: number; skip: number}>;
+export function listDeals(actor: AppActor, workspaceId: string, opts?: CrmDealReadOptions): Promise<{items: (CrmDealActiveListRow | CrmDealDirectListRow)[]; total: number; take: number; skip: number}>;
+export async function listDeals(actor: AppActor, workspaceId: string, opts?: CrmDealReadOptions) {
+  opts = opts ? structuredClone(opts) : undefined;
+  const direct = opts?.archiveFilter && opts.archiveFilter !== "active" ? createCrmDirectReadSession(actor, workspaceId) : undefined;
   await requireWorkspaceMembership({ actor, workspaceId });
   
   const take = opts?.take ?? 100;
@@ -1700,11 +1725,17 @@ export async function listDeals(actor: AppActor, workspaceId: string, opts?: { t
 
   const admitted = await readCrmRows(actor, workspaceId, "CrmDeal", (page) => prisma.crmDeal.findMany({
     where, include: { account: true, contact: true }, orderBy: [{ updatedAt: "desc" }, { id: "asc" }], ...page,
-  }));
-  const contactIds = await readableArtifactIds(actor, workspaceId, "CrmContact", admitted.flatMap((row) => row.contact ? [row.contact] : []));
-  const eligible = admitted.filter((row) => row.contact && contactIds.has(row.contact.id));
+  }), prisma, direct);
+  const contactCandidates = admitted.flatMap((row) => row.contact ? [row.contact] : []);
+  const contactIds = contactCandidates.length ? await readableArtifactIds(actor, workspaceId, "CrmContact", contactCandidates) : new Set<string>();
+  const permittedContacts = contactCandidates.filter(contact => contactIds.has(contact.id));
+  if (direct && permittedContacts.length) await captureCrmDirectReadContributors(actor, workspaceId, direct, () =>
+    captureArtifactInputProof(actor, workspaceId, permittedContacts.map(contact => ({kind: "CrmContact", id: contact.id, snapshot: contact}))));
+  const eligible = admitted.filter((row) => isCrmDirectOriginalRow(row) || (row.contact && contactIds.has(row.contact.id)));
   const result = crmPage(eligible, take, skip);
-  return { ...result, items: await Promise.all(result.items.map(async (row) => {
+  const output = { ...result, items: await Promise.all(result.items.map(async (row) => {
+    if (isCrmDirectOriginalRow(row)) return row;
+    return renderCrmDirectAwareRow(actor, workspaceId, direct, "CrmDeal", row, async () => {
     const [account, contact, tasks, transitions] = await Promise.all([
       visibleCrmRelated(actor, workspaceId, "CrmAccount", row.account),
       Promise.resolve(row.contact!),
@@ -1715,7 +1746,9 @@ export async function listDeals(actor: AppActor, workspaceId: string, opts?: { t
         where: { workspaceId, dealId: row.id }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], ...page })),
     ]);
     return { ...row, account, contact, activities: tasks.slice(0, 1), stageTransitions: transitions.slice(0, 1) };
+    });
   })) };
+  return direct ? finalizeCrmDirectReadResult(direct, output) : output;
 }
 
 export async function createDeal(actor: AppActor, params: {
@@ -1922,6 +1955,8 @@ export async function listCrmActivities(actor: AppActor, workspaceId: string, op
   skip?: number;
   archiveFilter?: ArchiveFilter;
 }) {
+  opts = opts ? structuredClone(opts) : undefined;
+  const direct = opts?.archiveFilter && opts.archiveFilter !== "active" ? createCrmDirectReadSession(actor, workspaceId) : undefined;
   await requireWorkspaceMembership({ actor, workspaceId });
 
   const take = opts?.take ?? 50;
@@ -1958,16 +1993,20 @@ export async function listCrmActivities(actor: AppActor, workspaceId: string, op
   const admitted = await readCrmRows(actor, workspaceId, "CrmActivity", (page) => prisma.crmActivity.findMany({
     where, include: { account: true, contact: true, deal: true },
     orderBy: [...(Array.isArray(orderBy) ? orderBy : [orderBy]), { id: "asc" }], ...page,
-  }));
+  }), prisma, direct);
   const result = crmPage(admitted, take, skip);
-  return { ...result, items: await Promise.all(result.items.map(async (row) => {
+  const output = { ...result, items: await Promise.all(result.items.map(async (row) => {
+    if (isCrmDirectOriginalRow(row)) return row;
+    return renderCrmDirectAwareRow(actor, workspaceId, direct, "CrmActivity", row, async () => {
     const [account, contact, deal] = await Promise.all([
       visibleCrmRelated(actor, workspaceId, "CrmAccount", row.account),
       visibleCrmRelated(actor, workspaceId, "CrmContact", row.contact),
       visibleCrmRelated(actor, workspaceId, "CrmDeal", row.deal),
     ]);
     return { ...row, account, contact, deal };
+    });
   })) };
+  return direct ? finalizeCrmDirectReadResult(direct, output) : output;
 }
 
 async function requireActiveCrmActivity(tx: any, workspaceId: string, activityId: string, replacements: CrmLinks = {}) {

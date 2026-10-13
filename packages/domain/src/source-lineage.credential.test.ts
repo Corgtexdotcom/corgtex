@@ -48,8 +48,16 @@ beforeEach(() => {
   db.artifactInputLineage.findFirst.mockImplementation(async ({ where }) => manifests.filter(row => row.workspaceId === where.workspaceId
     && row.artifactType === where.artifactType && row.artifactId === where.artifactId
     && (where.contentHash === undefined || row.contentHash === where.contentHash)).sort((a, b) => b.revision - a.revision)[0] ?? null);
-  db.artifactInputLineage.findMany.mockImplementation(async ({ where }) => manifests.filter(row => row.workspaceId === where.workspaceId
-    && row.artifactType === where.artifactType && where.artifactId.in.includes(row.artifactId)));
+  db.artifactInputLineage.findMany.mockImplementation(async ({ where, orderBy, take }) => {
+    const matched = manifests.filter(row => row.workspaceId === where.workspaceId
+      && row.artifactType === where.artifactType
+      && (typeof where.artifactId === "string" ? row.artifactId === where.artifactId : where.artifactId.in.includes(row.artifactId))
+      && (where.id === undefined || row.id === where.id)
+      && (where.contentHash === undefined || row.contentHash === where.contentHash)
+      && (where.origin === undefined || row.origin === where.origin));
+    if (orderBy?.revision === "desc") matched.sort((a, b) => b.revision - a.revision);
+    return take === undefined ? matched : matched.slice(0, take);
+  });
   db.artifactInputLineage.create.mockImplementation(async ({ data }) => {
     const row = { id: `manifest-${manifests.length}`, createdAt: date, ...data }; manifests.push(row); return row;
   });

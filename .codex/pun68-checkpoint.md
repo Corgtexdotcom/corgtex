@@ -51,11 +51,40 @@ is INCOMPLETE. Keep PR1517 draft; do not merge or deploy.
   Owner locks precede source/native locks. A wrong transaction rolls back the effect.
   Success and failure finalizers serialize on the same exact owner/lease row; a
   post-commit source-read failure cannot overwrite EXECUTED with FAILED.
-- Mixed Box/MCP publication uses one sealed, single-use capability and both safe
-  adapters on the same complete roots/actor/workspace/transaction. Raw scope runners
-  are private. Local epoch revocation is checked before SDK replay. Empty connection
-  sets use their local captured policy epoch; unsupported Slack-native publication
-  is withheld before provider replay until it has a safe commit adapter.
+- Slack/Box/MCP publication uses one deeply immutable, single-use capability and
+  safe adapters on the same complete roots/actor/workspace/transaction, including
+  all provider mixtures. Complete local caller/scope admission and old permission
+  vectors are checked before SDK replay. Native/governing rows lock before epochs;
+  unbound and detached callback scopes cannot open provider connections. Empty
+  connection sets retain their captured policy epoch. Derived-only native inputs
+  recover only vectors from the exact latest DERIVED ancestor; no fresh capture
+  repairs a revoked consumed generation.
+- New HUMAN_ORIGINAL snapshots bind their exact consumed manifest ID/revision in
+  the hashed access envelope. Unbound legacy same-hash history is held if an
+  incomplete original candidate makes its ancestry ambiguous. A later valid
+  original does not redeem an earlier malformed snapshot. Original reads and
+  captures require literally empty declared inputs and roots.
+- Archived CRM HUMAN_ORIGINAL bodies have a separate direct presentation receipt,
+  using the exact latest strict original and current target/relationship/principal
+  delivery fence. It never becomes model/copy/source authority, including nested
+  read capture. Free-text archive metadata and unproved relation labels/counts are
+  omitted. Ordinary contributors, predicates, counts and returned decorations
+  retain complete source proof in one final fenced transaction. The native archive
+  API serializes the exact result immediately after its delivery check, with no
+  cache. Archived DERIVED body partition is still incomplete.
+- Meeting RESOLVE for Action/Tension/Proposal freezes complete input history before
+  changing its own consumed records. Preparation writes snapshots only; publication
+  commits target, APPLIED Insight, applicable Flow/Policy lineage, audits and events
+  together, with separate outside-TX preflights. Meeting locks precede Insight locks
+  to match generation. A strict latest independent human-original Proposal can still
+  be explicitly published by its draft manager; old private history stays held.
+  Copied/model/MCP publication retains all old inputs and cannot use that distinction.
+- addConversationTurn seals the exact actor and copies content/context/roots before
+  its first await, retaining the exact supplied transaction separately. Bloop's
+  canonical conversation lifecycle files remain untouched. The proposed Brain
+  integration contract is in .codex/pun68-brain-integration-contract.md; current
+  preflight does not attest an independent run/lease/connection, and a complete
+  global lock plan plus typed checkpoint replay validation remain integration gates.
 - Fresh synthetic demo initialization settles only its own exact unclaimed native
   event, in the still-open creation transaction before semantic data exists. All
   permission epochs remain stored and protective pre/postflight guards stay intact.
@@ -120,6 +149,12 @@ The separate release task's branch/browser/Azure CLI/lease/runtime were untouche
 | Knowledge and fresh-original restoration | 74/74 units pass; rejects old snapshots/derived vectors/missing captures/malformed original inputs, permits fresh originals and Meeting aliases | /tmp/pun68-original-restore-knowledge-final-unit.log |
 | Actual Box-to-KnowledgeChunk caller | 2/2 local PG pass: complete owner-only receipt, no provider SDK in TX, post-embed drift preserves old chunks | /tmp/pun68-knowledge-box-caller-final-pg.log |
 | Local Document privacy/write race | 1/1 local PG pass: observed row wait, no deadlock, prior chunks preserved and unreadable after archive | /tmp/pun68-knowledge-document-lock-pg.log |
+| Retrieval mock composition after a4 hosted failures | 48/48 unit pass: real dispatcher in current-proof ranking fixture; exact single-use synthetic dispatcher in cache/gateway fixture | /tmp/pun68-a4-retrieval-ci-fixture-unit.log |
+| Slack/Box/MCP commit and historical original review fixes | 16/16 local PG, 3/3 latest-manifest PG, 69/69 focused units; 101/101 broader lineage units | /tmp/pun68-slack-all-native-reviewed-final-pg.log; /tmp/pun68-native-latest-manifest-pg.log; /tmp/pun68-final-original-history-unit.log |
+| CRM direct original/native ordinary cohort | 11 PG cases passed initially; corrected invalid fixture enum and remaining native-provider case passed; final137/137 focused units | /tmp/pun68-crm-direct-pg.log; /tmp/pun68-crm-direct-native-pg.log; /tmp/pun68-crm-direct-cohort-unit.log |
+| Actual CRM original/empty/unreadable-contact deal delivery | 22/22 actual-helper units, including listDeals plus canonical serializer, revoked membership and changed unreturned positive contact contributors | /tmp/pun68-crm-direct-cohort-unit.log |
+| Meeting RESOLVE complete closure and atomic publication | 294/294 units, 18/18 PG: three targets, uncited private ancestor, self-target mutation, Flow/Policy DAG, canonical writer rollback, restore race, generation concurrency and strict human-original publishing | /tmp/pun68-meeting-resolve-unit.log; /tmp/pun68-meeting-resolve-pg.log |
+| Conversation turn immutable caller submission | 42/42 conversation/input units; exact actor/TX/content/context/roots survive attempted caller mutation | /tmp/pun68-turn-immutable-unit.log |
 | Running Finance visibility at503dd0e0 | two synthetic contributors each see1 permitted import; member revoke API403/UI markers withheld; restore API200/0 old imports | .artifacts/pun68-finance-ui/README.md and screenshots/result JSON (ignored local evidence; font fixture, no provider/model call) |
 
 Focused cohorts overlap and ran on successive local revisions. Do not add their
@@ -146,10 +181,10 @@ this isolated repository so future merges retain tracked validation assets.
 4. Private graph native edit/review/publication and requester attribution remain
    incomplete. A regenerated approved fact currently requires a fresh proposed bundle;
    review inheritance is a pending product choice.
-5. Delegated provider user authority for bare credentials, mixed CRM archive body
-   projection, and Slack-native generic commit support remain incomplete. The mixed
-   Box/MCP adapter and actual CRM atomic confirmation are now separately proved;
-   neither proves canonical Brain lifecycle acceptance. Unsupported recipes are held.
+5. Delegated provider user authority for bare credentials and archived DERIVED CRM
+   body partition remain incomplete. Strict original-only direct CRM presentation
+   and Slack/Box/MCP safe scopes are now separately proved; neither proves canonical
+   Brain lifecycle acceptance. Unsupported recipes are held.
 6. Independent GPT-6.1 Sol xhigh review found raw runner, empty-set dispatcher,
    unsupported Slack replay, fresh-original creation-vector overreach, canonical
    Meeting identity and indexed-source/epoch lock ordering issues. Their corrections
@@ -157,6 +192,18 @@ this isolated repository so future merges retain tracked validation assets.
    Exact-head CI remains a gate. Running Finance content visibility now has synthetic
    evidence; that does not establish report regeneration or canonical Brain lifecycle.
    No ready/complete/ship claim is made.
+
+### Hosted CI ata4be4f9b
+
+Run38404855677 finished FAILURE:11996 passed/18 failed/2 skipped;735 passing
+files/5 failing/1 skipped. Build, DatabaseSync (including fresh seed), docs/policy,
+scans, lint/typecheck and migration/schema checks passed. The four Box knowledge
+writer failures from503 are resolved. Failures are7 genuine Recall gaps,2 Action
+public-reader gaps,1 archived CRM body-view gap, and8 retrieval test cases whose
+domain mocks lacked the newly integrated preflight exports. The retrieval fixtures
+are corrected with distinct transaction clients and48 passing units; the ranking
+fixture uses the real dispatcher and actual source helpers. The cache/gateway mock
+does not establish native source authority. A subsequent push needs exact-head CI.
 
 ### Hosted CI at503dd0e0
 

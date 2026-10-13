@@ -290,6 +290,7 @@ vi.mock("@corgtex/shared", () => {
 
 vi.mock("./source-lineage", async () => ({
   sealArtifactInputActor: (await import("./artifact-input-actor")).sealArtifactInputActor,
+  assertDirectArtifactReadOutsideCapture: vi.fn(),
   assertArtifactInputWriteFence: vi.fn(async () => {}),
   captureArtifactInputProof: vi.fn(async () => []),
   captureImmutableArtifactInputProof: vi.fn(async (_actor, _ws, roots) => roots),
@@ -298,6 +299,17 @@ vi.mock("./source-lineage", async () => ({
   preserveUnknownArtifactInputSnapshot: vi.fn(),
   readableArtifactIds: vi.fn(async (_actor: unknown, _ws: string, _kind: string, rows: Array<{ id: string }>) => new Set(rows.map((row) => row.id))),
 }));
+vi.mock("./crm-direct-original-read", () => ({
+  createCrmDirectReadSession: vi.fn(() => ({})),
+  admitCrmDirectOriginalRows: vi.fn(async () => []),
+  trackCrmDirectOrdinaryRows: vi.fn(async () => {}),
+  assertCrmDirectReadCurrent: vi.fn(async () => {}),
+  isCrmDirectOriginalRow: vi.fn(() => false),
+  finalizeCrmDirectReadResult: vi.fn(async (_session, result) => result),
+  captureCrmDirectReadContributors: vi.fn(async (_actor, _ws, _session, read) => read()),
+  renderCrmDirectAwareRow: vi.fn(async (_actor, _ws, _session, _kind, _row, render) => render()),
+}));
+
 vi.mock("./producer-lineage", () => ({
   prepareProducerLineage: vi.fn(async () => ({ mode: "DERIVED", inputs: [], roots: [] })),
   finishProducerLineage: vi.fn(),

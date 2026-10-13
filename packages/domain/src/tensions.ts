@@ -12,7 +12,7 @@ import { createNotificationIntent } from "./notifications";
 import { requireDraftManager, requireCreationInputRoots } from "./draft-permissions";
 import { requireCollaborativeWorkItemEditor } from "./collaborative-permissions";
 import { resolveWorkspaceProposalLink } from "./proposal-links";
-import { captureArtifactInputProof, readableArtifactIds, type LineageRoot } from "./source-lineage";
+import { assertArtifactInputWriteFence, captureArtifactInputProof, captureImmutableArtifactInputProof, readableArtifactIds, type LineageRoot } from "./source-lineage";
 import { captureReadableDigestInputs } from "./digest-lineage";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
@@ -475,13 +475,10 @@ export async function updateTension(actor: AppActor, params: ProducerLineagePara
   isPrivate?: boolean;
   evidenceDocumentIds?: string[] | null;
   expectedVersion?: number;
-}) {
-  const membership = await requireWorkspaceMembership({
-    actor,
-    workspaceId: params.workspaceId,
-  });
-
-  return prisma.$transaction(async (tx) => {
+}, transaction?: Prisma.TransactionClient) {
+  const run = async (tx: Prisma.TransactionClient) => {
+    await assertArtifactInputWriteFence(tx);
+    const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
     await acquireWorkItemAdvisoryLock(tx, "Tension", params.tensionId);
     const tension = await tx.tension.findUnique({
       where: { id: params.tensionId },
@@ -607,6 +604,9 @@ export async function updateTension(actor: AppActor, params: ProducerLineagePara
 
     const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
       artifact: { kind: "Tension", id: tension.id }, before: tension, capture: params, copied: params.lineageCopied });
+    if (transaction && params.lineageCopied && receipt.mode === "DERIVED") {
+      receipt.roots = await captureImmutableArtifactInputProof(actor, params.workspaceId, receipt.roots, tx);
+    }
     let updated;
     try {
       updated = await tx.tension.update({
@@ -716,8 +716,10 @@ export async function updateTension(actor: AppActor, params: ProducerLineagePara
       }
     }
 
+    await assertArtifactInputWriteFence(tx);
     return updated;
-  });
+  };
+  return transaction ? run(transaction) : prisma.$transaction(run);
 }
 
 export async function deleteTension(actor: AppActor, params: {

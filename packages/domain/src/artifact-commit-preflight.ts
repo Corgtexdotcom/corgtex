@@ -4,6 +4,10 @@ import { prisma, type AppActor } from "@corgtex/shared";
 import { sealArtifactInputActor } from "./artifact-input-actor";
 import { invariant } from "./errors";
 import { inspectStoredArtifactInputDependencies, isArtifactInputProofReadable, type LineageRoot } from "./source-lineage";
+import { assertArtifactInputClosureLocallyAdmissible } from "./source-lineage";
+import { withArtifactNativeCommitPhase } from "./artifact-native-commit-phase";
+import { prepareSlackNativeCommitPreflight, withSlackNativeCommitPreflight,
+  type SlackNativeCommitPreflight } from "./communication-native-authority";
 import { prepareExternalProviderRootCommitPreflight, withExternalProviderCommitPreflight,
   type ExternalProviderCommitPreflight } from "./external-provider-authority";
 import { prepareExternalMcpResponseCommitPreflight, withExternalMcpResponseCommitPreflight,
@@ -15,7 +19,8 @@ import { artifactPermissionEpochIdentities, isArtifactPermissionEpochProofCurren
 declare const commitBrand: unique symbol;
 export type ArtifactCommitPreflight = { readonly [commitBrand]: true };
 type Backend = { kind: "local" } | { kind: "box"; token: ExternalProviderCommitPreflight }
-  | { kind: "mcp"; token: ExternalMcpResponseCommitPreflight } | { kind: "mixed"; token: ExternalMixedCommitPreflight };
+  | { kind: "mcp"; token: ExternalMcpResponseCommitPreflight } | { kind: "slack"; token: SlackNativeCommitPreflight }
+  | { kind: "mixed"; token: ExternalMixedCommitPreflight };
 type State = { actor: AppActor; workspaceId: string; roots: LineageRoot[]; backend: Backend };
 const preflights = new WeakMap<object, State>();
 const MAX_NODES = 10000;
@@ -35,8 +40,9 @@ export async function prepareArtifactCommitPreflight(actor: AppActor, workspaceI
   const dependencies = await inspectStoredArtifactInputDependencies(prisma, workspaceId, roots, { maxNodes: MAX_NODES });
   invariant(dependencies.complete && dependencies.roots.length <= MAX_NODES,
     409, "UNKNOWN_LINEAGE", "Commit input closure is incomplete or unbounded.");
-  invariant(!dependencies.roots.some(root => root.kind === "CommunicationMessageNativeInput"),
-    409, "UNKNOWN_LINEAGE", "Slack native inputs require a transaction-safe commit adapter.");
+  // The entire caller scope and local ancestry must be admitted before any
+  // native child replays a query that can itself contain another source's text.
+  await assertArtifactInputClosureLocallyAdmissible(actor, workspaceId, roots);
   // Reject a locally revoked contributor before replaying a request whose query
   // may itself contain its text. These checks confer no remote/read capability.
   const currentCaptures = new Set<string>();
@@ -78,9 +84,12 @@ export async function prepareArtifactCommitPreflight(actor: AppActor, workspaceI
   // A connection-set absence proof is local control data: its captured policy
   // epoch locks later insertions without inventing a provider response to replay.
   const mcp = dependencies.roots.some(root => root.kind === "ExternalMcpResponseInput");
-  const backend: Backend = box && mcp ? { kind: "mixed", token: await prepareExternalMixedCommitPreflight(actor, workspaceId, roots) }
+  const slack = dependencies.roots.some(root => root.kind === "CommunicationMessageNativeInput");
+  const backend: Backend = Number(box) + Number(mcp) + Number(slack) >= 2
+    ? { kind: "mixed", token: await prepareExternalMixedCommitPreflight(actor, workspaceId, roots) }
     : box ? { kind: "box", token: await prepareExternalProviderRootCommitPreflight(actor, workspaceId, roots) }
     : mcp ? { kind: "mcp", token: await prepareExternalMcpResponseCommitPreflight(actor, workspaceId, roots) }
+    : slack ? { kind: "slack", token: await prepareSlackNativeCommitPreflight(actor, workspaceId, roots) }
     : { kind: "local" };
   invariant(await isArtifactInputProofReadable(actor, workspaceId, roots), 409, "SOURCE_CHANGED", "Commit source permissions changed.");
   const token = Object.freeze({}) as ArtifactCommitPreflight;
@@ -102,8 +111,11 @@ export async function withArtifactCommitPreflight<T>(actor: AppActor, workspaceI
     return result;
   };
   const backend = state.backend;
-  if (backend.kind === "box") return withExternalProviderCommitPreflight(actor, workspaceId, tx, backend.token, verified);
-  if (backend.kind === "mcp") return withExternalMcpResponseCommitPreflight(actor, workspaceId, tx, backend.token, verified);
-  if (backend.kind === "mixed") return withExternalMixedCommitPreflight(actor, workspaceId, tx, state.roots, backend.token, verified);
-  return verified();
+  return withArtifactNativeCommitPhase(() => {
+    if (backend.kind === "box") return withExternalProviderCommitPreflight(actor, workspaceId, tx, backend.token, verified);
+    if (backend.kind === "mcp") return withExternalMcpResponseCommitPreflight(actor, workspaceId, tx, backend.token, verified);
+    if (backend.kind === "slack") return withSlackNativeCommitPreflight(actor, workspaceId, tx, state.roots, backend.token, verified);
+    if (backend.kind === "mixed") return withExternalMixedCommitPreflight(actor, workspaceId, tx, state.roots, backend.token, verified);
+    return verified();
+  });
 }

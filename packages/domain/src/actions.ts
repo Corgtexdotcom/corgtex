@@ -16,7 +16,7 @@ import { humanMemberIdentityWhere } from "./member-identity";
 import { requireDraftManager, requireCreationInputRoots } from "./draft-permissions";
 import { requireCollaborativeWorkItemEditor } from "./collaborative-permissions";
 import { resolveWorkspaceProposalLink } from "./proposal-links";
-import { readableArtifactIds } from "./source-lineage";
+import { captureImmutableArtifactInputProof, readableArtifactIds } from "./source-lineage";
 import { captureReadableDigestInputs } from "./digest-lineage";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
@@ -1088,6 +1088,9 @@ async function updateActionRecord(actor: AppActor, params: ProducerLineageParams
 
     const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
       artifact: { kind: "Action", id: action.id }, before: action, capture: params, copied: params.lineageCopied });
+    if (params._tx && params.lineageCopied && receipt.mode === "DERIVED") {
+      receipt.roots = await captureImmutableArtifactInputProof(actor, params.workspaceId, receipt.roots, tx);
+    }
     let updated;
     try {
       updated = await tx.action.update({

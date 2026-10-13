@@ -13,7 +13,7 @@ vi.mock("@corgtex/shared", async (original) => ({ ...await original<typeof impor
 vi.mock("../../domain/src/auth", () => ({ requireWorkspaceMembership: fixture.membership, isGlobalOperator: () => false }));
 vi.mock("../../domain/src/brain-access", () => ({ resolveKnowledgeAccessDomains: async (actor: any) => fixture.domains.get(actor.user.id) ?? [] }));
 vi.mock("@corgtex/domain", async () => ({ ...await import("../../domain/src/source-lineage"),
-  ...await import("../../domain/src/brain-access") }));
+  ...await import("../../domain/src/brain-access"), ...await import("../../domain/src/artifact-commit-preflight") }));
 vi.mock("@corgtex/models", async () => ({ ...await import("../../models/src/provider-errors"), defaultModelGateway: model, resolveModel: () => "synthetic-model" }));
 
 import { resetLocalCacheStore } from "@corgtex/shared";
@@ -37,6 +37,11 @@ beforeEach(async () => {
   resetLocalCacheStore();
   fixture.rows.knowledgeChunk = [];
   fixture.prisma.$queryRaw = vi.fn(async () => []);
+  fixture.prisma.$transaction.mockImplementation(async (work: any) => {
+    const before = structuredClone(fixture.rows);
+    try { return await work({ ...fixture.prisma }); }
+    catch (error) { for (const name of Object.keys(before)) fixture.rows[name] = before[name]; throw error; }
+  });
   fixture.prisma.knowledgeChunk = {
     findFirst: vi.fn(async ({ where }: any) => structuredClone(fixture.rows.knowledgeChunk.find(row => row.id === where.id && row.workspaceId === where.workspaceId) ?? null)),
     deleteMany: vi.fn(async ({ where }: any) => { fixture.rows.knowledgeChunk = fixture.rows.knowledgeChunk.filter(row => row.sourceId !== where.sourceId || row.workspaceId !== where.workspaceId); return { count: 1 }; }),

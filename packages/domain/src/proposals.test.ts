@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { prisma } from "@corgtex/shared";
+import { SOURCE_PERMISSION_POLICY_VERSION } from "./source-permission-epochs";
 
 const makeTension = (id = "t-1", overrides = {}) => ({
   id, workspaceId: "ws-1", title: `Tension ${id}`, bodyMd: "Tension body", circleId: null, meetingId: null,
@@ -16,6 +17,8 @@ const makeProposal = (id = "p-1", overrides = {}) => ({
 
 vi.mock("@corgtex/shared", () => ({
   prisma: {
+    artifactInputLineage: { findFirst: vi.fn(async ({where}) => ({ origin: "HUMAN_ORIGINAL", contentHash: "a".repeat(64), rootsJson: [], inputsJson: [], epochProofVersion: 1,
+      permissionEpochsJson: { version: 1, policyVersion: SOURCE_PERMISSION_POLICY_VERSION, entries: [{ kind: "Proposal", id: where.artifactId, epoch: "1" }, { kind: "Workspace", id: where.workspaceId, epoch: "1" }] } })) },
     proposal: {
       count: vi.fn(),
       create: vi.fn(),
@@ -74,7 +77,7 @@ vi.mock("@corgtex/shared", () => ({
     },
     approvalFlow: {
       findUnique: vi.fn(),
-      update: vi.fn(),
+      update: vi.fn(async ({where, data}) => ({id: where.id, ...data})),
     },
     approvalDecision: {
       deleteMany: vi.fn(),
@@ -96,6 +99,7 @@ vi.mock("./source-lineage", async () => ({
   advanceHumanArtifactInputLineage: vi.fn(),
   captureArtifactInputProof: vi.fn().mockResolvedValue([]),
   captureArtifactInputSnapshotProof: vi.fn().mockResolvedValue([]),
+  captureImmutableArtifactInputProof: vi.fn(async (_actor, _workspaceId, roots) => roots),
   invalidateArtifactInputLineage: vi.fn(),
   lineageContentFingerprint: vi.fn().mockReturnValue("a".repeat(64)),
   preserveUnknownArtifactInputSnapshot: vi.fn(),
@@ -1709,6 +1713,8 @@ describe("resolveProposal", () => {
       proposalId: "p-2",
       outcome: "NOT_ADOPTED",
       decisionMd: "Open objections changed the decision.",
+      lineageCopied: true,
+      lineageRoots: [{ kind: "ArtifactInputSnapshot", id: "full-model-inputs", fingerprint: "b".repeat(64) }],
     });
 
     expect(prisma.approvalFlow.update).toHaveBeenCalledWith(expect.objectContaining({
@@ -3150,7 +3156,10 @@ describe("proposal lineage integration", () => {
 
   it("records the complete adopted policy receipt atomically from the updated Proposal", async () => {
     const { resolveProposal } = await import("./proposals");
-    const { recordArtifactInputLineage } = await import("./source-lineage");
+    const { recordArtifactInputLineage, captureImmutableArtifactInputProof } = await import("./source-lineage");
+    const outputSnapshot = { kind: "ArtifactInputSnapshot" as const, id: "resolved-proposal-output", fingerprint: "b".repeat(64) };
+    vi.mocked(captureImmutableArtifactInputProof).mockImplementationOnce(async (_actor, _workspaceId, roots) => [...roots])
+      .mockResolvedValueOnce([outputSnapshot]);
     const before = makeProposal("policy-source", { status: "OPEN", isPrivate: false, publishedAt: new Date() });
     const updated = { ...before, status: "RESOLVED", resolutionOutcome: "ADOPTED", decisionMd: "Adopt it", decidedAt: new Date() };
     const policy = { id: "policy-copy", workspaceId: "ws-1", proposalId: before.id, title: updated.title, bodyMd: updated.bodyMd, circleId: null, acceptedAt: updated.decidedAt };
@@ -3160,7 +3169,7 @@ describe("proposal lineage integration", () => {
     vi.mocked(prisma.policyCorpus.upsert).mockResolvedValueOnce(policy as any);
     await resolveProposal(actor, { workspaceId: "ws-1", proposalId: before.id, outcome: "ADOPTED", decisionMd: "Adopt it" });
     expect(recordArtifactInputLineage).toHaveBeenLastCalledWith(expect.objectContaining({ tx: prisma, actor,
-      artifact: { kind: "PolicyCorpus", id: policy.id }, content: policy, origin: "DERIVED", inputs: [{ kind: "Proposal", id: updated.id }] }));
+      artifact: { kind: "PolicyCorpus", id: policy.id }, content: policy, origin: "DERIVED", inputs: [], inheritedRoots: [outputSnapshot] }));
     expect(vi.mocked(prisma.policyCorpus.upsert).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(recordArtifactInputLineage).mock.invocationCallOrder[1]);
   });
 

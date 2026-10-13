@@ -10,7 +10,7 @@ const { prismaMock, modelGatewayMock } = vi.hoisted(() => {
   };
   return {
     prismaMock: {
-      $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(prismaMock)),
+      $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({ ...prismaMock })),
       $queryRaw: vi.fn(),
       knowledgeChunk: knowledgeChunkMock,
       workspace: { findUnique: vi.fn() },
@@ -77,16 +77,33 @@ vi.mock("@corgtex/models", async (importOriginal) => ({
   resolveModel: vi.fn().mockReturnValue("fake-model"),
 }));
 
-vi.mock("@corgtex/domain", () => ({
-  assertArtifactInputWriteFence: vi.fn().mockResolvedValue(undefined),
-  recordArtifactInputLineage: vi.fn().mockResolvedValue(undefined),
-  resolveKnowledgeAccessDomains: vi.fn(async () => ["WORKSPACE", "FINANCE"]),
-  readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map((row: any) => row.id))),
-  lineageContentFingerprint: (kind: string, row: any) => `${kind}:${row.id}`,
-  captureArtifactInputProof: vi.fn(async (_actor, _workspaceId, inputs) => inputs.map((input: any) => ({ kind: input.kind, id: input.id, fingerprint: `${input.kind}:${input.id}` }))),
-  captureImmutableArtifactInputProof: vi.fn(async (_actor, _workspaceId, roots) => roots),
-  isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
-}));
+vi.mock("@corgtex/domain", () => {
+  // Cache/gateway cases use synthetic source proofs. Actual source authority and
+  // native provider publication are covered by the lineage and PG caller suites.
+  const preflights = new WeakMap<object, { actor: unknown; workspaceId: string; roots: unknown }>();
+  return {
+    assertArtifactInputWriteFence: vi.fn().mockResolvedValue(undefined),
+    recordArtifactInputLineage: vi.fn().mockResolvedValue(undefined),
+    resolveKnowledgeAccessDomains: vi.fn(async () => ["WORKSPACE", "FINANCE"]),
+    readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map((row: any) => row.id))),
+    lineageContentFingerprint: (kind: string, row: any) => `${kind}:${row.id}`,
+    captureArtifactInputProof: vi.fn(async (_actor, _workspaceId, inputs) => inputs.map((input: any) => ({ kind: input.kind, id: input.id, fingerprint: `${input.kind}:${input.id}` }))),
+    captureImmutableArtifactInputProof: vi.fn(async (_actor, _workspaceId, roots) => roots),
+    prepareArtifactCommitPreflight: vi.fn(async (actor, workspaceId, roots) => {
+      const token = Object.freeze({});
+      preflights.set(token, { actor, workspaceId, roots: structuredClone(roots) });
+      return token;
+    }),
+    withArtifactCommitPreflight: vi.fn(async (actor, workspaceId, tx, roots, token, work) => {
+      const saved = preflights.get(token);
+      if (!saved || saved.actor !== actor || saved.workspaceId !== workspaceId || tx === prismaMock
+        || JSON.stringify(saved.roots) !== JSON.stringify(roots)) throw new Error("Synthetic commit binding changed.");
+      preflights.delete(token);
+      return work();
+    }),
+    isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
+  };
+});
 
 let persistedChunks: any[] = [];
 const persistedRows = (where: any) => structuredClone(persistedChunks.filter(row => row.workspaceId === where.workspaceId && where.id.in.includes(row.id)));

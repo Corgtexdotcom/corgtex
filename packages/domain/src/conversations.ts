@@ -1,4 +1,4 @@
-import { assertArtifactInputWriteFence, readableArtifactIds, recordArtifactInputLineage, advanceHumanArtifactInputLineage, currentArtifactInputRoots, captureArtifactInputProof, type LineageRoot } from "./source-lineage";
+import { assertArtifactInputWriteFence, readableArtifactIds, recordArtifactInputLineage, advanceHumanArtifactInputLineage, currentArtifactInputRoots, captureArtifactInputProof, sealArtifactInputActor, type LineageRoot } from "./source-lineage";
 import { prisma, toInputJson } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
@@ -137,6 +137,9 @@ export async function addConversationTurn(actor: AppActor, params: {
   lineageRoots?: LineageRoot[];
   tx?: import("@prisma/client").Prisma.TransactionClient;
 }) {
+  sealArtifactInputActor(actor);
+  const { tx: suppliedTx, ...submission } = params;
+  params = { ...structuredClone(submission), tx: suppliedTx };
   const userId = actor.kind === "user" ? actor.user.id : null;
   invariant(userId, 401, "AUTH_REQUIRED", "Conversations require a user actor.");
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx: params.tx });

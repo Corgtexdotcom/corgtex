@@ -5,11 +5,17 @@ import { Prisma } from "@prisma/client";
 import { decryptSecret, encryptSecret, prisma, type AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
+import { assertOutsideArtifactNativeCommitPhase, isArtifactNativeCommitPhase, withArtifactNativeCommitPhase } from "./artifact-native-commit-phase";
+import { savedEnclosingNativeEpochs, savedNativeVectorKey } from "./native-commit-original-vector";
 import { externalMcpConnectionGrantHash, externalMcpNativeReadRequest, loadExternalMcpNativeConnection,
   readExternalMcpNativeToolResult, assertExternalMcpNativeReadOrigin, type ExternalMcpConnectionRecord } from "./external-mcp";
 import { capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, parsePermissionEpochProof,
   type PermissionEpochProof } from "./source-permission-epochs";
 import type { LineageRoot } from "./source-lineage";
+import { claimSlackNativeCommitPreflight, inspectSlackNativeCommitClaim,
+  discardSlackNativeCommitPreflight,
+  lockSlackNativeGoverningRows, withClaimedSlackNativeCommitPreflight,
+  type SlackNativeCommitPreflight } from "./communication-native-authority";
 import { sealArtifactInputActor } from "./source-lineage";
 
 type Db = typeof prisma | Prisma.TransactionClient;
@@ -76,9 +82,32 @@ async function currentAuthority(actor: AppActor, workspaceId: string, connection
   return connection;
 }
 
+/** Preparatory local admission only; the safe reader still requires a live provider replay. */
+export async function isExternalMcpResponseInputLocallyCurrent(actor: AppActor, workspaceId: string,
+  input: ExternalMcpResponseInputRecord, db: Db = prisma) {
+  try {
+    const userId = principal(actor, workspaceId);
+    if (input.workspaceId !== workspaceId || input.localUserId !== userId || !nativeRequest(input)) return false;
+    const original = parsePermissionEpochProof(input.originalLocalEpochsJson);
+    if (!original || !originalEpochIdentities(workspaceId, userId, input.connectionId).every(identity =>
+      original.entries.some(entry => entry.kind === identity.kind && entry.id === identity.id))
+      || !await isArtifactPermissionEpochProofCurrent(workspaceId, original, db)) return false;
+    if (externalMcpResponseHash(JSON.parse(decryptSecret(input.encryptedResponseJson))) !== input.responseHash) return false;
+    const connection = await currentAuthority(actor, workspaceId, input.connectionId, db);
+    if (connection.providerKey !== input.providerKey || connection.serverUrl !== input.serverUrl
+      || (connection.providerAccountId ?? null) !== input.providerAccountId
+      || externalMcpConnectionGrantHash(connection) !== input.connectionGrantHash) return false;
+    const stored = await db.externalMcpResponseInput.findFirst({ where: { id: input.id, workspaceId } });
+    const { lineageContentFingerprint } = await import("./source-lineage");
+    return !!stored && lineageContentFingerprint("ExternalMcpResponseInput", stored)
+      === lineageContentFingerprint("ExternalMcpResponseInput", input);
+  } catch { return false; }
+}
+
 /** Capture authority revisions before the network call; a changed grant can never restamp old bytes. */
 export async function captureExternalMcpResponseInput(actor: AppActor, submitted: { workspaceId: string; connectionId: string;
   mode: Mode; query?: string; limit?: number; externalId?: string }): Promise<ExternalMcpCapturedResponse> {
+  assertOutsideArtifactNativeCommitPhase();
   sealArtifactInputActor(actor);
   const params = freezeJson(structuredClone(submitted));
   const userId = principal(actor, params.workspaceId);
@@ -148,22 +177,32 @@ const commitScope = new AsyncLocalStorage<CommitState & { tx: Prisma.Transaction
 declare const claimBrand: unique symbol;
 export type ExternalMcpResponseCommitClaim = { readonly [claimBrand]: true };
 const claims = new WeakMap<object, CommitState & { tx: Prisma.TransactionClient }>();
+/** Cancellation confers no authority; an attempted owner commit burns every peer plan. */
+export function discardExternalMcpResponseCommitPreflight(token: ExternalMcpResponseCommitPreflight,
+  claim?: ExternalMcpResponseCommitClaim) {
+  preflights.delete(token);
+  if (claim) claims.delete(claim);
+}
 
 /** Bounded provider replay happens before the writer transaction, using only original root proofs. */
 export async function prepareExternalMcpResponseCommitPreflight(actor: AppActor, workspaceId: string,
   originalRoots: readonly LineageRoot[]): Promise<ExternalMcpResponseCommitPreflight> {
+  assertOutsideArtifactNativeCommitPhase();
   const roots = structuredClone([...originalRoots]);
   const submittedRoots = structuredClone(roots);
   const userId = principal(actor, workspaceId);
   const actorHash = externalMcpResponseHash(actor);
   invariant(roots.length > 0 && roots.length <= MAX_ROOTS, 409, "SOURCE_CHANGED", "External MCP commit requires bounded original inputs.");
-  const { inspectStoredArtifactInputDependencies, isArtifactInputProofReadable, lineageContentFingerprint } = await import("./source-lineage");
+  const { inspectStoredArtifactInputDependencies, assertArtifactInputClosureLocallyAdmissible,
+    isArtifactInputProofReadable, lineageContentFingerprint } = await import("./source-lineage");
   const dependencies = await inspectStoredArtifactInputDependencies(prisma, workspaceId, roots);
   invariant(dependencies.complete && dependencies.roots.length <= MAX_ROOTS,
     409, "UNKNOWN_LINEAGE", "External MCP commit inputs have incomplete ancestry.");
+  await assertArtifactInputClosureLocallyAdmissible(actor, workspaceId, roots);
   const native = dependencies.roots.filter(root => root.kind === "ExternalMcpResponseInput");
   invariant(native.length > 0 && native.length <= MAX_NATIVE_INPUTS,
     409, "SOURCE_CHANGED", "External MCP commit needs a bounded native response.");
+  let enclosingEpochs: Awaited<ReturnType<typeof savedEnclosingNativeEpochs>> | undefined;
   const inputs: CommitState["inputs"] = new Map();
   for (const root of native) {
     const direct = roots.find(item => item.kind === root.kind && item.id === root.id && item.fingerprint === root.fingerprint);
@@ -175,6 +214,10 @@ export async function prepareExternalMcpResponseCommitPreflight(actor: AppActor,
         if (snapshot?.sourceKind === root.kind && snapshot.sourceId === root.id && snapshot.sourceFingerprint === root.fingerprint
           && snapshot.epochProofVersion === 1) { originalProof = parsePermissionEpochProof(snapshot.permissionEpochsJson); break; }
       }
+    }
+    if (!originalProof) {
+      enclosingEpochs ??= await savedEnclosingNativeEpochs(workspaceId, submittedRoots, "ExternalMcpResponseInput");
+      originalProof = enclosingEpochs.get(savedNativeVectorKey(root.kind, root.id, root.fingerprint)) ?? null;
     }
     invariant(originalProof && originalProof.entries.some(entry => entry.kind === root.kind && entry.id === root.id)
       && await isArtifactPermissionEpochProofCurrent(workspaceId, originalProof),
@@ -241,20 +284,73 @@ export async function withExternalMcpResponseCommitPreflight<T>(actor: AppActor,
     await tx.$queryRaw`SELECT "id" FROM "Member" WHERE "userId" = ${input.localUserId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
   }
   const { isArtifactInputProofReadable } = await import("./source-lineage");
-  return runExternalMcpResponseCommitClaim(actor, workspaceId, tx, claim, async () => {
+  return withArtifactNativeCommitPhase(() => runExternalMcpResponseCommitClaim(actor, workspaceId, tx, claim, async () => {
       invariant(await isArtifactInputProofReadable(actor, workspaceId, state.roots, tx),
         409, "SOURCE_CHANGED", "External MCP original proof changed before writing.");
       const result = await work();
       invariant(await isArtifactInputProofReadable(actor, workspaceId, state.roots, tx),
         409, "SOURCE_CHANGED", "External MCP original proof changed during writing.");
       return result;
-  });
+  }));
+}
+
+/** Safe two-provider executor: consume both plans synchronously, then lock all native rows before governors or epochs. */
+export async function withExternalMcpAndSlackCommitPreflights<T>(actor: AppActor, workspaceId: string,
+  tx: Prisma.TransactionClient, submitted: readonly LineageRoot[], mcpToken: ExternalMcpResponseCommitPreflight,
+  slackToken: SlackNativeCommitPreflight, work: () => Promise<T>): Promise<T> {
+  const mcpClaim = claimExternalMcpResponseCommitPreflight(actor, workspaceId, tx, mcpToken, submitted);
+  let slackClaim: ReturnType<typeof claimSlackNativeCommitPreflight>;
+  try {
+    slackClaim = claimSlackNativeCommitPreflight(actor, workspaceId, tx, slackToken, submitted);
+  } catch (error) {
+    discardExternalMcpResponseCommitPreflight(mcpToken, mcpClaim);
+    discardSlackNativeCommitPreflight(slackToken);
+    throw error;
+  }
+  try {
+  const mcp = claims.get(mcpClaim)!;
+  const slack = inspectSlackNativeCommitClaim(slackClaim);
+  invariant(slack.actor === actor && slack.workspaceId === workspaceId && slack.tx === tx,
+    409, "SOURCE_CHANGED", "Native commit principals disagree.");
+  const roots = [...submitted, ...mcp.roots.slice(submitted.length), ...slack.roots.slice(submitted.length)];
+  invariant(roots.length <= MAX_ROOTS, 409, "UNKNOWN_LINEAGE", "Mixed native proof is unbounded.");
+  const native = [
+    ...[...mcp.inputs.keys()].map(id => ({ kind: "ExternalMcpResponseInput", id })),
+    ...slack.inputIds.map(id => ({ kind: "CommunicationMessageNativeInput", id })),
+  ].sort((a, b) => a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
+  for (const row of native) {
+    if (row.kind === "ExternalMcpResponseInput")
+      await tx.$queryRaw`SELECT "id" FROM "ExternalMcpResponseInput" WHERE "id" = ${row.id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+    else await tx.$queryRaw`SELECT "id" FROM "CommunicationMessageNativeInput" WHERE "id" = ${row.id} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+  }
+  for (const id of [...mcp.inputs.keys()].sort()) {
+    const input = await tx.externalMcpResponseInput.findFirst({ where: { id, workspaceId } });
+    invariant(input, 409, "SOURCE_CHANGED", "External MCP native input changed during commit.");
+    await tx.$queryRaw`SELECT "id" FROM "ExternalMcpConnection" WHERE "id" = ${input.connectionId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+    await tx.$queryRaw`SELECT "id" FROM "Member" WHERE "userId" = ${input.localUserId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+  }
+  await lockSlackNativeGoverningRows(tx, workspaceId, slack.inputIds, actor);
+  const { isArtifactInputProofReadable } = await import("./source-lineage");
+  return await withArtifactNativeCommitPhase(() => runExternalMcpResponseCommitClaim(actor, workspaceId, tx, mcpClaim,
+    () => withClaimedSlackNativeCommitPreflight(actor, workspaceId, tx, slackClaim, async () => {
+      invariant(await isArtifactInputProofReadable(actor, workspaceId, roots, tx),
+        409, "SOURCE_CHANGED", "Mixed native proof changed before publication.");
+      const result = await work();
+      invariant(await isArtifactInputProofReadable(actor, workspaceId, roots, tx),
+        409, "SOURCE_CHANGED", "Mixed native proof changed during publication.");
+      return result;
+    })));
+  } finally {
+    discardExternalMcpResponseCommitPreflight(mcpToken, mcpClaim);
+    discardSlackNativeCommitPreflight(slackToken, slackClaim);
+  }
 }
 
 /** Live replay is mandatory outside the exact single-use commit transaction. */
 export async function isExternalMcpResponseInputCurrent(actor: AppActor, workspaceId: string,
   input: ExternalMcpResponseInputRecord, db: Db = prisma): Promise<boolean> {
   try {
+    if (db === prisma && isArtifactNativeCommitPhase()) return false;
     const userId = principal(actor, workspaceId);
     if (input.workspaceId !== workspaceId || input.localUserId !== userId || !nativeRequest(input)) return false;
     const original = parsePermissionEpochProof(input.originalLocalEpochsJson);

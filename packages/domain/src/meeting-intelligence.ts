@@ -17,6 +17,8 @@ import { buildMeetingIntelligenceContext, preserveMeetingLineageAfterMetadataWri
 import {
   captureArtifactInputProof,
   captureArtifactInputSnapshotProof,
+  captureImmutableArtifactInputProof,
+  assertArtifactInputWriteFence,
   invalidateArtifactInputLineage,
   isArtifactInputProofReadable,
   lineageContentFingerprint,
@@ -38,6 +40,9 @@ import {
   type MeetingTranscriptChunk,
 } from "./meeting-transcript-chunks";
 import { recordMeetingTranscriptProcessingStage } from "./meeting-transcript-processing";
+import { prepareArtifactCommitPreflight, withArtifactCommitPreflight } from "./artifact-commit-preflight";
+import { acquireWorkItemAdvisoryLock } from "./work-item-versions";
+import { acquireConstitutionCorpusAdvisoryLock } from "./constitutions";
 
 const AUTO_APPLY_CONFIDENCE_THRESHOLD = 0.8;
 const AUTO_APPLY_DELIBERATION_THRESHOLD = 0.85;
@@ -1122,6 +1127,101 @@ export async function dismissInsight(
   });
 }
 
+/** Preparation writes immutable history only. All resolution effects share the
+ * publication transaction; no provider replay runs while its locks are held. */
+async function applyResolutionWithLineage(actor: AppActor, workspaceId: string,
+  insight: MeetingInsight & { meeting: NonNullable<Awaited<ReturnType<typeof prisma.meeting.findFirst>>> },
+  autoApplied?: boolean) {
+  const targetKind = insight.targetEntityType;
+  const targetId = insight.targetEntityId;
+  invariant(targetId && (targetKind === "Action" || targetKind === "Tension" || targetKind === "Proposal"),
+    400, "INVALID_STATE", "Resolved insight must point to a supported target record.");
+  const outcome = (insight.resolutionOutcome || "ADOPTED") as ProposalResolutionOutcome;
+  const flow = targetKind === "Proposal" ? await prisma.approvalFlow.findFirst({
+    where: { workspaceId, subjectType: "PROPOSAL", subjectId: targetId }, select: { id: true },
+  }) : null;
+  const policy = targetKind === "Proposal" && outcome === "ADOPTED" ? await prisma.policyCorpus.findFirst({
+    where: { workspaceId, proposalId: targetId }, select: { id: true },
+  }) : null;
+  const originals = await captureArtifactInputProof(actor, workspaceId, [
+    { kind: "MeetingInsight", id: insight.id, snapshot: insight as unknown as Record<string, unknown> },
+    { kind: "Meeting", id: insight.meetingId, snapshot: insight.meeting as unknown as Record<string, unknown> },
+    { kind: targetKind, id: targetId },
+    ...(flow ? [{ kind: "ApprovalFlow" as const, id: flow.id }] : []),
+    ...(policy ? [{ kind: "PolicyCorpus" as const, id: policy.id }] : []),
+  ]);
+  const lockAndVerify = async (tx: Prisma.TransactionClient) => {
+    await assertArtifactInputWriteFence(tx);
+    await acquireWorkItemAdvisoryLock(tx, targetKind, targetId);
+    if (targetKind === "Proposal" && outcome === "ADOPTED") await acquireConstitutionCorpusAdvisoryLock(tx, workspaceId);
+    if (targetKind === "Action") await tx.$queryRaw`SELECT id FROM "Action" WHERE id = ${targetId} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+    else if (targetKind === "Tension") await tx.$queryRaw`SELECT id FROM "Tension" WHERE id = ${targetId} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+    else await tx.$queryRaw`SELECT id FROM "Proposal" WHERE id = ${targetId} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+    // Generation owns Meeting before it supersedes Insight rows. Follow the
+    // same order so concurrent generation cannot deadlock this publication.
+    await tx.$queryRaw`SELECT id FROM "Meeting" WHERE id = ${insight.meetingId} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+    await tx.$queryRaw`SELECT id FROM "MeetingInsight" WHERE id = ${insight.id} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+    if (flow) await tx.$queryRaw`SELECT id FROM "ApprovalFlow" WHERE id = ${flow.id} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+    if (policy) await tx.$queryRaw`SELECT id FROM "PolicyCorpus" WHERE id = ${policy.id} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+    await requireWorkspaceMembership({ actor, workspaceId, tx });
+    const currentInsight = await tx.meetingInsight.findUnique({ where: { id: insight.id, workspaceId } });
+    const currentMeeting = await tx.meeting.findFirst({ where: { id: insight.meetingId, workspaceId } });
+    const target = targetKind === "Action" ? await tx.action.findFirst({ where: { id: targetId, workspaceId } })
+      : targetKind === "Tension" ? await tx.tension.findFirst({ where: { id: targetId, workspaceId } })
+        : await tx.proposal.findFirst({ where: { id: targetId, workspaceId } });
+    const matches = (kind: LineageInput["kind"], row: { id: string } | null) => row && originals.some(root =>
+      root.kind === kind && root.id === row.id && root.fingerprint === lineageContentFingerprint(kind, row));
+    invariant(matches("MeetingInsight", currentInsight) && currentInsight && isActiveReviewableInsight(currentInsight)
+      && matches("Meeting", currentMeeting) && currentMeeting && !currentMeeting.archivedAt
+      && matches(targetKind, target) && target && !target.isPrivate && !target.archivedAt
+      && (target.status === "OPEN" || (targetKind === "Action" && target.status === "IN_PROGRESS")),
+    409, "SOURCE_CHANGED", "Resolution source or public target changed.");
+    if (targetKind === "Proposal") {
+      const currentFlow = await tx.approvalFlow.findFirst({ where: { workspaceId, subjectType: "PROPOSAL", subjectId: targetId } });
+      const currentPolicy = outcome === "ADOPTED" ? await tx.policyCorpus.findFirst({ where: { workspaceId, proposalId: targetId } }) : null;
+      invariant((currentFlow?.id ?? null) === (flow?.id ?? null) && (!currentFlow || matches("ApprovalFlow", currentFlow))
+        && (currentPolicy?.id ?? null) === (policy?.id ?? null) && (!currentPolicy || matches("PolicyCorpus", currentPolicy)),
+      409, "SOURCE_CHANGED", "Resolution workflow changed.");
+    }
+  };
+  const preparation = await prepareArtifactCommitPreflight(actor, workspaceId, originals);
+  const frozen = await prisma.$transaction(async tx => {
+    await lockAndVerify(tx);
+    return withArtifactCommitPreflight(actor, workspaceId, tx, originals, preparation,
+      () => captureImmutableArtifactInputProof(actor, workspaceId, originals, tx));
+  });
+  const publication = await prepareArtifactCommitPreflight(actor, workspaceId, frozen);
+  const result = await prisma.$transaction(async tx => {
+    await lockAndVerify(tx);
+    return withArtifactCommitPreflight(actor, workspaceId, tx, frozen, publication, async () => {
+      const sourceCapture = { lineageInputs: [] as LineageInput[], lineageRoots: frozen, lineageCopied: true };
+      const meetingContext = `*Created from meeting:* [${insight.meeting.title || "Untitled"}](/workspaces/${workspaceId}/meetings/${insight.meetingId})`;
+      const fullBody = [stripMeetingBlockContext(insight.bodyMd), meetingContext].filter(Boolean).join("\n\n");
+      if (targetKind === "Action") await updateAction(actor, { ...sourceCapture, workspaceId, actionId: targetId,
+        status: "COMPLETED", completedVia: fullBody, _tx: tx });
+      else if (targetKind === "Tension") await updateTension(actor, { ...sourceCapture, workspaceId, tensionId: targetId,
+        status: "RESOLVED", resolvedVia: `Meeting: ${insight.meeting.title || insight.meetingId}` }, tx);
+      else await resolveProposal(actor, { ...sourceCapture, workspaceId, proposalId: targetId, outcome, decisionMd: fullBody }, tx);
+      const targetOutput = await captureImmutableArtifactInputProof(actor, workspaceId,
+        await captureArtifactInputProof(actor, workspaceId, [{ kind: targetKind, id: targetId }], tx), tx);
+      const updated = await tx.meetingInsight.update({ where: { id: insight.id, workspaceId }, data: {
+        status: "APPLIED", appliedEntityType: targetKind, appliedEntityId: targetId,
+        reviewedByUserId: actor.kind === "user" ? actor.user.id : null, reviewedAt: new Date(),
+        autoAppliedAt: autoApplied ? new Date() : null, autoApplyError: null,
+      } });
+      await recordArtifactInputLineage({ tx, actor, workspaceId, artifact: { kind: "MeetingInsight", id: updated.id },
+        content: updated, origin: "DERIVED", inputs: [], inheritedRoots: [...frozen, ...targetOutput] });
+      await assertArtifactInputWriteFence(tx);
+      await requireWorkspaceMembership({ actor, workspaceId, tx });
+      return updated;
+    });
+  });
+  invariant(await isArtifactInputProofReadable(actor, workspaceId, frozen),
+    409, "SOURCE_CHANGED", "Resolution permissions changed before returning.");
+  await captureArtifactInputProof(actor, workspaceId, [{ kind: "MeetingInsight", id: result.id, snapshot: result as unknown as Record<string, unknown> }]);
+  return result;
+}
+
 export async function applyInsight(
   actor: AppActor,
   params: { workspaceId: string; insightId: string; autoApplied?: boolean; loadMemberDirectory?: MemberDirectoryLoader; actionDuplicateGuard?: DuplicateGuardOptions }
@@ -1143,6 +1243,9 @@ export async function applyInsight(
 
   invariant((await readableArtifactIds(actor, params.workspaceId, "Meeting", [insight.meeting])).has(insight.meeting.id),
     404, "NOT_FOUND", "Meeting not found.");
+  if (insight.operation === "RESOLVE" && insight.type !== "DELIBERATION_ENTRY") {
+    return applyResolutionWithLineage(actor, params.workspaceId, insight, params.autoApplied);
+  }
   const outputRoots = await prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM "MeetingInsight" WHERE id = ${insight.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     await tx.$queryRaw`SELECT id FROM "Meeting" WHERE id = ${insight.meetingId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
@@ -1196,38 +1299,6 @@ export async function applyInsight(
     });
     appliedEntityType = "DeliberationEntry";
     appliedEntityId = entry.id;
-  } else if (insight.operation === "RESOLVE") {
-    invariant(insight.targetEntityType && insight.targetEntityId, 400, "INVALID_STATE", "Resolved insight must point to a target record.");
-
-    if (insight.targetEntityType === "Action") {
-      await updateAction(actor, {
-        workspaceId: params.workspaceId,
-        actionId: insight.targetEntityId,
-        status: "COMPLETED",
-        completedVia: fullBody,
-      });
-      appliedEntityType = "Action";
-      appliedEntityId = insight.targetEntityId;
-    } else if (insight.targetEntityType === "Tension") {
-      await updateTension(actor, {
-        workspaceId: params.workspaceId,
-        tensionId: insight.targetEntityId,
-        status: "RESOLVED",
-        resolvedVia: `Meeting: ${insight.meeting.title || insight.meetingId}`,
-      });
-      appliedEntityType = "Tension";
-      appliedEntityId = insight.targetEntityId;
-    } else if (insight.targetEntityType === "Proposal") {
-      const outcome = (insight.resolutionOutcome || "ADOPTED") as ProposalResolutionOutcome;
-      await resolveProposal(actor, {
-        workspaceId: params.workspaceId,
-        proposalId: insight.targetEntityId,
-        outcome,
-        decisionMd: fullBody,
-      });
-      appliedEntityType = "Proposal";
-      appliedEntityId = insight.targetEntityId;
-    }
   } else if (insight.type === "CRM_CONTACT") {
     const crm = crmInsightPayload(insight.metadataJson);
     const email = requireCrmInsightEmail(crm);

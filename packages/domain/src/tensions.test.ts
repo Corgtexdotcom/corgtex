@@ -72,6 +72,7 @@ vi.mock("./auth", () => ({
 }));
 
 vi.mock("./source-lineage", () => ({
+  assertArtifactInputWriteFence: vi.fn(),
   isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
   captureArtifactInputProof: vi.fn().mockResolvedValue([]),
   readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) =>

@@ -3,15 +3,18 @@ import type { Prisma } from "@prisma/client";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { invariant } from "./errors";
 import type { LineageRoot } from "./source-lineage";
-import { prepareExternalProviderRootCommitPreflight, withExternalProviderAndMcpCommitPreflights,
+import { discardExternalProviderCommitPreflight, prepareExternalProviderRootCommitPreflight, withExternalProviderNativeCommitPreflights,
   type ExternalProviderCommitPreflight } from "./external-provider-authority";
-import { prepareExternalMcpResponseCommitPreflight, type ExternalMcpResponseCommitPreflight } from "./external-mcp-response-input";
+import { discardExternalMcpResponseCommitPreflight, prepareExternalMcpResponseCommitPreflight, withExternalMcpAndSlackCommitPreflights,
+  type ExternalMcpResponseCommitPreflight } from "./external-mcp-response-input";
+import { discardSlackNativeCommitPreflight, prepareSlackNativeCommitPreflight, type SlackNativeCommitPreflight } from "./communication-native-authority";
 
 declare const mixedBrand: unique symbol;
 /** One process-local, single-use capability for the exact mixed native closure. */
 export type ExternalMixedCommitPreflight = { readonly [mixedBrand]: true };
 type MixedState = { actor: AppActor; workspaceId: string; roots: LineageRoot[];
-  provider: ExternalProviderCommitPreflight; mcp: ExternalMcpResponseCommitPreflight };
+  provider?: ExternalProviderCommitPreflight; mcp?: ExternalMcpResponseCommitPreflight;
+  slack?: SlackNativeCommitPreflight };
 const preflights = new WeakMap<object, MixedState>();
 const MAX_ROOTS = 10000;
 
@@ -28,10 +31,21 @@ export async function prepareExternalMixedCommitPreflight(actor: AppActor, works
   originalRoots: readonly LineageRoot[]): Promise<ExternalMixedCommitPreflight> {
   const roots = freezeCopy(structuredClone([...originalRoots]));
   invariant(roots.length > 0 && roots.length <= MAX_ROOTS, 409, "SOURCE_CHANGED", "Mixed native proof is unbounded.");
-  const provider = await prepareExternalProviderRootCommitPreflight(actor, workspaceId, roots);
-  const mcp = await prepareExternalMcpResponseCommitPreflight(actor, workspaceId, roots);
+  const { inspectStoredArtifactInputDependencies, assertArtifactInputClosureLocallyAdmissible } = await import("./source-lineage");
+  const dependencies = await inspectStoredArtifactInputDependencies(prisma, workspaceId, roots, { maxNodes: MAX_ROOTS });
+  invariant(dependencies.complete && dependencies.roots.length <= MAX_ROOTS,
+    409, "UNKNOWN_LINEAGE", "Mixed native closure is incomplete.");
+  await assertArtifactInputClosureLocallyAdmissible(actor, workspaceId, roots);
+  const box = dependencies.roots.some(root => root.kind === "ExternalProviderFetchInput");
+  const mcpResponse = dependencies.roots.some(root => root.kind === "ExternalMcpResponseInput");
+  const slackMessage = dependencies.roots.some(root => root.kind === "CommunicationMessageNativeInput");
+  invariant(Number(box) + Number(mcpResponse) + Number(slackMessage) >= 2,
+    409, "UNKNOWN_LINEAGE", "Mixed commit needs multiple proven native sources.");
+  const provider = box ? await prepareExternalProviderRootCommitPreflight(actor, workspaceId, roots) : undefined;
+  const mcp = mcpResponse ? await prepareExternalMcpResponseCommitPreflight(actor, workspaceId, roots) : undefined;
+  const slack = slackMessage ? await prepareSlackNativeCommitPreflight(actor, workspaceId, roots) : undefined;
   const token = Object.freeze({}) as ExternalMixedCommitPreflight;
-  preflights.set(token, { actor, workspaceId, roots, provider, mcp });
+  preflights.set(token, { actor, workspaceId, roots, provider, mcp, slack });
   return token;
 }
 
@@ -44,6 +58,14 @@ export async function withExternalMixedCommitPreflight<T>(actor: AppActor, works
     && isDeepStrictEqual(state.roots, submittedRoots),
   409, "SOURCE_CHANGED", "Mixed native commit capability is unavailable.");
   preflights.delete(token);
-  return withExternalProviderAndMcpCommitPreflights(actor, workspaceId, tx,
-    state.roots, state.provider, state.mcp, work);
+  try {
+    if (state.provider) return await withExternalProviderNativeCommitPreflights(actor, workspaceId, tx,
+      state.roots, state.provider, state.mcp, state.slack, work);
+    invariant(state.mcp && state.slack, 409, "UNKNOWN_LINEAGE", "Mixed native plans are incomplete.");
+    return await withExternalMcpAndSlackCommitPreflights(actor, workspaceId, tx, state.roots, state.mcp, state.slack, work);
+  } finally {
+    if (state.provider) discardExternalProviderCommitPreflight(state.provider);
+    if (state.mcp) discardExternalMcpResponseCommitPreflight(state.mcp);
+    if (state.slack) discardSlackNativeCommitPreflight(state.slack);
+  }
 }
