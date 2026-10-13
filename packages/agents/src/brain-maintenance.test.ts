@@ -3,7 +3,7 @@ const { db, rebuild, absorb, membership } = vi.hoisted(() => ({ db: {
   workspace: {findFirst: vi.fn()}, brainArticle: {findMany: vi.fn(), findFirst: vi.fn()}, brainSource: {findMany: vi.fn(), findFirst: vi.fn()},
   brainDiscussionThread: {findMany: vi.fn(), findFirst: vi.fn()}, brainDiscussionComment: {findFirst: vi.fn()},
   knowledgeChunk: {findMany: vi.fn(), findFirst: vi.fn(), deleteMany: vi.fn()},
-  artifactInputLineage: {findFirst: vi.fn(), findMany: vi.fn()}, artifactInputSnapshot: {findFirst: vi.fn(), create: vi.fn()}, $transaction: vi.fn(),
+  artifactInputLineage: {findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn()}, artifactInputSnapshot: {findFirst: vi.fn(), create: vi.fn()}, $transaction: vi.fn(), $queryRaw: vi.fn(), $executeRaw: vi.fn(),
 }, rebuild: vi.fn(), absorb: vi.fn(), membership: vi.fn() }));
 vi.mock("@corgtex/shared", async original => ({...await original<any>(), prisma: db}));
 vi.mock("../../domain/src/auth", () => ({requireWorkspaceMembership: membership}));
@@ -11,17 +11,17 @@ vi.mock("../../domain/src/brain-access", () => ({resolveKnowledgeAccessDomains: 
 vi.mock("@corgtex/domain", async () => ({...await import("../../domain/src/source-lineage"), ...await import("../../domain/src/errors"),
   WIKILINK_RE: /\[\[([^\]]+)\]\]/g, rebuildBacklinks: rebuild, markThreadAbsorbed: absorb}));
 import { runBrainMaintenance } from "./brain-maintenance";
-import { lineageContentFingerprint, isArtifactInputProofReadable, captureArtifactInputProof } from "../../domain/src/source-lineage";
+import { recordArtifactInputLineage, isArtifactInputProofReadable, captureArtifactInputProof } from "../../domain/src/source-lineage";
+import { installSourcePermissionEpochFixture } from "../../domain/src/source-permission-epochs.test-fixture";
 const date = new Date("2025-01-01T00:00:00Z");
-let rows: Record<string, any[]>, manifests: any[], snapshots: any[];
+let rows: Record<string, any[]>, manifests: any[], snapshots: any[], originals: Array<{kind: string; row: any}>;
 function add(kind: string, row: any, proven = true) {
   (rows[kind] ??= []).push(row);
-  if (proven) manifests.push({workspaceId: "ws-1", artifactType: kind, artifactId: row.id, revision: 1, origin: "HUMAN_ORIGINAL",
-    contentHash: lineageContentFingerprint(kind as any, row), inputsJson: [], rootsJson: []});
+  if (proven) originals.push({kind, row});
   return row;
 }
 beforeEach(() => {
-  vi.resetAllMocks(); rows = {Workspace: [{id: "ws-1", name: "Workspace", createdAt: date}]}; manifests = []; snapshots = [];
+  vi.resetAllMocks(); rows = {Workspace: [{id: "ws-1", name: "Workspace", createdAt: date}]}; manifests = []; snapshots = []; originals = [];
   membership.mockResolvedValue(null);
   db.$transaction.mockImplementation(async work => work(db));
   for (const [kind, delegate] of [["Workspace", "workspace"], ["BrainArticle", "brainArticle"], ["BrainSource", "brainSource"],
@@ -33,10 +33,19 @@ beforeEach(() => {
   db.artifactInputLineage.findMany.mockImplementation(async ({where}) => manifests.filter(row => row.artifactType === where.artifactType && where.artifactId.in.includes(row.artifactId)));
   db.artifactInputSnapshot.findFirst.mockImplementation(async ({where}) => snapshots.find(row => row.id === where.id) ?? null);
   db.artifactInputSnapshot.create.mockImplementation(async ({data}) => {const row = {id: `snapshot-${snapshots.length}`, ...data, createdAt: new Date()}; snapshots.push(row); return row;});
+  db.artifactInputLineage.create.mockImplementation(async ({data}) => {const row = {id: `manifest-${manifests.length}`, ...data}; manifests.push(row); return row;});
+  installSourcePermissionEpochFixture(db);
   rebuild.mockResolvedValue({linkCount: 0}); absorb.mockResolvedValue({id: "resolved", status: "ABSORBED"});
 });
 const actor = {kind: "agent", authProvider: "bootstrap", label: "brain-maintenance", workspaceIds: ["ws-1"]} as any;
-const run = () => runBrainMaintenance({workspaceId: "ws-1", agentRunId: "run", actor});
+const originalAuthor = {kind: "user", user: {id: "author", email: "author@synthetic.test", displayName: "Author"}} as any;
+async function certifyOriginals() {
+  for (const {kind, row} of originals.splice(0)) await recordArtifactInputLineage({tx: db as any, actor: originalAuthor, workspaceId: "ws-1", artifact: {kind: kind as any, id: row.id}, content: row, origin: "HUMAN_ORIGINAL", inputs: []});
+}
+const run = async () => {
+  await certifyOriginals();
+  return runBrainMaintenance({workspaceId: "ws-1", agentRunId: "run", actor});
+};
 function article(id: string, isPrivate = false) { return add("BrainArticle", {id, workspaceId: "ws-1", title: id, slug: id, bodyMd: "Public [[missing]]",
   isPrivate, authority: "DRAFT", staleAfterDays: 1, lastVerifiedAt: null, createdAt: date, archivedAt: null}); }
 
@@ -72,6 +81,7 @@ describe("maintenance actual input lineage", () => {
     article("public");
     rebuild.mockImplementation(async (_actor, {tx}) => {
       const late = article("newly-visible");
+      await certifyOriginals();
       await captureArtifactInputProof(actor, "ws-1", [{kind: "BrainArticle", id: late.id, snapshot: late}], tx);
       return {linkCount: 1};
     });

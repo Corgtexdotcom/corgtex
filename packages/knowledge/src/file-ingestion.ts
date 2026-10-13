@@ -249,6 +249,13 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: Producer
     const priorSourceRoots = readableSource ? await captureImmutableArtifactInputProof(actor, params.workspaceId,
       await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "BrainSource", id: existingSource!.id, snapshot: existingSource! }], tx), tx) : [];
     if (existingSource && !readableSource) await preserveUnknownArtifactInputSnapshot(tx, params.workspaceId, { kind: "BrainSource", id: existingSource.id }, existingSource);
+    // Retain every actual pre-replacement field source and its original epoch vector.
+    // Both the old Document and copied Source labels remain immutable inputs;
+    // the new Document receipt separately binds the newly uploaded bytes.
+    const preservedReplacementRoots = mergeArtifactInputProofs(priorRoots, priorSourceRoots);
+    if (!await isArtifactInputProofReadable(actor, params.workspaceId, preservedReplacementRoots, tx)) {
+      throw new AppError(409, "SOURCE_CHANGED", "Replacement inputs changed before the file revision.");
+    }
     const replacementText = params.textContent;
     const replacementSourceContent = params.brainSourceContent;
     const contentHash = params.contentHash;
@@ -279,7 +286,7 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: Producer
 
     await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId, artifact: { kind: "Document", id: document.id }, content: document, receipt: documentReceipt });
     const sourceReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
-      capture: { lineageRoots: priorSourceRoots }, copied: true, completeCopy: true,
+      capture: { lineageRoots: preservedReplacementRoots }, copied: true, completeCopy: true,
       dependencies: [{ kind: "Document", id: document.id, snapshot: document }] });
     const source = existingSource
       ? await tx.brainSource.update({

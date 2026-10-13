@@ -67,7 +67,7 @@ export async function inspectStoredArtifactInputDependencyIdentities(db: Prisma.
     } else {
       const historical = await db.artifactInputLineage.findFirst({ where: { workspaceId, artifactType: input.kind,
         artifactId: input.id, contentHash: input.fingerprint }, orderBy: { revision: "desc" }, select: proofSelect });
-      if (!historical && ["NativeTranscriptInput", "CommunicationMessageNativeInput"].includes(input.kind)) {
+      if (!historical && ["NativeTranscriptInput", "CommunicationMessageNativeInput", "ExternalProviderFetchInput"].includes(input.kind)) {
         // These immutable constructor tables are original input receipts, not
         // native authored-body guesses. The consuming known manifest proves
         // they were captured; discovery grants no current owner/provider access.
@@ -75,16 +75,34 @@ export async function inspectStoredArtifactInputDependencyIdentities(db: Prisma.
         if (!record(capturedEpochs)) return false;
         const native = input.kind === "NativeTranscriptInput"
           ? await db.nativeTranscriptInput.findFirst({ where: { id: input.id, workspaceId } })
-          : await db.communicationMessageNativeInput.findFirst({ where: { id: input.id, workspaceId } });
+          : input.kind === "CommunicationMessageNativeInput"
+            ? await db.communicationMessageNativeInput.findFirst({ where: { id: input.id, workspaceId } })
+            : await db.externalProviderFetchInput.findFirst({ where: { id: input.id, workspaceId } });
         if (!native || native.workspaceId !== workspaceId || native.id !== input.id) return false;
         if (input.kind === "NativeTranscriptInput") {
           const transcript = native as { mode: string; ownerMemberId: string; submittedByUserId: string; encryptedPayloadJson: string; payloadHash: string };
           if (!["DIRECT_MEMBER_UPLOAD", "AUDIO_UPLOAD"].includes(transcript.mode) || !transcript.ownerMemberId || !transcript.submittedByUserId
             || typeof transcript.encryptedPayloadJson !== "string" || !transcript.encryptedPayloadJson || !/^[a-f0-9]{64}$/.test(transcript.payloadHash)) return false;
-        } else {
+        } else if (input.kind === "CommunicationMessageNativeInput") {
           const message = native as { mode: string; provider: string; installationId: string; communicationMessageId: string; encryptedPayloadJson: string; projectionHash: string };
           if (message.mode !== "AUTHENTICATED_FETCH" || message.provider !== "SLACK" || !message.installationId || !message.communicationMessageId
             || typeof message.encryptedPayloadJson !== "string" || !message.encryptedPayloadJson || !/^[a-f0-9]{64}$/.test(message.projectionHash)) return false;
+        } else {
+          const fetch = native as Record<string, unknown>;
+          if (fetch.providerKey !== "box" || fetch.serverUrl !== "https://mcp.box.com"
+            || ["externalContentSourceId", "connectionId", "localUserId", "providerAccountId", "externalId", "encryptedResponseJson"].some(field =>
+              typeof fetch[field] !== "string" || !fetch[field])
+            || typeof fetch.responseHash !== "string" || !/^[a-f0-9]{64}$/.test(fetch.responseHash)
+            || typeof fetch.connectionGrantHash !== "string" || !/^[a-f0-9]{64}$/.test(fetch.connectionGrantHash)
+            || !record(fetch.requestJson)) return false;
+          // This mirrors the constructor's native read binding without loading
+          // transport code, decrypting content, or granting current access.
+          const request = fetch.requestJson;
+          const binding = fetch.sourceKind === "FILE" ? { key: "file_id", tools: ["get_file_details", "get_file_content"] }
+            : fetch.sourceKind === "FOLDER" ? { key: "folder_id", tools: ["get_folder_details", "list_folder_content_by_folder_id"] }
+              : fetch.sourceKind === "HUB" ? { key: "hub_id", tools: ["get_hub_details", "get_hub_items"] } : null;
+          if (!binding || typeof fetch.toolName !== "string" || !binding.tools.includes(fetch.toolName)
+            || request[binding.key] !== fetch.externalId || Object.keys(request).some(field => ![binding.key, "fields", "limit"].includes(field))) return false;
         }
         const { parsePermissionEpochProof } = await import("./source-permission-epochs");
         const epochProof = parsePermissionEpochProof(capturedEpochs);

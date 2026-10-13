@@ -34,9 +34,16 @@ describe("digest input receipts", () => {
       ownerMemberId: readerMember.id, bodyMd: "New owner's independently supplied body" });
     expect(await readableArtifactIds(readerActor, workspace.id, "BrainArticle", [transferred])).toEqual(new Set([transferred.id]));
     expect(await listArticleVersions(readerActor, { workspaceId: workspace.id, slug: transferred.slug })).toEqual([]);
-    const [version] = await listArticleVersions(ownerActor, { workspaceId: workspace.id, slug: transferred.slug });
+    expect(await listArticleVersions(ownerActor, { workspaceId: workspace.id, slug: transferred.slug })).toEqual([]);
+    const version = await prisma.brainArticleVersion.findFirstOrThrow({ where: { articleId: transferred.id } });
     expect(version.bodyMd).toBe("Former owner's private text");
     expect(version.accessEnvelopeJson).toMatchObject({ isPrivate: true, ownerMemberId: original.ownerMemberId });
+    const currentRoots = await captureArtifactInputProof(readerActor, workspace.id, [{ kind: "BrainArticle", id: transferred.id }]);
+    const fresh = await createArticle(readerActor, { workspaceId: workspace.id, title: "New owner's permitted copy", type: "PROJECT",
+      bodyMd: transferred.bodyMd, isPrivate: true, ownerMemberId: readerMember.id, completeInputRoots: currentRoots });
+    expect(await readableArtifactIds(readerActor, workspace.id, "BrainArticle", [fresh])).toEqual(new Set([fresh.id]));
+    expect(fresh.bodyMd).not.toContain("Former owner's private text");
+    expect((await prisma.brainArticleVersion.findUniqueOrThrow({ where: { id: version.id } })).bodyMd).toBe(version.bodyMd);
   });
 
   it("preserves a mutable graph input exactly while enforcing its live source visibility", async () => {
@@ -60,8 +67,17 @@ describe("digest input receipts", () => {
     expect(await readableArtifactIds(readerActor, workspace.id, "BrainArticle", [article])).toEqual(new Set([article.id]));
     await prisma.contextGraphObject.update({ where: { id: object.id }, data: { status: "archived" } });
     expect(await readableArtifactIds(readerActor, workspace.id, "BrainArticle", [article])).toEqual(new Set());
-    await prisma.contextGraphObject.update({ where: { id: object.id }, data: { status: "active" } });
-    expect(await readableArtifactIds(readerActor, workspace.id, "BrainArticle", [article])).toEqual(new Set([article.id]));
+    const restored = await prisma.contextGraphObject.update({ where: { id: object.id }, data: { status: "active" } });
+    expect(await readableArtifactIds(readerActor, workspace.id, "BrainArticle", [article])).toEqual(new Set());
+    // A new generation consumes only the independently permitted current
+    // original, never the old copied article or its restored receipt.
+    await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: ownerActor, workspaceId: workspace.id,
+      artifact: { kind: "ContextGraphObject", id: restored.id }, content: restored, origin: "HUMAN_ORIGINAL", inputs: [] }));
+    const freshRoots = await captureArtifactInputProof(ownerActor, workspace.id, [{ kind: "ContextGraphObject", id: restored.id }]);
+    const rebuilt = await createArticle(agent, { workspaceId: workspace.id, title: restored.title, type: "PROJECT",
+      bodyMd: restored.summary ?? "", authority: "REFERENCE", isPrivate: false, completeInputRoots: freshRoots });
+    expect(await readableArtifactIds(readerActor, workspace.id, "BrainArticle", [rebuilt])).toEqual(new Set([rebuilt.id]));
+    expect((await prisma.brainArticle.findUniqueOrThrow({ where: { id: article.id } })).bodyMd).toBe("Exact original body");
   });
 
   it("keeps proven failure outcomes visible without requiring an edition, and finds safe editions past unknown history", async () => {
@@ -95,6 +111,10 @@ describe("digest input receipts", () => {
     const { workspace, ownerActor, readerActor, agent } = await fixture();
     const first = await prisma.brainSource.create({ data: { workspaceId: workspace.id, sourceType: "DOC", tier: 1, content: "Synthetic first fact" } });
     const second = await prisma.brainSource.create({ data: { workspaceId: workspace.id, sourceType: "DOC", tier: 1, content: "Synthetic second fact" } });
+    await prisma.$transaction(async tx => {
+      for (const source of [first, second]) await recordArtifactInputLineage({ tx, actor: ownerActor, workspaceId: workspace.id,
+        artifact: { kind: "BrainSource", id: source.id }, content: source, origin: "HUMAN_ORIGINAL", inputs: [] });
+    });
     const roots = await captureArtifactInputProof(ownerActor, workspace.id, [
       { kind: "Workspace", id: workspace.id }, { kind: "BrainSource", id: first.id }, { kind: "BrainSource", id: second.id },
     ]);

@@ -22,7 +22,7 @@ async function fixture(sourceRemovalEnabled = true) {
   return { workspace, admin: actor(admin), owner: actor(owner), outsider: actor(outsider), ownerMember };
 }
 
-async function sourceWithDocument(workspaceId: string, title: string) {
+async function sourceWithDocument(actor: AppActor, workspaceId: string, title: string) {
   const document = await prisma.document.create({ data: {
     workspaceId, title: `${title} document`, source: "upload", storageKey: `synthetic/${randomUUID()}`,
     textContent: `${title} source text`,
@@ -30,7 +30,25 @@ async function sourceWithDocument(workspaceId: string, title: string) {
   const source = await prisma.brainSource.create({ data: {
     workspaceId, sourceType: "DOC", tier: 1, title, content: `${title} facts`, metadata: { documentId: document.id },
   } });
+  await prisma.$transaction(async tx => {
+    await recordArtifactInputLineage({ tx, actor, workspaceId, artifact: { kind: "Document", id: document.id },
+      content: document, origin: "HUMAN_ORIGINAL", inputs: [] });
+    await recordArtifactInputLineage({ tx, actor, workspaceId, artifact: { kind: "BrainSource", id: source.id },
+      content: source, origin: "DERIVED", inputs: [{ kind: "Document", id: document.id }] });
+  });
   return { document, source };
+}
+
+async function authoredSource(actor: AppActor, data: Parameters<typeof prisma.brainSource.create>[0]["data"]) {
+  return prisma.$transaction(async tx => {
+    const source = await tx.brainSource.create({ data });
+    const copiedDocumentId = documentId(source.metadata);
+    await recordArtifactInputLineage({ tx, actor, workspaceId: source.workspaceId,
+      artifact: { kind: "BrainSource", id: source.id }, content: source,
+      origin: copiedDocumentId ? "DERIVED" : "HUMAN_ORIGINAL",
+      inputs: copiedDocumentId ? [{ kind: "Document", id: copiedDocumentId }] : [] });
+    return source;
+  });
 }
 
 function confirmParams(workspaceId: string, slug: string, expectedToken: string, mode: "keep_sources" | "remove_sources") {
@@ -72,7 +90,7 @@ describe("confirmed Brain article removal", () => {
 
   it("withholds a legacy target whose inputs cannot be proven", async () => {
     const { workspace, admin } = await fixture();
-    const { source } = await sourceWithDocument(workspace.id, "Unproven legacy");
+    const { source } = await sourceWithDocument(admin, workspace.id, "Unproven legacy");
     const article = await prisma.brainArticle.create({ data: {
       workspaceId: workspace.id, slug: "legacy-unproven-target", title: "Legacy target", type: "PROJECT",
       bodyMd: "Could contain unknown inputs", sourceIds: [source.id],
@@ -85,7 +103,7 @@ describe("confirmed Brain article removal", () => {
 
   it("keeps linked sources when a stored true flag has no runtime opt-in", async () => {
     const { workspace, admin, outsider } = await fixture();
-    const { document, source } = await sourceWithDocument(workspace.id, "Runtime paused");
+    const { document, source } = await sourceWithDocument(admin, workspace.id, "Runtime paused");
     const article = await prisma.brainArticle.create({ data: {
       workspaceId: workspace.id, slug: "runtime-paused", title: "Runtime paused", type: "PROJECT",
       bodyMd: "Original", sourceIds: [source.id],
@@ -108,7 +126,7 @@ describe("confirmed Brain article removal", () => {
 
   it("hides linked source removal while disabled but permits article-only archive", async () => {
     const { workspace, admin } = await fixture(false);
-    const { document, source } = await sourceWithDocument(workspace.id, "Paused");
+    const { document, source } = await sourceWithDocument(admin, workspace.id, "Paused");
     const article = await prisma.brainArticle.create({ data: {
       workspaceId: workspace.id, slug: "paused", title: "Paused", type: "PROJECT", bodyMd: "Original", sourceIds: [source.id],
     } });
@@ -130,7 +148,7 @@ describe("confirmed Brain article removal", () => {
 
   it("redacts restricted source and document previews for a brain-only credential", async () => {
     const { workspace, admin } = await fixture();
-    const { document, source } = await sourceWithDocument(workspace.id, "Finance confidential");
+    const { document, source } = await sourceWithDocument(admin, workspace.id, "Finance confidential");
     const article = await prisma.brainArticle.create({ data: {
       workspaceId: workspace.id, slug: "restricted-preview", title: "Article", type: "PROJECT", bodyMd: "Body", sourceIds: [source.id],
     } });
@@ -149,7 +167,7 @@ describe("confirmed Brain article removal", () => {
 
   it("keeps sources for an owner, leaves preview/cancel read-only, and rejects stale or repeated confirmation", async () => {
     const { workspace, admin, owner, outsider, ownerMember } = await fixture();
-    const { document, source } = await sourceWithDocument(workspace.id, "Keep");
+    const { document, source } = await sourceWithDocument(admin, workspace.id, "Keep");
     const article = await prisma.brainArticle.create({ data: {
       workspaceId: workspace.id, slug: "keep-article", title: "Keep article", type: "PROJECT", bodyMd: "Original",
       ownerMemberId: ownerMember.id, sourceIds: [source.id],
@@ -195,11 +213,11 @@ describe("confirmed Brain article removal", () => {
 
   it("removes an article, every representation of its source document, and the document recoverably", async () => {
     const { workspace, admin } = await fixture();
-    const { document, source } = await sourceWithDocument(workspace.id, "Remove");
-    const extra = await prisma.brainSource.create({ data: {
+    const { document, source } = await sourceWithDocument(admin, workspace.id, "Remove");
+    const extra = await authoredSource(admin, {
       workspaceId: workspace.id, sourceType: "DOC", tier: 1, title: "Another representation", content: "Same document",
       metadata: { documentId: document.id },
-    } });
+    });
     const article = await prisma.brainArticle.create({ data: {
       workspaceId: workspace.id, slug: "remove-all", title: "Remove all", type: "PROJECT", bodyMd: "Body",
       sourceIds: [source.id],
@@ -221,10 +239,10 @@ describe("confirmed Brain article removal", () => {
 
   it("reviews a shared derived article before removing its document and preserves its prior body", async () => {
     const { workspace, admin } = await fixture();
-    const { document, source: removed } = await sourceWithDocument(workspace.id, "Shared");
-    const remaining = await prisma.brainSource.create({ data: {
+    const { document, source: removed } = await sourceWithDocument(admin, workspace.id, "Shared");
+    const remaining = await authoredSource(admin, {
       workspaceId: workspace.id, sourceType: "DOC", tier: 1, title: "Remaining", content: "Remaining verified facts",
-    } });
+    });
     const target = await prisma.brainArticle.create({ data: {
       workspaceId: workspace.id, slug: "target", title: "Target", type: "PROJECT", bodyMd: "Target text", sourceIds: [removed.id],
     } });
@@ -276,7 +294,7 @@ describe("confirmed Brain article removal", () => {
 
   it("blocks unknown shared links without archiving the target, source, or document", async () => {
     const { workspace, admin } = await fixture();
-    const { document, source } = await sourceWithDocument(workspace.id, "Legacy");
+    const { document, source } = await sourceWithDocument(admin, workspace.id, "Legacy");
     const target = await prisma.brainArticle.create({ data: {
       workspaceId: workspace.id, slug: "legacy-target", title: "Target", type: "PROJECT", bodyMd: "Target", sourceIds: [source.id],
     } });
@@ -296,10 +314,10 @@ describe("confirmed Brain article removal", () => {
 
   it("blocks mixed derived and legacy source links in the preview", async () => {
     const { workspace, admin } = await fixture();
-    const { source } = await sourceWithDocument(workspace.id, "Mixed");
-    const citation = await prisma.brainSource.create({ data: {
+    const { source } = await sourceWithDocument(admin, workspace.id, "Mixed");
+    const citation = await authoredSource(admin, {
       workspaceId: workspace.id, sourceType: "DOC", tier: 1, content: "Citation only",
-    } });
+    });
     const target = await prisma.brainArticle.create({ data: {
       workspaceId: workspace.id, slug: "mixed-target", title: "Target", type: "PROJECT", bodyMd: "Target", sourceIds: [source.id],
     } });
@@ -323,10 +341,10 @@ describe("confirmed Brain article removal", () => {
   it("blocks a shared article whose remaining source is restricted, archived, or missing", async () => {
     const { workspace, admin } = await fixture();
     for (const condition of ["restricted", "archived", "missing"] as const) {
-      const { source: removed } = await sourceWithDocument(workspace.id, condition);
-      const remaining = await prisma.brainSource.create({ data: {
+      const { source: removed } = await sourceWithDocument(admin, workspace.id, condition);
+      const remaining = await authoredSource(admin, {
         workspaceId: workspace.id, sourceType: "DOC", tier: 1, content: `${condition} remaining facts`,
-      } });
+      });
       const target = await prisma.brainArticle.create({ data: {
         workspaceId: workspace.id, slug: `${condition}-target`, title: "Target", type: "PROJECT", bodyMd: "Target",
         sourceIds: [removed.id],
@@ -361,8 +379,8 @@ describe("confirmed Brain article removal", () => {
 
   it("sequences overlapping shared sources so stale parallel candidates cannot be accepted", async () => {
     const { workspace, admin } = await fixture();
-    const first = await sourceWithDocument(workspace.id, "First");
-    const second = await sourceWithDocument(workspace.id, "Second");
+    const first = await sourceWithDocument(admin, workspace.id, "First");
+    const second = await sourceWithDocument(admin, workspace.id, "Second");
     const target = await prisma.brainArticle.create({ data: {
       workspaceId: workspace.id, slug: "multi-target", title: "Multi target", type: "PROJECT", bodyMd: "Target",
       sourceIds: [first.source.id, second.source.id],
@@ -412,11 +430,11 @@ describe("confirmed Brain article removal", () => {
 
   it("continues to the next review when a failed first review no longer needs regeneration", async () => {
     const { workspace, admin } = await fixture();
-    const first = await sourceWithDocument(workspace.id, "First retry");
-    const second = await sourceWithDocument(workspace.id, "Second retry");
-    const other = await prisma.brainSource.create({ data: {
+    const first = await sourceWithDocument(admin, workspace.id, "First retry");
+    const second = await sourceWithDocument(admin, workspace.id, "Second retry");
+    const other = await authoredSource(admin, {
       workspaceId: workspace.id, sourceType: "DOC", tier: 1, content: "Remaining verified facts",
-    } });
+    });
     const target = await prisma.brainArticle.create({ data: {
       workspaceId: workspace.id, slug: "retry-target", title: "Retry target", type: "PROJECT", bodyMd: "Target",
       sourceIds: [first.source.id, second.source.id],

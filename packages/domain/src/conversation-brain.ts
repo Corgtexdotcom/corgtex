@@ -5,7 +5,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { appendEvents } from "./events";
 import { getUningestedConversations } from "./conversations";
 import { invariant } from "./errors";
-import { assertArtifactInputWriteFence, recordArtifactInputLineage, type LineageInput, type LineageRoot } from "./source-lineage";
+import { assertArtifactInputWriteFence, recordArtifactInputLineage, sealArtifactInputActor, type LineageInput, type LineageRoot } from "./source-lineage";
 
 export type ConversationBrainIngestParams = {
   workspaceId: string;
@@ -20,6 +20,7 @@ export type ConversationBrainIngestParams = {
 export async function ingestConversationOnDemandInTransaction(
   tx: Prisma.TransactionClient, actor: AppActor, submission: ConversationBrainIngestParams,
 ) {
+  sealArtifactInputActor(actor);
   const params = structuredClone(submission);
   await assertArtifactInputWriteFence(tx);
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });

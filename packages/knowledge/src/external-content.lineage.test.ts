@@ -72,7 +72,7 @@ const fixture = vi.hoisted(() => {
   }
   prisma.$transaction = vi.fn(async (run: (tx: any) => Promise<any>) => {
     const before = Object.fromEntries(names.map((name) => [name, tables[name].map((row) => ({ ...row }))]));
-    try { return await run(prisma); } catch (error) { for (const name of names) tables[name] = before[name]; throw error; }
+    try { return await run({ ...prisma }); } catch (error) { for (const name of names) tables[name] = before[name]; throw error; }
   });
   return { prisma, tables, time, revoked: new Set<string>(), departed: new Set<string>() };
 });

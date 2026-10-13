@@ -57,6 +57,12 @@ vi.mock("@corgtex/domain", () => ({
   lockWorkspaceArchiveArtifact: lockWorkspaceArchiveArtifactMock,
   brainSourceRecoveryIdentity: recoveryIdentityMock,
   brainSourceContentFingerprint: vi.fn(() => "source-fingerprint"),
+  captureArtifactInputProof: vi.fn(async (_actor, _workspaceId, inputs) => inputs.map((input: {kind: string; id: string}) => ({kind: input.kind, id: input.id, fingerprint: "a".repeat(64)}))),
+  captureImmutableArtifactInputProof: vi.fn(async (_actor, _workspaceId, roots) => roots),
+  isArtifactInputProofReadable: vi.fn(async () => true),
+  isArtifactInputProofPubliclyShareable: vi.fn(async () => true),
+  scanSourceReadableRecords: vi.fn(async ({load}) => (await load(undefined, 100)).filter((row: {isPrivate?: boolean}) => !row.isPrivate)),
+  invariant: (condition: unknown, _status: number, code: string, message: string) => {if (!condition) throw Object.assign(new Error(message), {code});},
   resolveKnowledgeAccessDomains: vi.fn(async () => ["WORKSPACE"]),
   readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) => new Set(records.map((record: { id: string }) => record.id))),
   readableBrainSourceIds: vi.fn(async (_actor, _workspaceId, records) =>
@@ -334,7 +340,9 @@ describe("absorbSource", () => {
     expect(updateArticleMock).not.toHaveBeenCalled();
     expect(createArticleMock).toHaveBeenCalledWith(expect.objectContaining({ label: "brain-absorb" }), expect.objectContaining({
       workspaceId: "workspace-1",
-      slug: "launch-2",
+      slug: expect.stringMatching(/^launch-[a-f0-9]{16}$/),
+      isPrivate: false,
+      completeInputRoots: expect.arrayContaining([expect.objectContaining({kind: "BrainSource", id: "source-1"})]),
       title: "Launch notes",
       authority: "REFERENCE",
       sourceIds: ["source-1"],

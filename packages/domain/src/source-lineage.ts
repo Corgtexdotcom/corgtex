@@ -12,9 +12,22 @@ import { internalSourcePermission } from "./internal-source-principal";
 import { getMcpToolInputRoots } from "./mcp-tool-input-context";
 import { isMcpToolInputEncryptedPayload } from "./mcp-tool-input-cipher";
 import { getExternalProviderPrincipalUserId } from "./external-provider-principal";
+import { artifactPermissionParents, loadArtifactPermissionMetadata } from "./source-permission-parents";
 
 type ArtifactReadCapture = { actor: AppActor; workspaceId: string; roots: Map<string, LineageRoot>; preserveConsumedRevisions: boolean };
 const artifactReadCapture = new AsyncLocalStorage<ArtifactReadCapture>();
+
+/** Seal the authenticated object in place: reconstruction would discard its
+ * server-owned WeakMap capabilities. Current database grants are still checked. */
+export function sealArtifactInputActor(actor: AppActor): AppActor {
+  if (actor.kind === "user") Object.freeze(actor.user);
+  else {
+    if (actor.scopes) Object.freeze(actor.scopes);
+    if (actor.workspaceIds) Object.freeze(actor.workspaceIds);
+    if (actor.supportOrigin) Object.freeze(actor.supportOrigin);
+  }
+  return Object.freeze(actor);
+}
 
 function observeArtifactRead(actor: AppActor, workspaceId: string, roots: readonly LineageRoot[]) {
   const scope = artifactReadCapture.getStore();
@@ -497,10 +510,10 @@ async function rootIsReadable(db: LineageClient, actor: AppActor, workspaceId: s
 
 async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: string,
   membership: { id: string; role: string } | null, domains: readonly string[], root: LineageRoot,
-  visited: Set<string>, memo: Map<string, boolean>, permissionOnly = false): Promise<boolean> {
+  visited: Set<string>, memo: Map<string, boolean>, permissionOnly = false, archivedMetadataOnly = false): Promise<boolean> {
   if (!await currentCredentialCanRead(db, actor, workspaceId, root.kind, memo)) return false;
   const loaded = await loadArtifact(db, workspaceId, root);
-  if (!isRecord(loaded) || isArchived(loaded)) return false;
+  if (!isRecord(loaded) || (isArchived(loaded) && !archivedMetadataOnly)) return false;
   const row: Record<string, unknown> = loaded;
   if (root.kind === "ArtifactInputSnapshot") {
     if (row.epochProofVersion !== 1 || !await isArtifactPermissionEpochProofCurrent(workspaceId, row.permissionEpochsJson, db)) return false;
@@ -668,7 +681,16 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
   }
   if (root.kind === "CheckIn" && (!actorCanReadRecord(actor, workspaceId, membership, root.kind, row)
     || !await db.member.findFirst({ where: { id: String(row.memberId), workspaceId, isActive: true }, select: { id: true } }))) return false;
-  if (root.kind === "RoleAssignment" && row.expiresAt instanceof Date && row.expiresAt <= new Date()) return false;
+  if (root.kind === "RoleAssignment") {
+    if (row.expiresAt instanceof Date && row.expiresAt <= new Date()) return false;
+    const [member, role] = await Promise.all([
+      db.member.findFirst({ where: { id: String(row.memberId), workspaceId, isActive: true }, select: { id: true } }),
+      db.role.findFirst({ where: { id: String(row.roleId), archivedAt: null,
+        circle: { workspaceId, archivedAt: null } }, select: { id: true } }),
+    ]);
+    if (!member || !role) return false;
+  }
+  if (root.kind === "Role" && !await db.circle.findFirst({ where: { id: String(row.circleId), workspaceId, archivedAt: null }, select: { id: true } })) return false;
   if (["CommunicationExternalUser", "CommunicationEntityLink"].includes(root.kind)) {
     const installation = await db.communicationInstallation.findFirst({ where: { id: String(row.installationId), workspaceId, status: "ACTIVE", disconnectedAt: null } });
     if (!installation || row.isDeleted === true) return false;
@@ -951,7 +973,7 @@ async function snapshotInput(actor: AppActor, tx: Prisma.TransactionClient, work
   const contentJson = Object.fromEntries(snapshotContentFields(root.kind)
     .map((field) => [field, record[field] ?? null]));
   const accessEnvelope = Object.fromEntries(["permissionKind", "kind", "isPrivate", "ownerMemberId", "authorUserId", "status", "createdByUserId",
-    "localUserId", "selectedByUserId", "connectionId", "providerKey", "sourceKind", "externalId", "submittedByUserId", "agentCredentialId", "actorKind", "credentialId", "credentialVersion", "scopeHash", "visibility", "isActive", "agentKey", "userId", "sessionId", "conversationId", "memberId", "authorMemberId", "recipientMemberId", "archivedAt", "accessDomain", "requesterUserId", "variantOfArticleId", "variantTargetFingerprint", "variantInputSetHash"]
+    "localUserId", "selectedByUserId", "connectionId", "providerKey", "sourceKind", "externalId", "submittedByUserId", "agentCredentialId", "actorKind", "credentialId", "credentialVersion", "scopeHash", "visibility", "classification", "publicEnabledAt", "publicRevokedAt", "isActive", "agentKey", "userId", "sessionId", "conversationId", "memberId", "authorMemberId", "recipientMemberId", "archivedAt", "accessDomain", "requesterUserId", "variantOfArticleId", "variantTargetFingerprint", "variantInputSetHash"]
     .map((field) => [field, envelope[field] ?? null]));
   const permissionEpochs = await captureArtifactPermissionEpochs(actor, workspaceId, [root, ...snapshotRoots], tx);
   const snapshot = await tx.artifactInputSnapshot.create({ data: {
@@ -1144,39 +1166,37 @@ export async function isArtifactInputProofPubliclyShareable(actor: AppActor, wor
   roots: readonly LineageRoot[], db: LineageClient = prisma) {
   if (!await isArtifactInputProofReadable(actor, workspaceId, roots, db)) return false;
   const seen = new Set<string>();
+  const publicAuthorities = new Set<string>();
+  const privateEnvelope = (kind: LineageKind, row: Record<string, unknown>) => row.isPrivate === true
+    || row.accessDomain === "FINANCE" || ["MeetingAudioAsset", "NativeTranscriptInput", "CommunicationMessageNativeInput", "GenericDerivedArtifactVariant", "ExternalProviderFetchInput", "ExternalContentSource", "FinanceReport", "FinanceReportFact", "FinanceImportApplication", "FinanceImportBatch", "FinanceImportCandidate", "FinanceReportUploadInput", "ExecutionRequest", "ExecutionResult", "ConversationOperationOutcome", "WorkspaceToolLinkCredential", "McpToolInput", "ConversationIngressInput", "AgentRequestInput", "AgentFeedbackInput", "ConversationPendingOperation", "ConversationPromptInput", "ConversationSession", "ConversationTurn", "RoleOnboardingSession", "CheckIn", "Notification", "NewspaperDelivery"].includes(kind)
+    || (kind === "Recognition" && row.visibility !== "WORKSPACE")
+    || (kind === "AdviceRequest" && row.audienceType !== "WORKSPACE")
+    || (kind === "ContextMapView" && row.createdByUserId != null)
+    || (kind === "BuildArtifact" && (row.visibility !== "PUBLIC_REVIEW" || row.classification !== "OPEN_CORE" || row.publicRevokedAt != null));
+  const authorityIsPublic = async (input: LineageInput): Promise<boolean> => {
+    const key = JSON.stringify([input.kind, input.id]);
+    if (publicAuthorities.has(key)) return true;
+    if (publicAuthorities.size >= 10000) return false;
+    publicAuthorities.add(key);
+    const row = await loadArtifactPermissionMetadata(db, workspaceId, input);
+    if (!row || isArchived(row) || (input.kind === "Member" && row.isActive !== true) || privateEnvelope(input.kind, row)) return false;
+    for (const parent of artifactPermissionParents(input.kind, row)) if (!await authorityIsPublic(parent)) return false;
+    return true;
+  };
   const visit = async (root: LineageRoot): Promise<boolean> => {
     const key = `${root.kind}:${root.id}:${root.fingerprint}`;
     if (seen.has(key)) return true;
     seen.add(key);
     const loaded = await loadArtifact(db, workspaceId, root);
     if (!isRecord(loaded)) return false;
-    const privateEnvelope = (kind: LineageKind, row: Record<string, unknown>) => row.isPrivate === true
-      || row.accessDomain === "FINANCE" || ["MeetingAudioAsset", "NativeTranscriptInput", "CommunicationMessageNativeInput", "GenericDerivedArtifactVariant", "ExternalProviderFetchInput", "ExternalContentSource", "FinanceReport", "FinanceReportFact", "FinanceImportApplication", "FinanceImportBatch", "FinanceImportCandidate", "FinanceReportUploadInput", "ExecutionRequest", "ExecutionResult", "ConversationOperationOutcome", "WorkspaceToolLinkCredential", "McpToolInput", "ConversationIngressInput", "AgentRequestInput", "AgentFeedbackInput", "ConversationPendingOperation", "ConversationPromptInput", "ConversationSession", "ConversationTurn", "RoleOnboardingSession", "CheckIn", "Notification", "NewspaperDelivery"].includes(kind)
-      || (kind === "Recognition" && row.visibility !== "WORKSPACE")
-      || (kind === "AdviceRequest" && row.audienceType !== "WORKSPACE")
-      || (kind === "ContextMapView" && row.createdByUserId != null)
-      || (kind === "BuildArtifact" && (row.visibility !== "PUBLIC_REVIEW" || row.classification !== "OPEN_CORE"));
     if (privateEnvelope(root.kind, loaded)) return false;
-    const parentKinds: Record<string, LineageKind> = { BRAIN_ARTICLE: "BrainArticle", DOCUMENT: "Document", MEETING: "Meeting",
-      PROPOSAL: "Proposal", ACTION: "Action", TENSION: "Tension" };
-    const parent = root.kind === "KnowledgeChunk" ? { kind: parentKinds[String(loaded.sourceType)], id: String(loaded.sourceId) }
-      : root.kind === "DeliberationEntry" ? { kind: parentKinds[String(loaded.parentType)], id: String(loaded.parentId) }
-        : ["KeyResult", "GoalUpdate"].includes(root.kind) ? { kind: "Goal" as const, id: String(loaded.goalId) }
-          : root.kind === "MeetingInsight" ? { kind: "Meeting" as const, id: String(loaded.meetingId) }
-            : root.kind === "BuildArtifactAsset" ? { kind: "BuildArtifact" as const, id: String(loaded.artifactId) }
-              : root.kind === "ActionChecklistItem" ? { kind: "Action" as const, id: String(loaded.actionId) }
-                : root.kind === "TensionUpvote" ? { kind: "Tension" as const, id: String(loaded.tensionId) }
-                  : root.kind === "PolicyCorpus" ? { kind: "Proposal" as const, id: String(loaded.proposalId) } : null;
-    if (parent) {
-      if (!parent.kind) return false;
-      const parentRow = await loadArtifact(db, workspaceId, parent);
-      if (!isRecord(parentRow) || privateEnvelope(parent.kind, parentRow)) return false;
-    }
+    for (const parent of artifactPermissionParents(root.kind, loaded)) if (!await authorityIsPublic(parent)) return false;
     let upstream: LineageRoot[] | null = [];
     if (root.kind === "ArtifactInputSnapshot") {
       if (!isRecord(loaded.accessEnvelopeJson) || privateEnvelope(loaded.sourceKind as LineageKind, loaded.accessEnvelopeJson)) return false;
       const original = await loadArtifact(db, workspaceId, { kind: loaded.sourceKind as LineageKind, id: String(loaded.sourceId) });
       if (!isRecord(original) || privateEnvelope(loaded.sourceKind as LineageKind, original)) return false;
+      for (const parent of artifactPermissionParents(loaded.sourceKind as LineageKind, original)) if (!await authorityIsPublic(parent)) return false;
       upstream = parseRoots(loaded.rootsJson as Prisma.JsonValue);
     } else if (root.kind === "BrainArticleVersion") {
       if (!isRecord(loaded.accessEnvelopeJson) || loaded.accessEnvelopeJson.isPrivate === true) return false;
@@ -1253,21 +1273,41 @@ export async function inspectStoredArtifactInputDependencies(db: LineageClient, 
 }
 
 /** Capture permission-transition history independently of mutable content hashes. */
-export async function captureArtifactPermissionEpochs(_actor: AppActor, workspaceId: string,
+export async function captureArtifactPermissionEpochs(actor: AppActor, workspaceId: string,
   fullAncestorRoots: readonly LineageRoot[], tx: Prisma.TransactionClient): Promise<PermissionEpochProof> {
   const identities = [{kind: "Workspace", id: workspaceId}];
-  for (const root of fullAncestorRoots) {
-    const loaded = await loadArtifact(tx, workspaceId, root);
+  if (actor.kind === "user") {
+    identities.push({ kind: "MemberUserPolicy", id: actor.user.id }, { kind: "WorkspaceSupportPolicy", id: actor.user.id });
+  } else {
+    if (actor.credentialId) identities.push({ kind: "AgentCredential", id: actor.credentialId });
+    if (actor.agentIdentityId) identities.push({ kind: "AgentIdentity", id: actor.agentIdentityId });
+    if (actor.supportOrigin) identities.push({ kind: "WorkspaceSupportPolicy", id: actor.supportOrigin.userId });
+  }
+  const pending: LineageInput[] = fullAncestorRoots.map(({ kind, id }) => ({ kind, id }));
+  const visited = new Set<string>();
+  for (let index = 0; index < pending.length; index++) {
+    const root = pending[index];
+    const key = JSON.stringify([root.kind, root.id]);
+    if (visited.has(key)) continue;
+    invariant(visited.size < 10000, 409, "PERMISSION_PROOF_LIMIT", "Permission parent discovery requires a bounded rebuild.");
+    visited.add(key);
+    const loaded = root.kind === "ArtifactInputSnapshot" ? await loadArtifact(tx, workspaceId, root)
+      : await loadArtifactPermissionMetadata(tx, workspaceId, root);
     invariant(isRecord(loaded), 409, "SOURCE_CHANGED", "A permission-bearing input is unavailable.");
     identities.push(...artifactPermissionEpochIdentities(root.kind, { ...loaded, id: root.id, workspaceId }));
+    pending.push(...artifactPermissionParents(root.kind, { ...loaded, id: root.id }));
+    if (root.kind === "FinanceImportBatch") {
+      const upload = await tx.financeReportUploadInput.findFirst({ where: { workspaceId, batchId: root.id }, select: { id: true } });
+      invariant(upload, 409, "SOURCE_CHANGED", "A native upload permission parent is unavailable.");
+      pending.push({ kind: "FinanceReportUploadInput", id: upload.id });
+    }
     if (root.kind === "ArtifactInputSnapshot") {
       invariant(loaded.epochProofVersion === 1
         && await isArtifactPermissionEpochProofCurrent(workspaceId, loaded.permissionEpochsJson, tx),
       409, "PERMISSION_CHANGED", "Preserved input permissions changed.");
-      const source = typeof loaded.sourceKind === "string" && loaded.sourceKind in CONTENT_FIELDS
-        ? await loadArtifact(tx, workspaceId, {kind: loaded.sourceKind as LineageKind, id: String(loaded.sourceId)}) : null;
-      invariant(isRecord(source), 409, "SOURCE_CHANGED", "A preserved input authority is unavailable.");
-      identities.push(...artifactPermissionEpochIdentities(String(loaded.sourceKind), { ...source, id: String(loaded.sourceId), workspaceId }));
+      invariant(typeof loaded.sourceKind === "string" && loaded.sourceKind in CONTENT_FIELDS && loaded.sourceKind !== "ArtifactInputSnapshot"
+        && typeof loaded.sourceId === "string", 409, "SOURCE_CHANGED", "A preserved input authority is unavailable.");
+      pending.push({ kind: loaded.sourceKind as LineageKind, id: loaded.sourceId });
       const prior = loaded.permissionEpochsJson as unknown as PermissionEpochProof;
       identities.push(...prior.entries.map(({kind, id}) => ({kind, id})));
     }
@@ -1460,6 +1500,36 @@ export async function advanceHumanArtifactInputLineage(params: {
   return true;
 }
 
+/** Administrative archive metadata cannot turn copied or unknown content into
+ * an original. Preserve the exact earlier epoch vector, including tombstones. */
+export async function advanceArchivedOriginalEnvelopeLineage(params: {
+  tx: Prisma.TransactionClient; workspaceId: string; artifact: LineageInput;
+  before: unknown; after: unknown;
+}) {
+  await assertArtifactInputWriteFence(params.tx);
+  const { tx, workspaceId, artifact, before, after } = params;
+  if (!isRecord(before) || !isRecord(after)) return false;
+  const prior = await latestManifest(tx, workspaceId, artifact);
+  const roots = prior ? parseRoots(prior.rootsJson) : null;
+  if (!prior || prior.origin !== "HUMAN_ORIGINAL" || !roots || roots.length
+    || !Array.isArray(prior.inputsJson) || prior.inputsJson.length
+    || prior.contentHash !== lineageContentFingerprint(artifact.kind, before)) return false;
+  const metadata = ["archivedAt", "archivedByUserId", "archiveReason", "updatedAt",
+    ...(artifact.kind === "Proposal" ? ["status"] : []), ...(artifact.kind === "AgentIdentity" ? ["isActive"] : [])];
+  const normalized = { ...after };
+  for (const field of metadata) normalized[field] = before[field];
+  if (lineageContentFingerprint(artifact.kind, normalized) !== prior.contentHash) return false;
+  await tx.artifactInputLineage.create({ data: {
+    workspaceId, artifactType: artifact.kind, artifactId: artifact.id, revision: prior.revision + 1,
+    origin: prior.origin, epochProofVersion: prior.epochProofVersion,
+    permissionEpochsJson: prior.permissionEpochsJson ?? Prisma.JsonNull,
+    contentHash: lineageContentFingerprint(artifact.kind, after),
+    inputsJson: prior.inputsJson as Prisma.InputJsonValue, rootsJson: prior.rootsJson as Prisma.InputJsonValue,
+  } });
+  await assertArtifactInputWriteFence(tx);
+  return true;
+}
+
 /** Explicitly remove any old proof after a writer cannot attest its complete inputs. */
 export async function invalidateArtifactInputLineage(params: {
   tx: Prisma.TransactionClient;
@@ -1493,6 +1563,26 @@ export async function currentArtifactInputRoots(db: LineageClient, workspaceId: 
   const manifest = await latestManifest(db, workspaceId, artifact);
   if (!manifest || manifest.contentHash !== lineageContentFingerprint(artifact.kind, content)) return null;
   return parseRoots(manifest.rootsJson);
+}
+
+/** Archive existence and paths are source-derived metadata too. This exception
+ * returns no body and never admits an archived input to a model or copy writer. */
+export async function isArtifactArchiveMetadataReadable(actor: AppActor, workspaceId: string,
+  artifact: LineageInput, db: LineageClient = prisma) {
+  const membership = await requireWorkspaceMembership({ actor, workspaceId, tx: db });
+  const domains = await resolveKnowledgeAccessDomains(actor, workspaceId, db);
+  const row = await loadArtifact(db, workspaceId, artifact);
+  if (!isRecord(row)) return false;
+  const fingerprint = lineageContentFingerprint(artifact.kind, row);
+  if (isArchived(row)) {
+    const manifest = await latestManifest(db, workspaceId, artifact);
+    if (!manifest || manifest.origin !== "HUMAN_ORIGINAL" || manifest.contentHash !== fingerprint
+      || manifest.epochProofVersion !== 1 || !parsePermissionEpochProof(manifest.permissionEpochsJson)
+      || parseRoots(manifest.rootsJson)?.length !== 0 || !Array.isArray(manifest.inputsJson)
+      || manifest.inputsJson.length !== 0) return false;
+  }
+  return evaluateRoot(db, actor, workspaceId, membership, domains,
+    { ...artifact, fingerprint }, new Set(), new Map(), false, true);
 }
 
 /** Returns only ids whose current content and every permission-bearing input are provably safe. */

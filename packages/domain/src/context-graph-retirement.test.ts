@@ -6,6 +6,7 @@ const { db, fence } = vi.hoisted(() => ({
     derivedArtifactRebuildState: { upsert: vi.fn() },
     artifactInputLineage: { findFirst: vi.fn(), create: vi.fn() }, artifactInputSnapshot: { findFirst: vi.fn() },
     nativeTranscriptInput: { findFirst: vi.fn() }, communicationMessageNativeInput: { findFirst: vi.fn() },
+    externalProviderFetchInput: { findFirst: vi.fn() },
     contextGraphObject: { findMany: vi.fn(), update: vi.fn() }, contextGraphRelationship: { findMany: vi.fn(), update: vi.fn() },
     contextGraphEvidenceRef: { findMany: vi.fn() }, contextGraphProposedDiff: { findMany: vi.fn(), update: vi.fn() },
   },
@@ -16,10 +17,14 @@ vi.mock("./source-permission-epochs", async importOriginal => {
   return { ...actual, capturePermissionEpochs: vi.fn(async () => ({ version: 1, policyVersion: actual.SOURCE_PERMISSION_POLICY_VERSION,
     entries: [{ kind: "Document", id: "document-a", epoch: "2" }] })) };
 });
-vi.mock("./source-lineage", async () => ({ assertArtifactInputWriteFence: fence, isLineageKind: (await vi.importActual<typeof import("./source-lineage")>("./source-lineage")).isLineageKind }));
+vi.mock("./source-lineage", async () => {
+  const actual = await vi.importActual<typeof import("./source-lineage")>("./source-lineage");
+  return { assertArtifactInputWriteFence: fence, isLineageKind: actual.isLineageKind, lineageContentFingerprint: actual.lineageContentFingerprint };
+});
 import { inspectStoredArtifactInputDependencyIdentities, retireContextGraphSourceDescendants, retireContextGraphChangedSourceDescendants } from "./context-graph-retirement";
 import type { Prisma } from "@prisma/client";
 import { SOURCE_PERMISSION_POLICY_VERSION } from "./source-permission-epochs";
+import { lineageContentFingerprint } from "./source-lineage";
 const tx = db as unknown as Prisma.TransactionClient;
 const lease = { lockedBy: "worker-a", lockedAt: new Date("2026-10-13T10:00:00Z") };
 const identity = { workspaceId: "ws-a", workflowJobId: "job-a", sourceType: "DOCUMENT", sourceId: "document-a", attempts: 2, expectedLease: lease };
@@ -43,6 +48,7 @@ beforeEach(() => {
   db.artifactInputLineage.findFirst.mockResolvedValue(manifest);
   db.nativeTranscriptInput.findFirst.mockResolvedValue(null);
   db.communicationMessageNativeInput.findFirst.mockResolvedValue(null);
+  db.externalProviderFetchInput.findFirst.mockResolvedValue(null);
   db.artifactInputSnapshot.findFirst.mockResolvedValue({ ...capturedEpochs, sourceKind: "Document", sourceId: "document-a", sourceFingerprint: "c".repeat(64), origin: "HUMAN_ORIGINAL", rootsJson: [] });
 });
 describe("source-bound graph retirement", () => {
@@ -139,6 +145,66 @@ describe("source-bound graph retirement", () => {
   });
 });
 describe("metadata-only complete ancestry", () => {
+  const nativeFetch = (sourceKind = "FILE", toolName = "get_file_content") => {
+    const key = sourceKind === "FILE" ? "file_id" : sourceKind === "FOLDER" ? "folder_id" : "hub_id";
+    return { id: "native-box", workspaceId: "ws-a", externalContentSourceId: "selected-source", connectionId: "connection",
+      localUserId: "owner", providerKey: "box", serverUrl: "https://mcp.box.com", providerAccountId: "provider-owner",
+      sourceKind, externalId: "selected-external-id", toolName, requestJson: { [key]: "selected-external-id" },
+      encryptedResponseJson: "persisted encrypted original response", responseHash: "c".repeat(64), connectionGrantHash: "d".repeat(64),
+      fetchedAt: new Date("2026-10-12T10:00:00Z"), createdAt: new Date("2026-10-12T10:00:00Z") };
+  };
+  const nativeFetchManifest = (input: ReturnType<typeof nativeFetch>) => ({ ...manifest,
+    rootsJson: [{ kind: "ExternalProviderFetchInput", id: input.id, fingerprint: lineageContentFingerprint("ExternalProviderFetchInput", input) }],
+    permissionEpochsJson: { version: 1, policyVersion: SOURCE_PERMISSION_POLICY_VERSION,
+      entries: [{ kind: "ExternalProviderFetchInput", id: input.id, epoch: "7" }] } });
+
+  it.each([
+    ["FILE", "get_file_details"], ["FILE", "get_file_content"], ["FOLDER", "get_folder_details"],
+    ["FOLDER", "list_folder_content_by_folder_id"], ["HUB", "get_hub_details"], ["HUB", "get_hub_items"],
+  ])("recognizes stored native %s/%s metadata without current provider or audience reads", async (sourceKind, toolName) => {
+    const native = nativeFetch(sourceKind, toolName);
+    db.artifactInputLineage.findFirst.mockResolvedValueOnce(nativeFetchManifest(native)).mockResolvedValue(null);
+    db.externalProviderFetchInput.findFirst.mockResolvedValue(native);
+    // The historical vector need not equal current counters for fresh recipe
+    // discovery; separately admitted original sources must prove current access.
+    db.$queryRaw.mockRejectedValue(new Error("Current permission queries are forbidden in metadata discovery"));
+    const result = await inspectStoredArtifactInputDependencyIdentities(tx, "ws-a", { kind: "ContextGraphObject", id: "graph-a" });
+    expect(result.complete).toBe(true);
+    expect(result.dependencies).toContainEqual({ kind: "ExternalProviderFetchInput", id: native.id });
+    expect(JSON.stringify(result)).not.toMatch(/encrypted original response|provider-owner|connectionGrantHash/);
+    expect(db.externalProviderFetchInput.findFirst).toHaveBeenCalledWith({ where: { id: native.id, workspaceId: "ws-a" } });
+    expect(db.$queryRaw).not.toHaveBeenCalled();
+    expect(db.artifactInputLineage.create).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing-row", "foreign-row", "edited-fingerprint", "missing-native-epoch", "malformed-root-vector",
+    "legacy-target", "account", "binding", "provider", "endpoint", "cipher", "hash", "ai-tool", "wrong-source-tool", "request-id", "extra-argument"])(
+    "does not certify unproved external native ancestry: %s", async scenario => {
+      const native = nativeFetch();
+      if (scenario === "account") native.providerAccountId = "";
+      if (scenario === "binding") native.externalContentSourceId = "";
+      if (scenario === "provider") native.providerKey = "legacy-http";
+      if (scenario === "endpoint") native.serverUrl = "https://untrusted.example.test";
+      if (scenario === "cipher") native.encryptedResponseJson = "";
+      if (scenario === "hash") native.responseHash = "guessed-hash";
+      if (scenario === "ai-tool") native.toolName = "ai_qa_single_file";
+      if (scenario === "wrong-source-tool") native.toolName = "get_folder_details";
+      if (scenario === "request-id") native.requestJson = { file_id: "other-file" };
+      if (scenario === "extra-argument") native.requestJson = { file_id: native.externalId, prompt: "unproved model question" };
+      const receipt = nativeFetchManifest(native);
+      if (scenario === "legacy-target") receipt.permissionEpochsJson = null as any;
+      if (scenario === "missing-native-epoch") receipt.permissionEpochsJson.entries = [{ kind: "Document", id: "other", epoch: "0" }];
+      if (scenario === "malformed-root-vector") Object.assign(receipt.rootsJson[0], { permissionEpochs: { version: 1,
+        policyVersion: SOURCE_PERMISSION_POLICY_VERSION, entries: [] } });
+      db.artifactInputLineage.findFirst.mockResolvedValueOnce(receipt).mockResolvedValue(null);
+      if (scenario === "edited-fingerprint") native.encryptedResponseJson = "changed after original capture";
+      if (scenario === "foreign-row") native.workspaceId = "ws-other";
+      db.externalProviderFetchInput.findFirst.mockResolvedValue(scenario === "missing-row" ? null : native);
+      expect((await inspectStoredArtifactInputDependencyIdentities(tx, "ws-a", { kind: "ContextGraphObject", id: "graph-a" })).complete).toBe(false);
+      expect(db.$queryRaw).not.toHaveBeenCalled();
+      expect(db.artifactInputLineage.create).not.toHaveBeenCalled();
+    });
+
   it.each(["version", "null", "empty", "malformed", "obsolete-policy"])("rejects a nonempty legacy derived target with %s captured proof", async kind => {
     const legacy = structuredClone(manifest);
     if (kind === "version") legacy.epochProofVersion = null as any;

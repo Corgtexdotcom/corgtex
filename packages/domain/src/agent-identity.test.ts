@@ -14,6 +14,7 @@ import {
 import { prisma } from "@corgtex/shared";
 import { prepareProducerLineage, finishProducerLineage } from "./producer-lineage";
 import * as sourceLineage from "./source-lineage";
+import { installSourcePermissionEpochFixture } from "./source-permission-epochs.test-fixture";
 vi.mock("./producer-lineage", () => ({
   prepareProducerLineage: vi.fn().mockResolvedValue({ mode: "HUMAN_ORIGINAL", inputs: [], roots: [] }),
   finishProducerLineage: vi.fn().mockResolvedValue(undefined),
@@ -79,6 +80,7 @@ vi.mock("@corgtex/shared", () => ({
       createMany: vi.fn(),
     },
     $executeRaw: vi.fn(),
+    $queryRaw: vi.fn(),
     $transaction: vi.fn(async (cb) => cb(prisma)),
   },
 }));
@@ -212,7 +214,7 @@ describe("agent-identity", () => {
     vi.mocked(prisma.agentIdentity.update).mockResolvedValue({ id: "ai-1", isActive: false } as any);
 
     const result = await deactivateAgentIdentity(adminActor, wsId, "ai-1");
-    expect(result.isActive).toBe(false);
+    expect(result).toEqual({ id: "ai-1" });
     expect(prisma.roleHolderHistory.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
         workspaceId: wsId,
@@ -491,6 +493,7 @@ describe("agent identity producers with actual lineage receipts", () => {
     (prisma as any).$executeRaw.mockResolvedValue(1);
     rows.user.push({ id: "u1", email: "admin@test.com", displayName: "Admin", bio: null, avatarUrl: null, linkedinUrl: null, websiteUrl: null });
     rows.member.push({ id: "m1", workspaceId: wsId, userId: "u1", role: "ADMIN", isActive: true, joinedAt: timestamp });
+    installSourcePermissionEpochFixture(prisma);
   });
   async function originalAction() {
     const row = { id: "source-action", workspaceId: wsId, title: "Complete source", bodyMd: "Complete source body", status: "DRAFT", authorUserId: "u1", isPrivate: true, archivedAt: null as Date | null, createdAt: timestamp, updatedAt: timestamp };

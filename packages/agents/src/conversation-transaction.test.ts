@@ -164,6 +164,35 @@ describe("conversation native inputs and turns in caller-owned transactions", ()
     expect(fixture.bases.primary.$transaction).not.toHaveBeenCalled();
   });
 
+  it("seals the exact caller actor before the first await without losing its object identity", async () => {
+    const actor = structuredClone(alice);
+    const authority = new WeakMap<object, string>([[actor, "synthetic-server-owned-authority"]]);
+    const prompt = await createConversationPromptInput(actor, { workspaceId, conversationId: base.sessionId, content: base.userMessage, tx });
+    const roots = await captureArtifactInputProof(actor, workspaceId, [{ kind: "ConversationPromptInput", id: prompt.id }], tx);
+    fixture.membership.mockClear();
+    const barrier = deferred();
+    const pending = withArtifactInputWriteFence(async (usedTx) => {
+      expect(usedTx).toBe(tx);
+      await barrier.promise;
+    }, () => ingestConversationOnDemandInTransaction(tx, actor, {
+      workspaceId, title: "Exact caller publication", content: base.userMessage, lineageRoots: roots,
+    }));
+    expect(Object.isFrozen(actor)).toBe(true);
+    if (actor.kind !== "user") throw new Error("Synthetic user fixture");
+    expect(Object.isFrozen(actor.user)).toBe(true);
+    expect(() => { actor.user.id = "synthetic-bob"; }).toThrow(TypeError);
+    expect(() => { (actor as any).kind = "agent"; }).toThrow(TypeError);
+    barrier.resolve();
+    const source = await pending;
+    expect(source.authorMemberId).toBe(`member-${workspaceId}-synthetic-alice`);
+    expect(fixture.membership.mock.calls.length).toBeGreaterThan(0);
+    for (const [params] of fixture.membership.mock.calls) {
+      expect(params.actor).toBe(actor);
+      expect(authority.get(params.actor)).toBe("synthetic-server-owned-authority");
+    }
+    expect(fixture.tables.get("auditLog")?.values().next().value).toMatchObject({ actorUserId: "synthetic-alice" });
+  });
+
   it("reuses the supplied transaction for both constructors and exact source proofs", async () => {
     const fence = vi.fn(async (usedTx) => { expect(usedTx).toBe(tx); });
     const [prompt, ingress] = await withArtifactInputWriteFence(fence, async () => [

@@ -4,6 +4,7 @@ import type { AppActor } from "@corgtex/shared";
 const { prismaMock, storageDeleteMock, appendEventsMock } = vi.hoisted(() => {
   const prisma = {
     workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },
+    workspaceFeatureFlag: { findMany: vi.fn().mockResolvedValue([{ flag: "FINANCE", enabled: false }]) },
     $transaction: vi.fn(),
     action: {
       findFirst: vi.fn(),
@@ -122,6 +123,7 @@ const actor: AppActor = {
 describe("workspace archive domain", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    prismaMock.member.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
     prismaMock.auditLog.create.mockResolvedValue({});
     prismaMock.approvalFlow.findFirst.mockResolvedValue(null);
@@ -198,6 +200,28 @@ describe("workspace archive domain", () => {
     }));
   });
 
+  it("returns only the authorized identity from archive, repeated archive, and restore without private content", async () => {
+    const active = { id: "private-action", workspaceId: "workspace-1", authorUserId: "admin-1", isPrivate: true,
+      title: "private-title-canary", descriptionMd: "private-body-canary", archivedAt: null, status: "OPEN" };
+    const archived = { ...active, archivedAt: new Date("2026-10-13T10:00:00Z"), archiveReason: "private-reason-canary" };
+    prismaMock.action.findFirst.mockResolvedValueOnce(active).mockResolvedValueOnce(archived).mockResolvedValueOnce(archived);
+    prismaMock.action.update.mockResolvedValueOnce(archived).mockResolvedValueOnce(active);
+    prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValue({ id: "archive-private", previousState: active });
+    const { archiveWorkspaceArtifact, restoreWorkspaceArtifact } = await import("./archive");
+    const params = { workspaceId: "workspace-1", entityType: "Action", entityId: active.id };
+    for (const result of [await archiveWorkspaceArtifact(actor, params), await archiveWorkspaceArtifact(actor, params),
+      await restoreWorkspaceArtifact(actor, params)]) {
+      expect(result).toEqual({ id: active.id });
+      expect(JSON.stringify(result)).not.toContain("canary");
+    }
+    expect(prismaMock.action.update).toHaveBeenCalledTimes(2);
+    expect(prismaMock.workspaceArchiveRecord.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      previousState: expect.objectContaining({ title: active.title, descriptionMd: active.descriptionMd, isPrivate: true }),
+    }) }));
+    expect(prismaMock.action.update).toHaveBeenLastCalledWith({ where: { id: active.id },
+      data: { archivedAt: null, archivedByUserId: null, archiveReason: null } });
+  });
+
   it("reindexes a restored Brain article after its source is reviewed", async () => {
     const archived = {
       id: "article-1", workspaceId: "workspace-1", slug: "reviewed-article",
@@ -223,9 +247,9 @@ describe("workspace archive domain", () => {
     prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValue({ id: "archive-activity-1", previousState: active });
     const { archiveWorkspaceArtifact, restoreWorkspaceArtifact } = await import("./archive");
     const params = { workspaceId: "workspace-1", entityType: "CrmActivity", entityId: "activity-1" };
-    await expect(archiveWorkspaceArtifact(actor, { ...params, reason: "test cleanup" })).resolves.toMatchObject(archived);
-    await expect(archiveWorkspaceArtifact(actor, params)).resolves.toMatchObject(archived);
-    await expect(restoreWorkspaceArtifact(actor, params)).resolves.toMatchObject(active);
+    await expect(archiveWorkspaceArtifact(actor, { ...params, reason: "test cleanup" })).resolves.toEqual({ id: archived.id });
+    await expect(archiveWorkspaceArtifact(actor, params)).resolves.toEqual({ id: archived.id });
+    await expect(restoreWorkspaceArtifact(actor, params)).resolves.toEqual({ id: active.id });
     await expect(restoreWorkspaceArtifact(actor, params)).rejects.toThrow("CrmActivity is not archived");
     expect(prismaMock.workspaceArchiveRecord.create).toHaveBeenCalledTimes(1);
     expect(prismaMock.$executeRaw).toHaveBeenCalledWith(expect.anything(), "workspace_archive:CrmActivity:activity-1");
@@ -297,7 +321,7 @@ describe("workspace archive domain", () => {
       workspaceId: "workspace-1",
       entityType: "Proposal",
       entityId: "proposal-1",
-    })).resolves.toMatchObject({ id: "proposal-1", status: "RESOLVED" });
+    })).resolves.toEqual({ id: "proposal-1" });
 
     expect(prismaMock.proposal.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
@@ -678,7 +702,7 @@ describe("workspace archive domain", () => {
     prismaMock.brainSource.update.mockResolvedValue({ ...source, archivedAt: new Date("2026-08-20T10:00:00.000Z") });
     const { archiveWorkspaceArtifact } = await import("./archive");
 
-    prismaMock.member.findUnique.mockResolvedValueOnce({
+    prismaMock.member.findUnique.mockResolvedValue({
       id: "admin-member",
       workspaceId: "workspace-1",
       userId: "admin-user",
@@ -695,7 +719,7 @@ describe("workspace archive domain", () => {
     })).resolves.toMatchObject({ id: "source-1" });
 
     prismaMock.brainSource.update.mockClear();
-    prismaMock.member.findUnique.mockResolvedValueOnce({
+    prismaMock.member.findUnique.mockResolvedValue({
       id: "author-member",
       workspaceId: "workspace-1",
       userId: "author-user",
@@ -1038,14 +1062,21 @@ describe("workspace archive domain", () => {
     expect(storageDeleteMock).not.toHaveBeenCalled();
   });
 
-  it("lists active archive records by default", async () => {
-    prismaMock.workspaceArchiveRecord.findMany.mockResolvedValue([{ id: "archive-1" }]);
+  it("filters active archive records by default and withholds unproved source metadata", async () => {
+    const metadata = { id: "archive-1", workspaceId: "workspace-1", entityType: "Action", entityId: "action-1",
+      archivedAt: new Date("2026-10-13T10:00:00Z"), archivedByUserId: "admin-1", restoredAt: null,
+      restoredByUserId: null, purgedAt: null, purgedByUserId: null,
+      createdAt: new Date("2026-10-13T10:00:00Z"), updatedAt: new Date("2026-10-13T10:00:00Z") };
+    prismaMock.workspaceArchiveRecord.findMany.mockResolvedValue([metadata]);
+    prismaMock.action.findFirst.mockResolvedValue({ id: "action-1", workspaceId: "workspace-1", archivedAt: metadata.archivedAt });
+    prismaMock.artifactInputLineage.findFirst.mockResolvedValue(null);
 
     const { listArchivedWorkspaceArtifacts } = await import("./archive");
     await expect(listArchivedWorkspaceArtifacts(actor, {
       workspaceId: "workspace-1",
       entityType: "Action",
-    })).resolves.toEqual([{ id: "archive-1", permanentPath: null }]);
+    })).resolves.toEqual([]);
+    expect(prismaMock.workspacePermalink.findMany).not.toHaveBeenCalled();
 
     expect(prismaMock.workspaceArchiveRecord.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
@@ -1057,7 +1088,33 @@ describe("workspace archive domain", () => {
     }));
   });
 
-  it("can look up purged archive records for typed link status pages", async () => {
+  it("withholds existence and paths when only a purged restricted snapshot remains", async () => {
+    const record = { id: "archive-restricted", workspaceId: "workspace-1", entityType: "BrainArticle", entityId: "purged-private-article",
+      archivedAt: new Date("2026-10-13T09:00:00Z"), archivedByUserId: "other-user", restoredAt: null,
+      restoredByUserId: null, purgedAt: new Date("2026-10-13T10:00:00Z"), purgedByUserId: "other-user",
+      createdAt: new Date("2026-10-13T09:00:00Z"), updatedAt: new Date("2026-10-13T10:00:00Z"),
+      entityLabel: "restricted-title-canary", archivedByLabel: "restricted-author-canary",
+      archiveReason: "restricted-reason-canary", purgeReason: "restricted-purge-canary",
+      previousState: { bodyMd: "restricted-body-canary", isPrivate: true, ownerMemberId: "other-owner", sourceIds: ["restricted-source-canary"] } };
+    // Return every stored field even if select is requested: the public DTO must
+    // also defend against accidental broadening of the data access projection.
+    prismaMock.workspaceArchiveRecord.findMany.mockResolvedValue([record]);
+    prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValue(record);
+    const { listArchivedWorkspaceArtifacts, getWorkspaceArchiveRecord } = await import("./archive");
+    const list = await listArchivedWorkspaceArtifacts(actor, { workspaceId: "workspace-1", includePurged: true });
+    const detail = await getWorkspaceArchiveRecord(actor, { workspaceId: "workspace-1", entityType: "BrainArticle", entityId: record.entityId, includePurged: true });
+    expect(list).toEqual([]);
+    expect(detail).toBeNull();
+    expect(JSON.stringify({ list, detail })).not.toContain("-canary");
+    expect(prismaMock.workspacePermalink.findMany).not.toHaveBeenCalled();
+    for (const query of [prismaMock.workspaceArchiveRecord.findMany.mock.calls.at(-1)?.[0], prismaMock.workspaceArchiveRecord.findFirst.mock.calls.at(-1)?.[0]]) {
+      expect(query.select).toMatchObject({ id: true, entityId: true, purgedAt: true });
+      for (const field of ["previousState", "entityLabel", "archivedByLabel", "archiveReason", "purgeReason"]) expect(query.select).not.toHaveProperty(field);
+    }
+    expect(prismaMock.brainArticle.findFirst).not.toHaveBeenCalled();
+  });
+
+  it("does not reveal purged identities through typed link status lookup", async () => {
     const purgedAt = new Date("2026-06-24T12:00:00.000Z");
     prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValue({
       id: "archive-1",
@@ -1072,7 +1129,7 @@ describe("workspace archive domain", () => {
       entityType: "Tension",
       entityId: "tension-1",
       includePurged: true,
-    })).resolves.toMatchObject({ id: "archive-1", purgedAt });
+    })).resolves.toBeNull();
 
     expect(prismaMock.workspaceArchiveRecord.findFirst).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({

@@ -62,6 +62,24 @@ async function communicationFixture() {
 }
 
 describe("complete permission governor SQL transitions", () => {
+  it("keeps producer content metadata separate from permission-bearing document rebinding", async () => {
+    const f = await fixture();
+    const source = await prisma.brainSource.create({ data: { workspaceId: f.workspace.id,
+      sourceType: "FILE_UPLOAD", tier: 3, title: "Synthetic file", content: "Original content", authorMemberId: f.member.id,
+      metadata: { documentId: "synthetic-document-one", contentHash: "original", fileHash: "original" } } });
+    const identities = [{ kind: "BrainSource", id: source.id }];
+    const before = await capture(f.workspace.id, identities);
+    await prisma.brainSource.update({ where: { id: source.id }, data: {
+      content: "Replacement content", metadata: { documentId: "synthetic-document-one",
+        contentHash: "replacement", fileHash: "replacement", extractionProgress: "completed" },
+    } });
+    expect(await isArtifactPermissionEpochProofCurrent(f.workspace.id, before)).toBe(true);
+    await cycle(f.workspace.id, identities,
+      () => prisma.brainSource.update({ where: { id: source.id }, data: { metadata: { documentId: "synthetic-document-two" } } }),
+      () => prisma.brainSource.update({ where: { id: source.id }, data: { metadata: { documentId: "synthetic-document-one" } } }));
+    expect(await isArtifactPermissionEpochProofCurrent(f.workspace.id, before)).toBe(false);
+  });
+
   it("resolves Role workspace through Circle and invalidates archive/restoration governors", async () => {
     const f = await roleFixture();
     await cycle(f.workspace.id, [{ kind: "Role", id: f.role.id }, { kind: "CircleRolePolicy", id: f.circle.id }, { kind: "ModulePolicy", id: "finance" }],
@@ -174,7 +192,7 @@ describe("complete permission governor SQL transitions", () => {
   it("permanently rejects incomplete v1 policy vectors even when their recorded counters still match", async () => {
     const f = await fixture(); const fresh = await capture(f.workspace.id, [{ kind: "Workspace", id: f.workspace.id }]);
     expect(fresh.policyVersion).toBe(SOURCE_PERMISSION_POLICY_VERSION);
-    expect(SOURCE_PERMISSION_POLICY_VERSION).toBe("pun68-permissions-v2");
+    expect(SOURCE_PERMISSION_POLICY_VERSION).toBe("pun68-permissions-v3");
     expect(await isArtifactPermissionEpochProofCurrent(f.workspace.id, { ...fresh, policyVersion: "pun68-permissions-v1" })).toBe(false);
     expect(await isArtifactPermissionEpochProofCurrent(f.workspace.id, fresh)).toBe(true);
   });

@@ -7,11 +7,13 @@ import { getMcpToolInputRoots } from "./mcp-tool-input-context";
 import { lockWorkspaceMembership } from "./workspace-support-access";
 import { inspectStoredArtifactInputDependencyIdentities } from "./context-graph-retirement";
 import { derivationHash, derivationRootSignature, preparePermittedDerivationInputs,
-  PERMITTED_DERIVATION_SOURCE_KINDS, type PermittedDerivationSource, type PreparedDerivationInputs } from "./permitted-derivation-inputs";
+  PERMITTED_DERIVATION_SOURCE_KINDS, type DerivationIdentity, type PermittedDerivationSource, type PreparedDerivationInputs } from "./permitted-derivation-inputs";
 import { assertArtifactInputWriteFence, captureArtifactInputProof, captureArtifactPermissionEpochs,
   isArtifactInputProofReadable, lineageContentFingerprint,
-  readableArtifactIds, recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
+  inspectStoredArtifactInputDependencies, readableArtifactIds, recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
 import { isArtifactPermissionEpochProofCurrent, type PermissionEpochProof } from "./source-permission-epochs";
+import { mergeArtifactInputProofs } from "./digest-lineage";
+import type { ExternalProviderCommitPreflight } from "./external-provider-authority";
 
 export const GRAPH_SOURCE_VARIANT_JOB_TYPE = "agent.graph-source-variant";
 export const GRAPH_SOURCE_VARIANT_GENERATOR_VERSION = "1";
@@ -53,8 +55,14 @@ type Recipe = { version: 1; memberId: string; userId: string; requestRoots: Line
   generatorVersion: string; instructionHash: string };
 type Payload = Recipe & { phase: "REQUESTED" | "GENERATING" | "APPLIED" | "STALE"; generationToken?: string; variantId?: string };
 type Prepared = { recipe: Recipe; inputs: PreparedDerivationInputs };
+type PreparationParams = { target: { kind: GraphTargetKind; id: string }; scope: GraphVariantScope;
+  mode?: GraphVariantMode; deletionEventId?: string; requestRoots?: readonly LineageRoot[] };
+type Discovery = { params: PreparationParams; memberId: string; requestRoots: LineageRoot[]; mode: GraphVariantMode;
+  fingerprint: string; targets: Target[]; cohortKey: string; dependencies: DerivationIdentity[]; additional: DerivationIdentity[] };
+type PhasePreflight = { discovery: Discovery; admitted: DerivationIdentity[]; roots: LineageRoot[];
+  targetEpochs: PermissionEpochProof; provider: ExternalProviderCommitPreflight };
 export type GraphSourceVariantGenerationResult = { phase: "APPLIED"; variantId: string } | { phase: "STALE" | "SUPERSEDED" };
-type GenerationClaim = GraphSourceVariantGenerationResult | { actor: UserActor; prepared: Prepared; token: string };
+type GenerationClaim = GraphSourceVariantGenerationResult | { actor: UserActor; prepared: Prepared; token: string; leaseStamp: string };
 const TARGET_KINDS: GraphTargetKind[] = ["ContextGraphObject", "ContextGraphRelationship", "ContextGraphEvidenceRef", "ContextGraphProposedDiff"];
 const LIMIT = 5000;
 const TX_OPTIONS = { maxWait: 5_000, timeout: 120_000 };
@@ -76,7 +84,7 @@ async function targetRow(tx: Prisma.TransactionClient, workspaceId: string, targ
     case "ContextGraphProposedDiff": return tx.contextGraphProposedDiff.findFirst({ where });
   }
 }
-function stale(error: unknown) { return error instanceof AppError && ["SOURCE_CHANGED", "PERMISSION_CHANGED", "UNKNOWN_LINEAGE", "SOURCE_RESTRICTED", "NOT_A_MEMBER", "FORBIDDEN", "SUPPORT_CONTENT_RESTRICTED", "SUPPORT_AUTHORIZATION_REVOKED", "WORKSPACE_SCOPE_MISMATCH"].includes(error.code); }
+function stale(error: unknown) { return error instanceof AppError && ["SOURCE_CHANGED", "PERMISSION_CHANGED", "UNKNOWN_LINEAGE", "UNSUPPORTED_PROVIDER_INPUT", "SOURCE_RESTRICTED", "NOT_A_MEMBER", "FORBIDDEN", "SUPPORT_CONTENT_RESTRICTED", "SUPPORT_AUTHORIZATION_REVOKED", "WORKSPACE_SCOPE_MISMATCH"].includes(error.code); }
 function payload(value: unknown): Payload {
   invariant(record(value) && value.version === 1 && typeof value.memberId === "string" && typeof value.userId === "string"
     && Array.isArray(value.requestRoots) && value.requestRoots.length <= LIMIT && value.requestRoots.every(root => record(root)
@@ -95,8 +103,8 @@ function payload(value: unknown): Payload {
 function sameRecipe(a: Recipe, b: Recipe) { return derivationHash(a) === derivationHash({ ...b, phase: undefined, generationToken: undefined, variantId: undefined }); }
 
 /** No prior title, body, status, layout, approval or evidence quote enters this input recipe. */
-async function prepare(tx: Prisma.TransactionClient, actor: UserActor, workspaceId: string,
-  params: { target: { kind: GraphTargetKind; id: string }; scope: GraphVariantScope; mode?: GraphVariantMode; deletionEventId?: string; requestRoots?: readonly LineageRoot[] }): Promise<Prepared | "ORIGINAL" | null> {
+async function discover(tx: Prisma.TransactionClient, actor: UserActor, workspaceId: string,
+  params: PreparationParams): Promise<Discovery | "ORIGINAL" | null> {
   graphVariantScopeKey(params.scope);
   invariant(targetKind(params.target.kind) && typeof params.target.id === "string", 400, "INVALID_INPUT", "Graph target is invalid.");
   const member = await requireWorkspaceMembership({ actor, workspaceId, tx });
@@ -158,7 +166,47 @@ async function prepare(tx: Prisma.TransactionClient, actor: UserActor, workspace
   const additional = [{ kind: "Workspace" as const, id: workspaceId }, { kind: "Member" as const, id: member.id }, { kind: "User" as const, id: actor.user.id },
     ...(params.scope.kind === "view" ? [{ kind: "ContextMapView" as const, id: params.scope.mapViewId }] : []),
     ...requestRoots.map(({ kind, id }) => ({ kind, id }))];
-  const inputs = await preparePermittedDerivationInputs(tx, actor, workspaceId, discovery.dependencies, targets, additional);
+  return { params, memberId: member.id, requestRoots, mode, fingerprint, targets, cohortKey, dependencies: discovery.dependencies, additional };
+}
+
+/** Capture independently admitted source receipts before opening an interactive transaction. */
+async function preparePhase(actor: UserActor, workspaceId: string, supplied: PreparationParams): Promise<PhasePreflight | "ORIGINAL" | null> {
+  const params = structuredClone(supplied);
+  const discovery = await discover(prisma, actor, workspaceId, params);
+  if (!discovery || discovery === "ORIGINAL") return discovery;
+  const admitted: DerivationIdentity[] = [];
+  const proofs: LineageRoot[][] = [];
+  for (const input of discovery.dependencies) {
+    if (!(PERMITTED_DERIVATION_SOURCE_KINDS as readonly string[]).includes(input.kind) || input.kind === "CommunicationMessage") continue;
+    try {
+      const roots = await captureArtifactInputProof(actor, workspaceId, [input]);
+      const ancestry = await inspectStoredArtifactInputDependencies(prisma, workspaceId, roots);
+      if (!ancestry.complete || ancestry.roots.some(root => root.kind === "CommunicationMessageNativeInput")) continue;
+      admitted.push(input); proofs.push(roots);
+    } catch (error) { if (!stale(error)) throw error; }
+  }
+  if (!admitted.length) return null;
+  const extra = await captureArtifactInputProof(actor, workspaceId, discovery.additional);
+  const roots = mergeArtifactInputProofs(...proofs, extra, discovery.requestRoots);
+  const targetEpochs = await prisma.$transaction(tx => captureArtifactPermissionEpochs(actor, workspaceId,
+    discovery.targets.map(target => ({ kind: target.kind, id: target.id, fingerprint: target.fingerprint })), tx));
+  const { prepareExternalProviderRootCommitPreflight } = await import("./external-provider-authority");
+  return { discovery, admitted, roots, targetEpochs, provider: await prepareExternalProviderRootCommitPreflight(actor, workspaceId, roots) };
+}
+
+async function withPhase<T>(actor: UserActor, workspaceId: string, tx: Prisma.TransactionClient,
+  phase: PhasePreflight, work: () => Promise<T>) {
+  const { withExternalProviderCommitPreflight } = await import("./external-provider-authority");
+  return withExternalProviderCommitPreflight(actor, workspaceId, tx, phase.provider, work);
+}
+
+/** Recheck only the captured blueprint and inputs under the same bounded local commit scope. */
+async function prepare(tx: Prisma.TransactionClient, actor: UserActor, workspaceId: string, phase: PhasePreflight): Promise<Prepared | null> {
+  const { params, memberId, requestRoots, mode, fingerprint, targets, cohortKey, additional } = phase.discovery;
+  const member = await requireWorkspaceMembership({ actor, workspaceId, tx });
+  invariant(member?.isActive && member.id === memberId && await isArtifactPermissionEpochProofCurrent(workspaceId, phase.targetEpochs, tx),
+    409, "SOURCE_CHANGED", "Graph preparation authority changed.");
+  const inputs = await preparePermittedDerivationInputs(tx, actor, workspaceId, phase.admitted, targets, additional);
   if (!inputs) return null;
   for (const target of targets) {
     await tx.$queryRaw(Prisma.sql`SELECT id FROM ${Prisma.raw(`"${target.kind}"`)} WHERE id = ${target.id} AND "workspaceId" = ${workspaceId} FOR UPDATE`);
@@ -235,10 +283,12 @@ async function variantReadable(tx: Prisma.TransactionClient, actor: UserActor, w
   if (variant.recipeVersion !== stored.version || variant.generatorVersion !== stored.generatorVersion
     || variant.instructionHash !== stored.instructionHash || variant.targetKind !== stored.target.kind || variant.targetId !== stored.target.id
     || derivationHash(variant.targetsJson) !== derivationHash(stored.targets) || derivationHash(variant.sourceStateJson) !== derivationHash(stored.sourceState)) return null;
-  const prepared = current && current.recipe.target.kind === stored.target.kind && current.recipe.target.id === stored.target.id
-    ? current : await prepare(tx, actor, workspaceId, { target: stored.target, scope: stored.scope, mode: stored.mode,
-    ...(stored.deletionEventId ? { deletionEventId: stored.deletionEventId } : {}), requestRoots: stored.requestRoots });
-  if (!prepared || typeof prepared === "string" || variant.ownerMemberId !== prepared.recipe.memberId || variant.inputSetHash !== prepared.recipe.inputSetHash
+  // Any cohort sibling may request the same whole bundle. Its stored anchor
+  // must be one of the exact targets already captured and locked in this phase.
+  const anchor = current?.recipe.targets.find(target => target.kind === stored.target.kind && target.id === stored.target.id);
+  const prepared = current && anchor ? { ...current,
+    recipe: { ...current.recipe, target: stored.target, targetFingerprint: anchor.fingerprint } } : null;
+  if (!prepared || variant.ownerMemberId !== prepared.recipe.memberId || variant.inputSetHash !== prepared.recipe.inputSetHash
     || variant.targetFingerprint !== prepared.recipe.targetFingerprint || !sameRecipe(prepared.recipe, stored)) return null;
   const roots = await captureArtifactInputProof(actor, workspaceId, [{ kind: "GenericDerivedArtifactVariant", id: variant.id, snapshot: variant }], tx);
   return { id: variant.id, ownerMemberId: variant.ownerMemberId, createdAt: variant.createdAt, cohortKey: prepared.recipe.cohortKey,
@@ -253,17 +303,30 @@ async function prior(tx: Prisma.TransactionClient, workspaceId: string, recipe: 
   return tx.genericDerivedArtifactVariant.findFirst({ where: { workspaceId, generatorKey: GRAPH_SOURCE_VARIANT_JOB_TYPE,
     ownerMemberId: recipe.memberId, inputSetHash: recipe.inputSetHash } });
 }
+const recipeParams = (recipe: Recipe): PreparationParams => ({ target: recipe.target, scope: recipe.scope, mode: recipe.mode,
+  ...(recipe.deletionEventId ? { deletionEventId: recipe.deletionEventId } : {}), requestRoots: recipe.requestRoots });
+async function releaseVariant(actor: UserActor, workspaceId: string, variantId: string) {
+  const row = await prisma.genericDerivedArtifactVariant.findFirst({ where: { id: variantId, workspaceId, generatorKey: GRAPH_SOURCE_VARIANT_JOB_TYPE } });
+  return Boolean(row && await isArtifactInputProofReadable(actor, workspaceId,
+    [{ kind: "GenericDerivedArtifactVariant", id: row.id, fingerprint: lineageContentFingerprint("GenericDerivedArtifactVariant", row) }]));
+}
 
 export async function requestGraphSourceVariant(actor: AppActor, params: { workspaceId: string; target: { kind: GraphTargetKind; id: string };
   scope: GraphVariantScope; mode?: GraphVariantMode; deletionEventId?: string }) {
+  params = structuredClone(params);
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   if (actor.kind !== "user") return { status: "UNAVAILABLE" as const, reason: "REBUILD_INPUTS_UNPROVEN" as const };
-  return prisma.$transaction(async tx => {
+  let phase: Awaited<ReturnType<typeof preparePhase>>;
+  try { phase = await preparePhase(actor, params.workspaceId, { ...params, requestRoots: getMcpToolInputRoots(actor, params.workspaceId) }); }
+  catch (error) { if (stale(error)) return { status: "UNAVAILABLE" as const, reason: "REBUILD_INPUTS_UNPROVEN" as const }; throw error; }
+  if (!phase) return { status: "UNAVAILABLE" as const, reason: "REBUILD_INPUTS_UNPROVEN" as const };
+  if (phase === "ORIGINAL") return { status: "NOT_NEEDED" as const };
+  const capturedPhase = phase;
+  const result = await prisma.$transaction(async tx => withPhase(actor, params.workspaceId, tx, capturedPhase, async () => {
     await lockWorkspaceMembership(tx, params.workspaceId);
     try {
-      const prepared = await prepare(tx, actor, params.workspaceId, { ...params, requestRoots: getMcpToolInputRoots(actor, params.workspaceId) });
+      const prepared = await prepare(tx, actor, params.workspaceId, capturedPhase);
       if (!prepared) return { status: "UNAVAILABLE" as const, reason: "REBUILD_INPUTS_UNPROVEN" as const };
-      if (prepared === "ORIGINAL") return { status: "NOT_NEEDED" as const };
       const existing = await prior(tx, params.workspaceId, prepared.recipe);
       if (existing) return await variantReadable(tx, actor, params.workspaceId, existing, prepared)
         ? { status: "READY" as const, variantId: existing.id } : { status: "UNAVAILABLE" as const, reason: "REBUILD_INPUTS_UNPROVEN" as const };
@@ -280,96 +343,166 @@ export async function requestGraphSourceVariant(actor: AppActor, params: { works
         dedupeKey, payload: json({ ...prepared.recipe, phase: "REQUESTED" }) } });
       return { status: "QUEUED" as const, jobId: job.id };
     } catch (error) { if (stale(error)) return { status: "UNAVAILABLE" as const, reason: "REBUILD_INPUTS_UNPROVEN" as const }; throw error; }
-  }, TX_OPTIONS);
+  }), TX_OPTIONS).catch(error => {
+    if (stale(error)) return { status: "UNAVAILABLE" as const, reason: "REBUILD_INPUTS_UNPROVEN" as const };
+    throw error;
+  });
+  if (result.status === "READY" && !await releaseVariant(actor, params.workspaceId, result.variantId))
+    return { status: "UNAVAILABLE" as const, reason: "REBUILD_INPUTS_UNPROVEN" as const };
+  return result;
 }
 
 /** Internal DTO only. Targets/cohort metadata must never be emitted to clients. */
 export async function getReadableGraphSourceVariants(actor: AppActor, params: { workspaceId: string; scope: GraphVariantScope }): Promise<ReadableGraphSourceVariant[]> {
+  params = structuredClone(params);
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   if (actor.kind !== "user") return [];
   graphVariantScopeKey(params.scope);
-  return prisma.$transaction(async tx => {
-    await lockWorkspaceMembership(tx, params.workspaceId);
-    const member = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
-    if (!member?.isActive) return [];
-    const rows = await tx.genericDerivedArtifactVariant.findMany({ where: { workspaceId: params.workspaceId, ownerMemberId: member.id,
-      generatorKey: GRAPH_SOURCE_VARIANT_JOB_TYPE }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: LIMIT + 1 });
-    invariant(rows.length <= LIMIT, 503, "SOURCE_READ_SCAN_LIMIT", "Graph variant collection is too large.");
-    const output: ReadableGraphSourceVariant[] = []; const cohorts = new Set<string>();
-    for (const row of rows) {
-      try {
-        const scope = (row.scopeJson as unknown as Recipe).scope;
-        if (graphVariantScopeKey(scope) !== graphVariantScopeKey(params.scope)) continue;
-        const admitted = await variantReadable(tx, actor, params.workspaceId, row);
-        if (!admitted || cohorts.has(admitted.cohortKey)) continue;
-        cohorts.add(admitted.cohortKey); output.push(admitted);
-      } catch (error) { if (!stale(error)) throw error; }
-    }
-    return output;
-  }, TX_OPTIONS);
+  const member = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  if (!member?.isActive) return [];
+  const rows = await prisma.genericDerivedArtifactVariant.findMany({ where: { workspaceId: params.workspaceId, ownerMemberId: member.id,
+    generatorKey: GRAPH_SOURCE_VARIANT_JOB_TYPE }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: LIMIT + 1 });
+  invariant(rows.length <= LIMIT, 503, "SOURCE_READ_SCAN_LIMIT", "Graph variant collection is too large.");
+  const output: ReadableGraphSourceVariant[] = []; const cohorts = new Set<string>();
+  for (const row of rows) {
+    try {
+      const scope = (row.scopeJson as unknown as Recipe).scope;
+      if (graphVariantScopeKey(scope) !== graphVariantScopeKey(params.scope)) continue;
+      const phase = await preparePhase(actor, params.workspaceId, recipeParams(payload(row.scopeJson)));
+      if (!phase || phase === "ORIGINAL") continue;
+      const admitted = await prisma.$transaction(tx => withPhase(actor, params.workspaceId, tx, phase, async () => {
+        await lockWorkspaceMembership(tx, params.workspaceId);
+        const current = await tx.genericDerivedArtifactVariant.findFirst({ where: { id: row.id, workspaceId: params.workspaceId } });
+        const prepared = await prepare(tx, actor, params.workspaceId, phase);
+        return current && prepared ? variantReadable(tx, actor, params.workspaceId, current, prepared) : null;
+      }), TX_OPTIONS);
+      if (admitted && !await isArtifactInputProofReadable(actor, params.workspaceId, admitted.roots)) continue;
+      if (!admitted || cohorts.has(admitted.cohortKey)) continue;
+      cohorts.add(admitted.cohortKey); output.push(admitted);
+    } catch (error) { if (!stale(error)) throw error; }
+  }
+  // Earlier rows are rechecked again after later candidates' live provider calls.
+  const released: ReadableGraphSourceVariant[] = [];
+  for (const row of output) if (await isArtifactInputProofReadable(actor, params.workspaceId, row.roots)) released.push(row);
+  return released;
 }
 export async function revalidateGraphSourceVariants(actor: AppActor, params: { workspaceId: string; variantIds: string[] }): Promise<boolean> {
+  params = structuredClone(params);
   if (actor.kind !== "user" || params.variantIds.length > LIMIT) return false;
-  return prisma.$transaction(async tx => {
-    await lockWorkspaceMembership(tx, params.workspaceId);
-    try {
-      for (const id of new Set(params.variantIds)) {
-        const row = await tx.genericDerivedArtifactVariant.findFirst({ where: { id, workspaceId: params.workspaceId, generatorKey: GRAPH_SOURCE_VARIANT_JOB_TYPE } });
-        if (!row || !await variantReadable(tx, actor, params.workspaceId, row)) return false;
-      }
-      return true;
-    } catch (error) { if (stale(error)) return false; throw error; }
-  }, TX_OPTIONS);
+  try {
+    for (const id of new Set(params.variantIds)) {
+      const row = await prisma.genericDerivedArtifactVariant.findFirst({ where: { id, workspaceId: params.workspaceId, generatorKey: GRAPH_SOURCE_VARIANT_JOB_TYPE } });
+      if (!row) return false;
+      const phase = await preparePhase(actor, params.workspaceId, recipeParams(payload(row.scopeJson)));
+      if (!phase || phase === "ORIGINAL") return false;
+      const admitted = await prisma.$transaction(tx => withPhase(actor, params.workspaceId, tx, phase, async () => {
+        await lockWorkspaceMembership(tx, params.workspaceId);
+        const current = await tx.genericDerivedArtifactVariant.findFirst({ where: { id, workspaceId: params.workspaceId } });
+        const prepared = await prepare(tx, actor, params.workspaceId, phase);
+        return current && prepared ? variantReadable(tx, actor, params.workspaceId, current, prepared) : null;
+      }), TX_OPTIONS);
+      if (!admitted || !await isArtifactInputProofReadable(actor, params.workspaceId, admitted.roots)) return false;
+    }
+    for (const id of new Set(params.variantIds)) if (!await releaseVariant(actor, params.workspaceId, id)) return false;
+    return true;
+  } catch (error) { if (stale(error)) return false; throw error; }
 }
 
 export async function generateGraphSourceVariant(params: { workspaceId: string; jobId: string; expectedAttempt: number; expectedOwner: string;
   generate: (sources: PermittedDerivationSource[], anchors: readonly never[], scope: GraphVariantScope) => Promise<GraphVariantCandidate> }): Promise<GraphSourceVariantGenerationResult> {
   invariant(Number.isInteger(params.expectedAttempt) && params.expectedAttempt > 0 && params.expectedOwner?.trim(), 400, "INVALID_INPUT", "An actual worker lease is required.");
-  const claim: GenerationClaim = await prisma.$transaction(async tx => {
+  params = { ...params };
+  const initialJob = await prisma.workflowJob.findFirst({ where: { id: params.jobId, workspaceId: params.workspaceId, type: GRAPH_SOURCE_VARIANT_JOB_TYPE } });
+  invariant(initialJob, 404, "NOT_FOUND", "Graph variant job not found.");
+  if (initialJob.status !== "RUNNING" || initialJob.attempts !== params.expectedAttempt || initialJob.lockedBy !== params.expectedOwner)
+    return { phase: "SUPERSEDED" };
+  const initialRecipe = payload(initialJob.payload);
+  if (initialRecipe.phase === "STALE") return { phase: "STALE" };
+  const jobHash = (job: typeof initialJob) => derivationHash([job.status, job.attempts, job.lockedBy, job.lockedAt, job.startedAt, job.payload]);
+  const leaseHash = (job: typeof initialJob) => derivationHash([job.status, job.attempts, job.lockedBy, job.lockedAt, job.startedAt]);
+  const initialJobHash = jobHash(initialJob);
+  let generationLeaseStamp: string | undefined;
+  const invalidateJob = async (token?: string): Promise<GraphSourceVariantGenerationResult> => prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM "WorkflowJob" WHERE id = ${params.jobId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    const job = await tx.workflowJob.findFirst({ where: { id: params.jobId, workspaceId: params.workspaceId, type: GRAPH_SOURCE_VARIANT_JOB_TYPE } });
+    if (!job || job.status !== "RUNNING" || job.attempts !== params.expectedAttempt || job.lockedBy !== params.expectedOwner)
+      return { phase: "SUPERSEDED" };
+    const recipe = payload(job.payload);
+    if (token && generationLeaseStamp && leaseHash(job) !== generationLeaseStamp) return { phase: "SUPERSEDED" };
+    if ((token && recipe.generationToken !== token) || (!token && jobHash(job) !== initialJobHash)) return { phase: "SUPERSEDED" };
+    await tx.workflowJob.update({ where: { id: job.id }, data: { payload: json({ ...recipe, phase: "STALE" }) } });
+    return { phase: "STALE" };
+  }, TX_OPTIONS);
+  let actor: UserActor;
+  let claimPhase: Awaited<ReturnType<typeof preparePhase>>;
+  try {
+    actor = await ownerActor(prisma, params.workspaceId, initialRecipe);
+    claimPhase = await preparePhase(actor, params.workspaceId, recipeParams(initialRecipe));
+  } catch (error) { if (stale(error)) return invalidateJob(); throw error; }
+  if (!claimPhase || claimPhase === "ORIGINAL") return invalidateJob();
+  const capturedClaimPhase = claimPhase;
+  let claim: GenerationClaim;
+  try { claim = await prisma.$transaction(async tx => withPhase(actor, params.workspaceId, tx, capturedClaimPhase, async () => {
     await lockWorkspaceMembership(tx, params.workspaceId);
     await tx.$queryRaw`SELECT id FROM "WorkflowJob" WHERE id = ${params.jobId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const job = await tx.workflowJob.findFirst({ where: { id: params.jobId, workspaceId: params.workspaceId, type: GRAPH_SOURCE_VARIANT_JOB_TYPE } });
     invariant(job, 404, "NOT_FOUND", "Graph variant job not found.");
-    if (job.status !== "RUNNING" || job.attempts !== params.expectedAttempt || job.lockedBy !== params.expectedOwner) return { phase: "SUPERSEDED" as const };
+    if (jobHash(job) !== initialJobHash) return { phase: "SUPERSEDED" as const };
     const recipe = payload(job.payload);
     const invalidate = async () => { await tx.workflowJob.update({ where: { id: job.id }, data: { payload: json({ ...recipe, phase: "STALE" }) } }); return { phase: "STALE" as const }; };
     if (recipe.phase === "STALE") return { phase: "STALE" as const };
     try {
-      const actor = await ownerActor(tx, params.workspaceId, recipe);
-      const prepared = await prepare(tx, actor, params.workspaceId, { target: recipe.target, scope: recipe.scope, mode: recipe.mode,
-        ...(recipe.deletionEventId ? { deletionEventId: recipe.deletionEventId } : {}), requestRoots: recipe.requestRoots });
-      if (!prepared || typeof prepared === "string" || !sameRecipe(prepared.recipe, recipe)) return invalidate();
+      const prepared = await prepare(tx, actor, params.workspaceId, capturedClaimPhase);
+      if (!prepared || !sameRecipe(prepared.recipe, recipe)) return invalidate();
       const existing = await prior(tx, params.workspaceId, recipe);
       if (existing) return await variantReadable(tx, actor, params.workspaceId, existing, prepared)
         ? { phase: "APPLIED" as const, variantId: existing.id } : invalidate();
       if (recipe.phase === "APPLIED") return invalidate();
       const token = randomUUID();
       await tx.workflowJob.update({ where: { id: job.id }, data: { payload: json({ ...recipe, phase: "GENERATING", generationToken: token }) } });
-      return { actor, prepared, token };
+      return { actor, prepared, token, leaseStamp: leaseHash(job) };
     } catch (error) { if (stale(error)) return invalidate(); throw error; }
-  }, TX_OPTIONS);
-  if ("phase" in claim) return claim;
+  }), TX_OPTIONS); } catch (error) { if (stale(error)) return invalidateJob(); throw error; }
+  if ("phase" in claim) {
+    if (claim.phase === "APPLIED" && !await releaseVariant(actor, params.workspaceId, claim.variantId)) return invalidateJob();
+    return claim;
+  }
+  generationLeaseStamp = claim.leaseStamp;
   const current = await isArtifactInputProofReadable(claim.actor, params.workspaceId, claim.prepared.inputs.roots)
     && await isArtifactPermissionEpochProofCurrent(params.workspaceId, claim.prepared.recipe.sourceState.permissionEpochs)
     && await isArtifactPermissionEpochProofCurrent(params.workspaceId, claim.prepared.recipe.sourceState.targetEpochs);
-  const candidate = current ? await params.generate(claim.prepared.inputs.sources, [], claim.prepared.recipe.scope) : null;
-  const bundle = candidate ? createGraphVariantBundle(candidate, claim.prepared.inputs.sources) : null;
-  return prisma.$transaction(async tx => {
+  const modelSources = structuredClone(claim.prepared.inputs.sources);
+  for (const source of modelSources) Object.freeze(source);
+  Object.freeze(modelSources);
+  const modelScope = Object.freeze(structuredClone(claim.prepared.recipe.scope));
+  const candidate = current ? await params.generate(modelSources, [], modelScope) : null;
+  const bundle = candidate ? createGraphVariantBundle(candidate, modelSources) : null;
+  const publicationJob = await prisma.workflowJob.findFirst({ where: { id: params.jobId, workspaceId: params.workspaceId, type: GRAPH_SOURCE_VARIANT_JOB_TYPE } });
+  if (!publicationJob || leaseHash(publicationJob) !== claim.leaseStamp) return { phase: "SUPERSEDED" };
+  const publicationJobHash = jobHash(publicationJob);
+  if (!bundle || !await isArtifactInputProofReadable(actor, params.workspaceId, claim.prepared.inputs.roots)
+    || !await isArtifactPermissionEpochProofCurrent(params.workspaceId, claim.prepared.recipe.sourceState.permissionEpochs)
+    || !await isArtifactPermissionEpochProofCurrent(params.workspaceId, claim.prepared.recipe.sourceState.targetEpochs)) return invalidateJob(claim.token);
+  let publicationPhase: Awaited<ReturnType<typeof preparePhase>>;
+  try { publicationPhase = await preparePhase(actor, params.workspaceId, recipeParams(claim.prepared.recipe)); }
+  catch (error) { if (stale(error)) return invalidateJob(claim.token); throw error; }
+  if (!publicationPhase || publicationPhase === "ORIGINAL") return invalidateJob(claim.token);
+  const capturedPublicationPhase = publicationPhase;
+  let contentWriteStarted = false;
+  let result: GraphSourceVariantGenerationResult;
+  try { result = await prisma.$transaction(async tx => withPhase(actor, params.workspaceId, tx, capturedPublicationPhase, async () => {
     await lockWorkspaceMembership(tx, params.workspaceId);
     await tx.$queryRaw`SELECT id FROM "WorkflowJob" WHERE id = ${params.jobId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const job = await tx.workflowJob.findFirst({ where: { id: params.jobId, workspaceId: params.workspaceId, type: GRAPH_SOURCE_VARIANT_JOB_TYPE } });
     invariant(job, 404, "NOT_FOUND", "Graph variant job not found.");
     const recipe = payload(job.payload);
-    if (job.status !== "RUNNING" || job.attempts !== params.expectedAttempt || job.lockedBy !== params.expectedOwner
+    if (jobHash(job) !== publicationJobHash || job.status !== "RUNNING" || job.attempts !== params.expectedAttempt || job.lockedBy !== params.expectedOwner
       || recipe.phase !== "GENERATING" || recipe.generationToken !== claim.token) return { phase: "SUPERSEDED" as const };
     const invalidate = async () => { await tx.workflowJob.update({ where: { id: job.id }, data: { payload: json({ ...recipe, phase: "STALE" }) } }); return { phase: "STALE" as const }; };
-    let contentWriteStarted = false;
     try {
       if (!bundle) return invalidate();
-      const actor = await ownerActor(tx, params.workspaceId, recipe);
-      const prepared = await prepare(tx, actor, params.workspaceId, { target: recipe.target, scope: recipe.scope, mode: recipe.mode,
-        ...(recipe.deletionEventId ? { deletionEventId: recipe.deletionEventId } : {}), requestRoots: recipe.requestRoots });
-      if (!prepared || typeof prepared === "string" || !sameRecipe(prepared.recipe, recipe)
+      const prepared = await prepare(tx, actor, params.workspaceId, capturedPublicationPhase);
+      if (!prepared || !sameRecipe(prepared.recipe, recipe)
         || !sameRecipe(prepared.recipe, claim.prepared.recipe) || !await isArtifactInputProofReadable(actor, params.workspaceId, claim.prepared.inputs.roots, tx)) return invalidate();
       const existing = await prior(tx, params.workspaceId, recipe);
       if (existing) return await variantReadable(tx, actor, params.workspaceId, existing, prepared)
@@ -395,5 +528,7 @@ export async function generateGraphSourceVariant(params: { workspaceId: string; 
       await tx.workflowJob.update({ where: { id: job.id }, data: { payload: json({ ...recipe, phase: "APPLIED", variantId: variant.id }) } });
       return { phase: "APPLIED" as const, variantId: variant.id };
     } catch (error) { if (!contentWriteStarted && stale(error)) return invalidate(); throw error; }
-  }, TX_OPTIONS);
+  }), TX_OPTIONS); } catch (error) { if (!contentWriteStarted && stale(error)) return invalidateJob(claim.token); throw error; }
+  if (result.phase === "APPLIED" && !await releaseVariant(actor, params.workspaceId, result.variantId)) return invalidateJob(claim.token);
+  return result;
 }

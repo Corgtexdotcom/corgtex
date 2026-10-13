@@ -2,7 +2,7 @@
 
 ## Publication status
 
-This document accompanies implementing code after71c31c98.
+This document accompanies implementing code after published0c00c554.
 Earlier documentation-only headdecd8ae5 did not contain these APIs. The draft now
 includes the transaction/native-input interfaces below. Their presence and focused
 tests do not establish Bloop's actual saver/route/worker lifecycle, which remains
@@ -25,7 +25,7 @@ do not cover Bloop's actual saver, canonical publication receipt or combined lif
 
 Caller-owned Brain publication API:
 - ingestConversationOnDemandInTransaction(tx, actor, submission) requires the supplied Prisma.TransactionClient and joins BrainSource, complete manifest, audit and outbox writes to it.
-- Submission is ConversationBrainIngestParams: workspaceId, title, content, optional sourceType, lineageInputs and lineageRoots. Inputs are copied before the first await.
+- Submission is ConversationBrainIngestParams: workspaceId, title, content, optional sourceType, lineageInputs and lineageRoots. Inputs are copied and the SAME authenticated actor is frozen before the first await, preserving WeakMap capability identity. The foundation must bind this immutable actor at its own admission/fence entry.
 - Membership and write-fence callbacks use this same tx before and after writes.
 - ingestConversationOnDemand(actor, {...submission, tx}) forwards to the same primitive; omitting tx retains the existing standalone transaction API.
 - A canonical receipt written by Bloop in this transaction must remain its authoritative publication identity; synthetic marker tests prove atomicity only.
@@ -58,7 +58,7 @@ Smallest lifecycle/schema ownership split:
 - Bloop: conversation request/run/job/approval/checkpoint/effect/publication lifecycle and bound-tx checkpoint adapter; dedicated assistant-harness export and its route/worker/recovery files.
 - PUN-68: source lineage/snapshot tables and helpers, native input/outcome definitions, actual model-input collector, Brain producer/read permissions and domain receipt/fence hooks. Agent index is released. CRM native job enqueue and Finance exact lease adapters are now wired in outbox; conversation lifecycle sections remain with Bloop/parent integration.
 
-Current migrations through177 are developed and applied ONLY to the disposable
+Current migrations through180 are developed and applied ONLY to the disposable
 local database at 127.0.0.1:55468/corgtex_test. Added native rows include immutable
 CrmQualificationFormInput, FinanceReportUploadInput and encrypted
 ExternalProviderFetchInput. Parent retains schema/lifecycle integration ownership.

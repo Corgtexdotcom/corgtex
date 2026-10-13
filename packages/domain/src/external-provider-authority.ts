@@ -5,7 +5,7 @@ import { decryptSecret, encryptSecret, prisma, type AppActor } from "@corgtex/sh
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 import type { LineageRoot } from "./source-lineage";
-import { isArtifactPermissionEpochProofCurrent } from "./source-permission-epochs";
+import { isArtifactPermissionEpochProofCurrent, parsePermissionEpochProof } from "./source-permission-epochs";
 import { getExternalProviderPrincipalUserId, getExternalProviderWorkerPurpose, registerExternalProviderWorkerPrincipal,
   revokeExternalProviderWorkerPrincipal } from "./external-provider-principal";
 export { getExternalProviderPrincipalUserId } from "./external-provider-principal";
@@ -110,17 +110,21 @@ export async function createExternalProviderSyncActor(params: { workspaceId: str
   } catch (error) { revokeExternalProviderWorkerPrincipal(actor); throw error; }
 }
 
-function freezeExact<T>(value: T): T {
+function freezeExact<T>(value: T, frozen = new WeakMap<object, unknown>()): T {
+  if (value && typeof value === "object" && frozen.has(value)) return frozen.get(value) as T;
   if (value instanceof Date) {
     const fixed = new Date(value.getTime());
-    return new Proxy(Object.freeze(fixed), { get(target, key) {
+    const immutable = new Proxy(Object.freeze(fixed), { get(target, key) {
       if (typeof key === "string" && key.startsWith("set")) return () => { throw new TypeError("Receipt dates are immutable."); };
       const entry = Reflect.get(target, key, target);
       return typeof entry === "function" ? entry.bind(target) : entry;
     } }) as T;
+    frozen.set(value, immutable);
+    return immutable;
   }
   if (value && typeof value === "object") {
-    for (const key of Object.keys(value)) (value as Record<string, unknown>)[key] = freezeExact((value as Record<string, unknown>)[key]);
+    frozen.set(value, value);
+    for (const key of Object.keys(value)) (value as Record<string, unknown>)[key] = freezeExact((value as Record<string, unknown>)[key], frozen);
     return Object.freeze(value);
   }
   return value;
@@ -221,6 +225,60 @@ export async function prepareExternalProviderCommitPreflight(actor: AppActor, wo
     && purposeHash === externalProviderResponseHash(getExternalProviderWorkerPurpose(actor)),
   409, "SOURCE_CHANGED", "External provider inputs changed before commit.");
   for (const receipt of captured) await assertExternalProviderCapturedResponseCurrent(receipt);
+  const opaque = Object.freeze({}) as ExternalProviderCommitPreflight;
+  commitPreflights.set(opaque, { actor, actorHash, workspaceId, principal, purposeHash, roots: freezeExact(roots), inputs });
+  return opaque;
+}
+
+/** Existing stored native inputs are verified live through their complete original source proofs. */
+export async function prepareExternalProviderRootCommitPreflight(actor: AppActor, workspaceId: string,
+  originalRoots: readonly LineageRoot[]): Promise<ExternalProviderCommitPreflight> {
+  const roots: LineageRoot[] = structuredClone([...originalRoots]);
+  const principal = getExternalProviderPrincipalUserId(actor, workspaceId);
+  const actorHash = externalProviderResponseHash(actor);
+  const purpose = getExternalProviderWorkerPurpose(actor);
+  const purposeHash = externalProviderResponseHash(purpose);
+  invariant(principal && roots.length > 0 && roots.length <= 10000
+    && (!purpose || roots.some(root => root.kind === "WorkflowJobInput" && root.id === purpose.workflowJobId && root.permissionEpochs)),
+  409, "SOURCE_CHANGED", "External provider commit lacks its original input proof.");
+  const { inspectStoredArtifactInputDependencies, isArtifactInputProofReadable, lineageContentFingerprint } = await import("./source-lineage");
+  const dependencies = await inspectStoredArtifactInputDependencies(prisma, workspaceId, roots);
+  invariant(dependencies.complete && dependencies.roots.length <= 10000
+    && !dependencies.roots.some(root => root.kind === "CommunicationMessageNativeInput"),
+  409, "UNSUPPORTED_PROVIDER_INPUT", "Every native provider input needs its bounded commit adapter.");
+  const native = dependencies.roots.filter(root => root.kind === "ExternalProviderFetchInput");
+  invariant(native.length <= MAX_COMMIT_INPUTS, 409, "SOURCE_CHANGED", "External provider commit requires bounded native inputs.");
+  const inputs: CommitState["inputs"] = new Map();
+  for (const root of native) {
+    const direct = roots.find(input => input.kind === root.kind && input.id === root.id && input.fingerprint === root.fingerprint);
+    let originalEpochs = direct?.permissionEpochs;
+    if (!originalEpochs) {
+      for (const snapshotRoot of dependencies.roots.filter(input => input.kind === "ArtifactInputSnapshot")) {
+        const snapshot = await prisma.artifactInputSnapshot.findFirst({ where: { id: snapshotRoot.id, workspaceId }, select: {
+          sourceKind: true, sourceId: true, sourceFingerprint: true, epochProofVersion: true, permissionEpochsJson: true } });
+        if (snapshot?.sourceKind === root.kind && snapshot.sourceId === root.id && snapshot.sourceFingerprint === root.fingerprint
+          && snapshot.epochProofVersion === 1) { originalEpochs = parsePermissionEpochProof(snapshot.permissionEpochsJson) ?? undefined; break; }
+      }
+    }
+    const originalProof = parsePermissionEpochProof(originalEpochs);
+    invariant(originalProof, 409, "SOURCE_CHANGED", "The original native permission proof is missing or changed.");
+    invariant(originalProof.entries.some(entry => entry.kind === root.kind && entry.id === root.id)
+      && await isArtifactPermissionEpochProofCurrent(workspaceId, originalProof),
+    409, "SOURCE_CHANGED", "The original native permission proof is missing or changed.");
+    // Retain the exact stored snapshot vector; never mint new permission epochs here.
+    if (!direct?.permissionEpochs) roots.push({ ...root, permissionEpochs: originalProof });
+    const input = await prisma.externalProviderFetchInput.findFirst({ where: { id: root.id, workspaceId } });
+    invariant(input && lineageContentFingerprint("ExternalProviderFetchInput", input) === root.fingerprint,
+      409, "SOURCE_CHANGED", "The original stored native input changed.");
+    const source = await prisma.externalContentSource.findFirst({ where: { id: input.externalContentSourceId, workspaceId, archivedAt: null } });
+    invariant(source, 409, "SOURCE_CHANGED", "External provider selection changed before commit.");
+    inputs.set(input.id, { fingerprint: root.fingerprint, binding: bindingHash(source) });
+  }
+  invariant(roots.length <= 10000, 409, "SOURCE_CHANGED", "External provider commit requires a bounded original proof.");
+  invariant(await isArtifactInputProofReadable(actor, workspaceId, roots)
+    && principal === getExternalProviderPrincipalUserId(actor, workspaceId) && actorHash === externalProviderResponseHash(actor)
+    && purposeHash === externalProviderResponseHash(getExternalProviderWorkerPurpose(actor)),
+  409, "SOURCE_CHANGED", "The original input proof changed before commit.");
   const opaque = Object.freeze({}) as ExternalProviderCommitPreflight;
   commitPreflights.set(opaque, { actor, actorHash, workspaceId, principal, purposeHash, roots: freezeExact(roots), inputs });
   return opaque;

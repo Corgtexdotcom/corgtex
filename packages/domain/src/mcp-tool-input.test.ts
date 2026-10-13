@@ -142,7 +142,7 @@ describe("exact authenticated MCP tool inputs and process-local producer scope",
     expect(decryptSecret(inputs()[0].argumentsJson)).toBe(JSON.stringify(payload));
     expect(isMcpToolInputEncryptedPayload(inputs()[0].argumentsJson)).toBe(true);
     expect(roots[0]).toMatchObject({ kind: "McpToolInput", id: inputs()[0].id, fingerprint: lineageContentFingerprint("McpToolInput", inputs()[0]),
-      permissionEpochs: { version: 1, policyVersion: "pun68-permissions-v2", entries: expect.arrayContaining([
+      permissionEpochs: { version: 1, policyVersion: "pun68-permissions-v3", entries: expect.arrayContaining([
         { kind: "McpToolInput", id: inputs()[0].id, epoch: "0" },
       ]) } });
     expect(fixture.tables.get("artifactInputLineage")?.size ?? 0).toBe(0); expect(getMcpToolInputRoots(alice, workspaceId)).toEqual([]);

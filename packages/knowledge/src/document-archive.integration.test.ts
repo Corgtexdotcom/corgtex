@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { beforeEach, expect, it, vi } from "vitest";
 import { getCacheVersion, prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
+import { requestBrainSourceRemoval } from "../../domain/src/brain-source-removal";
+import { createDocument } from "../../domain/src/documents";
 import { archiveWorkspaceArtifact } from "../../domain/src/archive";
 import { syncDocumentKnowledge } from "./chunks";
 import { defaultModelGateway } from "@corgtex/models";
@@ -13,10 +15,12 @@ it("does not let an in-flight document sync restore chunks after archive", async
   const user = await prisma.user.create({ data: { email: `doc-index-${randomUUID()}@example.test`, passwordHash: "fixture" } });
   await prisma.member.create({ data: { workspaceId: workspace.id, userId: user.id, role: "ADMIN" } });
   const actor: AppActor = { kind: "user", user: { id: user.id, email: user.email, displayName: "Admin" } };
-  const document = await prisma.document.create({ data: {
+  const document = await createDocument(actor, {
     workspaceId: workspace.id, title: "Synthetic document", source: "upload",
     storageKey: `synthetic/${randomUUID()}`, textContent: "Synthetic indexed content",
-  } });
+  });
+  const sources = await prisma.brainSource.findMany({where: {workspaceId: workspace.id, metadata: {path: ["documentId"], equals: document.id}}});
+  for (const source of sources) expect(await requestBrainSourceRemoval(actor, {workspaceId: workspace.id, sourceId: source.id})).toMatchObject({status: "archived"});
   let releaseEmbed!: () => void;
   let embedEntered!: () => void;
   const held = new Promise<void>((resolve) => { releaseEmbed = resolve; });
@@ -29,9 +33,10 @@ it("does not let an in-flight document sync restore chunks after archive", async
       latencyMs: 0, estimatedCostUsd: "0", rawProviderCostUsd: "0", billableCostUsd: "0",
     } };
   });
+  let oldSync: ReturnType<typeof syncDocumentKnowledge> | undefined;
   try {
-    const oldSync = syncDocumentKnowledge({ workspaceId: workspace.id, documentId: document.id });
-    await entered;
+    oldSync = syncDocumentKnowledge({ workspaceId: workspace.id, documentId: document.id });
+    await Promise.race([entered, oldSync.then(() => { throw new Error("Proven source sync did not reach the embedding barrier."); })]);
     let archiveSettled = false;
     const cacheVersionBefore = await getCacheVersion(`knowledge:${workspace.id}`);
     const archive = archiveWorkspaceArtifact(actor, {
@@ -49,6 +54,7 @@ it("does not let an in-flight document sync restore chunks after archive", async
     } })).toBe(0);
   } finally {
     releaseEmbed();
+    await oldSync?.catch(() => undefined);
     embed.mockRestore();
   }
 });

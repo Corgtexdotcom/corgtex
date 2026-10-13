@@ -1,18 +1,23 @@
+import { randomUUID } from "node:crypto";
 import { prisma } from "@corgtex/shared";
 import { defaultModelGateway, resolveModel } from "@corgtex/models";
 import { AGENT_REGISTRY } from "@corgtex/domain";
 import {
   createArticle,
-  updateArticle,
   markSourceAbsorbed,
   rebuildBacklinks,
   lockWorkspaceArchiveArtifact,
   brainSourceRecoveryIdentity,
   brainSourceContentFingerprint,
-  readBrainArticleDerivation,
-  readableArtifactIds,
   readableBrainSourceIds,
   resolveKnowledgeAccessDomains,
+  scanSourceReadableRecords,
+  captureArtifactInputProof,
+  captureImmutableArtifactInputProof,
+  isArtifactInputProofReadable,
+  isArtifactInputProofPubliclyShareable,
+  invariant,
+  type LineageRoot,
 } from "@corgtex/domain";
 import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
 import type { AppActor } from "@corgtex/shared";
@@ -32,14 +37,6 @@ function slugify(value: string, fallback: string) {
   return slug || fallback;
 }
 
-function uniqueSlug(base: string, existingSlugs: Set<string>) {
-  if (!existingSlugs.has(base)) return base;
-  for (let index = 2; index < 100; index += 1) {
-    const candidate = `${base}-${index}`;
-    if (!existingSlugs.has(candidate)) return candidate;
-  }
-  return `${base}-${Date.now()}`;
-}
 
 function sourceSkipReason(source: {
   workspaceId: string;
@@ -61,30 +58,13 @@ function isSourceSkipResult(value: unknown): value is SourceSkipResult {
     && (value as { skipped?: unknown }).skipped === true;
 }
 
-type InitialArticleWritePlan =
-  | {
-    kind: "update";
-    articleId: string;
-    slug: string;
-    bodyMd: string;
-    expectedUpdatedAt: Date;
-    changeSummary: string;
-  }
-  | {
-    kind: "create";
-    slug: string;
-    title: string;
-    type: BrainArticleType;
-    authority: BrainArticleAuthority;
-    bodyMd: string;
-    sourceIds: string[];
-  };
-
-type CascadeArticleWritePlan = {
-  articleId: string;
+type InitialArticleWritePlan = {
   slug: string;
+  title: string;
+  type: BrainArticleType;
+  authority: BrainArticleAuthority;
   bodyMd: string;
-  changeSummary: string;
+  sourceIds: string[];
 };
 
 /**
@@ -93,8 +73,8 @@ type CascadeArticleWritePlan = {
  * Given a BrainSource, this function:
  * 1. Classifies what type of knowledge the source contains
  * 2. Matches against existing articles (by title/slug/alias)
- * 3. Updates existing articles or creates new ones
- * 4. Syncs updated articles to the knowledge pipeline
+ * 3. Creates proposed articles while preserving every existing article
+ * 4. Syncs proposed articles to the knowledge pipeline
  * 5. Rebuilds backlinks
  * 6. Marks the source as absorbed
  */
@@ -105,9 +85,11 @@ export async function absorbSource(params: {
   model?: string;
   expectedSourceIdentity?: string;
 }) {
-  const source = await prisma.brainSource.findUnique({
+  params = {...params};
+  const loadedSource = await prisma.brainSource.findUnique({
     where: { id: params.sourceId },
   });
+  const source = loadedSource ? structuredClone(loadedSource) : null;
 
   function assertRecoveryIdentity(current: typeof source) {
     if (params.expectedSourceIdentity && (!current || brainSourceRecoveryIdentity(current) !== params.expectedSourceIdentity)) {
@@ -134,6 +116,20 @@ export async function absorbSource(params: {
     workspaceIds: [params.workspaceId],
   };
 
+  let liveRoots: LineageRoot[] = [];
+  let immutableRoots: LineageRoot[] = [];
+  async function assertInputsCurrent(client: Prisma.TransactionClient = prisma) {
+    invariant(await isArtifactInputProofReadable(agentActor, params.workspaceId, liveRoots, client),
+      409, "SOURCE_CHANGED", "Absorption inputs changed before publication.");
+    invariant(await isArtifactInputProofPubliclyShareable(agentActor, params.workspaceId, immutableRoots, client),
+      409, "SOURCE_RESTRICTED", "Absorption inputs cannot be published to the workspace.");
+  }
+  // Fresh opaque suffixes avoid probing private article names to choose the output slug.
+  function proposedSlug(base: string) {
+    const suffix = randomUUID().replaceAll("-", "").slice(0, 16);
+    return `${slugify(base, "source").slice(0, 54)}-${suffix}`;
+  }
+
   async function currentSkipReason(client: Pick<typeof prisma, "brainSource"> = prisma) {
     const current = await client.brainSource.findUnique({ where: { id: params.sourceId } });
     assertRecoveryIdentity(current);
@@ -156,7 +152,10 @@ export async function absorbSource(params: {
       await tx.$queryRaw`SELECT id FROM "BrainSource" WHERE id = ${sourceId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
       const reason = await currentSkipReason(tx);
       if (reason) return { skipped: true, reason, sourceId };
-      return operation(tx);
+      await assertInputsCurrent(tx);
+      const value = await operation(tx);
+      await assertInputsCurrent(tx);
+      return value;
     }, { maxWait: 5_000, timeout: 120_000 });
   }
 
@@ -168,17 +167,19 @@ export async function absorbSource(params: {
     return { skipped: true, reason: "source_restricted", sourceId };
   }
 
-  // The model only sees the source at classification time. Showing it the
-  // workspace article index would make every generated page depend on every
-  // article title and alias, even when it cites only this source.
-  const articles = await prisma.brainArticle.findMany({
-    where: { workspaceId: params.workspaceId, archivedAt: null, variantOfArticleId: null },
-  });
-
-  const readableArticleIds = await readableArtifactIds(agentActor, params.workspaceId, "BrainArticle", articles);
-  const activeArticles = articles.filter((article) => !article.archivedAt && readableArticleIds.has(article.id)
-    && (!article.isPrivate || (article.ownerMemberId === null && article.humanEditedAt === null
-      && readBrainArticleDerivation(article.derivationJson) !== null)));
+  // Matching and output metadata use only complete, currently readable public revisions.
+  // Private originals and unknown legacy rows never influence model inputs or samples.
+  const activeArticles = await scanSourceReadableRecords({ actor: agentActor, workspaceId: params.workspaceId,
+    kind: "BrainArticle", load: (afterId, take) => prisma.brainArticle.findMany({
+      where: { workspaceId: params.workspaceId, archivedAt: null, variantOfArticleId: null, isPrivate: false,
+        ...(afterId ? {id: {gt: afterId}} : {}) }, orderBy: {id: "asc"}, take,
+    }) });
+  liveRoots = await captureArtifactInputProof(agentActor, params.workspaceId, [
+    {kind: "BrainSource", id: sourceId, snapshot: source},
+    ...activeArticles.map(snapshot => ({kind: "BrainArticle" as const, id: snapshot.id, snapshot})),
+  ]);
+  immutableRoots = await prisma.$transaction(tx => captureImmutableArtifactInputProof(agentActor, params.workspaceId, liveRoots, tx));
+  await assertInputsCurrent();
   const articleIndex = activeArticles.map((a) => ({
     slug: a.slug,
     title: a.title,
@@ -235,13 +236,12 @@ Determine:
 
   const postAnalysisSkip = await skippedIfSourceInactive();
   if (postAnalysisSkip) return postAnalysisSkip;
+  await assertInputsCurrent();
 
   const initialWritePlans: InitialArticleWritePlan[] = [];
-  const plannedTouchedArticleIds: string[] = [];
-  const cascadeWritePlans: CascadeArticleWritePlan[] = [];
   const skippedNonDraftSlugs: string[] = [];
 
-  // Step 2: Update existing articles
+  // Step 2: Propose a separate revision; automatic actors cannot edit existing drafts.
   for (const slug of updateSlugs) {
     const existing = activeArticles.find((a) => a.slug === slug);
     if (!existing) continue;
@@ -250,6 +250,7 @@ Determine:
       continue;
     }
 
+    await assertInputsCurrent();
     const synthesized = await defaultModelGateway.chat({
       model,
       workspaceId: params.workspaceId,
@@ -283,15 +284,11 @@ Rules:
       ],
     });
 
+    await assertInputsCurrent();
     initialWritePlans.push({
-      kind: "update",
-      articleId: existing.id,
-      slug: existing.slug,
-      bodyMd: synthesized.content,
-      expectedUpdatedAt: existing.updatedAt,
-      changeSummary: `Absorbed ${source.sourceType} source: ${result.summary ?? "new information"}`,
+      slug: proposedSlug(existing.slug), title: existing.title, type: existing.type, authority: "DRAFT",
+      bodyMd: synthesized.content, sourceIds: [...new Set([...existing.sourceIds, source.id])],
     });
-    plannedTouchedArticleIds.push(existing.id);
   }
 
   // Step 3: Create new article if needed
@@ -299,6 +296,7 @@ Rules:
     // Check it doesn't already exist
     const existingSlug = activeArticles.find((a) => a.slug === createNew.slug);
     if (!existingSlug && updateSlugs.length === 0) {
+      await assertInputsCurrent();
       const drafted = await defaultModelGateway.chat({
         model,
         workspaceId: params.workspaceId,
@@ -329,9 +327,9 @@ Rules:
         ],
       });
 
+      await assertInputsCurrent();
       initialWritePlans.push({
-        kind: "create",
-        slug: uniqueSlug(slugify(createNew.slug, "source"), new Set(articles.map((article) => article.slug))),
+        slug: proposedSlug(createNew.slug),
         title: createNew.title,
         type: articleType,
         authority: source.tier === 1 || documentLikeSource ? "REFERENCE" : "DRAFT",
@@ -343,9 +341,9 @@ Rules:
 
   if (documentLikeSource && initialWritePlans.length === 0) {
     const fallbackTitle = source.title?.trim() || createNew?.title?.trim() || "Uploaded knowledge source";
-    const existingSlugs = new Set(articles.map((article) => article.slug));
     const baseSlug = slugify(createNew?.slug || fallbackTitle, "uploaded-knowledge-source");
-    const slug = uniqueSlug(baseSlug, existingSlugs);
+    const slug = proposedSlug(baseSlug);
+    await assertInputsCurrent();
     const drafted = await defaultModelGateway.chat({
       model,
       workspaceId: params.workspaceId,
@@ -375,8 +373,8 @@ Rules:
       ],
     });
 
+    await assertInputsCurrent();
     initialWritePlans.push({
-      kind: "create",
       slug,
       title: fallbackTitle,
       type: articleType,
@@ -393,129 +391,26 @@ Rules:
       sourceId: source.id,
       skippedSlugs: skippedNonDraftSlugs.filter((slug) => !activeArticles.find((article) => article.slug === slug)?.isPrivate),
       summary: result.summary ?? null,
+      lineageRoots: immutableRoots,
     };
   }
 
-  // --- Cascading updates ---
-  // Check if articles linking to updated articles need changes too
-  const MAX_CASCADE_BREADTH = 5;
-  const cascadedSlugs: string[] = [];
-  const errors: string[] = [];
-
-  if (plannedTouchedArticleIds.length > 0) {
-    // Find articles with inbound backlinks to any touched article
-    const inboundBacklinks = await prisma.brainBacklink.findMany({
-      where: {
-        workspaceId: params.workspaceId,
-        toArticleId: { in: plannedTouchedArticleIds },
-      },
-      include: {
-        fromArticle: {
-          select: { id: true, slug: true, title: true, type: true, authority: true, bodyMd: true, archivedAt: true, isPrivate: true },
-        },
-      },
-    });
-
-    // Deduplicate and exclude already-touched articles. Agents may only edit draft articles.
-    const candidateArticles = new Map<string, typeof inboundBacklinks[0]["fromArticle"]>();
-    for (const bl of inboundBacklinks) {
-      if (
-        !plannedTouchedArticleIds.includes(bl.fromArticle.id) &&
-        bl.fromArticle.authority === "DRAFT" && !bl.fromArticle.isPrivate &&
-        !bl.fromArticle.archivedAt &&
-        !candidateArticles.has(bl.fromArticle.id)
-      ) {
-        candidateArticles.set(bl.fromArticle.id, bl.fromArticle);
-      }
-    }
-
-    // Limit cascade breadth
-    const candidateRows = await prisma.brainArticle.findMany({
-      where: { workspaceId: params.workspaceId, id: { in: [...candidateArticles.keys()] }, archivedAt: null, isPrivate: false, variantOfArticleId: null },
-    });
-    const safeCandidateIds = await readableArtifactIds(agentActor, params.workspaceId, "BrainArticle", candidateRows);
-    const candidates = [...candidateArticles.values()].filter((candidate) => safeCandidateIds.has(candidate.id))
-      .slice(0, MAX_CASCADE_BREADTH);
-
-    for (const candidate of candidates) {
-      try {
-        // Build a summary of what changed in the touched articles
-        const changedSummaries = "A related article was updated from the new source";
-
-        const cascadeCheck = await defaultModelGateway.chat({
-          model,
-          workspaceId: params.workspaceId,
-          agentRunId: params.agentRunId,
-          taskType: "AGENT",
-          messages: [
-            {
-              role: "system",
-              content: `You are checking if a wiki article needs updating after related articles changed.
-
-Changes made: ${changedSummaries}
-Source that triggered changes: ${source.sourceType} — "${source.title ?? "untitled"}"
-
-Review the article below. If it references information that may now be outdated due to the above changes, produce an updated version. If it does NOT need changes, respond with exactly: NO_UPDATE_NEEDED
-
-Rules:
-- Only update if the article contains substantive references to the changed topics (not just see-also links)
-- Maintain the article's existing style and structure
-- Use [[wikilinks]] where appropriate
-- Keep updates minimal — only change what's affected`,
-            },
-            {
-              role: "user",
-              content: `Article: "${candidate.title}" (${candidate.type})\n\n${candidate.bodyMd.slice(0, 3000)}`,
-            },
-          ],
-        });
-
-        if (cascadeCheck.content.trim() !== "NO_UPDATE_NEEDED" && cascadeCheck.content.length > 50) {
-          cascadeWritePlans.push({
-            articleId: candidate.id,
-            slug: candidate.slug,
-            bodyMd: cascadeCheck.content,
-            changeSummary: `Cascading update: ${changedSummaries}`,
-          });
-          plannedTouchedArticleIds.push(candidate.id);
-          cascadedSlugs.push(candidate.slug);
-        }
-      } catch (err) {
-        // Don't fail the whole absorption for cascade failures
-        errors.push(`Cascade check failed for "${candidate.slug}": ${err}`);
-      }
-    }
-  }
-
+  // Proposed revisions leave their referenced originals unchanged, so no downstream
+  // article needs an automatic cascade edit.
   const writeResult = await runSourceWritePhase(async (tx) => {
     const touchedArticleIds: string[] = [];
     let createdArticleSlug: string | null = null;
     let publicTouchedArticleCount = 0;
 
     for (const plan of initialWritePlans) {
-      if (plan.kind === "update") {
-        const article = await updateArticle(agentActor, {
-          workspaceId: params.workspaceId,
-          slug: plan.slug,
-          bodyMd: plan.bodyMd,
-          expectedUpdatedAt: plan.expectedUpdatedAt,
-          absorbedSource: { sourceId: source.id, sourceFingerprint: brainSourceContentFingerprint(source),
-            agentRunId: params.agentRunId },
-          changeSummary: plan.changeSummary,
-          agentRunId: params.agentRunId,
-          tx,
-        });
-        touchedArticleIds.push(article.id);
-        if (!article.isPrivate) publicTouchedArticleCount += 1;
-        continue;
-      }
-
       const article = await createArticle(agentActor, {
         workspaceId: params.workspaceId,
         slug: plan.slug,
         title: plan.title,
         type: plan.type,
         authority: plan.authority,
+        isPrivate: false,
+        completeInputRoots: immutableRoots,
         bodyMd: plan.bodyMd,
         sourceIds: plan.sourceIds,
         derivation: {
@@ -528,21 +423,6 @@ Rules:
       touchedArticleIds.push(article.id);
       if (!article.isPrivate) publicTouchedArticleCount += 1;
       createdArticleSlug = article.isPrivate ? null : article.slug;
-    }
-
-    for (const plan of cascadeWritePlans) {
-      const article = await updateArticle(agentActor, {
-        workspaceId: params.workspaceId,
-        slug: plan.slug,
-        bodyMd: plan.bodyMd,
-        absorbedSource: { sourceId: source.id, sourceFingerprint: brainSourceContentFingerprint(source),
-          agentRunId: params.agentRunId },
-        changeSummary: plan.changeSummary,
-        agentRunId: params.agentRunId,
-        tx,
-      });
-      touchedArticleIds.push(article.id);
-      if (!article.isPrivate) publicTouchedArticleCount += 1;
     }
 
     // Step 5: Rebuild backlinks
@@ -561,16 +441,19 @@ Rules:
     await syncBrainArticleKnowledge({
       workspaceId: params.workspaceId,
       articleId,
+      lineageActor: agentActor,
     });
   }
 
+  await assertInputsCurrent();
   return {
     absorbed: true,
     sourceId: source.id,
-    updatedSlugs: updateSlugs.filter((slug) => !activeArticles.find((article) => article.slug === slug)?.isPrivate),
+    updatedSlugs: [],
     createdSlug: writeResult.createdArticleSlug,
     touchedArticleCount: writeResult.publicTouchedArticleCount,
     skippedSlugs: skippedNonDraftSlugs.filter((slug) => !activeArticles.find((article) => article.slug === slug)?.isPrivate),
     summary: result.summary ?? null,
+    lineageRoots: immutableRoots,
   };
 }

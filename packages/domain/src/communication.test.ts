@@ -180,7 +180,7 @@ vi.mock("./brain", () => ({
   ingestSource: vi.fn(),
 }));
 
-vi.mock("./source-permission-epochs", () => ({ artifactPermissionEpochIdentities:()=>[{kind:"Workspace",id:"workspace-1"}],
+vi.mock("./source-permission-epochs", async (original) => ({ ...await original<typeof import("./source-permission-epochs")>(), artifactPermissionEpochIdentities:()=>[{kind:"Workspace",id:"workspace-1"}],
   capturePermissionEpochs:vi.fn(async()=>({version:1})),isArtifactPermissionEpochProofCurrent:vi.fn(async()=>true) }));
 vi.mock("./source-lineage", () => ({ recordArtifactInputLineage:vi.fn(), preserveUnknownArtifactInputSnapshot:vi.fn(),
   captureArtifactInputProof: captureDigestProofMock,

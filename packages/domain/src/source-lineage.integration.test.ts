@@ -29,10 +29,11 @@ describe("complete input lineage", () => {
     ]);
     const ownerActor: AppActor = { kind: "user", user: { id: owner.id, email: owner.email, displayName: "Owner" } };
     const readerActor: AppActor = { kind: "user", user: { id: reader.id, email: reader.email, displayName: "Reader" } };
-    const agent: AppActor = { kind: "agent", authProvider: "bootstrap", label: "synthetic-lineage", workspaceIds: [workspace.id] };
     const source = await prisma.brainSource.create({ data: {
       workspaceId: workspace.id, sourceType: "DOC", tier: 1, title: "Private input", content: "Synthetic private fact",
     } });
+    await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: ownerActor, workspaceId: workspace.id,
+      artifact: { kind: "BrainSource", id: source.id }, content: source, origin: "HUMAN_ORIGINAL", inputs: [] }));
     const privateOriginal = await prisma.brainArticle.create({ data: {
       workspaceId: workspace.id, slug: "private-original", title: "Private original", type: "PROJECT",
       bodyMd: "Synthetic owner text", sourceIds: [], authority: "DRAFT", isPrivate: true, ownerMemberId: ownerMember.id,
@@ -50,7 +51,7 @@ describe("complete input lineage", () => {
         artifact: { kind: "BrainArticle", id: privateOriginal.id }, content: privateOriginal,
         origin: "HUMAN_ORIGINAL", inputs: [],
       });
-      await recordArtifactInputLineage({ tx, actor: agent, workspaceId: workspace.id,
+      await recordArtifactInputLineage({ tx, actor: ownerActor, workspaceId: workspace.id,
         artifact: { kind: "BrainArticle", id: derived.id }, content: derived,
         origin: "DERIVED", inputs: [
           { kind: "BrainSource", id: source.id }, { kind: "BrainArticle", id: privateOriginal.id },
@@ -97,6 +98,8 @@ describe("complete input lineage", () => {
     const rawSource = await prisma.brainSource.create({ data: {
       workspaceId: workspace.id, sourceType: "DOC", tier: 1, content: "Synthetic shared source",
     } });
+    await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: ownerActor, workspaceId: workspace.id,
+      artifact: { kind: "BrainSource", id: rawSource.id }, content: rawSource, origin: "HUMAN_ORIGINAL", inputs: [] }));
     await prisma.$transaction(async (tx) => {
       await recordArtifactInputLineage({ tx, actor: ownerActor, workspaceId: workspace.id,
         artifact: { kind: "BrainArticle", id: privateArticle.id }, content: privateArticle,
@@ -142,10 +145,16 @@ describe("complete input lineage", () => {
       title: legacyChat.title, content: "Unrelated new text", duplicateGuard: {},
     });
     expect(newSource.id).not.toBe(legacyChat.id);
-    await expect(ingestSource(ownerActor, { workspaceId: workspace.id, sourceType: "CONVERSATION", tier: 3,
+    const editedCopy = await ingestSource(ownerActor, { workspaceId: workspace.id, sourceType: "CONVERSATION", tier: 3,
       title: "Copied chat", content: copiedChat.content,
       duplicateGuard: { resolution: "update_existing", targetEntityId: copiedChat.id },
-    })).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    });
+    expect(editedCopy.id).toBe(copiedChat.id);
+    const retained = await prisma.artifactInputLineage.findFirstOrThrow({ where: { artifactType: "BrainSource", artifactId: copiedChat.id },
+      orderBy: { revision: "desc" } });
+    expect(retained.origin).toBe("DERIVED");
+    expect(retained.rootsJson).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "BrainArticle", id: privateArticle.id })]));
+    expect(await readableArtifactIds(readerActor, workspace.id, "BrainSource", [editedCopy])).toEqual(new Set());
     await prisma.brainArticle.update({ where: { id: privateArticle.id }, data: { bodyMd: "Changed owner original" } });
     expect((await listSources(ownerActor, { workspaceId: workspace.id })).items.map((source) => source.id))
       .toEqual(expect.arrayContaining([rawSource.id, newSource.id]));
@@ -179,6 +188,10 @@ describe("complete input lineage", () => {
         artifact: { kind: "Proposal", id: privateProposal.id }, content: privateProposal,
         origin: "HUMAN_ORIGINAL", inputs: [],
       });
+      for (const [kind, row] of [["Action", action], ["Tension", tension]] as const) {
+        await recordArtifactInputLineage({ tx, actor: ownerActor, workspaceId: workspace.id,
+          artifact: { kind, id: row.id }, content: row, origin: "HUMAN_ORIGINAL", inputs: [] });
+      }
     });
     expect((await getAction(readerActor, { workspaceId: workspace.id, actionId: action.id })).proposal).toBeNull();
     expect((await getTension(readerActor, { workspaceId: workspace.id, tensionId: tension.id })).proposal).toBeNull();

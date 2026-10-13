@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import { invariant } from "./errors";
 
-export const SOURCE_PERMISSION_POLICY_VERSION = "pun68-permissions-v2";
+export const SOURCE_PERMISSION_POLICY_VERSION = "pun68-permissions-v3";
 export type PermissionEpochIdentity = { kind: string; id: string };
 export type PermissionEpochProof = { version: 1; policyVersion: typeof SOURCE_PERMISSION_POLICY_VERSION;
   entries: Array<PermissionEpochIdentity & { epoch: string }> };
@@ -32,8 +32,9 @@ export function artifactPermissionEpochIdentities(kind: string, row: Record<stri
   const add = (permissionKind: string, id: unknown) => {
     if (typeof id === "string" && id) identities.push({ kind: permissionKind, id });
   };
-  const sourceKind = kind === "MeetingTranscript" ? "Meeting" : kind === "BrainArticleVersion" ? "BrainArticle" : kind;
-  add(sourceKind, kind === "BrainArticleVersion" ? row.articleId : row.id);
+  const sourceKind = ["MeetingTranscript", "MeetingAgenda"].includes(kind) ? "Meeting" : kind;
+  add(sourceKind, row.id);
+  if (kind === "BrainArticleVersion") add("BrainArticle", row.articleId);
   if (kind === "WorkflowJobInput") add("WorkflowJobInput", row.id);
   add("Workspace", row.workspaceId);
   for (const key of ["ownerMemberId", "memberId", "authorMemberId", "recipientMemberId"]) add("Member", row[key]);
@@ -42,6 +43,8 @@ export function artifactPermissionEpochIdentities(kind: string, row: Record<stri
     add("WorkspaceSupportPolicy", row[key]);
   }
   if (kind === "Member") add("MemberUserPolicy", row.userId);
+  if (kind === "User") add("MemberUserPolicy", row.id);
+  if (kind === "CrmProspectWorkspace") add("CrmProspectTargetAccessPolicy", row.targetWorkspaceId);
   if (kind === "RoleAssignment") { add("Member", row.memberId); add("MemberRolePolicy", row.memberId); add("Role", row.roleId); }
   for (const key of ["circleId", "parentCircleId", "targetCircleId"]) add("Circle", row[key]);
   if (kind === "AdviceRequest") {

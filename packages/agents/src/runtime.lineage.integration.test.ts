@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { captureArtifactInputSnapshotProof, captureArtifactInputProof, isArtifactInputProofReadable, readableArtifactIds, recordArtifactInputLineage,
-  loadAgentRequestInput, loadAgentFeedbackContinuation, triggerAgentRun, submitAgentFeedback, meetingTranscriptInputProjection, type LineageRoot } from "@corgtex/domain";
+  uploadMeetingTranscript, captureDirectMemberTranscriptInput, directMemberTranscriptRoots, loadAgentRequestInput, loadAgentFeedbackContinuation, triggerAgentRun, submitAgentFeedback, meetingTranscriptInputProjection, type LineageRoot } from "@corgtex/domain";
 import { executeAgentRun } from "./runtime";
 
 // Only operational model routing and budget decisions are stubbed. Real rows,
@@ -19,8 +19,13 @@ async function fixture() {
   const user = await prisma.user.create({ data: { email: `runtime-${randomUUID()}@example.test`, passwordHash: "synthetic" } });
   const member = await prisma.member.create({ data: { workspaceId: workspace.id, userId: user.id, role: "ADMIN" } });
   const actor: AppActor = { kind: "user", user };
-  const meeting = await prisma.meeting.create({ data: { workspaceId: workspace.id, title: "Synthetic meeting", source: "synthetic",
-    recordedAt: new Date(), transcript: "Native transcript fact", participantIds: [] } });
+  const submission = { workspaceId: workspace.id, title: "Synthetic meeting", source: "synthetic",
+    recordedAt: new Date(), transcript: "Native transcript fact", participantIds: [] };
+  const nativeReceipt = await captureDirectMemberTranscriptInput(actor, {workspaceId: workspace.id, submission});
+  const nativeRoots = await directMemberTranscriptRoots(actor, workspace.id, submission, nativeReceipt);
+  const uploaded = await uploadMeetingTranscript(actor, {...submission, copied: true, lineageRoots: nativeRoots});
+  if (!uploaded.meeting) throw new Error("Synthetic native transcript upload needs a new meeting.");
+  const meeting = uploaded.meeting;
   const identity = await prisma.agentIdentity.create({ data: { workspaceId: workspace.id, agentKey: "__workspace__", isActive: false,
     displayName: "Workspace policy", behaviorMd: "Explain the evidence clearly." } });
   await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor, workspaceId: workspace.id,

@@ -245,6 +245,9 @@ async function assertGoalInWorkspace(tx: Prisma.TransactionClient, workspaceId: 
       status: true,
       progressPercent: true,
       version: true,
+      sortOrder: true,
+      createdAt: true,
+      updatedAt: true,
     },
   });
   invariant(goal && goal.workspaceId === workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");

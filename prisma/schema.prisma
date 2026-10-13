@@ -3759,7 +3759,7 @@ model ArtifactInputLineage {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@unique([workspaceId, artifactType, artifactId, revision])
-  @@index([workspaceId, artifactType, artifactId, recordedAt], map: "ArtifactInputLineage_workspaceId_artifactType_artifactId_r_idx")
+  @@index([workspaceId, artifactType, artifactId, recordedAt], map: "ArtifactInputLineage_workspaceId_artifactType_artifactId_re_idx")
 }
 
 /// Immutable source content and original access envelope for a mutable prompt input.

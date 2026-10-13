@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
-import { prisma, type AppActor } from "@corgtex/shared";
+import { mcpCredentialVersion, prisma, type AppActor } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { searchIndexedKnowledge } from "../../knowledge/src/retrieval";
@@ -9,7 +9,7 @@ import { syncBrainArticleKnowledge } from "../../knowledge/src/chunks";
 import { createArticle, deleteSource, updateArticle } from "./brain";
 import { brainSourceContentFingerprint } from "./brain-derivation";
 import { archiveWorkspaceArtifact } from "./archive";
-import { captureArtifactInputSnapshotProof, recordArtifactInputLineage } from "./source-lineage";
+import { advanceHumanArtifactInputLineage, captureArtifactInputProof, captureArtifactInputSnapshotProof, recordArtifactInputLineage } from "./source-lineage";
 import {
   generateBrainSourceRemovalCandidate,
   listBrainSourceRemovalReviews,
@@ -34,7 +34,21 @@ async function fixture(sourceRemovalEnabled = true) {
   const remaining = await prisma.brainSource.create({ data: {
     workspaceId: workspace.id, sourceType: "DOC", tier: 1, title: "Remaining source", content: "Remaining facts",
   } });
+  await prisma.$transaction(async tx => {
+    for (const source of [removed, remaining]) await recordArtifactInputLineage({ tx, actor, workspaceId: workspace.id,
+      artifact: { kind: "BrainSource", id: source.id }, content: source, origin: "HUMAN_ORIGINAL", inputs: [] });
+  });
   return { workspace, actor, member, removed, remaining };
+}
+
+async function updateAuthoredSource(actor: AppActor, id: string, data: Prisma.BrainSourceUpdateInput) {
+  return prisma.$transaction(async tx => {
+    const before = await tx.brainSource.findUniqueOrThrow({ where: { id } });
+    const after = await tx.brainSource.update({ where: { id }, data });
+    await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: after.workspaceId,
+      artifact: { kind: "BrainSource", id }, before, after });
+    return after;
+  });
 }
 
 async function attestArticle(actor: AppActor, workspaceId: string, articleId: string, sourceIds: string[]) {
@@ -106,13 +120,18 @@ describe("Brain source removal review", () => {
     const unlinked = await prisma.brainSource.create({ data: {
       workspaceId: workspace.id, sourceType: "DOC", tier: 1, content: "Unlinked facts",
     } });
+    await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor, workspaceId: workspace.id,
+      artifact: { kind: "BrainSource", id: unlinked.id }, content: unlinked, origin: "HUMAN_ORIGINAL", inputs: [] }));
     expect(await deleteSource(actor, { workspaceId: workspace.id, sourceId: unlinked.id }))
       .toEqual({ id: unlinked.id, status: "archived" });
     await prisma.workspaceFeatureFlag.create({ data: {
       workspaceId: workspace.id, flag: "BRAIN_SOURCE_REMOVAL", enabled: true,
     } });
-    const reader: AppActor = { kind: "agent", authProvider: "credential", label: "Brain-only reader",
-      workspaceIds: [workspace.id], scopes: ["brain:read"] };
+    const readCredential = await prisma.agentCredential.create({ data: { workspaceId: workspace.id,
+      createdByUserId: actor.kind === "user" ? actor.user.id : null, label: "Brain-only reader", tokenHash: randomUUID(), scopes: ["brain:read"] } });
+    const reader: AppActor = { kind: "agent", authProvider: "credential", label: readCredential.label,
+      credentialId: readCredential.id, credentialVersion: mcpCredentialVersion(readCredential.tokenHash),
+      workspaceIds: [workspace.id], scopes: readCredential.scopes };
     await expect(deleteSource(reader, { workspaceId: workspace.id, sourceId: removed.id }))
       .rejects.toMatchObject({ status: 403 });
     expect(await prisma.workflowJob.count({ where: { workspaceId: workspace.id, type: "agent.brain-source-regenerate" } })).toBe(0);
@@ -130,7 +149,8 @@ describe("Brain source removal review", () => {
     const { workspace, actor, removed } = await fixture();
     const agent: AppActor = { kind: "agent", authProvider: "bootstrap", label: "brain-absorb", workspaceIds: [workspace.id] };
     const article = await createArticle(agent, {
-      workspaceId: workspace.id, title: "One source article", type: "PROJECT", bodyMd: "Human reviewed body",
+      workspaceId: workspace.id, title: "One source article", type: "PROJECT", bodyMd: "Human reviewed body", isPrivate: false,
+      completeInputRoots: await captureArtifactInputProof(agent, workspace.id, [{ kind: "BrainSource", id: removed.id }]),
       sourceIds: [removed.id], derivation: {
         sourceId: removed.id, sourceFingerprint: brainSourceContentFingerprint(removed), agentRunId: "synthetic-run",
       },
@@ -157,9 +177,7 @@ describe("Brain source removal review", () => {
       ] },
     } });
     await attestArticle(actor, workspace.id, article.id, [removed.id, remaining.id]);
-    const currentRemaining = await prisma.brainSource.update({
-      where: { id: remaining.id }, data: { content: "Current remaining facts" },
-    });
+    const currentRemaining = await updateAuthoredSource(actor, remaining.id, { content: "Current remaining facts" });
     await expect(deleteSource(member, { workspaceId: workspace.id, sourceId: removed.id }))
       .rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
     const requested = await deleteSource(actor, { workspaceId: workspace.id, sourceId: removed.id });
@@ -181,10 +199,10 @@ describe("Brain source removal review", () => {
     const [review] = await listBrainSourceRemovalReviews(actor, { workspaceId: workspace.id, sourceIds: [removed.id] });
     expect(review.articles).toMatchObject([{ id: article.id, title: "Article unavailable", currentBodyMd: null,
       candidateBodyMd: "Facts from remaining source only" }]);
-    await prisma.brainSource.update({ where: { id: remaining.id }, data: { content: "Changed after candidate generation" } });
+    await updateAuthoredSource(actor, remaining.id, { content: "Changed after candidate generation" });
     const [staleReview] = await listBrainSourceRemovalReviews(actor, { workspaceId: workspace.id, sourceIds: [removed.id] });
     expect(staleReview.articles).toEqual([]);
-    await prisma.brainSource.update({ where: { id: remaining.id }, data: { content: "Current remaining facts" } });
+    await updateAuthoredSource(actor, remaining.id, { content: "Current remaining facts" });
     process.env[runtimeOptIn] = "false";
     await expect(resolveBrainSourceRemoval(actor, { workspaceId: workspace.id, jobId: requested.jobId, decision: "accept" }))
       .rejects.toMatchObject({ status: 409, code: "BRAIN_SOURCE_REMOVAL_DISABLED" });
@@ -222,10 +240,10 @@ describe("Brain source removal review", () => {
       } })).toBe(0);
       expect(await searchIndexedKnowledge(query)).toEqual([]);
       embed.mockRejectedValueOnce(new Error("synthetic indexing failure"));
-      await expect(syncBrainArticleKnowledge({ workspaceId: workspace.id, articleId: article.id }))
+      await expect(syncBrainArticleKnowledge({ workspaceId: workspace.id, articleId: article.id, lineageActor: actor }))
         .rejects.toThrow("synthetic indexing failure");
       expect(await searchIndexedKnowledge(query)).toEqual([]);
-      expect(await syncBrainArticleKnowledge({ workspaceId: workspace.id, articleId: article.id })).toBe(1);
+      expect(await syncBrainArticleKnowledge({ workspaceId: workspace.id, articleId: article.id, lineageActor: actor })).toBe(1);
       expect((await searchIndexedKnowledge(query))[0]?.snippet).toBe("Facts from remaining source only");
     } finally {
       embed.mockRestore();
@@ -264,7 +282,7 @@ describe("Brain source removal review", () => {
     await prisma.workflowJob.update({ where: { id: requested.jobId }, data: { status: "RUNNING" } });
     const stale = await generateBrainSourceRemovalCandidate({ workspaceId: workspace.id, jobId: requested.jobId, expectedAttempt: 0, expectedOwner: null,
       generate: async () => {
-        await prisma.brainSource.update({ where: { id: remaining.id }, data: { content: "Revised remaining facts" } });
+        await updateAuthoredSource(actor, remaining.id, { content: "Revised remaining facts" });
         return "Old candidate";
       },
     });

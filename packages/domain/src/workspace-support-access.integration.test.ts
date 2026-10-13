@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getSupportAuthorizationContext, prisma, runWithSupportOrigin } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
@@ -6,6 +6,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { changeWorkspaceSupportGrant, getSupportSetup, updateSupportSetup, withWorkspaceSupportExecution } from "./workspace-support-access";
 import { createMember, updateMember } from "./members";
 import { listSources as listBrainSources } from "./brain";
+import { captureSlackSignedIngress } from "./communication-native-ingress";
 import { handleSlackCommand } from "./communication";
 import { changeSupportConfiguration, decideSupportAccessRequest, getSupportConfiguration, listSupportAccessRequests } from "./workspace-support-configuration";
 import { requireSupportRequestAccess } from "../../../apps/web/lib/support-request-access";
@@ -14,6 +15,7 @@ import { handleContextGraphSync } from "../../workflows/src/handlers/context-gra
 import * as events from "./events";
 import { issueAgentCredential, rotateAgentCredential } from "./agent-auth";
 import { assertTrialMemberCapacity } from "./trial-entitlements";
+import { captureArtifactInputProof, recordArtifactInputLineage } from "./source-lineage";
 
 const { setupEmail } = vi.hoisted(() => ({ setupEmail: vi.fn() }));
 const capabilityLookup = vi.hoisted(() => ({ model: "", run: undefined as (() => Promise<void>) | undefined }));
@@ -43,6 +45,20 @@ const isolated = (name: string, run: () => Promise<void>) => it(name, () => runW
 const change = (role: "SETUP" | "FULL", expectedVersion = 0, isActive = true) => runWithSupportOrigin(undefined,
   () => changeWorkspaceSupportGrant(owner, { workspaceId, email: support.user.email, role, expectedVersion, isActive }));
 
+async function assertMemberGraph(memberId: string, workspaceRole: string, active: boolean) {
+  const graph = await prisma.contextGraphObject.findFirstOrThrow({ where: { workspaceId, sourceEntityType: "Member", sourceEntityId: memberId } });
+  if (active) {
+    expect(graph).toMatchObject({ status: "approved", properties: { workspaceRole, isActive: true } });
+    expect(await captureArtifactInputProof(owner, workspaceId, [{ kind: "ContextGraphObject", id: graph.id }])).not.toHaveLength(0);
+  } else {
+    // Retirement preserves the last proved body/approval in history, while a
+    // tombstone removes it from current graph reads until a fresh rebuild.
+    expect(graph).toMatchObject({ status: "approved", properties: { workspaceRole, isActive: true } });
+    expect(await prisma.artifactInputLineage.findFirst({ where: { workspaceId, artifactType: "ContextGraphObject", artifactId: graph.id }, orderBy: { revision: "desc" } })).toMatchObject({ origin: "UNKNOWN" });
+    await expect(captureArtifactInputProof(owner, workspaceId, [{ kind: "ContextGraphObject", id: graph.id }])).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+  }
+}
+
 describe("workspace admin support contract on migrated PostgreSQL", () => {
   beforeEach(async () => runWithSupportOrigin(undefined, async () => {
     setupEmail.mockReset().mockResolvedValue({ sent: true });
@@ -53,7 +69,9 @@ describe("workspace admin support contract on migrated PostgreSQL", () => {
     const w = await prisma.workspace.create({ data: { slug: suffix, name: "Synthetic support workspace", supportOwnerUserId: a.id } });
     workspaceId = w.id; workspaces.push(w.id);
     await prisma.member.create({ data: { workspaceId, userId: a.id, role: "ADMIN", kind: "HUMAN" } });
-    await prisma.brainSource.create({ data: { workspaceId, sourceType: "DOC", tier: 1, title: "Synthetic private canary", content: "synthetic-content-canary" } });
+    const canary = await prisma.brainSource.create({ data: { workspaceId, sourceType: "ARTICLE", tier: 1, title: "Synthetic canary", content: "synthetic-content-canary" } });
+    await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: owner, workspaceId,
+      artifact: { kind: "BrainSource", id: canary.id }, content: canary, origin: "HUMAN_ORIGINAL", inputs: [] }));
   }));
   afterAll(async () => runWithSupportOrigin(undefined, async () => {
     await prisma.workflowJob.deleteMany({ where: { workspaceId: { in: workspaces } } });
@@ -74,11 +92,11 @@ describe("workspace admin support contract on migrated PostgreSQL", () => {
       const derived = deriveJobsForEvent(event).filter(job => job.type === "context-graph.sync");
       expect(derived).toHaveLength(1);
       const { dependsOnDedupeKey: _dependency, ...data } = derived[0];
-      const job = await prisma.workflowJob.create({ data });
-      await withWorkspaceSupportExecution(job, () => handleContextGraphSync(job.id, job.payload as { sourceType: string; sourceId: string }, workspaceId));
-      expect(await prisma.contextGraphObject.findFirst({ where: { workspaceId, sourceEntityType: "Member", sourceEntityId: member.id } })).toMatchObject({
-        status: active ? "approved" : "archived", properties: { workspaceRole: "ADMIN", isActive: active },
-      });
+      const lockedAt = new Date();
+      const job = await prisma.workflowJob.create({ data: { ...data, status: "RUNNING", attempts: 1, lockedBy: "synthetic-support-sync", lockedAt } });
+      await withWorkspaceSupportExecution(job, () => handleContextGraphSync(job.id, job.payload as { sourceType: string; sourceId: string }, workspaceId,
+        { attempts: job.attempts, expectedLease: { lockedBy: job.lockedBy!, lockedAt } }));
+      await assertMemberGraph(member.id, "ADMIN", active);
     };
     await change("FULL", 1);
     await check("member.created", true, 1);
@@ -186,11 +204,21 @@ describe("workspace admin support contract on migrated PostgreSQL", () => {
     await change("FULL");
     const member = await prisma.member.findUniqueOrThrow({ where: { workspaceId_userId: { workspaceId, userId: support.user.id } } });
     const teamId = randomUUID();
-    const installation = await prisma.communicationInstallation.create({ data: { workspaceId, provider: "SLACK", externalWorkspaceId: teamId, status: "ACTIVE" } });
+    const appId = `synthetic-app-${randomUUID()}`;
+    const installation = await prisma.communicationInstallation.create({ data: { workspaceId, provider: "SLACK", externalWorkspaceId: teamId, appId, status: "ACTIVE" } });
     await prisma.communicationExternalUser.create({ data: { installationId: installation.id, workspaceId, provider: "SLACK", externalUserId: "synthetic", userId: support.user.id, memberId: member.id } });
     await change("SETUP", 1);
-    const response = await handleSlackCommand(new URLSearchParams({ team_id: teamId, user_id: "synthetic", text: "brief" }));
-    expect(JSON.stringify(response)).not.toContain("Open actions");
+    vi.stubEnv("SLACK_SIGNING_SECRET", "synthetic-support-signing-secret");
+    try {
+      const payload = new URLSearchParams({ team_id: teamId, api_app_id: appId, user_id: "synthetic", text: "brief" });
+      const raw = payload.toString(), timestamp = String(Math.floor(Date.now() / 1000));
+      const ingress = captureSlackSignedIngress(raw, {
+        "x-slack-request-timestamp": timestamp,
+        "x-slack-signature": `v0=${createHmac("sha256", "synthetic-support-signing-secret").update(`v0:${timestamp}:${raw}`).digest("hex")}`,
+      });
+      const response = await handleSlackCommand(payload, ingress);
+      expect(JSON.stringify(response)).not.toContain("Open actions");
+    } finally { vi.unstubAllEnvs(); }
   });
   isolated("a grant in one workspace never revokes independent membership elsewhere", async () => {
     const other = await prisma.workspace.create({ data: { slug: randomUUID(), name: "Independent fixture" } }); workspaces.push(other.id);
@@ -436,12 +464,11 @@ describe("workspace admin support contract on migrated PostgreSQL", () => {
         const derived = deriveJobsForEvent(event).filter(job => job.type === "context-graph.sync");
         expect(derived).toHaveLength(1);
         const { dependsOnDedupeKey: _dependency, ...data } = derived[0];
-        return prisma.workflowJob.create({ data });
+        return prisma.workflowJob.create({ data: { ...data, status: "RUNNING", attempts: 1, lockedBy: "synthetic-support-sync", lockedAt: new Date() } });
       });
-      await withWorkspaceSupportExecution(job, () => handleContextGraphSync(job.id, job.payload as { sourceType: string; sourceId: string }, workspaceId));
-      expect(await prisma.contextGraphObject.findFirst({ where: { workspaceId, sourceEntityType: "Member", sourceEntityId: memberId } })).toMatchObject({
-        status: active ? "approved" : "archived", properties: { workspaceRole: expectedRole, isActive: active },
-      });
+      await withWorkspaceSupportExecution(job, () => handleContextGraphSync(job.id, job.payload as { sourceType: string; sourceId: string }, workspaceId,
+        { attempts: job.attempts, expectedLease: { lockedBy: job.lockedBy!, lockedAt: job.lockedAt! } }));
+      await assertMemberGraph(memberId, expectedRole, active);
     };
     await apply({ kind: "addMember", email: ordinary.email, role: "CONTRIBUTOR" });
     const member = await prisma.member.findUniqueOrThrow({ where: { workspaceId_userId: { workspaceId, userId: ordinary.id } } });

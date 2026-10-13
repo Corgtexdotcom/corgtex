@@ -102,7 +102,7 @@ vi.mock("./external-mcp", async importOriginal => ({ ...await importOriginal<typ
 import { selectExternalContentSource, syncExternalContentSource, listExternalContentSources, enqueueExternalContentSourceSync } from "./external-content-sources";
 import { captureExternalProviderFetchInput, createExternalProviderSyncActor, externalProviderResponseHash,
   getExternalProviderPrincipalUserId, isExternalProviderCapturedResponse, isExternalProviderFetchInputCurrent, assertExternalProviderCapturedResponseCurrent } from "./external-provider-authority";
-import { prepareExternalProviderCommitPreflight, withExternalProviderCommitPreflight, type ExternalProviderCommitPreflight } from "./external-provider-authority";
+import { prepareExternalProviderCommitPreflight, prepareExternalProviderRootCommitPreflight, withExternalProviderCommitPreflight, type ExternalProviderCommitPreflight } from "./external-provider-authority";
 import { captureArtifactInputProof, captureImmutableArtifactInputProof, recordArtifactInputLineage, isArtifactInputProofReadable, readableArtifactIds, isArtifactInputProofPubliclyShareable } from "./source-lineage";
 const owner = { kind: "user", user: { id: "general", email: "general@synthetic.test" } } as AppActor;
 const other = { kind: "user", user: { id: "finance", email: "finance@synthetic.test" } } as AppActor;
@@ -261,6 +261,27 @@ describe("External provider live authority and copied lineage with real helpers"
       await expect(withExternalProviderCommitPreflight(owner, ws, fixture.prisma, preflight, copy)).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
     });
     expect(copy).not.toHaveBeenCalled(); expect(remote.transport).not.toHaveBeenCalled();
+  });
+  it("preflights existing native roots live without creating new receipts, rejecting forged and moved roots", async () => {
+    const source = await setup(); const receipt = await capture(source.id);
+    const roots = [(source.metadata as any).selectionInputRoot, ...await captureArtifactInputProof(owner, ws,
+      [{ kind: "ExternalProviderFetchInput", id: receipt.input.id }])];
+    const count = fixture.tables.externalProviderFetchInput.length; remote.transport.mockClear();
+    const capability = await prepareExternalProviderRootCommitPreflight(owner, ws, roots);
+    expect(remote.transport).toHaveBeenCalled(); expect(fixture.tables.externalProviderFetchInput).toHaveLength(count);
+    remote.transport.mockClear();
+    await fixture.prisma.$transaction((tx: any) => withExternalProviderCommitPreflight(owner, ws, tx, capability, async () => {
+      expect(await isArtifactInputProofReadable(owner, ws, roots, tx)).toBe(true);
+    }));
+    expect(remote.transport).not.toHaveBeenCalled();
+    await expect(prepareExternalProviderRootCommitPreflight(owner, ws,
+      roots.map(root => root.kind === "ExternalProviderFetchInput" ? { ...root, fingerprint: "a".repeat(64) } : root)))
+      .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    await expect(prepareExternalProviderRootCommitPreflight(owner, ws,
+      roots.map(root => ({ ...root, permissionEpochs: undefined })))).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    fixture.tables.externalProviderFetchInput[0].workspaceId = "ws-other";
+    await expect(prepareExternalProviderRootCommitPreflight(owner, ws, roots)).rejects.toMatchObject({ code: "UNSUPPORTED_PROVIDER_INPUT" });
+    expect(fixture.tables.externalProviderFetchInput).toHaveLength(count);
   });
   it.each(["disconnect", "scopes", "token-rotation", "membership", "rebind", "native-bytes"])(
     "rejects local %s changes after preflight without network fallback", async change => {

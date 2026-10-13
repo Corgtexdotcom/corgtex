@@ -1,11 +1,22 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { prisma, type AppActor } from "@corgtex/shared";
+import { encryptSecret, prisma, type AppActor } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { syncBrainArticleKnowledge } from "../../knowledge/src/chunks";
 import { fetchReadableKnowledgeChunk, searchIndexedKnowledge } from "../../knowledge/src/retrieval";
+const slack = vi.hoisted(() => ({ original: { type: "message", ts: "1700000000.000001", user: "U_AUTHOR", text: "Public original communication facts" } }));
+vi.mock("@slack/web-api", () => ({ WebClient: class {
+  auth = { test: async () => ({ ok: true, team_id: "T_SYNTHETIC", user_id: "U_BOT" }) };
+  conversations = { info: async () => ({ ok: true, channel: { id: "synthetic-public", is_private: false, is_member: true, is_archived: false } }),
+    history: async () => ({ ok: true, messages: [slack.original] }) };
+} }));
+import { captureSlackNativeMessageFetch, withSlackNativeCommitReceipt } from "./communication-native-authority";
+import { communicationCanonicalJson, communicationNativeHash } from "./communication-native-ingress";
+import { artifactPermissionEpochIdentities, capturePermissionEpochs } from "./source-permission-epochs";
+import { lineageContentFingerprint } from "./source-lineage";
 import { createArticle, getArticle, listArticles, publishArticle, updateArticle } from "./brain";
+import { archiveWorkspaceArtifact, restoreWorkspaceArtifact } from "./archive";
 import { brainSourceContentFingerprint } from "./brain-derivation";
 import { captureArtifactInputProof, captureImmutableArtifactInputProof, readableArtifactIds, recordArtifactInputLineage, type LineageKind } from "./source-lineage";
 import { BRAIN_ARTICLE_VARIANT_JOB_TYPE, generateBrainArticleVariant, getReadableBrainArticleVariant,
@@ -48,15 +59,48 @@ async function mixedFixture() {
   const f = await fixture();
   const document = await prisma.document.create({ data: { workspaceId: f.workspace.id, title: "Public native document",
     source: "SYNTHETIC", storageKey: "DO NOT PROMPT STORAGE KEY", textContent: "Public native document facts", metadata: { secret: "DO NOT PROMPT DOCUMENT METADATA" } } });
-  const meeting = await prisma.meeting.create({ data: { workspaceId: f.workspace.id, title: "Public native meeting", source: "SYNTHETIC",
-    recordedAt: new Date(), participantIds: [], transcript: "Public native transcript facts", summaryMd: "DO NOT PROMPT UNPROVEN SUMMARY" } });
+  await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: f.ownerActor, workspaceId: f.workspace.id,
+    artifact: { kind: "Document", id: document.id }, content: document, origin: "HUMAN_ORIGINAL", inputs: [] }));
+  const transcriptSource = await prisma.brainSource.create({ data: { workspaceId: f.workspace.id, sourceType: "DOC", tier: 1,
+    title: "Public native meeting", content: "Public native transcript facts" } });
+  await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: f.ownerActor, workspaceId: f.workspace.id,
+    artifact: { kind: "BrainSource", id: transcriptSource.id }, content: transcriptSource, origin: "HUMAN_ORIGINAL", inputs: [] }));
+  const meeting = await prisma.meeting.create({ data: { workspaceId: f.workspace.id, title: transcriptSource.title!, source: "SYNTHETIC",
+    recordedAt: new Date(), participantIds: [], transcript: transcriptSource.content, summaryMd: "DO NOT PROMPT UNPROVEN SUMMARY" } });
+  // The transcript is an actual copy of independently shared human notes. It
+  // has complete input provenance, unlike a raw legacy transcript upload.
+  const { meetingTranscriptInputProjection } = await import("./meeting-intelligence-context");
+  await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: f.ownerActor, workspaceId: f.workspace.id,
+    artifact: { kind: "MeetingTranscript", id: meeting.id }, content: meetingTranscriptInputProjection(meeting), origin: "DERIVED",
+    inputs: [{ kind: "BrainSource", id: transcriptSource.id }] }));
   const installation = await prisma.communicationInstallation.create({ data: { workspaceId: f.workspace.id, provider: "SLACK",
-    externalWorkspaceId: `synthetic-${randomUUID()}`, status: "ACTIVE" } });
+    externalWorkspaceId: "T_SYNTHETIC", appId: "APP_SYNTHETIC", botUserId: "U_BOT", botTokenEnc: encryptSecret("synthetic-token"),
+    scopes: ["channels:read", "channels:history"], status: "ACTIVE" } });
   const channel = await prisma.communicationChannel.create({ data: { workspaceId: f.workspace.id, installationId: installation.id,
     provider: "SLACK", externalChannelId: "synthetic-public", name: "DO NOT PROMPT CHANNEL LABEL", kind: "PUBLIC", isIngestEnabled: true } });
-  const message = await prisma.communicationMessage.create({ data: { workspaceId: f.workspace.id, installationId: installation.id,
-    provider: "SLACK", externalChannelId: channel.externalChannelId, externalMessageId: `synthetic-${randomUUID()}`,
-    text: "Public original communication facts", raw: { secret: "DO NOT PROMPT RAW PROVIDER" } } });
+  const fetched = await captureSlackNativeMessageFetch({ workspaceId: f.workspace.id, installationId: installation.id,
+    channelId: channel.externalChannelId, messageTs: slack.original.ts });
+  const message = await prisma.$transaction(async tx => {
+    const stamp = new Date(Math.trunc(Number(slack.original.ts) * 1000));
+    const message = await tx.communicationMessage.create({ data: { workspaceId: f.workspace.id, installationId: installation.id,
+      provider: "SLACK", externalChannelId: channel.externalChannelId, externalMessageId: slack.original.ts, externalUserId: slack.original.user,
+      text: String(fetched.projected.text), raw: fetched.projected as any, messageTs: stamp, receivedAt: stamp,
+      expiresRawAt: new Date(Date.now() + 120000), permalink: null } });
+    const permissionEpochsJson = await capturePermissionEpochs(tx, f.workspace.id, artifactPermissionEpochIdentities("CommunicationMessage", message));
+    const input = await tx.communicationMessageNativeInput.create({ data: { workspaceId: f.workspace.id, installationId: installation.id,
+      communicationMessageId: message.id, provider: "SLACK", externalWorkspaceId: installation.externalWorkspaceId, appId: installation.appId,
+      providerPrincipalId: fetched.providerPrincipalId, externalChannelId: channel.externalChannelId, externalMessageId: message.externalMessageId,
+      externalUserId: message.externalUserId, threadExternalId: null, mode: "AUTHENTICATED_FETCH", ingressInputId: null,
+      requestJson: { ...fetched.request, messageContentFingerprint: lineageContentFingerprint("CommunicationMessage", message) } as any,
+      encryptedPayloadJson: encryptSecret(communicationCanonicalJson(fetched.payload)), projectedContentJson: fetched.projected as any,
+      projectionHash: communicationNativeHash(communicationCanonicalJson(fetched.projected)), installationGrantHash: fetched.installationGrantHash,
+      channelGrantHash: fetched.channelGrantHash, permissionEpochsJson: permissionEpochsJson as any, epochProofVersion: 1,
+      expiresRawAt: message.expiresRawAt!, fetchedAt: new Date(fetched.capturedAtMs) } });
+    await withSlackNativeCommitReceipt(f.ownerActor, f.workspace.id, input.id, tx, fetched, () => recordArtifactInputLineage({ tx,
+      actor: f.ownerActor, workspaceId: f.workspace.id, artifact: { kind: "CommunicationMessage", id: message.id }, content: message,
+      origin: "DERIVED", inputs: [{ kind: "CommunicationMessageNativeInput", id: input.id }] }));
+    return message;
+  });
   const session = await prisma.conversationSession.create({ data: { workspaceId: f.workspace.id, userId: f.owner.id,
     topic: "DO NOT PROMPT SESSION TOPIC", systemPrompt: "DO NOT PROMPT UNKNOWN SYSTEM" } });
   const prompt = await prisma.conversationPromptInput.create({ data: { workspaceId: f.workspace.id, sessionId: session.id, userId: f.owner.id,
@@ -91,7 +135,7 @@ async function mixedFixture() {
   const canonical = await createArticle(f.ownerActor, { workspaceId: f.workspace.id, slug: "mixed-broad-canonical", type: "PROJECT", authority: "REFERENCE",
     isPrivate: false, title: "PRIVATE MIXED CANONICAL TITLE CANARY", bodyMd: "PRIVATE MIXED CANONICAL BODY CANARY",
     sourceIds: [f.publicSource.id], completeInputRoots });
-  return { ...f, canonical, document, meeting, message, original, circle, role, action, tension, goal, prompt, ingress, request };
+  return { ...f, canonical, document, meeting, message, transcriptSource, original, circle, role, action, tension, goal, prompt, ingress, request };
 }
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -226,7 +270,7 @@ describe("permitted article variants across real read/write boundaries", () => {
     const f = await mixedFixture();
     const lease = await claim(f);
     const generate = vi.fn(async (sources: PermittedVariantSource[]) => {
-      expect(sources.map((source) => source.kind).sort()).toEqual(["BrainSource", "Document", "MeetingTranscript", "CommunicationMessage", "BrainArticle", "Role", "Circle", "Action", "Tension", "Goal"].sort());
+      expect(sources.map((source) => source.kind).sort()).toEqual(["BrainSource", "BrainSource", "Document", "MeetingTranscript", "CommunicationMessage", "BrainArticle", "Role", "Circle", "Action", "Tension", "Goal"].sort());
       expect(JSON.stringify(sources)).not.toContain("PRIVATE");
       expect(JSON.stringify(sources)).not.toContain("DO NOT PROMPT");
       expect(sources.find((source) => source.kind === "MeetingTranscript")?.content).toBe("Public native transcript facts");
@@ -236,7 +280,7 @@ describe("permitted article variants across real read/write boundaries", () => {
     expect(generated.phase).toBe("APPLIED");
     if (generated.phase !== "APPLIED") throw new Error("Expected applied mixed variant");
     const variant = await prisma.brainArticle.findUniqueOrThrow({ where: { id: generated.articleId } });
-    expect(variant.sourceIds).toEqual([f.publicSource.id]);
+    expect(variant.sourceIds.sort()).toEqual([f.publicSource.id, f.transcriptSource.id].sort());
     expect(variant.sourceIds).not.toContain(f.document.id);
     const manifest = await prisma.artifactInputLineage.findFirstOrThrow({ where: { artifactId: variant.id }, orderBy: { revision: "desc" } });
     expect(manifest.origin).toBe("DERIVED");
@@ -260,11 +304,8 @@ describe("permitted article variants across real read/write boundaries", () => {
     const first = await generateBrainArticleVariant({ ...firstLease, generate: async () => ({ title: "Initial mixed variant", bodyMd: "Public document and remaining facts." }) });
     if (first.phase !== "APPLIED") throw new Error("Expected initial variant");
     const firstVariant = await prisma.brainArticle.findUniqueOrThrow({ where: { id: first.articleId } });
-    const history = await prisma.$transaction(async (tx) => {
-      await tx.document.update({ where: { id: f.document.id }, data: { archivedAt: new Date() } });
-      return tx.workspaceArchiveRecord.create({ data: { workspaceId: f.workspace.id, entityType: "Document", entityId: f.document.id,
-        archivedByUserId: f.owner.id, archiveReason: "Synthetic native Document removal" } });
-    });
+    await archiveWorkspaceArtifact(f.ownerActor, { workspaceId: f.workspace.id, entityType: "Document", entityId: f.document.id,
+      reason: "Synthetic native Document removal" });
     await expect(getArticle(f.readerActor, { workspaceId: f.workspace.id, slug: firstVariant.slug })).rejects.toMatchObject({ status: 404 });
     const remainingLease = await claim(f);
     const remaining = await generateBrainArticleVariant({ ...remainingLease, generate: async (sources) => {
@@ -290,10 +331,7 @@ describe("permitted article variants across real read/write boundaries", () => {
     if (ownerVariant.phase !== "APPLIED") throw new Error("Expected owner variant");
     const ownerRow = await prisma.brainArticle.findUniqueOrThrow({ where: { id: ownerVariant.articleId } });
     await expect(getArticle(f.readerActor, { workspaceId: f.workspace.id, slug: ownerRow.slug })).rejects.toMatchObject({ status: 404 });
-    await prisma.$transaction(async (tx) => {
-      await tx.document.update({ where: { id: f.document.id }, data: { archivedAt: null } });
-      await tx.workspaceArchiveRecord.update({ where: { id: history.id }, data: { restoredAt: new Date(), restoredByUserId: f.owner.id } });
-    });
+    await restoreWorkspaceArtifact(f.ownerActor, { workspaceId: f.workspace.id, entityType: "Document", entityId: f.document.id });
     await expect(getArticle(f.readerActor, { workspaceId: f.workspace.id, slug: firstVariant.slug })).rejects.toMatchObject({ status: 404 });
     const restoredLease = await claim(f);
     expect(restoredLease.jobId).not.toBe(firstLease.jobId);
@@ -411,8 +449,8 @@ describe("permitted article variants across real read/write boundaries", () => {
     vi.spyOn(defaultModelGateway, "rerank").mockImplementation(async ({ documents }) => ({
       results: documents.map((document, index) => ({ index, score: 1, document })), usage: { provider: "fixture", model: "fixture-rerank" },
     }));
-    expect(await syncBrainArticleKnowledge({ workspaceId: f.workspace.id, articleId: variant.id })).toBe(1);
-    expect(await syncBrainArticleKnowledge({ workspaceId: f.workspace.id, articleId: f.canonical.id })).toBe(1);
+    expect(await syncBrainArticleKnowledge({ workspaceId: f.workspace.id, articleId: variant.id, lineageActor: f.readerActor })).toBe(1);
+    expect(await syncBrainArticleKnowledge({ workspaceId: f.workspace.id, articleId: f.canonical.id, lineageActor: f.ownerActor })).toBe(1);
     const query = { actor: f.readerActor, workspaceId: f.workspace.id, query: "public launch planning", sourceTypes: ["BRAIN_ARTICLE" as const] };
     const results = await searchIndexedKnowledge(query);
     expect(results.map((result) => result.sourceId)).toEqual([variant.id]);
