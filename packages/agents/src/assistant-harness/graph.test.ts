@@ -347,6 +347,67 @@ describe("assistant graph foundation", () => {
     expect(p.port.commit).toHaveBeenCalledWith(f.runtime, "run-a:publication:1", { id: "approval-a", selectionDigest: "exact-selection-digest" }, { result: "Selected thought", approvedContextSummary: "Approved summary" });
   });
 
+  it("permits selected-result publication without granting read authority or reserving a read dispatch", async () => {
+    const p = publicationFixture();
+    const f = fixture([response("", [call("publish_selection", { result: "My thought" })]), response("Saved")], { capabilities: { reads: [], publication: p.port } });
+    vi.mocked(f.runtime.authorize).mockImplementation(async operation => {
+      if (operation === "read") throw new AssistantHarnessError("SCOPE");
+    });
+    await expect(f.run().run(input)).resolves.toEqual({ status: "waiting", approvalId: "approval-a" });
+    p.approve();
+    await expect(f.run().run()).resolves.toMatchObject({ status: "completed", receiptIds: ["receipt-a"] });
+    expect(f.reservations).toEqual({ model: 2, tool: 0 });
+    expect(p.port.commit).toHaveBeenCalledTimes(1);
+  });
+
+  it("still bounds publication tool calls without treating them as read dispatches", async () => {
+    const p = publicationFixture();
+    const f = fixture([response("", [call("publish_selection", { result: "First" })]), response("", [call("publish_selection", { result: "Second" }, "second")])], { limits: { toolCalls: 1 }, capabilities: { reads: [], publication: p.port } });
+    await f.run().run(input);
+    p.approve();
+    await expect(f.run().run()).rejects.toThrow("LIMIT");
+    expect(p.port.prepare).toHaveBeenCalledTimes(1);
+    expect(p.port.commit).toHaveBeenCalledTimes(1);
+    expect(f.reservations.tool).toBe(0);
+  });
+
+  it("binds preparation to immutable accumulated source references", async () => {
+    const p = publicationFixture();
+    const f = fixture([response("", [call("read_brain")]), response("", [call("publish_selection", { result: "Selected thought" })])]);
+    f.options.capabilities.publication = p.port;
+    await expect(f.run().run(input)).resolves.toEqual({ status: "waiting", approvalId: "approval-a" });
+    const sources = vi.mocked(p.port.prepare).mock.calls[0][3];
+    expect(sources).toEqual([{ kind: "brain", id: "source-a" }]);
+    expect(Object.isFrozen(sources)).toBe(true);
+    expect(Object.isFrozen(sources[0])).toBe(true);
+    expect(f.runtime.authorize).toHaveBeenCalledWith("approval", sources);
+  });
+
+  it.each(["signal", "durable", "authority"])("does not checkpoint a pending approval after %s changes during preparation", async change => {
+    const p = publicationFixture();
+    const f = fixture([response("", [call("publish_selection", { result: "Thought" })])], { capabilities: { reads: [], publication: p.port } });
+    let entered!: () => void;
+    let release!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    vi.mocked(p.port.prepare).mockImplementationOnce(async () => {
+      entered();
+      await gate;
+      return { id: "approval-a", selectionDigest: "exact-selection-digest" };
+    });
+    const operation = f.run().run(input);
+    await waiting;
+    if (change === "signal") f.controller.abort();
+    else if (change === "durable") f.cancel();
+    else f.revoke();
+    release();
+    await expect(operation).rejects.toThrow(change === "authority" ? "SCOPE" : "CANCELLED");
+    const saved = await f.memory.getTuple({ configurable: { thread_id: f.runtime.scope.runId } });
+    expect(saved?.checkpoint.channel_values.data).toMatchObject({ pending: null });
+    expect(p.port.decision).not.toHaveBeenCalled();
+    expect(p.port.commit).not.toHaveBeenCalled();
+  });
+
   it.each(["signal", "durable", "authority"])("does not return waiting after %s cancellation or revocation during an approval query", async change => {
     const p = publicationFixture();
     const f = fixture([response("", [call("publish_selection", { result: "Thought" })])], { capabilities: { reads: [], publication: p.port } });

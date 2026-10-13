@@ -35,6 +35,7 @@ export async function callAssistantGateway(options: {
     }
     const stream = options.gateway.chatEventStream(request);
     let streamedBytes = 0;
+    let streamedEvents = 0;
     try {
       while (true) {
         const next = await stream.next();
@@ -43,8 +44,12 @@ export async function callAssistantGateway(options: {
           if (Buffer.byteLength(JSON.stringify(next.value), "utf8") > options.maximumBytes) throw new AssistantHarnessError("LIMIT");
           return next.value;
         }
-        streamedBytes += Buffer.byteLength(JSON.stringify(next.value), "utf8");
-        if (streamedBytes > options.maximumBytes) throw new AssistantHarnessError("LIMIT");
+        const payloads = next.value.type === "content_delta" ? [next.value.content]
+          : [next.value.argumentsDelta, next.value.idDelta ?? "", next.value.nameDelta ?? ""];
+        streamedBytes += payloads.reduce((bytes, payload) => bytes + Buffer.byteLength(payload, "utf8"), 0);
+        // Content limits do not charge each chunk's repeated event envelope.
+        // Separately bound empty/metadata events so they cannot keep a stream alive forever.
+        if (++streamedEvents > options.maximumBytes + 1024 || streamedBytes > options.maximumBytes) throw new AssistantHarnessError("LIMIT");
         // Arguments and private graph/checkpoint values are never client events.
         if (next.value.type === "content_delta") await deliver(runtime, next.value, options.sources);
       }

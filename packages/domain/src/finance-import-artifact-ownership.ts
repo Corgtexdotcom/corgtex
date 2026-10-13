@@ -1,7 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import { invariant } from "./errors";
 
-export type FinanceImportArtifactKind = "BRAIN_SOURCE" | "DOCUMENT";
+type FinanceImportArtifactKind = "BRAIN_SOURCE" | "DOCUMENT";
 
 type FinanceImportArtifact = {
   workspaceId: string;

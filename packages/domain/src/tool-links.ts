@@ -1,8 +1,9 @@
 import type { Prisma } from "@prisma/client";
 import { decryptSecret, encryptSecret, prisma } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
-import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
+import { actorUserIdForWorkspace } from "./auth";
 import { recordAudit } from "./audit-trail";
+import { requireWorkspaceOperation } from "./agent-operation-authorization";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { AppError, invariant } from "./errors";
 import {
@@ -150,7 +151,7 @@ export async function listWorkspaceToolLinks(actor: AppActor, params: {
   workspaceId: string;
   archiveFilter?: ArchiveFilter;
 }) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const membership = await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "list_tool_links" });
   const links = await prisma.workspaceToolLink.findMany({
     where: {
       workspaceId: params.workspaceId,
@@ -170,7 +171,7 @@ export async function getWorkspaceToolLink(actor: AppActor, params: {
   workspaceId: string;
   toolLinkId: string;
 }) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const membership = await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "list_tool_links" });
   const link = await prisma.workspaceToolLink.findFirst({
     where: {
       id: params.toolLinkId,
@@ -201,7 +202,7 @@ export async function createWorkspaceToolLink(actor: AppActor, params: {
   credentialSecret?: string | null;
   circleIds?: string[];
 }) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const membership = await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "upsert_tool_link" });
   const createdByUserId = actor.kind === "user" ? actor.user.id : await actorUserIdForWorkspace(actor, params.workspaceId);
   const secret = normalizeSecret(params.credentialSecret);
 
@@ -265,7 +266,7 @@ export async function updateWorkspaceToolLink(actor: AppActor, params: {
   credentialSecret?: string | null;
   circleIds?: string[];
 }) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const membership = await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "upsert_tool_link" });
 
   return prisma.$transaction(async (tx) => {
     const existing = await tx.workspaceToolLink.findFirst({
@@ -364,6 +365,7 @@ export async function archiveWorkspaceToolLink(actor: AppActor, params: {
   toolLinkId: string;
   reason?: string | null;
 }) {
+  await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "archive_tool_link" });
   await archiveWorkspaceArtifact(actor, {
     workspaceId: params.workspaceId,
     entityType: "WorkspaceToolLink",
@@ -378,41 +380,33 @@ export async function revealWorkspaceToolLinkCredential(actor: AppActor, params:
   workspaceId: string;
   toolLinkId: string;
 }) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "reveal_tool_link_credential" });
 
   return prisma.$transaction(async (tx) => {
+    const membership = await requireWorkspaceOperation({
+      actor, workspaceId: params.workspaceId, operation: "reveal_tool_link_credential", tx,
+    });
+    // Determine human creator/role authority without selecting the ciphertext.
+    const metadata = await tx.workspaceToolLink.findFirst({
+      where: { id: params.toolLinkId, workspaceId: params.workspaceId, archivedAt: null },
+      select: { id: true, createdByUserId: true },
+    });
+    invariant(metadata, 404, "NOT_FOUND", "Tool link not found.");
+    requireToolLinkCredentialManager(actor, membership, metadata);
     const link = await tx.workspaceToolLink.findFirst({
-      where: {
-        id: params.toolLinkId,
-        workspaceId: params.workspaceId,
-        archivedAt: null,
-      },
-      select: {
-        id: true,
-        title: true,
-        createdByUserId: true,
-        credentialLabel: true,
-        credentialSecretEnc: true,
-      },
+      where: { id: metadata.id, workspaceId: params.workspaceId, archivedAt: null,
+        createdByUserId: metadata.createdByUserId },
+      select: { id: true, title: true, credentialLabel: true, credentialSecretEnc: true },
     });
     invariant(link, 404, "NOT_FOUND", "Tool link not found.");
-    requireToolLinkCredentialManager(actor, membership, link);
-
+    const credentialSecret = link.credentialSecretEnc ? decryptSecret(link.credentialSecretEnc) : null;
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
       action: "tool_link.credential_revealed",
       entityType: "WorkspaceToolLink",
       entityId: link.id,
-      meta: {
-        title: link.title,
-        credentialLabel: link.credentialLabel,
-        hasCredential: Boolean(link.credentialSecretEnc),
-      },
+      meta: { title: link.title, credentialLabel: link.credentialLabel, hasCredential: Boolean(link.credentialSecretEnc) },
     });
-
-    return {
-      credentialLabel: link.credentialLabel,
-      credentialSecret: link.credentialSecretEnc ? decryptSecret(link.credentialSecretEnc) : null,
-    };
+    return { credentialLabel: link.credentialLabel, credentialSecret };
   });
 }

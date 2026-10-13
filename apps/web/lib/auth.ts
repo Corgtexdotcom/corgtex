@@ -9,6 +9,7 @@ import { beginAuthorizationContext, setSupportAuthorizationActor } from "@corgte
 import { AppError } from "@corgtex/domain";
 import { getWorkspaceSupportGrant, requireWorkspaceMembership } from "@corgtex/domain";
 import { isWorkspaceAuthorizedProviderRoute, requireSupportRequestAccess, workspaceIdFromPath } from "./support-request-access";
+import { requireAgentRouteCapability } from "./agent-route-capabilities";
 
 const SESSION_UNAVAILABLE_REDIRECT = "/login?error=session-unavailable";
 const SESSION_RESOLUTION_TIMEOUT_MS = 15_000;
@@ -62,6 +63,8 @@ export async function resolveRequestActor(request: NextRequest) {
       assertAllowedInControlPlaneMode(agentActor);
       setSupportAuthorizationActor(agentActor);
       await requireSupportRequestAccess(agentActor, request.nextUrl.pathname);
+      // ToolLinks checks its feature first, then enforces scope in the domain.
+      requireAgentRouteCapability(agentActor, request, { deferToolLinkScope: true });
       return agentActor;
     }
   }

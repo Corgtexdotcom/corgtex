@@ -79,6 +79,10 @@ imported, no extra pool is created, and no DDL or runtime `setup()` is present.
 Minimum proposed transaction contract for the domain/queue owner:
 
 - Bind immutable run/request identity, workspace, user, conversation and versioned policy.
+- Preparation receives the exact accumulated source references. In the same transaction
+  as any preparation write, revalidate current membership, source permissions, claim and
+  cancellation; a caller-side authorization check alone is not atomic. The runner also
+  rechecks after preparation returns before checkpointing a pending approval.
 - Check the current job owner/attempt and expected checkpoint lineage inside every
   checkpoint/write transaction. Reject stale writers even after connection loss.
 - For local publication, reauthorize and validate exact selection/decision/expiry, then

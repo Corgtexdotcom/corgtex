@@ -1,4 +1,5 @@
 import type { KnowledgeAccessDomain, KnowledgeSourceType } from "@prisma/client";
+import { authorizeConversationTool, filterConversationKnowledgeDomains } from "../conversation-capabilities";
 import { resolveKnowledgeAccessDomains } from "@corgtex/domain";
 import type { ModelTool, ModelUsageInput } from "@corgtex/models";
 import type { AppActor } from "@corgtex/shared";
@@ -29,19 +30,23 @@ export const searchBrainTool: ModelTool = {
 export async function resolveInteractiveKnowledgeAccessDomains(
   actor: AppActor | undefined,
   workspaceId: string,
+  operationScopes?: readonly string[],
 ): Promise<KnowledgeAccessDomain[]> {
   if (!actor) {
     throw new Error("Authenticated actor is required for knowledge access.");
   }
-  return resolveKnowledgeAccessDomains(actor, workspaceId);
+  await authorizeConversationTool(actor, workspaceId, "search_brain", undefined, operationScopes);
+  const domains = await resolveKnowledgeAccessDomains(actor, workspaceId);
+  return filterConversationKnowledgeDomains(actor, workspaceId, domains, operationScopes);
 }
 
 export async function searchBrain(
   actor: AppActor, workspaceId: string, query: string, limit: number = 5,
   usageContext: Pick<ModelUsageInput, "catalogItemId" | "agentCredentialId"> = {},
+  operationScopes?: readonly string[],
 ) {
   const safeLimit = Math.min(limit || 5, 10);
-  const accessDomains = await resolveInteractiveKnowledgeAccessDomains(actor, workspaceId);
+  const accessDomains = await resolveInteractiveKnowledgeAccessDomains(actor, workspaceId, operationScopes);
   const chunks = await searchIndexedKnowledge({
     workspaceId,
     catalogItemId: usageContext.catalogItemId,

@@ -45,8 +45,10 @@ export type EffectKnowledge =
   | { status: "UNKNOWN" };
 
 export type PublicationPort = {
-  /** Idempotent preparation bound to this run, operation and exact immutable selection. */
-  prepare(runtime: AssistantRuntime, operationId: string, selection: PublicationSelection): Promise<ApprovalReference>;
+  /** Idempotent preparation bound to this run, operation and exact selection/sources.
+   * Revalidate membership, source access, claim and cancellation inside the SAME
+   * transaction as preparation writes. A prior caller check is not a write fence. */
+  prepare(runtime: AssistantRuntime, operationId: string, selection: PublicationSelection, sources: readonly SourceReference[]): Promise<ApprovalReference>;
   /** Reload and validate exact selection, decision identity, expiry and current authority. */
   decision(runtime: AssistantRuntime, reference: ApprovalReference, selection: PublicationSelection): Promise<"PENDING" | "APPROVED" | "DENIED">;
   inspect(runtime: AssistantRuntime, operationId: string, reference: ApprovalReference): Promise<EffectKnowledge>;

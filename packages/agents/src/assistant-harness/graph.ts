@@ -113,9 +113,6 @@ export function createAssistantHarness(options: AssistantHarnessOptions, runtime
       const data = validateState(raw);
       const [call, ...calls] = data.calls;
       if (!call || data.toolCalls >= limits.toolCalls) throw new AssistantHarnessError("LIMIT");
-      await authorize(runtime, "read", data.sources);
-      await runtime.reserveDispatch("tool", limits.toolCalls);
-      checkCancellation(runtime);
       const next = { ...data, calls, toolCalls: data.toolCalls + 1 };
       const read = reads.get(call.function.name as "read_brain" | "read_meeting");
       if (!read && !(publication && call.function.name === "publish_selection")) return update(reply(next, call, '{"error":"TOOL_NOT_ALLOWED"}'));
@@ -126,12 +123,18 @@ export function createAssistantHarness(options: AssistantHarnessOptions, runtime
         if (!parsed.success) return update(reply(next, call, '{"error":"INVALID_ARGUMENTS"}'));
         await authorize(runtime, "approval", data.sources);
         const operationId = `${runtime.scope.runId}:publication:${next.toolCalls}`;
-        const reference = await publication.prepare(runtime, operationId, parsed.data);
+        const sources = Object.freeze(data.sources.map(source => Object.freeze({ ...source })));
+        const reference = await publication.prepare(runtime, operationId, parsed.data, sources);
+        // Preparation owns its atomic write fence; recheck before saving its result.
+        await authorize(runtime, "approval", data.sources);
         return update({ ...next, status: "approval", pending: { operationId, call, selection: parsed.data, reference } });
       }
       if (!read) throw new AssistantHarnessError("INPUT");
       const parsed = read.arguments.safeParse(args);
       if (!parsed.success) return update(reply(next, call, '{"error":"INVALID_ARGUMENTS"}'));
+      await authorize(runtime, "read", data.sources);
+      await runtime.reserveDispatch("tool", limits.toolCalls);
+      checkCancellation(runtime);
       await deliver(runtime, { type: "tool_start", name: read.name }, data.sources);
       // Neither the awaited reservation nor delivery acknowledgement is a read lease.
       await authorize(runtime, "read", data.sources);

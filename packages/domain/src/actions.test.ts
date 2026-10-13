@@ -4,6 +4,7 @@ import type { AppActor } from "@corgtex/shared";
 const { prismaMock } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
+    agentCredential: { findUnique: vi.fn() },
     $executeRaw: vi.fn(),
     $queryRaw: vi.fn(),
     action: {
@@ -58,6 +59,7 @@ const requireWorkspaceMembership = vi.fn();
 
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
+  mcpCredentialVersion: (hash: string) => `version:${hash}`,
 }));
 
 vi.mock("./auth", () => ({
@@ -94,6 +96,7 @@ describe("action domain lifecycle", () => {
       role: "MEMBER",
       isActive: true,
     });
+    prismaMock.agentCredential.findUnique.mockResolvedValue({ workspaceId: "workspace-1", isActive: true, tokenHash: "synthetic-hash", scopes: ["actions:write"], createdBy: null, supportGrantVersion: null });
     recordAudit.mockResolvedValue(undefined);
     appendEvents.mockResolvedValue(undefined);
     prismaMock.$executeRaw.mockResolvedValue({});
@@ -144,7 +147,7 @@ describe("action domain lifecycle", () => {
   it("rejects reuse of an agent request key with different author attribution", async () => {
     prismaMock.action.create.mockResolvedValueOnce({ id: "action-1", workspaceId: "workspace-1", title: "Follow up" });
     const { actionRequestSource, createAction } = await import("./actions");
-    const agent: AppActor = { kind: "agent", authProvider: "credential", label: "Test agent", workspaceIds: ["workspace-1"] };
+    const agent: AppActor = { kind: "agent", authProvider: "credential", credentialId: "synthetic-agent", credentialVersion: "version:synthetic-hash", scopes: ["actions:write"], label: "Test agent", workspaceIds: ["workspace-1"] };
     prismaMock.member.findFirst.mockResolvedValueOnce({ id: "member-1", userId: "author-1" });
     const source = actionRequestSource("MCP_REQUEST", "agent-1", "call-1");
     await createAction(agent, { workspaceId: "workspace-1", title: "Follow up", authorMemberId: "member-1", source });

@@ -30,9 +30,10 @@ import {
 import { validatePostgresRestoreRehearsal } from "./validate-postgres-restore-rehearsal.mjs";
 import { runRetainedPostgresCopyFixture } from "./ops-core-postgres-copy-fixture.mjs";
 import { runDockerSourceStart } from "./docker-source-start-diagnostic.mjs";
+import { pg18RehearsalImage } from "../ci-pgvector-image.mjs";
 
 const { Client } = pg;
-const SERVER_IMAGE = "pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a";
+const { image: SERVER_IMAGE, pullArgs: REHEARSAL_PULL_ARGS } = pg18RehearsalImage(process.env.CI_PGVECTOR_PG18_CONFIG_ID);
 const TEST_PASSWORD = "local-rehearsal-only";
 const TEST_READER_PASSWORD = "local-rehearsal-reader-only";
 const TEST_TARGET_OPERATOR_PASSWORD = "local-rehearsal-target-operator-only";
@@ -220,14 +221,14 @@ const main = async () => {
     await run("docker", ["network", "create", network], "NETWORK_CREATE_FAILED");
     networkCreated = true;
     await runDockerSourceStart([
-      "run", "--detach", "--name", sourceContainer, "--network", network,
+      "run", ...REHEARSAL_PULL_ARGS, "--detach", "--name", sourceContainer, "--network", network,
       "--publish", `127.0.0.1:${sourcePort}:5432`,
       "--env", `POSTGRES_PASSWORD=${TEST_PASSWORD}`,
       SERVER_IMAGE,
     ]);
     sourceStarted = true;
     await run("docker", [
-      "run", "--detach", "--name", targetContainer, "--network", network,
+      "run", ...REHEARSAL_PULL_ARGS, "--detach", "--name", targetContainer, "--network", network,
       "--network-alias", TARGET_TLS_HOST,
       "--network-alias", WRONG_TARGET_TLS_HOST,
       "--publish", `127.0.0.1:${targetPort}:5432`,

@@ -73,6 +73,59 @@ function fixture() {
 }
 
 describe("assistant stream delivery authority", () => {
+  it.each([1, 1000])("accepts the same bounded content streamed in chunks of %i characters", async chunkSize => {
+    const f = fixture();
+    const content = "a".repeat(1000);
+    const completed = { ...response, content };
+    vi.mocked(f.gateway.chatEventStream).mockImplementation(async function* () {
+      try {
+        for (let offset = 0; offset < content.length; offset += chunkSize) {
+          yield { type: "content_delta", content: content.slice(offset, offset + chunkSize) };
+        }
+        return completed;
+      } finally { f.cleanup(); }
+    });
+    await expect(callAssistantGateway({ gateway: f.gateway, runtime: f.runtime, sources: f.sources,
+      request: { messages: [{ role: "user", content: "Question" }] }, maximumCalls: 2, maximumBytes: 1500, stream: true,
+    })).resolves.toEqual(completed);
+    expect(f.sent.map(event => event.type === "content_delta" ? event.content : "").join("")).toBe(content);
+    expect(f.cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([1, 1000])("counts tool argument payload rather than envelopes for chunks of %i characters", async chunkSize => {
+    const f = fixture();
+    const args = JSON.stringify({ value: "a".repeat(1000) });
+    const completed: ChatCompletionResponse = { ...response, content: "", tool_calls: [{ id: "call-a", type: "function", function: { name: "read_brain", arguments: args } }] };
+    vi.mocked(f.gateway.chatEventStream).mockImplementation(async function* () {
+      try {
+        yield { type: "tool_call_delta", index: 0, idDelta: "call-a", nameDelta: "read_brain", argumentsDelta: "" };
+        for (let offset = 0; offset < args.length; offset += chunkSize) {
+          yield { type: "tool_call_delta", index: 0, argumentsDelta: args.slice(offset, offset + chunkSize) };
+        }
+        return completed;
+      } finally { f.cleanup(); }
+    });
+    await expect(callAssistantGateway({ gateway: f.gateway, runtime: f.runtime, sources: f.sources,
+      request: { messages: [{ role: "user", content: "Question" }] }, maximumCalls: 2, maximumBytes: 1500, stream: true,
+    })).resolves.toEqual(completed);
+    expect(f.sent).toEqual([]);
+    expect(f.cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds empty stream events independently of their payload size", async () => {
+    const f = fixture();
+    vi.mocked(f.gateway.chatEventStream).mockImplementation(async function* () {
+      try {
+        while (true) yield { type: "tool_call_delta", index: 0, argumentsDelta: "" };
+      } finally { f.cleanup(); }
+    });
+    await expect(callAssistantGateway({ gateway: f.gateway, runtime: f.runtime, sources: f.sources,
+      request: { messages: [{ role: "user", content: "Question" }] }, maximumCalls: 2, maximumBytes: 1500, stream: true,
+    })).rejects.toThrow("LIMIT");
+    expect(f.sent).toEqual([]);
+    expect(f.cleanup).toHaveBeenCalledTimes(1);
+  });
+
   it.each([false, true].flatMap(stream => ["source", "durable-cancel", "claim"].map(change => ({ stream, change }))))("blocks $change during reservation before stream=$stream dispatch", async ({ stream, change }) => {
     const f = fixture();
     let entered!: () => void;
