@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
+import type { Prisma } from "@prisma/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { encryptSecret, prisma, type AppActor } from "@corgtex/shared";
+import { encryptSecret, getPrismaClient, prisma, type AppActor } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { syncBrainArticleKnowledge } from "../../knowledge/src/chunks";
@@ -458,6 +459,12 @@ describe("permitted article variants across real read/write boundaries", () => {
     expect((await searchIndexedKnowledge({ ...query, actor: f.ownerActor })).map((result) => result.sourceId)).toEqual([f.canonical.id]);
     expect(await searchIndexedKnowledge({ ...query, workspaceId: f.foreign.id })).toEqual([]);
     const chunk = await prisma.knowledgeChunk.findFirstOrThrow({ where: { sourceId: variant.id } });
+    const receipt = await prisma.artifactInputLineage.findFirstOrThrow({ where: {
+      workspaceId: f.workspace.id, artifactType: "KnowledgeChunk", artifactId: chunk.id,
+    }, orderBy: { revision: "desc" } });
+    expect(receipt).toMatchObject({ origin: "DERIVED", contentHash: lineageContentFingerprint("KnowledgeChunk", chunk) });
+    expect(chunk.metadata).toMatchObject({ type: variant.type, authority: variant.authority, slug: variant.slug,
+      sourceContentHash: lineageContentFingerprint("BrainArticle", variant), sourceType: "BRAIN_ARTICLE", chunkIndex: 0 });
     expect(await fetchReadableKnowledgeChunk(f.readerActor, f.workspace.id, chunk.id)).toMatchObject({ id: chunk.id });
     expect(await fetchReadableKnowledgeChunk(f.ownerActor, f.workspace.id, chunk.id)).toBeNull();
     await archiveAndRestoreSource(f);
@@ -467,5 +474,56 @@ describe("permitted article variants across real read/write boundaries", () => {
     expect(await readableArtifactIds(f.readerActor, f.workspace.id, "BrainArticle", [row])).toEqual(new Set());
     await prisma.member.update({ where: { id: f.readerMember.id }, data: { isActive: false } });
     await expect(searchIndexedKnowledge(query)).rejects.toMatchObject({ code: "NOT_A_MEMBER" });
+  });
+
+  it("requires a fresh variant and chunk after its owner's membership is revoked and restored", async () => {
+    const f = await fixture();
+    const { variant } = await generateVariant(f);
+    vi.spyOn(defaultModelGateway, "embed").mockImplementation(async ({ input }) => ({
+      embeddings: (Array.isArray(input) ? input : [input]).map(() => [1, 0]), usage: { provider: "fixture", model: "fixture-embed" },
+    }));
+    expect(await syncBrainArticleKnowledge({ workspaceId: f.workspace.id, articleId: variant.id, lineageActor: f.readerActor })).toBe(1);
+    const previousChunk = await prisma.knowledgeChunk.findFirstOrThrow({ where: { sourceId: variant.id } });
+    await prisma.member.update({ where: { id: f.readerMember.id }, data: { isActive: false } });
+    await expect(fetchReadableKnowledgeChunk(f.readerActor, f.workspace.id, previousChunk.id)).rejects.toMatchObject({ code: "NOT_A_MEMBER" });
+    await prisma.member.update({ where: { id: f.readerMember.id }, data: { isActive: true } });
+    expect(await fetchReadableKnowledgeChunk(f.readerActor, f.workspace.id, previousChunk.id)).toBeNull();
+    const { variant: rebuilt } = await generateVariant(f);
+    expect(rebuilt.id).not.toBe(variant.id);
+    expect(await syncBrainArticleKnowledge({ workspaceId: f.workspace.id, articleId: rebuilt.id, lineageActor: f.readerActor })).toBe(1);
+    const currentChunk = await prisma.knowledgeChunk.findFirstOrThrow({ where: { sourceId: rebuilt.id } });
+    expect(await fetchReadableKnowledgeChunk(f.readerActor, f.workspace.id, currentChunk.id)).toMatchObject({ id: currentChunk.id });
+    expect(await fetchReadableKnowledgeChunk(f.readerActor, f.workspace.id, previousChunk.id)).toBeNull();
+    expect(await prisma.brainArticle.findUniqueOrThrow({ where: { id: variant.id } })).toMatchObject({ bodyMd: variant.bodyMd });
+  });
+
+  it("rolls back replacement chunks when persisted output differs from the generated full rows", async () => {
+    const f = await fixture();
+    const { variant } = await generateVariant(f);
+    vi.spyOn(defaultModelGateway, "embed").mockImplementation(async ({ input }) => ({
+      embeddings: (Array.isArray(input) ? input : [input]).map(() => [1, 0]), usage: { provider: "fixture", model: "fixture-embed" },
+    }));
+    expect(await syncBrainArticleKnowledge({ workspaceId: f.workspace.id, articleId: variant.id, lineageActor: f.readerActor })).toBe(1);
+    const before = await prisma.knowledgeChunk.findMany({ where: { sourceId: variant.id } });
+    const client = getPrismaClient();
+    const transaction = client.$transaction.bind(client);
+    // Exercise a changed SQL output with the real source/epoch/receipt helpers.
+    // No source permission gate is replaced by this faulty writer fixture.
+    vi.spyOn(client, "$transaction").mockImplementation((async (work: unknown, options?: object) => {
+      if (typeof work !== "function") throw new Error("Expected a callback transaction in the indexing fixture.");
+      return transaction(async tx => work(new Proxy(tx, { get(target, property, receiver) {
+        if (property !== "knowledgeChunk") return Reflect.get(target, property, receiver);
+        return new Proxy(target.knowledgeChunk, { get(delegate, method, delegateReceiver) {
+          if (method !== "createMany") return Reflect.get(delegate, method, delegateReceiver);
+          return (args: Prisma.KnowledgeChunkCreateManyArgs) => delegate.createMany({ ...args,
+            data: (Array.isArray(args.data) ? args.data : [args.data]).map(row => ({ ...row,
+              content: `${row.content} synthetic unexpected SQL output` })) });
+        } });
+      } })), options);
+    }) as typeof prisma.$transaction);
+    await expect(syncBrainArticleKnowledge({ workspaceId: f.workspace.id, articleId: variant.id, lineageActor: f.readerActor }))
+      .rejects.toMatchObject({ code: "SOURCE_CHANGED", message: "Persisted knowledge output differs from the generated chunks." });
+    expect(await prisma.knowledgeChunk.findMany({ where: { sourceId: variant.id } })).toEqual(before);
+    expect(await fetchReadableKnowledgeChunk(f.readerActor, f.workspace.id, before[0].id)).toMatchObject({ id: before[0].id });
   });
 });

@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import type { LineageInput, LineageKind } from "./source-lineage";
+import { loadExternalMcpConnectionSetInput } from "./external-mcp-connection-set";
 
 /** These edges supply live permission envelopes, independently of consumed body
  * ancestry. Keep this table aligned with source-lineage's parent authorization. */
@@ -21,6 +22,14 @@ export function artifactPermissionParents(kind: LineageKind, row: Record<string,
   if (kind === "BuildArtifactAsset") field("BuildArtifact", "artifactId");
   if (kind === "ExecutionResult") field("ExecutionRequest", "executionRequestId");
   if (kind === "WorkspaceToolLinkCredential") add("WorkspaceToolLink", row.id);
+  if (kind === "ConversationOperationOutcome" && row.controlJson && typeof row.controlJson === "object" && !Array.isArray(row.controlJson)) {
+    const control = row.controlJson as Record<string, unknown>;
+    if (control.version === 1 && row.operation === "BRAIN_SOURCE_REMOVAL_COMPLETED") {
+      add("BrainSource", control.sourceId); add("Document", control.documentId); add("BrainSource", control.pendingSourceId);
+    } else if (control.version === 1 && row.operation === "ACTION_COMPLETED") {
+      add("Action", control.actionId); add("McpToolInput", control.inputId); add("Member", control.assigneeMemberId);
+    }
+  }
   if (["MeetingInsight", "MeetingFollowUpReview"].includes(kind)) field("Meeting", "meetingId");
   if (kind === "NativeTranscriptInput" && row.mode === "AUDIO_UPLOAD") field("MeetingAudioAsset", "meetingAudioAssetId");
   if (kind === "CircleAgentAssignment") { field("AgentIdentity", "agentIdentityId"); field("Circle", "circleId"); }
@@ -105,6 +114,7 @@ function scopeRelations(value: object, workspaceId: string): Record<string, unkn
  * lineage nor demands a read scope from the principal writing a new output. */
 export async function loadArtifactPermissionMetadata(tx: Prisma.TransactionClient, workspaceId: string,
   input: LineageInput): Promise<Record<string, unknown> | null> {
+  if (input.kind === "ExternalMcpConnectionSet") return loadExternalMcpConnectionSetInput(workspaceId, input.id, tx);
   const modelName = MODEL_ALIASES[input.kind] ?? input.kind;
   const model = Prisma.dmmf.datamodel.models.find(candidate => candidate.name === modelName);
   if (!model) return null;
@@ -113,6 +123,7 @@ export async function loadArtifactPermissionMetadata(tx: Prisma.TransactionClien
   // The documentId in BrainSource's policy metadata is its actual live parent
   // binding; no metadata is forwarded to a model or persisted as semantic input.
   if (input.kind === "BrainSource") select.metadata = true;
+  if (input.kind === "ConversationOperationOutcome") { select.controlJson = true; select.operation = true; }
   const where = input.kind === "Workspace" ? { id: input.id === workspaceId ? input.id : "" }
     : input.kind === "User" ? { id: input.id, memberships: { some: { workspaceId, isActive: true } } }
       : { id: input.id, ...(input.kind === "CrmProspectWorkspace" ? { crmWorkspaceId: workspaceId }
@@ -126,6 +137,11 @@ export async function loadArtifactPermissionMetadata(tx: Prisma.TransactionClien
   const result = await delegate.findFirst({ where, select });
   if (result?.metadata && typeof result.metadata === "object" && !Array.isArray(result.metadata)) {
     result.metadata = { documentId: (result.metadata as Record<string, unknown>).documentId };
+  }
+  if (result?.controlJson && typeof result.controlJson === "object" && !Array.isArray(result.controlJson)) {
+    const control = result.controlJson as Record<string, unknown>;
+    result.controlJson = Object.fromEntries(["version", "sourceId", "documentId", "pendingSourceId", "actionId", "inputId", "assigneeMemberId"]
+      .map(field => [field, control[field]]));
   }
   return result;
 }

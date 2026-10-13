@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { decryptSecret, encryptSecret, env, prisma } from "@corgtex/shared";
+import { createHash, randomUUID } from "node:crypto";
+import { assertMcpOriginActive, decryptSecret, encryptSecret, env, getMcpOrigin, mcpScopesHash, parseMcpOrigin, prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { Prisma } from "@prisma/client";
 import { evaluateDelegatedActionPolicy } from "./action-policy";
@@ -228,12 +228,13 @@ function parseMcpResponseText(value: string): unknown {
     .map((line) => line.slice("data:".length).trim())
     .filter((line) => line && line !== "[DONE]");
 
-  for (const line of [...dataLines].reverse()) {
-    const parsed = parseJsonText(line);
-    if (parsed) return parsed;
-  }
-
-  return null;
+  // Progress frames are not a tool result. Multiple completions are ambiguous
+  // and must not let a later frame silently replace earlier content.
+  const completions = dataLines.map(parseJsonText).filter((frame) => {
+    const record = asRecord(frame);
+    return Object.hasOwn(record, "result") || Object.hasOwn(record, "error");
+  });
+  return completions.length === 1 ? completions[0] : null;
 }
 
 function extractMcpPayload(result: unknown) {
@@ -371,7 +372,7 @@ async function activeUserConnections(actor: AppActor, workspaceId: string, provi
     where: {
       workspaceId,
       userId,
-      ...(providerKey ? { providerKey } : {}),
+      providerKey: providerKey ?? { in: ["box", "notion"] },
       status: "ACTIVE",
     },
     orderBy: { updatedAt: "desc" },
@@ -397,13 +398,14 @@ async function requireActiveConnection(actor: AppActor, params: {
   return { provider, connection };
 }
 
-async function callExternalMcpTool(connection: ExternalMcpConnectionRecord, toolName: string, args: Record<string, unknown>) {
+async function callExternalMcpTool(connection: ExternalMcpConnectionRecord, toolName: string, args: Record<string, unknown>, strictResponse = false) {
   const activeConnection = await refreshExternalMcpConnectionIfNeeded(connection);
   const token = activeConnection.accessTokenEnc ? decryptSecret(activeConnection.accessTokenEnc) : null;
   if (!token) {
     throw new AppError(404, "NOT_CONNECTED", "External MCP connection is missing an access token.");
   }
 
+  const requestId = `corgtex-${randomUUID()}`;
   const response = await fetch(activeConnection.serverUrl, {
     method: "POST",
     headers: {
@@ -413,7 +415,7 @@ async function callExternalMcpTool(connection: ExternalMcpConnectionRecord, tool
     },
     body: JSON.stringify({
       jsonrpc: "2.0",
-      id: `corgtex-${Date.now()}`,
+      id: requestId,
       method: "tools/call",
       params: {
         name: toolName,
@@ -432,6 +434,11 @@ async function callExternalMcpTool(connection: ExternalMcpConnectionRecord, tool
     throw new AppError(502, "EXTERNAL_MCP_ERROR", "External MCP tool returned an unreadable response.");
   }
   const payloadRecord = asRecord(payload);
+  if (strictResponse && (payloadRecord.jsonrpc !== "2.0" || payloadRecord.id !== requestId
+    || !Object.hasOwn(payloadRecord, "result") || !payloadRecord.result
+    || typeof payloadRecord.result !== "object" || Array.isArray(payloadRecord.result))) {
+    throw new AppError(502, "EXTERNAL_MCP_ERROR", "External MCP tool returned an unbound response.");
+  }
   const payloadError = asRecord(payloadRecord.error);
   if (payloadRecord.error) {
     throw new AppError(502, "EXTERNAL_MCP_ERROR", asString(payloadError.message) || "External MCP tool returned an error.");
@@ -456,16 +463,6 @@ function externalCapabilitySummary(provider: ExternalMcpProvider, connection: Ex
   };
 }
 
-function externalToolName(provider: ExternalMcpProvider, connection: ExternalMcpConnectionRecord, feature: "search" | "fetch") {
-  requireConnectableProvider(provider);
-  const summary = externalCapabilitySummary(provider, connection);
-  const toolName = feature === "search"
-    ? summary.searchToolName ?? provider.searchToolName
-    : summary.fetchToolName ?? provider.fetchToolName;
-  invariant(toolName, 400, "NOT_READY", `${provider.displayName} ${feature} tool is not configured.`);
-  return toolName;
-}
-
 function externalSearchArgs(provider: ExternalMcpProvider, query: string, limit: number) {
   if (provider.providerKey === "box") {
     return {
@@ -484,6 +481,104 @@ function externalFetchArgs(provider: ExternalMcpProvider, externalId: string) {
     return { file_id: id };
   }
   return { id: externalId };
+}
+
+/** The native live-response adapter admits only these exact, server-selected reads. */
+export function externalMcpNativeReadRequest(providerKey: string, mode: "SEARCH" | "FETCH",
+  value: { query?: string; limit?: number; externalId?: string }) {
+  const provider = EXTERNAL_MCP_PROVIDERS[providerKey as ExternalMcpProviderKey];
+  invariant(provider && (providerKey === "box" || providerKey === "notion"), 403, "SOURCE_RESTRICTED", "External MCP native read is unavailable.");
+  if (mode === "SEARCH") {
+    invariant(typeof value.query === "string" && value.query.trim().length > 0 && value.query.length <= 2000
+      && Number.isInteger(value.limit) && value.limit! >= 1 && value.limit! <= 20,
+    400, "INVALID_INPUT", "External MCP search requires a bounded query.");
+    return { providerKey, serverUrl: provider.serverUrl, mode, toolName: provider.searchToolName!,
+      arguments: externalSearchArgs(provider, value.query, value.limit!) };
+  }
+  invariant(mode === "FETCH" && typeof value.externalId === "string" && value.externalId.length > 0
+    && value.externalId.length <= 2048, 400, "INVALID_INPUT", "External MCP fetch requires an item ID.");
+  if (providerKey === "box") {
+    invariant(!value.externalId.includes(":") || /^(file|folder):[^:]+$/.test(value.externalId),
+      400, "INVALID_INPUT", "Box item ID must identify one file or folder.");
+  }
+  const args = externalFetchArgs(provider, value.externalId);
+  const toolName = providerKey === "box" && "folder_id" in args ? "get_folder_details" : provider.fetchToolName!;
+  return { providerKey, serverUrl: provider.serverUrl, mode, toolName, arguments: args };
+}
+
+/** Current same-user connection. Refresh occurs before the native input's original epoch capture. */
+export async function loadExternalMcpNativeConnection(actor: AppActor, workspaceId: string, connectionId: string) {
+  invariant(actor.kind === "user", 403, "SOURCE_RESTRICTED", "External MCP content requires its connection owner.");
+  await requireWorkspaceMembership({ actor, workspaceId });
+  invariant(await prisma.member.findFirst({ where: { workspaceId, userId: actor.user.id, isActive: true }, select: { id: true } }),
+    403, "SOURCE_RESTRICTED", "External MCP owner membership is unavailable.");
+  const connection = await prisma.externalMcpConnection.findFirst({ where: { id: connectionId, workspaceId,
+    userId: actor.user.id, status: "ACTIVE", providerKey: { in: ["box", "notion"] } } }) as ExternalMcpConnectionRecord | null;
+  invariant(connection?.accessTokenEnc, 403, "SOURCE_RESTRICTED", "External MCP connection is unavailable.");
+  const provider = EXTERNAL_MCP_PROVIDERS[connection.providerKey as ExternalMcpProviderKey];
+  invariant(connection.serverUrl === provider.serverUrl && (connection.providerKey !== "box" || connection.providerAccountId),
+    403, "SOURCE_RESTRICTED", "External MCP connection authority is unavailable.");
+  const refreshed = await refreshExternalMcpConnectionIfNeeded(connection);
+  invariant(refreshed.status === "ACTIVE" && refreshed.accessTokenEnc,
+    403, "SOURCE_RESTRICTED", "External MCP connection is unavailable.");
+  const current = await prisma.externalMcpConnection.findFirst({ where: { id: connectionId, workspaceId,
+    userId: actor.user.id, status: "ACTIVE", providerKey: connection.providerKey } }) as ExternalMcpConnectionRecord | null;
+  invariant(current?.accessTokenEnc && current.serverUrl === provider.serverUrl
+    && externalMcpConnectionGrantHash(current) === externalMcpConnectionGrantHash(refreshed)
+    && await prisma.member.findFirst({ where: { workspaceId, userId: actor.user.id, isActive: true }, select: { id: true } }),
+  403, "SOURCE_RESTRICTED", "External MCP connection or owner membership changed during token refresh.");
+  return current;
+}
+
+/** A human OAuth origin must own the token and consent to this data read before SDK access. */
+export async function assertExternalMcpNativeReadOrigin(actor: AppActor, workspaceId: string,
+  db: typeof prisma | Prisma.TransactionClient = prisma) {
+  const ambient = getMcpOrigin();
+  if (!ambient) return null;
+  const origin = parseMcpOrigin(ambient);
+  invariant(actor.kind === "user" && origin.kind === "oauth" && origin.workspaceId === workspaceId,
+    403, "MCP_AUTHORIZATION_REVOKED", "External MCP read origin is unavailable.");
+  await assertMcpOriginActive(db, { ...origin,
+    requiredScopes: [...new Set([...(origin.requiredScopes ?? []), "external-tools:read"])] }, workspaceId);
+  const token = await db.mcpOAuthAccessToken.findUnique({ where: { id: origin.id },
+    select: { userId: true, workspaceId: true, scopes: true } });
+  invariant(token?.userId === actor.user.id && token.workspaceId === workspaceId
+    && mcpScopesHash(token.scopes) === origin.scopeHash && token.scopes.includes("external-tools:read"),
+  403, "MCP_AUTHORIZATION_REVOKED", "External MCP read consent is unavailable.");
+  return `${origin.kind}:${origin.id}:${origin.workspaceId}:${origin.scopeHash}:${origin.grantEpoch}`;
+}
+
+/** Return the complete consumed MCP tool result, before payload extraction or result limits. */
+export async function readExternalMcpNativeToolResult(actor: AppActor, params: { workspaceId: string; connectionId: string;
+  connectionGrantHash: string; providerKey: string; serverUrl: string; providerAccountId: string | null;
+  mode: "SEARCH" | "FETCH"; toolName: string; arguments: Record<string, unknown> }) {
+  invariant(actor.kind === "user", 403, "SOURCE_RESTRICTED", "External MCP content requires its connection owner.");
+  const originIdentity = await assertExternalMcpNativeReadOrigin(actor, params.workspaceId);
+  const connection = await loadExternalMcpNativeConnection(actor, params.workspaceId, params.connectionId);
+  const expected = params.mode === "SEARCH"
+    ? externalMcpNativeReadRequest(params.providerKey, "SEARCH", { query: asString(params.arguments.query), limit: asNumber(params.arguments.limit) ?? undefined })
+    : externalMcpNativeReadRequest(params.providerKey, "FETCH", { externalId: asString(params.arguments.file_id)
+      || (asString(params.arguments.folder_id) ? `folder:${asString(params.arguments.folder_id)}` : "")
+      || asString(params.arguments.id) });
+  const canonical = (value: unknown) => JSON.stringify(value, Object.keys(asRecord(value)).sort());
+  invariant(connection.userId === actor.user.id && connection.providerKey === params.providerKey
+    && connection.serverUrl === params.serverUrl && connection.providerAccountId === params.providerAccountId
+    && externalMcpConnectionGrantHash(connection) === params.connectionGrantHash
+    && expected.toolName === params.toolName && canonical(expected.arguments) === canonical(params.arguments),
+  403, "SOURCE_RESTRICTED", "External MCP read request or grant changed.");
+  if (connection.providerKey === "box") {
+    const identity = extractMcpPayload(await callExternalMcpTool(connection, "who_am_i", {}));
+    invariant(asString(asRecord(identity).id) === connection.providerAccountId,
+      403, "SOURCE_RESTRICTED", "External MCP account changed.");
+  }
+  const result = await callExternalMcpTool(connection, params.toolName, structuredClone(params.arguments), true);
+  invariant(asRecord(result).isError !== true, 403, "SOURCE_RESTRICTED", "External MCP returned an unreadable result.");
+  const after = await loadExternalMcpNativeConnection(actor, params.workspaceId, params.connectionId);
+  invariant(after.providerAccountId === params.providerAccountId && externalMcpConnectionGrantHash(after) === params.connectionGrantHash,
+    409, "SOURCE_CHANGED", "External MCP connection changed during the read.");
+  invariant(await assertExternalMcpNativeReadOrigin(actor, params.workspaceId) === originIdentity,
+    403, "MCP_AUTHORIZATION_REVOKED", "External MCP read consent changed during the read.");
+  return structuredClone(result);
 }
 
 function requireExternalToolAllowed(provider: ExternalMcpProvider, toolName: string, operation: ExternalMcpOperation) {
@@ -629,41 +724,54 @@ export async function searchConnectedExternalMcpContext(actor: AppActor, params:
   limit?: number;
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  invariant(actor.kind === "user", 403, "SOURCE_RESTRICTED", "External MCP search requires its connection owner.");
+  invariant(!params.providerKey || CONNECTABLE_EXTERNAL_MCP_PROVIDER_KEYS.includes(params.providerKey as "box" | "notion"),
+    403, "SOURCE_RESTRICTED", "External MCP search provider is unavailable.");
   const limit = Math.max(1, Math.min(params.limit ?? 5, 20));
+  const { captureArtifactInputProof, isArtifactInputProofReadable } = await import("./source-lineage");
+  const { captureExternalMcpResponseInput, registerExternalMcpResponseOutput } = await import("./external-mcp-response-input");
+  // The virtual set input records even an empty connection enumeration at its original policy revision.
+  const setRoots = await captureArtifactInputProof(actor, params.workspaceId,
+    [{ kind: "ExternalMcpConnectionSet", id: actor.user.id }]);
   const connections = await activeUserConnections(actor, params.workspaceId, params.providerKey);
   const results = [];
   const errors = [];
+  const roots = [...setRoots];
 
   for (const connection of connections) {
     const provider = providerForKey(connection.providerKey);
-    const searchToolName = externalToolName(provider, connection, "search");
     try {
-      const remote = await callExternalMcpTool(connection, searchToolName, externalSearchArgs(provider, params.query, limit));
-      const payload = extractMcpPayload(remote);
+      const receipt = await captureExternalMcpResponseInput(actor, { workspaceId: params.workspaceId,
+        connectionId: connection.id, mode: "SEARCH", query: params.query, limit });
+      const nativeRoots = await captureArtifactInputProof(actor, params.workspaceId,
+        [{ kind: "ExternalMcpResponseInput", id: receipt.input.id, snapshot: receipt.input }]);
+      roots.push(...nativeRoots);
+      const payload = extractMcpPayload(receipt.payload);
       await auditExternalMcpCall(actor, {
         workspaceId: params.workspaceId,
         connection,
-        toolName: searchToolName,
+        toolName: receipt.input.toolName,
         policyClass: "read",
         input: { query: params.query, limit },
         result: payload,
       });
       results.push(...normalizeSearchResults({ provider, connection, payload, limit }));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "External MCP search failed.";
+    } catch {
+      const message = "External MCP search is unavailable.";
       errors.push({ providerKey: provider.providerKey, message });
       await auditExternalMcpCall(actor, {
         workspaceId: params.workspaceId,
         connection,
-        toolName: searchToolName,
+        toolName: provider.searchToolName ?? "search",
         policyClass: "read",
         input: { query: params.query, limit },
         error: message,
       });
     }
   }
-
-  return { results: results.slice(0, limit), errors };
+  invariant(await isArtifactInputProofReadable(actor, params.workspaceId, roots),
+    409, "SOURCE_CHANGED", "External MCP search authority changed during enumeration.");
+  return registerExternalMcpResponseOutput(actor, params.workspaceId, { results: results.slice(0, limit), errors }, roots);
 }
 
 export async function fetchConnectedExternalMcpContext(actor: AppActor, params: {
@@ -673,35 +781,39 @@ export async function fetchConnectedExternalMcpContext(actor: AppActor, params: 
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const { provider, connection } = await requireActiveConnection(actor, params);
-  const fetchToolName = externalToolName(provider, connection, "fetch");
   try {
-    const remote = await callExternalMcpTool(connection, fetchToolName, externalFetchArgs(provider, params.externalId));
-    const payload = extractMcpPayload(remote);
+    const { captureExternalMcpResponseInput, registerExternalMcpResponseOutput } = await import("./external-mcp-response-input");
+    const { captureArtifactInputProof } = await import("./source-lineage");
+    const receipt = await captureExternalMcpResponseInput(actor, { workspaceId: params.workspaceId,
+      connectionId: connection.id, mode: "FETCH", externalId: params.externalId });
+    const roots = await captureArtifactInputProof(actor, params.workspaceId,
+      [{ kind: "ExternalMcpResponseInput", id: receipt.input.id, snapshot: receipt.input }]);
+    const payload = extractMcpPayload(receipt.payload);
     await auditExternalMcpCall(actor, {
       workspaceId: params.workspaceId,
       connection,
-      toolName: fetchToolName,
+      toolName: receipt.input.toolName,
       policyClass: "read",
       input: { externalId: params.externalId },
       result: payload,
     });
-    return {
+    return registerExternalMcpResponseOutput(actor, params.workspaceId, {
       providerKey: provider.providerKey,
       providerDisplayName: provider.displayName,
       externalId: params.externalId,
       content: payload,
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "External MCP fetch failed.";
+    }, roots);
+  } catch {
+    const message = "External MCP fetch is unavailable.";
     await auditExternalMcpCall(actor, {
       workspaceId: params.workspaceId,
       connection,
-      toolName: fetchToolName,
+      toolName: provider.fetchToolName ?? "fetch",
       policyClass: "read",
       input: { externalId: params.externalId },
       error: message,
     });
-    throw error;
+    throw new AppError(403, "SOURCE_RESTRICTED", message);
   }
 }
 

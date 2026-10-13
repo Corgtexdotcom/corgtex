@@ -57,7 +57,9 @@ beforeEach(async () => {
   });
   fixture.prisma.$transaction.mockImplementation(async (run: any) => {
     const before = structuredClone(fixture.rows);
-    try { return await run(fixture.prisma); }
+    // A real transaction has its own client identity while sharing the same
+    // database state. Native commit preflights reject the root Prisma client.
+    try { return await run({ ...fixture.prisma }); }
     catch (error) { for (const name of Object.keys(before)) fixture.rows[name] = before[name]; throw error; }
   });
 });

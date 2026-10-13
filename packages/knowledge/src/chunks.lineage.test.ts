@@ -38,15 +38,17 @@ async function currentReadable() {
 beforeEach(async () => {
   await resetFixture(); fixture.rows.knowledgeChunk = [];
   fixture.prisma.$queryRaw = vi.fn(async () => []);
-  fixture.prisma.document.findFirst.mockImplementation(async ({ where }: any) => fixture.rows.document.find(row => Object.entries(where).every(([field, value]) =>
-    value instanceof Date ? row[field] instanceof Date && row[field].getTime() === value.getTime() : row[field] === value)) ?? null);
+  fixture.prisma.document.findFirst.mockImplementation(async ({ where }: any) => structuredClone(fixture.rows.document.find(row => Object.entries(where).every(([field, value]) =>
+    value instanceof Date ? row[field] instanceof Date && row[field].getTime() === value.getTime() : row[field] === value)) ?? null));
   fixture.prisma.$transaction.mockImplementation(async (work: any) => {
     const before = structuredClone(fixture.rows);
     try { return await work(fixture.prisma); } catch (error) { for (const name of Object.keys(before)) fixture.rows[name] = before[name]; throw error; }
   });
   fixture.prisma.knowledgeChunk = {
-    findFirst: vi.fn(async ({ where }: any) => fixture.rows.knowledgeChunk.find(row => matches(row, where)) ?? null),
-    findMany: vi.fn(async ({ where, take }: any) => fixture.rows.knowledgeChunk.filter(row => matches(row, where)).slice(0, take)),
+    // Prisma returns independent row objects; metadata projection must not mutate
+    // the persisted fixture or the embedding worker's intended output.
+    findFirst: vi.fn(async ({ where }: any) => structuredClone(fixture.rows.knowledgeChunk.find(row => matches(row, where)) ?? null)),
+    findMany: vi.fn(async ({ where, take }: any) => structuredClone(fixture.rows.knowledgeChunk.filter(row => matches(row, where)).slice(0, take))),
     deleteMany: vi.fn(async ({ where }: any) => { fixture.rows.knowledgeChunk = fixture.rows.knowledgeChunk.filter(row => !matches(row, where)); return { count: 1 }; }),
     createMany: vi.fn(async ({ data }: any) => { fixture.rows.knowledgeChunk.push(...structuredClone(data)); return { count: data.length }; }),
   };

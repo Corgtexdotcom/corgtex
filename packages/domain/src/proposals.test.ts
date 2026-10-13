@@ -87,7 +87,11 @@ vi.mock("@corgtex/shared", () => ({
   },
 }));
 
-vi.mock("./source-lineage", () => ({
+vi.mock("./source-lineage", async () => ({
+  sealArtifactInputActor: (await import("./artifact-input-actor")).sealArtifactInputActor,
+  isLineageKind: (value: unknown) => ["Proposal"].includes(String(value)),
+  assertArtifactInputWriteFence: vi.fn().mockResolvedValue(undefined),
+  advanceArchivedArtifactEnvelopeLineage: vi.fn().mockResolvedValue(false),
   isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
   advanceHumanArtifactInputLineage: vi.fn(),
   captureArtifactInputProof: vi.fn().mockResolvedValue([]),

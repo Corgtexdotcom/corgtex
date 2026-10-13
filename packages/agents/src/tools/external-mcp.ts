@@ -14,6 +14,7 @@ import {
 
 type ToolContext = {
   workspaceId: string;
+  operationScopes?: readonly string[];
 };
 
 function parseArgumentsJson(value: unknown): Record<string, unknown> {
@@ -106,7 +107,7 @@ export async function searchConnectedContextAction(actor: AppActor, ctx: ToolCon
   const corgtexResults = [];
 
   if (args.includeCorgtex !== false) {
-    const accessDomains = await resolveInteractiveKnowledgeAccessDomains(actor, ctx.workspaceId);
+    const accessDomains = await resolveInteractiveKnowledgeAccessDomains(actor, ctx.workspaceId, ctx.operationScopes);
     const results = await searchIndexedKnowledge({
       actor,
       workspaceId: ctx.workspaceId,

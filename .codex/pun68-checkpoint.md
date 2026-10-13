@@ -1,141 +1,140 @@
 # PUN-68 implementing checkpoint
 
-This draft contains implementing code after published head0c00c554.
-Full acceptance is INCOMPLETE; keep PR1517 draft.
-All database operations used synthetic local PostgreSQL on port55468. No production
-migration, deployment, customer mutation, credential/grant change or purge occurred.
+This draft extends c9ffa7d35ead059bf5cd50e93780e8768c62650e and composes main
+fcdb20ef087ef2db8cfec8796a93bf457fd754b6 (PUN76 operation guards). Full acceptance
+is INCOMPLETE. Keep PR1517 draft; do not merge or deploy.
 
 ## Architecture and migration/backfill
 
-- Full actual-input saved-row hashes, immutable snapshots and transitive manifests
-  capture every source independently of citations. Preserve originals.
-- Current membership, credential scope/version, artifact envelopes, Finance policies
-  and every contributing source gate content, counts, ranking, traversal, evidence,
-  proposals, model context, cached results and copied writes.
-- Capture durable permission epochs before generation; save exact vectors in proofs
-  and snapshots, recheck current grants and epochs in publication transactions.
-  Triggers retain tombstones across restoration/deletion/recreation. Receipt merges
-  preserve captured permission revisions and reject conflicts.
-- Separate permitted-source Article variants and private graph bundles regenerate
-  from independently permitted originals, excluding old restricted semantic content.
-- Unknown legacy lineage/epoch proofs remain stored and withheld. Never fill an old
-  proof with current counters or infer complete input lineage from citations.
-  Rebuild only through verified producer recipes.
-- Additive migrations through20261013150000_brain_source_document_governor were
-  applied only locally. v3 includes typed permission parents and foreign CRM
-  access proxies; old v1/v2 vectors remain withheld. The additive index correction
-  was checked against both a fresh replay and the existing local catalog. Brain
-  source metadata changes revoke inputs when documentId changes, while content
-  hashes and extraction progress remain protected by full-row fingerprints.
-  Provider progress is a content revision; archive and stable
-  principal/source binding changes advance permission epochs.
-- Production rollout requires authorization and availability/backfill planning.
-  Rollback must retain permission enforcement or disable affected serving; an older
-  unprotected reader must not reactivate restricted content.
+- Record complete actual input lineage independently of citations, including saved
+  row content hashes, immutable historical snapshots and transitive permission
+  parents for Articles, graph objects/edges/evidence/proposals and copied content.
+- Current membership, source permissions, Finance policies, credential scope and
+  version, source envelopes, and durable permission epochs gate content, counts,
+  ranks, paths, context, cached output, search and MCP reads. Publication rechecks
+  exact inputs and current authority within its caller transaction.
+- Preserve originals. Regenerate separate member-specific Article variants from
+  independently permitted sources, as explicitly selected by the user. Removing
+  one of several sources rebuilds from those left. Standalone originals remain valid.
+- Unknown legacy lineage and old v1/v2 epoch proofs remain stored and withheld.
+  Rebuild only with a verified producer recipe, current requester and actual inputs;
+  never infer completeness from citations or stamp current epochs onto old content.
+- Additive migrations through 20261013230000_external_mcp_response_inputs (183)
+  were developed and applied only to synthetic local PostgreSQL on port55468.
+  Fresh replay of all183 migrations succeeded and has zero Prisma schema difference.
+  Migration176 checksum remains
+  bb0d420ff522689e1af059cadacaec0d42a1a439159e52dec126d70c3ace97ef.
+- 181 persists MCP OAuth consent epochs across revocation/restoration/recreation.
+  182 adds body-free native source-removal outcome controls. 183 records complete
+  immutable Box/Notion MCP response inputs and absence-sensitive connection-set epochs.
+- Backfills must retain unknown entries until authenticated recipes rebuild them.
+  No automatic production backfill dispatch or production DDL is authorized here.
+  Rollback must retain these read gates or disable affected serving; reverting to
+  an unprotected reader must not resurrect restricted cached or historical content.
 
-## Evidence and limits
+## Implemented corrections in this checkpoint
 
-Focused cohorts ran on successive local revisions, not one final acceptance head:
-chat transaction/pending/memory38 units; conversation fixtures290; conversation DB6;
-Slack153; native transcript/audio40 +DB1; Finance concurrencyDB5; epoch triggersDB12;
-graph variants29 +DB8; graph auto reads/retirement139; chunks177; execution/outbox100;
-residual jobs/run/audit40. Counts overlap and must not be added together.
-Additional verified corrections: historical targets require structurally valid epoch
-proofs; v2 covers communication, role, Advice, Build and Finance governors; CRM uses
-the caller transaction for nested membership; pending CRM locks its exact authority
-row before execution; MCP uses its real conversation session key; Box sync uses an
-opaque preflight outside the copy transaction. Caller-owned Brain publication is
-available through ingestConversationOnDemandInTransaction.
+- PUN76 operation guards precede trusted source wrappers. Immutable actor identity,
+  submission, scopes and roots remain sealed before awaits. Metadata-only pending
+  CRM permission checks precede reading full stored arguments or calling mutators.
+- Source retirement is a single-use, current native archive-generation control
+  capability. It exposes no archived body to models. Fresh retries use independently
+  permitted remaining inputs. Linked documents may already be archived only with
+  matching current native generation; shared documents remain active when required.
+  Restore during model generation stales the candidate. Original payloads remain intact.
+- Brain edit history copies only the prior manifest and original epoch vector.
+  Archive envelope transitions preserve exact old ancestry without making restored
+  stale derived content readable. Unknown history is never recertified.
+- Document source rebuilds require the actual current typed Document and complete
+  proof, current native requester/credential, pre/post-model checks, saved-row reread
+  and final publication fence. Old private guidance is not passed into new variants.
+- Chunk hashes are taken from full persisted SQL rows, including normalized JSONB
+  and embedding/ranking fields. Variant signatures include captured permission epochs.
+- Audit/timeline readers require current complete target and job source proofs
+  before exposing IDs, counts or events. Only fixed structural event vocabularies
+  survive; free-text metadata and unauthorized target existence are withheld.
+- External MCP native receipts retain the full Box/Notion tool response before
+  normalization and trimming, fixed tool/request, local principal and connection
+  grant, and original pre-SDK local epochs. Empty searches retain the complete
+  connection-set proof. Live replay is outside SQL transactions; supplied transaction
+  publication needs an opaque single-use preflight. Provider error text is withheld.
+  Actual chat/Brain saver composition is still a gate; helper success is not acceptance.
 
-Focused additional evidence:175 legacy/producer tests;102 Box authority tests;35
-conversation/pending units;27 epoch/governor DB tests;10 publication transaction DB
-tests;3 pending lock DB tests;1 actual registered MCP DB test;6 durable rebuild
-event DB tests (coalescing, rollback and feedback-loop prevention). Canonical publication
-saver proof remains unverified. Counts overlap and are not aggregate acceptance.
+## Validation and remaining failures
 
-Current typecheck, schema validation, public-docs and private-boundary checks passed
-on local revisions. Logs are in /tmp/pun68-* and are not committed production proof.
+All data is synthetic/disposable. No live provider calls, customer mutations,
+credential/grant changes, production migrations, purges, releases or deployments.
+The separate release task's branch/browser/Azure CLI/lease/runtime were untouched.
 
-The first full repo unit run completed with424 failures/10117 passes and15 environment
-errors. Many lineage fixtures have since been repaired; sandbox socket/process/file
-errors also affected unrelated scripts. A green aggregate, exact-head CI and final
-independent review are NOT claimed.
+| Check | Latest result | Local evidence |
+| --- | --- | --- |
+| Aggregate unit, after fixture and asset repairs | 11459 pass, 7 fail, 24 skipped; 681 passing files | /tmp/pun68-current-final-aggregate-unit.log |
+| Full repository TypeScript | pass | /tmp/pun68-current-final-types.log |
+| Root changed-file lint and diff | pass | /tmp/pun68-root-final-lint.log |
+| Remaining static/script/native-dispatch cohort | 549/549 pass | /tmp/pun68-materialized-static-native-cohort.log |
+| Lifecycle/route/archive fixtures | 267 pass, one old registry count then repaired | /tmp/pun68-archive-inventory-fixtures-final-unit.log |
+| Final schema inventory | 11/11 pass | /tmp/pun68-schema-inventory-final-unit.log |
+| Linked Document retirement/restore races | 3/3 local PG pass | /tmp/pun68-linked-document-retirement-new-integration.log |
+| Document rebuild/removal cohorts | 29/29 local PG, 4 unit pass | /tmp/pun68-document-source-rebuild-final-integration.log |
+| Native external MCP receipt | 29 unit, final3/3 local PG pass | /tmp/pun68-external-mcp-response-final-integration.log |
+| OAuth epochs and workspace/pending CRM | 113 unit, 20 local PG pass | /tmp/pun68-oauth-routing-final.log; /tmp/pun68-oauth-fixtures-final.log |
+| Source history/archive/native control | 72/72 units pass | /tmp/pun68-linked-removal-control-unit.log |
+| Native Action completion | 31 units, 7/9 local PG pass; two public-reader tests RED | /tmp/pun68-action-completion-* |
+| Fresh183 migrations/schema | all183 replayed, zero difference | /tmp/pun68-fresh183-migration-replay.log; /tmp/pun68-fresh183-migrations-schema-diff.log |
 
-## Prior remote findings
+Focused cohorts overlap and ran on successive local revisions. Do not add their
+counts or claim them as a single final acceptance run. Missing tracked test assets
+were restored from exact Git index blobs. Site next-intl4.12.0 was restored only to
+this checkout's ignored node_modules; manifests and package-lock were unchanged.
 
-Remote synthetic checks at71c31c98 passed58/61 assertions with zero harness errors.
-The remaining MCP session, nested CRM membership and authority-row-lock findings
-have local fixes and regression evidence in this checkpoint; remote repin is pending.
-Independent Sol review retracted its epoch-sort finding and identified real legacy,
-governor, rebuild, lifecycle and provider-transaction gaps. Legacy/governor and Box
-sync corrections are present; remaining integration/provider gaps stay open.
-Implementing changes include supplied-tx membership/Finance reads; exact prompt and
-native human/agent MCP ingress; original proposal principal/arguments/input roots;
-pending execution fences and uncertainty blocking repeat effects; fifth-turn memory
-inside caller ownership fences; and epochs preventing local revoke/restore replay.
-Helper tests do not establish Bloop's combined lifecycle.
+### Genuine behavior/integration gaps
 
-## Open blockers
+1. All seven aggregate failures are Recall recorder intake/recovery success paths
+   in meeting-recorders.test.ts. Calls currently lack immutable authenticated
+   provider input, live recording/lease/grant proof and an approved audience. They
+   are denied with UNKNOWN_LINEAGE before model/writer use. These are product gaps,
+   not stale fixtures to relax. Automatic/historical recordings have no human owner.
+2. Two native Action PG public-reader assertions remain RED. The whole private
+   MCP submission currently becomes an ancestor of the changed Action, hiding its
+   body from another member. Existing Action body/status must retain its prior
+   lineage while only the note and its derivatives use a separate audience proof.
+   Dropping the input ancestor or broadening private note access is not a fix.
+3. Bloop's actual canonical Brain admission/checkpoint saver/run/job/approval,
+   publication receipt and finalization composition remains UNVERIFIED. Source
+   helpers and mock provider dispatch do not establish canonical lifecycle acceptance.
+4. Private graph native edit/review/publication and requester attribution remain
+   incomplete. A regenerated approved fact currently requires a fresh proposed bundle;
+   review inheritance is a pending product choice.
+5. Mixed selected-Box and new MCP-response publication scope composition, delegated
+   provider user authority for bare credentials, and mixed CRM archive body projection
+   are not proved. Unsupported recipes continue to be withheld.
+6. Final independent GPT-6 Sol xhigh review, exact-head CI and running evidence for
+   changed Finance visibility remain gates. No ready/complete/ship claim is made.
 
-1. Compose Bloop's actual admission, checkpoint saver, run/job/approval, canonical
-   effect/publication receipt and finalization transactions. Existing web streaming
-   route still follows its earlier lifecycle; helper-only tests are insufficient.
-2. Recall/provider/recorder intake needs immutable authenticated fetch inputs and
-   live connection/recording/lease authority. Seven provider success tests stay red;
-   the current intake denies unverified calls before model/writer use.
-3. Native edit/review/publication of private graph bundles is incomplete. Canonical
-   regeneration cannot invent requester authority from attribution. Graph reapproval
-   and transcript/prompt/provider audience decisions remain pending.
-4. Graph request/claim/publication/release now use opaque provider preflight outside
-   interactive transactions. Box native proofs retain their original epoch vectors;
-   byte drift and local revoke/restore deny replay. Ordinary reads retain live
-   provider checks. Local epochs cannot detect an unobserved remote revoke/restore
-   cycle; unsupported cross-provider commit adapters remain withheld.
-5. Finish remaining fixtures, aggregate checks, running UI evidence for Finance
-   visibility, independent GPT-6 Sol xhigh review and exact-head CI. Compose PUN76's
-   independent operation guards while preserving PUN68's source receipts and fences.
+### Repaired stale fixtures/environment issues
 
-Unsupported recipes are blocked capabilities, not complete backfills. A partial
-filter is not the completed source-permission solution. Do not merge or deploy.
+The earlier aggregate had11316 passes/78 failures. Credential hashes/current grants,
+real OAuth epochs/native request receipts, distinct TX client identity, full saved
+ranking/chunk rows, route capability inventory and schema ownership registry fixtures
+were corrected without weakening private-source or revocation assertions. All those
+unit failures now pass. Missing public test docs and pinned TLS fixtures caused static
+script failures and were materialized from Git; no live migration runner was executed.
 
-## Current checkpoint corrections and focused evidence
+## Pending completion-note question for the parent to present
 
-- Typed metadata-only permission-parent closure, RoleAssignment liveness and
-  Role/Circle archive gates; public sharing rejects revoked BuildArtifact tokens
-  and private decision parents. Provider and actor capabilities keep exact object
-  identities; caller-owned Brain entry seals the authenticated actor before awaits.
-- Archive lists and detail return only explicit structural metadata after current
-  source admission. Purged/unknown entries are withheld; previousState, free-text
-  labels and reasons never become read authority. Pagination follows admission.
-  An exact known HUMAN_ORIGINAL can advance only allowlisted archive metadata,
-  preserving its historical vectors. Copied/unknown rows cannot be recertified.
-  Archive/restore responses expose only IDs; current transaction membership and
-  actor authorization, immutable actor/submission and write fences guard effects.
-- Graph provider cohort119 units,8 existing DB and3 new Box DB tests pass; actual
-  provider transport was mocked, all Prisma receipts/epochs were real and the
-  interactive-transaction transport counter stayed zero. SourceCore66 units pass
-  including archive-metadata admission and ID-only mutation responses. Migration180 governor
-  cohort16 DB passes, including metadata progress and document binding round trips.
-- Brain absorption preserves existing articles and creates fresh explicitly public
-  proposed drafts with complete frozen inputs and pre/post-model/publication gates.
-  Producer cohort35 units passes;9/10 integration cases pass. The remaining
-  Document indexing failure is traced to pre-persistence JSONB metadata hashing.
-  Permission-parent/Goal concurrency cohort20 DB passes; fresh180 migration
-  replay has zero schema difference.
-- Latest published exact-head CI at0c00c554: Build, Docs, secret/data/policy gates
-  passed; Database Sync failed on the corrected index spelling; combined test job
-  failed30 files/108 tests, with11301 passes. Current fixture corrections are not
-  yet exact-head aggregate acceptance. Earlier focused fixture cohorts: SourceCore
- 66/66; seven CI integration files58/60; seven Brain integration files39/52.
-  Subsequent code/fixture corrections require their affected reruns.
-- Remaining production gaps include source-removal retry/document coordination,
-  regenerated indexing, actual conversation saver/lifecycle integration, provider
-  recorder authority, and linked mixed CRM archive body viewing. Ordinary model
-  reads continue to reject archived content; a human actor alone does not establish
-  a UI read purpose. No synthetic HUMAN_ORIGINAL fixture proves mixed production
-  CRM rows (whose constructors record DERIVED) safe to expose in archive views.
+Exact question: “When MCP completes an already public Action, who should be able to
+read the newly submitted completion note?”
 
-Automatic/historical Recall recordings have no stored human owner. A product
-audience decision is pending; credentials, bot IDs and signed wakeups cannot invent
-a requester. Provider authority also needs a durable binding revision rather than
-an environment hash that could return to an older value.
+Options:
+- “Only the submitting principal” (recommended conservative default until sharing is
+  explicit): retain existing Action body/status visibility; show the note only to its
+  authenticated owner and restrict all derivatives that consume it.
+- “All current Action readers”: record this explicit command as authority to share
+  only the newly submitted note with members currently permitted to read the Action.
+  Do not widen any earlier private sources or the raw MCP request.
+
+This choice is still unresolved. The implementation needs independent native
+body/status and note projections either way. Preserving the public Action while
+withholding the private note is feasible; it has not yet been implemented or proved.
+Other pending choices cover Box audience, private prompt contribution publishing,
+uploaded/automatic transcripts, and graph reapproval.

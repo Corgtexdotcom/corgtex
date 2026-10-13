@@ -95,7 +95,7 @@ vi.mock("./archive", () => ({ archiveFilterWhere: () => ({ archivedAt: null }), 
 import { AppError } from "./errors";
 import { encryptSecret } from "../../shared/src/crypto";
 import { mcpCredentialVersion, mcpScopesHash, runWithMcpOrigin } from "../../shared/src/mcp-context";
-import { captureArtifactInputProof, captureArtifactInputSnapshotProof, isArtifactInputProofReadable,
+import { captureArtifactInputProof, captureArtifactInputSnapshotProof, captureImmutableArtifactInputProof, inspectStoredArtifactInputDependencies, isArtifactInputProofReadable,
   isArtifactInputProofPubliclyShareable, recordArtifactInputLineage, withArtifactInputReadCapture } from "./source-lineage";
 import { archiveWorkspaceToolLink, createWorkspaceToolLink, getWorkspaceToolLinkCredentialAccess, getWorkspaceToolLinkInputRoots,
   listWorkspaceToolLinks, revealWorkspaceToolLinkCredential, updateWorkspaceToolLink } from "./tool-links";
@@ -232,6 +232,93 @@ describe("ToolLink complete native lineage with synthetic SQL", () => {
     expect(await isArtifactInputProofPubliclyShareable(alpha, workspaceId, frozen)).toBe(false);
     rows("workspaceToolLink")[0].descriptionMd = "Unproved direct body mutation";
     expect(await isArtifactInputProofReadable(alpha, workspaceId, frozen)).toBe(false);
+  });
+
+  it("permits only the secret projection with the sensitive scope and embeds parent history through repeated freezing", async () => {
+    const created = await original();
+    const granted = credential(["tools:credentials:read", "context-graph:read"]);
+    await expect(revealWorkspaceToolLinkCredential(granted.actor, { workspaceId, toolLinkId: created.id }))
+      .resolves.toEqual({ credentialLabel: "Fixture access", credentialSecret: "synthetic-only" });
+    const direct = await captureArtifactInputProof(granted.actor, workspaceId,
+      [{ kind: "WorkspaceToolLinkCredential", id: created.id }], tx);
+    const frozen = await captureImmutableArtifactInputProof(granted.actor, workspaceId, direct, tx);
+    const frozenAgain = await captureImmutableArtifactInputProof(granted.actor, workspaceId, frozen, tx);
+    expect(frozenAgain).toHaveLength(1);
+    const receipt = fixture.tables.get("artifactInputSnapshot")!.get(frozenAgain[0].id);
+    expect(receipt.sourceKind).toBe("WorkspaceToolLinkCredential");
+    expect(receipt.rootsJson).toHaveLength(1);
+    expect(fixture.tables.get("artifactInputSnapshot")!.get(receipt.rootsJson[0].id).sourceKind).toBe("WorkspaceToolLink");
+    expect(await isArtifactInputProofReadable(granted.actor, workspaceId, frozenAgain, tx)).toBe(true);
+    const graph = insert("contextGraphObject", { id: "credential-projection-graph", workspaceId,
+      title: "Synthetic secret projection", properties: { secret: "synthetic-only" }, archivedAt: null });
+    await recordArtifactInputLineage({ tx, actor: granted.actor, workspaceId,
+      artifact: { kind: "ContextGraphObject", id: graph.id }, content: graph,
+      origin: "DERIVED", inputs: [], inheritedRoots: frozenAgain });
+    const manifest = rows("artifactInputLineage").at(-1);
+    expect(manifest.rootsJson).toHaveLength(1);
+    expect(await captureArtifactInputProof(granted.actor, workspaceId, [{ kind: "ContextGraphObject", id: graph.id }], tx)).toHaveLength(2);
+    expect(await isArtifactInputProofPubliclyShareable(granted.actor, workspaceId, frozenAgain, tx)).toBe(false);
+    rows("workspaceToolLink")[0].credentialSecretEnc = encryptSecret("rotated-synthetic-only");
+    expect(await isArtifactInputProofReadable(granted.actor, workspaceId, frozenAgain, tx)).toBe(false);
+  });
+
+  it("never lends a credential parent's scope exception to a generic root in either proof order", async () => {
+    const created = await original();
+    const granted = credential(["tools:credentials:read"]);
+    const secret = await captureArtifactInputProof(granted.actor, workspaceId, [{ kind: "WorkspaceToolLinkCredential", id: created.id }], tx);
+    const metadata = await captureArtifactInputProof(alpha, workspaceId, [{ kind: "WorkspaceToolLink", id: created.id }], tx);
+    for (const roots of [[...secret, ...metadata], [...metadata, ...secret]]) {
+      expect(await isArtifactInputProofReadable(granted.actor, workspaceId, roots, tx)).toBe(false);
+    }
+    const frozen = await captureImmutableArtifactInputProof(granted.actor, workspaceId, secret, tx);
+    const stored = fixture.tables.get("artifactInputSnapshot")!.get(frozen[0].id);
+    const parentRoot = stored.rootsJson[0];
+    expect(await isArtifactInputProofReadable(granted.actor, workspaceId, [parentRoot], tx)).toBe(false);
+    expect(await isArtifactInputProofReadable(granted.actor, workspaceId, [...frozen, parentRoot], tx)).toBe(false);
+  });
+
+  it("freezes a direct secret input before persistence and retains its complete parent dependencies", async () => {
+    const created = await original();
+    const granted = credential(["tools:credentials:read", "context-graph:read"]);
+    const secret = await captureArtifactInputProof(granted.actor, workspaceId, [{ kind: "WorkspaceToolLinkCredential", id: created.id }], tx);
+    const inspected = await inspectStoredArtifactInputDependencies(tx, workspaceId, secret);
+    expect(inspected.complete).toBe(true);
+    expect(inspected.roots).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "WorkspaceToolLink", id: created.id })]));
+    const graph = insert("contextGraphObject", { id: "direct-secret-graph", workspaceId, title: "Synthetic secret value",
+      properties: { secret: "synthetic-only" }, archivedAt: null });
+    const manifest = await recordArtifactInputLineage({ tx, actor: granted.actor, workspaceId,
+      artifact: { kind: "ContextGraphObject", id: graph.id }, content: graph, origin: "DERIVED", inputs: [], inheritedRoots: secret });
+    expect(manifest.rootsJson).toHaveLength(1);
+    expect((manifest.rootsJson as any[])[0].kind).toBe("ArtifactInputSnapshot");
+    expect(await captureArtifactInputProof(granted.actor, workspaceId, [{ kind: "ContextGraphObject", id: graph.id }], tx)).toHaveLength(2);
+    const frozenDependencies = await inspectStoredArtifactInputDependencies(tx, workspaceId, manifest.rootsJson as any);
+    expect(frozenDependencies.complete).toBe(true);
+    expect(frozenDependencies.roots).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "WorkspaceToolLink", id: created.id })]));
+    const legacy = rows("artifactInputLineage").find(row => row.id === manifest.id);
+    legacy.rootsJson = secret;
+    await expect(captureArtifactInputProof(granted.actor, workspaceId, [{ kind: "ContextGraphObject", id: graph.id }], tx))
+      .rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+  });
+
+  it("still requires every upstream source of the full credential parent", async () => {
+    const created = await original();
+    const document = insert("document", { id: "secret-parent-document", workspaceId, title: "Synthetic contributor",
+      contentMd: "Synthetic private input", accessDomain: "WORKSPACE", archivedAt: null });
+    await certify("Document", document);
+    const link = rows("workspaceToolLink")[0];
+    await recordArtifactInputLineage({ tx, actor: alpha, workspaceId,
+      artifact: { kind: "WorkspaceToolLink", id: created.id }, content: link,
+      origin: "DERIVED", inputs: [{ kind: "Document", id: document.id }] });
+    const granted = credential(["tools:credentials:read"]);
+    await expect(revealWorkspaceToolLinkCredential(granted.actor, { workspaceId, toolLinkId: created.id }))
+      .rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    fixture.tables.get("agentCredential")!.get(granted.row.id).scopes.push("brain:read");
+    const currentActor = { ...granted.actor, scopes: ["tools:credentials:read", "brain:read"] } as AppActor;
+    await expect(revealWorkspaceToolLinkCredential(currentActor, { workspaceId, toolLinkId: created.id }))
+      .resolves.toMatchObject({ credentialSecret: "synthetic-only" });
+    fixture.tables.get("document")!.get(document.id).archivedAt = new Date();
+    await expect(revealWorkspaceToolLinkCredential(currentActor, { workspaceId, toolLinkId: created.id }))
+      .rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
   });
 
   it("captures model/MCP raw credential parameters as ciphertext with actual submission roots", async () => {

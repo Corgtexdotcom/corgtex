@@ -3,16 +3,18 @@ import { Prisma } from "@prisma/client";
 import { incrementCacheVersion, prisma, type AppActor } from "@corgtex/shared";
 import { archiveWorkspaceArtifact } from "./archive";
 import { requireWorkspaceMembership } from "./auth";
-import { resolveKnowledgeAccessDomains } from "./brain-access";
 import { brainSourceContentFingerprint } from "./brain-derivation";
 import { requireBrainSourceRemovalEnabled } from "./brain-removal-gate";
 import { sourceIdsInDerivation } from "./brain-source-impact";
 import { lockActiveArticleSources, lockBrainSourceLink } from "./brain-source-links";
 import { AppError, invariant } from "./errors";
 import { appendEvents } from "./events";
-import { advanceHumanArtifactInputLineage, brainSourceNeedsLineage, captureArtifactInputProof, copyArtifactInputLineage, currentArtifactInputRoots,
+import { advanceHumanArtifactInputLineage, assertArtifactInputWriteFence, captureArtifactInputProof, copyArtifactInputLineage, currentArtifactInputRoots,
   inspectStoredArtifactInputDependencies, isArtifactInputProofReadable, readableArtifactIds,
-  readableBrainSourceIds, recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
+  readableBrainSourceIds, recordArtifactInputLineage, sealArtifactInputActor, type LineageRoot } from "./source-lineage";
+import { commitBrainSourceRemovalCompletion, consumeArchivedBrainSourceRetirement, findBrainSourceRemovalCompletion,
+  prepareArchivedBrainSourceRetirement, prepareBrainSourceRemovalControl,
+  type ArchivedBrainSourceRetirementToken, type BrainSourceRemovalControlToken } from "./brain-source-removal-outcome";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 
 type RemovalArticle = {
@@ -29,6 +31,7 @@ type RemovalRequest = {
   sourceId: string;
   sourceFingerprint: string;
   sourceDocumentId: string | null;
+  sourceDocumentControlHash?: string | null;
   sourceArchivedAt?: string | null;
   sourceArchiveStateHash?: string;
   articles: RemovalArticle[];
@@ -44,7 +47,17 @@ type RemovalPayload = RemovalRequest & {
   archiveDocumentId?: string;
   continuationSourceIds?: string[];
   nextPendingSourceId?: string | null;
+  completionPlanIdentityHash?: string;
 };
+
+type DeferredCompletion = { token: BrainSourceRemovalControlToken; actor: AppActor; workspaceId: string };
+const continuationCompletions = new WeakMap<Prisma.TransactionClient, DeferredCompletion[]>();
+function controlPlanIdentity(plan: RemovalRequest) {
+  return createHash("sha256").update(JSON.stringify([plan.version, plan.sourceId, plan.sourceFingerprint,
+    plan.sourceDocumentId, plan.sourceDocumentControlHash ?? null, plan.sourceArchivedAt ?? null, plan.sourceArchiveStateHash ?? null,
+    plan.articles.map(article => [article.id, article.hash, article.action,
+      article.remaining.map(source => [source.sourceId, source.fingerprint])])])).digest("hex");
+}
 
 function linkedDocumentId(metadata: Prisma.JsonValue | null) {
   return metadata && typeof metadata === "object" && !Array.isArray(metadata)
@@ -82,7 +95,8 @@ function readPayload(value: Prisma.JsonValue): RemovalPayload {
 
 function requestMatches(left: RemovalRequest, right: RemovalRequest) {
   const signature = (request: RemovalRequest) => JSON.stringify([
-    request.sourceId, request.sourceFingerprint, request.sourceDocumentId, request.sourceArchivedAt ?? null, request.sourceArchiveStateHash ?? null,
+    request.sourceId, request.sourceFingerprint, request.sourceDocumentId, request.sourceDocumentControlHash ?? null,
+    request.sourceArchivedAt ?? null, request.sourceArchiveStateHash ?? null,
     request.articles.map((article) => [
       article.id, article.slug, article.title, article.hash, article.action,
       article.remaining.map((source) => [source.sourceId, source.fingerprint]),
@@ -134,14 +148,29 @@ async function currentPlan(tx: Prisma.TransactionClient, workspaceId: string, so
   const allSourceIds = [...discoveredSourceIds, ...currentDependencies.flatMap((dependencies) => dependencies.roots
     .filter((root) => root.kind === "BrainSource").map((root) => root.id))];
   await lockSources(tx, allSourceIds);
+  const source = await tx.brainSource.findFirst({ where: { id: sourceId, workspaceId } });
+  invariant(source, 404, "NOT_FOUND", "Source exclusion identity not found.");
+  const sourceDocumentId = linkedDocumentId(source.metadata);
+  let sourceDocumentControlHash: string | null = null;
+  if (sourceDocumentId) {
+    // Keep the Source -> Document -> Article lock order. The excluded document
+    // supplies only current control identity, never model context or old bytes.
+    await tx.$queryRaw`SELECT id FROM "Document" WHERE id = ${sourceDocumentId} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+    const document = await tx.document.findFirst({ where: { id: sourceDocumentId, workspaceId }, select: {
+      id: true, workspaceId: true, accessDomain: true, archivedAt: true, archivedByUserId: true,
+    } });
+    invariant(document, 409, "SOURCE_CHANGED", "The exclusion document is unavailable.");
+    const archives = await tx.workspaceArchiveRecord.findMany({ where: { workspaceId, entityType: "Document", entityId: sourceDocumentId },
+      select: { id: true, archivedAt: true, restoredAt: true, purgedAt: true }, orderBy: { id: "asc" } });
+    sourceDocumentControlHash = createHash("sha256").update(JSON.stringify([document.id, document.workspaceId,
+      document.accessDomain, document.archivedAt, document.archivedByUserId, archives])).digest("hex");
+  }
   for (const id of beforeIds) {
     await tx.$queryRaw`SELECT id FROM "BrainArticle" WHERE id = ${id} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
   }
   const after = await discoverRemovalArticles(tx, workspaceId, sourceId);
   invariant(JSON.stringify(beforeIds) === JSON.stringify(after.map(({ article }) => article.id)),
     409, "SOURCE_CHANGED", "Article links changed; retry source removal.");
-  const source = await tx.brainSource.findFirst({ where: { id: sourceId, workspaceId } });
-  invariant(source, 404, "NOT_FOUND", "Source exclusion identity not found.");
   const plans: RemovalArticle[] = [];
   for (const { article, roots, dependencies } of after) {
     if (expected && !roots) invariant(false, 409, "SOURCE_CHANGED", "Article lineage changed; prepare a new candidate.");
@@ -179,7 +208,7 @@ async function currentPlan(tx: Prisma.TransactionClient, workspaceId: string, so
 
   const plan: RemovalRequest = {
     version: 1, sourceId, sourceFingerprint: brainSourceContentFingerprint(source),
-    sourceDocumentId: linkedDocumentId(source.metadata), sourceArchivedAt: source.archivedAt?.toISOString() ?? null,
+    sourceDocumentId, sourceDocumentControlHash, sourceArchivedAt: source.archivedAt?.toISOString() ?? null,
     sourceArchiveStateHash: await archiveStateHash(tx, workspaceId, sourceId), articles: plans,
   };
   if (expected) invariant(requestMatches(plan, expected), 409, "SOURCE_CHANGED", "Sources or articles changed; prepare a new candidate.");
@@ -206,8 +235,8 @@ async function preserveOriginalWithoutCitation(tx: Prisma.TransactionClient, act
   await incrementCacheVersion(`knowledge:${workspaceId}`, tx);
 }
 
-async function requireRemovalManager(actor: AppActor, workspaceId: string) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: ["ADMIN"] });
+async function requireRemovalManager(actor: AppActor, workspaceId: string, tx?: Prisma.TransactionClient) {
+  const membership = await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: ["ADMIN"], tx });
   invariant(actor.kind === "agent" || membership?.role === "ADMIN", 403, "FORBIDDEN", "Workspace admin access is required.");
 }
 
@@ -220,41 +249,48 @@ async function latestRemovalJob(tx: Prisma.TransactionClient | typeof prisma, wo
 
 export async function requestBrainSourceRemoval(actor: AppActor, params: {
   workspaceId: string; sourceId: string; archiveLinkedDocument?: boolean; _tx?: Prisma.TransactionClient;
-}) {
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  /** Internal opaque retry capability; never reconstructed from request JSON. */
+  _archivedExclusion?: ArchivedBrainSourceRetirementToken;
+}): Promise<{ id: string; status: "archived"; jobId?: never } | { id: string; status: "pending"; jobId: string }> {
+  sealArtifactInputActor(actor);
+  params = Object.freeze({ ...params });
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx: params._tx });
   const request = async (tx: Prisma.TransactionClient) => {
-    const existingSource = await tx.brainSource.findFirst({ where: { id: params.sourceId, workspaceId: params.workspaceId } });
+    const completed = await findBrainSourceRemovalCompletion(actor, { workspaceId: params.workspaceId, sourceId: params.sourceId,
+      archiveLinkedDocument: params.archiveLinkedDocument }, tx);
+    if (completed) {
+      invariant(completed.status === "archived", 409, "INVALID_REMOVAL_REQUEST", "Canonical source completion is invalid.");
+      return completed;
+    }
+    await lockBrainSourceLink(tx, params.sourceId);
+    await tx.$queryRaw`SELECT id FROM "BrainSource" WHERE id = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    await assertArtifactInputWriteFence(tx);
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
+    if (params._archivedExclusion) await consumeArchivedBrainSourceRetirement(params._archivedExclusion, actor, params, tx);
+    // An archived exclusion is used only for internal identity/ancestry checks.
+    // Its bytes never enter the fresh model or become a readable source proof.
+    const existingSource = await tx.brainSource.findFirst({ where: { id: params.sourceId, workspaceId: params.workspaceId,
+      ...(params._archivedExclusion ? {} : { archivedAt: null }) } });
     invariant(existingSource, 404, "NOT_FOUND", "Source not found.");
     const archiveDocumentId = params.archiveLinkedDocument ? linkedDocumentId(existingSource.metadata) : null;
-    if (existingSource.archivedAt) {
-      const priorJob = await latestRemovalJob(tx, params.workspaceId, existingSource.id);
-      const prior = priorJob ? readPayload(priorJob.payload) : null;
-      if (!prior || prior.phase === "APPLIED") {
-        invariant(!brainSourceNeedsLineage(existingSource)
-          && (await resolveKnowledgeAccessDomains(actor, params.workspaceId)).includes(existingSource.accessDomain),
-          404, "NOT_FOUND", "Source not found.");
-        await archiveLinkedDocumentIfResolved(tx, actor, params.workspaceId, archiveDocumentId ?? undefined);
-        return { id: existingSource.id, status: "archived" as const };
-      }
-      await requireRemovalManager(actor, params.workspaceId);
-      invariant(prior.sourceFingerprint === brainSourceContentFingerprint(existingSource)
-        && (!prior.sourceArchivedAt || prior.sourceArchivedAt === existingSource.archivedAt.toISOString()),
-        409, "SOURCE_CHANGED", "The source exclusion changed; prepare a new removal request.");
-    } else {
-      invariant((await readableBrainSourceIds(actor, params.workspaceId, [existingSource], tx)).has(existingSource.id),
-        404, "NOT_FOUND", "Source not found.");
-    }
+    invariant(Boolean(params._archivedExclusion && existingSource.archivedAt)
+      || (await readableBrainSourceIds(actor, params.workspaceId, [existingSource], tx)).has(existingSource.id),
+      404, "NOT_FOUND", "Source not found.");
     if (params.archiveLinkedDocument) {
       invariant(archiveDocumentId, 409, "SOURCE_CHANGED", "The source no longer belongs to a document.");
-      invariant(await tx.document.count({ where: { id: archiveDocumentId, workspaceId: params.workspaceId, archivedAt: null } }) === 1,
+      invariant(Boolean(params._archivedExclusion) || await tx.document.count({ where: { id: archiveDocumentId, workspaceId: params.workspaceId, archivedAt: null } }) === 1,
         409, "SOURCE_CHANGED", "The linked document is unavailable.");
     }
     const plan = await currentPlan(tx, params.workspaceId, params.sourceId);
+    invariant(!params._archivedExclusion || plan.articles.some(article => article.action === "regenerate"),
+      409, "RETIREMENT_REBUILD_REQUIRED", "An archived exclusion retry requires independently permitted replacement inputs.");
     invariant(!archiveDocumentId || plan.sourceDocumentId === archiveDocumentId,
       409, "SOURCE_CHANGED", "The source document changed; review it again.");
-    if (plan.articles.length > 0) await requireRemovalManager(actor, params.workspaceId);
+    if (plan.articles.length > 0) await requireRemovalManager(actor, params.workspaceId, tx);
     if (plan.articles.length > 0) await requireBrainSourceRemovalEnabled(tx, params.workspaceId);
     if (plan.articles.every((article) => article.action !== "regenerate")) {
+      const token = await prepareBrainSourceRemovalControl(actor, { workspaceId: params.workspaceId, sourceId: params.sourceId,
+        mode: "DIRECT", planIdentityHash: controlPlanIdentity(plan), archiveLinkedDocument: Boolean(archiveDocumentId) }, tx);
       for (const article of plan.articles) {
         if (article.action === "preserve") {
           await preserveOriginalWithoutCitation(tx, actor, params.workspaceId, article.id, params.sourceId);
@@ -270,7 +306,15 @@ export async function requestBrainSourceRemoval(actor: AppActor, params: {
         reason: "Removed after linked articles were archived.", _tx: tx,
       });
       await archiveLinkedDocumentIfResolved(tx, actor, params.workspaceId, archiveDocumentId ?? undefined);
-      return { id: params.sourceId, status: "archived" as const };
+      if (plan.articles.length > 0) await requireRemovalManager(actor, params.workspaceId, tx);
+      const deferred = continuationCompletions.get(tx);
+      if (deferred) {
+        deferred.push({ token, actor, workspaceId: params.workspaceId });
+        return { id: params.sourceId, status: "archived" as const };
+      }
+      const result = await commitBrainSourceRemovalCompletion(token, { actor, workspaceId: params.workspaceId }, tx);
+      invariant(result.status === "archived", 409, "INVALID_REMOVAL_REQUEST", "Canonical source completion is invalid.");
+      return result;
     }
     const latest = await latestRemovalJob(tx, params.workspaceId, params.sourceId);
     if (latest) {
@@ -295,28 +339,47 @@ export async function requestBrainSourceRemoval(actor: AppActor, params: {
 
 /** Continue a confirmed multi-source removal only after each shared-source review is accepted. */
 export async function continueBrainSourceRemovals(tx: Prisma.TransactionClient, actor: AppActor, workspaceId: string, sourceIds: string[]) {
-  for (let index = 0; index < sourceIds.length; index++) {
-    const sourceId = sourceIds[index];
-    const source = await tx.brainSource.findFirst({ where: { id: sourceId, workspaceId } });
-    invariant(source, 409, "SOURCE_CHANGED", "A selected source is unavailable.");
-    const result = await requestBrainSourceRemoval(actor, {
-      workspaceId, sourceId, archiveLinkedDocument: !!linkedDocumentId(source.metadata), _tx: tx,
-    });
-    if (result.status !== "pending") continue;
-    const job = await tx.workflowJob.findUniqueOrThrow({ where: { id: result.jobId } });
-    const payload = readPayload(job.payload);
-    invariant(!payload.continuationSourceIds, 409, "REMOVAL_ALREADY_PENDING", "A source already has a removal sequence in progress.");
-    await tx.workflowJob.update({ where: { id: job.id }, data: {
-      payload: { ...payload, continuationSourceIds: sourceIds.slice(index + 1) } as Prisma.InputJsonObject,
-    } });
-    return { pendingJobId: job.id, pendingSourceId: sourceId };
+  const previous = continuationCompletions.get(tx);
+  const deferred = previous ?? [];
+  continuationCompletions.set(tx, deferred);
+  sourceIds = [...new Set(sourceIds)];
+  let completed = false;
+  try {
+    for (let index = 0; index < sourceIds.length; index++) {
+      const sourceId = sourceIds[index];
+      const source = await tx.brainSource.findFirst({ where: { id: sourceId, workspaceId }, select: { id: true, metadata: true } });
+      invariant(source, 409, "SOURCE_CHANGED", "A selected source is unavailable.");
+      const result = await requestBrainSourceRemoval(actor, {
+        workspaceId, sourceId, archiveLinkedDocument: !!linkedDocumentId(source.metadata), _tx: tx,
+      });
+      if (result.status !== "pending") continue;
+      const job = await tx.workflowJob.findUniqueOrThrow({ where: { id: result.jobId } });
+      const payload = readPayload(job.payload);
+      invariant(!payload.continuationSourceIds, 409, "REMOVAL_ALREADY_PENDING", "A source already has a removal sequence in progress.");
+      await tx.workflowJob.update({ where: { id: job.id }, data: {
+        payload: { ...payload, continuationSourceIds: sourceIds.slice(index + 1) } as Prisma.InputJsonObject,
+      } });
+      completed = true;
+      return { pendingJobId: job.id, pendingSourceId: sourceId };
+    }
+    completed = true;
+    return { pendingJobId: null, pendingSourceId: null };
+  } finally {
+    if (!previous) {
+      continuationCompletions.delete(tx);
+      if (completed) for (const completion of deferred) await commitBrainSourceRemovalCompletion(completion.token,
+        { actor: completion.actor, workspaceId: completion.workspaceId }, tx);
+    }
   }
-  return { pendingJobId: null, pendingSourceId: null };
 }
 
 export async function retryBrainSourceRemoval(actor: AppActor, params: { workspaceId: string; jobId: string }) {
+  sealArtifactInputActor(actor);
+  params = Object.freeze({ ...params });
   await requireRemovalManager(actor, params.workspaceId);
   return prisma.$transaction(async (tx) => {
+    await assertArtifactInputWriteFence(tx);
+    await requireRemovalManager(actor, params.workspaceId, tx);
     await tx.$queryRaw`SELECT id FROM "WorkflowJob" WHERE id = ${params.jobId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const oldJob = await tx.workflowJob.findFirst({ where: {
       id: params.jobId, workspaceId: params.workspaceId, type: "agent.brain-source-regenerate",
@@ -339,6 +402,8 @@ export async function retryBrainSourceRemoval(actor: AppActor, params: { workspa
     const result = await requestBrainSourceRemoval(actor, {
       workspaceId: params.workspaceId, sourceId: old.sourceId,
       archiveLinkedDocument: !!old.archiveDocumentId, _tx: tx,
+      ...(source.archivedAt ? { _archivedExclusion: await prepareArchivedBrainSourceRetirement(actor,
+        { workspaceId: params.workspaceId, sourceId: old.sourceId }, tx) } : {}),
     });
     if (result.status === "pending") {
       const newJob = await tx.workflowJob.findUniqueOrThrow({ where: { id: result.jobId } });
@@ -530,15 +595,25 @@ export async function listBrainSourceRemovalReviews(actor: AppActor, params: { w
 export async function resolveBrainSourceRemoval(actor: AppActor, params: {
   workspaceId: string; jobId: string; decision: "accept" | "reject";
 }) {
+  sealArtifactInputActor(actor);
+  params = Object.freeze({ ...params });
   await requireRemovalManager(actor, params.workspaceId);
   return prisma.$transaction(async (tx) => {
+    await requireRemovalManager(actor, params.workspaceId, tx);
+    if (params.decision === "accept") {
+      const completed = await findBrainSourceRemovalCompletion(actor, { workspaceId: params.workspaceId, jobId: params.jobId }, tx);
+      if (completed) {
+        invariant(completed.status === "applied", 409, "INVALID_REMOVAL_REQUEST", "Canonical review completion is invalid.");
+        return completed;
+      }
+      const phases = await tx.$queryRaw<Array<{ phase: string | null }>>`SELECT payload->>'phase' AS phase
+        FROM "WorkflowJob" WHERE id = ${params.jobId} AND "workspaceId" = ${params.workspaceId} AND type = 'agent.brain-source-regenerate'`;
+      invariant(phases[0]?.phase !== "APPLIED", 409, "UNKNOWN_LINEAGE", "Completed review has no current canonical control receipt.");
+    }
     await tx.$queryRaw`SELECT id FROM "WorkflowJob" WHERE id = ${params.jobId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const job = await tx.workflowJob.findFirst({ where: { id: params.jobId, workspaceId: params.workspaceId, type: "agent.brain-source-regenerate" } });
     invariant(job, 404, "NOT_FOUND", "Regeneration candidate not found.");
     const payload = readPayload(job.payload);
-    if (payload.phase === "APPLIED" && params.decision === "accept") return {
-      status: "applied" as const, sourceId: payload.sourceId, pendingSourceId: payload.nextPendingSourceId ?? null,
-    };
     invariant(job.status === "COMPLETED" && payload.phase === "READY", 409, "INVALID_STATE", "Candidate is not ready for review.");
     if (params.decision === "reject") {
       await tx.workflowJob.update({ where: { id: job.id }, data: { payload: { ...payload, phase: "REJECTED" } as Prisma.InputJsonObject } });
@@ -552,6 +627,10 @@ export async function resolveBrainSourceRemoval(actor: AppActor, params: {
       : !payload.sourceArchivedAt && (await readableBrainSourceIds(actor, params.workspaceId, [source], tx)).has(source.id)),
       409, "SOURCE_CHANGED", "The source exclusion changed; prepare a new removal request.");
     await currentPlan(tx, params.workspaceId, payload.sourceId, payload);
+    const completionPlanIdentityHash = controlPlanIdentity(payload);
+    const token = await prepareBrainSourceRemovalControl(actor, { workspaceId: params.workspaceId, sourceId: payload.sourceId,
+      mode: "REVIEWED", jobId: job.id, planIdentityHash: completionPlanIdentityHash,
+      archiveLinkedDocument: Boolean(payload.archiveDocumentId) }, tx);
     invariant(payload.candidates && payload.candidateTitles && payload.candidateRoots && payload.regenerationRunId,
       409, "INVALID_STATE", "Candidate provenance is missing.");
     const generationRun = await tx.agentRun.findFirst({ where: {
@@ -624,8 +703,11 @@ export async function resolveBrainSourceRemoval(actor: AppActor, params: {
       ? await continueBrainSourceRemovals(tx, actor, params.workspaceId, payload.continuationSourceIds)
       : { pendingSourceId: null };
     await tx.workflowJob.update({ where: { id: job.id }, data: {
-      payload: { ...payload, phase: "APPLIED", nextPendingSourceId: continued.pendingSourceId } as Prisma.InputJsonObject,
+      payload: { ...payload, phase: "APPLIED", nextPendingSourceId: continued.pendingSourceId, completionPlanIdentityHash } as Prisma.InputJsonObject,
     } });
-    return { status: "applied" as const, sourceId: payload.sourceId, pendingSourceId: continued.pendingSourceId };
+    await requireRemovalManager(actor, params.workspaceId, tx);
+    const result = await commitBrainSourceRemovalCompletion(token, { actor, workspaceId: params.workspaceId, pendingSourceId: continued.pendingSourceId }, tx);
+    invariant(result.status === "applied", 409, "INVALID_REMOVAL_REQUEST", "Canonical review completion is invalid.");
+    return result;
   }, { maxWait: 5_000, timeout: 120_000 });
 }

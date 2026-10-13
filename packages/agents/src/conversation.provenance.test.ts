@@ -111,6 +111,8 @@ vi.mock("./pending-crm-operations", async (importOriginal) => {
   } };
 });
 vi.mock("@corgtex/domain", async () => ({
+  ...await import("../../domain/src/agent-operation-capabilities"),
+  ...await import("../../domain/src/agent-operation-authorization"),
   ...await import("../../domain/src/source-lineage"), ...await import("../../domain/src/conversation-lineage"),
   ...await import("../../domain/src/conversation-ingress"), ...await import("../../domain/src/conversations"),
   ...await import("../../domain/src/agent-memory"), ...await import("../../domain/src/digest-lineage"), ...await import("../../domain/src/source-scoped-read"),
@@ -123,7 +125,7 @@ vi.mock("@corgtex/domain", async () => ({
 }));
 
 import { AppError } from "../../domain/src/errors";
-import { mcpCredentialVersion, mcpScopesHash, runWithMcpOrigin, assertMcpOriginActive, getMcpOrigin } from "../../shared/src/mcp-context";
+import { mcpCredentialVersion, mcpScopesHash, runWithMcpOrigin, assertMcpOriginActive, getMcpOrigin, captureMcpOAuthGrantEpoch } from "../../shared/src/mcp-context";
 import { captureArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, recordArtifactInputLineage } from "../../domain/src/source-lineage";
 import { processConversationTurn, processConversationTurnStream } from "./conversation";
 
@@ -194,7 +196,7 @@ beforeEach(async () => {
   });
   fixture.base.$transaction.mockImplementation(async (callback) => {
     const prior = structuredClone(fixture.tables);
-    try { return await callback(fixture.prisma); } catch (error) { fixture.transactionErrors.push(error as Error); fixture.tables.clear(); for (const [key, rows] of prior) fixture.tables.set(key, rows); throw error; }
+    try { return await callback(new Proxy(fixture.prisma, { get(target, property) { return property === "$transaction" ? undefined : Reflect.get(target, property); } })); } catch (error) { fixture.transactionErrors.push(error as Error); fixture.tables.clear(); for (const [key, rows] of prior) fixture.tables.set(key, rows); throw error; }
   });
   fixture.base.$executeRaw.mockReset().mockResolvedValue(1);
   fixture.base.$queryRaw.mockReset().mockResolvedValue([]);
@@ -311,17 +313,46 @@ describe("conversation orchestration using actual provenance and permissions", (
   });
 
   it("honors native MCP OAuth membership and live scope revocation", async () => {
-    const token = insert("mcpOAuthAccessToken", { id: "oauth-a", workspaceId, scopes: ["conversations:write"], revokedAt: null, client: { isActive: true }, refreshExpiresAt: null });
-    const origin = { kind: "oauth" as const, id: token.id, workspaceId, scopeHash: mcpScopesHash(token.scopes), requiredScopes: ["conversations:write"] };
+    const token = insert("mcpOAuthAccessToken", { id: "oauth-a", workspaceId, userId: base.userId, scopes: ["conversations:write"], revokedAt: null, client: { isActive: true }, refreshExpiresAt: null });
+    const origin = { kind: "oauth" as const, id: token.id, workspaceId, scopeHash: mcpScopesHash(token.scopes), grantEpoch: await captureMcpOAuthGrantEpoch(tx, workspaceId, token.id), requiredScopes: ["conversations:write"] };
     const result = await runWithMcpOrigin(origin, () => processConversationTurn({ ...base, requestSource: "MCP" }));
     expect(result.lineageRoots.some((root) => root.kind === "ConversationIngressInput")).toBe(true);
     fixture.chat.mockImplementation(async () => { token.scopes = []; return reply("Revoked OAuth result"); });
     await expect(runWithMcpOrigin(origin, () => processConversationTurn({ ...base, requestSource: "MCP" }))).rejects.toThrow("MCP_AUTHORIZATION_REVOKED");
   });
 
+  it("peeks only scoped pending tool metadata and never reads a stored tool outside the caller's grant", async () => {
+    const { operation } = await pendingCompletion();
+    const stored = fixture.tables.get("conversationPendingOperation")!.get(operation.id);
+    stored.toolName = "reveal_tool_link_credential";
+    stored.argsJson = { secret: "wrong-scope-argument-canary" };
+    stored.resultJson = { secret: "wrong-scope-result-canary" };
+    const pendingDelegate = fixture.delegates.get("conversationPendingOperation");
+    pendingDelegate.findFirst.mockClear(); pendingDelegate.findUnique.mockClear(); pendingDelegate.update.mockClear();
+    fixture.chat.mockClear();
+    const result = await processConversationTurn({ ...base, userMessage: `confirm ${operation.id}`,
+      operationScopes: ["conversations:write", "relationships:write"] });
+    expect(pendingDelegate.findFirst).toHaveBeenCalledOnce();
+    expect(pendingDelegate.findFirst).toHaveBeenCalledWith({
+      where: { workspaceId, conversationId: base.sessionId, userId: base.userId, agentKey: base.agentKey,
+        id: operation.id, toolName: { in: ["record_relationship_activity", "complete_relationship_activity", "create_communication_suggestion"] } },
+      select: { id: true, status: true, toolName: true }, orderBy: { createdAt: "desc" },
+    });
+    expect(pendingDelegate.findUnique).not.toHaveBeenCalled();
+    expect(pendingDelegate.update).not.toHaveBeenCalled();
+    expect(JSON.stringify(fixture.chat.mock.calls)).not.toContain("wrong-scope-");
+    expect(JSON.stringify(result)).not.toContain("wrong-scope-");
+    expect(fixture.tables.get("crmActivity")!.get("activity-to-complete").completedAt).toBeNull();
+  });
+
   it("confirms stored CRM arguments through the actual mutator and prevents replay effects", async () => {
     const { operation } = await pendingCompletion();
-    const response = await processConversationTurn({ ...base, userMessage: `confirm ${operation.id}` });
+    const pendingDelegate = fixture.delegates.get("conversationPendingOperation");
+    pendingDelegate.findFirst.mockClear();
+    const response = await processConversationTurn({ ...base, userMessage: `confirm ${operation.id}`,
+      operationScopes: ["conversations:write", "relationships:write"] });
+    expect(pendingDelegate.findFirst.mock.calls[0][0]).toMatchObject({ select: { id: true, status: true, toolName: true } });
+    expect(pendingDelegate.findFirst.mock.calls[1][0]).toMatchObject({ where: { id: operation.id, toolName: "complete_relationship_activity" } });
     expect(response.assistantMessage, fixture.transactionErrors.map((error) => error.stack).join("\n")).toContain("Activity ID: activity-to-complete");
     expect(fixture.tables.get("crmActivity")!.get("activity-to-complete").completedAt).toBeInstanceOf(Date);
     expect(fixture.tables.get("conversationPendingOperation")!.get(operation.id).status).toBe("EXECUTED");

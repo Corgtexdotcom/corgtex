@@ -4,7 +4,12 @@ import { deleteCircle, listCircles, listCircleTree, suggestMaturityUpgrade, upda
 import { prisma } from "@corgtex/shared";
 import { readableArtifactIds } from "./source-lineage";
 
-vi.mock("./source-lineage", () => ({
+vi.mock("./source-lineage", async () => ({
+  sealArtifactInputActor: (await import("./artifact-input-actor")).sealArtifactInputActor,
+  isLineageKind: (value: unknown) => ["Circle", "Role"].includes(String(value)),
+  assertArtifactInputWriteFence: vi.fn().mockResolvedValue(undefined),
+  // This lifecycle fixture has no known content receipt to advance.
+  advanceArchivedArtifactEnvelopeLineage: vi.fn().mockResolvedValue(false),
   captureArtifactInputProof: vi.fn().mockResolvedValue([]),
   readableArtifactIds: vi.fn(),
 }));

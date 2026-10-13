@@ -28,7 +28,8 @@ describe("workspace MCP connection contract on real PostgreSQL", () => {
   const origin = async (token: string, workspaceId = a): Promise<McpOrigin> => {
     const session = await resolve(token, workspaceId);
     if (!session) throw new Error("Expected connection");
-    return { kind: "oauth", id: session.connectionId, workspaceId, scopeHash: mcpScopesHash(session.scopes), requiredScopes: ["workspace:read"] };
+    return { kind: "oauth", id: session.connectionId, workspaceId, scopeHash: mcpScopesHash(session.scopes),
+      grantEpoch: session.grantEpoch, requiredScopes: ["workspace:read"] };
   };
   const disconnect = (id: string, workspaceId = a) => fresh(() => revokeMcpWorkspaceConnection(actor, workspaceId, id));
   const change = (version: number, active: boolean, role: "FULL" | "SETUP" = "FULL") => fresh(async () => {

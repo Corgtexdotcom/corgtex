@@ -24,12 +24,13 @@ const direct = (kind: string, delegate: string): Descriptor => ({ delegate, tabl
 const child = (kind: string, delegate: string, relation: string): Descriptor => ({ delegate, table: kind, scope: (workspaceId) => ({ [relation]: { workspaceId } }) });
 
 /** Explicit inventory scope. New kinds require a reviewed loader instead of an unscoped generic table scan. */
-const LOADERS: Record<LineageKind, Descriptor> = {
+const LOADERS: Record<Exclude<LineageKind, "ExternalMcpConnectionSet">, Descriptor> = {
   MeetingAudioAsset: direct("MeetingAudioAsset", "meetingAudioAsset"),
   NativeTranscriptInput: direct("NativeTranscriptInput", "nativeTranscriptInput"),
   CommunicationMessageNativeInput: direct("CommunicationMessageNativeInput", "communicationMessageNativeInput"),
   GenericDerivedArtifactVariant: direct("GenericDerivedArtifactVariant", "genericDerivedArtifactVariant"),
   ExternalProviderFetchInput: direct("ExternalProviderFetchInput", "externalProviderFetchInput"), ExternalContentSource: direct("ExternalContentSource", "externalContentSource"),
+  ExternalMcpResponseInput: direct("ExternalMcpResponseInput", "externalMcpResponseInput"),
   FinanceReport: direct("FinanceReport", "financeReport"),
   FinanceReportFact: direct("FinanceReportFact", "financeReportFact"),
   FinanceImportApplication: direct("FinanceImportApplication", "financeImportApplication"),
@@ -91,7 +92,7 @@ const LOADERS: Record<LineageKind, Descriptor> = {
   ArtifactInputSnapshot: direct("ArtifactInputSnapshot", "artifactInputSnapshot"),
 };
 
-const NATIVE_INPUTS = new Set<LineageKind>(["NativeTranscriptInput", "CommunicationMessageNativeInput", "ExternalProviderFetchInput", "FinanceReportUploadInput", "CrmQualificationFormInput", "McpToolInput", "Workspace", "Member", "User", "RoleAssignment", "CircleAgentAssignment",
+const NATIVE_INPUTS = new Set<LineageKind>(["NativeTranscriptInput", "CommunicationMessageNativeInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "McpToolInput", "Workspace", "Member", "User", "RoleAssignment", "CircleAgentAssignment",
   "ConversationIngressInput", "DemoLeadIntakeInput", "CrmQualificationEmailInput", "CommunicationChannel", "ConversationPromptInput", "AgentRequestInput", "AgentFeedbackInput", "ModelUsageBudget", "ModelUsageCost", "ApprovalPolicy", "CrmDealStageTransition",
   "TensionUpvote", "ArtifactInputSnapshot"]);
 export const SOURCE_LINEAGE_BACKFILL_KINDS = (Object.keys(LOADERS) as LineageKind[]).filter((kind) => !NATIVE_INPUTS.has(kind));
@@ -111,7 +112,7 @@ export type SourceLineageBackfillEntry = LineageInput & {
 };
 type Inspected = { entry: SourceLineageBackfillEntry; row?: Row; roots?: LineageRoot[]; latest?: { revision: number; origin: string; contentHash: string } | null };
 
-function descriptor(kind: LineageKind) { return Object.hasOwn(LOADERS, kind) ? LOADERS[kind] : undefined; }
+function descriptor(kind: LineageKind) { return Object.hasOwn(LOADERS, kind) ? LOADERS[kind as keyof typeof LOADERS] : undefined; }
 function delegate(db: Db, info: Descriptor) { return (db as unknown as Record<string, Delegate>)[info.delegate]!; }
 function rowQuery(info: Descriptor, workspaceId: string, id?: string) {
   return { where: { AND: [info.scope(workspaceId), ...(id === undefined ? [] : [{ id }])] }, ...(info.select ? { select: info.select } : {}), ...(info.include ? { include: info.include } : {}) };

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { KnowledgeAccessDomain, KnowledgeSourceType, Prisma } from "@prisma/client";
 import { getSharedStateBackend, prisma, type AppActor } from "@corgtex/shared";
 import { assertArtifactInputWriteFence, captureArtifactInputProof, captureImmutableArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, readableArtifactIds, recordArtifactInputLineage, requireWorkspaceMembership, scanSourceReadableRecords, type LineageKind, type LineageRoot } from "@corgtex/domain";
@@ -287,7 +288,17 @@ export async function syncKnowledgeForSource(params: {
       },
     });
     await tx.knowledgeChunk.createMany({ data: chunkRows });
-    for (const row of chunkRows) {
+    // JSONB normalizes object key order. Attest the persisted full rows rather
+    // than the pre-insert projection, while rejecting any changed output bytes.
+    const insertedRows = await tx.knowledgeChunk.findMany({ where: {
+      workspaceId: params.workspaceId, id: { in: chunkRows.map(row => row.id) },
+    } });
+    const intendedRows = new Map<string, typeof chunkRows[number]>(chunkRows.map(row => [row.id, row]));
+    if (insertedRows.length !== chunkRows.length || insertedRows.some(row =>
+      !isDeepStrictEqual(row, intendedRows.get(row.id)))) {
+      throw Object.assign(new Error("Persisted knowledge output differs from the generated chunks."), { code: "SOURCE_CHANGED" });
+    }
+    for (const row of insertedRows) {
       await recordArtifactInputLineage({ tx, actor: sourceActor, workspaceId: params.workspaceId,
         artifact: { kind: "KnowledgeChunk", id: row.id }, content: row, origin: "DERIVED", inputs: [], inheritedRoots: sourceRoots });
     }
@@ -298,7 +309,7 @@ export async function syncKnowledgeForSource(params: {
     // PostgreSQL cache invalidation commits with its source rows. A failure must
     // roll both back instead of leaving cached results after a committed change.
     if (getSharedStateBackend() === "postgres") await invalidateKnowledgeCache(params.workspaceId, tx);
-    return captureArtifactInputProof(sourceActor, params.workspaceId, chunkRows.map(row => ({ kind: "KnowledgeChunk" as const, id: row.id, snapshot: row })), tx);
+    return captureArtifactInputProof(sourceActor, params.workspaceId, insertedRows.map(row => ({ kind: "KnowledgeChunk" as const, id: row.id, snapshot: row })), tx);
   });
   if (!persisted) return 0;
 

@@ -1,7 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import { env } from "./env";
 import { getSupportAuthorizationContext } from "./support-context";
-import { getMcpOrigin, assertMcpOriginActive } from "./mcp-context";
+import { getMcpOrigin, assertMcpOriginActiveAdvisory } from "./mcp-context";
 
 const createClient = () => {
   const client = new PrismaClient({
@@ -21,9 +21,9 @@ const createClient = () => {
     const runQuery = async () => {
       // This is an immediate live check, not an authorization grant or a replacement
       // for transactional writer fences. A postcheck cannot undo an autocommit write.
-      if (guardedMutation) await assertMcpOriginActive(client, mcpOrigin, mcpOrigin.workspaceId);
+      if (guardedMutation) await assertMcpOriginActiveAdvisory(client, mcpOrigin, mcpOrigin.workspaceId);
       const result = await query(args);
-      if (guardedMutation) await assertMcpOriginActive(client, mcpOrigin, mcpOrigin.workspaceId);
+      if (guardedMutation) await assertMcpOriginActiveAdvisory(client, mcpOrigin, mcpOrigin.workspaceId);
       return result;
     };
     if (mcpOrigin && ["Event", "WorkflowJob"].includes(model)
@@ -39,7 +39,7 @@ const createClient = () => {
         const workspaceId = row.workspaceId ?? row.workspace?.connect?.id
           ?? (["update", "updateMany"].includes(operation) || row === params.args.update ? mcpOrigin.workspaceId : undefined);
         if (typeof workspaceId !== "string") throw new Error("MCP_AUTHORIZATION_REVOKED");
-        await assertMcpOriginActive(client, mcpOrigin, workspaceId);
+        await assertMcpOriginActiveAdvisory(client, mcpOrigin, workspaceId);
         row.mcpOrigin = mcpOrigin;
       }
     }

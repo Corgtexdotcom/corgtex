@@ -978,7 +978,7 @@ describe("Brain discussions with actual complete lineage receipts", () => {
     vi.clearAllMocks();
     source = await vi.importActual<typeof import("./source-lineage")>("./source-lineage");
     const mocked = await import("./source-lineage");
-    for (const name of ["readableArtifactIds", "recordArtifactInputLineage", "currentArtifactInputRoots", "captureArtifactInputSnapshotProof"] as const) vi.mocked(mocked[name]).mockImplementation(source[name] as any);
+    for (const name of ["readableArtifactIds", "recordArtifactInputLineage", "copyArtifactInputLineage", "currentArtifactInputRoots", "captureArtifactInputSnapshotProof"] as const) vi.mocked(mocked[name]).mockImplementation(source[name] as any);
     for (const name of ["brainArticle", "brainArticleVersion", "auditLog", "brainSource", "brainDiscussionThread", "brainDiscussionComment", "member", "user", "action", "artifactInputLineage", "artifactInputSnapshot"]) {
       rows[name] = [];
       const delegate: any = (prismaMock as any)[name];
@@ -1085,6 +1085,25 @@ describe("Brain discussions with actual complete lineage receipts", () => {
     expect(await source.readableArtifactIds(ownerActor, "ws-1", "BrainArticleVersion", rows.brainArticleVersion)).toEqual(new Set());
     expect(JSON.stringify(rows.artifactInputLineage.filter((row) => row.artifactType === "BrainArticle").at(-1).rootsJson)).not.toContain(sourceA.id);
     expect(prismaMock.artifactInputSnapshot.create).not.toHaveBeenCalled();
+  });
+  it("preserves an original history body independently of the next edit's sources", async () => {
+    const { updateArticle } = await import("./brain");
+    rows.member.find(row => row.id === "mem-1").role = "ADMIN";
+    const input = { id: "new-edit-source", workspaceId: "ws-1", sourceType: "CONVERSATION", accessDomain: "WORKSPACE",
+      tier: 1, title: "New source", content: "New contributed content", channel: null, metadata: {}, archivedAt: null, createdAt: timestamp };
+    rows.brainSource.push(input);
+    await source.recordArtifactInputLineage({ tx: prismaMock as any, actor: ownerActor, workspaceId: "ws-1",
+      artifact: { kind: "BrainSource", id: input.id }, content: input, origin: "HUMAN_ORIGINAL", inputs: [] });
+    const roots = await source.captureArtifactInputProof(ownerActor, "ws-1", [{ kind: "BrainSource", id: input.id }], prismaMock as any);
+    await updateArticle(ownerActor, { workspaceId: "ws-1", slug: "original", bodyMd: input.content,
+      sourceIds: [input.id], additionalInputRoots: roots, changeSummary: "New edit's source text", agentRunId: "new-edit-run" });
+    const version = rows.brainArticleVersion[0];
+    expect(version).toMatchObject({ bodyMd: "Original article body", changeSummary: null, agentRunId: null });
+    expect(rows.artifactInputLineage.filter(row => row.artifactType === "BrainArticleVersion").at(-1))
+      .toMatchObject({ origin: "HUMAN_ORIGINAL", rootsJson: [], inputsJson: [] });
+    input.archivedAt = new Date("2026-10-13T00:00:00Z") as any;
+    expect(await source.readableArtifactIds(otherActor, "ws-1", "BrainArticle", rows.brainArticle)).toEqual(new Set());
+    expect(await source.readableArtifactIds(otherActor, "ws-1", "BrainArticleVersion", [version])).toEqual(new Set([version.id]));
   });
   it("writes original human thread and first comment atomically with empty-input receipts", async () => {
     const thread = await originalThread();

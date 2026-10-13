@@ -69,7 +69,8 @@ const INPUT_TABLES: Readonly<Partial<Record<string, string>>> = {
 };
 function hash(value: unknown) { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
 function rootSignature(roots: readonly LineageRoot[]) {
-  return roots.map(({ kind, id, fingerprint }) => [kind, id, fingerprint]).sort((left, right) =>
+  // Restored permissions require a fresh recipe even when source bytes match.
+  return roots.map(({ kind, id, fingerprint, permissionEpochs }) => [kind, id, fingerprint, permissionEpochs ?? null]).sort((left, right) =>
     JSON.stringify(left).localeCompare(JSON.stringify(right)));
 }
 function stateSignature(states: Record<string, string>) {

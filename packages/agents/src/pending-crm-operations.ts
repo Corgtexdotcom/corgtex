@@ -373,9 +373,22 @@ export async function createPendingCrmOperation(params: { ctx: PendingOperationC
   }
 }
 
-export async function findCrmPendingOperationForIntent(ctx: PendingOperationContext, intent: PendingOperationIntent) {
+/** Scope admission uses only owner-bound control metadata. Arguments and
+ * results stay behind the exact tool's operation and source-permission gates. */
+export async function peekCrmPendingOperationForIntent(ctx: PendingOperationContext, intent: PendingOperationIntent,
+  allowedToolNames: readonly string[]) {
   await requireContext(ctx);
-  const row = await prisma.conversationPendingOperation.findFirst({ where: { ...ownedWhere(ctx), ...(intent.pendingOperationId ? { id: intent.pendingOperationId } : {}) },
+  const row = await prisma.conversationPendingOperation.findFirst({ where: { ...ownedWhere(ctx),
+    toolName: { in: [...allowedToolNames] }, ...(intent.pendingOperationId ? { id: intent.pendingOperationId } : {}) },
+    select: { id: true, status: true, toolName: true }, orderBy: { createdAt: "desc" } });
+  return row && allowedToolNames.includes(row.toolName) ? { id: row.id, status: row.status, toolName: row.toolName } : null;
+}
+
+export async function findCrmPendingOperationForIntent(ctx: PendingOperationContext, intent: PendingOperationIntent,
+  expectedToolName?: string) {
+  await requireContext(ctx);
+  const row = await prisma.conversationPendingOperation.findFirst({ where: { ...ownedWhere(ctx),
+    ...(expectedToolName ? { toolName: expectedToolName } : {}), ...(intent.pendingOperationId ? { id: intent.pendingOperationId } : {}) },
     orderBy: { createdAt: "desc" } }) as PendingOperationRecord | null;
   return row ? view(ctx, row) : null;
 }

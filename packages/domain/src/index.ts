@@ -1,3 +1,5 @@
+export * from "./agent-operation-capabilities";
+export * from "./agent-operation-authorization";
 export * from "./actions";
 export * from "./action-duplicates";
 export * from "./agent-auth";
@@ -23,6 +25,9 @@ export * from "./brain-derivation";
 export * from "./brain-removal-gate";
 export * from "./brain-source-impact";
 export * from "./brain-source-removal";
+export { getBrainSourceRemovalOutcomeInputReceipt, getBrainSourceRemovalOutcomeInputRoots } from "./brain-source-removal-outcome";
+export { getExternalMcpResponseInputRoots } from "./external-mcp-response-input";
+export { getActionCompletionOutcomeInputReceipt, getActionCompletionOutcomeInputRoots } from "./action-completion";
 export * from "./brain-article-removal";
 export * from "./brain-access";
 export * from "./source-lineage";

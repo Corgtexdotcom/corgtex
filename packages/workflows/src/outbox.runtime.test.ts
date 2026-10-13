@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mcpScopesHash } from "../../shared/src/mcp-context";
 import { getNextPollIntervalMs, getWorkerPollOutcome } from "../../../apps/worker/src/polling";
 
 const {
@@ -71,6 +72,7 @@ const {
   },
   txMock: {
     $queryRaw: vi.fn(),
+    mcpOAuthAccessToken: { findUnique: vi.fn() },
     workflowJob: {
       upsert: vi.fn(),
       createMany: vi.fn(),
@@ -266,14 +268,27 @@ describe("runPendingJobs", () => {
   it.each([null, { workspaceId: "ws-1", revokedAt: new Date(), client: { isActive: true } },
     { workspaceId: "foreign", revokedAt: null, client: { isActive: true } },
     { workspaceId: "ws-1", revokedAt: null, client: { isActive: false } }])("rejects disconnected MCP provenance before the actual worker handler %j", async token => {
-    prismaMock.mcpOAuthAccessToken.findUnique.mockResolvedValue(token);
+    const current = token && { ...token, scopes: ["workspace:read"], refreshExpiresAt: null };
+    prismaMock.mcpOAuthAccessToken.findUnique.mockResolvedValue(current);
+    txMock.mcpOAuthAccessToken.findUnique.mockResolvedValue(current);
     txMock.$queryRaw.mockResolvedValueOnce([{ id: "mcp-job", workspaceId: "ws-1", type: "agent.meeting-summary",
-      payload: { meetingId: "meeting-1" }, attempts: 1, mcpOrigin: { kind: "oauth", id: "connection-A", workspaceId: "ws-1" } }]);
+      payload: { meetingId: "meeting-1" }, attempts: 1, mcpOrigin: { kind: "oauth", id: "connection-A", workspaceId: "ws-1",
+        scopeHash: mcpScopesHash(["workspace:read"]), grantEpoch: "0" } }]).mockResolvedValue([{ epoch: 0n }]);
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
     expect(runAgentWorkflowJobMock).not.toHaveBeenCalled();
     expect(recordMeetingTranscriptProcessingStageMock).not.toHaveBeenCalled();
     expect(prismaMock.workflowJob.update).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: "mcp-job" }, data: expect.objectContaining({ status: "FAILED" }),
+    }));
+  });
+  it("rejects a queued OAuth origin that predates the grant epoch", async () => {
+    txMock.$queryRaw.mockResolvedValueOnce([{ id: "legacy-mcp-job", workspaceId: "ws-1", type: "agent.meeting-summary",
+      payload: { meetingId: "meeting-1" }, attempts: 1, mcpOrigin: { kind: "oauth", id: "connection-A", workspaceId: "ws-1",
+        scopeHash: mcpScopesHash(["workspace:read"]) } }]);
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+    expect(runAgentWorkflowJobMock).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "legacy-mcp-job" }, data: expect.objectContaining({ status: "FAILED" }),
     }));
   });
   it.each([null, { isActive: false, role: "FULL", version: 1 }, { isActive: true, role: "SETUP", version: 1 },

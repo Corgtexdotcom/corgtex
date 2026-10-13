@@ -33,6 +33,7 @@ import {
   createAction,
   actionRequestSource,
   updateAction,
+  completeAction,
   returnActionToDraft,
   deleteAction,
   listTensions,
@@ -745,7 +746,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     return withMcpRequiredScopes(prisma, sessionCtx.mcpOrigin, scopes, work);
   };
   const tool = (name: string, description: string, inputSchema: Record<string, unknown>, handler: unknown) => {
-    if (!hasToolCapability(name)) throw new Error("MCP_UNKNOWN_TOOL_CAPABILITY");
+    if (!hasToolCapability(name)) throw new AppError(403, "AGENT_OPERATION_UNDECLARED", "This operation is unavailable to agent credentials.");
     const guardedHandler = typeof handler === "function"
       ? async (...args: unknown[]) => {
         return withLiveMcpScopes(TOOL_CAPABILITIES[name].scopes, async () => {
@@ -760,7 +761,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
             } else {
               await auditToolExecution(name, args[0], result);
             }
-            return name === "archive_tool_link" ? jsonResult(result) : result;
+            return name === "archive_tool_link" || name === "complete_action" ? jsonResult(result) : result;
           } catch (error) {
             await auditToolExecution(name, args[0], null, error);
             throw error;
@@ -808,6 +809,9 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         agentKey: "mcp-assistant",
         userMessage: message,
         actor,
+        operationScopes: actor.kind === "agent" && actor.authProvider === "bootstrap"
+          ? undefined
+          : Object.freeze([...(sessionCtx.scopes ?? [])]),
       });
       return jsonResult({ assistantMessage: result.assistantMessage });
     },
@@ -2959,20 +2963,15 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "complete_action",
-    "Mark an action as COMPLETED with a required completion note. Convenience wrapper around update_action.",
+    "Mark an action as COMPLETED with a required completion note. Returns only the committed completion status.",
     {
       actionId: z.string(),
       completedVia: z.string().describe("Required note explaining how the action was completed"),
     },
     async ({ actionId, completedVia }: { actionId: string; completedVia: string }) => {
       requireScope(sessionCtx, "actions:write");
-      const updated = await updateAction(actor, { workspaceId, actionId, status: "COMPLETED", completedVia });
-      return jsonResult({
-        id: updated.id,
-        status: updated.status,
-        version: updated.version,
-        webUrl: webUrl(workspaceId, `/actions/${updated.id}`),
-      });
+      const updated = await completeAction(actor, { workspaceId, actionId, completedVia });
+      return updated;
     },
   );
 

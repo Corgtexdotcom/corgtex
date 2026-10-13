@@ -814,6 +814,7 @@ model Workspace {
   externalMcpConnections         ExternalMcpConnection[]
   externalContentSources         ExternalContentSource[]
   externalProviderFetchInputs    ExternalProviderFetchInput[]
+  externalMcpResponseInputs      ExternalMcpResponseInput[]
   genericDerivedArtifactVariants GenericDerivedArtifactVariant[]
   derivedArtifactRebuildStates DerivedArtifactRebuildState[]
   sourcePermissionEpochs SourcePermissionEpoch[]
@@ -6525,6 +6526,7 @@ model ConversationOperationOutcome {
   operation String
   requestKey String
   requiredScopes String[]
+  controlJson Json?
   createdAt DateTime @default(now())
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   @@unique([workspaceId, requestKey])
@@ -6590,6 +6592,29 @@ model ExternalProviderFetchInput {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   @@index([workspaceId, externalContentSourceId], map: "ExternalProviderFetchInput_workspaceId_externalContentSourceId_")
   @@index([workspaceId, connectionId])
+}
+
+// Complete authenticated live MCP read results, before normalization or limits.
+model ExternalMcpResponseInput {
+  id String @id @default(uuid())
+  workspaceId String
+  connectionId String
+  localUserId String
+  providerKey String
+  serverUrl String
+  providerAccountId String?
+  mode String
+  toolName String
+  requestJson Json
+  encryptedResponseJson String @db.Text
+  responseHash String @db.VarChar(64)
+  connectionGrantHash String @db.VarChar(64)
+  originalLocalEpochsJson Json
+  fetchedAt DateTime @default(now())
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, connectionId, fetchedAt])
+  @@index([workspaceId, localUserId, fetchedAt])
 }
 
 // Immutable owner-specific graph bundles contain fresh identities and complete permitted input receipts.

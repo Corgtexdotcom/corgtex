@@ -8,6 +8,17 @@ import { invalidateKnowledgeCache } from "./retrieval";
 // Native source fixtures mirror the canonical writer input unless a regression
 // explicitly supplies an archived, replaced, or changed database row.
 const sourceSnapshots = new Map<string, any>();
+const storedChunks = new Map<string, any>();
+function mockChunkReads(fallback: any[] | ((args: any) => Promise<any[]>)) {
+  vi.mocked(prisma.knowledgeChunk.findMany).mockImplementation((async (args: any) => {
+    const persisted = [...storedChunks.values()].filter(row => Object.entries(args.where ?? {}).every(([field, value]: [string, any]) =>
+      value && typeof value === "object" && "in" in value ? value.in.includes(row[field]) : row[field] === value));
+    // Exact inserted IDs are authoritative full SQL rows, never old count projections.
+    if (args.where?.id?.in) return structuredClone(persisted);
+    const prior = typeof fallback === "function" ? await fallback(args) : fallback;
+    return structuredClone([...new Map([...prior, ...persisted].map(row => [row.id ?? row.sourceId, row])).values()]);
+  }) as any);
+}
 async function syncKnowledgeForSource(params: Parameters<typeof syncKnowledgeForSourceImpl>[0]) {
   sourceSnapshots.set(params.sourceId, { id: params.sourceId, workspaceId: params.workspaceId,
     title: params.sourceTitle?.trim() || null, textContent: params.content, bodyMd: params.content,
@@ -69,6 +80,23 @@ vi.mock("@corgtex/domain", async (importOriginal) => {
   };
 });
 vi.mock("./counts", () => ({ countReadableKnowledgeChunks: vi.fn(async () => (prisma as any).knowledgeChunk.count()) }));
+
+beforeEach(() => {
+  storedChunks.clear();
+  vi.mocked(prisma.knowledgeChunk.createMany).mockImplementation((async ({ data }: any) => {
+    const rows = Array.isArray(data) ? data : [data];
+    for (const row of rows) storedChunks.set(row.id, structuredClone(row));
+    return { count: rows.length };
+  }) as any);
+  vi.mocked(prisma.knowledgeChunk.deleteMany).mockImplementation((async ({ where }: any) => {
+    let count = 0;
+    for (const [id, row] of storedChunks) if (Object.entries(where ?? {}).every(([key, value]) => row[key] === value)) {
+      storedChunks.delete(id); count++;
+    }
+    return { count };
+  }) as any);
+  mockChunkReads([]);
+});
 
 describe("Workspace Indexing Health", () => {
   beforeEach(() => {
@@ -273,7 +301,7 @@ describe("syncKnowledgeForSource", () => {
     const oldStarted = new Promise<void>((resolve) => { signalOldStarted = resolve; });
     const oldRelease = new Promise<void>((resolve) => { releaseOld = resolve; });
     let current: any[] = [];
-    vi.mocked(prisma.knowledgeChunk.findMany).mockImplementation((async () => current) as any);
+    mockChunkReads(async () => current);
     syncAzureKnowledgeSourceMock.mockImplementation(async (input) => {
       if (input.chunks[0]?.content === "Old policy") {
         signalOldStarted();
@@ -351,7 +379,7 @@ describe("Workspace Reindex", () => {
     } as any);
 
     // a1 is chunked, a2 and d1 are not
-    vi.mocked(prisma.knowledgeChunk.findMany).mockImplementation((async (args: any) => {
+    mockChunkReads(async (args: any) => {
       const condition = args as any;
       if (condition.where?.sourceType === "BRAIN_ARTICLE") {
         return [{ sourceId: "a1", metadata: { sourceContentHash: lineageContentFingerprint("BrainArticle", {
@@ -359,7 +387,7 @@ describe("Workspace Reindex", () => {
         }) } } as any];
       }
       return []; // No documents chunked
-    }) as any);
+    });
 
     sourceSnapshots.set("a2", { id: "a2", workspaceId: "ws_1", title: "Article 2", bodyMd: "Body 2", type: "PROCESS", authority: "DRAFT", slug: "a-2" });
     sourceSnapshots.set("d1", { id: "d1", workspaceId: "ws_1", title: "Doc 1", textContent: "Text 1", accessDomain: "FINANCE", source: "API", mimeType: "text/plain", storageKey: "d1.txt" });
@@ -513,7 +541,7 @@ describe("knowledge indexing source revision receipts", () => {
     vi.mocked(prisma.brainArticle.findMany).mockResolvedValue([row] as any);
     vi.mocked(prisma.brainArticle.findUnique).mockResolvedValue(row as any);
     vi.mocked(prisma.document.findMany).mockResolvedValue([]);
-    vi.mocked(prisma.knowledgeChunk.findMany).mockResolvedValue([{ sourceId: row.id, metadata: {} }] as any);
+    mockChunkReads([{ sourceId: row.id, metadata: {} }]);
     expect(await reindexWorkspace("ws_1")).toMatchObject({ reindexedArticles: 1, errors: [] });
     expect(prisma.knowledgeChunk.createMany).toHaveBeenCalled();
   });

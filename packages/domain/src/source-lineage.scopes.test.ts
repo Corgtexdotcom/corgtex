@@ -45,7 +45,7 @@ vi.mock("../../shared/src/env", () => ({ env: { ENCRYPTION_KEY: "a".repeat(64) }
 vi.mock("./auth", () => ({ requireWorkspaceMembership: f.authorize }));
 vi.mock("./finance", () => ({ getFinanceAccessPolicy: async () => ({ canRead: false }) }));
 
-import { mcpCredentialVersion, mcpScopesHash, runWithMcpOrigin } from "../../shared/src/mcp-context";
+import { captureMcpOAuthGrantEpoch, mcpCredentialVersion, mcpScopesHash, runWithMcpOrigin } from "../../shared/src/mcp-context";
 import { captureArtifactInputProof, captureArtifactInputSnapshotProof, isArtifactInputProofReadable,
   recordArtifactInputLineage, type LineageKind, type LineageRoot } from "./source-lineage";
 import { createConversationIngressInput } from "./conversation-ingress";
@@ -61,6 +61,14 @@ function grant(id: string, scopes: string[], workspaceId = "ws-a") {
 function actorFor(row: any): AppActor {
   return { kind: "agent", authProvider: "credential", credentialId: row.id, credentialVersion: mcpCredentialVersion(row.tokenHash),
     label: "Synthetic current grant", workspaceIds: [row.workspaceId], scopes: [...row.scopes] };
+}
+function oauth(id: string, scopes: string[], userId = "owner", workspaceId = "ws-a") {
+  const row = f.insert("mcpOAuthAccessToken", { id, workspaceId, userId, scopes: [...scopes], revokedAt: null,
+    client: { isActive: true }, refreshExpiresAt: new Date("2099-01-01") });
+  return { row, run: async <T>(work: () => Promise<T>) => {
+    const grantEpoch = await captureMcpOAuthGrantEpoch(f.db, workspaceId, id);
+    return runWithMcpOrigin({ kind: "oauth", id, workspaceId, scopeHash: mcpScopesHash(row.scopes), grantEpoch }, work);
+  } };
 }
 async function original(kind: "BrainArticle" | "Action", id: string, workspaceId = "ws-a", isPrivate = false) {
   const row = f.insert(kind === "Action" ? "action" : "brainArticle", { id, workspaceId, title: "Synthetic original", bodyMd: "Synthetic original body",
@@ -83,7 +91,8 @@ beforeEach(() => {
   installSourcePermissionEpochFixture(f.db);
   f.base.$transaction.mockImplementation(async work => {
     const before = structuredClone(f.tables);
-    try { return await work(f.db); } catch (error) { f.tables.clear(); for (const [name, rows] of before) f.tables.set(name, rows); throw error; }
+    const tx = new Proxy(f.db, { get(target, property) { return property === "$transaction" ? undefined : target[property]; } });
+    try { return await work(tx); } catch (error) { f.tables.clear(); for (const [name, rows] of before) f.tables.set(name, rows); throw error; }
   });
 });
 
@@ -136,6 +145,14 @@ describe("closed credential source families with actual lineage checks", () => {
     expect(await isArtifactInputProofReadable(actorFor(row), "ws-a", roots, f.db)).toBe(false);
   });
 
+  it("binds a completion note even when a raw mutation leaves timestamps unchanged", async () => {
+    const action = await original("Action", "completion-note-fingerprint");
+    const roots = await proof(owner, "ws-a", "Action", action.id);
+    expect(await isArtifactInputProofReadable(owner, "ws-a", roots, f.db)).toBe(true);
+    action.completedVia = "Synthetic changed completion note";
+    expect(await isArtifactInputProofReadable(owner, "ws-a", roots, f.db)).toBe(false);
+  });
+
   it.each(["scope-hash", "token-rotation", "deleted-grant"] as const)("withholds a paused cached proof after %s changes", async change => {
     const article = await original("BrainArticle", "cached");
     const { row, actor } = grant("credential-a", ["brain:read", "tools:write"]);
@@ -172,4 +189,68 @@ describe("closed credential source families with actual lineage checks", () => {
     row.scopes = ["brain:read"];
     expect(await isArtifactInputProofReadable(actorFor(row), "ws-a", roots, f.db)).toBe(false);
   });
+});
+
+describe("OAuth consent at every contributing source", () => {
+  it.each(["actions:read", "brain:read"])("withholds Action-derived graph content until %s is consented", async scope => {
+    const action = await original("Action", "oauth-action");
+    const graph = await copiedGraph("oauth-graph", "Action", action);
+    const grant = oauth("oauth-a", ["context-graph:read"]);
+    await grant.run(async () => {
+      await expect(proof(owner, "ws-a", "ContextGraphObject", graph.id)).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    });
+    grant.row.scopes.push(scope);
+    expect(await grant.run(() => proof(owner, "ws-a", "ContextGraphObject", graph.id)))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ kind: "Action", id: action.id })]));
+  });
+
+  it("requires the Finance source scope even for a workspace administrator", async () => {
+    const budget = f.insert("modelUsageBudget", { id: "budget", workspaceId: "ws-a", monthlyBudgetCents: 100 });
+    const graph = await copiedGraph("finance-graph", "ModelUsageBudget", budget);
+    const grant = oauth("oauth-finance", ["context-graph:read", "brain:read"]);
+    await grant.run(async () => {
+      await expect(proof(owner, "ws-a", "ContextGraphObject", graph.id)).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    });
+    grant.row.scopes.push("finance:read");
+    expect(await grant.run(() => proof(owner, "ws-a", "ContextGraphObject", graph.id)))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ kind: "ModelUsageBudget", id: budget.id })]));
+  });
+
+  it("checks an immutable snapshot's original source scope", async () => {
+    const action = await original("Action", "oauth-snapshot");
+    const roots = await captureArtifactInputSnapshotProof(owner, "ws-a", { kind: "Action", id: action.id }, f.db);
+    const grant = oauth("oauth-a", ["context-graph:read"]);
+    expect(await grant.run(() => isArtifactInputProofReadable(owner, "ws-a", roots, f.db))).toBe(false);
+    grant.row.scopes.push("actions:read");
+    expect(await grant.run(() => isArtifactInputProofReadable(owner, "ws-a", roots, f.db))).toBe(true);
+  });
+
+  it("binds the token to its actual user and workspace, without widening ordinary web reads", async () => {
+    const article = await original("BrainArticle", "oauth-article");
+    const other = await original("BrainArticle", "oauth-other", "ws-b");
+    const grant = oauth("oauth-a", ["brain:read"]);
+    const beta: AppActor = { kind: "user", user: { id: "beta", email: "beta@example.test", displayName: "Beta" } };
+    expect(await grant.run(() => proof(owner, "ws-a", "BrainArticle", article.id))).toHaveLength(1);
+    await grant.run(async () => {
+      await expect(proof(beta, "ws-a", "BrainArticle", article.id)).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+      await expect(proof(owner, "ws-b", "BrainArticle", other.id)).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    });
+    expect(await proof(beta, "ws-a", "BrainArticle", article.id)).toHaveLength(1);
+  });
+
+  it.each(["revoke", "client-disable", "scope-change", "delete", "refresh-expiry"] as const)(
+    "withholds previously captured content after OAuth %s", async change => {
+      const article = await original("BrainArticle", "oauth-cached");
+      const grant = oauth("oauth-a", ["brain:read"]);
+      await grant.run(async () => {
+        const roots = await proof(owner, "ws-a", "BrainArticle", article.id);
+        if (change === "revoke") grant.row.revokedAt = new Date();
+        else if (change === "client-disable") grant.row.client.isActive = false;
+        else if (change === "scope-change") grant.row.scopes = ["context-graph:read"];
+        else if (change === "delete") f.tables.get("mcpOAuthAccessToken")!.delete(grant.row.id);
+        else grant.row.refreshExpiresAt = new Date("2000-01-01");
+        expect(await isArtifactInputProofReadable(owner, "ws-a", roots, f.db)).toBe(false);
+      });
+    },
+  );
 });

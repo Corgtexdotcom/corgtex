@@ -4,8 +4,10 @@ import { prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { brainSourceContentFingerprint } from "./brain-derivation";
 import { confirmBrainArticleRemoval, previewBrainArticleRemoval } from "./brain-article-removal";
-import { generateBrainSourceRemovalCandidate, resolveBrainSourceRemoval, retryBrainSourceRemoval } from "./brain-source-removal";
+import { generateBrainSourceRemovalCandidate, requestBrainSourceRemoval, resolveBrainSourceRemoval, retryBrainSourceRemoval } from "./brain-source-removal";
 import { archiveWorkspaceArtifact } from "./archive";
+import { rebuildDocumentBrainSource } from "./document-source-rebuild";
+import { generateBrainArticleVariant, getReadableBrainArticleVariant, requestBrainArticleVariant } from "./brain-article-variants";
 import { advanceHumanArtifactInputLineage, recordArtifactInputLineage } from "./source-lineage";
 
 async function fixture(sourceRemovalEnabled = true) {
@@ -175,10 +177,6 @@ describe("confirmed Brain article removal", () => {
     await attestArticle(admin, article);
     await expect(previewBrainArticleRemoval(outsider, { workspaceId: workspace.id, slug: article.slug }))
       .rejects.toMatchObject({ status: 403, code: "NOT_A_MEMBER" });
-    await prisma.brainSource.update({ where: { id: source.id }, data: { accessDomain: "FINANCE" } });
-    await expect(previewBrainArticleRemoval(owner, { workspaceId: workspace.id, slug: article.slug }))
-      .rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
-    await prisma.brainSource.update({ where: { id: source.id }, data: { accessDomain: "WORKSPACE" } });
     const preview = await previewBrainArticleRemoval(owner, { workspaceId: workspace.id, slug: article.slug });
     expect(preview.hasSources).toBe(true);
     expect(preview.canRemoveSources).toBe(false);
@@ -209,6 +207,43 @@ describe("confirmed Brain article removal", () => {
       .rejects.toMatchObject({ status: 403 });
     expect(await prisma.workspaceArchiveRecord.count({ where: { workspaceId: workspace.id } })).toBe(1);
     expect(admin).toBeDefined();
+  });
+
+  it("restores source access through a fresh owner variant while preserving the denied canonical article", async () => {
+    const { workspace, admin, owner, ownerMember } = await fixture();
+    const { document, source } = await sourceWithDocument(admin, workspace.id, "Independent");
+    const article = await prisma.brainArticle.create({ data: { workspaceId: workspace.id, slug: "restored-canonical", title: "Denied old title",
+      type: "PROJECT", bodyMd: "DENIED old composite body", ownerMemberId: ownerMember.id, sourceIds: [source.id] } });
+    await attestArticle(admin, article);
+    const oldManifest = await prisma.artifactInputLineage.findFirstOrThrow({ where: { artifactType: "BrainArticle", artifactId: article.id } });
+    await prisma.brainSource.update({ where: { id: source.id }, data: { accessDomain: "FINANCE" } });
+    await expect(previewBrainArticleRemoval(owner, { workspaceId: workspace.id, slug: article.slug })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await prisma.brainSource.update({ where: { id: source.id }, data: { accessDomain: "WORKSPACE" } });
+    await rebuildDocumentBrainSource(admin, { workspaceId: workspace.id, sourceId: source.id });
+    await expect(previewBrainArticleRemoval(owner, { workspaceId: workspace.id, slug: article.slug })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    const request = await requestBrainArticleVariant(owner, { workspaceId: workspace.id, articleId: article.id });
+    if (request.status !== "pending") throw new Error("Expected a fresh permitted-source variant recipe");
+    await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "RUNNING", attempts: 1, lockedBy: "variant-fixture-worker" } });
+    await expect(generateBrainArticleVariant({ workspaceId: workspace.id, jobId: request.jobId,
+      expectedAttempt: 1, expectedOwner: "variant-fixture-worker", generate: async inputs => {
+        expect(JSON.stringify(inputs)).not.toContain("DENIED old composite body");
+        expect(JSON.stringify(inputs)).not.toContain("Denied old title");
+        expect(inputs.some(input => input.kind === "Document" && input.id === document.id)).toBe(true);
+        return { title: "Fresh permitted variant", bodyMd: "Independent current document facts" };
+      } })).resolves.toMatchObject({ phase: "APPLIED" });
+    const variant = await getReadableBrainArticleVariant(owner, { workspaceId: workspace.id, articleId: article.id });
+    if (!variant) throw new Error("Expected the independently generated private owner variant");
+    expect(variant).toMatchObject({ isPrivate: true, ownerMemberId: ownerMember.id, variantOfArticleId: article.id });
+    const preview = await previewBrainArticleRemoval(owner, { workspaceId: workspace.id, slug: variant.slug });
+    expect(preview).toMatchObject({ article: { id: variant.id }, canRemoveSources: false, hasSources: true });
+    expect(await confirmBrainArticleRemoval(owner, confirmParams(workspace.id, variant.slug, preview.token, "keep_sources")))
+      .toMatchObject({ id: variant.id, pendingJobId: null });
+    await expect(confirmBrainArticleRemoval(owner, confirmParams(workspace.id, variant.slug, preview.token, "keep_sources")))
+      .rejects.toMatchObject({ code: "ALREADY_ARCHIVED" });
+    expect(await prisma.brainArticle.findUniqueOrThrow({ where: { id: article.id } })).toEqual(article);
+    expect(await prisma.artifactInputLineage.findUniqueOrThrow({ where: { id: oldManifest.id } })).toEqual(oldManifest);
+    expect((await prisma.brainSource.findUniqueOrThrow({ where: { id: source.id } })).archivedAt).toBeNull();
+    expect(await prisma.document.findUniqueOrThrow({ where: { id: document.id } })).toEqual(document);
   });
 
   it("removes an article, every representation of its source document, and the document recoverably", async () => {
@@ -284,8 +319,24 @@ describe("confirmed Brain article removal", () => {
     expect((await prisma.document.findUniqueOrThrow({ where: { id: document.id } })).archivedAt).toBeNull();
     expect((await prisma.brainSource.findUniqueOrThrow({ where: { id: removed.id } })).archivedAt).toBeNull();
     expect((await prisma.brainArticle.findUniqueOrThrow({ where: { id: shared.id } })).bodyMd).toBe("Human edited old claims");
+    const rejectedJob = await prisma.workflowJob.findUniqueOrThrow({ where: { id: retried.jobId } });
     await prisma.brainSource.update({ where: { id: removed.id }, data: { metadata: { documentId: document.id } } });
-    await resolveBrainSourceRemoval(admin, { workspaceId: workspace.id, jobId: retried.jobId, decision: "accept" });
+    await expect(resolveBrainSourceRemoval(admin, { workspaceId: workspace.id, jobId: retried.jobId, decision: "accept" }))
+      .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    await rebuildDocumentBrainSource(admin, { workspaceId: workspace.id, sourceId: removed.id });
+    const fresh = await requestBrainSourceRemoval(admin, { workspaceId: workspace.id, sourceId: removed.id, archiveLinkedDocument: true });
+    if (fresh.status !== "pending") throw new Error("Expected a fresh source recipe after restoration");
+    expect(fresh.jobId).not.toBe(retried.jobId);
+    await prisma.workflowJob.update({ where: { id: fresh.jobId }, data: { status: "RUNNING", attempts: 1, lockedBy: "fresh-fixture-worker" } });
+    await expect(generateBrainSourceRemovalCandidate({ workspaceId: workspace.id, jobId: fresh.jobId,
+      expectedAttempt: 1, expectedOwner: "fresh-fixture-worker", generate: async (_article, sources) => {
+        expect(sources.map(source => source.content)).toEqual(["Remaining verified facts"]);
+        return "Verified replacement";
+      } })).resolves.toMatchObject({ phase: "READY" });
+    await prisma.workflowJob.update({ where: { id: fresh.jobId }, data: { status: "COMPLETED" } });
+    await resolveBrainSourceRemoval(admin, { workspaceId: workspace.id, jobId: fresh.jobId, decision: "accept" });
+    const oldPayload = (await prisma.workflowJob.findUniqueOrThrow({ where: { id: retried.jobId } })).payload as Record<string, unknown>;
+    expect(oldPayload).toEqual(rejectedJob.payload);
     expect((await prisma.brainArticle.findUniqueOrThrow({ where: { id: shared.id } })).bodyMd).toBe("Verified replacement");
     expect((await prisma.brainArticleVersion.findFirstOrThrow({ where: { articleId: shared.id } })).bodyMd).toBe("Human edited old claims");
     expect((await prisma.brainSource.findUniqueOrThrow({ where: { id: removed.id } })).archivedAt).toBeInstanceOf(Date);

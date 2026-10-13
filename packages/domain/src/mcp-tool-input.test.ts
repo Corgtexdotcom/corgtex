@@ -85,7 +85,12 @@ import { prepareProducerLineage } from "./producer-lineage";
 const workspaceId = "synthetic-ws-a";
 const alice: AppActor = { kind: "user", user: { id: "synthetic-alice", email: "alice@example.test", displayName: null } };
 const bob: AppActor = { kind: "user", user: { id: "synthetic-bob", email: "bob@example.test", displayName: null } };
-const tx = fixture.prisma as any;
+// A Prisma transaction client has no $transaction method. Keep that shape so
+// OAuth epoch checks retain their lock on this same synthetic connection.
+const tx = new Proxy(fixture.prisma, { get(target, property) {
+  return property === "$transaction" ? undefined : Reflect.get(target, property);
+} }) as any;
+let oauthEpochs: ReturnType<typeof installSourcePermissionEpochFixture>;
 const payload = { title: "Synthetic submitted title", bodyMd: "  Exact synthetic submission\n", nested: { values: [1, true, null] } };
 const params = { workspaceId, toolName: "create_goal", args: payload, requiredScopes: ["goals:write"] };
 function insert(delegate: string, value: { id: string; [key: string]: unknown }) {
@@ -94,8 +99,9 @@ function insert(delegate: string, value: { id: string; [key: string]: unknown })
 }
 function oauth(actor = alice, ws = workspaceId, id = "oauth-alice") {
   const row = insert("mcpOAuthAccessToken", { id, workspaceId: ws, userId: actor.kind === "user" ? actor.user.id : "", revokedAt: null,
-    scopes: ["goals:write", "brain:write"], client: { isActive: true }, refreshExpiresAt: null });
-  return { row, origin: { kind: "oauth" as const, id, workspaceId: ws, scopeHash: mcpScopesHash(row.scopes), requiredScopes: [] } };
+    scopes: ["workspace:read", "goals:write", "brain:write", "brain:read", "tools:read", "conversations:write"], client: { isActive: true }, refreshExpiresAt: null });
+  oauthEpochs.bump(ws, "McpOAuthGrantPolicy", id);
+  return { row, origin: { kind: "oauth" as const, id, workspaceId: ws, scopeHash: mcpScopesHash(row.scopes), grantEpoch: "1", requiredScopes: [] } };
 }
 function credential(id = "credential-a", ws = workspaceId) {
   const row = insert("agentCredential", { id, workspaceId: ws, tokenHash: `synthetic-token-${id}`, scopes: ["goals:write", "brain:write"], isActive: true });
@@ -106,7 +112,7 @@ function inputs() { return [...(fixture.tables.get("mcpToolInput")?.values() ?? 
 
 beforeEach(() => {
   vi.clearAllMocks(); fixture.tables.clear(); fixture.memberships.clear();
-  installSourcePermissionEpochFixture(fixture.prisma);
+  oauthEpochs = installSourcePermissionEpochFixture(fixture.prisma);
   fixture.memberships.set(`${workspaceId}:synthetic-alice`, { id: "member-alice", role: "CONTRIBUTOR" });
   fixture.memberships.set(`${workspaceId}:synthetic-bob`, { id: "member-bob", role: "CONTRIBUTOR" });
   fixture.memberships.set("synthetic-ws-b:synthetic-bob", { id: "member-bob-b", role: "CONTRIBUTOR" });
@@ -118,7 +124,7 @@ beforeEach(() => {
   });
   fixture.base.$transaction.mockImplementation(async (callback) => {
     const prior = structuredClone(fixture.tables);
-    try { return await callback(fixture.prisma); } catch (error) { fixture.tables.clear(); for (const [key, rows] of prior) fixture.tables.set(key, rows); throw error; }
+    try { return await callback(tx); } catch (error) { fixture.tables.clear(); for (const [key, rows] of prior) fixture.tables.set(key, rows); throw error; }
   });
 });
 

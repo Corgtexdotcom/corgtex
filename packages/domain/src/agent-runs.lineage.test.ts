@@ -178,11 +178,11 @@ describe("agent run source lineage", () => {
     const event = { id: "event-1", type: "agent.run.failed", status: "COMPLETED", createdAt: now,
       payload: { result: "Private historical result" }, jobs: [{ id: "job-1", type: "agent.run", status: "FAILED", completedAt: now }] };
     db.auditLog.findMany.mockResolvedValue([audit]); db.event.findMany.mockResolvedValue([event]);
-    expect(await listAuditLogs(actor, "ws-1")).toEqual([{ ...audit, meta: null }]);
-    expect(await getEntityTimeline(actor, "ws-1", "AgentRun", "run-1")).toEqual({ auditLogs: [{ ...audit, meta: null }], relatedEvents: [{ ...event, payload: null }] });
+    expect(await listAuditLogs(actor, "ws-1")).toEqual([]);
+    expect(await getEntityTimeline(actor, "ws-1", "AgentRun", "run-1")).toEqual({ auditLogs: [], relatedEvents: [] });
     expect(audit.meta.prompt).toBe("Private historical prompt");
     expect(event.payload.result).toBe("Private historical result");
-    expect(db.auditLog.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ where: { workspaceId: "ws-1", entityType: "AgentRun", entityId: "run-1" } }));
+    expect(db.event.findMany).not.toHaveBeenCalled();
   });
 
 });

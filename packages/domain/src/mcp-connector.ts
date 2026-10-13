@@ -5,7 +5,7 @@ import { lockWorkspaceMembership, supportCapabilityVersion } from "./workspace-s
 import { validateMcpConsentResource, workspaceFromMcpResource, requireWorkspaceMcpActivation } from "./mcp-resource";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
-import { prisma, randomOpaqueToken, sha256, env } from "@corgtex/shared";
+import { captureMcpOAuthGrantEpoch, prisma, randomOpaqueToken, sha256, env } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { ALL_SCOPES, type AgentScope } from "./agent-auth";
@@ -1094,29 +1094,33 @@ export async function revokeMcpToken(params: {
 }
 
 export async function resolveMcpOAuthAccessToken(tokenString: string, expectedResource?: string | null) {
-  const token = await prisma.mcpOAuthAccessToken.findUnique({
-    where: { tokenHash: sha256(tokenString) },
-    include: {
-      client: true,
-      user: true,
-    },
-  });
-
-  if (!token || token.revokedAt || !token.client.isActive) {
-    return null;
-  }
-  if (new Date() > token.expiresAt) {
-    return null;
-  }
+  const submittedHash = sha256(tokenString);
   const scopedResource = workspaceFromMcpResource(expectedResource ?? "");
-  if ((scopedResource || workspaceFromMcpResource(token.resource ?? "")) && !env.MCP_WORKSPACE_CONNECTIONS_ENABLED) return null;
-  if (scopedResource && (token.workspaceId !== scopedResource || token.resource !== expectedResource)) return null;
-  if (expectedResource && token.resource && !areEquivalentMcpResources(token.resource, expectedResource)) {
-    return null;
-  }
-  if (!getMcpConnectorInstance(token.instanceSlug)) {
-    return null;
-  }
+  const admitted = (row: { workspaceId: string; resource: string | null; instanceSlug: string;
+    revokedAt: Date | null; expiresAt: Date; refreshExpiresAt: Date | null; client: { isActive: boolean } }) =>
+    !row.revokedAt && row.client.isActive && new Date() <= row.expiresAt
+    && (!row.refreshExpiresAt || row.refreshExpiresAt > new Date())
+    && (!(scopedResource || workspaceFromMcpResource(row.resource ?? "")) || env.MCP_WORKSPACE_CONNECTIONS_ENABLED)
+    && (!scopedResource || (row.workspaceId === scopedResource && row.resource === expectedResource))
+    && (!expectedResource || !row.resource || areEquivalentMcpResources(row.resource, expectedResource))
+    && Boolean(getMcpConnectorInstance(row.instanceSlug));
+  const authenticated = await prisma.$transaction(async tx => {
+    const candidate = await tx.mcpOAuthAccessToken.findUnique({
+      where: { tokenHash: submittedHash }, include: { client: true, user: true },
+    });
+    if (!candidate || !admitted(candidate)) return null;
+    // Lock the grant epoch before the authoritative token/client read. An
+    // in-flight revocation must either precede this admission or increment
+    // the captured epoch before the response is released.
+    const grantEpoch = await captureMcpOAuthGrantEpoch(tx, candidate.workspaceId, candidate.id);
+    const token = await tx.mcpOAuthAccessToken.findUnique({ where: { id: candidate.id }, include: { client: true, user: true } });
+    if (!token || token.tokenHash !== submittedHash || token.workspaceId !== candidate.workspaceId
+      || token.userId !== candidate.userId || token.clientId !== candidate.clientId
+      || !admitted(token)) return null;
+    return { token, grantEpoch };
+  });
+  if (!authenticated) return null;
+  const { token, grantEpoch } = authenticated;
   const actor: AppActor = {
       kind: "user" as const,
       user: {
@@ -1136,6 +1140,7 @@ export async function resolveMcpOAuthAccessToken(tokenString: string, expectedRe
   return {
     actor,
     connectionId: token.id,
+    grantEpoch,
     supportGrantVersion: token.supportGrantVersion,
     workspaceId: token.workspaceId,
     scopes: token.scopes,

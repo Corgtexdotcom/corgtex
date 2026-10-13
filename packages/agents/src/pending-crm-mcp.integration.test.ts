@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { mcpScopesHash, prisma, type AppActor } from "@corgtex/shared";
+import { mcpScopesHash, prisma, sha256, type AppActor } from "@corgtex/shared";
 import { runWithSupportOrigin } from "../../shared/src/support-context";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { createCrmAccount } from "../../domain/src/crm";
 import { captureArtifactInputProof, isArtifactInputProofReadable } from "../../domain/src/source-lineage";
+import { listMcpConnectorInstances, resolveMcpOAuthAccessToken } from "../../domain/src/mcp-connector";
 
 const model = vi.hoisted(() => ({ chat: vi.fn(), embed: vi.fn(), rerank: vi.fn() }));
 vi.mock("@corgtex/models", async (importOriginal) => ({
@@ -33,12 +34,18 @@ describe("registered MCP chat with native ingress and actual pending CRM executi
     await prisma.member.create({ data: { workspaceId: workspace.id, userId: user.id, role: "CONTRIBUTOR" } });
     const actor: AppActor = { kind: "user", user: { id: user.id, email: user.email, displayName: null } };
     const account = await createCrmAccount(actor, { workspaceId: workspace.id, name: "Synthetic MCP account" });
-    const scopes = ["conversations:write", "relationships:read", "relationships:write", "brain:read"];
+    const scopes = ["workspace:read", "conversations:write", "relationships:read", "relationships:write", "brain:read"];
     const client = await prisma.mcpOAuthClient.create({ data: { clientId: `synthetic-client-${randomUUID()}`, name: "Synthetic in-process MCP", redirectUris: [], scopes } });
+    const bearer = `mcp_at_${randomUUID()}`;
     const token = await prisma.mcpOAuthAccessToken.create({ data: { clientId: client.id, userId: user.id, workspaceId: workspace.id,
-      instanceSlug: workspace.slug, tokenHash: `synthetic-token-${randomUUID()}`, scopes, expiresAt: new Date(Date.now() + 60 * 60 * 1000) } });
+      instanceSlug: listMcpConnectorInstances()[0]!.slug, tokenHash: sha256(bearer), scopes,
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000) } });
+    const authenticated = await resolveMcpOAuthAccessToken(bearer);
+    expect(authenticated?.connectionId).toBe(token.id);
+    expect(authenticated?.actor.kind).toBe("user");
     const server = createCorgtexMcpServer({ actor, workspaceId: workspace.id, authKind: "oauth", scopes,
-      mcpOrigin: { kind: "oauth", id: token.id, workspaceId: workspace.id, scopeHash: mcpScopesHash(scopes) } });
+      mcpOrigin: { kind: "oauth", id: token.id, workspaceId: workspace.id,
+        scopeHash: mcpScopesHash(scopes), grantEpoch: authenticated!.grantEpoch } });
     const registeredChat = (server as any)._registeredTools.chat.handler as (args: { message: string }) => Promise<any>;
     const args = { title: "Synthetic MCP permitted effect", bodyMd: "Synthetic exact approved body", accountId: account.id };
     model.chat.mockResolvedValueOnce(reply("", [{ id: "synthetic-pending-call", type: "function", function: {

@@ -10,8 +10,8 @@ function createTestServer(create: any, ctx: any) {
   if (!ctx.mcpOrigin && (ctx.authKind === "oauth" || ctx.actor.authProvider === "credential")) {
     const id = `fixture-origin-${liveMcpRows.size}`;
     ctx = { ...ctx, mcpOrigin: { kind: ctx.authKind === "oauth" ? "oauth" : "agent", id, workspaceId: ctx.workspaceId,
-      scopeHash: mcpScopesHash(scopes), ...(ctx.authKind === "agent" ? { credentialVersion: mcpCredentialVersion("fixture-hash") } : {}) } };
-    liveMcpRows.set(id, { id, workspaceId: ctx.workspaceId, scopes, tokenHash: "fixture-hash", isActive: true, client: { isActive: true } });
+      scopeHash: mcpScopesHash(scopes), ...(ctx.authKind === "agent" ? { credentialVersion: mcpCredentialVersion("fixture-hash") } : { grantEpoch: "0" }) } };
+    liveMcpRows.set(id, { id, workspaceId: ctx.workspaceId, userId: ctx.actor.user?.id, grantEpoch: 0n, scopes, tokenHash: "fixture-hash", isActive: true, client: { isActive: true } });
   }
   return create(ctx);
 }
@@ -197,6 +197,7 @@ vi.mock("@corgtex/domain", async () => {
   createArticle: createArticleMock,
   createMeeting: createMeetingMock,
   updateAction: updateActionMock,
+  completeAction: updateActionMock,
   listTensions: listTensionsMock,
   createTension: createTensionMock,
   updateTension: updateTensionMock,
@@ -297,13 +298,21 @@ vi.mock("@corgtex/agents", () => ({
   processConversationTurn: vi.fn(),
 }));
 
-vi.mock("@corgtex/shared", async () => ({
-  ...await import("../../shared/src/mcp-context"),
-  prisma: {
-    mcpOAuthAccessToken: { findUnique: vi.fn(async ({where}) => liveMcpRows.get(where.id) ?? ({ workspaceId: "ws-1", scopes: ["workspace:read", "brain:read"], client: { isActive: true } })) },
+vi.mock("@corgtex/shared", async () => {
+  const db: any = {
+    mcpOAuthAccessToken: { findUnique: vi.fn(async ({where}) => liveMcpRows.get(where.id) ?? null) },
     agentCredential: { findUnique: vi.fn(async ({where}) => liveMcpRows.get(where.id) ?? null) },
     conversationSession: { findFirst: vi.fn(async () => ({id: "stored-mcp-session"})) },
-    $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({})),
+    $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(new Proxy(db, {
+      get(target, property) { return property === "$transaction" ? undefined : Reflect.get(target, property); },
+    }))),
+    $queryRaw: vi.fn(async (query: { sql: string; values: unknown[] }) => {
+      if (!query.sql.includes('FROM "SourcePermissionEpoch"')) return [];
+      const [workspaceId, kind, id] = query.values;
+      const row = liveMcpRows.get(String(id));
+      return kind === "McpOAuthGrantPolicy" && row?.workspaceId === workspaceId && row.grantEpoch !== undefined
+        ? [{ epoch: row.grantEpoch }] : [];
+    }),
     action: {
       findFirst: vi.fn(),
     },
@@ -323,10 +332,10 @@ vi.mock("@corgtex/shared", async () => ({
     deliberationEntry: {
       findFirst: vi.fn(),
     },
-  },
-  env: { APP_URL: "https://app.test" },
-  toInputJson: (value: unknown) => value,
-}));
+  };
+  return { ...await import("../../shared/src/mcp-context"), prisma: db,
+    env: { APP_URL: "https://app.test" }, toInputJson: (value: unknown) => value };
+});
 
 vi.mock("./auth", () => ({
   requireScope: vi.fn(),
@@ -340,13 +349,32 @@ describe("createCorgtexMcpServer", () => {
   ])("withholds %s resource after in-flight scope revocation", async (_name, uri, reader, scope) => {
     const {createCorgtexMcpServer} = await import("./server");
     const domain = await import("@corgtex/domain");
-    const row = {id: "resource-origin", workspaceId: "ws-1", scopes: [scope], client: {isActive: true}};
+    const row = {id: "resource-origin", workspaceId: "ws-1", userId: "user", grantEpoch: 0n, scopes: [scope], client: {isActive: true}};
     liveMcpRows.set(row.id, row);
     vi.mocked((domain as any)[reader]).mockImplementationOnce(async () => {row.scopes = []; return reader === "listPolicyCorpus" ? [] : {bodyMd: "Private result"};});
     const server = createCorgtexMcpServer({workspaceId: "ws-1", authKind: "oauth", actor: {kind: "user", user: {id: "user"}} as any,
-      scopes: [scope], mcpOrigin: {kind: "oauth", id: row.id, workspaceId: "ws-1", scopeHash: mcpScopesHash(row.scopes)}});
+      scopes: [scope], mcpOrigin: {kind: "oauth", id: row.id, workspaceId: "ws-1", scopeHash: mcpScopesHash(row.scopes), grantEpoch: "0"}});
     const resource = (server as any)._registeredResources[uri];
     await expect(resource.readCallback(new URL(uri), {})).rejects.toThrow("MCP_AUTHORIZATION_REVOKED");
+  });
+
+  it("withholds a resource after OAuth grant revocation and restoration during its read", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const domain = await import("@corgtex/domain");
+    const scopes = ["governance:read"];
+    const row = { id: "restored-resource-origin", workspaceId: "ws-1", userId: "user", grantEpoch: 0n, scopes, client: { isActive: true } };
+    liveMcpRows.set(row.id, row);
+    vi.mocked(domain.getCurrentConstitution).mockClear().mockImplementationOnce(async () => {
+      row.scopes = []; row.grantEpoch++;
+      row.scopes = scopes; row.grantEpoch++;
+      return { bodyMd: "stale-resource-canary" } as any;
+    });
+    const server = createCorgtexMcpServer({ workspaceId: "ws-1", authKind: "oauth", actor: { kind: "user", user: { id: "user" } } as any,
+      scopes, mcpOrigin: { kind: "oauth", id: row.id, workspaceId: "ws-1", scopeHash: mcpScopesHash(scopes), grantEpoch: "0" } });
+    const resource = (server as any)._registeredResources["corgtex://workspace/constitution"];
+    await expect(resource.readCallback(new URL("corgtex://workspace/constitution"), {})).rejects.toThrow("MCP_AUTHORIZATION_REVOKED");
+    expect(domain.getCurrentConstitution).toHaveBeenCalledOnce();
+    expect(row.scopes).toEqual(scopes);
   });
 
   it.each(["oauth", "agent"] as const)("rejects %s tool invocation without a bound origin", async authKind => {
@@ -763,6 +791,7 @@ describe("createCorgtexMcpServer", () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
 
+    liveMcpRows.set("connection-A", { id: "connection-A", workspaceId: "ws-1", userId: "user-1", grantEpoch: 0n, scopes: ["workspace:read", "brain:read"], client: { isActive: true } });
     const server = createTestServer(createCorgtexMcpServer, {
       actor: {
         kind: "user",
@@ -774,7 +803,7 @@ describe("createCorgtexMcpServer", () => {
       resource: "https://app.test/api/mcp",
       providerKey: "cursor",
       clientName: "Cursor",
-      mcpOrigin: { kind: "oauth", id: "connection-A", workspaceId: "ws-1", scopeHash: (await import("../../shared/src/mcp-context")).mcpScopesHash(["workspace:read", "brain:read"]) },
+      mcpOrigin: { kind: "oauth", id: "connection-A", workspaceId: "ws-1", grantEpoch: "0", scopeHash: (await import("../../shared/src/mcp-context")).mcpScopesHash(["workspace:read", "brain:read"]) },
     });
 
     const response = await (server as any)._registeredTools.get_current_connection.handler({});
@@ -3168,7 +3197,53 @@ describe("createCorgtexMcpServer", () => {
       userId: "user-1",
       userMessage: "show tools",
       actor,
+      operationScopes: ["conversations:write"],
     }));
+    const context = vi.mocked(processConversationTurn).mock.calls.at(-1)![0];
+    expect(Object.isFrozen(context.operationScopes)).toBe(true);
+  });
+
+  it.each([{ scopes: undefined }, { scopes: [] }])("rejects absent OAuth grants without a live origin before invoking chat $scopes", async ({ scopes }) => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { processConversationTurn } = await import("@corgtex/agents");
+    vi.mocked(processConversationTurn).mockReset().mockResolvedValueOnce({ assistantMessage: "done", contextUsed: {} } as any);
+    const server = createCorgtexMcpServer({
+      actor: { kind: "user", user: { id: "synthetic-user", email: "synthetic@example.test", displayName: null } },
+      workspaceId: "synthetic-workspace", authKind: "oauth", scopes,
+    });
+    // Even though requireScope is mocked in this routing suite, the real
+    // mandatory-origin boundary rejects this incomplete OAuth context first.
+    await expect((server as any)._registeredTools.chat.handler({ message: "synthetic message" }))
+      .rejects.toThrow("MCP_AUTHORIZATION_REVOKED");
+    expect(processConversationTurn).not.toHaveBeenCalled();
+  });
+
+  it.each([{ scopes: undefined }, { scopes: [] }])("keeps an absent operation ceiling empty even with a valid live OAuth origin $scopes", async ({ scopes }) => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { processConversationTurn } = await import("@corgtex/agents");
+    vi.mocked(processConversationTurn).mockReset().mockResolvedValueOnce({ assistantMessage: "done", contextUsed: {} } as any);
+    const server = createTestServer(createCorgtexMcpServer, {
+      actor: { kind: "user", user: { id: "synthetic-user", email: "synthetic@example.test", displayName: null } },
+      workspaceId: "synthetic-workspace", authKind: "oauth", scopes,
+    });
+    // The actual origin boundary sees the matching synthetic live token; the
+    // context's absent grant ceiling must still not become unrestricted.
+    await (server as any)._registeredTools.chat.handler({ message: "synthetic message" });
+    const submitted = vi.mocked(processConversationTurn).mock.calls.at(-1)![0];
+    expect(submitted.operationScopes).toEqual([]);
+    expect(Object.isFrozen(submitted.operationScopes)).toBe(true);
+  });
+
+  it("preserves trusted bootstrap chat authority", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { processConversationTurn } = await import("@corgtex/agents");
+    vi.mocked(processConversationTurn).mockResolvedValueOnce({ assistantMessage: "done", contextUsed: {} } as any);
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap", label: "synthetic-bootstrap" },
+      workspaceId: "synthetic-workspace", authKind: "agent",
+    });
+    await (server as any)._registeredTools.chat.handler({ message: "synthetic message" });
+    expect(vi.mocked(processConversationTurn).mock.calls.at(-1)![0].operationScopes).toBeUndefined();
   });
 
   it("lists same-user connected external tools with external tool scope", async () => {

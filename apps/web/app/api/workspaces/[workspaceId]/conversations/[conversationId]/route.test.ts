@@ -209,6 +209,8 @@ describe("POST /api/workspaces/[workspaceId]/conversations/[conversationId]", ()
     expect(returnMock).toHaveBeenCalledWith({
       assistantMessage: "",
       contextUsed: {},
+      lineageRoots: [],
+      promptInputId: "",
     });
     const conversationContext = processConversationTurnStream.mock.calls[0]?.[0] as { signal?: AbortSignal } | undefined;
     expect(conversationContext?.signal).toBeInstanceOf(AbortSignal);

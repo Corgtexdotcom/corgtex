@@ -40,6 +40,8 @@ describe("authenticateMcpRequest", () => {
     resolveMcpOAuthAccessTokenMock.mockResolvedValue({
       actor: { kind: "user", user: { id: "user-1", email: "user@example.com", displayName: "User" } },
       workspaceId: "ws-1",
+      connectionId: "connection-1",
+      grantEpoch: "3",
       scopes: ["brain:read"],
       instanceSlug: "client-a",
       resource: "https://mcp.corgtex.com/mcp",
@@ -62,6 +64,7 @@ describe("authenticateMcpRequest", () => {
     expect(ctx).toMatchObject({
       authKind: "oauth",
       workspaceId: "ws-1",
+      mcpOrigin: { kind: "oauth", id: expect.anything(), grantEpoch: "3" },
       scopes: ["brain:read"],
       instanceSlug: "client-a",
       clientId: "client-1",

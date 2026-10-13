@@ -34,10 +34,12 @@ const prepareProducerLineage = vi.fn();
 const finishProducerLineage = vi.fn();
 const currentArtifactInputRoots = vi.fn();
 
-vi.mock("./source-lineage", () => ({
+vi.mock("./source-lineage", async importOriginal => ({
+  sealArtifactInputActor: (await importOriginal<typeof import("./source-lineage")>()).sealArtifactInputActor,
   captureArtifactInputProof, captureArtifactInputSnapshotProof, isArtifactInputProofReadable, currentArtifactInputRoots,
   lineageContentFingerprint: vi.fn(() => "a".repeat(64)),
 }));
+vi.mock("./finance", () => ({ getFinanceAccessPolicy: async () => ({ canRead: false }) }));
 vi.mock("./producer-lineage", () => ({ prepareProducerLineage, finishProducerLineage }));
 
 vi.mock("@corgtex/shared", () => ({

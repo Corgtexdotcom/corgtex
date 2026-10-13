@@ -69,6 +69,24 @@ async function validateArchiveOutcome(actor: AppActor, workspaceId: string, valu
   await getConversationOperationOutcomeInputRoots(actor, workspaceId, value);
 }
 
+/** Bind a status-only result to this invocation's exact submitted command. */
+async function validateActionCompletionOutcome(actor: AppActor, workspaceId: string, value: unknown,
+  ownInput: LineageRoot, args: unknown) {
+  const { getActionCompletionOutcomeInputReceipt, getActionCompletionOutcomeInputRoots } = await import("./action-completion");
+  invariant(getActionCompletionOutcomeInputReceipt(value) && value !== null && typeof value === "object",
+    409, "UNKNOWN_LINEAGE", "Completion has no registered native command result.");
+  const roots = await getActionCompletionOutcomeInputRoots(actor, workspaceId, value as object);
+  const outcomes = roots.filter(root => root.kind === "ConversationOperationOutcome");
+  invariant(outcomes.length === 1 && args !== null && typeof args === "object" && "actionId" in args,
+    409, "UNKNOWN_LINEAGE", "Completion has no exact command identity.");
+  const outcome = await prisma.conversationOperationOutcome.findFirst({ where: { id: outcomes[0]!.id, workspaceId } });
+  const control = outcome?.controlJson;
+  invariant(outcome?.operation === "ACTION_COMPLETED" && control !== null && typeof control === "object" && !Array.isArray(control)
+    && control.inputId === ownInput.id && control.inputFingerprint === ownInput.fingerprint && control.actionId === args.actionId,
+  409, "SOURCE_CHANGED", "Completion belongs to a different submitted command.");
+  await getActionCompletionOutcomeInputRoots(actor, workspaceId, value as object);
+}
+
 /** Capture the complete authenticated tool submission before invoking the trusted handler. */
 export async function withMcpToolInput<TArgs, TResult>(actor: AppActor, params: { workspaceId: string; toolName: string; args: TArgs; requiredScopes: readonly string[] },
   work: (args: TArgs) => PromiseLike<TResult>): Promise<TResult> {
@@ -126,6 +144,7 @@ export async function withMcpToolInput<TArgs, TResult>(actor: AppActor, params: 
         const captured = await withArtifactInputReadCapture(actor, workspaceId, async () => {
           await captureArtifactInputProof(actor, workspaceId, roots.map((root) => ({ kind: root.kind, id: root.id })));
           const result = await work(submitted.args);
+          if (toolName === "complete_action") await validateActionCompletionOutcome(actor, workspaceId, result, ownInput, submitted.args);
           if (toolName === "archive_tool_link" && getConversationOperationOutcomeInputReceipt(result)) {
             await validateArchiveOutcome(actor, workspaceId, result, ownInput, submitted.args);
             terminalValue = result;
@@ -144,6 +163,7 @@ export async function withMcpToolInput<TArgs, TResult>(actor: AppActor, params: 
         value = terminalValue as TResult;
       }
       if (terminalReady) await validateArchiveOutcome(actor, workspaceId, value, ownInput, submitted.args);
+      if (toolName === "complete_action") await validateActionCompletionOutcome(actor, workspaceId, value, ownInput, submitted.args);
       const currentRoots = getMcpToolInputRoots(actor, workspaceId);
       await requireWorkspaceMembership({ actor, workspaceId });
       invariant(await isArtifactInputProofReadable(actor, workspaceId, currentRoots),

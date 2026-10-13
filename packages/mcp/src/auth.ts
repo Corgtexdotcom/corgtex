@@ -130,7 +130,7 @@ export async function authenticateMcpRequest(
       clientName: oauthSession.clientName,
       providerKey: oauthSession.providerKey,
       mcpOrigin: { kind: "oauth", id: oauthSession.connectionId, workspaceId: oauthSession.workspaceId,
-        scopeHash: mcpScopesHash(oauthSession.scopes), requiredScopes: [] },
+        scopeHash: mcpScopesHash(oauthSession.scopes), grantEpoch: oauthSession.grantEpoch, requiredScopes: [] },
     };
   }
 
@@ -143,7 +143,8 @@ export async function authenticateMcpRequest(
  */
 export function requireScope(ctx: McpSessionContext, scope: string): void {
   recordMcpRequiredScope(scope);
-  if (ctx.scopes && !ctx.scopes.includes(scope)) {
+  if ((ctx.authKind === "oauth" || (ctx.actor.kind === "agent" && ctx.actor.authProvider === "credential"))
+    && !ctx.scopes?.includes(scope)) {
     const purpose = describeScope(scope);
 
     // OAuth connector sessions are user-authorized. The user can reconnect in
@@ -179,7 +180,7 @@ export function requireScope(ctx: McpSessionContext, scope: string): void {
   }
 
   // Credential agents must have the scope explicitly
-  if (ctx.actor.scopes && !ctx.actor.scopes.includes(scope)) {
+  if (ctx.actor.authProvider === "credential" && !ctx.actor.scopes?.includes(scope)) {
     const label = ctx.actor.label ?? "this credential";
     const url = settingsUrl(ctx.workspaceId);
     const purpose = describeScope(scope);

@@ -146,7 +146,9 @@ describe("automatic production CI boundary", () => {
 
   it("retains isolated PostgreSQL migration, integration and seed-fixture checks", () => {
     for (const name of ["check", "db-sync"]) {
-      expect(job(name)).toContain("image: pgvector/pgvector:pg16");
+      expect(job(name)).toContain("uses: ./.github/actions/ci-pgvector");
+      expect(job(name)).not.toContain("services:");
+      expect(job(name)).toContain("Remove isolated PostgreSQL fixture");
       expect(job(name)).toContain("@localhost:5432/");
       expect(job(name)).toContain("npx prisma migrate deploy");
       expect(job(name)).not.toContain("secrets.PRODUCTION_DATABASE_URL");

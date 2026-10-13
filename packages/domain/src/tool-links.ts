@@ -1,8 +1,9 @@
 import type { Prisma } from "@prisma/client";
 import { decryptSecret, encryptSecret, prisma } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
-import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
+import { actorUserIdForWorkspace } from "./auth";
 import { recordAudit } from "./audit-trail";
+import { requireWorkspaceOperation } from "./agent-operation-authorization";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { AppError, invariant } from "./errors";
 import { findConversationToolLinkArchiveOutcome, recordConversationToolLinkArchiveOutcome,
@@ -11,7 +12,7 @@ import { getMcpToolInputRoots } from "./mcp-tool-input-context";
 import { captureConversationInputReceipt, validateConversationInputReceipt, type ConversationInputReceipt } from "./conversation-lineage";
 import { loadReadableDigestQuery, mergeArtifactInputProofs } from "./digest-lineage";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
-import { captureArtifactInputProof, captureArtifactInputSnapshotProof, currentArtifactInputRoots, isArtifactInputProofReadable, lineageContentFingerprint, type LineageKind, type LineageRoot } from "./source-lineage";
+import { captureArtifactInputProof, captureArtifactInputSnapshotProof, currentArtifactInputRoots, isArtifactInputProofReadable, lineageContentFingerprint, sealArtifactInputActor, type LineageKind, type LineageRoot } from "./source-lineage";
 import {
   canEditToolLinkMetadata,
   canManageToolLinkCredential,
@@ -230,7 +231,7 @@ export async function listWorkspaceToolLinks(actor: AppActor, params: {
   workspaceId: string;
   archiveFilter?: ArchiveFilter;
 }) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const membership = await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "list_tool_links" });
   const links = await loadReadableDigestQuery<ToolLinkRecord>({
     actor, workspaceId: params.workspaceId, kind: "WorkspaceToolLink", limit: 100, completeScan: true, keyset: true,
     loadBatch: ({ take, after }) => prisma.workspaceToolLink.findMany({
@@ -249,7 +250,7 @@ export async function getWorkspaceToolLink(actor: AppActor, params: {
   workspaceId: string;
   toolLinkId: string;
 }) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const membership = await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "list_tool_links" });
   const link = await prisma.workspaceToolLink.findFirst({
     where: {
       id: params.toolLinkId,
@@ -283,7 +284,7 @@ export async function createWorkspaceToolLink(actor: AppActor, params: {
   credentialSecret?: string | null;
   circleIds?: string[];
 } & ProducerLineageParams) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const membership = await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "upsert_tool_link" });
   const createdByUserId = actor.kind === "user" ? actor.user.id : await actorUserIdForWorkspace(actor, params.workspaceId);
   const secret = normalizeSecret(params.credentialSecret);
 
@@ -355,7 +356,7 @@ export async function updateWorkspaceToolLink(actor: AppActor, params: {
   credentialSecret?: string | null;
   circleIds?: string[];
 } & ProducerLineageParams) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const membership = await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "upsert_tool_link" });
 
   const result = await prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM "WorkspaceToolLink" WHERE id = ${params.toolLinkId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
@@ -465,7 +466,7 @@ export async function archiveWorkspaceToolLink(actor: AppActor, params: {
   reason?: string | null;
   requestLineageRoots?: readonly LineageRoot[];
 } & ProducerLineageParams) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const membership = await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "archive_tool_link" });
   const requestLineageRoots = params.requestLineageRoots ?? getMcpToolInputRoots(actor, params.workspaceId);
   const outcomeRequest = { workspaceId: params.workspaceId, toolLinkId: params.toolLinkId, requestLineageRoots };
   const result = await prisma.$transaction(async (tx) => {
@@ -496,21 +497,26 @@ export async function archiveWorkspaceToolLink(actor: AppActor, params: {
 
 async function readToolLinkCredential<T>(actor: AppActor, params: { workspaceId: string; toolLinkId: string },
   consume: (link: ToolLinkRecord, tx: Prisma.TransactionClient) => Promise<T>) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  sealArtifactInputActor(actor);
+  params = Object.freeze({ ...params });
+  await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "reveal_tool_link_credential" });
   let roots: LineageRoot[] = [];
   const result = await prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM "WorkspaceToolLink" WHERE id = ${params.toolLinkId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
-    const link = await tx.workspaceToolLink.findFirst({ where: {
+    const membership = await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId,
+      operation: "reveal_tool_link_credential", tx });
+    const metadata = await tx.workspaceToolLink.findFirst({ where: {
       id: params.toolLinkId, workspaceId: params.workspaceId, archivedAt: null,
+    }, select: { id: true, createdByUserId: true } });
+    invariant(metadata, 404, "NOT_FOUND", "Tool link not found.");
+    requireToolLinkCredentialManager(actor, membership, metadata);
+    const link = await tx.workspaceToolLink.findFirst({ where: {
+      id: metadata.id, workspaceId: params.workspaceId, archivedAt: null, createdByUserId: metadata.createdByUserId,
     }, select: toolLinkSelect });
     invariant(link, 404, "NOT_FOUND", "Tool link not found.");
     requireToolLinkCredentialManager(actor, membership, link);
-    roots = mergeArtifactInputProofs(
-      await captureToolLinkReader(actor, params.workspaceId, membership, tx),
-      await requireReadableToolLink(actor, params.workspaceId, link, tx),
-      await captureArtifactInputProof(actor, params.workspaceId,
-        [{ kind: "WorkspaceToolLinkCredential", id: link.id, snapshot: link }], tx),
-    );
+    roots = await captureArtifactInputProof(actor, params.workspaceId,
+      [{ kind: "WorkspaceToolLinkCredential", id: link.id, snapshot: link }], tx);
     invariant(await isArtifactInputProofReadable(actor, params.workspaceId, roots, tx),
       409, "SOURCE_CHANGED", "Credential access changed before use.");
     const value = await consume(link, tx);
@@ -540,7 +546,7 @@ export async function revealWorkspaceToolLinkCredential(actor: AppActor, params:
   return readToolLinkCredential(actor, params, async (link, tx) => {
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId, action: "tool_link.credential_revealed", entityType: "WorkspaceToolLink", entityId: link.id,
-      meta: { title: link.title, credentialLabel: link.credentialLabel, hasCredential: Boolean(link.credentialSecretEnc) },
+      meta: { credentialLabel: link.credentialLabel, hasCredential: Boolean(link.credentialSecretEnc) },
     });
     return { credentialLabel: link.credentialLabel,
       credentialSecret: link.credentialSecretEnc ? decryptSecret(link.credentialSecretEnc) : null };

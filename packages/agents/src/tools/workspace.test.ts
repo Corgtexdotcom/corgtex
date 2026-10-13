@@ -35,6 +35,12 @@ vi.mock("@corgtex/shared", () => ({
 }));
 
 vi.mock("@corgtex/domain", async () => ({
+  ...await import("../../../domain/src/agent-operation-capabilities"),
+  requireWorkspaceOperation: vi.fn(async (params: { actor: AppActor; operation: string }) => {
+    const { requireAgentOperation } = await import("../../../domain/src/agent-operation-capabilities");
+    requireAgentOperation(params.actor, params.operation);
+    return null;
+  }),
   ...await import("../../../domain/src/errors"),
   ...await import("../../../domain/src/privacy"),
   ...await import("../../../domain/src/source-scoped-read"),
@@ -58,7 +64,10 @@ const actor: AppActor = {
   },
 };
 const otherActor: AppActor = { ...actor, user: { ...actor.user, id: "user-2" } };
-const agent: AppActor = { kind: "agent", authProvider: "credential", label: "Assistant", workspaceIds: ["ws-1"] };
+const agent: AppActor = {
+  kind: "agent", authProvider: "credential", label: "Assistant", workspaceIds: ["ws-1"],
+  scopes: ["workspace:read", "circles:read", "members:read", "actions:read", "tensions:read", "proposals:read", "goals:read"],
+};
 
 // A synthetic query evaluator makes the regression observable in returned data,
 // rather than accepting an unconditional findMany mock regardless of its where.

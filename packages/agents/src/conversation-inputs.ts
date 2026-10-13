@@ -57,7 +57,7 @@ export async function prepareConversationInputs(params: { actor: AppActor; works
   pageContext?: ConversationPageContext | null; systemPrompt?: string | null; requestSource?: "MCP"; promptInputId?: string; ingressInputId?: string }) {
   if (params.actor.kind === "user" && params.actor.user.id !== params.userId) throw new AppError(403, "FORBIDDEN", "Conversation requester does not match the authenticated actor.");
   const collector = createConversationLineageCollector(params.actor, params.workspaceId);
-  if (params.requestSource === "MCP") {
+  if (params.requestSource === "MCP" || params.actor.kind === "agent") {
     const ingress = params.ingressInputId ? await prisma.conversationIngressInput.findFirst({ where: {
       id: params.ingressInputId, workspaceId: params.workspaceId, content: params.userMessage,
     } }) : await createConversationIngressInput(params.actor, { workspaceId: params.workspaceId, content: params.userMessage });

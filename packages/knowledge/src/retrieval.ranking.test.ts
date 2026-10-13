@@ -38,16 +38,17 @@ beforeEach(async () => {
   fixture.rows.knowledgeChunk = [];
   fixture.prisma.$queryRaw = vi.fn(async () => []);
   fixture.prisma.knowledgeChunk = {
-    findFirst: vi.fn(async ({ where }: any) => fixture.rows.knowledgeChunk.find(row => row.id === where.id && row.workspaceId === where.workspaceId) ?? null),
+    findFirst: vi.fn(async ({ where }: any) => structuredClone(fixture.rows.knowledgeChunk.find(row => row.id === where.id && row.workspaceId === where.workspaceId) ?? null)),
     deleteMany: vi.fn(async ({ where }: any) => { fixture.rows.knowledgeChunk = fixture.rows.knowledgeChunk.filter(row => row.sourceId !== where.sourceId || row.workspaceId !== where.workspaceId); return { count: 1 }; }),
     createMany: vi.fn(async ({ data }: any) => { fixture.rows.knowledgeChunk.push(...structuredClone(data)); return { count: data.length }; }),
     findMany: vi.fn(async ({ where, select, take }: any) => fixture.rows.knowledgeChunk.filter(row => row.workspaceId === where.workspaceId
-      && where.accessDomain.in.includes(row.accessDomain)
+      && (!where.accessDomain || where.accessDomain.in.includes(row.accessDomain))
       && (!where.sourceType || (typeof where.sourceType === "string" ? where.sourceType === row.sourceType : where.sourceType.in.includes(row.sourceType)))
       && (!where.id || where.id.in.includes(row.id))
       && (!where.OR || where.OR.some((parent: any) => parent.sourceType === row.sourceType && parent.sourceId === row.sourceId
         && parent.metadata.equals === row.metadata.sourceContentHash)))
-      .slice(0, take).map(row => Object.fromEntries(Object.keys(select).map(key => [key, structuredClone(row[key])])))),
+      .slice(0, take ?? fixture.rows.knowledgeChunk.length).map(row => select
+        ? Object.fromEntries(Object.keys(select).map(key => [key, structuredClone(row[key])])) : structuredClone(row))),
   };
   model.embed.mockReset().mockResolvedValue({ embeddings: [[1, 0]], usage: { model: "synthetic" } });
   model.rerank.mockReset().mockImplementation(async ({ documents, topK }) => ({ results: documents.slice(0, topK).map((_value, index) => ({ index, score: 1 - index * 0.1 })) }));
@@ -70,8 +71,10 @@ describe("knowledge ranking with actual current source proofs", () => {
     const first = await searchIndexedKnowledge({ ...params, limit: 5 });
     expect(first.map(row => row.sourceId)).toEqual(["public"]);
     expect(model.rerank.mock.calls[0][0].documents).toEqual(["Synthetic policy public\nPolicy public"]);
-    expect(fixture.prisma.knowledgeChunk.findMany.mock.calls.every(([query]: any[]) => query.select.content && query.select.embedding && query.select.embeddingModel && query.select.tokenCount)).toBe(true);
-    expect(fixture.prisma.knowledgeChunk.findMany.mock.calls[0][0].select).toMatchObject({ embedding: true, embeddingModel: true, tokenCount: true });
+    const rankingReads = fixture.prisma.knowledgeChunk.findMany.mock.calls.filter(([query]: any[]) => query.select);
+    expect(rankingReads.every(([query]: any[]) => query.select.content && query.select.embedding && query.select.embeddingModel && query.select.tokenCount)).toBe(true);
+    expect(rankingReads[0][0].select).toMatchObject({ embedding: true, embeddingModel: true, tokenCount: true });
+    expect(fixture.prisma.knowledgeChunk.findMany.mock.calls.some(([query]: any[]) => !query.select && query.where.id?.in.includes(visible.id))).toBe(true);
     expect(await getKnowledgeSearchInputRoots(alpha, workspaceId, first)).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "KnowledgeChunk", id: visible.id })]));
     expect(await getKnowledgeSearchInputRoots(beta, workspaceId, first).catch(() => null)).toBeNull();
     expect((await searchIndexedKnowledge({ ...params, actor: beta, limit: 5 })).map(row => row.sourceId).sort()).toEqual(["copied", "public"]);

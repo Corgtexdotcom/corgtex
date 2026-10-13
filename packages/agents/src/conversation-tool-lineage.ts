@@ -3,6 +3,7 @@ import {
   captureArtifactInputProof,
   captureConversationInputReceipt,
   requireWorkspaceMembership,
+  sealArtifactInputActor,
   withArtifactInputReadCapture,
   type ConversationInputReceipt,
 } from "@corgtex/domain";
@@ -12,10 +13,12 @@ import { getWorkspaceOverview, queryActions, queryGoals, queryOrgStructure, quer
 import { getMemberProfileAction, listMembersAction } from "./tools/members";
 import { listDueRelationshipWorkAction } from "./tools/crm";
 import { contextMapToolHandlers } from "./tools/context-map";
+import { searchConnectedContextAction, fetchConnectedContextAction } from "./tools/external-mcp";
 
 const trustedReadTools = new Set([
   "get_workspace_overview", "query_tensions", "query_actions", "query_proposals", "query_goals", "query_org_structure",
   "list_members", "get_member_profile", "list_due_relationship_work", "get_context_map_info", "get_selected_context_map_region",
+  "search_connected_context", "fetch_connected_context",
 ]);
 
 type MemberProfileInput = {
@@ -53,16 +56,22 @@ export async function executeTrustedConversationReadTool(params: {
   toolName: string;
   args: Record<string, unknown>;
   pageContext?: ConversationPageContext | null;
+  operationScopes?: readonly string[];
 }): Promise<{ value: unknown; receipt: ConversationInputReceipt } | null> {
   if (!trustedReadTools.has(params.toolName)) return null;
+  sealArtifactInputActor(params.actor);
+  params = { ...params, args: structuredClone(params.args), pageContext: structuredClone(params.pageContext),
+    operationScopes: params.operationScopes ? Object.freeze([...params.operationScopes]) : undefined };
   const { actor, workspaceId, toolName, args } = params;
-  const ctx = { workspaceId };
+  const ctx = { workspaceId, operationScopes: params.operationScopes };
   const captured = await withArtifactInputReadCapture(actor, workspaceId, async () => {
     const membership = await requireWorkspaceMembership({ actor, workspaceId });
-    await captureArtifactInputProof(actor, workspaceId, [
-      { kind: "Workspace", id: workspaceId },
-      ...(membership ? [{ kind: "Member" as const, id: membership.id }] : []),
-    ]);
+    if (toolName !== "search_connected_context" && toolName !== "fetch_connected_context") {
+      await captureArtifactInputProof(actor, workspaceId, [
+        { kind: "Workspace", id: workspaceId },
+        ...(membership ? [{ kind: "Member" as const, id: membership.id }] : []),
+      ]);
+    }
     switch (toolName) {
       case "get_workspace_overview": return getWorkspaceOverview(workspaceId, actor);
       case "query_tensions": return queryTensions(workspaceId, args.status as TensionStatus | undefined, args.assigneeId as string | undefined, args.tensionId as string | undefined, actor);
@@ -70,6 +79,8 @@ export async function executeTrustedConversationReadTool(params: {
       case "query_proposals": return queryProposals(workspaceId, args.status as ProposalStatus | undefined, actor);
       case "query_goals": return queryGoals(actor, workspaceId, args.cadence as GoalCadence | undefined, args.level as GoalLevel | undefined, args.status as GoalStatus | undefined);
       case "query_org_structure": return queryOrgStructure(workspaceId, actor);
+      case "search_connected_context": return searchConnectedContextAction(actor, ctx, args);
+      case "fetch_connected_context": return fetchConnectedContextAction(actor, ctx, args);
       case "list_members": {
         const result = await listMembersAction(actor, ctx);
         return { members: await Promise.all(result.members.map((member) => captureMemberProfile(actor, workspaceId, member))) };
@@ -102,6 +113,10 @@ export async function executeTrustedConversationReadTool(params: {
     }
     throw new Error("Trusted conversation reader has no handler.");
   });
+  if (toolName === "search_connected_context" || toolName === "fetch_connected_context") {
+    const expected = toolName === "search_connected_context" ? "ExternalMcpConnectionSet" : "ExternalMcpResponseInput";
+    if (!captured.roots.some(root => root.kind === expected)) throw new Error("External context has no complete native response receipt.");
+  }
   const receipt = await captureConversationInputReceipt({ actor, workspaceId, value: captured.value, trustedRoots: captured.roots });
   return { value: captured.value, receipt };
 }

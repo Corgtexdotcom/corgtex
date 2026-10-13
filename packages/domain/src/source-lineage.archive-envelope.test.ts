@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fixture, workspaceId, alpha, beta, resetFixture, known } from "../../agents/src/agents/model-consumer.test-fixture";
 import { installSourcePermissionEpochFixture } from "./source-permission-epochs.test-fixture";
-import { advanceArchivedOriginalEnvelopeLineage, captureArtifactInputProof, captureArtifactInputSnapshotProof,
+import { advanceArchivedArtifactEnvelopeLineage, captureArtifactInputProof, captureArtifactInputSnapshotProof, inspectStoredArtifactInputDependencies,
   invalidateArtifactInputLineage, isArtifactInputProofReadable, isArtifactArchiveMetadataReadable, readableArtifactIds, lineageContentFingerprint, withArtifactInputWriteFence } from "./source-lineage";
 import { isArtifactPermissionEpochProofCurrent } from "./source-permission-epochs";
 
@@ -22,11 +22,11 @@ function article(id = "human-original") {
     isPrivate: false, ownerMemberId: null, authority: "DRAFT", archivedAt: null, updatedAt: fixture.timestamp });
 }
 function advance(before: any, after: any) {
-  return advanceArchivedOriginalEnvelopeLineage({ tx: fixture.prisma, workspaceId,
+  return advanceArchivedArtifactEnvelopeLineage({ tx: fixture.prisma, workspaceId,
     artifact: { kind: "BrainArticle", id: before.id }, before, after });
 }
 
-describe("administrative archive transitions preserve proven originals only", () => {
+describe("administrative archive transitions preserve exact ancestry and earlier permission revisions", () => {
   it("advances an unchanged original through archive/restore without replacing its stored epoch vector or reviving a copied snapshot", async () => {
     const row = article();
     await known("BrainArticle", row, [], alpha);
@@ -57,12 +57,31 @@ describe("administrative archive transitions preserve proven originals only", ()
     expect(row.bodyMd).toBe(before.bodyMd);
   });
 
-  it.each(["DERIVED", "UNKNOWN", "MISSING"] as const)("does not advance %s content", async origin => {
+  it("preserves derived ancestry for retirement after archive/restore without reviving the old body", async () => {
+    const input = article("independent-input"); await known("BrainArticle", input, [], alpha);
+    const row = article("copied-output"); await known("BrainArticle", row, [{ kind: "BrainArticle", id: input.id }], alpha);
+    const prior = structuredClone(fixture.manifest("BrainArticle", row.id));
+    const before = structuredClone(row);
+    Object.assign(row, { archivedAt: new Date("2026-10-13T10:00:00Z"), updatedAt: new Date("2026-10-13T10:00:00Z") });
+    epochs.bump(workspaceId, "BrainArticle", row.id);
+    expect(await advance(before, row)).toBe(true);
+    const archived = structuredClone(row);
+    Object.assign(row, { archivedAt: null, updatedAt: new Date("2026-10-13T11:00:00Z") });
+    epochs.bump(workspaceId, "BrainArticle", row.id);
+    expect(await advance(archived, row)).toBe(true);
+    const restored = fixture.manifest("BrainArticle", row.id);
+    expect(restored).toMatchObject({ origin: "DERIVED", rootsJson: prior.rootsJson, inputsJson: prior.inputsJson,
+      permissionEpochsJson: prior.permissionEpochsJson, contentHash: lineageContentFingerprint("BrainArticle", row) });
+    expect(await isArtifactPermissionEpochProofCurrent(workspaceId, restored.permissionEpochsJson, fixture.prisma)).toBe(false);
+    expect(await readableArtifactIds(alpha, workspaceId, "BrainArticle", [row], fixture.prisma)).toEqual(new Set());
+    const ancestry = await inspectStoredArtifactInputDependencies(fixture.prisma, workspaceId, restored.rootsJson);
+    expect(ancestry).toMatchObject({ complete: true, roots: expect.arrayContaining([expect.objectContaining({ id: input.id })]) });
+    await expect(captureArtifactInputProof(alpha, workspaceId, [{ kind: "BrainArticle", id: row.id }], fixture.prisma))
+      .rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+  });
+  it.each(["UNKNOWN", "MISSING"] as const)("does not advance %s content", async origin => {
     const row = article();
-    if (origin === "DERIVED") {
-      const source = article("independent-input"); await known("BrainArticle", source, [], alpha);
-      await known("BrainArticle", row, [{ kind: "BrainArticle", id: source.id }], alpha);
-    } else if (origin === "UNKNOWN") {
+    if (origin === "UNKNOWN") {
       await invalidateArtifactInputLineage({ tx: fixture.prisma, workspaceId, artifact: { kind: "BrainArticle", id: row.id }, content: row });
     }
     const count = fixture.rows.artifactInputLineage.length;

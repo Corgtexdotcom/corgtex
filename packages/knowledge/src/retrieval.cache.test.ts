@@ -88,6 +88,9 @@ vi.mock("@corgtex/domain", () => ({
   isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
 }));
 
+let persistedChunks: any[] = [];
+const persistedRows = (where: any) => structuredClone(persistedChunks.filter(row => row.workspaceId === where.workspaceId && where.id.in.includes(row.id)));
+
 const actor: AppActor = { kind: "user", user: { id: "synthetic-user", email: "synthetic@example.test", displayName: "Synthetic user" } };
 const sourceKinds: Record<string, string> = { DOCUMENT: "Document", BRAIN_ARTICLE: "BrainArticle", MEETING: "Meeting", PROPOSAL: "Proposal" };
 // Existing cache/provider regressions use certified synthetic receipts. The lineage
@@ -117,12 +120,16 @@ describe("knowledge retrieval cache", () => {
     resetLocalCacheStore();
     await invalidateKnowledgeCache();
 
-    prismaMock.knowledgeChunk.findMany.mockReset().mockResolvedValue(certifyRows([]));
+    persistedChunks = [];
+    prismaMock.knowledgeChunk.findMany.mockReset().mockImplementation(async ({ where, select }: any) =>
+      !select && where.id?.in ? persistedRows(where) : []);
     prismaMock.brainArticle.findMany.mockReset().mockImplementation(async ({ where }: any) =>
       (where.id?.in ?? allSourceIds).map((id: string) => ({ id })));
     prismaMock.document.findMany.mockReset().mockResolvedValue(certifyRows([]));
     prismaMock.knowledgeChunk.deleteMany.mockReset();
-    prismaMock.knowledgeChunk.createMany.mockReset();
+    prismaMock.knowledgeChunk.createMany.mockReset().mockImplementation(async ({ data }: any) => {
+      persistedChunks.push(...structuredClone(data)); return { count: data.length };
+    });
     prismaMock.brainArticle.findMany.mockReset().mockImplementation(async (query) =>
       (query.where.id?.in ?? allSourceIds).map((id: string) => ({ id })));
     prismaMock.document.findMany.mockReset().mockImplementation(async (query) =>
@@ -816,7 +823,7 @@ describe("knowledge retrieval cache", () => {
   });
 
   it("invalidates cached retrieval when a source is resynced", async () => {
-    prismaMock.knowledgeChunk.findMany.mockResolvedValue(certifyRows([
+    const previousChunks = certifyRows([
       {
         id: "chunk-3",
         sourceType: "DOCUMENT",
@@ -827,7 +834,9 @@ describe("knowledge retrieval cache", () => {
         embedding: [1, 0],
         createdAt: new Date("2026-04-03T09:00:00.000Z"),
       },
-    ]));
+    ]);
+    prismaMock.knowledgeChunk.findMany.mockImplementation(async ({ where, select }: any) =>
+      !select && where.id?.in ? persistedRows(where) : previousChunks);
 
     await searchIndexedKnowledge({ actor,
       workspaceId: "ws-1",

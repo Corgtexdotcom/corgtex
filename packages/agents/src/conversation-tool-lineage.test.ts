@@ -311,9 +311,12 @@ describe("audited conversation read dispatch with real current receipts", () => 
     expect(await roots(output)).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "ContextMapView", id: view.id }), expect.objectContaining({ kind: "ContextGraphObject", id: object.id })]));
   });
 
-  it.each(["execute_external_tool", "fetch_connected_context", "search_connected_context", "list_tool_links", "reveal_tool_link_credential", "check_calendar_availability", "create_action", "save_to_brain", "search_brain"])("does not run or certify unsupported %s", async (toolName) => {
+  it.each(["execute_external_tool", "list_tool_links", "reveal_tool_link_credential", "check_calendar_availability", "create_action", "save_to_brain", "search_brain"])("does not run or certify unsupported %s", async (toolName) => {
     expect(await read(toolName)).toBeNull();
     expect(fixture.prisma.workspace.findFirst).not.toHaveBeenCalled();
     expect(fixture.prisma.member.findFirst).not.toHaveBeenCalled();
+  });
+  it.each(["fetch_connected_context", "search_connected_context"])("requires current membership before running native %s", async toolName => {
+    await expect(read(toolName)).rejects.toMatchObject({ code: "FORBIDDEN" });
   });
 });

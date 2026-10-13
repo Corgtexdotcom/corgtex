@@ -1,7 +1,7 @@
 import { captureArtifactInputProof, readableArtifactIds } from "./source-lineage";
 import { prepareProducerLineage, finishProducerLineage } from "./producer-lineage";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AppActor } from "@corgtex/shared";
+import { mcpCredentialVersion, type AppActor } from "@corgtex/shared";
 import { AppError } from "./errors";
 
 vi.mock("./producer-lineage", () => ({
@@ -12,6 +12,7 @@ vi.mock("./producer-lineage", () => ({
 const { prismaMock } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
+    agentCredential: { findUnique: vi.fn() },
     $executeRaw: vi.fn(),
     $queryRaw: vi.fn(),
     action: {
@@ -64,7 +65,8 @@ const appendEvents = vi.fn();
 const recordAudit = vi.fn();
 const requireWorkspaceMembership = vi.fn();
 
-vi.mock("@corgtex/shared", () => ({
+vi.mock("@corgtex/shared", async () => ({
+  ...await import("../../shared/src/mcp-context"),
   prisma: prismaMock,
 }));
 
@@ -98,11 +100,23 @@ const actor: AppActor = {
   },
 };
 
+function currentCredential(credentialId: string, scopes: string[]): Extract<AppActor, {kind: "agent"}> {
+  const tokenHash = `synthetic-token-${credentialId}`;
+  requireWorkspaceMembership.mockResolvedValue(null);
+  prismaMock.agentCredential.findUnique.mockImplementation(async ({where}: {where: {id: string}}) => where.id === credentialId ? {
+    id: credentialId, workspaceId: "workspace-1", isActive: true, tokenHash, scopes: [...scopes],
+    createdBy: null, supportGrantVersion: null,
+  } : null);
+  return {kind: "agent", authProvider: "credential", credentialId, credentialVersion: mcpCredentialVersion(tokenHash),
+    label: "Synthetic current credential", workspaceIds: ["workspace-1"], scopes: [...scopes]};
+}
+
 describe("action domain lifecycle", () => {
   it.each(["credential-a", "credential-b"])("rejects private creation by %s before duplicate reads or writes", async credentialId => {
     const {createAction} = await import("./actions");
-    const credential = {kind: "agent", authProvider: "credential", credentialId, workspaceIds: ["workspace-1"], scopes: ["support:write"]} as any;
+    const credential = currentCredential(credentialId, ["actions:write"]);
     await expect(createAction(credential, {workspaceId: "workspace-1", title: "Private", authorMemberId: "member-owner"})).rejects.toMatchObject({code: "PRIVATE_AGENT_ARTIFACT_UNSUPPORTED"});
+    expect(prismaMock.agentCredential.findUnique).toHaveBeenCalledWith(expect.objectContaining({where: {id: credentialId}}));
     expect(prismaMock.action.create).not.toHaveBeenCalled();
     expect(prismaMock.action.findMany).not.toHaveBeenCalled();
     expect(prismaMock.action.findFirst).not.toHaveBeenCalled();
@@ -117,10 +131,11 @@ describe("action domain lifecycle", () => {
 
   it.each(["credential-a", "credential-b"])("does not return a hidden private action through a no-op update by %s", async credentialId => {
     const {updateAction} = await import("./actions");
-    const credential = {kind: "agent", authProvider: "credential", credentialId, workspaceIds: ["workspace-1"], scopes: ["actions:write"]} as any;
+    const credential = currentCredential(credentialId, ["actions:read", "actions:write"]);
     prismaMock.action.findUnique.mockResolvedValue({id: "private", workspaceId: "workspace-1", status: "DRAFT", isPrivate: true,
       title: "Private title", bodyMd: "Private text", lineageDenied: true, archivedAt: null});
     await expect(updateAction(credential, {workspaceId: "workspace-1", actionId: "private"})).rejects.toMatchObject({code: "NOT_FOUND"});
+    expect(prismaMock.agentCredential.findUnique).toHaveBeenCalledWith(expect.objectContaining({where: {id: credentialId}}));
     expect(prismaMock.action.update).not.toHaveBeenCalled();
     expect(readableArtifactIds).toHaveBeenCalledWith(credential, "workspace-1", "Action", [expect.objectContaining({id: "private"})], prismaMock);
   });
@@ -140,6 +155,7 @@ describe("action domain lifecycle", () => {
       role: "MEMBER",
       isActive: true,
     });
+    prismaMock.agentCredential.findUnique.mockResolvedValue({ workspaceId: "workspace-1", isActive: true, tokenHash: "synthetic-hash", scopes: ["actions:write"], createdBy: null, supportGrantVersion: null });
     recordAudit.mockResolvedValue(undefined);
     appendEvents.mockResolvedValue(undefined);
     prismaMock.$executeRaw.mockResolvedValue({});
@@ -190,7 +206,7 @@ describe("action domain lifecycle", () => {
   it("rejects reuse of an agent request key with different author attribution", async () => {
     prismaMock.action.create.mockResolvedValueOnce({ id: "action-1", workspaceId: "workspace-1", title: "Follow up" });
     const { actionRequestSource, createAction } = await import("./actions");
-    const agent: AppActor = { kind: "agent", authProvider: "credential", label: "Test agent", workspaceIds: ["workspace-1"] };
+    const agent: AppActor = { kind: "agent", authProvider: "credential", credentialId: "synthetic-agent", credentialVersion: mcpCredentialVersion("synthetic-hash"), scopes: ["actions:write"], label: "Test agent", workspaceIds: ["workspace-1"] };
     prismaMock.member.findFirst.mockResolvedValueOnce({ id: "member-1", userId: "author-1" });
     const source = actionRequestSource("MCP_REQUEST", "agent-1", "call-1");
     await createAction(agent, { workspaceId: "workspace-1", title: "Follow up", authorMemberId: "member-1", source, isPrivate: false, assigneeMemberId: "member-2", lineageRoots: [{kind: "BrainSource", id: "source-1", fingerprint: "current"}] });

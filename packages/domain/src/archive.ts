@@ -23,7 +23,7 @@ import {
 import { appendEvents } from "./events";
 import { findSourceArticleImpacts, sourceIdsInDerivation } from "./brain-source-impact";
 import { lockActiveArticleSources, lockBrainSourceLink } from "./brain-source-links";
-import { advanceArchivedOriginalEnvelopeLineage, assertArtifactInputWriteFence, isArtifactArchiveMetadataReadable, isLineageKind, sealArtifactInputActor } from "./source-lineage";
+import { advanceArchivedArtifactEnvelopeLineage, assertArtifactInputWriteFence, isArtifactArchiveMetadataReadable, isLineageKind, sealArtifactInputActor } from "./source-lineage";
 
 export type ArchiveFilter = "active" | "archived" | "all";
 
@@ -716,7 +716,7 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
       }
       throw error;
     }
-    if (isLineageKind(config.entityType)) await advanceArchivedOriginalEnvelopeLineage({
+    if (isLineageKind(config.entityType)) await advanceArchivedArtifactEnvelopeLineage({
       tx, workspaceId: params.workspaceId, artifact: { kind: config.entityType, id: record.id }, before: record, after: updated,
     });
     if (config.entityType === "BrainArticle") {
@@ -863,7 +863,7 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
       }
       throw error;
     }
-    if (isLineageKind(config.entityType)) await advanceArchivedOriginalEnvelopeLineage({
+    if (isLineageKind(config.entityType)) await advanceArchivedArtifactEnvelopeLineage({
       tx, workspaceId: params.workspaceId, artifact: { kind: config.entityType, id: record.id }, before: record, after: updated,
     });
     if (config.entityType === "BrainArticle") {
