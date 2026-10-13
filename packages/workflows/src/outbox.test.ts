@@ -10,11 +10,20 @@ function actionSource(title = "Current action title") {
     archivedAt: null, duplicateOfActionId: null, authorUserId: "publisher-1", assigneeMemberId: "member-2", version: 1 };
 }
 function lineageStore(action: ReturnType<typeof actionSource>) {
-  const manifests: Record<string, any>[] = [{ artifactType: "Action", artifactId: action.id, revision: 1,
-    origin: "HUMAN_ORIGINAL", rootsJson: [], contentHash: lineageContentFingerprint("Action", action) }];
+  const manifests: Record<string, any>[] = [{ id: "action-original", workspaceId: action.workspaceId,
+    artifactType: "Action", artifactId: action.id, revision: 1,
+    origin: "HUMAN_ORIGINAL", inputsJson: [], rootsJson: [], contentHash: lineageContentFingerprint("Action", action) }];
+  const select = ({ where, orderBy, take }: any) => {
+    const matches = (actual: unknown, expected: any) => expected && typeof expected === "object" && "in" in expected
+      ? expected.in.includes(actual) : actual === expected;
+    const found = manifests.filter(row => Object.entries(where ?? {}).every(([key, value]) => matches(row[key], value)));
+    if (orderBy?.revision) found.sort((a, b) => (a.revision - b.revision) * (orderBy.revision === "desc" ? -1 : 1));
+    return found.slice(0, take ?? found.length);
+  };
   return {
-    findFirst: vi.fn(async ({ where }) => [...manifests].reverse().find(row => row.artifactType === where.artifactType && row.artifactId === where.artifactId) ?? null),
-    create: vi.fn(async ({ data }) => { manifests.push(data); return data; }),
+    findFirst: vi.fn(async (args): Promise<Record<string, any> | null> => select(args)[0] ?? null),
+    findMany: vi.fn(async args => select(args)),
+    create: vi.fn(async ({ data }) => { const row = { id: `manifest-${manifests.length}`, ...data }; manifests.push(row); return row; }),
   };
 }
 
@@ -592,6 +601,18 @@ describe("Action assignment dispatch", () => {
     expect(create).toHaveBeenCalledWith({ data: expect.objectContaining({ userId: "user-2", type: "action.assigned" }) });
   });
 
+  it("withholds an original receipt missing its input declaration instead of copying event text", async () => {
+    const { tx, event, create, manifests } = fixture();
+    const findOriginal = manifests.findFirst.getMockImplementation()!;
+    manifests.findFirst.mockImplementation(async args => {
+      const row = await findOriginal(args);
+      return row && { ...row, inputsJson: undefined };
+    });
+    await createNotificationsForEvent(tx, { ...event, payload: { ...event.payload, title: "Stale event title" } });
+    expect(create).not.toHaveBeenCalled();
+    expect(manifests.create).not.toHaveBeenCalled();
+  });
+
   it("withholds unknown current sources instead of copying stale event text", async () => {
     const { tx, event, create, manifests } = fixture();
     manifests.findFirst.mockResolvedValue(null);
@@ -607,8 +628,8 @@ describe("current advice notification dispatch", () => {
     const request = { id: "request-1", workspaceId: action.workspaceId, processId: "process-1", requestedByUserId: "requester-1",
       status: "ACTIVE", audienceType: "WORKSPACE", messageMd: "Current advice request", deadlineAt: new Date("2026-10-15T12:00:00Z") };
     const manifests = lineageStore(action);
-    await manifests.create({ data: { artifactType: "AdviceRequest", artifactId: request.id, revision: 1,
-      origin: "HUMAN_ORIGINAL", rootsJson: [], contentHash: lineageContentFingerprint("AdviceRequest", request) } });
+    await manifests.create({ data: { workspaceId: action.workspaceId, artifactType: "AdviceRequest", artifactId: request.id, revision: 1,
+      origin: "HUMAN_ORIGINAL", inputsJson: [], rootsJson: [], contentHash: lineageContentFingerprint("AdviceRequest", request) } });
     manifests.create.mockClear();
     const notifications = new Map<string, any>();
     const create = vi.fn(async ({ data }) => {

@@ -3,10 +3,12 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
+import type { AppActor } from "@corgtex/shared";
+import { MCP_TOOL_CAPABILITIES } from "../../../packages/domain/src/mcp-tool-capabilities";
 
 vi.mock("@corgtex/domain", async () => import("../../../packages/domain/src/agent-operation-capabilities"));
 
-import { AGENT_REST_ROUTE_CAPABILITIES } from "./agent-route-capabilities";
+import { AGENT_REST_ROUTE_CAPABILITIES, getAgentRouteCapability, requireAgentRouteCapability } from "./agent-route-capabilities";
 
 const webRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const appRoot = join(webRoot, "app");
@@ -127,6 +129,21 @@ describe("agent REST route authorization inventory fence", () => {
     const declared = Object.entries(AGENT_REST_ROUTE_CAPABILITIES).flatMap(([template, methods]) =>
       Object.keys(methods).map(method => `${method} ${template}`)).sort();
     expect(authenticatedRouteInventory()).toEqual(declared);
+  });
+
+  it("declares CRM archive GET with the canonical relationships read grant", () => {
+    const pathname = "/api/workspaces/workspace-1/leads/archive";
+    const request = {method: "GET", nextUrl: {pathname}};
+    const credential = (scopes: string[]): AppActor => ({kind: "agent", authProvider: "credential", label: "synthetic-crm-presentation", workspaceIds: ["workspace-1"], scopes});
+    expect(getAgentRouteCapability("GET", pathname)).toEqual({operation: "list_relationship_accounts", feature: "RELATIONSHIPS"});
+    expect(MCP_TOOL_CAPABILITIES.list_relationship_accounts.scopes).toEqual(["relationships:read"]);
+    expect(() => requireAgentRouteCapability(credential(["relationships:read"]), request)).not.toThrow();
+    for (const scopes of [[], ["relationships:write"], ["actions:read"]]) {
+      expect(() => requireAgentRouteCapability(credential(scopes), request, {deferToolLinkScope: true})).toThrow();
+    }
+    for (const method of ["POST", "PATCH", "DELETE"]) {
+      expect(() => requireAgentRouteCapability(credential(["relationships:read", "relationships:write"]), {...request, method})).toThrow();
+    }
   });
 
   it("discovers aliased actor imports, wrapper exports, and reexported HTTP methods using syntax", () => {

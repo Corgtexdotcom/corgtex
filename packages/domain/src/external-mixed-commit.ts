@@ -52,7 +52,7 @@ export async function prepareExternalMixedCommitPreflight(actor: AppActor, works
 /** The provider-owned wrapper is the only executor; it cannot skip locks or full proof checks. */
 export async function withExternalMixedCommitPreflight<T>(actor: AppActor, workspaceId: string,
   tx: Prisma.TransactionClient, submittedRoots: readonly LineageRoot[], token: ExternalMixedCommitPreflight,
-  work: () => Promise<T>): Promise<T> {
+  work: () => Promise<T>, beforeSourceEpochs?: () => Promise<void>): Promise<T> {
   const state = preflights.get(token);
   invariant(state && state.actor === actor && state.workspaceId === workspaceId && tx !== prisma
     && isDeepStrictEqual(state.roots, submittedRoots),
@@ -60,9 +60,9 @@ export async function withExternalMixedCommitPreflight<T>(actor: AppActor, works
   preflights.delete(token);
   try {
     if (state.provider) return await withExternalProviderNativeCommitPreflights(actor, workspaceId, tx,
-      state.roots, state.provider, state.mcp, state.slack, work);
+      state.roots, state.provider, state.mcp, state.slack, work, beforeSourceEpochs);
     invariant(state.mcp && state.slack, 409, "UNKNOWN_LINEAGE", "Mixed native plans are incomplete.");
-    return await withExternalMcpAndSlackCommitPreflights(actor, workspaceId, tx, state.roots, state.mcp, state.slack, work);
+    return await withExternalMcpAndSlackCommitPreflights(actor, workspaceId, tx, state.roots, state.mcp, state.slack, work, beforeSourceEpochs);
   } finally {
     if (state.provider) discardExternalProviderCommitPreflight(state.provider);
     if (state.mcp) discardExternalMcpResponseCommitPreflight(state.mcp);

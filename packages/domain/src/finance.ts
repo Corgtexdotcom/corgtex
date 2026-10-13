@@ -339,7 +339,8 @@ async function resolveFinanceModuleAccess(workspaceId: string, membership: Membe
  * When a disabling flag or support restriction could be inserted into an
  * absent row, the Workspace lock fences its foreign-key KEY SHARE until commit.
  */
-async function lockFinanceReadAuthority(tx: Prisma.TransactionClient, workspaceId: string, userId: string) {
+/** Physical authorization locks only; callers must still validate current policy. */
+export async function lockFinanceReadAuthority(tx: Prisma.TransactionClient, workspaceId: string, userId: string) {
   const flags = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
     SELECT "id" FROM "WorkspaceFeatureFlag"
     WHERE "workspaceId" = ${workspaceId} AND "flag" = 'FINANCE'

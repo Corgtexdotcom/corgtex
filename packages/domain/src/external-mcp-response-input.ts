@@ -14,7 +14,7 @@ import { capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, parsePe
 import type { LineageRoot } from "./source-lineage";
 import { claimSlackNativeCommitPreflight, inspectSlackNativeCommitClaim,
   discardSlackNativeCommitPreflight,
-  lockSlackNativeGoverningRows, withClaimedSlackNativeCommitPreflight,
+  lockSlackNativeGoverningRows, lockSlackNativeCommitClaimRows, withClaimedSlackNativeCommitPreflight,
   type SlackNativeCommitPreflight } from "./communication-native-authority";
 import { sealArtifactInputActor } from "./source-lineage";
 
@@ -273,7 +273,8 @@ async function runExternalMcpResponseCommitClaim<T>(actor: AppActor, workspaceId
 
 /** Supplied transactions cannot make network calls or adopt a newer grant revision. */
 export async function withExternalMcpResponseCommitPreflight<T>(actor: AppActor, workspaceId: string,
-  tx: Prisma.TransactionClient, token: ExternalMcpResponseCommitPreflight, work: () => Promise<T>): Promise<T> {
+  tx: Prisma.TransactionClient, token: ExternalMcpResponseCommitPreflight, work: () => Promise<T>,
+  beforeSourceEpochs?: () => Promise<void>): Promise<T> {
   const claim = claimExternalMcpResponseCommitPreflight(actor, workspaceId, tx, token);
   const state = claims.get(claim)!;
   for (const id of [...state.inputs.keys()].sort()) {
@@ -283,6 +284,7 @@ export async function withExternalMcpResponseCommitPreflight<T>(actor: AppActor,
     await tx.$queryRaw`SELECT "id" FROM "ExternalMcpConnection" WHERE "id" = ${input.connectionId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
     await tx.$queryRaw`SELECT "id" FROM "Member" WHERE "userId" = ${input.localUserId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
   }
+  if (beforeSourceEpochs) await withArtifactNativeCommitPhase(beforeSourceEpochs);
   const { isArtifactInputProofReadable } = await import("./source-lineage");
   return withArtifactNativeCommitPhase(() => runExternalMcpResponseCommitClaim(actor, workspaceId, tx, claim, async () => {
       invariant(await isArtifactInputProofReadable(actor, workspaceId, state.roots, tx),
@@ -297,7 +299,8 @@ export async function withExternalMcpResponseCommitPreflight<T>(actor: AppActor,
 /** Safe two-provider executor: consume both plans synchronously, then lock all native rows before governors or epochs. */
 export async function withExternalMcpAndSlackCommitPreflights<T>(actor: AppActor, workspaceId: string,
   tx: Prisma.TransactionClient, submitted: readonly LineageRoot[], mcpToken: ExternalMcpResponseCommitPreflight,
-  slackToken: SlackNativeCommitPreflight, work: () => Promise<T>): Promise<T> {
+  slackToken: SlackNativeCommitPreflight, work: () => Promise<T>,
+  beforeSourceEpochs?: () => Promise<void>): Promise<T> {
   const mcpClaim = claimExternalMcpResponseCommitPreflight(actor, workspaceId, tx, mcpToken, submitted);
   let slackClaim: ReturnType<typeof claimSlackNativeCommitPreflight>;
   try {
@@ -330,6 +333,8 @@ export async function withExternalMcpAndSlackCommitPreflights<T>(actor: AppActor
     await tx.$queryRaw`SELECT "id" FROM "Member" WHERE "userId" = ${input.localUserId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
   }
   await lockSlackNativeGoverningRows(tx, workspaceId, slack.inputIds, actor);
+  await lockSlackNativeCommitClaimRows(actor, workspaceId, tx, slackClaim);
+  if (beforeSourceEpochs) await withArtifactNativeCommitPhase(beforeSourceEpochs);
   const { isArtifactInputProofReadable } = await import("./source-lineage");
   return await withArtifactNativeCommitPhase(() => runExternalMcpResponseCommitClaim(actor, workspaceId, tx, mcpClaim,
     () => withClaimedSlackNativeCommitPreflight(actor, workspaceId, tx, slackClaim, async () => {

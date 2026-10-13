@@ -265,7 +265,7 @@ type SlackCommitState = { actor: AppActor; actorHash: string; workspaceId: strin
   submittedRoots: LineageRoot[]; roots: LineageRoot[];
   inputs: Map<string, { fingerprint: string; storedHash: string; receipt: SlackNativeFetchReceipt }> };
 const slackPreflights = new WeakMap<object, SlackCommitState>();
-const slackClaims = new WeakMap<object, SlackCommitState & { tx: Prisma.TransactionClient }>();
+const slackClaims = new WeakMap<object, SlackCommitState & { tx: Prisma.TransactionClient; rowLocks?: Promise<void> }>();
 /** Cancellation confers no authority; an attempted owner commit burns every peer plan. */
 export function discardSlackNativeCommitPreflight(token: SlackNativeCommitPreflight,
   claim?: SlackNativeCommitClaim) {
@@ -411,15 +411,28 @@ export async function lockSlackNativeCommitRows(tx: Prisma.TransactionClient, wo
   await lockSlackNativeGoverningRows(tx, workspaceId, inputIds, actor);
 }
 
+/** Reserve the exact opaque claim's physical rows without activating source
+ * authority. Mixed executors use this before their source-row reservation. */
+export async function lockSlackNativeCommitClaimRows(actor: AppActor, workspaceId: string,
+  tx: Prisma.TransactionClient, claim: SlackNativeCommitClaim): Promise<void> {
+  const state = slackClaims.get(claim);
+  invariant(state && state.actor === actor && state.actorHash === hash(actor)
+    && state.workspaceId === workspaceId && state.tx === tx && !commitReceipt.getStore(),
+  409, "SOURCE_CHANGED", "Slack commit claim is unavailable.");
+  await (state.rowLocks ??= lockSlackNativeCommitRows(tx, workspaceId, [...state.inputs.keys()], actor));
+}
+
 /** Safe even when called directly: all Slack locks and the entire proof are unavoidable. */
 export async function withClaimedSlackNativeCommitPreflight<T>(actor: AppActor, workspaceId: string,
-  tx: Prisma.TransactionClient, claim: SlackNativeCommitClaim, work: () => Promise<T>): Promise<T> {
+  tx: Prisma.TransactionClient, claim: SlackNativeCommitClaim, work: () => Promise<T>,
+  beforeSourceEpochs?: () => Promise<void>): Promise<T> {
   const state = slackClaims.get(claim);
   invariant(state && state.actor === actor && state.actorHash === hash(actor)
     && state.workspaceId === workspaceId && state.tx === tx && !commitReceipt.getStore(),
   409, "SOURCE_CHANGED", "Slack commit claim is unavailable.");
   slackClaims.delete(claim);
-  await lockSlackNativeCommitRows(tx, workspaceId, [...state.inputs.keys()], actor);
+  await (state.rowLocks ??= lockSlackNativeCommitRows(tx, workspaceId, [...state.inputs.keys()], actor));
+  if (beforeSourceEpochs) await withArtifactNativeCommitPhase(beforeSourceEpochs);
   const receipts = new Map([...state.inputs].map(([id, value]) => [id, value.receipt]));
   const scope = { actor, actorHash: state.actorHash, workspaceId, tx, receipts,
     expected: new Map([...state.inputs].map(([id, value]) => [id,
@@ -439,7 +452,7 @@ export async function withClaimedSlackNativeCommitPreflight<T>(actor: AppActor, 
 
 export async function withSlackNativeCommitPreflight<T>(actor: AppActor, workspaceId: string,
   tx: Prisma.TransactionClient, submitted: readonly LineageRoot[], token: SlackNativeCommitPreflight,
-  work: () => Promise<T>): Promise<T> {
+  work: () => Promise<T>, beforeSourceEpochs?: () => Promise<void>): Promise<T> {
   const claim = claimSlackNativeCommitPreflight(actor, workspaceId, tx, token, submitted);
-  return withClaimedSlackNativeCommitPreflight(actor, workspaceId, tx, claim, work);
+  return withClaimedSlackNativeCommitPreflight(actor, workspaceId, tx, claim, work, beforeSourceEpochs);
 }

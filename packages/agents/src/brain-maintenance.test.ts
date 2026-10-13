@@ -29,8 +29,15 @@ beforeEach(() => {
     (db as any)[delegate].findFirst.mockImplementation(async ({where}: any) => (rows[kind] ?? []).find(row => row.id === where.id) ?? null);
     (db as any)[delegate].findMany?.mockImplementation(async () => rows[kind] ?? []);
   }
-  db.artifactInputLineage.findFirst.mockImplementation(async ({where}) => manifests.find(row => row.artifactType === where.artifactType && row.artifactId === where.artifactId) ?? null);
-  db.artifactInputLineage.findMany.mockImplementation(async ({where}) => manifests.filter(row => row.artifactType === where.artifactType && where.artifactId.in.includes(row.artifactId)));
+  const selectManifests = ({where, orderBy, take}: any) => {
+    const matches = (actual: unknown, expected: any) => expected && typeof expected === "object" && "in" in expected
+      ? expected.in.includes(actual) : actual === expected;
+    const found = manifests.filter(row => Object.entries(where ?? {}).every(([key, value]) => matches(row[key], value)));
+    if (orderBy?.revision) found.sort((a, b) => (a.revision - b.revision) * (orderBy.revision === "desc" ? -1 : 1));
+    return found.slice(0, take ?? found.length);
+  };
+  db.artifactInputLineage.findFirst.mockImplementation(async args => selectManifests(args)[0] ?? null);
+  db.artifactInputLineage.findMany.mockImplementation(async args => selectManifests(args));
   db.artifactInputSnapshot.findFirst.mockImplementation(async ({where}) => snapshots.find(row => row.id === where.id) ?? null);
   db.artifactInputSnapshot.create.mockImplementation(async ({data}) => {const row = {id: `snapshot-${snapshots.length}`, ...data, createdAt: new Date()}; snapshots.push(row); return row;});
   db.artifactInputLineage.create.mockImplementation(async ({data}) => {const row = {id: `manifest-${manifests.length}`, ...data}; manifests.push(row); return row;});
@@ -75,6 +82,11 @@ describe("maintenance actual input lineage", () => {
     expect(db.knowledgeChunk.deleteMany).not.toHaveBeenCalled();
     expect(snapshots.some(row => row.sourceId === "private-thread" || row.sourceId === "unknown-thread" || row.sourceId === "recent" || row.sourceId === "finance")).toBe(false);
     expect(await isArtifactInputProofReadable(actor, "ws-1", result.lineageRoots, db as any)).toBe(true);
+    expect(db.artifactInputLineage.findMany).toHaveBeenCalledWith({
+      where: { workspaceId: "ws-1", artifactType: "BrainArticle", artifactId: "public", origin: "HUMAN_ORIGINAL",
+        id: expect.any(String), contentHash: expect.any(String) },
+      orderBy: { revision: "desc" }, take: 1,
+    });
   });
 
   it("captures the exact additional article revisions consumed by backlink rebuilding", async () => {

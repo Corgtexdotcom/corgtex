@@ -19,12 +19,14 @@ const f = vi.hoisted(() => {
     mcpPrepare: vi.fn(async () => Object.freeze({ backend: "mcp" })),
     mixedPrepare: vi.fn(async () => Object.freeze({ backend: "mixed" })),
     slackPrepare: vi.fn(async () => Object.freeze({ backend: "slack" })),
-    boxWith: vi.fn(async (_actor: unknown, _ws: string, _tx: unknown, _token: unknown, work: () => Promise<unknown>) => work()),
-    mcpWith: vi.fn(async (_actor: unknown, _ws: string, _tx: unknown, _token: unknown, work: () => Promise<unknown>) => work()),
+    boxWith: vi.fn(async (_actor: unknown, _ws: string, _tx: unknown, _token: unknown, work: () => Promise<unknown>,
+      beforeSourceEpochs?: () => Promise<void>) => { await beforeSourceEpochs?.(); return work(); }),
+    mcpWith: vi.fn(async (_actor: unknown, _ws: string, _tx: unknown, _token: unknown, work: () => Promise<unknown>,
+      beforeSourceEpochs?: () => Promise<void>) => { await beforeSourceEpochs?.(); return work(); }),
     mixedWith: vi.fn(async (_actor: unknown, _ws: string, _tx: unknown, _roots: unknown[], _token: unknown,
-      work: () => Promise<unknown>) => work()),
+      work: () => Promise<unknown>, beforeSourceEpochs?: () => Promise<void>) => { await beforeSourceEpochs?.(); return work(); }),
     slackWith: vi.fn(async (_actor: unknown, _ws: string, _tx: unknown, _roots: unknown[], _token: unknown,
-      work: () => Promise<unknown>) => work()),
+      work: () => Promise<unknown>, beforeSourceEpochs?: () => Promise<void>) => { await beforeSourceEpochs?.(); return work(); }),
   };
 });
 vi.mock("@corgtex/shared", () => ({ prisma: f.prisma }));
@@ -76,7 +78,7 @@ describe("artifact commit preflight dispatcher", () => {
     const work = vi.fn(async () => { f.state.events.push("write"); return "stored"; });
     await expect(withArtifactCommitPreflight(actor, workspaceId, tx, original, capability, work)).resolves.toBe("stored");
     expect(f.mixedWith).toHaveBeenCalledWith(actor, workspaceId, tx, original,
-      { backend: "mixed" }, expect.any(Function));
+      { backend: "mixed" }, expect.any(Function), undefined);
     expect(f.state.events).toEqual(["base-proof", "tx-proof", "write", "tx-proof"]);
   });
 
@@ -90,6 +92,36 @@ describe("artifact commit preflight dispatcher", () => {
       .resolves.toBe("empty");
     expect(f.mcpWith).not.toHaveBeenCalled();
     expect(f.state.events).toEqual(["base-proof", "tx-proof", "tx-proof"]);
+  });
+
+  it.each(["local", "box", "mcp", "slack", "mixed"] as const)("reserves source rows before full proofs for %s and burns a failed reservation", async backend => {
+    const original = [root("ContextGraphObject", "derived")];
+    const leaves: Record<typeof backend, any[]> = {
+      local: [], box: [root("ExternalProviderFetchInput", "box")],
+      mcp: [root("ExternalMcpResponseInput", "mcp")], slack: [root("CommunicationMessageNativeInput", "slack")],
+      mixed: [root("ExternalProviderFetchInput", "box"), root("CommunicationMessageNativeInput", "slack")],
+    };
+    f.state.closure = [original[0], ...leaves[backend]];
+    const capability = await prepareArtifactCommitPreflight(actor, workspaceId, original);
+    f.state.events = [];
+    const reserve = vi.fn(async () => { f.state.events.push("source-rows"); });
+    const work = vi.fn(async () => { f.state.events.push("write"); return "stored"; });
+    await expect(withArtifactCommitPreflight(actor, workspaceId, tx, original, capability, work,
+      { beforeSourceEpochs: reserve })).resolves.toBe("stored");
+    expect(reserve).toHaveBeenCalledOnce();
+    expect(f.state.events).toEqual(["source-rows", "tx-proof", "write", "tx-proof"]);
+
+    const rejected = await prepareArtifactCommitPreflight(actor, workspaceId, original);
+    const failure = Object.assign(new Error("Synthetic lock-plan changed"), { code: "SOURCE_CHANGED" });
+    const refuse = vi.fn(async () => { throw failure; });
+    work.mockClear(); f.state.events = [];
+    await expect(withArtifactCommitPreflight(actor, workspaceId, tx, original, rejected, work,
+      { beforeSourceEpochs: refuse })).rejects.toBe(failure);
+    expect(work).not.toHaveBeenCalled();
+    expect(f.state.events).toEqual([]);
+    await expect(withArtifactCommitPreflight(actor, workspaceId, tx, original, rejected, work,
+      { beforeSourceEpochs: reserve })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(reserve).toHaveBeenCalledOnce();
   });
 
   it("uses the Box preflight when a connection-set proof has no MCP response", async () => {

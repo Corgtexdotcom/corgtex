@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AppActor } from "@corgtex/shared";
+import { encryptSecret, type AppActor } from "@corgtex/shared";
 import { installSourcePermissionEpochFixture } from "./source-permission-epochs.test-fixture";
 
 const f = vi.hoisted(() => {
@@ -44,10 +44,18 @@ vi.mock("@corgtex/shared", async original => ({ ...await original<typeof import(
 vi.mock("../../shared/src/env", () => ({ env: { ENCRYPTION_KEY: "a".repeat(64) } }));
 vi.mock("./auth", () => ({ requireWorkspaceMembership: f.authorize }));
 vi.mock("./finance", () => ({ getFinanceAccessPolicy: async () => ({ canRead: false }) }));
+const replay = vi.hoisted(() => ({ sdk: vi.fn<typeof import("./external-mcp")["readExternalMcpNativeToolResult"]>(
+  async () => ({ structuredContent: { results: [] } })) }));
+vi.mock("./external-mcp", async original => ({
+  ...await original<typeof import("./external-mcp")>(), readExternalMcpNativeToolResult: replay.sdk,
+}));
 
 import { captureMcpOAuthGrantEpoch, mcpCredentialVersion, mcpScopesHash, runWithMcpOrigin } from "../../shared/src/mcp-context";
 import { captureArtifactInputProof, captureArtifactInputSnapshotProof, isArtifactInputProofReadable,
-  recordArtifactInputLineage, type LineageKind, type LineageRoot } from "./source-lineage";
+  recordArtifactInputLineage, readableArtifactIds, lineageContentFingerprint, withArtifactInputReadCapture, type LineageKind, type LineageRoot } from "./source-lineage";
+import { externalMcpNativeReadRequest, externalMcpConnectionGrantHash } from "./external-mcp";
+import { externalMcpResponseHash } from "./external-mcp-response-input";
+import { capturePermissionEpochs } from "./source-permission-epochs";
 import { createConversationIngressInput } from "./conversation-ingress";
 import { withMcpToolInput } from "./mcp-tool-input";
 import { getMcpToolInputRoots } from "./mcp-tool-input-context";
@@ -88,6 +96,7 @@ async function proof(actor: AppActor, workspaceId: string, kind: LineageKind, id
 
 beforeEach(() => {
   vi.clearAllMocks(); f.tables.clear();
+  replay.sdk.mockResolvedValue({ structuredContent: { results: [] } });
   installSourcePermissionEpochFixture(f.db);
   f.base.$transaction.mockImplementation(async work => {
     const before = structuredClone(f.tables);
@@ -253,4 +262,156 @@ describe("OAuth consent at every contributing source", () => {
       });
     },
   );
+});
+
+async function nativeQueryDerivedAccount(nativeFirst = true) {
+  const canary = "SYNTHETIC_DOCUMENT_QUERY_CANARY";
+  f.insert("workspace", { id: "ws-a", name: "Synthetic workspace" });
+  f.insert("member", { id: "member-owner", workspaceId: "ws-a", userId: "owner", isActive: true });
+  const document = f.insert("document", { id: "query-document", workspaceId: "ws-a", title: "Synthetic source",
+    textContent: canary, source: "SYNTHETIC", storageKey: "synthetic", accessDomain: "WORKSPACE", archivedAt: null });
+  await recordArtifactInputLineage({ tx: f.db, actor: owner, workspaceId: "ws-a", artifact: { kind: "Document", id: document.id },
+    content: document, origin: "HUMAN_ORIGINAL", inputs: [] });
+  const connection = f.insert("externalMcpConnection", { id: "mcp-connection", workspaceId: "ws-a", userId: "owner",
+    status: "ACTIVE", providerKey: "notion", serverUrl: "https://mcp.notion.com/mcp", providerAccountId: null,
+    scopes: ["read"], accessTokenEnc: "synthetic-unused", updatedAt: new Date() });
+  const request = externalMcpNativeReadRequest("notion", "SEARCH", { query: canary, limit: 1 });
+  const originalLocalEpochsJson = await capturePermissionEpochs(f.db, "ws-a", [
+    { kind: "Workspace", id: "ws-a" }, { kind: "MemberUserPolicy", id: "owner" },
+    { kind: "WorkspaceSupportPolicy", id: "owner" }, { kind: "ExternalMcpConnection", id: connection.id },
+    { kind: "ExternalMcpConnectionSetPolicy", id: "owner" }, { kind: "ExternalMcpResponseInput", id: "native-query" },
+  ]);
+  const response = { structuredContent: { results: [] } };
+  const input = f.insert("externalMcpResponseInput", { id: "native-query", workspaceId: "ws-a", connectionId: connection.id,
+    localUserId: "owner", providerKey: "notion", serverUrl: request.serverUrl, providerAccountId: null, mode: "SEARCH",
+    toolName: request.toolName, requestJson: request.arguments, encryptedResponseJson: encryptSecret(JSON.stringify(response)),
+    responseHash: externalMcpResponseHash(response), connectionGrantHash: externalMcpConnectionGrantHash(connection as any),
+    originalLocalEpochsJson, fetchedAt: new Date("2026-10-13T12:00:00Z") });
+  const nativeRoot: LineageRoot = { kind: "ExternalMcpResponseInput", id: input.id,
+    fingerprint: lineageContentFingerprint("ExternalMcpResponseInput", input) };
+  const documentRoot: LineageRoot = { kind: "Document", id: document.id,
+    fingerprint: lineageContentFingerprint("Document", document) };
+  const account = f.insert("crmAccount", { id: "derived-account", workspaceId: "ws-a",
+    name: "Synthetic derived account", archivedAt: null });
+  await recordArtifactInputLineage({ tx: f.db, actor: owner, workspaceId: "ws-a",
+    artifact: { kind: "CrmAccount", id: account.id }, content: account, origin: "DERIVED",
+    inputs: [], inheritedRoots: nativeFirst ? [nativeRoot, documentRoot] : [documentRoot, nativeRoot] });
+  replay.sdk.mockClear();
+  return { account, canary, nativeRoot, documentRoot, bodyRoot: { kind: "CrmAccount", id: account.id,
+    fingerprint: lineageContentFingerprint("CrmAccount", account) } as LineageRoot };
+}
+
+describe("complete local admission before native query replay", () => {
+  it.each(["proof", "list", "capture"] as const)("withholds %s if the contributing manifest changes during replay without a body change", async api => {
+    const fixture = await nativeQueryDerivedAccount();
+    const connection = f.tables.get("externalMcpConnection")!.get("mcp-connection");
+    const stored = f.tables.get("externalMcpResponseInput")!.get("native-query");
+    const request = externalMcpNativeReadRequest("notion", "SEARCH", { query: "NEW_SYNTHETIC_CONTRIBUTOR", limit: 1 });
+    const replacement = f.insert("externalMcpResponseInput", { ...stored, id: "replacement-native-query",
+      requestJson: request.arguments, originalLocalEpochsJson: await capturePermissionEpochs(f.db, "ws-a", [
+        { kind: "Workspace", id: "ws-a" }, { kind: "MemberUserPolicy", id: "owner" },
+        { kind: "WorkspaceSupportPolicy", id: "owner" }, { kind: "ExternalMcpConnection", id: connection.id },
+        { kind: "ExternalMcpConnectionSetPolicy", id: "owner" }, { kind: "ExternalMcpResponseInput", id: "replacement-native-query" },
+      ]) });
+    const next = await recordArtifactInputLineage({ tx: f.db, actor: owner, workspaceId: "ws-a",
+      artifact: { kind: "CrmAccount", id: fixture.account.id }, content: fixture.account, origin: "DERIVED",
+      inputs: [], inheritedRoots: [{ kind: "ExternalMcpResponseInput", id: replacement.id,
+        fingerprint: lineageContentFingerprint("ExternalMcpResponseInput", replacement) }, fixture.documentRoot] });
+    f.tables.get("artifactInputLineage")!.delete(next.id);
+    replay.sdk.mockClear();
+    replay.sdk.mockImplementation(async (_actor, nativeRequest) => {
+      if ((nativeRequest.arguments as { query?: string }).query === fixture.canary) {
+        f.tables.get("artifactInputLineage")!.set(next.id, next);
+        return { structuredContent: { results: [] } };
+      }
+      return { structuredContent: { results: [{ id: "changed-synthetic-replacement" }] } };
+    });
+    const current = oauth("receipt-reader", ["relationships:read", "external-tools:read", "brain:read"]);
+    await current.run(async () => {
+      if (api === "proof") expect(await isArtifactInputProofReadable(owner, "ws-a", [fixture.bodyRoot])).toBe(false);
+      else if (api === "list") expect(await readableArtifactIds(owner, "ws-a", "CrmAccount", [fixture.account])).toEqual(new Set());
+      else await expect(captureArtifactInputProof(owner, "ws-a", [{ kind: "CrmAccount", id: fixture.account.id }]))
+        .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    });
+    expect(replay.sdk).toHaveBeenCalledOnce();
+    expect(replay.sdk.mock.calls[0]?.[1]).toMatchObject({ arguments: { query: fixture.canary } });
+  });
+
+  it("captures only the independent surviving row after another contributor is restricted during replay", async () => {
+    const { account } = await nativeQueryDerivedAccount(false);
+    const independent = f.insert("crmAccount", { id: "independent-account", workspaceId: "ws-a",
+      name: "Synthetic independent human original", archivedAt: null });
+    await recordArtifactInputLineage({ tx: f.db, actor: owner, workspaceId: "ws-a",
+      artifact: { kind: "CrmAccount", id: independent.id }, content: independent, origin: "HUMAN_ORIGINAL", inputs: [] });
+    const current = oauth("oauth-T2", ["relationships:read", "external-tools:read", "brain:read"]);
+    replay.sdk.mockImplementationOnce(async () => {
+      f.tables.get("document")!.get("query-document").accessDomain = "FINANCE";
+      return { structuredContent: { results: [] } };
+    });
+    const result = await current.run(() => withArtifactInputReadCapture(owner, "ws-a", async () =>
+      [...await readableArtifactIds(owner, "ws-a", "CrmAccount", [account, independent])]));
+    expect(result.value).toEqual([independent.id]);
+    expect(result.roots).toEqual([expect.objectContaining({ kind: "CrmAccount", id: independent.id })]);
+    expect(replay.sdk).toHaveBeenCalledOnce();
+  });
+
+  it.each(["proof", "list", "capture"] as const)("withholds %s when an earlier contributor becomes restricted during native replay", async api => {
+    const { account, bodyRoot } = await nativeQueryDerivedAccount(false);
+    const current = oauth("oauth-T2", ["relationships:read", "external-tools:read", "brain:read"]);
+    replay.sdk.mockImplementationOnce(async () => {
+      f.tables.get("document")!.get("query-document").accessDomain = "FINANCE";
+      return { structuredContent: { results: [] } };
+    });
+    await current.run(async () => {
+      if (api === "proof") expect(await isArtifactInputProofReadable(owner, "ws-a", [bodyRoot])).toBe(false);
+      else if (api === "list") expect(await readableArtifactIds(owner, "ws-a", "CrmAccount", [account])).toEqual(new Set());
+      else await expect(captureArtifactInputProof(owner, "ws-a", [{ kind: "CrmAccount", id: account.id }]))
+        .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    });
+    expect(replay.sdk).toHaveBeenCalledOnce();
+  });
+
+  it.each(["proof", "list", "capture"] as const)("withholds a derived account before provider replay without Document consent in %s", async api => {
+    const { account, bodyRoot } = await nativeQueryDerivedAccount();
+    const current = oauth("oauth-T2", ["relationships:read", "external-tools:read"]);
+    await current.run(async () => {
+      if (api === "proof") expect(await isArtifactInputProofReadable(owner, "ws-a", [bodyRoot])).toBe(false);
+      else if (api === "list") expect(await readableArtifactIds(owner, "ws-a", "CrmAccount", [account])).toEqual(new Set());
+      else await expect(captureArtifactInputProof(owner, "ws-a", [{ kind: "CrmAccount", id: account.id }]))
+        .rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    });
+    expect(replay.sdk).not.toHaveBeenCalled();
+  });
+
+  it.each(["proof", "capture"] as const)("admits the complete separate input union before native replay in %s", async api => {
+    const { nativeRoot, documentRoot } = await nativeQueryDerivedAccount();
+    const current = oauth("oauth-T2", ["relationships:read", "external-tools:read"]);
+    await current.run(async () => {
+      if (api === "proof") expect(await isArtifactInputProofReadable(owner, "ws-a", [nativeRoot, documentRoot])).toBe(false);
+      else await expect(captureArtifactInputProof(owner, "ws-a", [nativeRoot, documentRoot]))
+        .rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    });
+    expect(replay.sdk).not.toHaveBeenCalled();
+  });
+
+  it.each(["proof", "list", "capture"] as const)("still replays with complete consent and denies remote drift in %s", async api => {
+    const { account, bodyRoot, canary } = await nativeQueryDerivedAccount();
+    const current = oauth("oauth-T2", ["relationships:read", "external-tools:read", "brain:read"]);
+    await current.run(async () => {
+      if (api === "proof") expect(await isArtifactInputProofReadable(owner, "ws-a", [bodyRoot])).toBe(true);
+      else if (api === "list") expect(await readableArtifactIds(owner, "ws-a", "CrmAccount", [account])).toEqual(new Set([account.id]));
+      else expect(await captureArtifactInputProof(owner, "ws-a", [{ kind: "CrmAccount", id: account.id }])).not.toHaveLength(0);
+    });
+    const successfulReplays = replay.sdk.mock.calls.length;
+    expect(successfulReplays).toBeGreaterThan(0);
+    for (const call of replay.sdk.mock.calls) expect(call[1]).toMatchObject({ arguments: { query: canary } });
+    replay.sdk.mockResolvedValue({ structuredContent: { results: [{ id: "changed-synthetic-result" }] } });
+    await current.run(async () => {
+      if (api === "proof") expect(await isArtifactInputProofReadable(owner, "ws-a", [bodyRoot])).toBe(false);
+      else if (api === "list") expect(await readableArtifactIds(owner, "ws-a", "CrmAccount", [account])).toEqual(new Set());
+      else await expect(captureArtifactInputProof(owner, "ws-a", [{ kind: "CrmAccount", id: account.id }]))
+        .rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    });
+    expect(replay.sdk.mock.calls.length).toBeGreaterThan(successfulReplays);
+  });
 });

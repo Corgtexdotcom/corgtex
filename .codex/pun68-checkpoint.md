@@ -4,6 +4,53 @@ This draft extends c9ffa7d35ead059bf5cd50e93780e8768c62650e and composes main
 8e484c4216b8217879ac64aa46042b32fe715501 (PUN76 guards and PUN78 sensitivity fix). Full acceptance
 is INCOMPLETE. Keep PR1517 draft; do not merge or deploy.
 
+## October13 current read-boundary correction
+
+Hosted CI at67e1b956849ef8d15dc26cf2f8e75ee83f84ad60 finished FAILURE
+(run38421210772):12059 tests passed,22 failed,2 skipped; one additional suite
+failed during import. Build, DatabaseSync/seed, schema, scans, policy, lint and
+type checks passed. Seven Recall and two Action failures remain product gates.
+Thirteen test failures and the import failure prompted faithful fixture repairs
+and actual Brain/native-caller corrections; these are not aggregate acceptance.
+
+The primary read APIs now complete local admission of the entire closure before
+native replay. They recheck the current local permission closure after awaited
+native work, using a fresh memo, and bind admission/replay/final admission to the
+same exact manifest heads. A same-body new manifest cannot introduce an unplayed
+native contributor during replay. List collectors receive only surviving allowed
+rows. Restricted source queries never reach the provider as a side effect of
+checking an otherwise inaccessible derived entry.
+
+Optional physical caller hooks run outside native authority, before full proof
+checks. The exact opaque Slack claim reserves its native/governing rows once;
+mixed wrappers cannot first lock earlier rows after epoch acquisition. The ambient
+physical helper grants no read capability and captures no epochs. These changes
+do not yet establish the complete global writer/target union.
+
+Independent GPT-6.1 Sol xhigh cleared this bounded root slice after reproducing
+and verifying the pre-replay scope, mid-replay permission and same-body manifest
+races. Focused units195/195 and exact final PostgreSQL28/28 pass; full domain
+typecheck and scoped lint exit0. Route/CRM import fixtures72/72,
+graph fixtures75/75 and Brain-maintenance/outbox fixtures35/35 pass without
+relaxing source permission negatives.
+
+Bloop's default-off foundation is published in draft PR1523 at
+9050c76d7794c74cd68253965e73083cda0e0801, verified tree
+514d9f4cb97531bf8b879e448bacb7cdc1115122. The earlier publication hold is no
+longer current. Its actual SQL saver/lifecycle/admission/approval/worker composition
+remains deferred and unproved. The shared source-plan API and ownership are in
+the integration contract. Its new foundation has34 focused units and10 actual
+PostgreSQL passes, but current writer/head/coverage migration and structural target
+receipts remain under implementation; those results are not complete acceptance.
+
+Independent caller review also found an overlapping same-key ExecutionResult
+reconciliation gap and a variant candidate whose new native contributor was not
+preflighted. Both owners are correcting them before those deltas are published.
+Mixed execution currently costs1969ms/1118 Prisma operations in preparation and
+6088ms/2215 operations in publication in the disposable fixture. Increasing its
+transaction timeout to120s establishes correctness evidence only; reducing this
+lock duration and proving the complete composed writer remain required work.
+
 ## Architecture and migration/backfill
 
 - Record complete actual input lineage independently of citations, including saved

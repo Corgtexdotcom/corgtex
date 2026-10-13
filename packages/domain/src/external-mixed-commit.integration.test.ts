@@ -9,9 +9,10 @@ const remote = vi.hoisted(() => ({
   boxRead: vi.fn(), mcpRead: vi.fn(), inTransaction: 0,
   slack: [{ type: "message", ts: "1700000000.000001", user: "U_PUBLIC", text: "Synthetic public Slack input" }],
   slackRead: vi.fn(),
+  slackTeamId: "T_SYNTHETIC",
 }));
 vi.mock("@slack/web-api", () => ({ WebClient: class {
-  auth = { test: async () => ({ ok: true, team_id: "T_SYNTHETIC", user_id: "U_BOT" }) };
+  auth = { test: async () => ({ ok: true, team_id: remote.slackTeamId, user_id: "U_BOT" }) };
   conversations = {
     info: async ({ channel }: { channel: string }) => ({ ok: true, channel: { id: channel, is_private: false,
       is_archived: false, is_member: true } }),
@@ -47,23 +48,25 @@ import { captureExternalMcpResponseInput, isExternalMcpResponseInputCurrent, pre
   withExternalMcpResponseCommitPreflight } from "./external-mcp-response-input";
 import { prepareExternalMixedCommitPreflight, withExternalMixedCommitPreflight } from "./external-mixed-commit";
 import { savedEnclosingNativeEpochs } from "./native-commit-original-vector";
-import { prepareArtifactCommitPreflight, withArtifactCommitPreflight } from "./artifact-commit-preflight";
+import { prepareArtifactCommitPreflight, withArtifactCommitPreflight, lockArtifactReadAuthorityRows } from "./artifact-commit-preflight";
 import { captureSlackNativeMessageFetch, isCommunicationMessageNativeInputCurrent,
   claimSlackNativeCommitPreflight, inspectSlackNativeCommitClaim, prepareSlackNativeCommitPreflight,
   withClaimedSlackNativeCommitPreflight, withSlackNativeCommitPreflight, withSlackNativeCommitReceipt } from "./communication-native-authority";
 import { communicationCanonicalJson, communicationNativeHash } from "./communication-native-ingress";
 import { artifactPermissionEpochIdentities, capturePermissionEpochs } from "./source-permission-epochs";
 import { captureArtifactInputProof, captureArtifactInputSnapshotProof,
-  captureArtifactPermissionEpochs, isArtifactInputProofReadable, recordArtifactInputLineage } from "./source-lineage";
+  captureArtifactPermissionEpochs, isArtifactInputProofReadable, readableArtifactIds, recordArtifactInputLineage } from "./source-lineage";
 import { lineageContentFingerprint } from "./source-lineage";
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 let current: Fixture | null = null;
+const oauthClients = new Set<string>();
 async function fixture() {
   const suffix = randomUUID();
   const user = await prisma.user.create({ data: { email: `mixed-owner-${suffix}@synthetic.test`, passwordHash: "synthetic" } });
   const other = await prisma.user.create({ data: { email: `mixed-other-${suffix}@synthetic.test`, passwordHash: "synthetic" } });
   const workspace = await prisma.workspace.create({ data: { name: "Synthetic mixed external commit", slug: `mixed-native-${suffix}` } });
+  remote.slackTeamId = `T_PUN68_ROOT_${suffix}`;
   await prisma.member.createMany({ data: [user.id, other.id].map(userId => ({ workspaceId: workspace.id, userId, role: "ADMIN", isActive: true })) });
   const actor = { kind: "user", user: { id: user.id, email: user.email, displayName: null, globalRole: "USER" } } as AppActor;
   const otherActor = { kind: "user", user: { id: other.id, email: other.email, displayName: null, globalRole: "USER" } } as AppActor;
@@ -87,7 +90,7 @@ async function fixture() {
 
 async function addSlack(f: Fixture, index = 0, priorInstallation?: Awaited<ReturnType<typeof prisma.communicationInstallation.create>>) {
   const installation = priorInstallation ?? await prisma.communicationInstallation.create({ data: { workspaceId: f.workspace.id,
-    provider: "SLACK", externalWorkspaceId: "T_SYNTHETIC", appId: "APP_SYNTHETIC", botUserId: "U_BOT",
+    provider: "SLACK", externalWorkspaceId: remote.slackTeamId, appId: "APP_SYNTHETIC", botUserId: "U_BOT",
     botTokenEnc: encryptSecret("synthetic-slack-token"), scopes: ["channels:read", "channels:history"], status: "ACTIVE" } });
   const channel = await prisma.communicationChannel.create({ data: { workspaceId: f.workspace.id,
     installationId: installation.id, provider: "SLACK", externalChannelId: `C_PUBLIC_${index}`,
@@ -133,6 +136,10 @@ afterEach(async () => {
   if (f) {
     await prisma.workspace.delete({ where: { id: f.workspace.id } });
     await prisma.user.deleteMany({ where: { id: { in: [f.user.id, f.other.id] } } });
+  }
+  if (oauthClients.size) {
+    await prisma.mcpOAuthClient.deleteMany({ where: { id: { in: [...oauthClients] } } });
+    oauthClients.clear();
   }
   remote.boxRead.mockClear(); remote.mcpRead.mockClear(); remote.inTransaction = 0;
   remote.slackRead.mockClear();
@@ -359,20 +366,42 @@ describe("complete Slack native commit closure", () => {
     expect(remote.slackRead).not.toHaveBeenCalled();
   });
 
-  it.each(["slack", "box+slack", "mcp+slack", "box+mcp+slack"])("publishes %s with no provider transport in the transaction", async combination => {
+  it.each(["box", "mcp", "box+mcp", "slack", "box+slack", "mcp+slack", "box+mcp+slack"])("publishes %s with source rows before epochs and no transport in the transaction", async combination => {
     const f = current = await fixture();
-    const slack = await addSlack(f);
+    const slack = combination.includes("slack") ? await addSlack(f) : undefined;
     const roots = [
       ...(combination.includes("box") ? [f.roots[0]!] : []),
       ...(combination.includes("mcp") ? [f.roots[1]!] : []),
-      ...slack.roots,
+      ...(slack?.roots ?? []),
     ];
     const token = await prepareArtifactCommitPreflight(f.actor, f.workspace.id, roots);
     remote.boxRead.mockClear(); remote.mcpRead.mockClear(); remote.slackRead.mockClear();
-    const output = await prisma.$transaction(tx => withArtifactCommitPreflight(f.actor, f.workspace.id, tx,
-      roots, token, async () => {
-        expect(await isCommunicationMessageNativeInputCurrent(f.actor, f.workspace.id, slack.input, tx)).toBe(true);
-        expect(await isCommunicationMessageNativeInputCurrent(f.actor, f.workspace.id, slack.input)).toBe(false);
+    const lockEvents: string[] = [];
+    const reserve = vi.fn();
+    const output = await prisma.$transaction(async connection => {
+      const tx = new Proxy(connection, { get(target, key) {
+        if (key !== "$queryRaw") return Reflect.get(target, key, target);
+        return (...args: any[]) => {
+          const sql = typeof args[0]?.sql === "string" ? args[0].sql : Array.isArray(args[0]) ? args[0].join("?") : "";
+          lockEvents.push(sql);
+          return (target.$queryRaw as (...args: any[]) => Promise<any>)(...args);
+        };
+      } });
+      reserve.mockImplementation(async () => {
+        expect(lockEvents.some(sql => /FROM "(ExternalProviderFetchInput|ExternalMcpResponseInput|CommunicationMessageNativeInput)"/.test(sql))).toBe(true);
+        expect(lockEvents.some(sql => sql.includes('FROM "SourcePermissionEpoch"'))).toBe(false);
+        await lockArtifactReadAuthorityRows(f.actor, f.workspace.id, tx);
+        lockEvents.push("reserved-source-rows");
+        // Reservation is inert: no native scope exists before the full proof.
+        if (slack) expect(await isCommunicationMessageNativeInputCurrent(f.actor, f.workspace.id, slack.input, tx)).toBe(false);
+        if (combination.includes("box")) expect(await isExternalProviderFetchInputCurrent(f.actor, f.workspace.id, f.provider.input, tx)).toBe(false);
+        if (combination.includes("mcp")) expect(await isExternalMcpResponseInputCurrent(f.actor, f.workspace.id, f.mcp.input, tx)).toBe(false);
+      });
+      return withArtifactCommitPreflight(f.actor, f.workspace.id, tx, roots, token, async () => {
+        if (slack) {
+          expect(await isCommunicationMessageNativeInputCurrent(f.actor, f.workspace.id, slack.input, tx)).toBe(true);
+          expect(await isCommunicationMessageNativeInputCurrent(f.actor, f.workspace.id, slack.input)).toBe(false);
+        }
         if (combination.includes("box")) {
           expect(await isExternalProviderFetchInputCurrent(f.actor, f.workspace.id, f.provider.input, tx)).toBe(true);
           expect(await isExternalProviderFetchInputCurrent(f.actor, f.workspace.id, f.provider.input)).toBe(false);
@@ -387,8 +416,12 @@ describe("complete Slack native commit closure", () => {
           artifact: { kind: "BrainSource", id: row.id }, content: row, origin: "DERIVED",
           inputs: [], inheritedRoots: roots });
         return row;
-      }));
+      }, { beforeSourceEpochs: reserve });
+    });
     expect(output.id).toBeTruthy();
+    expect(reserve).toHaveBeenCalledOnce();
+    expect(lockEvents.findIndex(sql => sql.includes('FROM "SourcePermissionEpoch"')))
+      .toBeGreaterThan(lockEvents.indexOf("reserved-source-rows"));
     expect(remote.slackRead).not.toHaveBeenCalled();
     expect(remote.boxRead).not.toHaveBeenCalled();
     expect(remote.mcpRead).not.toHaveBeenCalled();
@@ -424,6 +457,7 @@ describe("complete Slack native commit closure", () => {
     const client = await prisma.mcpOAuthClient.create({ data: { clientId: `native-closure-${randomUUID()}`,
       name: "Synthetic narrow OAuth", redirectUris: ["https://synthetic.example.test"],
       scopes: ["external-tools:read"] } });
+    oauthClients.add(client.id);
     const token = await prisma.mcpOAuthAccessToken.create({ data: { workspaceId: f.workspace.id,
       userId: f.user.id, clientId: client.id, instanceSlug: "selfserve", tokenHash: `synthetic-${randomUUID()}`,
       scopes: ["external-tools:read"], expiresAt: new Date(Date.now() + 60_000),
@@ -439,6 +473,87 @@ describe("complete Slack native commit closure", () => {
     expect(remote.mcpRead).not.toHaveBeenCalled();
     expect(remote.boxRead).not.toHaveBeenCalled();
     expect(remote.slackRead).not.toHaveBeenCalled();
+  });
+
+  it.each(["proof", "list", "capture"].flatMap(api => ["response", "privacy", "manifest"].map(change => [api, change] as const)))(
+    "admits the full primary %s closure and rechecks %s changes after replay", async (api, change) => {
+    const f = current = await fixture();
+    const canary = "SYNTHETIC_DOCUMENT_QUERY_CANARY";
+    const document = await prisma.document.create({ data: { workspaceId: f.workspace.id,
+      title: "Synthetic query contributor", source: "SYNTHETIC", storageKey: "synthetic-key", textContent: canary } });
+    await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: f.actor, workspaceId: f.workspace.id,
+      artifact: { kind: "Document", id: document.id }, content: document, origin: "HUMAN_ORIGINAL", inputs: [] }));
+    const native = await captureExternalMcpResponseInput(f.actor, { workspaceId: f.workspace.id,
+      connectionId: f.connection.id, mode: "SEARCH", query: canary, limit: 1 });
+    const inputs = [{ kind: "Document" as const, id: document.id },
+      { kind: "ExternalMcpResponseInput" as const, id: native.input.id }];
+    const roots = await captureArtifactInputProof(f.actor, f.workspace.id, change === "privacy" ? inputs : inputs.reverse());
+    const plan = await prepareArtifactCommitPreflight(f.actor, f.workspace.id, roots);
+    const account = await prisma.$transaction(tx => withArtifactCommitPreflight(f.actor, f.workspace.id, tx, roots, plan, async () => {
+      const row = await tx.crmAccount.create({ data: { workspaceId: f.workspace.id, name: "Synthetic derived account",
+        slug: `derived-${randomUUID()}`, descriptionMd: "Synthetic provider and document synthesis" } });
+      await recordArtifactInputLineage({ tx, actor: f.actor, workspaceId: f.workspace.id,
+        artifact: { kind: "CrmAccount", id: row.id }, content: row, origin: "DERIVED", inputs: [], inheritedRoots: roots });
+      return row;
+    }));
+    const bodyRoot = { kind: "CrmAccount" as const, id: account.id, fingerprint: lineageContentFingerprint("CrmAccount", account) };
+    const replacement = change === "manifest" ? await captureExternalMcpResponseInput(f.actor, { workspaceId: f.workspace.id,
+      connectionId: f.connection.id, mode: "SEARCH", query: "NEW_SYNTHETIC_CONTRIBUTOR", limit: 1 }) : undefined;
+    const replacementRoots = replacement ? await captureArtifactInputProof(f.actor, f.workspace.id,
+      [{ kind: "ExternalMcpResponseInput", id: replacement.input.id }, { kind: "Document", id: document.id }]) : undefined;
+    const replacementPlan = replacementRoots ? await prepareArtifactCommitPreflight(f.actor, f.workspace.id, replacementRoots) : undefined;
+    const client = await prisma.mcpOAuthClient.create({ data: { clientId: `primary-closure-${randomUUID()}`,
+      name: "Synthetic primary read client", redirectUris: ["https://synthetic.example.test"],
+      scopes: ["relationships:read", "external-tools:read", "brain:read"] } });
+    oauthClients.add(client.id);
+    const grant = async (scopes: string[]) => {
+      const token = await prisma.mcpOAuthAccessToken.create({ data: { workspaceId: f.workspace.id,
+        userId: f.user.id, clientId: client.id, instanceSlug: "selfserve", tokenHash: `synthetic-${randomUUID()}`,
+        scopes, expiresAt: new Date(Date.now() + 60_000), refreshExpiresAt: new Date(Date.now() + 3_600_000) } });
+      return { kind: "oauth" as const, id: token.id, workspaceId: f.workspace.id, scopeHash: mcpScopesHash(scopes),
+        grantEpoch: await prisma.$transaction(tx => captureMcpOAuthGrantEpoch(tx, f.workspace.id, token.id)) };
+    };
+    const runRead = async (allowed: boolean, captureError = "UNKNOWN_LINEAGE") => {
+      if (api === "proof") expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, [bodyRoot])).toBe(allowed);
+      else if (api === "list") expect(await readableArtifactIds(f.actor, f.workspace.id, "CrmAccount", [account]))
+        .toEqual(new Set(allowed ? [account.id] : []));
+      else if (allowed) expect(await captureArtifactInputProof(f.actor, f.workspace.id,
+        [{ kind: "CrmAccount", id: account.id }])).not.toHaveLength(0);
+      else await expect(captureArtifactInputProof(f.actor, f.workspace.id, [{ kind: "CrmAccount", id: account.id }]))
+        .rejects.toMatchObject({ code: captureError });
+    };
+    const denied = await grant(["relationships:read", "external-tools:read"]);
+    remote.mcpRead.mockClear();
+    await runWithMcpOrigin(denied, () => runRead(false));
+    expect(remote.mcpRead).not.toHaveBeenCalled();
+    const permitted = await grant(["relationships:read", "external-tools:read", "brain:read"]);
+    await runWithMcpOrigin(permitted, () => runRead(true));
+    const replays = remote.mcpRead.mock.calls.length;
+    expect(replays).toBeGreaterThan(0);
+    for (const call of remote.mcpRead.mock.calls) expect(call[1]).toMatchObject({ arguments: { query: canary } });
+    if (change === "privacy") remote.mcpRead.mockImplementationOnce(async () => {
+      if (remote.inTransaction) throw new Error("MCP SDK called during a writer transaction.");
+      await prisma.document.update({ where: { id: document.id }, data: { accessDomain: "FINANCE" } });
+      return structuredClone(remote.mcp);
+    });
+    else if (change === "manifest") remote.mcpRead.mockImplementationOnce(async () => {
+      if (remote.inTransaction) throw new Error("MCP SDK called during a writer transaction.");
+      const originalResponse = structuredClone(remote.mcp);
+      await prisma.$transaction(tx => withArtifactCommitPreflight(f.actor, f.workspace.id, tx,
+        replacementRoots!, replacementPlan!, () => recordArtifactInputLineage({ tx, actor: f.actor,
+          workspaceId: f.workspace.id, artifact: { kind: "CrmAccount", id: account.id }, content: account,
+          origin: "DERIVED", inputs: [], inheritedRoots: replacementRoots })));
+      remote.mcp = { structuredContent: { results: [{ id: "changed-synthetic-replacement" }] } };
+      return originalResponse;
+    });
+    else remote.mcp = { structuredContent: { results: [{ id: "changed-synthetic-hit" }] } };
+    await runWithMcpOrigin(permitted, () => runRead(false,
+      change === "privacy" ? "PERMISSION_CHANGED" : change === "manifest" ? "SOURCE_CHANGED" : "UNKNOWN_LINEAGE"));
+    expect(remote.mcpRead.mock.calls.length).toBeGreaterThan(replays);
+    if (change === "manifest") {
+      expect(remote.mcpRead.mock.calls.length).toBe(replays + 1);
+      expect(remote.mcpRead.mock.calls.at(-1)?.[1]).toMatchObject({ arguments: { query: canary } });
+    }
   });
 });
 

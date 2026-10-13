@@ -19,7 +19,7 @@ import { claimExternalMcpResponseCommitPreflight, inspectExternalMcpResponseComm
   type ExternalMcpResponseCommitClaim, type ExternalMcpResponseCommitPreflight } from "./external-mcp-response-input";
 import { claimSlackNativeCommitPreflight, inspectSlackNativeCommitClaim,
   discardSlackNativeCommitPreflight,
-  lockSlackNativeGoverningRows, withClaimedSlackNativeCommitPreflight,
+  lockSlackNativeGoverningRows, lockSlackNativeCommitClaimRows, withClaimedSlackNativeCommitPreflight,
   type SlackNativeCommitPreflight } from "./communication-native-authority";
 
 type AuthorityDb = Prisma.TransactionClient | typeof prisma;
@@ -386,7 +386,8 @@ async function runExternalProviderCommitClaim<T>(actor: AppActor, workspaceId: s
 
 /** No model or provider operations belong in this bounded callback. This capability is never serialized. */
 export async function withExternalProviderCommitPreflight<T>(actor: AppActor, workspaceId: string,
-  tx: Prisma.TransactionClient, preflight: ExternalProviderCommitPreflight, work: () => Promise<T>): Promise<T> {
+  tx: Prisma.TransactionClient, preflight: ExternalProviderCommitPreflight, work: () => Promise<T>,
+  beforeSourceEpochs?: () => Promise<void>): Promise<T> {
   const claim = claimExternalProviderCommitPreflight(actor, workspaceId, tx, preflight);
   const state = commitClaims.get(claim)!;
   for (const inputId of [...state.inputs.keys()].sort()) {
@@ -399,6 +400,7 @@ export async function withExternalProviderCommitPreflight<T>(actor: AppActor, wo
   }
   const purpose = getExternalProviderWorkerPurpose(actor);
   if (purpose) await tx.$queryRaw`SELECT "id" FROM "WorkflowJob" WHERE "id" = ${purpose.workflowJobId} AND "workspaceId" = ${workspaceId} FOR SHARE`;
+  if (beforeSourceEpochs) await withArtifactNativeCommitPhase(beforeSourceEpochs);
   const { isArtifactInputProofReadable } = await import("./source-lineage");
   return withArtifactNativeCommitPhase(() => runExternalProviderCommitClaim(actor, workspaceId, tx, claim, async () => {
       invariant(await isArtifactInputProofReadable(actor, workspaceId, state.roots, tx)
@@ -452,7 +454,7 @@ async function lockMixedNativeRows(tx: Prisma.TransactionClient, workspaceId: st
 export async function withExternalProviderNativeCommitPreflights<T>(actor: AppActor, workspaceId: string,
   tx: Prisma.TransactionClient, submittedRoots: readonly LineageRoot[], providerToken: ExternalProviderCommitPreflight,
   mcpToken: ExternalMcpResponseCommitPreflight | undefined, slackToken: SlackNativeCommitPreflight | undefined,
-  work: () => Promise<T>): Promise<T> {
+  work: () => Promise<T>, beforeSourceEpochs?: () => Promise<void>): Promise<T> {
   const submitted = freezeComparable(structuredClone([...submittedRoots]));
   const providerClaim = claimExternalProviderCommitPreflight(actor, workspaceId, tx, providerToken, submitted);
   let mcpClaim: ExternalMcpResponseCommitClaim | undefined;
@@ -479,6 +481,8 @@ export async function withExternalProviderNativeCommitPreflights<T>(actor: AppAc
     ...(slack?.roots.slice(submitted.length) ?? [])];
   invariant(roots.length <= 10000, 409, "SOURCE_CHANGED", "Mixed native proof is unbounded.");
   await lockMixedNativeRows(tx, workspaceId, [...provider.inputs.keys()], mcp?.inputIds ?? [], slack?.inputIds ?? [], actor);
+  if (slackClaim) await lockSlackNativeCommitClaimRows(actor, workspaceId, tx, slackClaim);
+  if (beforeSourceEpochs) await withArtifactNativeCommitPhase(beforeSourceEpochs);
   const { isArtifactInputProofReadable } = await import("./source-lineage");
   return await withArtifactNativeCommitPhase(() => runExternalProviderCommitClaim(actor, workspaceId, tx, providerClaim, async () => {
     const verified = async () => {
@@ -489,7 +493,8 @@ export async function withExternalProviderNativeCommitPreflights<T>(actor: AppAc
       409, "SOURCE_CHANGED", "Mixed native original proof changed during writing.");
     return result;
     };
-    return slackClaim ? withClaimedSlackNativeCommitPreflight(actor, workspaceId, tx, slackClaim, verified) : verified();
+    if (slackClaim) return withClaimedSlackNativeCommitPreflight(actor, workspaceId, tx, slackClaim, verified);
+    return verified();
   }, mcpClaim));
   } finally {
     commitClaims.delete(providerClaim);

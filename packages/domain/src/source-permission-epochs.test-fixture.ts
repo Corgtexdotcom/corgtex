@@ -28,10 +28,14 @@ export function installSourcePermissionEpochFixture(db: any) {
     }
     return rows;
   });
-  db.sourcePermissionEpoch = {findMany: vi.fn(async ({where}: any) => {
+  const findMany = vi.fn(async ({where}: any) => {
     const epoch = epochs.get(key(where.workspaceId, where.sourceKind, where.sourceId));
     return epoch === undefined ? [] : [{epoch}];
-  })};
+  });
+  db.sourcePermissionEpoch = { findMany, findUnique: vi.fn(async ({where}: any) => {
+    const rows = await findMany({where: where.workspaceId_sourceKind_sourceId});
+    return rows[0] ?? null;
+  }) };
   return { bump(workspaceId: string, kind: string, id: string) {
     const identity = key(workspaceId, kind, id);
     epochs.set(identity, (epochs.get(identity) ?? 0n) + 1n);

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const lockCrmLinkClosure = vi.hoisted(() => vi.fn().mockResolvedValue({ activities: [], deals: [], contacts: [], accountIds: [] }));
 const prismaMock = vi.hoisted(() => {
@@ -39,6 +39,18 @@ const prismaMock = vi.hoisted(() => {
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
 }));
+
+// This suite exercises active CRM gathering, never native archive presentation.
+// Isolate the unused presentation import graph rather than supplying fake provider grants.
+const unexpectedDirectPresentation = vi.hoisted(() => vi.fn(() => {
+  throw new Error("CRM information gathering must not enter direct archive presentation.");
+}));
+vi.mock("./crm-direct-original-read", () => ({
+  admitCrmDirectOriginalRows: unexpectedDirectPresentation,
+  assertCrmDirectReadCurrent: unexpectedDirectPresentation,
+  trackCrmDirectOrdinaryRows: unexpectedDirectPresentation,
+}));
+afterEach(() => { expect(unexpectedDirectPresentation).not.toHaveBeenCalled(); });
 
 vi.mock("./auth", () => ({ requireWorkspaceMembership: vi.fn(async () => ({ id: "member-1", role: "ADMIN" })) }));
 vi.mock("./meeting-intelligence-context", () => ({ meetingTranscriptInputProjection: (row: Record<string, unknown>) => Object.fromEntries(

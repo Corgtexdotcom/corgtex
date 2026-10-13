@@ -4,7 +4,7 @@ import type { AppActor } from "@corgtex/shared";
 
 export type AgentRouteCapability = {
   operation: McpToolName | null;
-  feature?: "TOOL_LINKS";
+  feature?: "TOOL_LINKS" | "RELATIONSHIPS";
 };
 
 type RouteMethods = Readonly<Partial<Record<string, AgentRouteCapability>>>;
@@ -489,6 +489,11 @@ export const AGENT_REST_ROUTE_CAPABILITIES = {
   },
   "/api/workspaces/[workspaceId]/meeting-transcript-sources": {
     GET: { operation: null },
+  },
+  // Native CRM presentation still requires current source authority at delivery;
+  // this transport policy grants only the canonical relationships read operation.
+  "/api/workspaces/[workspaceId]/leads/archive": {
+    GET: { operation: "list_relationship_accounts", feature: "RELATIONSHIPS" },
   },
   "/api/workspaces/[workspaceId]/meetings/[meetingId]/recording/cancel": {
     // REST returns raw recorder details that MCP deliberately redacts.

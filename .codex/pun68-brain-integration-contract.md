@@ -9,11 +9,13 @@ corrections have no schema changes. Pin the exact joint code/schema head before
 tests; do not test a moving checkout. A follow-up test database guard correction
 does not change these publication interfaces.
 
-Bloop reports local 8bbfa306db9133be6c334bb08087a20710f434fb, default-off,
-with no remote branch/PR. That implementation is not in this checkout and has
-not been reviewed here. Its earlier caller-tx review of 0c00c554 is not current
-composition evidence. This is a contract for review, not permission to publish
-Bloop's held work. Parent coordinates any later authorized integration.
+Bloop's default-off foundation is published in draft PR1523 at
+9050c76d7794c74cd68253965e73083cda0e0801. This isolated checkout fetched that
+read-only reference and verified tree514d9f4cb97531bf8b879e448bacb7cdc1115122,
+matching the reviewed8bbfa306 tree reported by the PR. Publication is authorized;
+merge, activation and deployment remain unauthorized. The foundation explicitly
+defers SQL saver, lifecycle schema, registered worker and actual composition.
+Its earlier caller-tx review of0c00c554 is not current composition evidence.
 
 ## File and schema ownership
 
@@ -23,7 +25,7 @@ Bloop's held work. Parent coordinates any later authorized integration.
 | PUN-68 | packages/agents/src/conversation-inputs.ts; conversation-lineage.ts; conversation-tool-lineage.ts and their provenance tests. Actual model-input collection; admitted native ID reuse; permission-safe history/context/tool output. |
 | PUN-68 schema | ArtifactInputLineage, ArtifactInputSnapshot, SourcePermissionEpoch, ConversationPromptInput, ConversationIngressInput, native input/control tables through migration183. Existing migrations are immutable. No Bloop lifecycle columns are to be added by PUN-68 without coordination. |
 | Bloop | packages/agents/src/conversation.ts and conversation.test.ts canonical Brain lifecycle sections, its held foundation files, and its dedicated assistant-harness export. Connection-bound saver, admission, queue intent, approval generations, canonical publication/finalization, recovery and claim fencing. |
-| Bloop proposed new files | packages/agents/src/brain-continuation/checkpoint-saver.ts; claims.ts; lifecycle.ts; lifecycle.integration.test.ts; packages/agents/src/assistant-harness.ts. These are reservations, not a claim that these paths exist at8bb. Bloop should map its existing held paths onto these responsibilities; no renaming is required. |
+| Bloop proposed new files | packages/agents/src/assistant-harness/postgres-checkpoint-port.ts; claims.ts; lifecycle.ts; lifecycle.integration.test.ts. checkpoint-store.ts remains the pinned SDK boundary. The dedicated assistant-harness subpath avoids packages/agents/src/index.ts; enqueueJob is injected without a new queue or agents-to-workflows dependency. These paths are reservations, not implemented composition evidence. |
 | Bloop lifecycle schema | Durable checkpoint/channel-write records, immutable admission/generation/approval identities, canonical publication and finalization receipts. Bloop proposes exact models/unique keys and a migration; parent owns schema.prisma merge, Workspace/tenant-purge registration and the next migration number after183. Local replay only. |
 | Coordinated shared files | prisma/schema.prisma, packages/agents/src/index.ts, packages/shared/src/env.ts, packages/workflows/src/outbox.ts, packages/agents/src/conversation.ts (PUN-68 already owns its published CRM source wrapper), apps/web/app/api/workspaces/[workspaceId]/conversations/[conversationId]/route.ts and native MCP conversation registration. Agree named hunks before editing. Bloop owns new Brain-specific route/worker dispatch hunks; no blanket file release. |
 
@@ -201,4 +203,114 @@ Primary Prisma delegates, second pools and SDK calls throw during bound TX tests
 
 Existing caller-tx helper PG tests and Bloop's41 focused tests are supporting
 evidence only. Full acceptance requires this actual composed lifecycle, independent
-GPT-6.1 Sol xhigh review and exact-head required CI. Publication hold remains in place.
+GPT-6.1 Sol xhigh review and exact-head required CI. Keep both PRs draft; publication
+of the foundation does not authorize activation, merge or deployment.
+
+## Response to Bloop's October13 concrete mapping
+
+The mapping is compatible with this contract subject to these corrections:
+
+- Preserve the stronger publication barrier: serialize the exact checkpoint and
+  pending writes before the bounded transaction, then commit the effect, its
+  canonical receipt, checkpoint and lifecycle together. A receipt-first graph
+  effect followed by a later LangGraph checkpoint is not equivalent. Preallocate
+  effect identifiers or serialize a typed publication intent when the checkpoint
+  needs a not-yet-written effect identity; never call a provider or serializer
+  under the transaction locks. An already independent tool effect uses its own
+  canonical receipt and control reconciliation, not a fabricated atomic claim.
+- Read authenticated control-only COMMITTED receipts before loading checkpoint
+  bodies during recovery. Revocation withholds content without erasing committed
+  success; never expose restricted IDs, labels or counts and never overwrite
+  COMMITTED with FAILED after an acknowledgement failure.
+- Use ConversationContinuation-prefixed models. Request uniqueness is
+  (workspaceId, principalBindingHash, requestKey); generation is
+  (workspaceId, requestId, generation); approval is
+  (workspaceId, requestId, approvalGeneration); publication is
+  (workspaceId, requestId, approvalGeneration, destinationHash); finalization is
+  (workspaceId, requestId, generation). Checkpoints include namespace/checkpointId
+  and writes include taskId/writeIndex. Enforce tenant/request/generation
+  consistency in relations and immutable semantic hashes, not only unique keys.
+  Preserve SDK pending-write conflict semantics. Do not retrofit uniqueness onto
+  historical turns. Dispatch is (workspaceId, requestId, dispatchKind, ordinal),
+  reserving actual run-wide dispatches; Gateway remains the sole billing owner.
+- Reuse WorkflowJob/Event and namespaced wakeups. Waiting and committed states
+  cannot fall through generic completeJob/failJob terminalization. Compose the
+  human path first; MCP continuation registration remains deferred.
+- Parent owns schema/migration after183 and coordinated tenant purge/transfer/
+  export classifications. Bloop owns only agreed conversation dispatch/recovery
+  hunks in outbox/worker, and the opt-in durable admission/subscription/result
+  hunks in the canonical conversation route and conversation.ts/tests. PUN-68's
+  existing CRM/source wrappers remain PUN-68-owned. Named hunk ownership must be
+  confirmed before any edit in a shared file; this response reserves no whole file.
+
+The bounded full lock-plan API above is still a proposal. Existing native scope
+tokens do not prove the complete row/epoch union or Bloop owner/connection binding.
+The shared implementation must use a closed authority-edge/physical-lock registry,
+reject changed ancestry without late locks, and serialize manifest appends with
+source head changes. No schema, SQL saver or actual lifecycle acceptance is
+established by the current foundation mapping. The foundation is now published
+as described above; this response does not authorize its live composition.
+
+## Bounded source-plan API for the staging-barrier integration
+
+These new modules are under implementation and review, not yet a published or
+accepted joint ABI. PUN-68 owns them and the existing source/authority adapters.
+
+```ts
+prepareSourceCommitLockPlan(actor, workspaceId, immutableRoots, {
+  writeTargets, ownerBinding,
+}): Promise<SourceCommitLockPlan>
+
+prepareSourceCommitOwnerAttestation(
+  actor, workspaceId, tx, plan, ownerBinding, assertOwner,
+): Promise<SourceCommitOwnerAttestation>
+
+withSourceCommitLockPlan(
+  actor, workspaceId, tx, immutableRoots, writeTargets, ownerBinding,
+  plan, attestation, dbOnlyWork,
+): Promise<T>
+```
+
+- Plan and attestation are opaque process-local single-use capabilities. Actor,
+  OAuth origin, native purpose, complete saved roots, output identities, owner
+  binding and actual interactive connection are immutable and exact. The current
+  implementation checks pg_backend_pid/transaction identity. Bloop's trusted
+  owner adapter must additionally verify the real request/run/job/attempt/lease/
+  generation; a caller-supplied callback or serialized tuple alone proves none
+  of those durable ownership facts.
+- ownerBinding is a typed WORKFLOW_JOB, AGENT_RUN, CONVERSATION_GENERATION or
+  HUMAN_REQUEST identity with a positive generation and immutable control data.
+  Current recovery ownership and the committed receipt's original writer tuple
+  remain separate. Control-only commitment reconciliation precedes this source
+  re-admission API and must work when body re-admission is denied.
+- writeTargets declares exact artifact IDs and projected governing metadata.
+  Preallocate creation IDs. Existing unreadable target bodies are not semantic
+  roots merely because a new permitted-source variant needs their structural
+  authority. Any structural saved-vector receipt needs a trusted constructor and
+  remains separate from content proofs. Unplanned snapshot/output IDs cannot be
+  silently introduced or used to refresh historical vectors.
+- Native replay and checkpoint serialization finish outside SQL. The source plan
+  is the OUTER executor and holds its scope through the INNER safe native adapter
+  and domain writer. The outer layer locks declared source heads/archive keys,
+  physical rows/predicates, then the original saved epoch union, and rewalks the
+  same closure before/after. It does not activate native authority. The inner
+  adapter may only reacquire already-covered rows/epochs, verifies the complete
+  proof, then invokes the writer. The temporary physical lock hook cannot host
+  this executor: its scope would end before the writer runs.
+- Existing manifest/semantic writers must reserve compatible heads BEFORE DML.
+  A lock added only when appending a receipt after content mutation is too late.
+  New ancestry, missing coverage, changed heads, conflicting saved vectors,
+  unknown aliases or exceeded budgets reject without acquiring extra locks.
+- Current ambient authorization observations are tagged commit-only fences, never
+  recorder inputs or substitute historical vectors. Scope/node/channel-write
+  metadata must bind immutable operationScopes and original proof. Source schema
+  remains through183; parent owns coordinated ConversationContinuation models,
+  compound tenant/request relations and the next migration, tested locally only.
+- The SDK staging saver must capture every callback and signed write index with
+  pinned conflict behavior, then CAS parent checkpoint and pending-write frontier
+  at the commit barrier. Run-wide dispatch reservations remain distinct from
+  checkpoint generations and Gateway billing. Actual PostgreSQL rollback,
+  claim-race, revocation and SDK equivalence tests are still required.
+
+There are no source-plan schema changes in this foundation. Complete existing
+writer migration and independent review precede describing this API as ready.

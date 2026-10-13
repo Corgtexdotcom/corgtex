@@ -15,6 +15,7 @@ import { prepareExternalMcpResponseCommitPreflight, withExternalMcpResponseCommi
 import { prepareExternalMixedCommitPreflight, withExternalMixedCommitPreflight,
   type ExternalMixedCommitPreflight } from "./external-mixed-commit";
 import { artifactPermissionEpochIdentities, isArtifactPermissionEpochProofCurrent, parsePermissionEpochProof } from "./source-permission-epochs";
+export { lockArtifactReadAuthorityRows } from "./artifact-read-authority-locks";
 
 declare const commitBrand: unique symbol;
 export type ArtifactCommitPreflight = { readonly [commitBrand]: true };
@@ -97,9 +98,13 @@ export async function prepareArtifactCommitPreflight(actor: AppActor, workspaceI
   return token;
 }
 
-/** Every branch runs the complete proof before and after DB-only work. */
+/** Every branch runs the complete proof before and after DB-only work. The
+ * optional physical source-row reservation runs after native/governing locks,
+ * before the first full proof; it cannot bypass that proof or grant a capability. */
 export async function withArtifactCommitPreflight<T>(actor: AppActor, workspaceId: string, tx: Prisma.TransactionClient,
-  originalRoots: readonly LineageRoot[], token: ArtifactCommitPreflight, work: () => Promise<T>): Promise<T> {
+  originalRoots: readonly LineageRoot[], token: ArtifactCommitPreflight, work: () => Promise<T>,
+  options?: { beforeSourceEpochs: () => Promise<void> }): Promise<T> {
+  const beforeSourceEpochs = options?.beforeSourceEpochs;
   const state = preflights.get(token);
   invariant(state && state.actor === actor && state.workspaceId === workspaceId && tx !== prisma
     && isDeepStrictEqual(state.roots, originalRoots), 409, "SOURCE_CHANGED", "Commit input capability is unavailable.");
@@ -112,10 +117,10 @@ export async function withArtifactCommitPreflight<T>(actor: AppActor, workspaceI
   };
   const backend = state.backend;
   return withArtifactNativeCommitPhase(() => {
-    if (backend.kind === "box") return withExternalProviderCommitPreflight(actor, workspaceId, tx, backend.token, verified);
-    if (backend.kind === "mcp") return withExternalMcpResponseCommitPreflight(actor, workspaceId, tx, backend.token, verified);
-    if (backend.kind === "slack") return withSlackNativeCommitPreflight(actor, workspaceId, tx, state.roots, backend.token, verified);
-    if (backend.kind === "mixed") return withExternalMixedCommitPreflight(actor, workspaceId, tx, state.roots, backend.token, verified);
-    return verified();
+    if (backend.kind === "box") return withExternalProviderCommitPreflight(actor, workspaceId, tx, backend.token, verified, beforeSourceEpochs);
+    if (backend.kind === "mcp") return withExternalMcpResponseCommitPreflight(actor, workspaceId, tx, backend.token, verified, beforeSourceEpochs);
+    if (backend.kind === "slack") return withSlackNativeCommitPreflight(actor, workspaceId, tx, state.roots, backend.token, verified, beforeSourceEpochs);
+    if (backend.kind === "mixed") return withExternalMixedCommitPreflight(actor, workspaceId, tx, state.roots, backend.token, verified, beforeSourceEpochs);
+    return (async () => { await beforeSourceEpochs?.(); return verified(); })();
   });
 }

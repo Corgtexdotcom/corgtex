@@ -2189,9 +2189,19 @@ describe("context graph domain", () => {
     resolveKnowledgeAccessDomainsMock.mockResolvedValue(["PUBLIC"]);
     prismaMock.artifactInputLineage.findFirst.mockImplementation(async ({ where }: any) =>
       [...manifests].reverse().find((row) => row.workspaceId === where.workspaceId && row.artifactType === where.artifactType && row.artifactId === where.artifactId) ?? null);
-    prismaMock.artifactInputLineage.findMany.mockImplementation(async ({ where }: any) =>
-      [...manifests].reverse().filter((row) => row.workspaceId === where.workspaceId && row.artifactType === where.artifactType && where.artifactId.in.includes(row.artifactId)));
-    prismaMock.artifactInputLineage.create.mockImplementation(async ({ data }: any) => { manifests.push(data); return data; });
+    prismaMock.artifactInputLineage.findMany.mockImplementation(async ({ where, orderBy, take }: any) => {
+      const matched = manifests.filter((row) => row.workspaceId === where.workspaceId && row.artifactType === where.artifactType
+        && (typeof where.artifactId === "string" ? row.artifactId === where.artifactId : where.artifactId.in.includes(row.artifactId))
+        && (where.id === undefined || row.id === where.id)
+        && (where.contentHash === undefined || row.contentHash === where.contentHash)
+        && (where.origin === undefined || row.origin === where.origin));
+      if (orderBy?.revision === "desc") matched.sort((a, b) => b.revision - a.revision);
+      return take === undefined ? matched : matched.slice(0, take);
+    });
+    prismaMock.artifactInputLineage.create.mockImplementation(async ({ data }: any) => {
+      const manifest = { id: `manifest-${manifests.length + 1}`, ...data };
+      manifests.push(manifest); return manifest;
+    });
     prismaMock.contextGraphObject.findFirst.mockImplementation(async ({ where }: any) => where.id === object.id && where.workspaceId === object.workspaceId ? object : null);
     prismaMock.contextGraphObject.update.mockImplementation(async ({ data }: any) => { object = { ...object, ...data, updatedAt: nextTime() }; return object; });
     prismaMock.contextGraphProposedDiff.create.mockImplementation(async ({ data }: any) => { proposedDiff = { id: "real-diff", createdAt: nextTime(), updatedAt: nextTime(), ...data }; return proposedDiff; });
