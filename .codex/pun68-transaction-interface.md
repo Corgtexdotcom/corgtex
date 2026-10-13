@@ -1,6 +1,16 @@
 # PUN-68 / conversation foundation transaction contract
 
-## Current verified interface
+## Publication status
+
+**Implementation is LOCAL and UNPUBLISHED as of published code head
+23cbd5b256288ab0e5fb1bc8d69b977e910b144c.** The documentation-only head
+decd8ae52ec258165cd1131717dedc1ead4d6899 did not contain the implementations
+or tests described below. Treat this document as a proposed integration contract,
+not evidence that the published branch implements it. The owner is integrating
+and testing the local cohort before publishing its implementing checkpoint.
+Bloop's actual saver/route/worker lifecycle remains unverified.
+
+## Locally implemented interface (not published evidence)
 
 The optional caller transaction is implemented in createConversationPromptInput,
 createConversationIngressInput, and addConversationTurn. Constructors capture the
@@ -9,7 +19,7 @@ prepareConversationInputs validates and reuses server-supplied promptInputId or
 ingressInputId after admission commit. It does not read uncommitted admission rows
 through an independent connection.
 
-Actual disposable PostgreSQL tests passed 5/5: native web/MCP input plus request/job
+LOCAL test evidence, absent from the published code: disposable PostgreSQL tests passed 5/5: native web/MCP input plus request/job
 enqueue rollback; final turn/manifest plus generic job completion commit; failure
 and mid-turn ownership-fence rollback. Unit transaction/terminal/provenance
 boundaries passed 77 tests. This evidence does not cover Bloop's actual saver,
