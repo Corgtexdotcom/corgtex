@@ -3613,8 +3613,8 @@ describe("context graph bounded permission scan", () => {
     const {readableArtifactIds} = await import("@corgtex/domain");
     const {createCorgtexMcpServer} = await import("./server");
     let offset = 0;
-    vi.mocked(prisma.contextGraphObject.findMany).mockReset().mockImplementation(async ({take}: any) =>
-      Array.from({length: take}, () => ({id: `denied-${offset++}`})) as any);
+    vi.mocked(prisma.contextGraphObject.findMany).mockReset().mockImplementation(({take} = {}) =>
+      Promise.resolve(Array.from({length: take ?? 0}, () => ({id: `denied-${offset++}`}))) as ReturnType<typeof prisma.contextGraphObject.findMany>);
     vi.mocked(readableArtifactIds).mockImplementation(async () => new Set());
     try {
       const server = createTestServer(createCorgtexMcpServer, {workspaceId: "ws-1", authKind: "oauth", actor: {kind: "user", user: {id: "u-1"}}});

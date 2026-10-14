@@ -1,9 +1,9 @@
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { expect, it, vi } from "vitest";
+import { expect, it, vi, type Mock } from "vitest";
 
 const state = vi.hoisted(() => ({
-  queries: new Map<string, ReturnType<typeof vi.fn>>(),
+  queries: new Map<string, Mock<(query: Query) => Promise<Row[]>>>(),
   readable: vi.fn(),
 }));
 type Row = { id: string; workspaceId: string; title: string; allowed: boolean; [key: string]: unknown };
