@@ -57,16 +57,15 @@ export function startSqlJobLease(job: SqlJobIdentity) {
     async assertCurrent(tx?: Prisma.TransactionClient) {
       await pending;
       if (failure) throw failure;
-      const db = tx ?? prisma;
       // A publication callback holds this row until commit. A stale reclaimer
       // cannot cross the same transaction's cursor, chunk and success-log writes.
-      const rows = tx ? await db.$queryRaw<{ id: string }[]>`
+      const rows = tx ? await tx.$queryRaw<{ id: string }[]>`
         SELECT id FROM "WorkflowJob" WHERE id = ${job.id} AND "workspaceId" = ${job.workspaceId}
           AND type = 'data-source.sync' AND status = 'RUNNING'
           AND "lockedBy" = ${job.lockedBy} AND attempts = ${job.attempts}
           AND payload->>'sourceId' = ${job.sourceId}
           AND "lockedAt" > clock_timestamp() - interval '5 minutes' FOR UPDATE`
-        : await db.$queryRaw<{ id: string }[]>`
+        : await prisma.$queryRaw<{ id: string }[]>`
         SELECT id FROM "WorkflowJob" WHERE id = ${job.id} AND "workspaceId" = ${job.workspaceId}
           AND type = 'data-source.sync' AND status = 'RUNNING'
           AND "lockedBy" = ${job.lockedBy} AND attempts = ${job.attempts}

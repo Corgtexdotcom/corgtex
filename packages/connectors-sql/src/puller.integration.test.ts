@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import { writeFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import pg from "pg";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, type Prisma } from "@prisma/client";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createSqlTestFixture } from "./postgres-test-fixture";
 import type { SqlTestFixture } from "./postgres-test-fixture";
@@ -25,7 +25,7 @@ beforeAll(async () => {
     timeout: 60_000,
     maxBuffer: 1024 * 1024,
   });
-  db = new PrismaClient({ datasources: { db: { url: fixture.connectionString } } });
+  db = new PrismaClient<Prisma.PrismaClientOptions>({ datasources: { db: { url: fixture.connectionString } } });
 }, 90_000);
 
 afterEach(async () => {
