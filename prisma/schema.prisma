@@ -818,6 +818,7 @@ model Workspace {
   sqlIngestionSourceClaims       SqlIngestionSourceClaim[]
   sqlIngestionAttempts           SqlIngestionAttempt[]
   sqlNativeRunInputs             SqlNativeRunInput[]
+  sqlNativeCaptureParts          SqlNativeCapturePart[]
   sqlKnowledgePublications       SqlKnowledgePublication[]
   informationCategoryPolicies    InformationCategoryPolicy[]
   genericDerivedArtifactVariants GenericDerivedArtifactVariant[]
@@ -5520,6 +5521,18 @@ model SqlNativeRunInput {
   createdAt DateTime @default(now())
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   @@index([workspaceId, sourceId])
+}
+
+/// Private encrypted transport only. Parts are inserted and removed inside the
+/// one native-capture transaction; they never grant input or serving authority.
+model SqlNativeCapturePart {
+  id String @id @default(uuid())
+  workspaceId String
+  nativeInputId String
+  ordinal Int
+  ciphertextPart String @db.Text
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@unique([workspaceId, nativeInputId, ordinal])
 }
 
 /// Complete immutable output set is staged without serving authority. One final

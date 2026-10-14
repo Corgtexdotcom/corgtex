@@ -95,6 +95,26 @@ Native header hashing streams bounded strings with exactly the prior canonical
 JSON bytes, including escaped text and UTF16 surrogate boundaries; existing
 receipt fingerprints remain compatible. No schema or public port changed.
 
+Bounded ciphertext transport followup adds `SqlNativeCapturePart` in migration
+`20261014030000_sql_native_cipher_staging` (187). At most two512KiB encrypted
+parts cross each worker query; they have workspace custody and no lineage/read
+authority. The same native-capture transaction verifies complete ordered part
+count, inserts the entire original using server string_agg, verifies complete
+cipher SHA/all original headers, and removes only that transaction's parts.
+Any incomplete, substituted or failed part rolls back; no receipt or model is
+admitted. One synchronous trusted rendering/V8 snapshot and private decode
+replace duplicate full native cloning. Issuer checks current owner/policy again
+after the capture transaction before minting the private receipt. Source/native
+epochs, original vectors, permanent tombstones, all caps and public ports stay
+unchanged; originals are never discarded. Actual1GiB acceptance still required.
+
+The prior1e3 checkpoint reached the first500-vector batch but still exceeded the
+same1GiB complete-process guard (peak1,091,698,688B; capture917,766,144B;
+startup423,444,480B). Its thirteen actual connector process/cold-reader/race and
+denial/restore cases pass, including non-UTC count1. Those functional results do
+not establish capacity. Migration187 removes large native-engine ciphertext
+parameters; its actual full-vector/process resource rerun remains mandatory.
+
 Full ordered captured columns are `{name,type,typeOid,typeModifier,collationOid,
 position,isNullable,identity,generated}`: declared pg_type/pg_attribute metadata,
 position=attnum. Raw records require the exact key set; JS integer-like property
@@ -148,7 +168,8 @@ safe children. Mixed, agent and MCP paths retain the general executor. The bound
 
 Migrations `20261014000000_sql_ingestion_claims`,
 `20261014010000_sql_native_publication` and
-`20261014020000_sql_bounded_staging` are additive. Claim/attempt/native/publication
+`20261014020000_sql_bounded_staging` and
+`20261014030000_sql_native_cipher_staging` are additive. Claim/attempt/native/publication
 tombstones have workspace custody, deliberately no source/log cascade that could
 revive an old source generation. Existing source policy defaults are workspace
 GENERAL and do not rewrite private records. No legacy chunk becomes eligible
@@ -157,6 +178,9 @@ owned disposable local database passed. Tenant purge inventory includes all new
 workspace custody models. Migration186 permits only the complete PREPARING-to-
 PREPARED transition to seal the streamed hash; existing sealed receipts remain
 immutable. It passed on the same disposable DB after the fresh185 replay.
+Migration187 passed on that owned disposable database; its non-serving transport
+model is included in the existing explicit tenant custody inventory. No production
+migration or data change was performed.
 Do not apply these migrations to production here.
 
 Rollback must keep source epoch/claim/native tombstones and original inputs;
@@ -237,6 +261,21 @@ blocker and confirmed actual connector hooks are receiver independent. Evidence:
 `/tmp/pun68-capture-bounded-fingerprint-unit.log`,
 `/tmp/pun68-capture-corrected-types.log`,
 `/tmp/pun68-capture-corrected-lint-final.log`.
+
+Part-transport validation:50/50 real application-PG aggregate tests pass,
+including full10000-row and complete4000-row/12000-chunk publication/count with
+unchanged60s test budgets. Additional post-capture owner-loss and partial-part
+failure/corruption/fresh retry checks pass3/3 on the final issuer;8 focused custody
+PG checks and9 custody/hash/renderer units pass. Full repository TypeScript with
+8GiB test heap, affected ESLint/diff and independent Sol review pass. Originals
+remain stored on post-commit owner loss, but no receipt/model is admitted.
+Evidence: `/tmp/pun68-cipher-parts-migration187.log`,
+`/tmp/pun68-cipher-parts-aggregate-result.json`,
+`/tmp/pun68-cipher-parts-aggregate-pg.log`,
+`/tmp/pun68-cipher-parts-owner-final-pg.log`,
+`/tmp/pun68-cipher-parts-unit-final2.log`,
+`/tmp/pun68-cipher-parts-types-final.log`,
+`/tmp/pun68-cipher-parts-lint-final.log`.
 
 Ordinary SQL counts scan the complete bounded100000-child collection in500
 identity pages. PostgreSQL compares canonical children to immutable staged bytes
