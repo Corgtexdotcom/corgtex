@@ -590,21 +590,42 @@ export async function listNotifications(actor: AppActor, workspaceId: string, op
 }) {
   if (actor.kind !== "user") return [];
   await requireWorkspaceMembership({ actor, workspaceId });
-  const rows = await prisma.notification.findMany({ where: {
-    workspaceId, userId: actor.user.id, ...(opts?.unreadOnly ? { readAt: null } : {}),
-  }, orderBy: { createdAt: "desc" } });
-  const readable = await readableArtifactIds(actor, workspaceId, "Notification", rows);
-  const eligible = rows.filter((row) => readable.has(row.id));
   const skip = Math.max(0, opts?.skip ?? 0);
-  return eligible.slice(skip, skip + Math.max(0, opts?.take ?? 30));
+  const take = Math.max(0, opts?.take ?? 30);
+  const result: Awaited<ReturnType<typeof prisma.notification.findMany>> = [];
+  if (!take) return result;
+  let visible = 0;
+  await visitReadableNotifications(actor, workspaceId, Boolean(opts?.unreadOnly), rows => {
+    for (const row of rows) {
+      if (visible++ >= skip) result.push(row);
+      if (result.length >= take) return false;
+    }
+  });
+  return result;
+}
+
+async function visitReadableNotifications(actor: AppActor & { kind: "user" }, workspaceId: string,
+  unreadOnly: boolean, visit: (rows: Awaited<ReturnType<typeof prisma.notification.findMany>>) => false | void) {
+  let after: { id: string; createdAt: Date } | undefined;
+  while (true) {
+    const rows = await prisma.notification.findMany({ where: {
+      workspaceId, userId: actor.user.id, ...(unreadOnly ? { readAt: null } : {}),
+      ...(after ? { OR: [{ createdAt: { lt: after.createdAt } },
+        { createdAt: after.createdAt, id: { lt: after.id } }] } : {}),
+    }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 100 });
+    const readable = await readableArtifactIds(actor, workspaceId, "Notification", rows);
+    if (visit(rows.filter(row => readable.has(row.id))) === false || rows.length < 100) return;
+    const last = rows.at(-1)!;
+    after = { id: last.id, createdAt: last.createdAt };
+  }
 }
 
 export async function countUnreadNotifications(actor: AppActor, workspaceId: string) {
   if (actor.kind !== "user") return 0;
-  const userId = actor.user.id;
   try {
-    const rows = await prisma.notification.findMany({ where: { workspaceId, userId, readAt: null } });
-    return (await readableArtifactIds(actor, workspaceId, "Notification", rows)).size;
+    let count = 0;
+    await visitReadableNotifications(actor, workspaceId, true, rows => { count += rows.length; });
+    return count;
   } catch { return 0; }
 }
 

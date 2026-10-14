@@ -215,3 +215,5 @@ export { withBrainExportWorker, getBrainExportWorkerPurpose, assertBrainExportWo
 
 export { withMeetingTranscriptWorker, getMeetingTranscriptWorkerPurpose, isMeetingTranscriptWorkerCurrent,
   assertMeetingTranscriptWorkerCurrent, isMeetingTranscriptWorkerJob } from "./native-meeting-workflow-principal";
+
+export * from "./workspace-initial-knowledge";
