@@ -1,7 +1,7 @@
 import { startSqlJobLease, withSqlJobAdmission } from "./sql-job-admission";
 import { captureCurrentAdviceNotification } from "./notification-event-lineage";
 import { enqueueCrmLineageJob } from "./crm-job-lineage";
-import type { EventStatus, NewspaperCadence, Prisma, WorkflowJobStatus } from "@prisma/client";
+import { Prisma, type EventStatus, type NewspaperCadence, type WorkflowJobStatus } from "@prisma/client";
 import { logger, prisma } from "@corgtex/shared";
 import { withWorkspaceSupportExecution, withMcpConnectionExecution } from "@corgtex/domain";
 import { deriveJobsForEvent } from "./derive-jobs";
@@ -508,6 +508,10 @@ export async function createNotificationsForEvent(tx: Prisma.TransactionClient, 
 
 async function claimPendingJobs(workerId: string, batchSize: number) {
   const staleBefore = new Date(Date.now() - LOCK_TIMEOUT_MS);
+  const claimable = Prisma.sql`(
+    (job.status = 'PENDING' AND job."runAfter" <= NOW())
+    OR (job.status = 'RUNNING' AND job."lockedAt" IS NOT NULL AND job."lockedAt" < ${staleBefore})
+  )`;
 
   return prisma.$transaction(async (tx) => {
     return tx.$queryRaw<ClaimedJob[]>`
@@ -515,10 +519,7 @@ async function claimPendingJobs(workerId: string, batchSize: number) {
         SELECT job.id, job.type, job."createdAt"
         FROM "WorkflowJob" AS job
         LEFT JOIN "WorkflowJob" AS dep ON dep.id = job."dependsOnJobId"
-        WHERE (
-          (job.status = 'PENDING' AND job."runAfter" <= NOW())
-          OR (job.status = 'RUNNING' AND job."lockedAt" IS NOT NULL AND job."lockedAt" < ${staleBefore})
-        )
+        WHERE ${claimable}
         AND (job."dependsOnJobId" IS NULL OR dep.status = 'COMPLETED')
         AND NOT EXISTS (
           SELECT 1 FROM "WorkspaceFeatureFlag" AS flag
@@ -527,11 +528,13 @@ async function claimPendingJobs(workerId: string, batchSize: number) {
         )
       ), head AS (
         SELECT job.id, job.type FROM "WorkflowJob" AS job JOIN eligible USING (id)
+        WHERE ${claimable}
         ORDER BY job."createdAt", job.id LIMIT 1 FOR UPDATE OF job SKIP LOCKED
       ), candidates AS (
         SELECT job.id FROM "WorkflowJob" AS job JOIN eligible USING (id) CROSS JOIN head
-        WHERE (head.type = 'data-source.sync' AND job.id = head.id)
-           OR (head.type <> 'data-source.sync' AND job.type <> 'data-source.sync')
+        WHERE ((head.type = 'data-source.sync' AND job.id = head.id)
+           OR (head.type <> 'data-source.sync' AND job.type <> 'data-source.sync'))
+          AND ${claimable}
         ORDER BY job."createdAt", job.id LIMIT ${batchSize}
         FOR UPDATE OF job SKIP LOCKED
       )
@@ -544,7 +547,7 @@ async function claimPendingJobs(workerId: string, batchSize: number) {
         "attempts" = job."attempts" + 1,
         "error" = NULL
       FROM candidates
-      WHERE job.id = candidates.id
+      WHERE job.id = candidates.id AND ${claimable}
       RETURNING
         job.id,
         job."supportOriginUserId",

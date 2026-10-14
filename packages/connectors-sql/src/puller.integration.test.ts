@@ -62,7 +62,7 @@ async function setup() {
   return { source, table };
 }
 
-async function child(mode: "ingestion" | "web-reader" | "mcp-reader" | "outbox" = "ingestion", budgeted = false) {
+async function child(mode: "ingestion" | "web-reader" | "mcp-reader" | "outbox" = "ingestion", budgeted = false, claimBarrier = false) {
   const process = startSqlIngestionProcess({
     DATABASE_URL: fixture.connectionString,
     ENCRYPTION_KEY: encryptionKey,
@@ -71,6 +71,7 @@ async function child(mode: "ingestion" | "web-reader" | "mcp-reader" | "outbox" 
     KNOWLEDGE_SEARCH_PROVIDER: "postgres",
     REDIS_KEY_PREFIX: "sql-race",
     NODE_ENV: "test",
+    ...(claimBarrier ? { SQL_TEST_CLAIM_BARRIER: "1" } : {}),
     ...(budgeted ? { SQL_TEST_HEAP_MB: "512", SQL_TEST_RSS_LIMIT_BYTES: String(1024 ** 3) } : {}),
   }, mode);
   children.push(process);
@@ -478,6 +479,69 @@ describe("native SQL publication across independent processes", () => {
 
 
 describe("exclusive SQL outbox admission", () => {
+  it.each(["complete", "renew"] as const)("rechecks a materialized SQL claim after concurrent %s", async (mutation) => {
+    const { source } = await setup();
+    const job = await db.workflowJob.create({ data: { workspaceId: source.workspaceId, type: "data-source.sync",
+      payload: { sourceId: source.id }, status: "RUNNING", lockedBy: "prior-worker", attempts: 1,
+      lockedAt: new Date(Date.now() - 86_400_000), runAfter: new Date(Date.now() - 86_400_000) } });
+    const key = randomBytes(4).readUInt32BE() % 2_000_000_000;
+    const name = `claim_pause_${randomBytes(6).toString("hex")}`, fn = fixture.table(name);
+    const worker = await child("outbox", false, true);
+    const observer = new pg.Client({ connectionString: fixture.connectionString });
+    await observer.connect();
+    try {
+      await fixture.writer.query("SELECT pg_advisory_lock($1)", [key]);
+      await fixture.writer.query(`CREATE FUNCTION ${fn}() RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN
+        PERFORM pg_advisory_xact_lock(${key}); RETURN true; END $$`);
+      await worker.run(source.id, false, false, `${fixture.schema}.${name}`);
+      const deadline = Date.now() + 15_000;
+      let blocked = false;
+      while (Date.now() < deadline) {
+        blocked = Number((await observer.query(`SELECT count(*) FROM pg_stat_activity WHERE wait_event='advisory' AND query LIKE '%admission_barrier%'`)).rows[0].count) > 0;
+        if (blocked) break;
+        await delay(20);
+      }
+      expect(blocked).toBe(true);
+      if (mutation === "complete") {
+        await db.workflowJob.update({ where: { id: job.id }, data: { status: "COMPLETED", completedAt: new Date(), lockedAt: null, lockedBy: null } });
+      } else {
+        // Native SQL renewal uses server instant; no fabricated future lease.
+        await observer.query(`UPDATE "WorkflowJob" SET "lockedAt"=clock_timestamp() WHERE id=$1`, [job.id]);
+      }
+      await fixture.writer.query("SELECT pg_advisory_unlock($1)", [key]);
+      await worker.complete();
+      expect(await db.workflowJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({
+        status: mutation === "complete" ? "COMPLETED" : "RUNNING", attempts: 1,
+        lockedBy: mutation === "complete" ? null : "prior-worker" });
+      expect(await db.sqlIngestionAttempt.count({ where: { sourceId: source.id } })).toBe(0);
+    } finally {
+      await fixture.writer.query("SELECT pg_advisory_unlock($1)", [key]);
+      await worker.close();
+      await fixture.writer.query(`DROP FUNCTION IF EXISTS ${fn}()`);
+      await observer.end();
+    }
+  });
+
+  it("does not prematurely reclaim another process SQL lease in a non-UTC database", async () => {
+    const first = await setup(), second = await setup();
+    const born = Date.now() - 60_000;
+    const jobs = [];
+    for (const [index, source] of [first.source, second.source].entries()) {
+      jobs.push(await db.workflowJob.create({ data: { workspaceId: source.workspaceId, type: "data-source.sync",
+        payload: { sourceId: source.id }, createdAt: new Date(born + index), runAfter: new Date(Date.now() - 86_400_000) } }));
+    }
+    const firstWorker = await child("outbox"), secondWorker = await child("outbox");
+    await firstWorker.run(first.source.id);
+    await firstWorker.prepared();
+    await secondWorker.run(second.source.id, false);
+    await secondWorker.complete();
+    expect(await db.workflowJob.findUniqueOrThrow({ where: { id: jobs[0].id } })).toMatchObject({ status: "RUNNING", attempts: 1 });
+    expect(await db.workflowJob.findUniqueOrThrow({ where: { id: jobs[1].id } })).toMatchObject({ status: "COMPLETED", attempts: 1 });
+    await firstWorker.release();
+    await firstWorker.complete();
+    expect(await db.workflowJob.findUniqueOrThrow({ where: { id: jobs[0].id } })).toMatchObject({ status: "COMPLETED", attempts: 1 });
+  });
+
   it("keeps five ordinary jobs concurrent and quiesces all before the SQL turn", async () => {
     const { source } = await setup();
     const born = Date.now() - 60_000, key = randomBytes(4).readUInt32BE() % 2_000_000_000;

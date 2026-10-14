@@ -61,7 +61,7 @@ export function startSqlIngestionProcess(environment: Record<string, string>, mo
   return {
     pid: child.pid,
     ready: () => waitFor("ready"),
-    run: (sourceId: string, gatePreparation = true, gatePublication = false) => send(child, { command: "run", sourceId, gatePreparation, gatePublication }),
+    run: (sourceId: string, gatePreparation = true, gatePublication = false, claimBarrier?: string) => send(child, { command: "run", sourceId, gatePreparation, gatePublication, claimBarrier }),
     dispatchAgain: () => send(child, { command: "dispatch-again" }),
     dispatchComplete: () => waitFor("dispatch-complete", 120_000),
     publicationReady: () => waitFor("publication-ready"),
@@ -91,6 +91,7 @@ function send(child: ChildProcess, message: Record<string, unknown>): Promise<vo
 
 async function runChild() {
   const mode = process.argv[3] ?? "ingestion";
+  const workerId = `sql-process-worker-${process.pid}`;
   let phase = "bootstrap", peakRssBytes = 0, modelBatches = 0, embeddedChunks = 0;
   const phasePeakRssBytes: Record<string, number> = {};
   const rssLimitBytes = Number(process.env.SQL_TEST_RSS_LIMIT_BYTES ?? "0") || null;
@@ -122,6 +123,34 @@ async function runChild() {
     await import("@corgtex/knowledge");
   } else {
     throw new Error("Unknown SQL test process mode");
+  }
+  let claimBarrier: string | undefined;
+  if (mode === "outbox" && process.env.SQL_TEST_CLAIM_BARRIER === "1") {
+    const { prisma } = await import("@corgtex/shared");
+    const originalTransaction = prisma.$transaction;
+    const client = globalThis.prismaGlobal;
+    if (!client) throw new Error("Synthetic Prisma client was not initialized");
+    // Test-only barrier in the real claim SQL after eligible IDs have been
+    // materialized, before head/candidate row locking. All rows remain native PG.
+    client.$transaction = (async (operation: unknown, ...options: unknown[]) => {
+      if (typeof operation !== "function") return Reflect.apply(originalTransaction, prisma, [operation, ...options]);
+      return Reflect.apply(originalTransaction, prisma, [async (tx: import("@prisma/client").Prisma.TransactionClient) => operation(new Proxy(tx, {
+        get(target, property) {
+          if (property !== "$queryRaw") return Reflect.get(target, property);
+          return (strings: TemplateStringsArray, ...values: unknown[]) => {
+            if (claimBarrier && Array.isArray(strings) && strings.join("").includes("WITH eligible AS")) {
+              const barrier = claimBarrier;
+              claimBarrier = undefined;
+              const parts = strings.map((part) => part.replace(
+                "), head AS (", `), admission_barrier AS MATERIALIZED (SELECT ${barrier}() FROM eligible LIMIT 1), head AS (`
+              ).replace('SELECT job.id, job.type FROM "WorkflowJob" AS job JOIN eligible USING (id)', 'SELECT job.id, job.type FROM "WorkflowJob" AS job JOIN eligible USING (id) CROSS JOIN admission_barrier'));
+              return Reflect.apply(target.$queryRaw, target, [Object.assign(parts, { raw: parts }), ...values]);
+            }
+            return Reflect.apply(target.$queryRaw, target, [strings, ...values]);
+          };
+        },
+      })), ...options]);
+    }) as typeof prisma.$transaction;
   }
   let gatePublication = false, nativeCloses = 0;
   let releasePublication: (() => void) | undefined;
@@ -215,7 +244,7 @@ async function runChild() {
     }
     process.send?.({ event: "read", metrics: { durationMs: 0, peakRssBytes: process.memoryUsage().rss, osMaxRssBytes: osMaxRssBytes(), rssLimitBytes, phasePeakRssBytes, modelBatches, embeddedChunks, dimensions }, read: { fetched: fetched !== null, count, searchIds: search.map((item) => item.chunkId), downstreamReadable } });
   }
-  process.on("message", (message: { command: string; sourceId?: string; gatePreparation?: boolean; gatePublication?: boolean; error?: string; workspaceId?: string; userId?: string; chunkId?: string }) => {
+  process.on("message", (message: { command: string; sourceId?: string; gatePreparation?: boolean; gatePublication?: boolean; claimBarrier?: string; error?: string; workspaceId?: string; userId?: string; chunkId?: string }) => {
     if (message.command === "read") {
       void read(message).catch((error: unknown) => process.send?.({ event: "failed", error: error instanceof Error ? error.message : String(error) }));
     } else if (message.command === "release-publication") {
@@ -224,12 +253,14 @@ async function runChild() {
       releasePreparation?.(message.error);
       releasePreparation = undefined;
     } else if (message.command === "dispatch-again" && runPendingJobs) {
-      void runPendingJobs("sql-process-worker", 25, 5).then(
+      void runPendingJobs(workerId, 25, 5).then(
         () => process.send?.({ event: "dispatch-complete" }),
         (error: unknown) => process.send?.({ event: "failed", error: String(error) }),
       );
     } else if (message.command === "run" && message.sourceId) {
       phase = "claim-and-native-capture";
+      if (message.claimBarrier && !/^[a-z0-9_]+\.[a-z0-9_]+$/.test(message.claimBarrier)) throw new Error("Invalid synthetic claim barrier");
+      claimBarrier = message.claimBarrier;
       gatePreparation = message.gatePreparation ?? true;
       gatePublication = message.gatePublication ?? false; nativeCloses = 0;
       const started = performance.now();
@@ -241,7 +272,7 @@ async function runChild() {
           peakRssBytes: Math.max(peakRssBytes, process.memoryUsage().rss), osMaxRssBytes: osMaxRssBytes(), rssLimitBytes, phasePeakRssBytes, modelBatches, embeddedChunks, dimensions } });
       };
       if (!syncExternalDataSource && !runPendingJobs) throw new Error("Cold reader cannot start ingestion");
-      void (runPendingJobs ? runPendingJobs("sql-process-worker", 25, 5) : syncExternalDataSource!(message.sourceId)).then(
+      void (runPendingJobs ? runPendingJobs(workerId, 25, 5) : syncExternalDataSource!(message.sourceId)).then(
         () => finish("complete"),
         (error: unknown) => finish("failed", error instanceof Error ? error.message : String(error)),
       );
