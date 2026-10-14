@@ -6,6 +6,7 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
   return {
     ...actual,
     prisma: {
+      informationCategoryPolicy: { findUnique: vi.fn(async () => null) },
       $transaction: vi.fn(),
       $queryRaw: vi.fn(),
       $executeRaw: vi.fn(),
@@ -486,11 +487,11 @@ describe("meeting-intelligence-context", () => {
     const manifests: any[] = []; const snapshots: any[] = [];
     (prisma.$executeRaw as ReturnType<typeof vi.fn>).mockReset().mockResolvedValue(1);
     installSourcePermissionEpochFixture(prisma);
-    let meeting: any = { id: "meeting-real", workspaceId: "ws-1", title: "Public original", source: "manual",
+    let meeting: any = { id: "meeting-real", workspaceId: "ws-1", informationCategory: "GENERAL", title: "Public original", source: "manual",
       transcript: "Public transcript", summaryMd: "Unknown legacy summary", blocksJson: { secret: "Unknown blocks" }, decisionsJson: { secret: "Unknown decisions" }, agendaJson: { secret: "Unknown agenda" },
       ingestionGuidanceMd: null, recordedAt: new Date("2026-05-01"), scheduledEndAt: null, seriesId: null,
       participantIds: [], participantEmails: [], archivedAt: null, createdAt: new Date("2026-05-01"), updatedAt: new Date("2026-05-01") };
-    const source: any = { id: "finance-source", workspaceId: "ws-1", accessDomain: "FINANCE", content: "Finance fact",
+    const source: any = { id: "finance-source", workspaceId: "ws-1", informationCategory: "GENERAL", accessDomain: "FINANCE", content: "Finance fact",
       title: "Synthetic direct human finance original", sourceType: "RFC", archivedAt: null, authorMemberId: "member-1",
       metadata: null, createdAt: new Date("2026-05-01"), updatedAt: new Date("2026-05-01") };
     (prisma.meeting.findFirst as ReturnType<typeof vi.fn>).mockImplementation(async ({ where, select }) => {

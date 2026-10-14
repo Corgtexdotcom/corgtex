@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const { db, rebuild, absorb, membership } = vi.hoisted(() => ({ db: {
+  informationCategoryPolicy: {findUnique: vi.fn(async () => null)},
   workspace: {findFirst: vi.fn()}, brainArticle: {findMany: vi.fn(), findFirst: vi.fn()}, brainSource: {findMany: vi.fn(), findFirst: vi.fn()},
   brainDiscussionThread: {findMany: vi.fn(), findFirst: vi.fn()}, brainDiscussionComment: {findFirst: vi.fn()},
   knowledgeChunk: {findMany: vi.fn(), findFirst: vi.fn(), deleteMany: vi.fn()},
@@ -16,6 +17,7 @@ import { installSourcePermissionEpochFixture } from "../../domain/src/source-per
 const date = new Date("2025-01-01T00:00:00Z");
 let rows: Record<string, any[]>, manifests: any[], snapshots: any[], originals: Array<{kind: string; row: any}>;
 function add(kind: string, row: any, proven = true) {
+  if (["BrainSource", "Document", "Meeting"].includes(kind)) row.informationCategory ??= "GENERAL";
   (rows[kind] ??= []).push(row);
   if (proven) originals.push({kind, row});
   return row;

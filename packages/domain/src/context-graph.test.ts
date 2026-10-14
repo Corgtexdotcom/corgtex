@@ -26,6 +26,7 @@ import { prisma } from "@corgtex/shared";
 
 const { requestGraphVariantMock, graphVariantsMock, revalidateGraphVariantsMock, mcpRootsMock, captureProofMock, immutableProofMock, advanceLineageMock, preserveUnknownMock, proofReadableMock, prismaMock, appendEventsMock, recordAuditMock, requireWorkspaceMembershipMock, readableArtifactIdsMock, currentArtifactInputRootsMock, recordArtifactInputLineageMock, resolveKnowledgeAccessDomainsMock } = vi.hoisted(() => {
   const prismaMock = {
+    informationCategoryPolicy: { findUnique: vi.fn(async () => null) },
     $queryRaw: vi.fn().mockResolvedValue([]),
     $executeRaw: vi.fn().mockResolvedValue(0),
     $transaction: vi.fn(async (callback: (tx: any) => Promise<unknown>) => callback(prismaMock)),
@@ -2250,8 +2251,8 @@ describe("context graph domain", () => {
     const lineage = await vi.importActual<typeof import("./source-lineage")>("./source-lineage");
     const manifests: any[] = [];
     const sources: any[] = [
-      { id: "public-source", workspaceId: "ws-1", accessDomain: "PUBLIC", content: "Public context", archivedAt: null },
-      { id: "finance-source", workspaceId: "ws-1", accessDomain: "FINANCE", content: "Finance context", archivedAt: null },
+      { id: "public-source", workspaceId: "ws-1", informationCategory: "GENERAL", accessDomain: "PUBLIC", content: "Public context", archivedAt: null },
+      { id: "finance-source", workspaceId: "ws-1", informationCategory: "GENERAL", accessDomain: "FINANCE", content: "Finance context", archivedAt: null },
     ];
     resolveKnowledgeAccessDomainsMock.mockResolvedValue(["PUBLIC", "FINANCE"]);
     prismaMock.brainSource.findFirst.mockImplementation(async ({ where }: any) => sources.find((row) => row.id === where.id && row.workspaceId === where.workspaceId) ?? null);

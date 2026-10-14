@@ -46,6 +46,7 @@ const fixture = vi.hoisted(() => {
         create: vi.fn(async ({ data }) => {
           const now = new Date();
           const row = { id: `${name}-${++serial}`, createdAt: now, updatedAt: now,
+            ...(["document", "brainSource", "meeting"].includes(name) ? { informationCategory: "GENERAL" } : {}),
             ...(name === "conversationPendingOperation" ? { status: "PENDING", proposedAt: now, resultJson: null, errorCode: null, errorMessage: null, executedAt: null, canceledAt: null } : {}), ...structuredClone(data) };
           if (!tables.has(name)) tables.set(name, new Map());
           tables.get(name)!.set(row.id, row);
@@ -103,7 +104,7 @@ let oauthEpochs: ReturnType<typeof installSourcePermissionEpochFixture>;
 const payload = {actionId: "action-one", completedVia: "  Current native completion note canary  "};
 const params = {workspaceId, toolName: "complete_action", args: payload, requiredScopes: ["actions:write"]};
 function insert(delegate: string, value: { id: string; [key: string]: unknown }) {
-  const row: { id: string; [key: string]: any } = { createdAt: new Date(), ...value };
+  const row: { id: string; [key: string]: any } = { createdAt: new Date(), ...(["document", "brainSource", "meeting"].includes(delegate) ? { informationCategory: "GENERAL" } : {}), ...value };
   if (!fixture.tables.has(delegate)) fixture.tables.set(delegate, new Map()); fixture.tables.get(delegate)!.set(row.id, row); return row;
 }
 function oauth(actor = alice, ws = workspaceId, id = "oauth-alice") {

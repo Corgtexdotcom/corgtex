@@ -335,6 +335,13 @@ export const AGENT_REST_ROUTE_CAPABILITIES = {
     GET: { operation: "list_circles" },
     POST: { operation: null },
   },
+  "/api/workspaces/[workspaceId]/conversations/[conversationId]/brain": {
+    POST: { operation: null },
+  },
+  "/api/workspaces/[workspaceId]/information-categories": {
+    PATCH: { operation: null },
+    POST: { operation: null },
+  },
   "/api/workspaces/[workspaceId]/conversations/[conversationId]": {
     GET: { operation: null },
     POST: { operation: null },

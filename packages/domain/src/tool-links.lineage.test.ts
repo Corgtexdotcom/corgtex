@@ -58,6 +58,7 @@ const fixture = vi.hoisted(() => {
         create: vi.fn(async ({ data, select, include }) => {
           const now = new Date();
           const row = { id: `${name}-${++serial}`, createdAt: now, updatedAt: now,
+            ...(["document", "brainSource", "meeting"].includes(name) ? { informationCategory: "GENERAL" } : {}),
             ...(name === "conversationPendingOperation" ? { status: "PENDING", proposedAt: now, resultJson: null, errorCode: null, errorMessage: null, executedAt: null, canceledAt: null } : {}), ...structuredClone(data) };
           if (name === "workspaceToolLink") {
             Object.assign(row, { archivedAt: null, archivedByUserId: null, archiveReason: null });
@@ -109,7 +110,7 @@ const alpha: AppActor = { kind: "user", user: { id: "alpha", email: "alpha@examp
 const beta: AppActor = { kind: "user", user: { id: "beta", email: "beta@example.test", displayName: "Beta" } };
 const tx = fixture.prisma as any;
 function insert(table: string, row: { id: string; [key: string]: any }) {
-  const data: { id: string; [key: string]: any } = { createdAt: new Date("2026-10-13T12:00:00Z"), updatedAt: new Date("2026-10-13T12:00:00Z"), ...row };
+  const data: { id: string; [key: string]: any } = { createdAt: new Date("2026-10-13T12:00:00Z"), updatedAt: new Date("2026-10-13T12:00:00Z"), ...(["document", "brainSource", "meeting"].includes(table) ? { informationCategory: "GENERAL" } : {}), ...row };
   if (!fixture.tables.has(table)) fixture.tables.set(table, new Map()); fixture.tables.get(table)!.set(data.id, data);
   return data;
 }
