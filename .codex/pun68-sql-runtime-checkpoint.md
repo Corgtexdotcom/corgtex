@@ -282,6 +282,44 @@ capacity is reused; no duplicate connector or full worker run was started here.
 The final source checkpoint still requires exact-head hosted CI and integrated
 Astra QA before any full PR/batch clearance. No merge or deployment.
 
+Exact recorder head `2c73321c68b88b83ee533235ef4c8662ea2ecd9c` CI run
+38536877066 is now terminal FAILURE: 12,507 passed, 31 failed and 39 skipped;
+768 files passed, two failed and two skipped. Hosted typecheck/unused/build,
+database sync, ARM64, docs/policy/scope and secret/client-data scans passed.
+Thirty recorder PG failures came from absent synthetic Recall shell settings;
+the remaining demo-credential fixture expected billing refusal while recorder
+DELETE correctly emitted permission rebuild work and the async guard refused.
+All fifteen earlier b0 failures passed in this run. Later scripted test-job gates
+were skipped after the full-suite failure, so complete hosted acceptance remains
+outstanding. Separate Astra review accepts the bounded 2c implementation.
+
+The reviewed fixture correction sets/restores only synthetic Recall settings,
+clears developer binding JSON, and preserves all 31 recorder assertions. An
+explicitly env-cleared rerun passed 31/31 in 73.65s. The batch coordinator reserved
+the demo credential integration test for this lane. Its correction proves both
+pending and dispatched permission work still refuse refresh, then isolates only
+the exact synthetic workspace/type/recording-governor event IDs before the
+independent billing negative. All original credential/SSO/billing/foreign-access,
+later asynchronous refusal and actual revocation assertions remain. That real PG
+case passed 1/1 in 824ms. No production disconnection guard, source permission,
+resource, migration or runtime implementation changed. Evidence:
+`/tmp/pun68-2c-ci-terminal.json`, `/tmp/pun68-2c-ci-failures.log`,
+`/tmp/pun68-recall-ci-env-pg.log`, `/tmp/pun68-demo-recorder-event-pg.log` and
+matching scoped lint logs. Full and unused-locals TypeScript pass at the unchanged
+4 GiB heap with incremental disabled after both fixture corrections; evidence is
+`/tmp/pun68-ci-fixture-types-final.log` and `/tmp/pun68-ci-fixture-unused-final.log`.
+Independent Sol accepts the small fixture/proposal deltas. Fresh correction-head
+hosted CI remains required.
+
+The requested next-slice proposal lives in
+`.codex/pun68-finance-restatement-design.md`: exact Finance proposal/reconciliation/
+review/application/lineage consumers, later removal/variant consumers and exclusions,
+real successful restatement/revocation/concurrency/rollback acceptance, and the
+remaining parent decisions on Report archive/deletion/tombstones, restoration and
+unreconstructable legacy recipes. Finance runtime/schema implementation has not
+started; no new grant, production data cleanup, merge or deployment is authorized.
+
+
 Capture avoids a complete ciphertext RETURNING response: the insertion returns
 small immutable headers, and the same real transaction checks server SHA256 of
 the stored ciphertext against the issuer's exact encrypted original, plus every
