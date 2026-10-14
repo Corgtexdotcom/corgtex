@@ -42,7 +42,12 @@ export async function readCrmRows<T extends { id: string }>(actor: AppActor, wor
     invariant(next.id !== cursor?.id && fresh.length > 0, 409, "SOURCE_CHANGED", "CRM records changed while reading.");
     cursor = { id: next.id };
   }
-  invariant(false, 413, "CRM_READ_BUDGET", "This CRM query is too broad. Narrow its filters and try again.");
+  // A complete collection may end exactly at the budget. Probe only the next
+  // identity; do not admit or count an over-budget row as a partial result.
+  const more = await fetch({take: 1, ...(cursor ? {cursor, skip: 1} : {})});
+  invariant(more.length === 0, 413, "CRM_READ_BUDGET", "This CRM query is too broad. Narrow its filters and try again.");
+  if (direct) await assertCrmDirectReadCurrent(direct, tx);
+  return admitted;
 }
 
 export function crmPage<T>(rows: T[], take: number, skip: number) {
