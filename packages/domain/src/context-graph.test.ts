@@ -31,7 +31,7 @@ const { requestGraphVariantMock, graphVariantsMock, revalidateGraphVariantsMock,
     $executeRaw: vi.fn().mockResolvedValue(0),
     $transaction: vi.fn(async (callback: (tx: any) => Promise<unknown>) => callback(prismaMock)),
     artifactInputLineage: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn() },
-    artifactInputSnapshot: { findFirst: vi.fn(), create: vi.fn() },
+    artifactInputSnapshot: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn() },
     genericDerivedArtifactVariant: { findFirst: vi.fn().mockResolvedValue(null) },
     brainSource: { findFirst: vi.fn() },
     contextGraphObject: {
@@ -2195,6 +2195,8 @@ describe("context graph domain", () => {
     });
     prismaMock.artifactInputSnapshot.findFirst.mockImplementation(async ({ where }: any) =>
       snapshots.find((snapshot) => snapshot.id === where.id && snapshot.workspaceId === where.workspaceId) ?? null);
+    prismaMock.artifactInputSnapshot.findMany.mockImplementation(async ({ where }: any) =>
+      snapshots.filter(snapshot => snapshot.workspaceId === where.workspaceId && where.id.in.includes(snapshot.id)));
     resolveKnowledgeAccessDomainsMock.mockResolvedValue(["PUBLIC"]);
     prismaMock.artifactInputLineage.findFirst.mockImplementation(async ({ where }: any) =>
       [...manifests].reverse().find((row) => row.workspaceId === where.workspaceId && row.artifactType === where.artifactType && row.artifactId === where.artifactId) ?? null);
@@ -2446,6 +2448,8 @@ describe("context graph domain", () => {
     prismaMock.artifactInputLineage.create.mockImplementation(async ({ data }: any) => { manifests.push(data); return data; });
     prismaMock.artifactInputSnapshot.create.mockImplementation(async ({ data }: any) => { const row = { id: `snapshot-${snapshots.length}`, ...data }; snapshots.push(row); return row; });
     prismaMock.artifactInputSnapshot.findFirst.mockImplementation(async ({ where }: any) => snapshots.find(row => row.id === where.id && row.workspaceId === where.workspaceId) ?? null);
+    prismaMock.artifactInputSnapshot.findMany.mockImplementation(async ({ where }: any) =>
+      snapshots.filter(row => row.workspaceId === where.workspaceId && where.id.in.includes(row.id)));
     resolveKnowledgeAccessDomainsMock.mockResolvedValue(["PUBLIC"]);
     captureProofMock.mockImplementation(lineage.captureArtifactInputProof);
     immutableProofMock.mockImplementation(lineage.captureImmutableArtifactInputProof);

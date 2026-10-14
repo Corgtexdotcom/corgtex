@@ -6,7 +6,8 @@ import { deletePendingTranscriptPayload, readPendingTranscriptPayload, storePend
 let workspaceId: string;
 let otherWorkspaceId: string;
 function payload(): PendingTranscriptPayload {
-  return { workspaceId, transcript: "Synthetic private transcript", fileName: null, title: null, source: null,
+  return {
+    uploadedByUserId: "synthetic-user", rawFileBase64: null, rawFileMimeType: null, workspaceId, transcript: "Synthetic private transcript", fileName: null, title: null, source: null,
     recordedAt: null, timeZone: null, summaryMd: null, ingestionGuidanceMd: null,
     participantIds: [], participantEmails: [], meetingId: null, createNewMeeting: false };
 }
@@ -24,12 +25,14 @@ afterEach(async () => {
 
 describe("PostgreSQL pending transcripts", () => {
   it("encrypts durable content, supports reusable reads, and isolates tenant reads and deletion", async () => {
-    const original = payload();
+    const original = { ...payload(), fileName: "synthetic.txt", rawFileMimeType: "text/plain",
+      rawFileBase64: Buffer.from("\ufeffSynthetic private transcript\r\n").toString("base64") };
     const token = await storePendingTranscriptPayload(original);
     expect(token).toBeTruthy();
     const row = await prisma.pendingTranscriptUpload.findFirstOrThrow({ where: { workspaceId } });
     expect(row.id).not.toContain(token!);
     expect(row.encryptedPayload).not.toContain(original.transcript);
+    expect(row.encryptedPayload).not.toContain(original.rawFileBase64);
     expect(JSON.parse(decryptSecret(row.encryptedPayload))).toEqual(original);
     expect(await readPendingTranscriptPayload(workspaceId, token!)).toEqual(original);
     expect(await readPendingTranscriptPayload(workspaceId, token!)).toEqual(original);

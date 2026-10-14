@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readActionListReturnHref } from "./return-context";
 
 const actor = {
   kind: "user" as const,
@@ -38,6 +39,7 @@ const updateDeliberationEntry = vi.fn();
 const uploadWorkItemEvidenceDocument = vi.fn(async () => []);
 const revalidatePath = vi.fn();
 const redirect = vi.fn();
+const getLocale = vi.fn(async () => "en");
 
 vi.mock("@/lib/demo-guard", () => ({
   enforceDemoGuard,
@@ -72,6 +74,10 @@ vi.mock("next/navigation", () => ({
   redirect,
 }));
 
+vi.mock("next-intl/server", () => ({
+  getLocale,
+}));
+
 vi.mock("../work-item-evidence-upload", () => ({
   uploadWorkItemEvidenceDocument,
 }));
@@ -101,15 +107,36 @@ function buildEditFormData(expectedVersion = "9") {
   return formData;
 }
 
+async function submitCreateWithRedirect(formData: FormData) {
+  const { createActionAction } = await import("./actions");
+  const redirectSignal = new Error("NEXT_REDIRECT");
+  redirect.mockImplementationOnce(() => {
+    throw redirectSignal;
+  });
+  await expect(createActionAction(formData)).rejects.toBe(redirectSignal);
+  return new URL(redirect.mock.calls.at(-1)![0], "https://app.local");
+}
+
+function expectCreateDestination(destination: URL, id: string, status: string, locale = "en") {
+  expect(destination.origin).toBe("https://app.local");
+  expect(destination.pathname).toBe(`/${locale}/workspaces/workspace-1/actions/${encodeURIComponent(id)}`);
+  expect([...destination.searchParams.keys()]).toEqual(["returnTo"]);
+  const returnTo = destination.searchParams.get("returnTo")!;
+  expect(returnTo).toBe(`/workspaces/workspace-1/actions?status=${status}&scope=workspace`);
+  expect(readActionListReturnHref("workspace-1", returnTo)).toBe(returnTo);
+  expect(readActionListReturnHref("workspace-2", returnTo)).toBeNull();
+}
+
 afterEach(() => {
   vi.clearAllMocks();
 });
 
 describe("action item server actions", () => {
   it("creates form-submitted actions as private drafts by default", async () => {
-    const { createActionAction } = await import("./actions");
+    createAction.mockResolvedValueOnce({ id: "saved-draft-1", status: "DRAFT" });
+    const destination = await submitCreateWithRedirect(buildCreateFormData());
 
-    await createActionAction(buildCreateFormData());
+    expectCreateDestination(destination, "saved-draft-1", "DRAFT");
 
     expect(enforceDemoGuard).toHaveBeenCalledWith("workspace-1");
     expect(requirePageActor).toHaveBeenCalled();
@@ -125,7 +152,147 @@ describe("action item server actions", () => {
       isPrivate: true,
       source: { type: "WEB_REQUEST", id: "test-source" },
     }));
+    expect(createAction).toHaveBeenCalledTimes(1);
+    expect(revalidatePath.mock.calls).toEqual([["/"], ["/workspaces/workspace-1", "layout"]]);
+    expect(getLocale.mock.invocationCallOrder[0]).toBeLessThan(createAction.mock.invocationCallOrder[0]);
+    expect(createAction.mock.invocationCallOrder[0]).toBeLessThan(revalidatePath.mock.invocationCallOrder[0]);
+    expect(revalidatePath.mock.invocationCallOrder.at(-1)).toBeLessThan(redirect.mock.invocationCallOrder[0]);
+    expect(publishAction).not.toHaveBeenCalled();
   });
+
+  it.each(["en", "es"])("preserves request locale %s when opening the saved Draft", async (locale) => {
+    getLocale.mockResolvedValueOnce(locale);
+    createAction.mockResolvedValueOnce({ id: "saved-draft-1", status: "DRAFT" });
+
+    expectCreateDestination(await submitCreateWithRedirect(buildCreateFormData()), "saved-draft-1", "DRAFT", locale);
+  });
+
+  it.each(["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"])(
+    "opens an idempotency-resolved record with its actual %s status and canonical ID",
+    async (status) => {
+      createAction.mockResolvedValueOnce({ id: "canonical-action-1", status });
+      const formData = buildCreateFormData();
+      formData.set("actionId", "submitted-alias");
+      formData.set("status", "DRAFT");
+
+      expectCreateDestination(await submitCreateWithRedirect(formData), "canonical-action-1", status);
+
+      expect(createAction).toHaveBeenCalledTimes(1);
+      expect(createAction.mock.calls[0][1]).not.toHaveProperty("actionId");
+      expect(createAction.mock.calls[0][1]).not.toHaveProperty("status");
+      expect(publishAction).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["use_existing", "update_existing", "create_new"])(
+    "preserves duplicate choice %s and navigates to the actual returned record",
+    async (resolution) => {
+      const status = resolution === "create_new" ? "DRAFT" : "IN_PROGRESS";
+      createAction.mockResolvedValueOnce({ id: "returned-action-1", status });
+      const formData = buildCreateFormData();
+      formData.set("duplicateResolution", resolution);
+      formData.set("duplicateTargetEntityId", "requested-target-1");
+
+      expectCreateDestination(await submitCreateWithRedirect(formData), "returned-action-1", status);
+
+      expect(createAction.mock.calls[0][1].duplicateGuard).toEqual({ resolution, targetEntityId: "requested-target-1" });
+      expect(createAction).toHaveBeenCalledTimes(1);
+      expect(updateAction).not.toHaveBeenCalled();
+      expect(publishAction).not.toHaveBeenCalled();
+    },
+  );
+
+  it("preserves an enabled duplicate guard without a resolution and an unassigned Draft", async () => {
+    createAction.mockResolvedValueOnce({ id: "unassigned-draft-1", status: "DRAFT" });
+    const formData = buildCreateFormData();
+    formData.set("duplicateGuardEnabled", "true");
+    formData.delete("assigneeMemberId");
+    formData.delete("dueAt");
+    formData.delete("priority");
+    formData.delete("bodyMd");
+
+    expectCreateDestination(await submitCreateWithRedirect(formData), "unassigned-draft-1", "DRAFT");
+
+    expect(createAction.mock.calls[0][1]).toMatchObject({
+      duplicateGuard: {}, assigneeMemberId: null, dueAt: undefined, priority: undefined, bodyMd: null,
+    });
+  });
+
+  it.each([
+    "https://evil.example/actions",
+    "//evil.example/actions",
+    "/workspaces/workspace-2/actions?status=DRAFT",
+    "/workspaces/workspace-1/actions?status=OPEN&assigneeMemberId=other-member&page=9",
+  ])("ignores supplied navigation destination %s", async (returnTo) => {
+    createAction.mockResolvedValueOnce({ id: "saved-draft-1", status: "DRAFT" });
+    const formData = buildCreateFormData();
+    formData.set("returnTo", returnTo);
+    formData.set("redirectTo", returnTo);
+    formData.set("locale", "es");
+
+    expectCreateDestination(await submitCreateWithRedirect(formData), "saved-draft-1", "DRAFT");
+  });
+
+  it("encodes the returned ID as one detail path segment", async () => {
+    const id = "synthetic/id?returnTo=//evil.example";
+    createAction.mockResolvedValueOnce({ id, status: "DRAFT" });
+
+    expectCreateDestination(await submitCreateWithRedirect(buildCreateFormData()), id, "DRAFT");
+  });
+
+  it("stops a demo-denied create before authentication, saving or navigation", async () => {
+    const { createActionAction } = await import("./actions");
+    const error = new MockAppError(403, "DEMO_READ_ONLY", "Synthetic demo denial");
+    enforceDemoGuard.mockRejectedValueOnce(error);
+
+    await expect(createActionAction(buildCreateFormData())).rejects.toBe(error);
+
+    expect(requirePageActor).not.toHaveBeenCalled();
+    expect(getLocale).not.toHaveBeenCalled();
+    expect(createAction).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
+  it("preserves the authentication redirect before saving or success navigation", async () => {
+    const { createActionAction } = await import("./actions");
+    const authRedirect = new Error("NEXT_REDIRECT: /login");
+    requirePageActor.mockRejectedValueOnce(authRedirect);
+
+    await expect(createActionAction(buildCreateFormData())).rejects.toBe(authRedirect);
+
+    expect(getLocale).not.toHaveBeenCalled();
+    expect(createAction).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
+  it("resolves locale before saving so a locale failure causes no write", async () => {
+    const { createActionAction } = await import("./actions");
+    const error = new Error("Synthetic locale failure");
+    getLocale.mockRejectedValueOnce(error);
+
+    await expect(createActionAction(buildCreateFormData())).rejects.toBe(error);
+
+    expect(createAction).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
+  it.each(["FORBIDDEN", "INVALID_INPUT", "DUPLICATE_CONFIRMATION_REQUIRED", "IDEMPOTENCY_CONFLICT", "ACTION_SOURCE_UNAVAILABLE", "NOT_FOUND"])(
+    "propagates create domain error %s without refresh or success navigation",
+    async (code) => {
+      const { createActionAction } = await import("./actions");
+      const error = new MockAppError(409, code, "Synthetic domain failure");
+      createAction.mockRejectedValueOnce(error);
+
+      await expect(createActionAction(buildCreateFormData())).rejects.toBe(error);
+
+      expect(createAction).toHaveBeenCalledTimes(1);
+      expect(revalidatePath).not.toHaveBeenCalled();
+      expect(redirect).not.toHaveBeenCalled();
+    },
+  );
 
   it("forwards the exact observed version for generic Action content updates", async () => {
     const { updateActionAction } = await import("./actions");
@@ -356,11 +523,11 @@ describe("action item server actions", () => {
   });
 
   it("honors an explicit public create control if one is later added to the form", async () => {
-    const { createActionAction } = await import("./actions");
+    createAction.mockResolvedValueOnce({ id: "saved-open-1", status: "OPEN" });
     const formData = buildCreateFormData();
     formData.set("isPrivate", "off");
 
-    await createActionAction(formData);
+    expectCreateDestination(await submitCreateWithRedirect(formData), "saved-open-1", "OPEN");
 
     expect(createAction).toHaveBeenCalledWith(actor, expect.objectContaining({
       isPrivate: false,

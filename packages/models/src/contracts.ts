@@ -1,5 +1,29 @@
 import type { ModelTaskType } from "@prisma/client";
 
+/** Server-owned authorization, never deserialize this capability from request JSON.
+ * Resolve to permit one HTTP send; reject to deny it. Called after headers are
+ * prepared on every retry, with the operation's cancellation/deadline signal.
+ * This is not a billing reservation or an authorization lease for later sends. */
+export type ModelAttemptGuard = (context: Readonly<{ signal: AbortSignal }>) => Promise<void>;
+
+export type ModelRequestControls = {
+  signal?: AbortSignal;
+  /** Opts into fresh authorization and disables OpenRouter's opaque fallbacks.
+   * Guarded OpenRouter multipart transcription is unsupported and fails closed.
+   * Callers must propagate these controls into nested model operations. */
+  authorizeAttempt?: ModelAttemptGuard;
+};
+
+/** Deliberately omits the guard's error/cause, which can contain private data. */
+export class ModelAttemptAuthorizationError extends Error {
+  readonly code = "MODEL_ATTEMPT_DENIED";
+
+  constructor() {
+    super("Model request attempt was not authorized.");
+    this.name = "ModelAttemptAuthorizationError";
+  }
+}
+
 export type ModelUsageInput = {
   workspaceId: string;
   workflowJobId?: string;
@@ -43,14 +67,13 @@ export type ModelTool = {
   };
 };
 
-export type ChatCompletionRequest = {
+export type ChatCompletionRequest = ModelRequestControls & {
   workspaceId: string;
   taskType: ModelTaskType;
   model?: string;
   messages: ChatMessage[];
   tools?: ModelTool[];
   tool_choice?: "auto" | "none" | "required" | { type: "function", function: { name: string } };
-  signal?: AbortSignal;
   workflowJobId?: string;
   agentRunId?: string;
   catalogItemId?: string;
@@ -73,7 +96,7 @@ export type ChatStreamEvent =
     argumentsDelta: string;
   };
 
-export type ExtractionRequest = {
+export type ExtractionRequest = ModelRequestControls & {
   workspaceId: string;
   model?: string;
   instruction: string;
@@ -91,7 +114,7 @@ export type ExtractionResponse = {
   usage: Omit<ModelUsageInput, "workspaceId" | "workflowJobId" | "agentRunId" | "taskType">;
 };
 
-export type EmbeddingRequest = {
+export type EmbeddingRequest = ModelRequestControls & {
   workspaceId: string;
   model?: string;
   input: string | string[];
@@ -107,7 +130,7 @@ export type EmbeddingResponse = {
   usage: Omit<ModelUsageInput, "workspaceId" | "workflowJobId" | "agentRunId" | "taskType">;
 };
 
-export type RerankRequest = {
+export type RerankRequest = ModelRequestControls & {
   workspaceId: string;
   model?: string;
   query: string;
@@ -131,7 +154,7 @@ export type RerankResponse = {
   usage: Omit<ModelUsageInput, "workspaceId" | "workflowJobId" | "agentRunId" | "taskType">;
 };
 
-export type AudioTranscriptionRequest = {
+export type AudioTranscriptionRequest = ModelRequestControls & {
   workspaceId: string;
   model?: string;
   fileName: string;

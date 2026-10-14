@@ -8,9 +8,16 @@
     "@corgtex/knowledge": "0.1.0",
     "@corgtex/models": "0.1.0",
     "@corgtex/shared": "0.1.0",
+    "@langchain/core": "1.2.17",
+    "@langchain/langgraph": "1.4.21",
+    "@langchain/langgraph-checkpoint": "1.1.6",
     "zod": "^4.4.3"
   },
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./assistant-harness": "./src/assistant-harness/index.ts"
+  },
+  "devDependencies": {
+    "langsmith": "0.10.11"
   }
 }

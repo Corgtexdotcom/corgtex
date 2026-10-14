@@ -1,4 +1,4 @@
-import type { Prisma } from "@prisma/client";
+import type { BrainArticle, Meeting, Prisma } from "@prisma/client";
 import {
   filterWorkspaceBriefingSources,
   normalizeNewspaperEditionDigest,
@@ -22,6 +22,7 @@ import {
   capDashboardUnreadNotificationCount,
   isDashboardUnreadNotificationCountCapped,
 } from "@/lib/dashboard-briefing";
+import { scanReadableArtifactPages } from "@/lib/readable-artifact-pages";
 import { getDashboardWorkAttentionCountsFromMetrics } from "@/lib/dashboard-attention";
 
 export const dynamic = "force-dynamic";
@@ -307,73 +308,11 @@ export default async function WorkspaceDashboard({
       deadlines.set(request.process.subjectId, request.deadlineAt);
     }
   }
-  const visiblePersonalOpenActionWhere = currentMember?.id
-    ? {
-      AND: [
-        visibleOpenActionWhere,
-        { OR: [{ assigneeMemberId: currentMember.id }, { id: { in: [...adviceDeadlinesByKind.ACTION.keys()] } }] },
-      ],
-    } satisfies Prisma.ActionWhereInput
-    : null;
-  const personalProposalConditions: Prisma.ProposalWhereInput[] = currentMember?.id
-    ? [
-      { ownerMemberId: currentMember.id },
-      { id: { in: [...adviceDeadlinesByKind.PROPOSAL.keys()] } },
-    ]
-    : [];
-  const visiblePersonalOpenProposalWhere = currentMember?.id
-    ? {
-      AND: [
-        visibleOpenProposalWhere,
-        { OR: personalProposalConditions },
-      ],
-    } satisfies Prisma.ProposalWhereInput
-    : null;
-  const visiblePersonalOpenTensionWhere = currentMember?.id
-    ? {
-      AND: [
-        visibleOpenTensionWhere,
-        { OR: [{ assigneeMemberId: currentMember.id }, { id: { in: [...adviceDeadlinesByKind.TENSION.keys()] } }] },
-      ],
-    } satisfies Prisma.TensionWhereInput
-    : null;
-  const [
-    unreadNotificationsCount,
-    candidateArticles,
-    articleCountCandidates,
-    latestDailyWorkspaceBriefing,
-    latestWeeklyWorkspaceBriefing,
-    newspaperEditions,
-    meetings,
-    workspaceData,
-    membersCount,
-    actionTotalCount,
-    actionPersonalCount,
-    proposalTotalCandidates,
-    proposalPersonalCandidates,
-    tensionTotalCount,
-    tensionPersonalCount,
-    personalActions,
-    candidatePersonalProposals,
-    personalTensions,
+  const [unreadNotificationsCount, latestDailyWorkspaceBriefing,
+    latestWeeklyWorkspaceBriefing, newspaperEditions, workspaceData, membersCount,
   ] = await prisma.$transaction([
-    prisma.notification.count({
-      where: {
-        workspaceId,
-        userId: actor.kind === "user" ? actor.user.id : "__agent_actor__",
-        readAt: null,
-      },
-    }),
-    prisma.brainArticle.findMany({
-      where: {
-        workspaceId,
-        archivedAt: null,
-        isPrivate: false,
-        type: { notIn: ["DIGEST", "PERSON"] },
-      },
-      orderBy: { updatedAt: "desc" },
-    }),
-    prisma.brainArticle.findMany({ where: { workspaceId, archivedAt: null } }),
+    prisma.notification.count({ where: { workspaceId,
+      userId: actor.kind === "user" ? actor.user.id : "__agent_actor__", readAt: null } }),
     prisma.workspaceBriefing.findFirst({
       where: {
         workspaceId,
@@ -446,63 +385,77 @@ export default async function WorkspaceDashboard({
         updatedAt: true,
       },
     }),
-    prisma.meeting.findMany({
-      where: {
-        workspaceId,
-        status: "COMPLETED",
-        archivedAt: null,
-      },
-      select: {
-        id: true,
-        title: true,
-        summaryMd: true,
-        recordedAt: true,
-        updatedAt: true,
-        createdAt: true,
-      },
-      orderBy: { recordedAt: "desc" },
-    }),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true, name: true } }),
     prisma.member.count({ where: { workspaceId, isActive: true } }),
-    prisma.action.count({ where: visibleOpenActionWhere }),
-    visiblePersonalOpenActionWhere
-      ? prisma.action.count({ where: visiblePersonalOpenActionWhere })
-      : prisma.action.count({ where: { id: "__no_current_member__" } }),
-    prisma.proposal.findMany({ where: visibleOpenProposalWhere }),
-    visiblePersonalOpenProposalWhere
-      ? prisma.proposal.findMany({ where: visiblePersonalOpenProposalWhere })
-      : prisma.proposal.findMany({ where: { id: "__no_current_member__" } }),
-    prisma.tension.count({ where: visibleOpenTensionWhere }),
-    visiblePersonalOpenTensionWhere
-      ? prisma.tension.count({ where: visiblePersonalOpenTensionWhere })
-      : prisma.tension.count({ where: { id: "__no_current_member__" } }),
-    prisma.action.findMany({
-      where: visiblePersonalOpenActionWhere ?? { id: "__no_current_member__" },
-      select: { id: true, title: true, status: true, priority: true, assigneeMemberId: true, dueAt: true, updatedAt: true },
-      orderBy: [{ priority: "desc" }, { dueAt: "asc" }, { updatedAt: "desc" }],
+  ]);
+  const articles: BrainArticle[] = [];
+  const meetings: Meeting[] = [];
+  let actionPersonalCount = 0, proposalPersonalCount = 0, tensionPersonalCount = 0;
+  let personalItems: PersonalNewspaperItem[] = [];
+  const personalSources: MemberBriefingContext["personalSources"] = [];
+  const rankingTime = new Date();
+  const retainPersonal = (item: PersonalNewspaperItem) => {
+    personalSources.push({ type: item.kind === "ADVICE" ? "ADVICE_REQUEST" : item.kind, id: item.id, title: item.title });
+    personalItems = rankPersonalNewspaperItems([...personalItems, item], rankingTime).slice(0, 8);
+  };
+  const pageArgs = (cursor: string | undefined, take: number) => ({
+    orderBy: { id: "asc" as const }, take, ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+  });
+  const [articleTotalCount, actionTotalCount, proposalTotalCount, tensionTotalCount, meetingTotalCount] = await Promise.all([
+    scanReadableArtifactPages({ actor, workspaceId, kind: "BrainArticle",
+      loadPage: (cursor, take) => prisma.brainArticle.findMany({ where: { workspaceId, archivedAt: null }, ...pageArgs(cursor, take) }),
+      visit: (article) => {
+        if (article.isPrivate || article.type === "DIGEST" || article.type === "PERSON") return;
+        articles.push(article);
+        articles.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime() || a.id.localeCompare(b.id));
+        articles.length = Math.min(articles.length, 50);
+      },
     }),
-    prisma.proposal.findMany({
-      where: visiblePersonalOpenProposalWhere ?? { id: "__no_current_member__" },
-      orderBy: [{ priority: "desc" }, { updatedAt: "desc" }],
+    scanReadableArtifactPages({ actor, workspaceId, kind: "Action",
+      loadPage: (cursor, take) => prisma.action.findMany({ where: visibleOpenActionWhere, ...pageArgs(cursor, take) }),
+      visit: (action) => {
+        if (!currentMember || (action.assigneeMemberId !== currentMember.id && !adviceDeadlinesByKind.ACTION.has(action.id))) return;
+        actionPersonalCount++;
+        const adviceDeadline = adviceDeadlinesByKind.ACTION.get(action.id) ?? null;
+        const useAdviceDeadline = adviceDeadline && (!action.dueAt || utcDueDay(adviceDeadline) <= utcDueDay(action.dueAt));
+        retainPersonal({ id: action.id, title: action.title, status: action.status, priority: action.priority, updatedAt: action.updatedAt,
+          kind: "ACTION", reason: action.assigneeMemberId === currentMember.id ? "assigned" : "advice",
+          dueAt: useAdviceDeadline ? adviceDeadline : action.dueAt, dueAtKind: useAdviceDeadline ? "DATETIME" : "DATE",
+          href: `/workspaces/${workspaceId}/actions/${action.id}` });
+      },
     }),
-    prisma.tension.findMany({
-      where: visiblePersonalOpenTensionWhere ?? { id: "__no_current_member__" },
-      select: { id: true, title: true, status: true, priority: true, assigneeMemberId: true, updatedAt: true },
-      orderBy: [{ priority: "desc" }, { updatedAt: "desc" }],
+    scanReadableArtifactPages({ actor, workspaceId, kind: "Proposal",
+      loadPage: (cursor, take) => prisma.proposal.findMany({ where: visibleOpenProposalWhere, ...pageArgs(cursor, take) }),
+      visit: (proposal) => {
+        if (!currentMember || (proposal.ownerMemberId !== currentMember.id && !adviceDeadlinesByKind.PROPOSAL.has(proposal.id))) return;
+        proposalPersonalCount++;
+        retainPersonal({ id: proposal.id, title: proposal.title, status: proposal.status, priority: proposal.priority, updatedAt: proposal.updatedAt,
+          kind: "PROPOSAL", reason: proposal.ownerMemberId === currentMember.id ? "owner" : "advice",
+          dueAt: adviceDeadlinesByKind.PROPOSAL.get(proposal.id) ?? null, dueAtKind: "DATETIME",
+          href: `/workspaces/${workspaceId}/proposals/${proposal.id}` });
+      },
+    }),
+    scanReadableArtifactPages({ actor, workspaceId, kind: "Tension",
+      loadPage: (cursor, take) => prisma.tension.findMany({ where: visibleOpenTensionWhere, ...pageArgs(cursor, take) }),
+      visit: (tension) => {
+        if (!currentMember || (tension.assigneeMemberId !== currentMember.id && !adviceDeadlinesByKind.TENSION.has(tension.id))) return;
+        tensionPersonalCount++;
+        retainPersonal({ id: tension.id, title: tension.title, status: tension.status, priority: tension.priority, updatedAt: tension.updatedAt,
+          kind: "TENSION", reason: tension.assigneeMemberId === currentMember.id ? "assigned" : "advice",
+          dueAt: adviceDeadlinesByKind.TENSION.get(tension.id) ?? null, dueAtKind: "DATETIME",
+          href: `/workspaces/${workspaceId}/tensions/${tension.id}` });
+      },
+    }),
+    scanReadableArtifactPages({ actor, workspaceId, kind: "Meeting",
+      loadPage: (cursor, take) => prisma.meeting.findMany({ where: { workspaceId, status: "COMPLETED", archivedAt: null }, ...pageArgs(cursor, take) }),
+      visit: (meeting) => {
+        meetings.push(meeting);
+        meetings.sort((a, b) => latestActivityTimeBefore(rankingTime, b.updatedAt, b.recordedAt, b.createdAt)
+          - latestActivityTimeBefore(rankingTime, a.updatedAt, a.recordedAt, a.createdAt) || a.id.localeCompare(b.id));
+        meetings.length = Math.min(meetings.length, 20);
+      },
     }),
   ]);
-  const [visibleArticleIds, visibleProposalIds] = await Promise.all([
-    readableArtifactIds(actor, workspaceId, "BrainArticle", articleCountCandidates),
-    readableArtifactIds(actor, workspaceId, "Proposal", [
-      ...new Map([...proposalTotalCandidates, ...proposalPersonalCandidates, ...candidatePersonalProposals]
-        .map((proposal) => [proposal.id, proposal])).values(),
-    ]),
-  ]);
-  const articles = candidateArticles.filter((article) => visibleArticleIds.has(article.id)).slice(0, 50);
-  const articleTotalCount = articleCountCandidates.filter((article) => visibleArticleIds.has(article.id)).length;
-  const proposalTotalCount = proposalTotalCandidates.filter((proposal) => visibleProposalIds.has(proposal.id)).length;
-  const proposalPersonalCount = proposalPersonalCandidates.filter((proposal) => visibleProposalIds.has(proposal.id)).length;
-  const personalProposals = candidatePersonalProposals.filter((proposal) => visibleProposalIds.has(proposal.id));
   const chunksCount = await countReadableKnowledgeChunks(actor, workspaceId);
   const branding = workspaceData
     ? workspaceBranding(workspaceData)
@@ -516,45 +469,10 @@ export default async function WorkspaceDashboard({
     tensionPersonalCount,
     tensionTotalCount,
   });
-  const personalItems: PersonalNewspaperItem[] = rankPersonalNewspaperItems([
-    ...personalActions.map((action) => {
-      const adviceDeadline = adviceDeadlinesByKind.ACTION.get(action.id) ?? null;
-      const useAdviceDeadline = adviceDeadline
-        && (!action.dueAt || utcDueDay(adviceDeadline) <= utcDueDay(action.dueAt));
-      return {
-        ...action,
-        kind: "ACTION" as const,
-        reason: action.assigneeMemberId === currentMember?.id ? "assigned" as const : "advice" as const,
-        dueAt: useAdviceDeadline ? adviceDeadline : action.dueAt,
-        dueAtKind: useAdviceDeadline ? "DATETIME" as const : "DATE" as const,
-        href: `/workspaces/${workspaceId}/actions/${action.id}`,
-      };
-    }),
-    ...personalProposals.map((proposal) => ({
-      ...proposal,
-      kind: "PROPOSAL" as const,
-      reason: proposal.ownerMemberId === currentMember?.id ? "owner" as const : "advice" as const,
-      dueAt: adviceDeadlinesByKind.PROPOSAL.get(proposal.id) ?? null,
-      dueAtKind: "DATETIME" as const,
-      href: `/workspaces/${workspaceId}/proposals/${proposal.id}`,
-    })),
-    ...personalTensions.map((tension) => ({
-      ...tension,
-      kind: "TENSION" as const,
-      reason: tension.assigneeMemberId === currentMember?.id ? "assigned" as const : "advice" as const,
-      dueAt: adviceDeadlinesByKind.TENSION.get(tension.id) ?? null,
-      dueAtKind: "DATETIME" as const,
-      href: `/workspaces/${workspaceId}/tensions/${tension.id}`,
-    })),
-  ], new Date());
   const memberContext: MemberBriefingContext | null = currentMember ? {
     roleNames: memberCircleAssignments.map((assignment) => assignment.role.name),
     circleNames: memberCircleAssignments.map((assignment) => assignment.role.circle.name),
-    personalSources: personalItems.map((item) => ({
-      type: item.kind === "ADVICE" ? "ADVICE_REQUEST" as const : item.kind,
-      id: item.id,
-      title: item.title,
-    })),
+    personalSources,
   } : null;
   const briefingCandidates = [latestDailyWorkspaceBriefing, latestWeeklyWorkspaceBriefing]
     .filter((briefing): briefing is NonNullable<typeof latestDailyWorkspaceBriefing> => Boolean(briefing))
@@ -866,7 +784,7 @@ export default async function WorkspaceDashboard({
       <div className="nr-footer">
         {t("footerStats", {
           articles: articleTotalCount,
-          meetings: meetings.length,
+          meetings: meetingTotalCount,
           chunks: chunksCount,
           members: membersCount,
         })}

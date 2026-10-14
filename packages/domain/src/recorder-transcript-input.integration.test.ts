@@ -81,9 +81,10 @@ describe("authenticated recorder native custody and atomic publication", () => {
     expect(input.ownerMemberId).toBeNull(); expect(input.submittedByUserId).toBeNull();
     expect(JSON.parse(decryptSecret(input.encryptedPayloadJson)).responses[0].text).toBe(JSON.stringify(artifact.transcriptPayload));
     const publication = await prisma.recorderTranscriptPublication.findFirstOrThrow({ where: { nativeInputId: input.id } });
-    expect(await prisma.event.findUnique({ where: { id: publication.eventId } })).toMatchObject({ status: "PENDING", payload: expect.objectContaining({ nativeInputId: input.id }) });
+    expect(await prisma.event.findUnique({ where: { id: publication.eventId } })).toMatchObject({ status: "PENDING", payload: expect.objectContaining({ nativeInputId: input.id, source: "recorder:recall_ai" }) });
     expect(await prisma.artifactInputLineage.findUnique({ where: { id: publication.transcriptManifestId } })).toMatchObject({ origin: "DERIVED", artifactType: "MeetingTranscript" });
     expect(await prisma.meetingRecording.findUnique({ where: { id: f.recording.id } })).toMatchObject({ status: "COMPLETED", transcriptProcessedAt: expect.any(Date) });
+    expect(await prisma.meeting.findUnique({ where: { id: f.meeting.id } })).toMatchObject({ source: "recorder:recall_ai" });
     const roots = await captureArtifactInputProof(f.actor, f.workspace.id, [{ kind: "MeetingTranscript", id: f.meeting.id }]);
     expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, roots)).toBe(true);
     await expect(prisma.nativeTranscriptInput.update({ where: { id: input.id }, data: { encryptedPayloadJson: "replacement" } })).rejects.toThrow("Immutable");
@@ -494,7 +495,9 @@ describe("Meeting BaaS authenticated native continuity", () => {
     const publication = await prisma.recorderTranscriptPublication.findFirstOrThrow({ where: { nativeInputId: input.id } });
     expect(await prisma.meetingRecorderProviderEvent.findUnique({ where: { id: publication.providerEventId! } })).toMatchObject({ processedAt: expect.any(Date) });
     const { getMeeting } = await import("./meetings");
-    expect(await getMeeting(f.actor, f.workspace.id, f.meeting.id)).toMatchObject({ transcript: "BaaS speaker [00:00:00]: Exact BaaS original." });
+    expect(await getMeeting(f.actor, f.workspace.id, f.meeting.id)).toMatchObject({ transcript: "BaaS speaker [00:00:00]: Exact BaaS original.", source: "recorder:meeting_baas" });
+    expect(await prisma.event.findFirstOrThrow({ where: { workspaceId: f.workspace.id, type: "meeting.transcript-uploaded" } }))
+      .toMatchObject({ payload: expect.objectContaining({ source: "recorder:meeting_baas" }) });
     await expect(processMeetingRecorderWebhook("MEETING_BAAS", request)).resolves.toMatchObject({ duplicate: true });
     expect(calls).toHaveBeenCalledTimes(2);
     expect(await prisma.recorderTranscriptPublication.count()).toBe(1);

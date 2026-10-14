@@ -1,4 +1,4 @@
-import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations, listDailyCompanyUnderstandingQuestions, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig, getUserWorkspaceOnboardingState, getAiWorkspaceSelectionState, resolveWorkspaceModuleAccess, resolveKnowledgeAccessDomains, SELF_SERVE_WORKSPACE_TOUR_KEY, SELF_SERVE_WORKSPACE_TOUR_VERSION } from "@corgtex/domain";
+import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations, listDailyCompanyUnderstandingQuestions, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig, getUserWorkspaceOnboardingState, getAiWorkspaceSelectionState, resolveWorkspaceModuleAccess, hasWorkspaceInitialKnowledgeSource, SELF_SERVE_WORKSPACE_TOUR_KEY, SELF_SERVE_WORKSPACE_TOUR_VERSION } from "@corgtex/domain";
 import { workspaceBranding, prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { countReadableKnowledgeChunks } from "@corgtex/knowledge";
@@ -42,32 +42,8 @@ function localizedPath(path: string, locale: string) {
 }
 
 async function hasWorkspaceInitialKnowledge(actor: AppActor, workspaceId: string) {
-  const domains = await resolveKnowledgeAccessDomains(actor, workspaceId);
-  const [documentCount, brainSourceCount, meetingCount, knowledgeChunkCount] = await Promise.all([
-    prisma.document.count({
-      where: { workspaceId, archivedAt: null, accessDomain: { in: domains } },
-    }),
-    prisma.brainSource.count({
-      where: {
-        workspaceId,
-        archivedAt: null,
-        accessDomain: { in: domains },
-        sourceType: { in: ["FILE_UPLOAD", "DOC", "ARTICLE", "MEETING", "EXTERNAL_CONTENT"] },
-      },
-    }),
-    prisma.meeting.count({
-      where: {
-        workspaceId,
-        archivedAt: null,
-        OR: [
-          { transcript: { not: null } },
-          { summaryMd: { not: null } },
-        ],
-      },
-    }),
-    countReadableKnowledgeChunks(actor, workspaceId, ["DOCUMENT", "MEETING"]),
-  ]);
-  return documentCount + brainSourceCount + meetingCount + knowledgeChunkCount > 0;
+  return await hasWorkspaceInitialKnowledgeSource(actor, workspaceId)
+    || await countReadableKnowledgeChunks(actor, workspaceId, ["DOCUMENT", "MEETING"]) > 0;
 }
 
 function syncSettingsRecord(value: unknown) {

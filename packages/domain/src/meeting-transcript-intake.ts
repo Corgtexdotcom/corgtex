@@ -4,7 +4,7 @@ import { prisma, type AppActor } from "@corgtex/shared";
 import { createMeeting, getMeeting, uploadMeetingTranscript } from "./meetings";
 import type { DuplicateGuardOptions } from "./duplicate-guard";
 import { invariant } from "./errors";
-import { audioTranscriptIntakeRoots, directMemberTranscriptRoots,
+import { audioTranscriptIntakeRoots, directMemberTranscriptRoots, withMemberTranscriptReceipt,
   type AudioTranscriptIntakeReceipt, type DirectMemberTranscriptReceipt } from "./native-transcript-input";
 import { getAudioTranscriptWorkerPurpose } from "./native-transcript-principal";
 import { captureArtifactInputProof, captureArtifactInputSnapshotProof } from "./source-lineage";
@@ -243,6 +243,7 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
   // A source label or provider record id is not an authenticated receipt. In
   // particular, model tool arguments can arrive with a human conversation actor.
   const { nativeReceipt, ...submitted } = params;
+  return withMemberTranscriptReceipt(actor, params.workspaceId, submitted, nativeReceipt, async () => {
   const audioWorker = actor.kind === "agent" ? getAudioTranscriptWorkerPurpose(actor, params.workspaceId) : null;
   invariant(!params.sourceRecordId && !params.batchId && !params.allowTranscriptAppend && !params.replaceTranscript
     && ((actor.kind === "user" && !params.provider) || (audioWorker && params.provider === "MANUAL_UPLOAD")),
@@ -367,4 +368,5 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
       ? existingMeetingMessage(result.meeting.title, inferred.title)
       : `Transcript saved as meeting "${result.meeting.title ?? inferred.title ?? "Untitled meeting"}". Summary and follow-up extraction are queued.`,
   };
+  });
 }

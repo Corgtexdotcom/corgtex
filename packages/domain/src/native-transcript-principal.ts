@@ -46,3 +46,19 @@ export function getRecorderTranscriptWorkerPurpose(actor: AppActor, workspaceId:
   const purpose = recorderWorkers.get(actor);
   return purpose?.workspaceId === workspaceId ? purpose : null;
 }
+
+/** Only the authenticated transcript adapter registers an operation. Serialized
+ * labels, provider IDs and copied actor objects cannot carry pending custody. */
+export type TranscriptSourceImportPurpose = Readonly<{
+  workspaceId: string; connectionId: string; inputId: string; recordId: string;
+  meetingId: string; operationId: string; callerMemberId?: string; callerUserId?: string;
+}>;
+const transcriptImports = new WeakMap<AppActor, TranscriptSourceImportPurpose>();
+export function registerTranscriptSourceImport(actor: AppActor, purpose: TranscriptSourceImportPurpose) {
+  transcriptImports.set(actor, Object.freeze({ ...purpose }));
+}
+export function revokeTranscriptSourceImport(actor: AppActor) { transcriptImports.delete(actor); }
+export function getTranscriptSourceImportPurpose(actor: AppActor, workspaceId: string) {
+  const purpose = transcriptImports.get(actor);
+  return purpose?.workspaceId === workspaceId ? purpose : null;
+}

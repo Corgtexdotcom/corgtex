@@ -1,3 +1,4 @@
+import { BoundedSnapshotReads } from "./source-snapshot-read-pass";
 import { categoryGovernorIdentities } from "./information-category-policy";
 import type { Prisma } from "@prisma/client";
 import { isDeepStrictEqual } from "node:util";
@@ -59,7 +60,8 @@ export async function isArtifactInputPermissionEpochCoverageComplete(params: {
     return await isSqlKnowledgeChunkPublished(workspaceId, params.content, db)
       && await isArtifactPermissionEpochProofCurrent(workspaceId, own, db);
   }
-  const dependencies = await inspectStoredArtifactInputDependencies(db, workspaceId, roots, { maxNodes: 10000 });
+  const snapshotReads = new BoundedSnapshotReads(db, workspaceId);
+  const dependencies = await inspectStoredArtifactInputDependencies(db, workspaceId, roots, { maxNodes: 10000, snapshotReads });
   if (!dependencies.complete) return false;
   const proofs = [own];
   // Discovery may cross a mutable same-body manifest appended AFTER the actual
@@ -79,8 +81,8 @@ export async function isArtifactInputPermissionEpochCoverageComplete(params: {
       proofs.push(saved);
     }
     if (root.kind === "ArtifactInputSnapshot") {
-      const snapshot = await db.artifactInputSnapshot.findFirst({ where: { id: root.id, workspaceId },
-      });
+      const snapshot = snapshotReads.get(root.id)
+        ?? await db.artifactInputSnapshot.findFirst({ where: { id: root.id, workspaceId } });
       const saved = snapshot?.epochProofVersion === 1 ? parsePermissionEpochProof(snapshot.permissionEpochsJson) : null;
       if (!saved || lineageContentFingerprint("ArtifactInputSnapshot", snapshot) !== root.fingerprint
         || !Array.isArray(snapshot!.rootsJson) || !snapshot!.contentJson
@@ -133,7 +135,8 @@ export async function isArtifactInputPermissionEpochCoverageComplete(params: {
     if (visited.has(key)) continue;
     if (visited.size >= 10000) return false;
     visited.add(key);
-    const row = savedRow ?? await loadArtifactPermissionMetadata(db, workspaceId, input);
+    const row = savedRow ?? (input.kind === "ArtifactInputSnapshot" ? snapshotReads.get(input.id) : undefined)
+      ?? await loadArtifactPermissionMetadata(db, workspaceId, input);
     if (!row) return false;
     // A snapshot's saved vector describes the original source, whose live
     // envelope is discovered separately. The immutable receipt ID is no grant.
@@ -151,5 +154,8 @@ export async function isArtifactInputPermissionEpochCoverageComplete(params: {
       if (!queue({ kind: "FinanceReportUploadInput", id: upload.id })) return false;
     }
   }
-  return isArtifactPermissionEpochProofCurrent(workspaceId, union, db);
+  if (!await isArtifactPermissionEpochProofCurrent(workspaceId, union, db)) return false;
+  // Reobserve every reused row after all authority checks. Snapshot payloads
+  // have no database immutability constraint; even same-TX DML must reject.
+  return snapshotReads.isCurrent();
 }

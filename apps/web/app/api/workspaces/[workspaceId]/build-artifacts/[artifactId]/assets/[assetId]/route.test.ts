@@ -22,7 +22,7 @@ describe("protected build asset delivery", () => {
     expect(response.headers.get("location")).toBeNull();
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(await response.text()).toBe("synthetic bytes");
-    expect(authorize.mock.calls.length).toBeGreaterThanOrEqual(3); // initial, pre-read and post-read delivery gates
+    expect(authorize).toHaveBeenCalledTimes(2); // initial authorization and one final delivery fence
     expect(getAsset).toHaveBeenCalledWith(actor, { workspaceId: "synthetic-workspace", artifactId: "artifact", assetId: "asset" });
   });
 });

@@ -11,7 +11,7 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
       $queryRaw: vi.fn(),
       $executeRaw: vi.fn(),
       artifactInputLineage: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn() },
-      artifactInputSnapshot: { findFirst: vi.fn(), create: vi.fn() },
+      artifactInputSnapshot: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn() },
       brainSource: { findFirst: vi.fn() },
       nativeTranscriptInput: { create: vi.fn(), findFirst: vi.fn() },
       workspaceFeatureFlag: {
@@ -512,6 +512,8 @@ describe("meeting-intelligence-context", () => {
       const row = { id: `snapshot-${snapshots.length + 1}`, ...data }; snapshots.push(row); return row;
     });
     (prisma.artifactInputSnapshot.findFirst as ReturnType<typeof vi.fn>).mockImplementation(async ({ where }) => snapshots.find((row) => row.id === where.id && row.workspaceId === where.workspaceId) ?? null);
+    (prisma.artifactInputSnapshot.findMany as ReturnType<typeof vi.fn>).mockImplementation(async ({ where }) =>
+      snapshots.filter(row => row.workspaceId === where.workspaceId && where.id.in.includes(row.id)));
     vi.mocked(isArtifactInputProofReadable).mockImplementation(actual.isArtifactInputProofReadable);
     vi.mocked(lineageContentFingerprint).mockImplementation(actual.lineageContentFingerprint);
     vi.mocked(recordArtifactInputLineage).mockImplementation(actual.recordArtifactInputLineage);

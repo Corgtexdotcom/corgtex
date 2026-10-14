@@ -7,7 +7,7 @@ const { db, authorize } = vi.hoisted(() => ({ db: {
   agentCredential: { findFirst: vi.fn() },
   brainArticle: { findFirst: vi.fn() }, action: { findFirst: vi.fn() }, document: { findFirst: vi.fn() },
   checkIn: { findFirst: vi.fn() }, modelUsage: { findFirst: vi.fn() },
-  contextGraphObject: { findFirst: vi.fn() }, artifactInputSnapshot: { findFirst: vi.fn(), create: vi.fn() },
+  contextGraphObject: { findFirst: vi.fn() }, artifactInputSnapshot: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn() },
   artifactInputLineage: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn() },
 }, authorize: vi.fn() }));
 vi.mock("@corgtex/shared", async importOriginal => ({ ...await importOriginal<any>(), prisma: db }));
@@ -45,6 +45,8 @@ beforeEach(() => {
     ["CheckIn", "checkIn"], ["ModelUsageCost", "modelUsage"], ["ContextGraphObject", "contextGraphObject"], ["ArtifactInputSnapshot", "artifactInputSnapshot"]] as const) {
     db[delegate].findFirst.mockImplementation(async ({ where }) => rows[kind]?.[where.id]?.workspaceId === where.workspaceId ? rows[kind][where.id] : null);
   }
+  db.artifactInputSnapshot.findMany.mockImplementation(async ({ where }) => Object.values(rows.ArtifactInputSnapshot ?? {})
+    .filter(row => row.workspaceId === where.workspaceId && where.id.in.includes(row.id)));
   db.artifactInputLineage.findFirst.mockImplementation(async ({ where }) => manifests.filter(row => row.workspaceId === where.workspaceId
     && row.artifactType === where.artifactType && row.artifactId === where.artifactId
     && (where.contentHash === undefined || row.contentHash === where.contentHash)).sort((a, b) => b.revision - a.revision)[0] ?? null);

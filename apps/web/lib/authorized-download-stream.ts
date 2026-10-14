@@ -129,7 +129,7 @@ export async function authorizedDownloadStream(
           }
           pending = next.value; offset = 0;
         }
-        if (options?.authorizeEveryDelivery || delivered >= DOWNLOAD_AUTH_BYTES || performance.now() - checkedAt >= DOWNLOAD_AUTH_INTERVAL_MS) {
+        if (!options?.authorizeEveryDelivery && (delivered >= DOWNLOAD_AUTH_BYTES || performance.now() - checkedAt >= DOWNLOAD_AUTH_INTERVAL_MS)) {
           await authorize();
           checkedAt = performance.now(); delivered = 0;
         }
@@ -141,6 +141,7 @@ export async function authorizedDownloadStream(
           await authorize();
           signal.throwIfAborted();
           if (stopped) return;
+          checkedAt = performance.now(); delivered = 0;
         }
         offset += length; delivered += length;
         if (offset === pending.byteLength) pending = null;

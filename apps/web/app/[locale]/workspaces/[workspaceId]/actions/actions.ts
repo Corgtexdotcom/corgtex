@@ -24,6 +24,9 @@ import type { AdviceRequestAudienceType, AdviceRequestPreferredChannel } from "@
 import type { WorkItemEditActionState } from "@/lib/components/WorkItemEditForm";
 import { uploadWorkItemEvidenceDocument } from "../work-item-evidence-upload";
 import { redirect } from "next/navigation";
+import { getLocale } from "next-intl/server";
+import { appendActionReturnTo, buildActionListReturnHref } from "./return-context";
+import { buildActionListQuery } from "./view-model";
 
 function asStringArray(formData: FormData, key: string) {
   return formData.getAll(key).map((value) => String(value).trim()).filter(Boolean);
@@ -73,7 +76,8 @@ export async function createActionAction(formData: FormData) {
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
-  await createAction(actor, {
+  const locale = await getLocale();
+  const saved = await createAction(actor, {
     workspaceId,
     title: asString(formData, "title"),
     bodyMd: asOptional(formData, "bodyMd"),
@@ -86,6 +90,14 @@ export async function createActionAction(formData: FormData) {
     source: actionRequestSource("WEB_REQUEST", actor.kind === "user" ? actor.user.id : actor.label, asString(formData, "idempotencyKey")),
   });
   refresh(workspaceId);
+  const returnTo = buildActionListReturnHref(
+    workspaceId,
+    buildActionListQuery({ status: saved.status }, "workspace"),
+  );
+  redirect(appendActionReturnTo(
+    `/${locale}/workspaces/${encodeURIComponent(workspaceId)}/actions/${encodeURIComponent(saved.id)}`,
+    returnTo,
+  ));
 }
 
 export async function updateActionAction(formData: FormData) {

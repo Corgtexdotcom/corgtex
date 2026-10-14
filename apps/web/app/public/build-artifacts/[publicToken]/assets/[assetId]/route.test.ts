@@ -36,7 +36,7 @@ describe("public build artifact asset route", () => {
     expect(response.headers.get("location")).toBeNull();
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(await response.text()).toBe("synthetic proof");
-    expect(authorize.mock.calls.length).toBeGreaterThanOrEqual(3); // initial and both delivery fences
+    expect(authorize).toHaveBeenCalledTimes(2); // initial authorization and one final delivery fence
     expect(resolvePublicBuildArtifactAsset).toHaveBeenCalledWith({
       publicToken: "token",
       assetId: "asset-1",

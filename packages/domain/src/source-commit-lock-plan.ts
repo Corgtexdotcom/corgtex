@@ -8,7 +8,7 @@ import type { ArtifactStructuralAuthority } from "./artifact-structural-authorit
 import type { LineageInput, LineageKind, LineageRoot } from "./source-lineage";
 import { sealArtifactInputActor } from "./artifact-input-actor";
 import { getExternalProviderWorkerPurpose } from "./external-provider-principal";
-import { getRecorderTranscriptWorkerPurpose, getAudioTranscriptWorkerPurpose } from "./native-transcript-principal";
+import { getTranscriptSourceImportPurpose, getRecorderTranscriptWorkerPurpose, getAudioTranscriptWorkerPurpose } from "./native-transcript-principal";
 import { invariant } from "./errors";
 import { CATEGORY_BOUND_SOURCE_KINDS } from "./information-category-policy";
 import { assertOutsideArtifactNativeCommitPhase, withArtifactNativeCommitPhase } from "./artifact-native-commit-phase";
@@ -18,7 +18,7 @@ import { authorityIdentity, authorityRecord, discoverAmbientSourceAuthority, dis
   SOURCE_AUTHORITY_REGISTRY, SOURCE_AUTHORITY_TABLES,
   type SourceAuthorityBudget, type SourceAuthorityClient, type SourceAuthorityEdges, type SourceAuthorityRow } from "./source-authority-edges";
 
-export type SourceCommitOwnerBinding = Readonly<{ kind: "WORKFLOW_JOB" | "AGENT_RUN" | "CONVERSATION_GENERATION" | "HUMAN_REQUEST" | "RECORDER_TRANSCRIPT";
+export type SourceCommitOwnerBinding = Readonly<{ kind: "WORKFLOW_JOB" | "AGENT_RUN" | "CONVERSATION_GENERATION" | "HUMAN_REQUEST" | "RECORDER_TRANSCRIPT" | "TRANSCRIPT_SOURCE_IMPORT";
   id: string; generation: number; [key: string]: unknown }>;
 export type SourceCommitWriteTarget = LineageInput & { /** Declare changed governing bindings BEFORE opening the transaction. */
   projectedAuthority?: Record<string, unknown>;
@@ -28,7 +28,7 @@ declare const planBrand: unique symbol;
 declare const ownerBrand: unique symbol;
 export type SourceCommitLockPlan = { readonly [planBrand]: true };
 export type SourceCommitOwnerAttestation = { readonly [ownerBrand]: true };
-export const SOURCE_COMMIT_CONTROL_TABLES = ["FinanceReportFact", "MeetingRecording", "MeetingRecorderProviderEvent", "MeetingRecorderSmokeRun", "MeetingTranscriptProcessingProgress", "AuditLog", "Event", "RecorderTranscriptPublication", "RecorderTranscriptAttempt"] as const;
+export const SOURCE_COMMIT_CONTROL_TABLES = ["NativeTranscriptPublication", "MeetingTranscriptSourceRecord", "FinanceReportFact", "MeetingRecording", "MeetingRecorderProviderEvent", "MeetingRecorderSmokeRun", "MeetingTranscriptProcessingProgress", "AuditLog", "Event", "RecorderTranscriptPublication", "RecorderTranscriptAttempt"] as const;
 /** Typed exact before/after control projections. These confer no semantic input authority. */
 export type SourceCommitControlWriteTarget = { table: typeof SOURCE_COMMIT_CONTROL_TABLES[number]; id: string;
   before: Record<string, unknown> | null; after: Record<string, unknown> | null };
@@ -75,13 +75,13 @@ export function sourceCommitHeadAdvisoryKey(workspaceId:string,input:LineageInpu
   invariant(row,409,"SOURCE_LOCK_UNSUPPORTED","Virtual control inputs have no writable source head.");
   return `source-head:${workspaceId}:${rowKey(row)}`;
 }
-const nativePurposeHash=(actor:AppActor,workspaceId:string)=>hash([getExternalProviderWorkerPurpose(actor)??null,getAudioTranscriptWorkerPurpose(actor,workspaceId)??null,getRecorderTranscriptWorkerPurpose(actor,workspaceId)??null]);
+const nativePurposeHash=(actor:AppActor,workspaceId:string)=>hash([getExternalProviderWorkerPurpose(actor)??null,getAudioTranscriptWorkerPurpose(actor,workspaceId)??null,getRecorderTranscriptWorkerPurpose(actor,workspaceId)??null,getTranscriptSourceImportPurpose(actor,workspaceId)??null]);
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === "object") { for (const item of Object.values(value)) deepFreeze(item); Object.freeze(value); }
   return value;
 }
 function validBinding(binding: SourceCommitOwnerBinding) {
-  invariant(binding && ["WORKFLOW_JOB", "AGENT_RUN", "CONVERSATION_GENERATION", "HUMAN_REQUEST", "RECORDER_TRANSCRIPT"].includes(binding.kind)
+  invariant(binding && ["WORKFLOW_JOB", "AGENT_RUN", "CONVERSATION_GENERATION", "HUMAN_REQUEST", "RECORDER_TRANSCRIPT", "TRANSCRIPT_SOURCE_IMPORT"].includes(binding.kind)
     && typeof binding.id === "string" && binding.id.length > 0 && Number.isSafeInteger(binding.generation) && binding.generation > 0,
   409, "SOURCE_OWNER_UNAVAILABLE", "Commit requires an exact typed owner and generation binding.");
   // Bind only finite serializable scalar/object data; no executable or object-identity authority can be serialized here.

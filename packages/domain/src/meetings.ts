@@ -1,3 +1,4 @@
+import { lockCompanyTranscriptPublication, finishCompanyTranscriptPublication } from "./native-transcript-publication";
 import { createHash, randomUUID } from "node:crypto";
 import ICAL from "ical.js";
 import { prisma } from "@corgtex/shared";
@@ -593,6 +594,7 @@ async function updateMeetingWithTranscriptTx(
     copied?: boolean;
   }
 ) {
+  await lockCompanyTranscriptPublication(tx, actor, params.workspaceId, params.meetingId);
   const existing = await tx.meeting.findFirst({
     where: { id: params.meetingId, workspaceId: params.workspaceId, archivedAt: null },
   });
@@ -660,10 +662,12 @@ async function updateMeetingWithTranscriptTx(
       aiProcessedAt: null,
     },
   });
-  await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+  const nativePublicationManifest = await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
     artifact: { kind: "MeetingTranscript", id: meeting.id }, content: meetingTranscriptInputProjection(meeting), receipt: transcriptReceipt });
   await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
     artifact: { kind: "Meeting", id: meeting.id }, content: meeting, receipt: meetingReceipt });
+
+  await finishCompanyTranscriptPublication(tx, actor, params.workspaceId, nativePublicationManifest);
 
   await tx.meetingInsight.deleteMany({
     where: {
@@ -1790,6 +1794,7 @@ export async function createMeeting(actor: AppActor, params: CreateMeetingParams
   }
 
   const persist = async (tx: Prisma.TransactionClient) => {
+    await lockCompanyTranscriptPublication(tx, actor, params.workspaceId);
     await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
     const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId, capture: params,
       copied });
@@ -1815,8 +1820,10 @@ export async function createMeeting(actor: AppActor, params: CreateMeetingParams
     });
     await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
       artifact: { kind: "Meeting", id: meeting.id }, content: meeting, receipt });
-    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+    const nativePublicationManifest = await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
       artifact: { kind: "MeetingTranscript", id: meeting.id }, content: meetingTranscriptInputProjection(meeting), receipt });
+
+    await finishCompanyTranscriptPublication(tx, actor, params.workspaceId, nativePublicationManifest);
 
     await ensureWorkspacePermalink(tx, actor, {
       workspaceId: params.workspaceId,

@@ -1,3 +1,4 @@
+import { assertMeetingTranscriptWorkerCurrent } from "./native-meeting-workflow-principal";
 import { createHash, randomUUID } from "node:crypto";
 import { CrmActivityType, type MeetingInsight, type OAuthProvider, type Prisma } from "@prisma/client";
 import { prisma, type AppActor } from "@corgtex/shared";
@@ -484,6 +485,7 @@ export async function createCrmMeetingReviewInsights(actor: AppActor, params: {
   if (emails.length === 0) return [] as MeetingInsight[];
 
   return prisma.$transaction(async (tx) => {
+    await assertMeetingTranscriptWorkerCurrent(actor, params.workspaceId, tx);
     await tx.$queryRaw`SELECT id FROM "Meeting" WHERE id = ${meeting.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const current = await tx.meeting.findFirst({ where: { id: meeting.id, workspaceId: params.workspaceId, archivedAt: null } });
     invariant(current && lineageContentFingerprint("Meeting", current) === lineageContentFingerprint("Meeting", original),
@@ -600,6 +602,7 @@ export async function createCrmMeetingReviewInsights(actor: AppActor, params: {
         artifact: { kind: "MeetingInsight", id: insight.id }, content: insight, origin: "DERIVED", inputs,
         inheritedRoots: roots, transitiveOnlyKinds: ["Meeting"],
       });
+      await assertMeetingTranscriptWorkerCurrent(actor, params.workspaceId, tx);
       return created;
     };
     const primaryMatch = matches[0];
