@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { deserialize, serialize } from "node:v8";
 import { isDeepStrictEqual } from "node:util";
-import type { Prisma, SqlNativeRunInput } from "@prisma/client";
+import { Prisma, type SqlNativeRunInput } from "@prisma/client";
 import { decryptSecret, encryptSecret, prisma, type AppActor } from "@corgtex/shared";
 import { invariant } from "./errors";
 import { getRegisteredSqlNativeAccessValidator, getRegisteredSqlNativeDriver } from "./sql-native-driver";
@@ -21,6 +21,7 @@ type Capture = {attempt: SqlIngestionAttempt; input: SqlNativeRunInput; payload:
 const nativeHeaderSelect = {id: true, workspaceId: true, sourceId: true, attemptId: true, generation: true,
   configurationFingerprint: true, sourcePermissionEpoch: true, permissionEpochsJson: true,
   payloadHash: true, rowsProcessed: true, nextCursor: true, createdAt: true} as const;
+const CIPHER_PART_SIZE = 512 * 1024;
 const captures = new WeakMap<AuthenticatedSqlRunReceipt, Capture>();
 // Cache only authenticated immutable bytes/shape, never access or permissions.
 // Every lookup below still checks current source, caller, epochs and attempt;
@@ -145,14 +146,14 @@ export async function captureSqlIngestionAttempt(attempt: SqlIngestionAttempt): 
     assertCurrentSource: () => assertSqlIngestionAttemptCurrent(attempt)});
   try {
     await assertSqlIngestionAttemptCurrent(attempt);
-    // structuredClone turns Node Buffer cells into Uint8Array, changing their
-    // native rendering and bytes representation. V8 retains PG native values.
-    const fetched = deserialize(serialize({rows: native.rows, pages: native.pages,
-      rowsProcessed: native.rowsProcessed, nextCursor: native.nextCursor, renderingVersion: 1})) as Payload;
+    // Rendering and serialization are synchronous. Seal one exact V8 snapshot
+    // before any await; then keep only its private deserialized native values.
+    const fetched: Payload = {rows: native.rows, pages: native.pages,
+      rowsProcessed: native.rowsProcessed, nextCursor: native.nextCursor, renderingVersion: 1};
     // A supplied text label cannot authenticate source content. Render the
     // preserved actual native cells using their complete sealed column order.
     invariant(Array.isArray(fetched.rows), 409, "SQL_NATIVE_RECEIPT_INVALID", "Native SQL rows are unavailable.");
-    const payload: Payload = {...fetched, rows: fetched.rows.map((row: SqlNativeRow) => {
+    const candidate: Payload = {...fetched, rows: fetched.rows.map((row: SqlNativeRow) => {
       validateDefinition(row.definition);
       invariant(row.row && typeof row.row === "object" && !Array.isArray(row.row),
         409, "SQL_NATIVE_RECEIPT_INVALID", "Native SQL row cells are unavailable.");
@@ -160,11 +161,13 @@ export async function captureSqlIngestionAttempt(attempt: SqlIngestionAttempt): 
         "PostgreSQL temporal cells require their exact scoped native wire text.");
       return {...row, content: renderSqlNativeRow(row.row, row.definition.columns)};
     })};
-    validateNativeSet(payload, source.selectedTables);
+    validateNativeSet(candidate, source.selectedTables);
     // V8 preserves native Date, bigint and byte values independently of model
     // rendering. This binary payload is encrypted before durable storage.
-    const bytes = serialize(payload);
+    const bytes = serialize(candidate);
     invariant(bytes.length <= 64 * 1024 * 1024, 413, "SQL_NATIVE_RUN_TOO_LARGE", "Native SQL run exceeds the bounded payload size.");
+    const payload = deserialize(bytes) as Payload;
+    validateNativeSet(payload, source.selectedTables);
     const id = randomUUID(), original = sqlIngestionOriginalPermissions(attempt);
     const encryptedPayload = encryptSecret(bytes.toString("base64"));
     const encryptedHash = createHash("sha256").update(encryptedPayload).digest("hex");
@@ -180,15 +183,36 @@ export async function captureSqlIngestionAttempt(attempt: SqlIngestionAttempt): 
       // Returning the full encrypted run duplicates a large native engine/JSON
       // response. Verify the complete original ciphertext on the server in this
       // same transaction; only small immutable headers cross back to Node.
-      const header = await tx.sqlNativeRunInput.create({data, select: nativeHeaderSelect});
+      // Bound every native-engine argument batch to at most 1MiB. The database
+      // assembles the complete encrypted original in the same transaction;
+      // partial parts have no receipt, lineage or serving authority.
+      const partCount = Math.ceil(encryptedPayload.length / CIPHER_PART_SIZE);
+      for (let part = 0; part < partCount; part += 2) {
+        await tx.sqlNativeCapturePart.createMany({data: Array.from({length: Math.min(2, partCount - part)}, (_, index) => ({
+          id: randomUUID(), workspaceId: attempt.workspaceId, nativeInputId: id, ordinal: part + index,
+          ciphertextPart: encryptedPayload.slice((part + index) * CIPHER_PART_SIZE, (part + index + 1) * CIPHER_PART_SIZE),
+        }))});
+      }
+      const inserted = await tx.$executeRaw`INSERT INTO "SqlNativeRunInput"
+        (id, "workspaceId", "sourceId", "attemptId", generation, "configurationFingerprint", "sourcePermissionEpoch",
+          "permissionEpochsJson", "encryptedPayload", "payloadHash", "rowsProcessed", "nextCursor")
+        SELECT ${id}, ${data.workspaceId}, ${data.sourceId}, ${data.attemptId}, ${data.generation},
+          ${data.configurationFingerprint}, ${data.sourcePermissionEpoch}, ${JSON.stringify(data.permissionEpochsJson)}::jsonb,
+          string_agg("ciphertextPart", '' ORDER BY ordinal), ${data.payloadHash}, ${data.rowsProcessed}, ${data.nextCursor}
+        FROM "SqlNativeCapturePart" WHERE "workspaceId" = ${attempt.workspaceId} AND "nativeInputId" = ${id}
+        HAVING count(*) = ${partCount} AND min(ordinal) = 0 AND max(ordinal) = ${partCount - 1}`;
+      invariant(inserted === 1, 409, "SQL_NATIVE_RECEIPT_INVALID", "Native SQL encrypted transport is incomplete.");
+      const header = await tx.sqlNativeRunInput.findUniqueOrThrow({where: {id}, select: nativeHeaderSelect});
       const [stored] = await tx.$queryRaw<Array<{matches: boolean}>>`SELECT
         encode(sha256(convert_to("encryptedPayload", 'UTF8')), 'hex') = ${encryptedHash} AS matches
         FROM "SqlNativeRunInput" WHERE id = ${id} AND "workspaceId" = ${attempt.workspaceId}`;
       invariant(stored?.matches && Object.keys(data).filter(key => key !== "encryptedPayload").every(key =>
         isDeepStrictEqual(header[key as keyof typeof header], data[key as keyof typeof data])),
       409, "SQL_NATIVE_RECEIPT_INVALID", "Persisted native SQL receipt differs from its authenticated original.");
+      await tx.sqlNativeCapturePart.deleteMany({where: {workspaceId: attempt.workspaceId, nativeInputId: id}});
       return {...header, encryptedPayload};
     }, {timeout: 10_000});
+    await assertSqlIngestionAttemptCurrent(attempt);
     const receipt = Object.freeze({receiptId: id}) as AuthenticatedSqlRunReceipt;
     captures.set(receipt, {attempt, input, payload: freeze(payload),
       native: {beforePublication: native.beforePublication, dispose: native.dispose}, disposed: false, finalized: false});

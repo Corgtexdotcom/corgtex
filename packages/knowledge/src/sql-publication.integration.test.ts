@@ -1,8 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Prisma } from "@prisma/client";
 import { serialize, deserialize } from "node:v8";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getPrismaClient, prisma, type AppActor } from "@corgtex/shared";
+import { decryptSecret, getPrismaClient, prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { registerSqlNativeDriver } from "../../domain/src/sql-native-driver";
 import { claimSqlIngestionAttempt, failSqlIngestionAttempt, sqlIngestionConfigurationFingerprint } from "../../domain/src/sql-ingestion-attempt";
@@ -276,6 +276,58 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
       prepareMs: Math.round(preparedAt - start), publishMs: Math.round(committedAt - preparedAt),
       searchMs: Math.round(performance.now() - committedAt)});
   });
+  it("does not mint a native receipt after owner loss at the capture transaction boundary", async () => {
+    const f = await fixture(), attempt = await f.claim();
+    const client = getPrismaClient(), original = client.$transaction.bind(client);
+    const transaction = vi.spyOn(client, "$transaction").mockImplementation((async (...args: unknown[]) => {
+      const result = await Reflect.apply(original, client, args);
+      if (result && typeof result === "object" && "encryptedPayload" in result) {
+        await prisma.externalDataSource.update({where: {id: f.source.id}, data: {isRestricted: true, allowedRoleIds: []}});
+      }
+      return result;
+    }) as typeof client.$transaction);
+    try {
+      await expect(captureSqlIngestionAttempt(attempt)).rejects.toMatchObject({code: "SQL_INGESTION_FENCE_LOST"});
+      expect(await prisma.sqlNativeRunInput.count({where: {workspaceId: f.workspace.id}})).toBe(1);
+      expect(await prisma.sqlNativeCapturePart.count()).toBe(0);
+      expect(models.embed).not.toHaveBeenCalled();
+      expect(transport.closes).toBe(1);
+    } finally {transaction.mockRestore();}
+  });
+  it("stores the complete original across multiple bounded ciphertext batches without retaining parts", async () => {
+    transport.rows = [row(1, "synthetic ".repeat(80_000))];
+    const f = await fixture(), attempt = await f.claim(), receipt = await captureSqlIngestionAttempt(attempt);
+    const original = await prisma.sqlNativeRunInput.findUniqueOrThrow({where: {id: receipt.receiptId}});
+    expect(original.encryptedPayload.length).toBeGreaterThan(2 * 1024 * 1024);
+    const bytes = Buffer.from(decryptSecret(original.encryptedPayload), "base64");
+    expect(createHash("sha256").update(bytes).digest("hex")).toBe(original.payloadHash);
+    expect((deserialize(bytes) as {rows: SqlNativeRow[]}).rows[0].row).toEqual(transport.rows[0].row);
+    expect(await prisma.sqlNativeCapturePart.count()).toBe(0);
+    expect(models.embed).not.toHaveBeenCalled();
+  });
+  it.each(["failure", "substitution"])("rolls back partial cipher transport on %s and permits a fresh authenticated retry", async target => {
+    transport.rows = [row(1, "synthetic ".repeat(80_000))];
+    const f = await fixture(), attempt = await f.claim();
+    await prisma.$executeRawUnsafe(`CREATE FUNCTION pun68_synthetic_part_substitution() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN ${target === "failure" ? "IF NEW.ordinal=2 THEN RAISE EXCEPTION 'synthetic partial transport failure' USING ERRCODE='23514'; END IF;"
+        : 'IF NEW.ordinal=1 THEN NEW."ciphertextPart" := (CASE WHEN left(NEW."ciphertextPart",1)=\'X\' THEN \'Y\' ELSE \'X\' END) || substring(NEW."ciphertextPart" FROM 2); END IF;'} RETURN NEW; END $$`);
+    await prisma.$executeRawUnsafe(`CREATE TRIGGER pun68_synthetic_part_substitution BEFORE INSERT ON "SqlNativeCapturePart"
+      FOR EACH ROW EXECUTE FUNCTION pun68_synthetic_part_substitution()`);
+    try {
+      if (target === "failure") await expect(captureSqlIngestionAttempt(attempt)).rejects.toThrow(/synthetic partial transport failure/);
+      else await expect(captureSqlIngestionAttempt(attempt)).rejects.toMatchObject({code: "SQL_NATIVE_RECEIPT_INVALID"});
+      expect(await prisma.sqlNativeCapturePart.count()).toBe(0);
+      expect(await prisma.sqlNativeRunInput.count({where: {workspaceId: f.workspace.id}})).toBe(0);
+      expect((await prisma.externalDataSource.findUniqueOrThrow({where: {id: f.source.id}})).lastCursorValue).toBeNull();
+      expect(models.embed).not.toHaveBeenCalled();
+    } finally {
+      await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS pun68_synthetic_part_substitution ON "SqlNativeCapturePart"');
+      await prisma.$executeRawUnsafe("DROP FUNCTION IF EXISTS pun68_synthetic_part_substitution()");
+    }
+    await captureSqlIngestionAttempt(attempt);
+    expect(await prisma.sqlNativeRunInput.count({where: {workspaceId: f.workspace.id}})).toBe(1);
+    expect(await prisma.sqlNativeCapturePart.count()).toBe(0);
+  });
   it.each(["cipher", "header"])("rolls back a native issuer when an insert trigger substitutes its authenticated %s", async target => {
     const f = await fixture(), attempt = await f.claim();
     await prisma.$executeRawUnsafe(`CREATE FUNCTION pun68_synthetic_native_substitution() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -286,6 +338,7 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
     try {
       await expect(captureSqlIngestionAttempt(attempt)).rejects.toMatchObject({code: "SQL_NATIVE_RECEIPT_INVALID"});
       expect(await prisma.sqlNativeRunInput.count({where: {workspaceId: f.workspace.id}})).toBe(0);
+      expect(await prisma.sqlNativeCapturePart.count()).toBe(0);
       expect(models.embed).not.toHaveBeenCalled();
     } finally {
       await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS pun68_synthetic_native_substitution ON "SqlNativeRunInput"');
