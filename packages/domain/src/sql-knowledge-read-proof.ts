@@ -1,4 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
+import { createHash } from "node:crypto";
+import { serialize } from "node:v8";
 import { prisma, type AppActor } from "@corgtex/shared";
 import type { KnowledgeChunk, SqlNativeRunInput } from "@prisma/client";
 import { getMcpOrigin } from "../../shared/src/mcp-context";
@@ -16,6 +18,14 @@ export async function captureSqlKnowledgeInputProof(actor: AppActor, workspaceId
   candidates: readonly KnowledgeChunk[]): Promise<LineageRoot[] | null | undefined> {
   if (actor.kind !== "user" || getMcpOrigin() || isArtifactNativeCommitPhase() || !candidates.length
     || candidates.length > 5000 || candidates.some(row => row.sourceType !== "EXTERNAL_DATABASE")) return undefined;
+  // The capture read owns full vector rows only until the compact proof is
+  // built. Do not retain those rows throughout the independent native replay.
+  const proof = await captureSqlKnowledgeRows(actor, workspaceId, candidates);
+  return proof && await isSqlKnowledgeInputProofReadable(actor, workspaceId, proof) === true ? proof : null;
+}
+
+async function captureSqlKnowledgeRows(actor: Extract<AppActor, {kind: "user"}>, workspaceId: string,
+  candidates: readonly KnowledgeChunk[]): Promise<LineageRoot[] | null> {
   const ids = [...new Set(candidates.map(row => row.id))];
   const [rows, manifests] = await Promise.all([
     prisma.knowledgeChunk.findMany({where: {workspaceId, id: {in: ids}}}),
@@ -55,7 +65,7 @@ export async function captureSqlKnowledgeInputProof(actor: AppActor, workspaceId
     try {proof.push({kind: "SqlNativeRunInput", id: input.id, fingerprint: lineageContentFingerprint("SqlNativeRunInput", input),
       permissionEpochs: mergePermissionEpochProofs(original, caller)!});} catch {return null;}
   }
-  return await isSqlKnowledgeInputProofReadable(actor, workspaceId, proof) === true ? proof : null;
+  return proof;
 }
 
 /** Fixed read-only SQL collection executor. Undefined selects the general mixed
@@ -68,7 +78,8 @@ export async function isSqlKnowledgeInputProofReadable(actor: AppActor, workspac
   const children = roots.filter(root => root.kind === "KnowledgeChunk");
   if (!children.length || children.length > 5000) return undefined;
   const ids = [...new Set(children.map(root => root.id))];
-  const firstRows = await prisma.knowledgeChunk.findMany({where: {workspaceId, id: {in: ids}}});
+  const firstRows = await prisma.knowledgeChunk.findMany({where: {workspaceId, id: {in: ids}},
+    select: {sourceType: true, metadata: true}});
   if (firstRows.some(row => row.sourceType !== "EXTERNAL_DATABASE")) return undefined;
   if (firstRows.length !== ids.length) return false;
   let union;
@@ -137,7 +148,13 @@ export async function isSqlKnowledgeInputProofReadable(actor: AppActor, workspac
     if (!await isArtifactPermissionEpochProofCurrent(workspaceId, persistedUnion, prisma)) return null;
     for (const input of originals) if (!await isSqlNativeRunInputLocallyCurrent(actor, workspaceId, input)) return null;
     if (!await isArtifactPermissionEpochProofCurrent(workspaceId, union, prisma)) return null;
-    return ids.map(id => ({row: byId.get(id), manifest: latest.get(id), stage: stages.get(id)}));
+    // Keep complete observation identity, not the semantic content fingerprint:
+    // timestamps, original manifests, staging ordinals and all vector bytes must
+    // also match after the native await. Serialize one tuple at a time so neither
+    // the entry ledger nor the exit ledger retains vector-bearing ORM objects.
+    return ids.map(id => createHash("sha256").update(serialize([
+      byId.get(id), latest.get(id), stages.get(id),
+    ])).digest("hex"));
   };
   const before = await local(native);
   if (!before) return false;

@@ -627,6 +627,35 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
     expect(await isSqlKnowledgeInputProofReadable(f.aliceActor, f.workspace.id, roots)).toBe(false);
     expect((await prisma.sqlNativeRunInput.findFirstOrThrow()).permissionEpochsJson).toEqual(original);
   });
+  it.each(["embedding", "staged embedding", "stage ordinal", "manifest timestamp", "delete/recreate", "configuration"])(
+    "complete SQL read observation rejects %s changes across native replay", async change => {
+      transport.rows = [row(1), row(2)];
+      const f = await fixture(), p = await f.prepare(); await publishPreparedSqlKnowledgeAttempt({...p, commit: f.commit});
+      const chunks = await prisma.knowledgeChunk.findMany({orderBy: {id: "asc"}});
+      const roots = (await captureSqlKnowledgeInputProof(f.aliceActor, f.workspace.id, chunks))!;
+      expect(roots).not.toBeNull();
+      const target = chunks.at(-1)!;
+      const original = (await prisma.sqlNativeRunInput.findFirstOrThrow()).permissionEpochsJson;
+      transport.afterAccess = async () => {
+        transport.afterAccess = undefined;
+        if (change === "embedding") await prisma.knowledgeChunk.update({where: {id: target.id}, data: {embedding: [0, 1]}});
+        else if (change === "staged embedding") {
+          const stage = await prisma.sqlKnowledgeStagedChunk.findUniqueOrThrow({where: {id: target.id}});
+          await prisma.sqlKnowledgeStagedChunk.update({where: {id: target.id},
+            data: {contentJson: {...stage.contentJson as Prisma.JsonObject, embedding: [0, 1]}}});
+        } else if (change === "stage ordinal") await prisma.sqlKnowledgeStagedChunk.update({where: {id: target.id}, data: {ordinal: 100}});
+        else if (change === "manifest timestamp") await prisma.artifactInputLineage.updateMany({where: {
+          workspaceId: f.workspace.id, artifactType: "KnowledgeChunk", artifactId: target.id},
+          data: {recordedAt: new Date("2001-01-01T00:00:00.000Z")}});
+        else if (change === "delete/recreate") {
+          await prisma.knowledgeChunk.delete({where: {id: target.id}});
+          await prisma.knowledgeChunk.create({data: {...target, embedding: target.embedding as Prisma.InputJsonValue,
+            metadata: target.metadata as Prisma.InputJsonValue}});
+        } else await prisma.externalDataSource.update({where: {id: f.source.id}, data: {connectionStringEnc: "synthetic-changed-current-config"}});
+      };
+      expect(await isSqlKnowledgeInputProofReadable(f.aliceActor, f.workspace.id, roots)).toBe(false);
+      expect((await prisma.sqlNativeRunInput.findFirstOrThrow()).permissionEpochsJson).toEqual(original);
+    });
   it("one unproved child does not hide a separately published readable child in counts or search", async () => {
     transport.rows = [row(1, "Synthetic withheld first input"), row(2, "Synthetic independently readable second input")];
     const f = await fixture(), p = await f.prepare(); await publishPreparedSqlKnowledgeAttempt({...p, commit: f.commit});
