@@ -1,5 +1,5 @@
 "use client";
-import { useId, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 type Turn = { id: string; sequenceNumber: number; userMessage: string; assistantMessage: string };
 async function hash(value: unknown) {
@@ -10,6 +10,7 @@ export function BrainAnswerExport({ workspaceId, conversationId, output, turns }
   workspaceId: string; conversationId: string; output: Turn; turns: Turn[];
 }) {
   const t = useTranslations("chat.brainExport"), id = useId();
+  const requestIds = useRef(new Map<string, string>());
   const [mode, setMode] = useState<"NONE" | "PARTIAL" | "FULL">("NONE");
   const [title, setTitle] = useState(output.assistantMessage.split("\n")[0].replace(/^#+\s*/, "").slice(0, 100));
   const [selected, setSelected] = useState<string[]>([]);
@@ -21,11 +22,17 @@ export function BrainAnswerExport({ workspaceId, conversationId, output, turns }
       event.preventDefault(); setBusy(true); setError(null);
       try {
         const chosen = mode === "NONE" ? [] : turns.filter(turn => mode === "FULL" || selected.includes(turn.id));
+        const submission = { outputTurnId: output.id,
+          expectedOutputHash: await hash(output.assistantMessage), title: title.trim(), transcriptMode: mode,
+          selectedTurns: await Promise.all(chosen.map(async turn => ({ id: turn.id, hash: await hash([turn.id, turn.userMessage, turn.assistantMessage]) }))),
+        };
+        // A failed response can follow a committed export. Reuse the exact
+        // choice's key, including when returning to an earlier pending choice.
+        const choice = JSON.stringify(submission);
+        let requestId = requestIds.current.get(choice);
+        if (!requestId) { requestId = crypto.randomUUID(); requestIds.current.set(choice, requestId); }
         const response = await fetch(`/api/workspaces/${workspaceId}/conversations/${conversationId}/brain`, { method: "POST",
-          headers: { "Content-Type": "application/json" }, body: JSON.stringify({ outputTurnId: output.id,
-            expectedOutputHash: await hash(output.assistantMessage), title, transcriptMode: mode,
-            selectedTurns: await Promise.all(chosen.map(async turn => ({ id: turn.id, hash: await hash([turn.id, turn.userMessage, turn.assistantMessage]) }))),
-            requestId: crypto.randomUUID() }) });
+          headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...submission, requestId }) });
         if (!response.ok) { const body = await response.json(); throw new Error(body.error?.message || body.message || t("failed")); }
         setSaved(true);
       } catch (caught) { setError(caught instanceof Error ? caught.message : t("failed")); }
