@@ -11,7 +11,8 @@ const fixture = vi.hoisted(() => {
     && (!where.accessDomain || where.accessDomain.in.includes(source.accessDomain))
     && source.archivedAt === null && (where.isPrivate !== false || !source.isPrivate));
   const prisma = {
-    $queryRaw: vi.fn(async () => []),
+    $queryRaw: vi.fn(async (query: {sql: string}) => query.sql.includes("AS stamp") ? [{stamp: "empty-native-collection"}]
+      : query.sql.includes("AS current") ? [{current: true}] : []),
     knowledgeChunk: { findMany: vi.fn(async ({ where, take }: any) => chunks.filter((chunk) =>
       chunk.workspaceId === where.workspaceId && where.accessDomain.in.includes(chunk.accessDomain)
       && (!where.sourceType || chunk.sourceType === where.sourceType)
@@ -42,6 +43,10 @@ vi.mock("@corgtex/domain", () => ({
     new Set(rows.filter((row) => fixture.permitted.get(`${actor.kind === "user" ? actor.user.id : "agent"}:${workspaceId}`)?.has(row.id))
       .map((row) => row.id))),
 }));
+vi.mock("../../domain/src/source-lineage", () => ({withArtifactCountReleaseSnapshot: async (_actor: AppActor, _ws: string,
+  _roots: unknown, remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => {
+  await remote(); return finish(fixture.prisma);
+}}));
 
 import { countReadableKnowledgeChunks } from "./counts";
 

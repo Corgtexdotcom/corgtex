@@ -76,6 +76,13 @@ remain ten pages of at most 1000 rows, 64 MiB native bytes, 100000 declared outp
 chunks, and embedding/staging batches of 500. Limits throw before publication;
 they never partially advance a cursor or silently reduce the 10000-row cap.
 
+Bounded staging declares complete identities/counts in PREPARING before models,
+streams each500-vector model batch into immutable non-serving staging, and drops
+those vectors before the next batch. Only the complete descriptor/hash set can
+seal PREPARED. Publication loads at most500 staged vectors per batch; private
+preparation state keeps compact identities/hashes, and a compact SHA256 manifest
+ledger preserves complete post-callback rollback checks.
+
 Full ordered captured columns are `{name,type,typeOid,typeModifier,collationOid,
 position,isNullable,identity,generated}`: declared pg_type/pg_attribute metadata,
 position=attnum. Raw records require the exact key set; JS integer-like property
@@ -108,6 +115,11 @@ source commits require current membership/category/role/circle/Finance checks,
 original vectors, exact staged committed membership and mandatory provider proof.
 Provider replay is outside SQL; private one-use downstream preflight is bound to
 the exact actor, workspace, roots/native inputs and real transaction and expires.
+Expiry means the exact scope ends, not a provider grant lease or TTL. Provider
+SELECT is a read observation. Provider-only revocation after replay and before
+app commit can leave immutable storage committed; every subsequent delivery
+freshly authorizes and withholds it. No cross-database atomicity or durable
+provider permission is inferred from storage.
 An observed provider denial permanently invalidates that receipt's own serving
 epoch. Restoring grants cannot recertify original cached outputs; a new independent
 native scan is needed. Unproved/network access is temporarily withheld, preserving
@@ -122,14 +134,18 @@ batch falls back to individual admission so one unknown child does not hide othe
 safe children. Mixed, agent and MCP paths retain the general executor. The bounded
 16 MiB/16-entry cache stores decoded immutable bytes/shape only, never grant results.
 
-Migrations `20261014000000_sql_ingestion_claims` and
-`20261014010000_sql_native_publication` are additive. Claim/attempt/native/publication
+Migrations `20261014000000_sql_ingestion_claims`,
+`20261014010000_sql_native_publication` and
+`20261014020000_sql_bounded_staging` are additive. Claim/attempt/native/publication
 tombstones have workspace custody, deliberately no source/log cascade that could
 revive an old source generation. Existing source policy defaults are workspace
 GENERAL and do not rewrite private records. No legacy chunk becomes eligible
 without complete authenticated lineage. Fresh replay of all185 migrations on an
 owned disposable local database passed. Tenant purge inventory includes all new
-workspace custody models. Do not apply these migrations to production here.
+workspace custody models. Migration186 permits only the complete PREPARING-to-
+PREPARED transition to seal the streamed hash; existing sealed receipts remain
+immutable. It passed on the same disposable DB after the fresh185 replay.
+Do not apply these migrations to production here.
 
 Rollback must keep source epoch/claim/native tombstones and original inputs;
 rolling back a reader/writer cannot restore eligibility for old unproved chunks.
@@ -150,14 +166,42 @@ Logs are local `/tmp/pun68-sql-runtime-verified-cohort-pg.log`,
 `/tmp/pun68-sql-runtime-final-cohort-unit.log` and
 `/tmp/pun68-sql-runtime-verified-cohort-types.log`.
 
+Bounded staging/count followup:44/44 real application-PG regressions pass,
+including the complete4000-row/12000-chunk count in27.4s INCLUDING preparation
+and publication, under the unchanged60s test limit. Mixed body/head/epoch races,
+clock-driven role expiry, independent unknown-child withholding, a new source
+during empty admission, second-model-batch failure/fresh retry, immutable cipher
+updates and same-ID native replacement all pass. Original ciphertext remains
+immutable; per-stage fences hold its actual row and compare every original header
+and payload hash plus the complete original epoch vector without reloading its
+full ciphertext each batch. Disposal clears only process-local capture memory.
+Five focused count/renderer units, final full repository TypeScript and scoped
+ESLint pass; independent Sol found no bounded code blocker. Evidence:
+`/tmp/pun68-sql-bounded-aggregate-result.json`,
+`/tmp/pun68-sql-bounded-aggregate-pg.log`,
+`/tmp/pun68-sql-count-stream-unit-final.log`,
+`/tmp/pun68-sql-bounded-final-types.log`,
+`/tmp/pun68-sql-bounded-final-lint.log`.
+
 These are not actual connector/two-process acceptance. Worker must compose the
 published actual runtime and complete both publish orders, same cursors, reclaim,
 configuration/credentials, delete/recreate, rollback/cache/status and full4000
 rows/at least8000 chunks/over10000 combined identity regressions. Measure real
 model-sized vectors, complete legal output sets, peak memory, query count, lock
-duration and competing policy writes; current preparation/publication still
-retain complete outputs in memory. Existing explicit fail-closed5000 chunk count
-scan bound needs full-product capacity acceptance, not a silent partial count.
+duration and competing policy writes. Full-vector retention has been replaced by
+bounded500-vector batches; actual worker1Gi resource acceptance remains open
+until the connector reruns the composed production path.
+
+Ordinary SQL counts scan the complete bounded100000-child collection in500
+identity pages. PostgreSQL compares canonical children to immutable staged bytes
+and validates exact original native/child vectors, independently withholding
+unknown children. A compact SHA256 row/head ledger retains every raw candidate
+and original epoch. After fresh native authorization, a shared RepeatableRead
+snapshot rechecks complete raw cardinality/native collection, all row/head stamps
+and original epochs, current native source/role/terminal authority (including
+wall-clock role expiry), and bounded generic root bodies/heads/permissions for
+mixed counts. Generic search/root budgets and the10000-native-row cap remain
+unchanged; over-bound collections fail explicitly without a partial count.
 
 Recall/native recorder, broader producer/category/audience/role-circle consent
 integration, Finance immutable restatement revisions, lifecycle/regeneration,

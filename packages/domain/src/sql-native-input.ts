@@ -206,7 +206,8 @@ export async function disposeSqlIngestionCapture(receipt: AuthenticatedSqlRunRec
   const capture = captures.get(receipt);
   if (!capture || capture.disposed) return;
   capture.disposed = true;
-  await capture.native.dispose();
+  try {await capture.native.dispose();}
+  finally {captures.delete(receipt);}
 }
 
 /** Every delivery checks original vectors and current source authority. A native
@@ -269,11 +270,18 @@ export async function assertSqlNativeCaptureCurrent(attempt: SqlIngestionAttempt
   receipt: AuthenticatedSqlRunReceipt, tx: Prisma.TransactionClient) {
   const capture = captureOf(attempt, receipt);
   await tx.$queryRaw`SELECT id FROM "SqlNativeRunInput" WHERE id = ${capture.input.id} AND "workspaceId" = ${attempt.workspaceId} FOR SHARE`;
-  const stored = await tx.sqlNativeRunInput.findUnique({where: {id: capture.input.id}});
+  // The authenticated ciphertext is immutable by database trigger. A held row,
+  // exact original header/hash and monotonic original epochs fence delete/recreate
+  // without transferring the complete encrypted run for every staged batch.
+  const select = {id: true, workspaceId: true, sourceId: true, attemptId: true, generation: true,
+    configurationFingerprint: true, sourcePermissionEpoch: true, permissionEpochsJson: true,
+    payloadHash: true, rowsProcessed: true, nextCursor: true, createdAt: true} as const;
+  const stored = await tx.sqlNativeRunInput.findUnique({where: {id: capture.input.id}, select});
+  const expected = Object.fromEntries(Object.keys(select).map(key => [key, capture.input[key as keyof SqlNativeRunInput]]));
   const original = parsePermissionEpochProof(capture.input.permissionEpochsJson);
   invariant(original, 409, "SQL_INGESTION_FENCE_LOST", "Native SQL input lost its original vector.");
   const held = await capturePermissionEpochs(tx, attempt.workspaceId, original.entries);
-  invariant(stored && isDeepStrictEqual(stored, capture.input)
+  invariant(stored && isDeepStrictEqual(stored, expected)
     && isDeepStrictEqual(held, original)
     && await isArtifactPermissionEpochProofCurrent(attempt.workspaceId, stored.permissionEpochsJson, tx),
   409, "SQL_INGESTION_FENCE_LOST", "Native SQL source evidence changed before publication.");
