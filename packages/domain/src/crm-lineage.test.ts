@@ -192,9 +192,22 @@ describe("CRM input receipts", () => {
     expect(crmPage(admitted, 1, 1)).toMatchObject({ total: 2, items: [{ id: "raw-101" }] });
     expect(fetch.mock.calls[1][0]).toEqual({ take: 100, cursor: { id: "raw-99" }, skip: 1 });
     let pageIndex = 0;
-    const endless = vi.fn(async () => Array.from({ length: 100 }, (_, index) => ({ id: `unknown-${pageIndex++}-${index}` })));
+    const endless = vi.fn(async (_page: {take: number}) => Array.from({ length: 100 }, (_, index) => ({ id: `unknown-${pageIndex++}-${index}` })));
     await expect(readCrmRows(general, "ws-crm", "CrmAccount", endless)).rejects.toMatchObject({ code: "CRM_READ_BUDGET", status: 413 });
-    expect(endless).toHaveBeenCalledTimes(50);
+    expect(endless).toHaveBeenCalledTimes(51);
+    expect(endless.mock.calls.at(-1)?.[0]).toMatchObject({take: 1, skip: 1});
+  });
+
+  it.each([4_999, 5_000, 5_001])("distinguishes a complete %i-row collection from one beyond the CRM budget", async count => {
+    const rows = Array.from({length: count}, (_, index) => ({id: `unknown-${index}`}));
+    const fetch = vi.fn(async (page: {take: number; cursor?: {id: string}; skip?: number}) => {
+      const start = page.cursor ? rows.findIndex(row => row.id === page.cursor!.id) + (page.skip ?? 0) : 0;
+      return rows.slice(start, start + page.take);
+    });
+    const result = readCrmRows(general, "ws-crm", "CrmAccount", fetch);
+    if (count > 5_000) await expect(result).rejects.toMatchObject({code: "CRM_READ_BUDGET"});
+    else expect(crmPage(await result, 50, 0)).toEqual({items: [], total: 0, take: 50, skip: 0});
+    if (count >= 5_000) expect(fetch.mock.calls.at(-1)?.[0]).toEqual({take: 1, cursor: {id: "unknown-4999"}, skip: 1});
   });
 
   it("records full prompt and recipient receipts through suggestion edits, state transitions and sent activity copies", async () => {
