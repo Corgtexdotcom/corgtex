@@ -1,6 +1,6 @@
 import { invariant } from "./errors";
 
-export function isReservedPublicDemoEmail(email: string | undefined) {
+function isReservedPublicDemoEmail(email: string | undefined) {
   return email?.trim().toLowerCase() === "demo@jnj-demo.corgtex.app";
 }
 

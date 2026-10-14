@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { runCompanyUnderstandingAgentMock, runActionExtractionAgentMock, runBrainSourceRegenerationJobMock, runProposalDraftingAgentMock, runConstitutionUpdateTriggerAgentMock, recoveryGuard, execute, absorb, captureProof, maintenance } = vi.hoisted(() => ({
+const { runCompanyUnderstandingAgentMock, runActionExtractionAgentMock, runBrainSourceRegenerationJobMock, runProposalDraftingAgentMock, runConstitutionUpdateTriggerAgentMock, recoveryGuard, execute, absorb, captureProof, maintenance, meetingWorker, meetingActor } = vi.hoisted(() => ({
+  meetingWorker: vi.fn(),
+  meetingActor: Object.freeze({kind: "agent", authProvider: "bootstrap", label: "claimed-meeting"}),
   runCompanyUnderstandingAgentMock: vi.fn(),
   runActionExtractionAgentMock: vi.fn(),
   runBrainSourceRegenerationJobMock: vi.fn(),
@@ -9,7 +11,7 @@ const { runCompanyUnderstandingAgentMock, runActionExtractionAgentMock, runBrain
   recoveryGuard: vi.fn(), execute: vi.fn(), absorb: vi.fn(), captureProof: vi.fn(), maintenance: vi.fn(),
 }));
 
-vi.mock("@corgtex/domain", () => ({ assertBrainSourceRecoveryJob: recoveryGuard, captureArtifactInputProof: captureProof }));
+vi.mock("@corgtex/domain", () => ({ assertBrainSourceRecoveryJob: recoveryGuard, captureArtifactInputProof: captureProof, withMeetingTranscriptWorker: meetingWorker }));
 
 vi.mock("@corgtex/agents", () => ({
   executeAgentRun: execute,
@@ -32,6 +34,7 @@ vi.mock("@corgtex/agents", () => ({
 describe("runAgentWorkflowJob", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    meetingWorker.mockImplementation(async (_claim, work) => work(meetingActor));
     runCompanyUnderstandingAgentMock.mockResolvedValue({ id: "run-1" });
     absorb.mockResolvedValue({ absorbed: true, sourceId: "source" });
   });
@@ -191,14 +194,15 @@ describe("runAgentWorkflowJob", () => {
   it.each([undefined, false])("does not pass a legacy reviewOnly=%s bypass on manual extraction", async (reviewOnly) => {
     const { runAgentWorkflowJob } = await import("./agent-dispatch");
     await runAgentWorkflowJob({
-      id: "manual-job",
+      id: "manual-job", attempts: 3,
       workspaceId: "ws-1",
       type: "agent.action-extraction",
       payload: { meetingId: "meeting-1", triggerType: "MANUAL", reviewOnly },
-    });
+    }, "worker-1");
+    expect(meetingWorker).toHaveBeenCalledWith({workspaceId: "ws-1", meetingId: "meeting-1", jobId: "manual-job", owner: "worker-1", attempt: 3, claim: undefined}, expect.any(Function));
 
     expect(runActionExtractionAgentMock).toHaveBeenCalledWith({
-      workspaceId: "ws-1",
+      lineageActor: meetingActor, workspaceId: "ws-1",
       triggerRef: "manual-job",
       meetingId: "meeting-1",
       triggerType: "MANUAL",

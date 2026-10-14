@@ -825,6 +825,8 @@ model Workspace {
   derivedArtifactRebuildStates DerivedArtifactRebuildState[]
   sourcePermissionEpochs SourcePermissionEpoch[]
   nativeTranscriptInputs NativeTranscriptInput[]
+  nativeTranscriptPublications NativeTranscriptPublication[]
+  transcriptTransportArchives TranscriptTransportArchive[]
   recorderTranscriptBindings RecorderTranscriptBinding[]
   recorderTranscriptClaims RecorderTranscriptClaim[]
   recorderTranscriptAttempts RecorderTranscriptAttempt[]
@@ -3518,7 +3520,8 @@ model MeetingTranscriptSourceRecord {
   supersededRecords  MeetingTranscriptSourceRecord[]    @relation("MeetingTranscriptRecordSupersession")
   meetingInsights    MeetingInsight[]
 
-  @@unique([workspaceId, provider, externalId, contentHash])
+  // Successful content identity is a partial unique index in migration191.
+  // FAILED diagnostics are append-only and never occupy publication identity.
   @@index([workspaceId, provider, externalId])
   @@index([workspaceId, recordedAt])
   @@index([meetingId])
@@ -6915,6 +6918,7 @@ model NativeTranscriptInput {
   meetingAudioAssetId String?
   sourceRecordId String?
   connectionId String?
+  transportArchiveId String?
   recordingId String?
   recorderAttemptId String?
   recorderMeetingId String?
@@ -6934,6 +6938,39 @@ model NativeTranscriptInput {
   @@index([workspaceId, sourceRecordId])
 }
 
+
+// Non-serving exact authenticated transport custody, shared by selected native inputs.
+model TranscriptTransportArchive {
+  id String @id @default(uuid())
+  workspaceId String
+  connectionId String
+  provider String
+  configurationHash String @db.VarChar(64)
+  wireHash String @db.VarChar(64)
+  byteSize Int
+  encryptedWiresJson String @db.Text
+  cipherHash String @default(dbgenerated())
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, connectionId])
+}
+
+// One original public member publication; old private native inputs are never promoted.
+model NativeTranscriptPublication {
+  id String @id @default(uuid())
+  workspaceId String
+  nativeInputId String
+  nativeFingerprint String @db.VarChar(64)
+  meetingId String
+  transcriptManifestId String
+  manifestHash String @db.VarChar(64)
+  transcriptFingerprint String @db.VarChar(64)
+  permissionEpochsJson Json
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@unique([workspaceId, nativeInputId])
+  @@index([workspaceId, meetingId])
+}
 
 // Recorder custody is never a human submission or a semantic permission grant.
 model RecorderTranscriptBinding {

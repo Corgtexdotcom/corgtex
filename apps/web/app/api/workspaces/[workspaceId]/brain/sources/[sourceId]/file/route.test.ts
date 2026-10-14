@@ -151,7 +151,7 @@ describe("source byte-bound authorized proxy", () => {
     const reader = response.body!.getReader(); let delivered = 0;
     for (;;) { const next = await reader.read(); if (next.done) break; delivered += next.value.byteLength; }
     expect(delivered).toBe(65 * 1024 * 1024);
-    expect(mocks.readable.mock.calls.length - callsBeforeDelivery).toBeGreaterThanOrEqual(2 * 65 * 16);
+    expect(mocks.readable.mock.calls.length - callsBeforeDelivery).toBe(65 * 16); // exactly one final authorization per 64 KiB delivery
     expect(mocks.signed).not.toHaveBeenCalled();
   });
 

@@ -142,7 +142,8 @@ describe("notifications domain", () => {
         userId: "user-1",
         readAt: null,
       },
-      orderBy: { createdAt: "desc" },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: 100,
     });
   });
 

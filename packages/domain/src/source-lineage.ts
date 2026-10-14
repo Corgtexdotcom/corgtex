@@ -1,8 +1,9 @@
+import { getMeetingTranscriptWorkerPurpose, isMeetingTranscriptWorkerCurrent } from "./native-meeting-workflow-principal";
 import type { BoundedSnapshotReads } from "./source-snapshot-read-pass";
 import { getBrainExportWorkerPurpose, isBrainExportWorkerCurrent } from "./brain-export-worker";
 import { canReadInformationCategory, categoryGovernorIdentities, CATEGORY_BOUND_SOURCE_KINDS } from "./information-category-policy";
 import { financeFactValue, financeValueHash, isFinanceFactRevisionIntact } from "./finance-fact-value";
-import { getRecorderTranscriptWorkerPurpose, nativeTranscriptPrincipalUserId } from "./native-transcript-principal";
+import { getTranscriptSourceImportPurpose, getRecorderTranscriptWorkerPurpose, nativeTranscriptPrincipalUserId } from "./native-transcript-principal";
 import { artifactPermissionEpochIdentities, capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, mergePermissionEpochProofs, parsePermissionEpochProof, withSourceCommitPermissionReadPass, type PermissionEpochProof } from "./source-permission-epochs";
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -238,6 +239,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /** Hash only fields that can convey information or change visibility. */
 function snapshotContentFields(kind: LineageKind, row?: Record<string, unknown>) {
+  if (kind === "NativeTranscriptInput" && row?.mode === "PROVIDER_IMPORT") return [...fingerprintFields(kind), "transportArchiveId"];
   if (kind === "NativeTranscriptInput" && row?.mode === "RECORDER") return [...fingerprintFields(kind), "recorderAttemptId", "recorderMeetingId", "recorderBindingId", "recorderProvider"];
   return kind === "BrainSource" ? ["id", "workspaceId", "informationCategory", "accessDomain", "sourceType", "tier", "title", "channel", "content", "ingestionGuidanceMd", "fileStorageKey", "fileMimeType", "metadata", "authorMemberId", "fileName", "fileSizeBytes", "externalId", "createdAt"] : [...fingerprintFields(kind), ...((CATEGORY_BOUND_SOURCE_KINDS as readonly string[]).includes(kind) ? ["informationCategory"] : [])];
 }
@@ -253,6 +255,7 @@ export function lineageContentFingerprint(kind: LineageKind, row: unknown): stri
     return brainSourceContentFingerprint(row as Parameters<typeof brainSourceContentFingerprint>[0]);
   }
   const fields = fingerprintFields(kind);
+  if (kind === "NativeTranscriptInput" && row.mode === "PROVIDER_IMPORT") fields.push("transportArchiveId");
   if (kind === "NativeTranscriptInput" && row.mode === "RECORDER") fields.push("recorderAttemptId", "recorderMeetingId", "recorderBindingId", "recorderProvider");
   if (kind === "SqlNativeRunInput") {
     // Preserve the existing JSON fingerprint byte for byte while avoiding
@@ -468,15 +471,20 @@ function isArchived(row: unknown) {
   return isRecord(row) && (row.archivedAt != null || row.status === "archived");
 }
 
-function actorCanReadRecord(actor: AppActor, workspaceId: string, membership: { id: string; role: string } | null, kind: LineageKind, row: Record<string, unknown>) {
+function actorCanReadRecord(actor: AppActor, workspaceId: string, membership: { id: string; role: string } | null, kind: LineageKind, row: Record<string, unknown>, nativeSnapshotFingerprint?: string) {
   if (kind === "ConversationOperationOutcome" && row.operation === "BRAIN_EXPORT_CONSENT") return Boolean(membership && actor.kind === "user" || getBrainExportWorkerPurpose(actor, workspaceId)?.receiptId === row.id);
   if (kind === "ConversationOperationOutcome" && row.operation === "ACTION_COMPLETION_PUBLIC_NOTE")
     return row.actorKind === "public" && row.userId == null && row.credentialId == null
       && row.credentialVersion == null && row.scopeHash == null
       && Array.isArray(row.requiredScopes) && row.requiredScopes.length === 0;
   if (kind === "MeetingAudioAsset") return nativeTranscriptPrincipalUserId(actor, workspaceId) === row.uploadedByUserId;
+  const meetingWorker = kind === "NativeTranscriptInput" && ["COMPANY_MEMBER_UPLOAD", "PROVIDER_IMPORT", "RECORDER"].includes(String(row.mode))
+    && getMeetingTranscriptWorkerPurpose(actor, workspaceId)?.nativeInputs.some(input => input.id === row.id
+      && input.fingerprint === (nativeSnapshotFingerprint ?? lineageContentFingerprint("NativeTranscriptInput", row)));
+  if (kind === "NativeTranscriptInput" && row.mode === "COMPANY_MEMBER_UPLOAD") return Boolean(membership || meetingWorker);
+  if (kind === "NativeTranscriptInput" && row.mode === "PROVIDER_IMPORT") return Boolean(membership || meetingWorker || getTranscriptSourceImportPurpose(actor, workspaceId));
   if (kind === "NativeTranscriptInput") return row.mode === "RECORDER"
-    ? Boolean(membership || getRecorderTranscriptWorkerPurpose(actor, workspaceId))
+    ? Boolean(membership || meetingWorker || getRecorderTranscriptWorkerPurpose(actor, workspaceId))
     : nativeTranscriptPrincipalUserId(actor, workspaceId) === row.submittedByUserId;
   if (kind === "GenericDerivedArtifactVariant") return actor.kind === "user" && membership?.id === row.ownerMemberId;
   if (kind === "ExternalMcpResponseInput" || kind === "ExternalMcpConnectionSet") return actor.kind === "user" && actor.user.id === row.localUserId;
@@ -720,7 +728,7 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
       ? envelope.permissionKind as LineageKind : sourceKind;
     if (permissionKind !== sourceKind && !(sourceKind === "BrainArticleVersion" && permissionKind === "BrainArticle")) return false;
     if (isArchived(envelope) || (!consentAllows(purpose, sourceKind, String(row.sourceId), String(row.sourceFingerprint))
-      && !actorCanReadRecord(actor, workspaceId, membership, permissionKind, {...envelope, id: row.sourceId}))) return false;
+      && !actorCanReadRecord(actor, workspaceId, membership, permissionKind, {...envelope, id: row.sourceId}, sourceKind === "NativeTranscriptInput" ? String(row.sourceFingerprint) : undefined))) return false;
     if (sourceKind === "CheckIn" && !await db.member.findFirst({ where: { id: String(envelope.memberId), workspaceId, isActive: true }, select: { id: true } })) return false;
     if ((sourceKind === "BrainSource" || sourceKind === "Document") && !domains.includes(String(envelope.accessDomain))) return false;
     if (sourceKind === "ConversationTurn" && actor.kind === "user" && envelope.requesterUserId !== actor.user.id
@@ -795,6 +803,8 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
   }
   if (root.kind === "NativeTranscriptInput") {
     if (row.mode === "RECORDER") {
+      if (getMeetingTranscriptWorkerPurpose(actor, workspaceId) && !await isMeetingTranscriptWorkerCurrent(actor, workspaceId,
+        { meetingId: String(row.recorderMeetingId), inputId: root.id }, db === prisma ? undefined : db)) return false;
       const meeting = await db.meeting.findFirst({where: {id: String(row.recorderMeetingId), workspaceId}});
       if (!meeting || !await canReadInformationCategory(actor, workspaceId, meeting.informationCategory, db)
         && !await (await import("./recorder-transcript-input")).isRecorderCategoryCaptureCurrent(actor, workspaceId, meeting.id, db)) return false;
@@ -1358,6 +1368,7 @@ async function snapshotInput(actor: AppActor, tx: Prisma.TransactionClient, work
   const accessEnvelope = Object.fromEntries(["permissionKind", "operation", "kind", "isPrivate", "ownerMemberId", "authorUserId", "status", "createdByUserId",
     "localUserId", "selectedByUserId", "connectionId", "providerKey", "sourceKind", "externalId", "submittedByUserId", "agentCredentialId", "actorKind", "credentialId", "credentialVersion", "scopeHash", "visibility", "classification", "publicEnabledAt", "publicRevokedAt", "isActive", "agentKey", "userId", "sessionId", "conversationId", "memberId", "authorMemberId", "recipientMemberId", "archivedAt", "accessDomain", "requesterUserId", "variantOfArticleId", "variantTargetFingerprint", "variantInputSetHash"]
     .map((field) => [field, envelope[field] ?? null]));
+  if (root.kind === "NativeTranscriptInput" && ["PROVIDER_IMPORT", "COMPANY_MEMBER_UPLOAD"].includes(String(record.mode))) accessEnvelope.mode = String(record.mode);
   if (root.kind === "NativeTranscriptInput" && record.mode === "RECORDER") Object.assign(accessEnvelope, {
     mode: record.mode, recordingId: record.recordingId, recorderAttemptId: record.recorderAttemptId,
     recorderMeetingId: record.recorderMeetingId, recorderBindingId: record.recorderBindingId, recorderProvider: record.recorderProvider,
@@ -1865,9 +1876,10 @@ export async function inspectStoredArtifactInputDependencies(db: LineageClient, 
 export async function captureArtifactPermissionEpochs(actor: AppActor, workspaceId: string,
   fullAncestorRoots: readonly LineageRoot[], tx: Prisma.TransactionClient): Promise<PermissionEpochProof> {
   const identities = [{kind: "Workspace", id: workspaceId}];
-  if (actor.kind === "user") {
+  const companyPublication = (await import("./native-transcript-publication")).hasCompanyTranscriptPublicationScope(actor, workspaceId);
+  if (actor.kind === "user" && !companyPublication) {
     identities.push({ kind: "MemberUserPolicy", id: actor.user.id }, { kind: "WorkspaceSupportPolicy", id: actor.user.id });
-  } else {
+  } else if (actor.kind === "agent") {
     if (actor.credentialId) identities.push({ kind: "AgentCredential", id: actor.credentialId });
     if (actor.agentIdentityId) identities.push({ kind: "AgentIdentity", id: actor.agentIdentityId });
     if (actor.supportOrigin) identities.push({ kind: "WorkspaceSupportPolicy", id: actor.supportOrigin.userId });
@@ -1887,7 +1899,7 @@ export async function captureArtifactPermissionEpochs(actor: AppActor, workspace
       .filter(identity => root.kind !== "ArtifactInputSnapshot" || identity.kind !== root.kind || identity.id !== root.id));
     const categoryGovernors = await categoryGovernorIdentities(root.kind, loaded, workspaceId, tx);
     identities.push(...categoryGovernors);
-    if (categoryGovernors.length && actor.kind === "user") {
+    if (categoryGovernors.length && actor.kind === "user" && !companyPublication) {
       const member = await tx.member.findFirst({where: {workspaceId, userId: actor.user.id, isActive: true}, select: {id: true}});
       if (member) identities.push({kind: "MemberRolePolicy", id: member.id});
     }

@@ -1,3 +1,4 @@
+import { getMeetingTranscriptWorkerPurpose } from "./native-meeting-workflow-principal";
 import { categoryGovernorIdentities } from "./information-category-policy";
 import type { Prisma } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
@@ -5,7 +6,7 @@ import type { LineageInput, LineageKind, LineageRoot } from "./source-lineage";
 import { invariant } from "./errors";
 import { artifactPermissionEpochIdentities, type PermissionEpochIdentity } from "./source-permission-epochs";
 import { getExternalProviderWorkerPurpose } from "./external-provider-principal";
-import { getRecorderTranscriptWorkerPurpose, getAudioTranscriptWorkerPurpose } from "./native-transcript-principal";
+import { getTranscriptSourceImportPurpose, getRecorderTranscriptWorkerPurpose, getAudioTranscriptWorkerPurpose } from "./native-transcript-principal";
 
 export type SourceAuthorityClient = Prisma.TransactionClient;
 export type SourceAuthorityRow = { table: string; id: string; mode?: "SHARE" | "UPDATE" };
@@ -75,7 +76,7 @@ export const SOURCE_AUTHORITY_REGISTRY = freezeDescriptor({
 } satisfies Record<LineageKind, Descriptor>);
 
 // Physical governors which are not themselves model inputs still need explicit allowlisted SQL identifiers.
-export const SOURCE_AUTHORITY_GOVERNOR_TABLES = ["CommunicationInstallation", "CommunicationIngressInput", "WorkspaceIntegrationBinding", "ExternalMcpConnection",
+export const SOURCE_AUTHORITY_GOVERNOR_TABLES = ["TranscriptTransportArchive", "NativeTranscriptPublication", "MeetingTranscriptSourceConnection", "MeetingTranscriptSourceRecord", "CommunicationInstallation", "CommunicationIngressInput", "WorkspaceIntegrationBinding", "ExternalMcpConnection",
   "SqlKnowledgePublication", "SqlKnowledgeStagedChunk", "InformationCategoryPolicy", "WorkspaceSupportGrant", "AgentCredential", "McpOAuthAccessToken", "McpOAuthClient", "WorkspaceFeatureFlag", "WorkspaceModuleGrant",
   "AdviceRequestRecipient", "WorkspaceArchiveRecord", "WorkspaceToolLinkCircleTag", "ArtifactInputLineage", "WorkflowJob", "RecorderTranscriptBinding", "RecorderTranscriptAttempt", "RecorderTranscriptClaim", "RecorderTranscriptPublication", "WorkspaceMeetingRecorderConfig", "MeetingRecording", "MeetingRecorderProviderEvent", "MeetingRecorderSmokeRun", "MeetingTranscriptProcessingProgress", "AuditLog", "Event"] as const;
 export const SOURCE_AUTHORITY_TABLES:readonly string[] = Object.freeze([...new Set([...Object.values(SOURCE_AUTHORITY_REGISTRY).flatMap(d => d.table ? [d.table] : []), ...SOURCE_AUTHORITY_GOVERNOR_TABLES])]);
@@ -99,6 +100,10 @@ export function sourceAuthorityDelegate(db: SourceAuthorityClient, table: string
   invariant(SOURCE_AUTHORITY_TABLES.includes(table), 409, "SOURCE_LOCK_UNSUPPORTED", "Source authority table is not registered.");
   const delegate = (db as unknown as Record<string, unknown>)[table[0].toLowerCase() + table.slice(1)] as Delegate | undefined;
   invariant(delegate?.findFirst && delegate.findMany, 409, "SOURCE_LOCK_UNSUPPORTED", "Source authority storage is unavailable.");
+  if (table === "TranscriptTransportArchive") {
+    const select = { id: true, workspaceId: true, connectionId: true, provider: true, configurationHash: true, wireHash: true, cipherHash: true, byteSize: true, createdAt: true };
+    return { findFirst: args => delegate.findFirst({ ...args, select }), findMany: args => delegate.findMany({ ...args, select }) };
+  }
   return delegate;
 }
 function scopeRelations(value: Record<string, unknown>, workspaceId: string): Record<string, unknown> {
@@ -275,8 +280,28 @@ export async function discoverSourceAuthorityEdges(context: AuthorityDiscoveryCo
   if (["AgentStep", "AgentToolCall"].includes(kind)) field("AgentRun", "agentRunId");
   if (kind === "MeetingAudioAsset") await rows("NativeTranscriptInput", { workspaceId, mode: "AUDIO_UPLOAD", meetingAudioAssetId: input.id }, `audio-native:${input.id}`, "NativeTranscriptInput", true);
   if (kind === "NativeTranscriptInput") {
-    invariant(["AUDIO_UPLOAD", "DIRECT_MEMBER_UPLOAD", "RECORDER"].includes(String(content.mode)), 409, "SOURCE_LOCK_UNSUPPORTED", "Provider transcript authority is unsupported.");
-    if (content.mode === "RECORDER") {
+    invariant(["AUDIO_UPLOAD", "DIRECT_MEMBER_UPLOAD", "RECORDER", "PROVIDER_IMPORT", "COMPANY_MEMBER_UPLOAD"].includes(String(content.mode)), 409, "SOURCE_LOCK_UNSUPPORTED", "Provider transcript authority is unsupported.");
+    if (content.mode === "COMPANY_MEMBER_UPLOAD") {
+      const { hasPendingCompanyTranscript } = await import("./native-transcript-publication");
+      if (!hasPendingCompanyTranscript(actor, workspaceId, input.id)) {
+        const bindings = await rows("NativeTranscriptPublication", { workspaceId, nativeInputId: input.id }, `company-publication:${input.id}`, undefined, true);
+        invariant(bindings.length === 1, 409, "SOURCE_LOCK_UNSUPPORTED", "Company transcript publication is unavailable.");
+        add("Meeting", String(bindings[0].meetingId), true);
+        await rows("ArtifactInputLineage", { workspaceId, id: bindings[0].transcriptManifestId }, `company-original:${input.id}`, undefined, true);
+      }
+    } else if (content.mode === "PROVIDER_IMPORT") {
+      const { decodeProviderTranscriptInput } = await import("./transcript-source-native-input");
+      const payload = decodeProviderTranscriptInput(content);
+      invariant(payload && payload.workspaceId === workspaceId, 409, "SOURCE_LOCK_UNSUPPORTED", "Provider native custody is unavailable.");
+      await rows("TranscriptTransportArchive", { id: payload.archive.id, workspaceId }, `transcript-archive:${payload.archive.id}`, undefined, true);
+      await rows("MeetingTranscriptSourceConnection", { id: payload.connectionId, workspaceId }, `transcript-connection:${payload.connectionId}`, undefined, true);
+      const purpose = getTranscriptSourceImportPurpose(actor, workspaceId);
+      if (purpose?.inputId !== input.id) {
+        await rows("MeetingTranscriptSourceRecord", { id: payload.recordId, workspaceId }, `transcript-record:${payload.recordId}`, undefined, true);
+        add("Meeting", payload.meetingId, true);
+        await rows("ArtifactInputLineage", { id: payload.manifestId, workspaceId, artifactType: "MeetingTranscript", artifactId: payload.meetingId }, `transcript-original:${input.id}`, undefined, true);
+      }
+    } else if (content.mode === "RECORDER") {
       invariant(content.ownerMemberId == null && content.submittedByUserId == null && ["RECALL_AI", "MEETING_BAAS"].includes(String(content.recorderProvider)),
         409, "SOURCE_LOCK_UNSUPPORTED", "Recorder custody cannot borrow a human or unsupported provider grant.");
       field("Meeting", "recorderMeetingId");
@@ -458,6 +483,13 @@ export async function discoverAmbientSourceAuthority(context: AuthorityDiscovery
     for (const row of found) { const id = authorityIdentity(row.id); budget.consume(`row:${table}:${id}`); result.rows.push({ table, id }); }
     return found;
   };
+  const meetingWorker = getMeetingTranscriptWorkerPurpose(actor, workspaceId);
+  if (meetingWorker) await collect("WorkflowJob", { id: meetingWorker.jobId, workspaceId }, `meeting-workflow:${meetingWorker.jobId}`);
+  const transcriptCaller = getTranscriptSourceImportPurpose(actor, workspaceId);
+  if (transcriptCaller?.callerMemberId && transcriptCaller.callerUserId) {
+    result.policies.push({kind: "Member", id: transcriptCaller.callerMemberId}, {kind: "MemberUserPolicy", id: transcriptCaller.callerUserId}, {kind: "WorkspaceSupportPolicy", id: transcriptCaller.callerUserId});
+    await collect("Member", {id: transcriptCaller.callerMemberId, workspaceId, userId: transcriptCaller.callerUserId}, `transcript-caller:${transcriptCaller.callerMemberId}`);
+  }
   const userId = actor.kind === "user" ? actor.user.id : actor.supportOrigin?.userId;
   if (userId) {
     result.policies.push({kind: "MemberUserPolicy", id: userId}, {kind: "WorkspaceSupportPolicy", id: userId});

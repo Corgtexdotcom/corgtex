@@ -1,8 +1,8 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
-const { uploadMeetingTranscript, captureDirectMemberTranscriptInput, intakeMeetingTranscript, extractTextFromFileBuffer, requireWorkspaceMembership, resolveRequestActor, handleRouteError } = vi.hoisted(() => ({
+const { uploadMeetingTranscript, captureCompanyMemberTranscriptInput, intakeMeetingTranscript, extractTextFromFileBuffer, requireWorkspaceMembership, resolveRequestActor, handleRouteError } = vi.hoisted(() => ({
   uploadMeetingTranscript: vi.fn(),
-  captureDirectMemberTranscriptInput: vi.fn(),
+  captureCompanyMemberTranscriptInput: vi.fn(),
   intakeMeetingTranscript: vi.fn(),
   extractTextFromFileBuffer: vi.fn(),
   requireWorkspaceMembership: vi.fn(),
@@ -24,7 +24,7 @@ class MockAppError extends Error {
 vi.mock("@corgtex/domain", () => ({
   AppError: MockAppError,
   intakeMeetingTranscript,
-  captureDirectMemberTranscriptInput,
+  captureCompanyMemberTranscriptInput,
   uploadMeetingTranscript,
   requireWorkspaceMembership,
 }));
@@ -45,7 +45,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 beforeEach(() => {
-  captureDirectMemberTranscriptInput.mockResolvedValue({ inputId: "native-1" });
+  captureCompanyMemberTranscriptInput.mockResolvedValue({ inputId: "native-1" });
 });
 
 describe("POST /api/workspaces/[workspaceId]/meetings/transcript", () => {
@@ -78,7 +78,7 @@ describe("POST /api/workspaces/[workspaceId]/meetings/transcript", () => {
     );
 
     expect(response.status).toBe(409);
-    expect(captureDirectMemberTranscriptInput).toHaveBeenCalledWith(
+    expect(captureCompanyMemberTranscriptInput).toHaveBeenCalledWith(
       { kind: "user", user: { id: "user-1" } },
       expect.objectContaining({ workspaceId: "ws-1", submission: expect.objectContaining({
         transcript: "Transcript text", title: "Weekly Tactical",
@@ -131,7 +131,7 @@ describe("POST /api/workspaces/[workspaceId]/meetings/transcript", () => {
     );
 
     expect(response.status).toBe(201);
-    expect(captureDirectMemberTranscriptInput).toHaveBeenCalledWith(
+    expect(captureCompanyMemberTranscriptInput).toHaveBeenCalledWith(
       { kind: "user", user: { id: "user-1" } },
       expect.objectContaining({ submission: expect.objectContaining({
         rawFileBase64: Buffer.from("ignored").toString("base64"),

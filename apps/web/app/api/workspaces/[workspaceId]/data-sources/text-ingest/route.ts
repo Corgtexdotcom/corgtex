@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
-import { captureDirectMemberTranscriptInput, ingestSource, intakeMeetingTranscript, requireWorkspaceMembership } from "@corgtex/domain";
+import { captureCompanyMemberTranscriptInput, ingestSource, intakeMeetingTranscript, requireWorkspaceMembership } from "@corgtex/domain";
 import type { DuplicateGuardOptions, DuplicateGuardResolution } from "@corgtex/domain";
 import type { BrainSourceType } from "@prisma/client";
 import { parseOptionalMeetingDateTimeInput } from "@/lib/meeting-timezone";
@@ -65,7 +65,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         ingestionGuidanceMd: typeof ingestionGuidanceMd === "string" ? ingestionGuidanceMd : null,
         duplicateGuard,
       };
-      const nativeReceipt = await captureDirectMemberTranscriptInput(actor, { workspaceId, submission });
+      const nativeReceipt = await captureCompanyMemberTranscriptInput(actor, { workspaceId, submission });
       const result = await intakeMeetingTranscript(actor, { ...submission, nativeReceipt });
 
       if (result.status === "needs_clarification") {

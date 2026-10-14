@@ -2,14 +2,14 @@ import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
 const {
   ingestSource,
-  captureDirectMemberTranscriptInput,
+  captureCompanyMemberTranscriptInput,
   intakeMeetingTranscript,
   requireWorkspaceMembership,
   resolveRequestActor,
   handleRouteError,
 } = vi.hoisted(() => ({
   ingestSource: vi.fn(),
-  captureDirectMemberTranscriptInput: vi.fn(),
+  captureCompanyMemberTranscriptInput: vi.fn(),
   intakeMeetingTranscript: vi.fn(),
   requireWorkspaceMembership: vi.fn(),
   resolveRequestActor: vi.fn(),
@@ -18,7 +18,7 @@ const {
 
 vi.mock("@corgtex/domain", () => ({
   ingestSource,
-  captureDirectMemberTranscriptInput,
+  captureCompanyMemberTranscriptInput,
   intakeMeetingTranscript,
   requireWorkspaceMembership,
 }));
@@ -35,7 +35,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 beforeEach(() => {
-  captureDirectMemberTranscriptInput.mockResolvedValue({ inputId: "native-1" });
+  captureCompanyMemberTranscriptInput.mockResolvedValue({ inputId: "native-1" });
 });
 
 function postTextIngest(body: unknown) {

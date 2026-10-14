@@ -1,7 +1,7 @@
 import { getReadableBrainArticleVariant, requestBrainArticleVariant } from "./brain-article-variants";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { captureReadableDigestInputs } from "./digest-lineage";
-import { scanSourceReadableRecords } from "./source-scoped-read";
+import { countSourceReadableRecords } from "./source-scoped-read";
 import type { BrainArticleAuthority, BrainArticleType, BrainDiscussionTargetType, BrainSource, BrainSourceType } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { isDeepStrictEqual } from "node:util";
@@ -1237,7 +1237,7 @@ export async function getBrainStatus(actor: AppActor, params: {
 
   const [articles, sources, articlesWithBacklinks] = await Promise.all([
     prisma.brainArticle.findMany({ where: { workspaceId: params.workspaceId } }),
-    scanSourceReadableRecords({ actor, workspaceId: params.workspaceId, kind: "BrainSource", load: (afterId, take) => prisma.brainSource.findMany({
+    countSourceReadableRecords({ actor, workspaceId: params.workspaceId, kind: "BrainSource", load: (afterId, take) => prisma.brainSource.findMany({
       where: {
         workspaceId: params.workspaceId,
         accessDomain: { in: accessDomains },
@@ -1252,7 +1252,7 @@ export async function getBrainStatus(actor: AppActor, params: {
       select: { fromArticleId: true, toArticleId: true },
     }),
   ]);
-  const unabsorbedSources = sources.length;
+  const unabsorbedSources = sources;
   const visibleIds = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", articles);
   const visibleArticles = articles.filter((article) => visibleIds.has(article.id));
   const linkedIds = new Set(articlesWithBacklinks

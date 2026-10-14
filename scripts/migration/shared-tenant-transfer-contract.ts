@@ -79,7 +79,7 @@ export interface TenantTransferSnapshot {
 // authority in the target, even when a fresh target epoch happens to match.
 export const historicalAuthorityTables: ReadonlySet<string> = new Set([
   "SourcePermissionEpoch", "ArtifactInputLineage", "ArtifactInputSnapshot",
-  "CommunicationIngressInput", "CommunicationMessageNativeInput", "NativeTranscriptInput",
+  "CommunicationIngressInput", "CommunicationMessageNativeInput", "NativeTranscriptInput", "NativeTranscriptPublication", "TranscriptTransportArchive",
   "RecorderTranscriptBinding", "RecorderTranscriptClaim", "RecorderTranscriptAttempt", "RecorderTranscriptPublication",
   "SqlIngestionSourceClaim", "SqlIngestionAttempt", "SqlNativeRunInput", "SqlNativeCapturePart",
   "SqlKnowledgePublication", "SqlKnowledgeStagedChunk", "ExternalProviderFetchInput", "ExternalMcpResponseInput",
@@ -107,7 +107,9 @@ const scalarReferenceFields: Record<string, readonly string[]> = {
   ArtifactInputSnapshot: ["sourceId"],
   CommunicationIngressInput: ["installationId", "externalWorkspaceId", "appId", "externalEventId"],
   CommunicationMessageNativeInput: ["installationId", "communicationMessageId", "externalWorkspaceId", "appId", "providerPrincipalId", "externalChannelId", "externalMessageId", "externalUserId", "threadExternalId", "ingressInputId"],
-  NativeTranscriptInput: ["ownerMemberId", "submittedByUserId", "meetingAudioAssetId", "sourceRecordId", "connectionId", "recordingId", "recorderAttemptId", "recorderMeetingId", "recorderBindingId"],
+  NativeTranscriptInput: ["ownerMemberId", "submittedByUserId", "meetingAudioAssetId", "sourceRecordId", "connectionId", "transportArchiveId", "recordingId", "recorderAttemptId", "recorderMeetingId", "recorderBindingId"],
+  TranscriptTransportArchive: ["connectionId"],
+  NativeTranscriptPublication: ["nativeInputId", "meetingId", "transcriptManifestId"],
   RecorderTranscriptClaim: ["recordingId", "attemptId"],
   RecorderTranscriptAttempt: ["claimId", "recordingId", "meetingId", "externalBotId", "bindingId", "providerEventId", "nativeInputId"],
   RecorderTranscriptPublication: ["attemptId", "nativeInputId", "recordingId", "meetingId", "providerEventId", "eventId", "transcriptManifestId", "meetingManifestId"],
@@ -255,6 +257,7 @@ const scalarReferenceFields: Record<string, readonly string[]> = {
 const scalarSecretFields: Record<string, readonly string[]> = {
   CommunicationIngressInput: ["signature", "encryptedRawBody"],
   CommunicationMessageNativeInput: ["encryptedPayloadJson"],
+  TranscriptTransportArchive: ["encryptedWiresJson"],
   NativeTranscriptInput: ["encryptedPayloadJson"],
   RecorderTranscriptClaim: ["nonce"],
   RecorderTranscriptAttempt: ["nonce", "encryptedOriginJson"],
