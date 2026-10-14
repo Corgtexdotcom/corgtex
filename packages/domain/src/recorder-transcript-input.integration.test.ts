@@ -58,8 +58,16 @@ function provider(recording: Awaited<ReturnType<typeof fixture>>["recording"]) {
 async function ingest(f: Awaited<ReturnType<typeof fixture>>) {
   return withRecorderTranscriptAttempt(f.recording, null, async receipt => publishRecorderTranscript(await prepareRecorderTranscript(receipt, provider(f.recording), { source: "synthetic" })));
 }
-beforeEach(async () => { probe.failPublication = false; probe.tamperEvent = false; probe.tamperMeeting = false; probe.tamperManifest = false; probe.dispatchEvent = false; await truncateAllTables(); });
-afterAll(async () => { await prisma.$disconnect(); });
+beforeEach(async () => {
+  // The native driver fixture is independent of developer credentials and CI's shell.
+  vi.stubEnv("RECALL_API_KEY", "synthetic-recall-key");
+  vi.stubEnv("RECALL_REGION", "us-west-2");
+  vi.stubEnv("RECALL_WEBHOOK_SECRET", "synthetic-signing");
+  vi.stubEnv("RECALL_WORKSPACE_BINDINGS_JSON", undefined);
+  probe.failPublication = false; probe.tamperEvent = false; probe.tamperMeeting = false; probe.tamperManifest = false; probe.dispatchEvent = false;
+  await truncateAllTables();
+});
+afterAll(async () => { try { await prisma.$disconnect(); } finally { vi.unstubAllEnvs(); } });
 
 describe("authenticated recorder native custody and atomic publication", () => {
   it("claims before native fetch, commits complete manifests and event atomically, and serves after the worker lease ends", async () => {
