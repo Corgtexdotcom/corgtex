@@ -73,15 +73,30 @@ code with authoritative sealed source config. Application callers supply no raw
 rows or replacement native hook. Complete native rows/pages are encrypted and
 hashed, including empty-page coverage and full native column definitions. Limits
 remain ten pages of at most 1000 rows, 64 MiB native bytes, 100000 declared output
-chunks, and embedding/staging batches of 500. Limits throw before publication;
-they never partially advance a cursor or silently reduce the 10000-row cap.
+chunks, and vector-bearing embedding/staging/publication batches of 128. Limits
+throw before publication; they never partially advance a cursor or silently reduce the 10000-row cap.
 
 Bounded staging declares complete identities/counts in PREPARING before models,
-streams each500-vector model batch into immutable non-serving staging, and drops
+streams each 128-vector model batch into immutable non-serving staging, and drops
 those vectors before the next batch. Only the complete descriptor/hash set can
-seal PREPARED. Publication loads at most500 staged vectors per batch; private
+seal PREPARED. Publication loads at most 128 staged vectors per batch; private
 preparation state keeps compact identities/hashes, and a compact SHA256 manifest
-ledger preserves complete post-callback rollback checks.
+ledger preserves complete post-callback rollback checks. Identity-only row
+replacement pages remain 500. Persisted-row verification and final callback
+content checks use the same 128-vector bound, including the final partial page.
+No complete output/vector limit or preparation/publication timeout changed.
+
+The actual `7cb4c6b2` transport checkpoint still failed the unchanged 4,000-row /
+12,000-chunk x 1,536-vector worker at model batch 3 / 1,500 embedded chunks:
+startup 423,591,936B, capture 714,244,096B, model 1,078,345,728B and OS peak
+1,078,394,880B against 1,073,741,824B. All 13 connector process/cold-reader/race/
+provider cases pass, but these functional results do not clear capacity. The
+128-vector correction passes 51 source PG regressions plus two final-tail
+callback rollback cases; the model-failure/fresh 600-output retry uses
+1,536-dimensional vectors. Bounded independent Sol QA accepts this correction.
+Existing connector ownership retains the complete unchanged 512MiB-V8 / 1GiB-RSS
+rerun, including ordinary reads, query, transaction and concurrency measurements.
+Actual capacity remains unaccepted.
 
 Capture avoids a complete ciphertext RETURNING response: the insertion returns
 small immutable headers, and the same real transaction checks server SHA256 of
@@ -225,7 +240,7 @@ configuration/credentials, delete/recreate, rollback/cache/status and full4000
 rows/at least8000 chunks/over10000 combined identity regressions. Measure real
 model-sized vectors, complete legal output sets, peak memory, query count, lock
 duration and competing policy writes. Full-vector retention has been replaced by
-bounded500-vector batches; actual worker1Gi resource acceptance remains open
+bounded 128-vector batches; actual worker1Gi resource acceptance remains open
 until the connector reruns the composed production path.
 
 Actual connector composition at7c92532b proved a remaining resource failure:
