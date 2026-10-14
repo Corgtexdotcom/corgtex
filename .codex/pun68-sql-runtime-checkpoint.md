@@ -192,8 +192,133 @@ No checked-in compiler configuration, workflow, resource, permission or provider
 The coordinator confirms sole source-lane ownership of recorder/intake/native
 transcript receipt/principal, Recall bindings/webhook callers and matching tests,
 with no known competing editor. Connector ownership stays SQL/outbox/bootstrap;
-Brain conversation remains separate. Authenticated Recall intake starts only
-after this compiler checkpoint settles; no intake change is part of this diff.
+Brain conversation remains separate. The compiler-only head `b0f97af6` settled
+before the following authenticated recorder checkpoint.
+
+## Authenticated Recall recorder checkpoint (migration 188)
+
+The complete `b0f97af6` CI run 38521473365 terminated with test failure:
+12,492 passed, 15 failed and 39 skipped. Hosted typecheck, unused locals, build,
+ARM64 preparation, database checks and policy/private/public boundaries passed.
+The failures were seven recorder intake cases, six ranking mocks missing the
+external-source delegate and two tenant derived-selector drift checks. The
+compiler blocker is closed; this is not a whole-PR CI success.
+
+Recorder intake now claims a durable generation/nonce before provider HTTP.
+Only signed Recall webhook origin or authenticated canonical Recall recovery can
+produce private attempt/prepare receipts. Workspace, provider credential/account
+configuration, recording/bot/Meeting, exact provider event and original policy
+vectors are sealed before fetching. Migration 188 adds workspace custody binding,
+claim, attempt and publication rows plus a distinct RECORDER native mode with no
+fabricated human owner. Original encrypted native inputs and publication identity
+are immutable; binding revocation cannot revive an old revision. Database
+configuration disable/restore invalidates the original policy vector.
+
+Preparation preserves complete provider response text in encrypted custody and
+selects the trusted adapter's exact response branch in declared request order.
+Discarded partial downloads and failed responses remain custody during fallback.
+The existing 20 MiB attempt transport budget is enforced while streaming, shared
+across parallel responses; oversized streams are cancelled before full-body
+allocation. Ordinary provider requests retain their existing reader. Unknown
+prior transcript or Meeting ancestry is withheld even when its text matches.
+Legacy processed/duplicate markers cannot substitute for an exact durable native
+publication receipt; authenticated recovery can proceed while unknown ancestry
+still fails closed. Verified empty intake has its own fenced native terminal
+receipt and creates no serving transcript or event.
+
+Provider work and full preparation stay outside application SQL. A single real
+120-second transaction publishes the Meeting/transcript, exact complete manifests,
+insight/progress/audit controls, pending outbox event, recording/smoke/provider-event
+markers and immutable publication receipt. Source head/physical locks, original
+epochs, exact control before/after projections and complete output/manifests are
+checked after writes. A direct native consumer explicitly holds the publication's
+original transcript manifest through commit. Positive committed results return
+only after transaction commit; failure leaves the captured original and rolls all
+publication effects back. Later privately authenticated recordings retain exact
+prior recorder ancestry without borrowing a later worker lease as a reader grant.
+
+Validation: 31/31 final real-PostgreSQL recorder cases pass, including actual
+signed-webhook/authenticated-recovery drivers with synthetic HTTP outside SQL,
+claim/reclaim and busy retry, owner/epoch restore races, empty custody, exact event/
+manifest/output rollback, unreceipted legacy recovery, partial-download fallback,
+direct original-manifest lock contention and shared/oversized response cancellation.
+The earlier sequential source aggregate passed 103/103 (five files); its unaffected
+SQL/native/source-plan coverage is reused. Final affected units pass 213/213 across
+ten files; earlier broader affected units passed 233/233. Ranking and tenant
+fixtures retain their original policy assertions; the staged SQL child is included
+in indirect tenant selectors and the direct custody relation count is now 190.
+Full TypeScript and unused locals pass with incremental disabled at the unchanged
+4 GiB heap. Affected ESLint, diff and public/private boundary checks pass.
+Independent Sol xhigh accepts the bounded checkpoint after review of the final
+code and PostgreSQL/unit evidence; compiler completion is confirmed separately.
+Migration 188 was applied only to the source-owned disposable PostgreSQL fixture;
+no production DDL or connector fixture operation occurred in this checkpoint.
+
+Evidence is local ignored/temporary output:
+`/tmp/pun68-recall-transport-final-pg.log`,
+`/tmp/pun68-recall-aggregate-pg.log`,
+`/tmp/pun68-recall-final-unit.log`,
+`/tmp/pun68-recall-types-final.log`,
+`/tmp/pun68-recall-unused-final2.log`,
+`/tmp/pun68-recall-review-closure-lint.log`,
+`/tmp/pun68-recall-transport-lint.log`,
+`/tmp/pun68-recall-migration188.log`, and
+`/tmp/pun68-b0-terminal-ci.json`. No generated evidence or provider data is committed.
+
+Automatic approval review rejected a proposed `source-lineage.ts` change that
+would have replaced the exact recorder private-purpose check with general
+`actor.kind === "agent"` readability. Its stated reason was that this broadened
+authority and conflicted with the explicit no-label/private-purpose boundary;
+focused tests did not authorize the weakening. The rejected edit was never
+executed or retried. The exact active-member/private-purpose gate is retained.
+This permits the bounded recorder intake/member-read workflow but still blocks
+generic agents from consuming committed recorder sources. Broader Brain/agent
+consumer integration and any new authority remain held, together with unobserved
+external credential restore and full category/circle/consent integration.
+
+The existing connector owner retains SQL/outbox/bootstrap and resource acceptance.
+Previously measured unchanged SQL full publication/fetch/count/search/downstream
+capacity is reused; no duplicate connector or full worker run was started here.
+The final source checkpoint still requires exact-head hosted CI and integrated
+Astra QA before any full PR/batch clearance. No merge or deployment.
+
+Exact recorder head `2c73321c68b88b83ee533235ef4c8662ea2ecd9c` CI run
+38536877066 is now terminal FAILURE: 12,507 passed, 31 failed and 39 skipped;
+768 files passed, two failed and two skipped. Hosted typecheck/unused/build,
+database sync, ARM64, docs/policy/scope and secret/client-data scans passed.
+Thirty recorder PG failures came from absent synthetic Recall shell settings;
+the remaining demo-credential fixture expected billing refusal while recorder
+DELETE correctly emitted permission rebuild work and the async guard refused.
+All fifteen earlier b0 failures passed in this run. Later scripted test-job gates
+were skipped after the full-suite failure, so complete hosted acceptance remains
+outstanding. Separate Astra review accepts the bounded 2c implementation.
+
+The reviewed fixture correction sets/restores only synthetic Recall settings,
+clears developer binding JSON, and preserves all 31 recorder assertions. An
+explicitly env-cleared rerun passed 31/31 in 73.65s. The batch coordinator reserved
+the demo credential integration test for this lane. Its correction proves both
+pending and dispatched permission work still refuse refresh, then isolates only
+the exact synthetic workspace/type/recording-governor event IDs before the
+independent billing negative. All original credential/SSO/billing/foreign-access,
+later asynchronous refusal and actual revocation assertions remain. That real PG
+case passed 1/1 in 824ms. No production disconnection guard, source permission,
+resource, migration or runtime implementation changed. Evidence:
+`/tmp/pun68-2c-ci-terminal.json`, `/tmp/pun68-2c-ci-failures.log`,
+`/tmp/pun68-recall-ci-env-pg.log`, `/tmp/pun68-demo-recorder-event-pg.log` and
+matching scoped lint logs. Full and unused-locals TypeScript pass at the unchanged
+4 GiB heap with incremental disabled after both fixture corrections; evidence is
+`/tmp/pun68-ci-fixture-types-final.log` and `/tmp/pun68-ci-fixture-unused-final.log`.
+Independent Sol accepts the small fixture/proposal deltas. Fresh correction-head
+hosted CI remains required.
+
+The requested next-slice proposal lives in
+`.codex/pun68-finance-restatement-design.md`: exact Finance proposal/reconciliation/
+review/application/lineage consumers, later removal/variant consumers and exclusions,
+real successful restatement/revocation/concurrency/rollback acceptance, and the
+remaining parent decisions on Report archive/deletion/tombstones, restoration and
+unreconstructable legacy recipes. Finance runtime/schema implementation has not
+started; no new grant, production data cleanup, merge or deployment is authorized.
+
 
 Capture avoids a complete ciphertext RETURNING response: the insertion returns
 small immutable headers, and the same real transaction checks server SHA256 of
@@ -400,7 +525,8 @@ wall-clock role expiry), and bounded generic root bodies/heads/permissions for
 mixed counts. Generic search/root budgets and the10000-native-row cap remain
 unchanged; over-bound collections fail explicitly without a partial count.
 
-Recall/native recorder, broader producer/category/audience/role-circle consent
-integration, Finance immutable restatement revisions, lifecycle/regeneration,
-legacy/backfill/rollback and integrated Astra QA remain full PR1517 blockers.
+Authenticated Recall intake has the bounded checkpoint above. Generic agent
+consumption, broader producer/category/audience/role-circle consent integration,
+Finance immutable restatement revisions, lifecycle/regeneration, legacy/backfill/
+rollback and integrated Astra QA remain full PR1517 blockers.
 Do not merge/deploy or describe this checkpoint as the complete permission fix.

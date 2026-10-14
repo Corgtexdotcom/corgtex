@@ -98,6 +98,12 @@ export function artifactPermissionEpochIdentities(kind: string, row: Record<stri
       for (const id of Array.isArray(row.allowedCircleIds) ? row.allowedCircleIds : []) add("Circle", id);
     }
   }
+  if (kind === "NativeTranscriptInput" && row.mode === "RECORDER") {
+    add("Meeting", row.recorderMeetingId); add("MeetingRecording", row.recordingId);
+    // One stable absence-sensitive policy key; binding IDs and worker leases are not reader epochs.
+    add("RecorderProviderPolicy", row.recorderProvider);
+    add("FeaturePolicy", "MEETING_RECORDERS");
+  }
   if (kind === "SqlNativeRunInput") add("ExternalDataSource", row.sourceId);
   for (const key of ["ownerMemberId", "memberId", "authorMemberId", "recipientMemberId"]) add("Member", row[key]);
   for (const key of ["userId", "authorUserId", "createdByUserId", "submittedByUserId", "requesterUserId", "requestedByUserId", "localUserId", "selectedByUserId", "uploadedByUserId"]) {

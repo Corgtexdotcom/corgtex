@@ -12,12 +12,16 @@ type AuthorityDb = Prisma.TransactionClient | typeof prisma;
 type NativeTranscriptInputRecord = {
   workspaceId: string;
   mode: string;
-  ownerMemberId: string;
-  submittedByUserId: string;
+  ownerMemberId: string | null;
+  submittedByUserId: string | null;
+  recordingId: string | null;
+  recorderAttemptId?: string | null;
+  recorderMeetingId?: string | null;
+  recorderBindingId?: string | null;
+  recorderProvider?: string | null;
   meetingAudioAssetId: string | null;
   sourceRecordId: string | null;
   connectionId: string | null;
-  recordingId: string | null;
   encryptedPayloadJson: string;
   payloadHash: string;
   fileHash: string | null;
@@ -199,6 +203,7 @@ export async function createAudioTranscriptWorkerActor(params: {
   409, "SOURCE_RESTRICTED", "Audio transcription requires its active leased job and source.");
   const actor: AppActor = Object.freeze({ kind: "agent", authProvider: "bootstrap", label: "meeting-audio-transcription-worker",
     workspaceIds: Object.freeze([params.workspaceId]) as unknown as string[], scopes: Object.freeze(["meetings:write"]) as unknown as string[] });
+  invariant(input.ownerMemberId && input.submittedByUserId, 409, "SOURCE_CHANGED", "Audio input has no human owner.");
   registerAudioTranscriptWorker(actor, { workspaceId: params.workspaceId, audioAssetId: asset.id,
     workflowJobId: job.id, ownerMemberId: input.ownerMemberId, uploadedByUserId: input.submittedByUserId,
     assetBindingHash: String(input.grantHash ?? ""), jobLeaseHash: audioJobLeaseHash(job) });
@@ -242,6 +247,11 @@ export async function isNativeTranscriptInputCurrent(actor: AppActor, workspaceI
     if (input.workspaceId !== workspaceId || !/^[a-f0-9]{64}$/.test(input.payloadHash)
       || !payload || Array.isArray(payload) || typeof payload !== "object"
       || nativeTranscriptPayloadHash(payload) !== input.payloadHash) return false;
+    if (input.mode === "RECORDER") {
+      const { isRecorderTranscriptInputCurrent } = await import("./recorder-transcript-input");
+      return isRecorderTranscriptInputCurrent(actor, workspaceId, input, payload, db);
+    }
+    if (!input.ownerMemberId || !input.submittedByUserId) return false;
     const principalUserId = nativeTranscriptPrincipalUserId(actor, workspaceId);
     if (!principalUserId || principalUserId !== input.submittedByUserId) return false;
     const member = await db.member.findFirst({ where: { id: input.ownerMemberId,

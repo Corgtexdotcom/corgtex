@@ -37,6 +37,7 @@ export function artifactPermissionParents(kind: LineageKind, row: Record<string,
     }
   }
   if (["MeetingInsight", "MeetingFollowUpReview"].includes(kind)) field("Meeting", "meetingId");
+  if (kind === "NativeTranscriptInput" && row.mode === "RECORDER") field("Meeting", "recorderMeetingId");
   if (kind === "NativeTranscriptInput" && row.mode === "AUDIO_UPLOAD") field("MeetingAudioAsset", "meetingAudioAssetId");
   if (kind === "CircleAgentAssignment") { field("AgentIdentity", "agentIdentityId"); field("Circle", "circleId"); }
   if (kind === "RoleAssignment") { field("Member", "memberId"); field("Role", "roleId"); }
@@ -103,7 +104,7 @@ const METADATA_FIELDS = new Set([
   "circleId", "parentCircleId", "targetCircleId", "agentIdentityId", "credentialId", "agentCredentialId", "accessDomain",
   "installationId", "externalChannelId", "communicationMessageId", "messageId", "connectionId", "externalContentSourceId",
   "variantOfArticleId", "targetKind", "targetId", "audienceType", "goalId", "actionId", "tensionId", "articleId", "threadId",
-  "mapViewId", "constitutionId", "proposalId", "artifactId", "executionRequestId", "meetingId", "mode", "meetingAudioAssetId",
+  "mapViewId", "constitutionId", "proposalId", "artifactId", "executionRequestId", "meetingId", "mode", "meetingAudioAssetId", "recordingId", "recorderAttemptId", "recorderMeetingId", "recorderBindingId", "recorderProvider",
   "sessionId", "conversationId", "flowId", "subjectType", "subjectId", "sourceType", "sourceId", "parentType", "parentId",
   "demoLeadId", "qualificationId", "accountId", "contactId", "dealId", "activityId", "targetWorkspaceId", "batchId", "documentId",
   "brainSourceId", "sourceBatchId", "reportId", "sourceCandidateId", "candidateId", "targetFactId", "roleId",

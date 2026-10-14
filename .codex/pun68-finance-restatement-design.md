@@ -84,3 +84,58 @@ loss; delete/restore; forged/legacy revision denial; exact retry/replay rollback
 two concurrent restatements; source-lock/owner order and bounded operations.
 Successful restatement must preserve the immutable old value and every original
 source permission vector, and must not mint a refreshed historical Fact vector.
+
+## Next bounded slice and consumer reservations
+
+Proposal at source head `2c73321c`; no Finance runtime/schema implementation or
+new authority is authorized by this note. Source owner remains the recovery lane;
+the existing batch coordinator confirms reservations before any overlapping edit.
+
+- Finance source consumers: `finance-import-proposal.ts`,
+  `finance-import-reconciliation.ts` (`captureFinanceCurrentFactProof` and rerun),
+  `finance-import-review.ts`, `finance-import-application.ts`
+  (`applyFinanceReportImport`) and `finance-import-lineage.ts`, with their matching
+  tests. Integrate immutable before-value ancestry across ALL four consumers in
+  one slice; changing only application leaves old mutable ancestry in candidates.
+- Source infrastructure: typed revision constructor and source registry/lineage,
+  authority edges, permission coverage/epochs/parents, source commit plan,
+  schema/migration and tenant ownership/purge selectors. Reserve the next additive
+  migration only after order is confirmed; no renumbering or production DDL.
+- Public Finance consumer:
+  `apps/web/app/api/workspaces/[workspaceId]/finance/imports/[batchId]/route.ts`.
+  Preserve POST apply and PATCH clarify/review contracts. Coordinate any route/test
+  change; no UI, grant or workflow expansion is assumed.
+- Following lifecycle consumers: `brain-source-removal.ts`,
+  `brain-source-removal-outcome.ts`, `brain-article-variants.ts`,
+  `derived-artifact-variants.ts` and their existing tests. Reserve `brain.ts`,
+  `context-graph.ts` and agent adapters `brain-source-regenerate.ts`,
+  `brain-article-variant.ts`, `graph-source-variant.ts` separately before edits.
+  Bloop's `conversation.ts`/Brain continuation, connector outbox/bootstrap/runner,
+  parent PR1523 harness/approval UI and PUN89 CI/root package remain excluded.
+
+Finance acceptance must prove a successful same-Fact 123.45 to 234.56 restatement
+from two real authenticated uploads with a different historical approving writer,
+retaining exact old/new immutable values, original bytes, recipe, approval identity
+and permission vectors. Cover ADD/UPDATE/UNCHANGED/DUPLICATE, exact live-Fact parity,
+independent old/new-source revocation, Finance/member/feature loss, forged/legacy
+revision denial, pending-batch re-reconciliation, complete retry/replay rollback,
+two concurrent restatements and source/owner lock order. Keep current row/output
+bounds, the 120-second transaction limit and 4 GiB compiler budget unchanged.
+The current safety rollback test remains a negative; success must not be achieved
+by refreshing historical epochs or dropping an ancestor.
+
+Lifecycle acceptance uses the approved remaining-source policy: regenerate only
+from independently permitted surviving sources, preserve standalone originals and
+private records, create separate member variants, and retain graph approval only
+when reviewed meaning/targets/authority remain valid. Test source removal and
+restore races, reclaimed jobs, deleted/recreated owners, stale outputs, complete
+atomic rollback, denied source content/count/search, narrower-member variants and
+approval retention versus material-change withholding. No generic-agent recorder
+read grant is introduced.
+
+Parent decisions still block lifecycle schema/activation: whether FinanceReport
+ARCHIVED invalidates all historical value revisions; Report/Fact deletion FK and
+tombstone behavior while preserving immutable evidence; the exact restoration
+rule requiring fresh authenticated regeneration; and treatment of legacy Facts
+whose original recipe cannot be reconstructed. Recommend retaining/withholding
+such evidence pending decisions; do not implement new permissions or data cleanup.

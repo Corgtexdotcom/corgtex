@@ -22,6 +22,7 @@ export type TenantPurgeDerivedSelector =
   | { kind: "NO_SELECTOR_PRESERVE"; model: Prisma.ModelName; authorizesRoot: false };
 
 const SELECTOR_DSL = `
+R|SqlKnowledgeStagedChunk|publication.workspace|WORKSPACE|B|
 R|AdviceRequestRecipient|request.workspace|WORKSPACE|B|;R|AdviceRequestRecipient|member.workspace|WORKSPACE|B|
 R|AgentStep|agentRun.workspace|WORKSPACE|B|;R|AgentToolCall|agentRun.workspace|WORKSPACE|B|
 R|ApprovalDecision|flow.workspace|WORKSPACE|B|;R|ApprovalDecision|member.workspace|WORKSPACE|B|
@@ -97,7 +98,7 @@ export function decodeTenantPurgeDerivedSelectors(dsl: string): readonly TenantP
 }
 
 export const TENANT_PURGE_DERIVED_SELECTORS = decodeTenantPurgeDerivedSelectors(SELECTOR_DSL);
-export const TENANT_PURGE_INDIRECT_MODELS = Object.freeze(["AdviceRequestRecipient", "AgentStep", "AgentToolCall", "ApprovalDecision", "BrainArticleVersion", "BrainDiscussionComment", "BrainDiscussionThread", "BuildArtifactAsset", "CircleAgentAssignment", "ContextMapLayoutItem", "ConversationTurn", "CrmConversationMessage", "ExternalDataSyncLog", "GoalLink", "GoalUpdate", "KeyResult", "MemberExpertise", "Objection", "Role", "RoleAssignment", "TensionUpvote", "WebhookDelivery", "WorkspaceToolLinkCircleTag"] as const satisfies readonly Prisma.ModelName[]);
+export const TENANT_PURGE_INDIRECT_MODELS = Object.freeze(["AdviceRequestRecipient", "AgentStep", "AgentToolCall", "ApprovalDecision", "BrainArticleVersion", "BrainDiscussionComment", "BrainDiscussionThread", "BuildArtifactAsset", "CircleAgentAssignment", "ContextMapLayoutItem", "ConversationTurn", "CrmConversationMessage", "ExternalDataSyncLog", "GoalLink", "GoalUpdate", "KeyResult", "MemberExpertise", "Objection", "Role", "RoleAssignment", "SqlKnowledgeStagedChunk", "TensionUpvote", "WebhookDelivery", "WorkspaceToolLinkCircleTag"] as const satisfies readonly Prisma.ModelName[]);
 
 export interface TenantPurgeSchemaField { name: string; kind: string; type: string; isId?: boolean; isUnique?: boolean; relationFromFields?: readonly string[] }
 export interface TenantPurgeSchemaModel { name: string; fields: readonly TenantPurgeSchemaField[] }

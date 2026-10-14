@@ -32,6 +32,20 @@ describe("demo legacy credential retirement", () => {
       const recording = await prisma.meetingRecording.create({ data: { workspaceId: workspace.id, meetingId: meeting.id, provider: "RECALL_AI", externalBotId: key, meetingUrl: "https://example.test", status: "SCHEDULED" } });
       await expect(assertDemoWorkspaceDisconnected(prisma, workspace.id)).rejects.toThrow("recording authority");
       await prisma.meetingRecording.delete({ where: { id: recording.id } });
+      // Recorder retirement emits real permission work; neither pending nor
+      // dispatched history may be treated as a disconnected workspace.
+      await expect(assertDemoWorkspaceDisconnected(prisma, workspace.id)).rejects.toThrow("asynchronous authority");
+      const recordingEvents = await prisma.event.findMany({ where: { workspaceId: workspace.id,
+        type: "source-permission.changed", status: "PENDING",
+        payload: { path: ["governors"], array_contains: [{ kind: "MeetingRecording", id: recording.id }] } } });
+      expect(recordingEvents.length).toBeGreaterThan(0);
+      const recordingEventIds = recordingEvents.map(event => event.id);
+      const dispatched = await prisma.event.updateMany({ where: { workspaceId: workspace.id, type: "source-permission.changed",
+        id: { in: recordingEventIds }, status: "PENDING" }, data: { status: "DISPATCHED", dispatchedAt: new Date() } });
+      expect(dispatched.count).toBe(recordingEventIds.length);
+      await expect(assertDemoWorkspaceDisconnected(prisma, workspace.id)).rejects.toThrow("asynchronous authority");
+      // Remove only this synthetic recording's identified events to reach the independent billing negative.
+      await prisma.event.deleteMany({ where: { workspaceId: workspace.id, type: "source-permission.changed", id: { in: recordingEventIds } } });
       const billing = await prisma.workspaceBillingProfile.create({ data: { workspaceId: workspace.id, stripeCustomerId: `synthetic-${key}` } });
       await expect(assertDemoWorkspaceDisconnected(prisma, workspace.id)).rejects.toThrow("billing authority");
       await prisma.workspaceBillingProfile.delete({ where: { id: billing.id } });
