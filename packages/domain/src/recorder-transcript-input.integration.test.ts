@@ -584,9 +584,9 @@ describe("Meeting BaaS authenticated native continuity", () => {
     const role = await prisma.role.create({ data: { circleId: circle.id, name: "Reader", accountabilities: [], artifacts: [] } });
     const member = await prisma.member.findFirstOrThrow({ where: { workspaceId: f.workspace.id } });
     await prisma.roleAssignment.create({ data: { memberId: member.id, roleId: role.id } });
-    await classifyInformationSource(f.actor, { workspaceId: f.workspace.id, kind: "Meeting", id: f.meeting.id, category: "SALARY" });
     await configureInformationCategory(f.actor, { workspaceId: f.workspace.id, category: "SALARY", isRestricted: true,
       allowedRoleIds: [role.id], allowedCircleIds: [] });
+    await classifyInformationSource(f.actor, { workspaceId: f.workspace.id, kind: "Meeting", id: f.meeting.id, category: "SALARY" });
     native(f); await processMeetingRecorderWebhook("MEETING_BAAS", signed(f));
     const roots = await captureArtifactInputProof(f.actor, f.workspace.id, [{ kind: "MeetingTranscript", id: f.meeting.id }]);
     expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, roots)).toBe(true);
