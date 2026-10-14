@@ -27,7 +27,12 @@ variables; never put them in command arguments or committed files.
 4. `prepare-publication --snapshot /private/source.json --options
    /private/policy.json --output /private/prepared.json` stages exact selected rows
    with their original states and records any explicitly detached references.
-   Stage old credentials and executable jobs/events. Retain business history.
+   Stage old credentials and executable jobs/events, including pending permission
+   events, by their exact original primary keys. Never fake completion or delete
+   work to make a publication pass. Retain business history.
+   Also stage every row in the historical authority families listed below. Original
+   exports must use `copy` or `transform` for these families; `discard`, `rebuild`
+   and `operator-control` cannot substitute for preservation.
    Stage any source `operator_import_inactive` marker explicitly. To preserve
    newspaper click history, `disable-tracking-token` replaces only tracked-link
    token hashes with nonfunctional values while retaining their rows.
@@ -46,6 +51,41 @@ variables; never put them in command arguments or committed files.
    existing tenant. Check transformed digests, representative content/history,
    existing credentials, isolation, disabled effects and retry behavior.
 
+
+## Historical authority preservation
+
+The publication and direct importer reject any remaining populated table in these
+families, including reencryption, transformed IDs, matching epoch counters, or a
+prepared wrapper. Empty table metadata can remain. JSON field classification
+records what the bytes mean; it never grants permission.
+
+- `SourcePermissionEpoch`, `ArtifactInputLineage`, `ArtifactInputSnapshot`.
+- `CommunicationIngressInput`, `CommunicationMessageNativeInput`.
+- `NativeTranscriptInput` in **every** mode, including direct member/audio uploads,
+  recorder custody and legacy modes.
+- `RecorderTranscriptBinding`, `RecorderTranscriptClaim`, `RecorderTranscriptAttempt`,
+  `RecorderTranscriptPublication`.
+- `SqlIngestionSourceClaim`, `SqlIngestionAttempt`, `SqlNativeRunInput`,
+  `SqlNativeCapturePart`, `SqlKnowledgePublication`, `SqlKnowledgeStagedChunk`.
+- `ExternalProviderFetchInput`, `ExternalMcpResponseInput`, `ConversationIngressInput`,
+  `McpToolInput`, `ConversationOperationOutcome`, `CrmQualificationFormInput`,
+  `FinanceReportUploadInput`.
+
+Keep the complete original rows in the private staging artifact: identifiers,
+text, ciphertext, proof, hashes, timestamps, statuses and nonce/signature values.
+Do not rebase or reset permission epochs, bypass triggers, or replace historical
+proof with a fresh target grant. Register opaque scalar identities as references,
+encrypted data/nonces/signatures as secrets, and storage locators as objects.
+Polymorphic identifiers such as `Event.aggregateId` require classification without
+an invented foreign key.
+
+A referencing business row may remain only after an explicit, legitimate nullable
+reference detachment, whose original value is retained in staging. Otherwise stage
+the referencing row as well. Imported business bytes remain intact but existing
+readers withhold content without valid lineage. Only a real producer rebuild under
+current target authority may make a fresh output readable; activation or matching
+source/target counter values alone cannot revive copied proof.
+
 ## Publish and cut over
 
 Stop the actual source writers and reconcile in-flight work. Capture final data
@@ -59,9 +99,11 @@ configuration; both must match the receipt before any database query. Do not
 derive these expected identities from the receipt being checked.
 The transaction publishes inactive
 members/agents and an `operator_import_inactive` feature flag with its receipt.
-The flag suppresses all-workspace scheduled jobs, recurring-series materialization
-and approval expiry. It is not a universal write lock: integrations and executable pending
-work need their own reviewed disabled settings or staging. Deploy these runtime
+The flag suppresses event/job claims, all-workspace scheduled jobs,
+recurring-series materialization and approval expiry. Fresh target permission
+triggers may create epochs and pending events during import; they remain held by
+this atomically committed marker. It is not a universal write lock: integrations
+need their own reviewed disabled settings and source executable work needs staging. Deploy these runtime
 guards before publishing an inactive workspace.
 
 Run `verify-inactive`, then verify access and actual client workflows. Activation,

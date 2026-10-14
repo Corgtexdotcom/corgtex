@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { assertPg18NotNullSource, readPgNotNullEvidence } from "./pg18-pg16-notnull";
 import { inventorySharedTenantSource, quoteIdentifier } from "./shared-tenant-inventory.mjs";
 import { getWorkspaceModelMetadata, getWorkspaceOwnershipRules, type WorkspaceOwnershipRule } from "./workspace-ownership";
-import { assertTransferTableFieldPolicies, transferScalarFieldKinds } from "./shared-tenant-transfer-contract";
+import { assertHistoricalAuthorityPreserved, assertTransferTableFieldPolicies, transferScalarFieldKinds } from "./shared-tenant-transfer-contract";
 import type {
   TenantTransferManifest, TenantTransferSnapshot, TransferColumn, TransferForeignKey,
   TransferSqlClient, TransferTableData, TransferTablePolicy,
@@ -126,6 +126,11 @@ export async function exportTenantSnapshot(
         if (!manifest.tables[raw.name]) throw new Error(`Unclassified populated table: ${raw.name}`);
         if (raw.name === "_prisma_migrations" && manifest.tables[raw.name].disposition !== "operator-control") {
           throw new Error("_prisma_migrations must remain operator-control metadata");
+        }
+        assertHistoricalAuthorityPreserved(raw.name, true, manifest.tables[raw.name]);
+        if (["Event", "WorkflowJob"].includes(raw.name) && !transfers(manifest.tables[raw.name])) {
+          const pending = await client.query(`SELECT 1 FROM ${tableName(raw.name)} WHERE status::text IN ('PENDING','RUNNING') OR "lockedBy" IS NOT NULL OR "lockedAt" IS NOT NULL LIMIT 1`);
+          if (pending.rows.length) throw new Error(`TRANSFER_SOURCE_WORK_PRESERVATION_REQUIRED:${raw.name}`);
         }
         const structured = columns.filter((column) => /^jsonb?$/.test(column.type) || column.type.endsWith("[]"));
         const classified = columns.filter((column) => structured.includes(column) || transferScalarFieldKinds[raw.name]?.[column.name]);
