@@ -189,6 +189,11 @@ export { readConversationToolLinkArchiveOutcome, getConversationOperationOutcome
 export type { ConversationToolLinkArchiveResult, ConversationToolLinkArchiveRequest } from "./conversation-operation-outcome";
 export * from "./source-lineage-rebuild";
 export * from "./source-lineage-backfill";
+export { claimSqlIngestionAttempt, renewSqlIngestionAttempt, failSqlIngestionAttempt,
+  sqlIngestionConfigurationFingerprint, SQL_INGESTION_LEASE_MS, SQL_INGESTION_RENEW_INTERVAL_MS } from "./sql-ingestion-attempt";
+export { captureSqlIngestionAttempt, disposeSqlIngestionCapture } from "./sql-native-input";
+export type { SqlIngestionAttempt, AuthenticatedSqlRunReceipt, PreparedSqlKnowledgeAttempt,
+  SqlPublicationIdentity, CommittedSqlKnowledgePublication } from "./sql-ingestion-contract";
 
 export { createCheckInGenerationActor, createBudgetAlertActor } from "./internal-source-principal";
 

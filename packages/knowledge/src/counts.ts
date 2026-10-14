@@ -7,7 +7,7 @@ import { scanReadableKnowledgeChunks } from "./retrieval";
 export async function countReadableKnowledgeChunks(actor: AppActor, workspaceId: string,
   sourceTypes?: KnowledgeSourceType[]) {
   const accessDomains = await resolveKnowledgeAccessDomains(actor, workspaceId);
-  const supported: KnowledgeSourceType[] = ["BRAIN_ARTICLE", "DOCUMENT", "MEETING", "PROPOSAL"];
+  const supported: KnowledgeSourceType[] = ["BRAIN_ARTICLE", "DOCUMENT", "MEETING", "PROPOSAL", "EXTERNAL_CONTENT", "EXTERNAL_DATABASE"];
   const selected = sourceTypes?.length ? sourceTypes.filter((type) => supported.includes(type)) : supported;
   if (!selected.length || !accessDomains.length) return 0;
   const { chunks, roots } = await scanReadableKnowledgeChunks({ actor, workspaceId, accessDomains, sourceTypes: selected });

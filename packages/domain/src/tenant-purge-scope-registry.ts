@@ -20,7 +20,7 @@ export const TENANT_PURGE_MODEL_DISPOSITIONS = {
     "ContextGraphObject", "ContextGraphProposedDiff", "ContextGraphRelationship", "ContextMapLayoutItem", "ContextMapView", "ConversationPendingOperation", "ConversationPromptInput", "ConversationIngressInput", "McpToolInput", "ConversationOperationOutcome", "ConversationSession", "ConversationTurn",
     "CrmAccount", "CrmActivity", "CrmCommunicationSuggestion", "CrmContact", "CrmConversation", "CrmConversationMessage", "CrmDeal", "CrmDealStageTransition", "CrmProspectWorkspace",
     "CrmQualification", "CrmQualificationFormInput", "CustomerDeploymentAccess", "CustomerReleaseTarget", "DecisionRecord", "DeliberationEntry", "DemoLead", "Document", "ExecutionRequest", "ExecutionResult", "ExpertiseTag",
-    "ExternalContentSource", "ExternalContentSyncLog", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalDataSource", "ExternalDataSyncLog", "ExternalMcpConnection", "FinanceClient", "FinanceConsultant", "FinanceContributionEntry",
+    "ExternalContentSource", "ExternalContentSyncLog", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalDataSource", "ExternalDataSyncLog", "SqlIngestionSourceClaim", "SqlIngestionAttempt", "SqlNativeRunInput", "SqlKnowledgePublication", "SqlKnowledgeStagedChunk", "InformationCategoryPolicy", "ExternalMcpConnection", "FinanceClient", "FinanceConsultant", "FinanceContributionEntry",
     "FinanceExpense", "FinanceImportApplication", "FinanceImportBatch", "FinanceReportUploadInput", "FinanceImportProfile", "FinanceProject", "FinanceReport", "FinanceTimeEntry", "Goal", "GoalLink", "GoalUpdate",
     "GovernanceScore", "ImpactFootprint", "InboundWebhook", "KeyResult", "KnowledgeChunk", "McpOAuthAccessToken", "McpOAuthAuthorizationCode", "Meeting", "MeetingAudioAsset",
     "MeetingFollowUpReview", "MeetingInsight", "MeetingRecorderSmokeRun", "MeetingRecording", "MeetingSeries", "MeetingTranscriptImportBatch", "MeetingTranscriptProcessingProgress",
@@ -67,6 +67,8 @@ export interface TenantPurgeDirectRelation {
 }
 
 const DIRECT_RELATION_DSL = `
+SqlNativeRunInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;SqlKnowledgePublication|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;InformationCategoryPolicy|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;
+SqlIngestionSourceClaim|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;SqlIngestionAttempt|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;
 NativeTranscriptInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;CommunicationIngressInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;CommunicationMessageNativeInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;SourcePermissionEpoch|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;GenericDerivedArtifactVariant|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;DerivedArtifactRebuildState|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;
 ExternalProviderFetchInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;ExternalMcpResponseInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;FinanceReportUploadInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;CrmQualificationFormInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;ConversationOperationOutcome|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;McpToolInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;ConversationIngressInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;AgentRequestInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;AgentFeedbackInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;ConversationPromptInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;WorkspaceFeatureFlag|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;ArtifactInputLineage|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;ArtifactInputSnapshot|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;FinanceClient|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;FinanceConsultant|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;FinanceProject|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
 FinanceTimeEntry|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;FinanceExpense|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;FinanceContributionEntry|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;FinanceReport|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
@@ -130,7 +132,7 @@ export function decodeDirectRelations(dsl: string, sourceBits: string): TenantPu
 }
 
 // Each row has delete/update source bits: 1 is explicit, 0 is the verified PostgreSQL default.
-const DIRECT_RELATION_SOURCE_BITS = `${"10".repeat(172)}${"11".repeat(3)}1010101010`;
+const DIRECT_RELATION_SOURCE_BITS = `${"10".repeat(177)}${"11".repeat(3)}1010101010`;
 export const TENANT_PURGE_DIRECT_RELATIONS = decodeDirectRelations(DIRECT_RELATION_DSL, DIRECT_RELATION_SOURCE_BITS);
 
 function stripPrismaComments(schema: string) {

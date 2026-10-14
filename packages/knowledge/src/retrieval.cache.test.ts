@@ -11,7 +11,7 @@ const { prismaMock, modelGatewayMock } = vi.hoisted(() => {
   return {
     prismaMock: {
       $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({ ...prismaMock })),
-      $queryRaw: vi.fn(),
+      $queryRaw: vi.fn(async () => []),
       knowledgeChunk: knowledgeChunkMock,
       workspace: { findUnique: vi.fn() },
       agentCredential: { findFirst: vi.fn() },
@@ -21,7 +21,8 @@ const { prismaMock, modelGatewayMock } = vi.hoisted(() => {
       document: { findMany: vi.fn(), findFirst: vi.fn() },
       meeting: { findMany: vi.fn() },
       proposal: { findMany: vi.fn() },
-      externalContentSource: { findFirst: vi.fn() },
+      externalContentSource: { findFirst: vi.fn(), findMany: vi.fn(async () => []) },
+      sqlNativeRunInput: { findMany: vi.fn(async () => []) },
     },
     modelGatewayMock: {
       embed: vi.fn<ModelGateway["embed"]>(async ({ input }) => {

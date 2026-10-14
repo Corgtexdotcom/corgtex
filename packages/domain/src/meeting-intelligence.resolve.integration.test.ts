@@ -24,8 +24,11 @@ const database = new URL(process.env.DATABASE_URL ?? "postgresql://invalid/inval
 const assignedLocalFixture = database.hostname === "127.0.0.1" && database.port === "55468";
 const assignedCiFixture = process.env.GITHUB_ACTIONS === "true"
   && database.hostname === "localhost" && database.port === "5432";
-if (!["postgres:", "postgresql:"].includes(database.protocol) || (!assignedLocalFixture && !assignedCiFixture)
-  || database.pathname !== "/corgtex_test" || database.searchParams.get("schema") !== "public") {
+const assignedExplicitFixture = process.env.CORGTEX_DISPOSABLE_TEST_DATABASE_URL === process.env.DATABASE_URL
+  && ["localhost", "127.0.0.1", "[::1]"].includes(database.hostname) && /^\/[a-z0-9_]+_test$/.test(database.pathname);
+if (!["postgres:", "postgresql:"].includes(database.protocol) || (!assignedExplicitFixture &&
+  ((!assignedLocalFixture && !assignedCiFixture) || database.pathname !== "/corgtex_test"))
+  || database.searchParams.get("schema") !== "public") {
   throw new Error("Meeting resolution requires the assigned disposable local or GitHub Actions PostgreSQL fixture.");
 }
 
@@ -111,7 +114,7 @@ describe("Meeting RESOLVE complete transactional lineage", () => {
     await expect(withArtifactInputWriteFence(async tx => {
       if (tx && (await tx.meetingInsight.findUniqueOrThrow({ where: { id: f.insight.id } })).status === "APPLIED")
         throw new AppError(409, "SOURCE_CHANGED", "Synthetic final fence failed");
-    }, () => applyInsight(f.actor, { workspaceId: f.workspace.id, insightId: f.insight.id }))).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    }, () => applyInsight(f.actor, { workspaceId: f.workspace.id, insightId: f.insight.id }))).rejects.toMatchObject({ code: "ARTIFACT_INPUT_WRITE_FENCE_LOST" });
     expect((await f.getTarget()).status).toBe("OPEN");
     expect((await prisma.meetingInsight.findUniqueOrThrow({ where: { id: f.insight.id } })).status).toBe("SUGGESTED");
     expect(await prisma.event.count({ where: { workspaceId: f.workspace.id } })).toBe(eventCount);

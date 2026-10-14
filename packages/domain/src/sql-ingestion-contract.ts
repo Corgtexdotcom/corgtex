@@ -1,7 +1,7 @@
 import type { Prisma } from "@prisma/client";
 
-/** Type contract only. These brands do not mint runtime authority; the future
- * trusted claim/capture implementations must check exact private token identity. */
+/** Brands do not mint runtime authority. Trusted claim/capture implementations
+ * require exact private token identity. */
 declare const attemptBrand: unique symbol;
 declare const receiptBrand: unique symbol;
 declare const preparedBrand: unique symbol;
@@ -17,8 +17,14 @@ export type SqlNativeType = "int2" | "int4" | "int8" | "numeric" | "date" | "tim
   | "timestamptz" | "uuid" | "text" | "varchar" | "bpchar";
 export type SqlNativeColumn = Readonly<{name: string; type: SqlNativeType; typeOid: number;
   typeModifier: number; collationOid: number}>;
+/** Ordered complete native SELECT * shape from pg_attribute/pg_type, including
+ * payload columns. These are captured by the trusted native driver, never
+ * reconstructed from rendered model text. Key/cursor types remain bounded. */
+export type SqlNativeCapturedColumn = Readonly<{name: string; type: string; typeOid: number;
+  typeModifier: number; collationOid: number; position: number; isNullable: boolean;
+  identity: string; generated: string}>;
 export type SqlNativeDefinition = Readonly<{schema: string; name: string; relationOid: number;
-  cursor: SqlNativeColumn; key: readonly SqlNativeColumn[]}>;
+  cursor: SqlNativeColumn; key: readonly SqlNativeColumn[]; columns: readonly SqlNativeCapturedColumn[]}>;
 export type SqlNativeRow = Readonly<{
   /** Exact actual driver row, retained separately from rendered model content. */
   row: Readonly<Record<string, unknown>>; table: string; definition: SqlNativeDefinition;
@@ -38,12 +44,22 @@ export type SqlNativeDriverResult = Readonly<{rows: readonly SqlNativeRow[]; pag
 export type SqlNativeDriver = (input: Readonly<{source: SqlSourceConfiguration;
   attempt: SqlIngestionAttempt; assertCurrentSource(): Promise<void>}>) => Promise<SqlNativeDriverResult>;
 
+/** Authenticated current provider SELECT/RLS/definition admission for precisely
+ * these native parents. It receives no rendered content and mints no receipts.
+ * Return true only for authenticated allowed access, false for authenticated
+ * denial (which tombstones the receipt); throw for unsupported/unproved access.
+ * None of those failures may fall back to local membership/category guards. */
+export type SqlNativeAccessValidator = (input: Readonly<{source: SqlSourceConfiguration;
+  parents: Readonly<{rows: readonly Pick<SqlNativeRow, "table" | "definition" | "values" | "primaryKey">[];
+    pages: readonly SqlNativePage[]}>;
+  assertCurrentSource(): Promise<void>}>) => Promise<boolean>;
+
 export type SqlPublicationIdentity = Readonly<{publicationId: string; workspaceId: string; sourceId: string;
   attemptId: string; generation: string; configurationFingerprint: string; rowsProcessed: number;
   chunksCreated: number; nextCursor: string | null}>;
 export type CommittedSqlKnowledgePublication = SqlPublicationIdentity & Readonly<{committed: true}>;
 
-/** Future runtime exports from @corgtex/domain. Not implemented by these types. */
+/** Runtime exports from @corgtex/domain; these type ports grant no authority. */
 export interface SqlIngestionAttemptPort {
   claimSqlIngestionAttempt(input: {workspaceId: string; sourceId: string;
     expectedConfigurationFingerprint: string; expectedCursor: string | null; logId: string}): Promise<SqlIngestionAttempt>;
@@ -54,7 +70,7 @@ export interface SqlIngestionAttemptPort {
   failSqlIngestionAttempt(input: {attempt: SqlIngestionAttempt; error: string; logId: string}): Promise<void>;
   disposeSqlIngestionCapture(receipt: AuthenticatedSqlRunReceipt): Promise<void>;
 }
-/** Future runtime exports from @corgtex/knowledge, avoiding domain→Knowledge→
+/** Runtime exports from @corgtex/knowledge, avoiding domain→Knowledge→
  * domain imports. No numeric return can stand in for committed publication. */
 export interface SqlKnowledgePublicationPort {
   prepareSqlKnowledgeAttempt(input: {attempt: SqlIngestionAttempt;

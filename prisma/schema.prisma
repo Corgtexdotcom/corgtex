@@ -815,6 +815,11 @@ model Workspace {
   externalContentSources         ExternalContentSource[]
   externalProviderFetchInputs    ExternalProviderFetchInput[]
   externalMcpResponseInputs      ExternalMcpResponseInput[]
+  sqlIngestionSourceClaims       SqlIngestionSourceClaim[]
+  sqlIngestionAttempts           SqlIngestionAttempt[]
+  sqlNativeRunInputs             SqlNativeRunInput[]
+  sqlKnowledgePublications       SqlKnowledgePublication[]
+  informationCategoryPolicies    InformationCategoryPolicy[]
   genericDerivedArtifactVariants GenericDerivedArtifactVariant[]
   derivedArtifactRebuildStates DerivedArtifactRebuildState[]
   sourcePermissionEpochs SourcePermissionEpoch[]
@@ -5416,6 +5421,11 @@ model ExternalDataSource {
   id                  String    @id @default(uuid())
   workspaceId         String
   label               String
+  accessDomain        KnowledgeAccessDomain @default(WORKSPACE)
+  informationCategory String @default("GENERAL")
+  isRestricted        Boolean @default(false)
+  allowedRoleIds      String[] @default([])
+  allowedCircleIds    String[] @default([])
   driverType          String    @default("postgres")
   connectionStringEnc String
   selectedTables      String[]  @default([])
@@ -5438,9 +5448,117 @@ model ExternalDataSource {
   @@index([workspaceId, archivedAt])
 }
 
+// Source tombstone deliberately has no ExternalDataSource FK: deletion and
+// recreation must retain the generation, rather than revive an old worker.
+model SqlIngestionSourceClaim {
+  id String @id @default(uuid())
+  workspaceId String
+  sourceId String
+  generation BigInt @default(0)
+  activeAttemptId String?
+  ownerNonce String?
+  configurationFingerprint String? @db.VarChar(64)
+  leaseExpiresAt DateTime?
+  status String @default("IDLE")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@unique([workspaceId, sourceId])
+}
+
+model SqlIngestionAttempt {
+  id String @id @default(uuid())
+  workspaceId String
+  sourceId String
+  generation BigInt
+  ownerNonce String
+  configurationFingerprint String @db.VarChar(64)
+  expectedCursor String? @db.Text
+  sourcePermissionEpoch BigInt
+  originalPermissionEpochsJson Json @default("{}")
+  logId String
+  status String @default("RUNNING")
+  leaseExpiresAt DateTime
+  error String? @db.Text
+  createdAt DateTime @default(now())
+  completedAt DateTime?
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@unique([workspaceId, sourceId, generation])
+  @@index([workspaceId, sourceId, status])
+}
+
+
+/// Current company category restriction; absence is also versioned authority.
+model InformationCategoryPolicy {
+  id String @id @default(uuid())
+  workspaceId String
+  category String
+  isRestricted Boolean @default(false)
+  allowedRoleIds String[] @default([])
+  allowedCircleIds String[] @default([])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@unique([workspaceId, category])
+}
+
+/// Created only by the authenticated registered native scanner. No source FK:
+/// originals survive source deletion, with their original permission vector.
+model SqlNativeRunInput {
+  id String @id @default(uuid())
+  workspaceId String
+  sourceId String
+  attemptId String @unique
+  generation BigInt
+  configurationFingerprint String @db.VarChar(64)
+  sourcePermissionEpoch BigInt
+  permissionEpochsJson Json
+  encryptedPayload String @db.Text
+  payloadHash String @db.VarChar(64)
+  rowsProcessed Int
+  nextCursor String? @db.Text
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, sourceId])
+}
+
+/// Complete immutable output set is staged without serving authority. One final
+/// transaction publishes all chunks and the cursor, then seals COMMITTED.
+model SqlKnowledgePublication {
+  id String @id @default(uuid())
+  workspaceId String
+  sourceId String
+  attemptId String @unique
+  nativeInputId String
+  generation BigInt
+  configurationFingerprint String @db.VarChar(64)
+  outputSetHash String @db.VarChar(64)
+  chunksCreated Int
+  rowsProcessed Int
+  nextCursor String? @db.Text
+  status String @default("PREPARING")
+  createdAt DateTime @default(now())
+  committedAt DateTime?
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  chunks SqlKnowledgeStagedChunk[]
+  @@index([workspaceId, sourceId, status])
+}
+
+model SqlKnowledgeStagedChunk {
+  id String @id
+  publicationId String
+  ordinal Int
+  rowIndex Int
+  contentHash String @db.VarChar(64)
+  contentJson Json
+  publication SqlKnowledgePublication @relation(fields: [publicationId], references: [id], onDelete: Cascade)
+  @@unique([publicationId, ordinal])
+}
+
 model ExternalDataSyncLog {
   id            String    @id @default(uuid())
   sourceId      String
+  sqlAttemptId  String? @unique
   rowsProcessed Int       @default(0)
   chunksCreated Int       @default(0)
   error         String?

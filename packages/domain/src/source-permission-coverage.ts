@@ -1,4 +1,5 @@
 import type { Prisma } from "@prisma/client";
+import { isDeepStrictEqual } from "node:util";
 import { artifactPermissionParents, loadArtifactPermissionMetadata } from "./source-permission-parents";
 import { artifactPermissionEpochIdentities, isArtifactPermissionEpochProofCurrent,
   mergePermissionEpochProofs, parsePermissionEpochProof } from "./source-permission-epochs";
@@ -8,6 +9,23 @@ import { inspectStoredArtifactInputDependencies, lineageContentFingerprint,
 type SavedPreimage = { input: LineageInput; row: Record<string, unknown>; snapshotId: string };
 const inputKey = (input: LineageInput) => JSON.stringify([input.kind, input.id]);
 const revisionKey = (input: LineageRoot) => JSON.stringify([input.kind, input.id, input.fingerprint]);
+
+/** Exact worker publication vector. Snapshot consumers retain additional
+ * original caller governors and use the generic historical coverage path. */
+export function isPublishedSqlKnowledgeVector(artifactId: string, content: Record<string, unknown>,
+  roots: readonly LineageRoot[], permissionEpochs: unknown, nativePermissionEpochs: unknown): boolean {
+  const metadata = content.metadata as Record<string, unknown> | null;
+  const own = parsePermissionEpochProof(permissionEpochs), original = parsePermissionEpochProof(nativePermissionEpochs);
+  if (!own || !original || !metadata || typeof metadata.nativeInputId !== "string" || roots.length !== 1) return false;
+  const root = roots[0];
+  if (root.kind !== "SqlNativeRunInput" || root.id !== metadata.nativeInputId
+    || root.fingerprint !== metadata.sourceContentHash || !isDeepStrictEqual(root.permissionEpochs, original)) return false;
+  const keys = new Set(artifactPermissionEpochIdentities("KnowledgeChunk", {...content, id: artifactId})
+    .map(identity => JSON.stringify([identity.kind, identity.id])));
+  const ownEntries = own.entries.filter(entry => keys.has(JSON.stringify([entry.kind, entry.id])));
+  if (ownEntries.length !== keys.size) return false;
+  try {return isDeepStrictEqual(mergePermissionEpochProofs(original, {...own, entries: ownEntries}), own);} catch {return false;}
+}
 
 /** Check consumed history without minting a permission revision. A current H0
  * creation manifest cannot supply a missing earlier consumption epoch. */
@@ -23,6 +41,23 @@ export async function isArtifactInputPermissionEpochCoverageComplete(params: {
   const { workspaceId, artifact, roots, db } = params;
   const own = parsePermissionEpochProof(params.permissionEpochs);
   if (!own) return false;
+  if (artifact.kind === "KnowledgeChunk" && params.content?.id === artifact.id
+    && params.content.sourceType === "EXTERNAL_DATABASE") {
+    // Dedicated SQL publication seals the native collection and staged child.
+    // Verify that exact contract without loading the encrypted full run again
+    // for every child. Source vectors remain their original captured values.
+    const metadata = params.content.metadata as Record<string, unknown> | null;
+    if (!metadata || typeof metadata.nativeInputId !== "string" || roots.length !== 1) return false;
+    const root = roots[0];
+    if (root.kind !== "SqlNativeRunInput" || root.id !== metadata.nativeInputId
+      || root.fingerprint !== metadata.sourceContentHash) return false;
+    const native = await db.sqlNativeRunInput.findFirst({where: {id: root.id, workspaceId},
+      select: {permissionEpochsJson: true}});
+    if (!native || !isPublishedSqlKnowledgeVector(artifact.id, params.content, roots, own, native.permissionEpochsJson)) return false;
+    const {isSqlKnowledgeChunkPublished} = await import("./sql-native-input");
+    return await isSqlKnowledgeChunkPublished(workspaceId, params.content, db)
+      && await isArtifactPermissionEpochProofCurrent(workspaceId, own, db);
+  }
   const dependencies = await inspectStoredArtifactInputDependencies(db, workspaceId, roots, { maxNodes: 10000 });
   if (!dependencies.complete) return false;
   const proofs = [own];

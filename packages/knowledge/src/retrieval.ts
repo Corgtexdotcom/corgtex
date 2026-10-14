@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { KnowledgeAccessDomain, KnowledgeSourceType, Prisma } from "@prisma/client";
+import { Prisma, type KnowledgeAccessDomain, type KnowledgeSourceType } from "@prisma/client";
 import { getCacheJson, getCacheVersion, incrementCacheVersion, prisma, cosineSimilarity, logger, setCacheJson } from "@corgtex/shared";
 import { CatalogBudgetError, defaultModelGateway, ModelProviderHttpError, WorkspaceModelBudgetError } from "@corgtex/models";
 import type { AppActor } from "@corgtex/shared";
@@ -149,6 +149,8 @@ const knowledgeLineageKinds: Partial<Record<KnowledgeSourceType, LineageKind>> =
   DOCUMENT: "Document",
   MEETING: "Meeting",
   PROPOSAL: "Proposal",
+  EXTERNAL_CONTENT: "ExternalContentSource",
+  EXTERNAL_DATABASE: "SqlNativeRunInput",
 };
 
 type RetrievalAccess = {
@@ -158,6 +160,9 @@ type RetrievalAccess = {
   maxSensitivity?: SensitivityLabel;
   sourceTypes?: KnowledgeSourceType[];
 };
+
+const knowledgeSourceKey = (chunk: {sourceType: KnowledgeSourceType; sourceId: string; metadata?: unknown}) =>
+  `${chunk.sourceType}:${chunk.sourceType === "EXTERNAL_DATABASE" ? (chunk.metadata as Record<string, unknown> | null)?.nativeInputId : chunk.sourceId}`;
 
 type ReadableSource = { contentHash: string; kind: LineageKind; record: { id: string; [key: string]: unknown } };
 type SearchRun = { results: KnowledgeSearchResult[]; roots: LineageRoot[] };
@@ -176,7 +181,11 @@ function unavailableInput(error: unknown) {
 
 async function currentInputProof(params: RetrievalAccess, roots: LineageRoot[]) {
   if (roots.length === 0) return false;
-  try { return await isArtifactInputProofReadable(params.actor, params.workspaceId, roots); }
+  try {
+    const {isSqlKnowledgeInputProofReadable} = await import("../../domain/src/sql-knowledge-read-proof");
+    const sql = await isSqlKnowledgeInputProofReadable(params.actor, params.workspaceId, roots);
+    return sql ?? await isArtifactInputProofReadable(params.actor, params.workspaceId, roots);
+  }
   catch (error) {
     if (unavailableInput(error)) return false;
     throw error;
@@ -214,11 +223,14 @@ async function captureKnowledgeInputs(params: RetrievalAccess,
   chunks: Array<{ id: string; sourceType: KnowledgeSourceType; sourceId: string; [key: string]: unknown }>,
   sources: Map<string, ReadableSource>) {
   if (chunks.length === 0) return [] as LineageRoot[];
+  const {captureSqlKnowledgeInputProof} = await import("../../domain/src/sql-knowledge-read-proof");
+  const sql = await captureSqlKnowledgeInputProof(params.actor, params.workspaceId, chunks as unknown as import("@prisma/client").KnowledgeChunk[]);
+  if (sql !== undefined) return sql;
   const parentInputs = new Map<string, { kind: LineageKind; id: string; snapshot: Record<string, unknown> }>();
   for (const chunk of chunks) {
-    const source = sources.get(`${chunk.sourceType}:${chunk.sourceId}`);
+    const source = sources.get(knowledgeSourceKey(chunk));
     if (!source) return null;
-    parentInputs.set(`${chunk.sourceType}:${chunk.sourceId}`, { kind: source.kind, id: source.record.id, snapshot: source.record });
+    parentInputs.set(`${source.kind}:${source.record.id}`, { kind: source.kind, id: source.record.id, snapshot: source.record });
   }
   try {
     return await captureArtifactInputProof(params.actor, params.workspaceId, [
@@ -248,6 +260,27 @@ async function readableKnowledgeSources(params: RetrievalAccess, sourceIds?: Map
     if (!kind) continue; // No complete input proof exists for this source type.
     const ids = sourceIds?.get(sourceType);
     if (sourceIds && !ids?.length) continue;
+    if (sourceType === "EXTERNAL_DATABASE") {
+      // Bound source admission by immutable native runs, rather than 10k row
+      // namespaces. Only current committed children can introduce a run here.
+      const nativeIds = await prisma.$queryRaw<Array<{id: string}>>(Prisma.sql`
+        SELECT DISTINCT i.id FROM "SqlNativeRunInput" i
+        JOIN "SqlKnowledgePublication" p ON p."nativeInputId" = i.id AND p."workspaceId" = i."workspaceId" AND p.status = 'COMMITTED'
+        WHERE i."workspaceId" = ${params.workspaceId} AND EXISTS (
+          SELECT 1 FROM "KnowledgeChunk" k WHERE k."workspaceId" = i."workspaceId" AND k."sourceType" = 'EXTERNAL_DATABASE'
+          AND k.metadata->>'nativeInputId' = i.id AND k.metadata->>'sqlPublicationId' = p.id
+          AND k."accessDomain"::text IN (${Prisma.join(params.accessDomains)})
+          ${ids ? Prisma.sql`AND k."sourceId" IN (${Prisma.join(ids)})` : Prisma.empty})
+        ORDER BY i.id LIMIT ${KNOWLEDGE_SCAN_LIMIT - scanned + 1}`);
+      scanned += nativeIds.length;
+      if (scanned > KNOWLEDGE_SCAN_LIMIT) scanLimitExceeded();
+      if (!nativeIds.length) continue;
+      const records = await prisma.sqlNativeRunInput.findMany({where: {workspaceId: params.workspaceId, id: {in: nativeIds.map(row => row.id)}}});
+      const readable = await readableArtifactIds(params.actor, params.workspaceId, "SqlNativeRunInput", records);
+      for (const record of records) if (readable.has(record.id)) sources.set(`${sourceType}:${record.id}`, {
+        kind, record, contentHash: lineageContentFingerprint(kind, record)});
+      continue;
+    }
     const where = { workspaceId: params.workspaceId, ...(ids ? { id: { in: ids } } : {}), archivedAt: null };
     const scan = { take: KNOWLEDGE_SCAN_LIMIT - scanned + 1 };
     const records = sourceType === "BRAIN_ARTICLE"
@@ -256,7 +289,8 @@ async function readableKnowledgeSources(params: RetrievalAccess, sourceIds?: Map
         ? await prisma.document.findMany({ ...scan, where: { ...where, accessDomain: { in: params.accessDomains } } })
         : sourceType === "MEETING"
           ? await prisma.meeting.findMany({ ...scan, where })
-          : await prisma.proposal.findMany({ ...scan, where });
+          : sourceType === "EXTERNAL_CONTENT" ? await prisma.externalContentSource.findMany({...scan, where})
+            : await prisma.proposal.findMany({ ...scan, where });
     scanned += records.length;
     if (scanned > KNOWLEDGE_SCAN_LIMIT) scanLimitExceeded();
     const readable = await readableArtifactIds(params.actor, params.workspaceId, kind, records);
@@ -279,9 +313,16 @@ type PermissionChunk = Prisma.KnowledgeChunkGetPayload<{ select: typeof chunkPro
 /** The child's own manifest can restrict it further than its readable parent. */
 async function admitKnowledgeChunks(params: RetrievalAccess, chunks: PermissionChunk[], sources: Map<string, ReadableSource>) {
   const current = chunks.filter((chunk) => {
-    const source = sources.get(`${chunk.sourceType}:${chunk.sourceId}`);
+    const source = sources.get(knowledgeSourceKey(chunk));
     return !!source && (chunk.metadata as Record<string, unknown> | null)?.sourceContentHash === source.contentHash;
   });
+  if (current.length) {
+    const {captureSqlKnowledgeInputProof} = await import("../../domain/src/sql-knowledge-read-proof");
+    const sql = await captureSqlKnowledgeInputProof(params.actor, params.workspaceId, current);
+    if (sql) return current;
+    // One withheld child must not hide independent permitted candidates. If
+    // the complete fast set cannot be proven, use the ordinary per-child gate.
+  }
   const readable = await readableArtifactIds(params.actor, params.workspaceId, "KnowledgeChunk", current);
   return current.filter((chunk) => readable.has(chunk.id));
 }
@@ -302,8 +343,11 @@ export async function scanReadableKnowledgeChunks(params: RetrievalAccess, perTy
           workspaceId: params.workspaceId, accessDomain: { in: params.accessDomains }, sourceType,
           OR: [...sources].filter(([key]) => !sourceType || key.startsWith(`${sourceType}:`)).map(([key, source]) => {
             const separator = key.indexOf(":");
-            return { sourceType: key.slice(0, separator) as KnowledgeSourceType, sourceId: key.slice(separator + 1),
-              metadata: { path: ["sourceContentHash"], equals: source.contentHash } };
+            const type = key.slice(0, separator) as KnowledgeSourceType;
+            return type === "EXTERNAL_DATABASE" ? {sourceType: type, AND: [
+              {metadata: {path: ["nativeInputId"], equals: source.record.id}},
+              {metadata: {path: ["sourceContentHash"], equals: source.contentHash}}]} :
+              {sourceType: type, sourceId: key.slice(separator + 1), metadata: { path: ["sourceContentHash"], equals: source.contentHash }};
           }),
           sensitivity: params.maxSensitivity ? { in: levelsUpTo(params.maxSensitivity) } : undefined,
           ...(cursor ? { AND: [{ OR: [
@@ -356,7 +400,7 @@ async function currentKnowledgeCitations<T extends KnowledgeCitation>(params: Re
     if (!chunk || chunk.sourceType !== citation.sourceType || chunk.sourceId !== citation.sourceId
       || chunk.chunkIndex !== citation.chunkIndex || chunk.content.slice(0, 400) !== citation.snippet
       || chunk.sourceTitle !== citation.title) return false;
-    const source = sources.get(`${chunk.sourceType}:${chunk.sourceId}`);
+    const source = sources.get(knowledgeSourceKey(chunk));
     return !!source && (chunk.metadata as Record<string, unknown> | null)?.sourceContentHash === source.contentHash;
   });
 }

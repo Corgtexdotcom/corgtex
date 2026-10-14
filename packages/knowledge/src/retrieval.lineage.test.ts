@@ -15,10 +15,13 @@ const f = vi.hoisted(() => {
     && (!args.where.id || args.where.id.in.includes(row.id)) && row.archivedAt === null
     && (!args.where.accessDomain || args.where.accessDomain.in.includes(row.accessDomain)));
   const prisma = {
+    $queryRaw: vi.fn(async () => []),
     brainArticle: { findMany: vi.fn(async (args) => rows(args, "BRAIN_ARTICLE")) },
     document: { findMany: vi.fn(async (args) => rows(args, "DOCUMENT")) },
     meeting: { findMany: vi.fn(async (args) => rows(args, "MEETING")) },
     proposal: { findMany: vi.fn(async (args) => rows(args, "PROPOSAL")) },
+    externalContentSource: { findMany: vi.fn(async (args) => rows(args, "EXTERNAL_CONTENT")) },
+    sqlNativeRunInput: { findMany: vi.fn(async () => []) },
     knowledgeChunk: { findFirst: vi.fn(async (args) => receipts.find((row) => row.id === args.where.id && row.workspaceId === args.where.workspaceId && args.where.accessDomain.in.includes(row.accessDomain)) ?? null), findMany: vi.fn(async (args) => receipts.filter((row) => row.workspaceId === args.where.workspaceId
       && args.where.accessDomain.in.includes(row.accessDomain)
       && (!args.where.id || args.where.id.in.includes(row.id))
@@ -152,7 +155,7 @@ describe("actor-aware knowledge lineage", () => {
     article("other-tenant", [publicInput], "ws-2");
     const results = await searchIndexedKnowledge({ actor: bob, workspaceId: "ws-1", query: "policy", limit: 1, accessDomains: ["FINANCE", "WORKSPACE"] });
     expect(results.map((result) => result.sourceId)).toEqual(["public"]);
-    expect(f.prisma.knowledgeChunk.findMany.mock.calls[0][0]).toMatchObject({ where: {
+    expect(f.prisma.knowledgeChunk.findMany.mock.calls.filter(([query]) => query.take === 500)[0][0]).toMatchObject({ where: {
       accessDomain: { in: ["WORKSPACE"] }, OR: [expect.objectContaining({ sourceType: "BRAIN_ARTICLE", sourceId: "public", metadata: { path: ["sourceContentHash"], equals: f.hash("BrainArticle", f.sources[2]) } })],
     }, take: 500 });
     expect(f.gateway.rerank.mock.calls[0][0].documents.join(" ")).not.toMatch(/finance|unknown|other-tenant/);
@@ -462,7 +465,7 @@ describe("child lineage admission before retrieval windows", () => {
       const roots = await getKnowledgeSearchInputRoots(actor, workspaceId, first);
       expect(roots.filter(root => root.kind === "KnowledgeChunk").map(root => root.id)).toEqual(chunks.slice(500).map(row => row.id));
       expect(f.prisma.knowledgeChunk.findMany.mock.calls.filter(([query]) => query.take === 500)).toHaveLength(2);
-      expect(f.prisma.knowledgeChunk.findMany.mock.calls[1][0]).toMatchObject({where: {workspaceId,
+      expect(f.prisma.knowledgeChunk.findMany.mock.calls.filter(([query]) => query.take === 500)[1][0]).toMatchObject({where: {workspaceId,
         AND: [{OR: expect.arrayContaining([{createdAt: chunks[499].createdAt, chunkIndex: 499, id: {gt: chunks[499].id}}])}]},
         orderBy: [{createdAt: "desc"}, {chunkIndex: "asc"}, {id: "asc"}]});
       expect(await searchIndexedKnowledge(params)).toEqual(first);

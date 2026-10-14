@@ -51,6 +51,11 @@ export function artifactPermissionParents(kind: LineageKind, row: Record<string,
     const parent = subjects[String(row.subjectType)];
     if (parent) field(parent, "subjectId");
   }
+  if (kind === "SqlNativeRunInput") field("ExternalDataSource", "sourceId");
+  if (kind === "KnowledgeChunk" && row.sourceType === "EXTERNAL_DATABASE") {
+    const metadata = row.metadata;
+    if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) add("SqlNativeRunInput", (metadata as Record<string, unknown>).nativeInputId);
+  }
   if (kind === "KnowledgeChunk") {
     const sources: Record<string, LineageKind> = { BRAIN_ARTICLE: "BrainArticle", DOCUMENT: "Document", MEETING: "Meeting", PROPOSAL: "Proposal", EXTERNAL_CONTENT: "ExternalContentSource" };
     const parent = sources[String(row.sourceType)];
@@ -102,7 +107,7 @@ const METADATA_FIELDS = new Set([
   "sessionId", "conversationId", "flowId", "subjectType", "subjectId", "sourceType", "sourceId", "parentType", "parentId",
   "demoLeadId", "qualificationId", "accountId", "contactId", "dealId", "activityId", "targetWorkspaceId", "batchId", "documentId",
   "brainSourceId", "sourceBatchId", "reportId", "sourceCandidateId", "candidateId", "targetFactId", "roleId",
-  "isPrivate", "visibility", "classification", "publicRevokedAt", "archivedAt", "isActive",
+  "informationCategory", "isRestricted", "allowedRoleIds", "allowedCircleIds", "isPrivate", "visibility", "classification", "publicRevokedAt", "archivedAt", "isActive",
 ]);
 const RELATION_WORKSPACES: Partial<Record<LineageKind, object>> = {
   Role: { circle: {} }, RoleAssignment: { member: {}, role: { circle: {} } }, CircleAgentAssignment: { circle: {} },
@@ -133,7 +138,7 @@ export async function loadArtifactPermissionMetadata(tx: Prisma.TransactionClien
   const select = Object.fromEntries([...fields].filter(name => METADATA_FIELDS.has(name)).map(name => [name, true]));
   // The documentId in BrainSource's policy metadata is its actual live parent
   // binding; no metadata is forwarded to a model or persisted as semantic input.
-  if (input.kind === "BrainSource") select.metadata = true;
+  if (["BrainSource", "KnowledgeChunk"].includes(input.kind)) select.metadata = true;
   if (input.kind === "ConversationOperationOutcome") { select.controlJson = true; select.operation = true; }
   const where = input.kind === "Workspace" ? { id: input.id === workspaceId ? input.id : "" }
     : input.kind === "User" ? { id: input.id, memberships: { some: { workspaceId, isActive: true } } }
@@ -147,7 +152,8 @@ export async function loadArtifactPermissionMetadata(tx: Prisma.TransactionClien
   if (!delegate) return null;
   const result = await delegate.findFirst({ where, select });
   if (result?.metadata && typeof result.metadata === "object" && !Array.isArray(result.metadata)) {
-    result.metadata = { documentId: (result.metadata as Record<string, unknown>).documentId };
+    const metadata = result.metadata as Record<string, unknown>;
+    result.metadata = { documentId: metadata.documentId, nativeInputId: metadata.nativeInputId, sqlPublicationId: metadata.sqlPublicationId };
   }
   if (result?.controlJson && typeof result.controlJson === "object" && !Array.isArray(result.controlJson)) {
     const control = result.controlJson as Record<string, unknown>;

@@ -25,6 +25,8 @@ const child = (kind: string, delegate: string, relation: string): Descriptor => 
 
 /** Explicit inventory scope. New kinds require a reviewed loader instead of an unscoped generic table scan. */
 const LOADERS: Record<Exclude<LineageKind, "ExternalMcpConnectionSet">, Descriptor> = {
+  ExternalDataSource: direct("ExternalDataSource", "externalDataSource"),
+  SqlNativeRunInput: direct("SqlNativeRunInput", "sqlNativeRunInput"),
   MeetingAudioAsset: direct("MeetingAudioAsset", "meetingAudioAsset"),
   NativeTranscriptInput: direct("NativeTranscriptInput", "nativeTranscriptInput"),
   CommunicationMessageNativeInput: direct("CommunicationMessageNativeInput", "communicationMessageNativeInput"),

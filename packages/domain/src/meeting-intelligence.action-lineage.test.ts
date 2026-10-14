@@ -170,7 +170,7 @@ describe("meeting resolution actual lineage helpers", () => {
     const before = rows("artifactInputLineage").filter(row => row.artifactType === kind).length;
     await expect(withArtifactInputWriteFence(async () => {
       if (find("meetingInsight", "insight").status === "APPLIED") throw new AppError(409, "SOURCE_CHANGED", "Synthetic final fence revoked");
-    }, () => applyInsight(alice, {workspaceId, insightId: "insight"}))).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+    }, () => applyInsight(alice, {workspaceId, insightId: "insight"}))).rejects.toMatchObject({code: "ARTIFACT_INPUT_WRITE_FENCE_LOST"});
     expect(find(kind[0].toLowerCase() + kind.slice(1), "target").status).toBe("OPEN");
     expect(find("meetingInsight", "insight").status).toBe("SUGGESTED");
     expect(rows("auditLog")).toEqual([]); expect(rows("event")).toEqual([]); expect(rows("policyCorpus")).toEqual([]);

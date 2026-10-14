@@ -22,6 +22,7 @@ const related = (table: string, relation: Record<string, unknown>, manifest: Des
 
 /** Closed SQL/model registry. A new lineage kind cannot silently acquire a default loader or lock policy. */
 export const SOURCE_AUTHORITY_REGISTRY = freezeDescriptor({
+  ExternalDataSource: row("ExternalDataSource", "optional"), SqlNativeRunInput: row("SqlNativeRunInput", "optional"),
   MeetingAudioAsset: row("MeetingAudioAsset"), NativeTranscriptInput: row("NativeTranscriptInput", "optional", { native: true }),
   CommunicationMessageNativeInput: row("CommunicationMessageNativeInput", "optional", { native: true }),
   GenericDerivedArtifactVariant: row("GenericDerivedArtifactVariant"), ExternalProviderFetchInput: row("ExternalProviderFetchInput", "optional", { native: true }),
@@ -74,7 +75,7 @@ export const SOURCE_AUTHORITY_REGISTRY = freezeDescriptor({
 
 // Physical governors which are not themselves model inputs still need explicit allowlisted SQL identifiers.
 export const SOURCE_AUTHORITY_GOVERNOR_TABLES = ["CommunicationInstallation", "CommunicationIngressInput", "WorkspaceIntegrationBinding", "ExternalMcpConnection",
-  "WorkspaceSupportGrant", "AgentCredential", "McpOAuthAccessToken", "McpOAuthClient", "WorkspaceFeatureFlag", "WorkspaceModuleGrant",
+  "SqlKnowledgePublication", "SqlKnowledgeStagedChunk", "InformationCategoryPolicy", "WorkspaceSupportGrant", "AgentCredential", "McpOAuthAccessToken", "McpOAuthClient", "WorkspaceFeatureFlag", "WorkspaceModuleGrant",
   "AdviceRequestRecipient", "WorkspaceArchiveRecord", "WorkspaceToolLinkCircleTag", "ArtifactInputLineage", "WorkflowJob"] as const;
 export const SOURCE_AUTHORITY_TABLES:readonly string[] = Object.freeze([...new Set([...Object.values(SOURCE_AUTHORITY_REGISTRY).flatMap(d => d.table ? [d.table] : []), ...SOURCE_AUTHORITY_GOVERNOR_TABLES])]);
 export function sourceAuthorityDescriptor(kind: LineageKind): Descriptor {
@@ -209,8 +210,19 @@ export async function discoverSourceAuthorityEdges(context: AuthorityDiscoveryCo
     const subjects: Record<string, LineageKind> = { PROPOSAL: "Proposal", ACTION: "Action", TENSION: "Tension" };
     const parent = subjects[String(content.subjectType)]; invariant(parent, 409, "SOURCE_LOCK_UNSUPPORTED", "Approval subject authority is unsupported."); field(parent, "subjectId");
   }
+  if (kind === "SqlNativeRunInput") field("ExternalDataSource", "sourceId");
+  if (kind === "ExternalDataSource") {
+    await rows("InformationCategoryPolicy", {workspaceId, category: content.informationCategory}, `sql-category:${input.id}`);
+  }
   if (kind === "KnowledgeChunk") {
-    const parent = sourceKinds[String(content.sourceType)]; invariant(parent, 409, "SOURCE_LOCK_UNSUPPORTED", "Knowledge source authority is unsupported."); field(parent, "sourceId");
+    if (content.sourceType === "EXTERNAL_DATABASE") {
+      const metadata = authorityRecord(content.metadata);
+      add("SqlNativeRunInput", metadata?.nativeInputId, true);
+      await rows("SqlKnowledgePublication", {id: metadata?.sqlPublicationId, workspaceId}, `sql-publication:${input.id}`, undefined, true);
+      await rows("SqlKnowledgeStagedChunk", {id: input.id, publication: {workspaceId}}, `sql-output:${input.id}`, undefined, true);
+    } else {
+      const parent = sourceKinds[String(content.sourceType)]; invariant(parent, 409, "SOURCE_LOCK_UNSUPPORTED", "Knowledge source authority is unsupported."); field(parent, "sourceId");
+    }
   }
   if (kind === "DeliberationEntry") {
     const parent = discussionKinds[String(content.parentType)]; invariant(parent, 409, "SOURCE_LOCK_UNSUPPORTED", "Discussion authority is unsupported."); field(parent, "parentId");

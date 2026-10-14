@@ -11,10 +11,11 @@ const fixture = vi.hoisted(() => {
     && (!where.accessDomain || where.accessDomain.in.includes(source.accessDomain))
     && source.archivedAt === null && (where.isPrivate !== false || !source.isPrivate));
   const prisma = {
+    $queryRaw: vi.fn(async () => []),
     knowledgeChunk: { findMany: vi.fn(async ({ where, take }: any) => chunks.filter((chunk) =>
       chunk.workspaceId === where.workspaceId && where.accessDomain.in.includes(chunk.accessDomain)
       && (!where.sourceType || chunk.sourceType === where.sourceType)
-      && where.OR.some((parent: any) => parent.sourceType === chunk.sourceType && parent.sourceId === chunk.sourceId)
+      && (!where.OR || where.OR.some((parent: any) => parent.sourceType === chunk.sourceType && parent.sourceId === chunk.sourceId))
       && (!where.AND || where.AND[0].OR.some((condition: any) => condition.createdAt?.lt ? chunk.createdAt < condition.createdAt.lt
         : chunk.createdAt.getTime() === condition.createdAt.getTime() && (condition.chunkIndex?.gt !== undefined
           ? chunk.chunkIndex > condition.chunkIndex.gt : chunk.chunkIndex === condition.chunkIndex && chunk.id > condition.id.gt))))
@@ -23,6 +24,8 @@ const fixture = vi.hoisted(() => {
     document: { findMany: vi.fn(async ({ where }: any) => rows("DOCUMENT", where)) },
     meeting: { findMany: vi.fn(async ({ where }: any) => rows("MEETING", where)) },
     proposal: { findMany: vi.fn(async ({ where }: any) => rows("PROPOSAL", where)) },
+    externalContentSource: { findMany: vi.fn(async ({ where }: any) => rows("EXTERNAL_CONTENT", where)) },
+    sqlNativeRunInput: { findMany: vi.fn(async () => []) },
   };
   const hash = (kind: string, row: any) => JSON.stringify([kind, row.title, row.bodyMd ?? row.textContent]);
   return { sources, chunks, domains, permitted, prisma, hash };

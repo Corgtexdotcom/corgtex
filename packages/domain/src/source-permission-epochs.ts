@@ -91,6 +91,14 @@ export function artifactPermissionEpochIdentities(kind: string, row: Record<stri
   if (kind === "BrainArticleVersion") add("BrainArticle", row.articleId);
   if (kind === "WorkflowJobInput") add("WorkflowJobInput", row.id);
   add("Workspace", row.workspaceId);
+  if (kind === "ExternalDataSource") {
+    add("InformationCategoryPolicy", row.informationCategory);
+    if (row.isRestricted === true) {
+      for (const id of Array.isArray(row.allowedRoleIds) ? row.allowedRoleIds : []) add("Role", id);
+      for (const id of Array.isArray(row.allowedCircleIds) ? row.allowedCircleIds : []) add("Circle", id);
+    }
+  }
+  if (kind === "SqlNativeRunInput") add("ExternalDataSource", row.sourceId);
   for (const key of ["ownerMemberId", "memberId", "authorMemberId", "recipientMemberId"]) add("Member", row[key]);
   for (const key of ["userId", "authorUserId", "createdByUserId", "submittedByUserId", "requesterUserId", "requestedByUserId", "localUserId", "selectedByUserId", "uploadedByUserId"]) {
     add("MemberUserPolicy", row[key]);
