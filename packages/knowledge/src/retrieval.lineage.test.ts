@@ -14,8 +14,10 @@ const f = vi.hoisted(() => {
   const rows = (args: any, type: string) => sources.filter((row) => row.type === type && row.workspaceId === args.where.workspaceId
     && (!args.where.id || args.where.id.in.includes(row.id)) && row.archivedAt === null
     && (!args.where.accessDomain || args.where.accessDomain.in.includes(row.accessDomain)));
+  let sqlCollectionCurrent = true;
   const prisma = {
-    $queryRaw: vi.fn(async () => []),
+    $queryRaw: vi.fn(async (query: {sql: string}) => query.sql.includes("AS stamp") ? [{stamp: "empty-native-collection"}]
+      : query.sql.includes("AS current") ? [{current: sqlCollectionCurrent}] : []),
     brainArticle: { findMany: vi.fn(async (args) => rows(args, "BRAIN_ARTICLE")) },
     document: { findMany: vi.fn(async (args) => rows(args, "DOCUMENT")) },
     meeting: { findMany: vi.fn(async (args) => rows(args, "MEETING")) },
@@ -92,13 +94,24 @@ const f = vi.hoisted(() => {
     }
     return roots.length > 0;
   });
-  const afterCacheWrite = vi.fn();
+  const afterCacheWrite = vi.fn(), beforeCountSnapshot = vi.fn();
+  // Model the existing final snapshot port; this unit fixture has no SQL native
+  // runs, while the real-PG suite covers actual shared-snapshot/epoch behavior.
+  const countRelease = vi.fn(async (actor: AppActor, workspaceId: string, roots: any[],
+    remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => {
+    if (roots.length && !await currentProof(actor, workspaceId, roots)) throw Object.assign(new Error("Changed count inputs"), {code: "SOURCE_CHANGED"});
+    await remote(); await beforeCountSnapshot();
+    if (roots.length && !await currentProof(actor, workspaceId, roots)) throw Object.assign(new Error("Changed count snapshot"), {code: "SOURCE_CHANGED"});
+    return finish(prisma);
+  });
   return { sources, receipts, domains, membership, sourceInputs, chunkInputs, hash, prisma, resolveDomains, readable, capture, currentProof, afterCacheWrite,
+    beforeCountSnapshot, countRelease, resetSqlCollection: () => {sqlCollectionCurrent = true;}, changeSqlCollection: () => {sqlCollectionCurrent = false;},
     gateway: { embed: vi.fn(async () => ({ embeddings: [[1, 0]], usage: { model: "test" } })),
       rerank: vi.fn(async ({ documents, topK }) => ({ results: documents.slice(0, topK).map((_: string, index: number) => ({ index, score: 1 - index * 0.1 })) })),
       chat: vi.fn(async () => ({ content: "SYNTHETIC derived answer" })) } };
 });
 
+vi.mock("../../domain/src/source-lineage", () => ({withArtifactCountReleaseSnapshot: f.countRelease}));
 vi.mock("@corgtex/domain", () => ({ readableArtifactIds: f.readable, resolveKnowledgeAccessDomains: f.resolveDomains, lineageContentFingerprint: f.hash, captureArtifactInputProof: f.capture, isArtifactInputProofReadable: f.currentProof }));
 vi.mock("@corgtex/shared", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@corgtex/shared")>();
@@ -130,6 +143,7 @@ beforeEach(() => {
   resetLocalCacheStore();
   vi.clearAllMocks();
   f.afterCacheWrite.mockReset();
+  f.beforeCountSnapshot.mockReset(); f.resetSqlCollection();
   f.sources.length = 0;
   f.receipts.length = 0;
   f.sourceInputs.clear();
@@ -417,6 +431,19 @@ describe("actor-aware knowledge lineage", () => {
     await expect(getKnowledgeSearchInputRoots(alice, "ws-1", result)).rejects.toThrow("unavailable");
   });
 
+  it.each(["parent", "uncited child", "SQL collection"] as const)("withholds count when %s changes at the final snapshot", async target => {
+    f.domains.set("bob:ws-1", ["WORKSPACE"]);
+    const chunks = crowdedChildren("ws-1");
+    f.beforeCountSnapshot.mockImplementationOnce(() => {
+      if (target === "parent") f.sourceInputs.get("ws-1:safe-parent-ws-1")![0].current = false;
+      else if (target === "uncited child") f.chunkInputs.set(`ws-1:${chunks[501].id}`, [{domain: "WORKSPACE", current: false}]);
+      else f.changeSqlCollection();
+    });
+    const {countReadableKnowledgeChunks} = await import("./counts");
+    await expect(countReadableKnowledgeChunks(bob, "ws-1")).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+    expect(f.countRelease).toHaveBeenCalledOnce(); expect(f.beforeCountSnapshot).toHaveBeenCalledOnce();
+  });
+
   it.each(["search", "answer"] as const)("rebuilds a legacy unproven %s cache blob", async (kind) => {
     article("legacy-winner", [publicInput]);
     article("legacy-uncited", [publicInput]);
@@ -480,6 +507,12 @@ describe("child lineage admission before retrieval windows", () => {
       expect(await fetchReadableKnowledgeChunk(actor, workspaceId, chunks[500].id)).toMatchObject({id: chunks[500].id});
       const {countReadableKnowledgeChunks} = await import("./counts");
       expect(await countReadableKnowledgeChunks(actor, workspaceId)).toBe(2);
+      expect(f.countRelease).toHaveBeenCalledOnce();
+      expect(f.countRelease.mock.calls[0].slice(0, 2)).toEqual([actor, workspaceId]);
+      const countRoots = f.countRelease.mock.calls[0][2];
+      expect(countRoots.filter(root => root.kind === "KnowledgeChunk").map(root => root.id)).toEqual(chunks.slice(500).map(row => row.id));
+      expect(countRoots).toContainEqual(expect.objectContaining({kind: "BrainArticle", id: `safe-parent-${workspaceId}`}));
+      expect(f.prisma.$queryRaw.mock.calls.filter(([query]) => query.sql.includes("AS current"))).toHaveLength(1);
     });
 
   it.each(["search", "answer"] as const)("rebuilds %s after an uncited child's own ancestor is revoked", async kind => {

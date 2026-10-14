@@ -96,7 +96,7 @@ callback rollback cases; the model-failure/fresh 600-output retry uses
 1,536-dimensional vectors. Bounded independent Sol QA accepts this correction.
 Existing connector ownership retains the complete unchanged 512MiB-V8 / 1GiB-RSS
 rerun, including ordinary reads, query, transaction and concurrency measurements.
-Actual capacity remains unaccepted.
+Actual capacity remained unaccepted at that checkpoint.
 
 The actual `bc6ccb2d` composition subsequently committed all 4,000 rows and
 12,000 chunks x 1,536 vectors: 94 model batches, publication duration 126,696ms,
@@ -104,7 +104,8 @@ OS publication peak 807,960,576B, longest locked transaction 76,296ms (below the
 unchanged 120s limit), 4,289 top-level queries and 136,348 including triggers;
 2,411 observer queries were excluded. Its 13 smaller process cases pass. The
 first ordinary fetch then failed at 1,079,689,216B against 1GiB, with 55,846,776B
-of array buffers. Full fetch/count/search/downstream capacity remains withheld.
+of array buffers. Full fetch/count/search/downstream capacity remained withheld
+at that checkpoint.
 
 The followup read correction transports complete originals in at most two
 512KiB ciphertext parts per query. Full client/server SHA and exact entry/exit
@@ -122,12 +123,77 @@ proof and downstream commit preflight share the same bounded custody loader.
 Read correction evidence: 53/53 real source PG regressions, 6/6 focused positive/
 substitution/read-proof cases, 1/1 final downstream source-commit case and 18/18
 crypto/fingerprint units pass. Bounded independent Sol QA found no remaining
-crypto/custody/hash/authority blocker. Whole-worker 1GiB and hosted CI gates
-remain open until the existing connector owner measures the new composition.
-The broader read/count/cache/renderer unit selection passes 80/84; four count
-fixtures return no SQL collection-stamp row and fail identically with the
-published `bc6ccb2d` retrieval/count modules in an ignored baseline overlay.
-These retained source-wide harness failures are not cleared by this correction.
+crypto/custody/hash/authority blocker. The connector owner composed source
+`ed5f379a8a98ce014208cddcaf292cb97cc30fc1` into clean local head
+`3d737527543aa102de78538215ae0be3ee88381e`. The unchanged 4,000 rows / 12,000
+chunks x 1,536 vectors pass complete publication, ordinary fetch, count 12,000,
+search and downstream proof at 512MiB V8 and whole-process 1GiB. OS peak is
+946,290,688B (902MiB), leaving 127,451,136B (122MiB) headroom. Publication takes
+125,117ms, longest locked transaction 75,316ms below the unchanged 120s limit,
+and reads 46,713ms. Publication has 4,288 top-level queries / 136,347 including
+triggers, excluding 2,379 observers. All 13 independent process/race/cold-serving
+cases pass. Independent Astra accepts this bounded composed SQL integration.
+Evidence remains in the connector owner's ignored `.artifacts/` files:
+`sql-bounded-reader-full-run-metrics.json`, `sql-bounded-reader-full-run.log` and
+`sql-bounded-reader-process-races.log`. Separate read-query counts and full
+concurrent-job capacity are unmeasured; connector ownership retains pre-claim
+SQL-exclusive admission and its acceptance. No resource or timeout changed.
+
+The four existing count-fixture failures reproduce with the published `bc6ccb2d`
+retrieval/count modules. The fixture now returns the missing empty native
+collection stamp and models the existing final snapshot port using its original
+complete-root permission proof before and after native authorization. All prior
+privacy/window/cache/count assertions remain. Three new final-snapshot negatives
+withhold on parent ancestry, uncited-child ancestry or SQL collection changes.
+The fixture passes 40/40 and affected read/count/cache/renderer selection 87/87;
+scoped ESLint and independent Sol QA pass. Logs are
+`/tmp/pun68-count-fixture-unit.log` and
+`/tmp/pun68-count-fixture-aggregate-unit.log`. This followup changes tests only.
+
+Exact `ed5f379a` CI run 38515120361 fails TypeScript with exit134 near the default
+4GiB heap before tests. Build, database sync, policy and boundary checks pass;
+synthetic ARM64 preparation separately fails the pinned Postgres image pull with
+registry rate limiting. One cold local compiler trace at the established 8GiB
+diagnostic heap succeeds with incremental disabled. Its dominant 5.296s relation
+is `shared/db.ts:42` passing the inferred PrismaClient to the TransactionClient
+argument of `assertMcpOriginActiveAdvisory`; this identifies a type expansion
+hotspot, not total memory attribution. Trace dumping itself forces type rendering
+before statistics, so traced memory is not an uninstrumented CI estimate. Prior
+untraced 4,082,802K and actual hosted OOM remain the budget evidence. Diagnostics
+are `/tmp/pun68-cold-ts-diagnostics.log`,
+`/tmp/pun68-cold-ts-trace-summary.json` and `/tmp/pun68-cold-ts-hotspots.json`.
+No shared DB/MCP guard, workflow, provider or resource setting changed here.
+
+The fixture-only `2f4b7479` hosted run 38518341397 also OOMs at typecheck with
+exit134 before tests; its ARM64 preparation passes. The identical local cold
+4096MiB baseline reproduces OOM. Per-source attribution then identifies a second
+whole-client comparison at the shared-state factory's custom-datasource callers.
+The correction describes only the MCP checker's exact existing read queries and
+generated payloads, and gives the shared-state factory its four actual generated
+query/transaction/version capabilities. Canonical MCP writer/capture/scope ports,
+complete transaction overloads and caller-owned invalidation transactions retain
+their original generated types. No runtime statement, query, option or test
+fixture changes: emitted JS matches `2f4b7479` byte-for-byte. The constructor
+experiment is removed; `db.ts` itself is unchanged.
+
+Full cold repository TypeScript now passes at the unchanged 4096MiB heap with
+incremental disabled and no trace: 5,460 files, 1,337,742 types, 5,159,998
+instantiations, 3,715,144K reported memory, 57.90s wall time and 3,992,600,576B
+maximum RSS. All type assertions are included: configured/default/transaction
+compatibility, required query shapes/full authority payloads, missing capability
+negatives and unchanged transaction writer ports. Affected MCP/database/shared
+state units pass 39/39, scoped lint/diff pass, and independent Sol accepts the
+bounded correction. Evidence: `/tmp/pun68-types-4g-shared-state-boundary.log`,
+`/tmp/pun68-shared-typing-unit.log`, `/tmp/pun68-shared-typing-lint.log` and
+`/tmp/pun68-mcp-typing-runtime-proof.json`. Exact correction-head hosted CI remains
+required; this local compile does not clear the held full PR/source integration.
+No checked-in compiler configuration, workflow, resource, permission or provider change.
+
+The coordinator confirms sole source-lane ownership of recorder/intake/native
+transcript receipt/principal, Recall bindings/webhook callers and matching tests,
+with no known competing editor. Connector ownership stays SQL/outbox/bootstrap;
+Brain conversation remains separate. Authenticated Recall intake starts only
+after this compiler checkpoint settles; no intake change is part of this diff.
 
 Capture avoids a complete ciphertext RETURNING response: the insertion returns
 small immutable headers, and the same real transaction checks server SHA256 of
@@ -152,7 +218,7 @@ admitted. One synchronous trusted rendering/V8 snapshot and private decode
 replace duplicate full native cloning. Issuer checks current owner/policy again
 after the capture transaction before minting the private receipt. Source/native
 epochs, original vectors, permanent tombstones, all caps and public ports stay
-unchanged; originals are never discarded. Actual1GiB acceptance still required.
+unchanged; originals are never discarded. Actual1GiB evidence is recorded above.
 
 The prior1e3 checkpoint reached the first500-vector batch but still exceeded the
 same1GiB complete-process guard (peak1,091,698,688B; capture917,766,144B;
@@ -272,7 +338,7 @@ rows/at least8000 chunks/over10000 combined identity regressions. Measure real
 model-sized vectors, complete legal output sets, peak memory, query count, lock
 duration and competing policy writes. Full-vector retention has been replaced by
 bounded 128-vector batches; actual worker1Gi resource acceptance remains open
-until the connector reruns the composed production path.
+until the connector reruns the composed production path (later evidence above).
 
 Actual connector composition at7c92532b proved a remaining resource failure:
 unchanged4000 rows/12000 chunks with1536-vector models, a512MiB V8 heap cap and
