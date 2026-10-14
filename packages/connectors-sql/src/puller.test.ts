@@ -22,7 +22,7 @@ vi.mock("@corgtex/shared", () => ({
       update: mocked.update,
       updateMany: mocked.updateMany,
     },
-    externalDataSyncLog: { create: mocked.logCreate, update: mocked.logUpdate },
+    externalDataSyncLog: { create: mocked.logCreate, update: mocked.logUpdate, updateMany: mocked.logUpdate },
   },
 }));
 vi.mock("@corgtex/knowledge", () => ({ syncKnowledgeForSource: mocked.knowledge }));
@@ -31,14 +31,20 @@ vi.mock("./postgres", () => ({
   connectReadOnly: mocked.connect,
   describeTable: mocked.describeTable,
   pullPage: mocked.pullPage,
+  usesTemporalTextDecoding: (definition: TableDefinition, name: string) =>
+    [1082, 1114, 1184, 1182, 1115, 1185].includes([definition.cursor, ...definition.key].find((column) => column.name === name)?.typeOid ?? 0),
 }));
 
-import { syncExternalDataSource } from "./puller";
+import { createSqlIngestionRunner } from "./runner";
+import { capturePostgresScan, scanFingerprint } from "./native-scan";
+import type { Prisma } from "@prisma/client";
+import type { AuthenticatedSqlRunReceipt, PreparedSqlKnowledgeAttempt, SqlIngestionAttempt, SqlIngestionAttemptPort, SqlKnowledgePublicationPort } from "@corgtex/domain/sql-ingestion-contract";
 
 type SourceFixture = {
   id: string;
   workspaceId: string;
   isActive: boolean;
+  archivedAt: null;
   driverType: string;
   connectionStringEnc: string;
   cursorColumn: string;
@@ -71,6 +77,78 @@ let committedKnowledge: Map<string, KnowledgeInput>;
 let checkpointWrites: CheckpointWrite[];
 let statusWrites: CheckpointWrite[];
 
+const attempts = new WeakMap<SqlIngestionAttempt, { source: SourceFixture; committed: boolean }>();
+const scans = new WeakMap<AuthenticatedSqlRunReceipt, Awaited<ReturnType<typeof capturePostgresScan>>>();
+const preparations = new WeakMap<PreparedSqlKnowledgeAttempt, { receipt: AuthenticatedSqlRunReceipt; chunks: number; rows: KnowledgeInput[] }>();
+const ports: SqlIngestionAttemptPort & SqlKnowledgePublicationPort = {
+  async claimSqlIngestionAttempt(input) {
+    const attempt = { attemptId: "attempt", generation: "1", workspaceId: input.workspaceId,
+      sourceId: input.sourceId, configurationFingerprint: input.expectedConfigurationFingerprint, logId: input.logId } as SqlIngestionAttempt;
+    attempts.set(attempt, { source: structuredClone(source), committed: false });
+    return attempt;
+  },
+  async renewSqlIngestionAttempt() { return { leaseExpiresAt: new Date(Date.now() + 300_000) }; },
+  async captureSqlIngestionAttempt(attempt) {
+    const captured = attempts.get(attempt)!.source;
+    const scan = await capturePostgresScan(captured, async () => {
+      if (!source.isActive || scanFingerprint(source) !== scanFingerprint(captured)) {
+        throw new Error("CURSOR_SCAN_CHANGED: source configuration changed");
+      }
+      if (source.lastCursorValue !== captured.lastCursorValue) throw new Error("CURSOR_CONFLICT: source checkpoint changed");
+    });
+    const receipt = { receiptId: "receipt" } as AuthenticatedSqlRunReceipt;
+    scans.set(receipt, scan);
+    return receipt;
+  },
+  async prepareSqlKnowledgeAttempt({ attempt, receipt }) {
+    const scan = scans.get(receipt)!;
+    const rows: KnowledgeInput[] = [];
+    let chunks = 0;
+    for (const row of scan.rows) {
+      const input = { workspaceId: attempt.workspaceId, sourceType: "EXTERNAL_DATABASE", accessDomain: "WORKSPACE",
+        sourceId: `byodb:${attempt.sourceId}:${row.table}:${row.primaryKey}`, sourceTitle: `${row.table} row ${row.primaryKey}`,
+        content: row.content, metadata: { table: row.table, sourceId: attempt.sourceId } };
+      const count = await mocked.knowledge(input);
+      if (typeof count !== "number" || count <= 0) throw new Error("SQL row publication did not acknowledge complete prepared output");
+      rows.push(input);
+      chunks += count;
+    }
+    const prepared = { preparationId: "prepared" } as PreparedSqlKnowledgeAttempt;
+    preparations.set(prepared, { receipt, chunks, rows });
+    return prepared;
+  },
+  async publishPreparedSqlKnowledgeAttempt({ attempt, prepared, beforePublication, commit }) {
+    const plan = preparations.get(prepared)!;
+    const scan = scans.get(plan.receipt)!;
+    await beforePublication?.();
+    await scan.beforePublication();
+    const identity = { publicationId: "publication", workspaceId: attempt.workspaceId, sourceId: attempt.sourceId,
+      attemptId: attempt.attemptId, generation: attempt.generation, configurationFingerprint: attempt.configurationFingerprint,
+      rowsProcessed: scan.rowsProcessed, chunksCreated: plan.chunks, nextCursor: scan.nextCursor };
+    const before = structuredClone(source);
+    try {
+      await commit({ externalDataSource: { updateMany: mocked.updateMany }, externalDataSyncLog: { update: mocked.logUpdate } } as unknown as Prisma.TransactionClient, identity);
+    } catch (error) {
+      source = before;
+      throw error;
+    }
+    for (const row of plan.rows) committedKnowledge.set(row.sourceId, row);
+    attempts.get(attempt)!.committed = true;
+    return { ...identity, committed: true };
+  },
+  async failSqlIngestionAttempt({ attempt, error, logId }) {
+    const state = attempts.get(attempt)!;
+    if (state.committed) return;
+    await mocked.logUpdate({ where: { id: logId, sourceId: attempt.sourceId }, data: { error, completedAt: new Date() } });
+    const captured = state.source;
+    await mocked.updateMany({ where: { id: captured.id, workspaceId: captured.workspaceId, isActive: true,
+      driverType: captured.driverType, connectionStringEnc: captured.connectionStringEnc, cursorColumn: captured.cursorColumn,
+      selectedTables: { equals: captured.selectedTables }, lastCursorValue: captured.lastCursorValue }, data: { lastSyncError: error } });
+  },
+  async disposeSqlIngestionCapture(receipt) { await scans.get(receipt)!.dispose(); },
+};
+const syncExternalDataSource = createSqlIngestionRunner(ports);
+
 function column(name: string, type: CursorColumn["type"] = "int4"): CursorColumn {
   const oids = { int4: 23, int8: 20, timestamptz: 1184, date: 1082, uuid: 2950, text: 25 };
   return { name, type, typeOid: oids[type as keyof typeof oids], typeModifier: -1, collationOid: 0 };
@@ -79,6 +157,13 @@ function column(name: string, type: CursorColumn["type"] = "int4"): CursorColumn
 function definition(token = table, cursor = column("seq"), key = [column("id")]): TableDefinition {
   const [schema, name] = token.split(".");
   return { schema, name, relationOid: 101, cursor, key };
+}
+
+function nativeDefinition(value: TableDefinition) {
+  const columns = [...new Map([...value.key, value.cursor, column("payload", "text")]
+    .map((entry) => [entry.name, entry])).values()]
+    .map((entry, index) => ({ ...entry, position: index + 1, isNullable: false, identity: "", generated: "" }));
+  return { ...value, columns };
 }
 
 function page(...rows: PageRow[]): Page {
@@ -129,6 +214,7 @@ beforeEach(() => {
     id: "source-1",
     workspaceId: "workspace-1",
     isActive: true,
+    archivedAt: null,
     driverType: "postgres",
     connectionStringEnc: "synthetic-encrypted-placeholder",
     cursorColumn: "seq",
@@ -169,7 +255,7 @@ beforeEach(() => {
   mocked.describeTable.mockImplementation(async (_client, token: string) => {
     const value = definitions.get(token);
     if (!value) throw new Error(`No synthetic table definition: ${token}`);
-    return structuredClone(value);
+    return structuredClone(nativeDefinition(value));
   });
   mocked.pullPage.mockImplementation(async (_client, value: TableDefinition, _bookmark, limit: number) => {
     expect(limit).toBe(1000);
@@ -177,7 +263,6 @@ beforeEach(() => {
   });
   mocked.knowledge.mockImplementation(async (input: KnowledgeInput) => {
     knowledgeCalls.push(input);
-    committedKnowledge.set(input.sourceId, input);
     return 2;
   });
 });
@@ -193,7 +278,7 @@ describe("typed SQL ingestion checkpoints", () => {
       [table]: { definition: definition(), values: ["1", "1"] },
     } });
     expect(checkpoint().scanFingerprint).toMatch(/^[a-f0-9]{64}$/);
-    expect(mocked.pullPage).toHaveBeenCalledWith(client, definition(), null, 1000);
+    expect(mocked.pullPage).toHaveBeenCalledWith(client, nativeDefinition(definition()), null, 1000);
     expect(mocked.updateMany).toHaveBeenCalledOnce();
     expect(mocked.end).toHaveBeenCalledOnce();
   });
@@ -206,7 +291,7 @@ describe("typed SQL ingestion checkpoints", () => {
     setPages(table, page(row(1001)));
     await syncExternalDataSource(source.id);
 
-    expect(mocked.pullPage.mock.calls[1]).toEqual([client, definition(), ["1000", "1000"], 1000]);
+    expect(mocked.pullPage.mock.calls[1]).toEqual([client, nativeDefinition(definition()), ["1000", "1000"], 1000]);
     expect(checkpoint().tables[table].values).toEqual(["1001", "1001"]);
     expect(knowledgeCalls.map((input) => input.sourceId)).toEqual([
       `byodb:${source.id}:${table}:999`, `byodb:${source.id}:${table}:1000`, `byodb:${source.id}:${table}:1001`,
@@ -223,7 +308,7 @@ describe("typed SQL ingestion checkpoints", () => {
 
     await syncExternalDataSource(source.id);
 
-    expect(mocked.pullPage.mock.calls[1]).toEqual([client, definition(), ["999", "41"], 1000]);
+    expect(mocked.pullPage.mock.calls[1]).toEqual([client, nativeDefinition(definition()), ["999", "41"], 1000]);
     expect(checkpoint().version).toBe(1);
     expect(checkpoint().scanFingerprint).toBe(savedState.scanFingerprint);
     expect(checkpoint().tables[table]).toEqual({ definition: savedState.tables[table].definition, values: ["999", "42"] });
@@ -249,7 +334,7 @@ describe("typed SQL ingestion checkpoints", () => {
     expect(knowledgeCalls[0].sourceId).toBe(`byodb:${source.id}:${table}:${exactId}`);
     setPages(table, page());
     await syncExternalDataSource(source.id);
-    expect(mocked.pullPage.mock.calls[1]).toEqual([client, metadata, [preciseTimestamp, exactId], 1000]);
+    expect(mocked.pullPage.mock.calls[1]).toEqual([client, nativeDefinition(metadata), [preciseTimestamp, exactId], 1000]);
   });
 
   it("drains more than 1000 tied timestamps using the unique tuple boundary", async () => {
@@ -292,7 +377,7 @@ describe("typed SQL ingestion checkpoints", () => {
 
     await syncExternalDataSource(source.id);
 
-    expect(mocked.pullPage.mock.calls[0]).toEqual([client, definition("public.beta"), ["3000", "3000"], 1000]);
+    expect(mocked.pullPage.mock.calls[0]).toEqual([client, nativeDefinition(definition("public.beta")), ["3000", "3000"], 1000]);
     expect(checkpoint().nextTable).toBeNull();
     expect(knowledgeCalls).toHaveLength(12_000);
     expect(mocked.updateMany).toHaveBeenCalledTimes(2);
@@ -323,8 +408,8 @@ describe("typed SQL ingestion checkpoints", () => {
       content: "id: 1\nseq: 1\npayload: row-1",
       metadata: { table, sourceId: "source-1" },
     });
-    expect(mocked.logUpdate).toHaveBeenLastCalledWith({ where: { id: "log-1" }, data: {
-      rowsProcessed: 1, chunksCreated: 2, completedAt: expect.any(Date),
+    expect(mocked.logUpdate).toHaveBeenLastCalledWith({ where: { id: "log-1", sourceId: source.id }, data: {
+      rowsProcessed: 1, chunksCreated: 2, completedAt: expect.any(Date), error: null,
     } });
     expect(checkpointWrites[0].data).toMatchObject({ lastSyncAt: expect.any(Date), lastSyncError: null });
   });
@@ -440,9 +525,9 @@ describe("cursor compatibility and validation", () => {
 
   it("detects metadata changes before querying the next page", async () => {
     setPages(table, fullPage(1), page(row(1001)));
-    mocked.knowledge.mockImplementationOnce(async () => {
+    mocked.pullPage.mockImplementationOnce(async () => {
       definitions.set(table, definition(table, { ...column("seq"), typeModifier: 12 }));
-      return 2;
+      return fullPage(1);
     });
 
     await expect(syncExternalDataSource(source.id)).rejects.toThrow(/CURSOR_DEFINITION_CHANGED/);
@@ -555,6 +640,17 @@ describe("cursor compatibility and validation", () => {
     expect(source.lastCursorValue).toBeNull();
   });
 
+  it("does not publish an earlier valid page when a later page has an invalid tuple", async () => {
+    setPages(table, fullPage(1), page({ row: { id: 1001, seq: 1001 }, values: ["1001"] }));
+
+    await expect(syncExternalDataSource(source.id)).rejects.toThrow(/CURSOR_PAGE_INVALID/);
+
+    expect(mocked.pullPage).toHaveBeenCalledTimes(2);
+    expect(mocked.knowledge).not.toHaveBeenCalled();
+    expectNoCheckpointWrite();
+    expect(source.lastCursorValue).toBeNull();
+  });
+
   it("rejects a page exceeding its requested limit before ingestion", async () => {
     setPages(table, page(...fullPage(1).rows, row(1001)));
 
@@ -566,13 +662,21 @@ describe("cursor compatibility and validation", () => {
 });
 
 describe("checkpoint and retry boundaries", () => {
-  it.each(["before", "after"] as const)("retries the page when knowledge fails %s its simulated commit", async (phase) => {
+  it("does not advance the checkpoint when a nonempty row publication is rejected with zero", async () => {
+    setPages(table, page(row(1)));
+    mocked.knowledge.mockResolvedValueOnce(0);
+
+    await expect(syncExternalDataSource(source.id)).rejects.toThrow(/publication|commit|acknowledg/i);
+
+    expectNoCheckpointWrite();
+    expect(source.lastCursorValue).toBeNull();
+  });
+
+  it("retries the full page after model preparation fails without publishing its valid prefix", async () => {
     setPages(table, page(row(1), row(2), row(3)));
     mocked.knowledge.mockImplementation(async (input: KnowledgeInput) => {
       knowledgeCalls.push(input);
       const shouldFail = knowledgeCalls.length === 2;
-      if (shouldFail && phase === "before") throw new Error("knowledge acknowledgement failed");
-      committedKnowledge.set(input.sourceId, input);
       if (shouldFail) throw new Error("knowledge acknowledgement failed");
       return 2;
     });
@@ -581,7 +685,7 @@ describe("checkpoint and retry boundaries", () => {
 
     expect(source.lastCursorValue).toBeNull();
     expectNoCheckpointWrite();
-    expect(committedKnowledge.size).toBe(phase === "before" ? 1 : 2);
+    expect(committedKnowledge.size).toBe(0);
     expect(mocked.end).toHaveBeenCalledOnce();
     setPages(table, page(row(1), row(2), row(3)));
     await syncExternalDataSource(source.id);
@@ -604,7 +708,7 @@ describe("checkpoint and retry boundaries", () => {
     expect(mocked.end).toHaveBeenCalledOnce();
   });
 
-  it.each(["before", "after"] as const)("retries correctly when checkpoint acknowledgement fails %s simulated commit", async (phase) => {
+  it.each(["before", "after"] as const)("rolls back and replays when checkpoint callback fails %s its SQL update", async (phase) => {
     setPages(table, page(row(1), row(2)));
     mocked.updateMany.mockImplementationOnce(async (write: CheckpointWrite) => {
       if (phase === "after") Object.assign(source, write.data);
@@ -614,21 +718,22 @@ describe("checkpoint and retry boundaries", () => {
     await expect(syncExternalDataSource(source.id)).rejects.toThrow("checkpoint acknowledgement failed");
 
     expect(knowledgeCalls).toHaveLength(2);
-    if (phase === "before") expect(source.lastCursorValue).toBeNull();
-    else expect(checkpoint().tables[table].values).toEqual(["2", "2"]);
-    setPages(table, phase === "before" ? page(row(1), row(2)) : page());
+    expect(source.lastCursorValue).toBeNull();
+    expect(committedKnowledge.size).toBe(0);
+    setPages(table, page(row(1), row(2)));
     await syncExternalDataSource(source.id);
-    expect(knowledgeCalls).toHaveLength(phase === "before" ? 4 : 2);
+    expect(knowledgeCalls).toHaveLength(4);
     expect(checkpoint().tables[table].values).toEqual(["2", "2"]);
   });
 
-  it("keeps an acknowledged checkpoint when the completion log fails", async () => {
+  it("rolls back the checkpoint and chunks when the completion log fails", async () => {
     setPages(table, page(row(1)));
     mocked.logUpdate.mockRejectedValueOnce(new Error("completion log failed"));
 
     await expect(syncExternalDataSource(source.id)).rejects.toThrow("completion log failed");
 
-    expect(checkpoint().tables[table].values).toEqual(["1", "1"]);
+    expect(source.lastCursorValue).toBeNull();
+    expect(committedKnowledge.size).toBe(0);
     expect(source.lastSyncError).toBe("completion log failed");
     expect(statusWrites).toHaveLength(1);
     expect(statusWrites[0].where).toMatchObject({
@@ -637,19 +742,20 @@ describe("checkpoint and retry boundaries", () => {
       selectedTables: { equals: [table] }, lastCursorValue: source.lastCursorValue,
     });
     expect(mocked.update).not.toHaveBeenCalled();
-    setPages(table, page());
+    setPages(table, page(row(1)));
     await syncExternalDataSource(source.id);
-    expect(knowledgeCalls).toHaveLength(1);
+    expect(knowledgeCalls).toHaveLength(2);
     expect(source.lastSyncError).toBeNull();
   });
 
-  it("reports its own cleanup failure against the acknowledged checkpoint", async () => {
+  it("rejects provider cleanup failure before checkpoint publication", async () => {
     setPages(table, page(row(1)));
     mocked.end.mockRejectedValueOnce(new Error("source connection cleanup failed"));
 
     await expect(syncExternalDataSource(source.id)).rejects.toThrow("source connection cleanup failed");
 
-    expect(checkpoint().tables[table].values).toEqual(["1", "1"]);
+    expect(source.lastCursorValue).toBeNull();
+    expectNoCheckpointWrite();
     expect(source.lastSyncError).toBe("source connection cleanup failed");
     expect(statusWrites[0].where.lastCursorValue).toBe(source.lastCursorValue);
     expect(mocked.update).not.toHaveBeenCalled();
@@ -674,27 +780,29 @@ describe("checkpoint and retry boundaries", () => {
     expect(source.lastCursorValue).toBe(winningCursor);
     expect(source.lastSyncError).toBe("winning run diagnostic");
     expect(statusWrites[0].where.lastCursorValue).toBe(originalCursor);
-    expect(mocked.logUpdate).toHaveBeenCalledWith({ where: { id: "log-1" }, data: {
+    expect(mocked.logUpdate).toHaveBeenCalledWith({ where: { id: "log-1", sourceId: source.id }, data: {
       error: "obsolete ingestion failed", completedAt: expect.any(Date),
     } });
     expect(mocked.update).not.toHaveBeenCalled();
   });
 
-  it("does not overwrite newer status after an ambiguously committed checkpoint loses its acknowledgement", async () => {
+  it("does not overwrite newer status after a committed publication loses its acknowledgement", async () => {
     setPages(table, page(row(1)));
-    mocked.updateMany.mockImplementationOnce(async (write: CheckpointWrite) => {
-      expect(write.data.lastCursorValue).toBeTypeOf("string");
-      Object.assign(source, write.data);
+    const publish = ports.publishPreparedSqlKnowledgeAttempt.bind(ports);
+    const spy = vi.spyOn(ports, "publishPreparedSqlKnowledgeAttempt").mockImplementationOnce(async (input) => {
+      await publish(input);
       source.lastSyncError = "newer run diagnostic";
-      throw new Error("checkpoint acknowledgement lost");
+      throw new Error("publication acknowledgement lost");
     });
-
-    await expect(syncExternalDataSource(source.id)).rejects.toThrow("checkpoint acknowledgement lost");
-
+    try {
+      await expect(syncExternalDataSource(source.id)).rejects.toThrow("publication acknowledgement lost");
+    } finally {
+      spy.mockRestore();
+    }
     expect(checkpoint().tables[table].values).toEqual(["1", "1"]);
+    expect(committedKnowledge.size).toBe(1);
     expect(source.lastSyncError).toBe("newer run diagnostic");
-    expect(statusWrites).toHaveLength(1);
-    expect(statusWrites[0].where.lastCursorValue).toBeNull();
+    expect(statusWrites).toHaveLength(0);
     expect(mocked.update).not.toHaveBeenCalled();
   });
 
@@ -718,7 +826,7 @@ describe("checkpoint and retry boundaries", () => {
     setPages(table, page(row(2)));
     mocked.updateMany.mockResolvedValueOnce({ count: 0 });
 
-    await expect(syncExternalDataSource(source.id)).rejects.toThrow(/conflict|CURSOR.*CONCURRENT|configuration.*changed/i);
+    await expect(syncExternalDataSource(source.id)).rejects.toThrow(/FENCE_LOST|conflict|CURSOR.*CONCURRENT|configuration.*changed/i);
 
     expect(source.lastCursorValue).toBe(original);
     expect(mocked.updateMany).toHaveBeenLastCalledWith({ where: expect.objectContaining({ id: source.id, lastCursorValue: original }), data: {
@@ -738,7 +846,7 @@ describe("checkpoint and retry boundaries", () => {
       return { count: 0 };
     });
 
-    await expect(syncExternalDataSource(source.id)).rejects.toThrow(/conflict|CURSOR.*CONCURRENT|configuration.*changed/i);
+    await expect(syncExternalDataSource(source.id)).rejects.toThrow(/FENCE_LOST|conflict|CURSOR.*CONCURRENT|configuration.*changed/i);
 
     expect(source.connectionStringEnc).toBe("concurrent-replacement");
     expect(source.lastCursorValue).toBeNull();
@@ -746,9 +854,9 @@ describe("checkpoint and retry boundaries", () => {
 
   it("stops before requesting another page when the source configuration changes during ingestion", async () => {
     setPages(table, fullPage(1), page(row(1001)));
-    mocked.knowledge.mockImplementationOnce(async () => {
+    mocked.pullPage.mockImplementationOnce(async () => {
       source.connectionStringEnc = "concurrent-replacement";
-      return 2;
+      return fullPage(1);
     });
 
     await expect(syncExternalDataSource(source.id)).rejects.toThrow(/CURSOR_SCAN_CHANGED/);

@@ -10,6 +10,7 @@ export default defineConfig({
     alias: {
       "@": fileURLToPath(new URL("./apps/web", import.meta.url)),
       "@corgtex/domain/modules": fileURLToPath(new URL("./packages/domain/src/modules/index.ts", import.meta.url)),
+      "@corgtex/domain/sql-native-driver": fileURLToPath(new URL("./packages/domain/src/sql-native-driver.ts", import.meta.url)),
       "@corgtex/domain": fileURLToPath(new URL("./packages/domain/src/index.ts", import.meta.url)),
       "@corgtex/shared/telemetry": fileURLToPath(new URL("./packages/shared/src/telemetry.ts", import.meta.url)),
       "@corgtex/shared/telemetry-node": fileURLToPath(new URL("./packages/shared/src/telemetry-node.ts", import.meta.url)),

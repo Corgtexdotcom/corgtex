@@ -142,20 +142,19 @@ describe("real pg typed SQL ingestion pages", () => {
     expect(result.rows.map((entry) => entry.row.amount)).toEqual(result.rows.map((entry) => entry.values[0]));
   });
 
-  it.each(["ts", "tz"])("retains exact %s microseconds while preserving original Date row values", async (column) => {
+  it.each(["ts", "tz"])("retains exact %s microseconds in both native cells and cursor tuples", async (column) => {
     const definition = await describeTable(reader, fixture.table("temporal_rows"), column);
     expect(definition.cursor.typeOid).toBe(column === "ts" ? 1114 : 1184);
     const first = await pullPage(reader, definition, null, 1);
     const exact = column === "ts" ? timestamp : timestamptz;
-    expect(first.rows[0].row[column]).toBeInstanceOf(Date);
-    expect((first.rows[0].row[column] as Date).getUTCMilliseconds()).toBe(123);
+    expect(first.rows[0].row[column]).toBe(exact);
     expect(first.rows[0].values).toEqual([exact, "9007199254740992"]);
     const second = await pullPage(reader, definition, first.rows[0].values, 1);
     expect(second.rows[0].row.id).toBe("9007199254740993");
     expect(second.rows[0].values[0]).toContain(".123457");
   });
 
-  it("keeps exact timestamp cursors independent of process timezone while driver Date content follows it", async () => {
+  it("keeps native temporal cells and cursor tuples independent of process timezone", async () => {
     const originalTimezone = process.env.TZ;
     try {
       process.env.TZ = "America/New_York";
@@ -165,8 +164,8 @@ describe("real pg typed SQL ingestion pages", () => {
       const instantPage = await pullPage(reader, instantDefinition, null, 1);
       expect(timestampPage.rows[0].values).toEqual([timestamp, "9007199254740992"]);
       expect(instantPage.rows[0].values).toEqual([timestamptz, "9007199254740992"]);
-      expect((timestampPage.rows[0].row.ts as Date).toISOString()).toBe("2026-10-13T03:59:59.123Z");
-      expect((instantPage.rows[0].row.tz as Date).toISOString()).toBe("2026-10-12T23:59:59.123Z");
+      expect(timestampPage.rows[0].row.ts).toBe(timestamp);
+      expect(instantPage.rows[0].row.tz).toBe(timestamptz);
     } finally {
       if (originalTimezone === undefined) delete process.env.TZ;
       else process.env.TZ = originalTimezone;
@@ -180,7 +179,7 @@ describe("real pg typed SQL ingestion pages", () => {
     expect(result.rows.map((entry) => entry.values)).toEqual([
       ["2026-10-12", "9007199254740992"], ["2026-10-12", "9007199254740993"], ["2026-10-13", "1000000000000000000"],
     ]);
-    expect(result.rows[0].row.day).toBeInstanceOf(Date);
+    expect(result.rows[0].row.day).toBe("2026-10-12");
   });
 
   it("drains all 1501 identical timestamps across the 1000-row page boundary exactly once", async () => {
@@ -227,7 +226,7 @@ describe("real pg typed SQL ingestion pages", () => {
     const definition = await describeTable(reader, fixture.table("temporal_rows"), "ts");
     const page = await pullPage(reader, definition, null, 1);
     expect(page.rows[0].row.text).toBe("original text one");
-    expect(page.rows[0].row.ts).toBeInstanceOf(Date);
+    expect(page.rows[0].row.ts).toBe(timestamp);
     expect(Object.hasOwn(page.rows[0].row, "__proto__")).toBe(true);
     expect(page.rows[0].row.__proto__).toBe("own proto value");
     expect(page.rows[0].row.constructor).toBe("own constructor value");

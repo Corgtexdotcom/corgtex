@@ -4,7 +4,7 @@ import { connectReadOnly, describeTable, listTables, pullPage, pullRows } from "
 import type { CursorColumn, TableDefinition } from "./cursor";
 
 const mocks = vi.hoisted(() => ({
-  construct: vi.fn(), connect: vi.fn(), query: vi.fn(), end: vi.fn(),
+  construct: vi.fn(), connect: vi.fn(), query: vi.fn(), end: vi.fn(), setTypeParser: vi.fn(),
 }));
 vi.mock("pg", () => ({
   default: {
@@ -13,6 +13,7 @@ vi.mock("pg", () => ({
       connect = mocks.connect;
       query = mocks.query;
       end = mocks.end;
+      setTypeParser = mocks.setTypeParser;
     },
   },
 }));
@@ -27,16 +28,22 @@ const primaryKey: CursorColumn = {
 const table: TableDefinition = {
   schema: "public", name: "events", relationOid: 1234, cursor: timestamp, key: [primaryKey],
 };
+const capturedColumns = [primaryKey, timestamp].map((column, index) => ({ ...column,
+  position: index + 1, isNullable: false, identity: "", generated: "" }));
 const client = { query: mocks.query } as unknown as pg.Client;
 
 function metadata(overrides: Record<string, unknown> = {}) {
-  return {
+  const value = {
     relation_oid: "1234", schema_name: "public", table_name: "events",
     cursor_name: "updated_at", cursor_type: "timestamptz", cursor_type_oid: "1184",
     cursor_type_mod: -1, cursor_collation_oid: "0",
     key_columns: [{ column: "id", type: "int8", typeOid: "20", typeMod: -1, collationOid: "0" }],
+    captured_columns: capturedColumns,
     ...overrides,
   };
+  return { ...value, wire_columns: value.captured_columns.map((column) => ({
+    position: column.position, typeOid: column.typeOid, typeModifier: column.typeModifier,
+  })) };
 }
 
 function page(rows: unknown[][] = [], names = ["id", "updated_at", "updated_at", "id"]) {
@@ -87,12 +94,15 @@ describe("read-only PostgreSQL connection", () => {
 
 describe("table ordering discovery", () => {
   it("normalizes exact OID strings and keeps every composite key component in catalog order", async () => {
-    mocks.query.mockResolvedValueOnce({ rows: [metadata({ key_columns: [
+    const tenant = { name: "tenant_id", type: "int4", typeOid: 23, typeModifier: -1, collationOid: 0 };
+    const columns = [...capturedColumns, { ...tenant, position: 3, isNullable: false, identity: "", generated: "" }];
+    mocks.query.mockResolvedValueOnce({ rows: [metadata({ captured_columns: columns, key_columns: [
       { column: "tenant_id", type: "int4", typeOid: 23, typeMod: -1, collationOid: 0 },
       { column: "id", type: "int8", typeOid: "20", typeMod: -1, collationOid: "0" },
     ] })] });
     expect(await describeTable(client, "public.events", "updated_at")).toEqual({
       ...table,
+      columns,
       key: [{ name: "tenant_id", type: "int4", typeOid: 23, typeModifier: -1, collationOid: 0 }, primaryKey],
     });
     expect(mocks.query.mock.calls[0][1]).toEqual(["public", "events", "updated_at"]);
