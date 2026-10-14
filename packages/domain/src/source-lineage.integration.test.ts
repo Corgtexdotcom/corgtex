@@ -2,13 +2,15 @@ import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
-import { readableArtifactIds, recordArtifactInputLineage } from "./source-lineage";
+import { captureArtifactInputProof, readableArtifactIds, recordArtifactInputLineage } from "./source-lineage";
 import { ingestSource, listSources } from "./brain";
 import { getAction, listActions } from "./actions";
 import { getTension, listTensions } from "./tensions";
 import { listCompanyDirectionFromBrain } from "./goals";
 import { createCheckIn, respondToCheckIn } from "./check-ins";
 import { ingestConversationOnDemand } from "./conversation-brain";
+import { createConversation, createConversationPromptInput, addConversationTurn } from "./conversations";
+import { brainExportHash, exportConversationAnswerToBrain } from "./conversation-brain-consent";
 
 describe("complete input lineage", () => {
   beforeEach(async () => { await truncateAllTables(); });
@@ -112,11 +114,25 @@ describe("complete input lineage", () => {
     });
     await expect(ingestConversationOnDemand(ownerActor, { workspaceId: workspace.id,
       title: "Unproven copied chat", content: "Synthetic private canary",
-    })).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
-    const savedChat = await ingestConversationOnDemand(ownerActor, { workspaceId: workspace.id,
-      title: "Proven copied chat", content: "Synthetic private canary",
+    })).rejects.toMatchObject({ code: "BRAIN_CONSENT_REQUIRED" });
+    await expect(ingestConversationOnDemand(ownerActor, { workspaceId: workspace.id,
+      title: "Model-selected copied chat", content: "Synthetic private canary",
       lineageInputs: [{ kind: "BrainArticle", id: privateArticle.id }],
-    });
+    })).rejects.toMatchObject({ code: "BRAIN_CONSENT_REQUIRED" });
+    const session = await createConversation(ownerActor, { workspaceId: workspace.id });
+    const prompt = await createConversationPromptInput(ownerActor, { workspaceId: workspace.id,
+      conversationId: session.id, content: "Private question about my article" });
+    const roots = await captureArtifactInputProof(ownerActor, workspace.id,
+      [{ kind: "ConversationPromptInput", id: prompt.id }, { kind: "BrainArticle", id: privateArticle.id }]);
+    const turn = await addConversationTurn(ownerActor, { workspaceId: workspace.id,
+      conversationId: session.id, userMessage: prompt.content, assistantMessage: "Synthetic private canary",
+      promptInputId: prompt.id, lineageRoots: roots });
+    const exported = await exportConversationAnswerToBrain(ownerActor, { workspaceId: workspace.id,
+      conversationId: session.id, outputTurnId: turn.id, expectedOutputHash: brainExportHash(turn.assistantMessage),
+      title: "Proven copied chat", transcriptMode: "NONE", selectedTurns: [], requestId: randomUUID() });
+    const savedChat = await prisma.brainSource.findUniqueOrThrow({ where: { id: exported.sourceId } });
+    expect(savedChat.content).toBe(turn.assistantMessage);
+    expect(savedChat.content).not.toContain(prompt.content);
     expect((await listSources(ownerActor, { workspaceId: workspace.id })).items.map((source) => source.id))
       .toContain(savedChat.id);
     expect((await listSources(readerActor, { workspaceId: workspace.id })).items.map((source) => source.id))
@@ -158,9 +174,15 @@ describe("complete input lineage", () => {
     await prisma.brainArticle.update({ where: { id: privateArticle.id }, data: { bodyMd: "Changed owner original" } });
     expect((await listSources(ownerActor, { workspaceId: workspace.id })).items.map((source) => source.id))
       .toEqual(expect.arrayContaining([rawSource.id, newSource.id]));
-    expect((await listSources(ownerActor, { workspaceId: workspace.id })).items.map((source) => source.id))
-      .not.toContain(copiedChat.id);
+    const visibleAfterChange = (await listSources(ownerActor, { workspaceId: workspace.id })).items.map(source => source.id);
+    expect(visibleAfterChange).not.toContain(copiedChat.id);
+    // Consent preserves the exact historical output across body-only revisions,
+    // while an actual source permission transition still revokes that copy.
+    expect(visibleAfterChange).toContain(savedChat.id);
     expect(await readableArtifactIds(ownerActor, workspace.id, "BrainArticle", [derivedArticle])).toEqual(new Set());
+    await prisma.brainArticle.update({ where: { id: privateArticle.id }, data: { archivedAt: new Date() } });
+    expect((await listSources(ownerActor, { workspaceId: workspace.id })).items.map(source => source.id))
+      .not.toContain(savedChat.id);
   });
 
   it("does not reveal private or unproven proposal metadata through public linked work items", async () => {
