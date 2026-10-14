@@ -7,8 +7,10 @@ import pg from "pg";
 import { verifyPassword } from "../../packages/shared/src/crypto";
 import { exportTenantSnapshot, hashCanonical, hashFrames } from "./shared-tenant-export";
 import { importTenantSnapshot, type TenantImportOptions } from "./shared-tenant-import";
+import { prepareTenantPublication } from "./shared-tenant-publication";
 import { inventorySharedTenantSource } from "./shared-tenant-inventory.mjs";
 import { validateObjectReceipt, type ObjectCopyReceipt } from "./shared-tenant-objects";
+import { historicalAuthorityTables, transferScalarFieldKinds } from "./shared-tenant-transfer-contract";
 import type { TenantTransferManifest, TenantTransferSnapshot, TransferSqlClient } from "./shared-tenant-transfer-contract";
 
 let containerId: string;
@@ -16,6 +18,9 @@ let port: string;
 let admin: pg.Client;
 let source: pg.Client;
 let snapshot: TenantTransferSnapshot;
+let originalSnapshot: TenantTransferSnapshot;
+let originalProof: string;
+let staged: ReturnType<typeof prepareTenantPublication>["staging"];
 const workspaceId = randomUUID();
 const newUser = randomUUID(); const linkedSourceUser = randomUUID();
 const targetLinkedUser = randomUUID(); const otherWorkspace = randomUUID(); const otherCircle = randomUUID();
@@ -64,24 +69,41 @@ before(async () => {
   await source.query(`INSERT INTO "Event" (id,"workspaceId",type,payload,status,"dispatchedAt") VALUES ($1,$2,'synthetic.history','{}','DISPATCHED',now())`, [terminalEventId, workspaceId]);
   await source.query(`INSERT INTO "WorkflowJob" (id,"workspaceId","eventId",type,payload,status,"completedAt","updatedAt") VALUES ($1,$2,$3,'synthetic.history','{}','COMPLETED',now(),now())`, [terminalJobId, workspaceId, terminalEventId]);
   await source.query(`INSERT INTO "WorkspaceFeatureFlag" (id,"workspaceId",flag,enabled,config,"updatedAt") VALUES ($1,$2,'synthetic-existing-flag',false,'{}',now())`, [randomUUID(), workspaceId]);
+  originalProof = execFileSync(process.execPath, ["--import", "tsx", "scripts/migration/shared-tenant-authority.fixture.ts", "seed"], {
+    env: { ...process.env, NODE_ENV: "test", DATABASE_URL: connectionString("transfer_source"), TRANSFER_TEST_WORKSPACE: workspaceId, TRANSFER_TEST_USER: newUser }, encoding: "utf8", timeout: 30_000,
+  }).trim().split("\n").at(-1)!;
+  const nativeOwner = (await source.query('SELECT id FROM "Member" WHERE "workspaceId"=$1 AND "userId"=$2', [workspaceId, newUser])).rows[0].id;
+  for (const mode of ["DIRECT_MEMBER_UPLOAD", "AUDIO_UPLOAD"]) await source.query(`INSERT INTO "NativeTranscriptInput" (id,"workspaceId",mode,"ownerMemberId","submittedByUserId","encryptedPayloadJson","payloadHash") VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    [randomUUID(), workspaceId, mode, nativeOwner, newUser, `preserved:${mode}:original ciphertext`, "a".repeat(64)]);
+  await source.query(`INSERT INTO "NativeTranscriptInput" (id,"workspaceId",mode,"recordingId","recorderAttemptId","recorderMeetingId","recorderBindingId","recorderProvider","encryptedPayloadJson","payloadHash") VALUES ($1,$2,'RECORDER',$3,$4,$5,$6,'RECALL_AI','preserved:RECORDER:original ciphertext',$7)`,
+    [randomUUID(), workspaceId, randomUUID(), randomUUID(), randomUUID(), randomUUID(), "b".repeat(64)]);
   const inventory = await inventorySharedTenantSource(source);
   const manifest: TenantTransferManifest = {
     formatVersion: 1, transferId: "synthetic-import", workspaceId, workspaceSlug: workspaceId, schemaSha256: inventory.schemaSha256,
     tables: Object.fromEntries(inventory.tables.filter((table: { rows: string }) => BigInt(table.rows) > 0n).map((table: { name: string }) => [table.name, {
       disposition: table.name === "_prisma_migrations" ? "operator-control" : "copy", reason: "Explicit synthetic importer fixture",
-      fields: { ...(table.name === "User" ? { passwordHash: { kind: "secret", reason: "Source password is replaced for new target identities" } } : {}),
+      fields: { ...Object.fromEntries(Object.entries(transferScalarFieldKinds[table.name] ?? {}).map(([name, kind]) => [name, { kind, reason: "Explicit synthetic scalar classification; no inferred FK or grant" }])), ...(table.name === "User" ? { passwordHash: { kind: "secret", reason: "Source password is replaced for new target identities" } } : {}),
         ...(table.name === "KnowledgeChunk" ? { sourceId: { kind: "reference", reason: "Explicit polymorphic historical source identifier" } } : {}),
         ...(table.name === "EmailDelivery" ? { providerMessageId: { kind: "reference", reason: "Provider receipt identity" }, workspaceId: { kind: "reference", reason: "Scalar tenant ownership" }, userId: { kind: "reference", reason: "Explicit scalar user binding", references: { table: "User", column: "id" } } } : {}),
         ...Object.fromEntries(inventory.schema.columns.filter((column: { table: string; type: string }) => column.table === table.name && (/^jsonb?$/.test(column.type) || column.type.endsWith("[]")))
           .map((column: { name: string }) => [column.name, { kind: "content", reason: "Synthetic content remains in PostgreSQL text format" }])) },
     }])),
   };
-  snapshot = await exportTenantSnapshot(source, manifest);
+  originalSnapshot = await exportTenantSnapshot(source, manifest);
+  const prepared = prepareFixture(originalSnapshot);
+  snapshot = prepared.publicationSnapshot; staged = prepared.staging;
 });
 after(async () => {
   await source?.end(); await admin?.end();
   if (containerId) execFileSync("docker", ["stop", containerId], { stdio: "pipe" });
 });
+function prepareFixture(value: TenantTransferSnapshot) {
+  return prepareTenantPublication(value, { stagedRows: value.tables.flatMap((table) => {
+    const selected = table.rows.filter((row) => historicalAuthorityTables.has(table.name)
+      || (table.name === "Event" && row[table.columns.findIndex((column) => column.name === "status")] === "PENDING"));
+    return selected.length ? [{ table: table.name, primaryKeys: selected.map((row) => table.primaryKey.map((key) => row[table.columns.findIndex((column) => column.name === key)])), reason: "Preserve original authority and pending permission work privately" }] : [];
+  }), detachReferences: [] });
+}
 function objectReceipt(value = snapshot, entries: ObjectCopyReceipt["entries"] = []): ObjectCopyReceipt {
   const body = { formatVersion: 1 as const, transferId: value.manifest.transferId, sourceSnapshotSha256: value.sha256,
     sourceStoreId: "synthetic-source", targetStoreId: "synthetic-target", entries };
@@ -173,7 +195,7 @@ test("integrated inactive import preserves existing tenant, target identity, sel
   assert.equal((await target.query('SELECT status FROM "WorkflowJob" WHERE id=$1', [terminalJobId])).rows[0].status, "COMPLETED");
   assert.equal((await target.query('SELECT status FROM "Event" WHERE id=$1', [terminalEventId])).rows[0].status, "DISPATCHED");
   assert.equal((await target.query(`SELECT count(*) FROM "WorkflowJob" WHERE "workspaceId"=$1 AND status='PENDING' AND "runAfter"<=now()`, [workspaceId])).rows[0].count, "0");
-  assert.equal((await target.query(`SELECT count(*) FROM "Event" WHERE "workspaceId"=$1 AND status='PENDING' AND "availableAt"<=now()`, [workspaceId])).rows[0].count, "0");
+  assert.ok(Number((await target.query(`SELECT count(*) FROM "Event" WHERE "workspaceId"=$1 AND status='PENDING' AND type='source-permission.changed'`, [workspaceId])).rows[0].count) > 0);
 }));
 
 test("workspace, inactive membership and marker receipt become visible together at commit", async () => withTarget(async (target, observer) => {
@@ -427,7 +449,7 @@ test("rehashed snapshots cannot omit or misclassify a known credential before op
       botTokenEnc: { kind: "secret", reason: "Source credential must be removed before publication" },
       scopes: { kind: "content", reason: "Original scopes" }, optionalScopes: { kind: "content", reason: "Original optional scopes" },
     } };
-    value = await exportTenantSnapshot(source, manifest);
+    value = prepareFixture(await exportTenantSnapshot(source, manifest)).publicationSnapshot;
   } finally { await source.query('DELETE FROM "CommunicationInstallation" WHERE id=$1', [id]); }
   for (const kind of [undefined, "content"] as const) {
     const bad = structuredClone(value);
@@ -454,7 +476,7 @@ test("exact reviewed inline locator exception leaves every other real object sub
     manifest.tables.Document = { disposition: "copy", reason: "Reviewed historical mixed source locators", fields: {
       storageKey: { kind: "object", reason: "Each locator requires a verified object or exact absence/inline evidence", retainedInlineValues: [{ valueSha256: createHash("sha256").update(inlineLocator).digest("hex"), evidenceSha256: "a".repeat(64), reason: "Synthetic source object absence and complete retained text verified" }] },
     } };
-    value = await exportTenantSnapshot(source, manifest);
+    value = prepareFixture(await exportTenantSnapshot(source, manifest)).publicationSnapshot;
   } finally { await source.query('DELETE FROM "Document" WHERE id=ANY($1::text[])', [[inline, blob]]); }
   const input = options(value);
   await assert.rejects(importTenantSnapshot(target, value, input), /TRANSFER_OBJECT_REFERENCE_UNVERIFIED/); await assertAbsent(target);
@@ -501,7 +523,7 @@ test("explicit tracking token disable preserves link identities and click histor
   try {
     const manifest = structuredClone(snapshot.manifest);
     manifest.tables.NewspaperTrackedLink = { disposition: "copy", reason: "Preserve click history with source token capability disabled", fields: { tokenHash: { kind: "secret", reason: "Old tracking capability must not work on target" } } };
-    value = await exportTenantSnapshot(source, manifest);
+    value = prepareFixture(await exportTenantSnapshot(source, manifest)).publicationSnapshot;
   } finally { await source.query('DELETE FROM "NewspaperTrackedLink" WHERE id=ANY($1::text[])', [[first, second]]); }
   const input = options(value);
   await assert.rejects(importTenantSnapshot(target, value, input), /TRANSFER_SECRET_DISPOSITION_REQUIRED/); await assertAbsent(target);
@@ -532,7 +554,7 @@ test("demo qualification bearer token requires explicit secret classification an
   try {
     const manifest = structuredClone(snapshot.manifest);
     manifest.tables.DemoLead = { disposition: "copy", reason: "Preserve lead history while removing source bearer capability", fields: { qualifyToken: { kind: "secret", reason: "Public qualification capability must not transfer" } } };
-    value = await exportTenantSnapshot(source, manifest);
+    value = prepareFixture(await exportTenantSnapshot(source, manifest)).publicationSnapshot;
   } finally { await source.query('DELETE FROM "DemoLead" WHERE id=$1', [id]); }
   const bad = structuredClone(value); bad.manifest.tables.DemoLead.fields!.qualifyToken.kind = "content";
   bad.manifestSha256 = hashCanonical(bad.manifest); const { sha256: _hash, ...body } = bad; bad.sha256 = hashCanonical(body);
@@ -543,4 +565,30 @@ test("demo qualification bearer token requires explicit secret classification an
   const input = options(value); input.transforms = { DemoLead: { qualifyToken: { kind: "null", reason: "Disable unauthenticated source qualification lookup" } } };
   await importTenantSnapshot(target, value, input);
   assert.deepEqual((await target.query('SELECT "qualifyToken","visitCount" FROM "DemoLead" WHERE id=$1', [id])).rows[0], { qualifyToken: null, visitCount: 9 });
+}));
+
+
+test("private authority staging preserves exact source rows and imports fresh epochs with old proof withheld", async () => withTarget(async (target) => {
+  let queries = 0;
+  await assert.rejects(importTenantSnapshot({ query: async () => { queries++; throw new Error("unexpected database query"); } }, originalSnapshot, options(originalSnapshot)), /TRANSFER_HISTORICAL_AUTHORITY_MUST_BE_STAGED/);
+  assert.equal(queries, 0);
+  for (const table of originalSnapshot.tables.filter((entry) => historicalAuthorityTables.has(entry.name) && entry.rows.length)) {
+    const archive = staged.rows.find((entry) => entry.table === table.name)!;
+    assert.deepEqual(archive.rows, table.rows); assert.deepEqual(archive.columns, table.columns);
+    assert.deepEqual(snapshot.tables.find((entry) => entry.name === table.name)!.rows, []);
+  }
+  const eventTable = originalSnapshot.tables.find((entry) => entry.name === "Event")!;
+  const pending = eventTable.rows.filter((row) => row[eventTable.columns.findIndex((column) => column.name === "status")] === "PENDING");
+  assert.ok(pending.length > 0);
+  assert.deepEqual(staged.rows.find((entry) => entry.table === "Event")!.rows, pending);
+  await importTenantSnapshot(target, snapshot, options());
+  assert.equal((await target.query('SELECT count(*) FROM "ArtifactInputLineage" WHERE "workspaceId"=$1', [workspaceId])).rows[0].count, "0");
+  assert.equal((await target.query('SELECT count(*) FROM "NativeTranscriptInput" WHERE "workspaceId"=$1', [workspaceId])).rows[0].count, "0");
+  const targetDatabase = (await target.query("SELECT current_database() AS name")).rows[0].name;
+  const result = execFileSync(process.execPath, ["--import", "tsx", "scripts/migration/shared-tenant-authority.fixture.ts", "verify"], {
+    env: { ...process.env, NODE_ENV: "test", DATABASE_URL: connectionString(targetDatabase), TRANSFER_TEST_WORKSPACE: workspaceId,
+      TRANSFER_TEST_USER: targetLinkedUser, TRANSFER_TEST_PROOF: originalProof, TRANSFER_TEST_ACTIVE_WORKSPACE: otherWorkspace }, encoding: "utf8", timeout: 45_000,
+  }).trim().split("\n").at(-1)!;
+  const evidence = JSON.parse(result);
+  assert.ok(evidence.matchingCounters > 0); assert.equal(evidence.readable, false); assert.equal(evidence.heldJobAttempts, 0);
 }));

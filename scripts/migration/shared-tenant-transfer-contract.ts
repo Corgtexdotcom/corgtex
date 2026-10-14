@@ -74,10 +74,56 @@ export interface TenantTransferSnapshot {
   sha256: string;
 }
 
+// These records authenticate source-local observations, permissions or producer
+// custody. Preserve their original bytes privately; copying them never issues
+// authority in the target, even when a fresh target epoch happens to match.
+export const historicalAuthorityTables: ReadonlySet<string> = new Set([
+  "SourcePermissionEpoch", "ArtifactInputLineage", "ArtifactInputSnapshot",
+  "CommunicationIngressInput", "CommunicationMessageNativeInput", "NativeTranscriptInput",
+  "RecorderTranscriptBinding", "RecorderTranscriptClaim", "RecorderTranscriptAttempt", "RecorderTranscriptPublication",
+  "SqlIngestionSourceClaim", "SqlIngestionAttempt", "SqlNativeRunInput", "SqlNativeCapturePart",
+  "SqlKnowledgePublication", "SqlKnowledgeStagedChunk", "ExternalProviderFetchInput", "ExternalMcpResponseInput",
+  "ConversationIngressInput", "McpToolInput", "ConversationOperationOutcome", "CrmQualificationFormInput", "FinanceReportUploadInput",
+]);
+
+export function assertHistoricalAuthorityPreserved(table: string, populated: boolean, policy: TransferTablePolicy | undefined) {
+  if (populated && historicalAuthorityTables.has(table) && policy?.disposition !== "copy" && policy?.disposition !== "transform") {
+    throw new Error(`TRANSFER_AUTHORITY_PRESERVATION_REQUIRED:${table}`);
+  }
+}
+
+export function assertNoHistoricalAuthority(tables: readonly TransferTableData[]) {
+  for (const table of tables) if (historicalAuthorityTables.has(table.name) && table.rows.length) {
+    throw new Error(`TRANSFER_HISTORICAL_AUTHORITY_MUST_BE_STAGED:${table.name}`);
+  }
+}
+
 // Reviewed scalar inventory from the current schema. These are classification
 // requirements, not inferred transfer dispositions or permission to copy values.
 // Provider/polymorphic references deliberately do not invent a database FK.
 const scalarReferenceFields: Record<string, readonly string[]> = {
+  SourcePermissionEpoch: ["sourceId"],
+  ArtifactInputLineage: ["artifactId"],
+  ArtifactInputSnapshot: ["sourceId"],
+  CommunicationIngressInput: ["installationId", "externalWorkspaceId", "appId", "externalEventId"],
+  CommunicationMessageNativeInput: ["installationId", "communicationMessageId", "externalWorkspaceId", "appId", "providerPrincipalId", "externalChannelId", "externalMessageId", "externalUserId", "threadExternalId", "ingressInputId"],
+  NativeTranscriptInput: ["ownerMemberId", "submittedByUserId", "meetingAudioAssetId", "sourceRecordId", "connectionId", "recordingId", "recorderAttemptId", "recorderMeetingId", "recorderBindingId"],
+  RecorderTranscriptClaim: ["recordingId", "attemptId"],
+  RecorderTranscriptAttempt: ["claimId", "recordingId", "meetingId", "externalBotId", "bindingId", "providerEventId", "nativeInputId"],
+  RecorderTranscriptPublication: ["attemptId", "nativeInputId", "recordingId", "meetingId", "providerEventId", "eventId", "transcriptManifestId", "meetingManifestId"],
+  SqlIngestionSourceClaim: ["sourceId", "activeAttemptId"],
+  SqlIngestionAttempt: ["sourceId", "logId"],
+  SqlNativeRunInput: ["sourceId", "attemptId"],
+  SqlNativeCapturePart: ["nativeInputId"],
+  SqlKnowledgePublication: ["sourceId", "attemptId", "nativeInputId"],
+  ExternalDataSyncLog: ["sqlAttemptId"],
+  ExternalProviderFetchInput: ["externalContentSourceId", "connectionId", "localUserId", "providerAccountId", "externalId"],
+  ExternalMcpResponseInput: ["connectionId", "localUserId", "providerAccountId"],
+  ConversationIngressInput: ["userId", "credentialId"],
+  McpToolInput: ["userId", "credentialId"],
+  ConversationOperationOutcome: ["userId", "credentialId", "requestKey"],
+  CrmQualificationFormInput: ["demoLeadId", "qualificationId"],
+  FinanceReportUploadInput: ["batchId", "documentId", "brainSourceId", "uploadedByUserId"],
   FinanceClient: ["createdByUserId"],
   FinanceConsultant: ["createdByUserId"],
   FinanceProject: ["createdByUserId"],
@@ -206,6 +252,17 @@ const scalarReferenceFields: Record<string, readonly string[]> = {
   ProviderCutover: ["recordedByUserId"],
 };
 const scalarSecretFields: Record<string, readonly string[]> = {
+  CommunicationIngressInput: ["signature", "encryptedRawBody"],
+  CommunicationMessageNativeInput: ["encryptedPayloadJson"],
+  NativeTranscriptInput: ["encryptedPayloadJson"],
+  RecorderTranscriptClaim: ["nonce"],
+  RecorderTranscriptAttempt: ["nonce", "encryptedOriginJson"],
+  SqlIngestionSourceClaim: ["ownerNonce"],
+  SqlIngestionAttempt: ["ownerNonce"],
+  SqlNativeRunInput: ["encryptedPayload"],
+  SqlNativeCapturePart: ["ciphertextPart"],
+  ExternalProviderFetchInput: ["encryptedResponseJson"],
+  ExternalMcpResponseInput: ["encryptedResponseJson"],
   DemoLead: ["qualifyToken"],
   CommunicationInstallation: ["botTokenEnc"],
   User: ["passwordHash"],
@@ -238,6 +295,8 @@ const scalarSecretFields: Record<string, readonly string[]> = {
   ProcurementTrial: ["connectorTokenEnc"],
 };
 const scalarObjectFields: Record<string, readonly string[]> = {
+  NativeTranscriptInput: ["storageKey"],
+  FinanceReportUploadInput: ["storageKey"],
   BuildArtifactAsset: ["storageKey"],
   MeetingAudioAsset: ["storageKey"],
   Document: ["storageKey"],
@@ -262,6 +321,7 @@ export function isRetainedInlineValue(table: string, column: string, value: stri
 
 /** All checks concern column metadata and explicit policies; values never enter errors. */
 export function assertTransferTableFieldPolicies(table: Pick<TransferTableData, "name" | "columns" | "rows">, policy: TransferTablePolicy | undefined) {
+  assertHistoricalAuthorityPreserved(table.name, table.rows.length > 0, policy);
   for (const [name, field] of Object.entries(policy?.fields ?? {})) {
     if (!field || !policyKinds.has(field.kind) || typeof field.reason !== "string" || !field.reason.trim()) {
       throw new Error(`TRANSFER_FIELD_POLICY_REQUIRED:${table.name}.${name}`);
