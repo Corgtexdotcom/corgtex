@@ -129,7 +129,8 @@ export async function exportTenantSnapshot(
         }
         assertHistoricalAuthorityPreserved(raw.name, true, manifest.tables[raw.name]);
         if (["Event", "WorkflowJob"].includes(raw.name) && !transfers(manifest.tables[raw.name])) {
-          const pending = await client.query(`SELECT 1 FROM ${tableName(raw.name)} WHERE status::text IN ('PENDING','RUNNING') OR "lockedBy" IS NOT NULL OR "lockedAt" IS NOT NULL LIMIT 1`);
+          const pending = await client.query(`SELECT 1 FROM ${tableName(raw.name)} r WHERE r."workspaceId" = $1
+            AND (r.status::text IN ('PENDING','RUNNING') OR r."lockedBy" IS NOT NULL OR r."lockedAt" IS NOT NULL) LIMIT 1`, [manifest.workspaceId]);
           if (pending.rows.length) throw new Error(`TRANSFER_SOURCE_WORK_PRESERVATION_REQUIRED:${raw.name}`);
         }
         const structured = columns.filter((column) => /^jsonb?$/.test(column.type) || column.type.endsWith("[]"));
