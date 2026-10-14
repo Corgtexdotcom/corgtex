@@ -1,11 +1,24 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ edge: vi.fn(), node: vi.fn(), sentry: vi.fn() }));
+const mocks = vi.hoisted(() => ({ edge: vi.fn(), node: vi.fn(), sentry: vi.fn(), native: vi.fn() }));
 vi.mock("@sentry/nextjs", () => ({ captureRequestError: mocks.sentry, init: vi.fn() }));
 vi.mock("@corgtex/shared/telemetry", () => ({ captureErrorTelemetry: mocks.edge }));
 vi.mock("@corgtex/shared/telemetry-node", () => ({ captureErrorTelemetry: mocks.node }));
-import { authorizationContextTelemetryAttributes, onRequestError } from "./instrumentation";
+vi.mock("@corgtex/connectors-sql/native-driver", () => { mocks.native(); return {}; });
+import { authorizationContextTelemetryAttributes, onRequestError, register } from "./instrumentation";
 afterEach(() => { vi.unstubAllEnvs(); vi.clearAllMocks(); });
 describe("instrumentation runtime boundary", () => {
+  it("does not load the native PostgreSQL adapter in Edge runtime", async () => {
+    vi.stubEnv("NEXT_RUNTIME", "edge");
+    await register();
+    expect(mocks.native).not.toHaveBeenCalled();
+  });
+
+  it("initializes the native PostgreSQL adapter before Node serving", async () => {
+    vi.stubEnv("NEXT_RUNTIME", "nodejs");
+    await register();
+    expect(mocks.native).toHaveBeenCalledOnce();
+  });
+
   it.each(["edge", "nodejs"])("uses only the %s telemetry adapter", async runtime => {
     vi.stubEnv("NEXT_RUNTIME", runtime);
     await onRequestError(new Error("synthetic"), { method: "POST" }, { routeType: "action" });

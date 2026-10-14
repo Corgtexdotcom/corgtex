@@ -4,6 +4,7 @@ import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 import { privacyFilter } from "./privacy";
+import { readableArtifactIds } from "./source-lineage";
 
 export const WORKSPACE_PERMALINK_ENTITY_TYPES = [
   "Action",
@@ -121,28 +122,24 @@ async function resolveTension(actor: AppActor, membership: MembershipSummary | n
 }
 
 async function resolveProposal(actor: AppActor, membership: MembershipSummary | null, workspaceId: string, entityId: string) {
-  return prisma.proposal.findFirst({
+  const proposal = await prisma.proposal.findFirst({
     where: { id: entityId, workspaceId, ...privacyFilter(actor, membership) },
-    select: { id: true, archivedAt: true },
   });
+  if (!proposal) return null;
+  return (await readableArtifactIds(actor, workspaceId, "Proposal", [proposal])).has(proposal.id) ? proposal : null;
 }
 
 async function resolveArticle(actor: AppActor, membership: MembershipSummary | null, workspaceId: string, entityId: string) {
   const article = await prisma.brainArticle.findFirst({
     where: { id: entityId, workspaceId },
-    select: {
-      id: true,
-      slug: true,
-      isPrivate: true,
-      archivedAt: true,
-      ownerMember: { select: { userId: true } },
-    },
+    include: { ownerMember: { select: { userId: true } } },
   });
-  if (!article?.isPrivate) return article;
+  if (!article) return null;
   const canReadPrivateDraft = actor.kind === "agent"
     || membership?.role === "ADMIN"
     || (actor.kind === "user" && article.ownerMember?.userId === actor.user.id);
-  return canReadPrivateDraft ? article : null;
+  if (article.isPrivate && !canReadPrivateDraft) return null;
+  return (await readableArtifactIds(actor, workspaceId, "BrainArticle", [article])).has(article.id) ? article : null;
 }
 
 async function resolveMeeting(workspaceId: string, entityId: string) {
@@ -153,10 +150,11 @@ async function resolveMeeting(workspaceId: string, entityId: string) {
 }
 
 async function resolveGoal(actor: AppActor, membership: MembershipSummary | null, workspaceId: string, entityId: string) {
-  return prisma.goal.findFirst({
+  const goal = await prisma.goal.findFirst({
     where: { id: entityId, workspaceId, ...privacyFilter(actor, membership) },
-    select: { id: true, archivedAt: true, cadence: true },
   });
+  if (!goal) return null;
+  return (await readableArtifactIds(actor, workspaceId, "Goal", [goal])).has(goal.id) ? goal : null;
 }
 
 async function resolveLinkedEntity(
@@ -204,6 +202,10 @@ export async function resolveWorkspacePermalink(actor: AppActor, params: {
     params.workspaceId,
     permalink.entityId,
   );
+
+  if (!entity && ["Proposal", "BrainArticle", "Goal"].includes(permalink.entityType)) {
+    invariant(false, 404, "NOT_FOUND", "Permanent link target not found.");
+  }
 
   if (entity) {
     return {

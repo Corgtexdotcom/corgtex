@@ -1,13 +1,15 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
 const {
   ingestSource,
+  captureCompanyMemberTranscriptInput,
   intakeMeetingTranscript,
   requireWorkspaceMembership,
   resolveRequestActor,
   handleRouteError,
 } = vi.hoisted(() => ({
   ingestSource: vi.fn(),
+  captureCompanyMemberTranscriptInput: vi.fn(),
   intakeMeetingTranscript: vi.fn(),
   requireWorkspaceMembership: vi.fn(),
   resolveRequestActor: vi.fn(),
@@ -16,6 +18,7 @@ const {
 
 vi.mock("@corgtex/domain", () => ({
   ingestSource,
+  captureCompanyMemberTranscriptInput,
   intakeMeetingTranscript,
   requireWorkspaceMembership,
 }));
@@ -30,6 +33,9 @@ vi.mock("@/lib/http", () => ({
 
 afterEach(() => {
   vi.clearAllMocks();
+});
+beforeEach(() => {
+  captureCompanyMemberTranscriptInput.mockResolvedValue({ inputId: "native-1" });
 });
 
 function postTextIngest(body: unknown) {
@@ -77,6 +83,7 @@ describe("POST /api/workspaces/[workspaceId]/data-sources/text-ingest", () => {
       recordedAt: new Date("2026-06-11T21:07:00.000Z"),
       ingestionGuidanceMd: "Highlight onboarding owner.",
       duplicateGuard: {},
+      nativeReceipt: { inputId: "native-1" },
     });
     expect(ingestSource).not.toHaveBeenCalled();
     expect(handleRouteError).not.toHaveBeenCalled();

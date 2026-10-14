@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AppError, classifyUploadedTextForMeeting, intakeMeetingTranscript } from "@corgtex/domain";
+import { AppError, captureDirectMemberTranscriptInput, classifyUploadedTextForMeeting, intakeMeetingTranscript, requireWorkspaceMembership } from "@corgtex/domain";
 import { extractTextFromFileBuffer, ingestFile } from "@corgtex/knowledge";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
@@ -21,6 +21,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId } = await params;
+    await requireWorkspaceMembership({ actor, workspaceId });
     const formData = await request.formData();
     const file = formData.get("file");
 
@@ -60,17 +61,21 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         });
       }
 
-      const intake = await intakeMeetingTranscript(actor, {
+      const submission = {
         workspaceId,
         transcript: extracted.textContent,
         fileName: file.name,
+        rawFileBase64: fileBuffer.toString("base64"),
+        rawFileMimeType: mimeType,
         userMessage,
         meetingId,
         title: formString(formData, "title"),
         source: formString(formData, "source") ?? "chat-transcript-upload",
         recordedAt,
         participantEmails: formList(formData, "participantEmails"),
-      });
+      };
+      const nativeReceipt = await captureDirectMemberTranscriptInput(actor, { workspaceId, submission });
+      const intake = await intakeMeetingTranscript(actor, { ...submission, nativeReceipt });
 
       return NextResponse.json({
         ...intake,

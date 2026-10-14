@@ -774,6 +774,8 @@ model Workspace {
   events                         Event[]
   workflowJobs                   WorkflowJob[]
   knowledge                      KnowledgeChunk[]
+  artifactInputLineage           ArtifactInputLineage[]
+  artifactInputSnapshots         ArtifactInputSnapshot[]
   modelUsage                     ModelUsage[]
   agentRuns                      AgentRun[]
   agentCreds                     AgentCredential[]
@@ -784,6 +786,12 @@ model Workspace {
   agentMemories                  AgentMemory[]
   webhookEndpoints               WebhookEndpoint[]
   inboundWebhooks                InboundWebhook[]
+  conversationPromptInputs       ConversationPromptInput[]
+  conversationIngressInputs      ConversationIngressInput[]
+  mcpToolInputs                  McpToolInput[]
+  conversationOperationOutcomes   ConversationOperationOutcome[]
+  crmQualificationFormInputs     CrmQualificationFormInput[]
+  financeReportUploadInputs      FinanceReportUploadInput[]
   brainArticles                  BrainArticle[]
   brainSources                   BrainSource[]
   brainBacklinks                 BrainBacklink[]
@@ -805,6 +813,26 @@ model Workspace {
   mcpOAuthTokens                 McpOAuthAccessToken[]
   externalMcpConnections         ExternalMcpConnection[]
   externalContentSources         ExternalContentSource[]
+  externalProviderFetchInputs    ExternalProviderFetchInput[]
+  externalMcpResponseInputs      ExternalMcpResponseInput[]
+  sqlIngestionSourceClaims       SqlIngestionSourceClaim[]
+  sqlIngestionAttempts           SqlIngestionAttempt[]
+  sqlNativeRunInputs             SqlNativeRunInput[]
+  sqlNativeCaptureParts          SqlNativeCapturePart[]
+  sqlKnowledgePublications       SqlKnowledgePublication[]
+  informationCategoryPolicies    InformationCategoryPolicy[]
+  genericDerivedArtifactVariants GenericDerivedArtifactVariant[]
+  derivedArtifactRebuildStates DerivedArtifactRebuildState[]
+  sourcePermissionEpochs SourcePermissionEpoch[]
+  nativeTranscriptInputs NativeTranscriptInput[]
+  nativeTranscriptPublications NativeTranscriptPublication[]
+  transcriptTransportArchives TranscriptTransportArchive[]
+  recorderTranscriptBindings RecorderTranscriptBinding[]
+  recorderTranscriptClaims RecorderTranscriptClaim[]
+  recorderTranscriptAttempts RecorderTranscriptAttempt[]
+  recorderTranscriptPublications RecorderTranscriptPublication[]
+  communicationIngressInputs CommunicationIngressInput[]
+  communicationMessageNativeInputs CommunicationMessageNativeInput[]
   externalContentSyncLogs        ExternalContentSyncLog[]
   externalResources              WorkspaceExternalResource[]
   externalResourceAttachments    WorkspaceExternalResourceAttachment[]
@@ -870,6 +898,7 @@ model Workspace {
   financeExpenses                FinanceExpense[]
   financeContributionEntries     FinanceContributionEntry[]
   financeReports                 FinanceReport[]
+  financeReportFactRevisions      FinanceReportFactRevision[]
   financeImportBatches           FinanceImportBatch[]
   financeImportApplications      FinanceImportApplication[]
   financeImportProfiles          FinanceImportProfile[]
@@ -887,6 +916,8 @@ model Workspace {
   contextMapViews                ContextMapView[]
   contextGraphProposedDiffs      ContextGraphProposedDiff[]
   managedCustomerDeployment      CustomerDeployment?
+  agentFeedbackInputs AgentFeedbackInput[]
+  agentRequestInputs AgentRequestInput[]
 }
 
 model WorkspaceFeatureFlag {
@@ -1116,6 +1147,37 @@ model FinanceReportFact {
   @@index([sourceBatchId])
 }
 
+/// Immutable published value and original approval/recipe. No Fact/Report FK:
+/// deleting or rebinding canonical rows must not erase historical evidence.
+model FinanceReportFactRevision {
+  id String @id @default(uuid())
+  workspaceId String
+  factId String
+  factVersion Int
+  reportId String
+  accountPath String[]
+  kind FinanceReportFactKind
+  periodStart DateTime @db.Date
+  periodEnd DateTime @db.Date
+  amountCents Int
+  dimensions Json?
+  semanticKey String @db.VarChar(64)
+  sourceBatchId String
+  sourceCandidateId String
+  appliedByUserId String
+  approvedByUserId String
+  approvedAt DateTime
+  candidateVersion Int
+  valueHash String @db.VarChar(64)
+  recipeJson Json
+  recipeHash String @db.VarChar(64)
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@unique([workspaceId, factId, factVersion])
+  @@index([workspaceId, semanticKey])
+  @@index([workspaceId, reportId])
+}
+
 model FinanceImportBatch {
   id                        String                      @id @default(uuid())
   workspaceId               String
@@ -1199,6 +1261,7 @@ model FinanceImportCandidate {
   action                  FinanceImportCandidateAction
   reviewState             FinanceImportCandidateReviewState @default(PROPOSED)
   semanticKey             String?                           @db.VarChar(64)
+  currentFactRevisionId   String?
   currentFactId           String?
   currentAmountCents      Int?
   confidenceBps           Int
@@ -1231,6 +1294,8 @@ model FinanceImportApplication {
   idempotencyKey   String                             @db.VarChar(64)
   targetType       FinanceImportApplicationTargetType
   targetFactId     String?
+  beforeRevisionId String?
+  afterRevisionId  String?
   beforeValueJson  Json?
   afterValueJson   Json?
   beforeValueHash  String?                            @db.VarChar(64)
@@ -1528,6 +1593,8 @@ model CommunicationInboundEvent {
 
   @@index([workspaceId, provider, status])
   @@index([provider, externalEventId])
+  ingressInputId String?
+  ingressInput CommunicationIngressInput? @relation(fields: [ingressInputId], references: [id], onDelete: SetNull)
 }
 
 model CommunicationEntityLink {
@@ -2805,6 +2872,7 @@ model MeetingSeries {
 
 model Meeting {
   id                  String        @id @default(uuid())
+  informationCategory String @default("GENERAL")
   workspaceId         String
   seriesId            String?
   status              MeetingStatus @default(COMPLETED)
@@ -3026,6 +3094,7 @@ model MeetingRecorderSmokeRun {
 
 model Document {
   id               String                @id @default(uuid())
+  informationCategory String @default("GENERAL")
   workspaceId      String
   accessDomain     KnowledgeAccessDomain @default(WORKSPACE)
   title            String
@@ -3451,7 +3520,8 @@ model MeetingTranscriptSourceRecord {
   supersededRecords  MeetingTranscriptSourceRecord[]    @relation("MeetingTranscriptRecordSupersession")
   meetingInsights    MeetingInsight[]
 
-  @@unique([workspaceId, provider, externalId, contentHash])
+  // Successful content identity is a partial unique index in migration191.
+  // FAILED diagnostics are append-only and never occupy publication identity.
   @@index([workspaceId, provider, externalId])
   @@index([workspaceId, recordedAt])
   @@index([meetingId])
@@ -3719,6 +3789,48 @@ model KnowledgeChunk {
 
   @@index([workspaceId, sourceType, sourceId])
   @@index([workspaceId, accessDomain, sourceType, sourceId])
+}
+
+/// Immutable evidence for the complete inputs to one saved artifact revision.
+/// An absent row means unknown lineage and must never be treated as an empty input set.
+model ArtifactInputLineage {
+  id           String   @id @default(uuid())
+  workspaceId  String
+  artifactType String
+  artifactId   String
+  revision     Int
+  origin       String
+  contentHash  String
+  inputsJson   Json     @default("[]")
+  rootsJson    Json     @default("[]")
+  recordedAt   DateTime @default(now())
+  epochProofVersion Int?
+  permissionEpochsJson Json?
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, artifactType, artifactId, revision])
+  @@index([workspaceId, artifactType, artifactId, recordedAt], map: "ArtifactInputLineage_workspaceId_artifactType_artifactId_re_idx")
+}
+
+/// Immutable source content and original access envelope for a mutable prompt input.
+model ArtifactInputSnapshot {
+  id                 String   @id @default(uuid())
+  workspaceId        String
+  sourceKind         String
+  sourceId           String
+  sourceFingerprint  String
+  origin             String
+  contentJson        Json
+  accessEnvelopeJson Json
+  epochProofVersion Int?
+  permissionEpochsJson Json?
+  rootsJson          Json
+  createdAt          DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, sourceKind, sourceId])
 }
 
 model ContextGraphObject {
@@ -4078,6 +4190,7 @@ model ConversationSession {
 
   workspace      Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   user           User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  promptInputs   ConversationPromptInput[]
   turns          ConversationTurn[]
   roleOnboarding RoleOnboardingSession?
   checkIns       CheckIn[]
@@ -4144,10 +4257,26 @@ enum RoleOnboardingStatus {
   DISMISSED
 }
 
+model ConversationPromptInput {
+  id String @id @default(uuid())
+  workspaceId String
+  sessionId String
+  userId String
+  content String @db.Text
+  createdAt DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  session ConversationSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  turns ConversationTurn[]
+
+  @@index([workspaceId, sessionId, userId])
+}
+
 model ConversationTurn {
   id               String   @id @default(uuid())
   conversationId   String
   sequenceNumber   Int
+  promptInputId    String?
   userMessage      String   @db.Text
   assistantMessage String   @db.Text
   contextJson      Json?
@@ -4155,6 +4284,7 @@ model ConversationTurn {
   createdAt        DateTime @default(now())
 
   conversation ConversationSession @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  promptInput ConversationPromptInput? @relation(fields: [promptInputId], references: [id], onDelete: SetNull)
   agentRun     AgentRun?           @relation(fields: [agentRunId], references: [id], onDelete: SetNull)
 
   @@index([conversationId, sequenceNumber])
@@ -4196,6 +4326,12 @@ model BrainArticle {
   // Explicit agent-created lineage. Legacy sourceIds may also be citations.
   derivationJson   Json?
   humanEditedAt    DateTime?
+  // Member-specific immutable rebuilds never inherit the canonical body.
+  variantOfArticleId String?
+  variantTargetFingerprint String?
+  variantInputSetHash String?
+  variantSourceStateJson Json?
+  variantGenerationJobId String?
   archivedAt       DateTime?
   archivedByUserId String?
   archiveReason    String?
@@ -4210,6 +4346,8 @@ model BrainArticle {
   discussions   BrainDiscussionThread[]
 
   @@unique([workspaceId, slug])
+  @@unique([workspaceId, variantOfArticleId, ownerMemberId, variantTargetFingerprint, variantInputSetHash], map: "BrainArticle_variant_recipe_key")
+  @@index([workspaceId, variantOfArticleId, ownerMemberId])
   @@index([workspaceId, type])
   @@index([workspaceId, authority])
   @@index([workspaceId, archivedAt])
@@ -4220,6 +4358,7 @@ model BrainArticleVersion {
   articleId     String
   version       Int
   bodyMd        String   @db.Text
+  accessEnvelopeJson Json?
   changeSummary String?
   agentRunId    String?
   createdAt     DateTime @default(now())
@@ -4231,6 +4370,7 @@ model BrainArticleVersion {
 
 model BrainSource {
   id                  String                @id @default(uuid())
+  informationCategory String @default("GENERAL")
   workspaceId         String
   accessDomain        KnowledgeAccessDomain @default(WORKSPACE)
   sourceType          BrainSourceType
@@ -5327,6 +5467,11 @@ model ExternalDataSource {
   id                  String    @id @default(uuid())
   workspaceId         String
   label               String
+  accessDomain        KnowledgeAccessDomain @default(WORKSPACE)
+  informationCategory String @default("GENERAL")
+  isRestricted        Boolean @default(false)
+  allowedRoleIds      String[] @default([])
+  allowedCircleIds    String[] @default([])
   driverType          String    @default("postgres")
   connectionStringEnc String
   selectedTables      String[]  @default([])
@@ -5349,9 +5494,129 @@ model ExternalDataSource {
   @@index([workspaceId, archivedAt])
 }
 
+// Source tombstone deliberately has no ExternalDataSource FK: deletion and
+// recreation must retain the generation, rather than revive an old worker.
+model SqlIngestionSourceClaim {
+  id String @id @default(uuid())
+  workspaceId String
+  sourceId String
+  generation BigInt @default(0)
+  activeAttemptId String?
+  ownerNonce String?
+  configurationFingerprint String? @db.VarChar(64)
+  leaseExpiresAt DateTime?
+  status String @default("IDLE")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@unique([workspaceId, sourceId])
+}
+
+model SqlIngestionAttempt {
+  id String @id @default(uuid())
+  workspaceId String
+  sourceId String
+  generation BigInt
+  ownerNonce String
+  configurationFingerprint String @db.VarChar(64)
+  expectedCursor String? @db.Text
+  sourcePermissionEpoch BigInt
+  originalPermissionEpochsJson Json @default("{}")
+  logId String
+  status String @default("RUNNING")
+  leaseExpiresAt DateTime
+  error String? @db.Text
+  createdAt DateTime @default(now())
+  completedAt DateTime?
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@unique([workspaceId, sourceId, generation])
+  @@index([workspaceId, sourceId, status])
+}
+
+
+/// Current company category restriction; absence is also versioned authority.
+model InformationCategoryPolicy {
+  id String @id @default(uuid())
+  workspaceId String
+  category String
+  isRestricted Boolean @default(false)
+  allowedRoleIds String[] @default([])
+  allowedCircleIds String[] @default([])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@unique([workspaceId, category])
+}
+
+/// Created only by the authenticated registered native scanner. No source FK:
+/// originals survive source deletion, with their original permission vector.
+model SqlNativeRunInput {
+  id String @id @default(uuid())
+  workspaceId String
+  sourceId String
+  attemptId String @unique
+  generation BigInt
+  configurationFingerprint String @db.VarChar(64)
+  sourcePermissionEpoch BigInt
+  permissionEpochsJson Json
+  encryptedPayload String @db.Text
+  payloadHash String @db.VarChar(64)
+  rowsProcessed Int
+  nextCursor String? @db.Text
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, sourceId])
+}
+
+/// Private encrypted transport only. Parts are inserted and removed inside the
+/// one native-capture transaction; they never grant input or serving authority.
+model SqlNativeCapturePart {
+  id String @id @default(uuid())
+  workspaceId String
+  nativeInputId String
+  ordinal Int
+  ciphertextPart String @db.Text
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@unique([workspaceId, nativeInputId, ordinal])
+}
+
+/// Complete immutable output set is staged without serving authority. One final
+/// transaction publishes all chunks and the cursor, then seals COMMITTED.
+model SqlKnowledgePublication {
+  id String @id @default(uuid())
+  workspaceId String
+  sourceId String
+  attemptId String @unique
+  nativeInputId String
+  generation BigInt
+  configurationFingerprint String @db.VarChar(64)
+  outputSetHash String @db.VarChar(64)
+  chunksCreated Int
+  rowsProcessed Int
+  nextCursor String? @db.Text
+  status String @default("PREPARING")
+  createdAt DateTime @default(now())
+  committedAt DateTime?
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  chunks SqlKnowledgeStagedChunk[]
+  @@index([workspaceId, sourceId, status])
+}
+
+model SqlKnowledgeStagedChunk {
+  id String @id
+  publicationId String
+  ordinal Int
+  rowIndex Int
+  contentHash String @db.VarChar(64)
+  contentJson Json
+  publication SqlKnowledgePublication @relation(fields: [publicationId], references: [id], onDelete: Cascade)
+  @@unique([publicationId, ordinal])
+}
+
 model ExternalDataSyncLog {
   id            String    @id @default(uuid())
   sourceId      String
+  sqlAttemptId  String? @unique
   rowsProcessed Int       @default(0)
   chunksCreated Int       @default(0)
   error         String?
@@ -6363,4 +6628,410 @@ model PendingTranscriptUpload {
   createdAt DateTime @default(now())
   @@index([expiresAt])
   @@index([workspaceId])
+}
+
+model AgentFeedbackInput {
+  id String @id @default(uuid())
+  workspaceId String
+  agentRunId String
+  stepId String
+  priorRunSnapshotId String?
+  userId String
+  content String @db.Text
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, agentRunId, userId])
+}
+
+model AgentRequestInput {
+  id String @id @default(uuid())
+  workspaceId String
+  userId String
+  agentKey String
+  prompt String @db.Text
+  meetingId String?
+  proposalId String?
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, userId, agentKey])
+}
+
+// Exact authenticated MCP request material, never a declaration about model ancestry.
+model ConversationIngressInput {
+  id String @id @default(uuid())
+  workspaceId String
+  actorKind String
+  userId String?
+  credentialId String?
+  credentialVersion String?
+  scopeHash String?
+  content String @db.Text
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, userId])
+  @@index([workspaceId, credentialId])
+}
+
+// Raw tool submissions are native authenticated inputs, not human authorship certificates.
+model McpToolInput {
+  id String @id @default(uuid())
+  workspaceId String
+  actorKind String
+  userId String?
+  credentialId String?
+  credentialVersion String?
+  scopeHash String?
+  toolName String
+  argumentsJson String @db.Text
+  requiredScopes String[]
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, userId])
+  @@index([workspaceId, credentialId])
+}
+
+// A committed operation fact permits a constant acknowledgment without archived source content.
+model ConversationOperationOutcome {
+  id String @id @default(uuid())
+  workspaceId String
+  actorKind String
+  userId String?
+  credentialId String?
+  credentialVersion String?
+  scopeHash String?
+  operation String
+  requestKey String
+  requiredScopes String[]
+  controlJson Json?
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@unique([workspaceId, requestKey])
+  @@index([workspaceId, userId])
+  @@index([workspaceId, credentialId])
+}
+
+// Exact fresh token-authorized form input, kept separate from mutable extraction/review fields.
+model CrmQualificationFormInput {
+  id String @id @default(uuid())
+  workspaceId String
+  demoLeadId String
+  qualificationId String
+  companyName String
+  website String
+  roleTitle String?
+  aiExperience String
+  helpNeeded String @db.Text
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@unique([workspaceId, qualificationId])
+  @@index([workspaceId, demoLeadId])
+}
+
+// Authenticated human upload authority for this exact immutable Finance file and extraction purpose.
+model FinanceReportUploadInput {
+  id String @id @default(uuid())
+  workspaceId String
+  batchId String
+  documentId String
+  brainSourceId String
+  uploadedByUserId String
+  fileHash String
+  storageKey String
+  mimeType String
+  fileSizeBytes Int
+  originalFilename String
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@unique([workspaceId, batchId])
+  @@index([workspaceId, uploadedByUserId])
+}
+
+// Exact authenticated provider responses; history never confers a current remote grant.
+model ExternalProviderFetchInput {
+  id String @id @default(uuid())
+  workspaceId String
+  externalContentSourceId String
+  connectionId String
+  localUserId String
+  providerKey String
+  serverUrl String
+  providerAccountId String?
+  sourceKind String
+  externalId String
+  toolName String
+  requestJson Json
+  encryptedResponseJson String @db.Text
+  responseHash String @db.VarChar(64)
+  connectionGrantHash String @db.VarChar(64)
+  fetchedAt DateTime @default(now())
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, externalContentSourceId], map: "ExternalProviderFetchInput_workspaceId_externalContentSourceId_")
+  @@index([workspaceId, connectionId])
+}
+
+// Complete authenticated live MCP read results, before normalization or limits.
+model ExternalMcpResponseInput {
+  id String @id @default(uuid())
+  workspaceId String
+  connectionId String
+  localUserId String
+  providerKey String
+  serverUrl String
+  providerAccountId String?
+  mode String
+  toolName String
+  requestJson Json
+  encryptedResponseJson String @db.Text
+  responseHash String @db.VarChar(64)
+  connectionGrantHash String @db.VarChar(64)
+  originalLocalEpochsJson Json
+  fetchedAt DateTime @default(now())
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, connectionId, fetchedAt])
+  @@index([workspaceId, localUserId, fetchedAt])
+}
+
+// Immutable owner-specific graph bundles contain fresh identities and complete permitted input receipts.
+model GenericDerivedArtifactVariant {
+  id String @id @default(uuid())
+  workspaceId String
+  targetKind String
+  targetId String
+  ownerMemberId String
+  recipeVersion Int @default(1)
+  generatorKey String
+  generatorVersion String
+  instructionHash String @db.VarChar(64)
+  targetFingerprint String @db.VarChar(64)
+  inputSetHash String @db.VarChar(64)
+  sourceStateJson Json
+  targetsJson Json
+  scopeJson Json
+  payloadJson Json
+  generationJobId String
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@unique([workspaceId, targetKind, targetId, ownerMemberId, targetFingerprint, inputSetHash], map: "GenericDerivedArtifactVariant_generation_key")
+  @@index([workspaceId, ownerMemberId, createdAt])
+  @@index([workspaceId, targetKind, targetId])
+  @@index([generationJobId])
+}
+
+// Metadata-only invalidation and reviewed replacement pointer; never certifies old output as current.
+model DerivedArtifactRebuildState {
+  id String @id @default(uuid())
+  workspaceId String
+  targetKind String
+  targetId String
+  targetManifestId String
+  targetFingerprint String @db.VarChar(64)
+  sourceStateJson Json
+  generationKey String
+  state String
+  replacementVariantId String?
+  eventId String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@unique([workspaceId, targetKind, targetId, targetManifestId], map: "DerivedArtifactRebuildState_target_manifest_key")
+  @@index([workspaceId, state])
+}
+
+// Durable permission tombstones. Resource deletion never resets an epoch.
+model SourcePermissionEpoch {
+  id String @id @default(uuid())
+  workspaceId String
+  sourceKind String
+  sourceId String
+  epoch BigInt @default(0)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@unique([workspaceId, sourceKind, sourceId])
+}
+
+// Authenticated raw HTTP envelope, preserved independently of parsed mutable inbound records.
+model CommunicationIngressInput {
+  id String @id @default(uuid())
+  workspaceId String
+  installationId String
+  provider String
+  externalWorkspaceId String
+  appId String?
+  ingressKind String
+  externalEventId String?
+  requestTimestamp String
+  signature String
+  signingBindingHash String @db.VarChar(64)
+  installationGrantHash String @db.VarChar(64)
+  encryptedRawBody String @db.Text
+  bodyHash String @db.VarChar(64)
+  permissionEpochsJson Json
+  epochProofVersion Int @default(1)
+  expiresRawAt DateTime
+  receivedAt DateTime @default(now())
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, installationId])
+  inboundEvents CommunicationInboundEvent[]
+}
+
+// Exact currently admitted provider message; no old raw row can manufacture native authorship.
+model CommunicationMessageNativeInput {
+  id String @id @default(uuid())
+  workspaceId String
+  installationId String
+  communicationMessageId String
+  provider String
+  externalWorkspaceId String
+  appId String?
+  providerPrincipalId String
+  externalChannelId String
+  externalMessageId String
+  externalUserId String?
+  threadExternalId String?
+  mode String
+  ingressInputId String?
+  requestJson Json
+  encryptedPayloadJson String @db.Text
+  projectedContentJson Json
+  projectionHash String @db.VarChar(64)
+  installationGrantHash String @db.VarChar(64)
+  channelGrantHash String @db.VarChar(64)
+  permissionEpochsJson Json
+  epochProofVersion Int @default(1)
+  expiresRawAt DateTime
+  fetchedAt DateTime @default(now())
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, communicationMessageId])
+  @@index([workspaceId, installationId, externalChannelId])
+}
+
+// Exact native submission bytes; provider labels and mutable import rows confer no grant.
+model NativeTranscriptInput {
+  id String @id @default(uuid())
+  workspaceId String
+  mode String
+  ownerMemberId String?
+  submittedByUserId String?
+  meetingAudioAssetId String?
+  sourceRecordId String?
+  connectionId String?
+  transportArchiveId String?
+  recordingId String?
+  recorderAttemptId String?
+  recorderMeetingId String?
+  recorderBindingId String?
+  recorderProvider String?
+  storageKey String?
+  fileHash String? @db.VarChar(64)
+  fileSizeBytes Int?
+  mimeType String?
+  encryptedPayloadJson String @db.Text
+  payloadHash String @db.VarChar(64)
+  grantHash String? @db.VarChar(64)
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, ownerMemberId])
+  @@unique([workspaceId, mode, meetingAudioAssetId])
+  @@index([workspaceId, sourceRecordId])
+}
+
+
+// Non-serving exact authenticated transport custody, shared by selected native inputs.
+model TranscriptTransportArchive {
+  id String @id @default(uuid())
+  workspaceId String
+  connectionId String
+  provider String
+  configurationHash String @db.VarChar(64)
+  wireHash String @db.VarChar(64)
+  byteSize Int
+  encryptedWiresJson String @db.Text
+  cipherHash String @default(dbgenerated())
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, connectionId])
+}
+
+// One original public member publication; old private native inputs are never promoted.
+model NativeTranscriptPublication {
+  id String @id @default(uuid())
+  workspaceId String
+  nativeInputId String
+  nativeFingerprint String @db.VarChar(64)
+  meetingId String
+  transcriptManifestId String
+  manifestHash String @db.VarChar(64)
+  transcriptFingerprint String @db.VarChar(64)
+  permissionEpochsJson Json
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@unique([workspaceId, nativeInputId])
+  @@index([workspaceId, meetingId])
+}
+
+// Recorder custody is never a human submission or a semantic permission grant.
+model RecorderTranscriptBinding {
+  id String @id @default(uuid())
+  workspaceId String
+  provider String
+  configurationHash String @db.VarChar(64)
+  active Boolean @default(true)
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, provider, active])
+}
+model RecorderTranscriptClaim {
+  id String @id @default(uuid())
+  workspaceId String
+  recordingId String @unique
+  attemptId String @unique
+  generation Int
+  nonce String
+  leaseUntil DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, leaseUntil])
+}
+model RecorderTranscriptAttempt {
+  id String @id
+  workspaceId String
+  claimId String
+  recordingId String
+  meetingId String
+  provider String
+  externalBotId String
+  bindingId String
+  configurationHash String @db.VarChar(64)
+  generation Int
+  nonce String
+  providerEventId String?
+  originHash String @db.VarChar(64)
+  encryptedOriginJson String @db.Text
+  nativeInputId String? @unique
+  failureCode String?
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@unique([claimId, generation])
+  @@index([workspaceId, recordingId])
+}
+model RecorderTranscriptPublication {
+  id String @id
+  workspaceId String
+  attemptId String @unique
+  nativeInputId String @unique
+  recordingId String
+  meetingId String
+  providerEventId String?
+  eventId String @unique
+  transcriptManifestId String
+  meetingManifestId String
+  completePlanHash String @db.VarChar(64)
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, recordingId])
 }

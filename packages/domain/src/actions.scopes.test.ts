@@ -13,7 +13,7 @@ const mocks = vi.hoisted(() => ({
     actionChecklistItem: { findMany: vi.fn() },
   },
 }));
-vi.mock("@corgtex/shared", () => ({ prisma: mocks.db, mcpCredentialVersion: (hash: string) => `version:${hash}` }));
+vi.mock("@corgtex/shared", async () => ({ ...await vi.importActual<typeof import("@corgtex/shared")>("@corgtex/shared"), prisma: mocks.db, mcpCredentialVersion: (hash: string) => `version:${hash}` }));
 vi.mock("./auth", () => ({ requireWorkspaceMembership: mocks.membership, actorUserIdForWorkspace: vi.fn() }));
 vi.mock("./audit-trail", () => ({ recordAudit: mocks.audit }));
 vi.mock("./events", () => ({ appendEvents: mocks.events }));
@@ -46,39 +46,30 @@ beforeEach(() => {
 });
 
 describe("Action operation grants", () => {
-  it("keeps canonical write-only completion allowed", async () => {
-    await expect(completeAction(actor, { ...params, completedVia: "Synthetic completed note" })).resolves.toMatchObject({ status: "COMPLETED" });
-    expect(mocks.db.action.update).toHaveBeenCalledOnce();
+  it("rejects completion without its authenticated native MCP invocation", async () => {
+    await expect(completeAction({...actor}, { ...params, completedVia: "Synthetic completed note" })).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+    expect(mocks.db.action.findFirst).not.toHaveBeenCalled();
+    expect(mocks.db.action.update).not.toHaveBeenCalled();
   });
 
-  it("does not let completion forward undeclared content edits", async () => {
-    const injectedTransaction = { action: { findUnique: vi.fn(), update: vi.fn() } };
-    await expect(completeAction(actor, {
-      ...params, completedVia: "Synthetic completed note", title: "Unpermitted title",
-      bodyMd: "Unpermitted body", assigneeMemberId: "other-assignee",
-      expectedVersion: -123, _tx: injectedTransaction,
-    } as Parameters<typeof completeAction>[1])).resolves.toMatchObject({ status: "COMPLETED" });
-    expect(mocks.db.action.update.mock.calls[0][0].data).not.toHaveProperty("title");
-    expect(mocks.db.action.update.mock.calls[0][0].data).not.toHaveProperty("bodyMd");
-    expect(mocks.db.action.update.mock.calls[0][0].data).not.toHaveProperty("assigneeMemberId");
-    expect(injectedTransaction.action.findUnique).not.toHaveBeenCalled();
-    expect(injectedTransaction.action.update).not.toHaveBeenCalled();
-    expect(mocks.db.$transaction).toHaveBeenCalledOnce();
-  });
-
-  it.each([false, true])("preserves write-only duplicate use_existing with a source claim %j", async withSource => {
+  it.each([false, true])("requires read before duplicate use_existing with a source claim %j", async withSource => {
     mocks.duplicate.mockResolvedValue({ resolution: "use_existing", match: { entityId: "synthetic-action" } });
     await expect(createAction(actor, { workspaceId: params.workspaceId, title: "Synthetic duplicate", duplicateGuard: { resolution: "use_existing" },
       ...(withSource ? { source: { type: "MCP_REQUEST", id: "synthetic-request" } } : {}),
-    })).resolves.toMatchObject({ id: "synthetic-action" });
+    })).rejects.toMatchObject({status: 403});
+    expect(mocks.duplicate).not.toHaveBeenCalled();
+    expect(mocks.db.actionCreationSource.findUnique).not.toHaveBeenCalled();
+    expect(mocks.db.action.findUnique).not.toHaveBeenCalled();
   });
 
-  it.each([false, true])("preserves write-only duplicate update_existing with a source claim %j", async withSource => {
+  it.each([false, true])("requires read before duplicate update_existing with a source claim %j", async withSource => {
     mocks.duplicate.mockResolvedValue({ resolution: "update_existing", match: { entityId: "synthetic-action" } });
     await expect(createAction(actor, { workspaceId: params.workspaceId, title: "Synthetic duplicate", bodyMd: "Synthetic merged body", duplicateGuard: { resolution: "update_existing" },
       ...(withSource ? { source: { type: "MCP_REQUEST", id: "synthetic-request" } } : {}),
-    })).resolves.toMatchObject({ bodyMd: "Synthetic merged body" });
-    expect(mocks.db.action.update).toHaveBeenCalledOnce();
+    })).rejects.toMatchObject({status: 403});
+    expect(mocks.duplicate).not.toHaveBeenCalled();
+    expect(mocks.db.actionCreationSource.findUnique).not.toHaveBeenCalled();
+    expect(mocks.db.action.update).not.toHaveBeenCalled();
   });
 
   it("requires a read grant for general updates before record access", async () => {

@@ -3,6 +3,8 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { prisma } from "@corgtex/shared";
 import { finalizeExpiredApprovalFlows } from "@corgtex/domain";
 import { dispatchPendingEvents, runPendingJobs, scheduleDailyJobs, scheduleDripCampaigns, schedulePeriodicJobs } from "./outbox";
+import { captureArtifactInputSnapshotProof, recordArtifactInputLineage } from "../../domain/src/source-lineage";
+import { crmIngressActor, recordFreshDemoLeadLineage } from "../../domain/src/crm-ingress-lineage";
 
 const workspaceIds: string[] = [];
 const userIds: string[] = [];
@@ -42,6 +44,10 @@ describe("operator import scheduler exclusion", () => {
     const past = new Date("2000-01-01T00:00:00Z");
     const controlCreatedAt = new Date("2000-01-02T00:00:00Z");
     const future = new Date("2099-01-01T00:00:00Z");
+    // Permission events are real queued work, but this consumer test exercises
+    // only inert synthetic handlers. Leave rebuild producers queued for later.
+    const deferRebuilds = () => prisma.event.updateMany({ where: { workspaceId: { in: workspaceIds }, type: "source-permission.changed", status: "PENDING" }, data: { availableAt: future } });
+    await deferRebuilds();
     // Unknown synthetic types exercise the real claims and completion paths but
     // have no handler, provider, notification or email side effects.
     const event = async (workspaceId: string | null, leased = false) => {
@@ -92,10 +98,15 @@ describe("operator import scheduler exclusion", () => {
     expect((await prisma.workspaceFeatureFlag.findUniqueOrThrow({ where })).enabled).toBe(true);
     if (release === "delete") await prisma.workspaceFeatureFlag.delete({ where });
     else await prisma.workspaceFeatureFlag.update({ where, data: { enabled: false } });
+    await deferRebuilds();
     await dispatchPendingEvents("synthetic-consumer", 10);
     await runPendingJobs("synthetic-consumer", 10, 1);
     await runPendingJobs("synthetic-consumer", 10, 1);
-    for (const row of heldEvents) expect(await prisma.event.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({ status: "DISPATCHED", attempts: 3 });
+    for (const row of heldEvents) {
+      const stored = await prisma.event.findUniqueOrThrow({ where: { id: row.id } });
+      if (row.type === "synthetic.consumer-hold") expect(stored).toMatchObject({ status: "DISPATCHED", attempts: 3 });
+      else expect(stored).toEqual(row);
+    }
     for (const row of [parent, stale, child]) expect(await prisma.workflowJob.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({ status: "COMPLETED", attempts: 3 });
     for (const id of [failed.id, blocked.id, notDue.id, freshLease.id]) expect(await prisma.workflowJob.findUniqueOrThrow({ where: { id } })).toEqual(heldJobs.find((row) => row.id === id));
   });
@@ -118,10 +129,17 @@ describe("operator import scheduler exclusion", () => {
             featureFlags: { create: { flag: "operator_import_inactive", enabled: inactive } },
           } : {}),
         } });
-        created.push(await tx.demoLead.create({ data: {
+        const lead = await tx.demoLead.create({ data: {
           workspaceId: id, email: `lead-${id}@example.invalid`,
-          createdAt: new Date("2026-09-01T00:00:00Z"), followUpCount: 1,
-        } }));
+          createdAt: new Date("2026-09-01T00:00:00Z"), followUpCount: 0,
+        } });
+        await recordFreshDemoLeadLineage(tx, lead, { createdId: lead.id, email: lead.email, source: lead.source });
+        const actor = crmIngressActor(id);
+        const prior = await captureArtifactInputSnapshotProof(actor, id, { kind: "DemoLead", id: lead.id }, tx);
+        const followedUp = await tx.demoLead.update({ where: { id: lead.id }, data: { followUpCount: lead.followUpCount + 1 } });
+        await recordArtifactInputLineage({ tx, actor, workspaceId: id, artifact: { kind: "DemoLead", id: lead.id },
+          content: followedUp, origin: "DERIVED", inputs: [], inheritedRoots: prior });
+        created.push(followedUp);
       }
       return created;
     });
@@ -220,20 +238,25 @@ describe("operator import scheduler exclusion", () => {
           id, name: "Synthetic approval fixture", slug: `approval-${id}`,
           featureFlags: { create: { flag: "operator_import_inactive", enabled: inactive } },
         } });
+        await tx.member.create({ data: { workspaceId: id, userId, role: "ADMIN" } });
+        const actor = { kind: "user" as const, user: { id: userId, email: `approval-${userId}@example.test`, displayName: null } };
         const action = await tx.action.create({ data: {
           workspaceId: id, authorUserId: userId, title: "Synthetic approval subject", status: "OPEN",
         } });
+        await recordArtifactInputLineage({ tx, actor, workspaceId: id, artifact: { kind: "Action", id: action.id }, content: action, origin: "HUMAN_ORIGINAL", inputs: [] });
         const flow = await tx.approvalFlow.create({ data: {
           workspaceId: id, subjectType: "ACTION", subjectId: action.id,
           mode: "CONSENT", status: "ACTIVE", closesAt: new Date("2020-01-01T00:00:00Z"),
         } });
+        await recordArtifactInputLineage({ tx, actor, workspaceId: id, artifact: { kind: "ApprovalFlow", id: flow.id }, content: flow, origin: "DERIVED", inputs: [],
+          inheritedRoots: await captureArtifactInputSnapshotProof(actor, id, { kind: "Action", id: action.id }, tx) });
         flowIds.push(flow.id);
       }
     });
     await finalizeExpiredApprovalFlows();
     expect((await prisma.approvalFlow.findUniqueOrThrow({ where: { id: flowIds[0] } })).status).toBe("ACTIVE");
     expect((await prisma.approvalFlow.findUniqueOrThrow({ where: { id: flowIds[1] } })).status).not.toBe("ACTIVE");
-    expect(await prisma.event.count({ where: { workspaceId: inertId } })).toBe(0);
+    expect(await prisma.event.count({ where: { workspaceId: inertId, type: { not: "source-permission.changed" } } })).toBe(0);
     expect(await prisma.auditLog.count({ where: { workspaceId: inertId } })).toBe(0);
     await prisma.workspaceFeatureFlag.update({
       where: { workspaceId_flag: { workspaceId: inertId, flag: "operator_import_inactive" } },
@@ -241,6 +264,6 @@ describe("operator import scheduler exclusion", () => {
     });
     await finalizeExpiredApprovalFlows();
     expect((await prisma.approvalFlow.findUniqueOrThrow({ where: { id: flowIds[0] } })).status).not.toBe("ACTIVE");
-    expect(await prisma.event.count({ where: { workspaceId: inertId } })).toBe(2);
+    expect(await prisma.event.count({ where: { workspaceId: inertId, type: { not: "source-permission.changed" } } })).toBe(2);
   });
 });

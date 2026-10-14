@@ -7,6 +7,7 @@ import { fetchSlackThreadMessages, sendSlackMessage, updateSlackMessage, validat
 import {
   markSlackMeetingActionReviewPosted,
   prepareSlackMeetingActionReviewPost,
+  assertMeetingReviewPublicPublication,
 } from "./meeting-action-review";
 import {
   buildLegacyAgendaFallback,
@@ -23,6 +24,59 @@ import {
 import { extractMeetingInsights } from "./meeting-intelligence";
 import { buildMeetingIntelligenceContext } from "./meeting-intelligence-context";
 import { ensureMeetingSeriesOccurrences } from "./meetings";
+import { captureArtifactInputProof, captureArtifactInputSnapshotProof, isArtifactInputProofReadable, isArtifactInputProofPubliclyShareable,
+  lineageContentFingerprint, type LineageRoot } from "./source-lineage";
+import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
+
+const agendaProjection = { id: true, workspaceId: true, agendaJson: true, archivedAt: true, createdAt: true } as const;
+
+function agendaActor(workspaceId: string): AppActor {
+  return { kind: "agent", authProvider: "bootstrap", label: "meeting-agenda", workspaceIds: [workspaceId] };
+}
+
+async function requireAgendaProof(actor: AppActor, workspaceId: string, roots: LineageRoot[]) {
+  invariant(roots.length > 0 && await isArtifactInputProofReadable(actor, workspaceId, roots),
+    409, "UNKNOWN_LINEAGE", "The complete agenda input receipt is unavailable or changed.");
+}
+
+async function saveAgendaWithProof(actor: AppActor, workspaceId: string, meetingId: string,
+  agenda: MeetingAgenda, roots: LineageRoot[], expectedMeetingHash?: string) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "Meeting" WHERE id = ${meetingId} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+    const current = await tx.meeting.findFirst({ where: { id: meetingId, workspaceId, archivedAt: null } });
+    invariant(current && expectedMeetingHash && lineageContentFingerprint("Meeting", current) === expectedMeetingHash,
+      409, "SOURCE_CHANGED", "The meeting changed during agenda generation.");
+    // Validate the exact prompt receipt before replacing its mutable inputs.
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId,
+      capture: { lineageRoots: roots }, copied: true,
+      snapshotDependencies: roots.filter((root) => root.id === meetingId
+        && (root.kind === "MeetingAgenda" || root.kind === "Meeting")),
+    });
+    const updated = await tx.meeting.update({ where: { id: meetingId },
+      data: { agendaJson: toInputJson(agenda) }, select: agendaProjection });
+    await finishProducerLineage({ tx, actor, workspaceId,
+      artifact: { kind: "MeetingAgenda", id: meetingId }, content: updated, receipt });
+    return updated;
+  });
+}
+
+async function requireReadableAgenda(actor: AppActor, workspaceId: string, meetingId: string) {
+  return captureArtifactInputProof(actor, workspaceId, [{ kind: "MeetingAgenda", id: meetingId }]);
+}
+
+async function requirePublicSlackPublication(workspaceId: string, installationId: string, channelId: string, roots: LineageRoot[]) {
+  const actor = agendaActor(workspaceId);
+  const channel = await prisma.communicationChannel.findFirst({ where: {
+    workspaceId, installationId, externalChannelId: channelId, kind: "PUBLIC", isIngestEnabled: true, isArchived: false,
+  } });
+  invariant(channel, 403, "SOURCE_RESTRICTED", "The destination is not an active public workspace channel.");
+  const destinationRoots = await captureArtifactInputProof(actor, workspaceId,
+    [{ kind: "CommunicationChannel", id: channel.id, snapshot: channel }]);
+  const validation = await validateSlackPostTarget(installationId, channelId);
+  invariant(validation.ok, 403, "SOURCE_RESTRICTED", "The Slack destination is unavailable.");
+  invariant(await isArtifactInputProofPubliclyShareable(actor, workspaceId, [...roots, ...destinationRoots]),
+    403, "SOURCE_RESTRICTED", "The content is not available to this public channel.");
+}
 
 type AgendaEditOutput = {
   action: "update" | "clarify";
@@ -250,13 +304,13 @@ export async function prepareAgendaForMeeting(params: {
   workflowJobId?: string;
 }) {
   const context = await buildMeetingAgendaContext(params.workspaceId, params.meetingId);
+  const actor = agendaActor(params.workspaceId);
+  const { lineageInputs: _inputs, lineageRoots = [], sourceStateHash, ...promptContext } = context;
+  await requireAgendaProof(actor, params.workspaceId, lineageRoots);
   const template = selectedMeetingAgendaTemplate(context);
   if (template?.key === REGULAR_UPDATE_AGENDA_TEMPLATE_KEY) {
     const agenda = buildRegularUpdateAgenda(context);
-    await prisma.meeting.update({
-      where: { id: context.meeting.id },
-      data: { agendaJson: toInputJson(agenda) },
-    });
+    await saveAgendaWithProof(actor, params.workspaceId, context.meeting.id, agenda, lineageRoots, sourceStateHash);
     return { meeting: context.meeting, agenda, context };
   }
 
@@ -272,7 +326,7 @@ export async function prepareAgendaForMeeting(params: {
         "Use the supplied meeting, attendee, open tension, prior follow-up, and pending action context.",
         "Do not invent private facts. Preserve source IDs where provided.",
       ].join("\n"),
-      input: JSON.stringify(context),
+      input: JSON.stringify(promptContext),
       schemaHint: `{
         "title": "string",
         "intro": "string",
@@ -293,10 +347,7 @@ export async function prepareAgendaForMeeting(params: {
     agenda = fallbackAgenda;
     fallbackReason = "model_generation_failed";
   }
-  await prisma.meeting.update({
-    where: { id: context.meeting.id },
-    data: { agendaJson: toInputJson(agenda) },
-  });
+  await saveAgendaWithProof(actor, params.workspaceId, context.meeting.id, agenda, lineageRoots, sourceStateHash);
 
   return { meeting: context.meeting, agenda, context, fallbackReason };
 }
@@ -418,6 +469,7 @@ async function agendaPayloadForPosting(params: {
 }) {
   const existingAgenda = normalizeMeetingAgendaForDisplay(params.meeting.agendaJson, params.meeting.title || "Meeting agenda");
   if (existingAgenda) {
+    await requireReadableAgenda(agendaActor(params.workspaceId), params.workspaceId, params.meeting.id);
     return {
       meeting: params.meeting,
       agenda: existingAgenda,
@@ -454,7 +506,16 @@ async function postAgendaForMeeting(params: {
     meeting: params.meeting,
     workflowJobId: params.workflowJobId,
   });
+  const actor = agendaActor(params.workspaceId);
+  const agendaRoots = await requireReadableAgenda(actor, params.workspaceId, params.meeting.id);
+  const { lineageRoots = [] } = context as typeof context & ProducerLineageParams;
+  await requireAgendaProof(actor, params.workspaceId, lineageRoots.filter((root) => root.id !== params.meeting.id
+    || (root.kind !== "Meeting" && root.kind !== "MeetingAgenda")));
   const attendeeMentions = await attendeeMentionsForContext(params.installationId, params.workspaceId, context.attendees);
+  await requirePublicSlackPublication(params.workspaceId, params.installationId, params.channelId, [
+    ...agendaRoots, ...lineageRoots.filter((root) => root.id !== params.meeting.id
+      || (root.kind !== "Meeting" && root.kind !== "MeetingAgenda")),
+  ]);
   const response = await sendSlackMessage(params.installationId, { channel: params.channelId }, renderAgendaSlackBlocks({
     meeting: params.meeting,
     agenda,
@@ -468,7 +529,6 @@ async function postAgendaForMeeting(params: {
   await prisma.meeting.update({
     where: { id: params.meeting.id },
     data: {
-      agendaJson: toInputJson(agenda),
       agendaChannelId: String(response.channel ?? params.channelId),
       agendaMessageTs: messageTs,
       agendaPostedAt: new Date(),
@@ -682,11 +742,50 @@ export async function runMeetingAgendaThreadEdit(params: {
   const installation = await activeSlackInstallation(params.workspaceId);
   invariant(installation?.id === params.installationId, 404, "NOT_FOUND", "Slack installation not found.");
   const settings = agendaSettings(installation.settings);
-  const threadMessages = await fetchSlackThreadMessages(params.installationId, {
+  const fetchedThreadMessages = await fetchSlackThreadMessages(params.installationId, {
     channelId: params.channelId,
     threadTs: params.threadTs,
     limit: 20,
+  }, actor);
+
+  // Remote text is not an entitlement receipt. Every supplied Slack message
+  // must match a currently readable, persisted message before it enters the prompt.
+  const messageIds = [...new Set([params.messageTs, ...fetchedThreadMessages.map((message) => message.ts)])];
+  const storedMessages = await prisma.communicationMessage.findMany({ where: {
+    workspaceId: params.workspaceId, installationId: params.installationId,
+    externalChannelId: params.channelId, externalMessageId: { in: messageIds },
+  } });
+  const messagesById = new Map(storedMessages.map((message) => [message.externalMessageId, message]));
+  const requestMessage = messagesById.get(params.messageTs);
+  invariant(requestMessage?.text === params.messageText
+    && (requestMessage.externalMessageId === params.threadTs || requestMessage.threadExternalId === params.threadTs),
+    409, "UNKNOWN_LINEAGE", "The agenda edit request has no current source receipt.");
+  // The current agenda is already a proven input. Do not recopy its remote
+  // bot post or unpersisted thread context into the model prompt.
+  const threadMessages = fetchedThreadMessages.filter((message) => message.ts !== params.threadTs && messagesById.has(message.ts));
+  const promptMessageIds = new Set([params.messageTs, ...threadMessages.map((message) => message.ts)]);
+  for (const message of threadMessages) {
+    const stored = messagesById.get(message.ts);
+    invariant(stored && stored.text === message.text && (stored.externalUserId ?? "") === message.user
+      && (stored.externalMessageId === params.threadTs || stored.threadExternalId === params.threadTs),
+    409, "UNKNOWN_LINEAGE", "A thread message changed or has no current source receipt.");
+  }
+  const { promptRoots, priorAgendaRoots } = await prisma.$transaction(async (tx) => {
+    const roots = await captureArtifactInputProof(actor, params.workspaceId, [
+      { kind: "MeetingTranscript", id: meeting.id, snapshot: meeting },
+      { kind: "MeetingAgenda", id: meeting.id, snapshot: { agendaJson: meeting.agendaJson } },
+      ...storedMessages.filter((message) => promptMessageIds.has(message.externalMessageId)).map((message) => ({ kind: "CommunicationMessage" as const, id: message.id, snapshot: message })),
+    ], tx);
+    const priorAgenda = await captureArtifactInputSnapshotProof(actor, params.workspaceId,
+      { kind: "MeetingAgenda", id: meeting.id }, tx);
+    return {
+      promptRoots: [...roots.filter((root) => root.kind !== "MeetingAgenda" || root.id !== meeting.id), ...priorAgenda],
+      priorAgendaRoots: roots.filter((root) => root.kind === "MeetingAgenda" && root.id === meeting.id),
+    };
   });
+  await requireAgendaProof(actor, params.workspaceId, promptRoots);
+
+  await requirePublicSlackPublication(params.workspaceId, params.installationId, params.channelId, promptRoots);
 
   const extraction = await defaultModelGateway.extract({
     workspaceId: params.workspaceId,
@@ -729,6 +828,8 @@ export async function runMeetingAgendaThreadEdit(params: {
     }`,
   });
 
+  await requireAgendaProof(actor, params.workspaceId, promptRoots);
+  await requirePublicSlackPublication(params.workspaceId, params.installationId, params.channelId, promptRoots);
   const edit = parseAgendaEditOutput(extraction.output, meeting.title || currentAgenda.title);
   if (edit.action !== "update" || !edit.agenda) {
     const clarification = edit.clarification || "I could not identify a concrete agenda edit. Please tell me what to add, remove, reword, or reorder.";
@@ -743,6 +844,29 @@ export async function runMeetingAgendaThreadEdit(params: {
   const attendeeMentions = await attendeeMentionsForContext(params.installationId, params.workspaceId, context.attendees);
   const changeSummary = edit.changeSummary || "Updated the agenda.";
 
+  await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "Meeting" WHERE id = ${meeting.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    invariant(await isArtifactInputProofReadable(actor, params.workspaceId, priorAgendaRoots, tx),
+      409, "SOURCE_CHANGED", "The agenda changed during the edit.");
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      capture: { lineageRoots: promptRoots }, copied: true });
+    const updated = await tx.meeting.update({ where: { id: meeting.id },
+      data: { agendaJson: toInputJson(edit.agenda) }, select: agendaProjection });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "MeetingAgenda", id: meeting.id }, content: updated, receipt });
+    await tx.auditLog.create({ data: {
+      workspaceId: params.workspaceId, actorUserId: params.actorUserId,
+      action: "meeting.agenda.edited", entityType: "Meeting", entityId: meeting.id,
+      meta: { channelId: params.channelId, threadTs: params.threadTs, messageTs: params.messageTs, changeSummary },
+    } });
+  });
+
+  await requireReadableAgenda(actor, params.workspaceId, meeting.id);
+  await requireAgendaProof(actor, params.workspaceId, promptRoots);
+  await requirePublicSlackPublication(params.workspaceId, params.installationId, params.channelId, [
+    ...promptRoots, ...(context.lineageRoots ?? []).filter((root) => root.id !== meeting.id
+      || (root.kind !== "Meeting" && root.kind !== "MeetingAgenda")),
+  ]);
   await updateSlackMessage(params.installationId, {
     channel: params.channelId,
     ts: params.threadTs,
@@ -757,27 +881,6 @@ export async function runMeetingAgendaThreadEdit(params: {
     threadTs: params.threadTs,
   }, [slackSection("Agenda updated", [changeSummary])]);
 
-  await prisma.$transaction([
-    prisma.meeting.update({
-      where: { id: meeting.id },
-      data: { agendaJson: toInputJson(edit.agenda) },
-    }),
-    prisma.auditLog.create({
-      data: {
-        workspaceId: params.workspaceId,
-        actorUserId: params.actorUserId,
-        action: "meeting.agenda.edited",
-        entityType: "Meeting",
-        entityId: meeting.id,
-        meta: {
-          channelId: params.channelId,
-          threadTs: params.threadTs,
-          messageTs: params.messageTs,
-          changeSummary,
-        },
-      },
-    }),
-  ]);
 
   return { edited: true, changeSummary };
 }
@@ -786,6 +889,7 @@ export async function runMeetingInsightsExtraction(params: {
   workspaceId: string;
   meetingId: string;
   workflowJobId?: string | null;
+  actor?: AppActor;
 }) {
   const meeting = await prisma.meeting.findFirst({
     where: { id: params.meetingId, workspaceId: params.workspaceId },
@@ -795,7 +899,7 @@ export async function runMeetingInsightsExtraction(params: {
     return { skipped: true, reason: "missing_transcript_or_already_processed" };
   }
 
-  const actor: AppActor = {
+  const actor: AppActor = params.actor ?? {
     kind: "agent",
     authProvider: "bootstrap",
     label: "Meeting facilitation",
@@ -814,7 +918,7 @@ export async function postMeetingSummaryToAgendaThread(params: {
   workspaceId: string;
   meetingId: string;
 }) {
-  const reviewPreparation = await prepareSlackMeetingActionReviewPost(params);
+  const reviewPreparation = await prepareSlackMeetingActionReviewPost(agendaActor(params.workspaceId), params);
   if (reviewPreparation?.configured) {
     if (reviewPreparation.skipped) {
       return { skipped: true, reason: reviewPreparation.reason };
@@ -825,6 +929,7 @@ export async function postMeetingSummaryToAgendaThread(params: {
       return { skipped: true, reason: validation.code };
     }
 
+    await assertMeetingReviewPublicPublication(agendaActor(params.workspaceId), reviewPreparation);
     const response = await sendSlackMessage(reviewPreparation.installationId, {
       channel: reviewPreparation.channelId,
       threadTs: reviewPreparation.threadTs ?? undefined,
@@ -833,7 +938,7 @@ export async function postMeetingSummaryToAgendaThread(params: {
     invariant(messageTs, 502, "SLACK_POST_FAILED", "Slack did not return a message timestamp for the meeting follow-up review.");
     const threadTs = reviewPreparation.threadTs ?? messageTs;
 
-    await markSlackMeetingActionReviewPosted({
+    await markSlackMeetingActionReviewPosted(agendaActor(params.workspaceId), {
       workspaceId: reviewPreparation.workspaceId,
       meetingId: reviewPreparation.meetingId,
       reviewId: reviewPreparation.reviewId,
@@ -846,6 +951,7 @@ export async function postMeetingSummaryToAgendaThread(params: {
     });
 
     for (const blocks of reviewPreparation.message.overflowBlocks) {
+      await assertMeetingReviewPublicPublication(agendaActor(params.workspaceId), reviewPreparation);
       await sendSlackMessage(reviewPreparation.installationId, {
         channel: reviewPreparation.channelId,
         threadTs,
@@ -861,14 +967,6 @@ export async function postMeetingSummaryToAgendaThread(params: {
 
   const meeting = await prisma.meeting.findFirst({
     where: { id: params.meetingId, workspaceId: params.workspaceId },
-    select: {
-      id: true,
-      title: true,
-      summaryMd: true,
-      agendaChannelId: true,
-      agendaMessageTs: true,
-      summaryPostedAt: true,
-    },
   });
   if (!meeting?.summaryMd || !meeting.agendaChannelId || !meeting.agendaMessageTs || meeting.summaryPostedAt) {
     return { skipped: true, reason: "summary_thread_not_ready" };
@@ -886,8 +984,20 @@ export async function postMeetingSummaryToAgendaThread(params: {
       status: { not: "DISMISSED" },
     },
     orderBy: { createdAt: "asc" },
-    select: { type: true, title: true, bodyMd: true },
   });
+  const actor = agendaActor(params.workspaceId);
+  let roots: LineageRoot[];
+  try {
+    roots = await captureArtifactInputProof(actor, params.workspaceId, [
+      { kind: "Meeting", id: meeting.id, snapshot: meeting },
+      ...insights.map((insight) => ({ kind: "MeetingInsight" as const, id: insight.id, snapshot: insight })),
+    ]);
+    await requirePublicSlackPublication(params.workspaceId, installation.id, meeting.agendaChannelId, roots);
+  } catch (error) {
+    if (!(error instanceof Error) || !("code" in error)
+      || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED", "NOT_FOUND"].includes(String(error.code))) throw error;
+    return { skipped: true, reason: "summary_inputs_unavailable" };
+  }
   const groupedInsights = new Map<MeetingInsightType, Array<{ title: string; bodyMd: string }>>();
   for (const insight of insights) {
     const items = groupedInsights.get(insight.type) ?? [];

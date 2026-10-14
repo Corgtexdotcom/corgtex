@@ -33,7 +33,7 @@ export async function PATCH(request: NextRequest, { params }: Params) {
       priority: workItemPriorityFromBody(body),
       expectedVersion: body.expectedVersion,
     });
-    const proposalForResponse = await loadProposalWorkItemResponse(workspaceId, proposal.id) ?? proposal;
+    const proposalForResponse = await loadProposalWorkItemResponse(actor, workspaceId, proposal.id);
     return NextResponse.json({ proposal: serializeProposalWorkItem(proposalForResponse) });
   } catch (error) {
     return handleRouteError(error);

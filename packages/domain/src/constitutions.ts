@@ -4,6 +4,8 @@ import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
+import { captureArtifactInputProof, invalidateArtifactInputLineage, readableArtifactIds, recordArtifactInputLineage } from "./source-lineage";
+import { finishProducerLineage, prepareProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 
 const CONSTITUTION_VERSION_RETRY_LIMIT = 3;
 const INVALID_SOURCE_MESSAGE = "Invalid Constitution source reference.";
@@ -28,7 +30,7 @@ export type ConstitutionCorpusFingerprintRow = Prisma.PolicyCorpusGetPayload<{
   select: typeof CONSTITUTION_CORPUS_SELECT;
 }>;
 
-type ConstitutionCorpusClient = Pick<Prisma.TransactionClient, "policyCorpus">;
+type ConstitutionCorpusClient = Prisma.TransactionClient | typeof prisma;
 
 function canonicalizeFingerprintValue(value: unknown): unknown {
   if (value instanceof Date) return value.toISOString();
@@ -57,13 +59,12 @@ export function fingerprintConstitutionCorpus(corpus: readonly ConstitutionCorpu
     .digest("hex");
 }
 
-export async function loadConstitutionCorpusSnapshot(client: ConstitutionCorpusClient, workspaceId: string) {
-  const corpus = await client.policyCorpus.findMany({
-    where: { workspaceId },
-    select: CONSTITUTION_CORPUS_SELECT,
-    orderBy: [{ acceptedAt: "asc" }, { id: "asc" }],
-  });
-
+export async function loadConstitutionCorpusSnapshot(actor: AppActor, client: ConstitutionCorpusClient, workspaceId: string) {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const rows = await client.policyCorpus.findMany({ where: { workspaceId } });
+  const readable = await readableArtifactIds(actor, workspaceId, "PolicyCorpus", rows, client);
+  const corpus = rows.filter((policy) => readable.has(policy.id))
+    .sort((left, right) => left.acceptedAt.getTime() - right.acceptedAt.getTime() || left.id.localeCompare(right.id));
   return { corpus, fingerprint: fingerprintConstitutionCorpus(corpus) };
 }
 
@@ -78,33 +79,24 @@ async function resolveSourceReferences(
   tx: Prisma.TransactionClient,
   workspaceId: string,
   references: readonly ConstitutionSourceReferenceInput[],
+  actor?: AppActor,
 ) {
   const policyIds = [...new Set(references.map((reference) => reference.policyCorpusId))];
   const policies = await tx.policyCorpus.findMany({
     where: { workspaceId, id: { in: policyIds } },
-    select: {
-      id: true,
-      acceptedAt: true,
+    include: {
       proposal: {
-        select: {
-          id: true,
-          title: true,
-          workspaceId: true,
-          isPrivate: true,
-          publishedAt: true,
+        include: {
           tensions: {
-            where: {
-              workspaceId,
-              isPrivate: false,
-              publishedAt: { not: null },
-              archivedAt: null,
-            },
-            select: { id: true, title: true },
+            where: { workspaceId, isPrivate: false, publishedAt: { not: null }, archivedAt: null },
           },
         },
       },
     },
   });
+  const readablePolicies = actor ? await readableArtifactIds(actor, workspaceId, "PolicyCorpus", policies, tx) : null;
+  const readableProposals = actor ? await readableArtifactIds(actor, workspaceId, "Proposal", policies.map((policy) => policy.proposal), tx) : null;
+  const readableTensions = actor ? await readableArtifactIds(actor, workspaceId, "Tension", policies.flatMap((policy) => policy.proposal.tensions), tx) : null;
   const policiesById = new Map(policies.map((policy) => [policy.id, policy]));
   const orders = new Set<string>();
   const targets = new Set<string>();
@@ -128,13 +120,20 @@ async function resolveSourceReferences(
     const targetKey = `${reference.pointOrder}:${reference.policyCorpusId}:${reference.sourceKind}:${reference.proposalId ?? reference.tensionId}`;
 
     if (!policy || !validPoint || !validOrder || !labelSnapshot?.trim()
+      || (readablePolicies && !readablePolicies.has(policy.id))
+      || (proposalSource && readableProposals && !readableProposals.has(policy.proposal.id))
+      || (tension && readableTensions && !readableTensions.has(tension.id))
       || orders.has(orderKey) || targets.has(targetKey)) {
       throw new Error(INVALID_SOURCE_MESSAGE);
     }
     orders.add(orderKey);
     targets.add(targetKey);
 
-    return {
+    return { inputs: [
+      { kind: "PolicyCorpus" as const, id: policy.id, snapshot: policy },
+      proposalSource ? { kind: "Proposal" as const, id: policy.proposal.id, snapshot: policy.proposal }
+        : { kind: "Tension" as const, id: tension!.id, snapshot: tension! },
+    ], data: {
       pointKey: `point-${reference.pointOrder}`,
       pointOrder: reference.pointOrder,
       sourceOrder: reference.sourceOrder,
@@ -144,7 +143,7 @@ async function resolveSourceReferences(
       tensionId: tension?.id ?? null,
       labelSnapshot,
       acceptedAtSnapshot: policy.acceptedAt,
-    };
+    } };
   });
 }
 
@@ -181,27 +180,19 @@ export async function listConstitutionVersions(actor: AppActor, workspaceId: str
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
 
-  const [items, total] = await Promise.all([
-    prisma.constitution.findMany({
-      where: { workspaceId },
-      orderBy: { version: "desc" },
-      take,
-      skip,
-    }),
-    prisma.constitution.count({ where: { workspaceId } }),
-  ]);
-
-  return { items, total, take, skip };
+  const rows = await prisma.constitution.findMany({ where: { workspaceId } });
+  const readable = await readableArtifactIds(actor, workspaceId, "Constitution", rows);
+  const visible = rows.filter((row) => readable.has(row.id)).sort((left, right) => right.version - left.version);
+  return { items: visible.slice(skip, skip + take), total: visible.length, take, skip };
 }
 
-export async function getCurrentConstitution(workspaceId: string) {
-  return prisma.constitution.findFirst({
-    where: { workspaceId },
-    orderBy: { version: "desc" },
-  });
+export async function getCurrentConstitution(actor: AppActor, workspaceId: string) {
+  const versions = await listConstitutionVersions(actor, workspaceId, { take: 1 });
+  return versions.items[0] ?? null;
 }
 
-export async function createConstitutionVersion(params: {
+export async function createConstitutionVersion(params: ProducerLineageParams & {
+  lineageActor?: AppActor;
   workspaceId: string;
   bodyMd: string;
   diffSummary?: string | null;
@@ -213,25 +204,32 @@ export async function createConstitutionVersion(params: {
   references?: readonly ConstitutionSourceReferenceInput[];
   expectedCorpusFingerprint?: string | null;
 }) {
+  if (params.lineageActor) await requireWorkspaceMembership({ actor: params.lineageActor, workspaceId: params.workspaceId });
   for (let attempt = 0; attempt < CONSTITUTION_VERSION_RETRY_LIMIT; attempt += 1) {
     try {
       return await prisma.$transaction(async (tx) => {
         await acquireConstitutionCorpusAdvisoryLock(tx, params.workspaceId);
         if (params.expectedCorpusFingerprint != null) {
-          const snapshot = await loadConstitutionCorpusSnapshot(tx, params.workspaceId);
+          const snapshot = params.lineageActor
+            ? await loadConstitutionCorpusSnapshot(params.lineageActor, tx, params.workspaceId)
+            : { fingerprint: fingerprintConstitutionCorpus(await tx.policyCorpus.findMany({ where: { workspaceId: params.workspaceId }, select: CONSTITUTION_CORPUS_SELECT })) };
           if (snapshot.fingerprint !== params.expectedCorpusFingerprint) {
             throw new Error("Constitution policy corpus changed during synthesis.");
           }
         }
         const sourceReferences = params.references === undefined
           ? undefined
-          : await resolveSourceReferences(tx, params.workspaceId, params.references);
+          : await resolveSourceReferences(tx, params.workspaceId, params.references, params.lineageActor);
         const latest = await tx.constitution.findFirst({
           where: { workspaceId: params.workspaceId },
           orderBy: { version: "desc" },
         });
 
-        return tx.constitution.create({
+        if (params.lineageActor && params.lineageRoots?.length) {
+          // Captured roots attest every model input, while citations only govern display.
+          await captureArtifactInputProof(params.lineageActor, params.workspaceId, params.lineageInputs ?? [], tx);
+        }
+        const constitution = await tx.constitution.create({
           data: {
             workspaceId: params.workspaceId,
             version: (latest?.version ?? 0) + 1,
@@ -242,9 +240,38 @@ export async function createConstitutionVersion(params: {
             modelUsed: params.modelUsed,
             promptTokens: params.promptTokens ?? null,
             completionTokens: params.completionTokens ?? null,
-            ...(sourceReferences?.length ? { sourceReferences: { create: sourceReferences } } : {}),
+            ...(sourceReferences?.length ? { sourceReferences: { create: sourceReferences.map((reference) => reference.data) } } : {}),
           },
+          include: { sourceReferences: true },
         });
+        if (params.lineageActor && params.lineageRoots?.length) {
+          await recordArtifactInputLineage({ tx, actor: params.lineageActor, workspaceId: params.workspaceId,
+            artifact: { kind: "Constitution", id: constitution.id }, content: constitution, origin: "DERIVED",
+            inputs: params.lineageInputs ?? [], inheritedRoots: params.lineageRoots, transitiveOnlyKinds: ["Constitution"] });
+        } else {
+          await invalidateArtifactInputLineage({ tx, workspaceId: params.workspaceId,
+            artifact: { kind: "Constitution", id: constitution.id }, content: constitution });
+        }
+        for (const reference of constitution.sourceReferences) {
+          if (!params.lineageActor) {
+            await invalidateArtifactInputLineage({ tx, workspaceId: params.workspaceId,
+              artifact: { kind: "ConstitutionSourceReference", id: reference.id }, content: reference });
+            continue;
+          }
+          const source = sourceReferences!.find((candidate) => candidate.data.pointOrder === reference.pointOrder
+            && candidate.data.sourceOrder === reference.sourceOrder)!;
+          const receipt = await prepareProducerLineage({ tx, actor: params.lineageActor, workspaceId: params.workspaceId,
+            copied: true, completeCopy: true, dependencies: [
+              { kind: "Constitution", id: constitution.id, snapshot: constitution }, ...source.inputs,
+            ] });
+          await finishProducerLineage({ tx, actor: params.lineageActor, workspaceId: params.workspaceId,
+            artifact: { kind: "ConstitutionSourceReference", id: reference.id }, content: reference, receipt });
+        }
+        if (!params.lineageActor || !(await readableArtifactIds(params.lineageActor, params.workspaceId, "Constitution", [constitution], tx)).has(constitution.id)) {
+          return { id: constitution.id, version: constitution.version, contentWithheld: true as const };
+        }
+        const visibleReferences = await readableArtifactIds(params.lineageActor, params.workspaceId, "ConstitutionSourceReference", constitution.sourceReferences, tx);
+        return { ...constitution, sourceReferences: constitution.sourceReferences.filter((reference) => visibleReferences.has(reference.id)) };
       }, { isolationLevel: "ReadCommitted" });
     } catch (error) {
       if (attempt === CONSTITUTION_VERSION_RETRY_LIMIT - 1 || !isConstitutionVersionConflict(error)) {
@@ -259,18 +286,17 @@ export async function createConstitutionVersion(params: {
 export async function listPolicyCorpus(actor: AppActor, workspaceId: string) {
   await requireWorkspaceMembership({ actor, workspaceId });
 
-  return prisma.policyCorpus.findMany({
-    where: { workspaceId },
-    include: {
-      proposal: {
-        select: { id: true, title: true, status: true },
-      },
-      circle: {
-        select: { id: true, name: true },
-      },
-    },
-    orderBy: { acceptedAt: "desc" },
-  });
+  const policies = await prisma.policyCorpus.findMany({ where: { workspaceId }, include: { proposal: true, circle: true } });
+  const readable = await readableArtifactIds(actor, workspaceId, "PolicyCorpus", policies);
+  const visible = policies.filter((policy) => readable.has(policy.id));
+  const readableProposals = await readableArtifactIds(actor, workspaceId, "Proposal", visible.map((policy) => policy.proposal));
+  const readableCircles = await readableArtifactIds(actor, workspaceId, "Circle", visible.flatMap((policy) => policy.circle ? [policy.circle] : []));
+  return visible.sort((left, right) => right.acceptedAt.getTime() - left.acceptedAt.getTime()).map((policy) => ({ ...policy,
+    proposalId: readableProposals.has(policy.proposalId) ? policy.proposalId : null,
+    proposal: readableProposals.has(policy.proposalId) ? { id: policy.proposal.id, title: policy.proposal.title, status: policy.proposal.status } : null,
+    circleId: policy.circleId && readableCircles.has(policy.circleId) ? policy.circleId : null,
+    circle: policy.circle && readableCircles.has(policy.circle.id) ? { id: policy.circle.id, name: policy.circle.name } : null,
+  }));
 }
 
 export async function getApprovalPolicies(actor: AppActor, workspaceId: string) {

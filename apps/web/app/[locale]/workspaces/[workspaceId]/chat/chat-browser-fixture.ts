@@ -16,14 +16,16 @@ export type ChatRequest = {
 
 export type ChatFixture = {
   requests: ChatRequest[];
+  canonicalReads: ChatRequest[];
   refreshes: number;
   configure: (patch: { workspaceId?: string; activeSessionId?: string | null; rail?: boolean; mobileMode?: boolean; questions?: boolean }) => void;
   reply: (id: number, value: unknown, status?: number) => void;
   stream: (id: number) => void;
   chunk: (id: number, text: string) => void;
   bytes: (id: number, bytes: number[]) => void;
-  finish: (id: number) => void;
+  finish: (id: number, committed?: boolean) => void;
   fail: (id: number) => void;
+  routeBrain: (id: number) => Promise<void>;
   unmount: () => void;
   settle: () => Promise<void>;
 };
@@ -43,8 +45,11 @@ export function conversation(id: string) {
 }
 
 // Bundle the real chat/rail, React, Intl and Markdown renderer. Only Next navigation
-// and the unrelated launch panel are replaced. No auth, database or agent runtime.
-export async function startChatBrowserFixture() {
+// and the unrelated launch panel are replaced. The optional Brain handler runs
+// the actual route with synthetic auth/service boundaries, never a database/provider.
+export async function startChatBrowserFixture(options: {
+  brainRoute?: (request: Request, params: { workspaceId: string; conversationId: string }) => Promise<Response>;
+} = {}) {
   const webRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
   const messages = JSON.parse(await readFile(`${webRoot}/messages/en.json`, "utf8"));
   const component = fileURLToPath(new URL("./ChatInterface.tsx", import.meta.url));
@@ -56,11 +61,25 @@ export async function startChatBrowserFixture() {
       import {NextIntlClientProvider} from "next-intl";
       import {ChatInterface} from ${JSON.stringify(component)};
       import {WorkspaceChatRail} from ${JSON.stringify(rail)};
-      const fixture = window.__chatFixture = {requests: [], refreshes: 0};
+      const fixture = window.__chatFixture = {requests: [], canonicalReads: [], refreshes: 0};
       const pending = new Map();
       const streams = new Map();
+      const conversations = new Map();
+      const completions = new Map();
+      const streamText = new Map();
+      const nativeFetch = window.fetch.bind(window);
       window.fetch = (url, options = {}) => {
         if (!String(url).startsWith('/api/workspaces/')) throw new Error('Unexpected fixture fetch: ' + url);
+        // Successful legacy flow controls now emit the real commit receipt and
+        // provide its persisted GET. Audit these automatic reads separately so
+        // the original 25 controls retain stable request IDs. Explicit receipt
+        // cases still control/reject every canonical response themselves.
+        if ((!options.method || options.method === 'GET') && completions.has(String(url))) {
+          const conversation = completions.get(String(url)); completions.delete(String(url));
+          fixture.canonicalReads.push({id: fixture.canonicalReads.length, url: String(url), method: 'GET', body: null,
+            aborted: options.signal?.aborted || false, canceled: false});
+          return Promise.resolve(new Response(JSON.stringify({conversation}), {headers: {'Content-Type': 'application/json'}}));
+        }
         const request = {id: fixture.requests.length, url: String(url), method: options.method || 'GET',
           body: options.body instanceof FormData ? Array.from(options.body.entries()).map(([key, value]) => key + ':' + (value.name || value)).join('\\n') : options.body || null,
           aborted: options.signal?.aborted || false, canceled: false};
@@ -71,20 +90,46 @@ export async function startChatBrowserFixture() {
         return new Promise(resolve => pending.set(request.id, resolve));
       };
       fixture.reply = (id, value, status = 200) => {
+        if (status === 200 && value.conversation) conversations.set(fixture.requests[id].url, value.conversation);
         const resolve = pending.get(id); pending.delete(id);
         resolve(new Response(JSON.stringify(value), {status, headers: {'Content-Type': 'application/json'}}));
       };
       fixture.stream = id => {
+        streamText.set(id, {text: '', decoder: new TextDecoder()});
         const stream = new ReadableStream({start(controller) {streams.set(id, controller);},
           cancel() {fixture.requests[id].canceled = true; streams.delete(id);}});
         const resolve = pending.get(id); pending.delete(id);
         resolve(new Response(stream, {headers: {'Content-Type': 'text/event-stream'}}));
       };
-      fixture.chunk = (id, text) => streams.get(id)?.enqueue(new TextEncoder().encode(text));
-      fixture.bytes = (id, bytes) => streams.get(id)?.enqueue(new Uint8Array(bytes));
-      fixture.finish = id => {streams.get(id)?.close(); streams.delete(id);};
+      fixture.chunk = (id, text) => { const state = streamText.get(id); if (state) state.text += text; streams.get(id)?.enqueue(new TextEncoder().encode(text)); };
+      fixture.bytes = (id, bytes) => { const state = streamText.get(id); if (state) state.text += state.decoder.decode(new Uint8Array(bytes), {stream: true}); streams.get(id)?.enqueue(new Uint8Array(bytes)); };
+      fixture.finish = (id, committed = true) => {
+        const controller = streams.get(id);
+        const state = streamText.get(id);
+        if (controller && committed && state) {
+          state.text += state.decoder.decode();
+          const events = state.text.split('\\n').flatMap(line => { try { return [JSON.parse(line.replace(/^data: /, ''))]; } catch { return []; } });
+          if (!events.some(event => event.committedTurn)) {
+            const request = fixture.requests[id], conversationId = request.url.split('/').at(-1);
+            const previous = conversations.get(request.url) || {id: conversationId, turns: []};
+            const turn = {id: 'committed-' + id, sequenceNumber: previous.turns.length + 1,
+              createdAt: '2026-01-01T00:00:00.000Z', userMessage: JSON.parse(request.body).message,
+              assistantMessage: events.map(event => event.text || '').join('')};
+            const persisted = {...previous, turns: [...previous.turns, turn]};
+            conversations.set(request.url, persisted); completions.set(request.url, persisted);
+            controller.enqueue(new TextEncoder().encode('data: ' + JSON.stringify({committedTurn: {id: turn.id, sequenceNumber: turn.sequenceNumber, createdAt: turn.createdAt}}) + '\\n\\n'));
+          }
+        }
+        controller?.close(); streams.delete(id); streamText.delete(id);
+      };
       fixture.fail = id => {streams.get(id)?.error(new Error('Synthetic stream interrupted')); streams.delete(id);};
       fixture.settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      fixture.routeBrain = async id => {
+        const request = fixture.requests[id];
+        const response = await nativeFetch(request.url, {method: request.method, headers: {'Content-Type': 'application/json'}, body: request.body});
+        const resolve = pending.get(id); pending.delete(id); resolve(response);
+        await fixture.settle();
+      };
       const root = createRoot(document.getElementById('root'));
       fixture.unmount = () => root.unmount();
       function Fixture() {
@@ -117,7 +162,22 @@ export async function startChatBrowserFixture() {
     } }],
   });
   const css = await readFile(`${webRoot}/app/styles/pages.css`, "utf8");
-  const server = createServer((request, response) => {
+  const server = createServer(async (request, response) => {
+    const brain = /^\/api\/workspaces\/([^/]+)\/conversations\/([^/]+)\/brain$/.exec(request.url ?? "");
+    if (request.method === "POST" && brain && options.brainRoute) {
+      try {
+        let body = "";
+        for await (const chunk of request) body += chunk;
+        const result = await options.brainRoute(new Request(`http://127.0.0.1${request.url}`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body,
+        }), { workspaceId: brain[1], conversationId: brain[2] });
+        response.writeHead(result.status, { "Content-Type": "application/json" });
+        response.end(await result.text());
+      } catch {
+        response.writeHead(500).end("Synthetic route fixture failed");
+      }
+      return;
+    }
     if (request.url === "/fixture.js") {
       response.setHeader("Content-Type", "text/javascript");
       response.end(result.outputFiles[0].text);
@@ -187,4 +247,12 @@ export async function streamAction(page: Page, id: number, action: "stream" | "c
 
 export async function refreshes(page: Page) {
   return page.evaluate(() => window.__chatFixture.refreshes);
+}
+
+export async function routeBrain(page: Page, id: number) {
+  await page.evaluate(id => window.__chatFixture.routeBrain(id), id);
+}
+
+export async function finishUncommitted(page: Page, id: number) {
+  await page.evaluate(async id => { window.__chatFixture.finish(id, false); await window.__chatFixture.settle(); }, id);
 }

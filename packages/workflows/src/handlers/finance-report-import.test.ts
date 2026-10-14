@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
-  claim: vi.fn(), complete: vi.fn(), fail: vi.fn(), extract: vi.fn(), propose: vi.fn(), storage: { get: vi.fn() },
+  assert: vi.fn(), claim: vi.fn(), complete: vi.fn(), fail: vi.fn(), extract: vi.fn(), propose: vi.fn(), storage: { get: vi.fn() },
 }));
 vi.mock("@corgtex/agents", () => ({ runFinanceReportImportAgentV1: mocks.propose }));
 vi.mock("@corgtex/domain", () => ({
   claimFinanceReportImportExtraction: mocks.claim,
+  assertFinanceReportImportExtractionCurrent: mocks.assert,
   completeFinanceReportImportExtraction: mocks.complete,
   failFinanceReportImportExtraction: mocks.fail,
 }));
@@ -18,9 +19,10 @@ vi.mock("@corgtex/knowledge", () => {
 vi.mock("@corgtex/storage", () => ({ defaultStorage: mocks.storage }));
 const data = Buffer.from("Account,Amount");
 const hash = createHash("sha256").update(data).digest("hex");
-const claim = { skipped: false, batchId: "batch-1", version: 2, storageKey: "private/report.csv",
+const claim = { receipt: { kind: "FINANCE_REPORT_EXTRACTION" as const }, skipped: false, batchId: "batch-1", version: 2, storageKey: "private/report.csv",
   fileHash: hash, fileSizeBytes: data.byteLength, fileName: "synthetic.csv", mimeType: "text/csv" };
-const job = { workspaceId: "workspace-1", batchId: "batch-1", workflowJobId: "job-1", attempts: 1, isFinalAttempt: false };
+const job = { workspaceId: "workspace-1", batchId: "batch-1", workflowJobId: "job-1", attempts: 1, isFinalAttempt: false,
+  expectedLease: { lockedBy: "worker-1", lockedAt: new Date("2026-10-13T12:00:00Z") } };
 async function run(overrides = {}) {
   const { runFinanceReportImportExtractionJob } = await import("./finance-report-import");
   return runFinanceReportImportExtractionJob({ ...job, ...overrides });
@@ -28,6 +30,7 @@ async function run(overrides = {}) {
 describe("Finance report extraction workflow handler", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.assert.mockReset().mockResolvedValue(undefined);
     mocks.claim.mockResolvedValue(claim);
     mocks.storage.get.mockResolvedValue({ data, contentType: "text/csv" });
     mocks.extract.mockResolvedValue({ fileHash: hash, fileSizeBytes: data.byteLength, format: "CSV", mimeType: "text/csv",
@@ -45,6 +48,18 @@ describe("Finance report extraction workflow handler", () => {
       extraction: expect.objectContaining({ fileHash: hash, format: "CSV",
         text: expect.stringContaining('"sheet":"CSV","row":1,"column":1'),
         metadata: { pageCount: 0, sheetCount: 1, rowCount: 1, cellCount: 2 } }) }));
+  });
+  it("withholds processing when the lease or permissions change during storage", async () => {
+    mocks.assert.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("Current source revoked"));
+    await expect(run()).rejects.toThrow("Current source revoked");
+    expect(mocks.extract).not.toHaveBeenCalled();
+    expect(mocks.complete).not.toHaveBeenCalled();
+  });
+  it("withholds persistence when sources change during parsing", async () => {
+    mocks.assert.mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("Current source revoked"));
+    await expect(run()).rejects.toThrow("Current source revoked");
+    expect(mocks.extract).toHaveBeenCalledOnce();
+    expect(mocks.complete).not.toHaveBeenCalled();
   });
   it("skips a completed claim without reading storage", async () => {
     mocks.claim.mockResolvedValueOnce({ skipped: true, batchId: "batch-1", version: 3 });

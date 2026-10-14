@@ -88,7 +88,7 @@ export const unassignRoleTool: ModelTool = {
 };
 
 export async function listMembersAction(actor: AppActor, ctx: any) {
-  const members = await listMembersEnriched(ctx.workspaceId);
+  const members = await listMembersEnriched(actor, ctx.workspaceId);
   return { members };
 }
 

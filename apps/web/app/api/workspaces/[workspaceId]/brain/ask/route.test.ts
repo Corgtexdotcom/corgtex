@@ -54,6 +54,7 @@ describe("POST /api/workspaces/[workspaceId]/brain/ask", () => {
     expect(response.status).toBe(200);
     expect(resolveKnowledgeAccessDomains).toHaveBeenCalledWith(actor, "workspace-1");
     expect(answerKnowledgeQuestion).toHaveBeenCalledWith({
+      actor,
       workspaceId: "workspace-1",
       question: "What changed in the forecast?",
       limit: 6,

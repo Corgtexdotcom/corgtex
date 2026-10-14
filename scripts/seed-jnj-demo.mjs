@@ -3,7 +3,10 @@ import { randomBytes, scryptSync } from "node:crypto";
 
 import { assertDemoCredentialsScoped, assertDemoWorkspaceDisconnected, assertDemoPersonasQuiesced, DISABLED_DEMO_PERSONA_PASSWORD_HASH, revokeDemoCredentials } from "./lib/demo-credentials.mjs";
 
-const prisma = new PrismaClient();
+import { createFreshDemoSeedWorkspace, settleFreshDemoInitialization } from "./lib/demo-seed-lifecycle.mjs";
+
+const database = new PrismaClient();
+let prisma = database;
 
 const WORKSPACE_SLUG = "jnj-demo";
 const WORKSPACE_NAME = "Johnson & Johnson";
@@ -2332,9 +2335,7 @@ async function refreshAdviceDeliberationEntries(proposal, records) {
   }
 }
 
-async function main() {
-  console.log("Starting J&J Demo Workspace Seed...");
-
+async function demoPreflight() {
   // Refuse shared identities before any fixture or credential writes.
   const existingUsers = await prisma.user.findMany({
     where: { email: { in: TEAM_MEMBERS.map((member) => member.email) } },
@@ -2355,19 +2356,32 @@ async function main() {
   await assertDemoWorkspaceDisconnected(prisma, existingWorkspace?.id, existingUsers.map((user) => user.id));
   await assertDemoCredentialsScoped(prisma, existingWorkspace?.id, existingUsers.map((user) => user.id));
 
+  return { existingUsers, existingWorkspace };
+}
+
+async function main() {
+  console.log("Starting J&J Demo Workspace Seed...");
+  const before = await demoPreflight();
+
   if (process.argv.includes("--preflight")) {
     console.log("Demo fixture preflight passed without writes");
     return;
   }
 
+  const counts = await database.$transaction(async tx => {
+    prisma = tx;
+    try {
+      const { existingUsers, existingWorkspace } = await demoPreflight();
+      if (existingWorkspace?.id !== before.existingWorkspace?.id) throw new Error("Demo workspace changed after preflight");
+      if (existingWorkspace) await tx.$queryRawUnsafe('SELECT id FROM "Workspace" WHERE id = $1 FOR UPDATE', existingWorkspace.id);
+
   // 1. Create Workspace
-  const workspace = existingWorkspace
-    ? await prisma.workspace.update({ where: { id: existingWorkspace.id, slug: WORKSPACE_SLUG }, data: { name: WORKSPACE_NAME, description: WORKSPACE_DESC } })
-    : await prisma.workspace.create({ data: { slug: WORKSPACE_SLUG, name: WORKSPACE_NAME, description: WORKSPACE_DESC } });
+  const fresh = existingWorkspace ? null : await createFreshDemoSeedWorkspace(tx, { slug: WORKSPACE_SLUG, name: WORKSPACE_NAME, description: WORKSPACE_DESC });
+  const workspace = fresh?.workspace ?? await prisma.workspace.update({ where: { id: existingWorkspace.id, slug: WORKSPACE_SLUG }, data: { name: WORKSPACE_NAME, description: WORKSPACE_DESC } });
   const wsId = workspace.id;
   console.log(`✅ Workspace created: ${WORKSPACE_NAME}`);
 
-  await revokeDemoCredentials(prisma, wsId, existingUsers.map((user) => user.id));
+  await revokeDemoCredentials(prisma, wsId, existingUsers.map((user) => user.id), { inTransaction: true });
 
   // 2. Create Users & Members
   const memberMappings = {};
@@ -2395,6 +2409,49 @@ async function main() {
   }
   console.log(`✅ ${TEAM_MEMBERS.length} Users/Members created`);
 
+  // 4. Create Circles & Roles
+  const circleMappings = {};
+  for (const c of CIRCLES) {
+    const circle = await prisma.circle.upsert({
+      where: { id: `${wsId}-${c.id}` },
+      update: { name: c.name, purposeMd: c.purpose },
+      create: { id: `${wsId}-${c.id}`, workspaceId: wsId, name: c.name, purposeMd: c.purpose }
+    });
+    circleMappings[c.id] = circle.id;
+  }
+  
+  const roleIds = [];
+  const assignments = [];
+  for (const r of ROLES) {
+    const circleId = circleMappings[r.circle];
+    const roleId = `${circleId}-role-${slugify(r.name)}`;
+    const role = await prisma.role.upsert({
+      where: { id: roleId },
+      update: { name: r.name, purposeMd: r.purpose, accountabilities: r.accountabilities },
+      create: { id: roleId, circleId: circleId, name: r.name, purposeMd: r.purpose, accountabilities: r.accountabilities }
+    });
+    
+    roleIds.push(role.id);
+    if (r.assignee && memberMappings[r.assignee]) {
+      const memberId = memberMappings[r.assignee].memberId;
+      assignments.push({ roleId: role.id, memberId });
+      await prisma.roleAssignment.upsert({
+        where: { roleId_memberId: { roleId: role.id, memberId } },
+        update: {},
+        create: { roleId: role.id, memberId }
+      });
+    }
+  }
+  console.log(`✅ ${CIRCLES.length} Circles and ${ROLES.length} Roles created`);
+
+  if (fresh) {
+    for (const flag of ["AI_WORKSPACES", "RELATIONSHIPS", "CONTEXT_MAPS"]) await enableWorkspaceFeature(wsId, flag);
+    await prisma.workspaceFeatureFlag.create({ data: { workspaceId: wsId, flag: "FINANCE", enabled: true,
+      config: { financeCapabilities: { reports: true, reportImports: true } } } });
+    await settleFreshDemoInitialization(tx, fresh.token, { userIds: Object.values(memberMappings).map(value => value.userId),
+      emails: TEAM_MEMBERS.map(member => member.email), circleIds: Object.values(circleMappings), roleIds, assignments });
+  }
+
   // 3. Create Constitution
   await prisma.constitution.upsert({
     where: { workspaceId_version: { workspaceId: wsId, version: 1 } },
@@ -2409,37 +2466,6 @@ async function main() {
       triggerRef: "seed"
     }
   });
-
-  // 4. Create Circles & Roles
-  const circleMappings = {};
-  for (const c of CIRCLES) {
-    const circle = await prisma.circle.upsert({
-      where: { id: `${wsId}-${c.id}` },
-      update: { name: c.name, purposeMd: c.purpose },
-      create: { id: `${wsId}-${c.id}`, workspaceId: wsId, name: c.name, purposeMd: c.purpose }
-    });
-    circleMappings[c.id] = circle.id;
-  }
-  
-  for (const r of ROLES) {
-    const circleId = circleMappings[r.circle];
-    const roleId = `${circleId}-role-${slugify(r.name)}`;
-    const role = await prisma.role.upsert({
-      where: { id: roleId },
-      update: { name: r.name, purposeMd: r.purpose, accountabilities: r.accountabilities },
-      create: { id: roleId, circleId: circleId, name: r.name, purposeMd: r.purpose, accountabilities: r.accountabilities }
-    });
-    
-    if (r.assignee && memberMappings[r.assignee]) {
-      const memberId = memberMappings[r.assignee].memberId;
-      await prisma.roleAssignment.upsert({
-        where: { roleId_memberId: { roleId: role.id, memberId } },
-        update: {},
-        create: { roleId: role.id, memberId }
-      });
-    }
-  }
-  console.log(`✅ ${CIRCLES.length} Circles and ${ROLES.length} Roles created`);
 
   // 5. Create Brain Articles
   for (const a of ARTICLES) {
@@ -2918,6 +2944,12 @@ async function main() {
   await assertDemoWorkspaceDisconnected(prisma, wsId, finalUsers.map((user) => user.id));
   await assertDemoCredentialsScoped(prisma, wsId, finalUsers.map((user) => user.id));
 
+      return counts;
+    } finally {
+      prisma = database;
+    }
+  }, { maxWait: 5_000, timeout: 120_000 });
+
   console.log("Demo workspace refreshed:");
   Object.entries(counts).forEach(([key, value]) => {
     console.log(`  ${key.padEnd(18)} ${value}`);
@@ -2928,4 +2960,4 @@ async function main() {
 
 main()
   .catch(e => { console.error(e); process.exit(1); })
-  .finally(async () => { await prisma.$disconnect(); });
+  .finally(async () => { await database.$disconnect(); });

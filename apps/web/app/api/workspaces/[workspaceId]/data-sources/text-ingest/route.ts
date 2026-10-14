@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
-import { ingestSource, intakeMeetingTranscript, requireWorkspaceMembership } from "@corgtex/domain";
+import { captureCompanyMemberTranscriptInput, ingestSource, intakeMeetingTranscript, requireWorkspaceMembership } from "@corgtex/domain";
 import type { DuplicateGuardOptions, DuplicateGuardResolution } from "@corgtex/domain";
 import type { BrainSourceType } from "@prisma/client";
 import { parseOptionalMeetingDateTimeInput } from "@/lib/meeting-timezone";
@@ -52,7 +52,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     // which creates a proper Meeting record and triggers the full meeting
     // intelligence pipeline (summary → insights → auto-apply → Slack post).
     if (String(sourceType || "ARTICLE") === "MEETING") {
-      const result = await intakeMeetingTranscript(actor, {
+      const submission = {
         workspaceId,
         transcript: content,
         title: title ? String(title) : null,
@@ -64,7 +64,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         ),
         ingestionGuidanceMd: typeof ingestionGuidanceMd === "string" ? ingestionGuidanceMd : null,
         duplicateGuard,
-      });
+      };
+      const nativeReceipt = await captureCompanyMemberTranscriptInput(actor, { workspaceId, submission });
+      const result = await intakeMeetingTranscript(actor, { ...submission, nativeReceipt });
 
       if (result.status === "needs_clarification") {
         return NextResponse.json(result, { status: 409 });

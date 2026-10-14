@@ -4,6 +4,8 @@ import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { getSupportAuthorizationContext, setSupportAuthorizationActor, setSupportAuthorizationGrant, getMcpOrigin, assertMcpOriginActive } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { systemActorMemberIdentityWhere } from "./member-identity";
+import { assertSourceCommitMcpOriginCovered } from "./source-commit-row-locks";
+import { assertSourceCommitTransactionCompatible } from "./source-commit-lock-plan";
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 14;
 
@@ -217,8 +219,12 @@ export async function requireWorkspaceMembership(params: {
   tx?: Prisma.TransactionClient;
 }) {
   const db = params.tx ?? prisma;
+  assertSourceCommitTransactionCompatible(db);
   const mcpOrigin = getMcpOrigin();
-  if (mcpOrigin) await assertMcpOriginActive(db, mcpOrigin, params.workspaceId);
+  if (mcpOrigin) {
+    await assertSourceCommitMcpOriginCovered(db, params.workspaceId, mcpOrigin);
+    await assertMcpOriginActive(db, mcpOrigin, params.workspaceId);
+  }
   setSupportAuthorizationActor(params.actor);
   await requireDeploymentWorkspaceScope(params.workspaceId, db);
   if (params.actor.kind === "user" && isPublicDemoUser(params.actor.user)) {

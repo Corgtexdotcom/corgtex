@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { marked } from "marked";
+import { BrainAnswerExport } from "./BrainAnswerExport";
 import { formatConversationDate } from "./date-format";
 import type { WorkspaceChatPageContext } from "./page-context";
 
@@ -37,6 +38,8 @@ type Turn = {
   assistantMessage: string;
   createdAt: string;
 };
+
+type ExportContext = { workspaceId: string; conversationId: string; turns: Turn[] };
 
 type ChatRequest = {
   controller: AbortController;
@@ -83,6 +86,7 @@ export function ChatInterface({
   const [activeQuestionId, setActiveQuestionId] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(activeSessionId);
   const [turns, setTurns] = useState<Turn[]>([]);
+  const [exportContext, setExportContext] = useState<ExportContext | null>(null);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -152,6 +156,7 @@ export function ChatInterface({
     setActiveQuestionId(null);
     setSessionId(activeSessionId);
     setTurns([]);
+    setExportContext(null);
     setLoading(false);
     setError(null);
     setErrorAction(null);
@@ -184,6 +189,7 @@ export function ChatInterface({
     selectDraft(id);
     setSessionId(id);
     setTurns([]);
+    setExportContext(null);
     setLoading(true);
     setError(null);
     setErrorAction(null);
@@ -193,6 +199,9 @@ export function ChatInterface({
       if (!res.ok) throw new Error(t("errorFailedToLoad"));
       const data = await res.json();
       if (!isCurrentRequest(request)) return;
+      if (data.conversation?.id !== id || !Array.isArray(data.conversation.turns)) {
+        throw new Error(t("errorFailedToLoad"));
+      }
       const loadedTurns = data.conversation.turns as Turn[];
       const lastTurn = loadedTurns.at(-1);
       const loadedConversation: ConversationSummary = {
@@ -211,6 +220,7 @@ export function ChatInterface({
           : null,
       };
       setTurns(loadedTurns);
+      setExportContext({ workspaceId, conversationId: id, turns: loadedTurns });
       setConversations((prev) => {
         const existing = prev.find((conversation) => conversation.id === id);
         if (!existing) return [loadedConversation, ...prev];
@@ -241,6 +251,7 @@ export function ChatInterface({
       selectDraft(null);
       setSessionId(null);
       setTurns([]);
+      setExportContext(null);
       setLoading(false);
     }
   }, [activeSessionId, loadConversation, cancelRequest, selectDraft]);
@@ -256,6 +267,7 @@ export function ChatInterface({
     setSessionId(null);
     setActiveQuestionId(null);
     setTurns([]);
+    setExportContext(null);
     setError(null);
     setErrorAction(null);
     setEditingTopic(false);
@@ -295,6 +307,7 @@ export function ChatInterface({
     setError(null);
     setErrorAction(null);
     setTurns([]);
+    setExportContext(null);
     setShowMobileHistory(false);
     setEditingTopic(false);
     try {
@@ -315,6 +328,7 @@ export function ChatInterface({
       const loadedTurns = conversation.turns ?? [];
       selectDraft(conversation.id);
       setTurns(loadedTurns);
+      setExportContext({ workspaceId, conversationId: conversation.id, turns: loadedTurns });
       setSessionId(conversation.id);
       setActiveQuestionId(question.id);
       setShowNewChat(false);
@@ -568,6 +582,8 @@ export function ChatInterface({
         createdAt: new Date().toISOString(),
       };
       setTurns((prev) => [...prev, optimisticTurn]);
+      let displayedTurnId = optimisticTurn.id;
+      let committedTurnId: string | null = null;
 
       try {
         const res = await fetch(`/api/workspaces/${workspaceId}/conversations/${currentSessionId}`, {
@@ -601,7 +617,7 @@ export function ChatInterface({
           if (!isCurrentRequest(request)) return;
           setTurns((prev) =>
             prev.map((turn) =>
-              turn.id === optimisticTurn.id
+              turn.id === displayedTurnId
                 ? { ...turn, assistantMessage: nextMessage }
                 : turn
             )
@@ -617,7 +633,15 @@ export function ChatInterface({
 
             if (line.startsWith("data: ") && line !== "data: [DONE]") {
               try {
-                const payload = JSON.parse(line.slice(6)) as { text?: string; topic?: string; refreshCurrentRoute?: boolean };
+                const payload = JSON.parse(line.slice(6)) as { text?: string; topic?: string; refreshCurrentRoute?: boolean; committedTurn?: { id: string; sequenceNumber: number; createdAt: string } };
+                const committed = payload.committedTurn;
+                if (!committedTurnId && committed && typeof committed.id === "string" && committed.id && !committed.id.startsWith("pending-")
+                  && Number.isInteger(committed.sequenceNumber) && committed.sequenceNumber > 0 && typeof committed.createdAt === "string") {
+                  const pendingId = displayedTurnId;
+                  displayedTurnId = committed.id;
+                  committedTurnId = committed.id;
+                  setTurns(previous => previous.map(turn => turn.id === pendingId ? { ...turn, ...committed } : turn));
+                }
                 if (payload.topic) {
                   setConversations((prev) =>
                     prev.map((c) =>
@@ -652,6 +676,26 @@ export function ChatInterface({
         buffer += decoder.decode();
         consumeBuffer();
 
+        if (committedTurnId) {
+          // The receipt carries identity only. Read the persisted answer and
+          // transcript through the existing authorized route before exporting.
+          const committedResponse = await fetch(`/api/workspaces/${workspaceId}/conversations/${currentSessionId}`, { signal: request.controller.signal });
+          if (!isCurrentRequest(request)) return;
+          if (!committedResponse.ok) throw new Error(t("errorFailedToLoad"));
+          const committedData = await committedResponse.json();
+          if (!isCurrentRequest(request)) return;
+          const persistedTurns = committedData.conversation?.turns as Turn[] | undefined;
+          if (committedData.conversation?.id !== currentSessionId || !Array.isArray(persistedTurns)
+            || !persistedTurns.some(turn => turn.id === committedTurnId && turn.assistantMessage)) {
+            throw new Error(t("errorFailedToLoad"));
+          }
+          setTurns(persistedTurns);
+          setExportContext({ workspaceId, conversationId: currentSessionId, turns: persistedTurns });
+          assistantMessage = persistedTurns.find(turn => turn.id === committedTurnId)!.assistantMessage;
+        } else {
+          throw new Error(t("errorStreamUnavailable"));
+        }
+
         updateInput("");
         removeAttachment();
         setConversations((prev) =>
@@ -675,7 +719,7 @@ export function ChatInterface({
         if (!isCurrentRequest(request)) return;
         setError(err instanceof Error ? err.message : t("errorFailedToSend"));
         updateInput(submittedDraft.input);
-        setTurns((prev) => prev.filter((turn) => turn.id !== optimisticTurn.id));
+        setTurns((prev) => prev.filter((turn) => turn.id !== displayedTurnId));
       }
     } finally {
       request.reader?.releaseLock();
@@ -820,6 +864,7 @@ export function ChatInterface({
                       setLoading(false);
                       setSessionId(null);
                       setTurns([]);
+                      setExportContext(null);
                       setActiveQuestionId(null);
                       setError(null);
                       setShowNewChat(false);
@@ -956,8 +1001,10 @@ export function ChatInterface({
                 </div>
               </div>
             ) : (
-              turns.map((turn) => (
-                <div key={turn.id} className="chat-turn">
+              turns.map((turn) => {
+                const persistedOutput = exportContext?.workspaceId === workspaceId && exportContext.conversationId === sessionId
+                  ? exportContext.turns.find(persisted => persisted.id === turn.id) : undefined;
+                return <div key={`${workspaceId}/${sessionId}/${turn.id}`} className="chat-turn" data-turn-id={turn.id}>
                   <div className="chat-message user">
                     <div style={{ whiteSpace: "pre-wrap" }}>{turn.userMessage}</div>
                   </div>
@@ -968,6 +1015,7 @@ export function ChatInterface({
                         className="markdown-body"
                         dangerouslySetInnerHTML={{ __html: renderAssistantMarkdown(turn.assistantMessage) }}
                       />
+                      {sessionId && !loading && exportContext && persistedOutput && <BrainAnswerExport workspaceId={workspaceId} conversationId={sessionId} output={persistedOutput} turns={exportContext.turns} />}
                     </div>
                   ) : (
                     <div className="chat-message assistant">
@@ -975,8 +1023,8 @@ export function ChatInterface({
                       <div className="chat-typing">{t("thinking")}</div>
                     </div>
                   )}
-                </div>
-              ))
+                </div>;
+              })
             )}
             <div ref={messagesEndRef} />
           </div>

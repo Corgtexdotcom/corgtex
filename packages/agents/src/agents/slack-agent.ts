@@ -1,6 +1,6 @@
-import type { AgentTriggerType } from "@prisma/client";
+import type { AgentTriggerType, Action, Tension, Proposal, CommunicationMessage, CommunicationContextSummary } from "@prisma/client";
 import { defaultModelGateway } from "@corgtex/models";
-import { answerKnowledgeQuestion, searchIndexedKnowledge } from "@corgtex/knowledge";
+import { getKnowledgeSearchInputRoots, searchIndexedKnowledge } from "@corgtex/knowledge";
 import {
   createWorkItemFromCommunicationSource,
   deleteAction,
@@ -9,15 +9,24 @@ import {
   deleteTension,
   deliverSlackAgentResponse,
   evaluateDelegatedActionPolicy,
-  fetchSlackThreadMessages,
+  fetchAndPersistReadableSlackThreadMessages,
   isHumanMemberIdentity,
   listMembers,
+  captureArtifactInputProof,
+  captureReadableDigestInputs,
+  isArtifactInputProofReadable,
+  isArtifactInputProofPubliclyShareable,
+  mergeArtifactInputProofs,
+  invariant,
+  validateSlackPostTarget,
+  type LineageKind,
+  type LineageRoot,
   type SlackAgentDelivery,
   type SlackAgentJobPayload,
 } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import type { HumanActor } from "@corgtex/shared";
-import { executeAgentRun, asString } from "../runtime";
+import { executeAgentRun, asString, type AgentHelpers, type AgentInputReceipt } from "../runtime";
 
 type SlackAgentIntent =
   | "brief"
@@ -127,19 +136,6 @@ function isSlackUndoRequest(prompt: string) {
     && /\b(that|last|latest|previous|recent|just|created)\b/.test(normalized);
 }
 
-function undoEntityLabel(entityType: SlackUndoEntityType) {
-  if (entityType === "BrainSource") return "Brain note";
-  return entityType;
-}
-
-function undoEntityUrl(workspaceId: string, entityType: SlackUndoEntityType, entityId: string) {
-  const base = `/workspaces/${workspaceId}`;
-  if (entityType === "Action") return `${base}/actions/${entityId}`;
-  if (entityType === "Tension") return `${base}/tensions/${entityId}`;
-  if (entityType === "Proposal") return `${base}/proposals/${entityId}`;
-  return `${base}/brain`;
-}
-
 function normalizeCapabilitiesPrompt(prompt: string) {
   return prompt
     .replace(/<@[A-Z0-9]+(?:\|[^>]+)?>/gi, " ")
@@ -233,84 +229,50 @@ function slackLink(url: string, label: string) {
 }
 
 async function loadUndoEntitySummary(workspaceId: string, entityType: SlackUndoEntityType, entityId: string) {
-  const select = { id: true, title: true, archivedAt: true };
-  if (entityType === "Action") {
-    const record = await prisma.action.findFirst({ where: { id: entityId, workspaceId }, select });
-    return record ? { title: record.title, archivedAt: record.archivedAt } : null;
-  }
-  if (entityType === "Tension") {
-    const record = await prisma.tension.findFirst({ where: { id: entityId, workspaceId }, select });
-    return record ? { title: record.title, archivedAt: record.archivedAt } : null;
-  }
-  if (entityType === "Proposal") {
-    const record = await prisma.proposal.findFirst({ where: { id: entityId, workspaceId }, select });
-    return record ? { title: record.title, archivedAt: record.archivedAt } : null;
-  }
-  const source = await prisma.brainSource.findFirst({
-    where: { id: entityId, workspaceId },
-    select: { id: true, title: true, archivedAt: true },
-  });
-  return source ? { title: source.title, archivedAt: source.archivedAt } : null;
+  const where = { id: entityId, workspaceId, archivedAt: null };
+  if (entityType === "Action") return prisma.action.findFirst({ where });
+  if (entityType === "Tension") return prisma.tension.findFirst({ where });
+  if (entityType === "Proposal") return prisma.proposal.findFirst({ where });
+  return prisma.brainSource.findFirst({ where });
 }
 
-async function findSlackUndoCandidate(params: SlackAgentJobPayload) {
+async function findSlackUndoCandidate(actor: HumanActor, params: SlackInputPayload,
+  proof: SlackProofContext, collectInputs: (roots: LineageRoot[]) => Promise<void>) {
   const hint = undoEntityHint(params.prompt);
   const entityTypes = hint ? [hint] : [...SLACK_UNDO_ENTITY_TYPES];
-  const createdAfter = new Date(Date.now() - SLACK_UNDO_LOOKBACK_MS);
-  const baseWhere = {
-    installationId: params.installationId,
-    workspaceId: params.workspaceId,
-    provider: "SLACK" as const,
-    externalUserId: params.externalUserId,
-    action: { in: SLACK_UNDO_CREATE_ACTIONS },
-    entityType: { in: entityTypes },
-    createdAt: { gte: createdAfter },
-  };
-
-  const scopedQueries = [
-    params.channelId && params.threadTs
-      ? {
-        ...baseWhere,
-        message: {
-          externalChannelId: params.channelId,
-          OR: [
-            { externalMessageId: params.threadTs },
-            { threadExternalId: params.threadTs },
-          ],
-        },
-      }
-      : null,
-    params.channelId
-      ? {
-        ...baseWhere,
-        message: { externalChannelId: params.channelId },
-      }
-      : null,
+  const baseWhere = { installationId: params.installationId, workspaceId: params.workspaceId,
+    provider: "SLACK" as const, externalUserId: params.externalUserId,
+    action: { in: SLACK_UNDO_CREATE_ACTIONS }, entityType: { in: entityTypes },
+    createdAt: { gte: new Date(Date.now() - SLACK_UNDO_LOOKBACK_MS) } };
+  const scopes = [
+    params.channelId && params.threadTs ? { ...baseWhere, message: { externalChannelId: params.channelId,
+      OR: [{ externalMessageId: params.threadTs! }, { threadExternalId: params.threadTs }] } } : null,
+    params.channelId ? { ...baseWhere, message: { externalChannelId: params.channelId } } : null,
     baseWhere,
-  ].filter((query): query is typeof baseWhere => Boolean(query));
-
-  for (const where of scopedQueries) {
-    const links = await prisma.communicationEntityLink.findMany({
-      where,
-      orderBy: { createdAt: "desc" },
-      take: 8,
-      select: {
-        id: true,
-        action: true,
-        entityType: true,
-        entityId: true,
-        createdAt: true,
-      },
-    });
-
-    for (const link of links) {
-      if (!SLACK_UNDO_ENTITY_TYPES.includes(link.entityType as SlackUndoEntityType)) continue;
-      const entityType = link.entityType as SlackUndoEntityType;
-      const entity = await loadUndoEntitySummary(params.workspaceId, entityType, link.entityId);
-      if (entity && !entity.archivedAt) return { ...link, entityType, title: entity.title };
+  ].filter((where): where is typeof baseWhere => !!where);
+  for (const where of scopes) {
+    for (let skip = 0; skip < 5_000; skip += 50) {
+      const links = await prisma.communicationEntityLink.findMany({ where,
+        orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: 50, skip });
+      const permittedLinks = await captureReadableDigestInputs({ actor, workspaceId: params.workspaceId,
+        kind: "CommunicationEntityLink", records: links });
+      for (const link of permittedLinks.records) {
+        if (!SLACK_UNDO_ENTITY_TYPES.includes(link.entityType as SlackUndoEntityType)) continue;
+        const entityType = link.entityType as SlackUndoEntityType;
+        const entity = await loadUndoEntitySummary(params.workspaceId, entityType, link.entityId);
+        if (!entity) continue;
+        const captured = await captureReadableDigestInputs({ actor, workspaceId: params.workspaceId,
+          kind: entityType, records: [entity] });
+        if (!captured.records.length) continue;
+        const roots = mergeArtifactInputProofs(permittedLinks.proofs.get(link.id)!, captured.roots);
+        if (proof.publicReply && !await isArtifactInputProofPubliclyShareable(actor, params.workspaceId, roots)) continue;
+        await collectInputs(roots);
+        return { ...link, entityType, title: entity.title };
+      }
+      if (links.length < 50) break;
+      invariant(skip + 50 < 5_000, 503, "INPUT_SCAN_LIMIT", "Slack undo candidates need a lineage rebuild.");
     }
   }
-
   return null;
 }
 
@@ -344,45 +306,20 @@ async function archiveSlackUndoCandidate(actor: HumanActor, params: SlackAgentJo
   });
 }
 
-async function undoLastSlackCreatedItem(actor: HumanActor, params: SlackAgentJobPayload) {
-  const candidate = await findSlackUndoCandidate(params);
-  if (!candidate) {
-    return {
-      done: [],
-      couldNot: ["I could not find an active Slack-created item from you in the last 24 hours to undo."],
-      next: "Reply with the item link or create a fresh correction request.",
-      target: null,
-    };
-  }
-
-  const label = undoEntityLabel(candidate.entityType);
-  const title = candidate.title || candidate.entityId;
+async function undoLastSlackCreatedItem(actor: HumanActor, params: SlackInputPayload, proof: SlackProofContext,
+  collectInputs: (roots: LineageRoot[]) => Promise<void>, archive: (candidate: {
+    action: string; entityType: SlackUndoEntityType; entityId: string; title: string | null;
+  }) => Promise<void>) {
+  const candidate = await findSlackUndoCandidate(actor, params, proof, collectInputs);
+  if (!candidate) return { archived: false, done: [],
+    couldNot: ["I could not undo an item from this request."], next: "Open the item in Corgtex to review it." };
   try {
-    await archiveSlackUndoCandidate(actor, params, candidate);
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : "The archive request failed.";
-    return {
-      done: [],
-      couldNot: [`I found ${label} ${title}, but could not archive it from Slack: ${reason}`],
-      next: "Open the item in Corgtex to review permissions or archive it manually.",
-      target: {
-        entityType: candidate.entityType,
-        entityId: candidate.entityId,
-        title: candidate.title,
-      },
-    };
+    await archive(candidate);
+    return { archived: true, done: ["I undid the Slack-created item."], couldNot: [], next: "No follow-up needed." };
+  } catch {
+    return { archived: false, done: [], couldNot: ["I could not complete this undo request."],
+      next: "Open the item in Corgtex to review it." };
   }
-
-  return {
-    done: [`Archived ${label} ${slackLink(undoEntityUrl(params.workspaceId, candidate.entityType, candidate.entityId), title)}.`],
-    couldNot: [],
-    next: "No follow-up needed.",
-    target: {
-      entityType: candidate.entityType,
-      entityId: candidate.entityId,
-      title: candidate.title,
-    },
-  };
 }
 
 async function loadActor(workspaceId: string, userId: string): Promise<HumanActor | null> {
@@ -394,7 +331,7 @@ async function loadActor(workspaceId: string, userId: string): Promise<HumanActo
 
   const member = await prisma.member.findUnique({
     where: { workspaceId_userId: { workspaceId, userId } },
-    select: { id: true, isActive: true },
+    include: { user: { select: { id: true, email: true, displayName: true } } },
   });
   return member?.isActive ? { kind: "user", user } : null;
 }
@@ -500,6 +437,9 @@ async function answerSlackConversation(params: {
   threadMessages: unknown;
   channelMessages: unknown;
   contextSummaries: unknown;
+  collectInputs: (roots: LineageRoot[]) => Promise<void>;
+  tool: AgentHelpers["tool"];
+  behavior: string | null;
 }) {
   if (ACCOUNT_LOOKUP_RE.test(params.prompt)) {
     return answerAccountLookup({
@@ -514,22 +454,13 @@ async function answerSlackConversation(params: {
     return answerMemberList(params.members, params.prompt);
   }
 
-  const knowledge = await answerKnowledgeQuestion({
-    workspaceId: params.workspaceId,
-    question: params.prompt,
-    workflowJobId: params.workflowJobId,
-    agentRunId: params.agentRunId,
-  }).catch(() => null);
-  const slackKnowledge = await searchIndexedKnowledge({
-    workspaceId: params.workspaceId,
-    query: params.prompt,
-    sourceTypes: ["SLACK"],
-    limit: 5,
-    workflowJobId: params.workflowJobId,
-    agentRunId: params.agentRunId,
-  }).catch(() => []);
+  const knowledge = await searchIndexedKnowledge({
+    actor: params.actor, workspaceId: params.workspaceId, query: params.prompt,
+    workflowJobId: params.workflowJobId, agentRunId: params.agentRunId,
+  });
+  await params.collectInputs(await getKnowledgeSearchInputRoots(params.actor, params.workspaceId, knowledge));
 
-  const chat = await defaultModelGateway.chat({
+  const chat = await params.tool("model.conversation", { purpose: "workspace_question" }, () => defaultModelGateway.chat({
     model: params.model,
     workspaceId: params.workspaceId,
     workflowJobId: params.workflowJobId,
@@ -539,6 +470,7 @@ async function answerSlackConversation(params: {
       {
         role: "system",
         content: [
+          params.behavior ?? "",
           "You are Corgtex in Slack. Answer as a helpful conversation agent for the authenticated workspace member.",
           "Use only the supplied workspace context, Slack context, and knowledge answer. Do not invent private facts.",
           "Do not reveal secrets, tokens, raw credentials, bootstrap bundle content, private ops notes, or unrelated client data.",
@@ -568,36 +500,154 @@ async function answerSlackConversation(params: {
           threadMessages: params.threadMessages,
           channelMessages: params.channelMessages,
           slackContextSummaries: params.contextSummaries,
-          slackKnowledge,
-          knowledgeAnswer: knowledge?.answer ?? null,
+          knowledge,
         }),
       },
     ],
-  });
+  }));
 
-  return chat.content.trim() || knowledge?.answer || "I do not have enough information to answer that yet.";
+  return chat.content.trim() || "I do not have enough information to answer that yet.";
 }
 
-async function deliverSafely(payload: SlackAgentJobPayload, response: SlackAgentDelivery) {
+type SlackInputPayload = SlackAgentJobPayload & { requestInputId?: string | null };
+type SlackProofContext = { actor: HumanActor; prompt: string; roots: LineageRoot[]; publicReply: boolean;
+  sourceMessageId?: string; threadTs?: string };
+
+async function loadSlackRequest(params: SlackInputPayload): Promise<SlackProofContext | null> {
+  const actor = await loadActor(params.workspaceId, params.actorUserId);
+  if (!actor) return null;
+  const mapping = await prisma.communicationExternalUser.findUnique({ where: {
+    installationId_externalUserId: { installationId: params.installationId, externalUserId: params.externalUserId },
+  } });
+  invariant(mapping && mapping.workspaceId === params.workspaceId && mapping.provider === "SLACK"
+    && !mapping.isDeleted && !mapping.isBot && mapping.userId === actor.user.id,
+  409, "SOURCE_RESTRICTED", "The Slack requester mapping is unavailable.");
+  const channel = await prisma.communicationChannel.findFirst({ where: {
+    workspaceId: params.workspaceId, installationId: params.installationId, provider: "SLACK",
+    externalChannelId: params.channelId ?? "", kind: "PUBLIC", isIngestEnabled: true, isArchived: false,
+  } });
+  invariant(channel, 409, "SOURCE_RESTRICTED", "The original public Slack channel is unavailable.");
+  const member = await prisma.member.findUnique({ where: { workspaceId_userId: { workspaceId: params.workspaceId, userId: actor.user.id } },
+    include: { user: { select: { id: true, email: true, displayName: true } } } });
+  invariant(member?.isActive && (!mapping.memberId || mapping.memberId === member.id), 409, "SOURCE_RESTRICTED", "The Slack requester membership changed.");
+  const base = await captureArtifactInputProof(actor, params.workspaceId, [
+    { kind: "CommunicationChannel", id: channel.id, snapshot: channel },
+    { kind: "CommunicationExternalUser", id: mapping.id, snapshot: mapping },
+    { kind: "Member", id: member.id, snapshot: member },
+    { kind: "User", id: actor.user.id, snapshot: actor.user },
+  ]);
+  let prompt: string;
+  let requestRoots: LineageRoot[];
+  let sourceMessageId: string | undefined;
+  let threadTs: string | undefined;
+  if (params.source === "app_mention") {
+    invariant(params.messageTs, 409, "UNKNOWN_LINEAGE", "The original Slack request timestamp is unavailable.");
+    const message = await prisma.communicationMessage.findFirst({ where: {
+      workspaceId: params.workspaceId, installationId: params.installationId, provider: "SLACK",
+      ...(params.sourceMessageId ? { id: params.sourceMessageId } : {}), externalChannelId: channel.externalChannelId,
+      externalMessageId: params.messageTs, externalUserId: params.externalUserId,
+      isHidden: false, isDeleted: false, textRedactedAt: null, text: { not: null },
+    } });
+    invariant(message && typeof message.text === "string" && message.text.trim() && (!params.threadTs || (message.threadExternalId || message.externalMessageId) === params.threadTs),
+      409, "UNKNOWN_LINEAGE", "The original Slack request is unavailable.");
+    prompt = message.text.trim();
+    sourceMessageId = message.id;
+    threadTs = message.threadExternalId || message.externalMessageId;
+    requestRoots = await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "CommunicationMessage", id: message.id, snapshot: message }]);
+  } else {
+    invariant(params.requestInputId, 409, "UNKNOWN_LINEAGE", "This Slack request has no immutable authored input.");
+    const request = await prisma.agentRequestInput.findFirst({ where: {
+      id: params.requestInputId, workspaceId: params.workspaceId, userId: actor.user.id, agentKey: "slack-agent",
+    } });
+    invariant(request && request.prompt.trim(), 409, "UNKNOWN_LINEAGE", "The authored Slack request is unavailable.");
+    prompt = request.prompt;
+    requestRoots = await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "AgentRequestInput", id: request.id, snapshot: request }]);
+    if (params.source === "message_shortcut") {
+      invariant(params.sourceMessageId && params.messageTs, 409, "UNKNOWN_LINEAGE", "The selected native Slack source is unavailable.");
+      const selected = await prisma.communicationMessage.findFirst({ where: {
+        id: params.sourceMessageId, workspaceId: params.workspaceId, installationId: params.installationId, provider: "SLACK",
+        externalChannelId: channel.externalChannelId, externalMessageId: params.messageTs,
+        isHidden: false, isDeleted: false, textRedactedAt: null, text: { not: null },
+      } });
+      invariant(selected && (!params.threadTs || (selected.threadExternalId || selected.externalMessageId) === params.threadTs),
+        409, "UNKNOWN_LINEAGE", "The selected Slack source changed before execution.");
+      sourceMessageId = selected.id;
+      threadTs = selected.threadExternalId || selected.externalMessageId;
+      requestRoots = mergeArtifactInputProofs(requestRoots, await captureArtifactInputProof(actor, params.workspaceId,
+        [{ kind: "CommunicationMessage", id: selected.id, snapshot: selected }]));
+    }
+  }
+  const roots = mergeArtifactInputProofs(base, requestRoots);
+  const publicReply = params.source === "app_mention";
+  invariant(!publicReply || await isArtifactInputProofPubliclyShareable(actor, params.workspaceId, roots),
+    409, "SOURCE_RESTRICTED", "The request cannot be shared in this public Slack channel.");
+  return { actor, prompt, roots, publicReply, sourceMessageId, threadTs };
+}
+
+/** Bound raw scans, then apply source and public-audience gates before sampling. */
+async function loadSlackReadableRows<T extends { id: string }>(params: {
+  proof: SlackProofContext; workspaceId: string; kind: LineageKind; limit: number;
+  load: (take: number, skip: number) => Promise<T[]>;
+}) {
+  const records: T[] = [];
+  const roots: LineageRoot[][] = [];
+  const seen = new Set<string>();
+  const take = 50;
+  for (let skip = 0; skip < 5_000 && records.length < params.limit; skip += take) {
+    const batch = await params.load(take, skip);
+    const captured = await captureReadableDigestInputs({ actor: params.proof.actor, workspaceId: params.workspaceId, kind: params.kind, records: batch });
+    for (const row of captured.records) {
+      if (seen.has(row.id)) continue;
+      seen.add(row.id);
+      const proof = captured.proofs.get(row.id)!;
+      if (params.proof.publicReply && !await isArtifactInputProofPubliclyShareable(params.proof.actor, params.workspaceId, proof)) continue;
+      records.push(row); roots.push(proof);
+      if (records.length === params.limit) break;
+    }
+    if (batch.length < take || records.length === params.limit) return { records, roots: mergeArtifactInputProofs(...roots) };
+  }
+  invariant(records.length === params.limit, 503, "INPUT_SCAN_LIMIT", "Slack context needs a lineage rebuild before collection can complete.");
+  return { records, roots: mergeArtifactInputProofs(...roots) };
+}
+
+async function deliverSafely(payload: SlackInputPayload, response: SlackAgentDelivery, proof: SlackProofContext, roots: LineageRoot[]) {
+  invariant(await isArtifactInputProofReadable(proof.actor, payload.workspaceId, roots), 409, "SOURCE_CHANGED", "Slack inputs changed before delivery.");
+  const mapping = await prisma.communicationExternalUser.findUnique({ where: {
+    installationId_externalUserId: { installationId: payload.installationId, externalUserId: payload.externalUserId },
+  } });
+  invariant(mapping && !mapping.isDeleted && mapping.userId === proof.actor.user.id, 409, "SOURCE_RESTRICTED", "The Slack requester mapping changed.");
+  if (proof.publicReply) {
+    invariant(!payload.responseUrlEnc && await isArtifactInputProofPubliclyShareable(proof.actor, payload.workspaceId, roots),
+      409, "SOURCE_RESTRICTED", "These inputs cannot be published to Slack.");
+  }
+  const target = await validateSlackPostTarget(payload.installationId, payload.channelId ?? "", { requirePublic: true });
+  invariant(target.ok && target.channelId === payload.channelId, 409, "SOURCE_RESTRICTED", "The original Slack destination changed.");
+  invariant(await isArtifactInputProofReadable(proof.actor, payload.workspaceId, roots)
+    && (!proof.publicReply || await isArtifactInputProofPubliclyShareable(proof.actor, payload.workspaceId, roots)),
+  409, "SOURCE_CHANGED", "Slack inputs changed during destination validation.");
   try {
     await deliverSlackAgentResponse(payload, response);
     return { delivered: true };
-  } catch (error) {
-    return {
-      delivered: false,
-      error: error instanceof Error ? error.message : "Unknown Slack delivery error.",
-    };
+  } catch {
+    return { delivered: false, error: "Slack delivery failed." };
   }
 }
 
-export async function runSlackAgent(params: SlackAgentJobPayload & {
+export async function runSlackAgent(input: SlackInputPayload & {
   workflowJobId?: string;
   triggerType?: AgentTriggerType;
 }) {
-  const triggerRef = params.inboundEventId ?? params.sourceMessageId ?? params.workflowJobId ?? `${params.source}:${params.messageTs ?? params.prompt}`;
+  const proof = await loadSlackRequest(input);
+  if (!proof) return { skipped: true, reason: "requester_unavailable" };
+  const params = { ...input, prompt: proof.prompt, sourceMessageId: proof.sourceMessageId ?? input.sourceMessageId,
+    threadTs: proof.threadTs ?? input.threadTs, responseUrlEnc: proof.publicReply ? null : input.responseUrlEnc };
+  const triggerRef = params.source === "app_mention" ? params.sourceMessageId ?? params.messageTs!
+    : params.requestInputId!;
 
   return executeAgentRun({
     agentKey: "slack-agent",
+    lineageActor: proof.actor, lineageRoots: proof.roots,
+    contextLineageRoots: context => context.lineageRoots,
     workspaceId: params.workspaceId,
     triggerType: params.triggerType ?? "EVENT",
     triggerRef,
@@ -611,184 +661,77 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
       sourceMessageId: params.sourceMessageId ?? null,
     },
     plan: ["load-slack-context", "extract-intent", "execute-safe-work", "reply-in-slack"],
-    buildContext: async (helpers) => helpers.tool("slack-context.load", {
-      source: params.source,
-      sourceMessageId: params.sourceMessageId ?? null,
-    }, async () => {
-      const actor = await loadActor(params.workspaceId, params.actorUserId);
-      if (!actor) {
-        return {
-          actor: null,
-          members: [],
-          externalUsers: [],
-          userTimezone: "UTC",
-          openActions: [],
-          openTensions: [],
-          openProposals: [],
-          sourceMessage: null,
-          threadMessages: [],
-          channelMessages: [],
-          contextSummaries: [],
-        };
-      }
-
-      const currentMessageDateRaw = params.messageTs ? new Date(Number(params.messageTs.split(".")[0]) * 1000) : null;
-      const currentMessageDate = currentMessageDateRaw && Number.isFinite(currentMessageDateRaw.getTime())
-        ? currentMessageDateRaw
-        : null;
-
-      const [
-        members,
-        externalUser,
-        externalUsers,
-        openActions,
-        openTensions,
-        openProposals,
-        sourceMessage,
-        fetchedThreadMessages,
-        storedThreadMessages,
-        channelMessagesDesc,
-        contextSummaries,
-      ] = await Promise.all([
+    buildContext: async () => {
+      const actor = proof.actor;
+      const currentMessageDate = params.messageTs ? new Date(Number(params.messageTs.split(".")[0]) * 1000) : null;
+      const commonMessageWhere = { installationId: params.installationId, workspaceId: params.workspaceId,
+        provider: "SLACK" as const, externalChannelId: params.channelId!, text: { not: null },
+        textRedactedAt: null, isBot: false, isHidden: false, isDeleted: false };
+      const rowParams = { proof, workspaceId: params.workspaceId };
+      const freshThread = params.threadTs ? await fetchAndPersistReadableSlackThreadMessages(actor, {
+        workspaceId: params.workspaceId, installationId: params.installationId, channelId: params.channelId!, threadTs: params.threadTs, limit: 200,
+      }) : [];
+      const [memberRows, externalRows, actions, tensions, proposals, messages, channel, summaries, selected] = await Promise.all([
         listMembers(params.workspaceId),
-        prisma.communicationExternalUser.findUnique({
-          where: { installationId_externalUserId: { installationId: params.installationId, externalUserId: params.externalUserId } },
-          select: { rawProfile: true },
-        }),
-        prisma.communicationExternalUser.findMany({
-          where: { installationId: params.installationId, workspaceId: params.workspaceId },
-          select: { externalUserId: true, userId: true, memberId: true, email: true, displayName: true },
-        }),
-        prisma.action.findMany({
-          where: { workspaceId: params.workspaceId, status: { in: ["OPEN", "IN_PROGRESS"] } },
-          orderBy: { createdAt: "desc" },
-          take: 5,
-          select: { id: true, title: true, status: true },
-        }),
-        prisma.tension.findMany({
-          where: { workspaceId: params.workspaceId, status: "OPEN" },
-          orderBy: { createdAt: "desc" },
-          take: 5,
-          select: { id: true, title: true, status: true },
-        }),
-        prisma.proposal.findMany({
-          where: { workspaceId: params.workspaceId, status: "OPEN" },
-          orderBy: { createdAt: "desc" },
-          take: 5,
-          select: { id: true, title: true, status: true },
-        }),
-        params.sourceMessageId
-          ? prisma.communicationMessage.findUnique({
-            where: { id: params.sourceMessageId },
-            select: { id: true, text: true, externalUserId: true, externalChannelId: true, externalMessageId: true, threadExternalId: true },
-          })
-          : Promise.resolve(null),
-        params.channelId && params.threadTs
-          ? fetchSlackThreadMessages(params.installationId, { channelId: params.channelId, threadTs: params.threadTs })
-          : Promise.resolve([]),
-        params.channelId && params.threadTs
-          ? prisma.communicationMessage.findMany({
-            where: {
-              installationId: params.installationId,
-              workspaceId: params.workspaceId,
-              provider: "SLACK",
-              externalChannelId: params.channelId,
-              text: { not: null },
-              textRedactedAt: null,
-              isBot: false,
-              isHidden: false,
-              isDeleted: false,
-              OR: [{ externalMessageId: params.threadTs }, { threadExternalId: params.threadTs }],
-            },
-            orderBy: { messageTs: "asc" },
-            take: 80,
-            select: { id: true, text: true, externalUserId: true, externalMessageId: true, threadExternalId: true, messageTs: true },
-          })
-          : Promise.resolve([]),
-        params.channelId
-          ? prisma.communicationMessage.findMany({
-            where: {
-              installationId: params.installationId,
-              workspaceId: params.workspaceId,
-              provider: "SLACK",
-              externalChannelId: params.channelId,
-              text: { not: null },
-              textRedactedAt: null,
-              isBot: false,
-              isHidden: false,
-              isDeleted: false,
-              ...(currentMessageDate ? { messageTs: { lte: currentMessageDate } } : {}),
-            },
-            orderBy: { messageTs: "desc" },
-            take: 40,
-            select: { id: true, text: true, externalUserId: true, externalMessageId: true, threadExternalId: true, messageTs: true },
-          })
-          : Promise.resolve([]),
-        params.channelId
-          ? prisma.communicationContextSummary.findMany({
-            where: {
-              installationId: params.installationId,
-              workspaceId: params.workspaceId,
-              provider: "SLACK",
-              externalChannelId: params.channelId,
-              ...(params.threadTs ? { OR: [{ threadExternalId: params.threadTs }, { threadExternalId: null }] } : {}),
-            },
-            orderBy: { summaryDate: "desc" },
-            take: 6,
-            select: { title: true, summaryMd: true, threadExternalId: true, summaryDate: true, messageCount: true },
-          })
-          : Promise.resolve([]),
+        prisma.communicationExternalUser.findMany({ where: { installationId: params.installationId, workspaceId: params.workspaceId, provider: "SLACK", isDeleted: false, isBot: false } }),
+        loadSlackReadableRows<Action>({ ...rowParams, kind: "Action", limit: 5, load: (take, skip) => prisma.action.findMany({ where: { workspaceId: params.workspaceId, status: { in: ["OPEN", "IN_PROGRESS"] }, archivedAt: null }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take, skip }) }),
+        loadSlackReadableRows<Tension>({ ...rowParams, kind: "Tension", limit: 5, load: (take, skip) => prisma.tension.findMany({ where: { workspaceId: params.workspaceId, status: "OPEN", archivedAt: null }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take, skip }) }),
+        loadSlackReadableRows<Proposal>({ ...rowParams, kind: "Proposal", limit: 5, load: (take, skip) => prisma.proposal.findMany({ where: { workspaceId: params.workspaceId, status: "OPEN", archivedAt: null }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take, skip }) }),
+        loadSlackReadableRows<CommunicationMessage>({ ...rowParams, kind: "CommunicationMessage", limit: 80,
+          load: async (take, skip) => freshThread.slice(skip, skip + take) }),
+        loadSlackReadableRows<CommunicationMessage>({ ...rowParams, kind: "CommunicationMessage", limit: 40, load: (take, skip) => prisma.communicationMessage.findMany({ where: { ...commonMessageWhere, ...(currentMessageDate && Number.isFinite(currentMessageDate.getTime()) ? { messageTs: { lte: currentMessageDate } } : {}) }, orderBy: [{ messageTs: "desc" }, { id: "asc" }], take, skip }) }),
+        loadSlackReadableRows<CommunicationContextSummary>({ ...rowParams, kind: "CommunicationContextSummary", limit: 6, load: (take, skip) => prisma.communicationContextSummary.findMany({ where: { workspaceId: params.workspaceId, installationId: params.installationId, provider: "SLACK", externalChannelId: params.channelId!, ...(params.threadTs ? { OR: [{ threadExternalId: params.threadTs }, { threadExternalId: null }] } : {}) }, orderBy: [{ summaryDate: "desc" }, { id: "asc" }], take, skip }) }),
+        params.sourceMessageId ? prisma.communicationMessage.findFirst({ where: { ...commonMessageWhere, id: params.sourceMessageId! } }) : Promise.resolve(null),
       ]);
-      const threadMessages = storedThreadMessages.length > 0
-        ? storedThreadMessages.map((message) => ({
-          user: message.externalUserId,
-          text: message.text,
-          ts: message.externalMessageId,
-          threadTs: message.threadExternalId,
-        }))
-        : fetchedThreadMessages;
-      const channelMessages = channelMessagesDesc.reverse().map((message) => ({
-        user: message.externalUserId,
-        text: message.text,
-        ts: message.externalMessageId,
-        threadTs: message.threadExternalId,
-      }));
-
-      return {
-        actor,
-        members,
-        externalUsers,
-        userTimezone: rawProfileTimezone(externalUser?.rawProfile),
-        openActions,
-        openTensions,
-        openProposals,
-        sourceMessage,
-        threadMessages,
-        channelMessages,
-        contextSummaries,
-      };
-    }),
+      const members = await captureReadableDigestInputs({ actor, workspaceId: params.workspaceId, kind: "Member", records: memberRows.map(member => ({ ...member, user: { id: member.user.id, email: member.user.email, displayName: member.user.displayName } })) });
+      const users = await captureReadableDigestInputs({ actor, workspaceId: params.workspaceId, kind: "User", records: memberRows.map(member => member.user) });
+      const userIds = new Set(users.records.map(user => user.id));
+      const permittedMembers = members.records.filter(member => userIds.has(member.user.id));
+      const external = await captureReadableDigestInputs({ actor, workspaceId: params.workspaceId, kind: "CommunicationExternalUser", records: externalRows });
+      const selectedInputs = await captureReadableDigestInputs({ actor, workspaceId: params.workspaceId, kind: "CommunicationMessage", records: selected ? [selected] : [] });
+      const selectedMessage = selectedInputs.records[0] ?? null;
+      const lineageRoots = mergeArtifactInputProofs(proof.roots, actions.roots, tensions.roots, proposals.roots,
+        messages.roots, channel.roots, summaries.roots, selectedInputs.roots,
+        ...permittedMembers.map(member => members.proofs.get(member.id)!), ...users.proofs.values(), ...external.proofs.values());
+      invariant(!proof.publicReply || await isArtifactInputProofPubliclyShareable(actor, params.workspaceId, lineageRoots), 409, "SOURCE_RESTRICTED", "Slack context cannot be shared publicly.");
+      const projectMessage = (message: CommunicationMessage) => ({ user: message.externalUserId, text: message.text, ts: message.externalMessageId, threadTs: message.threadExternalId });
+      return { actor, members: permittedMembers, externalUsers: external.records,
+        userTimezone: rawProfileTimezone(external.records.find(row => row.externalUserId === params.externalUserId)?.rawProfile),
+        openActions: actions.records.map(({ id, title, status }) => ({ id, title, status })),
+        openTensions: tensions.records.map(({ id, title, status }) => ({ id, title, status })),
+        openProposals: proposals.records.map(({ id, title, status }) => ({ id, title, status })),
+        sourceMessage: selectedMessage ? projectMessage(selectedMessage) : null,
+        threadMessages: messages.records.map(projectMessage), channelMessages: channel.records.reverse().map(projectMessage),
+        contextSummaries: summaries.records.map(({ title, summaryMd, threadExternalId, summaryDate, messageCount }) => ({ title, summaryMd, threadExternalId, summaryDate, messageCount })), lineageRoots };
+    },
     execute: async (context, helpers, runId, model) => {
-      const actor = context.actor as HumanActor | null;
-      if (!actor) {
-        const response = renderConversationResponse(
-          "I could not match your Slack user to an active Corgtex account in this workspace. Open Corgtex settings and confirm your Slack email matches your Corgtex account.",
-        );
-        const delivery = await helpers.tool("slack.reply", { reason: "missing_actor" }, () => deliverSafely(params, response));
-        return { resultJson: { status: "NO_ACTOR", delivery } };
-      }
+      const actor = context.actor as HumanActor;
+      let roots = mergeArtifactInputProofs(context.lineageRoots, [...helpers.behaviorLineageRoots]);
+      let receipt: AgentInputReceipt = await helpers.captureInputs(roots);
+      const collectInputs = async (added: LineageRoot[]) => {
+        roots = mergeArtifactInputProofs(roots, added);
+        invariant(!proof.publicReply || await isArtifactInputProofPubliclyShareable(proof.actor, params.workspaceId, roots), 409, "SOURCE_RESTRICTED", "Knowledge context cannot be shared in Slack.");
+        receipt = await helpers.captureInputs(roots);
+      };
+      const tool: AgentHelpers["tool"] = (name, input, work) => helpers.tool(name, input, async () => {
+        invariant(await isArtifactInputProofReadable(proof.actor, params.workspaceId, roots), 409, "SOURCE_CHANGED", "Slack inputs changed before execution.");
+        const result = await work();
+        invariant(await isArtifactInputProofReadable(proof.actor, params.workspaceId, roots), 409, "SOURCE_CHANGED", "Slack inputs changed during execution.");
+        return result;
+      }, { receipt });
 
       if (isCapabilitiesPrompt(params.prompt)) {
         const parts = renderCapabilitiesResponse();
         const response = renderSlackResponse(parts);
-        const delivery = await helpers.tool("slack.reply", {
+        const delivery = await tool("slack.reply", {
           reason: "capabilities",
           source: params.source,
           channelId: params.channelId ?? null,
           responseUrl: Boolean(params.responseUrlEnc),
-        }, () => deliverSafely(params, response));
+        }, () => deliverSafely(params, response, proof, roots));
 
         return {
+          lineageReceipt: receipt,
           resultJson: {
             intent: "capabilities",
             confidence: 1,
@@ -800,39 +743,36 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
       }
 
       if (isSlackUndoRequest(params.prompt)) {
-        const undo = await helpers.tool("corgtex.undo", {
-          source: params.source,
-          channelId: params.channelId ?? null,
-          threadTs: params.threadTs ?? null,
-        }, () => undoLastSlackCreatedItem(actor, params));
-        const response = renderSlackResponse(undo);
-        const delivery = await helpers.tool("slack.reply", {
-          reason: "undo_created_item",
-          source: params.source,
-          channelId: params.channelId ?? null,
-          responseUrl: Boolean(params.responseUrlEnc),
-        }, () => deliverSafely(params, response));
-
-        return {
-          resultJson: {
-            intent: "undo_created_item",
-            confidence: undo.target ? 1 : 0,
-            created: [],
-            done: undo.done,
-            couldNot: undo.couldNot,
-            next: undo.next,
-            target: undo.target,
-            delivery,
-          },
-        };
+        const undo = await undoLastSlackCreatedItem(actor, params, proof, collectInputs, async candidate => {
+          invariant(await isArtifactInputProofReadable(actor, params.workspaceId, roots)
+            && (!proof.publicReply || await isArtifactInputProofPubliclyShareable(actor, params.workspaceId, roots)),
+          409, "SOURCE_CHANGED", "Undo inputs changed before archival.");
+          await helpers.tool("corgtex.undo", { purpose: "archive_requested_slack_item" },
+            () => archiveSlackUndoCandidate(actor, params, candidate), { receipt });
+        });
+        if (undo.archived) {
+          // The archived target invalidates the earlier context. A deterministic
+          // acknowledgment reveals no target data and uses only the still-current
+          // original request. The whole run intentionally remains unproven.
+          const requestReceipt = await helpers.captureInputs(proof.roots);
+          const delivery = await helpers.tool("slack.reply.undo_ack", { status: "acknowledged" },
+            () => deliverSafely(params, renderConversationResponse("I undid the Slack-created item."), proof, proof.roots),
+            { receipt: requestReceipt });
+          return { resultJson: { intent: "undo_created_item", status: "ACKNOWLEDGED", delivery } };
+        }
+        const delivery = await tool("slack.reply", { reason: "undo_unavailable" },
+          () => deliverSafely(params, renderSlackResponse(undo), proof, roots));
+        return { lineageReceipt: receipt, resultJson: { intent: "undo_created_item", done: undo.done,
+          couldNot: undo.couldNot, next: undo.next, delivery } };
       }
 
-      const extraction = await helpers.tool("model.extract", { prompt: params.prompt }, async () => defaultModelGateway.extract({
+      const extraction = await tool("model.extract", { prompt: params.prompt }, async () => defaultModelGateway.extract({
         model,
         workspaceId: params.workspaceId,
         workflowJobId: params.workflowJobId,
         agentRunId: runId,
         instruction: [
+          helpers.behaviorContext ?? "",
           "Classify a plain Slack request for Corgtex.",
           "Return JSON only with intent, confidence, title, bodyMd, assigneeHint, dueDateISO, publish, answer, couldNot, and next.",
           "Allowed intents: brief, create_action, create_tension, create_proposal, capture_note, capabilities, answer_question, summarize_thread, unsupported.",
@@ -868,17 +808,20 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
       const couldNot = [...parsed.couldNot];
       let next = parsed.next;
       const created: Array<{ entityType: string; entityId: string; webUrl: string; opened: boolean }> = [];
+      let privateResult = false;
+      let unknownResult = false;
 
       if (isUnsupportedOperation(params.prompt, parsed)) {
         const response = renderUnsupportedResponse();
-        const delivery = await helpers.tool("slack.reply", {
+        const delivery = await tool("slack.reply", {
           reason: "unsupported",
           source: params.source,
           channelId: params.channelId ?? null,
           responseUrl: Boolean(params.responseUrlEnc),
-        }, () => deliverSafely(params, response));
+        }, () => deliverSafely(params, response, proof, roots));
 
         return {
+          lineageReceipt: receipt,
           resultJson: {
             intent: parsed.intent,
             confidence: parsed.confidence,
@@ -890,7 +833,7 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
           },
         };
       } else if (shouldUseConversationMode(params.prompt, parsed)) {
-        const answer = await helpers.tool("slack.conversation.answer", { prompt: params.prompt }, () => answerSlackConversation({
+        const answer = await answerSlackConversation({
           actor,
           prompt: params.prompt,
           workspaceId: params.workspaceId,
@@ -913,16 +856,18 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
           threadMessages: context.threadMessages,
           channelMessages: context.channelMessages,
           contextSummaries: context.contextSummaries,
-        }));
+          collectInputs, tool, behavior: helpers.behaviorContext,
+        });
         const response = renderConversationResponse(answer);
-        const delivery = await helpers.tool("slack.reply", {
+        const delivery = await tool("slack.reply", {
           reason: "conversation_answer",
           source: params.source,
           channelId: params.channelId ?? null,
           responseUrl: Boolean(params.responseUrlEnc),
-        }, () => deliverSafely(params, response));
+        }, () => deliverSafely(params, response, proof, roots));
 
         return {
+          lineageReceipt: receipt,
           resultJson: {
             intent: "answer_question",
             confidence: Math.max(parsed.confidence, 0.8),
@@ -941,14 +886,6 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
         const tensions = Array.isArray(context.openTensions) ? context.openTensions.length : 0;
         const proposals = Array.isArray(context.openProposals) ? context.openProposals.length : 0;
         done.push(`Prepared a brief: ${actions} open actions, ${tensions} open tensions, and ${proposals} open proposals.`);
-      } else if (parsed.intent === "answer_question") {
-        const answer = await helpers.tool("knowledge.answer", { prompt: params.prompt }, () => answerKnowledgeQuestion({
-          workspaceId: params.workspaceId,
-          question: params.prompt,
-          workflowJobId: params.workflowJobId,
-          agentRunId: runId,
-        }));
-        done.push(answer.answer);
       } else if (parsed.intent === "capabilities") {
         const parts = renderCapabilitiesResponse();
         done.push(...parts.done);
@@ -959,14 +896,14 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
         if (threadMessages.length === 0) {
           couldNot.push("I could not load thread context to summarize.");
         } else {
-          const summary = await helpers.tool("model.chat", { purpose: "summarize_slack_thread" }, () => defaultModelGateway.chat({
+          const summary = await tool("model.chat", { purpose: "summarize_slack_thread" }, () => defaultModelGateway.chat({
             model,
             workspaceId: params.workspaceId,
             workflowJobId: params.workflowJobId,
             agentRunId: runId,
             taskType: "AGENT",
             messages: [
-              { role: "system", content: "Summarize this Slack thread concisely for a Corgtex workspace operator. Include decisions, open questions, and action candidates when present." },
+              { role: "system", content: [helpers.behaviorContext, "Summarize this Slack thread concisely for a Corgtex workspace operator. Include decisions, open questions, and action candidates when present."].filter(Boolean).join("\n\n") },
               { role: "user", content: JSON.stringify(threadMessages) },
             ],
           }));
@@ -1011,7 +948,7 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
         if (!kind) {
           couldNot.push("I could not map that request to a supported Slack-agent v1 action.");
         } else {
-          const item = await helpers.tool("corgtex.create", {
+          const item = await tool("corgtex.create", {
             kind,
             title: parsed.title,
             open,
@@ -1025,6 +962,7 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
             kind,
             title: parsed.title,
             bodyMd: parsed.bodyMd,
+            lineageRoots: roots,
             sourceMessageId: params.sourceMessageId ?? null,
             externalUserId: params.externalUserId,
             assigneeMemberId: kind === "ACTION" ? assignee.memberId : null,
@@ -1034,6 +972,17 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
           }));
 
           created.push(item);
+          const entityType = item.entityType as SlackUndoEntityType;
+          const stored = SLACK_UNDO_ENTITY_TYPES.includes(entityType)
+            ? await loadUndoEntitySummary(params.workspaceId, entityType, item.entityId) : null;
+          const captured = await captureReadableDigestInputs({ actor, workspaceId: params.workspaceId,
+            kind: entityType, records: stored ? [stored] : [] });
+          if (captured.records.length) {
+            roots = mergeArtifactInputProofs(roots, captured.roots);
+            receipt = await helpers.captureInputs(roots);
+          } else unknownResult = true;
+          privateResult = unknownResult || (proof.publicReply && (!item.opened
+            || !await isArtifactInputProofPubliclyShareable(actor, params.workspaceId, roots)));
           const state = kind === "BRAIN_NOTE"
             ? "captured"
             : item.opened
@@ -1043,14 +992,17 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
         }
       }
 
-      const response = renderSlackResponse({ done, couldNot, next });
-      const delivery = await helpers.tool("slack.reply", {
-        source: params.source,
-        channelId: params.channelId ?? null,
-        responseUrl: Boolean(params.responseUrlEnc),
-      }, () => deliverSafely(params, response));
+      const response = privateResult
+        ? renderConversationResponse("I completed the request. Review the result in Corgtex.")
+        : renderSlackResponse({ done, couldNot, next });
+      const delivery = privateResult
+        ? await helpers.tool("slack.reply.private_result_ack", { status: "acknowledged" },
+          () => deliverSafely(params, response, proof, proof.roots), { receipt: await helpers.captureInputs(proof.roots) })
+        : await tool("slack.reply", { source: params.source, channelId: params.channelId ?? null,
+          responseUrl: Boolean(params.responseUrlEnc) }, () => deliverSafely(params, response, proof, roots));
 
       return {
+        ...(unknownResult ? {} : { lineageReceipt: receipt }),
         resultJson: {
           intent: parsed.intent,
           confidence: parsed.confidence,

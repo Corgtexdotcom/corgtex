@@ -20,13 +20,14 @@ beforeEach(() => {
   vi.spyOn(process, "on").mockReturnValue(process);
   vi.stubEnv("SENTRY_DSN", ""); vi.stubEnv("GITHUB_SHA", "b".repeat(40));
   vi.stubEnv("RAILWAY_GIT_COMMIT_SHA", ""); vi.stubEnv("VERCEL_GIT_COMMIT_SHA", "");
-  mocks.read.mockReset();
+  mocks.read.mockReset(); mocks.health = null;
 });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 describe("worker health release integration", () => {
   it.each(["worker", "web"])("validates the baked role %s at the actual worker health endpoint", async role => {
     mocks.read.mockReturnValue(JSON.stringify({ schemaVersion: 1, role, gitSha: "a".repeat(40) }));
     await import("./index");
+    await vi.waitFor(() => expect(mocks.health).toBeTypeOf("function"));
     const response = { writeHead: vi.fn(), end: vi.fn() };
     mocks.health!({ url: "/health" }, response);
     const health = JSON.parse(response.end.mock.calls[0][0]);

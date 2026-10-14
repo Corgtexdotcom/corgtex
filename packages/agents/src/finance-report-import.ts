@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { defaultModelGateway, type ModelGateway } from "@corgtex/models";
-import { AppError, claimFinanceReportImportProposal, failFinanceReportImportProposal, normalizeFinanceImportCurrency,
+import { AppError, prepareFinanceReportImportProposalInput, bindFinanceReportProposalBehavior,
+  assertFinanceReportProposalInputCurrent, claimFinanceReportImportProposal, failFinanceReportImportProposal, normalizeFinanceImportCurrency,
   persistFinanceReportImportProposal, resolveFinanceImportCurrency } from "@corgtex/domain";
 import { z } from "zod";
 import { executeAgentRun } from "./runtime";
@@ -53,7 +54,7 @@ export type FinanceReportImportProposalV1 = Omit<ModelProposal, "currency" | "ma
 export type FinanceReportImportProposalResultV1 =
   | { version: 1; kind: "SUCCESS"; attempts: 1 | 2; proposal: FinanceReportImportProposalV1 }
   | { version: 1; kind: "FAILURE"; attempts: 0 | 1 | 2; code: "INVALID_INPUT" | "INVALID_MODEL_OUTPUT" | "PROVIDER_ERROR" };
-export type FinanceReportImportProposalInputV1 = { workspaceId: string; format: FinanceReportEvidenceFormat; extractedEvidence: string; workspaceCurrencyCodes: string[]; model?: string; workflowJobId?: string; agentRunId?: string; gateway?: ModelGateway };
+export type FinanceReportImportProposalInputV1 = { workspaceId: string; format: FinanceReportEvidenceFormat; extractedEvidence: string; workspaceCurrencyCodes: string[]; model?: string; workflowJobId?: string; agentRunId?: string; gateway?: ModelGateway; behaviorContext?: string | null; beforeModel?: () => Promise<void> };
 
 const ISO_CODES = new Set(FINANCE_REPORT_ISO_4217_CODES);
 const SCHEMA_HINT = JSON.stringify(z.toJSONSchema(financeReportModelProposalSchemaV1));
@@ -125,10 +126,12 @@ export async function proposeFinanceReportImportV1(input: FinanceReportImportPro
   const gateway = input.gateway ?? defaultModelGateway;
   let previous: unknown; let feedback: string | undefined;
   for (const attempts of [1, 2] as const) {
+    await input.beforeModel?.();
     try {
-      const response = await gateway.extract({ workspaceId: input.workspaceId, model: input.model, workflowJobId: input.workflowJobId, agentRunId: input.agentRunId, instruction: attempts === 1 ? INSTRUCTION : `${INSTRUCTION} Repair the previous object using this validation feedback: ${feedback}.`, schemaHint: SCHEMA_HINT, input: JSON.stringify({ format: input.format, extractedEvidence: input.extractedEvidence, ...(attempts === 2 ? { previous } : {}) }) });
+      const response = await gateway.extract({ workspaceId: input.workspaceId, model: input.model, workflowJobId: input.workflowJobId, agentRunId: input.agentRunId, instruction: `${input.behaviorContext ?? ""}\n\n${attempts === 1 ? INSTRUCTION : `${INSTRUCTION} Repair the previous object using this validation feedback: ${feedback}.`}`, schemaHint: SCHEMA_HINT, input: JSON.stringify({ format: input.format, extractedEvidence: input.extractedEvidence, ...(attempts === 2 ? { previous } : {}) }) });
       previous = response.output;
     } catch { return { version: 1, kind: "FAILURE", attempts, code: "PROVIDER_ERROR" }; }
+    await input.beforeModel?.();
     const bound = bindProposal(previous, input, workspaceCurrency);
     if (bound.proposal) return { version: 1, kind: "SUCCESS", attempts, proposal: bound.proposal };
     feedback = bound.feedback;
@@ -172,36 +175,43 @@ function candidateDrafts(proposal: FinanceReportImportProposalV1) {
 }
 
 export async function runFinanceReportImportAgentV1(params: { workspaceId: string; batchId: string; expectedVersion: number;
-  workflowJobId: string; attempts: number; isFinalAttempt: boolean }) {
+  workflowJobId: string; attempts: number; isFinalAttempt: boolean; expectedLease?: { lockedBy: string; lockedAt: Date } }) {
   let claim: Awaited<ReturnType<typeof claimFinanceReportImportProposal>> | undefined;
   let runId: string | undefined;
   let providerFailure = false;
+  const prepared = await prepareFinanceReportImportProposalInput(params);
   try {
-    const run = await executeAgentRun({ agentKey: "finance-report-import", workspaceId: params.workspaceId, triggerType: "EVENT",
+    const run = await executeAgentRun({ lineageActor: prepared.actor, lineageRoots: prepared.lineageRoots,
+      contextIsAuditedRead: true, contextLineageRoots: () => claim && !claim.skipped ? claim.lineageRoots : prepared.lineageRoots,
+      agentKey: "finance-report-import", workspaceId: params.workspaceId, triggerType: "EVENT",
       triggerRef: `${params.workflowJobId}:attempt:${params.attempts}`, goal: "Interpret exact Finance report evidence into blocked editable candidates for deterministic reconciliation.",
       payload: { batchId: params.batchId, workflowJobId: params.workflowJobId }, plan: ["claim-import", "propose-semantics", "persist-blocked-candidates"],
       buildContext: async (_helpers, currentRunId) => { runId = currentRunId; claim = await claimFinanceReportImportProposal({ ...params, agentRunId: currentRunId });
         return { batchId: params.batchId, skipped: claim.skipped, version: claim.version, ...(!claim.skipped ? { format: claim.format } : {}) }; },
-      execute: async (_context, _helpers, currentRunId, model) => {
-        if (!claim || claim.skipped) return { resultJson: { batchId: params.batchId, skipped: true } };
-        const result = await proposeFinanceReportImportV1({ workspaceId: params.workspaceId, format: claim.format,
-          extractedEvidence: claim.extractedEvidence, workspaceCurrencyCodes: claim.workspaceCurrencyCodes, model,
-          workflowJobId: params.workflowJobId, agentRunId: currentRunId });
+      execute: async (_context, helpers, currentRunId, model) => {
+        if (!claim || claim.skipped) return { lineageReceipt: await helpers.captureInputs(prepared.lineageRoots), resultJson: { batchId: params.batchId, skipped: true } };
+        const modelRoots = await bindFinanceReportProposalBehavior(claim.receipt, helpers.behaviorLineageRoots);
+        const modelReceipt = await helpers.captureInputs(modelRoots);
+        const activeClaim = claim;
+        const result = await helpers.tool("model.finance-interpret", {}, () => proposeFinanceReportImportV1({ workspaceId: params.workspaceId, format: activeClaim.format,
+          extractedEvidence: activeClaim.extractedEvidence, workspaceCurrencyCodes: activeClaim.workspaceCurrencyCodes, model,
+          workflowJobId: params.workflowJobId, agentRunId: currentRunId, behaviorContext: helpers.behaviorContext,
+          beforeModel: () => assertFinanceReportProposalInputCurrent(activeClaim.receipt) }), { receipt: modelReceipt });
         if (result.kind === "FAILURE") {
           if (result.code === "PROVIDER_ERROR") { providerFailure = true; throw new Error("Finance report interpretation provider failed."); }
-          const failed = await failFinanceReportImportProposal({ ...params, agentRunId: currentRunId, expectedVersion: claim.version, failureCode: result.code });
-          return { resultJson: { batchId: params.batchId, kind: "FAILURE", failureCode: failed.failureCode, attempts: result.attempts } };
+          const failed = await failFinanceReportImportProposal({ ...params, receipt: claim.receipt, agentRunId: currentRunId, expectedVersion: claim.version, failureCode: result.code });
+          return { lineageReceipt: modelReceipt, resultJson: { batchId: params.batchId, kind: "FAILURE", failureCode: failed.failureCode, attempts: result.attempts } };
         }
         const blockers = result.proposal.exceptions.filter(({ severity }) => severity === "BLOCKER");
         const nullAmounts = result.proposal.mappings.some(({ amountCents }) => amountCents === null);
         const needsInput = blockers.length > 0 || nullAmounts;
         const currencyOnly = !nullAmounts && blockers.length === 1 && blockers[0]?.code === "CURRENCY_UNRESOLVED";
         const periods = result.proposal.periods.map(({ periodStart, periodEnd }) => [periodStart, periodEnd]).flat().sort();
-        const stored = await persistFinanceReportImportProposal({ ...params, agentRunId: currentRunId, expectedVersion: claim.version,
+        const stored = await persistFinanceReportImportProposal({ ...params, receipt: claim.receipt, agentRunId: currentRunId, expectedVersion: claim.version,
           interpretation: durableInterpretation(result.proposal), currency: result.proposal.currency, periodStart: periods[0]!, periodEnd: periods.at(-1)!,
           candidates: !needsInput || currencyOnly ? candidateDrafts(result.proposal) : [], warningCount: result.proposal.exceptions.filter(({ severity }) => severity === "WARNING").length,
           blockerCount: needsInput ? Math.max(1, blockers.length) : 0, ...(blockers[0] ? { blocker: { code: blockers[0].code, message: blockers[0].message } } : {}) });
-        return { resultJson: { batchId: params.batchId, kind: "SUCCESS", attempts: result.attempts, stage: stored.stage, candidateCount: stored.candidateCount } };
+        return { lineageReceipt: await helpers.captureInputs(stored.lineageRoots), resultJson: { batchId: params.batchId, kind: "SUCCESS", attempts: result.attempts, stage: stored.stage, candidateCount: stored.candidateCount } };
       } });
     if ("skipped" in run && run.skipped) {
       if (!params.isFinalAttempt) throw new Error("Finance report agent runtime policy deferred the run.");
@@ -209,10 +219,10 @@ export async function runFinanceReportImportAgentV1(params: { workspaceId: strin
     }
     return run;
   } catch (error) {
-    if (providerFailure && params.isFinalAttempt && claim && !claim.skipped && runId) await failFinanceReportImportProposal({ ...params, agentRunId: runId,
+    if (providerFailure && params.isFinalAttempt && claim && !claim.skipped && runId) await failFinanceReportImportProposal({ ...params, receipt: claim.receipt, agentRunId: runId,
       expectedVersion: claim.version, failureCode: "PROVIDER_ERROR" });
     if (error instanceof AppError && ["INVALID_INPUT", "INVALID_FINANCE_IMPORT_INTERPRETATION", "INVALID_FINANCE_IMPORT_PROPOSAL"].includes(error.code)
-      && claim && !claim.skipped && runId) return failFinanceReportImportProposal({ ...params, agentRunId: runId, expectedVersion: claim.version, failureCode: "INVALID_MODEL_OUTPUT" });
+      && claim && !claim.skipped && runId) return failFinanceReportImportProposal({ ...params, receipt: claim.receipt, agentRunId: runId, expectedVersion: claim.version, failureCode: "INVALID_MODEL_OUTPUT" });
     throw error;
   }
 }

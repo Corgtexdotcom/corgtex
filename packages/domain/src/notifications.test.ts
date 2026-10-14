@@ -8,8 +8,12 @@ const {
   sendSlackMessageMock,
 } = vi.hoisted(() => ({
   prismaMock: {
+    $executeRaw: vi.fn(),
+    user: { findFirst: vi.fn() },
     workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },
     notification: {
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
       findMany: vi.fn(),
       count: vi.fn(),
       updateMany: vi.fn(),
@@ -67,6 +71,10 @@ vi.mock("./communication", () => ({
   sendSlackMessage: sendSlackMessageMock,
 }));
 
+const lineageMocks = vi.hoisted(() => ({ prepare: vi.fn(), finish: vi.fn(), readable: vi.fn() }));
+vi.mock("./producer-lineage", () => ({ prepareProducerLineage: lineageMocks.prepare, finishProducerLineage: lineageMocks.finish }));
+vi.mock("./source-lineage", () => ({ readableArtifactIds: lineageMocks.readable }));
+
 const actor: AppActor = {
   kind: "user" as const,
   user: {
@@ -80,6 +88,17 @@ const actor: AppActor = {
 describe("notifications domain", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    lineageMocks.prepare.mockReset().mockImplementation(async ({ capture }) => capture?.lineageRoots?.length
+      ? { mode: "DERIVED", inputs: [], roots: capture.lineageRoots } : { mode: "UNKNOWN" });
+    lineageMocks.finish.mockReset().mockResolvedValue(undefined);
+    lineageMocks.readable.mockReset().mockImplementation(async (_actor, _workspace, _kind, rows) => new Set(rows.map((row: { id: string }) => row.id)));
+    prismaMock.notification.findUnique.mockReset().mockResolvedValue(null);
+    prismaMock.notification.findMany.mockReset().mockResolvedValue([{ id: "notification-1" }]);
+    prismaMock.user.findFirst.mockReset().mockResolvedValue({ id: "user-1", email: "user-1@example.com", displayName: "User", globalRole: "USER" });
+    prismaMock.notification.findFirst.mockReset().mockImplementation(async () => {
+      const delivery = await prismaMock.notificationDelivery.findUnique();
+      return delivery ? { ...delivery.notification, workspaceId: delivery.workspaceId, userId: delivery.userId } : null;
+    });
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-24T12:00:00.000Z"));
     prismaMock.notification.updateMany.mockResolvedValue({ count: 1 });
@@ -116,31 +135,30 @@ describe("notifications domain", () => {
     prismaMock.notification.findMany.mockResolvedValue([{ id: "notification-1" }]);
 
     const { listNotifications } = await import("./notifications");
-    await expect(listNotifications(actor, "workspace-1", { unreadOnly: true, take: 10, skip: 20 })).resolves.toEqual([{ id: "notification-1" }]);
+    await expect(listNotifications(actor, "workspace-1", { unreadOnly: true, take: 10, skip: 0 })).resolves.toEqual([{ id: "notification-1" }]);
     expect(prismaMock.notification.findMany).toHaveBeenCalledWith({
       where: {
         workspaceId: "workspace-1",
         userId: "user-1",
         readAt: null,
       },
-      orderBy: { createdAt: "desc" },
-      take: 10,
-      skip: 20,
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: 100,
     });
   });
 
   it("countUnreadNotifications counts unread rows", async () => {
-    prismaMock.notification.count.mockResolvedValue(3);
+    prismaMock.notification.findMany.mockResolvedValue([{ id: "n1" }, { id: "n2" }, { id: "n3" }]);
 
     const { countUnreadNotifications } = await import("./notifications");
-    await expect(countUnreadNotifications("user-1", "workspace-1")).resolves.toBe(3);
+    await expect(countUnreadNotifications(actor, "workspace-1")).resolves.toBe(3);
   });
 
   it("markNotificationRead marks one notification for the actor", async () => {
     const { markNotificationRead } = await import("./notifications");
     await markNotificationRead(actor, "workspace-1", "notification-1");
     expect(prismaMock.notification.updateMany).toHaveBeenCalledWith({
-      where: { id: "notification-1", workspaceId: "workspace-1", userId: "user-1" },
+      where: { id: { in: ["notification-1"] }, workspaceId: "workspace-1", userId: "user-1" },
       data: { readAt: new Date("2026-04-24T12:00:00.000Z") },
     });
   });
@@ -149,7 +167,7 @@ describe("notifications domain", () => {
     const { markAllNotificationsRead } = await import("./notifications");
     await markAllNotificationsRead(actor, "workspace-1");
     expect(prismaMock.notification.updateMany).toHaveBeenCalledWith({
-      where: { workspaceId: "workspace-1", userId: "user-1", readAt: null },
+      where: { id: { in: ["notification-1"] }, workspaceId: "workspace-1", userId: "user-1", readAt: null },
       data: { readAt: new Date("2026-04-24T12:00:00.000Z") },
     });
   });
@@ -158,6 +176,7 @@ describe("notifications domain", () => {
     const { createNotificationIntent } = await import("./notifications");
 
     await createNotificationIntent(prismaMock as any, {
+      lineageActor: actor, lineageRoots: [{ kind: "Tension", id: "tension-1", fingerprint: "a".repeat(64) }],
       workspaceId: "workspace-1",
       type: "deliberation.mention",
       recipientUserIds: ["user-1", "user-2", "actor-user"],
@@ -172,12 +191,8 @@ describe("notifications domain", () => {
         isActive: true,
       }),
     }));
-    expect(prismaMock.notification.createMany).toHaveBeenCalledWith({
-      data: [
-        expect.objectContaining({ userId: "user-1", type: "deliberation.mention" }),
-        expect.objectContaining({ userId: "user-2", type: "deliberation.mention" }),
-      ],
-    });
+    expect(prismaMock.notification.create).toHaveBeenCalledWith({ data: expect.objectContaining({ userId: "user-1", type: "deliberation.mention" }) });
+    expect(prismaMock.notification.create).toHaveBeenCalledWith({ data: expect.objectContaining({ userId: "user-2", type: "deliberation.mention" }) });
   });
 
   it("createNotificationIntent dedupes recipients, excludes the actor, and trusts the active human member query", async () => {
@@ -185,6 +200,7 @@ describe("notifications domain", () => {
 
     const { createNotificationIntent } = await import("./notifications");
     await createNotificationIntent(prismaMock as any, {
+      lineageActor: actor, lineageRoots: [{ kind: "Tension", id: "tension-1", fingerprint: "a".repeat(64) }],
       workspaceId: "workspace-1",
       type: "deliberation.mention",
       recipientUserIds: ["user-1", "user-1", "user-2", "actor-user"],
@@ -199,11 +215,7 @@ describe("notifications domain", () => {
         isActive: true,
       }),
     }));
-    expect(prismaMock.notification.createMany).toHaveBeenCalledWith({
-      data: [
-        expect.objectContaining({ userId: "user-2" }),
-      ],
-    });
+    expect(prismaMock.notification.create).toHaveBeenCalledWith({ data: expect.objectContaining({ userId: "user-2" }) });
   });
 
   it("createNotificationIntent applies exact preferences before global defaults", async () => {
@@ -215,17 +227,14 @@ describe("notifications domain", () => {
 
     const { createNotificationIntent } = await import("./notifications");
     await createNotificationIntent(prismaMock as any, {
+      lineageActor: actor, lineageRoots: [{ kind: "Tension", id: "tension-1", fingerprint: "a".repeat(64) }],
       workspaceId: "workspace-1",
       type: "deliberation.mention",
       recipientUserIds: ["user-1", "user-2"],
       title: "Mentioned you",
     });
 
-    expect(prismaMock.notification.createMany).toHaveBeenCalledWith({
-      data: [
-        expect.objectContaining({ userId: "user-1" }),
-      ],
-    });
+    expect(prismaMock.notification.create).toHaveBeenCalledWith({ data: expect.objectContaining({ userId: "user-1" }) });
   });
 
   it("createNotificationIntent honors OFF without creating rows or deliveries", async () => {
@@ -238,6 +247,7 @@ describe("notifications domain", () => {
 
     const { createNotificationIntent } = await import("./notifications");
     await createNotificationIntent(prismaMock as any, {
+      lineageActor: actor, lineageRoots: [{ kind: "Tension", id: "tension-1", fingerprint: "a".repeat(64) }],
       workspaceId: "workspace-1",
       type: "deliberation.mention",
       recipientUserIds: ["user-1"],
@@ -257,6 +267,7 @@ describe("notifications domain", () => {
 
     const { createNotificationIntent } = await import("./notifications");
     await createNotificationIntent(prismaMock as any, {
+      lineageActor: actor, lineageRoots: [{ kind: "Tension", id: "tension-1", fingerprint: "a".repeat(64) }],
       workspaceId: "workspace-1",
       type: "deliberation.mention",
       recipientUserIds: ["user-1"],
@@ -275,7 +286,6 @@ describe("notifications domain", () => {
         title: "Mentioned you",
         priority: "HIGH",
       }),
-      select: { id: true, workspaceId: true, userId: true },
     });
     expect(prismaMock.notificationDelivery.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({
@@ -303,6 +313,7 @@ describe("notifications domain", () => {
 
     const { createNotificationIntent } = await import("./notifications");
     await createNotificationIntent(prismaMock as any, {
+      lineageActor: actor, lineageRoots: [{ kind: "Tension", id: "tension-1", fingerprint: "a".repeat(64) }],
       workspaceId: "workspace-1",
       type: "deliberation.mention",
       recipientUserIds: ["user-1"],
@@ -316,7 +327,6 @@ describe("notifications domain", () => {
         userId: "user-1",
         type: "deliberation.mention",
       }),
-      select: { id: true, workspaceId: true, userId: true },
     }));
     expect(prismaMock.notificationDelivery.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({
@@ -347,17 +357,14 @@ describe("notifications domain", () => {
 
     const { createNotificationIntent } = await import("./notifications");
     await createNotificationIntent(prismaMock as any, {
+      lineageActor: actor, lineageRoots: [{ kind: "Tension", id: "tension-1", fingerprint: "a".repeat(64) }],
       workspaceId: "workspace-1",
       type: "meeting.created",
       recipientUserIds: ["user-1"],
       title: "Meeting created",
     });
 
-    expect(prismaMock.notification.createMany).toHaveBeenCalledWith({
-      data: [
-        expect.objectContaining({ userId: "user-1", type: "meeting.created" }),
-      ],
-    });
+    expect(prismaMock.notification.create).toHaveBeenCalledWith({ data: expect.objectContaining({ userId: "user-1", type: "meeting.created" }) });
     expect(prismaMock.notificationDelivery.upsert).not.toHaveBeenCalled();
     expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalled();
   });
@@ -372,17 +379,14 @@ describe("notifications domain", () => {
 
     const { createNotificationIntent } = await import("./notifications");
     await createNotificationIntent(prismaMock as any, {
+      lineageActor: actor, lineageRoots: [{ kind: "Tension", id: "tension-1", fingerprint: "a".repeat(64) }],
       workspaceId: "workspace-1",
       type: "meeting.created",
       recipientUserIds: ["user-1"],
       title: "Meeting created",
     });
 
-    expect(prismaMock.notification.createMany).toHaveBeenCalledWith({
-      data: [
-        expect.objectContaining({ userId: "user-1", type: "meeting.created" }),
-      ],
-    });
+    expect(prismaMock.notification.create).toHaveBeenCalledWith({ data: expect.objectContaining({ userId: "user-1", type: "meeting.created" }) });
     expect(prismaMock.notificationDelivery.upsert).not.toHaveBeenCalled();
     expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalled();
   });
@@ -390,6 +394,7 @@ describe("notifications domain", () => {
   it("createNotificationIntent upserts deduped notification rows", async () => {
     const { createNotificationIntent } = await import("./notifications");
     await createNotificationIntent(prismaMock as any, {
+      lineageActor: actor, lineageRoots: [{ kind: "Tension", id: "tension-1", fingerprint: "a".repeat(64) }],
       workspaceId: "workspace-1",
       type: "deliberation.mention",
       recipientUserIds: ["user-1"],
@@ -397,15 +402,76 @@ describe("notifications domain", () => {
       dedupeKey: "mention:entry-1",
     });
 
-    expect(prismaMock.notification.upsert).toHaveBeenCalledWith({
-      where: { dedupeKey: "mention:entry-1:user-1" },
-      update: {},
-      create: expect.objectContaining({
+    expect(prismaMock.notification.findUnique).toHaveBeenCalledWith({ where: { dedupeKey: "mention:entry-1:user-1" } });
+    expect(prismaMock.notification.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
         dedupeKey: "mention:entry-1:user-1",
         userId: "user-1",
       }),
-      select: { id: true, workspaceId: true, userId: true },
     });
+  });
+
+  it("stores missing receipts as unknown atomically without queuing copied content", async () => {
+    prismaMock.notificationPreference.findMany.mockResolvedValue([
+      { userId: "user-1", notifType: "deliberation.mention", channel: "EMAIL" },
+    ]);
+    const { createNotificationIntent } = await import("./notifications");
+    await createNotificationIntent(prismaMock as any, {
+      workspaceId: "workspace-1", type: "deliberation.mention", recipientUserIds: ["user-1"],
+      title: "Copied restricted title",
+    });
+    expect(lineageMocks.finish).toHaveBeenCalledWith(expect.objectContaining({
+      tx: prismaMock, artifact: { kind: "Notification", id: "notification-user-1" }, receipt: { mode: "UNKNOWN" },
+    }));
+    expect(prismaMock.notificationDelivery.upsert).not.toHaveBeenCalled();
+  });
+
+  it("does not recertify deduped content with a retry's different roots", async () => {
+    prismaMock.notification.findUnique.mockResolvedValue({ id: "old", workspaceId: "workspace-1", userId: "user-1", title: "Old payload" });
+    lineageMocks.readable.mockResolvedValue(new Set());
+    const { createNotificationIntent } = await import("./notifications");
+    await createNotificationIntent(prismaMock as any, {
+      lineageActor: actor, lineageRoots: [{ kind: "Tension", id: "new", fingerprint: "a".repeat(64) }],
+      workspaceId: "workspace-1", type: "deliberation.mention", recipientUserIds: ["user-1"],
+      title: "New payload", dedupeKey: "same",
+    });
+    expect(prismaMock.notification.create).not.toHaveBeenCalled();
+    expect(lineageMocks.finish).not.toHaveBeenCalled();
+    expect(prismaMock.notificationDelivery.upsert).not.toHaveBeenCalled();
+  });
+
+  it("filters unavailable sources before list pagination and unread counts", async () => {
+    prismaMock.notification.findMany.mockResolvedValue([{ id: "hidden" }, { id: "shown-1" }, { id: "shown-2" }]);
+    lineageMocks.readable.mockResolvedValue(new Set(["shown-1", "shown-2"]));
+    const { listNotifications, countUnreadNotifications } = await import("./notifications");
+    await expect(listNotifications(actor, "workspace-1", { skip: 1, take: 1 })).resolves.toEqual([{ id: "shown-2" }]);
+    await expect(countUnreadNotifications(actor, "workspace-1")).resolves.toBe(2);
+  });
+
+  it.each(["EMAIL", "SLACK"])("withholds queued %s content after recipient revocation", async (channel) => {
+    prismaMock.notificationDelivery.findUnique.mockResolvedValue({
+      id: "delivery-1", notificationId: "notification-1", workspaceId: "workspace-1", userId: "user-1",
+      channel, status: "PENDING", attempts: 0, user: { email: "old@example.com" },
+      notification: { id: "notification-1", title: "Restricted", bodyMd: "Restricted" },
+    });
+    prismaMock.user.findFirst.mockResolvedValue(null);
+    const { deliverNotificationDelivery } = await import("./notifications");
+    await expect(deliverNotificationDelivery("delivery-1")).resolves.toEqual({ status: "SKIPPED" });
+    expect(sendEmailMock).not.toHaveBeenCalled();
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["EMAIL", "SLACK"])("rechecks source access immediately before %s publication", async (channel) => {
+    prismaMock.notificationDelivery.findUnique.mockResolvedValue({
+      id: "delivery-1", notificationId: "notification-1", workspaceId: "workspace-1", userId: "user-1",
+      channel, status: "PENDING", attempts: 0, user: { email: "user-1@example.com" },
+      notification: { id: "notification-1", title: "Restricted", bodyMd: "Restricted" },
+    });
+    lineageMocks.readable.mockResolvedValueOnce(new Set(["notification-1"])).mockResolvedValue(new Set());
+    const { deliverNotificationDelivery } = await import("./notifications");
+    await expect(deliverNotificationDelivery("delivery-1")).resolves.toEqual({ status: "SKIPPED" });
+    expect(sendEmailMock).not.toHaveBeenCalled();
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
   });
 
   it("deliverNotificationDelivery sends email and records provider success", async () => {

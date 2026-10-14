@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useId, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import { TableActionGroup } from "@/lib/components/ControlPrimitives";
@@ -49,6 +49,7 @@ export function UserSettingsPanel({
   const router = useRouter();
   const locale = useLocale();
   const t = useTranslations("settings");
+  const controlId = useId();
   const [isHydrated, setIsHydrated] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -184,6 +185,7 @@ export function UserSettingsPanel({
     const options = notificationChannelOptions({ includeUseDefault, slackConnected, activityOnly });
     return (
       <select
+        id={`${controlId}-notification-${notifType}`}
         className="nr-input"
         style={{ padding: "6px 10px", minWidth: 220 }}
         value={value}
@@ -199,7 +201,7 @@ export function UserSettingsPanel({
   };
   const renderPreferenceRows = (rows: NotificationPreferenceRow[]) => rows.map((row) => (
     <tr key={row.type}>
-      <td>{row.label}</td>
+      <td><label htmlFor={`${controlId}-notification-${row.type}`}>{row.label}</label></td>
       <td style={{ width: 260 }}>
         {renderChannelSelect(
           row.type,
@@ -224,9 +226,11 @@ export function UserSettingsPanel({
         {error && <div className="form-message form-message-error mb-4">{error}</div>}
 
         <div className="user-profile-card">
-          <div
+          <button
+            type="button"
             className="avatar-upload"
             onClick={() => fileInputRef.current?.click()}
+            aria-label={t("btnUploadAvatar")}
             title={t("btnUploadAvatar")}
           >
             {profile.user.avatarUrl ? (
@@ -241,22 +245,23 @@ export function UserSettingsPanel({
                 {profile.user.displayName?.charAt(0)?.toUpperCase() || profile.user.email.charAt(0).toUpperCase()}
               </span>
             )}
-            <div className="avatar-overlay">
+            <span className="avatar-overlay" aria-hidden="true">
               {t("btnUploadAvatar")}
-            </div>
-            <input
-              type="file"
-              accept="image/*"
-              ref={fileInputRef}
-              style={{ display: "none" }}
-              onChange={handleAvatarUpload}
-            />
-          </div>
+            </span>
+          </button>
+          <input
+            type="file"
+            accept="image/*"
+            ref={fileInputRef}
+            style={{ display: "none" }}
+            onChange={handleAvatarUpload}
+          />
 
           <form onSubmit={handleProfileSave} className="stack" style={{ flex: 1, gap: 16 }}>
             <div>
-              <label>{t("labelDisplayName")}</label>
+              <label htmlFor={`${controlId}-display-name`}>{t("labelDisplayName")}</label>
               <input
+                id={`${controlId}-display-name`}
                 type="text"
                 className="nr-input"
                 value={displayName}
@@ -266,8 +271,9 @@ export function UserSettingsPanel({
             </div>
 
             <div>
-              <label>{t("labelBio")}</label>
+              <label htmlFor={`${controlId}-bio`}>{t("labelBio")}</label>
               <textarea
+                id={`${controlId}-bio`}
                 className="nr-input"
                 rows={3}
                 value={bio}
@@ -278,8 +284,9 @@ export function UserSettingsPanel({
 
             <div className="row" style={{ gap: 16, alignItems: "center" }}>
               <div style={{ flex: 1 }}>
-                <label>{t("labelLinkedinUrl")}</label>
+                <label htmlFor={`${controlId}-linkedin-url`}>{t("labelLinkedinUrl")}</label>
                 <input
+                  id={`${controlId}-linkedin-url`}
                   type="url"
                   className="nr-input"
                   value={linkedinUrl}
@@ -289,8 +296,9 @@ export function UserSettingsPanel({
                 />
               </div>
               <div style={{ flex: 1 }}>
-                <label>{t("labelWebsiteUrl")}</label>
+                <label htmlFor={`${controlId}-website-url`}>{t("labelWebsiteUrl")}</label>
                 <input
+                  id={`${controlId}-website-url`}
                   type="url"
                   className="nr-input"
                   value={websiteUrl}
@@ -303,8 +311,8 @@ export function UserSettingsPanel({
 
             <div className="row" style={{ gap: 16, alignItems: 'center' }}>
               <div style={{ flex: 1 }}>
-                <label>{t("labelEmail")}</label>
-                <input type="email" className="nr-input" value={profile.user.email} disabled />
+                <label htmlFor={`${controlId}-email`}>{t("labelEmail")}</label>
+                <input id={`${controlId}-email`} type="email" className="nr-input" value={profile.user.email} disabled />
               </div>
               <div style={{ flex: 1 }}>
                 <label>{t("labelMemberSince")}</label>
@@ -379,10 +387,11 @@ export function UserSettingsPanel({
       <div className="nr-form-section">
         <h2>{t("sectionNotifications")}</h2>
         <div className="nested-item" style={{ marginBottom: 16 }}>
-          <label style={{ display: "block", marginBottom: 8, fontWeight: 600 }}>
+          <label htmlFor={`${controlId}-newspaper-cadence`} style={{ display: "block", marginBottom: 8, fontWeight: 600 }}>
             {t("labelNewspaperCadence")}
           </label>
           <select
+            id={`${controlId}-newspaper-cadence`}
             className="nr-input"
             style={{ maxWidth: 280 }}
             value={newspaperCadence}
@@ -399,7 +408,7 @@ export function UserSettingsPanel({
           <table className="notif-pref-table">
             <tbody>
               <tr>
-                <td style={{ fontWeight: 600 }}>Default</td>
+                <td style={{ fontWeight: 600 }}><label htmlFor={`${controlId}-notification-*`}>Default</label></td>
                 <td style={{ width: 260 }}>
                   {renderChannelSelect("*", preferenceValue("*", "IN_APP"), false)}
                 </td>

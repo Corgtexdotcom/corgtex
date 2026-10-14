@@ -1,5 +1,5 @@
 import type { ChatCompletionRequest, ChatCompletionResponse } from "@corgtex/models";
-import { AssistantHarnessError, authorize, checkCancellation, deliver } from "./contracts";
+import { AssistantHarnessError, authorize, checkCancellation, deliver, snapshotRuntime, snapshotSources } from "./contracts";
 import type { AssistantGateway, AssistantRuntime, SourceReference } from "./contracts";
 
 /** The existing gateway remains the only ModelUsage writer and provider/budget owner. */
@@ -12,12 +12,13 @@ export async function callAssistantGateway(options: {
   maximumBytes: number;
   stream: boolean;
 }): Promise<ChatCompletionResponse> {
-  const { runtime } = options;
-  await authorize(runtime, "model", options.sources);
+  const runtime = snapshotRuntime(options.runtime);
+  const sources = snapshotSources(options.sources);
+  await authorize(runtime, "model", sources);
   await runtime.reserveDispatch("model", options.maximumCalls);
   // The awaited reservation is not an authority lease: revalidate before invoking
   // the gateway. Its internal provider attempts remain gateway-owned.
-  await authorize(runtime, "model", options.sources);
+  await authorize(runtime, "model", sources);
   const request: ChatCompletionRequest = {
     ...options.request,
     workspaceId: runtime.scope.workspaceId,
@@ -36,6 +37,7 @@ export async function callAssistantGateway(options: {
     const stream = options.gateway.chatEventStream(request);
     let streamedBytes = 0;
     let streamedEvents = 0;
+    let failed = false;
     try {
       while (true) {
         const next = await stream.next();
@@ -51,11 +53,17 @@ export async function callAssistantGateway(options: {
         // Separately bound empty/metadata events so they cannot keep a stream alive forever.
         if (++streamedEvents > options.maximumBytes + 1024 || streamedBytes > options.maximumBytes) throw new AssistantHarnessError("LIMIT");
         // Arguments and private graph/checkpoint values are never client events.
-        if (next.value.type === "content_delta") await deliver(runtime, next.value, options.sources);
+        if (next.value.type === "content_delta") await deliver(runtime, next.value, sources);
       }
+    } catch (error) {
+      failed = true;
+      throw error;
     } finally {
       // Closing the generator runs gateway cleanup/accounting even after cancellation.
-      await stream.return(undefined as never);
+      try { await stream.return(undefined as never); } catch (error) {
+        // A cleanup failure must not replace the primary authorization/limit failure.
+        if (!failed) throw error;
+      }
     }
   } catch (error) {
     checkCancellation(runtime);

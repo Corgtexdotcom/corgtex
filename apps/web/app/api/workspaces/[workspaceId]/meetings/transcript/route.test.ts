@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
-const { uploadMeetingTranscript, intakeMeetingTranscript, extractTextFromFileBuffer, requireWorkspaceMembership, resolveRequestActor, handleRouteError } = vi.hoisted(() => ({
+const { uploadMeetingTranscript, captureCompanyMemberTranscriptInput, intakeMeetingTranscript, extractTextFromFileBuffer, requireWorkspaceMembership, resolveRequestActor, handleRouteError } = vi.hoisted(() => ({
   uploadMeetingTranscript: vi.fn(),
+  captureCompanyMemberTranscriptInput: vi.fn(),
   intakeMeetingTranscript: vi.fn(),
   extractTextFromFileBuffer: vi.fn(),
   requireWorkspaceMembership: vi.fn(),
@@ -23,6 +24,7 @@ class MockAppError extends Error {
 vi.mock("@corgtex/domain", () => ({
   AppError: MockAppError,
   intakeMeetingTranscript,
+  captureCompanyMemberTranscriptInput,
   uploadMeetingTranscript,
   requireWorkspaceMembership,
 }));
@@ -42,8 +44,13 @@ vi.mock("@/lib/http", () => ({
 afterEach(() => {
   vi.clearAllMocks();
 });
+beforeEach(() => {
+  captureCompanyMemberTranscriptInput.mockResolvedValue({ inputId: "native-1" });
+});
 
 describe("POST /api/workspaces/[workspaceId]/meetings/transcript", () => {
+  // The native receipt is minted before intake and bound to the exact payload.
+  // It is intentionally opaque to callers of this HTTP route.
   it("returns matching candidates as a conflict when transcript auto-match is ambiguous", async () => {
     resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
     intakeMeetingTranscript.mockResolvedValue({
@@ -71,6 +78,12 @@ describe("POST /api/workspaces/[workspaceId]/meetings/transcript", () => {
     );
 
     expect(response.status).toBe(409);
+    expect(captureCompanyMemberTranscriptInput).toHaveBeenCalledWith(
+      { kind: "user", user: { id: "user-1" } },
+      expect.objectContaining({ workspaceId: "ws-1", submission: expect.objectContaining({
+        transcript: "Transcript text", title: "Weekly Tactical",
+      }) }),
+    );
     expect(intakeMeetingTranscript).toHaveBeenCalledWith(
       { kind: "user", user: { id: "user-1" } },
       expect.objectContaining({
@@ -80,6 +93,7 @@ describe("POST /api/workspaces/[workspaceId]/meetings/transcript", () => {
         transcript: "Transcript text",
         ingestionGuidanceMd: "Highlight decisions.",
         participantEmails: ["jan@example.com"],
+        nativeReceipt: { inputId: "native-1" },
       }),
     );
     expect(uploadMeetingTranscript).not.toHaveBeenCalled();
@@ -117,6 +131,13 @@ describe("POST /api/workspaces/[workspaceId]/meetings/transcript", () => {
     );
 
     expect(response.status).toBe(201);
+    expect(captureCompanyMemberTranscriptInput).toHaveBeenCalledWith(
+      { kind: "user", user: { id: "user-1" } },
+      expect.objectContaining({ submission: expect.objectContaining({
+        rawFileBase64: Buffer.from("ignored").toString("base64"),
+        rawFileMimeType: "text/plain", transcript: "Jan: We agreed Milan will own onboarding.",
+      }) }),
+    );
     expect(intakeMeetingTranscript).toHaveBeenCalledWith(
       { kind: "user", user: { id: "user-1" } },
       expect.objectContaining({
@@ -126,6 +147,7 @@ describe("POST /api/workspaces/[workspaceId]/meetings/transcript", () => {
         title: "Weekly Tactical",
         recordedAt: new Date("2026-06-11T21:07:00.000Z"),
         ingestionGuidanceMd: "Track onboarding follow-ups.",
+        nativeReceipt: { inputId: "native-1" },
       }),
     );
     expect(uploadMeetingTranscript).not.toHaveBeenCalled();

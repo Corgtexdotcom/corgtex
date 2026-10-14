@@ -1,4 +1,5 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+vi.mock("@corgtex/domain", async () => import("../../domain/src/source-lineage-rebuild"));
 import { deriveJobsForEvent } from "./derive-jobs";
 
 describe("deriveJobsForEvent", () => {
@@ -103,6 +104,8 @@ describe("deriveJobsForEvent", () => {
         payload: { onboardingSessionId: "onboarding-1" },
         dedupeKey: "event-role-1:role-onboarding-intro:onboarding-1",
       },
+      { workspaceId: "ws-1", eventId: "event-role-1", type: "source-lineage.rebuild",
+        payload: { eventId: "event-role-1" }, dedupeKey: "event-role-1:source-lineage-rebuild" },
     ]);
   });
 
@@ -124,6 +127,8 @@ describe("deriveJobsForEvent", () => {
           dedupeKey: `event-${type}:context-graph-sync:MEMBER:member-1`,
           dependsOnDedupeKey: undefined,
         },
+        { workspaceId: "ws-1", eventId: `event-${type}`, type: "source-lineage.rebuild",
+          payload: { eventId: `event-${type}` }, dedupeKey: `event-${type}:source-lineage-rebuild` },
       ]);
     }
   });
@@ -220,6 +225,24 @@ describe("deriveJobsForEvent", () => {
         dedupeKey: "event-meeting-processed-1:context-graph-sync:MEETING:meeting-1",
         dependsOnDedupeKey: undefined,
       },
+      {
+        workspaceId: "ws-1", eventId: "event-meeting-processed-1", type: "source-lineage.rebuild",
+        payload: { eventId: "event-meeting-processed-1" }, dedupeKey: "event-meeting-processed-1:source-lineage-rebuild",
+      },
     ]);
+  });
+});
+
+
+describe("lineage rebuild event derivation", () => {
+  it("waits for source absorption before workspace regeneration", () => {
+    const jobs = deriveJobsForEvent({ id: "source-event", type: "brain-source.created", workspaceId: "ws-1", payload: { sourceId: "source-1" } });
+    expect(jobs.map((job) => job.type)).toEqual(["agent.brain-absorb", "source-lineage.rebuild"]);
+    expect(jobs).toContainEqual({ workspaceId: "ws-1", eventId: "source-event", type: "source-lineage.rebuild",
+      payload: { eventId: "source-event" }, dedupeKey: "source-event:source-lineage-rebuild", dependsOnDedupeKey: "source-event:brain-absorb" });
+  });
+  it("routes explicit privacy changes without copying the event content", () => {
+    const jobs = deriveJobsForEvent({ id: "change", type: "source-lineage.changed", workspaceId: "ws-1", payload: { oldTitle: "Hidden title" } });
+    expect(jobs).toEqual([{ workspaceId: "ws-1", eventId: "change", type: "source-lineage.rebuild", payload: { eventId: "change" }, dedupeKey: "change:source-lineage-rebuild" }]);
   });
 });

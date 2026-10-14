@@ -1,7 +1,20 @@
 import { mkdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { NextRequest } from "next/server";
 import type { Page } from "playwright";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { configure, conversation, refreshes, reply, requests, startChatBrowserFixture, streamAction } from "./chat-browser-fixture";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { configure, conversation, finishUncommitted, refreshes, reply, requests, routeBrain, startChatBrowserFixture, streamAction } from "./chat-browser-fixture";
+
+// Actual API entry point, with synthetic auth/service boundaries. The source
+// owner's permission/hash/epoch implementation is unchanged and separately tested.
+const nativeExport = vi.hoisted(() => vi.fn());
+const nativeConversation = vi.hoisted(() => vi.fn());
+vi.mock("@corgtex/domain", () => ({ exportConversationAnswerToBrain: nativeExport, getConversation: nativeConversation,
+  isArtifactInputProofReadable: vi.fn(), addConversationTurn: vi.fn(), renameConversation: vi.fn(), deleteConversation: vi.fn(), completeRoleOnboardingConversation: vi.fn() }));
+vi.mock("@corgtex/agents", () => ({ processConversationTurnStream: vi.fn(), sanitizeConversationPageContext: (value: unknown) => value }));
+vi.mock("@corgtex/models", () => ({ defaultModelGateway: { chat: vi.fn() } }));
+vi.mock("@/lib/auth", () => ({ resolveRequestActor: async () => ({ kind: "user", user: { id: "synthetic-user" } }) }));
+vi.mock("@/lib/http", () => ({ handleRouteError: (error: Error) => Response.json({ message: error.message }, { status: 409 }) }));
 
 // PERSONAL_CHAT_BROWSER_QA=1 npm run test:unit -- ChatInterface.browser.test.ts
 // Uses actual React effects and browser streams; all data and APIs are synthetic.
@@ -10,9 +23,25 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
   let fixture: Awaited<ReturnType<typeof startChatBrowserFixture>>;
   let page: Page;
   let errors: string[];
+  let loseExportResponse: boolean;
+  let nativeRead: typeof import("@/app/api/workspaces/[workspaceId]/conversations/[conversationId]/route").GET;
 
-  beforeAll(async () => { fixture = await startChatBrowserFixture(); });
+  beforeAll(async () => {
+    const { POST } = await import("@/app/api/workspaces/[workspaceId]/conversations/[conversationId]/brain/route");
+    nativeRead = (await import("@/app/api/workspaces/[workspaceId]/conversations/[conversationId]/route")).GET;
+    fixture = await startChatBrowserFixture({ brainRoute: async (request, params) => {
+      const response = await POST(new NextRequest(request), { params: Promise.resolve(params) });
+      if (loseExportResponse && response.ok) {
+        loseExportResponse = false;
+        return Response.json({ message: "Synthetic response lost after commit" }, { status: 503 });
+      }
+      return response;
+    } });
+  });
   beforeEach(async () => {
+    nativeExport.mockReset().mockResolvedValue({ sourceId: "synthetic-brain-source" });
+    nativeConversation.mockReset();
+    loseExportResponse = false;
     page = await fixture.newPage();
     errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
@@ -419,5 +448,169 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
     expect((await requests(page))[1]).toMatchObject({ aborted: true, canceled: true });
     expect(await refreshes(page)).toBe(0);
     expect(await page.locator(".chat-layout").count()).toBe(0);
+  });
+
+  const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  const exports = () => page.getByText("Save to Brain", { exact: true });
+  const exportForm = () => page.locator(".chat-turn").last().locator("details");
+  const persisted = () => {
+    const data = conversation("a");
+    data.turns.push({ id: "persisted-a2", sequenceNumber: 7, userMessage: "Persisted second question",
+      assistantMessage: "Persisted final answer", createdAt: "2026-01-02T00:00:00.000Z" });
+    return data;
+  };
+  async function loadPersisted() {
+    await select("a"); await requestAt(0);
+    const data = persisted(); await reply(page, 0, { conversation: data }); return data;
+  }
+  async function replyPersisted(id: number, data: ReturnType<typeof persisted>) {
+    const request = (await requests(page))[id];
+    const parts = request.url.split("/");
+    nativeConversation.mockResolvedValueOnce(data);
+    const response = await nativeRead(new NextRequest(`${fixture.origin}${request.url}`), {
+      params: Promise.resolve({ workspaceId: parts[3], conversationId: parts[5] }),
+    });
+    expect(response.status).toBe(200);
+    expect(nativeConversation).toHaveBeenLastCalledWith({ kind: "user", user: { id: "synthetic-user" } }, parts[3], parts[5]);
+    await reply(page, id, await response.json(), response.status);
+  }
+  async function openExport(mode: string) {
+    await exports().last().click();
+    await exportForm().getByLabel("Transcript metadata to include", { exact: true }).selectOption(mode);
+    if (mode === "PARTIAL") await exportForm().getByRole("checkbox").first().check();
+  }
+  async function submitExport(id: number) {
+    await exportForm().getByRole("button", { name: "Confirm and save", exact: true }).click();
+    const request = await requestAt(id);
+    expect(request.url).toBe("/api/workspaces/alpha/conversations/a/brain");
+    return JSON.parse(request.body!);
+  }
+  async function committedSend(post = 1) {
+    await streamAction(page, post, "stream");
+    await streamAction(page, post, "chunk", 'data: {"text":"Streamed partial"}\n\n');
+    await streamAction(page, post, "chunk", 'data: {"committedTurn":{"id":"persisted-a2","sequenceNumber":7,"createdAt":"2026-01-02T00:00:00.000Z"}}\n\n');
+  }
+
+  for (const mode of ["NONE", "PARTIAL", "FULL"]) {
+    it(`sends exact persisted output and ${mode} metadata through the actual Brain route`, async () => {
+      const data = await loadPersisted(); await openExport(mode);
+      const body = await submitExport(1);
+      const selected = mode === "NONE" ? [] : mode === "PARTIAL" ? data.turns.slice(0, 1) : data.turns;
+      expect(body).toMatchObject({ outputTurnId: "persisted-a2", expectedOutputHash: digest(data.turns[1].assistantMessage), transcriptMode: mode,
+        selectedTurns: selected.map(turn => ({ id: turn.id, hash: digest([turn.id, turn.userMessage, turn.assistantMessage]) })) });
+      await routeBrain(page, 1);
+      await exportForm().getByRole("status").waitFor();
+      expect(nativeExport).toHaveBeenCalledWith({ kind: "user", user: { id: "synthetic-user" } }, { workspaceId: "alpha", conversationId: "a", ...body });
+    });
+
+    it(`reuses the exact ${mode} export identity after the actual route commits and its response is lost`, async () => {
+      await loadPersisted(); await openExport(mode); loseExportResponse = true;
+      const first = await submitExport(1); await routeBrain(page, 1);
+      await exportForm().getByRole("alert").waitFor();
+      const retry = await submitExport(2); expect(retry).toEqual(first);
+      await routeBrain(page, 2); await exportForm().getByRole("status").waitFor();
+      expect(nativeExport).toHaveBeenCalledTimes(2);
+      expect(nativeExport.mock.calls[1][1]).toEqual(nativeExport.mock.calls[0][1]);
+    });
+  }
+
+  it("keeps the earlier export identity when changing metadata mode and returning after lost responses", async () => {
+    await loadPersisted(); await openExport("NONE"); loseExportResponse = true;
+    const first = await submitExport(1); await routeBrain(page, 1); await exportForm().getByRole("alert").waitFor();
+    await exportForm().getByLabel("Transcript metadata to include", { exact: true }).selectOption("FULL"); loseExportResponse = true;
+    const changed = await submitExport(2); expect(changed.requestId).not.toBe(first.requestId);
+    await routeBrain(page, 2); await exportForm().getByRole("alert").waitFor();
+    await exportForm().getByLabel("Transcript metadata to include", { exact: true }).selectOption("NONE");
+    expect(await submitExport(3)).toEqual(first); await routeBrain(page, 3);
+    await exportForm().getByRole("status").waitFor();
+  });
+
+  it("remaps committed identity before export and reads exact persisted wording instead of streamed fragments", async () => {
+    await load(); await startSend("Second question", 1); await committedSend();
+    expect(await page.locator('[data-turn-id="persisted-a2"]').count()).toBe(1);
+    expect(await exports().count()).toBe(0);
+    await streamAction(page, 1, "chunk", 'data: {"text":" after receipt"}\n\n');
+    expect(await messages().innerText()).toContain("Streamed partial after receipt");
+    await streamAction(page, 1, "finish");
+    expect(await requestAt(2)).toMatchObject({ method: "GET", url: "/api/workspaces/alpha/conversations/a" });
+    expect(await exports().count()).toBe(0);
+    const data = persisted(); await replyPersisted(2, data);
+    expect(await messages().innerText()).toContain("Persisted final answer");
+    expect(await messages().innerText()).not.toContain("Streamed partial");
+    expect(await page.locator('[data-turn-id^="pending-"]').count()).toBe(0);
+    await openExport("FULL"); const body = await submitExport(3);
+    expect(body.expectedOutputHash).toBe(digest(data.turns[1].assistantMessage));
+    expect(body.selectedTurns.map((turn: { id: string }) => turn.id)).toEqual(["turn-a", "persisted-a2"]);
+    await routeBrain(page, 3); await exportForm().getByRole("status").waitFor();
+    await mkdir(".artifacts/personal-chat", { recursive: true });
+    await page.screenshot({ path: ".artifacts/personal-chat/composed-native-export.png", fullPage: true });
+  });
+
+  for (const staleFails of [false, true]) {
+    it(`ignores a committed-answer reload that ${staleFails ? "fails" : "succeeds"} after navigation`, async () => {
+      await load(); await startSend("Abandoned answer", 1); await committedSend(); await streamAction(page, 1, "finish"); await requestAt(2);
+      await load("b", 3); await reply(page, 2, { conversation: persisted() }, staleFails ? 503 : 200);
+      expect((await requests(page))[2].aborted).toBe(true);
+      expect(await messages().innerText()).toContain("Answer b");
+      expect(await messages().innerText()).not.toContain("Persisted final answer");
+      await exports().click(); await page.getByRole("button", { name: "Confirm and save", exact: true }).click();
+      expect(await requestAt(4)).toMatchObject({ url: "/api/workspaces/alpha/conversations/b/brain" });
+      expect(JSON.parse((await requests(page))[4].body!).outputTurnId).toBe("turn-b");
+      await routeBrain(page, 4);
+    });
+  }
+
+  it("rejects a late persisted reload after workspace change and exports only the selected workspace", async () => {
+    await load(); await startSend("Alpha prompt", 1); await committedSend(); await streamAction(page, 1, "finish"); await requestAt(2);
+    await configure(page, { workspaceId: "beta", activeSessionId: "c" }); await requestAt(3);
+    expect(await exports().count()).toBe(0); await reply(page, 3, { conversation: conversation("c") });
+    await reply(page, 2, { conversation: persisted() });
+    expect(await input().inputValue()).toBe(""); expect(await messages().innerText()).toContain("Answer c");
+    await exports().click(); await page.getByRole("button", { name: "Confirm and save", exact: true }).click();
+    expect(await requestAt(4)).toMatchObject({ url: "/api/workspaces/beta/conversations/c/brain" });
+    expect(JSON.parse((await requests(page))[4].body!).outputTurnId).toBe("turn-c"); await routeBrain(page, 4);
+  });
+
+  it("does not restore an old export's saved state or selection after another conversation loads", async () => {
+    await loadPersisted(); await openExport("PARTIAL"); await submitExport(1);
+    await load("b", 2); await reply(page, 1, { sourceId: "old-source" }, 201);
+    await exports().click();
+    expect(await page.getByLabel("Brain title", { exact: true }).inputValue()).toBe("Answer b");
+    expect(await page.getByLabel("Transcript metadata to include", { exact: true }).inputValue()).toBe("NONE");
+    expect(await page.getByRole("status").count()).toBe(0);
+    await page.getByRole("button", { name: "Confirm and save", exact: true }).click();
+    expect(await requestAt(3)).toMatchObject({ url: "/api/workspaces/alpha/conversations/b/brain" }); await routeBrain(page, 3);
+  });
+
+  it("retains attachments and exact draft when a stream ends without commit, then removes uncommitted output on retry", async () => {
+    await load(); await input().fill("  Retry exact\n draft  ");
+    await page.locator('input[type="file"]').setInputFiles({ name: "native.txt", mimeType: "text/plain", buffer: Buffer.from("Synthetic native attachment") });
+    await send().click(); await requestAt(1); await reply(page, 1, { message: "Uploaded once", webUrl: "/synthetic/uploaded" }); await requestAt(2);
+    await streamAction(page, 2, "stream"); await streamAction(page, 2, "chunk", 'data: {"text":"Uncommitted answer"}\n\n');
+    await finishUncommitted(page, 2);
+    expect(await input().inputValue()).toBe("  Retry exact\n draft  ");
+    expect(await page.locator(".chat-attachment-bar").innerText()).toContain("native.txt");
+    expect(await messages().innerText()).not.toContain("Uncommitted answer"); expect(await exports().count()).toBe(1);
+    await send().click(); expect(await requestAt(3)).toMatchObject({ url: "/api/workspaces/alpha/conversations/a" });
+    expect(JSON.parse((await requests(page))[3].body!).message).toContain("/synthetic/uploaded");
+    await committedSend(3); await streamAction(page, 3, "finish"); await requestAt(4); await replyPersisted(4, persisted());
+    expect(await input().inputValue()).toBe(""); expect(await page.locator(".chat-attachment-bar").count()).toBe(0);
+    expect((await requests(page)).filter(request => request.url.endsWith("/chat/attachments"))).toHaveLength(1);
+  });
+
+  it("removes the remapped answer and restores its draft if the stream fails after receipt", async () => {
+    await load(); await startSend("Retry after receipt", 1); await committedSend(); await streamAction(page, 1, "fail");
+    expect(await input().inputValue()).toBe("Retry after receipt");
+    expect(await page.locator('[data-turn-id="persisted-a2"]').count()).toBe(0);
+    expect(await messages().innerText()).not.toContain("Streamed partial"); expect(await exports().count()).toBe(1);
+  });
+
+  it("rejects a current load or commit read whose conversation identity does not match its route", async () => {
+    await select("a"); await requestAt(0); await reply(page, 0, { conversation: conversation("b") });
+    expect(await exports().count()).toBe(0); expect(await messages().innerText()).not.toContain("Answer b");
+    await load("a", 1); await startSend("Mismatched commit read", 2); await committedSend(2); await streamAction(page, 2, "finish"); await requestAt(3);
+    await reply(page, 3, { conversation: conversation("b") });
+    expect(await input().inputValue()).toBe("Mismatched commit read"); expect(await messages().innerText()).not.toContain("Answer b");
+    expect(await exports().count()).toBe(1);
   });
 });

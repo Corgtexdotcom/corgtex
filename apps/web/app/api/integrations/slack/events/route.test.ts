@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
-const { verifySlackRequestMock, ingestCommunicationEventMock } = vi.hoisted(() => ({
-  verifySlackRequestMock: vi.fn(),
+const { captureSlackSignedIngressMock, ingestCommunicationEventMock } = vi.hoisted(() => ({
+  captureSlackSignedIngressMock: vi.fn(),
   ingestCommunicationEventMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/domain", () => ({
-  verifySlackRequest: verifySlackRequestMock,
+  captureSlackSignedIngress: captureSlackSignedIngressMock,
   ingestCommunicationEvent: ingestCommunicationEventMock,
   AppError: class AppError extends Error {
     status = 400;
@@ -26,7 +26,7 @@ describe("POST /api/integrations/slack/events", () => {
 
     expect(response.status).toBe(200);
     await expect(response.text()).resolves.toBe("challenge-token");
-    expect(verifySlackRequestMock).toHaveBeenCalled();
+    expect(captureSlackSignedIngressMock).toHaveBeenCalled();
     expect(ingestCommunicationEventMock).not.toHaveBeenCalled();
   });
 
@@ -43,6 +43,6 @@ describe("POST /api/integrations/slack/events", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ ok: true });
-    expect(ingestCommunicationEventMock).toHaveBeenCalledWith("SLACK", body);
+    expect(ingestCommunicationEventMock).toHaveBeenCalledWith("SLACK", body, undefined);
   });
 });

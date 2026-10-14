@@ -26,6 +26,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
       agentIdentityId: agentId,
       behaviorMd: String(body.behaviorMd ?? ""),
     });
+    if ("contentWithheld" in updated) return NextResponse.json(updated);
     return NextResponse.json({ behaviorMd: updated.behaviorMd ?? "" });
   } catch (error) {
     return handleRouteError(error);

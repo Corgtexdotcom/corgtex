@@ -23,6 +23,7 @@ import {
 import { appendEvents } from "./events";
 import { findSourceArticleImpacts, sourceIdsInDerivation } from "./brain-source-impact";
 import { lockActiveArticleSources, lockBrainSourceLink } from "./brain-source-links";
+import { advanceArchivedArtifactEnvelopeLineage, assertArtifactInputWriteFence, isArtifactArchiveMetadataReadable, isLineageKind, sealArtifactInputActor } from "./source-lineage";
 
 export type ArchiveFilter = "active" | "archived" | "all";
 
@@ -584,6 +585,22 @@ async function activeArchiveRecord(tx: Prisma.TransactionClient, workspaceId: st
   });
 }
 
+const archiveMetadataSelect = {
+  id: true, workspaceId: true, entityType: true, entityId: true,
+  archivedAt: true, archivedByUserId: true, restoredAt: true, restoredByUserId: true,
+  purgedAt: true, purgedByUserId: true, createdAt: true, updatedAt: true,
+} as const;
+
+function archiveMetadata(record: Prisma.WorkspaceArchiveRecordGetPayload<{ select: typeof archiveMetadataSelect }>) {
+  return { id: record.id, workspaceId: record.workspaceId,
+    entityType: record.entityType, entityId: record.entityId, entityLabel: record.entityType,
+    archivedAt: record.archivedAt, archivedByUserId: record.archivedByUserId,
+    restoredAt: record.restoredAt, restoredByUserId: record.restoredByUserId,
+    purgedAt: record.purgedAt, purgedByUserId: record.purgedByUserId,
+    createdAt: record.createdAt, updatedAt: record.updatedAt,
+    archiveReason: null, archivedByLabel: null, purgeReason: null };
+}
+
 export async function getWorkspaceArchiveRecord(actor: AppActor, params: {
   workspaceId: string;
   entityType: string;
@@ -592,7 +609,7 @@ export async function getWorkspaceArchiveRecord(actor: AppActor, params: {
   includeRestored?: boolean;
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  return prisma.workspaceArchiveRecord.findFirst({
+  const record = await prisma.workspaceArchiveRecord.findFirst({
     where: {
       workspaceId: params.workspaceId,
       entityType: params.entityType,
@@ -601,7 +618,11 @@ export async function getWorkspaceArchiveRecord(actor: AppActor, params: {
       ...(params.includePurged ? {} : { purgedAt: null }),
     },
     orderBy: { archivedAt: "desc" },
+    select: archiveMetadataSelect,
   });
+  return record && !record.purgedAt && isLineageKind(record.entityType)
+    && await isArtifactArchiveMetadataReadable(actor, params.workspaceId, { kind: record.entityType, id: record.entityId })
+    ? archiveMetadata(record) : null;
 }
 
 export async function archiveWorkspaceArtifact(actor: AppActor, params: {
@@ -612,11 +633,13 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
   expectedVersion?: number;
   _tx?: Prisma.TransactionClient;
 }) {
+  sealArtifactInputActor(actor);
+  params = Object.freeze({ ...params });
   if (params.expectedVersion !== undefined) {
     invariant(Number.isSafeInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "Expected version is invalid.");
   }
   const config = configFor(params.entityType);
-  const membership = await requireWorkspaceMembership({
+  await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
     allowedRoles: config.archiveAllowedRoles,
@@ -624,6 +647,8 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
   const reason = params.reason?.trim() || null;
 
   const archive = async (tx: Prisma.TransactionClient) => {
+    await assertArtifactInputWriteFence(tx);
+    const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: config.archiveAllowedRoles, tx });
     await lockWorkspaceArchiveArtifact(tx, config.entityType, params.entityId);
     let record = await findRecord(tx, config, params.workspaceId, params.entityId);
     await config.canArchive?.({ tx, record, actor, membership });
@@ -631,7 +656,8 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
       invariant(record.version === params.expectedVersion, 409, "VERSION_CONFLICT", "The record changed. Reload and try again.");
     }
     if (record.archivedAt) {
-      return record;
+      await assertArtifactInputWriteFence(tx);
+      return { id: record.id };
     }
 
     if (config.entityType === "BrainSource" || config.entityType === "Document") {
@@ -650,7 +676,7 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
         // here, which would invert that order.
         await tx.$queryRaw`SELECT id FROM "Document" WHERE id = ${record.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
         record = await findRecord(tx, config, params.workspaceId, params.entityId);
-        if (record.archivedAt) return record;
+        if (record.archivedAt) { await assertArtifactInputWriteFence(tx); return { id: record.id }; }
         documentSources = await tx.brainSource.findMany({
           where: { workspaceId: params.workspaceId, metadata: { path: ["documentId"], equals: record.id } },
           select: { id: true, archivedAt: true },
@@ -690,6 +716,9 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
       }
       throw error;
     }
+    if (isLineageKind(config.entityType)) await advanceArchivedArtifactEnvelopeLineage({
+      tx, workspaceId: params.workspaceId, artifact: { kind: config.entityType, id: record.id }, before: record, after: updated,
+    });
     if (config.entityType === "BrainArticle") {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brain_article_index:${params.workspaceId}:${record.id}`}, 0))`;
       await tx.knowledgeChunk.deleteMany({ where: {
@@ -723,6 +752,12 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
         canonicalPath: workspaceEntityCanonicalPath(params.workspaceId, config.entityType, record),
       });
     }
+
+    if (["BrainSource", "Document"].includes(config.entityType)) await appendEvents(tx, [{
+      workspaceId: params.workspaceId, type: "source-lineage.changed",
+      aggregateType: config.entityType, aggregateId: record.id,
+      payload: { kind: config.entityType, id: record.id, change: "archived" },
+    }]);
 
     await tx.workspaceArchiveRecord.create({
       data: {
@@ -763,7 +798,10 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
       });
     }
 
-    return updated;
+    const finalMembership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: config.archiveAllowedRoles, tx });
+    await config.canArchive?.({ tx, record: updated, actor, membership: finalMembership });
+    await assertArtifactInputWriteFence(tx);
+    return { id: updated.id };
   };
   return params._tx ? archive(params._tx) : prisma.$transaction(archive);
 }
@@ -774,17 +812,22 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
   entityId: string;
   expectedVersion?: number;
 }) {
+  sealArtifactInputActor(actor);
+  params = Object.freeze({ ...params });
   const config = configFor(params.entityType);
   if (params.expectedVersion !== undefined) {
     invariant(Number.isSafeInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "Expected version is invalid.");
   }
-  const membership = await requireWorkspaceMembership({
+  await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
     allowedRoles: config.restoreAllowedRoles === null ? undefined : config.restoreAllowedRoles ?? ["ADMIN"],
   });
 
   return prisma.$transaction(async (tx) => {
+    await assertArtifactInputWriteFence(tx);
+    const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId,
+      allowedRoles: config.restoreAllowedRoles === null ? undefined : config.restoreAllowedRoles ?? ["ADMIN"], tx });
     await lockWorkspaceArchiveArtifact(tx, config.entityType, params.entityId);
     const record = await findRecord(tx, config, params.workspaceId, params.entityId);
     invariant(record.archivedAt, 400, "INVALID_STATE", `${config.entityType} is not archived.`);
@@ -820,6 +863,9 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
       }
       throw error;
     }
+    if (isLineageKind(config.entityType)) await advanceArchivedArtifactEnvelopeLineage({
+      tx, workspaceId: params.workspaceId, artifact: { kind: config.entityType, id: record.id }, before: record, after: updated,
+    });
     if (config.entityType === "BrainArticle") {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brain_article_index:${params.workspaceId}:${record.id}`}, 0))`;
     }
@@ -857,6 +903,14 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
       ]);
     }
 
+    // BrainSource restore already emits brain-source.created above, whose
+    // absorption dependency schedules exactly one complete lineage rebuild.
+    if (config.entityType === "Document") await appendEvents(tx, [{
+      workspaceId: params.workspaceId, type: "source-lineage.changed",
+      aggregateType: config.entityType, aggregateId: record.id,
+      payload: { kind: config.entityType, id: record.id, change: "restored" },
+    }]);
+
     if (archiveRecord) {
       await tx.workspaceArchiveRecord.update({
         where: { id: archiveRecord.id },
@@ -878,7 +932,11 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
       },
     });
 
-    return updated;
+    const finalMembership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId,
+      allowedRoles: config.restoreAllowedRoles === null ? undefined : config.restoreAllowedRoles ?? ["ADMIN"], tx });
+    await config.canRestoreActor?.({ record: updated, actor, membership: finalMembership });
+    await assertArtifactInputWriteFence(tx);
+    return { id: updated.id };
   });
 }
 
@@ -920,6 +978,11 @@ export async function purgeWorkspaceArtifact(actor: AppActor, params: {
     }
 
     await delegate(tx, config).delete({ where: { id: record.id } });
+    if (["BrainSource", "Document"].includes(config.entityType)) await appendEvents(tx, [{
+      workspaceId: params.workspaceId, type: "source-lineage.changed",
+      aggregateType: config.entityType, aggregateId: record.id,
+      payload: { kind: config.entityType, id: record.id, change: "purged" },
+    }]);
     await tx.workspaceArchiveRecord.update({
       where: { id: archiveRecord.id },
       data: {
@@ -960,6 +1023,8 @@ export async function listArchivedWorkspaceArtifacts(actor: AppActor, params: {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"] });
   const take = params.take ?? 100;
   const skip = params.skip ?? 0;
+  invariant(Number.isInteger(take) && take >= 0 && take <= 5_000 && Number.isInteger(skip) && skip >= 0,
+    400, "INVALID_INPUT", "Archive pagination is invalid.");
 
   const records = await prisma.workspaceArchiveRecord.findMany({
     where: {
@@ -968,15 +1033,27 @@ export async function listArchivedWorkspaceArtifacts(actor: AppActor, params: {
       ...(params.includeRestored ? {} : { restoredAt: null }),
       ...(params.includePurged ? {} : { purgedAt: null }),
     },
-    orderBy: { archivedAt: "desc" },
-    take,
-    skip,
+    orderBy: [{ archivedAt: "desc" }, { id: "asc" }],
+    // Audit storage is not a source permission grant. In particular, a purged
+    // artifact's preserved before-image must never become a content endpoint.
+    select: archiveMetadataSelect,
+    // Apply caller pagination after source admission; withheld records must not
+    // alter returned positions or consume the caller's visible page.
+    take: 5_001,
   });
-  if (records.length === 0) return records;
+  invariant(records.length <= 5_000, 413, "ARCHIVE_READ_BUDGET", "Narrow the archive filters and try again.");
+  const metadata = [];
+  for (const record of records) {
+    if (record.purgedAt || !isLineageKind(record.entityType)
+      || !await isArtifactArchiveMetadataReadable(actor, params.workspaceId, { kind: record.entityType, id: record.entityId })) continue;
+    metadata.push(archiveMetadata(record));
+  }
+  const page = metadata.slice(skip, skip + take);
+  if (page.length === 0) return page;
 
-  const permalinkEligibleRecords = records.filter((record) => isWorkspacePermalinkEntityType(record.entityType));
+  const permalinkEligibleRecords = page.filter((record) => isWorkspacePermalinkEntityType(record.entityType));
   if (permalinkEligibleRecords.length === 0) {
-    return records.map((record) => ({ ...record, permanentPath: null }));
+    return page.map((record) => ({ ...record, permanentPath: null }));
   }
 
   const permalinks = await prisma.workspacePermalink.findMany({
@@ -992,7 +1069,7 @@ export async function listArchivedWorkspaceArtifacts(actor: AppActor, params: {
     permalinks.map((permalink) => [`${permalink.entityType}:${permalink.entityId}`, permalink]),
   );
 
-  return records.map((record) => {
+  return page.map((record) => {
     const permalink = permalinkByEntity.get(`${record.entityType}:${record.entityId}`);
     return {
       ...record,

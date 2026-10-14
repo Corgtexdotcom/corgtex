@@ -1,5 +1,7 @@
-import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations, listDailyCompanyUnderstandingQuestions, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig, getUserWorkspaceOnboardingState, getAiWorkspaceSelectionState, resolveWorkspaceModuleAccess, SELF_SERVE_WORKSPACE_TOUR_KEY, SELF_SERVE_WORKSPACE_TOUR_VERSION } from "@corgtex/domain";
+import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations, listDailyCompanyUnderstandingQuestions, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig, getUserWorkspaceOnboardingState, getAiWorkspaceSelectionState, resolveWorkspaceModuleAccess, hasWorkspaceInitialKnowledgeSource, SELF_SERVE_WORKSPACE_TOUR_KEY, SELF_SERVE_WORKSPACE_TOUR_VERSION } from "@corgtex/domain";
 import { workspaceBranding, prisma } from "@corgtex/shared";
+import type { AppActor } from "@corgtex/shared";
+import { countReadableKnowledgeChunks } from "@corgtex/knowledge";
 import type { Metadata } from "next";
 import { logoutAction, requirePageActor } from "@/lib/auth";
 import { filterWorkspacesForDeploymentScope } from "@/lib/deployment-workspace-scope";
@@ -39,36 +41,9 @@ function localizedPath(path: string, locale: string) {
   return `/${locale}${path}`;
 }
 
-async function hasWorkspaceInitialKnowledge(workspaceId: string) {
-  const [documentCount, brainSourceCount, meetingCount, knowledgeChunkCount] = await Promise.all([
-    prisma.document.count({
-      where: { workspaceId, archivedAt: null },
-    }),
-    prisma.brainSource.count({
-      where: {
-        workspaceId,
-        archivedAt: null,
-        sourceType: { in: ["FILE_UPLOAD", "DOC", "ARTICLE", "MEETING", "EXTERNAL_CONTENT"] },
-      },
-    }),
-    prisma.meeting.count({
-      where: {
-        workspaceId,
-        archivedAt: null,
-        OR: [
-          { transcript: { not: null } },
-          { summaryMd: { not: null } },
-        ],
-      },
-    }),
-    prisma.knowledgeChunk.count({
-      where: {
-        workspaceId,
-        sourceType: { in: ["DOCUMENT", "MEETING"] },
-      },
-    }),
-  ]);
-  return documentCount + brainSourceCount + meetingCount + knowledgeChunkCount > 0;
+async function hasWorkspaceInitialKnowledge(actor: AppActor, workspaceId: string) {
+  return await hasWorkspaceInitialKnowledgeSource(actor, workspaceId)
+    || await countReadableKnowledgeChunks(actor, workspaceId, ["DOCUMENT", "MEETING"]) > 0;
 }
 
 function syncSettingsRecord(value: unknown) {
@@ -108,7 +83,7 @@ export default async function WorkspaceLayout({
   }
 
   const [unreadCount, conversationsResult, dailyQuestions, featureFlags, membership, invitePolicy, workspaceRuntime, onboardingState, hasInitialKnowledge, googleConnection, productFeedbackTarget, hasSupportAccess] = await Promise.all([
-    userId ? countUnreadNotifications(userId, workspaceId) : Promise.resolve(0),
+    userId ? countUnreadNotifications(actor, workspaceId) : Promise.resolve(0),
     listConversations(actor, workspaceId, { take: 30 }).catch(() => ({ items: [], total: 0, take: 30, skip: 0 })),
     userId ? listDailyCompanyUnderstandingQuestions(actor, { workspaceId, take: 3 }).catch(() => []) : Promise.resolve([]),
     getWorkspaceFeatureFlags(workspaceId),
@@ -120,7 +95,7 @@ export default async function WorkspaceLayout({
       tourKey: SELF_SERVE_WORKSPACE_TOUR_KEY,
       tourVersion: SELF_SERVE_WORKSPACE_TOUR_VERSION,
     }).catch(() => null) : Promise.resolve(null),
-    hasWorkspaceInitialKnowledge(workspaceId).catch(() => false),
+    hasWorkspaceInitialKnowledge(actor, workspaceId).catch(() => false),
     userId ? prisma.oAuthConnection.findFirst({
       where: {
         userId,
