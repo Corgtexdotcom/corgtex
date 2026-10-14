@@ -313,6 +313,8 @@ vi.mock("@corgtex/shared", async () => {
       return kind === "McpOAuthGrantPolicy" && row?.workspaceId === workspaceId && row.grantEpoch !== undefined
         ? [{ epoch: row.grantEpoch }] : [];
     }),
+    contextGraphObject: {findMany: vi.fn()},
+    contextGraphRelationship: {findMany: vi.fn()},
     action: {
       findFirst: vi.fn(),
     },
@@ -3576,5 +3578,49 @@ describe("createCorgtexMcpServer", () => {
       const completeTool = (server as any)._registeredTools["complete_action"];
       expect(completeTool.inputSchema.shape?.expectedVersion).toBeUndefined();
     });
+  });
+});
+
+
+describe("context graph bounded permission scan", () => {
+  it("replenishes hidden object and relationship pages without materializing the whole graph", async () => {
+    const {prisma} = await import("@corgtex/shared");
+    const {readableArtifactIds} = await import("@corgtex/domain");
+    const {createCorgtexMcpServer} = await import("./server");
+    const objects = Array.from({length: 260}, (_, index) => ({id: `object-${index}`, visible: index >= 100}));
+    const relationships = Array.from({length: 260}, (_, index) => ({id: `relationship-${index}`, visible: index >= 100}));
+    const page = (rows: typeof objects) => async ({take, cursor, skip = 0}: {take: number; cursor?: {id: string}; skip?: number}) => {
+      const offset = cursor ? rows.findIndex(row => row.id === cursor.id) + skip : 0;
+      return rows.slice(offset, offset + take);
+    };
+    vi.mocked(prisma.contextGraphObject.findMany).mockImplementation(page(objects) as any);
+    vi.mocked(prisma.contextGraphRelationship.findMany).mockImplementation(page(relationships) as any);
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspace, _kind, rows) =>
+      new Set(rows.filter(row => (row as {visible?: boolean}).visible).map(row => row.id)));
+    try {
+      const server = createTestServer(createCorgtexMcpServer, {workspaceId: "ws-1", authKind: "oauth", actor: {kind: "user", user: {id: "u-1"}}});
+      const response = await (server as any)._registeredTools.query_context_graph.handler({take: 3});
+      const result = response.structuredContent;
+      expect(result.objects.map((row: {id: string}) => row.id)).toEqual(["object-100", "object-101", "object-102"]);
+      expect(result.relationships).toHaveLength(6);
+      expect(prisma.contextGraphObject.findMany).toHaveBeenLastCalledWith(expect.objectContaining({take: 100, cursor: {id: "object-99"}, skip: 1}));
+      expect(prisma.contextGraphRelationship.findMany).toHaveBeenLastCalledWith(expect.objectContaining({take: 100,
+        where: expect.objectContaining({workspaceId: "ws-1", sourceObjectId: {in: ["object-100", "object-101", "object-102"]}})}));
+    } finally {vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspace, _kind, rows) => new Set(rows.map(row => row.id)));}
+  });
+  it("stops an over-budget denied graph at a one-row sentinel", async () => {
+    const {prisma} = await import("@corgtex/shared");
+    const {readableArtifactIds} = await import("@corgtex/domain");
+    const {createCorgtexMcpServer} = await import("./server");
+    let offset = 0;
+    vi.mocked(prisma.contextGraphObject.findMany).mockReset().mockImplementation(async ({take}: any) =>
+      Array.from({length: take}, () => ({id: `denied-${offset++}`})) as any);
+    vi.mocked(readableArtifactIds).mockImplementation(async () => new Set());
+    try {
+      const server = createTestServer(createCorgtexMcpServer, {workspaceId: "ws-1", authKind: "oauth", actor: {kind: "user", user: {id: "u-1"}}});
+      await expect((server as any)._registeredTools.query_context_graph.handler({take: 1})).rejects.toMatchObject({code: "CONTEXT_GRAPH_SCAN_LIMIT"});
+      expect(prisma.contextGraphObject.findMany).toHaveBeenCalledTimes(51);
+      expect(prisma.contextGraphObject.findMany).toHaveBeenLastCalledWith(expect.objectContaining({take: 1}));
+    } finally {vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspace, _kind, rows) => new Set(rows.map(row => row.id)));}
   });
 });
