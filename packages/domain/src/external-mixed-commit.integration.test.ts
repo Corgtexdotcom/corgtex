@@ -451,7 +451,7 @@ describe("complete Slack native commit closure", () => {
       sourceWriterJobs.add(job.id);
       const outputId = randomUUID();
       const options = { writeTargets: [{ kind: "BrainSource" as const, id: outputId,
-        projectedAuthority: { sourceType: "EXTERNAL_CONTENT", accessDomain: "WORKSPACE" } }],
+        projectedAuthority: { sourceType: "EXTERNAL_CONTENT", accessDomain: "WORKSPACE", informationCategory: "GENERAL" } }],
       ownerBinding: { kind: "WORKFLOW_JOB" as const, id: job.id, generation: 1,
         lockedBy: job.lockedBy, lockedAt: job.lockedAt!.toISOString(), requesterUserId: f.user.id } };
       const token = await prepareArtifactSourceCommit(f.actor, f.workspace.id, roots, options);
@@ -500,6 +500,50 @@ describe("complete Slack native commit closure", () => {
         .toBe(combination === "slack" ? 1 : 0);
       await expect(prisma.$transaction(tx => withArtifactSourceCommit(f.actor, f.workspace.id, tx,
         roots, options, token, async () => {}, async () => "reused"))).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    });
+
+  it.each(["insert", "restore", "undeclared-category", "omitted-category"])(
+    "rejects %s output category drift without adopting new authority", async mutation => {
+      const f = current = await fixture();
+      const roots = [f.roots[0]!];
+      const originalRoots = structuredClone(roots);
+      const job = await prisma.workflowJob.create({ data: { workspaceId: f.workspace.id,
+        type: "synthetic.source-writer", payload: { requesterUserId: f.user.id }, status: "RUNNING",
+        attempts: 1, lockedAt: new Date(), lockedBy: "synthetic-local-owner" } });
+      sourceWriterJobs.add(job.id);
+      const outputId = randomUUID();
+      const options = { writeTargets: [{ kind: "BrainSource" as const, id: outputId,
+        projectedAuthority: { sourceType: "EXTERNAL_CONTENT", accessDomain: "WORKSPACE",
+          ...(mutation === "omitted-category" ? {} : { informationCategory: "GENERAL" }) } }],
+        ownerBinding: { kind: "WORKFLOW_JOB" as const, id: job.id, generation: 1,
+          lockedBy: job.lockedBy, lockedAt: job.lockedAt!.toISOString(), requesterUserId: f.user.id } };
+      const token = await prepareArtifactSourceCommit(f.actor, f.workspace.id, roots, options);
+      expect(await prisma.informationCategoryPolicy.count({ where: { workspaceId: f.workspace.id } })).toBe(0);
+      if (mutation === "insert" || mutation === "restore") {
+        const policy = await prisma.informationCategoryPolicy.create({ data: { workspaceId: f.workspace.id,
+          category: "GENERAL", isRestricted: true, allowedRoleIds: [], allowedCircleIds: [] } });
+        if (mutation === "restore") await prisma.informationCategoryPolicy.delete({ where: { id: policy.id } });
+      }
+      const work = vi.fn(async (tx: Parameters<typeof recordArtifactInputLineage>[0]["tx"]) => {
+        const row = await tx.brainSource.create({ data: { id: outputId, workspaceId: f.workspace.id,
+          sourceType: "EXTERNAL_CONTENT", tier: 2, title: "Uncommitted synthetic output", content: "Permitted input",
+          informationCategory: mutation === "undeclared-category" ? "OTHER" : "GENERAL" } });
+        await recordArtifactInputLineage({ tx, actor: f.actor, workspaceId: f.workspace.id,
+          artifact: { kind: "BrainSource", id: row.id }, content: row, origin: "DERIVED", inputs: [], inheritedRoots: roots });
+      });
+      await expect(prisma.$transaction(tx => withArtifactSourceCommit(f.actor, f.workspace.id, tx,
+        roots, options, token, async (bound) => {
+          const [owner] = await bound.$queryRaw<Array<{ id: string }>>`SELECT id FROM "WorkflowJob"
+            WHERE id = ${job.id} AND "workspaceId" = ${f.workspace.id} AND status = 'RUNNING'
+              AND attempts = 1 AND "lockedBy" = ${job.lockedBy} FOR UPDATE`;
+          expect(owner?.id).toBe(job.id);
+        }, () => work(tx)), { timeout: 30_000 })).rejects.toMatchObject({ code:
+          mutation === "insert" || mutation === "restore" ? "SOURCE_CHANGED" : "SOURCE_LOCK_UNCOVERED" });
+      if (mutation === "insert" || mutation === "restore") expect(work).not.toHaveBeenCalled();
+      expect(await prisma.brainSource.count({ where: { id: outputId } })).toBe(0);
+      expect(await prisma.artifactInputLineage.count({ where: { workspaceId: f.workspace.id, artifactId: outputId } })).toBe(0);
+      expect(roots).toEqual(originalRoots);
+      expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, roots)).toBe(true);
     });
 
   it("denies a restored local channel epoch and a changed remote message without copying", async () => {

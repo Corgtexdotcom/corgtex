@@ -10,6 +10,7 @@ import { sealArtifactInputActor } from "./artifact-input-actor";
 import { getExternalProviderWorkerPurpose } from "./external-provider-principal";
 import { getRecorderTranscriptWorkerPurpose, getAudioTranscriptWorkerPurpose } from "./native-transcript-principal";
 import { invariant } from "./errors";
+import { CATEGORY_BOUND_SOURCE_KINDS } from "./information-category-policy";
 import { assertOutsideArtifactNativeCommitPhase, withArtifactNativeCommitPhase } from "./artifact-native-commit-phase";
 import { artifactPermissionEpochIdentities, capturePermissionEpochs, mergePermissionEpochProofs, parsePermissionEpochProof, type PermissionEpochIdentity, type PermissionEpochProof } from "./source-permission-epochs";
 import { authorityIdentity, authorityRecord, discoverAmbientSourceAuthority, discoverSourceAuthorityEdges,
@@ -235,7 +236,12 @@ async function discover(state: Omit<PlanState,"discovered">, db: SourceAuthority
     }
     for (const policy of edges.policies) {
       const key=JSON.stringify([policy.kind,policy.id]);remaining.consume(`policy:${key}`);policies.set(key,policy);
-      if(ambient) ambientPolicies.set(key,policy);
+      // Declared output category governors are current write constraints, never
+      // refreshed historical inputs. OWN epochs keep their existing reservation.
+      const categoryGovernor = output && authorityInput
+        && (CATEGORY_BOUND_SOURCE_KINDS as readonly string[]).includes(authorityInput.kind)
+        && ["InformationCategoryPolicy", "Role", "Circle"].includes(policy.kind);
+      if(ambient || categoryGovernor) ambientPolicies.set(key,policy);
       else if(!output) {
         if(!semantic&&authorityInput&&policy.kind===authorityInput.kind&&policy.id===authorityInput.id
           &&["Member","User"].includes(authorityInput.kind)) {
@@ -280,7 +286,7 @@ async function discover(state: Omit<PlanState,"discovered">, db: SourceAuthority
       invariant(output && projected,409,"SOURCE_LOCK_INCOMPLETE","A source authority row is unavailable.");
       if (!afterWork) ledger.set(`output:${logicalKey(input)}`,"ABSENT");
       ledger.set(`expected-output:${logicalKey(input)}`,hash(outputEnvelope(projectedAuthorityRecord(input,projected,workspaceId))));
-      await addEdges(await discoverSourceAuthorityEdges(context,input,projectedAuthorityRecord(input,projected,workspaceId)),false,true);
+      await addEdges(await discoverSourceAuthorityEdges(context,input,projectedAuthorityRecord(input,projected,workspaceId)),false,true,input);
       continue;
     }
     if (!output && root?.permissionEpochs !== undefined) addVector(root.permissionEpochs);
@@ -292,7 +298,7 @@ async function discover(state: Omit<PlanState,"discovered">, db: SourceAuthority
     if (output && !afterWork) ledger.set(`output:${logicalKey(input)}`,hash(envelope(loaded)));
     if(output) ledger.set(`expected-output:${logicalKey(input)}`,hash(outputEnvelope(afterWork?loaded:projectedAuthorityRecord(input,{...loaded,...projected},workspaceId))));
     await addEdges(await discoverSourceAuthorityEdges(context,input,loaded),false,Boolean(output),input,loaded,Boolean(root),structural);
-    if (projected) await addEdges(await discoverSourceAuthorityEdges(context,input,projectedAuthorityRecord(input,{...loaded,...projected},workspaceId)),false,true);
+    if (projected) await addEdges(await discoverSourceAuthorityEdges(context,input,projectedAuthorityRecord(input,{...loaded,...projected},workspaceId)),false,true,input);
     if (input.kind === "ArtifactInputSnapshot") {
       // A declared newborn snapshot is an OUTPUT, never historical input authority.
       // Its exact source governor was discovered from projectedAuthority before DML.
@@ -487,6 +493,20 @@ export async function prepareSourceCommitLockPlan(actor:AppActor,workspaceId:str
     409,"SOURCE_CHANGED","A structural target was supplied more than once.");
   for(const receipt of state.structural)invariant(!state.writeTargets.some(target=>logicalKey(target)===logicalKey(receipt.target)),
     409,"SOURCE_LOCK_UNCOVERED","Structural authority cannot mutate its canonical target.");
+  // Explicit output categories need durable absence markers before discovery.
+  // This initializes no policy or semantic authority and never changes an existing
+  // epoch. The returned current vector is discarded; original proofs stay intact.
+  const outputCategories = [...new Set(state.writeTargets.flatMap(target => {
+    const category = target.projectedAuthority?.informationCategory;
+    return (CATEGORY_BOUND_SOURCE_KINDS as readonly string[]).includes(target.kind)
+      && typeof category === "string" && category.length > 0 ? [authorityIdentity(category)] : [];
+  }))];
+  invariant(outputCategories.length <= maxNodes,409,"SOURCE_LOCK_LIMIT","Output category closure is too large.");
+  if(outputCategories.length) {
+    const primary = (options.db ?? prisma) as SourceAuthorityPrimaryClient;
+    await primary.$transaction(async tx => { await capturePermissionEpochs(tx,workspaceId,
+      outputCategories.map(id => ({kind:"InformationCategoryPolicy",id}))); });
+  }
   const discovered = await discover(state,options.db ?? prisma);
   for(const receipt of state.structural)invariant(state.writeTargets.some(target=>discovered.newborns.includes(logicalKey(target))&&structuralOutputReferences(target.projectedAuthority).some(reference=>logicalKey(reference)===logicalKey(receipt.target))),
     409,"SOURCE_LOCK_UNCOVERED","Structural authority requires a declared newborn private variant.");
