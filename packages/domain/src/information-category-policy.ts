@@ -56,6 +56,11 @@ export async function classifyInformationSource(actor: AppActor, input: {workspa
     const administrators = await tx.$queryRaw<Array<{id: string}>>`SELECT id FROM "Member" WHERE "workspaceId"=${input.workspaceId}
       AND "userId"=${actor.user.id} AND "isActive"=true AND role='ADMIN' FOR SHARE`;
     invariant(administrators.length === 1, 403, "FORBIDDEN", "A current company administrator is required.");
+    if (input.category !== "GENERAL") {
+      const policies = await tx.$queryRaw<Array<{id: string}>>`SELECT id FROM "InformationCategoryPolicy"
+        WHERE "workspaceId"=${input.workspaceId} AND category=${input.category} FOR SHARE`;
+      invariant(policies.length === 1, 400, "UNKNOWN_INFORMATION_CATEGORY", "Configure this company category before assigning it to a source.");
+    }
     const where = {id: input.id, workspaceId: input.workspaceId}, data = {informationCategory: input.category};
     const result = input.kind === "BrainSource" ? await tx.brainSource.updateMany({where, data})
       // This is a permission-only reclassification. Preserve the Document body

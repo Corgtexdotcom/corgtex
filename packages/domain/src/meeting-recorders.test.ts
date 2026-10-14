@@ -4299,11 +4299,11 @@ describe("meeting recorder domain", () => {
     const { reconcileMeetingRecorders } = await import("./meeting-recorders");
 
     let mockDb = [
-      { id: "recording-stale", workspaceId: "workspace-1", meetingId: "meeting-stale", provider: "MEETING_BAAS", externalBotId: "bot-stale", status: "RECORDING", activeDedupeKey: "dedupe-1", createdAt: new Date(Date.now() - 36000000), joinAt: new Date(Date.now() - 36000000), transcriptProcessedAt: null, meeting: { recordedAt: new Date(Date.now() - 36000000), scheduledEndAt: new Date(Date.now() - 32400000) } },
+      { id: "recording-stale", workspaceId: "workspace-1", meetingId: "meeting-stale", provider: "MEETING_BAAS", externalBotId: "bot-stale", status: "RECORDING", activeDedupeKey: "dedupe-1", createdAt: new Date(Date.now() - 93600000), joinAt: new Date(Date.now() - 93600000), transcriptProcessedAt: null, meeting: { recordedAt: new Date(Date.now() - 93600000), scheduledEndAt: new Date(Date.now() - 90000000) } },
       { id: "recording-expired", workspaceId: "workspace-1", meetingId: "meeting-expired", provider: "RECALL_AI", externalBotId: "bot-expired", status: "COMPLETED", activeDedupeKey: null, createdAt: new Date(Date.now() - 93600000), joinAt: new Date(Date.now() - 93600000), transcriptProcessedAt: null, meeting: { recordedAt: new Date(Date.now() - 93600000), scheduledEndAt: new Date(Date.now() - 90000000) } },
       { id: "recording-permanent", workspaceId: "workspace-1", meetingId: "meeting-permanent", provider: "RECALL_AI", externalBotId: "bot-permanent", status: "COMPLETED", activeDedupeKey: null, createdAt: new Date(Date.now() - 7200000), joinAt: new Date(Date.now() - 7200000), transcriptProcessedAt: null, meeting: { recordedAt: new Date(Date.now() - 7200000), scheduledEndAt: new Date(Date.now() - 3600000) } }
     ];
-    prismaMock.meetingRecording.findMany.mockImplementation(async (q: any) => mockDb.filter((r) => q.where?.provider === "RECALL_AI" ? (r.provider === "RECALL_AI" && (!q.where.OR || q.where.OR.some((c: any) => c.status?.in?.includes(r.status) || (c.status === "FAILED" && c.failureCode === "STALE_RECORDER" && r.status === "FAILED" && (r as any).failureCode === "STALE_RECORDER")))) : (q.where?.status?.in ? q.where.status.in.includes(r.status) : false)));
+    prismaMock.meetingRecording.findMany.mockImplementation(async (q: any) => mockDb.filter((r) => q.where?.provider?.in?.includes("RECALL_AI") ? (q.where.provider.in.includes(r.provider) && (!q.where.OR || q.where.OR.some((c: any) => c.status?.in?.includes(r.status) || (c.status === "FAILED" && c.failureCode === "STALE_RECORDER" && r.status === "FAILED" && (r as any).failureCode === "STALE_RECORDER")))) : (q.where?.status?.in ? q.where.status.in.includes(r.status) : false)));
     prismaMock.meetingRecording.findUnique.mockImplementation(async (args: any) => mockDb.find(r => r.id === args.where.id) || null);
     prismaMock.meetingRecording.update.mockImplementation(async (args: any) => { const idx = mockDb.findIndex(r => r.id === args.where.id); if (idx !== -1) mockDb[idx] = { ...mockDb[idx], ...args.data }; return mockDb[idx]; });
 
@@ -4318,7 +4318,7 @@ describe("meeting recorder domain", () => {
     // Pass 1: should terminalize all three
     await reconcileMeetingRecorders("workspace-1");
 
-    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "recording-stale" }, data: expect.objectContaining({ status: "FAILED", failureCode: "STALE_RECORDER" }) }));
+    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "recording-stale" }, data: expect.objectContaining({ status: "FAILED", failureCode: "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" }) }));
     expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "recording-expired" }, data: expect.objectContaining({ status: "FAILED", failureCode: "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" }) }));
     expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "recording-permanent" }, data: expect.objectContaining({ status: "FAILED", failureCode: "RECORDER_TRANSCRIPT_FETCH_FAILED" }) }));
 
@@ -4374,7 +4374,7 @@ describe("meeting recorder domain", () => {
   it("terminalizes 24-hour expired active recordings with zero provider calls", async () => {
     const { reconcileMeetingRecorders } = await import("./meeting-recorders");
     let mockDb = [{ id: "active-expired", workspaceId: "workspace-1", meetingId: "meeting-expired", provider: "RECALL_AI", externalBotId: "bot-expired", status: "RECORDING", activeDedupeKey: "dedupe-1", createdAt: new Date(1), joinAt: new Date(1), transcriptProcessedAt: null, meeting: { recordedAt: new Date(1), scheduledEndAt: new Date(1) } }];
-    prismaMock.meetingRecording.findMany.mockImplementation(async (q: any) => q.where?.provider === "RECALL_AI" ? mockDb : []); prismaMock.meetingRecording.findUnique.mockImplementation(async () => mockDb[0]);
+    prismaMock.meetingRecording.findMany.mockImplementation(async (q: any) => q.where?.provider?.in?.includes("RECALL_AI") ? mockDb : []); prismaMock.meetingRecording.findUnique.mockImplementation(async () => mockDb[0]);
     await reconcileMeetingRecorders("workspace-1");
     expect(fetchMock).not.toHaveBeenCalled(); expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "active-expired" }, data: expect.objectContaining({ status: "FAILED", failureCode: "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" }) }));
   });
@@ -4382,7 +4382,7 @@ describe("meeting recorder domain", () => {
   it("expires recovery absolutely despite a repeatedly renewed webhook claim", async () => {
     const { reconcileMeetingRecorders } = await import("./meeting-recorders");
     const recording = { id: "claim-race", workspaceId: "workspace-1", meetingId: "meeting-claim", provider: "RECALL_AI", externalBotId: "bot-claim", status: "RECORDING", activeDedupeKey: "dedupe-1", createdAt: new Date(1), joinAt: new Date(1), transcriptProcessedAt: null, meeting: { recordedAt: new Date(1), scheduledEndAt: new Date(1) } };
-    prismaMock.meetingRecording.findMany.mockImplementation(async (q: any) => q.where?.provider === "RECALL_AI" ? [recording] : []); prismaMock.meetingRecording.findUnique.mockResolvedValue(recording as any); prismaMock.meetingRecorderProviderEvent.findFirst.mockResolvedValue({ id: "webhook-fresh" } as any);
+    prismaMock.meetingRecording.findMany.mockImplementation(async (q: any) => q.where?.provider?.in?.includes("RECALL_AI") ? [recording] : []); prismaMock.meetingRecording.findUnique.mockResolvedValue(recording as any); prismaMock.meetingRecorderProviderEvent.findFirst.mockResolvedValue({ id: "webhook-fresh" } as any);
     await reconcileMeetingRecorders("workspace-1");
     expect(prismaMock.meetingRecorderProviderEvent.findFirst).not.toHaveBeenCalled(); expect(fetchMock).not.toHaveBeenCalled();
     expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "claim-race" }, data: expect.objectContaining({ failureCode: "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" }) }));
@@ -4393,7 +4393,7 @@ describe("meeting recorder domain", () => {
     const { createHmac } = await import("crypto");
     const recording = { id: "rec-late", workspaceId: "workspace-1", meetingId: "meeting-1", provider: "RECALL_AI", externalBotId: "bot-late", status: "COMPLETED", activeDedupeKey: "dedupe-1", createdAt: new Date(1), joinAt: new Date(1), transcriptProcessedAt: null as Date | null, failureCode: null as string | null, failureMessage: null as string | null, meeting: { recordedAt: new Date(1), scheduledEndAt: new Date(1), workspaceId: "workspace-1" } };
     let mockDb = [recording];
-    prismaMock.meetingRecording.findMany.mockImplementation(async (q: any) => mockDb.filter(r => q.where?.provider === "RECALL_AI" ? true : false));
+    prismaMock.meetingRecording.findMany.mockImplementation(async (q: any) => mockDb.filter(r => q.where?.provider?.in?.includes("RECALL_AI") ? true : false));
     prismaMock.meetingRecording.findUnique.mockImplementation(async () => mockDb[0]);
     prismaMock.meetingRecorderProviderEvent.findFirst.mockResolvedValue(null);
     prismaMock.meetingRecorderSmokeRun.updateMany.mockResolvedValue({ count: 1 });

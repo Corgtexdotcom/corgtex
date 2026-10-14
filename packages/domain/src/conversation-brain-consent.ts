@@ -76,8 +76,12 @@ export async function exportConversationAnswerToBrain(actor: AppActor, submissio
       AND "workspaceId"=${request.workspaceId} AND "userId"=${userId} FOR SHARE`;
     const session = await tx.conversationSession.findFirst({ where: { id: request.conversationId, workspaceId: request.workspaceId, userId } });
     invariant(session, 404, "NOT_FOUND", "Conversation not found.");
-    const turns = await tx.conversationTurn.findMany({ where: { conversationId: session.id }, orderBy: [{ sequenceNumber: "asc" }, { id: "asc" }], take: 101 });
-    invariant(turns.length <= 100, 413, "BRAIN_EXPORT_LIMIT", "Choose a conversation with at most 100 turns.");
+    // NONE and PARTIAL bind only the chosen output and explicit metadata. FULL
+    // still scans one sentinel beyond its complete-transcript limit.
+    const turns = await tx.conversationTurn.findMany({ where: { conversationId: session.id,
+      ...(request.transcriptMode === "FULL" ? {} : {id: {in: [request.outputTurnId, ...request.selectedTurns.map(turn => turn.id)]}}) },
+      orderBy: [{ sequenceNumber: "asc" }, { id: "asc" }], take: 101 });
+    invariant(request.transcriptMode !== "FULL" || turns.length <= 100, 413, "BRAIN_EXPORT_LIMIT", "Full transcript sharing supports at most 100 turns. Choose no transcript or a smaller selection.");
     const output = turns.find(turn => turn.id === request.outputTurnId);
     invariant(output && output.assistantMessage && brainExportHash(output.assistantMessage) === request.expectedOutputHash,
       409, "BRAIN_EXPORT_STALE", "The answer changed. Reload it before sharing.");

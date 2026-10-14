@@ -3642,12 +3642,44 @@ async function completeRecordingWithTranscriptArtifact(_provider: MeetingRecorde
   return publishRecorderTranscript(await prepareRecorderTranscript(nativeAttempt, artifact, metadata));
 }
 
+/** BaaS v2's standardized transcript is nested under result.utterances. Keep
+ * unsupported/error payloads distinct from an authenticated empty transcript. */
+export function meetingBaasTranscriptPayload(payload: unknown): unknown[] {
+  invariant(isRecord(payload) && isRecord(payload.result) && Array.isArray(payload.result.utterances),
+    502, "RECORDER_TRANSCRIPT_INVALID", "Meeting BaaS returned an unsupported transcript artifact.");
+  invariant(payload.result.utterances.every(entry => isRecord(entry) && typeof entry.text === "string"),
+    502, "RECORDER_TRANSCRIPT_INVALID", "Meeting BaaS returned an unsupported transcript utterance.");
+  return payload.result.utterances;
+}
+
+async function fetchMeetingBaasTranscriptArtifact(externalBotId: string) {
+  // Refresh expired webhook URLs through the exact authenticated bot. API keys
+  // never accompany the provider's presigned storage URL, including redirects.
+  const metadata = await fetchJson(`https://api.meetingbaas.com/v2/bots/${encodeURIComponent(externalBotId)}`, {
+    redirect: "error", headers: { "x-meeting-baas-api-key": requireVendorSecret("MEETING_BAAS"), accept: "application/json" },
+  });
+  const bot = isRecord(metadata) && isRecord(metadata.data) ? metadata.data : null;
+  invariant(bot?.bot_id === externalBotId, 409, "RECORDER_WEBHOOK_RECORDING_MISMATCH", "Provider response does not bind this recorder bot.");
+  if (bot.status !== "completed" || !readString(bot.transcription)) {
+    throw new AppError(503, "RECORDER_TRANSCRIPT_NOT_READY", "Meeting BaaS transcript is not ready.");
+  }
+  const downloadUrl = readString(bot.transcription)!;
+  const url = new URL(downloadUrl);
+  invariant(url.protocol === "https:" && !url.username && !url.password, 502, "RECORDER_TRANSCRIPT_URL_INVALID", "Meeting BaaS returned an invalid transcript URL.");
+  let ordinal: number | undefined;
+  const response = await fetchJson(downloadUrl, { redirect: "error", headers: { accept: "application/json" } }, {
+    onRecorderWire: value => { ordinal = value; },
+  });
+  return bindRecorderTranscriptArtifact({ transcriptPayload: meetingBaasTranscriptPayload(response), metadata }, [ordinal]);
+}
+
 async function ingestProviderTranscript(provider: MeetingRecorderProvider, recording: MeetingRecording, event: ProviderWebhookEvent,
   origin: { rawBody: string; headers: Headers | Record<string, string>; providerEventId: string; workspaceId?: string }) {
-  invariant(provider === "RECALL_AI", 409, "UNKNOWN_LINEAGE", "This provider requires authenticated native recorder intake.");
   return withRecorderTranscriptAttempt(recording, origin, async receipt => {
-    const artifact = await fetchRecallTranscriptArtifact({ workspaceId: recording.workspaceId, transcriptId: event.transcriptId,
-      transcriptUrl: event.transcriptUrl, externalBotId: recording.externalBotId });
+    const artifact = provider === "MEETING_BAAS"
+      ? await fetchMeetingBaasTranscriptArtifact(recording.externalBotId!)
+      : await fetchRecallTranscriptArtifact({ workspaceId: recording.workspaceId, transcriptId: event.transcriptId,
+        transcriptUrl: event.transcriptUrl, externalBotId: recording.externalBotId });
     return completeRecordingWithTranscriptArtifact(provider, recording, artifact, receipt);
   });
 }
@@ -3839,7 +3871,7 @@ async function markDuplicateRecoveredRecordingsSkipped(group: RecoverableRecallR
   return skipped;
 }
 
-async function findRecoverableRecallRecording(recordingId: string) {
+async function findRecoverableRecallRecording(recordingId: string, provider: MeetingRecorderProvider) {
   const recording = await prisma.meetingRecording.findUnique({
     where: { id: recordingId },
     include: {
@@ -3851,7 +3883,7 @@ async function findRecoverableRecallRecording(recordingId: string) {
       },
     },
   });
-  if (!recording || recording.provider !== "RECALL_AI") {
+  if (!recording || recording.provider !== provider) {
     return null;
   }
   return recording as RecoverableRecallRecording;
@@ -4035,7 +4067,7 @@ async function recoverRecallTranscripts(workspaceId: string) {
   const recordings = await prisma.meetingRecording.findMany({
     where: {
       workspaceId,
-      provider: "RECALL_AI",
+      provider: { in: ["RECALL_AI", "MEETING_BAAS"] },
       externalBotId: { not: null },
       OR: [
         { status: { in: RECOVERABLE_RECALL_RECORDING_STATUSES } },
@@ -4082,13 +4114,13 @@ async function recoverRecallTranscripts(workspaceId: string) {
       }
 
       try {
-        const current = await findRecoverableRecallRecording(recording.id);
+        const current = await findRecoverableRecallRecording(recording.id, recording.provider);
         if (!current || !current.externalBotId) {
           continue;
         }
 
         const completed = await withRecorderTranscriptAttempt(current, null, async receipt => {
-        try {
+        if (current.provider === "RECALL_AI") try {
           const bot = await fetchRecallBot(current.externalBotId!, current.workspaceId);
           if (!recallBotIsDone(bot)) {
             return false;
@@ -4106,13 +4138,15 @@ async function recoverRecallTranscripts(workspaceId: string) {
           }
           throw error;
         }
-        const artifact = await fetchRecallTranscriptArtifact({ externalBotId: current.externalBotId, workspaceId: current.workspaceId });
-        const latest = await findRecoverableRecallRecording(recording.id);
+        const artifact = current.provider === "MEETING_BAAS"
+          ? await fetchMeetingBaasTranscriptArtifact(current.externalBotId!)
+          : await fetchRecallTranscriptArtifact({ externalBotId: current.externalBotId, workspaceId: current.workspaceId });
+        const latest = await findRecoverableRecallRecording(recording.id, recording.provider);
         if (!latest || !latest.externalBotId) {
           return false;
         }
 
-        return completeRecordingWithTranscriptArtifact("RECALL_AI", latest, artifact, receipt);
+        return completeRecordingWithTranscriptArtifact(current.provider, latest, artifact, receipt);
         });
         if (completed && completed.committed && !("empty" in completed)) {
           recovered += 1;

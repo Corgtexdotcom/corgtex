@@ -78,6 +78,33 @@ describe("authenticated output-specific Brain consent", () => {
     await db.member.update({where: {id: ownerMembership.id}, data: {isActive: true}});
     expect(await isArtifactInputProofReadable(reader, workspace.id, proof)).toBe(false);
   }, 120_000);
+  it("shares a bounded answer and partial selection beyond 100 turns without exporting unrelated history", async () => {
+    const {owner, reader, workspace, session, first, turn, request} = await fixture();
+    // Unselected historical rows deliberately lack input receipts. They must not
+    // be loaded into, or acquire authority through, this selected output export.
+    await db.conversationTurn.createMany({data: Array.from({length: 100}, (_, index) => ({conversationId: session.id,
+      sequenceNumber: index + 2, userMessage: `Unselected private ${index}`, assistantMessage: `Unselected answer ${index}`}))});
+    const output = await turn("Late selected question", "Late selected answer");
+    expect(output.sequenceNumber).toBe(102);
+    const late = {...request, outputTurnId: output.id, expectedOutputHash: brainExportHash(output.assistantMessage)};
+    const none = await exportConversationAnswerToBrain(owner, late);
+    expect(await db.brainSource.findUniqueOrThrow({where: {id: none.sourceId}})).toMatchObject({content: output.assistantMessage,
+      metadata: {transcriptMode: "NONE", transcript: []}});
+    const choice = {id: first.id, hash: brainExportHash([first.id, first.userMessage, first.assistantMessage])};
+    const partial = await exportConversationAnswerToBrain(owner, {...late, transcriptMode: "PARTIAL", selectedTurns: [choice], requestId: randomUUID()});
+    const source = await db.brainSource.findUniqueOrThrow({where: {id: partial.sourceId}});
+    expect(source.content).toBe(output.assistantMessage);
+    expect((source.metadata as {transcript: unknown[]}).transcript).toEqual([{turnId: first.id, userMessage: first.userMessage, assistantMessage: first.assistantMessage}]);
+    const proof = await captureArtifactInputProof(owner, workspace.id, [{kind: "BrainSource", id: source.id}]);
+    expect(await isArtifactInputProofReadable(reader, workspace.id, proof)).toBe(true);
+    const foreignSession = await createConversation(reader, {workspaceId: workspace.id});
+    const foreign = await db.conversationTurn.create({data: {conversationId: foreignSession.id, sequenceNumber: 1, userMessage: "Other member private", assistantMessage: "Other answer"}});
+    for (const selectedTurns of [[{...choice, hash: "0".repeat(64)}], [{id: foreign.id, hash: brainExportHash([foreign.id, foreign.userMessage, foreign.assistantMessage])}]]) {
+      await expect(exportConversationAnswerToBrain(owner, {...late, transcriptMode: "PARTIAL", selectedTurns, requestId: randomUUID()})).rejects.toMatchObject({code: "BRAIN_EXPORT_STALE"});
+    }
+    await expect(exportConversationAnswerToBrain(owner, {...late, transcriptMode: "FULL", selectedTurns: [choice], requestId: randomUUID()})).rejects.toMatchObject({code: "BRAIN_EXPORT_LIMIT"});
+    expect(await db.brainSource.count({where: {workspaceId: workspace.id}})).toBe(2);
+  }, 120_000);
   it("keeps other restricted contributors restricted after explicit export", async () => {
     const {owner, reader, workspace, turn, request} = await fixture();
     const member = await db.member.findFirstOrThrow({where: {workspaceId: workspace.id, userId: owner.kind === "user" ? owner.user.id : ""}});

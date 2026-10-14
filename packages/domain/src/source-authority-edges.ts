@@ -277,7 +277,7 @@ export async function discoverSourceAuthorityEdges(context: AuthorityDiscoveryCo
   if (kind === "NativeTranscriptInput") {
     invariant(["AUDIO_UPLOAD", "DIRECT_MEMBER_UPLOAD", "RECORDER"].includes(String(content.mode)), 409, "SOURCE_LOCK_UNSUPPORTED", "Provider transcript authority is unsupported.");
     if (content.mode === "RECORDER") {
-      invariant(content.ownerMemberId == null && content.submittedByUserId == null && content.recorderProvider === "RECALL_AI",
+      invariant(content.ownerMemberId == null && content.submittedByUserId == null && ["RECALL_AI", "MEETING_BAAS"].includes(String(content.recorderProvider)),
         409, "SOURCE_LOCK_UNSUPPORTED", "Recorder custody cannot borrow a human or unsupported provider grant.");
       field("Meeting", "recorderMeetingId");
       await rows("RecorderTranscriptBinding", { id: authorityIdentity(content.recorderBindingId), workspaceId }, `recorder-binding:${content.recorderBindingId}`, undefined, true);

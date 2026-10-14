@@ -32,11 +32,11 @@ vi.mock("@corgtex/shared", async importOriginal => {
 });
 import { prisma, decryptSecret } from "@corgtex/shared";
 import { prepareArtifactSourceCommit, withArtifactSourceCommit } from "./artifact-source-commit";
-import { redactProviderArtifactUrls } from "./meeting-recorders";
+import { processMeetingRecorderWebhook, reconcileMeetingRecorders, redactProviderArtifactUrls } from "./meeting-recorders";
 import { recordArtifactInputLineage, captureArtifactInputProof, isArtifactInputProofReadable } from "./source-lineage";
-import { readRecorderProviderResponse, captureRecorderProviderWire, reserveRecorderProviderWire, publishEmptyRecorderTranscript, prepareRecorderTranscript, publishRecorderTranscript, withRecorderTranscriptAttempt } from "./recorder-transcript-input";
+import { isRecorderTranscriptInputCurrent, readRecorderProviderResponse, captureRecorderProviderWire, reserveRecorderProviderWire, publishEmptyRecorderTranscript, prepareRecorderTranscript, publishRecorderTranscript, withRecorderTranscriptAttempt } from "./recorder-transcript-input";
 
-async function fixture(proven = true) {
+async function fixture(proven = true, provider: "RECALL_AI" | "MEETING_BAAS" = "RECALL_AI") {
   const workspace = await prisma.workspace.create({ data: { name: "Synthetic recorder", slug: `recorder-${randomUUID()}` } });
   const user = await prisma.user.create({ data: { email: `${randomUUID()}@example.test`, displayName: "Recorder member", passwordHash: "synthetic" } });
   await prisma.member.create({ data: { workspaceId: workspace.id, userId: user.id, role: "ADMIN" } });
@@ -45,7 +45,7 @@ async function fixture(proven = true) {
   if (proven) await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor, workspaceId: workspace.id,
     artifact: { kind: "Meeting", id: meeting.id }, content: meeting, origin: "HUMAN_ORIGINAL", inputs: [] }));
   await prisma.workspaceMeetingRecorderConfig.create({ data: { workspaceId: workspace.id, enabled: true } });
-  const recording = await prisma.meetingRecording.create({ data: { workspaceId: workspace.id, meetingId: meeting.id, provider: "RECALL_AI", externalBotId: `synthetic-bot-${randomUUID()}`, meetingUrl: "https://meet.google.com/synthetic", status: "COMPLETED" } });
+  const recording = await prisma.meetingRecording.create({ data: { workspaceId: workspace.id, meetingId: meeting.id, provider, externalBotId: `synthetic-bot-${randomUUID()}`, meetingUrl: "https://meet.google.com/synthetic", status: "COMPLETED" } });
   return { workspace, actor, meeting, recording };
 }
 const artifact = { transcriptPayload: [{ speaker: "Synthetic speaker", start: 0, text: "Exact native recorder original." }], metadata: { source: "synthetic" } };
@@ -60,6 +60,9 @@ async function ingest(f: Awaited<ReturnType<typeof fixture>>) {
 }
 beforeEach(async () => {
   // The native driver fixture is independent of developer credentials and CI's shell.
+  vi.unstubAllGlobals();
+  vi.stubEnv("MEETING_BAAS_API_KEY", "synthetic-baas-key");
+  vi.stubEnv("MEETING_BAAS_WEBHOOK_SECRET", "synthetic-baas-secret");
   vi.stubEnv("RECALL_API_KEY", "synthetic-recall-key");
   vi.stubEnv("RECALL_REGION", "us-west-2");
   vi.stubEnv("RECALL_WEBHOOK_SECRET", "synthetic-signing");
@@ -67,7 +70,7 @@ beforeEach(async () => {
   probe.failPublication = false; probe.tamperEvent = false; probe.tamperMeeting = false; probe.tamperManifest = false; probe.dispatchEvent = false;
   await truncateAllTables();
 });
-afterAll(async () => { try { await prisma.$disconnect(); } finally { vi.unstubAllEnvs(); } });
+afterAll(async () => { try { await prisma.$disconnect(); } finally { vi.unstubAllEnvs(); vi.unstubAllGlobals(); } });
 
 describe("authenticated recorder native custody and atomic publication", () => {
   it("claims before native fetch, commits complete manifests and event atomically, and serves after the worker lease ends", async () => {
@@ -440,6 +443,165 @@ describe("authenticated recorder native custody and atomic publication", () => {
     })).rejects.toMatchObject({ code: "TRANSCRIPT_TOO_LARGE" });
     expect(bytes).toBeLessThanOrEqual(20 * 1024 * 1024 + 4 * 64 * 1024);
     expect(cancelled).toHaveBeenCalled(); expect(await prisma.recorderTranscriptPublication.count()).toBe(0);
+  });
+
+});
+
+describe("Meeting BaaS authenticated native continuity", () => {
+  const downloadUrl = "https://storage.example.test/synthetic-baas.json?signed=synthetic";
+  const wireText = '\ufeff{ "result": { "utterances": [{"speaker":"BaaS speaker","start":0.125,"end":2.5,"text":"Exact BaaS original."}] } }\n';
+  function signed(f: Awaited<ReturnType<typeof fixture>>, extra: Record<string, unknown> = {}) {
+    const rawBody = JSON.stringify({ id: `baas-event-${randomUUID()}`, event: "bot.completed", data: {
+      bot_id: f.recording.externalBotId, status: "completed", transcription: "https://expired.example.test/old.json",
+      extra: { workspaceId: f.workspace.id, recordingId: f.recording.id, meetingId: f.meeting.id, ...extra },
+    } });
+    return { rawBody, headers: { "webhook-id": "synthetic-baas-message", "webhook-timestamp": "1",
+      "webhook-signature": `v1,${createHmac("sha256", "synthetic-baas-secret").update(`synthetic-baas-message.1.${rawBody}`).digest("base64")}` } };
+  }
+  function native(f: Awaited<ReturnType<typeof fixture>>, options: { text?: string; botId?: string; beforeDownload?: () => Promise<void> } = {}) {
+    const calls = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      expect(probe.depth).toBe(0);
+      expect(init?.redirect).toBe("error");
+      const claim = await prisma.recorderTranscriptClaim.findUniqueOrThrow({ where: { recordingId: f.recording.id } });
+      expect(claim.leaseUntil.getTime()).toBeGreaterThan(Date.now());
+      if (String(url) === `https://api.meetingbaas.com/v2/bots/${f.recording.externalBotId}`) {
+        expect(new Headers(init?.headers).get("x-meeting-baas-api-key")).toBe("synthetic-baas-key");
+        return new Response(JSON.stringify({ success: true, data: { bot_id: options.botId ?? f.recording.externalBotId,
+          status: "completed", transcription: downloadUrl } }), { status: 200 });
+      }
+      expect(String(url)).toBe(downloadUrl);
+      expect(new Headers(init?.headers).get("x-meeting-baas-api-key")).toBeNull();
+      expect(new Headers(init?.headers).get("Authorization")).toBeNull();
+      await options.beforeDownload?.();
+      return new Response(options.text ?? wireText, { status: 200 });
+    });
+    vi.stubGlobal("fetch", calls);
+    return calls;
+  }
+  it("publishes a signed BaaS webhook with exact encrypted wire bytes and ordinary authorized read, then deduplicates", async () => {
+    const f = await fixture(true, "MEETING_BAAS"), request = signed(f), calls = native(f);
+    await expect(processMeetingRecorderWebhook("MEETING_BAAS", request)).resolves.toMatchObject({ processed: true });
+    const input = await prisma.nativeTranscriptInput.findFirstOrThrow({ where: { recordingId: f.recording.id } });
+    expect(input).toMatchObject({ recorderProvider: "MEETING_BAAS", ownerMemberId: null, submittedByUserId: null });
+    const payload = JSON.parse(decryptSecret(input.encryptedPayloadJson));
+    expect(payload.responses.map((wire: { authenticated: boolean }) => wire.authenticated)).toEqual([true, false]);
+    expect(payload.responses[1].text).toBe(wireText);
+    expect(payload.origin.rawBody).toBe(request.rawBody);
+    expect(await isRecorderTranscriptInputCurrent(f.actor, f.workspace.id, { ...input, recorderProvider: "RECALL_AI" }, payload, prisma)).toBe(false);
+    expect(await isRecorderTranscriptInputCurrent(f.actor, randomUUID(), input, payload, prisma)).toBe(false);
+    expect(await isRecorderTranscriptInputCurrent(f.actor, f.workspace.id, input, { ...payload, provider: "RECALL_AI" }, prisma)).toBe(false);
+    expect(payload.selectedResponseOrdinals).toEqual([1]);
+    const publication = await prisma.recorderTranscriptPublication.findFirstOrThrow({ where: { nativeInputId: input.id } });
+    expect(await prisma.meetingRecorderProviderEvent.findUnique({ where: { id: publication.providerEventId! } })).toMatchObject({ processedAt: expect.any(Date) });
+    const { getMeeting } = await import("./meetings");
+    expect(await getMeeting(f.actor, f.workspace.id, f.meeting.id)).toMatchObject({ transcript: "BaaS speaker [00:00:00]: Exact BaaS original." });
+    await expect(processMeetingRecorderWebhook("MEETING_BAAS", request)).resolves.toMatchObject({ duplicate: true });
+    expect(calls).toHaveBeenCalledTimes(2);
+    expect(await prisma.recorderTranscriptPublication.count()).toBe(1);
+  });
+  it.each(["COMPLETED", "RECORDING", "FAILED"] as const)("recovers a %s BaaS recording through authenticated canonical bot HTTP with no webhook or human principal", async status => {
+    const f = await fixture(true, "MEETING_BAAS"), calls = native(f);
+    await prisma.meetingRecording.update({ where: { id: f.recording.id }, data: { status, failureCode: status === "FAILED" ? "STALE_RECORDER" : null } });
+    await reconcileMeetingRecorders(f.workspace.id);
+    const input = await prisma.nativeTranscriptInput.findFirstOrThrow({ where: { recordingId: f.recording.id } });
+    expect(JSON.parse(decryptSecret(input.encryptedPayloadJson)).origin.kind).toBe("AUTHENTICATED_RECOVERY");
+    expect(await prisma.recorderTranscriptPublication.count()).toBe(1);
+    expect(calls).toHaveBeenCalledTimes(2);
+  });
+  it("retains authenticated empty custody and a terminal event without publishing transcript knowledge", async () => {
+    const f = await fixture(true, "MEETING_BAAS"); native(f, { text: '{"result":{"utterances":[]}}' });
+    await processMeetingRecorderWebhook("MEETING_BAAS", { ...signed(f), headers: { "x-mb-secret": "synthetic-baas-secret" } });
+    expect(await prisma.nativeTranscriptInput.count()).toBe(1);
+    expect(await prisma.recorderTranscriptPublication.count()).toBe(0);
+    expect(await prisma.meetingRecording.findUnique({ where: { id: f.recording.id } })).toMatchObject({ transcriptProcessedAt: expect.any(Date), failureCode: "RECORDER_TRANSCRIPT_EMPTY" });
+    expect(await prisma.event.count({ where: { type: "meeting.transcript-uploaded" } })).toBe(0);
+  });
+  it("rejects an unrelated canonical bot despite a valid signed target and leaves its event retryable", async () => {
+    const f = await fixture(true, "MEETING_BAAS"); const calls = native(f, { botId: "foreign-bot" });
+    await expect(processMeetingRecorderWebhook("MEETING_BAAS", signed(f))).rejects.toMatchObject({ code: "RECORDER_WEBHOOK_RECORDING_MISMATCH" });
+    expect(calls).toHaveBeenCalledTimes(1); expect(await prisma.nativeTranscriptInput.count()).toBe(0);
+    expect(await prisma.meetingRecorderProviderEvent.findFirst()).toMatchObject({ processedAt: null });
+  });
+  it.each(["workspace", "provider", "signature"])("rejects a forged %s before provider traffic or custody", async kind => {
+    const f = await fixture(true, "MEETING_BAAS"), calls = native(f);
+    const request = signed(f, kind === "workspace" ? { workspaceId: randomUUID() } : {});
+    if (kind === "provider") await prisma.meetingRecording.update({ where: { id: f.recording.id }, data: { provider: "RECALL_AI" } });
+    if (kind === "signature") request.headers["webhook-signature"] = "v1,forged";
+    await expect(processMeetingRecorderWebhook("MEETING_BAAS", request)).rejects.toMatchObject({ code: kind === "signature" ? "INVALID_SIGNATURE" : "RECORDER_WEBHOOK_RECORDING_MISMATCH" });
+    expect(calls).not.toHaveBeenCalled(); expect(await prisma.nativeTranscriptInput.count()).toBe(0);
+  });
+  it("rejects Recall credentials as BaaS recovery custody", async () => {
+    const f = await fixture(true, "MEETING_BAAS");
+    await expect(withRecorderTranscriptAttempt(f.recording, null, async receipt => {
+      provider(f.recording);
+      return prepareRecorderTranscript(receipt, artifact, {});
+    })).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    expect(await prisma.nativeTranscriptInput.count()).toBe(0);
+  });
+  it("preserves immutable custody and rolls back every publication marker after a late transaction failure", async () => {
+    const f = await fixture(true, "MEETING_BAAS"); native(f); probe.failPublication = true;
+    await expect(processMeetingRecorderWebhook("MEETING_BAAS", signed(f))).rejects.toThrow("synthetic publication rollback");
+    expect(await prisma.nativeTranscriptInput.count()).toBe(1); expect(await prisma.recorderTranscriptPublication.count()).toBe(0);
+    expect(await prisma.meeting.findUnique({ where: { id: f.meeting.id } })).toMatchObject({ transcript: null });
+    expect(await prisma.meetingRecording.findUnique({ where: { id: f.recording.id } })).toMatchObject({ transcriptProcessedAt: null });
+    expect(await prisma.meetingRecorderProviderEvent.findFirst()).toMatchObject({ processedAt: null });
+    expect(await prisma.event.count({ where: { type: "meeting.transcript-uploaded" } })).toBe(0);
+  });
+  it("rejects configuration disable and restore during provider work and never publishes its stale attempt", async () => {
+    const f = await fixture(true, "MEETING_BAAS"); native(f, { beforeDownload: async () => {
+      await prisma.workspaceMeetingRecorderConfig.update({ where: { workspaceId: f.workspace.id }, data: { enabled: false } });
+      await prisma.workspaceMeetingRecorderConfig.update({ where: { workspaceId: f.workspace.id }, data: { enabled: true } });
+    } });
+    await expect(processMeetingRecorderWebhook("MEETING_BAAS", signed(f))).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(await prisma.recorderTranscriptPublication.count()).toBe(0);
+  });
+  it("fences a reclaimed BaaS attempt after HTTP and permits its fresh recovery generation", async () => {
+    const f = await fixture(true, "MEETING_BAAS"); native(f, { beforeDownload: async () => {
+      await prisma.recorderTranscriptClaim.update({ where: { recordingId: f.recording.id }, data: { leaseUntil: new Date(0) } });
+      await withRecorderTranscriptAttempt(f.recording, null, async () => undefined);
+    } });
+    await expect(processMeetingRecorderWebhook("MEETING_BAAS", signed(f))).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(await prisma.recorderTranscriptPublication.count()).toBe(0);
+    native(f); await reconcileMeetingRecorders(f.workspace.id);
+    expect(await prisma.recorderTranscriptPublication.count()).toBe(1);
+    expect(await prisma.recorderTranscriptClaim.findUnique({ where: { recordingId: f.recording.id } })).toMatchObject({ generation: 3 });
+  });
+  it("keeps BaaS global credentials separate from workspace authority and permanently withholds proof after policy revoke/restore", async () => {
+    const f = await fixture(true, "MEETING_BAAS"); native(f); await processMeetingRecorderWebhook("MEETING_BAAS", signed(f));
+    const roots = await captureArtifactInputProof(f.actor, f.workspace.id, [{ kind: "MeetingTranscript", id: f.meeting.id }]);
+    vi.stubEnv("MEETING_BAAS_API_KEY", "rotated-synthetic-key");
+    expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, roots)).toBe(false);
+    vi.stubEnv("MEETING_BAAS_API_KEY", "synthetic-baas-key");
+    expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, roots)).toBe(true);
+    await prisma.workspaceMeetingRecorderConfig.update({ where: { workspaceId: f.workspace.id }, data: { enabled: false } });
+    await prisma.workspaceMeetingRecorderConfig.update({ where: { workspaceId: f.workspace.id }, data: { enabled: true } });
+    expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, roots)).toBe(false);
+  });
+  it("captures only its restricted meeting and leaves ordinary readers and unregistered agents denied", async () => {
+    const f = await fixture(true, "MEETING_BAAS");
+    const { classifyInformationSource, configureInformationCategory } = await import("./information-category-policy");
+    const circle = await prisma.circle.create({ data: { workspaceId: f.workspace.id, name: "BaaS permitted readers" } });
+    const role = await prisma.role.create({ data: { circleId: circle.id, name: "Reader", accountabilities: [], artifacts: [] } });
+    const member = await prisma.member.findFirstOrThrow({ where: { workspaceId: f.workspace.id } });
+    await prisma.roleAssignment.create({ data: { memberId: member.id, roleId: role.id } });
+    await configureInformationCategory(f.actor, { workspaceId: f.workspace.id, category: "SALARY", isRestricted: true,
+      allowedRoleIds: [role.id], allowedCircleIds: [] });
+    await classifyInformationSource(f.actor, { workspaceId: f.workspace.id, kind: "Meeting", id: f.meeting.id, category: "SALARY" });
+    native(f); await processMeetingRecorderWebhook("MEETING_BAAS", signed(f));
+    const roots = await captureArtifactInputProof(f.actor, f.workspace.id, [{ kind: "MeetingTranscript", id: f.meeting.id }]);
+    expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, roots)).toBe(true);
+    const ordinary = await prisma.user.create({ data: { email: `${randomUUID()}@example.test`, passwordHash: "synthetic" } });
+    await prisma.member.create({ data: { workspaceId: f.workspace.id, userId: ordinary.id } });
+    expect(await isArtifactInputProofReadable({ kind: "user", user: ordinary }, f.workspace.id, roots)).toBe(false);
+    const copied: AppActor = { kind: "agent", authProvider: "bootstrap", label: "native-recorder-transcript-worker",
+      workspaceIds: [f.workspace.id], scopes: ["meetings:write", "support:write"] };
+    expect(await isArtifactInputProofReadable(copied, f.workspace.id, roots)).toBe(false);
+  });
+  it.each(['{"error":"synthetic unavailable"}', '{"result":{"utterances":[{"error":"unavailable"}]}}'])("does not turn malformed BaaS provider JSON %s into an empty success receipt", async text => {
+    const f = await fixture(true, "MEETING_BAAS"); native(f, { text });
+    await expect(processMeetingRecorderWebhook("MEETING_BAAS", signed(f))).rejects.toMatchObject({ code: "RECORDER_TRANSCRIPT_INVALID" });
+    expect(await prisma.nativeTranscriptInput.count()).toBe(0);
+    expect(await prisma.meetingRecording.findUnique({ where: { id: f.recording.id } })).toMatchObject({ transcriptProcessedAt: null });
   });
 
 });
