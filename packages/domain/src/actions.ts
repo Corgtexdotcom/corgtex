@@ -3,6 +3,7 @@ import { scanSourceReadableRecords } from "./source-scoped-read";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { createHash } from "node:crypto";
 import { prisma } from "@corgtex/shared";
+import { getMcpOrigin } from "../../shared/src/mcp-context";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import type { ActionStatus, MeetingInsight, Prisma } from "@prisma/client";
 import { appendEvents } from "./events";
@@ -81,6 +82,14 @@ type CreateActionParams = ProducerLineageParams & {
   _membership?: import("@corgtex/shared").MembershipSummary | null;
   _tx?: Prisma.TransactionClient;
 };
+
+/** GPT OAuth POST authenticates the same direct human submission with or
+ * without an idempotency key. A source tag never turns agent/MCP input into a
+ * human original; explicit and inherited roots remain with the producer. */
+function copiedActionSource(actor: AppActor, source: {type: string} | null | undefined) {
+  return Boolean(source && !["WEB_REQUEST", "API_REQUEST"].includes(source.type)
+    && !(source.type === "GPT_REQUEST" && actor.kind === "user" && !getMcpOrigin()));
+}
 
 export function actionRequestSource(type: "WEB_REQUEST" | "API_REQUEST" | "GPT_REQUEST" | "MCP_REQUEST" | "AGENT_TOOL", principalId: string, key: string) {
   const normalizedKey = key.trim();
@@ -684,7 +693,7 @@ async function applyActionDuplicateUpdate(
   if (!existing.proposalId && params.proposalId) updateParams.proposalId = params.proposalId;
   if (params.priority !== undefined && params.priority !== null && existing.priority !== params.priority) updateParams.priority = params.priority;
   if (!Object.keys(updateParams).some((field) => !["workspaceId", "actionId", "lineageInputs", "lineageRoots"].includes(field))) return existing;
-  updateParams.lineageCopied = Boolean(params.source && !["WEB_REQUEST", "API_REQUEST"].includes(params.source.type));
+  updateParams.lineageCopied = copiedActionSource(actor, params.source);
   updateParams.expectedVersion = existing.version;
   updateParams._membership = membership;
   updateParams._tx = tx;
@@ -772,7 +781,7 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
     }
     const receipt = await prepareProducerLineage({
       tx, actor, workspaceId: params.workspaceId, capture: params,
-      copied: Boolean(source && !["WEB_REQUEST", "API_REQUEST"].includes(source.type)),
+      copied: copiedActionSource(actor, source),
       dependencies: actor.kind === "agent" ? [
         ...(source?.type === "MEETING_INSIGHT" ? [{ kind: "MeetingInsight" as const, id: source.id }] : []),
         ...(params.proposalId ? [{ kind: "Proposal" as const, id: params.proposalId }] : []),

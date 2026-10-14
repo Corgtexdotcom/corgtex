@@ -1,7 +1,7 @@
 import { captureArtifactInputProof, readableArtifactIds } from "./source-lineage";
 import { prepareProducerLineage, finishProducerLineage } from "./producer-lineage";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { mcpCredentialVersion, type AppActor } from "@corgtex/shared";
+import { mcpCredentialVersion, runWithMcpOrigin, type AppActor } from "@corgtex/shared";
 import { AppError } from "./errors";
 
 vi.mock("./producer-lineage", () => ({
@@ -188,6 +188,20 @@ describe("action domain lifecycle", () => {
 
     expect(prismaMock.action.create).toHaveBeenCalledTimes(1);
     expect(prismaMock.actionCreationSource.create).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["human", "mcp", "agent"])("classifies a GPT_REQUEST tag for %s without waiving captured roots", async principal => {
+    const {actionRequestSource, createAction} = await import("./actions");
+    const caller = principal === "agent" ? currentCredential("gpt-spoof", ["actions:write"]) : actor;
+    const lineageRoots = [{kind: "BrainSource" as const, id: "restricted", fingerprint: "original"}];
+    prismaMock.action.create.mockResolvedValueOnce({id: "tagged", workspaceId: "workspace-1", title: "Submitted"});
+    const run = () => createAction(caller, {workspaceId: "workspace-1", title: "Submitted", lineageRoots,
+      ...(principal === "agent" ? {isPrivate: false, assigneeMemberId: "member-2"} : {}),
+      source: actionRequestSource("GPT_REQUEST", "user-1", "request-1")});
+    if (principal === "mcp") await runWithMcpOrigin({kind: "oauth", id: "synthetic-origin", workspaceId: "workspace-1", scopeHash: "synthetic", grantEpoch: "0"}, run);
+    else await run();
+    expect(prepareProducerLineage).toHaveBeenCalledWith(expect.objectContaining({copied: principal !== "human",
+      capture: expect.objectContaining({lineageRoots})}));
   });
 
   it("rejects reuse of a request key with different Action content", async () => {
