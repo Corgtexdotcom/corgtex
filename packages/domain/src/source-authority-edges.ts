@@ -1,3 +1,4 @@
+import { categoryGovernorIdentities } from "./information-category-policy";
 import type { Prisma } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
 import type { LineageInput, LineageKind, LineageRoot } from "./source-lineage";
@@ -48,9 +49,9 @@ export const SOURCE_AUTHORITY_REGISTRY = freezeDescriptor({
   Role: related("Role", { circle: {} }), Circle: row("Circle"), RoleAssignment: related("RoleAssignment", { member: {}, role: { circle: {} } }, "optional"),
   RoleVersion: row("RoleVersion"), RoleHolderHistory: row("RoleHolderHistory"), BrainSource: row("BrainSource"), BrainArticle: row("BrainArticle"),
   BrainArticleVersion: related("BrainArticleVersion", { article: {} }), Document: row("Document"), Meeting: row("Meeting"),
-  MeetingTranscript: row("Meeting", "required", { projection: ["id", "workspaceId", "title", "source", "externalId", "calendarExternalId", "meetingUrl", "meetingUrlHash", "transcript", "ingestionGuidanceMd", "recordedAt", "scheduledEndAt", "seriesId", "participantIds", "participantEmails", "archivedAt", "createdAt"] }),
+  MeetingTranscript: row("Meeting", "required", { projection: ["id", "workspaceId", "informationCategory", "title", "source", "externalId", "calendarExternalId", "meetingUrl", "meetingUrlHash", "transcript", "ingestionGuidanceMd", "recordedAt", "scheduledEndAt", "seriesId", "participantIds", "participantEmails", "archivedAt", "createdAt"] }),
   MeetingInsight: row("MeetingInsight"), MeetingSeries: row("MeetingSeries"),
-  MeetingAgenda: row("Meeting", "required", { projection: ["id", "workspaceId", "agendaJson", "archivedAt", "createdAt"] }),
+  MeetingAgenda: row("Meeting", "required", { projection: ["id", "workspaceId", "informationCategory", "agendaJson", "archivedAt", "createdAt"] }),
   DeliberationEntry: row("DeliberationEntry"), KnowledgeChunk: row("KnowledgeChunk"), MeetingFollowUpReview: row("MeetingFollowUpReview"),
   Action: row("Action"), ActionChecklistItem: row("ActionChecklistItem"), Tension: row("Tension"), TensionUpvote: related("TensionUpvote", { tension: {} }, "optional"),
   Recognition: row("Recognition"), GoalUpdate: related("GoalUpdate", { goal: {} }), KeyResult: related("KeyResult", { goal: {} }),
@@ -203,6 +204,21 @@ export async function discoverSourceAuthorityEdges(context: AuthorityDiscoveryCo
     if (content.memberId != null || content.userId != null) await rows("Member", { workspaceId,
       ...(content.memberId != null ? { id: content.memberId } : {}), ...(content.userId != null ? { userId: content.userId } : {}) }, `communication-mapping:${input.id}`, "Member", true);
   }
+  if (kind === "ConversationOperationOutcome" && content.operation === "BRAIN_EXPORT_CONSENT") {
+    const { decodeBrainExportConsent } = await import("./conversation-brain-consent");
+    const consent = decodeBrainExportConsent(content);
+    const { getBrainExportWorkerPurpose } = await import("./brain-export-worker");
+    const worker = getBrainExportWorkerPurpose(actor, workspaceId);
+    if (worker) await rows("WorkflowJob", {id: worker.jobId, workspaceId}, `brain-export-job:${input.id}`, undefined, true);
+    invariant(consent, 409, "SOURCE_LOCK_INCOMPLETE", "Authenticated Brain export receipt is unavailable.");
+    result.consumedArtifacts = [...(result.consumedArtifacts ?? []), ...consent.roots];
+    const boundSources = await rows("BrainSource", {id: consent.sourceId, workspaceId}, `brain-export-source:${input.id}`, undefined, true);
+    result.policies.push(...artifactPermissionEpochIdentities("BrainSource", boundSources[0]));
+    await rows("InformationCategoryPolicy", {workspaceId, category: boundSources[0].informationCategory}, `brain-export-category:${input.id}`);
+    const governors = await categoryGovernorIdentities("BrainSource", boundSources[0], workspaceId, db);
+    result.policies.push(...governors);
+    for (const governor of governors) await rows(governor.kind, {id: governor.id}, `brain-export-governor:${governor.kind}:${governor.id}`);
+  }
   if (kind === "ConversationPromptInput") field("ConversationSession", "sessionId");
   if (["ConversationPendingOperation", "ConversationTurn"].includes(kind)) field("ConversationSession", "conversationId");
   if (["ApprovalDecision", "Objection"].includes(kind)) field("ApprovalFlow", "flowId");
@@ -211,8 +227,11 @@ export async function discoverSourceAuthorityEdges(context: AuthorityDiscoveryCo
     const parent = subjects[String(content.subjectType)]; invariant(parent, 409, "SOURCE_LOCK_UNSUPPORTED", "Approval subject authority is unsupported."); field(parent, "subjectId");
   }
   if (kind === "SqlNativeRunInput") field("ExternalDataSource", "sourceId");
-  if (kind === "ExternalDataSource") {
-    await rows("InformationCategoryPolicy", {workspaceId, category: content.informationCategory}, `sql-category:${input.id}`);
+  if (["ExternalDataSource", "BrainSource", "Document", "Meeting", "MeetingTranscript", "MeetingAgenda"].includes(kind)) {
+    await rows("InformationCategoryPolicy", {workspaceId, category: content.informationCategory}, `source-category:${input.kind}:${input.id}`);
+    const governors = await categoryGovernorIdentities(kind, content, workspaceId, db);
+    result.policies.push(...governors);
+    for (const governor of governors) await rows(governor.kind, {id: governor.id, ...(governor.kind === "Role" ? {circle: {workspaceId}} : {workspaceId})}, `source-category-governor:${governor.kind}:${governor.id}`);
   }
   if (kind === "KnowledgeChunk") {
     if (content.sourceType === "EXTERNAL_DATABASE") {

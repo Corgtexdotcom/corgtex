@@ -1,3 +1,4 @@
+import { categoryGovernorIdentities } from "./information-category-policy";
 import type { Prisma } from "@prisma/client";
 import { isDeepStrictEqual } from "node:util";
 import { artifactPermissionParents, loadArtifactPermissionMetadata } from "./source-permission-parents";
@@ -138,6 +139,7 @@ export async function isArtifactInputPermissionEpochCoverageComplete(params: {
     // envelope is discovered separately. The immutable receipt ID is no grant.
     const required = artifactPermissionEpochIdentities(input.kind, { ...row, id: input.id, workspaceId })
       .filter(identity => input.kind !== "ArtifactInputSnapshot" || identity.kind !== input.kind || identity.id !== input.id);
+    required.push(...await categoryGovernorIdentities(input.kind, row, workspaceId, db));
     if (!required.every(identity => savedKeys.has(JSON.stringify([identity.kind, identity.id])))) return false;
     for (const parent of artifactPermissionParents(input.kind, row)) if (!queue(parent)) return false;
     if (input.kind === "FinanceImportBatch") {

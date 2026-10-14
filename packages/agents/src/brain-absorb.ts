@@ -21,6 +21,9 @@ import {
   captureImmutableArtifactInputProof,
   isArtifactInputProofReadable,
   isArtifactInputProofPubliclyShareable,
+  isBrainExportProofWorkspaceShareable,
+  getBrainExportWorkerPurpose,
+  assertBrainExportWorkerCurrent,
   invariant,
   type LineageRoot,
 } from "@corgtex/domain";
@@ -126,7 +129,10 @@ export async function absorbSource(params: {
   async function assertInputsCurrent(client: Prisma.TransactionClient = prisma) {
     invariant(await isArtifactInputProofReadable(agentActor, params.workspaceId, liveRoots, client),
       409, "SOURCE_CHANGED", "Absorption inputs changed before publication.");
-    invariant(await isArtifactInputProofPubliclyShareable(agentActor, params.workspaceId, immutableRoots, client),
+    await assertBrainExportWorkerCurrent(agentActor, params.workspaceId, client);
+    invariant(await (getBrainExportWorkerPurpose(agentActor, params.workspaceId)
+      ? isBrainExportProofWorkspaceShareable(agentActor, params.workspaceId, immutableRoots, client)
+      : isArtifactInputProofPubliclyShareable(agentActor, params.workspaceId, immutableRoots, client)),
       409, "SOURCE_RESTRICTED", "Absorption inputs cannot be published to the workspace.");
   }
   // Fresh opaque suffixes avoid probing private article names to choose the output slug.
@@ -152,6 +158,7 @@ export async function absorbSource(params: {
   }
 
   async function lockSource(tx: Prisma.TransactionClient) {
+    await assertBrainExportWorkerCurrent(agentActor, params.workspaceId, tx);
     await lockWorkspaceArchiveArtifact(tx, "BrainSource", sourceId);
     await tx.$queryRaw`SELECT id FROM "BrainSource" WHERE id = ${sourceId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
   }

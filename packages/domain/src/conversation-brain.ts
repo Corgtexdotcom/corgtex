@@ -1,11 +1,10 @@
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
-import type { BrainSourceType, Prisma } from "@prisma/client";
-import { requireWorkspaceMembership } from "./auth";
+import type { BrainSource, Prisma } from "@prisma/client";
 import { appendEvents } from "./events";
 import { getUningestedConversations } from "./conversations";
 import { invariant } from "./errors";
-import { assertArtifactInputWriteFence, recordArtifactInputLineage, sealArtifactInputActor, type LineageInput, type LineageRoot } from "./source-lineage";
+import { recordArtifactInputLineage, type LineageInput, type LineageRoot } from "./source-lineage";
 
 export type ConversationBrainIngestParams = {
   workspaceId: string;
@@ -16,35 +15,11 @@ export type ConversationBrainIngestParams = {
   lineageRoots?: LineageRoot[];
 };
 
-/** Join publication content, receipt and outbox writes to the caller's atomic transaction. */
+/** Model-originated content is not an authenticated choice to share a conversation. */
 export async function ingestConversationOnDemandInTransaction(
-  tx: Prisma.TransactionClient, actor: AppActor, submission: ConversationBrainIngestParams,
-) {
-  sealArtifactInputActor(actor);
-  const params = structuredClone(submission);
-  await assertArtifactInputWriteFence(tx);
-  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
-  const finalSourceType = (params.sourceType as BrainSourceType) || "CONVERSATION";
-  invariant(Boolean(params.lineageInputs?.length || params.lineageRoots?.length),
-    409, "UNKNOWN_LINEAGE", "Conversation content cannot be saved until all its input permissions are verified.");
-  const source = await tx.brainSource.create({ data: {
-    workspaceId: params.workspaceId, sourceType: finalSourceType, tier: 2,
-    content: params.content, title: params.title,
-    authorMemberId: membership?.id || null, channel: "chat-demand",
-  } });
-  await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
-    artifact: { kind: "BrainSource", id: source.id }, content: source,
-    origin: "DERIVED", inputs: params.lineageInputs ?? [], inheritedRoots: params.lineageRoots,
-  });
-  await tx.auditLog.create({ data: {
-    workspaceId: params.workspaceId, actorUserId: actor.kind === "user" ? actor.user.id : null,
-    action: "brain-source.created", entityType: "BrainSource", entityId: source.id,
-    meta: { sourceType: source.sourceType, tier: source.tier, onDemand: true },
-  } });
-  await appendEvents(tx, [{ workspaceId: params.workspaceId, type: "brain-source.created",
-    aggregateType: "BrainSource", aggregateId: source.id, payload: { sourceId: source.id } }]);
-  await assertArtifactInputWriteFence(tx);
-  return source;
+  _tx: Prisma.TransactionClient, _actor: AppActor, _submission: ConversationBrainIngestParams,
+): Promise<BrainSource> {
+  invariant(false, 409, "BRAIN_CONSENT_REQUIRED", "Use Save to Brain on a persisted answer and confirm the transcript selection.");
 }
 
 /** Standalone callers retain an owned transaction; foundation callers can supply theirs. */

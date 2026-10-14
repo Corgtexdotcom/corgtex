@@ -14,7 +14,7 @@ vi.mock("@corgtex/domain", () => ({
 describe("save_to_brain", () => {
   beforeEach(() => { vi.clearAllMocks(); });
 
-  it("reports unverified conversation inputs as an unsuccessful save", async () => {
+  it("requires authenticated UI consent instead of accepting model-selected content", async () => {
     const { saveToBrainAction } = await import("./brain-save");
     ingestConversationOnDemandMock.mockRejectedValue(new TestAppError(409, "UNKNOWN_LINEAGE", "Unverified inputs"));
 
@@ -22,6 +22,7 @@ describe("save_to_brain", () => {
       { workspaceId: "ws-1" }, { title: "Notes", content: "Synthetic text" });
 
     expect(result).toMatchObject({ success: false });
-    expect(result.message).toContain("could not be verified");
+    expect(result.message).toContain("Only your confirmation");
+    expect(ingestConversationOnDemandMock).not.toHaveBeenCalled();
   });
 });

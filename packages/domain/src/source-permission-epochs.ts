@@ -95,7 +95,7 @@ export function artifactPermissionEpochIdentities(kind: string, row: Record<stri
   if (kind === "BrainArticleVersion") add("BrainArticle", row.articleId);
   if (kind === "WorkflowJobInput") add("WorkflowJobInput", row.id);
   add("Workspace", row.workspaceId);
-  if (kind === "ExternalDataSource") {
+  if (["ExternalDataSource", "BrainSource", "Document", "Meeting", "MeetingTranscript", "MeetingAgenda"].includes(kind)) {
     add("InformationCategoryPolicy", row.informationCategory);
     if (row.isRestricted === true) {
       for (const id of Array.isArray(row.allowedRoleIds) ? row.allowedRoleIds : []) add("Role", id);

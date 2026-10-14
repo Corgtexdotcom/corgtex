@@ -116,7 +116,7 @@ const GOVERNING_FIELDS = ["id", "workspaceId", "crmWorkspaceId", "ownerMemberId"
   "provider", "providerKey", "externalId", "externalWorkspaceId", "appId", "providerPrincipalId", "accessDomain", "credentialId", "agentCredentialId", "agentIdentityId", "audienceType",
   "goalId", "actionId", "tensionId", "articleId", "threadId", "mapViewId", "constitutionId", "proposalId", "artifactId", "executionRequestId", "meetingId", "sessionId", "conversationId",
   "flowId", "subjectType", "subjectId", "sourceType", "sourceId", "parentType", "parentId", "demoLeadId", "qualificationId", "accountId", "contactId", "dealId", "activityId", "targetWorkspaceId",
-  "batchId", "documentId", "brainSourceId", "sourceBatchId", "reportId", "sourceCandidateId", "candidateId", "targetFactId", "factId", "appliedByUserId", "approvedByUserId", "kind", "beforeRevisionId", "afterRevisionId", "agentRunId", "stepId", "priorRunSnapshotId", "variantOfArticleId",
+  "batchId", "documentId", "informationCategory", "brainSourceId", "sourceBatchId", "reportId", "sourceCandidateId", "candidateId", "targetFactId", "factId", "appliedByUserId", "approvedByUserId", "kind", "beforeRevisionId", "afterRevisionId", "agentRunId", "stepId", "priorRunSnapshotId", "variantOfArticleId",
   "variantTargetFingerprint", "variantSourceStateJson", "targetFingerprint", "targetKind", "targetId", "targetsJson", "scopeJson", "sourceStateJson", "metadata", "operation", "controlJson", "ingressInputId"];
 const envelope = (row: Record<string, unknown>) => Object.fromEntries(GOVERNING_FIELDS.filter(key => key in row).map(key => [key,row[key]]));
 const outputEnvelope=(row:Record<string,unknown>)=>Object.fromEntries(GOVERNING_FIELDS.map(key=>[key,row[key]??null]));

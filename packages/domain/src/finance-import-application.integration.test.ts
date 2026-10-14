@@ -76,7 +76,7 @@ async function restatementFixture() {
 }
 describe("Finance report application database contract", () => {
   it("publishes immutable historical revisions for a real two-upload restatement without rebasing old proof", async () => {
-    const { alice, bob, workspace, actor, approver, ready, request, semanticKey, originalBytes } = await restatementFixture();
+    const { alice, bob, workspace, approver, ready, request, semanticKey, originalBytes } = await restatementFixture();
     const first = await ready(12_345);
     await expect(applyFinanceReportImport(approver, request(first))).resolves.toMatchObject({appliedNow: 1});
     const oldFact = await prisma.financeReportFact.findUniqueOrThrow({where: {workspaceId_semanticKey: {workspaceId: workspace.id, semanticKey}}});

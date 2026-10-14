@@ -1,3 +1,5 @@
+import { getBrainExportWorkerPurpose, isBrainExportWorkerCurrent } from "./brain-export-worker";
+import { canReadInformationCategory, categoryGovernorIdentities, CATEGORY_BOUND_SOURCE_KINDS } from "./information-category-policy";
 import { financeFactValue, financeValueHash, isFinanceFactRevisionIntact } from "./finance-fact-value";
 import { getRecorderTranscriptWorkerPurpose, nativeTranscriptPrincipalUserId } from "./native-transcript-principal";
 import { artifactPermissionEpochIdentities, capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, mergePermissionEpochProofs, parsePermissionEpochProof, withSourceCommitPermissionReadPass, type PermissionEpochProof } from "./source-permission-epochs";
@@ -236,7 +238,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Hash only fields that can convey information or change visibility. */
 function snapshotContentFields(kind: LineageKind, row?: Record<string, unknown>) {
   if (kind === "NativeTranscriptInput" && row?.mode === "RECORDER") return [...fingerprintFields(kind), "recorderAttemptId", "recorderMeetingId", "recorderBindingId", "recorderProvider"];
-  return kind === "BrainSource" ? ["id", "workspaceId", "accessDomain", "sourceType", "tier", "title", "channel", "content", "ingestionGuidanceMd", "fileStorageKey", "fileMimeType", "metadata", "authorMemberId", "fileName", "fileSizeBytes", "externalId", "createdAt"] : fingerprintFields(kind);
+  return kind === "BrainSource" ? ["id", "workspaceId", "informationCategory", "accessDomain", "sourceType", "tier", "title", "channel", "content", "ingestionGuidanceMd", "fileStorageKey", "fileMimeType", "metadata", "authorMemberId", "fileName", "fileSizeBytes", "externalId", "createdAt"] : [...fingerprintFields(kind), ...((CATEGORY_BOUND_SOURCE_KINDS as readonly string[]).includes(kind) ? ["informationCategory"] : [])];
 }
 
 function fingerprintFields(kind: LineageKind) {
@@ -366,13 +368,13 @@ async function loadArtifact(db: LineageClient, workspaceId: string, input: Linea
     case "Document": return db.document.findFirst({ where });
     case "Meeting": return db.meeting.findFirst({ where });
     case "MeetingTranscript": return db.meeting.findFirst({ where, select: {
-      id: true, workspaceId: true, title: true, source: true, externalId: true, calendarExternalId: true, meetingUrl: true, meetingUrlHash: true, transcript: true, ingestionGuidanceMd: true,
+      id: true, workspaceId: true, informationCategory: true, title: true, source: true, externalId: true, calendarExternalId: true, meetingUrl: true, meetingUrlHash: true, transcript: true, ingestionGuidanceMd: true,
       recordedAt: true, scheduledEndAt: true, seriesId: true, participantIds: true, participantEmails: true,
       archivedAt: true, createdAt: true,
     } });
     case "MeetingInsight": return db.meetingInsight.findFirst({ where });
     case "MeetingSeries": return db.meetingSeries.findFirst({ where });
-    case "MeetingAgenda": return db.meeting.findFirst({ where, select: { id: true, workspaceId: true, agendaJson: true, archivedAt: true, createdAt: true } });
+    case "MeetingAgenda": return db.meeting.findFirst({ where, select: { id: true, workspaceId: true, informationCategory: true, agendaJson: true, archivedAt: true, createdAt: true } });
     case "MeetingFollowUpReview": return db.meetingFollowUpReview.findFirst({ where });
     case "DeliberationEntry": return db.deliberationEntry.findFirst({ where });
     case "KnowledgeChunk": return db.knowledgeChunk.findFirst({ where });
@@ -457,7 +459,7 @@ const IMPLICIT_HUMAN_ORIGINAL_SNAPSHOT_KINDS = new Set<LineageKind>([
 ]);
 
 function isNativeControlOutcome(row: Record<string, unknown>) {
-  return ["BRAIN_SOURCE_REMOVAL_COMPLETED", "ACTION_COMPLETED", "ACTION_COMPLETION_PUBLIC_NOTE"].includes(String(row.operation))
+  return ["BRAIN_SOURCE_REMOVAL_COMPLETED", "ACTION_COMPLETED", "ACTION_COMPLETION_PUBLIC_NOTE", "BRAIN_EXPORT_CONSENT"].includes(String(row.operation))
     && isRecord(row.controlJson) && row.controlJson.version === 1;
 }
 
@@ -466,6 +468,7 @@ function isArchived(row: unknown) {
 }
 
 function actorCanReadRecord(actor: AppActor, workspaceId: string, membership: { id: string; role: string } | null, kind: LineageKind, row: Record<string, unknown>) {
+  if (kind === "ConversationOperationOutcome" && row.operation === "BRAIN_EXPORT_CONSENT") return Boolean(membership && actor.kind === "user" || getBrainExportWorkerPurpose(actor, workspaceId)?.receiptId === row.id);
   if (kind === "ConversationOperationOutcome" && row.operation === "ACTION_COMPLETION_PUBLIC_NOTE")
     return row.actorKind === "public" && row.userId == null && row.credentialId == null
       && row.credentialVersion == null && row.scopeHash == null
@@ -591,7 +594,11 @@ async function currentCredentialCanRead(db: LineageClient, actor: AppActor, work
   return live && (!scopes.length || scopes.some(scope => actor.scopes?.includes(scope)));
 }
 
-type InternalReadPurpose = { kind: "credential-parent"; toolLinkId: string };
+type InternalReadPurpose = { kind: "credential-parent"; toolLinkId: string }
+  | { kind: "brain-export"; receiptId: string; privateInputs: readonly { kind: string; id: string; fingerprint: string }[] };
+function consentAllows(purpose: InternalReadPurpose | undefined, kind: string, id: string, fingerprint: string) {
+  return purpose?.kind === "brain-export" && purpose.privateInputs.some(input => input.kind === kind && input.id === id && input.fingerprint === fingerprint);
+}
 function credentialPurposeSnapshot(row: Record<string, unknown>) {
   return row.sourceKind === "WorkspaceToolLinkCredential" && isRecord(row.accessEnvelopeJson)
     && row.accessEnvelopeJson.credentialParentPurposeVersion === 1;
@@ -613,7 +620,7 @@ async function rootIsReadable(db: LineageClient, actor: AppActor, workspaceId: s
       membership, domains, root, visited, localMemo, purpose))) return false;
   }
   if (root.permissionEpochs !== undefined && !await isArtifactPermissionEpochProofCurrent(workspaceId, root.permissionEpochs, db)) return false;
-  const key = `${root.kind}:${root.id}:${root.fingerprint}:${purpose ? `credential-parent:${purpose.toolLinkId}` : "ordinary"}`;
+  const key = `${root.kind}:${root.id}:${root.fingerprint}:${purpose?.kind === "credential-parent" ? `credential-parent:${purpose.toolLinkId}` : purpose?.kind === "brain-export" ? `brain-export:${purpose.receiptId}` : "ordinary"}`;
   if (visited.has(key)) return false;
   const cached = memo.get(key);
   if (cached !== undefined) return cached;
@@ -709,10 +716,12 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
     const permissionKind = typeof envelope.permissionKind === "string" && envelope.permissionKind in CONTENT_FIELDS
       ? envelope.permissionKind as LineageKind : sourceKind;
     if (permissionKind !== sourceKind && !(sourceKind === "BrainArticleVersion" && permissionKind === "BrainArticle")) return false;
-    if (isArchived(envelope) || !actorCanReadRecord(actor, workspaceId, membership, permissionKind, envelope)) return false;
+    if (isArchived(envelope) || (!consentAllows(purpose, sourceKind, String(row.sourceId), String(row.sourceFingerprint))
+      && !actorCanReadRecord(actor, workspaceId, membership, permissionKind, {...envelope, id: row.sourceId}))) return false;
     if (sourceKind === "CheckIn" && !await db.member.findFirst({ where: { id: String(envelope.memberId), workspaceId, isActive: true }, select: { id: true } })) return false;
     if ((sourceKind === "BrainSource" || sourceKind === "Document") && !domains.includes(String(envelope.accessDomain))) return false;
-    if (sourceKind === "ConversationTurn" && actor.kind === "user" && envelope.requesterUserId !== actor.user.id) return false;
+    if (sourceKind === "ConversationTurn" && actor.kind === "user" && envelope.requesterUserId !== actor.user.id
+      && !consentAllows(purpose, sourceKind, String(row.sourceId), String(row.sourceFingerprint))) return false;
     const upstream = parseRoots(row.rootsJson as Prisma.JsonValue);
     if (!upstream || !knownSnapshotOrigin(row)
       || (sourceKind === "WorkspaceToolLinkCredential" && (row.origin !== "DERIVED" || !credentialPurposeSnapshot(row)))
@@ -754,7 +763,7 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
     }
     if (!await evaluateRoot(db, actor, workspaceId, membership, domains,
       { kind: sourceKind, id: String(row.sourceId), fingerprint: String(row.sourceFingerprint) }, visited, memo, true, false, purpose)) return false;
-    for (const input of upstream) if (!await rootIsReadable(db, actor, workspaceId, membership, domains, input, visited, memo)) return false;
+    for (const input of upstream) if (!await rootIsReadable(db, actor, workspaceId, membership, domains, input, visited, memo, purpose)) return false;
     return true;
   }
   if (root.kind === "GenericDerivedArtifactVariant") {
@@ -782,6 +791,11 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
     if (!input || !await isNativeTranscriptInputCurrent(actor, workspaceId, input, db)) return false;
   }
   if (root.kind === "NativeTranscriptInput") {
+    if (row.mode === "RECORDER") {
+      const meeting = await db.meeting.findFirst({where: {id: String(row.recorderMeetingId), workspaceId}});
+      if (!meeting || !await canReadInformationCategory(actor, workspaceId, meeting.informationCategory, db)
+        && !await (await import("./recorder-transcript-input")).isRecorderCategoryCaptureCurrent(actor, workspaceId, meeting.id, db)) return false;
+    }
     const { isNativeTranscriptInputCurrent } = await import("./native-transcript-input");
     if (!await isNativeTranscriptInputCurrent(actor, workspaceId, row as unknown as Parameters<typeof isNativeTranscriptInputCurrent>[2], db)) return false;
   }
@@ -811,6 +825,12 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
     if (!await current(actor, workspaceId,
       row as unknown as Parameters<typeof authority.isExternalMcpResponseInputCurrent>[2], db)) return false;
   }
+  if ((CATEGORY_BOUND_SOURCE_KINDS as readonly string[]).includes(root.kind)) {
+    if (typeof row.informationCategory !== "string") return false;
+    if (!await canReadInformationCategory(actor, workspaceId, row.informationCategory, db)
+      && !(["Meeting", "MeetingTranscript", "MeetingAgenda"].includes(root.kind)
+        && await (await import("./recorder-transcript-input")).isRecorderCategoryCaptureCurrent(actor, workspaceId, root.id, db))) return false;
+  }
   if (root.kind === "ExternalDataSource") {
     const {canReadSqlSource} = await import("./sql-source-policy");
     if (!domains.includes(String(row.accessDomain)) || !await canReadSqlSource(actor, workspaceId,
@@ -830,7 +850,14 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
   if (root.kind === "McpToolInput" && (!isMcpToolInputEncryptedPayload(row.argumentsJson) || !Array.isArray(row.requiredScopes) || !row.requiredScopes.length
     || row.requiredScopes.some(scope => typeof scope !== "string" || !scope))) return false;
   if (root.kind === "ConversationOperationOutcome") {
-    if (row.operation === "BRAIN_SOURCE_REMOVAL_COMPLETED") {
+    if (row.operation === "BRAIN_EXPORT_CONSENT") {
+      const { currentBrainExportConsent } = await import("./conversation-brain-consent");
+      const consent = await currentBrainExportConsent(actor, row, workspaceId, db);
+      if (!consent || !(actor.kind === "user" && membership
+        || await isBrainExportWorkerCurrent(actor, workspaceId, root.id, db))) return false;
+      const exportPurpose: InternalReadPurpose = { kind: "brain-export", receiptId: root.id, privateInputs: consent.privateInputs };
+      for (const input of consent.roots) if (!await rootIsReadable(db, actor, workspaceId, membership, domains, input, visited, memo, exportPurpose)) return false;
+    } else if (row.operation === "BRAIN_SOURCE_REMOVAL_COMPLETED") {
       const { isBrainSourceRemovalOutcomeReadable } = await import("./brain-source-removal-outcome");
       if (!await isBrainSourceRemovalOutcomeReadable(actor, workspaceId, row, db)) return false;
     } else if (row.operation === "ACTION_COMPLETED") {
@@ -1104,11 +1131,13 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
   }
   if (root.kind === "ConversationPromptInput") {
     const session = await db.conversationSession.findFirst({ where: { id: String(row.sessionId), workspaceId } });
-    if (!session || session.userId !== row.userId || (actor.kind === "user" && session.userId !== actor.user.id)) return false;
+    if (!session || session.userId !== row.userId || (actor.kind === "user" && session.userId !== actor.user.id
+      && !consentAllows(purpose, root.kind, root.id, root.fingerprint))) return false;
   }
   if (root.kind === "ConversationTurn") {
     const session = await db.conversationSession.findFirst({ where: { id: String(row.conversationId), workspaceId } });
-    if (!session || actor.kind !== "user" || session.userId !== actor.user.id) return false;
+    if (!session || (!consentAllows(purpose, root.kind, root.id, root.fingerprint)
+      && (actor.kind !== "user" || session.userId !== actor.user.id))) return false;
   }
   if (root.kind === "AdviceRequest" && (actor.kind !== "user" || row.requestedByUserId !== actor.user.id)) {
     if (row.audienceType === "MEMBERS") {
@@ -1179,7 +1208,7 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
   }
   if ((root.kind === "BrainSource" || root.kind === "Document")
     && !domains.includes(String((row as Record<string, unknown>).accessDomain))) return false;
-  if (!actorCanReadRecord(actor, workspaceId, membership, root.kind, row)) return false;
+  if (!consentAllows(purpose, root.kind, root.id, root.fingerprint) && !actorCanReadRecord(actor, workspaceId, membership, root.kind, row)) return false;
   if (permissionOnly) return true;
   if (lineageContentFingerprint(root.kind, row) !== root.fingerprint) return false;
   const manifest = db === prisma ? readManifest ?? null : await latestManifest(db, workspaceId, root);
@@ -1205,7 +1234,7 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
     // contributed the value. Persisted derivations now require its typed snapshot.
     if (upstream.some(input => input.kind === "WorkspaceToolLinkCredential")) return false;
     for (const input of upstream) {
-      if (!await rootIsReadable(db, actor, workspaceId, membership, domains, input, visited, memo)) return false;
+      if (!await rootIsReadable(db, actor, workspaceId, membership, domains, input, visited, memo, purpose)) return false;
     }
   }
   return true;
@@ -1323,7 +1352,7 @@ async function snapshotInput(actor: AppActor, tx: Prisma.TransactionClient, work
   }
   const contentJson = Object.fromEntries(snapshotContentFields(root.kind, content)
     .map((field) => [field, record[field] ?? null]));
-  const accessEnvelope = Object.fromEntries(["permissionKind", "kind", "isPrivate", "ownerMemberId", "authorUserId", "status", "createdByUserId",
+  const accessEnvelope = Object.fromEntries(["permissionKind", "operation", "kind", "isPrivate", "ownerMemberId", "authorUserId", "status", "createdByUserId",
     "localUserId", "selectedByUserId", "connectionId", "providerKey", "sourceKind", "externalId", "submittedByUserId", "agentCredentialId", "actorKind", "credentialId", "credentialVersion", "scopeHash", "visibility", "classification", "publicEnabledAt", "publicRevokedAt", "isActive", "agentKey", "userId", "sessionId", "conversationId", "memberId", "authorMemberId", "recipientMemberId", "archivedAt", "accessDomain", "requesterUserId", "variantOfArticleId", "variantTargetFingerprint", "variantInputSetHash"]
     .map((field) => [field, envelope[field] ?? null]));
   if (root.kind === "NativeTranscriptInput" && record.mode === "RECORDER") Object.assign(accessEnvelope, {
@@ -1646,6 +1675,17 @@ export async function rebaseArtifactInputProofToSnapshots(actor: AppActor, works
 /** Public destinations have no reliable per-user membership/finance entitlement. */
 export async function isArtifactInputProofPubliclyShareable(actor: AppActor, workspaceId: string,
   roots: readonly LineageRoot[], db: LineageClient = prisma) {
+  return artifactInputProofAudience(actor, workspaceId, roots, db);
+}
+/** An exact active export worker may publish the selected output within its company. */
+export async function isBrainExportProofWorkspaceShareable(actor: AppActor, workspaceId: string,
+  roots: readonly LineageRoot[], db: LineageClient = prisma) {
+  const purpose = getBrainExportWorkerPurpose(actor, workspaceId);
+  return Boolean(purpose && await isBrainExportWorkerCurrent(actor, workspaceId, purpose.receiptId, db)
+    && await artifactInputProofAudience(actor, workspaceId, roots, db, purpose.receiptId));
+}
+async function artifactInputProofAudience(actor: AppActor, workspaceId: string,
+  roots: readonly LineageRoot[], db: LineageClient, consentReceiptId?: string) {
   if (!await isArtifactInputProofReadable(actor, workspaceId, roots, db)) return false;
   const seen = new Set<string>();
   const publicAuthorities = new Set<string>();
@@ -1662,7 +1702,7 @@ export async function isArtifactInputProofPubliclyShareable(actor: AppActor, wor
     publicAuthorities.add(key);
     const row = await loadArtifactPermissionMetadata(db, workspaceId, input);
     if (!row || isArchived(row) || (input.kind === "Member" && row.isActive !== true) || privateEnvelope(input.kind, row)) return false;
-    if (input.kind === "ExternalDataSource") {
+    if ((CATEGORY_BOUND_SOURCE_KINDS as readonly string[]).includes(input.kind)) {
       const category = typeof row.informationCategory === "string" ? await db.informationCategoryPolicy.findUnique({
         where: {workspaceId_category: {workspaceId, category: row.informationCategory}}}) : null;
       if (category?.isRestricted) return false;
@@ -1676,13 +1716,22 @@ export async function isArtifactInputProofPubliclyShareable(actor: AppActor, wor
     seen.add(key);
     const loaded = await loadArtifact(db, workspaceId, root);
     if (!isRecord(loaded)) return false;
+    // The complete read above validates every inner input under the exact private
+    // consent purpose. Only this authenticated boundary may stop audience descent.
+    if (consentReceiptId && (root.kind === "ConversationOperationOutcome" && root.id === consentReceiptId
+      && loaded.operation === "BRAIN_EXPORT_CONSENT" || root.kind === "ArtifactInputSnapshot"
+      && loaded.sourceKind === "ConversationOperationOutcome" && loaded.sourceId === consentReceiptId)) return true;
     if (privateEnvelope(root.kind, loaded)) return false;
+    if ((CATEGORY_BOUND_SOURCE_KINDS as readonly string[]).includes(root.kind) && typeof loaded.informationCategory === "string"
+      && (await db.informationCategoryPolicy.findUnique({where: {workspaceId_category: {workspaceId, category: loaded.informationCategory}}}))?.isRestricted) return false;
     for (const parent of artifactPermissionParents(root.kind, loaded)) if (!await authorityIsPublic(parent)) return false;
     let upstream: LineageRoot[] | null = [];
     if (root.kind === "ArtifactInputSnapshot") {
       if (!isRecord(loaded.accessEnvelopeJson) || privateEnvelope(loaded.sourceKind as LineageKind, loaded.accessEnvelopeJson)) return false;
       const original = await loadArtifact(db, workspaceId, { kind: loaded.sourceKind as LineageKind, id: String(loaded.sourceId) });
       if (!isRecord(original) || privateEnvelope(loaded.sourceKind as LineageKind, original)) return false;
+      if ((CATEGORY_BOUND_SOURCE_KINDS as readonly string[]).includes(String(loaded.sourceKind)) && typeof original.informationCategory === "string"
+        && (await db.informationCategoryPolicy.findUnique({where: {workspaceId_category: {workspaceId, category: original.informationCategory}}}))?.isRestricted) return false;
       for (const parent of artifactPermissionParents(loaded.sourceKind as LineageKind, original)) if (!await authorityIsPublic(parent)) return false;
       upstream = parseRoots(loaded.rootsJson as Prisma.JsonValue);
     } else if (root.kind === "BrainArticleVersion") {
@@ -1743,6 +1792,13 @@ export async function inspectStoredArtifactInputDependencies(db: LineageClient, 
       upstream = parseRoots(row.rootsJson as Prisma.JsonValue);
       if (!upstream || !knownSnapshotOrigin(row)
         || (row.origin === "DERIVED" && !upstream.length)) return false;
+      if (row.sourceKind === "ConversationOperationOutcome" && isRecord(row.contentJson) && row.contentJson.operation === "BRAIN_EXPORT_CONSENT") {
+        const { decodeBrainExportConsent } = await import("./conversation-brain-consent");
+        const original = await loadArtifact(db, workspaceId, {kind: "ConversationOperationOutcome", id: String(row.sourceId)});
+        const consent = original && decodeBrainExportConsent(original);
+        if (!consent) return false;
+        upstream.push(...consent.roots);
+      }
       if (row.sourceKind === "ConversationOperationOutcome") {
         const dependency = publicNoteDependency(row.contentJson);
         if (dependency === null) return false;
@@ -1763,6 +1819,12 @@ export async function inspectStoredArtifactInputDependencies(db: LineageClient, 
           || (manifest.origin === "DERIVED" && (!upstream.length || manifest.epochProofVersion !== 1
             || !parsePermissionEpochProof(manifest.permissionEpochsJson)))) return false;
       } else if (needsManifest(root.kind, row)) return false;
+      if (root.kind === "ConversationOperationOutcome" && row.operation === "BRAIN_EXPORT_CONSENT") {
+        const { decodeBrainExportConsent } = await import("./conversation-brain-consent");
+        const consent = decodeBrainExportConsent(row);
+        if (!consent) return false;
+        upstream = [...(upstream ?? []), ...consent.roots];
+      }
       if (root.kind === "ConversationOperationOutcome") {
         const dependency = publicNoteDependency(row);
         if (dependency === null) return false;
@@ -1819,7 +1881,21 @@ export async function captureArtifactPermissionEpochs(actor: AppActor, workspace
     invariant(isRecord(loaded), 409, "SOURCE_CHANGED", "A permission-bearing input is unavailable.");
     identities.push(...artifactPermissionEpochIdentities(root.kind, { ...loaded, id: root.id, workspaceId })
       .filter(identity => root.kind !== "ArtifactInputSnapshot" || identity.kind !== root.kind || identity.id !== root.id));
+    const categoryGovernors = await categoryGovernorIdentities(root.kind, loaded, workspaceId, tx);
+    identities.push(...categoryGovernors);
+    if (categoryGovernors.length && actor.kind === "user") {
+      const member = await tx.member.findFirst({where: {workspaceId, userId: actor.user.id, isActive: true}, select: {id: true}});
+      if (member) identities.push({kind: "MemberRolePolicy", id: member.id});
+    }
     pending.push(...artifactPermissionParents(root.kind, { ...loaded, id: root.id }));
+    if (root.kind === "ConversationOperationOutcome" && loaded.operation === "BRAIN_EXPORT_CONSENT") {
+      const { decodeBrainExportConsent } = await import("./conversation-brain-consent");
+      const native = await loadArtifact(tx, workspaceId, root);
+      const consent = native && decodeBrainExportConsent(native);
+      invariant(consent && await isArtifactPermissionEpochProofCurrent(workspaceId, consent.epochs, tx),
+        409, "PERMISSION_CHANGED", "The confirmed export's original authority changed.");
+      identities.push(...consent.epochs.entries.map(({kind, id}) => ({kind, id})));
+    }
     if (root.kind === "FinanceImportBatch") {
       const upload = await tx.financeReportUploadInput.findFirst({ where: { workspaceId, batchId: root.id }, select: { id: true } });
       invariant(upload, 409, "SOURCE_CHANGED", "A native upload permission parent is unavailable.");

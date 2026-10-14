@@ -7,7 +7,7 @@ import { installSourcePermissionEpochFixture } from "../../../domain/src/source-
 export const fixture = (() => {
   const rows: Record<string, any[]> = {};
   const timestamp = new Date("2026-10-12T10:00:00Z");
-  const names = ["workspace", "user", "member", "document", "action", "tension", "proposal", "meeting", "meetingInsight",
+  const names = ["informationCategoryPolicy", "workspace", "user", "member", "document", "action", "tension", "proposal", "meeting", "meetingInsight",
     "modelUsageBudget", "modelUsage", "notification", "constitution", "constitutionSourceReference", "policyCorpus", "brainArticle", "checkIn", "brainSource", "conversationSession", "conversationTurn", "conversationPromptInput", "agentIdentity", "artifactInputLineage", "artifactInputSnapshot", "agentRun", "agentStep", "agentToolCall", "event"];
   const relatedKind: Record<string, string> = { user: "user", meeting: "meeting", member: "member", ownerMember: "member", agentRun: "agentRun", conversation: "conversationSession", session: "conversationSession" };
   function relation(row: any, key: string) {
@@ -15,7 +15,7 @@ export const fixture = (() => {
   }
   function matches(row: any, where: any): boolean {
     return Boolean(row) && Object.entries(where ?? {}).every(([key, value]: [string, any]) => {
-      if (["workspaceId_agentKey", "workspaceId_userId"].includes(key)) return matches(row, value);
+      if (["workspaceId_category", "workspaceId_agentKey", "workspaceId_userId"].includes(key)) return matches(row, value);
       if (key === "AND") return (Array.isArray(value) ? value : [value]).every((part: any) => matches(row, part));
       if (key === "OR") return value.some((part: any) => matches(row, part));
       if (key === "NOT") return !matches(row, value);
@@ -47,6 +47,7 @@ export const fixture = (() => {
   function stored(name: string, data: any) {
     return { id: `${name}-${rows[name].length}`, createdAt: timestamp,
       ...(!["user", "member", "workspace", "modelUsageBudget", "modelUsage", "notification", "constitution", "constitutionSourceReference", "policyCorpus", "brainArticle", "checkIn", "brainSource", "agentRun", "agentStep", "agentToolCall"].includes(name) ? { updatedAt: timestamp } : {}),
+      ...(["brainSource", "document", "meeting"].includes(name) ? { informationCategory: "GENERAL" } : {}),
       ...(name === "brainSource" ? { accessDomain: "WORKSPACE", archivedAt: null } : {}),
       ...(name === "conversationSession" ? { status: "ACTIVE" } : {}),
       ...(name === "agentRun" ? { contextJson: {}, resultJson: null } : {}),
