@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { AppError } from "./errors";
 import { Prisma, type MeetingRecording, type RecorderTranscriptAttempt } from "@prisma/client";
-import { encryptSecret, prisma, type AppActor } from "@corgtex/shared";
+import { encryptSecret, env, prisma, type AppActor } from "@corgtex/shared";
 import { capturePermissionEpochs, isArtifactPermissionEpochProofCurrent } from "./source-permission-epochs";
 import { invariant } from "./errors";
 import { requireRecallWorkspaceBinding } from "./recall-workspace-bindings";
@@ -29,9 +29,16 @@ const attempts = new WeakMap<object, AttemptState>();
 const transport = new AsyncLocalStorage<AttemptState>();
 const hash = (value: unknown) => nativeTranscriptPayloadHash(value);
 
-function bindingHash(workspaceId: string, config: { enabled: boolean; defaultProvider: string; fallbackProvider: string | null; providerSettings: unknown }) {
-  const binding = requireRecallWorkspaceBinding(workspaceId);
-  return hash({ workspaceId, provider: "RECALL_AI", apiKey: binding.apiKey, webhookSecret: binding.webhookSecret,
+function providerBinding(workspaceId: string, provider: string) {
+  if (provider === "RECALL_AI") return requireRecallWorkspaceBinding(workspaceId);
+  invariant(provider === "MEETING_BAAS" && env.MEETING_BAAS_API_KEY, 503, "RECORDER_VENDOR_NOT_CONFIGURED", "Recorder provider credentials are unavailable.");
+  return { apiKey: env.MEETING_BAAS_API_KEY, webhookSecret: env.MEETING_BAAS_WEBHOOK_SECRET,
+    providerWorkspaceId: null, region: "meetingbaas" };
+}
+
+function bindingHash(workspaceId: string, provider: string, config: { enabled: boolean; defaultProvider: string; fallbackProvider: string | null; providerSettings: unknown }) {
+  const binding = providerBinding(workspaceId, provider);
+  return hash({ workspaceId, provider, apiKey: binding.apiKey, webhookSecret: binding.webhookSecret,
     providerWorkspaceId: binding.providerWorkspaceId ?? null, region: binding.region,
     config: { enabled: config.enabled, defaultProvider: config.defaultProvider,
       fallbackProvider: config.fallbackProvider, providerSettings: config.providerSettings } });
@@ -48,8 +55,10 @@ export function captureRecorderProviderWire(url: string, init: RequestInit, stat
   if (ordinal === undefined || !state.streamedOrdinals.has(ordinal)) state.transportBytes += bytes;
   invariant(state.transportBytes <= MAX_ARTIFACT_BYTES && state.wireBytes <= MAX_ARTIFACT_BYTES, 413, "TRANSCRIPT_TOO_LARGE", "Recorder artifact exceeds its native payload bound.");
   const headers = new Headers(init.headers);
-  const authenticated = new URL(url).origin === `https://${state.region}.recall.ai`
-    && headers.get("Authorization") === (/^(Token|Bearer)\s+/i.test(state.apiKey) ? state.apiKey : `Token ${state.apiKey}`);
+  const authenticated = state.attempt.provider === "MEETING_BAAS"
+    ? new URL(url).origin === "https://api.meetingbaas.com" && headers.get("x-meeting-baas-api-key") === state.apiKey
+    : new URL(url).origin === `https://${state.region}.recall.ai`
+      && headers.get("Authorization") === (/^(Token|Bearer)\s+/i.test(state.apiKey) ? state.apiKey : `Token ${state.apiKey}`);
   state.wires.push({ ordinal: ordinal ?? state.wireOrdinal++, url, status, text, authenticated });
 }
 
@@ -158,8 +167,8 @@ async function assertOwner(state: AttemptState, db: Db) {
     && recording && recording.workspaceId === attempt.workspaceId && recording.meetingId === attempt.meetingId
     && recording.provider === attempt.provider && recording.externalBotId === attempt.externalBotId
     && (sameMarkers || exactTerminalMarkers)
-    && binding?.active && !binding.revokedAt && binding.configurationHash === attempt.configurationHash
-    && bindingHash(attempt.workspaceId, config) === attempt.configurationHash
+    && binding?.provider === attempt.provider && binding.workspaceId === attempt.workspaceId && binding.active && !binding.revokedAt && binding.configurationHash === attempt.configurationHash
+    && bindingHash(attempt.workspaceId, attempt.provider, config) === attempt.configurationHash
     && await isArtifactPermissionEpochProofCurrent(attempt.workspaceId, state.origin.permissionEpochs, db)
     && (!attempt.providerEventId || (event && event.workspaceId === attempt.workspaceId && event.recordingId === attempt.recordingId
       && event.provider === attempt.provider && (!event.externalBotId || event.externalBotId === attempt.externalBotId)
@@ -174,28 +183,30 @@ async function assertOwner(state: AttemptState, db: Db) {
  * receipt cannot be minted from a provider label, copied actor or raw payload. */
 export async function withRecorderTranscriptAttempt<T>(recording: MeetingRecording, origin: Origin,
   work: (receipt: RecorderTranscriptAttemptReceipt) => Promise<T>): Promise<T | null> {
-  invariant(recording.provider === "RECALL_AI" && recording.externalBotId, 409, "UNKNOWN_LINEAGE", "Recorder provider intake is unsupported.");
+  invariant(["RECALL_AI", "MEETING_BAAS"].includes(recording.provider) && recording.externalBotId, 409, "UNKNOWN_LINEAGE", "Recorder provider intake is unsupported.");
   let eventIdentity: Record<string, unknown> | null = null;
   if (origin) {
-    const { verifyRecallWebhookSignature, normalizeRecallWebhook, redactProviderArtifactUrls } = await import("./meeting-recorders");
-    invariant(verifyRecallWebhookSignature({ headers: origin.headers, payload: origin.rawBody, workspaceId: origin.workspaceId }),
+    const { verifyRecallWebhookSignature, normalizeRecallWebhook, verifyMeetingBaasWebhookSignature, normalizeMeetingBaasWebhook, redactProviderArtifactUrls } = await import("./meeting-recorders");
+    invariant(recording.provider === "RECALL_AI"
+      ? verifyRecallWebhookSignature({ headers: origin.headers, payload: origin.rawBody, workspaceId: origin.workspaceId })
+      : verifyMeetingBaasWebhookSignature({ headers: origin.headers, payload: origin.rawBody }),
       401, "INVALID_SIGNATURE", "Recorder intake has no authenticated webhook origin.");
-    const event = normalizeRecallWebhook(JSON.parse(origin.rawBody));
+    const event = (recording.provider === "RECALL_AI" ? normalizeRecallWebhook : normalizeMeetingBaasWebhook)(JSON.parse(origin.rawBody));
     invariant(event.externalBotId === recording.externalBotId && (!event.recordingId || event.recordingId === recording.id)
       && (!event.workspaceId || event.workspaceId === recording.workspaceId) && (!event.meetingId || event.meetingId === recording.meetingId)
       && (!origin.workspaceId || origin.workspaceId === recording.workspaceId),
       403, "RECORDER_WEBHOOK_RECORDING_MISMATCH", "Authenticated recorder origin does not bind this exact target.");
-    const issuer = origin.workspaceId ? `RECALL_AI:${origin.workspaceId}` : "RECALL_AI";
+    const issuer = recording.provider === "RECALL_AI" && origin.workspaceId ? `RECALL_AI:${origin.workspaceId}` : recording.provider;
     eventIdentity = { externalEventId: event.eventId, eventType: event.eventType,
       dedupeKey: `${issuer}:${event.eventId ?? createHash("sha256").update(origin.rawBody).digest("hex")}`,
       payloadHash: hash(redactProviderArtifactUrls(JSON.parse(origin.rawBody))) };
   }
   const ingress = origin ? { kind: "SIGNED_WEBHOOK", rawBody: origin.rawBody,
-    headers: Object.fromEntries([...new Headers(origin.headers).entries()].filter(([key]) => ["svix-id", "svix-timestamp", "svix-signature", "webhook-id", "webhook-timestamp", "webhook-signature"].includes(key))), providerEventId: origin.providerEventId, eventIdentity }
+    headers: Object.fromEntries([...new Headers(origin.headers).entries()].filter(([key]) => ["svix-id", "svix-timestamp", "svix-signature", "webhook-id", "webhook-timestamp", "webhook-signature", "x-mb-secret"].includes(key))), providerEventId: origin.providerEventId, eventIdentity }
     : { kind: "AUTHENTICATED_RECOVERY", recordingId: recording.id, externalBotId: recording.externalBotId };
   const claimed = await prisma.$transaction(async tx => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`recorder-claim:${recording.workspaceId}:${recording.id}`},0))`;
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`recorder-provider:${recording.workspaceId}:RECALL_AI`},0))`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`recorder-provider:${recording.workspaceId}:${recording.provider}`},0))`;
     const old = await tx.recorderTranscriptClaim.findUnique({ where: { recordingId: recording.id } });
     if (old) await tx.$queryRaw`SELECT "id" FROM "RecorderTranscriptClaim" WHERE "id"=${old.id} FOR UPDATE`;
     await tx.$queryRaw`SELECT "id" FROM "MeetingRecording" WHERE "id"=${recording.id} FOR SHARE`;
@@ -221,13 +232,13 @@ export async function withRecorderTranscriptAttempt<T>(recording: MeetingRecordi
       return null;
     }
     const config = await configCurrent(recording.workspaceId, tx);
-    const configurationHash = bindingHash(recording.workspaceId, config);
-    let binding = await tx.recorderTranscriptBinding.findFirst({ where: { workspaceId: recording.workspaceId, provider: "RECALL_AI", active: true } });
+    const configurationHash = bindingHash(recording.workspaceId, recording.provider, config);
+    let binding = await tx.recorderTranscriptBinding.findFirst({ where: { workspaceId: recording.workspaceId, provider: recording.provider, active: true } });
     if (binding && binding.configurationHash !== configurationHash) {
       await tx.recorderTranscriptBinding.update({ where: { id: binding.id }, data: { active: false, revokedAt: new Date() } });
       binding = null;
     }
-    binding ??= await tx.recorderTranscriptBinding.create({ data: { workspaceId: recording.workspaceId, provider: "RECALL_AI", configurationHash } });
+    binding ??= await tx.recorderTranscriptBinding.create({ data: { workspaceId: recording.workspaceId, provider: recording.provider, configurationHash } });
     if (old && old.leaseUntil.getTime() > Date.now()) {
       const published = await tx.recorderTranscriptPublication.findUnique({ where: { attemptId: old.attemptId } });
       if (!published) return { busy: true as const };
@@ -239,7 +250,7 @@ export async function withRecorderTranscriptAttempt<T>(recording: MeetingRecordi
     const originalPolicy = await capturePermissionEpochs(tx, recording.workspaceId, [
       { kind: "Workspace", id: recording.workspaceId }, { kind: "Meeting", id: recording.meetingId },
       { kind: "MeetingRecording", id: recording.id }, { kind: "FeaturePolicy", id: "MEETING_RECORDERS" },
-      { kind: "RecorderProviderPolicy", id: "RECALL_AI" },
+      { kind: "RecorderProviderPolicy", id: recording.provider },
     ]);
     const authenticatedOrigin = { ...ingress, permissionEpochs: originalPolicy };
     const attempt = await tx.recorderTranscriptAttempt.create({ data: { id, workspaceId: recording.workspaceId, claimId,
@@ -254,7 +265,7 @@ export async function withRecorderTranscriptAttempt<T>(recording: MeetingRecordi
     return null;
   }
   const { attempt } = claimed;
-  const binding = requireRecallWorkspaceBinding(recording.workspaceId);
+  const binding = providerBinding(recording.workspaceId, recording.provider);
   const actor: AppActor = Object.freeze({ kind: "agent", authProvider: "bootstrap", label: "native-recorder-transcript-worker",
     workspaceIds: [recording.workspaceId], scopes: ["meetings:write", "support:write"] });
   registerRecorderTranscriptWorker(actor, { workspaceId: attempt.workspaceId, recordingId: attempt.recordingId, meetingId: attempt.meetingId,
@@ -296,13 +307,15 @@ async function captureRecorderOriginal(receipt: RecorderTranscriptAttemptReceipt
   const { attempt } = state;
   invariant(!attempt.nativeInputId, 409, "UNKNOWN_LINEAGE", "Recorder attempt already captured its immutable original.");
   const successful = [...state.wires].sort((a,b)=>a.ordinal-b.ordinal).filter(wire => wire.status >= 200 && wire.status < 300);
-  const canonicalBot = `https://${state.region}.recall.ai/api/v1/bot/${attempt.externalBotId}/`;
-  invariant(successful.length > 0 && (state.origin.kind === "SIGNED_WEBHOOK" || successful.some(wire => wire.authenticated && wire.url.startsWith(canonicalBot))),
+  const canonicalBot = attempt.provider === "MEETING_BAAS"
+    ? `https://api.meetingbaas.com/v2/bots/${encodeURIComponent(attempt.externalBotId)}`
+    : `https://${state.region}.recall.ai/api/v1/bot/${attempt.externalBotId}/`;
+  invariant(successful.length > 0 && (state.origin.kind === "SIGNED_WEBHOOK" || successful.some(wire => wire.authenticated && (attempt.provider === "MEETING_BAAS" ? wire.url === canonicalBot : wire.url.startsWith(canonicalBot)))),
     409, "UNKNOWN_LINEAGE", "Recorder recovery has no authenticated canonical provider response.");
   for (const wire of successful) if (!wire.authenticated) invariant(
     String(state.origin.rawBody ?? "").includes(wire.url) || successful.some(parent => parent.authenticated && parent.text.includes(wire.url)),
     409, "UNKNOWN_LINEAGE", "Recorder download is not bound to its authenticated origin.");
-  const { normalizeProviderTranscript } = await import("./meeting-recorders");
+  const { normalizeProviderTranscript, meetingBaasTranscriptPayload } = await import("./meeting-recorders");
   const incoming = normalizeProviderTranscript(artifact.transcriptPayload).trim();
   const selection = selectedArtifacts.get(artifact);
   invariant(!selection || selection.state === state, 409, "UNKNOWN_LINEAGE", "Recorder artifact belongs to another native attempt.");
@@ -314,6 +327,7 @@ async function captureRecorderOriginal(receipt: RecorderTranscriptAttemptReceipt
   const responseTranscripts = selected.map(wire => {
     try {
       const body: unknown = JSON.parse(wire.text.replace(/^\uFEFF/, ""));
+      if (attempt.provider === "MEETING_BAAS") return normalizeProviderTranscript(meetingBaasTranscriptPayload(body)).trim();
       const record = body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : null;
       return typeof body === "string" || Array.isArray(body) || [record?.segments, record?.transcript, record?.words].some(Array.isArray)
         ? normalizeProviderTranscript(body).trim() : "";
@@ -523,7 +537,7 @@ export async function isRecorderTranscriptInputCurrent(actor: AppActor, workspac
     recorderAttemptId?: string | null; recorderMeetingId?: string | null; recorderBindingId?: string | null;
     recorderProvider?: string | null; payloadHash: string; grantHash: string | null }, payload: Record<string, unknown>, db: Db) {
   try {
-    if (input.ownerMemberId || input.submittedByUserId || input.recorderProvider !== "RECALL_AI") return false;
+    if (input.ownerMemberId || input.submittedByUserId || !["RECALL_AI", "MEETING_BAAS"].includes(input.recorderProvider ?? "")) return false;
     const [attempt, binding, recording, config] = await Promise.all([
       db.recorderTranscriptAttempt.findFirst({ where: { id: input.recorderAttemptId ?? "", workspaceId } }),
       db.recorderTranscriptBinding.findFirst({ where: { id: input.recorderBindingId ?? "", workspaceId } }),
@@ -532,7 +546,8 @@ export async function isRecorderTranscriptInputCurrent(actor: AppActor, workspac
     const purpose = getRecorderTranscriptWorkerPurpose(actor, workspaceId);
     if (!attempt || !binding?.active || binding.revokedAt || !recording || (attempt.failureCode && !(attempt.failureCode === "RECORDER_EMPTY" && purpose?.attemptId === attempt.id))
       || attempt.nativeInputId == null || attempt.nativeInputId !== input.id || attempt.bindingId !== input.recorderBindingId || binding.configurationHash !== input.grantHash
-      || bindingHash(workspaceId, config) !== input.grantHash || attempt.configurationHash !== input.grantHash
+      || binding.provider !== attempt.provider || input.recorderProvider !== attempt.provider || payload.provider !== attempt.provider
+      || bindingHash(workspaceId, attempt.provider, config) !== input.grantHash || attempt.configurationHash !== input.grantHash
       || attempt.recordingId !== input.recordingId || attempt.meetingId !== input.recorderMeetingId
       || recording.meetingId !== attempt.meetingId || recording.provider !== attempt.provider || recording.externalBotId !== attempt.externalBotId
       || payload.workspaceId !== workspaceId || payload.attemptId !== attempt.id || payload.bindingId !== attempt.bindingId
@@ -572,6 +587,6 @@ export async function isRecorderCategoryCaptureCurrent(actor: AppActor, workspac
   if (!claim || !attempt || !binding?.active || binding.revokedAt || claim.attemptId !== purpose.attemptId
     || claim.generation !== purpose.generation || claim.nonce !== purpose.nonce || claim.leaseUntil.getTime() <= Date.now()
     || attempt.meetingId !== meetingId || attempt.recordingId !== purpose.recordingId || attempt.bindingId !== binding.id
-    || attempt.generation !== purpose.generation || attempt.nonce !== purpose.nonce) return false;
-  try { return binding.configurationHash === bindingHash(workspaceId, await configCurrent(workspaceId, db)); } catch { return false; }
+    || attempt.generation !== purpose.generation || attempt.nonce !== purpose.nonce || binding.provider !== attempt.provider) return false;
+  try { return binding.configurationHash === bindingHash(workspaceId, attempt.provider, await configCurrent(workspaceId, db)); } catch { return false; }
 }
