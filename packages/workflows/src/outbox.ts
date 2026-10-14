@@ -340,7 +340,10 @@ async function claimPendingEvents(workerId: string, batchSize: number) {
         SELECT event.id
         FROM "Event" AS event
         WHERE event.status = 'PENDING'
-          AND event."availableAt" <= NOW()
+          AND (
+            (event.type = 'brain-source.created' AND event."availableAt" <= (NOW() AT TIME ZONE 'UTC'))
+            OR (event.type <> 'brain-source.created' AND event."availableAt" <= NOW())
+          )
           AND (event."lockedAt" IS NULL OR event."lockedAt" < ${staleBefore})
           AND NOT EXISTS (
             SELECT 1 FROM "WorkspaceFeatureFlag" AS flag
@@ -515,8 +518,14 @@ async function claimPendingJobs(workerId: string, batchSize: number) {
         FROM "WorkflowJob" AS job
         LEFT JOIN "WorkflowJob" AS dep ON dep.id = job."dependsOnJobId"
         WHERE (
-          (job.status = 'PENDING' AND job."runAfter" <= NOW())
-          OR (job.status = 'RUNNING' AND job."lockedAt" IS NOT NULL AND job."lockedAt" < ${staleBefore})
+          (job.status = 'PENDING' AND (
+            (job.type = 'agent.brain-absorb' AND job."runAfter" <= (NOW() AT TIME ZONE 'UTC'))
+            OR (job.type <> 'agent.brain-absorb' AND job."runAfter" <= NOW())
+          ))
+          OR (job.status = 'RUNNING' AND job."lockedAt" IS NOT NULL AND (
+            (job.type = 'agent.brain-absorb' AND job."lockedAt" < (clock_timestamp() AT TIME ZONE 'UTC') - interval '5 minutes')
+            OR (job.type <> 'agent.brain-absorb' AND job."lockedAt" < ${staleBefore})
+          ))
         )
         AND (job."dependsOnJobId" IS NULL OR dep.status = 'COMPLETED')
         AND NOT EXISTS (
@@ -532,7 +541,8 @@ async function claimPendingJobs(workerId: string, batchSize: number) {
       SET
         status = 'RUNNING',
         "startedAt" = NOW(),
-        "lockedAt" = NOW(),
+        "lockedAt" = CASE WHEN job.type = 'agent.brain-absorb'
+          THEN (clock_timestamp() AT TIME ZONE 'UTC') ELSE NOW()::timestamp END,
         "lockedBy" = ${workerId},
         "attempts" = job."attempts" + 1,
         "error" = NULL
@@ -1148,7 +1158,8 @@ async function handleJob(job: ClaimedJob, workerId: string) {
   }
 
   if (job.type.startsWith("agent.")) {
-    const result = await runAgentWorkflowJob(job);
+    const result = job.type === "agent.brain-absorb"
+      ? await runAgentWorkflowJob(job, workerId) : await runAgentWorkflowJob(job);
     if (result && typeof result === "object" && "skipped" in result && result.reason === "concurrency_limit") {
       throw new RetryableWorkflowJobError("Agent concurrency limit reached.");
     }
@@ -1239,7 +1250,7 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
       await recordMeetingProgressForJob(job, resultWasSkipped(result) ? "SKIPPED" : "COMPLETED");
     }));
     if (!diagnostic) {
-      if (job.type === "agent.brain-source-regenerate" && !superseded) {
+      if ((job.type === "agent.brain-source-regenerate" || job.type === "agent.brain-absorb") && !superseded) {
         // A reclaimed job may still have an older model call in flight.
         await prisma.workflowJob.updateMany({
           where: { id: job.id, workspaceId: job.workspaceId, type: job.type,
@@ -1263,7 +1274,7 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
         where: { id: job.id, workspaceId: job.workspaceId, type: RELEASE_DIAGNOSTIC_JOB_TYPE, status: "RUNNING", lockedBy: workerId },
         data: { status: "FAILED", lockedAt: null, lockedBy: null, error: "Release diagnostic failed; reconcile the exact operation." },
       });
-    } else if (job.type === "agent.brain-source-regenerate") {
+    } else if (job.type === "agent.brain-source-regenerate" || job.type === "agent.brain-absorb") {
       const status: WorkflowJobStatus = job.attempts >= MAX_ATTEMPTS || executionAuthorizationRevoked(error) ? "FAILED" : "PENDING";
       await prisma.workflowJob.updateMany({
         where: { id: job.id, workspaceId: job.workspaceId, type: job.type,
