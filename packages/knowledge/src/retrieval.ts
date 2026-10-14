@@ -9,7 +9,7 @@ import { getKnowledgeSearchProvider, isAzureKnowledgeSearchConfigured, normalize
 import { captureSqlCountCollection, captureSqlCountPageProof, captureSqlCountStamps, isSqlCountLedgerCurrent, retainSqlCountEpochs,
   type SqlCountEpoch, type SqlCountStamp } from "./sql-count-proof";
 import { withArtifactCountReleaseSnapshot } from "../../domain/src/source-lineage";
-import { isSqlNativeRunInputLocallyCurrent } from "../../domain/src/sql-native-input";
+import { isSqlNativeRunInputLocallyCurrent, loadSqlNativeRunInputs } from "../../domain/src/sql-native-input";
 
 const sensitivityOrder: SensitivityLabel[] = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "PII"];
 
@@ -279,7 +279,7 @@ async function readableKnowledgeSources(params: RetrievalAccess, sourceIds?: Map
       scanned += nativeIds.length;
       if (scanned > KNOWLEDGE_SCAN_LIMIT) scanLimitExceeded();
       if (!nativeIds.length) continue;
-      const records = await prisma.sqlNativeRunInput.findMany({where: {workspaceId: params.workspaceId, id: {in: nativeIds.map(row => row.id)}}});
+      const records = await loadSqlNativeRunInputs(params.workspaceId, nativeIds.map(row => row.id));
       const readable = await readableArtifactIds(params.actor, params.workspaceId, "SqlNativeRunInput", records);
       for (const record of records) if (readable.has(record.id)) sources.set(`${sourceType}:${record.id}`, {
         kind, record, contentHash: lineageContentFingerprint(kind, record)});

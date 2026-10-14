@@ -6,7 +6,7 @@ import { isArtifactNativeCommitPhase } from "./artifact-native-commit-phase";
 import { lineageContentFingerprint, type LineageRoot } from "./source-lineage";
 import { isPublishedSqlKnowledgeVector } from "./source-permission-coverage";
 import { capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, mergePermissionEpochProofs, parsePermissionEpochProof } from "./source-permission-epochs";
-import { isSqlNativeRunInputCurrent, isSqlNativeRunInputLocallyCurrent } from "./sql-native-input";
+import { areSqlNativeRunInputsUnchanged, isSqlNativeRunInputCurrent, isSqlNativeRunInputLocallyCurrent, loadSqlNativeRunInputs } from "./sql-native-input";
 import { requireWorkspaceMembership } from "./auth";
 
 /** Capture original vectors for actual current SQL candidates in one bounded
@@ -29,7 +29,7 @@ export async function captureSqlKnowledgeInputProof(actor: AppActor, workspaceId
   for (const manifest of manifests) if (!latest.has(manifest.artifactId)) latest.set(manifest.artifactId, manifest);
   const nativeIds = [...new Set(rows.map(row => (row.metadata as Record<string, unknown> | null)?.nativeInputId))];
   if (nativeIds.some(id => typeof id !== "string" || !id)) return null;
-  const native = await prisma.sqlNativeRunInput.findMany({where: {workspaceId, id: {in: nativeIds as string[]}}});
+  const native = await loadSqlNativeRunInputs(workspaceId, nativeIds as string[]);
   if (native.length !== nativeIds.length) return null;
   // Hold caller policy epochs before reading membership bindings, then capture
   // that exact member's role history. No provider or model runs in this TX.
@@ -82,7 +82,7 @@ export async function isSqlKnowledgeInputProofReadable(actor: AppActor, workspac
     || !union.entries.some(entry => entry.kind === "WorkspaceSupportPolicy" && entry.id === actor.user.id)) return false;
   const nativeIds = [...new Set(firstRows.map(row => (row.metadata as Record<string, unknown> | null)?.nativeInputId))];
   if (nativeIds.some(id => typeof id !== "string" || !id)) return false;
-  const native = await prisma.sqlNativeRunInput.findMany({where: {workspaceId, id: {in: nativeIds as string[]}}});
+  const native = await loadSqlNativeRunInputs(workspaceId, nativeIds as string[]);
   if (native.length !== nativeIds.length) return false;
   const nativeById = new Map(native.map(row => [row.id, row]));
   const nativeStamp = new Map(native.map(row => [row.id, lineageContentFingerprint("SqlNativeRunInput", row)]));
@@ -96,16 +96,14 @@ export async function isSqlKnowledgeInputProofReadable(actor: AppActor, workspac
   // ancestry changes. Local permission changes cannot introduce an unreplayed leaf.
   const local = async (originals: readonly SqlNativeRunInput[]) => {
     if (!await isArtifactPermissionEpochProofCurrent(workspaceId, union, prisma)) return null;
-    const [rows, manifests, staged, publications, currentNative] = await Promise.all([
+    const [rows, manifests, staged, publications, nativeUnchanged] = await Promise.all([
       prisma.knowledgeChunk.findMany({where: {workspaceId, id: {in: ids}}}),
       prisma.artifactInputLineage.findMany({where: {workspaceId, artifactType: "KnowledgeChunk", artifactId: {in: ids}}, orderBy: {revision: "desc"}}),
       prisma.sqlKnowledgeStagedChunk.findMany({where: {id: {in: ids}}}),
       prisma.sqlKnowledgePublication.findMany({where: {workspaceId, id: {in: publicationIds as string[]}, status: "COMMITTED", committedAt: {not: null}}}),
-      prisma.sqlNativeRunInput.findMany({where: {workspaceId, id: {in: nativeIds as string[]}}}),
+      areSqlNativeRunInputsUnchanged(workspaceId, originals),
     ]);
-    const currentById = new Map(currentNative.map(row => [row.id, row]));
-    if (rows.length !== ids.length || staged.length !== ids.length || currentNative.length !== originals.length
-      || originals.some(row => !isDeepStrictEqual(row, currentById.get(row.id)))) return null;
+    if (rows.length !== ids.length || staged.length !== ids.length || !nativeUnchanged) return null;
     const byId = new Map(rows.map(row => [row.id, row])), stages = new Map(staged.map(row => [row.id, row]));
     const pubs = new Map(publications.map(row => [row.id, row]));
     const latest = new Map<string, typeof manifests[number]>();

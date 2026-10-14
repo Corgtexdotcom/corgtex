@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { deserialize, serialize } from "node:v8";
 import { isDeepStrictEqual } from "node:util";
 import { Prisma, type SqlNativeRunInput } from "@prisma/client";
-import { decryptSecret, encryptSecret, prisma, type AppActor } from "@corgtex/shared";
+import { decryptSecretBase64, encryptSecret, prisma, type AppActor } from "@corgtex/shared";
 import { invariant } from "./errors";
 import { getRegisteredSqlNativeAccessValidator, getRegisteredSqlNativeDriver } from "./sql-native-driver";
 import { renderSqlNativeRow } from "./sql-native-rendering";
@@ -26,7 +26,7 @@ const captures = new WeakMap<AuthenticatedSqlRunReceipt, Capture>();
 // Cache only authenticated immutable bytes/shape, never access or permissions.
 // Every lookup below still checks current source, caller, epochs and attempt;
 // every ordinary delivery still invokes the registered native access validator.
-const decoded = new Map<string, {encrypted: string; hash: string; configuration: string;
+const decoded = new Map<string, {encrypted: string; hash: string; configuration: string; encryptedHash: string;
   rowsProcessed: number; nextCursor: string | null; payload: Payload; bytes: number}>();
 let decodedBytes = 0;
 const MAX_DECODED_BYTES = 16 * 1024 * 1024;
@@ -110,6 +110,72 @@ function validateDefinition(definition: SqlNativeDefinition) {
   }
 }
 
+type NativeReadHeader = Omit<SqlNativeRunInput, "encryptedPayload"> & {ciphertextLength: number; ciphertextHash: string};
+const nativeReadColumns = Prisma.join(Object.keys(nativeHeaderSelect).map(key => Prisma.raw(`"${key}"`)), ", ");
+function ciphertextHash(value: string) {
+  const digest = createHash("sha256");
+  for (let offset = 0; offset < value.length; offset += CIPHER_PART_SIZE) digest.update(value.slice(offset, offset + CIPHER_PART_SIZE));
+  return digest.digest("hex");
+}
+async function nativeReadHeader(workspaceId: string, id: string, db: Db) {
+  const [row] = await db.$queryRaw<NativeReadHeader[]>(Prisma.sql`SELECT ${nativeReadColumns},
+    length("encryptedPayload") AS "ciphertextLength",
+    encode(sha256(convert_to("encryptedPayload", 'UTF8')), 'hex') AS "ciphertextHash"
+    FROM "SqlNativeRunInput" WHERE id = ${id} AND "workspaceId" = ${workspaceId}`);
+  return row;
+}
+
+/** Read complete original ciphertext in bounded packets. These are custody
+ * reads only: callers must still authorize original epochs and live provider
+ * access. Entry/exit headers and the full server/client hash prevent mixed runs. */
+export async function loadSqlNativeRunInput(workspaceId: string, id: string, db: Db = prisma): Promise<SqlNativeRunInput | null> {
+  const first = await nativeReadHeader(workspaceId, id, db);
+  if (!first || first.ciphertextLength <= 0 || first.ciphertextLength > 128 * 1024 * 1024) return null;
+  const {ciphertextLength, ciphertextHash: expectedHash, ...header} = first;
+  const cached = decoded.get(id);
+  let encryptedPayload: string;
+  if (cached?.encryptedHash === expectedHash && cached.encrypted.length === ciphertextLength) encryptedPayload = cached.encrypted;
+  else {
+    const parts: string[] = [];
+    for (let offset = 0; offset < ciphertextLength; offset += 2 * CIPHER_PART_SIZE) {
+      const [part] = await db.$queryRaw<Array<{ciphertextPart: string; nextCiphertextPart: string}>>(Prisma.sql`SELECT
+        substr("encryptedPayload", ${offset + 1}::integer, ${CIPHER_PART_SIZE}::integer) AS "ciphertextPart",
+        substr("encryptedPayload", ${offset + CIPHER_PART_SIZE + 1}::integer, ${CIPHER_PART_SIZE}::integer) AS "nextCiphertextPart"
+        FROM "SqlNativeRunInput" WHERE id = ${id} AND "workspaceId" = ${workspaceId}`);
+      if (!part || part.ciphertextPart.length + part.nextCiphertextPart.length !== Math.min(2 * CIPHER_PART_SIZE, ciphertextLength - offset)) return null;
+      parts.push(part.ciphertextPart, part.nextCiphertextPart);
+    }
+    encryptedPayload = parts.join("");
+    if (ciphertextHash(encryptedPayload) !== expectedHash) return null;
+  }
+  const last = await nativeReadHeader(workspaceId, id, db);
+  if (!last || !isDeepStrictEqual(first, last)) return null;
+  return {...header, encryptedPayload};
+}
+
+export async function loadSqlNativeRunInputs(workspaceId: string, ids: readonly string[], db: Db = prisma) {
+  const inputs: SqlNativeRunInput[] = [];
+  for (const id of new Set(ids)) {
+    const input = await loadSqlNativeRunInput(workspaceId, id, db);
+    if (input) inputs.push(input);
+  }
+  return inputs;
+}
+
+/** Local rechecks retain full ciphertext equality without retransferring it.
+ * No hash/header observation grants membership, native access or publication. */
+export async function areSqlNativeRunInputsUnchanged(workspaceId: string, inputs: readonly SqlNativeRunInput[], db: Db = prisma) {
+  for (const input of inputs) {
+    const current = await nativeReadHeader(workspaceId, input.id, db);
+    if (!current) return false;
+    const {ciphertextLength, ciphertextHash: currentHash, ...header} = current;
+    const expected = Object.fromEntries(Object.keys(nativeHeaderSelect).map(key => [key, input[key as keyof SqlNativeRunInput]]));
+    if (!isDeepStrictEqual(header, expected) || ciphertextLength !== input.encryptedPayload.length
+      || currentHash !== ciphertextHash(input.encryptedPayload)) return false;
+  }
+  return true;
+}
+
 function originalPayload(input: SqlNativeRunInput, selectedTables: readonly string[]): Payload {
   const saved = decoded.get(input.id);
   if (saved && saved.encrypted === input.encryptedPayload && saved.hash === input.payloadHash
@@ -117,7 +183,7 @@ function originalPayload(input: SqlNativeRunInput, selectedTables: readonly stri
     && saved.nextCursor === input.nextCursor) {
     decoded.delete(input.id); decoded.set(input.id, saved); return saved.payload;
   }
-  const bytes = Buffer.from(decryptSecret(input.encryptedPayload), "base64");
+  const bytes = decryptSecretBase64(input.encryptedPayload, 64 * 1024 * 1024);
   invariant(hash(bytes) === input.payloadHash, 409, "SQL_NATIVE_RECEIPT_INVALID", "Native SQL bytes changed.");
   const payload = deserialize(bytes) as Payload;
   validateNativeSet(payload, selectedTables);
@@ -128,7 +194,7 @@ function originalPayload(input: SqlNativeRunInput, selectedTables: readonly stri
     while (decoded.size && (decoded.size >= 16 || decodedBytes + bytes.length > MAX_DECODED_BYTES)) {
       const id = decoded.keys().next().value!; decodedBytes -= decoded.get(id)!.bytes; decoded.delete(id);
     }
-    decoded.set(input.id, {encrypted: input.encryptedPayload, hash: input.payloadHash, configuration: input.configurationFingerprint,
+    decoded.set(input.id, {encrypted: input.encryptedPayload, hash: input.payloadHash, configuration: input.configurationFingerprint, encryptedHash: ciphertextHash(input.encryptedPayload),
       rowsProcessed: input.rowsProcessed, nextCursor: input.nextCursor, payload: freeze(payload), bytes: bytes.length});
     decodedBytes += bytes.length;
   }
