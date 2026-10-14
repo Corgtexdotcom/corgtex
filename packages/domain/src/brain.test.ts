@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { prismaMock } = vi.hoisted(() => ({
   prismaMock: {
+    informationCategoryPolicy: { findUnique: vi.fn(async () => null) },
     $transaction: vi.fn(),
     $queryRaw: vi.fn(),
     $executeRaw: vi.fn(),
@@ -402,7 +403,7 @@ describe("Brain article draft lifecycle", () => {
     const { brainSourceContentFingerprint } = await import("./brain-derivation");
     const {lineageContentFingerprint} = await import("./source-lineage");
     const source = {
-      id: "source-1", workspaceId: "ws-1", accessDomain: "WORKSPACE",
+      id: "source-1", workspaceId: "ws-1", informationCategory: "GENERAL", accessDomain: "WORKSPACE",
       sourceType: "DOC", tier: 1, title: "Notes", channel: "upload",
       content: "Original notes", ingestionGuidanceMd: null,
       fileStorageKey: "file-1", fileMimeType: "text/plain", archivedAt: null,
@@ -441,7 +442,7 @@ describe("Brain article draft lifecycle", () => {
     const { brainSourceContentFingerprint } = await import("./brain-derivation");
     const {lineageContentFingerprint} = await import("./source-lineage");
     const source = {
-      id: "source-1", workspaceId: "ws-1", accessDomain: "WORKSPACE",
+      id: "source-1", workspaceId: "ws-1", informationCategory: "GENERAL", accessDomain: "WORKSPACE",
       sourceType: "DOC", tier: 1, title: "Notes", channel: "upload",
       content: "Replaced notes", ingestionGuidanceMd: null,
       fileStorageKey: "file-2", fileMimeType: "text/plain", archivedAt: null,
@@ -1005,7 +1006,7 @@ describe("Brain discussions with actual complete lineage receipts", () => {
         .sort((a, b) => name === "artifactInputLineage" ? b.revision - a.revision : a.id.localeCompare(b.id))
         .slice(args.skip ?? 0, (args.skip ?? 0) + (args.take ?? rows[name].length)).map((row) => project(name, row, args)));
       if (delegate.create) delegate.create.mockImplementation(async ({ data }: any) => {
-        const row = { id: `${name}-${rows[name].length}`, createdAt: timestamp, ...(name === "brainDiscussionThread" ? { status: "OPEN", resolvedAt: null, absorbedAt: null } : {}), ...data };
+        const row = { id: `${name}-${rows[name].length}`, createdAt: timestamp, ...(name === "brainSource" ? { informationCategory: "GENERAL" } : {}), ...(name === "brainDiscussionThread" ? { status: "OPEN", resolvedAt: null, absorbedAt: null } : {}), ...data };
         rows[name].push(row); return { ...row };
       });
       if (delegate.update) delegate.update.mockImplementation(async ({ where, data }: any) => {
@@ -1074,7 +1075,7 @@ describe("Brain discussions with actual complete lineage receipts", () => {
   });
   it("rebuilds a generated digest from permitted remaining sources and preserves revoked old body as unknown history", async () => {
     const { updateArticle } = await import("./brain");
-    const sourceA = { id: "old-source", workspaceId: "ws-1", sourceType: "CONVERSATION", accessDomain: "WORKSPACE",
+    const sourceA = { id: "old-source", workspaceId: "ws-1", informationCategory: "GENERAL", sourceType: "CONVERSATION", accessDomain: "WORKSPACE",
       tier: 1, title: "Old", channel: null, content: "Revoked old content", metadata: {}, archivedAt: null, createdAt: timestamp };
     const sourceB = { ...sourceA, id: "remaining-source", title: "Remaining", content: "Permitted remaining content" };
     rows.brainSource.push(sourceA, sourceB);
@@ -1105,7 +1106,7 @@ describe("Brain discussions with actual complete lineage receipts", () => {
   it("preserves an original history body independently of the next edit's sources", async () => {
     const { updateArticle } = await import("./brain");
     rows.member.find(row => row.id === "mem-1").role = "ADMIN";
-    const input = { id: "new-edit-source", workspaceId: "ws-1", sourceType: "CONVERSATION", accessDomain: "WORKSPACE",
+    const input = { id: "new-edit-source", workspaceId: "ws-1", informationCategory: "GENERAL", sourceType: "CONVERSATION", accessDomain: "WORKSPACE",
       tier: 1, title: "New source", content: "New contributed content", channel: null, metadata: {}, archivedAt: null, createdAt: timestamp };
     rows.brainSource.push(input);
     await source.recordArtifactInputLineage({ tx: prismaMock as any, actor: ownerActor, workspaceId: "ws-1",
@@ -1196,7 +1197,7 @@ describe("Brain discussions with actual complete lineage receipts", () => {
 
   it("counts only independently permitted unabsorbed source bodies", async () => {
     const input = await privateInput();
-    const publicSource = { id: "source-original", workspaceId: "ws-1", sourceType: "CONVERSATION", tier: 1, content: "Original public source", title: "Original", metadata: {}, accessDomain: "WORKSPACE", absorbedAt: null, archivedAt: null, createdAt: timestamp };
+    const publicSource = { id: "source-original", workspaceId: "ws-1", informationCategory: "GENERAL", sourceType: "CONVERSATION", tier: 1, content: "Original public source", title: "Original", metadata: {}, accessDomain: "WORKSPACE", absorbedAt: null, archivedAt: null, createdAt: timestamp };
     rows.brainSource.push(publicSource);
     await source.recordArtifactInputLineage({ tx: prismaMock as any, actor: ownerActor, workspaceId: "ws-1", artifact: { kind: "BrainSource", id: publicSource.id }, content: publicSource, origin: "HUMAN_ORIGINAL", inputs: [] });
     const restricted = { ...publicSource, id: "source-private", content: input.bodyMd };

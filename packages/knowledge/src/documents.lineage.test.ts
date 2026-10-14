@@ -29,7 +29,7 @@ const fixture = vi.hoisted(() => {
     if (args.select) result = Object.fromEntries(Object.keys(args.select).map((key) => [key, result[key]]));
     return result;
   };
-  const names = ["crmAccount", "crmContact", "crmDeal", "crmActivity", "crmDealStageTransition", "crmConversation", "crmConversationMessage",
+  const names = ["informationCategoryPolicy", "crmAccount", "crmContact", "crmDeal", "crmActivity", "crmDealStageTransition", "crmConversation", "crmConversationMessage",
     "crmProspectWorkspace", "crmCommunicationSuggestion", "document", "meeting", "meetingInsight", "artifactInputLineage", "artifactInputSnapshot", "workspace", "executionRequest", "executionResult", "demoLead", "crmQualification", "workflowJob", "brainArticle", "brainSource", "mcpToolInput", "member", "user", "knowledgeChunk"];
   const prisma: any = { $queryRaw: vi.fn(async () => []), $executeRaw: vi.fn(async () => 1),
     auditLog: { create: vi.fn(async () => ({})) }, event: { createMany: vi.fn(async () => ({ count: 1 })) } };
@@ -51,7 +51,8 @@ const fixture = vi.hoisted(() => {
         return rows.slice(start, start + (args.take ?? rows.length)).map((row) => project(row, args));
       }),
       create: vi.fn(async ({ data }: any) => {
-        const row = { id: `${name}-${tables[name].length + 1}`, archivedAt: null, createdAt: time,
+        const row = { id: `${name}-${tables[name].length + 1}`,
+          ...(["document", "brainSource", "meeting"].includes(name) ? { informationCategory: "GENERAL" } : {}), archivedAt: null, createdAt: time,
           ...(["document", "brainSource"].includes(name) ? { accessDomain: "WORKSPACE" } : {}),
           ...(name === "executionRequest" ? { status: "PENDING", results: [], claimedAt: null, completedAt: null } : {}),
           ...(name !== "crmActivity" && name !== "crmDealStageTransition" ? { updatedAt: time } : {}), ...data };

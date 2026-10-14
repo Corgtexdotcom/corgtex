@@ -27,7 +27,7 @@ const fixture = vi.hoisted(() => {
     return result;
   };
   const sqlJson = (value: any) => ["JsonNull", "DbNull"].includes(value?.constructor?.name) ? null : value;
-  const names = ["document", "brainSource", "artifactInputLineage", "artifactInputSnapshot", "workspace", "user", "financeImportBatch", "financeReportUploadInput", "workflowJob", "event", "financeImportCandidate", "financeReportFact", "financeReportFactRevision", "agentRun", "agentIdentity", "financeReport", "financeImportApplication"];
+  const names = ["informationCategoryPolicy", "document", "brainSource", "artifactInputLineage", "artifactInputSnapshot", "workspace", "user", "financeImportBatch", "financeReportUploadInput", "workflowJob", "event", "financeImportCandidate", "financeReportFact", "financeReportFactRevision", "agentRun", "agentIdentity", "financeReport", "financeImportApplication"];
   const permissionEpochs = new Map<string, bigint>();
   const epochKey = (workspaceId: unknown, kind: unknown, id: unknown) => JSON.stringify([workspaceId, kind, id]);
   const rawSql = (query: any) => Array.isArray(query?.strings) ? query.strings.join("?") : String(query);
@@ -72,7 +72,8 @@ const fixture = vi.hoisted(() => {
       createMany: vi.fn(async ({ data }: any) => { for (const row of data) await prisma[name].create({ data: row }); return { count: data.length }; }),
       create: vi.fn(async ({ data }: any) => {
         data = Object.fromEntries(Object.entries(data).map(([key, value]) => [key, sqlJson(value)]));
-        const row = { id: `${name}-${tables[name].length + 1}`, archivedAt: null, createdAt: time,
+        const row = { id: `${name}-${tables[name].length + 1}`,
+          ...(["document", "brainSource", "meeting"].includes(name) ? { informationCategory: "GENERAL" } : {}), archivedAt: null, createdAt: time,
           ...(name === "financeImportBatch" ? { version: 1, retryCount: 0, workflowJobId: null } : {}),
           ...(name === "financeReport" || name === "financeReportFact" ? { version: 1, status: "ACTIVE" } : {}),
           ...(name === "financeImportCandidate" ? { version: 1, currentFactId: null, currentFactRevisionId: null, currentAmountCents: null, approvedByUserId: null, approvedAt: null } : {}),

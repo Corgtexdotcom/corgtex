@@ -51,6 +51,7 @@ const fixture = vi.hoisted(() => {
         create: vi.fn(async ({ data }) => {
           const now = new Date();
           const row = { id: `${name}-${++serial}`, createdAt: now, updatedAt: now,
+            ...(["document", "brainSource", "meeting"].includes(name) ? { informationCategory: "GENERAL" } : {}),
             ...(name === "conversationPendingOperation" ? { status: "PENDING", proposedAt: now, resultJson: null, errorCode: null, errorMessage: null, executedAt: null, canceledAt: null } : {}), ...structuredClone(data) };
           if (!tables.has(name)) tables.set(name, new Map());
           tables.get(name)!.set(row.id, row);
@@ -91,7 +92,7 @@ const bob: AppActor = {kind: "user", user: {id: "bob", email: "bob@example.test"
 const tx = new Proxy(fixture.prisma, { get(target, property) { return property === "$transaction" ? undefined : Reflect.get(target, property); } });
 const at = new Date("2026-10-13T12:00:00Z");
 let epochs: ReturnType<typeof installSourcePermissionEpochFixture>;
-const put = (delegate: string, data: any) => { const row = {createdAt: at, updatedAt: at, ...data}; if (!fixture.tables.has(delegate)) fixture.tables.set(delegate, new Map()); fixture.tables.get(delegate)!.set(row.id, row); return row; };
+const put = (delegate: string, data: any) => { const row = {createdAt: at, updatedAt: at, ...(["document", "brainSource", "meeting"].includes(delegate) ? { informationCategory: "GENERAL" } : {}), ...data}; if (!fixture.tables.has(delegate)) fixture.tables.set(delegate, new Map()); fixture.tables.get(delegate)!.set(row.id, row); return row; };
 const rows = (delegate: string) => [...(fixture.tables.get(delegate)?.values() ?? [])];
 const find = (delegate: string, id: string) => fixture.tables.get(delegate)!.get(id);
 beforeEach(() => {
