@@ -10,7 +10,9 @@ import type {
   ModelUsageInput,
   RerankRequest,
   AudioTranscriptionRequest,
+  ModelAttemptGuard,
 } from "./contracts";
+import { ModelAttemptAuthorizationError } from "./contracts";
 import { assertCatalogModelBudget, assertWorkspaceModelBudget, recordModelUsage } from "./usage";
 import { estimateModelCost, getModelPrice } from "./pricing";
 import { ModelProviderHttpError } from "./provider-errors";
@@ -451,7 +453,7 @@ async function authHeaders(route?: ModelProviderRoute) {
   return headers;
 }
 
-function withProviderOptions(provider: string, body: Record<string, unknown>) {
+function withProviderOptions(provider: string, body: Record<string, unknown>, guarded = false) {
   if (!isOpenRouterProvider(provider)) {
     return body;
   }
@@ -459,7 +461,7 @@ function withProviderOptions(provider: string, body: Record<string, unknown>) {
   return {
     ...body,
     provider: {
-      allow_fallbacks: true,
+      allow_fallbacks: !guarded,
       data_collection: "deny",
       require_parameters: true,
     },
@@ -491,7 +493,7 @@ const MAX_RETRY_DELAY_MS = 60_000;
 
 type RequestOperation = ReturnType<typeof requestOperation>;
 
-function requestOperation(parentSignal?: AbortSignal, timeoutMs = REQUEST_TIMEOUT_MS) {
+function requestOperation(parentSignal?: AbortSignal, timeoutMs = REQUEST_TIMEOUT_MS, authorizeAttempt?: ModelAttemptGuard) {
   const deadline = Date.now() + timeoutMs;
   const controller = new AbortController();
   const expire = () => controller.abort(new DOMException("Model request timed out.", "TimeoutError"));
@@ -500,6 +502,7 @@ function requestOperation(parentSignal?: AbortSignal, timeoutMs = REQUEST_TIMEOU
   const timer = setTimeout(expire, timeoutMs);
   if (parentSignal?.aborted) abortFromParent();
   return {
+    authorizeAttempt,
     deadline,
     signal: controller.signal,
     check() {
@@ -581,6 +584,16 @@ async function requestWithRetries<T>(
       operation.check();
       const init = await abortable(options(), operation.signal);
       operation.check();
+      if (operation.authorizeAttempt) {
+        try {
+          await abortable(operation.authorizeAttempt(Object.freeze({ signal: operation.signal })), operation.signal);
+        } catch {
+          // Preserve genuine cancellation; never leak/retry a guard's arbitrary error.
+          operation.check();
+          throw new ModelAttemptAuthorizationError();
+        }
+        operation.check();
+      }
       const response = await abortable(fetch(url, { ...init, signal: operation.signal }), operation.signal);
       if (response.ok) return await abortable(read(response), operation.signal);
       responseStatus = response.status;
@@ -666,7 +679,7 @@ async function sleep(ms: number, signal?: AbortSignal) {
 }
 
 async function postJson<TResponse>(path: string, body: Record<string, unknown>, route: ModelProviderRoute | undefined, operation: RequestOperation, failFastOnRateLimit = false) {
-  const payload = JSON.stringify(withProviderOptions(providerForRoute(route), body));
+  const payload = JSON.stringify(withProviderOptions(providerForRoute(route), body, Boolean(operation.authorizeAttempt)));
   return requestWithRetries(
     `${baseUrl(route)}${path}`,
     async () => ({ method: "POST", headers: await requestHeaders(route), body: payload }),
@@ -790,7 +803,7 @@ async function completeChat(
   bodyExtras?: Record<string, unknown>,
   sharedOperation?: RequestOperation,
 ) {
-  const operation = sharedOperation ?? requestOperation(request.signal);
+  const operation = sharedOperation ?? requestOperation(request.signal, REQUEST_TIMEOUT_MS, request.authorizeAttempt);
   try {
     const startedAt = Date.now();
     const model = modelOverride ?? request.model ?? env.MODEL_CHAT_DEFAULT;
@@ -814,7 +827,7 @@ async function completeChat(
     const latencyMs = Date.now() - startedAt;
     const content = normalizeContent(response.choices?.[0]?.message?.content);
     const tool_calls = response.choices?.[0]?.message?.tool_calls;
-    const inputTokens = response.usage?.prompt_tokens ?? estimateSerializedTokens(withProviderOptions(provider, body));
+    const inputTokens = response.usage?.prompt_tokens ?? estimateSerializedTokens(withProviderOptions(provider, body, Boolean(operation.authorizeAttempt)));
     const outputTokens = response.usage?.completion_tokens ?? estimateChatOutputTokens(content, tool_calls);
     const usage = await recordUsage({
       workspaceId: request.workspaceId,
@@ -892,7 +905,7 @@ async function* completeChatEventStream(
   modelOverride?: string,
   bodyExtras?: Record<string, unknown>,
 ): AsyncGenerator<ChatStreamEvent, ChatCompletionResponse> {
-  const operation = requestOperation(request.signal, STREAM_TIMEOUT_MS);
+  const operation = requestOperation(request.signal, STREAM_TIMEOUT_MS, request.authorizeAttempt);
   try {
     const startedAt = Date.now();
     const model = modelOverride ?? request.model ?? env.MODEL_CHAT_DEFAULT;
@@ -913,7 +926,7 @@ async function* completeChatEventStream(
       ...(request.tools && request.tools.length > 0 ? { tools: request.tools } : {}),
       ...(request.tool_choice ? { tool_choice: request.tool_choice } : {}),
       ...(bodyExtras ?? {}),
-    })));
+    }), Boolean(operation.authorizeAttempt)));
 
     const response = await requestWithRetries(
       `${baseUrl(route)}/chat/completions`,
@@ -1087,7 +1100,7 @@ async function repairExtractionObject(request: ExtractionRequest, raw: string, o
 }
 
 async function embedTexts(request: EmbeddingRequest) {
-  const operation = requestOperation();
+  const operation = requestOperation(request.signal, REQUEST_TIMEOUT_MS, request.authorizeAttempt);
   try {
     const startedAt = Date.now();
     const inputs = Array.isArray(request.input) ? request.input : [request.input];
@@ -1121,7 +1134,7 @@ async function embedTexts(request: EmbeddingRequest) {
 }
 
 async function transcribeAudioFile(request: AudioTranscriptionRequest) {
-  const operation = requestOperation();
+  const operation = requestOperation(request.signal, REQUEST_TIMEOUT_MS, request.authorizeAttempt);
   try {
     const startedAt = Date.now();
     const model = request.model ?? env.MODEL_TRANSCRIPTION_DEFAULT;
@@ -1130,6 +1143,11 @@ async function transcribeAudioFile(request: AudioTranscriptionRequest) {
     }
     const route = providerRouteForModel(model);
     const provider = providerForRoute(route);
+    // Multipart provider routing has no supported fallback-control contract here.
+    // Do not silently send a guarded request through opaque downstream attempts.
+    if (request.authorizeAttempt && isOpenRouterProvider(provider)) {
+      throw new Error("Guarded OpenRouter audio transcription is not supported.");
+    }
     assertKnownModelPrice(provider, model);
     await assertWorkspaceModelBudget(request.workspaceId);
     await assertCatalogModelBudget({
@@ -1197,7 +1215,7 @@ export const openAICompatibleModelGateway: ModelGateway = {
   },
 
   async extract(request: ExtractionRequest) {
-    const operation = requestOperation();
+    const operation = requestOperation(request.signal, REQUEST_TIMEOUT_MS, request.authorizeAttempt);
     try {
       const response = await completeChat({
         workspaceId: request.workspaceId,
@@ -1274,6 +1292,8 @@ export const openAICompatibleModelGateway: ModelGateway = {
 
   async rerank(request: RerankRequest) {
     const embedded = await embedTexts({
+      signal: request.signal,
+      authorizeAttempt: request.authorizeAttempt,
       workspaceId: request.workspaceId,
       workflowJobId: request.workflowJobId,
       agentRunId: request.agentRunId,
