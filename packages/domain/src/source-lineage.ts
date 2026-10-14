@@ -303,7 +303,10 @@ async function loadArtifact(db: LineageClient, workspaceId: string, input: Linea
   const where = { id: input.id, workspaceId };
   switch (input.kind) {
     case "ExternalDataSource": return db.externalDataSource.findFirst({where});
-    case "SqlNativeRunInput": return db.sqlNativeRunInput.findFirst({where});
+    case "SqlNativeRunInput": {
+      const {loadSqlNativeRunInput} = await import("./sql-native-input");
+      return loadSqlNativeRunInput(workspaceId, input.id, db);
+    }
     case "MeetingAudioAsset": return db.meetingAudioAsset.findFirst({ where });
     case "NativeTranscriptInput": return db.nativeTranscriptInput.findFirst({ where });
     case "CommunicationMessageNativeInput": return db.communicationMessageNativeInput.findFirst({ where });

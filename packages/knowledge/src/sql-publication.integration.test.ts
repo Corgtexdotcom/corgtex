@@ -6,7 +6,7 @@ import { decryptSecret, getPrismaClient, prisma, type AppActor } from "@corgtex/
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { registerSqlNativeDriver } from "../../domain/src/sql-native-driver";
 import { claimSqlIngestionAttempt, failSqlIngestionAttempt, sqlIngestionConfigurationFingerprint } from "../../domain/src/sql-ingestion-attempt";
-import { captureSqlIngestionAttempt } from "../../domain/src/sql-native-input";
+import { captureSqlIngestionAttempt, loadSqlNativeRunInput } from "../../domain/src/sql-native-input";
 import type { AuthenticatedSqlRunReceipt, SqlNativeDefinition, SqlNativeRow, SqlPublicationIdentity } from "../../domain/src/sql-ingestion-contract";
 import { prepareSqlKnowledgeAttempt, publishPreparedSqlKnowledgeAttempt } from "./sql-publication";
 import { countReadableKnowledgeChunks } from "./counts";
@@ -316,6 +316,37 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
     expect((deserialize(bytes) as {rows: SqlNativeRow[]}).rows[0].row).toEqual(transport.rows[0].row);
     expect(await prisma.sqlNativeCapturePart.count()).toBe(0);
     expect(models.embed).not.toHaveBeenCalled();
+  });
+  it.each(["part", "header"])("bounded native custody reads reject substituted %s without granting access", async target => {
+    transport.rows = [row(1, "synthetic ".repeat(60_000))];
+    const f = await fixture(), attempt = await f.claim(), receipt = await captureSqlIngestionAttempt(attempt);
+    const originalInput = await prisma.sqlNativeRunInput.findUniqueOrThrow({where: {id: receipt.receiptId}});
+    expect(await loadSqlNativeRunInput(f.workspace.id, receipt.receiptId)).toEqual(originalInput);
+    const client = getPrismaClient(), original = client.$queryRaw.bind(client);
+    let parts = 0, headers = 0;
+    const read = vi.spyOn(client, "$queryRaw").mockImplementation((async (...args: unknown[]) => {
+      const result = await Reflect.apply(original, client, args);
+      const query = args[0] as {strings?: readonly string[]};
+      const text = query.strings?.join("") ?? "";
+      if (!Array.isArray(result) || !result[0]) return result;
+      if (text.includes('AS "ciphertextPart"')) {
+        parts++;
+        expect(result[0].ciphertextPart.length + result[0].nextCiphertextPart.length).toBeLessThanOrEqual(2 * 512 * 1024);
+        if (target === "part" && parts === 2) return [{...result[0], ciphertextPart:
+          (result[0].ciphertextPart[0] === "X" ? "Y" : "X") + result[0].ciphertextPart.slice(1)}];
+      }
+      if (text.includes('AS "ciphertextHash"') && ++headers === 2 && target === "header") {
+        return [{...result[0], nextCursor: "synthetic substituted header"}];
+      }
+      return result;
+    }) as typeof client.$queryRaw);
+    try {
+      expect(await loadSqlNativeRunInput(f.workspace.id, receipt.receiptId)).toBeNull();
+      expect(parts).toBeGreaterThan(1);
+      expect(models.embed).not.toHaveBeenCalled(); expect(transport.accessChecks).toBe(0);
+      expect(await prisma.knowledgeChunk.count()).toBe(0);
+    } finally {read.mockRestore();}
+    expect(await prisma.sqlNativeRunInput.findUniqueOrThrow({where: {id: receipt.receiptId}})).toEqual(originalInput);
   });
   it.each(["failure", "substitution"])("rolls back partial cipher transport on %s and permits a fresh authenticated retry", async target => {
     transport.rows = [row(1, "synthetic ".repeat(80_000))];

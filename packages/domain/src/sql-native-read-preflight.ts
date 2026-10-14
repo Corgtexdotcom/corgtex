@@ -4,7 +4,7 @@ import type { Prisma, SqlNativeRunInput } from "@prisma/client";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { invariant } from "./errors";
 import { lineageContentFingerprint, type LineageRoot } from "./source-lineage";
-import { isSqlNativeRunInputCurrent, isSqlNativeRunInputLocallyCurrent } from "./sql-native-input";
+import { isSqlNativeRunInputCurrent, isSqlNativeRunInputLocallyCurrent, loadSqlNativeRunInput } from "./sql-native-input";
 
 declare const preflightBrand: unique symbol;
 export type SqlNativeReadCommitPreflight = Readonly<{[preflightBrand]: true}>;
@@ -20,7 +20,7 @@ export async function prepareSqlNativeReadCommitPreflight(actor: AppActor, works
   const unique = [...new Map(nativeRoots.map(root => [root.id, root])).values()];
   const inputs: SqlNativeRunInput[] = [];
   for (const root of unique) {
-    const input = await prisma.sqlNativeRunInput.findFirst({where: {id: root.id, workspaceId}});
+    const input = await loadSqlNativeRunInput(workspaceId, root.id);
     invariant(input && lineageContentFingerprint("SqlNativeRunInput", input) === root.fingerprint
       && await isSqlNativeRunInputCurrent(actor, workspaceId, input),
     409, "SOURCE_CHANGED", "SQL native source access is no longer provable.");

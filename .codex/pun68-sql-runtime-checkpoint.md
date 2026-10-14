@@ -98,6 +98,37 @@ Existing connector ownership retains the complete unchanged 512MiB-V8 / 1GiB-RSS
 rerun, including ordinary reads, query, transaction and concurrency measurements.
 Actual capacity remains unaccepted.
 
+The actual `bc6ccb2d` composition subsequently committed all 4,000 rows and
+12,000 chunks x 1,536 vectors: 94 model batches, publication duration 126,696ms,
+OS publication peak 807,960,576B, longest locked transaction 76,296ms (below the
+unchanged 120s limit), 4,289 top-level queries and 136,348 including triggers;
+2,411 observer queries were excluded. Its 13 smaller process cases pass. The
+first ordinary fetch then failed at 1,079,689,216B against 1GiB, with 55,846,776B
+of array buffers. Full fetch/count/search/downstream capacity remains withheld.
+
+The followup read correction transports complete originals in at most two
+512KiB ciphertext parts per query. Full client/server SHA and exact entry/exit
+headers reject partial, substituted or mixed reads. Local bulk proof rechecks
+retain complete ciphertext equality through server SHA and original headers.
+Existing immutable-byte cache reuse requires the exact stored ciphertext SHA;
+current membership, configuration, original epochs and live provider proof are
+still rechecked. Cache budgets, ciphertext format and public domain ports remain
+unchanged. The decoder authenticates complete GCM ciphertext in a bounded first
+pass before interpreting base64; a second bounded pass produces the exact V8
+bytes, retaining the 64MiB byte bound, payload SHA and full native shape checks.
+This adds no migration or serving authority. Source-lineage, retrieval, bulk
+proof and downstream commit preflight share the same bounded custody loader.
+
+Read correction evidence: 53/53 real source PG regressions, 6/6 focused positive/
+substitution/read-proof cases, 1/1 final downstream source-commit case and 18/18
+crypto/fingerprint units pass. Bounded independent Sol QA found no remaining
+crypto/custody/hash/authority blocker. Whole-worker 1GiB and hosted CI gates
+remain open until the existing connector owner measures the new composition.
+The broader read/count/cache/renderer unit selection passes 80/84; four count
+fixtures return no SQL collection-stamp row and fail identically with the
+published `bc6ccb2d` retrieval/count modules in an ignored baseline overlay.
+These retained source-wide harness failures are not cleared by this correction.
+
 Capture avoids a complete ciphertext RETURNING response: the insertion returns
 small immutable headers, and the same real transaction checks server SHA256 of
 the stored ciphertext against the issuer's exact encrypted original, plus every
