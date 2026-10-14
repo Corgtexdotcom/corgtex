@@ -1,5 +1,5 @@
 import type { AgentTriggerType } from "@prisma/client";
-import { toInputJson } from "@corgtex/shared";
+import { toInputJson, type AppActor } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
 import {
   AppError,
@@ -101,8 +101,9 @@ export async function runMeetingSummaryAgent(params: {
   triggerRef: string;
   meetingId: string;
   triggerType?: AgentTriggerType;
+  lineageActor?: AppActor;
 }) {
-  const actor = meetingIntelligenceActor(params.workspaceId);
+  const actor = params.lineageActor ?? meetingIntelligenceActor(params.workspaceId);
   const planRoots = await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "Workspace", id: params.workspaceId }]);
   return executeAgentRun({
     lineageActor: actor, lineageRoots: planRoots, contextIsAuditedRead: true,
@@ -184,6 +185,7 @@ export async function runMeetingSummaryAgent(params: {
       for (const chunk of transcriptChunks) {
         await revalidateInputs();
         await recordMeetingTranscriptProcessingStage({
+          workerActor: actor,
           workspaceId: params.workspaceId,
           meetingId: meeting.id,
           stage: "SUMMARIZING",

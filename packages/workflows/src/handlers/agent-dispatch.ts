@@ -2,7 +2,7 @@ import { prisma, type AppActor } from "@corgtex/shared";
 import { runInboxTriageAgent, runDailyCheckInAgent, runMeetingSummaryAgent, runActionExtractionAgent, runProposalDraftingAgent, runConstitutionUpdateTriggerAgent, runConstitutionSynthesisAgent, runCrmDripFollowupAgent, runCrmEmailExtractionAgent, runCrmLeadEnrichmentAgent, runCompanyUnderstandingAgent } from "@corgtex/agents";
 import { executeAgentRun } from "@corgtex/agents";
 import { runBrainMaintenance, absorbSource, runBrainSourceRegenerationJob, runBrainArticleVariantJob, runGraphSourceVariantJob } from "@corgtex/agents";
-import { assertBrainSourceRecoveryJob, captureArtifactInputProof, withBrainExportWorker } from "@corgtex/domain";
+import { assertBrainSourceRecoveryJob, captureArtifactInputProof, withBrainExportWorker, withMeetingTranscriptWorker, getMeetingTranscriptWorkerPurpose, assertMeetingTranscriptWorkerCurrent, invariant } from "@corgtex/domain";
 
 function asString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -14,12 +14,25 @@ export async function runAgentWorkflowJob(job: {
   type: string;
   payload: unknown;
   attempts?: number;
-}, claimOwner?: string) {
+}, claimOwner?: string, meetingActor?: AppActor) {
   if (!job.workspaceId) {
     return null;
   }
 
   const payload = (job.payload ?? {}) as Record<string, unknown>;
+  const runMeeting = async <T>(work: (actor: AppActor) => Promise<T>) => {
+    if (meetingActor) {
+      const purpose = getMeetingTranscriptWorkerPurpose(meetingActor, job.workspaceId!);
+      invariant(purpose && purpose.jobId === job.id && purpose.jobType === job.type
+        && purpose.owner === claimOwner && purpose.attempt === job.attempts
+        && purpose.payload === JSON.stringify(job.payload),
+      409, "MEETING_WORKFLOW_JOB_LOST", "Meeting dispatch requires the original claimed execution actor.");
+      await assertMeetingTranscriptWorkerCurrent(meetingActor, job.workspaceId!);
+      return work(meetingActor);
+    }
+    return withMeetingTranscriptWorker({workspaceId: job.workspaceId!, meetingId: asString(payload.meetingId),
+      jobId: job.id, owner: claimOwner ?? "", attempt: job.attempts ?? 0, claim: undefined}, work);
+  };
 
   if (job.type === "agent.inbox-triage") {
     return runInboxTriageAgent({
@@ -41,21 +54,23 @@ export async function runAgentWorkflowJob(job: {
   }
 
   if (job.type === "agent.meeting-summary") {
-    return runMeetingSummaryAgent({
-      workspaceId: job.workspaceId,
+    return runMeeting(lineageActor => runMeetingSummaryAgent({
+      lineageActor,
+      workspaceId: job.workspaceId!,
       triggerRef: job.id,
       meetingId: asString(payload.meetingId),
       triggerType: job.type === "agent.meeting-summary" && payload.triggerType === "MANUAL" ? "MANUAL" : "EVENT",
-    });
+    }));
   }
 
   if (job.type === "agent.action-extraction") {
-    return runActionExtractionAgent({
-      workspaceId: job.workspaceId,
+    return runMeeting(lineageActor => runActionExtractionAgent({
+      lineageActor,
+      workspaceId: job.workspaceId!,
       triggerRef: job.id,
       meetingId: asString(payload.meetingId),
       triggerType: payload.triggerType === "MANUAL" ? "MANUAL" : "EVENT",
-    });
+    }));
   }
 
   if (job.type === "agent.proposal-drafting") {

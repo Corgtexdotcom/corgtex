@@ -889,6 +889,7 @@ export async function runMeetingInsightsExtraction(params: {
   workspaceId: string;
   meetingId: string;
   workflowJobId?: string | null;
+  actor?: AppActor;
 }) {
   const meeting = await prisma.meeting.findFirst({
     where: { id: params.meetingId, workspaceId: params.workspaceId },
@@ -898,7 +899,7 @@ export async function runMeetingInsightsExtraction(params: {
     return { skipped: true, reason: "missing_transcript_or_already_processed" };
   }
 
-  const actor: AppActor = {
+  const actor: AppActor = params.actor ?? {
     kind: "agent",
     authProvider: "bootstrap",
     label: "Meeting facilitation",

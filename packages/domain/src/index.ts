@@ -212,3 +212,6 @@ export * from "./conversation-brain-consent";
 export { configureInformationCategory, classifyInformationSource } from "./information-category-policy";
 
 export { withBrainExportWorker, getBrainExportWorkerPurpose, assertBrainExportWorkerCurrent } from "./brain-export-worker";
+
+export { withMeetingTranscriptWorker, getMeetingTranscriptWorkerPurpose, isMeetingTranscriptWorkerCurrent,
+  assertMeetingTranscriptWorkerCurrent, isMeetingTranscriptWorkerJob } from "./native-meeting-workflow-principal";

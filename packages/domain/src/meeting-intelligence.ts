@@ -1,3 +1,4 @@
+import { assertMeetingTranscriptWorkerCurrent } from "./native-meeting-workflow-principal";
 import { createHash } from "node:crypto";
 import { CrmActivityType } from "@prisma/client";
 import type { MeetingInsightType, MeetingInsight, MeetingInsightOperation, Prisma, ProposalResolutionOutcome } from "@prisma/client";
@@ -639,6 +640,7 @@ Be conservative — only extract items you're confident about.
     invariant(await isArtifactInputProofReadable(actor, params.workspaceId, lineageRoots),
       409, "SOURCE_CHANGED", "Meeting insight inputs changed during generation.");
     await recordMeetingTranscriptProcessingStage({
+          workerActor: actor,
       workspaceId: params.workspaceId,
       meetingId: meeting.id,
       stage: "EXTRACTING_INSIGHTS",
@@ -736,6 +738,7 @@ Be conservative — only extract items you're confident about.
   for (const item of insights) addCommitment(item);
 
   const extractedInsights = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    await assertMeetingTranscriptWorkerCurrent(actor, params.workspaceId, tx);
     await tx.$queryRaw`SELECT id FROM "Meeting" WHERE id = ${meeting.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const currentMeeting = await tx.meeting.findFirst({ where: { id: meeting.id, workspaceId: params.workspaceId, archivedAt: null } });
     invariant(currentMeeting && lineageContentFingerprint("Meeting", currentMeeting) === meetingContext.sourceStateHash,
@@ -1013,6 +1016,7 @@ Be conservative — only extract items you're confident about.
     const updatedMeeting = await tx.meeting.update({ where: { id: meeting.id }, data: { aiProcessedAt: new Date() } });
     await preserveMeetingLineageAfterMetadataWrite(tx, actor, params.workspaceId, currentMeeting, updatedMeeting);
 
+    await assertMeetingTranscriptWorkerCurrent(actor, params.workspaceId, tx);
     return createdInsights;
   });
   const crmInsights = await createCrmMeetingReviewInsights(actor, {

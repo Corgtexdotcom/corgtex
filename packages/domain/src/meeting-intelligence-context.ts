@@ -1,3 +1,4 @@
+import { assertMeetingTranscriptWorkerCurrent } from "./native-meeting-workflow-principal";
 import { Prisma, type ActionStatus, type KnowledgeSourceType, type ProposalStatus, type SensitivityLabel, type TensionStatus } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
@@ -1000,6 +1001,7 @@ export async function persistMeetingSummaryWithLineage(actor: AppActor, params: 
   invariant(params.lineageInputs.some((input) => input.kind === "MeetingTranscript" && input.id === params.meetingId)
     && params.lineageRoots.length > 0, 409, "UNKNOWN_LINEAGE", "Meeting summary requires its complete prompt receipt.");
   return prisma.$transaction(async (tx) => {
+    await assertMeetingTranscriptWorkerCurrent(actor, params.workspaceId, tx);
     await tx.$queryRaw`SELECT id FROM "Meeting" WHERE id = ${params.meetingId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const current = await tx.meeting.findFirst({ where: { id: params.meetingId, workspaceId: params.workspaceId, archivedAt: null } });
     if (!current) return { count: 0, reason: "missing_meeting" as const };
@@ -1029,6 +1031,7 @@ export async function persistMeetingSummaryWithLineage(actor: AppActor, params: 
       artifact: { kind: "Meeting", id: updated.id }, content: updated, origin: "DERIVED",
       inputs: lineageInputs, inheritedRoots,
     });
+    await assertMeetingTranscriptWorkerCurrent(actor, params.workspaceId, tx);
     return { count: 1, meeting: updated };
   });
 }
