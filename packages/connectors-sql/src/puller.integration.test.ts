@@ -61,7 +61,7 @@ async function setup() {
   return { source, table };
 }
 
-async function child() {
+async function child(mode: "ingestion" | "web-reader" | "mcp-reader" = "ingestion") {
   const process = startSqlIngestionProcess({
     DATABASE_URL: fixture.connectionString,
     ENCRYPTION_KEY: encryptionKey,
@@ -70,7 +70,7 @@ async function child() {
     KNOWLEDGE_SEARCH_PROVIDER: "postgres",
     REDIS_KEY_PREFIX: "sql-race",
     NODE_ENV: "test",
-  });
+  }, mode);
   children.push(process);
   await process.ready();
   return process;
@@ -116,6 +116,15 @@ describe("native SQL publication across independent processes", () => {
     expect((await worker.read(source.workspaceId, user.id, chunks[0].id)).read).toEqual({
       fetched: true, count: 1, searchIds: [chunks[0].id], downstreamReadable: true,
     });
+    const coldReader = await child("web-reader");
+    expect((await coldReader.read(source.workspaceId, user.id, chunks[0].id)).read).toEqual({
+      fetched: true, count: 1, searchIds: [chunks[0].id], downstreamReadable: true,
+    });
+    const mcpReader = await child("mcp-reader");
+    expect((await mcpReader.read(source.workspaceId, user.id, chunks[0].id)).read).toEqual({
+      fetched: true, count: 1, searchIds: [chunks[0].id], downstreamReadable: true,
+    });
+    expect(await db.sqlIngestionAttempt.count({ where: { sourceId: source.id } })).toBe(1);
   });
 
   it("publishes and serves the full bounded run when combined row and chunk counts exceed ten thousand", async () => {
@@ -233,7 +242,7 @@ describe("native SQL publication across independent processes", () => {
       }
       const connection = new URL(fixture.connectionString); connection.username = role;
       await db.externalDataSource.update({ where: { id: source.id }, data: { connectionStringEnc: encryptedConnection(connection.toString()) } });
-      const worker = await child(), reader = await child();
+      const worker = await child(), reader = await child("web-reader");
       await worker.run(source.id, false, true);
       await worker.publicationReady();
       expect(await db.knowledgeChunk.count({ where: { workspaceId: source.workspaceId } })).toBe(0);

@@ -1,4 +1,5 @@
 import { fork } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import type { ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
@@ -11,8 +12,8 @@ interface Message {
 }
 
 /** A separate Node process, module cache, model gateway and Prisma pool per run. */
-export function startSqlIngestionProcess(environment: Record<string, string>) {
-  const child = fork(fileURLToPath(import.meta.url), ["sql-ingestion-child"], {
+export function startSqlIngestionProcess(environment: Record<string, string>, mode: "ingestion" | "web-reader" | "mcp-reader" = "ingestion") {
+  const child = fork(fileURLToPath(import.meta.url), ["sql-ingestion-child", mode], {
     execArgv: ["--import", "tsx"],
     env: { ...process.env, ...environment },
     stdio: ["ignore", "pipe", "pipe", "ipc"],
@@ -87,10 +88,23 @@ function send(child: ChildProcess, message: Record<string, unknown>): Promise<vo
 }
 
 async function runChild() {
-  const [{ defaultModelGateway }, { syncExternalDataSource }] = await Promise.all([
-    import("@corgtex/models"),
-    import("./puller"),
-  ]);
+  const mode = process.argv[3] ?? "ingestion";
+  const { defaultModelGateway } = await import("@corgtex/models");
+  let syncExternalDataSource: typeof import("./puller")["syncExternalDataSource"] | undefined;
+  if (mode === "ingestion") {
+    syncExternalDataSource = (await import("./puller")).syncExternalDataSource;
+  } else if (mode === "web-reader") {
+    // A genuine cold serving process: no ingestion module has run. Exercise the
+    // production Next Node bootstrap, then the ordinary Knowledge entrypoint.
+    process.env.NEXT_RUNTIME = "nodejs";
+    await (await import("../../../apps/web/instrumentation")).register();
+    await import("@corgtex/knowledge");
+  } else if (mode === "mcp-reader") {
+    await import("../../mcp/src/server");
+    await import("@corgtex/knowledge");
+  } else {
+    throw new Error("Unknown SQL test process mode");
+  }
   let gatePublication = false, nativeCloses = 0;
   let releasePublication: (() => void) | undefined;
   const originalEnd = pg.Client.prototype.end;
@@ -142,7 +156,31 @@ async function runChild() {
     const actor = { kind: "user" as const, user }, workspaceId = message.workspaceId!, chunkId = message.chunkId!;
     const fetched = await fetchReadableKnowledgeChunk(actor, workspaceId, chunkId);
     const count = await countReadableKnowledgeChunks(actor, workspaceId, ["EXTERNAL_DATABASE"]);
-    const search = await searchIndexedKnowledge({ actor, workspaceId, query: "committed payload synthetic", sourceTypes: ["EXTERNAL_DATABASE"] });
+    let search = await searchIndexedKnowledge({ actor, workspaceId, query: "committed payload synthetic", sourceTypes: ["EXTERNAL_DATABASE"] });
+    if (mode === "mcp-reader") {
+      const { createCorgtexMcpServer } = await import("../../mcp/src/server");
+      const { captureMcpOAuthGrantEpoch, mcpScopesHash } = await import("@corgtex/shared");
+      const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+      const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+      const scopes = ["brain:read"];
+      const application = await prisma.mcpOAuthClient.create({ data: { clientId: randomUUID(), name: "Synthetic cold MCP reader", redirectUris: [], scopes } });
+      const token = await prisma.mcpOAuthAccessToken.create({ data: { clientId: application.id, userId: user.id, workspaceId,
+        instanceSlug: "synthetic", tokenHash: randomUUID(), scopes, expiresAt: new Date(Date.now() + 60_000) } });
+      const grantEpoch = await prisma.$transaction(tx => captureMcpOAuthGrantEpoch(tx, workspaceId, token.id));
+      const server = createCorgtexMcpServer({ actor, workspaceId, authKind: "oauth", scopes,
+        mcpOrigin: { kind: "oauth", id: token.id, workspaceId, grantEpoch, scopeHash: mcpScopesHash(scopes) } });
+      const client = new Client({ name: "cold-reader-test", version: "1.0.0" });
+      try {
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+        await server.connect(serverTransport); await client.connect(clientTransport);
+        const result = await client.callTool({ name: "search_knowledge", arguments: { query: "committed payload synthetic", limit: 5 } });
+        if (result.isError || !Array.isArray(result.content) || result.content[0]?.type !== "text") throw new Error("Cold MCP search did not return a successful result");
+        search = JSON.parse(result.content[0].text as string) as typeof search;
+      } finally {
+        await client.close(); await server.close();
+        await prisma.mcpOAuthClient.delete({ where: { id: application.id } });
+      }
+    }
     let downstreamReadable = false;
     try {
       const roots = await captureArtifactInputProof(actor, workspaceId, [{ kind: "KnowledgeChunk", id: chunkId }]);
@@ -171,6 +209,7 @@ async function runChild() {
         process.send?.({ event, error, metrics: { durationMs: performance.now() - started,
           peakRssBytes: Math.max(peakRssBytes, process.memoryUsage().rss), modelBatches, embeddedChunks, dimensions } });
       };
+      if (!syncExternalDataSource) throw new Error("Cold reader cannot start ingestion");
       void syncExternalDataSource(message.sourceId).then(
         () => finish("complete"),
         (error: unknown) => finish("failed", error instanceof Error ? error.message : String(error)),

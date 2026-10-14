@@ -308,6 +308,7 @@ async function shutdown(signal: string) {
 // --- Main ---
 
 async function main() {
+  await import("@corgtex/connectors-sql/native-driver");
   log("info", {
     event: "starting",
     executionMode,
