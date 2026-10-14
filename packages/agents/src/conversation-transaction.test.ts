@@ -146,20 +146,15 @@ describe("conversation native inputs and turns in caller-owned transactions", ()
     } finally { fixture.boundary.rejectGlobal = false; }
   });
 
-  it("captures publication title, body and complete roots before the first await without any global DB access", async () => {
+  it("rejects model-originated publication even with complete private input roots and global DB forbidden", async () => {
     const prompt = await createConversationPromptInput(alice, { workspaceId, conversationId: base.sessionId, content: base.userMessage, tx });
     const lineageRoots = await captureArtifactInputProof(alice, workspaceId, [{ kind: "ConversationPromptInput", id: prompt.id }], tx);
-    const params = { workspaceId, title: "Exact synthetic title", content: "Exact synthetic body", lineageRoots: structuredClone(lineageRoots) };
     fixture.boundary.rejectGlobal = true;
     try {
-      const pending = ingestConversationOnDemandInTransaction(tx, alice, params);
-      params.title = "Mutated later title"; params.content = "Mutated later body"; params.lineageRoots[0].fingerprint = "stale";
-      const source = await pending;
-      expect(source).toMatchObject({ title: "Exact synthetic title", content: "Exact synthetic body" });
-      const roots = await captureArtifactInputProof(alice, workspaceId, [{ kind: "BrainSource", id: source.id }], tx);
-      expect(await isArtifactInputProofReadable(alice, workspaceId, roots, tx)).toBe(true);
-      expect(roots).toEqual(expect.arrayContaining(lineageRoots));
-      expect(size("auditLog")).toBe(1); expect(size("event")).toBe(1);
+      await expect(ingestConversationOnDemandInTransaction(tx, alice, {
+        workspaceId, title: "Synthetic unconsented title", content: "Synthetic unconsented body", lineageRoots,
+      })).rejects.toMatchObject({ code: "BRAIN_CONSENT_REQUIRED" });
+      for (const table of ["brainSource", "auditLog", "event"]) expect(size(table)).toBe(0);
     } finally { fixture.boundary.rejectGlobal = false; }
     expect(fixture.bases.primary.$transaction).not.toHaveBeenCalled();
   });
@@ -174,8 +169,9 @@ describe("conversation native inputs and turns in caller-owned transactions", ()
     const pending = withArtifactInputWriteFence(async (usedTx) => {
       expect(usedTx).toBe(tx);
       await barrier.promise;
-    }, () => ingestConversationOnDemandInTransaction(tx, actor, {
-      workspaceId, title: "Exact caller publication", content: base.userMessage, lineageRoots: roots,
+    }, () => addConversationTurn(actor, {
+      workspaceId, conversationId: base.sessionId, promptInputId: prompt.id, userMessage: base.userMessage,
+      assistantMessage: "Exact caller answer", lineageRoots: roots, tx,
     }));
     expect(Object.isFrozen(actor)).toBe(true);
     if (actor.kind !== "user") throw new Error("Synthetic user fixture");
@@ -183,14 +179,15 @@ describe("conversation native inputs and turns in caller-owned transactions", ()
     expect(() => { actor.user.id = "synthetic-bob"; }).toThrow(TypeError);
     expect(() => { (actor as any).kind = "agent"; }).toThrow(TypeError);
     barrier.resolve();
-    const source = await pending;
-    expect(source.authorMemberId).toBe(`member-${workspaceId}-synthetic-alice`);
+    const turn = await pending;
+    expect(turn).toMatchObject({ conversationId: base.sessionId, promptInputId: prompt.id, assistantMessage: "Exact caller answer" });
     expect(fixture.membership.mock.calls.length).toBeGreaterThan(0);
     for (const [params] of fixture.membership.mock.calls) {
       expect(params.actor).toBe(actor);
       expect(authority.get(params.actor)).toBe("synthetic-server-owned-authority");
     }
-    expect(fixture.tables.get("auditLog")?.values().next().value).toMatchObject({ actorUserId: "synthetic-alice" });
+    expect(await isArtifactInputProofReadable(actor, workspaceId,
+      await captureArtifactInputProof(actor, workspaceId, [{ kind: "ConversationTurn", id: turn.id }], tx), tx)).toBe(true);
   });
 
   it("reuses the supplied transaction for both constructors and exact source proofs", async () => {

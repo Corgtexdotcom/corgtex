@@ -146,6 +146,18 @@ describe("agent REST route authorization inventory fence", () => {
     }
   });
 
+  it("keeps category administration and explicit Brain consent unavailable to credential agents", () => {
+    const actor: AppActor = { kind: "agent", authProvider: "credential", label: "synthetic-agent", workspaceIds: ["workspace-1"], scopes: ["conversations:write", "brain:write"] };
+    for (const [method, pathname] of [
+      ["PATCH", "/api/workspaces/workspace-1/information-categories"],
+      ["POST", "/api/workspaces/workspace-1/information-categories"],
+      ["POST", "/api/workspaces/workspace-1/conversations/conversation-1/brain"],
+    ]) {
+      expect(getAgentRouteCapability(method, pathname)).toEqual({ operation: null });
+      expect(() => requireAgentRouteCapability(actor, { method, nextUrl: { pathname } })).toThrow();
+    }
+  });
+
   it("discovers aliased actor imports, wrapper exports, and reexported HTTP methods using syntax", () => {
     const inspected = inspectModule(`
       import { resolveRequestActor as authenticate } from "@/lib/auth";

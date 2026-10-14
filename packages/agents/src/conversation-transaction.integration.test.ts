@@ -83,53 +83,43 @@ describe("native conversation transactions on the explicitly disposable local da
     expect(await prisma.conversationTurn.count()).toBe(1);
   });
 
-  it.each(["primitive", "wrapper"] as const)("commits %s publication, complete source proof and static test marker only in the supplied transaction", async (entry) => {
-    const f = await fixture();
-    const prompt = await createConversationPromptInput(f.actor, { workspaceId: f.workspace.id, conversationId: f.session.id, content: request });
-    const lineageRoots = await captureArtifactInputProof(f.actor, f.workspace.id, [{ kind: "ConversationPromptInput", id: prompt.id }]);
-    const source = await prisma.$transaction(async (tx) => {
-      expect(tx === getPrismaClient()).toBe(false);
-      const restore = forbidPrimaryDatabaseCalls(tx);
-      try {
-        const params = { workspaceId: f.workspace.id, title: "Synthetic derived publication", content: "Synthetic derived conversation body", lineageRoots };
-        const value = entry === "primitive" ? await ingestConversationOnDemandInTransaction(tx, f.actor, params)
-          : await ingestConversationOnDemand(f.actor, { ...params, tx });
-        // This static marker proves caller atomicity only; it is not a canonical saver receipt.
-        await tx.event.create({ data: { workspaceId: f.workspace.id, type: "synthetic.publication-marker", aggregateId: value.id, payload: { recorded: true } } });
-        const proof = await captureArtifactInputProof(f.actor, f.workspace.id, [{ kind: "BrainSource", id: value.id }], tx);
-        expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, proof, tx)).toBe(true);
-        return value;
-      } finally { restore(); }
-    });
-    expect(source).toMatchObject({ title: "Synthetic derived publication", content: "Synthetic derived conversation body" });
-    expect(await prisma.brainSource.count()).toBe(1);
-    expect(await prisma.artifactInputLineage.count({ where: { artifactType: "BrainSource", artifactId: source.id } })).toBe(1);
-    expect(await prisma.auditLog.count({ where: { entityType: "BrainSource", entityId: source.id } })).toBe(1);
-    expect(await prisma.event.count({ where: { type: "brain-source.created", aggregateId: source.id } })).toBe(1);
-    expect(await prisma.event.count({ where: { type: "synthetic.publication-marker", aggregateId: source.id } })).toBe(1);
-  });
-
-  it.each(["marker", "owner"] as const)("rolls back publication content, proof, audit and both outbox markers on %s failure", async (failure) => {
+  it.each(["primitive", "wrapper"] as const)("rejects unconsented %s publication even with complete private roots and the caller transaction", async (entry) => {
     const f = await fixture();
     const prompt = await createConversationPromptInput(f.actor, { workspaceId: f.workspace.id, conversationId: f.session.id, content: request });
     const lineageRoots = await captureArtifactInputProof(f.actor, f.workspace.id, [{ kind: "ConversationPromptInput", id: prompt.id }]);
     await expect(prisma.$transaction(async (tx) => {
+      expect(tx === getPrismaClient()).toBe(false);
       const restore = forbidPrimaryDatabaseCalls(tx);
       try {
-        await withArtifactInputWriteFence(async (usedTx) => {
-          expect(usedTx === tx).toBe(true);
-          if (failure === "owner" && await tx.event.count({ where: { workspaceId: f.workspace.id, type: "brain-source.created" } })) {
-            throw new AppError(409, "OWNER_STALE", "Synthetic publication owner expired");
-          }
-        }, async () => {
-          const source = await ingestConversationOnDemandInTransaction(tx, f.actor, {
-            workspaceId: f.workspace.id, title: "Uncommitted synthetic publication", content: "Uncommitted synthetic body", lineageRoots,
-          });
-          await tx.event.create({ data: { workspaceId: f.workspace.id, type: "synthetic.publication-marker", aggregateId: source.id, payload: { recorded: true } } });
-          throw new Error("Synthetic publication marker commit rejected");
-        });
+        const params = { workspaceId: f.workspace.id, title: "Synthetic unconsented publication", content: "Synthetic private conversation body", lineageRoots };
+        return entry === "primitive" ? await ingestConversationOnDemandInTransaction(tx, f.actor, params)
+          : await ingestConversationOnDemand(f.actor, { ...params, tx });
       } finally { restore(); }
-    })).rejects.toThrow(failure === "owner" ? "Synthetic publication owner expired" : "Synthetic publication marker commit rejected");
+    })).rejects.toMatchObject({ code: "BRAIN_CONSENT_REQUIRED" });
+    expect(await prisma.brainSource.count()).toBe(0);
+    expect(await prisma.artifactInputLineage.count({ where: { artifactType: "BrainSource" } })).toBe(0);
+    expect(await prisma.auditLog.count({ where: { entityType: "BrainSource" } })).toBe(0);
+    expect(await prisma.event.count({ where: { type: "brain-source.created" } })).toBe(0);
+    expect(await prisma.conversationPromptInput.count()).toBe(1);
+  });
+
+  it.each(["live", "stale"] as const)("withholds unconsented publication under a %s owner fence and rolls back prior transaction markers", async (owner) => {
+    const f = await fixture();
+    const prompt = await createConversationPromptInput(f.actor, { workspaceId: f.workspace.id, conversationId: f.session.id, content: request });
+    const lineageRoots = await captureArtifactInputProof(f.actor, f.workspace.id, [{ kind: "ConversationPromptInput", id: prompt.id }]);
+    const fence = vi.fn(async () => {
+      if (owner === "stale") throw new AppError(409, "OWNER_STALE", "Synthetic publication owner expired");
+    });
+    await expect(prisma.$transaction(async (tx) => {
+      await tx.event.create({ data: { workspaceId: f.workspace.id, type: "synthetic.publication-marker", aggregateId: f.session.id, payload: { recorded: true } } });
+      const restore = forbidPrimaryDatabaseCalls(tx);
+      try {
+        await withArtifactInputWriteFence(fence, () => ingestConversationOnDemandInTransaction(tx, f.actor, {
+          workspaceId: f.workspace.id, title: "Unconsented publication", content: "Unconsented body", lineageRoots,
+        }));
+      } finally { restore(); }
+    })).rejects.toMatchObject({ code: "BRAIN_CONSENT_REQUIRED" });
+    expect(fence).not.toHaveBeenCalled();
     expect(await prisma.brainSource.count()).toBe(0);
     expect(await prisma.artifactInputLineage.count({ where: { artifactType: "BrainSource" } })).toBe(0);
     expect(await prisma.auditLog.count({ where: { entityType: "BrainSource" } })).toBe(0);
