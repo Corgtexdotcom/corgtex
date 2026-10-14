@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceBriefingCandidate } from "./workspace-briefing";
+import { AppError } from "./errors";
 
 const {
   prismaMock,
   requireWorkspaceMembershipMock,
 } = vi.hoisted(() => ({
   prismaMock: {
+    $transaction: vi.fn(),
     meeting: { findMany: vi.fn() },
     proposal: { findMany: vi.fn() },
     tension: { findMany: vi.fn() },
@@ -20,6 +22,7 @@ const {
     workspaceBriefing: {
       upsert: vi.fn(),
       findFirst: vi.fn(),
+      findMany: vi.fn(),
     },
   },
   requireWorkspaceMembershipMock: vi.fn(),
@@ -32,6 +35,17 @@ vi.mock("@corgtex/shared", () => ({
 
 vi.mock("./auth", () => ({
   requireWorkspaceMembership: requireWorkspaceMembershipMock,
+}));
+
+const readableArtifactIdsMock = vi.hoisted(() => vi.fn());
+vi.mock("./source-lineage", () => ({ readableArtifactIds: readableArtifactIdsMock,
+  captureArtifactInputProof: vi.fn(async (actor, workspaceId, inputs) => {
+    for (const input of inputs) if (input.kind === "WorkspaceBriefing"
+      && !(await readableArtifactIdsMock(actor, workspaceId, input.kind, [{ id: input.id }])).has(input.id)) throw new AppError(409, "UNKNOWN_LINEAGE", "Unknown fixture");
+    return inputs.map(({ kind, id }: any) => ({ kind, id, fingerprint: "a".repeat(64) }));
+  }),
+  recordArtifactInputLineage: vi.fn(), invalidateArtifactInputLineage: vi.fn(),
+  isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
 }));
 
 function baseCandidate(overrides: Partial<WorkspaceBriefingCandidate>): WorkspaceBriefingCandidate {
@@ -54,6 +68,7 @@ function baseCandidate(overrides: Partial<WorkspaceBriefingCandidate>): Workspac
 describe("workspace briefing", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock));
     requireWorkspaceMembershipMock.mockResolvedValue({ id: "member-1" });
     for (const model of [
       prismaMock.meeting,
@@ -72,6 +87,22 @@ describe("workspace briefing", () => {
     }
     prismaMock.workspaceBriefing.upsert.mockImplementation(async ({ create }: any) => ({ id: "briefing-1", ...create }));
     prismaMock.workspaceBriefing.findFirst.mockResolvedValue(null);
+    prismaMock.workspaceBriefing.findMany.mockResolvedValue([]);
+    readableArtifactIdsMock.mockImplementation(async (_actor: unknown, _workspaceId: string, _kind: string,
+      rows: Array<{ id: string }>) => new Set(rows.map((row) => row.id)));
+  });
+
+  it("returns only a briefing whose complete inputs are currently readable", async () => {
+    const { getLatestWorkspaceBriefing } = await import("./workspace-briefing");
+    prismaMock.workspaceBriefing.findMany.mockResolvedValueOnce([
+      { id: "hidden", workspaceId: "ws-1", title: "Payroll" },
+      { id: "safe", workspaceId: "ws-1", title: "Public update" },
+    ]);
+    readableArtifactIdsMock.mockResolvedValueOnce(new Set(["safe"]));
+
+    const result = await getLatestWorkspaceBriefing({ workspaceId: "ws-1",
+      actor: { kind: "user", user: { id: "user-1" } } as any });
+    expect(result?.id).toBe("safe");
   });
 
   it("ranks actionable, time-sensitive candidates as lead briefing items", async () => {
@@ -1606,7 +1637,8 @@ describe("workspace briefing", () => {
           audienceType: "WORKSPACE",
           status: "ACTIVE",
         }),
-        take: 30,
+        take: 50,
+        skip: 0,
       }),
       expect.objectContaining({
         where: expect.objectContaining({
@@ -1618,7 +1650,8 @@ describe("workspace briefing", () => {
             { updatedAt: { gte: new Date("2026-04-29T00:00:00.000Z"), lte: new Date("2026-04-30T12:00:00.000Z") } },
           ],
         }),
-        take: 10,
+        take: 50,
+        skip: 0,
       }),
     ]));
   });

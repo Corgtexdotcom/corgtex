@@ -1,7 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import { env } from "./env";
 import { getSupportAuthorizationContext } from "./support-context";
-import { getMcpOrigin, assertMcpOriginActive } from "./mcp-context";
+import { getMcpOrigin, assertMcpOriginActiveAdvisory } from "./mcp-context";
 
 const createClient = () => {
   const client = new PrismaClient({
@@ -16,6 +16,16 @@ const createClient = () => {
     const params = { model, action: operation, args: args as Record<string, any> };
     const context = getSupportAuthorizationContext();
     const mcpOrigin = getMcpOrigin();
+    const guardedMutation = mcpOrigin && ["create", "createMany", "createManyAndReturn", "upsert", "update",
+      "updateMany", "updateManyAndReturn", "delete", "deleteMany"].includes(operation);
+    const runQuery = async () => {
+      // This is an immediate live check, not an authorization grant or a replacement
+      // for transactional writer fences. A postcheck cannot undo an autocommit write.
+      if (guardedMutation) await assertMcpOriginActiveAdvisory(client, mcpOrigin, mcpOrigin.workspaceId);
+      const result = await query(args);
+      if (guardedMutation) await assertMcpOriginActiveAdvisory(client, mcpOrigin, mcpOrigin.workspaceId);
+      return result;
+    };
     if (mcpOrigin && ["Event", "WorkflowJob"].includes(model)
       && ["create", "createMany", "upsert", "update", "updateMany"].includes(operation)) {
       if (["upsert", "update", "updateMany"].includes(operation)) {
@@ -29,12 +39,12 @@ const createClient = () => {
         const workspaceId = row.workspaceId ?? row.workspace?.connect?.id
           ?? (["update", "updateMany"].includes(operation) || row === params.args.update ? mcpOrigin.workspaceId : undefined);
         if (typeof workspaceId !== "string") throw new Error("MCP_AUTHORIZATION_REVOKED");
-        await assertMcpOriginActive(client, mcpOrigin, workspaceId);
+        await assertMcpOriginActiveAdvisory(client, mcpOrigin, workspaceId);
         row.mcpOrigin = mcpOrigin;
       }
     }
     if (!context?.supportUserId || !["Event", "WorkflowJob"].includes(params.model ?? "")
-      || !["create", "createMany", "upsert", "update", "updateMany"].includes(params.action)) return query(args);
+      || !["create", "createMany", "upsert", "update", "updateMany"].includes(params.action)) return runQuery();
     const rows = params.action === "upsert"
       ? [params.args.create, params.args.update]
       : Array.isArray(params.args.data) ? params.args.data : [params.args.data];
@@ -58,7 +68,7 @@ const createClient = () => {
       row.supportOriginUserId = context.supportUserId;
       row.supportGrantVersion = grant.version;
     }
-    return query(args);
+    return runQuery();
   } } } });
   return extended as unknown as PrismaClient;
 };

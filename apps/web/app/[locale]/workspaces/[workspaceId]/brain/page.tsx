@@ -1,5 +1,5 @@
 import React from "react";
-import { getBrainStatus, listArticles, requireWorkspaceMembership, listMeetings, listDocuments, resolveKnowledgeAccessDomains } from "@corgtex/domain";
+import { getBrainStatus, listArticles, readableArtifactIds, requireWorkspaceMembership, listMeetings, listDocuments, resolveKnowledgeAccessDomains } from "@corgtex/domain";
 import { answerKnowledgeQuestion, searchIndexedKnowledge } from "@corgtex/knowledge";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
@@ -55,12 +55,12 @@ export default async function BrainPage({
     listBrainArticleTypeCounts({ workspaceId, actor, membership }),
     getBrainStatus(actor, { workspaceId }),
     provisionalQuery.trim()
-      ? searchIndexedKnowledge({ workspaceId, query: provisionalQuery, limit: 12, accessDomains, sourceTypes: ["BRAIN_ARTICLE", "DOCUMENT", "MEETING"] })
+      ? searchIndexedKnowledge({ actor, workspaceId, query: provisionalQuery, limit: 12, accessDomains, sourceTypes: ["BRAIN_ARTICLE", "DOCUMENT", "MEETING"] })
       : Promise.resolve([]),
     provisionalQuestion.trim()
-      ? answerKnowledgeQuestion({ workspaceId, question: provisionalQuestion, limit: 4, accessDomains, sourceTypes: ["BRAIN_ARTICLE", "DOCUMENT", "MEETING"] })
+      ? answerKnowledgeQuestion({ actor, workspaceId, question: provisionalQuestion, limit: 4, accessDomains, sourceTypes: ["BRAIN_ARTICLE", "DOCUMENT", "MEETING"] })
       : Promise.resolve(null),
-    listMeetings(workspaceId, { status: "COMPLETED" }),
+    listMeetings(actor, workspaceId, { status: "COMPLETED" }),
     listDocuments(actor, workspaceId),
   ]);
 
@@ -409,23 +409,19 @@ async function listBrainArticleTypeCounts(params: {
   actor: AppActor;
   membership: { id?: string | null; role?: string | null } | null | undefined;
 }) {
-  const counts = await prisma.brainArticle.groupBy({
-    by: ["type"],
+  const candidates = await prisma.brainArticle.findMany({
     where: {
       AND: [
         { workspaceId: params.workspaceId, archivedAt: null },
         { OR: brainArticleVisibility(params.actor, params.membership) },
       ],
     },
-    _count: {
-      _all: true,
-    },
   });
-
-  return counts.map((entry) => ({
-    type: entry.type,
-    count: entry._count._all,
-  }));
+  const readableIds = await readableArtifactIds(params.actor, params.workspaceId, "BrainArticle", candidates);
+  const counts = new Map<string, number>();
+  for (const article of candidates) if (readableIds.has(article.id))
+    counts.set(article.type, (counts.get(article.type) ?? 0) + 1);
+  return [...counts].map(([type, count]) => ({ type, count }));
 }
 
 async function listSearchResultArticleRefs(params: {
@@ -438,7 +434,7 @@ async function listSearchResultArticleRefs(params: {
   const unresolvedRefs = getUnresolvedBrainSearchArticleRefs(params.results, params.visibleArticleRefs);
   if (unresolvedRefs.length === 0) return [];
 
-  return prisma.brainArticle.findMany({
+  const candidates = await prisma.brainArticle.findMany({
     where: {
       AND: [
         { workspaceId: params.workspaceId, archivedAt: null },
@@ -451,11 +447,10 @@ async function listSearchResultArticleRefs(params: {
         { OR: brainArticleVisibility(params.actor, params.membership) },
       ],
     },
-    select: {
-      id: true,
-      slug: true,
-    },
   });
+  const readableIds = await readableArtifactIds(params.actor, params.workspaceId, "BrainArticle", candidates);
+  return candidates.filter((article) => readableIds.has(article.id))
+    .map(({ id, slug }) => ({ id, slug }));
 }
 
 function brainArticleVisibility(

@@ -1,7 +1,7 @@
 import type { AgentTriggerType } from "@prisma/client";
-import { prisma } from "@corgtex/shared";
+import { prisma, type AppActor } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
-import { createConstitutionVersion, loadConstitutionCorpusSnapshot } from "@corgtex/domain";
+import { captureArtifactInputProof, createConstitutionVersion, getCurrentConstitution, invariant, isArtifactInputProofReadable, loadConstitutionCorpusSnapshot, type LineageRoot } from "@corgtex/domain";
 import { executeAgentRun } from "../runtime";
 
 function parseConstitutionSynthesis(content: string, policyIds: Set<string>) {
@@ -55,8 +55,13 @@ export async function runConstitutionSynthesisAgent(params: {
   workspaceId: string;
   triggerRef: string;
   triggerType?: AgentTriggerType;
+  actor?: AppActor;
 }) {
+  const actor: AppActor = params.actor ?? { kind: "agent", authProvider: "bootstrap", label: "constitution-synthesis", workspaceIds: [params.workspaceId] };
+  const planRoots = await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "Workspace", id: params.workspaceId }]);
   return executeAgentRun({
+    lineageActor: actor, lineageRoots: planRoots, contextIsAuditedRead: true,
+    contextLineageRoots: context => context.lineageRoots as LineageRoot[],
     agentKey: "constitution-synthesis",
     workspaceId: params.workspaceId,
     triggerType: params.triggerType ?? "EVENT",
@@ -66,15 +71,18 @@ export async function runConstitutionSynthesisAgent(params: {
     plan: ["load-context", "synthesize-constitution", "persist-version"],
     buildContext: (helpers) => helpers.tool("policy.load-corpus", {}, async () => {
       const [corpusSnapshot, currentConstitution] = await Promise.all([
-        loadConstitutionCorpusSnapshot(prisma, params.workspaceId),
-        prisma.constitution.findFirst({
-          where: { workspaceId: params.workspaceId },
-          orderBy: { version: "desc" },
-        }),
+        loadConstitutionCorpusSnapshot(actor, prisma, params.workspaceId),
+        getCurrentConstitution(actor, params.workspaceId),
       ]);
 
+      const lineageInputs = [
+        ...corpusSnapshot.corpus.map((policy) => ({ kind: "PolicyCorpus" as const, id: policy.id, snapshot: policy })),
+        ...(currentConstitution ? [{ kind: "Constitution" as const, id: currentConstitution.id, snapshot: currentConstitution }] : []),
+      ];
+      const lineageRoots = lineageInputs.length ? await captureArtifactInputProof(actor, params.workspaceId, lineageInputs) : [];
       return {
-        policies: corpusSnapshot.corpus,
+        lineageRoots,
+        policies: corpusSnapshot.corpus.map(policy => ({ id: policy.id, title: policy.title, bodyMd: policy.bodyMd, acceptedAt: policy.acceptedAt })),
         corpusFingerprint: corpusSnapshot.fingerprint,
         currentConstitution: currentConstitution ? {
           version: currentConstitution.version,
@@ -82,8 +90,9 @@ export async function runConstitutionSynthesisAgent(params: {
           createdAt: currentConstitution.createdAt,
         } : null,
       };
-    }),
+    }, { receipt: helpers.plannedInputReceipt, auditedRead: true }),
     execute: async (context, helpers, runId, model) => {
+      const lineageRoots = [...(Array.isArray(context.lineageRoots) ? context.lineageRoots as LineageRoot[] : []), ...helpers.behaviorLineageRoots];
       const policies = Array.isArray(context.policies) ? context.policies : [];
       const corpusFingerprint = typeof context.corpusFingerprint === "string"
         ? context.corpusFingerprint
@@ -110,6 +119,9 @@ export async function runConstitutionSynthesisAgent(params: {
         throw new Error("Constitution synthesis requires exact accepted policy IDs.");
       }
 
+      invariant(lineageRoots.length > 0 && await isArtifactInputProofReadable(actor, params.workspaceId, lineageRoots),
+        409, "SOURCE_CHANGED", "Constitution synthesis inputs are unavailable.");
+      const receipt = await helpers.captureInputs(lineageRoots);
       const synthesized = await helpers.tool("model.chat", { policyCount: policies.length }, async () => defaultModelGateway.chat({ model,
         workspaceId: params.workspaceId,
         agentRunId: runId,
@@ -117,9 +129,9 @@ export async function runConstitutionSynthesisAgent(params: {
         messages: [
           {
             role: "system",
-            content: `You are a governance document synthesizer for a self-managing organization. Your task is to create or update a 10-point constitution document. First and foremost, the constitution MUST preserve its fixed Mission, Vision, and Purpose exactly as they are defined in the provided organizational context or the current constitution (if updating).
+            content: `${helpers.behaviorContext ? `${helpers.behaviorContext}\n\n` : ""}You are a governance document synthesizer for a self-managing organization. Your task is to create or update a 10-point constitution document. First and foremost, the constitution MUST preserve its fixed Mission, Vision, and Purpose exactly as they are defined in the provided organizational context or the current constitution (if updating).
 
-The 10 points should be generated ad hoc based on the most up-to-date and important parts of the organization's decisions and direction. Extract this context from the accepted policy corpus and any available internal sources.
+The 10 points should be generated ad hoc based on the most up-to-date and important parts of the organization's decisions and direction. Extract this context only from the provided accepted policy corpus and readable prior constitution.
 
 The constitution should:
 - Start with the fixed section for Mission, Vision, and Purpose.
@@ -145,13 +157,15 @@ ${currentConstitution ? "You are UPDATING the existing constitution. You MUST pr
             }),
           },
         ],
-      }));
+      }), { receipt });
 
       const { bodyMd, references } = parseConstitutionSynthesis(
         synthesized.content,
         new Set(policyIds),
       );
 
+      if (currentConstitution) invariant(await isArtifactInputProofReadable(actor, params.workspaceId, lineageRoots),
+        409, "SOURCE_CHANGED", "Constitution summary inputs changed.");
       const diffSummary = currentConstitution
         ? await helpers.tool("model.chat", { purpose: "diff-summary" }, async () => defaultModelGateway.chat({ model,
             workspaceId: params.workspaceId,
@@ -170,13 +184,14 @@ ${currentConstitution ? "You are UPDATING the existing constitution. You MUST pr
                 }),
               },
             ],
-          }))
+          }), { receipt })
         : null;
 
       // Persist the new constitution version
       const latestVersion = currentConstitution?.version ?? 0;
       const newVersion = await helpers.step("persist-version", { version: latestVersion + 1 }, async () =>
         createConstitutionVersion({
+          lineageActor: actor, lineageRoots,
           workspaceId: params.workspaceId,
           bodyMd,
           references,
@@ -187,10 +202,11 @@ ${currentConstitution ? "You are UPDATING the existing constitution. You MUST pr
           promptTokens: synthesized.usage?.inputTokens ?? null,
           completionTokens: synthesized.usage?.outputTokens ?? null,
           expectedCorpusFingerprint: corpusFingerprint,
-        })
+        }), { receipt }
       );
 
       return {
+        lineageReceipt: receipt,
         resultJson: {
           constitutionId: newVersion.id,
           version: newVersion.version,

@@ -1,7 +1,8 @@
+import type { AppActor } from "@corgtex/shared";
 import { runInboxTriageAgent, runDailyCheckInAgent, runMeetingSummaryAgent, runActionExtractionAgent, runProposalDraftingAgent, runConstitutionUpdateTriggerAgent, runConstitutionSynthesisAgent, runCrmDripFollowupAgent, runCrmEmailExtractionAgent, runCrmLeadEnrichmentAgent, runCompanyUnderstandingAgent } from "@corgtex/agents";
 import { executeAgentRun } from "@corgtex/agents";
-import { runBrainMaintenance, absorbSource, runBrainSourceRegenerationJob } from "@corgtex/agents";
-import { assertBrainSourceRecoveryJob } from "@corgtex/domain";
+import { runBrainMaintenance, absorbSource, runBrainSourceRegenerationJob, runBrainArticleVariantJob, runGraphSourceVariantJob } from "@corgtex/agents";
+import { assertBrainSourceRecoveryJob, captureArtifactInputProof } from "@corgtex/domain";
 
 function asString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -64,8 +65,9 @@ export async function runAgentWorkflowJob(job: {
       prompt: asString(payload.prompt),
       meetingId: asString(payload.meetingId) || null,
       triggerType: payload.triggerType === "API" ? "API" : "MANUAL",
-      reviewFeedback: asString(payload.reviewFeedback) || undefined,
-      previousAdvice: asString(payload.previousAdvice) || undefined,
+      requestInputId: asString(payload.requestInputId) || undefined,
+      feedbackInputId: asString(payload.feedbackInputId) || undefined,
+      priorRunSnapshotId: asString(payload.priorRunSnapshotId) || undefined,
     });
   }
 
@@ -75,8 +77,9 @@ export async function runAgentWorkflowJob(job: {
       triggerRef: job.id,
       proposalId: asString(payload.proposalId),
       triggerType: payload.triggerType === "MANUAL" ? "MANUAL" : "EVENT",
-      reviewFeedback: asString(payload.reviewFeedback) || undefined,
-      previousAdvice: asString(payload.previousAdvice) || undefined,
+      requestInputId: asString(payload.requestInputId) || undefined,
+      feedbackInputId: asString(payload.feedbackInputId) || undefined,
+      priorRunSnapshotId: asString(payload.priorRunSnapshotId) || undefined,
     });
   }
 
@@ -89,7 +92,11 @@ export async function runAgentWorkflowJob(job: {
   }
 
   if (job.type === "agent.brain-maintenance") {
+    const lineageActor: AppActor = {kind: "agent", authProvider: "bootstrap", label: "brain-maintenance", workspaceIds: [job.workspaceId]};
+    const lineageRoots = await captureArtifactInputProof(lineageActor, job.workspaceId, [{kind: "Workspace", id: job.workspaceId}]);
     return executeAgentRun({
+      lineageActor, lineageRoots,
+      contextLineageRoots: () => lineageRoots,
       agentKey: "brain-maintenance",
       workspaceId: job.workspaceId,
       triggerType: payload.triggerType === "MANUAL" ? "MANUAL" : "SCHEDULE",
@@ -98,15 +105,12 @@ export async function runAgentWorkflowJob(job: {
       payload: {},
       plan: ["freshness-scan", "dead-link-scan", "orphan-detection", "tier3-cleanup", "backlink-rebuild", "discussion-maintenance"],
       buildContext: async (helpers) =>
-        helpers.tool("brain.workspace-info", {}, async () => ({ workspaceId: job.workspaceId })),
-      execute: async (_context, helpers, runId, _model) =>
-        helpers.step("maintenance", {}, async () => {
-          const result = await runBrainMaintenance({
-            workspaceId: job.workspaceId!,
-            agentRunId: runId,
-          });
-          return { resultJson: result };
-        }),
+        helpers.tool("brain.workspace-info", {}, async () => ({ workspaceId: job.workspaceId }), {receipt: helpers.plannedInputReceipt}),
+      execute: async (_context, helpers, runId, _model) => {
+        const {lineageRoots: consumedRoots, ...result} = await runBrainMaintenance({workspaceId: job.workspaceId!, agentRunId: runId, actor: lineageActor});
+        const receipt = await helpers.captureInputs(consumedRoots);
+        return helpers.step("maintenance", {}, async () => ({resultJson: result, lineageReceipt: receipt}), {receipt});
+      },
     });
   }
 
@@ -150,6 +154,20 @@ export async function runAgentWorkflowJob(job: {
       throw new Error("Brain source recovery was skipped by agent runtime before processing.");
     }
     return result;
+  }
+
+  if (job.type === "agent.graph-source-variant") {
+    if (!Number.isSafeInteger(job.attempts) || (job.attempts ?? 0) < 1 || !claimOwner) {
+      throw new Error("Graph variant generation requires a claimed worker attempt.");
+    }
+    return runGraphSourceVariantJob({workspaceId: job.workspaceId, jobId: job.id, expectedAttempt: job.attempts!, expectedOwner: claimOwner});
+  }
+
+  if (job.type === "agent.brain-article-variant") {
+    if (!Number.isSafeInteger(job.attempts) || (job.attempts ?? 0) < 1 || !claimOwner) {
+      throw new Error("Article variant generation requires a claimed worker attempt.");
+    }
+    return runBrainArticleVariantJob({ workspaceId: job.workspaceId, jobId: job.id, expectedAttempt: job.attempts!, expectedOwner: claimOwner });
   }
 
   if (job.type === "agent.brain-source-regenerate") {

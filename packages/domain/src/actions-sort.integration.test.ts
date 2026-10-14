@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { expect, it } from "vitest";
 import { getPrismaClient, type AppActor } from "@corgtex/shared";
 import { countActionsByStatus, listActions } from "./actions";
+import { recordArtifactInputLineage } from "./source-lineage";
 
 const prisma = getPrismaClient();
 
@@ -41,6 +42,13 @@ it("sorts filtered Actions before pagination, with undated Actions last in eithe
       status: "COMPLETED" as const, isPrivate: false,
       dueAt: new Date("2026-10-01T00:00:00.000Z"), createdAt: new Date("2026-10-01T12:00:00.000Z"),
     })) });
+    // These fixtures are direct human-authored Actions, not unclassified legacy rows.
+    await prisma.$transaction(async tx => {
+      for (const action of await tx.action.findMany({ where: { workspaceId } })) {
+        await recordArtifactInputLineage({ tx, actor, workspaceId, artifact: { kind: "Action", id: action.id },
+          content: action, origin: "HUMAN_ORIGINAL", inputs: [] });
+      }
+    }, { timeout: 30_000 });
 
     const visible = await listActions(actor, workspaceId, { statuses: ["OPEN"], sort: "due_asc", take: 200 });
     expect(visible.items.map((action) => action.id)).toEqual([ids.firstDue, ...[ids.tiedA, ids.tiedB].sort().reverse(), ids.lastDue, ids.noDue]);

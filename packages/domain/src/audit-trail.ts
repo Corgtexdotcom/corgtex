@@ -1,7 +1,10 @@
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
-import { Prisma } from "@prisma/client";
+import { Prisma, EventStatus, WorkflowJobStatus } from "@prisma/client";
+import { redactAgentRunContent } from "./agent-runs";
 import { requireWorkspaceMembership } from "./auth";
+import { AppError, invariant } from "./errors";
+import { captureArtifactInputProof, isArtifactInputProofReadable, isLineageKind, readableArtifactIds, sealArtifactInputActor, type LineageKind, type LineageRoot } from "./source-lineage";
 
 export async function recordAudit(
   tx: Prisma.TransactionClient,
@@ -26,6 +29,99 @@ export async function recordAudit(
   });
 }
 
+// Only server-defined operation vocabulary is an operational fact. Historical
+// free text is never certified by the current target's content receipt.
+const AUDIT_OPERATIONS: Partial<Record<LineageKind, readonly string[]>> = {
+  Action: ["action.checklist_item.created", "action.checklist_item.deleted", "action.checklist_item.updated", "action.completed", "action.created", "action.duplicate_resolved", "action.published", "action.returned_to_draft", "action.updated", "create_action"],
+  AdviceRequest: ["advice.request.completed", "advice.request.withdrawn", "advice.requested"],
+  AgentRun: ["agentRun.feedbackSubmitted"],
+  ApprovalFlow: ["approval.decision_recorded", "approval.finalized", "approval.objection_created", "approval.objection_resolved", "approval.withdrawn"],
+  BrainArticle: ["brain-article.created", "brain-article.published", "brain-article.regenerated", "brain-article.returned_to_draft", "brain-article.updated", "brain-article.variant.created"],
+  BrainSource: ["brain-source.created", "brain-source.reconciled", "brain-source.updated"],
+  BuildArtifact: ["build_artifact.public_revoked"],
+  BuildArtifactAsset: ["build_artifact_asset.created", "managed_release.inventory_frozen"],
+  Circle: ["circle.created", "circle.updated"],
+  ContextGraphObject: ["context-graph.object.upserted"],
+  ContextGraphProposedDiff: ["context-graph.diff.applied", "context-graph.diff.edited", "context-graph.diff.proposed"],
+  ContextGraphRelationship: ["context-graph.relationship.upserted"],
+  ContextMapView: ["context-graph.map.imported", "context-map.layout.updated", "context-map.view.personal.created"],
+  CrmAccount: ["crm.account.converted_to_client", "crm.account.created", "crm.account.customer_lifecycle_registered", "crm.account.updated"],
+  CrmActivity: ["crm.activity.completed", "crm.activity.updated"],
+  CrmCommunicationSuggestion: ["crm.communication_suggestion.created", "crm.communication_suggestion.declined", "crm.communication_suggestion.failed", "crm.communication_suggestion.requested", "crm.communication_suggestion.sent", "crm.communication_suggestion.updated"],
+  CrmContact: ["crm.contact.created", "crm.contact.updated"],
+  CrmDeal: ["crm.deal.created", "crm.deal.updated"],
+  DeliberationEntry: ["deliberation.entry_posted", "deliberation.entry_resolved", "deliberation.entry_updated"],
+  Document: ["document.created", "document.updated"],
+  ExecutionRequest: ["execution_request.created", "execution_result.submitted"],
+  ExternalContentSource: ["external-content-source.selected", "external-content-source.sync_requested"],
+  FinanceImportBatch: ["finance-report-import.applied", "finance-report-import.extracted", "finance-report-import.extraction-failed", "finance-report-import.proposed", "finance-report-import.reconciled", "finance-report-import.uploaded"],
+  FinanceImportCandidate: ["finance-report-import.candidate-edited"],
+  Goal: ["goal.created", "goal.updated", "workspace-artifact.archived"],
+  Meeting: ["meeting.agenda.edited", "meeting.created", "meeting.intelligence-regeneration-requested", "meeting.processed_content_updated", "meeting.scheduled", "meeting.transcript-uploaded", "meeting.updated", "meeting_follow_up_review_posted"],
+  MeetingAudioAsset: ["meeting-audio.ingested", "meeting-audio.uploaded"],
+  MeetingSeries: ["meeting-invite.imported", "meeting-series.created", "meeting-series.recorder-url-updated"],
+  Member: ["member.access_link.created", "member.created", "member.merged", "procurement_trial.admin_created"],
+  Proposal: ["proposal.created", "proposal.created_from_tension", "proposal.opened", "proposal.published", "proposal.reopened", "proposal.resolved", "proposal.returned_to_draft", "proposal.support_reopened_resolved", "proposal.updated", "workspace-artifact.archived"],
+  Role: ["role.created", "role.updated", "workspace-artifact.archived"],
+  RoleAssignment: ["role.assigned", "role.unassigned"],
+  Tension: ["tension.created", "tension.published", "tension.returned_to_draft", "tension.updated"],
+  WorkspaceToolLink: ["tool_link.created", "tool_link.credential_revealed", "tool_link.updated"],
+};
+const ARCHIVE_OPERATIONS = new Set(["workspace-artifact.archived", "workspace-artifact.restored", "workspace-artifact.purged"]);
+const EVENT_OPERATIONS: Partial<Record<LineageKind, readonly string[]>> = {
+  Action: ["action.assigned", "action.checklist_item.created", "action.checklist_item.deleted", "action.checklist_item.updated", "action.created", "action.published", "action.returned_to_draft", "action.updated"],
+  AdviceRequest: ["advice.reminder_due", "advice.request.completed", "advice.request.withdrawn", "advice.requested"],
+  AgentIdentity: ["agent-identity.created", "agent-identity.deactivated"],
+  ApprovalFlow: ["approval.decision_recorded", "approval.finalized", "approval.objection_created", "approval.objection_resolved"],
+  BrainArticle: ["brain-article.created", "brain-article.published", "brain-article.returned_to_draft", "brain-article.updated", "source-lineage.changed"],
+  BrainSource: ["brain-source.created", "source-lineage.changed"],
+  CheckIn: ["checkin.response_received", "checkin.skipped"],
+  Circle: ["circle.created"],
+  CircleAgentAssignment: ["agent-identity.circle-assigned", "agent-identity.circle-unassigned"],
+  ContextGraphProposedDiff: ["context-graph.diff.applied"],
+  ContextMapView: ["context-graph.map.imported"],
+  CrmAccount: ["crm.account.converted_to_client", "crm.account.created", "crm.account.customer_lifecycle_registered"],
+  CrmContact: ["crm.contact.created"],
+  CrmConversation: ["crm.inquiry.acknowledgement_sent", "crm.inquiry.captured"],
+  CrmDeal: ["crm.deal.created"],
+  CrmProspectWorkspace: ["crm.prospect_workspace.provisioned"],
+  CrmQualification: ["crm.qualification.approved", "crm.qualification.rejected", "crm.qualification.submitted"],
+  DeliberationEntry: ["advice.reply_posted", "deliberation.entry_posted", "deliberation.entry_updated"],
+  DemoLead: ["demo-lead.captured"],
+  Document: ["document.created", "document.updated"],
+  FinanceImportBatch: ["finance-report-import.extracted", "finance-report-import.proposed", "finance-report-import.reconciled", "finance-report-import.uploaded"],
+  Goal: ["goal.created", "goal.updated"],
+  GoalLink: ["goal-link.created"],
+  Meeting: ["meeting.created", "meeting.processed-content-updated", "meeting.scheduled", "meeting.transcript-uploaded"],
+  Member: ["member.created", "member.deactivated", "member.merged"],
+  Proposal: ["proposal.created", "proposal.opened", "proposal.published", "proposal.reopened", "proposal.returned_to_draft", "proposal.support_reopened_resolved", "proposal.updated"],
+  Role: ["role.created", "role.updated"],
+  RoleAssignment: ["role.assigned", "role.assignment.updated", "role.unassigned"],
+  Tension: ["tension.created", "tension.published", "tension.returned_to_draft", "tension.updated"],
+};
+const JOB_OPERATIONS = new Set(["agent.action-extraction", "agent.brain-absorb", "agent.checkin-analysis", "agent.constitution-synthesis", "agent.constitution-update-trigger", "agent.crm-email-extraction", "agent.crm-lead-enrichment", "agent.inbox-triage", "agent.meeting-summary", "agent.role-onboarding-intro", "context-graph.sync", "email.crm-inquiry-acknowledgement", "email.demo-welcome-newspaper", "finance-report-import.extract", "finance-report-import.interpret", "governance.score", "knowledge.sync.action", "knowledge.sync.brain-article", "knowledge.sync.circle", "knowledge.sync.document", "knowledge.sync.event", "knowledge.sync.meeting", "knowledge.sync.proposal", "knowledge.sync.role", "knowledge.sync.tension", "meeting.insights.extract", "meeting.summary.post", "source-lineage.rebuild"]);
+const EVENT_STATUSES = new Set<string>(Object.values(EventStatus));
+const JOB_STATUSES = new Set<string>(Object.values(WorkflowJobStatus));
+const AUDIT_SCAN_LIMIT = 5000;
+
+const AUDIT_SELECT = { id: true, workspaceId: true, actorUserId: true, action: true, entityType: true,
+  entityId: true, createdAt: true } as const;
+type AuditOperationalRow = Prisma.AuditLogGetPayload<{ select: typeof AUDIT_SELECT }>;
+function auditOperationalFields(row: AuditOperationalRow) {
+  return { id: row.id, workspaceId: row.workspaceId, actorUserId: row.actorUserId,
+    action: row.action, entityType: row.entityType, entityId: row.entityId,
+    createdAt: row.createdAt, meta: null };
+}
+
+async function captureAuditTarget(actor: AppActor, workspaceId: string, kind: string, id: string, snapshot?: Record<string, unknown>): Promise<LineageRoot[] | null> {
+  if (!isLineageKind(kind)) return null;
+  try { return await captureArtifactInputProof(actor, workspaceId, [{ kind, id, ...(snapshot ? { snapshot } : {}) }]); }
+  catch (error) {
+    if (error instanceof AppError && ["SOURCE_CHANGED", "UNKNOWN_LINEAGE", "PERMISSION_CHANGED"].includes(error.code)) return null;
+    throw error;
+  }
+}
+
 export async function listAuditLogs(actor: AppActor, workspaceId: string, opts?: {
   take?: number;
   entityType?: string;
@@ -33,56 +129,77 @@ export async function listAuditLogs(actor: AppActor, workspaceId: string, opts?:
   action?: string;
   actorUserId?: string;
 }) {
+  sealArtifactInputActor(actor);
+  opts = opts ? { ...opts } : undefined;
   await requireWorkspaceMembership({ actor, workspaceId });
-
-  return prisma.auditLog.findMany({
-    where: {
-      workspaceId,
+  if (opts?.entityType && !isLineageKind(opts.entityType)) return [];
+  if (opts?.entityType && opts.entityId && !await captureAuditTarget(actor, workspaceId, opts.entityType, opts.entityId)) return [];
+  const rows = await prisma.auditLog.findMany({
+    where: { workspaceId,
       ...(opts?.entityType ? { entityType: opts.entityType } : {}),
       ...(opts?.entityId ? { entityId: opts.entityId } : {}),
       ...(opts?.action ? { action: { contains: opts.action } } : {}),
       ...(opts?.actorUserId ? { actorUserId: opts.actorUserId } : {}),
     },
-    orderBy: { createdAt: "desc" },
-    take: opts?.take ?? 50,
+    select: AUDIT_SELECT,
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: AUDIT_SCAN_LIMIT + 1,
   });
+  invariant(rows.length <= AUDIT_SCAN_LIMIT, 409, "SOURCE_READ_SCAN_LIMIT", "Audit selection exceeds the safe scan limit; narrow the filters.");
+  const proofs = new Map<string, LineageRoot[] | null>();
+  const candidates = [];
+  for (const row of rows) {
+    if (!isLineageKind(row.entityType) || !(AUDIT_OPERATIONS[row.entityType]?.includes(row.action) || ARCHIVE_OPERATIONS.has(row.action))) continue;
+    const key = JSON.stringify([row.entityType, row.entityId]);
+    if (!proofs.has(key)) proofs.set(key, await captureAuditTarget(actor, workspaceId, row.entityType, row.entityId));
+    const roots = proofs.get(key);
+    if (roots) candidates.push({ row, roots });
+  }
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const visible = [];
+  for (const { row, roots } of candidates) {
+    if (await isArtifactInputProofReadable(actor, workspaceId, roots)) visible.push(auditOperationalFields(row));
+  }
+  return visible.slice(0, Math.max(0, Math.min(opts?.take ?? 50, AUDIT_SCAN_LIMIT)));
 }
 
 export async function getEntityTimeline(actor: AppActor, workspaceId: string, entityType: string, entityId: string) {
+  sealArtifactInputActor(actor);
   await requireWorkspaceMembership({ actor, workspaceId });
-
+  const empty = { auditLogs: [], relatedEvents: [] };
+  const roots = await captureAuditTarget(actor, workspaceId, entityType, entityId);
+  if (!roots || !isLineageKind(entityType)) return empty;
   const [auditLogs, relatedEvents] = await Promise.all([
-    prisma.auditLog.findMany({
-      where: { workspaceId, entityType, entityId },
-      orderBy: { createdAt: "asc" },
-    }),
-    prisma.event.findMany({
-      where: {
-        workspaceId,
-        aggregateType: entityType,
-        aggregateId: entityId,
-      },
-      select: {
-        id: true,
-        type: true,
-        status: true,
-        payload: true,
-        createdAt: true,
-        jobs: {
-          select: {
-            id: true,
-            type: true,
-            status: true,
-            completedAt: true,
-          },
-          orderBy: { createdAt: "asc" },
-        },
-      },
-      orderBy: { createdAt: "asc" },
-    }),
+    prisma.auditLog.findMany({ where: { workspaceId, entityType, entityId }, select: AUDIT_SELECT,
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: AUDIT_SCAN_LIMIT + 1 }),
+    prisma.event.findMany({ where: { workspaceId, aggregateType: entityType, aggregateId: entityId },
+      select: { id: true, type: true, status: true, createdAt: true },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: AUDIT_SCAN_LIMIT + 1 }),
   ]);
+  invariant(auditLogs.length <= AUDIT_SCAN_LIMIT && relatedEvents.length <= AUDIT_SCAN_LIMIT,
+    409, "SOURCE_READ_SCAN_LIMIT", "Timeline exceeds the safe scan limit.");
+  const visibleEvents = relatedEvents.filter(event => EVENT_OPERATIONS[entityType]?.includes(event.type) && EVENT_STATUSES.has(event.status));
+  // One bound across all events; a per-event nested take would multiply the scan.
+  const jobs = visibleEvents.length ? await prisma.workflowJob.findMany({
+    where: { workspaceId, eventId: { in: visibleEvents.map(event => event.id) } },
+    select: { id: true, eventId: true, type: true, status: true, completedAt: true },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: AUDIT_SCAN_LIMIT + 1,
+  }) : [];
+  invariant(jobs.length <= AUDIT_SCAN_LIMIT, 409, "SOURCE_READ_SCAN_LIMIT", "Timeline exceeds the safe scan limit.");
+  const admittedJobs = [];
+  for (const job of jobs) {
+    if (!JOB_OPERATIONS.has(job.type) || !JOB_STATUSES.has(job.status)) continue;
+    const jobRoots = await captureAuditTarget(actor, workspaceId, "WorkflowJobInput", job.id, job);
+    if (jobRoots) admittedJobs.push({ row: job, roots: jobRoots });
+  }
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const currentJobs: typeof jobs = [];
+  for (const job of admittedJobs) if (await isArtifactInputProofReadable(actor, workspaceId, job.roots)) currentJobs.push(job.row);
+  if (!await isArtifactInputProofReadable(actor, workspaceId, roots)) return empty;
+  return { auditLogs: auditLogs.filter(row => AUDIT_OPERATIONS[entityType]?.includes(row.action) || ARCHIVE_OPERATIONS.has(row.action)).map(auditOperationalFields),
+    relatedEvents: visibleEvents.map(event => ({ id: event.id, type: event.type, status: event.status, createdAt: event.createdAt,
+      jobs: currentJobs.filter(job => job.eventId === event.id).map(job => ({ id: job.id, type: job.type, status: job.status, completedAt: job.completedAt })), payload: null })) };
 
-  return { auditLogs, relatedEvents };
 }
 
 export async function getAgentRunTrace(actor: AppActor, workspaceId: string, agentRunId: string) {
@@ -115,23 +232,27 @@ export async function getAgentRunTrace(actor: AppActor, workspaceId: string, age
     },
   });
 
-  return run;
+  return run ? redactAgentRunContent(actor, workspaceId, run) : null;
 }
 
 export async function getModelUsageSummary(actor: AppActor, workspaceId: string, opts?: {
   periodDays?: number;
 }) {
-  await requireWorkspaceMembership({ actor, workspaceId });
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  invariant(actor.kind === "user" && membership?.role === "ADMIN", 403, "FORBIDDEN", "Model usage costs require a current workspace administrator.");
 
   const periodDays = opts?.periodDays ?? 30;
   const since = new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000);
 
-  const usages = await prisma.modelUsage.findMany({
+  const candidates = await prisma.modelUsage.findMany({
     where: {
       workspaceId,
       createdAt: { gte: since },
     },
     select: {
+      id: true,
+      workspaceId: true,
+      agentRunId: true,
       provider: true,
       model: true,
       taskType: true,
@@ -141,14 +262,19 @@ export async function getModelUsageSummary(actor: AppActor, workspaceId: string,
       estimatedCostUsd: true,
       billableCostUsd: true,
       createdAt: true,
-      agentRun: {
-        select: {
-          agentKey: true,
-        },
-      },
+      agentRun: true,
     },
     orderBy: { createdAt: "desc" },
+    take: 5001,
   });
+  invariant(candidates.length <= 5000, 409, "SOURCE_READ_SCAN_LIMIT", "Model usage period exceeds the safe scan limit; choose a shorter period.");
+  const costRows = candidates.map(({ id, workspaceId: rowWorkspaceId, estimatedCostUsd, billableCostUsd, createdAt }) =>
+    ({ id, workspaceId: rowWorkspaceId, estimatedCostUsd, billableCostUsd, createdAt }));
+  const readableCosts = await readableArtifactIds(actor, workspaceId, "ModelUsageCost", costRows);
+  const runs = [...new Map(candidates.flatMap(row => row.agentRun ? [[row.agentRun.id, row.agentRun] as const] : [])).values()];
+  const readableRuns = await readableArtifactIds(actor, workspaceId, "AgentRun", runs);
+  const usages = candidates.filter(row => readableCosts.has(row.id)
+    && (!row.agentRunId || (row.agentRun?.id === row.agentRunId && readableRuns.has(row.agentRunId))));
 
   // Aggregate by model
   const byModel = new Map<string, {

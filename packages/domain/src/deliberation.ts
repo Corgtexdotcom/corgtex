@@ -4,6 +4,8 @@ import { prisma } from "@corgtex/shared";
 import { requireWorkspaceMembership, actorUserIdForWorkspace } from "./auth";
 import { invariant } from "./errors";
 import { appendEvents } from "./events";
+import { captureArtifactInputProof, readableArtifactIds, type LineageInput } from "./source-lineage";
+import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { createNotificationIntent } from "./notifications";
 import { resolveAdviceRequestRequesterUsers } from "./advice-requests";
@@ -419,7 +421,7 @@ async function assertCanManageDeliberationEntry(tx: Prisma.TransactionClient, pa
   );
 }
 
-export async function postDeliberationEntry(actor: AppActor, params: {
+export async function postDeliberationEntry(actor: AppActor, params: ProducerLineageParams & {
   workspaceId: string;
   parentType: string;
   parentId: string;
@@ -520,6 +522,7 @@ export async function postDeliberationEntry(actor: AppActor, params: {
       parentId: params.parentId,
     });
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId, capture: params });
     const entry = await tx.deliberationEntry.create({
       data: {
         workspaceId: params.workspaceId,
@@ -534,6 +537,9 @@ export async function postDeliberationEntry(actor: AppActor, params: {
         adviceRequestId: linkedAdviceRequest?.id ?? null,
       }
     });
+
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "DeliberationEntry", id: entry.id }, content: entry, receipt });
 
     await tx.auditLog.create({
       data: {
@@ -570,73 +576,93 @@ export async function postDeliberationEntry(actor: AppActor, params: {
       });
     }
 
-    const mentionedUserIds = await resolveMentionedUserIds(tx, {
-      workspaceId: params.workspaceId,
-      bodyMd,
-      authorUserId,
-      explicitTargetUserId,
-      explicitTargetUserIds,
-      skipManualMentions: skipManualMentionParsing,
-    });
-    const publicParent = await publicReplyParent(tx, params);
-    const adviceReplyRecipients = linkedAdviceRequest && publicParent
-      ? await resolveAdviceRequestRequesterUsers(tx, {
+    const notificationCapture = async (parentTitle?: string | null) => {
+      const inputs: Array<LineageInput & { snapshot?: Record<string, unknown> }> = [
+        { kind: "DeliberationEntry", id: entry.id, snapshot: entry },
+        ...(actor.kind === "user" ? [{ kind: "User" as const, id: actor.user.id, snapshot: actor.user }] : []),
+        ...(parentTitle ? [{ kind: parentEntityType(params.parentType) as LineageInput["kind"],
+          id: params.parentId, snapshot: { title: parentTitle } }] : []),
+      ];
+      try {
+        return { lineageActor: actor, lineageRoots: await captureArtifactInputProof(actor, params.workspaceId, inputs, tx) };
+      } catch (error) {
+        if (!(error instanceof Error) || !("code" in error)
+          || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(String(error.code))) throw error;
+        // Preserve the source operation without certifying copied notification text.
+        return { lineageActor: actor };
+      }
+    };
+    if (receipt.mode !== "UNKNOWN") {
+      const mentionedUserIds = await resolveMentionedUserIds(tx, {
         workspaceId: params.workspaceId,
-        adviceRequestId: linkedAdviceRequest.id,
-        excludeUserIds: [authorUserId],
-      })
-      : [];
-    const replyParent = publicParent && !adviceReplyRecipients.some((recipient) => recipient.userId === publicParent.authorUserId)
-      ? publicParent
-      : null;
-    let parentAuthorMentionNotified = false;
-    if (mentionedUserIds.length > 0) {
-      const context = await parentNotificationContext(tx, {
-        workspaceId: params.workspaceId,
-        parentType: params.parentType,
-        parentId: params.parentId,
+        bodyMd,
+        authorUserId,
+        explicitTargetUserId,
+        explicitTargetUserIds,
+        skipManualMentions: skipManualMentionParsing,
       });
-      const mentionNotification = {
-        workspaceId: params.workspaceId,
-        type: "deliberation.mention",
-        actorUserId: authorUserId,
-        entityType: parentEntityType(params.parentType),
-        entityId: params.parentId,
-        title: `${actorLabel(actor)} mentioned you in a ${parentLabel(params.parentType)}${context.title ? `: ${context.title}` : ""}`,
-        bodyMd: context.includeBody ? notificationExcerpt(bodyMd) : null,
-        priority: "HIGH" as const,
-      };
-      const parentAuthorWasMentioned = replyParent && mentionedUserIds.includes(replyParent.authorUserId);
-      if (parentAuthorWasMentioned) {
-        const result = await createNotificationIntent(tx, {
-          ...mentionNotification,
-          recipientUserIds: [replyParent.authorUserId],
+      const publicParent = await publicReplyParent(tx, params);
+      const adviceReplyRecipients = linkedAdviceRequest && publicParent
+        ? await resolveAdviceRequestRequesterUsers(tx, {
+          workspaceId: params.workspaceId,
+          adviceRequestId: linkedAdviceRequest.id,
+          excludeUserIds: [authorUserId],
+        })
+        : [];
+      const replyParent = publicParent && !adviceReplyRecipients.some((recipient) => recipient.userId === publicParent.authorUserId)
+        ? publicParent
+        : null;
+      let parentAuthorMentionNotified = false;
+      if (mentionedUserIds.length > 0) {
+        const context = await parentNotificationContext(tx, {
+          workspaceId: params.workspaceId,
+          parentType: params.parentType,
+          parentId: params.parentId,
         });
-        parentAuthorMentionNotified = result.count > 0;
+        const mentionNotification = {
+          ...await notificationCapture(context.title),
+          workspaceId: params.workspaceId,
+          type: "deliberation.mention",
+          actorUserId: authorUserId,
+          entityType: parentEntityType(params.parentType),
+          entityId: params.parentId,
+          title: `${actorLabel(actor)} mentioned you in a ${parentLabel(params.parentType)}${context.title ? `: ${context.title}` : ""}`,
+          bodyMd: context.includeBody ? notificationExcerpt(bodyMd) : null,
+          priority: "HIGH" as const,
+        };
+        const parentAuthorWasMentioned = replyParent && mentionedUserIds.includes(replyParent.authorUserId);
+        if (parentAuthorWasMentioned) {
+          const result = await createNotificationIntent(tx, {
+            ...mentionNotification,
+            recipientUserIds: [replyParent.authorUserId],
+          });
+          parentAuthorMentionNotified = result.count > 0;
+        }
+        const remainingRecipients = parentAuthorWasMentioned
+          ? mentionedUserIds.filter((userId) => userId !== replyParent.authorUserId)
+          : mentionedUserIds;
+        if (remainingRecipients.length > 0) {
+          await createNotificationIntent(tx, { ...mentionNotification, recipientUserIds: remainingRecipients });
+        }
       }
-      const remainingRecipients = parentAuthorWasMentioned
-        ? mentionedUserIds.filter((userId) => userId !== replyParent.authorUserId)
-        : mentionedUserIds;
-      if (remainingRecipients.length > 0) {
-        await createNotificationIntent(tx, { ...mentionNotification, recipientUserIds: remainingRecipients });
-      }
-    }
 
-    if (replyParent
-      && replyParent.authorUserId !== authorUserId
-      && !parentAuthorMentionNotified) {
-      await createNotificationIntent(tx, {
-        workspaceId: params.workspaceId,
-        type: "deliberation.reply",
-        recipientUserIds: [replyParent.authorUserId],
-        actorUserId: authorUserId,
-        entityType: parentEntityType(params.parentType),
-        entityId: params.parentId,
-        title: `${actorLabel(actor)} replied to your ${parentLabel(params.parentType)}: ${replyParent.title}`,
-        bodyMd: notificationExcerpt(bodyMd),
-        priority: "NORMAL",
-        dedupeKey: `deliberation-reply:${entry.id}`,
-      });
+      if (replyParent
+        && replyParent.authorUserId !== authorUserId
+        && !parentAuthorMentionNotified) {
+        await createNotificationIntent(tx, {
+          workspaceId: params.workspaceId,
+          type: "deliberation.reply",
+          ...await notificationCapture(replyParent.title),
+          recipientUserIds: [replyParent.authorUserId],
+          actorUserId: authorUserId,
+          entityType: parentEntityType(params.parentType),
+          entityId: params.parentId,
+          title: `${actorLabel(actor)} replied to your ${parentLabel(params.parentType)}: ${replyParent.title}`,
+          bodyMd: notificationExcerpt(bodyMd),
+          priority: "NORMAL",
+          dedupeKey: `deliberation-reply:${entry.id}`,
+        });
+      }
     }
 
     await appendEvents(tx, [
@@ -686,7 +712,7 @@ export async function postDeliberationEntry(actor: AppActor, params: {
   });
 }
 
-export async function resolveDeliberationEntry(actor: AppActor, params: {
+export async function resolveDeliberationEntry(actor: AppActor, params: ProducerLineageParams & {
   workspaceId: string;
   entryId: string;
   resolvedNote: string;
@@ -698,6 +724,7 @@ export async function resolveDeliberationEntry(actor: AppActor, params: {
   invariant(resolvedNote.length > 0, 400, "INVALID_INPUT", "Resolution note is required.");
 
   return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "DeliberationEntry" WHERE id = ${params.entryId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const entry = await tx.deliberationEntry.findUnique({
       where: { id: params.entryId }
     });
@@ -713,6 +740,8 @@ export async function resolveDeliberationEntry(actor: AppActor, params: {
       action: "resolve",
     });
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "DeliberationEntry", id: entry.id }, before: entry, capture: params });
     const updated = await tx.deliberationEntry.update({
       where: { id: entry.id },
       data: {
@@ -720,6 +749,9 @@ export async function resolveDeliberationEntry(actor: AppActor, params: {
         resolvedNote,
       }
     });
+
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "DeliberationEntry", id: updated.id }, content: updated, receipt });
 
     await tx.auditLog.create({
       data: {
@@ -736,7 +768,7 @@ export async function resolveDeliberationEntry(actor: AppActor, params: {
   });
 }
 
-export async function updateDeliberationEntry(actor: AppActor, params: {
+export async function updateDeliberationEntry(actor: AppActor, params: ProducerLineageParams & {
   workspaceId: string;
   entryId: string;
   entryType?: string;
@@ -747,6 +779,7 @@ export async function updateDeliberationEntry(actor: AppActor, params: {
   const isAdmin = membership ? membership.role === "ADMIN" : actor.kind === "agent";
 
   return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "DeliberationEntry" WHERE id = ${params.entryId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const entry = await tx.deliberationEntry.findUnique({
       where: { id: params.entryId },
     });
@@ -786,10 +819,15 @@ export async function updateDeliberationEntry(actor: AppActor, params: {
     const changedFields = Object.keys(data).filter((field) => entry[field as keyof typeof entry] !== data[field]);
     if (changedFields.length === 0) return entry;
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "DeliberationEntry", id: entry.id }, before: entry, capture: params });
     const updated = await tx.deliberationEntry.update({
       where: { id: entry.id },
       data,
     });
+
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "DeliberationEntry", id: updated.id }, content: updated, receipt });
 
     await tx.auditLog.create({
       data: {
@@ -835,7 +873,7 @@ export async function listDeliberationEntries(actor: AppActor, params: {
   parentId: string;
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  return prisma.deliberationEntry.findMany({
+  const entries = await prisma.deliberationEntry.findMany({
     where: {
       workspaceId: params.workspaceId,
       parentType: params.parentType,
@@ -844,6 +882,8 @@ export async function listDeliberationEntries(actor: AppActor, params: {
     include: deliberationEntryListInclude,
     orderBy: { createdAt: "asc" }
   });
+  const readable = await readableArtifactIds(actor, params.workspaceId, "DeliberationEntry", entries);
+  return entries.filter((entry) => readable.has(entry.id));
 }
 
 export async function listDeliberationEntriesForParents(actor: AppActor, params: {
@@ -871,7 +911,9 @@ export async function listDeliberationEntriesForParents(actor: AppActor, params:
     orderBy: { createdAt: "asc" }
   });
 
+  const readable = await readableArtifactIds(actor, params.workspaceId, "DeliberationEntry", entries);
   for (const entry of entries) {
+    if (!readable.has(entry.id)) continue;
     entriesByParentId.get(entry.parentId)?.push(entry);
   }
 

@@ -19,6 +19,7 @@ const {
   upsertNewspaperEditionMock,
   collectWorkspaceBriefingCandidatesMock,
   upsertWorkspaceBriefingMock,
+  readableArtifactIdsMock,
 } = vi.hoisted(() => ({
   txMock: {
     demoLead: {
@@ -30,6 +31,7 @@ const {
     newspaperDelivery: {
       create: vi.fn(),
     },
+    brainSource: { create: vi.fn() },
   },
   prismaMock: {
     $transaction: vi.fn(),
@@ -69,6 +71,7 @@ const {
     brainSource: {
       create: vi.fn(),
     },
+    artifactInputLineage: { findFirst: vi.fn() },
     brainArticle: {
       findUnique: vi.fn(),
       findMany: vi.fn(),
@@ -102,6 +105,7 @@ const {
   upsertNewspaperEditionMock: vi.fn(),
   collectWorkspaceBriefingCandidatesMock: vi.fn(),
   upsertWorkspaceBriefingMock: vi.fn(),
+  readableArtifactIdsMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -144,6 +148,19 @@ vi.mock("@corgtex/domain", async () => ({
     { id: "otherUpdates", title: "Other Updates", aliases: ["misc", "other", "brainUpdates", "documentUpdates"] },
   ],
   getAgentModelOverride: vi.fn().mockResolvedValue(undefined),
+  readableArtifactIds: readableArtifactIdsMock,
+  captureArtifactInputProof: vi.fn(async (_actor, _workspaceId, inputs) => inputs.map(({ kind, id }: any) => ({ kind, id, fingerprint: "a".repeat(64) }))),
+  captureReadableDigestInputs: vi.fn(async ({ kind, records }: any) => ({ records,
+    proofs: new Map(records.map((record: any) => [record.id, [{ kind, id: record.id, fingerprint: "a".repeat(64) }]])),
+    roots: records.map((record: any) => ({ kind, id: record.id, fingerprint: "a".repeat(64) })),
+  })),
+  loadReadableDigestQuery: vi.fn(async ({ limit, loadBatch }: any) => loadBatch({ take: limit, skip: 0 })),
+  isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
+  isDigestInputProofShared: vi.fn().mockResolvedValue(true),
+  requireWorkspaceMembership: vi.fn().mockResolvedValue({ id: "member-1", isActive: true }),
+  AppError: (await import("../../domain/src/errors")).AppError,
+  recordArtifactInputLineage: vi.fn(),
+  mergeArtifactInputProofs: (...proofs: any[][]) => [...new Map(proofs.flat().map((root) => [`${root.kind}:${root.id}`, root])).values()],
   getWorkspaceNewspaperCadence: getWorkspaceNewspaperCadenceMock,
   isHumanNewspaperRecipientIdentity: (identity: { kind?: string | null; user?: { email?: string | null; displayName?: string | null } | null; email?: string | null; displayName?: string | null }) => {
     const user = identity.user ?? identity;
@@ -235,7 +252,9 @@ vi.mock("@corgtex/domain", async () => ({
   recordDemoWelcomeCrmActivity: recordDemoWelcomeCrmActivityMock,
   workspaceBriefingPeriodFromCadence: (cadence: string) => cadence === "WEEKLY" ? "WEEKLY" : "DAILY",
   workspaceBriefingContextSince: (period: string, date: Date) => new Date(date.getTime() - (period === "WEEKLY" ? 90 : 30) * 24 * 60 * 60 * 1000),
-  collectWorkspaceBriefingCandidates: collectWorkspaceBriefingCandidatesMock,
+  collectWorkspaceBriefingCandidates: async (...args: any[]) => (await collectWorkspaceBriefingCandidatesMock(...args)).map((candidate: any) => ({
+    ...candidate, lineageRoots: candidate.lineageRoots ?? [{ kind: "BrainArticle", id: candidate.sourceId, fingerprint: "a".repeat(64) }],
+  })),
   buildWorkspaceBriefingFromDigest: ({ title, period, dateKey, digest }: any) => {
     const items = digest.sections.flatMap((section: any) => section.items.map((item: string, index: number) => ({
       kind: section.id === "meetingBriefs"
@@ -398,6 +417,8 @@ function mockRecentBuildArtifact() {
 describe("runDailyDigest", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    readableArtifactIdsMock.mockImplementation(async (_actor: unknown, _workspaceId: string, _kind: string,
+      rows: Array<{ id: string }>) => new Set(rows.map((row) => row.id)));
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof txMock) => Promise<unknown>) => callback(txMock));
     batchIngestDailyConversationsMock.mockResolvedValue(undefined);
     prismaMock.conversationSession.findMany.mockResolvedValue([]);
@@ -429,6 +450,8 @@ describe("runDailyDigest", () => {
     });
     prismaMock.demoLead.findFirst.mockResolvedValue(null);
     prismaMock.brainSource.create.mockResolvedValue({ id: "source-1" });
+    txMock.brainSource.create.mockResolvedValue({ id: "source-1" });
+    prismaMock.artifactInputLineage.findFirst.mockResolvedValue({ origin: "DERIVED" });
     prismaMock.brainArticle.findUnique.mockResolvedValue(null);
     prismaMock.brainArticle.findMany.mockResolvedValue([]);
     chatMock.mockResolvedValue({ content: "Merged profile body" });
@@ -477,6 +500,31 @@ describe("runDailyDigest", () => {
     prismaMock.workspace.findUnique.mockResolvedValue({ name: "Workspace One" });
   });
 
+  it("regenerates permitted shared artifacts without ingestion, profile writes, or outbound delivery", async () => {
+    getWorkspaceNewspaperCadenceMock.mockResolvedValue("DAILY");
+    prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
+    prismaMock.conversationSession.findMany.mockResolvedValue([
+      { id: "session-a", userId: "user-a", user: { id: "user-a", email: "a@example.com", displayName: "A" }, turns: [{ id: "turn-a", userMessage: "Current source", assistantMessage: "Current response" }] },
+    ]);
+    prismaMock.brainArticle.findUnique.mockResolvedValue({ id: "human-digest", authority: "DRAFT", ownerMemberId: null,
+      humanEditedAt: new Date(), frontmatterJson: { generatedBy: "daily-digest" }, bodyMd: "Human-edited original" });
+    const { runDailyDigest } = await import("./daily-digest");
+    const result = await runDailyDigest({ workspaceId: "workspace-1", dateISO: "2026-04-30T12:00:00.000Z", cadence: "DAILY", regenerationOnly: true, rebuildRef: "change-1" });
+    expect(result).toMatchObject({ regenerationOnly: true, rebuildRef: "change-1", updatedProfiles: 0, sentEmails: 0 });
+    expect(batchIngestDailyConversationsMock).not.toHaveBeenCalled();
+    expect(txMock.brainSource.create).not.toHaveBeenCalled();
+    expect(chatMock).not.toHaveBeenCalled();
+    expect(createArticleMock).not.toHaveBeenCalled();
+    expect(updateArticleMock).not.toHaveBeenCalled();
+    expect(upsertWorkspaceBriefingMock).toHaveBeenCalledWith(expect.objectContaining({ runKey: "workspace-1:lineage-rebuild:change-1:DAILY" }));
+    expect(upsertNewspaperEditionMock).toHaveBeenCalledWith(expect.objectContaining({ runKey: "workspace-1:lineage-rebuild:change-1:DAILY" }));
+    expect(sendEmailMock).not.toHaveBeenCalled();
+    expect(recordNewspaperDeliveryMock).not.toHaveBeenCalled();
+    expect(instrumentNewspaperHtmlLinksMock).not.toHaveBeenCalled();
+    expect(JSON.stringify(extractMock.mock.calls)).not.toContain("Human-edited original");
+    expect(extractMock.mock.calls.every(([request]) => request.instruction.startsWith("Generate a structured"))).toBe(true);
+  });
+
   it("excludes operational inventory artifacts from build-artifact digest inputs", async () => {
     const { runDailyDigest } = await import("./daily-digest");
     await runDailyDigest({
@@ -493,6 +541,41 @@ describe("runDailyDigest", () => {
           pullRequestNumber: null,
         },
       }),
+    }));
+  });
+
+  it("continues delivery to active recipients when an earlier recipient loses membership", async () => {
+    const { AppError, requireWorkspaceMembership } = await import("@corgtex/domain");
+    getWorkspaceNewspaperCadenceMock.mockResolvedValue("DAILY");
+    prismaMock.member.findMany.mockResolvedValue([
+      { id: "departed-member", newspaperCadence: "DAILY", user: { id: "departed", email: "departed@example.test", displayName: "Departed" } },
+      { id: "active-member", newspaperCadence: "DAILY", user: { id: "active", email: "active@example.test", displayName: "Active" } },
+    ]);
+    const membership = vi.mocked(requireWorkspaceMembership);
+    membership.mockImplementation(async ({ actor }) => {
+      if (actor.kind === "user" && actor.user.id === "departed") throw new AppError(403, "NOT_A_MEMBER", "Synthetic departed member");
+      return { id: "active-member", isActive: true } as any;
+    });
+    try {
+      const { runDailyDigest } = await import("./daily-digest");
+      await runDailyDigest({ workspaceId: "workspace-1", dateISO: "2026-04-30T12:00:00.000Z", cadence: "DAILY" });
+      expect(sendEmailMock).toHaveBeenCalledTimes(1);
+      expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({ to: "active@example.test" }));
+      expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
+        status: "SENT", lineageRoots: expect.arrayContaining([expect.objectContaining({ kind: "Member", id: "active-member" })]),
+      }));
+    } finally { membership.mockResolvedValue({ id: "member-1", isActive: true } as any); }
+  });
+
+  it("skips email delivery when the stored briefing's complete inputs cannot be verified", async () => {
+    readableArtifactIdsMock.mockResolvedValue(new Set());
+    const { runDailyDigest } = await import("./daily-digest");
+    const result = await runDailyDigest({ workspaceId: "workspace-1", dateISO: "2026-04-30T12:00:00.000Z" });
+
+    expect(sendEmailMock).not.toHaveBeenCalled();
+    expect(result.skippedEmails).toBeGreaterThan(0);
+    expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      status: "SKIPPED", subject: "Workspace briefing",
     }));
   });
 
@@ -717,7 +800,7 @@ describe("runDailyDigest", () => {
         }),
       }),
     }));
-    expect(listSlackMessagesForDigestMock).toHaveBeenCalledWith("workspace-1", since, cutoff);
+    expect(listSlackMessagesForDigestMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), "workspace-1", since, cutoff, expect.any(Array));
     expect(prismaMock.buildArtifact.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
         workspaceId: "workspace-1",
@@ -1677,6 +1760,10 @@ describe("runDailyDigest", () => {
         authority: "DRAFT",
         sourceIds: [],
         bodyMd: "Old digest",
+        ownerMemberId: null,
+        humanEditedAt: null,
+        frontmatterJson: { generatedBy: "daily-digest" },
+        updatedAt: new Date("2026-04-30T11:00:00.000Z"),
       })
       .mockResolvedValue({ bodyMd: "Member profile" });
 
@@ -1760,6 +1847,8 @@ describe("runDailyDigest", () => {
         }),
       }),
     }));
+    expect(instrumentNewspaperHtmlLinksMock).not.toHaveBeenCalled();
+    expect(sendEmailMock.mock.calls[0][0].html).not.toContain("/api/newspaper/click/");
     expect(txMock.demoLead.update).toHaveBeenCalledWith({
       where: { id: "lead-1" },
       data: { welcomeEmailSentAt: expect.any(Date) },

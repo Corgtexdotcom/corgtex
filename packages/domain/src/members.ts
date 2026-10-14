@@ -1,3 +1,5 @@
+import { readableArtifactIds, captureArtifactInputProof, type LineageKind } from "./source-lineage";
+import { scanSourceReadableRecords } from "./source-scoped-read";
 import { requireUnreservedPublicDemoEmail } from "./public-demo-identity";
 import type { MemberInviteRequestStatus, MemberKind, MemberRole } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
@@ -224,8 +226,21 @@ export async function listSystemMembers(workspaceId: string, opts?: { includeIna
   });
 }
 
-export async function listMembersEnriched(workspaceId: string, opts?: { includeInactive?: boolean }) {
-  return prisma.member.findMany({
+async function redactMemberRoleAssignments<T extends { roleAssignments: Array<{ id: string; role: { id: string; circleId: string; circle: { id: string } } }> }>(actor: AppActor, workspaceId: string, members: T[]) {
+  const assignments = members.flatMap((member) => member.roleAssignments);
+  const [allowedAssignments, allowedRoles, allowedCircles] = await Promise.all([
+    readableArtifactIds(actor, workspaceId, "RoleAssignment", assignments),
+    readableArtifactIds(actor, workspaceId, "Role", assignments.map((assignment) => assignment.role)),
+    readableArtifactIds(actor, workspaceId, "Circle", assignments.map((assignment) => assignment.role.circle)),
+  ]);
+  return members.map((member) => ({ ...member, roleAssignments: member.roleAssignments.filter((assignment) =>
+    allowedAssignments.has(assignment.id) && allowedRoles.has(assignment.role.id) && allowedCircles.has(assignment.role.circleId)),
+  }));
+}
+
+export async function listMembersEnriched(actor: AppActor, workspaceId: string, opts?: { includeInactive?: boolean }) {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const members = await prisma.member.findMany({
     where: {
       workspaceId,
       ...(opts?.includeInactive ? {} : { isActive: true }),
@@ -254,12 +269,7 @@ export async function listMembersEnriched(workspaceId: string, opts?: { includeI
         include: {
           role: {
             include: {
-              circle: {
-                select: {
-                  id: true,
-                  name: true,
-                },
-              },
+              circle: true,
             },
           },
         },
@@ -269,6 +279,7 @@ export async function listMembersEnriched(workspaceId: string, opts?: { includeI
       joinedAt: "asc",
     },
   });
+  return redactMemberRoleAssignments(actor, workspaceId, members);
 }
 
 export async function getMemberInvitePolicy(workspaceId: string): Promise<MemberInvitePolicy> {
@@ -883,71 +894,46 @@ export async function getMemberProfile(actor: AppActor, workspaceId: string, mem
         include: {
           role: {
             include: {
-              circle: {
-                select: { id: true, name: true, maturityStage: true },
-              },
+              circle: true,
             },
           },
         },
-      },
-      assignedActions: {
-        where: { status: "OPEN" },
-        take: 5,
-        orderBy: { createdAt: "desc" },
-      },
-      assignedTensions: {
-        where: { status: "OPEN", ...visibleWorkspaceRecordWhere },
-        take: 5,
-        orderBy: { createdAt: "desc" },
       },
     },
   });
 
   invariant(member && member.workspaceId === workspaceId, 404, "NOT_FOUND", "Member not found.");
 
-  const meetings = await prisma.meeting.findMany({
-    where: {
-      workspaceId,
-      participantIds: {
-        has: member.user.id,
-      },
-    },
-    orderBy: { recordedAt: "desc" },
-    take: 5,
-  });
-
-  const recentActivity = await prisma.auditLog.findMany({
-    where: {
-      workspaceId,
-      actorUserId: member.user.id,
-    },
-    orderBy: { createdAt: "desc" },
-    take: 10,
-  });
-
-  const proposals = await prisma.proposal.findMany({
-    where: {
-      workspaceId,
-      authorUserId: member.user.id,
-      ...visibleWorkspaceRecordWhere,
-    },
-    orderBy: { createdAt: "desc" },
-    take: 5,
-  });
-
-  const authoredTensions = await prisma.tension.findMany({
-    where: {
-      workspaceId,
-      authorUserId: member.user.id,
-      status: "OPEN",
-      ...visibleWorkspaceRecordWhere,
-    },
-    orderBy: { createdAt: "desc" },
-    take: 5,
-  });
+  const load = <T extends { id: string }>(kind: LineageKind, query: (afterId: string | undefined, take: number) => Promise<T[]>) =>
+    scanSourceReadableRecords({ actor, workspaceId, kind, load: query });
+  const [allActions, allAssignedTensions, allMeetings, allProposals, allAuthoredTensions] = await Promise.all([
+    load("Action", (afterId, take) => prisma.action.findMany({ where: { AND: [{ workspaceId, assigneeMemberId: member.id, status: "OPEN", ...visibleWorkspaceRecordWhere }, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take })),
+    load("Tension", (afterId, take) => prisma.tension.findMany({ where: { AND: [{ workspaceId, assigneeMemberId: member.id, status: "OPEN", ...visibleWorkspaceRecordWhere }, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take })),
+    load("Meeting", (afterId, take) => prisma.meeting.findMany({ where: { workspaceId, participantIds: { has: member.user.id }, archivedAt: null, ...(afterId ? { id: { gt: afterId } } : {}) }, orderBy: { id: "asc" }, take })),
+    load("Proposal", (afterId, take) => prisma.proposal.findMany({ where: { AND: [{ workspaceId, authorUserId: member.user.id, ...visibleWorkspaceRecordWhere }, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take })),
+    load("Tension", (afterId, take) => prisma.tension.findMany({ where: { AND: [{ workspaceId, authorUserId: member.user.id, status: "OPEN", ...visibleWorkspaceRecordWhere }, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take })),
+  ]);
+  const latest = <T extends { id: string; createdAt: Date }>(rows: T[]) => rows.sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime() || right.id.localeCompare(left.id)).slice(0, 5);
+  const meetings = allMeetings.sort((left, right) => right.recordedAt.getTime() - left.recordedAt.getTime() || right.id.localeCompare(left.id)).slice(0, 5);
+  const proposals = latest(allProposals), authoredTensions = latest(allAuthoredTensions);
+  const safeMembers = await redactMemberRoleAssignments(actor, workspaceId, [member]);
+  const safeMember = { ...safeMembers[0], assignedActions: latest(allActions), assignedTensions: latest(allAssignedTensions) };
+  const logs = await prisma.auditLog.findMany({ where: { workspaceId, actorUserId: member.user.id }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 5001 });
+  invariant(logs.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Activity permission scan exceeds its supported size.");
+  const kinds: Record<string, LineageKind> = { Action: "Action", Tension: "Tension", Proposal: "Proposal", Goal: "Goal", BrainArticle: "BrainArticle", BrainSource: "BrainSource", Circle: "Circle", Role: "Role", Member: "Member", Meeting: "Meeting" };
+  const recentActivity = [];
+  for (const log of logs) {
+    const kind = log.entityType ? kinds[log.entityType] : null;
+    if (!kind || !log.entityId) continue;
+    try { await captureArtifactInputProof(actor, workspaceId, [{ kind, id: log.entityId }]); }
+    catch (error) { if (error instanceof AppError && ["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) continue; throw error; }
+    // Historical audit payloads are not proof-bearing copies of today's artifact.
+    recentActivity.push({ ...log, meta: null });
+    if (recentActivity.length === 10) break;
+  }
 
   return {
-    member,
+    member: safeMember,
     meetings,
     recentActivity,
     proposals,

@@ -1,3 +1,4 @@
+import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import type { Prisma, TensionStatus } from "@prisma/client";
@@ -6,11 +7,13 @@ import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { loadAdviceRequestCountSummaries } from "./advice-requests";
 import { invariant } from "./errors";
-import { humanMemberIdentityWhere } from "./member-identity";
+import { humanMemberIdentityWhere, systemActorMemberIdentityWhere } from "./member-identity";
 import { createNotificationIntent } from "./notifications";
-import { requireDraftManager } from "./draft-permissions";
+import { requireDraftManager, requireCreationInputRoots } from "./draft-permissions";
 import { requireCollaborativeWorkItemEditor } from "./collaborative-permissions";
 import { resolveWorkspaceProposalLink } from "./proposal-links";
+import { assertArtifactInputWriteFence, captureArtifactInputProof, captureImmutableArtifactInputProof, readableArtifactIds, type LineageRoot } from "./source-lineage";
+import { captureReadableDigestInputs } from "./digest-lineage";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import {
@@ -35,7 +38,7 @@ function isPrismaNotFoundError(error: unknown) {
   return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "P2025";
 }
 
-type CreateTensionParams = {
+type CreateTensionParams = ProducerLineageParams & {
   workspaceId: string;
   title: string;
   bodyMd?: string | null;
@@ -127,10 +130,46 @@ function workItemOrderBy(sort: WorkItemSort | undefined): Prisma.TensionOrderByW
   }
   return [
     { priority: "desc" },
-    { upvotes: { _count: "desc" } },
     { createdAt: "desc" },
     { id: "desc" },
   ];
+}
+
+async function readableTensionVotes<T extends { id: string; userId: string }>(actor: AppActor, workspaceId: string, votes: T[]) {
+  invariant(votes.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Vote permission scan exceeds its supported size.");
+  return (await captureReadableDigestInputs({ actor, workspaceId, kind: "TensionUpvote", records: votes,
+    additionalInputs: (vote) => [{ kind: "User", id: vote.userId }],
+  })).records;
+}
+
+async function redactTensionJoins<T extends {
+  authorUserId: string;
+  author?: { id: string; displayName: string | null; email: string };
+  assigneeMemberId?: string | null;
+  assigneeMember?: { id: string } | null;
+  raisedByMemberId?: string | null;
+  raisedByMember?: { id: string } | null;
+  circleId?: string | null;
+  circle?: { id: string } | null;
+}>(actor: AppActor, workspaceId: string, rows: T[]) {
+  const [authors, members, circles] = await Promise.all([
+    captureReadableDigestInputs({ actor, workspaceId, kind: "User", records: rows.flatMap((row) => row.author ? [row.author] : []) }),
+    captureReadableDigestInputs({ actor, workspaceId, kind: "Member", records: rows.flatMap((row) => [row.assigneeMember, row.raisedByMember].filter((member): member is { id: string } => Boolean(member))) }),
+    captureReadableDigestInputs({ actor, workspaceId, kind: "Circle", records: rows.flatMap((row) => row.circle ? [row.circle] : []) }),
+  ]);
+  const authorIds = new Set(authors.records.map((row) => row.id));
+  const memberIds = new Set(members.records.map((row) => row.id));
+  const circleIds = new Set(circles.records.map((row) => row.id));
+  return rows.map((row) => ({ ...row,
+    authorUserId: authorIds.has(row.authorUserId) ? row.authorUserId : null,
+    author: row.author && authorIds.has(row.author.id) ? row.author as NonNullable<T["author"]> : { id: "", displayName: null, email: "" },
+    assigneeMemberId: row.assigneeMember && memberIds.has(row.assigneeMember.id) ? row.assigneeMemberId : null,
+    assigneeMember: row.assigneeMember && memberIds.has(row.assigneeMember.id) ? row.assigneeMember as NonNullable<T["assigneeMember"]> : null,
+    raisedByMemberId: row.raisedByMember && memberIds.has(row.raisedByMember.id) ? row.raisedByMemberId : null,
+    raisedByMember: row.raisedByMember && memberIds.has(row.raisedByMember.id) ? row.raisedByMember as NonNullable<T["raisedByMember"]> : null,
+    circleId: row.circle && circleIds.has(row.circle.id) ? row.circleId : null,
+    circle: row.circle && circleIds.has(row.circle.id) ? row.circle as NonNullable<T["circle"]> : null,
+  }));
 }
 
 export async function listTensions(actor: AppActor, workspaceId: string, opts?: ListTensionsOptions) {
@@ -171,12 +210,12 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
     });
   }
 
-  const [items, total] = await Promise.all([
-    prisma.tension.findMany({
+  const candidates = await prisma.tension.findMany({
       where,
       include: {
         author: {
           select: {
+            id: true,
             displayName: true,
             email: true,
           },
@@ -185,6 +224,7 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
           include: {
             user: {
               select: {
+                id: true,
                 displayName: true,
                 email: true,
               },
@@ -195,31 +235,44 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
           include: {
             user: {
               select: {
+                id: true,
                 displayName: true,
                 email: true,
               },
             },
           },
         },
-        circle: {
-          select: {
-            id: true,
-            name: true,
-          },
-        },
+        circle: true,
         upvotes: true,
-        proposal: { select: { id: true, title: true } },
+        proposal: true,
       },
       orderBy: workItemOrderBy(opts?.sort),
-      take,
-      skip,
-    }),
-    prisma.tension.count({ where }),
-  ]);
-  const requestCountSummaries = await loadAdviceRequestCountSummaries(workspaceId, "TENSION", items.map((item) => item.id));
+      take: 5001,
+    });
+  invariant(candidates.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Source permission scan exceeds its supported size.");
+  const permitted = await readableArtifactIds(actor, workspaceId, "Tension", candidates);
+  const admitted = candidates.filter((candidate) => permitted.has(candidate.id));
+  const votes = await readableTensionVotes(actor, workspaceId, admitted.flatMap((candidate) => candidate.upvotes ?? []));
+  const voteIds = new Set(votes.map((vote) => vote.id));
+  const withVotes = admitted.map((candidate) => ({ ...candidate,
+    upvotes: (candidate.upvotes ?? []).filter((vote) => voteIds.has(vote.id)),
+  }));
+  if (!opts?.sort || opts.sort === "priority") withVotes.sort((left, right) =>
+    (right.priority ?? 0) - (left.priority ?? 0) || right.upvotes.length - left.upvotes.length
+    || (right.createdAt?.getTime() ?? 0) - (left.createdAt?.getTime() ?? 0) || right.id.localeCompare(left.id));
+  const total = admitted.length;
+  const items = withVotes.slice(skip, skip + take);
+  const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "TENSION", items.map((item) => item.id));
+  const redactedItems = await redactTensionJoins(actor, workspaceId, items);
+  const linkedProposals = items.flatMap((item) => item.proposal ? [item.proposal] : []);
+  const visibleProposalIds = linkedProposals.length
+    ? await readableArtifactIds(actor, workspaceId, "Proposal", linkedProposals) : new Set<string>();
   return {
-    items: items.map((item) => ({
+    items: redactedItems.map((item) => ({
       ...item,
+      proposalId: item.proposal && visibleProposalIds.has(item.proposal.id) ? item.proposalId : null,
+      proposal: item.proposal && visibleProposalIds.has(item.proposal.id)
+        ? { id: item.proposal.id, title: item.proposal.title } : null,
       ...requestCountSummaries.get(item.id),
     })),
     total,
@@ -234,6 +287,8 @@ async function applyTensionDuplicateUpdate(actor: AppActor, params: CreateTensio
   const updateParams: Parameters<typeof updateTension>[1] = {
     workspaceId: params.workspaceId,
     tensionId,
+    lineageInputs: params.lineageInputs,
+    lineageRoots: params.lineageRoots,
   };
   if ((mergedBody ?? null) !== (existing.bodyMd ?? null)) updateParams.bodyMd = mergedBody;
   if (!existing.circleId && params.circleId) updateParams.circleId = params.circleId;
@@ -241,16 +296,23 @@ async function applyTensionDuplicateUpdate(actor: AppActor, params: CreateTensio
   if (!existing.raisedByMemberId && params.raisedByMemberId) updateParams.raisedByMemberId = params.raisedByMemberId;
   if (!existing.proposalId && params.proposalId) updateParams.proposalId = params.proposalId;
   if (params.priority !== undefined && params.priority !== null && existing.priority !== params.priority) updateParams.priority = params.priority;
-  if (Object.keys(updateParams).length <= 2) return existing;
+  if (!Object.keys(updateParams).some((field) => !["workspaceId", "tensionId", "lineageInputs", "lineageRoots"].includes(field))) return existing;
+  updateParams.lineageCopied = Boolean(params.meetingId);
   updateParams.expectedVersion = existing.version;
   return updateTension(actor, updateParams);
 }
 
-export async function createTension(actor: AppActor, params: CreateTensionParams) {
+export async function createTension(actor: AppActor, params: CreateTensionParams, transaction?: Prisma.TransactionClient) {
   const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
+    tx: transaction,
   });
+  params = { ...params, lineageRoots: await requireCreationInputRoots({ actor, workspaceId: params.workspaceId,
+    isPrivate: params.isPrivate ?? true, roots: params.lineageRoots, tx: transaction }) };
+
+  invariant(!transaction || !["use_existing", "update_existing"].includes(params.duplicateGuard?.resolution ?? ""),
+    400, "DUPLICATE_GUARD_TRANSACTION_UNSUPPORTED", "This duplicate resolution cannot join the supplied transaction.");
 
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Tension title is required.");
@@ -266,8 +328,16 @@ export async function createTension(actor: AppActor, params: CreateTensionParams
     meetingId: params.meetingId,
     actorUserId: actor.kind === "user" ? actor.user.id : null,
     membershipId: membership?.id ?? null,
-    includePrivate: actor.kind === "agent" || membership?.role === "ADMIN",
-  }, params.duplicateGuard);
+    includePrivate: actor.kind === "user" && membership?.role === "ADMIN",
+  }, params.duplicateGuard, transaction, async (rows) => {
+    const records = rows as Array<{ id: string; [key: string]: unknown }>;
+    const visible = await (transaction
+      ? readableArtifactIds(actor, params.workspaceId, "Tension", records, transaction)
+      : readableArtifactIds(actor, params.workspaceId, "Tension", records));
+    return records.filter((record) => visible.has(record.id));
+  });
+  invariant(!transaction || !duplicateDecision || duplicateDecision.resolution === "create_new",
+    400, "DUPLICATE_GUARD_TRANSACTION_UNSUPPORTED", "This duplicate resolution cannot join the supplied transaction.");
   if (duplicateDecision?.resolution === "use_existing") {
     return getTension(actor, { workspaceId: params.workspaceId, tensionId: duplicateDecision.match.entityId });
   }
@@ -277,17 +347,38 @@ export async function createTension(actor: AppActor, params: CreateTensionParams
   const isPrivate = params.isPrivate ?? true;
   const publishedAt = isPrivate ? null : new Date();
 
-  return prisma.$transaction(async (tx) => {
+  const create = async (tx: Prisma.TransactionClient) => {
+    await requireCreationInputRoots({ actor, workspaceId: params.workspaceId, isPrivate: params.isPrivate ?? true, roots: params.lineageRoots, tx });
     const raisedByMemberId = await resolveRaisedByMemberId(tx, params.workspaceId, params.raisedByMemberId);
     const assigneeMemberId = await resolveResponsibleMemberId(tx, params.workspaceId, params.assigneeMemberId);
     const proposalId = await resolveWorkspaceProposalLink(tx, actor, membership, params.workspaceId, params.proposalId);
-    let authorUserId = actor.kind === "user"
-      ? actor.user.id
-      : await actorUserIdForWorkspace(actor, params.workspaceId);
+    let authorUserId: string;
+    if (actor.kind === "user") authorUserId = actor.user.id;
+    else if (transaction) {
+      const systemMember = await tx.member.findFirst({ where: {
+        workspaceId: params.workspaceId, isActive: true, role: "ADMIN", ...systemActorMemberIdentityWhere(),
+      }, select: { userId: true } });
+      const adminMember = systemMember ?? await tx.member.findFirst({ where: {
+        workspaceId: params.workspaceId, isActive: true, role: "ADMIN",
+      }, select: { userId: true } });
+      invariant(adminMember, 500, "CONFIG_ERROR", "Workspace has no admin member available for system actions.");
+      authorUserId = adminMember.userId;
+    } else authorUserId = await actorUserIdForWorkspace(actor, params.workspaceId);
     const attributedMemberId = params.authorMemberId || raisedByMemberId;
     if (actor.kind === "agent" && attributedMemberId) {
       authorUserId = await resolveWorkspaceMemberUserId(tx, params.workspaceId, attributedMemberId, "Tension author must be an active member of this workspace.");
     }
+    const receipt = await prepareProducerLineage({
+      tx, actor, workspaceId: params.workspaceId, capture: params,
+      copied: Boolean(params.meetingId),
+      dependencies: actor.kind === "agent" ? [
+        ...(params.meetingId ? [{ kind: "Meeting" as const, id: params.meetingId }] : []),
+        ...(params.proposalId ? [{ kind: "Proposal" as const, id: params.proposalId }] : []),
+        ...(params.circleId ? [{ kind: "Circle" as const, id: params.circleId }] : []),
+        ...(raisedByMemberId ? [{ kind: "Member" as const, id: raisedByMemberId }] : []),
+        ...(assigneeMemberId ? [{ kind: "Member" as const, id: assigneeMemberId }] : []),
+      ] : [],
+    });
     const tension = await tx.tension.create({
       data: {
         workspaceId: params.workspaceId,
@@ -305,6 +396,9 @@ export async function createTension(actor: AppActor, params: CreateTensionParams
         publishedAt,
       },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Tension", id: tension.id }, content: tension, receipt });
+
 
     await ensureWorkspacePermalink(tx, actor, {
       workspaceId: params.workspaceId,
@@ -361,12 +455,14 @@ export async function createTension(actor: AppActor, params: CreateTensionParams
     }
 
     return tension;
-  });
+  };
+  return transaction ? create(transaction) : prisma.$transaction(create);
 }
 
-export async function updateTension(actor: AppActor, params: {
+export async function updateTension(actor: AppActor, params: ProducerLineageParams & {
   workspaceId: string;
   tensionId: string;
+  lineageCopied?: boolean;
   title?: string;
   bodyMd?: string | null;
   status?: "DRAFT" | "OPEN" | "RESOLVED";
@@ -379,19 +475,18 @@ export async function updateTension(actor: AppActor, params: {
   isPrivate?: boolean;
   evidenceDocumentIds?: string[] | null;
   expectedVersion?: number;
-}) {
-  const membership = await requireWorkspaceMembership({
-    actor,
-    workspaceId: params.workspaceId,
-  });
-
-  return prisma.$transaction(async (tx) => {
+}, transaction?: Prisma.TransactionClient) {
+  const run = async (tx: Prisma.TransactionClient) => {
+    await assertArtifactInputWriteFence(tx);
+    const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
     await acquireWorkItemAdvisoryLock(tx, "Tension", params.tensionId);
     const tension = await tx.tension.findUnique({
       where: { id: params.tensionId },
     });
 
     invariant(tension && tension.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Tension not found.");
+    invariant((await readableArtifactIds(actor, params.workspaceId, "Tension", [tension], tx)).has(tension.id),
+      404, "NOT_FOUND", "Tension not found.");
 
     invariant(!tension.archivedAt, 400, "INVALID_STATE", "Archived tensions cannot be edited.");
 
@@ -507,6 +602,11 @@ export async function updateTension(actor: AppActor, params: {
     if (tension.isPrivate !== undefined) updateWhere.isPrivate = tension.isPrivate ?? false;
     updateWhere.version = params.expectedVersion ?? tension.version;
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Tension", id: tension.id }, before: tension, capture: params, copied: params.lineageCopied });
+    if (transaction && params.lineageCopied && receipt.mode === "DERIVED") {
+      receipt.roots = await captureImmutableArtifactInputProof(actor, params.workspaceId, receipt.roots, tx);
+    }
     let updated;
     try {
       updated = await tx.tension.update({
@@ -519,6 +619,9 @@ export async function updateTension(actor: AppActor, params: {
       }
       throw error;
     }
+
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Tension", id: updated.id }, content: updated, receipt });
 
     const evidenceDocumentIds = params.status === "RESOLVED"
       ? await createWorkItemEvidenceLinks(tx, {
@@ -588,7 +691,18 @@ export async function updateTension(actor: AppActor, params: {
         select: { userId: true },
       });
       if (assignee) {
+        let notificationRoots: LineageRoot[] = [];
+        try {
+          notificationRoots = await captureArtifactInputProof(actor, params.workspaceId, [
+            { kind: "Tension", id: updated.id, snapshot: updated },
+            { kind: "Member", id: updated.assigneeMemberId! },
+          ], tx);
+        } catch (error) {
+          if (typeof error !== "object" || error === null || !("code" in error)
+            || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(String(error.code))) throw error;
+        }
         await createNotificationIntent(tx, {
+          lineageActor: actor, lineageRoots: notificationRoots,
           workspaceId: params.workspaceId,
           type: "tension.assigned",
           recipientUserIds: [assignee.userId],
@@ -602,8 +716,10 @@ export async function updateTension(actor: AppActor, params: {
       }
     }
 
+    await assertArtifactInputWriteFence(tx);
     return updated;
-  });
+  };
+  return transaction ? run(transaction) : prisma.$transaction(run);
 }
 
 export async function deleteTension(actor: AppActor, params: {
@@ -648,7 +764,13 @@ export async function upvoteTension(actor: AppActor, params: {
     "Only open public tensions can be upvoted.",
   );
 
-  return prisma.tensionUpvote.upsert({
+  return prisma.$transaction(async (tx) => {
+    const previous = await tx.tensionUpvote.findUnique({ where: { tensionId_userId: {
+      tensionId: params.tensionId, userId: actor.user.id,
+    } } });
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: previous ? { kind: "TensionUpvote", id: previous.id } : undefined, before: previous ?? undefined });
+    const upvote = await tx.tensionUpvote.upsert({
     where: {
       tensionId_userId: {
         tensionId: params.tensionId,
@@ -660,6 +782,10 @@ export async function upvoteTension(actor: AppActor, params: {
       tensionId: params.tensionId,
       userId: actor.user.id,
     },
+    });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "TensionUpvote", id: upvote.id }, content: upvote, receipt });
+    return upvote;
   });
 }
 
@@ -682,10 +808,15 @@ export async function publishTension(actor: AppActor, params: {
     invariant(tension.status === "DRAFT", 400, "INVALID_STATE", "Only draft tensions can be opened.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: tension, resolvedMembership: membership });
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Tension", id: tension.id }, before: tension, allowSystemTransition: true });
     const updated = await tx.tension.update({
       where: { id: params.tensionId },
       data: { status: "OPEN", isPrivate: false, publishedAt: new Date(), resolvedAt: null },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Tension", id: updated.id }, content: updated, receipt });
+
 
     await tx.auditLog.create({
       data: {
@@ -730,6 +861,8 @@ export async function returnTensionToDraft(actor: AppActor, params: {
     invariant(tension.status === "OPEN" || tension.status === "RESOLVED", 400, "INVALID_STATE", "Only open or resolved tensions can be returned to draft.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: tension, resolvedMembership: membership });
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Tension", id: tension.id }, before: tension, allowSystemTransition: true });
     const updated = await tx.tension.update({
       where: { id: params.tensionId },
       data: {
@@ -740,6 +873,9 @@ export async function returnTensionToDraft(actor: AppActor, params: {
         resolvedAt: null,
       },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Tension", id: updated.id }, content: updated, receipt });
+
 
     await tx.auditLog.create({
       data: {
@@ -777,12 +913,22 @@ export async function getTension(actor: AppActor, params: { workspaceId: string;
     include: {
       author: { select: { id: true, displayName: true, email: true } },
       circle: { select: { id: true, name: true } },
-      assigneeMember: { include: { user: { select: { displayName: true, email: true } } } },
-      raisedByMember: { include: { user: { select: { displayName: true, email: true } } } },
-      proposal: { select: { id: true, title: true, status: true } },
+      assigneeMember: { include: { user: { select: { id: true, displayName: true, email: true } } } },
+      raisedByMember: { include: { user: { select: { id: true, displayName: true, email: true } } } },
+      proposal: true,
       upvotes: true,
     },
   });
   invariant(tension, 404, "NOT_FOUND", "Tension not found.");
-  return tension;
+  invariant((await readableArtifactIds(actor, params.workspaceId, "Tension", [tension])).has(tension.id),
+    404, "NOT_FOUND", "Tension not found.");
+  const visibleProposalIds = tension.proposal
+    ? await readableArtifactIds(actor, params.workspaceId, "Proposal", [tension.proposal]) : new Set<string>();
+  return {
+    ...(await redactTensionJoins(actor, params.workspaceId, [tension]))[0],
+    upvotes: await readableTensionVotes(actor, params.workspaceId, tension.upvotes ?? []),
+    proposalId: tension.proposal && visibleProposalIds.has(tension.proposal.id) ? tension.proposalId : null,
+    proposal: tension.proposal && visibleProposalIds.has(tension.proposal.id)
+      ? { id: tension.proposal.id, title: tension.proposal.title, status: tension.proposal.status } : null,
+  };
 }

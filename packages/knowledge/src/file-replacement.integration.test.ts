@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { beforeEach, expect, it, vi } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
+import { createDocument } from "../../domain/src/documents";
+import { ingestSource } from "../../domain/src/brain";
 import { lockWorkspaceArchiveArtifact } from "../../domain/src/archive";
 import { defaultStorage } from "@corgtex/storage";
 import { defaultModelGateway } from "@corgtex/models";
@@ -15,14 +17,14 @@ async function fixture() {
   const user = await prisma.user.create({ data: { email: `replace-${randomUUID()}@example.test`, passwordHash: "fixture" } });
   await prisma.member.create({ data: { workspaceId: workspace.id, userId: user.id, role: "ADMIN" } });
   const actor: AppActor = { kind: "user", user: { id: user.id, email: user.email, displayName: "Admin" } };
-  const document = await prisma.document.create({ data: {
+  const document = await createDocument(actor, {
     workspaceId: workspace.id, title: "Synthetic policy.txt", source: "FILE_UPLOAD", mimeType: "text/plain",
     storageKey: `synthetic/${randomUUID()}`, textContent: "Synthetic policy: prior terms.",
-  } });
-  const source = await prisma.brainSource.create({ data: {
+  });
+  const source = await ingestSource(actor, {
     workspaceId: workspace.id, sourceType: "FILE_UPLOAD", tier: 2, content: document.textContent!, title: document.title,
     metadata: { documentId: document.id },
-  } });
+  });
   const replace = () => ingestFile(actor, { workspaceId: workspace.id, fileName: "policy.txt", documentTitle: document.title,
     mimeType: "text/plain", fileBuffer: Buffer.from("Synthetic policy: current terms."), uploadSource: "FILE_UPLOAD",
     duplicateGuard: { resolution: "update_existing", targetEntityId: document.id } });
@@ -43,9 +45,10 @@ it("rejects an old embedding after replacement and indexes only current document
   });
   const put = vi.spyOn(defaultStorage, "put").mockImplementation(async (key, data) => ({ key, size: data.length }));
   const remove = vi.spyOn(defaultStorage, "delete").mockResolvedValue(undefined);
+  let oldSync: ReturnType<typeof syncDocumentKnowledge> | undefined;
   try {
-    const oldSync = syncDocumentKnowledge({ workspaceId: workspace.id, documentId: document.id });
-    await started;
+    oldSync = syncDocumentKnowledge({ workspaceId: workspace.id, documentId: document.id });
+    await Promise.race([started, oldSync.then(() => { throw new Error("Proven source sync did not reach the embedding barrier."); })]);
     await replace();
     release();
     expect(await oldSync).toBe(0);
@@ -54,7 +57,7 @@ it("rejects an old embedding after replacement and indexes only current document
     expect(chunks).toHaveLength(1);
     expect(chunks[0].content).toContain("current terms");
     expect(chunks[0].content).not.toContain("prior terms");
-  } finally { release(); embed.mockRestore(); put.mockRestore(); remove.mockRestore(); }
+  } finally { release(); await oldSync?.catch(() => undefined); embed.mockRestore(); put.mockRestore(); remove.mockRestore(); }
 });
 
 it("waits for source coordination before acquiring the replacement document row", async () => {
@@ -68,7 +71,7 @@ it("waits for source coordination before acquiring the replacement document row"
     await prisma.$transaction(async (tx) => {
       await lockWorkspaceArchiveArtifact(tx, "BrainSource", source.id);
       replacement = replace();
-      await stored;
+      await Promise.race([stored, replacement.then(() => { throw new Error("Proven replacement did not reach the storage barrier."); })]);
       await new Promise((resolve) => setTimeout(resolve, 100));
       // Confirmed article removal holds source locks before touching Documents.
       // A replacement waiting for that source must leave this row available.

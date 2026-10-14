@@ -1,4 +1,4 @@
-import { getModelUsageSummary, getModelUsageBudget, listAgentIdentities } from "@corgtex/domain";
+import { requireWorkspaceMembership, getModelUsageSummary, getModelUsageBudget, listAgentIdentities } from "@corgtex/domain";
 import { AgentBudgetManager } from "../settings/agents/AgentBudgetManager";
 import { AgentSpendLimits } from "./AgentSpendLimits";
 import type { AppActor } from "@corgtex/shared";
@@ -11,6 +11,8 @@ export async function SpendControlTab({
   workspaceId: string;
   actor: AppActor;
 }) {
+  const membership = await requireWorkspaceMembership({actor, workspaceId});
+  if (actor.kind !== "user" || membership?.role !== "ADMIN") return null;
   const [usageSummary, budget, agentIdentities] = await Promise.all([
     getModelUsageSummary(actor, workspaceId, { periodDays: 30 }),
     getModelUsageBudget(actor, workspaceId),

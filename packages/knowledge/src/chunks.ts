@@ -1,10 +1,13 @@
 import { randomUUID } from "node:crypto";
-import type { KnowledgeAccessDomain, KnowledgeSourceType } from "@prisma/client";
-import { getSharedStateBackend, prisma } from "@corgtex/shared";
+import { isDeepStrictEqual } from "node:util";
+import type { KnowledgeAccessDomain, KnowledgeSourceType, Prisma } from "@prisma/client";
+import { getSharedStateBackend, prisma, type AppActor } from "@corgtex/shared";
+import { assertArtifactInputWriteFence, captureArtifactInputProof, captureImmutableArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, prepareArtifactCommitPreflight, readableArtifactIds, recordArtifactInputLineage, requireWorkspaceMembership, scanSourceReadableRecords, withArtifactCommitPreflight, type LineageKind, type LineageRoot } from "@corgtex/domain";
 import { defaultModelGateway } from "@corgtex/models";
 import { invalidateKnowledgeCache } from "./retrieval";
 import { getKnowledgeSearchProvider, isAzureKnowledgeSearchConfigured, logAzureKnowledgeIndexingWarning, syncAzureKnowledgeSource } from "./azure-search";
 import { classifyChunkSensitivity } from "./sensitivity";
+import { countReadableKnowledgeChunks } from "./counts";
 
 function normalizeText(input: string | null | undefined) {
   return (input ?? "").trim();
@@ -73,6 +76,35 @@ export function chunkText(input: string, maxLength = 1200, overlapSize = 150) {
   return doSplit(normalized, separators);
 }
 
+type SourceSnapshot = { kind: LineageKind; contentHash: string; content: string; rawContent: string | null; title: string | null; record: Record<string, unknown> };
+
+async function knowledgeSourceSnapshot(params: { workspaceId: string; sourceType: KnowledgeSourceType; sourceId: string },
+  db: typeof prisma | Prisma.TransactionClient = prisma): Promise<SourceSnapshot | null> {
+  const where = { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null };
+  const row = params.sourceType === "BRAIN_ARTICLE" ? await db.brainArticle.findFirst({ where: { ...where, OR: [{ isPrivate: false }, { variantOfArticleId: { not: null }, isPrivate: true }] } })
+    : params.sourceType === "DOCUMENT" ? await db.document.findFirst({ where })
+      : params.sourceType === "MEETING" ? await db.meeting.findFirst({ where })
+        : params.sourceType === "PROPOSAL" ? await db.proposal.findFirst({ where })
+          : params.sourceType === "EXTERNAL_CONTENT" ? await db.externalContentSource.findFirst({ where }) : null;
+  if (!row) return null;
+  const kind: LineageKind = params.sourceType === "BRAIN_ARTICLE" ? "BrainArticle"
+    : params.sourceType === "DOCUMENT" ? "Document" : params.sourceType === "MEETING" ? "Meeting"
+      : params.sourceType === "EXTERNAL_CONTENT" ? "ExternalContentSource" : "Proposal";
+  const source = row as unknown as Record<string, unknown>;
+  const fields = kind === "BrainArticle" ? [source.bodyMd]
+    : kind === "Document" ? [source.title, source.textContent]
+      : kind === "ExternalContentSource" ? [(source.metadata as Record<string, unknown> | null)?.materializedContent]
+      : kind === "Meeting" ? [source.title, source.summaryMd, source.transcript]
+        : [source.title, source.summary, source.bodyMd];
+  return {
+    kind, record: source,
+    contentHash: lineageContentFingerprint(kind, row),
+    content: fields.filter(Boolean).join("\n\n"),
+    rawContent: kind === "Document" && typeof source.textContent === "string" ? source.textContent : null,
+    title: typeof source.title === "string" ? source.title : null,
+  };
+}
+
 export async function syncKnowledgeForSource(params: {
   workspaceId: string;
   sourceType: KnowledgeSourceType;
@@ -84,8 +116,15 @@ export async function syncKnowledgeForSource(params: {
   workflowJobId?: string;
   agentRunId?: string;
   sourceUpdatedAt?: Date;
+  lineageActor?: AppActor;
 }) {
+  // Only these canonical renderers have complete, current source proof.
+  if (!["BRAIN_ARTICLE", "DOCUMENT", "MEETING", "PROPOSAL", "EXTERNAL_CONTENT"].includes(params.sourceType)) return 0;
+  params = { ...params, metadata: params.metadata ? structuredClone(params.metadata) : undefined,
+    sourceUpdatedAt: params.sourceUpdatedAt ? new Date(params.sourceUpdatedAt) : undefined };
   const chunks = chunkText(params.content);
+  // Provider cleanup needs an independently authorized archive path; arbitrary empty payloads cannot delete copies.
+  if (params.sourceType === "EXTERNAL_CONTENT" && !chunks.length) return 0;
   if (chunks.length === 0) {
     const retired = await prisma.$transaction(async (tx) => {
       if (params.sourceType === "BRAIN_ARTICLE") {
@@ -130,6 +169,49 @@ export async function syncKnowledgeForSource(params: {
     return 0;
   }
 
+  const snapshot = await knowledgeSourceSnapshot(params);
+  if (["BRAIN_ARTICLE", "DOCUMENT", "MEETING", "PROPOSAL", "EXTERNAL_CONTENT"].includes(params.sourceType)
+    && (!snapshot || (snapshot.content !== params.content && snapshot.rawContent !== params.content)
+      || snapshot.title !== (params.sourceTitle?.trim() || null))) return 0;
+
+  if (!snapshot || (params.sourceType === "DOCUMENT" ? snapshot.record.accessDomain !== params.accessDomain : params.accessDomain !== "WORKSPACE")) return 0;
+  if (params.sourceUpdatedAt && (!(snapshot.record.updatedAt instanceof Date)
+    || snapshot.record.updatedAt.getTime() !== params.sourceUpdatedAt.getTime())) return 0;
+  const sourceActor: AppActor = params.lineageActor ?? { kind: "agent", authProvider: "bootstrap", label: "knowledge-source-sync", workspaceIds: [params.workspaceId] };
+  let sourceProof: LineageRoot[];
+  let sourceRoots: LineageRoot[];
+  try {
+    sourceProof = await captureArtifactInputProof(sourceActor, params.workspaceId,
+      [{ kind: snapshot.kind, id: params.sourceId, snapshot: snapshot.record }]);
+    // Freeze the generation-time permission vector as well as every source body.
+    // A revoke/restore episode cannot certify an already running embedding job.
+    const freezePreflight = await prepareArtifactCommitPreflight(sourceActor, params.workspaceId, sourceProof);
+    sourceRoots = await prisma.$transaction(async tx => {
+      await assertArtifactInputWriteFence(tx);
+      return withArtifactCommitPreflight(sourceActor, params.workspaceId, tx, sourceProof, freezePreflight,
+        () => captureImmutableArtifactInputProof(sourceActor, params.workspaceId, sourceProof, tx));
+    });
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && ["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(String(error.code))) return 0;
+    throw error;
+  }
+  if (!await isArtifactInputProofReadable(sourceActor, params.workspaceId, sourceRoots)) return 0;
+  const storedMetadata = snapshot.record.metadata && typeof snapshot.record.metadata === "object" && !Array.isArray(snapshot.record.metadata)
+    ? structuredClone(snapshot.record.metadata as Record<string, unknown>) : {};
+  const nativeAnnotations = snapshot.kind === "BrainArticle" ? { type: snapshot.record.type, authority: snapshot.record.authority, slug: snapshot.record.slug }
+    : snapshot.kind === "Document" ? { source: snapshot.record.source, mimeType: snapshot.record.mimeType, storageKey: snapshot.record.storageKey }
+      : snapshot.kind === "Meeting" ? { source: snapshot.record.source,
+        recordedAt: snapshot.record.recordedAt instanceof Date ? snapshot.record.recordedAt.toISOString() : null,
+        hasIngestionGuidance: Boolean(snapshot.record.ingestionGuidanceMd) }
+        : snapshot.kind === "Proposal" ? { status: snapshot.record.status } : {};
+  const sourceMetadata: Record<string, unknown> = { ...storedMetadata, ...Object.fromEntries(Object.entries(nativeAnnotations).filter(([, value]) => value !== undefined)),
+    ...(params.workflowJobId ? { workflowJobId: params.workflowJobId } : {}) };
+  // External annotations are deliberately replaced by the proven provider parent.
+  // Other writers reject unproved caller annotations rather than certify them.
+  if (snapshot.kind !== "ExternalContentSource" && Object.entries(params.metadata ?? {}).filter(([, value]) => value !== undefined).some(([key, value]) =>
+    !Object.hasOwn(sourceMetadata, key) || JSON.stringify(value) !== JSON.stringify(sourceMetadata[key]))) return 0;
+  params = { ...params, metadata: snapshot.kind === "ExternalContentSource" ? storedMetadata : sourceMetadata };
+
   const embeddingResponse = await defaultModelGateway.embed({
     workspaceId: params.workspaceId,
     workflowJobId: params.workflowJobId,
@@ -137,10 +219,12 @@ export async function syncKnowledgeForSource(params: {
     input: chunks,
   });
 
+  const createdAt = new Date();
   const chunkRows = chunks.map((content, index) => {
     const sensitivity = classifyChunkSensitivity(content);
     return {
       id: randomUUID(),
+      createdAt,
       workspaceId: params.workspaceId,
       sourceType: params.sourceType,
       accessDomain: params.accessDomain,
@@ -151,6 +235,7 @@ export async function syncKnowledgeForSource(params: {
       embedding: embeddingResponse.embeddings[index] ?? null,
       metadata: {
         ...(params.metadata ?? {}),
+        sourceContentHash: snapshot?.contentHash ?? null,
         chunkIndex: index,
         sourceType: params.sourceType,
         sensitivityPatterns: sensitivity.matchedPatterns,
@@ -161,12 +246,34 @@ export async function syncKnowledgeForSource(params: {
     };
   });
 
-  const persisted = await prisma.$transaction(async (tx) => {
+  // The worker lease remains a live commit authority, while the output keeps
+  // the frozen job receipt so completion does not invalidate indexed content.
+  const commitRoots = [...sourceRoots, ...sourceProof.filter(root => root.kind === "WorkflowJobInput")];
+  let commitPreflight: Awaited<ReturnType<typeof prepareArtifactCommitPreflight>>;
+  try {
+    commitPreflight = await prepareArtifactCommitPreflight(sourceActor, params.workspaceId, commitRoots);
+  } catch (error) {
+    // Regular source reindexing skips stale work. The external sync owner must
+    // receive the error so it can mark its provider copy as stale.
+    if (snapshot.kind !== "ExternalContentSource" && error && typeof error === "object" && "code" in error
+      && ["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(String(error.code))) return 0;
+    throw error;
+  }
+  const persisted = await prisma.$transaction(async tx => {
+    await assertArtifactInputWriteFence(tx);
+    // Privacy/archive writes take the source row before their epoch trigger.
+    // Match that order before the local proof takes shared epoch locks.
+    if (snapshot.kind === "Meeting") await tx.$queryRaw`SELECT "id" FROM "Meeting" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+    if (snapshot.kind === "Proposal") await tx.$queryRaw`SELECT "id" FROM "Proposal" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+    if (snapshot.kind === "BrainArticle") await tx.$queryRaw`SELECT "id" FROM "BrainArticle" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+    if (snapshot.kind === "Document") await tx.$queryRaw`SELECT "id" FROM "Document" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+    return withArtifactCommitPreflight(sourceActor, params.workspaceId, tx, commitRoots, commitPreflight, async () => {
+    // Compare the exact revision captured before embedding inside the complete
+    // source scope. Restoration is a new permission revision.
     if (params.sourceType === "BRAIN_ARTICLE") {
-      await tx.$queryRaw`SELECT "id" FROM "BrainArticle" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brain_article_index:${params.workspaceId}:${params.sourceId}`}, 0))`;
       const article = await tx.brainArticle.findFirst({
-        where: { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null, isPrivate: false, bodyMd: params.content,
+        where: { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null, OR: [{ isPrivate: false }, { variantOfArticleId: { not: null }, isPrivate: true }], bodyMd: params.content,
           ...(params.sourceUpdatedAt ? { updatedAt: params.sourceUpdatedAt } : {}) },
         select: { id: true },
       });
@@ -174,7 +281,6 @@ export async function syncKnowledgeForSource(params: {
     }
     const storageKey = params.sourceType === "DOCUMENT" ? params.metadata?.storageKey : null;
     if (typeof storageKey === "string") {
-      await tx.$queryRaw`SELECT "id" FROM "Document" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`document_index:${params.workspaceId}:${params.sourceId}`}, 0))`;
       const document = await tx.document.findFirst({
         where: { id: params.sourceId, workspaceId: params.workspaceId, storageKey,
@@ -183,6 +289,15 @@ export async function syncKnowledgeForSource(params: {
       });
       if (!document) return false;
     }
+    if (snapshot?.kind === "ExternalContentSource") {
+      await tx.$queryRaw`SELECT "id" FROM "ExternalContentSource" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+    }
+    if (snapshot) {
+      const current = await knowledgeSourceSnapshot(params, tx);
+      if (!current || current.contentHash !== snapshot.contentHash) return false;
+    }
+    await assertArtifactInputWriteFence(tx);
+    if (!await isArtifactInputProofReadable(sourceActor, params.workspaceId, sourceRoots, tx)) return false;
     await tx.knowledgeChunk.deleteMany({
       where: {
         workspaceId: params.workspaceId,
@@ -191,13 +306,33 @@ export async function syncKnowledgeForSource(params: {
       },
     });
     await tx.knowledgeChunk.createMany({ data: chunkRows });
+    // JSONB normalizes object key order. Attest the persisted full rows rather
+    // than the pre-insert projection, while rejecting any changed output bytes.
+    const insertedRows = await tx.knowledgeChunk.findMany({ where: {
+      workspaceId: params.workspaceId, id: { in: chunkRows.map(row => row.id) },
+    } });
+    const intendedRows = new Map<string, typeof chunkRows[number]>(chunkRows.map(row => [row.id, row]));
+    if (insertedRows.length !== chunkRows.length || insertedRows.some(row =>
+      !isDeepStrictEqual(row, intendedRows.get(row.id)))) {
+      throw Object.assign(new Error("Persisted knowledge output differs from the generated chunks."), { code: "SOURCE_CHANGED" });
+    }
+    for (const row of insertedRows) {
+      await recordArtifactInputLineage({ tx, actor: sourceActor, workspaceId: params.workspaceId,
+        artifact: { kind: "KnowledgeChunk", id: row.id }, content: row, origin: "DERIVED", inputs: [], inheritedRoots: sourceRoots });
+    }
+    await assertArtifactInputWriteFence(tx);
+    if (!await isArtifactInputProofReadable(sourceActor, params.workspaceId, sourceRoots, tx)) {
+      throw Object.assign(new Error("Knowledge inputs changed before receipt commit."), { code: "SOURCE_CHANGED" });
+    }
     // PostgreSQL cache invalidation commits with its source rows. A failure must
     // roll both back instead of leaving cached results after a committed change.
     if (getSharedStateBackend() === "postgres") await invalidateKnowledgeCache(params.workspaceId, tx);
-    return true;
+    return captureArtifactInputProof(sourceActor, params.workspaceId, insertedRows.map(row => ({ kind: "KnowledgeChunk" as const, id: row.id, snapshot: row })), tx);
+    });
   });
   if (!persisted) return 0;
 
+  if (!await isArtifactInputProofReadable(sourceActor, params.workspaceId, persisted)) return 0;
   await syncAzureSourceBestEffort({
     workspaceId: params.workspaceId,
     sourceType: params.sourceType,
@@ -215,19 +350,24 @@ export async function syncKnowledgeForSource(params: {
       metadata: row.metadata,
       sensitivity: row.sensitivity,
     })),
-  });
+  }, { actor: sourceActor, roots: persisted });
 
   await invalidateKnowledgeCache(params.workspaceId);
+  if (!await isArtifactInputProofReadable(sourceActor, params.workspaceId, persisted)) return 0;
   return chunks.length;
 }
 
-async function syncAzureSourceBestEffort(params: Parameters<typeof syncAzureKnowledgeSource>[0]) {
+async function syncAzureSourceBestEffort(params: Parameters<typeof syncAzureKnowledgeSource>[0], sourceProof?: { actor: AppActor; roots: LineageRoot[] }) {
   if (getKnowledgeSearchProvider() === "azure" && !isAzureKnowledgeSearchConfigured("admin")) {
     throw new Error("Azure Search indexing is enabled but not configured for writes.");
   }
   try {
     let desired = params;
     for (let attempt = 0; attempt < 3; attempt++) {
+      if (desired.chunks.length && (!sourceProof
+        || !await isArtifactInputProofReadable(sourceProof.actor, params.workspaceId, sourceProof.roots))) {
+        throw new Error("Document inputs changed before Azure indexing; retry from a current source receipt.");
+      }
       const result = await syncAzureKnowledgeSource(desired);
       if (result.skipped) return;
 
@@ -240,6 +380,15 @@ async function syncAzureSourceBestEffort(params: Parameters<typeof syncAzureKnow
       const currentIds = current.map((chunk) => chunk.id).sort();
       const attemptedIds = desired.chunks.map((chunk) => chunk.id).sort();
       if (currentIds.length === attemptedIds.length && currentIds.every((id, index) => id === attemptedIds[index])) return;
+      if (params.sourceType === "DOCUMENT" || params.sourceType === "EXTERNAL_CONTENT") {
+        if (!sourceProof || !await isArtifactInputProofReadable(sourceProof.actor, params.workspaceId, sourceProof.roots)) {
+          throw new Error("Document inputs changed during Azure indexing; its newer SQL rows require a fresh receipt.");
+        }
+        const ids = await readableArtifactIds(sourceProof.actor, params.workspaceId, "KnowledgeChunk", current);
+        if (ids.size !== current.length) throw new Error("Document chunk inputs cannot be proved for Azure replay.");
+        sourceProof = { actor: sourceProof.actor, roots: await captureArtifactInputProof(sourceProof.actor, params.workspaceId,
+          current.map(chunk => ({ kind: "KnowledgeChunk" as const, id: chunk.id, snapshot: chunk }))) };
+      }
       desired = {
         ...params,
         chunks: current.map((chunk) => ({
@@ -274,30 +423,27 @@ async function syncAzureSourceBestEffort(params: Parameters<typeof syncAzureKnow
 export async function syncBrainArticleKnowledge(params: {
   workspaceId: string;
   articleId: string;
+  lineageActor?: AppActor;
 }) {
   const article = await prisma.brainArticle.findUnique({
     where: { id: params.articleId },
-    select: { id: true, workspaceId: true, title: true, slug: true, type: true,
-      authority: true, bodyMd: true, isPrivate: true, archivedAt: true, updatedAt: true },
   });
   if (!article || article.workspaceId !== params.workspaceId) return 0;
   return syncKnowledgeForSource({
     workspaceId: params.workspaceId, sourceType: "BRAIN_ARTICLE", accessDomain: "WORKSPACE",
-    sourceId: article.id, sourceTitle: article.title,
-    content: article.archivedAt || article.isPrivate ? "" : article.bodyMd,
+    sourceId: article.id, sourceTitle: article.title, lineageActor: params.lineageActor,
+    content: article.archivedAt || (article.isPrivate && !article.variantOfArticleId) ? "" : article.bodyMd,
     sourceUpdatedAt: article.updatedAt,
     metadata: { type: article.type, authority: article.authority, slug: article.slug },
   });
 }
 
-export async function syncDocumentKnowledge(params: { workspaceId: string; documentId: string; workflowJobId?: string }) {
-  const document = await prisma.document.findUnique({ where: { id: params.documentId }, select: {
-    id: true, workspaceId: true, title: true, source: true, mimeType: true, storageKey: true,
-    textContent: true, accessDomain: true, archivedAt: true, updatedAt: true,
-  } });
+export async function syncDocumentKnowledge(params: { workspaceId: string; documentId: string; workflowJobId?: string; lineageActor?: AppActor }) {
+  const document = await prisma.document.findUnique({ where: { id: params.documentId } });
   if (!document || document.workspaceId !== params.workspaceId) return 0;
   return syncKnowledgeForSource({
     workspaceId: params.workspaceId, sourceType: "DOCUMENT", accessDomain: document.accessDomain,
+    lineageActor: params.lineageActor,
     sourceId: document.id, sourceTitle: document.title,
     content: document.archivedAt ? "" : [document.title, document.textContent].filter(Boolean).join("\n\n"),
     sourceUpdatedAt: document.updatedAt,
@@ -319,40 +465,45 @@ export type WorkspaceIndexingHealth = {
   recentErrors: string[];
 };
 
-export async function getWorkspaceIndexingHealth(workspaceId: string): Promise<WorkspaceIndexingHealth> {
+export async function getWorkspaceIndexingHealth(workspaceId: string, lineageActor?: AppActor): Promise<WorkspaceIndexingHealth> {
+  const actor: AppActor = lineageActor ?? { kind: "agent", authProvider: "bootstrap", label: "document-index-health", workspaceIds: [workspaceId] };
+  await requireWorkspaceMembership({ actor, workspaceId });
   const [articles, sources, documents, chunks, errors] = await Promise.all([
-    prisma.brainArticle.findMany({
-      where: { workspaceId, isPrivate: false, archivedAt: null },
-      select: { id: true, title: true, slug: true },
-    }),
-    prisma.brainSource.count({
-      where: { workspaceId, archivedAt: null },
-    }),
-    prisma.document.count({
-      where: { workspaceId, textContent: { not: null }, archivedAt: null },
-    }),
-    prisma.knowledgeChunk.count({
-      where: { workspaceId },
-    }),
-    prisma.workflowJob.findMany({
-      where: {
-        workspaceId,
-        type: { startsWith: "knowledge.sync." },
-        status: "FAILED",
-        createdAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
-      },
-      orderBy: { createdAt: "desc" },
-      take: 10,
-      select: { type: true, error: true, createdAt: true },
-    }),
+    scanSourceReadableRecords({ actor, workspaceId, kind: "BrainArticle", load: (afterId, take) => prisma.brainArticle.findMany({
+      where: { workspaceId, archivedAt: null, ...(afterId ? { id: { gt: afterId } } : {}) }, orderBy: { id: "asc" }, take,
+    }) }),
+    scanSourceReadableRecords({ actor, workspaceId, kind: "BrainSource", load: (afterId, take) => prisma.brainSource.findMany({
+      where: { workspaceId, archivedAt: null, ...(afterId ? { id: { gt: afterId } } : {}) }, orderBy: { id: "asc" }, take,
+    }) }),
+    scanSourceReadableRecords({ actor, workspaceId, kind: "Document", load: (afterId, take) => prisma.document.findMany({
+      where: { workspaceId, textContent: { not: null }, archivedAt: null, ...(afterId ? { id: { gt: afterId } } : {}) }, orderBy: { id: "asc" }, take,
+    }) }),
+    countReadableKnowledgeChunks(actor, workspaceId),
+    scanSourceReadableRecords({ actor, workspaceId, kind: "WorkflowJobInput", load: (afterId, take) => prisma.workflowJob.findMany({
+      where: { workspaceId, type: { startsWith: "knowledge.sync." }, status: "FAILED",
+        createdAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) }, ...(afterId ? { id: { gt: afterId } } : {}) },
+      orderBy: { id: "asc" }, take,
+      // Provider errors have no content receipt. Never release their raw text.
+      select: { id: true, workspaceId: true, eventId: true, type: true, payload: true, createdAt: true },
+    }) }),
   ]);
 
   const articleIds = articles.map((a) => a.id);
-  const articleChunks = await prisma.knowledgeChunk.findMany({
-    where: { workspaceId, sourceType: "BRAIN_ARTICLE", sourceId: { in: articleIds } },
-    select: { sourceId: true },
-    distinct: ["sourceId"],
-  });
+  const articleChunks = await scanSourceReadableRecords({ actor, workspaceId, kind: "KnowledgeChunk",
+    load: (afterId, take) => prisma.knowledgeChunk.findMany({
+      where: { workspaceId, sourceType: "BRAIN_ARTICLE", sourceId: { in: articleIds }, ...(afterId ? { id: { gt: afterId } } : {}) },
+      orderBy: { id: "asc" }, take,
+    }) });
+  const proofs = await captureArtifactInputProof(actor, workspaceId, [
+    ...articles.map((row) => ({ kind: "BrainArticle" as const, id: row.id, snapshot: row })),
+    ...sources.map((row) => ({ kind: "BrainSource" as const, id: row.id, snapshot: row })),
+    ...documents.map((row) => ({ kind: "Document" as const, id: row.id, snapshot: row })),
+    ...articleChunks.map((row) => ({ kind: "KnowledgeChunk" as const, id: row.id, snapshot: row })),
+    ...errors.map((row) => ({ kind: "WorkflowJobInput" as const, id: row.id, snapshot: row })),
+  ]);
+  if (!await isArtifactInputProofReadable(actor, workspaceId, proofs)) {
+    throw Object.assign(new Error("Indexing health inputs changed before release."), { code: "SOURCE_CHANGED", status: 409 });
+  }
 
   const chunkedArticleIds = new Set(articleChunks.map((c) => c.sourceId));
   const unchunkedArticles = articles.filter((a) => !chunkedArticleIds.has(a.id));
@@ -368,41 +519,52 @@ export async function getWorkspaceIndexingHealth(workspaceId: string): Promise<W
     status,
     metrics: {
       totalArticles: articles.length,
-      totalSources: sources,
-      totalDocuments: documents,
+      totalSources: sources.length,
+      totalDocuments: documents.length,
       totalChunks: chunks,
     },
-    unchunkedArticles,
-    recentErrors: errors.map((e) => `[${e.createdAt.toISOString()}] ${e.type}: ${e.error}`),
+    unchunkedArticles: unchunkedArticles.map(({ id, title, slug }) => ({ id, title, slug })),
+    recentErrors: errors.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || a.id.localeCompare(b.id))
+      .slice(0, 10).map((e) => `[${e.createdAt.toISOString()}] ${e.type}: Indexing failed.`),
   };
 }
 
-export async function reindexWorkspace(workspaceId: string) {
+export async function reindexWorkspace(workspaceId: string, lineageActor?: AppActor) {
+  const actor: AppActor = lineageActor ?? { kind: "agent", authProvider: "bootstrap", label: "document-reindex", workspaceIds: [workspaceId] };
+  await requireWorkspaceMembership({ actor, workspaceId });
   const [articles, documents] = await Promise.all([
-    prisma.brainArticle.findMany({
-      where: { workspaceId, isPrivate: false, archivedAt: null },
-      select: { id: true },
-    }),
-    prisma.document.findMany({
-      where: { workspaceId, textContent: { not: null }, archivedAt: null },
-      select: { id: true },
-    }),
+    scanSourceReadableRecords({ actor, workspaceId, kind: "BrainArticle", load: (afterId, take) => prisma.brainArticle.findMany({
+      where: { workspaceId, isPrivate: false, archivedAt: null, ...(afterId ? { id: { gt: afterId } } : {}) }, orderBy: { id: "asc" }, take,
+    }) }),
+    scanSourceReadableRecords({ actor, workspaceId, kind: "Document", load: (afterId, take) => prisma.document.findMany({
+      where: { workspaceId, textContent: { not: null }, archivedAt: null, ...(afterId ? { id: { gt: afterId } } : {}) }, orderBy: { id: "asc" }, take,
+    }) }),
   ]);
 
   const existingArticleChunks = await prisma.knowledgeChunk.findMany({
     where: { workspaceId, sourceType: "BRAIN_ARTICLE", sourceId: { in: articles.map((a) => a.id) } },
-    select: { sourceId: true },
-    distinct: ["sourceId"],
+    orderBy: { id: "asc" }, take: 5001,
   });
 
   const existingDocumentChunks = await prisma.knowledgeChunk.findMany({
     where: { workspaceId, sourceType: "DOCUMENT", sourceId: { in: documents.map((d) => d.id) } },
-    select: { sourceId: true },
-    distinct: ["sourceId"],
+    orderBy: { id: "asc" }, take: 5001,
   });
 
-  const chunkedArticleIds = new Set(existingArticleChunks.map((c) => c.sourceId));
-  const chunkedDocumentIds = new Set(existingDocumentChunks.map((c) => c.sourceId));
+  if (existingArticleChunks.length > 5000 || existingDocumentChunks.length > 5000) {
+    throw Object.assign(new Error("Knowledge reindex receipt scan exceeds its supported size."), { code: "SOURCE_READ_SCAN_LIMIT" });
+  }
+  const [readableArticleChunks, readableDocumentChunks] = await Promise.all([
+    readableArtifactIds(actor, workspaceId, "KnowledgeChunk", existingArticleChunks),
+    readableArtifactIds(actor, workspaceId, "KnowledgeChunk", existingDocumentChunks),
+  ]);
+  const articleHashes = new Map(articles.map((article) => [article.id, lineageContentFingerprint("BrainArticle", article)]));
+  const documentHashes = new Map(documents.map((document) => [document.id, lineageContentFingerprint("Document", document)]));
+  // A legacy or superseded receipt needs rebuilding even when SQL still has a chunk.
+  const chunkedArticleIds = new Set(existingArticleChunks.filter((chunk) =>
+    readableArticleChunks.has(chunk.id) && (chunk.metadata as Record<string, unknown> | null)?.sourceContentHash === articleHashes.get(chunk.sourceId)).map((chunk) => chunk.sourceId));
+  const chunkedDocumentIds = new Set(existingDocumentChunks.filter((chunk) =>
+    readableDocumentChunks.has(chunk.id) && (chunk.metadata as Record<string, unknown> | null)?.sourceContentHash === documentHashes.get(chunk.sourceId)).map((chunk) => chunk.sourceId));
 
   const articlesToReindex = articles.filter((a) => !chunkedArticleIds.has(a.id));
   const documentsToReindex = documents.filter((d) => !chunkedDocumentIds.has(d.id));
@@ -414,7 +576,7 @@ export async function reindexWorkspace(workspaceId: string) {
   for (const article of articlesToReindex) {
     try {
       // Re-read under the article index lock: this list may predate an archive.
-      if (await syncBrainArticleKnowledge({ workspaceId, articleId: article.id })) reindexedArticles++;
+      if (await syncBrainArticleKnowledge({ workspaceId, articleId: article.id, lineageActor: actor })) reindexedArticles++;
     } catch (err) {
       errors.push(`Failed to reindex article ${article.id}: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -422,7 +584,7 @@ export async function reindexWorkspace(workspaceId: string) {
 
   for (const doc of documentsToReindex) {
     try {
-      if (await syncDocumentKnowledge({ workspaceId, documentId: doc.id })) reindexedDocuments++;
+      if (await syncDocumentKnowledge({ workspaceId, documentId: doc.id, lineageActor: actor })) reindexedDocuments++;
     } catch (err) {
       errors.push(`Failed to reindex document ${doc.id}: ${err instanceof Error ? err.message : String(err)}`);
     }

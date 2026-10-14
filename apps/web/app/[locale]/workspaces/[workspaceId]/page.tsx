@@ -6,11 +6,13 @@ import {
   personalizeWorkspaceBriefing,
   privacyFilter,
   rankPersonalNewspaperItems,
+  readableArtifactIds,
   requireWorkspaceMembership,
   scoreMemberBriefingItem,
 } from "@corgtex/domain";
 import type { MemberBriefingContext, PersonalNewspaperItem } from "@corgtex/domain";
 import { prisma, workspaceBranding } from "@corgtex/shared";
+import { countReadableKnowledgeChunks } from "@corgtex/knowledge";
 import { requirePageActor } from "@/lib/auth";
 import Link from "next/link";
 import { getFormatter, getTranslations } from "next-intl/server";
@@ -337,23 +339,22 @@ export default async function WorkspaceDashboard({
     : null;
   const [
     unreadNotificationsCount,
-    articles,
-    articleTotalCount,
+    candidateArticles,
+    articleCountCandidates,
     latestDailyWorkspaceBriefing,
     latestWeeklyWorkspaceBriefing,
     newspaperEditions,
     meetings,
-    chunksCount,
     workspaceData,
     membersCount,
     actionTotalCount,
     actionPersonalCount,
-    proposalTotalCount,
-    proposalPersonalCount,
+    proposalTotalCandidates,
+    proposalPersonalCandidates,
     tensionTotalCount,
     tensionPersonalCount,
     personalActions,
-    personalProposals,
+    candidatePersonalProposals,
     personalTensions,
   ] = await prisma.$transaction([
     prisma.notification.count({
@@ -370,23 +371,9 @@ export default async function WorkspaceDashboard({
         isPrivate: false,
         type: { notIn: ["DIGEST", "PERSON"] },
       },
-      select: {
-        id: true,
-        slug: true,
-        title: true,
-        bodyMd: true,
-        type: true,
-        isPrivate: true,
-        updatedAt: true,
-        publishedAt: true,
-        createdAt: true,
-      },
       orderBy: { updatedAt: "desc" },
-      take: 50,
     }),
-    prisma.brainArticle.count({
-      where: { workspaceId },
-    }),
+    prisma.brainArticle.findMany({ where: { workspaceId, archivedAt: null } }),
     prisma.workspaceBriefing.findFirst({
       where: {
         workspaceId,
@@ -475,17 +462,16 @@ export default async function WorkspaceDashboard({
       },
       orderBy: { recordedAt: "desc" },
     }),
-    prisma.knowledgeChunk.count({ where: { workspaceId } }),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true, name: true } }),
     prisma.member.count({ where: { workspaceId, isActive: true } }),
     prisma.action.count({ where: visibleOpenActionWhere }),
     visiblePersonalOpenActionWhere
       ? prisma.action.count({ where: visiblePersonalOpenActionWhere })
       : prisma.action.count({ where: { id: "__no_current_member__" } }),
-    prisma.proposal.count({ where: visibleOpenProposalWhere }),
+    prisma.proposal.findMany({ where: visibleOpenProposalWhere }),
     visiblePersonalOpenProposalWhere
-      ? prisma.proposal.count({ where: visiblePersonalOpenProposalWhere })
-      : prisma.proposal.count({ where: { id: "__no_current_member__" } }),
+      ? prisma.proposal.findMany({ where: visiblePersonalOpenProposalWhere })
+      : prisma.proposal.findMany({ where: { id: "__no_current_member__" } }),
     prisma.tension.count({ where: visibleOpenTensionWhere }),
     visiblePersonalOpenTensionWhere
       ? prisma.tension.count({ where: visiblePersonalOpenTensionWhere })
@@ -497,14 +483,6 @@ export default async function WorkspaceDashboard({
     }),
     prisma.proposal.findMany({
       where: visiblePersonalOpenProposalWhere ?? { id: "__no_current_member__" },
-      select: {
-        id: true,
-        title: true,
-        status: true,
-        priority: true,
-        ownerMemberId: true,
-        updatedAt: true,
-      },
       orderBy: [{ priority: "desc" }, { updatedAt: "desc" }],
     }),
     prisma.tension.findMany({
@@ -513,6 +491,19 @@ export default async function WorkspaceDashboard({
       orderBy: [{ priority: "desc" }, { updatedAt: "desc" }],
     }),
   ]);
+  const [visibleArticleIds, visibleProposalIds] = await Promise.all([
+    readableArtifactIds(actor, workspaceId, "BrainArticle", articleCountCandidates),
+    readableArtifactIds(actor, workspaceId, "Proposal", [
+      ...new Map([...proposalTotalCandidates, ...proposalPersonalCandidates, ...candidatePersonalProposals]
+        .map((proposal) => [proposal.id, proposal])).values(),
+    ]),
+  ]);
+  const articles = candidateArticles.filter((article) => visibleArticleIds.has(article.id)).slice(0, 50);
+  const articleTotalCount = articleCountCandidates.filter((article) => visibleArticleIds.has(article.id)).length;
+  const proposalTotalCount = proposalTotalCandidates.filter((proposal) => visibleProposalIds.has(proposal.id)).length;
+  const proposalPersonalCount = proposalPersonalCandidates.filter((proposal) => visibleProposalIds.has(proposal.id)).length;
+  const personalProposals = candidatePersonalProposals.filter((proposal) => visibleProposalIds.has(proposal.id));
+  const chunksCount = await countReadableKnowledgeChunks(actor, workspaceId);
   const branding = workspaceData
     ? workspaceBranding(workspaceData)
     : { primaryName: "Corgtex", secondaryLabel: "powered by Corgtex" };
@@ -565,10 +556,19 @@ export default async function WorkspaceDashboard({
       title: item.title,
     })),
   } : null;
-  const latestWorkspaceBriefing = [latestDailyWorkspaceBriefing, latestWeeklyWorkspaceBriefing]
+  const briefingCandidates = [latestDailyWorkspaceBriefing, latestWeeklyWorkspaceBriefing]
     .filter((briefing): briefing is NonNullable<typeof latestDailyWorkspaceBriefing> => Boolean(briefing))
-    .sort((left, right) => right.generatedAt.getTime() - left.generatedAt.getTime())[0] ?? null;
-  const latestNewspaperEdition = newspaperEditions[0] ?? null;
+    .sort((left, right) => right.generatedAt.getTime() - left.generatedAt.getTime());
+  const [briefingRows, editionRows] = await Promise.all([
+    prisma.workspaceBriefing.findMany({ where: { workspaceId, id: { in: briefingCandidates.map((item) => item.id) } } }),
+    prisma.newspaperEdition.findMany({ where: { workspaceId, id: { in: newspaperEditions.map((item) => item.id) } } }),
+  ]);
+  const [visibleBriefingIds, visibleEditionIds] = await Promise.all([
+    readableArtifactIds(actor, workspaceId, "WorkspaceBriefing", briefingRows),
+    readableArtifactIds(actor, workspaceId, "NewspaperEdition", editionRows),
+  ]);
+  const latestWorkspaceBriefing = briefingCandidates.find((item) => visibleBriefingIds.has(item.id)) ?? null;
+  const latestNewspaperEdition = newspaperEditions.find((item) => visibleEditionIds.has(item.id)) ?? null;
   const latestEditionDigest = latestNewspaperEdition
     ? normalizeNewspaperEditionDigest(latestNewspaperEdition)
     : null;

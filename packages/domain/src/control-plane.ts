@@ -5261,7 +5261,7 @@ export async function listControlPlaneCustomerMembers(actor: AppActor, deploymen
   const adapter = createControlPlaneAdapter(deployment);
 
   if (deployment.managedWorkspaceId) {
-    const members = await listMembersEnriched(deployment.managedWorkspaceId, { includeInactive: true });
+    const members = await listMembersEnriched(actor, deployment.managedWorkspaceId, { includeInactive: true });
     return {
       deploymentId,
       accessMode: adapter.kind,
@@ -7806,7 +7806,8 @@ function normalizeRemoteAgentRun(run: JsonRecord) {
     agentKey: stringField(run.agentKey) ?? stringField(run.key) ?? stringField(run.name) ?? "unknown",
     triggerType: stringField(run.triggerType),
     status: stringField(run.status) ?? "UNKNOWN",
-    goal: stringField(run.goal),
+    // Cached remote metadata has no verifiable content receipt.
+    goal: "Content unavailable",
     approvalRequired: booleanField(run.approvalRequired) ?? false,
     createdAt: stringField(run.createdAt),
     startedAt: stringField(run.startedAt),
@@ -8109,14 +8110,13 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
         agentKey: true,
         triggerType: true,
         status: true,
-        goal: true,
         approvalRequired: true,
         createdAt: true,
         startedAt: true,
         completedAt: true,
         failedAt: true,
       },
-    }),
+    }).then(runs => runs.map(run => ({ ...run, goal: "Content unavailable" }))),
     prisma.agentRun.findMany({
       where: { workspaceId: managedWorkspaceId, status: "WAITING_APPROVAL" },
       orderBy: { createdAt: "desc" },
@@ -8125,14 +8125,13 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
         agentKey: true,
         triggerType: true,
         status: true,
-        goal: true,
         approvalRequired: true,
         createdAt: true,
         startedAt: true,
         completedAt: true,
         failedAt: true,
       },
-    }),
+    }).then(runs => runs.map(run => ({ ...run, goal: "Content unavailable" }))),
     prisma.workflowJob.findMany({
       where: { workspaceId: managedWorkspaceId, status: "FAILED" },
       orderBy: { updatedAt: "desc" },

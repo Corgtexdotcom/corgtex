@@ -18,6 +18,7 @@ export async function GET(request: NextRequest) {
 
     const accessDomains = await resolveKnowledgeAccessDomains(actor, workspaceId);
     const results = await searchIndexedKnowledge({
+      actor,
       workspaceId,
       query,
       limit,

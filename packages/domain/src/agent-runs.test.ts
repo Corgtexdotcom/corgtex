@@ -4,7 +4,11 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
   const actual = await importOriginal<any>();
   const mockedPrisma = {
     ...actual.prisma,
-    agentStep: { updateMany: vi.fn() },
+    $queryRaw: vi.fn(async () => []),
+    agentStep: { updateMany: vi.fn(), findFirst: vi.fn(async () => ({ id: "step-1", agentRunId: "run-1" })), findUniqueOrThrow: vi.fn(async () => ({ id: "step-1" })) },
+    agentFeedbackInput: { create: vi.fn(async ({data}) => ({ id: "feedback-1", ...data })) },
+    agentRequestInput: { create: vi.fn(async ({data}) => ({ id: "request-1", ...data })) },
+    modelUsage: { findMany: vi.fn(async ({where}) => where.id.in.map((id: string) => ({id, workspaceId: "ws-1", estimatedCostUsd: "0.1", billableCostUsd: null, createdAt: new Date()}))) },
     agentRun: { updateMany: vi.fn(), findUnique: vi.fn(), findMany: vi.fn() },
     workflowJob: { create: vi.fn() },
     auditLog: { create: vi.fn() },
@@ -24,9 +28,28 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
 vi.mock("./auth", () => ({
   requireWorkspaceMembership: vi.fn().mockResolvedValue(true),
 }));
+vi.mock("./source-lineage", async importOriginal => ({ ...await importOriginal<any>(),
+  captureArtifactInputProof: vi.fn(async () => [{kind: "AgentFeedbackInput", id: "feedback-1", fingerprint: "a".repeat(64)}]),
+  captureArtifactInputSnapshotProof: vi.fn(async () => [{kind: "ArtifactInputSnapshot", id: "snapshot-1", fingerprint: "a".repeat(64)}]),
+  recordArtifactInputLineage: vi.fn(),
+  readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) => new Set(records.map((row: { id: string }) => row.id))) }));
 vi.mock("./proposals", () => ({ getProposal: vi.fn() }));
 
 describe("agent-runs", () => {
+  it("includes all agent types for per-artifact lineage checks after the operational window", async () => {
+    const { prisma } = await import("@corgtex/shared");
+    const { listAgentRuns } = await import("./agent-runs");
+    vi.mocked(prisma.agentRun.findMany).mockResolvedValue([
+      { id: "other", workspaceId: "ws-1", agentKey: "meeting-summary", planJson: {}, steps: [], toolCalls: [], modelUsage: [] },
+    ] as any);
+    const runs = await listAgentRuns({ kind: "user", user: { id: "u-1" } } as any, "ws-1", { take: 2 });
+    expect(prisma.agentRun.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { workspaceId: "ws-1", status: undefined },
+      take: 2,
+    }));
+    expect(runs.map((run) => run.id)).toEqual(["other"]);
+  });
+
   it("returns summarized model usage for listed runs without exposing raw usage rows", async () => {
     const { prisma } = await import("@corgtex/shared");
     const { listAgentRuns } = await import("./agent-runs");
@@ -40,7 +63,7 @@ describe("agent-runs", () => {
         toolCalls: [],
         modelUsage: [
           {
-            provider: "openai",
+            id: "usage-" + Math.random(), provider: "openai",
             model: "gpt-4o",
             taskType: "CHAT",
             inputTokens: 10,
@@ -50,7 +73,7 @@ describe("agent-runs", () => {
             billableCostUsd: "0.050000",
           },
           {
-            provider: "openai",
+            id: "usage-" + Math.random(), provider: "openai",
             model: "gpt-4o",
             taskType: "CHAT",
             inputTokens: 7,
@@ -60,7 +83,7 @@ describe("agent-runs", () => {
             billableCostUsd: null,
           },
           {
-            provider: "anthropic",
+            id: "usage-3", provider: "anthropic",
             model: "claude-sonnet-4",
             taskType: "SUMMARY",
             inputTokens: 20,
@@ -143,11 +166,10 @@ describe("agent-runs", () => {
       });
       expect(prisma.agentRun.findUnique).toHaveBeenCalledWith({
         where: { id: "run-1", workspaceId: "ws-1" },
-        select: { id: true, agentKey: true, status: true, approvalRequired: true, resultJson: true, planJson: true },
       });
       expect(prisma.agentRun.updateMany).toHaveBeenCalledWith({
         where: { id: "run-1", workspaceId: "ws-1", status: "WAITING_APPROVAL", approvalRequired: true },
-        data: expect.objectContaining({ status: "COMPLETED", approvalRequired: false, resultJson: expect.objectContaining({ feedbackDisposition: "ADVISORY_CONTINUATION_QUEUED" }) }),
+        data: expect.objectContaining({ status: "COMPLETED", approvalRequired: false }),
       });
       expect(prisma.agentStep.updateMany).toHaveBeenCalledWith({
         where: { id: "step-1", agentRunId: "run-1", name: "approval-checkpoint", status: "PENDING", humanFeedback: null },
@@ -155,10 +177,12 @@ describe("agent-runs", () => {
       });
       expect(prisma.workflowJob.create).toHaveBeenCalledWith({ data: expect.objectContaining({
         workspaceId: "ws-1", type: "agent.proposal-drafting",
-        payload: expect.objectContaining({ reviewFeedback: "Please clarify", sourceAgentRunId: "run-1", meetingId: "meeting-1" }),
+        payload: { triggerType: "MANUAL", feedbackInputId: "feedback-1", priorRunSnapshotId: "snapshot-1" },
       }) });
       expect(prisma.auditLog.create).toHaveBeenCalledWith({ data: expect.objectContaining({ action: "agentRun.feedbackSubmitted", entityId: "run-1" }) });
       expect(result).toEqual({ id: "step-1", continuationJobId: "job-2" });
+      expect(prisma.agentFeedbackInput.create).toHaveBeenCalledWith({ data: expect.objectContaining({ content: "Please clarify", userId: "u-1", agentRunId: "run-1", stepId: "step-1", priorRunSnapshotId: "snapshot-1" }) });
+      expect(prisma.agentRun.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.not.objectContaining({ resultJson: expect.anything() }) }));
       expect(prisma.proposal.create).not.toHaveBeenCalled();
       expect(prisma.proposal.update).not.toHaveBeenCalled();
       expect(prisma.action.create).not.toHaveBeenCalled();

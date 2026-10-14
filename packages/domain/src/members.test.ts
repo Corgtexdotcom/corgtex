@@ -46,14 +46,17 @@ const { prismaMock, selfServeOpsMock, sendEmailMock, sharedEnv } = vi.hoisted(()
       create: vi.fn(),
     },
     roleHolderHistory: {
+      findMany: vi.fn(),
       updateMany: vi.fn(),
     },
     roleOnboardingSession: {
+      findMany: vi.fn(),
       updateMany: vi.fn(),
     },
     roleAssignment: {
       deleteMany: vi.fn(),
     },
+    action: { findMany: vi.fn() },
     meeting: {
       findMany: vi.fn(),
     },
@@ -107,6 +110,11 @@ vi.mock("./auth", async (importOriginal) => {
   } };
 });
 
+vi.mock("./source-lineage", () => ({
+  readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) => new Set(records.filter((row: { lineageReadable?: boolean }) => row.lineageReadable !== false).map((row: { id: string }) => row.id))),
+  captureArtifactInputProof: vi.fn(async (_actor, _workspaceId, inputs) => inputs.map((input: { kind: string; id: string }) => ({ ...input, fingerprint: "a".repeat(64) }))),
+}));
+
 const actor: AppActor = {
   kind: "user" as const,
   user: {
@@ -127,6 +135,9 @@ describe("members domain", () => {
     prismaMock.passwordResetToken.create.mockResolvedValue({});
     prismaMock.session.deleteMany.mockResolvedValue({ count: 0 });
     prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue(null);
+    prismaMock.roleHolderHistory.findMany.mockResolvedValue([]);
+    prismaMock.roleOnboardingSession.findMany.mockResolvedValue([]);
+    prismaMock.action.findMany.mockResolvedValue([]);
     prismaMock.roleHolderHistory.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.roleOnboardingSession.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.roleAssignment.deleteMany.mockResolvedValue({ count: 1 });
@@ -796,18 +807,19 @@ describe("members domain", () => {
     prismaMock.member.findUnique.mockResolvedValue({
       id: "member-1",
       workspaceId: "workspace-1",
+      roleAssignments: [],
       user: { id: "user-1", avatarUrl: "https://example.com/avatar.png", bio: "Operations lead." },
     });
-    prismaMock.meeting.findMany.mockResolvedValue([{ id: "meeting-1" }]);
-    prismaMock.auditLog.findMany.mockResolvedValue([{ id: "audit-1" }]);
-    prismaMock.proposal.findMany.mockResolvedValue([{ id: "proposal-1" }]);
-    prismaMock.tension.findMany.mockResolvedValue([{ id: "tension-1" }]);
+    prismaMock.meeting.findMany.mockResolvedValue([{ id: "meeting-1", recordedAt: new Date() }]);
+    prismaMock.auditLog.findMany.mockResolvedValue([{ id: "audit-1", entityType: "Proposal", entityId: "proposal-1", meta: { privateHistory: "must be redacted" } }]);
+    prismaMock.proposal.findMany.mockResolvedValue([{ id: "proposal-1", createdAt: new Date() }]);
+    prismaMock.tension.findMany.mockResolvedValue([{ id: "tension-1", createdAt: new Date() }]);
 
     const { getMemberProfile } = await import("./members");
     await expect(getMemberProfile(actor, "workspace-1", "member-1")).resolves.toMatchObject({
       member: { id: "member-1" },
       meetings: [{ id: "meeting-1" }],
-      recentActivity: [{ id: "audit-1" }],
+      recentActivity: [{ id: "audit-1", meta: null }],
       proposals: [{ id: "proposal-1" }],
       authoredTensions: [{ id: "tension-1" }],
     });
@@ -859,7 +871,8 @@ describe("members domain", () => {
       .mockResolvedValueOnce({
         id: "member-1",
         workspaceId: "workspace-1",
-        user: { id: "profile-user", email: "profile@example.com" },
+        roleAssignments: [],
+      user: { id: "profile-user", email: "profile@example.com" },
       });
     prismaMock.meeting.findMany.mockResolvedValue([]);
     prismaMock.auditLog.findMany.mockResolvedValue([]);
@@ -876,30 +889,18 @@ describe("members domain", () => {
         { isPrivate: true, status: "DRAFT", authorUserId: "viewer-user" },
       ],
     };
-    expect(prismaMock.member.findUnique).toHaveBeenNthCalledWith(2, expect.objectContaining({
-      include: expect.objectContaining({
-        assignedTensions: expect.objectContaining({
-          where: expect.objectContaining({
-            status: "OPEN",
-            ...visibleWhere,
-          }),
-        }),
-      }),
-    }));
-    expect(prismaMock.proposal.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({
-        workspaceId: "workspace-1",
-        authorUserId: "profile-user",
-        ...visibleWhere,
-      }),
+    expect(prismaMock.action.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { AND: [expect.objectContaining({ workspaceId: "workspace-1", assigneeMemberId: "member-1", status: "OPEN", ...visibleWhere })] },
+      orderBy: { id: "asc" }, take: 100,
     }));
     expect(prismaMock.tension.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({
-        workspaceId: "workspace-1",
-        authorUserId: "profile-user",
-        status: "OPEN",
-        ...visibleWhere,
-      }),
+      where: { AND: [expect.objectContaining({ workspaceId: "workspace-1", assigneeMemberId: "member-1", status: "OPEN", ...visibleWhere })] },
+    }));
+    expect(prismaMock.proposal.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { AND: [expect.objectContaining({ workspaceId: "workspace-1", authorUserId: "profile-user", ...visibleWhere })] },
+    }));
+    expect(prismaMock.tension.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { AND: [expect.objectContaining({ workspaceId: "workspace-1", authorUserId: "profile-user", status: "OPEN", ...visibleWhere })] },
     }));
   });
 });

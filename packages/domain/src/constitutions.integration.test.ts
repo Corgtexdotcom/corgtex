@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { getPrismaClient } from "@corgtex/shared";
+import { getPrismaClient, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { listWorkspaceAgreements } from "./agreements";
+import { captureArtifactInputProof, recordArtifactInputLineage } from "./source-lineage";
 import {
   acquireConstitutionCorpusAdvisoryLock,
   createConstitutionVersion,
-  loadConstitutionCorpusSnapshot,
+  loadConstitutionCorpusSnapshot, fingerprintConstitutionCorpus, getCurrentConstitution, listConstitutionVersions,
 } from "./constitutions";
 
 const prisma = getPrismaClient();
@@ -62,7 +63,13 @@ async function createCorpusFixture(slug = "constitution-source") {
       acceptedAt: new Date("2026-08-10T00:00:00.000Z"),
     },
   });
-  return { workspace, user, proposal, tension, policy };
+  const actor: AppActor = { kind: "user", user: { id: user.id, email: user.email, displayName: user.displayName } };
+  await prisma.$transaction(async (tx) => {
+    await recordArtifactInputLineage({ tx, actor, workspaceId: workspace.id, artifact: { kind: "Proposal", id: proposal.id }, content: proposal, origin: "HUMAN_ORIGINAL", inputs: [] });
+    await recordArtifactInputLineage({ tx, actor, workspaceId: workspace.id, artifact: { kind: "Tension", id: tension.id }, content: tension, origin: "HUMAN_ORIGINAL", inputs: [] });
+    await recordArtifactInputLineage({ tx, actor, workspaceId: workspace.id, artifact: { kind: "PolicyCorpus", id: policy.id }, content: policy, origin: "DERIVED", inputs: [{ kind: "Proposal", id: proposal.id }] });
+  });
+  return { workspace, user, actor, proposal, tension, policy };
 }
 
 async function waitForQueuedCorpusLock(workspaceId: string) {
@@ -80,6 +87,17 @@ async function waitForQueuedCorpusLock(workspaceId: string) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error("Constitution writer did not queue on the corpus lock.");
+}
+
+async function legacyFixtureCorpus(workspaceId: string) {
+  const corpus = await prisma.policyCorpus.findMany({ where: { workspaceId } });
+  return { corpus, fingerprint: fingerprintConstitutionCorpus(corpus) };
+}
+
+async function createKnownConstitution(actor: AppActor, params: Parameters<typeof createConstitutionVersion>[0]) {
+  const corpus = await loadConstitutionCorpusSnapshot(actor, prisma, params.workspaceId);
+  const lineageRoots = await captureArtifactInputProof(actor, params.workspaceId, corpus.corpus.map((policy) => ({ kind: "PolicyCorpus", id: policy.id, snapshot: policy })));
+  return createConstitutionVersion({ ...params, lineageActor: actor, lineageRoots });
 }
 
 async function waitForBlockedSourceInsert() {
@@ -196,11 +214,14 @@ describe("Constitution provenance database contract", () => {
       }),
     ]);
 
-    const snapshot = await loadConstitutionCorpusSnapshot(prisma, localWorkspace.id);
-    expect(snapshot.corpus.map((row) => Object.keys(row).sort())).toEqual([
-      ["acceptedAt", "bodyMd", "id", "title"],
-      ["acceptedAt", "bodyMd", "id", "title"],
-    ]);
+    const localActor: AppActor = { kind: "user", user: { id: localUser.id, email: localUser.email, displayName: localUser.displayName } };
+    await prisma.member.create({ data: { workspaceId: localWorkspace.id, userId: localUser.id, role: "CONTRIBUTOR" } });
+    await prisma.$transaction(async (tx) => {
+      await recordArtifactInputLineage({ tx, actor: localActor, workspaceId: localWorkspace.id, artifact: { kind: "Proposal", id: localProposal.id }, content: localProposal, origin: "HUMAN_ORIGINAL", inputs: [] });
+      await recordArtifactInputLineage({ tx, actor: localActor, workspaceId: localWorkspace.id, artifact: { kind: "PolicyCorpus", id: localPolicy.id }, content: localPolicy, origin: "DERIVED", inputs: [{ kind: "Proposal", id: localProposal.id }] });
+    });
+    const snapshot = await loadConstitutionCorpusSnapshot(localActor, prisma, localWorkspace.id);
+    expect(snapshot.corpus.map((row) => row.id)).toEqual([localPolicy.id]);
     expect(JSON.stringify(snapshot.corpus)).not.toContain("DO NOT DISCLOSE");
 
     await expect(createConstitutionVersion({
@@ -313,7 +334,7 @@ describe("Constitution provenance database contract", () => {
 
   it("rechecks corpus drift after the shared writer lock", async () => {
     const { workspace, policy } = await createCorpusFixture("constitution-drift");
-    const snapshot = await loadConstitutionCorpusSnapshot(prisma, workspace.id);
+    const snapshot = await legacyFixtureCorpus(workspace.id);
     let releaseWriter = () => {};
     let writerLocked = () => {};
     const release = new Promise<void>((resolve) => { releaseWriter = resolve; });
@@ -343,7 +364,7 @@ describe("Constitution provenance database contract", () => {
 
   it("retains snapshots after source deletion while rejecting invalid source ownership", async () => {
     const { workspace, proposal, tension, policy } = await createCorpusFixture();
-    const snapshot = await loadConstitutionCorpusSnapshot(prisma, workspace.id);
+    const snapshot = await legacyFixtureCorpus(workspace.id);
     const constitution = await createConstitutionVersion({
       workspaceId: workspace.id,
       bodyMd: "# Constitution",
@@ -388,8 +409,8 @@ describe("Constitution provenance database contract", () => {
   it("shows current authorized origins and hides archived or private sources without snapshot fallback", async () => {
     const { workspace, user, proposal, tension, policy } = await createCorpusFixture("constitution-visible-origins");
     const actor = { kind: "user" as const, user: { id: user.id, email: user.email, displayName: user.displayName } };
-    const snapshot = await loadConstitutionCorpusSnapshot(prisma, workspace.id);
-    await createConstitutionVersion({
+    const snapshot = await legacyFixtureCorpus(workspace.id);
+    await createKnownConstitution(actor, {
       workspaceId: workspace.id,
       bodyMd: "# Constitution with sources",
       modelUsed: "integration-test",
@@ -399,38 +420,40 @@ describe("Constitution provenance database contract", () => {
         { pointOrder: 1, sourceOrder: 2, policyCorpusId: policy.id, sourceKind: "TENSION", tensionId: tension.id },
       ],
     });
-    await prisma.proposal.update({ where: { id: proposal.id }, data: { title: "Current proposal title" } });
-    await prisma.tension.update({ where: { id: tension.id }, data: { title: "Current tension title" } });
 
     const visible = await listWorkspaceAgreements(actor, { workspaceId: workspace.id });
     expect(visible.currentConstitution?.sourceReferences).toMatchObject([
-      { targetId: proposal.id, title: "Current proposal title" },
-      { targetId: tension.id, title: "Current tension title" },
+      { targetId: proposal.id, title: proposal.title },
+      { targetId: tension.id, title: tension.title },
     ]);
-    expect(visible.policyCorpus[0]?.proposal).toEqual({ id: proposal.id, title: "Current proposal title" });
-    expect(JSON.stringify(visible)).not.toContain("Missing provenance");
+    expect(visible.policyCorpus[0]?.proposal).toEqual({ id: proposal.id, title: proposal.title });
+    expect(visible.currentConstitution?.bodyMd).toBe("# Constitution with sources");
+    await prisma.proposal.update({ where: { id: proposal.id }, data: { title: "Current proposal title" } });
+    const changed = await listWorkspaceAgreements(actor, { workspaceId: workspace.id });
+    expect(changed.currentConstitution).toBeNull();
+    expect(changed.policyCorpus).toEqual([]);
 
     await prisma.tension.update({ where: { id: tension.id }, data: { archivedAt: new Date() } });
     await prisma.proposal.update({ where: { id: proposal.id }, data: { archivedAt: new Date() } });
     const archived = await listWorkspaceAgreements(actor, { workspaceId: workspace.id });
-    expect(archived.currentConstitution?.sourceReferences).toEqual([]);
-    expect(archived.policyCorpus[0]?.proposal).toBeNull();
+    expect(archived.currentConstitution).toBeNull();
+    expect(archived.policyCorpus).toEqual([]);
     expect(JSON.stringify(archived)).not.toContain(proposal.id);
     expect(JSON.stringify(archived)).not.toContain(tension.id);
 
     await prisma.proposal.update({ where: { id: proposal.id }, data: { archivedAt: null, status: "DRAFT", isPrivate: true, publishedAt: null } });
     const privateOrigin = await listWorkspaceAgreements(actor, { workspaceId: workspace.id });
-    expect(privateOrigin.currentConstitution?.sourceReferences).toEqual([]);
-    expect(privateOrigin.policyCorpus[0]?.proposal).toBeNull();
+    expect(privateOrigin.currentConstitution).toBeNull();
+    expect(privateOrigin.policyCorpus).toEqual([]);
     expect(JSON.stringify(privateOrigin)).not.toContain(proposal.id);
   });
 
-  it("keeps legacy Constitutions plain and drops deleted source IDs and labels", async () => {
+  it("withholds unknown legacy Constitutions and drops deleted source IDs and labels", async () => {
     const { workspace, user, proposal, tension, policy } = await createCorpusFixture("constitution-deleted-origins");
     const actor = { kind: "user" as const, user: { id: user.id, email: user.email, displayName: user.displayName } };
     await createConstitutionVersion({ workspaceId: workspace.id, bodyMd: "# Legacy Constitution", modelUsed: "integration-test" });
     const legacy = await listWorkspaceAgreements(actor, { workspaceId: workspace.id });
-    expect(legacy.currentConstitution?.sourceReferences).toEqual([]);
+    expect(legacy.currentConstitution).toBeNull();
 
     await createConstitutionVersion({
       workspaceId: workspace.id,
@@ -446,7 +469,7 @@ describe("Constitution provenance database contract", () => {
     await prisma.proposal.delete({ where: { id: proposal.id } });
 
     const deleted = await listWorkspaceAgreements(actor, { workspaceId: workspace.id });
-    expect(deleted.currentConstitution?.sourceReferences).toEqual([]);
+    expect(deleted.currentConstitution).toBeNull();
     expect(JSON.stringify(deleted)).not.toContain(proposal.id);
     expect(JSON.stringify(deleted)).not.toContain(tension.id);
     expect(JSON.stringify(deleted)).not.toContain("Missing provenance");
@@ -465,4 +488,61 @@ describe("Constitution provenance database contract", () => {
     await expect(listWorkspaceAgreements(actor, { workspaceId: foreign.id })).rejects.toMatchObject({ status: 403 });
     await expect(prisma.constitution.count({ where: { workspaceId: workspace.id } })).resolves.toBe(before);
   });
+  it("captures a consumed known prior Constitution as immutable history while keeping unknown newer bodies out", async () => {
+    const f = await createCorpusFixture("constitution-prior-snapshot");
+    const old = await createConstitutionVersion({ workspaceId: f.workspace.id, bodyMd: "# Independent human mission", modelUsed: "human-fixture" });
+    const prior = await prisma.constitution.findUniqueOrThrow({ where: { id: old.id } });
+    await prisma.$transaction((tx) => recordArtifactInputLineage({ tx, actor: f.actor, workspaceId: f.workspace.id,
+      artifact: { kind: "Constitution", id: prior.id }, content: prior, origin: "HUMAN_ORIGINAL", inputs: [] }));
+    const unknown = await createConstitutionVersion({ workspaceId: f.workspace.id, bodyMd: "UNKNOWN PRIOR CANARY", modelUsed: "unknown-model" });
+    expect(await getCurrentConstitution(f.actor, f.workspace.id)).toMatchObject({ id: prior.id, bodyMd: prior.bodyMd });
+    const corpus = await loadConstitutionCorpusSnapshot(f.actor, prisma, f.workspace.id);
+    const roots = await captureArtifactInputProof(f.actor, f.workspace.id, [
+      ...corpus.corpus.map((policy) => ({ kind: "PolicyCorpus" as const, id: policy.id, snapshot: policy })),
+      { kind: "Constitution", id: prior.id, snapshot: prior },
+    ]);
+    const created = await createConstitutionVersion({ workspaceId: f.workspace.id, lineageActor: f.actor, lineageRoots: roots,
+      bodyMd: "# Updated independent human mission with known policy", modelUsed: "synthetic-model",
+      expectedCorpusFingerprint: corpus.fingerprint,
+      references: [{ pointOrder: 1, sourceOrder: 1, policyCorpusId: f.policy.id, sourceKind: "PROPOSAL" }] });
+    const manifest = await prisma.artifactInputLineage.findFirstOrThrow({ where: { artifactType: "Constitution", artifactId: created.id }, orderBy: { revision: "desc" } });
+    expect(manifest.origin).toBe("DERIVED");
+    const storedRoots = manifest.rootsJson as Array<{ kind: string; id: string }>;
+    const snapshotRoot = storedRoots.find((root) => root.kind === "ArtifactInputSnapshot");
+    expect(snapshotRoot).toBeDefined();
+    expect(await prisma.artifactInputSnapshot.findUniqueOrThrow({ where: { id: snapshotRoot!.id } }))
+      .toMatchObject({ sourceKind: "Constitution", sourceId: prior.id, contentJson: expect.objectContaining({ bodyMd: prior.bodyMd }) });
+    const versions = await listConstitutionVersions(f.actor, f.workspace.id);
+    expect(versions.total).toBe(2);
+    expect(versions.items.map((version) => version.id)).toEqual([created.id, prior.id]);
+    expect(JSON.stringify(versions)).not.toContain("UNKNOWN PRIOR CANARY");
+    expect(await prisma.constitution.findUniqueOrThrow({ where: { id: unknown.id } })).toMatchObject({ bodyMd: "UNKNOWN PRIOR CANARY" });
+    const ref = await prisma.constitutionSourceReference.findFirstOrThrow({ where: { constitutionId: created.id } });
+    expect(await prisma.artifactInputLineage.findFirstOrThrow({ where: { artifactType: "ConstitutionSourceReference", artifactId: ref.id }, orderBy: { revision: "desc" } }))
+      .toMatchObject({ origin: "DERIVED" });
+  });
+
+  it("rolls back Constitution and copied reference writes when an uncited prompt input changes", async () => {
+    const f = await createCorpusFixture("constitution-uncited-input");
+    const proposal = await prisma.proposal.create({ data: { workspaceId: f.workspace.id, authorUserId: f.user.id,
+      title: "Second policy", bodyMd: "Uncited policy facts", status: "RESOLVED", resolutionOutcome: "ADOPTED", isPrivate: false, publishedAt: new Date() } });
+    const uncited = await prisma.policyCorpus.create({ data: { workspaceId: f.workspace.id, proposalId: proposal.id,
+      title: proposal.title, bodyMd: proposal.bodyMd, acceptedAt: new Date() } });
+    await prisma.$transaction(async (tx) => {
+      await recordArtifactInputLineage({ tx, actor: f.actor, workspaceId: f.workspace.id,
+        artifact: { kind: "Proposal", id: proposal.id }, content: proposal, origin: "HUMAN_ORIGINAL", inputs: [] });
+      await recordArtifactInputLineage({ tx, actor: f.actor, workspaceId: f.workspace.id,
+        artifact: { kind: "PolicyCorpus", id: uncited.id }, content: uncited, origin: "DERIVED", inputs: [{ kind: "Proposal", id: proposal.id }] });
+    });
+    const captured = await loadConstitutionCorpusSnapshot(f.actor, prisma, f.workspace.id);
+    const roots = await captureArtifactInputProof(f.actor, f.workspace.id, captured.corpus.map((policy) => ({ kind: "PolicyCorpus", id: policy.id, snapshot: policy })));
+    await prisma.policyCorpus.update({ where: { id: uncited.id }, data: { bodyMd: "Changed after model context capture" } });
+    await expect(createConstitutionVersion({ workspaceId: f.workspace.id, lineageActor: f.actor, lineageRoots: roots,
+      bodyMd: "Candidate using both policies", modelUsed: "synthetic-model",
+      references: [{ pointOrder: 1, sourceOrder: 1, policyCorpusId: f.policy.id, sourceKind: "PROPOSAL" }] }))
+      .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(await prisma.constitution.count({ where: { workspaceId: f.workspace.id } })).toBe(0);
+    expect(await prisma.constitutionSourceReference.count({ where: { workspaceId: f.workspace.id } })).toBe(0);
+  });
+
 });

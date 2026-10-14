@@ -6,6 +6,13 @@ import { recordAudit } from "./audit-trail";
 import { requireWorkspaceOperation } from "./agent-operation-authorization";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { AppError, invariant } from "./errors";
+import { findConversationToolLinkArchiveOutcome, recordConversationToolLinkArchiveOutcome,
+  getConversationOperationOutcomeInputRoots } from "./conversation-operation-outcome";
+import { getMcpToolInputRoots } from "./mcp-tool-input-context";
+import { captureConversationInputReceipt, validateConversationInputReceipt, type ConversationInputReceipt } from "./conversation-lineage";
+import { loadReadableDigestQuery, mergeArtifactInputProofs } from "./digest-lineage";
+import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
+import { captureArtifactInputProof, captureArtifactInputSnapshotProof, currentArtifactInputRoots, isArtifactInputProofReadable, lineageContentFingerprint, sealArtifactInputActor, type LineageKind, type LineageRoot } from "./source-lineage";
 import {
   canEditToolLinkMetadata,
   canManageToolLinkCredential,
@@ -27,7 +34,9 @@ const toolLinkSelect = {
   previewImageUrl: true,
   previewFaviconUrl: true,
   credentialLabel: true,
+  credentialSecretEnc: true,
   archivedAt: true,
+  archivedByUserId: true,
   archiveReason: true,
   createdAt: true,
   updatedAt: true,
@@ -40,23 +49,93 @@ const toolLinkSelect = {
   },
   circleTags: {
     include: {
-      circle: {
-        select: {
-          id: true,
-          name: true,
-          archivedAt: true,
-        },
-      },
+      circle: true,
     },
-    orderBy: {
-      createdAt: "asc",
-    },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
   },
 } satisfies Prisma.WorkspaceToolLinkSelect;
 
-type ToolLinkRecord = Prisma.WorkspaceToolLinkGetPayload<{ select: typeof toolLinkSelect }> & {
-  credentialSecretEnc?: string | null;
-};
+type ToolLinkRecord = Prisma.WorkspaceToolLinkGetPayload<{ select: typeof toolLinkSelect }>;
+
+const toolLinkReceipts = new WeakMap<object, ConversationInputReceipt>();
+
+/** An actor/workspace/payload-bound server receipt, rechecked on every use. */
+export async function getWorkspaceToolLinkInputRoots(actor: AppActor, workspaceId: string, value: object) {
+  const receipt = toolLinkReceipts.get(value);
+  invariant(receipt, 409, "UNKNOWN_LINEAGE", "Tool link output has no trusted source receipt.");
+  return validateConversationInputReceipt({ actor, workspaceId, value, receipt });
+}
+
+async function bindToolLinkOutput(actor: AppActor, workspaceId: string, value: object, roots: LineageRoot[], tx?: Prisma.TransactionClient) {
+  toolLinkReceipts.set(value, await captureConversationInputReceipt({ actor, workspaceId, value, trustedRoots: roots, db: tx }));
+}
+
+async function captureToolLinkReader(actor: AppActor, workspaceId: string, membership: MembershipSummary | null | undefined,
+  tx?: Prisma.TransactionClient) {
+  return captureArtifactInputProof(actor, workspaceId, [
+    { kind: "Workspace", id: workspaceId },
+    ...(membership ? [{ kind: "Member" as const, id: membership.id, snapshot: { id: membership.id,
+      userId: membership.userId, role: membership.role, isActive: membership.isActive } }] : []),
+  ], tx);
+}
+
+function toolLinkInputSnapshot(kind: LineageKind, row: Record<string, unknown>) {
+  return kind === "WorkspaceToolLink" && Array.isArray(row.circleTags) ? { ...row,
+    circleTags: row.circleTags.map((tag) => ({ id: tag.id, toolLinkId: tag.toolLinkId, circleId: tag.circleId, createdAt: tag.createdAt })),
+  } : row;
+}
+
+async function captureReadableToolLinkInputs<T extends { id: string }>(actor: AppActor, workspaceId: string,
+  kind: LineageKind, records: T[], tx?: Prisma.TransactionClient, writtenRevision = false) {
+  const admitted: T[] = [];
+  const proofs: LineageRoot[][] = [];
+  for (const row of records) {
+    try {
+      let roots: LineageRoot[];
+      if (writtenRevision) {
+        // The read observer retains the consumed old revision until its caller
+        // rebases it. Bind the new revision separately without replacing that input.
+        const inherited = await currentArtifactInputRoots(tx ?? prisma, workspaceId, { kind, id: row.id }, row);
+        invariant(inherited, 409, "UNKNOWN_LINEAGE", "Tool link output has no complete stored lineage.");
+        roots = mergeArtifactInputProofs([{ kind, id: row.id, fingerprint: lineageContentFingerprint(kind, row) }], inherited);
+        invariant(await isArtifactInputProofReadable(actor, workspaceId, roots, tx), 409, "SOURCE_CHANGED", "Tool link output changed.");
+      } else roots = await captureArtifactInputProof(actor, workspaceId, [{ kind, id: row.id, snapshot: toolLinkInputSnapshot(kind, row) }], tx);
+      admitted.push(row);
+      proofs.push(roots);
+    } catch (error) {
+      if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
+    }
+  }
+  return { records: admitted, roots: mergeArtifactInputProofs(...proofs) };
+}
+
+async function serializeReadableToolLinks(actor: AppActor, workspaceId: string,
+  membership: MembershipSummary | null | undefined, links: ToolLinkRecord[], tx?: Prisma.TransactionClient) {
+  const readerRoots = await captureToolLinkReader(actor, workspaceId, membership, tx);
+  const admitted = await captureReadableToolLinkInputs(actor, workspaceId, "WorkspaceToolLink", links, tx, Boolean(tx));
+  const [creators, circles] = await Promise.all([
+    captureReadableToolLinkInputs(actor, workspaceId, "User", admitted.records.flatMap((link) => link.createdBy ? [link.createdBy] : []), tx),
+    captureReadableToolLinkInputs(actor, workspaceId, "Circle", admitted.records.flatMap((link) => link.circleTags.map((tag) => tag.circle).filter((circle) => !circle.archivedAt)), tx),
+  ]);
+  const credentialCaps = actor.kind === "agent"
+    ? await captureReadableToolLinkInputs(actor, workspaceId, "WorkspaceToolLinkCredential", admitted.records, tx)
+    : { records: admitted.records.filter((link) => canManageToolLinkCredential(actor, membership, link)), roots: [] };
+  const credentialManagerIds = new Set(credentialCaps.records.map((row) => row.id));
+  const creatorIds = new Set(creators.records.map((row) => row.id));
+  const circleIds = new Set(circles.records.map((row) => row.id));
+  const roots = mergeArtifactInputProofs(readerRoots, admitted.roots, creators.roots, circles.roots, credentialCaps.roots);
+  const result = admitted.records.map((link) => serializeToolLink(actor, membership, {
+    ...link, createdBy: link.createdBy && creatorIds.has(link.createdBy.id) ? link.createdBy : null,
+    circleTags: link.circleTags.filter((tag) => circleIds.has(tag.circleId)),
+  }, credentialManagerIds.has(link.id)));
+  invariant(await isArtifactInputProofReadable(actor, workspaceId, roots, tx), 409, "SOURCE_CHANGED", "Tool link inputs changed before return.");
+  for (const value of result) await bindToolLinkOutput(actor, workspaceId, value, roots, tx);
+  return { result, roots };
+}
+
+async function requireReadableToolLink(actor: AppActor, workspaceId: string, link: ToolLinkRecord, tx?: Prisma.TransactionClient) {
+  return captureArtifactInputProof(actor, workspaceId, [{ kind: "WorkspaceToolLink", id: link.id, snapshot: toolLinkInputSnapshot("WorkspaceToolLink", link) }], tx);
+}
 
 function normalizeString(value: string | null | undefined) {
   const trimmed = value?.trim();
@@ -101,6 +180,7 @@ function serializeToolLink(
   actor: AppActor,
   membership: MembershipSummary | null | undefined,
   link: ToolLinkRecord,
+  canManageCredential = canManageToolLinkCredential(actor, membership, link),
 ) {
   return {
     id: link.id,
@@ -126,7 +206,7 @@ function serializeToolLink(
       .filter((circle) => !circle.archivedAt)
       .map((circle) => ({ id: circle.id, name: circle.name })),
     canManage: canEditToolLinkMetadata(actor, membership),
-    canManageCredentials: canManageToolLinkCredential(actor, membership, link),
+    canManageCredentials: canManageCredential,
     canArchive: canManageToolLinkCredential(actor, membership, link),
   };
 }
@@ -152,19 +232,18 @@ export async function listWorkspaceToolLinks(actor: AppActor, params: {
   archiveFilter?: ArchiveFilter;
 }) {
   const membership = await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "list_tool_links" });
-  const links = await prisma.workspaceToolLink.findMany({
-    where: {
-      workspaceId: params.workspaceId,
-      ...archiveFilterWhere(params.archiveFilter),
-    },
-    orderBy: [{ category: "asc" }, { title: "asc" }],
-    select: {
-      ...toolLinkSelect,
-      credentialSecretEnc: true,
-    },
+  const links = await loadReadableDigestQuery<ToolLinkRecord>({
+    actor, workspaceId: params.workspaceId, kind: "WorkspaceToolLink", limit: 100, completeScan: true, keyset: true,
+    loadBatch: ({ take, after }) => prisma.workspaceToolLink.findMany({
+      where: { workspaceId: params.workspaceId, ...archiveFilterWhere(params.archiveFilter),
+        ...(after ? { id: { gt: after.id } } : {}) },
+      orderBy: { id: "asc" }, select: toolLinkSelect, take,
+    }),
   });
-
-  return links.map((link) => serializeToolLink(actor, membership, link));
+  const { result: visible, roots } = await serializeReadableToolLinks(actor, params.workspaceId, membership, links);
+  visible.sort((a, b) => a.category.localeCompare(b.category) || a.title.localeCompare(b.title) || a.id.localeCompare(b.id));
+  await bindToolLinkOutput(actor, params.workspaceId, visible, roots);
+  return visible;
 }
 
 export async function getWorkspaceToolLink(actor: AppActor, params: {
@@ -184,7 +263,10 @@ export async function getWorkspaceToolLink(actor: AppActor, params: {
     },
   });
   invariant(link, 404, "NOT_FOUND", "Tool link not found.");
-  return serializeToolLink(actor, membership, link);
+  await requireReadableToolLink(actor, params.workspaceId, link);
+  const { result: [result] } = await serializeReadableToolLinks(actor, params.workspaceId, membership, [link]);
+  invariant(result, 404, "NOT_FOUND", "Tool link not found.");
+  return result;
 }
 
 export async function createWorkspaceToolLink(actor: AppActor, params: {
@@ -201,13 +283,15 @@ export async function createWorkspaceToolLink(actor: AppActor, params: {
   credentialLabel?: string | null;
   credentialSecret?: string | null;
   circleIds?: string[];
-}) {
+} & ProducerLineageParams) {
   const membership = await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "upsert_tool_link" });
   const createdByUserId = actor.kind === "user" ? actor.user.id : await actorUserIdForWorkspace(actor, params.workspaceId);
   const secret = normalizeSecret(params.credentialSecret);
 
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const circleIds = await validateCircleIds(tx, params.workspaceId, params.circleIds);
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId, capture: params });
+    invariant(receipt.mode !== "UNKNOWN", 409, "UNKNOWN_LINEAGE", "Tool link creation requires complete source inputs.");
     const link = await tx.workspaceToolLink.create({
       data: {
         workspaceId: params.workspaceId,
@@ -233,6 +317,8 @@ export async function createWorkspaceToolLink(actor: AppActor, params: {
       },
     });
 
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "WorkspaceToolLink", id: link.id }, content: link, receipt });
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
       action: "tool_link.created",
@@ -246,8 +332,12 @@ export async function createWorkspaceToolLink(actor: AppActor, params: {
       },
     });
 
-    return serializeToolLink(actor, membership, link);
+    const { result: [result] } = await serializeReadableToolLinks(actor, params.workspaceId, membership, [link], tx);
+    invariant(result, 409, "UNKNOWN_LINEAGE", "Tool link output has no complete source proof.");
+    return result;
   });
+  await getWorkspaceToolLinkInputRoots(actor, params.workspaceId, result);
+  return result;
 }
 
 export async function updateWorkspaceToolLink(actor: AppActor, params: {
@@ -265,23 +355,27 @@ export async function updateWorkspaceToolLink(actor: AppActor, params: {
   credentialLabel?: string | null;
   credentialSecret?: string | null;
   circleIds?: string[];
-}) {
+} & ProducerLineageParams) {
   const membership = await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "upsert_tool_link" });
 
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "WorkspaceToolLink" WHERE id = ${params.toolLinkId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const existing = await tx.workspaceToolLink.findFirst({
       where: {
         id: params.toolLinkId,
         workspaceId: params.workspaceId,
         archivedAt: null,
       },
-      select: {
-        id: true,
-        createdByUserId: true,
-      },
+      select: toolLinkSelect,
     });
     invariant(existing, 404, "NOT_FOUND", "Tool link not found.");
     requireToolLinkMetadataEditor(actor, membership);
+    await requireReadableToolLink(actor, params.workspaceId, existing, tx);
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "WorkspaceToolLink", id: existing.id }, before: existing, capture: params });
+    invariant(receipt.mode !== "UNKNOWN", 409, "UNKNOWN_LINEAGE", "A partial edit cannot prove the existing tool link content.");
+    if (receipt.mode === "ADVANCE") await captureArtifactInputSnapshotProof(actor, params.workspaceId,
+      { kind: "WorkspaceToolLink", id: existing.id, fingerprint: lineageContentFingerprint("WorkspaceToolLink", existing) }, tx);
     const editsCredential = params.credentialLabel !== undefined || params.credentialSecret !== undefined;
     if (editsCredential) {
       requireToolLinkCredentialManager(actor, membership, existing);
@@ -328,6 +422,8 @@ export async function updateWorkspaceToolLink(actor: AppActor, params: {
       },
     });
 
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "WorkspaceToolLink", id: updated.id }, content: updated, receipt });
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
       action: "tool_link.updated",
@@ -342,8 +438,12 @@ export async function updateWorkspaceToolLink(actor: AppActor, params: {
       },
     });
 
-    return serializeToolLink(actor, membership, updated);
+    const { result: [result] } = await serializeReadableToolLinks(actor, params.workspaceId, membership, [updated], tx);
+    invariant(result, 409, "UNKNOWN_LINEAGE", "Tool link output has no complete source proof.");
+    return result;
   });
+  await getWorkspaceToolLinkInputRoots(actor, params.workspaceId, result);
+  return result;
 }
 
 export async function upsertWorkspaceToolLink(actor: AppActor, params: Omit<Parameters<typeof createWorkspaceToolLink>[1], "workspaceId"> & {
@@ -364,49 +464,91 @@ export async function archiveWorkspaceToolLink(actor: AppActor, params: {
   workspaceId: string;
   toolLinkId: string;
   reason?: string | null;
-}) {
-  await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "archive_tool_link" });
-  await archiveWorkspaceArtifact(actor, {
-    workspaceId: params.workspaceId,
-    entityType: "WorkspaceToolLink",
-    entityId: params.toolLinkId,
-    reason: params.reason ?? "Archived from tool links directory.",
+  requestLineageRoots?: readonly LineageRoot[];
+} & ProducerLineageParams) {
+  const membership = await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "archive_tool_link" });
+  const requestLineageRoots = params.requestLineageRoots ?? getMcpToolInputRoots(actor, params.workspaceId);
+  const outcomeRequest = { workspaceId: params.workspaceId, toolLinkId: params.toolLinkId, requestLineageRoots };
+  const result = await prisma.$transaction(async (tx) => {
+    if (requestLineageRoots.length) {
+      const previous = await findConversationToolLinkArchiveOutcome(actor, outcomeRequest, tx);
+      if (previous) return previous;
+    }
+    await tx.$queryRaw`SELECT id FROM "WorkspaceToolLink" WHERE id = ${params.toolLinkId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    const existing = await tx.workspaceToolLink.findFirst({ where: {
+      id: params.toolLinkId, workspaceId: params.workspaceId, archivedAt: null,
+    }, select: toolLinkSelect });
+    invariant(existing, 404, "NOT_FOUND", "Tool link not found.");
+    requireToolLinkCredentialManager(actor, membership, existing);
+    if (params.lineageRoots?.length) invariant(await isArtifactInputProofReadable(actor, params.workspaceId, params.lineageRoots, tx),
+      409, "SOURCE_CHANGED", "Archive inputs changed before persistence.");
+    await requireReadableToolLink(actor, params.workspaceId, existing, tx);
+    // Preserve the original revision in the archive history. Its live grant is
+    // intentionally revoked by the archive; no receipt certifies the old body afterward.
+    await archiveWorkspaceArtifact(actor, {
+      workspaceId: params.workspaceId, entityType: "WorkspaceToolLink", entityId: params.toolLinkId,
+      reason: params.reason ?? "Archived from tool links directory.", _tx: tx,
+    });
+    return requestLineageRoots.length ? recordConversationToolLinkArchiveOutcome(actor, outcomeRequest, tx) : { id: params.toolLinkId };
   });
+  if ("success" in result) await getConversationOperationOutcomeInputRoots(actor, params.workspaceId, result);
+  return result;
+}
 
-  return { id: params.toolLinkId };
+async function readToolLinkCredential<T>(actor: AppActor, params: { workspaceId: string; toolLinkId: string },
+  consume: (link: ToolLinkRecord, tx: Prisma.TransactionClient) => Promise<T>) {
+  sealArtifactInputActor(actor);
+  params = Object.freeze({ ...params });
+  await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "reveal_tool_link_credential" });
+  let roots: LineageRoot[] = [];
+  const result = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "WorkspaceToolLink" WHERE id = ${params.toolLinkId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+    const membership = await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId,
+      operation: "reveal_tool_link_credential", tx });
+    const metadata = await tx.workspaceToolLink.findFirst({ where: {
+      id: params.toolLinkId, workspaceId: params.workspaceId, archivedAt: null,
+    }, select: { id: true, createdByUserId: true } });
+    invariant(metadata, 404, "NOT_FOUND", "Tool link not found.");
+    requireToolLinkCredentialManager(actor, membership, metadata);
+    const link = await tx.workspaceToolLink.findFirst({ where: {
+      id: metadata.id, workspaceId: params.workspaceId, archivedAt: null, createdByUserId: metadata.createdByUserId,
+    }, select: toolLinkSelect });
+    invariant(link, 404, "NOT_FOUND", "Tool link not found.");
+    requireToolLinkCredentialManager(actor, membership, link);
+    roots = await captureArtifactInputProof(actor, params.workspaceId,
+      [{ kind: "WorkspaceToolLinkCredential", id: link.id, snapshot: link }], tx);
+    invariant(await isArtifactInputProofReadable(actor, params.workspaceId, roots, tx),
+      409, "SOURCE_CHANGED", "Credential access changed before use.");
+    const value = await consume(link, tx);
+    invariant(await isArtifactInputProofReadable(actor, params.workspaceId, roots, tx),
+      409, "SOURCE_CHANGED", "Credential access changed during use.");
+    return value;
+  });
+  invariant(await isArtifactInputProofReadable(actor, params.workspaceId, roots),
+    409, "SOURCE_CHANGED", "Credential access changed before return.");
+  await bindToolLinkOutput(actor, params.workspaceId, result as object, roots);
+  return result;
+}
+
+/** Model tools use the protected Tools UI; no credential value enters model messages. */
+export async function getWorkspaceToolLinkCredentialAccess(actor: AppActor, params: {
+  workspaceId: string; toolLinkId: string;
+}) {
+  return readToolLinkCredential(actor, params, async (link) => ({
+    credentialLabel: link.credentialLabel, hasCredential: Boolean(link.credentialSecretEnc),
+  }));
 }
 
 export async function revealWorkspaceToolLinkCredential(actor: AppActor, params: {
   workspaceId: string;
   toolLinkId: string;
 }) {
-  await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "reveal_tool_link_credential" });
-
-  return prisma.$transaction(async (tx) => {
-    const membership = await requireWorkspaceOperation({
-      actor, workspaceId: params.workspaceId, operation: "reveal_tool_link_credential", tx,
-    });
-    // Determine human creator/role authority without selecting the ciphertext.
-    const metadata = await tx.workspaceToolLink.findFirst({
-      where: { id: params.toolLinkId, workspaceId: params.workspaceId, archivedAt: null },
-      select: { id: true, createdByUserId: true },
-    });
-    invariant(metadata, 404, "NOT_FOUND", "Tool link not found.");
-    requireToolLinkCredentialManager(actor, membership, metadata);
-    const link = await tx.workspaceToolLink.findFirst({
-      where: { id: metadata.id, workspaceId: params.workspaceId, archivedAt: null,
-        createdByUserId: metadata.createdByUserId },
-      select: { id: true, title: true, credentialLabel: true, credentialSecretEnc: true },
-    });
-    invariant(link, 404, "NOT_FOUND", "Tool link not found.");
-    const credentialSecret = link.credentialSecretEnc ? decryptSecret(link.credentialSecretEnc) : null;
+  return readToolLinkCredential(actor, params, async (link, tx) => {
     await recordAudit(tx, actor, {
-      workspaceId: params.workspaceId,
-      action: "tool_link.credential_revealed",
-      entityType: "WorkspaceToolLink",
-      entityId: link.id,
-      meta: { title: link.title, credentialLabel: link.credentialLabel, hasCredential: Boolean(link.credentialSecretEnc) },
+      workspaceId: params.workspaceId, action: "tool_link.credential_revealed", entityType: "WorkspaceToolLink", entityId: link.id,
+      meta: { credentialLabel: link.credentialLabel, hasCredential: Boolean(link.credentialSecretEnc) },
     });
-    return { credentialLabel: link.credentialLabel, credentialSecret };
+    return { credentialLabel: link.credentialLabel,
+      credentialSecret: link.credentialSecretEnc ? decryptSecret(link.credentialSecretEnc) : null };
   });
 }

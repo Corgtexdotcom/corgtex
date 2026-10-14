@@ -1,132 +1,35 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fixture, resetFixture, workspaceId, alpha, sharedEnv, domainExports } from "./agents/model-consumer.test-fixture";
 
-const prismaMock = {
-  agentRun: {
-    findFirst: vi.fn(),
-    count: vi.fn(),
-    create: vi.fn(),
-    update: vi.fn(),
-  },
-  agentStep: {
-    create: vi.fn(),
-    createMany: vi.fn(),
-    update: vi.fn(),
-  },
-  agentToolCall: {
-    create: vi.fn(),
-    createMany: vi.fn(),
-    update: vi.fn(),
-  },
-  workspaceAgentConfig: {
-    findUnique: vi.fn(),
-  },
-  modelUsageBudget: {
-    findUnique: vi.fn(),
-  },
-  event: {
-    create: vi.fn(),
-  },
-  $transaction: vi.fn(),
-  agentIdentity: {
-    findUnique: vi.fn(),
-  },
-};
-
-const envMock = {
-  AGENT_KILL_SWITCH: false,
-  WORKSPACE_AGENT_MAX_CONCURRENCY: 4,
-};
-
-const createDailyCompanyUnderstandingQuestionsMock = vi.fn();
-
-vi.mock("@corgtex/shared", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@corgtex/shared")>();
-  return {
-    ...actual,
-    prisma: prismaMock,
-    env: envMock,
-    toInputJson: (value: unknown) => JSON.parse(JSON.stringify(value ?? null)),
-  };
+const { createDailyQuestionsMock } = vi.hoisted(() => ({ createDailyQuestionsMock: vi.fn() }));
+vi.mock("@corgtex/shared", () => ({ prisma: fixture.prisma, env: sharedEnv,
+  toInputJson: (value: unknown) => JSON.parse(JSON.stringify(value ?? null)) }));
+vi.mock("../../domain/src/auth", () => ({ requireWorkspaceMembership: fixture.membership, isGlobalOperator: () => false }));
+vi.mock("../../domain/src/brain-access", () => ({ resolveKnowledgeAccessDomains: async (actor: any) =>
+  actor.kind === "agent" ? ["WORKSPACE", "FINANCE"] : fixture.domains.get(actor.user.id) ?? [] }));
+vi.mock("@corgtex/domain", async () => {
+  const domain = await domainExports();
+  createDailyQuestionsMock.mockImplementation(domain.createDailyCompanyUnderstandingQuestions);
+  return { ...domain, createDailyCompanyUnderstandingQuestions: createDailyQuestionsMock };
 });
+vi.mock("@corgtex/models", () => ({ resolveModel: () => "synthetic-model", defaultModelGateway: { chat: fixture.chat } }));
+import { runDailyCheckInAgent } from "./agents/daily-check-in";
+import { readableArtifactIds } from "../../domain/src/source-lineage";
 
-vi.mock("@corgtex/domain", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@corgtex/domain")>();
-  return {
-    ...actual,
-    createDailyCompanyUnderstandingQuestions: createDailyCompanyUnderstandingQuestionsMock,
-    isAgentEnabled: vi.fn().mockResolvedValue(true),
-    getAgentModelOverride: vi.fn().mockResolvedValue(undefined),
-    resolveAgentIdentityLimits: vi.fn().mockResolvedValue(null),
-    resolveAgentBehaviorContext: vi.fn().mockResolvedValue(null),
-  };
-});
-
-vi.mock("@corgtex/models", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@corgtex/models")>();
-  return {
-    ...actual,
-    resolveModel: vi.fn().mockReturnValue("fake-model"),
-  };
-});
-
+beforeEach(resetFixture);
 describe("runDailyCheckInAgent", () => {
-  beforeEach(() => {
-    envMock.AGENT_KILL_SWITCH = false;
-    envMock.WORKSPACE_AGENT_MAX_CONCURRENCY = 4;
-
-    prismaMock.agentRun.findFirst.mockReset().mockResolvedValue(null);
-    prismaMock.agentRun.count.mockReset().mockResolvedValue(0);
-    prismaMock.agentRun.create.mockReset().mockResolvedValue({ id: "run-1" });
-    prismaMock.agentRun.update.mockReset().mockImplementation(async ({ where, data }: any) => ({
-      id: where.id,
-      ...data,
-    }));
-
-    prismaMock.agentStep.create.mockReset().mockImplementation(async ({ data }: any) => ({
-      id: `step-${String(data.name)}`,
-      ...data,
-    }));
-    prismaMock.agentStep.createMany.mockReset().mockResolvedValue({ count: 0 });
-    prismaMock.agentStep.update.mockReset().mockImplementation(async ({ where, data }: any) => ({
-      id: where.id,
-      ...data,
-    }));
-
-    prismaMock.agentToolCall.create.mockReset().mockImplementation(async ({ data }: any) => ({
-      id: `tool-${String(data.name)}`,
-      ...data,
-    }));
-    prismaMock.agentToolCall.createMany.mockReset().mockResolvedValue({ count: 0 });
-    prismaMock.agentToolCall.update.mockReset().mockImplementation(async ({ where, data }: any) => ({
-      id: where.id,
-      ...data,
-    }));
-
-    prismaMock.workspaceAgentConfig.findUnique.mockReset().mockResolvedValue(null);
-    prismaMock.event.create.mockReset().mockResolvedValue({ id: "event-1" });
-    prismaMock.modelUsageBudget.findUnique.mockReset().mockResolvedValue(null);
-    prismaMock.$transaction.mockReset().mockImplementation(async (fn: any) => fn(prismaMock));
-    prismaMock.agentIdentity.findUnique.mockReset().mockResolvedValue(null);
-    createDailyCompanyUnderstandingQuestionsMock.mockReset().mockResolvedValue({ created: 2, cap: 3 });
-  });
-
-  it("creates daily company understanding questions without requiring a database", async () => {
-    const { runDailyCheckInAgent } = await import(".");
-
-    const result = await runDailyCheckInAgent({
-      workspaceId: "ws-1",
-      triggerRef: "trigger-1",
-      memberId: "member-1",
-      triggerType: "SCHEDULE",
-    });
-
-    expect(createDailyCompanyUnderstandingQuestionsMock).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "agent", label: "daily-check-in" }),
-      expect.objectContaining({
-        workspaceId: "ws-1",
-        memberId: "member-1",
-      }),
+  it("creates receipted daily questions without requiring a database", async () => {
+    const result = await runDailyCheckInAgent({ workspaceId, triggerRef: "trigger-1", memberId: "member-alpha", triggerType: "SCHEDULE" });
+    expect(createDailyQuestionsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent", label: "CHECKIN_GENERATION" }),
+      expect.objectContaining({ workspaceId, memberId: "member-alpha", lineageRoots: expect.arrayContaining([
+        expect.objectContaining({ kind: "Member", id: "member-alpha" }),
+        expect.objectContaining({ kind: "User", id: "alpha" }),
+      ]) }),
     );
-    expect(result).toEqual(expect.objectContaining({ status: "COMPLETED" }));
+    expect(result).toMatchObject({ status: "COMPLETED", resultJson: { created: 3, cap: 3 } });
+    expect(await readableArtifactIds(alpha, workspaceId, "CheckIn", fixture.rows.checkIn)).toEqual(new Set(fixture.rows.checkIn.map((row: any) => row.id)));
+    expect(fixture.rows.checkIn.every((row: any) => fixture.manifest("CheckIn", row.id).origin === "DERIVED")).toBe(true);
+    expect(fixture.chat).not.toHaveBeenCalled();
   });
 });

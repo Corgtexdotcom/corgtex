@@ -1,3 +1,4 @@
+import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { prisma } from "@corgtex/shared";
 import type { Prisma } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
@@ -5,12 +6,14 @@ import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
 import { lockWorkspaceMembership } from "./workspace-support-access";
 import { archiveFilterWhere, type ArchiveFilter } from "./archive";
-import { invariant } from "./errors";
+import { AppError, invariant } from "./errors";
+import { captureArtifactInputProof, readableArtifactIds } from "./source-lineage";
 import {
   closeRoleLifecycleForRoles,
   createRoleVersionSnapshot,
   dismissRoleOnboardingForAssignment,
   endRoleHolderHistory,
+  endVerifiedRoleHolderHistories,
   ensureRoleOnboardingForAssignment,
   startRoleHolderHistory,
 } from "./role-onboarding";
@@ -59,8 +62,9 @@ type MemberForAssignment = Prisma.MemberGetPayload<{ include: typeof ROLE_ASSIGN
 
 export { activeRoleAssignmentWhere, isRoleAssignmentActive } from "./role-assignment-activity";
 
-export async function listRoles(workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
-  return prisma.role.findMany({
+export async function listRoles(actor: AppActor, workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const roles = await prisma.role.findMany({
     where: {
       ...archiveFilterWhere(opts?.archiveFilter),
       circle: {
@@ -69,15 +73,59 @@ export async function listRoles(workspaceId: string, opts?: { archiveFilter?: Ar
       },
     },
     include: {
-      circle: {
-        select: {
-          id: true,
-          name: true,
-        },
-      },
+      circle: true,
     },
-    orderBy: [{ circle: { sortOrder: "asc" } }, { sortOrder: "asc" }, { createdAt: "asc" }],
   });
+  const visibleRoles = await readableArtifactIds(actor, workspaceId, "Role", roles);
+  const admitted = roles.filter((role) => visibleRoles.has(role.id));
+  const visibleCircles = await readableArtifactIds(actor, workspaceId, "Circle", admitted.map((role) => role.circle));
+  return admitted
+    .sort((left, right) => {
+      // Withheld circle metadata must not influence grouping or ranking.
+      const leftOrder = visibleCircles.has(left.circleId) ? left.circle.sortOrder : 0;
+      const rightOrder = visibleCircles.has(right.circleId) ? right.circle.sortOrder : 0;
+      return leftOrder - rightOrder || left.sortOrder - right.sortOrder || left.createdAt.getTime() - right.createdAt.getTime();
+    })
+    .map((role) => ({ ...role,
+      circleId: visibleCircles.has(role.circleId) ? role.circleId : null,
+      circle: visibleCircles.has(role.circleId) ? { id: role.circle.id, name: role.circle.name } : null,
+    }));
+}
+
+/** Gate association and profile content before exposing role filler counts. */
+export async function filterReadableRoleAssignments<T extends {
+  id: string;
+  member: { id: string; user: { id: string; email: string; displayName: string | null; bio?: string | null } };
+}>(actor: AppActor, workspaceId: string, assignments: T[]): Promise<T[]> {
+  const visibleAssignments = await readableArtifactIds(actor, workspaceId, "RoleAssignment", assignments);
+  const admitted = assignments.filter((assignment) => visibleAssignments.has(assignment.id));
+  const visibleMembers = await readableArtifactIds(actor, workspaceId, "Member", admitted.map(({ member }) => ({
+    ...member, user: { id: member.user.id, email: member.user.email, displayName: member.user.displayName },
+  })));
+  const visibleProfiles = new Set<string>();
+  for (const assignment of admitted) {
+    if (!visibleMembers.has(assignment.member.id)) continue;
+    try {
+      // Label projections omit profile fields. Capture the authoritative User
+      // receipt and verify only observed fields, without inventing null values.
+      await captureArtifactInputProof(actor, workspaceId, [{ kind: "User", id: assignment.member.user.id,
+        snapshot: assignment.member.user }]);
+      visibleProfiles.add(assignment.id);
+    } catch (error) {
+      if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
+    }
+  }
+  return admitted.filter((assignment) => visibleProfiles.has(assignment.id));
+}
+
+async function roleMutationResult(tx: Prisma.TransactionClient, actor: AppActor, workspaceId: string,
+  role: Prisma.RoleGetPayload<{ include: { circle: true } }>) {
+  const visible = await readableArtifactIds(actor, workspaceId, "Role", [role], tx);
+  if (!visible.has(role.id)) return { id: role.id, contentWithheld: true as const };
+  const visibleCircles = await readableArtifactIds(actor, workspaceId, "Circle", [role.circle], tx);
+  const circleVisible = visibleCircles.has(role.circle.id);
+  return { ...role, circleId: circleVisible ? role.circleId : null,
+    circle: circleVisible ? { id: role.circle.id, name: role.circle.name } : null };
 }
 
 export async function getRole(actor: AppActor, params: {
@@ -99,15 +147,7 @@ export async function getRole(actor: AppActor, params: {
       },
     },
     include: {
-      circle: {
-        select: {
-          id: true,
-          name: true,
-          purposeMd: true,
-          domainMd: true,
-          maturityStage: true,
-        },
-      },
+      circle: true,
       assignments: {
         include: {
           member: {
@@ -124,16 +164,26 @@ export async function getRole(actor: AppActor, params: {
             },
           },
         },
-        orderBy: { assignedAt: "desc" },
       },
     },
   });
 
   invariant(role, 404, "NOT_FOUND", "Role not found.");
-  return role;
+  const visible = await readableArtifactIds(actor, params.workspaceId, "Role", [role]);
+  invariant(visible.has(role.id), 404, "NOT_FOUND", "Role not found.");
+  const visibleCircles = await readableArtifactIds(actor, params.workspaceId, "Circle", [role.circle]);
+  const assignments = await filterReadableRoleAssignments(actor, params.workspaceId, role.assignments);
+  return { ...role,
+    circleId: visibleCircles.has(role.circleId) ? role.circleId : null,
+    circle: visibleCircles.has(role.circleId) ? {
+      id: role.circle.id, name: role.circle.name, purposeMd: role.circle.purposeMd,
+      domainMd: role.circle.domainMd, maturityStage: role.circle.maturityStage,
+    } : null,
+    assignments: assignments.sort((left, right) => right.assignedAt.getTime() - left.assignedAt.getTime()),
+  };
 }
 
-export async function createRole(actor: AppActor, params: {
+export async function createRole(actor: AppActor, params: ProducerLineageParams & {
   workspaceId: string;
   circleId: string;
   name: string;
@@ -167,6 +217,7 @@ export async function createRole(actor: AppActor, params: {
       where: { circleId: circle.id },
     });
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId, capture: params });
     const role = await tx.role.create({
       data: {
         circleId: circle.id,
@@ -178,14 +229,12 @@ export async function createRole(actor: AppActor, params: {
         sortOrder,
       },
       include: {
-        circle: {
-          select: {
-            id: true,
-            name: true,
-          },
-        },
+        circle: true,
       },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Role", id: role.id }, content: role, receipt });
+
 
     await tx.auditLog.create({
       data: {
@@ -222,11 +271,11 @@ export async function createRole(actor: AppActor, params: {
       },
     ]);
 
-    return role;
+    return roleMutationResult(tx, actor, params.workspaceId, role);
   });
 }
 
-export async function updateRole(actor: AppActor, params: {
+export async function updateRole(actor: AppActor, params: ProducerLineageParams & {
   workspaceId: string;
   roleId: string;
   circleId?: string;
@@ -295,21 +344,27 @@ export async function updateRole(actor: AppActor, params: {
     if (Object.keys(data).length === 0) {
       const unchanged = await tx.role.findUnique({
         where: { id: params.roleId },
-        include: { circle: { select: { id: true, name: true } } },
+        include: { circle: true },
       });
       invariant(unchanged, 404, "NOT_FOUND", "Role not found.");
-      return unchanged;
+      return roleMutationResult(tx, actor, params.workspaceId, unchanged);
     }
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Role", id: role.id }, before: role, capture: params });
     const updated = await tx.role.update({
       where: { id: params.roleId },
       data,
-      include: { circle: { select: { id: true, name: true } } },
+      include: { circle: true },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Role", id: updated.id }, content: updated, receipt });
+
 
     if (movedRole) {
       const now = new Date();
-      await tx.roleHolderHistory.updateMany({
+      await endVerifiedRoleHolderHistories(tx, {
+        workspaceId: params.workspaceId, actor,
         where: {
           workspaceId: params.workspaceId,
           roleId: role.id,
@@ -360,7 +415,7 @@ export async function updateRole(actor: AppActor, params: {
       },
     ]);
 
-    return updated;
+    return roleMutationResult(tx, actor, params.workspaceId, updated);
   });
 }
 
@@ -687,6 +742,7 @@ async function assignRoleInTransaction(
   }
 
   const onboarding = await ensureRoleOnboardingForAssignment(tx, {
+    actor,
     workspaceId: params.workspaceId,
     role: params.role,
     member: params.member,
@@ -809,8 +865,9 @@ async function unassignRoleInTransaction(
   return { id: assignment.id };
 }
 
-export async function listRoleAssignments(workspaceId: string) {
-  return prisma.roleAssignment.findMany({
+export async function listRoleAssignments(actor: AppActor, workspaceId: string) {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const assignments = await prisma.roleAssignment.findMany({
     where: {
       role: {
         circle: {
@@ -822,14 +879,26 @@ export async function listRoleAssignments(workspaceId: string) {
     },
     include: {
       role: {
-        select: { id: true, name: true, circle: { select: { id: true, name: true } } },
+        include: { circle: true },
       },
       member: {
         include: {
-          user: { select: { id: true, email: true, displayName: true } },
+          user: { select: { id: true, email: true, displayName: true, bio: true } },
         },
       },
     },
-    orderBy: { assignedAt: "desc" },
   });
+  const visibleRoles = await readableArtifactIds(actor, workspaceId, "Role", assignments.map((assignment) => assignment.role));
+  const admitted = await filterReadableRoleAssignments(actor, workspaceId,
+    assignments.filter((assignment) => visibleRoles.has(assignment.roleId)));
+  const visibleCircles = await readableArtifactIds(actor, workspaceId, "Circle", admitted.map((assignment) => assignment.role.circle));
+  return admitted
+    .sort((left, right) => right.assignedAt.getTime() - left.assignedAt.getTime())
+    .map((assignment) => ({ ...assignment,
+      role: { id: assignment.role.id, name: assignment.role.name,
+        circle: visibleCircles.has(assignment.role.circleId)
+          ? { id: assignment.role.circle.id, name: assignment.role.circle.name } : null },
+      member: { ...assignment.member, user: { id: assignment.member.user.id,
+        email: assignment.member.user.email, displayName: assignment.member.user.displayName } },
+    }));
 }

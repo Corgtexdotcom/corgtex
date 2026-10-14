@@ -11,13 +11,13 @@ export function validateMeetingTranscriptText(transcript: string, truncated = fa
   return transcript;
 }
 
-export async function extractMeetingTranscriptFile(file: File) {
+export async function extractMeetingTranscriptFile(file: File, originalBytes?: Buffer) {
   if (file.size > MAX_MEETING_TRANSCRIPT_FILE_BYTES) {
     throw new AppError(413, "TRANSCRIPT_FILE_TOO_LARGE", "Transcript files must be 5 MB or smaller.");
   }
 
   const extracted = await extractTextFromFileBuffer({
-    fileBuffer: Buffer.from(await file.arrayBuffer()),
+    fileBuffer: originalBytes ?? Buffer.from(await file.arrayBuffer()),
     fileName: file.name,
     mimeType: file.type || "application/octet-stream",
     maxExtractBytes: MAX_MEETING_TRANSCRIPT_FILE_BYTES,

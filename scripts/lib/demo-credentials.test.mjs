@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { assertDemoCredentialsScoped, assertDemoWorkspaceDisconnected, assertDemoPersonasQuiesced, DISABLED_DEMO_PERSONA_PASSWORD_HASH } from "./demo-credentials.mjs";
+import { assertDemoCredentialsScoped, assertDemoWorkspaceDisconnected, assertDemoPersonasQuiesced, DISABLED_DEMO_PERSONA_PASSWORD_HASH, revokeDemoCredentials } from "./demo-credentials.mjs";
 
 const models = ["workspaceSsoConfig", "meetingTranscriptSourceConnection", "communicationInstallation", "workspaceRecorderCalendarSource", "oAuthConnection", "externalMcpConnection", "aiWorkspaceConnection", "appInstallation", "externalDataSource", "webhookEndpoint", "selfServeSupportSession", "procurementSetupSession", "procurementTrial", "workspaceToolLink", "oAuthAuthorizationCode", "oAuthAccessToken", "mcpOAuthAuthorizationCode", "mcpOAuthAccessToken", "appSession", "agentCredential", "workspaceMeetingRecorderConfig", "meetingRecording", "workspaceBillingProfile", "aiUsageLedgerEntry", "event", "workflowJob"];
 it.each(models)("refuses existing external authority before refreshing demo: %s", async (model) => {
@@ -44,4 +44,22 @@ it.each([
   )) };
   await expect(assertDemoCredentialsScoped(db, "demo", ["public"])).rejects.toThrow("support grants");
   expect(db.workspaceSupportGrant.count).toHaveBeenCalledWith({ where: { userId: { in: ["public"] } } });
+});
+
+it("uses the same credential operations/scopes inside an existing transaction without nesting", async () => {
+  const operationModels = ["session", "passwordResetToken", "oAuthAuthorizationCode", "mcpOAuthAuthorizationCode",
+    "oAuthAccessToken", "mcpOAuthAccessToken", "appSession", "agentCredential", "oAuthApp"];
+  const db = Object.fromEntries(operationModels.map(model => [model, {
+    deleteMany: vi.fn(async () => ({ count: 0 })), updateMany: vi.fn(async () => ({ count: 0 })),
+  }]));
+  db.$transaction = vi.fn(async operations => Promise.all(operations));
+  await revokeDemoCredentials(db, "demo", ["public"]);
+  const first = operationModels.map(model => ({ deletes: db[model].deleteMany.mock.calls, updates: db[model].updateMany.mock.calls }));
+  for (const model of operationModels) { db[model].deleteMany.mockClear(); db[model].updateMany.mockClear(); }
+  db.$transaction.mockClear();
+  await revokeDemoCredentials(db, "demo", ["public"], { inTransaction: true });
+  const withoutDates = calls => JSON.parse(JSON.stringify(calls, (key, value) => key === "revokedAt" ? "CURRENT_TIME" : value));
+  expect(withoutDates(operationModels.map(model => ({ deletes: db[model].deleteMany.mock.calls, updates: db[model].updateMany.mock.calls }))))
+    .toEqual(withoutDates(first));
+  expect(db.$transaction).not.toHaveBeenCalled();
 });
