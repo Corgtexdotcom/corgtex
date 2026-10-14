@@ -908,6 +908,8 @@ a.wiki-list-item:hover {
   justify-content: center;
   flex-shrink: 0;
   border: 2px dashed var(--line);
+  padding: 0;
+  color: var(--text);
   cursor: pointer;
 }
 
@@ -919,7 +921,8 @@ a.wiki-list-item:hover {
   background-size: cover;
 }
 
-.avatar-upload:hover .avatar-overlay {
+.avatar-upload:hover .avatar-overlay,
+.avatar-upload:focus-visible .avatar-overlay {
   opacity: 1;
 }
 
