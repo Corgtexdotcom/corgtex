@@ -81,8 +81,16 @@ export async function prepareSqlKnowledgeAttempt(input: {attempt: SqlIngestionAt
       await prisma.$transaction(async tx => {
         await lockSqlIngestionAttempt(attempt, tx);
         await assertSqlNativeCaptureCurrent(attempt, receipt, tx);
-        await tx.sqlKnowledgeStagedChunk.createMany({data: batch.map((output, index) => ({id: output.row.id,
-          publicationId, ordinal: offset + index, rowIndex: output.rowIndex, contentHash: output.hash, contentJson: json(output.row)}))});
+        // A single bounded JSON text parameter avoids Prisma's per-number JSON
+        // transport allocations while PostgreSQL preserves the exact staged rows.
+        const staged = JSON.stringify(batch.map((output, index) => ({id: output.row.id,
+          publicationId, ordinal: offset + index, rowIndex: output.rowIndex, contentHash: output.hash, contentJson: output.row})));
+        const inserted = await tx.$executeRaw(Prisma.sql`INSERT INTO "SqlKnowledgeStagedChunk"
+          ("id", "publicationId", "ordinal", "rowIndex", "contentHash", "contentJson")
+          SELECT "id", "publicationId", "ordinal", "rowIndex", "contentHash", "contentJson"
+          FROM jsonb_to_recordset(${staged}::jsonb) AS rows("id" text, "publicationId" text,
+            "ordinal" integer, "rowIndex" integer, "contentHash" text, "contentJson" jsonb)`);
+        invariant(inserted === batch.length, "SQL_PUBLICATION_SET_CHANGED", "SQL staged batch is incomplete.");
       }, {timeout: 10_000});
       // Staging is immutable and has no serving authority. Retain only the
       // complete descriptor/hash set; vectors never accumulate across batches.

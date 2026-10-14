@@ -182,6 +182,30 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
     expect(await prisma.sqlNativeRunInput.count()).toBe(1); // Preserve the original native receipt.
     await failSqlIngestionAttempt({attempt: p.attempt, logId: p.attempt.logId, error: "Synthetic completion log failure"});
   });
+  it("a staged row failure rolls back the complete transport batch without publishing or advancing the cursor", async () => {
+    transport.rows = [row(1), row(2)];
+    const f = await fixture(), attempt = await f.claim(), receipt = await captureSqlIngestionAttempt(attempt);
+    const beforeCache = await prisma.sharedCacheVersion.findMany();
+    await prisma.$executeRawUnsafe(`CREATE FUNCTION pun85_stage_transport_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.ordinal = 1 THEN RAISE EXCEPTION 'synthetic staged row failure' USING ERRCODE='23514'; END IF; RETURN NEW; END $$`);
+    await prisma.$executeRawUnsafe(`CREATE TRIGGER pun85_stage_transport_failure BEFORE INSERT ON "SqlKnowledgeStagedChunk"
+      FOR EACH ROW EXECUTE FUNCTION pun85_stage_transport_failure()`);
+    try {
+      await expect(prepareSqlKnowledgeAttempt({attempt, receipt})).rejects.toThrow("synthetic staged row failure");
+      const publication = await prisma.sqlKnowledgePublication.findFirstOrThrow({where: {attemptId: attempt.attemptId}});
+      expect(publication).toMatchObject({status: "PREPARING", chunksCreated: 2, outputSetHash: ""});
+      expect(await prisma.sqlKnowledgeStagedChunk.count({where: {publicationId: publication.id}})).toBe(0);
+      expect(await prisma.knowledgeChunk.count()).toBe(0);
+      expect(await prisma.artifactInputLineage.count()).toBe(0);
+      expect((await prisma.externalDataSource.findUniqueOrThrow({where: {id: f.source.id}})).lastCursorValue).toBeNull();
+      expect((await prisma.externalDataSyncLog.findUniqueOrThrow({where: {id: attempt.logId}})).completedAt).toBeNull();
+      expect(await prisma.sharedCacheVersion.findMany()).toEqual(beforeCache);
+      expect(await prisma.sqlNativeRunInput.count()).toBe(1);
+    } finally {
+      await prisma.$executeRawUnsafe(`DROP TRIGGER pun85_stage_transport_failure ON "SqlKnowledgeStagedChunk"`);
+      await prisma.$executeRawUnsafe(`DROP FUNCTION pun85_stage_transport_failure()`);
+    }
+  });
   it("a later model batch failure preserves non-serving staging and a fresh independent retry publishes the complete run", async () => {
     transport.rows = Array.from({length: 600}, (_, index) => row(index + 1));
     const f = await fixture(), attempt = await f.claim(), receipt = await captureSqlIngestionAttempt(attempt);
