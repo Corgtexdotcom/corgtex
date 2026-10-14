@@ -6,6 +6,8 @@ import { requirePageActor } from "@/lib/auth";
 import { asString, asOptional, refresh } from "../action-utils";
 import { redirect } from "next/navigation";
 import {
+  AppError,
+  captureDirectMemberTranscriptInput,
   createMeetingSeries,
   deleteMeeting,
   enqueueMeetingAgendaPreparation,
@@ -31,7 +33,7 @@ import {
   type DuplicateGuardResolution,
   type MeetingTranscriptIntakeResult,
 } from "@corgtex/domain";
-import { extractMeetingTranscriptFile, validateMeetingTranscriptText } from "@/lib/meeting-transcript-file";
+import { extractMeetingTranscriptFile, MAX_MEETING_TRANSCRIPT_FILE_BYTES, validateMeetingTranscriptText } from "@/lib/meeting-transcript-file";
 import {
   deletePendingTranscriptPayload,
   readPendingTranscriptPayload,
@@ -178,6 +180,9 @@ function actionValuesFromFormData(formData: FormData): MeetingTranscriptActionVa
 function pendingPayloadFromUpload(payload: TranscriptUploadPayload): PendingTranscriptPayload {
   return {
     workspaceId: payload.workspaceId,
+    uploadedByUserId: payload.uploadedByUserId,
+    rawFileBase64: payload.rawFileBase64,
+    rawFileMimeType: payload.rawFileMimeType,
     transcript: payload.transcript,
     fileName: payload.fileName,
     title: payload.title,
@@ -228,14 +233,14 @@ function serializeClarificationCandidates(result: Extract<MeetingTranscriptIntak
   })) ?? [];
 }
 
-async function buildTranscriptUploadPayload(formData: FormData): Promise<TranscriptUploadPayload | TranscriptUploadPayloadError> {
+async function buildTranscriptUploadPayload(formData: FormData, uploadedByUserId: string): Promise<TranscriptUploadPayload | TranscriptUploadPayloadError> {
   const workspaceId = asString(formData, "workspaceId");
   const pendingTranscriptToken = optionalFormString(formData, "pendingTranscriptToken");
   const existingPayload = pendingTranscriptToken
     ? await readPendingTranscriptPayload(workspaceId, pendingTranscriptToken)
     : null;
 
-  if (pendingTranscriptToken && !existingPayload) {
+  if (pendingTranscriptToken && (!existingPayload || existingPayload.uploadedByUserId !== uploadedByUserId)) {
     return {
       status: "error",
       message: "The pending transcript upload expired. Upload the transcript again.",
@@ -246,11 +251,20 @@ async function buildTranscriptUploadPayload(formData: FormData): Promise<Transcr
   const file = formData.get("file");
   const submittedTranscript = asOptional(formData, "transcript");
   let transcript = submittedTranscript?.trim() ? submittedTranscript : existingPayload?.transcript ?? "";
-  let fileName = existingPayload?.fileName ?? null;
+  const replacesText = Boolean(submittedTranscript?.trim());
+  let fileName = replacesText ? null : existingPayload?.fileName ?? null;
+  let rawFileBase64 = replacesText ? null : existingPayload?.rawFileBase64 ?? null;
+  let rawFileMimeType = replacesText ? null : existingPayload?.rawFileMimeType ?? null;
   let retryRequiresTranscriptUpload = false;
 
   if (file instanceof File && file.size > 0) {
-    transcript = await extractMeetingTranscriptFile(file);
+    if (file.size > MAX_MEETING_TRANSCRIPT_FILE_BYTES) {
+      throw new AppError(413, "TRANSCRIPT_FILE_TOO_LARGE", "Transcript files must be 5 MB or smaller.");
+    }
+    const originalBytes = Buffer.from(await file.arrayBuffer());
+    transcript = await extractMeetingTranscriptFile(file, originalBytes);
+    rawFileBase64 = originalBytes.toString("base64");
+    rawFileMimeType = file.type || "application/octet-stream";
     fileName = file.name;
     retryRequiresTranscriptUpload = true;
   }
@@ -280,6 +294,9 @@ async function buildTranscriptUploadPayload(formData: FormData): Promise<Transcr
 
   return {
     workspaceId,
+    uploadedByUserId,
+    rawFileBase64,
+    rawFileMimeType,
     pendingTranscriptToken,
     retryRequiresTranscriptUpload,
     transcript,
@@ -425,11 +442,12 @@ export async function uploadMeetingTranscriptStateAction(
 
     const actor = await requirePageActor();
     await requireWorkspaceMembership({ actor, workspaceId });
-    const payload = await buildTranscriptUploadPayload(formData);
+    if (actor.kind !== "user") throw new AppError(403, "FORBIDDEN", "A member upload is required.");
+    const payload = await buildTranscriptUploadPayload(formData, actor.user.id);
     if (!isTranscriptUploadPayload(payload)) return payload;
     uploadPayload = payload;
 
-    const result = await intakeMeetingTranscript(actor, {
+    const submission = {
       workspaceId,
       meetingId: payload.meetingId,
       title: payload.title,
@@ -437,13 +455,17 @@ export async function uploadMeetingTranscriptStateAction(
       recordedAt: parseOptionalMeetingDateTimeInput(payload.recordedAt, payload.timeZone, "Recorded at"),
       transcript: payload.transcript,
       fileName: payload.fileName,
+      rawFileBase64: payload.rawFileBase64,
+      rawFileMimeType: payload.rawFileMimeType,
       createNewMeeting: payload.createNewMeeting,
       summaryMd: payload.summaryMd,
       ingestionGuidanceMd: payload.ingestionGuidanceMd,
       participantIds: payload.participantIds,
       participantEmails: payload.participantEmails,
       duplicateGuard: duplicateGuardOptionsFromTranscriptFormData(formData),
-    });
+    };
+    const nativeReceipt = await captureDirectMemberTranscriptInput(actor, { workspaceId, submission });
+    const result = await intakeMeetingTranscript(actor, { ...submission, nativeReceipt });
 
     if (result.status === "needs_clarification") {
       const pendingPayload = pendingPayloadFromUpload(payload);

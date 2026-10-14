@@ -22,6 +22,8 @@ const deleteMeeting = vi.fn();
 const applyInsight = vi.fn();
 const syncSlackMeetingActionReviewAfterWebApply = vi.fn();
 const intakeMeetingTranscript = vi.fn();
+const nativeReceipt = Object.freeze({ inputId: "native-member-input" });
+const captureDirectMemberTranscriptInput = vi.fn(async (_actor: typeof actor, _params: { workspaceId: string; submission: Record<string, unknown> }) => nativeReceipt);
 const extractTextFromFileBuffer = vi.fn();
 const requireWorkspaceMembership = vi.fn();
 const captureTelemetryEvent = vi.fn();
@@ -60,6 +62,11 @@ vi.mock("@corgtex/knowledge", () => ({
 
 vi.mock("@corgtex/shared", () => ({
   getRedisClient,
+  encryptSecret: (value: string) => `encrypted:${value}`,
+  decryptSecret: (value: string) => {
+    if (!value.startsWith("encrypted:")) throw new Error("Invalid ciphertext");
+    return value.slice("encrypted:".length);
+  },
   getSharedStateBackend: () => "redis",
   redisKey: (key: string) => `test:${key}`,
 }));
@@ -94,6 +101,7 @@ vi.mock("@corgtex/domain", () => ({
   enqueueMeetingAgendaPreparation: vi.fn(),
   importMeetingInvite: vi.fn(),
   intakeMeetingTranscript,
+  captureDirectMemberTranscriptInput,
   isDuplicateGuardMatchError: (error: any) => error?.code === "DUPLICATE_GUARD_MATCH",
   postDeliberationEntry: vi.fn(),
   requireWorkspaceMembership,
@@ -104,6 +112,13 @@ vi.mock("@corgtex/domain", () => ({
   sendManualMeetingRecorder,
   updateInsight: vi.fn(),
 }));
+
+function encryptedPending(value: Record<string, unknown>) {
+  return `encrypted:${JSON.stringify({
+    uploadedByUserId: "user-1", rawFileBase64: value.fileName ? Buffer.from(String(value.transcript)).toString("base64") : null,
+    rawFileMimeType: value.fileName ? "text/plain" : null, ...value,
+  })}`;
+}
 
 function formData(values: Record<string, string>) {
   const data = new FormData();
@@ -136,6 +151,62 @@ afterEach(() => {
 });
 
 describe("meeting server actions", () => {
+  it("captures the exact file submission and preserves its encrypted bytes and uploader through clarification", async () => {
+    const { uploadMeetingTranscriptStateAction } = await import("./actions");
+    const bytes = Buffer.from("\ufeffJan: Exact original.\r\n", "utf8");
+    extractTextFromFileBuffer.mockResolvedValueOnce({ textContent: "Jan: Exact original." });
+    intakeMeetingTranscript.mockResolvedValueOnce({ status: "needs_clarification", requiredFields: ["recordedAt"], message: "Date?" });
+    const first = formData({ workspaceId: "workspace-1" });
+    first.set("file", new File([bytes], "exact.txt", { type: "text/plain" }));
+    const state = await uploadMeetingTranscriptStateAction(initialTranscriptState, first);
+    expect(state.status).toBe("needs_clarification");
+    const captured = captureDirectMemberTranscriptInput.mock.calls[0];
+    expect(captured).toEqual([actor, { workspaceId: "workspace-1", submission: expect.objectContaining({
+      rawFileBase64: bytes.toString("base64"), rawFileMimeType: "text/plain", fileName: "exact.txt", transcript: "Jan: Exact original.",
+    }) }]);
+    expect(intakeMeetingTranscript).toHaveBeenCalledWith(actor, { ...captured[1].submission, nativeReceipt });
+    const ciphertext = redisClient.setEx.mock.calls[0][2];
+    const saved = JSON.parse(ciphertext.slice("encrypted:".length));
+    expect(saved).toMatchObject({ uploadedByUserId: "user-1", rawFileBase64: bytes.toString("base64") });
+    redisClient.get.mockResolvedValueOnce(ciphertext);
+    intakeMeetingTranscript.mockResolvedValueOnce({ status: "meeting_created", meeting: { id: "meeting-1" } });
+    await uploadMeetingTranscriptStateAction(state, formData({
+      workspaceId: "workspace-1", pendingTranscriptToken: state.pendingTranscriptToken!, recordedAt: "2026-07-15T09:00", timeZone: "UTC",
+    }));
+    expect(captureDirectMemberTranscriptInput.mock.calls[1][1].submission).toMatchObject({
+      rawFileBase64: bytes.toString("base64"), fileName: "exact.txt", recordedAt: new Date("2026-07-15T09:00:00Z"),
+    });
+  });
+
+  it("rejects another uploader's pending transcript before capture or intake", async () => {
+    const { uploadMeetingTranscriptStateAction } = await import("./actions");
+    redisClient.get.mockResolvedValueOnce(encryptedPending({
+      workspaceId: "workspace-1", uploadedByUserId: "other-user", transcript: "Private text", fileName: null,
+      title: null, source: null, recordedAt: null, timeZone: null, summaryMd: null, ingestionGuidanceMd: null,
+      participantIds: [], participantEmails: [],
+    }));
+    expect(await uploadMeetingTranscriptStateAction(initialTranscriptState, formData({
+      workspaceId: "workspace-1", pendingTranscriptToken: "other-member-token",
+    }))).toMatchObject({ status: "error", retryRequiresTranscriptUpload: true });
+    expect(captureDirectMemberTranscriptInput).not.toHaveBeenCalled();
+    expect(intakeMeetingTranscript).not.toHaveBeenCalled();
+  });
+
+  it("captures replacement pasted text without claiming the previous file's bytes", async () => {
+    const { uploadMeetingTranscriptStateAction } = await import("./actions");
+    redisClient.get.mockResolvedValueOnce(encryptedPending({
+      workspaceId: "workspace-1", transcript: "Old text", fileName: "old.txt", title: null, source: null,
+      recordedAt: null, timeZone: null, summaryMd: null, ingestionGuidanceMd: null, participantIds: [], participantEmails: [],
+    }));
+    intakeMeetingTranscript.mockResolvedValueOnce({ status: "meeting_created", meeting: { id: "meeting-1" } });
+    await uploadMeetingTranscriptStateAction(initialTranscriptState, formData({
+      workspaceId: "workspace-1", pendingTranscriptToken: "token", transcript: "New member text",
+    }));
+    expect(captureDirectMemberTranscriptInput.mock.calls[0][1].submission).toMatchObject({
+      transcript: "New member text", fileName: null, rawFileBase64: null, rawFileMimeType: null,
+    });
+  });
+
   it("preserves native attendee controls with repeated member ids and external emails", async () => {
     const { createMeetingSeriesAction } = await import("./actions");
     const data = new FormData();
@@ -423,7 +494,7 @@ describe("meeting server actions", () => {
 
   it("uses a pending transcript token for selected meeting resubmission and clears it", async () => {
     const { uploadMeetingTranscriptStateAction } = await import("./actions");
-    redisClient.get.mockResolvedValueOnce(JSON.stringify({
+    redisClient.get.mockResolvedValueOnce(encryptedPending({
       workspaceId: "workspace-1",
       transcript: "Jan: We discussed follow-up actions.",
       fileName: "weekly.txt",
@@ -483,7 +554,7 @@ describe("meeting server actions", () => {
 
   it("lets a replacement file override a pending transcript during clarification", async () => {
     const { uploadMeetingTranscriptStateAction } = await import("./actions");
-    redisClient.get.mockResolvedValueOnce(JSON.stringify({
+    redisClient.get.mockResolvedValueOnce(encryptedPending({
       workspaceId: "workspace-1",
       transcript: "Old cached transcript.",
       fileName: "old.txt",
@@ -558,7 +629,7 @@ describe("meeting server actions", () => {
 
   it("keeps the old stored token when a replacement cannot be stored and requests re-upload", async () => {
     const { uploadMeetingTranscriptStateAction } = await import("./actions");
-    redisClient.get.mockResolvedValueOnce(JSON.stringify({
+    redisClient.get.mockResolvedValueOnce(encryptedPending({
       workspaceId: "workspace-1", transcript: "Old cached transcript.", fileName: "old.txt",
       title: "Weekly Review", source: "transcript-upload", recordedAt: null, timeZone: "UTC",
       summaryMd: null, ingestionGuidanceMd: null, participantIds: [], participantEmails: [],
@@ -581,7 +652,7 @@ describe("meeting server actions", () => {
 
   it("preserves a pending transcript token when clarification validation fails", async () => {
     const { uploadMeetingTranscriptStateAction } = await import("./actions");
-    redisClient.get.mockResolvedValueOnce(JSON.stringify({
+    redisClient.get.mockResolvedValueOnce(encryptedPending({
       workspaceId: "workspace-1",
       transcript: "Jan: We discussed follow-up actions.",
       fileName: "weekly.txt",
@@ -655,7 +726,7 @@ describe("meeting server actions", () => {
 
   it("uses a pending transcript token for new-meeting resubmission and clears it", async () => {
     const { uploadMeetingTranscriptStateAction } = await import("./actions");
-    redisClient.get.mockResolvedValueOnce(JSON.stringify({
+    redisClient.get.mockResolvedValueOnce(encryptedPending({
       workspaceId: "workspace-1",
       transcript: "Jan: We discussed follow-up actions.",
       fileName: "weekly.txt",
@@ -705,7 +776,7 @@ describe("meeting server actions", () => {
 
   it("preserves stored create-new choice through duplicate confirmation resubmission", async () => {
     const { uploadMeetingTranscriptStateAction } = await import("./actions");
-    redisClient.get.mockResolvedValueOnce(JSON.stringify({
+    redisClient.get.mockResolvedValueOnce(encryptedPending({
       workspaceId: "workspace-1",
       transcript: "Jan: We discussed follow-up actions.",
       fileName: "weekly.txt",
