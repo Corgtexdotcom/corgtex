@@ -61,7 +61,7 @@ async function setup() {
   return { source, table };
 }
 
-async function child(mode: "ingestion" | "web-reader" | "mcp-reader" = "ingestion") {
+async function child(mode: "ingestion" | "web-reader" | "mcp-reader" = "ingestion", budgeted = false) {
   const process = startSqlIngestionProcess({
     DATABASE_URL: fixture.connectionString,
     ENCRYPTION_KEY: encryptionKey,
@@ -70,6 +70,7 @@ async function child(mode: "ingestion" | "web-reader" | "mcp-reader" = "ingestio
     KNOWLEDGE_SEARCH_PROVIDER: "postgres",
     REDIS_KEY_PREFIX: "sql-race",
     NODE_ENV: "test",
+    ...(budgeted ? { SQL_TEST_HEAP_MB: "512", SQL_TEST_RSS_LIMIT_BYTES: String(1024 ** 3) } : {}),
   }, mode);
   children.push(process);
   await process.ready();
@@ -131,26 +132,27 @@ describe("native SQL publication across independent processes", () => {
     const { source, table } = await setup();
     await fixture.writer.query(`DELETE FROM ${table}`);
     await fixture.writer.query(`INSERT INTO ${table} SELECT n, n, repeat('synthetic ', 180) FROM generate_series(1, 4000) AS n`);
-    const worker = await child();
+    const worker = await child("ingestion", true);
     const capacityUser = await db.user.create({ data: { email: `${randomUUID()}@example.test`, passwordHash: "synthetic", displayName: "Capacity reader" } });
     users.push(capacityUser.id);
     await db.member.create({ data: { workspaceId: source.workspaceId, userId: capacityUser.id, role: "ADMIN" } });
     const observer = new pg.Client({ connectionString: fixture.connectionString });
     await observer.connect();
     const hasStatistics = (await observer.query("SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'")).rowCount === 1;
-    const queryCount = async () => hasStatistics ? Number((await observer.query("SELECT coalesce(sum(calls),0) AS calls FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())")).rows[0].calls) : null;
+    const queryCount = async () => hasStatistics ? (await observer.query("SELECT coalesce(sum(calls),0)::float8 AS all, coalesce(sum(calls) FILTER (WHERE toplevel),0)::float8 AS top FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())")).rows[0] as { all: number; top: number } : null;
     const beforeQueries = await queryCount();
-    let stopped = false, longestChunkTransactionMs = 0;
+    let stopped = false, longestChunkTransactionMs = 0, observationQueries = 0;
     const observation = (async () => {
       while (!stopped) {
         const result = await observer.query(`SELECT max(extract(epoch from (clock_timestamp()-a.xact_start))*1000) AS age
           FROM pg_stat_activity a WHERE a.datname=current_database() AND a.pid<>pg_backend_pid()
           AND EXISTS (SELECT 1 FROM pg_locks l WHERE l.pid=a.pid AND l.relation='"KnowledgeChunk"'::regclass AND l.mode='RowExclusiveLock' AND l.granted)`);
+        observationQueries++;
         longestChunkTransactionMs = Math.max(longestChunkTransactionMs, Number(result.rows[0].age ?? 0));
         await delay(50);
       }
     })();
-    let completed, afterQueries: number | null = null;
+    let completed, afterQueries: { all: number; top: number } | null = null;
     try {
       await worker.run(source.id);
       await worker.prepared();
@@ -162,9 +164,14 @@ describe("native SQL publication across independent processes", () => {
       try { await observation; afterQueries = await queryCount(); } finally { await observer.end(); }
     }
     const metrics = { ...completed.metrics, longestChunkTransactionMs,
-      databaseQueries: afterQueries !== null && beforeQueries !== null ? afterQueries - beforeQueries : null };
+      databaseQueries: afterQueries && beforeQueries ? {
+        topLevel: afterQueries.top - beforeQueries.top - observationQueries - 1,
+        includingTriggers: afterQueries.all - beforeQueries.all - observationQueries - 1,
+        observerQueriesExcluded: observationQueries + 1,
+      } : null };
     if (process.env.PUN85_METRICS_FILE) await writeFile(process.env.PUN85_METRICS_FILE, JSON.stringify(metrics, null, 2));
     expect(longestChunkTransactionMs).toBeLessThan(120_000);
+    expect(completed.metrics?.osMaxRssBytes).toBeLessThan(1024 ** 3);
     const chunks = await db.knowledgeChunk.findMany({ where: { workspaceId: source.workspaceId }, select: { sourceId: true } });
     expect(new Set(chunks.map((chunk) => chunk.sourceId)).size).toBe(4000);
     expect(chunks.length).toBeGreaterThanOrEqual(8000);
@@ -176,7 +183,8 @@ describe("native SQL publication across independent processes", () => {
     const startedRead = performance.now();
     const read = await worker.read(source.workspaceId, capacityUser.id, first.id);
     if (process.env.PUN85_METRICS_FILE) await writeFile(process.env.PUN85_METRICS_FILE,
-      JSON.stringify({ ...metrics, readDurationMs: performance.now() - startedRead, read: read.read }, null, 2));
+      JSON.stringify({ ...metrics, readDurationMs: performance.now() - startedRead, read: read.read, readProcessMetrics: read.metrics }, null, 2));
+    expect(read.metrics?.osMaxRssBytes).toBeLessThan(1024 ** 3);
     expect(read.read).toMatchObject({ fetched: true, count: chunks.length, downstreamReadable: true });
     expect(read.read?.searchIds.length).toBeGreaterThan(0);
   }, 240_000);

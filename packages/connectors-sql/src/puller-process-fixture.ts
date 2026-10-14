@@ -8,13 +8,13 @@ interface Message {
   event: "ready" | "prepared" | "complete" | "failed" | "publication-ready" | "read";
   read?: { fetched: boolean; count: number; searchIds: string[]; downstreamReadable: boolean };
   error?: string;
-  metrics?: { durationMs: number; peakRssBytes: number; modelBatches: number; embeddedChunks: number; dimensions: number };
+  metrics?: { durationMs: number; peakRssBytes: number; modelBatches: number; embeddedChunks: number; dimensions: number; osMaxRssBytes: number; rssLimitBytes: number | null };
 }
 
 /** A separate Node process, module cache, model gateway and Prisma pool per run. */
 export function startSqlIngestionProcess(environment: Record<string, string>, mode: "ingestion" | "web-reader" | "mcp-reader" = "ingestion") {
   const child = fork(fileURLToPath(import.meta.url), ["sql-ingestion-child", mode], {
-    execArgv: ["--import", "tsx"],
+    execArgv: ["--import", "tsx", ...(environment.SQL_TEST_HEAP_MB ? [`--max-old-space-size=${Number(environment.SQL_TEST_HEAP_MB)}`] : [])],
     env: { ...process.env, ...environment },
     stdio: ["ignore", "pipe", "pipe", "ipc"],
   });
@@ -89,6 +89,17 @@ function send(child: ChildProcess, message: Record<string, unknown>): Promise<vo
 
 async function runChild() {
   const mode = process.argv[3] ?? "ingestion";
+  let phase = "bootstrap", peakRssBytes = 0, modelBatches = 0, embeddedChunks = 0;
+  const rssLimitBytes = Number(process.env.SQL_TEST_RSS_LIMIT_BYTES ?? "0") || null;
+  const osMaxRssBytes = () => process.resourceUsage().maxRSS * 1024;
+  // Enforce the entire process, including native buffers/Prisma/tsx, not just V8.
+  const rssGuard = setInterval(() => {
+    if (rssLimitBytes && osMaxRssBytes() > rssLimitBytes) {
+      process.send?.({ event: "failed", error: `SQL process RSS budget exceeded: ${osMaxRssBytes()} > ${rssLimitBytes}; ${JSON.stringify({ phase, modelBatches, embeddedChunks, memory: process.memoryUsage() })}` },
+        () => process.exit(1));
+    }
+  }, 10);
+  rssGuard.unref();
   const { defaultModelGateway } = await import("@corgtex/models");
   let syncExternalDataSource: typeof import("./puller")["syncExternalDataSource"] | undefined;
   if (mode === "ingestion") {
@@ -123,13 +134,13 @@ async function runChild() {
     }
   }) as typeof pg.Client.prototype.end;
   let gatePreparation = false;
-  let peakRssBytes = 0, modelBatches = 0, embeddedChunks = 0;
   const dimensions = Number(process.env.SQL_TEST_VECTOR_DIMENSIONS ?? "1536");
   let releasePreparation: ((error?: string) => void) | undefined;
   // Only the remote model boundary is substituted. Native provider reads,
   // durable source claims, receipts, Knowledge writes and Prisma TXs are real.
   defaultModelGateway.embed = async (request) => {
     modelBatches++;
+    phase = `model-batch-${modelBatches}`;
     embeddedChunks += Array.isArray(request.input) ? request.input.length : 1;
     if (gatePreparation) {
       gatePreparation = false;
@@ -149,6 +160,7 @@ async function runChild() {
     usage: { provider: "synthetic", model: "synthetic-rerank", inputTokens: 1, outputTokens: 0 },
   });
   async function read(message: { workspaceId?: string; userId?: string; chunkId?: string }) {
+    phase = "read";
     const { prisma } = await import("@corgtex/shared");
     const { fetchReadableKnowledgeChunk, countReadableKnowledgeChunks, searchIndexedKnowledge } = await import("@corgtex/knowledge");
     const { captureArtifactInputProof, isArtifactInputProofReadable } = await import("@corgtex/domain");
@@ -188,7 +200,7 @@ async function runChild() {
     } catch (error) {
       if (!(error instanceof Error) || !/source|input|read|access/i.test(error.message)) throw error;
     }
-    process.send?.({ event: "read", read: { fetched: fetched !== null, count, searchIds: search.map((item) => item.chunkId), downstreamReadable } });
+    process.send?.({ event: "read", metrics: { durationMs: 0, peakRssBytes: process.memoryUsage().rss, osMaxRssBytes: osMaxRssBytes(), rssLimitBytes, modelBatches, embeddedChunks, dimensions }, read: { fetched: fetched !== null, count, searchIds: search.map((item) => item.chunkId), downstreamReadable } });
   }
   process.on("message", (message: { command: string; sourceId?: string; gatePreparation?: boolean; gatePublication?: boolean; error?: string; workspaceId?: string; userId?: string; chunkId?: string }) => {
     if (message.command === "read") {
@@ -199,6 +211,7 @@ async function runChild() {
       releasePreparation?.(message.error);
       releasePreparation = undefined;
     } else if (message.command === "run" && message.sourceId) {
+      phase = "claim-and-native-capture";
       gatePreparation = message.gatePreparation ?? true;
       gatePublication = message.gatePublication ?? false; nativeCloses = 0;
       const started = performance.now();
@@ -207,7 +220,7 @@ async function runChild() {
       const finish = (event: "complete" | "failed", error?: string) => {
         clearInterval(monitor);
         process.send?.({ event, error, metrics: { durationMs: performance.now() - started,
-          peakRssBytes: Math.max(peakRssBytes, process.memoryUsage().rss), modelBatches, embeddedChunks, dimensions } });
+          peakRssBytes: Math.max(peakRssBytes, process.memoryUsage().rss), osMaxRssBytes: osMaxRssBytes(), rssLimitBytes, modelBatches, embeddedChunks, dimensions } });
       };
       if (!syncExternalDataSource) throw new Error("Cold reader cannot start ingestion");
       void syncExternalDataSource(message.sourceId).then(
