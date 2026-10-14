@@ -10,6 +10,7 @@ import { findSourceArticleImpacts, readBrainArticleDerivation, sourceIdsInDeriva
 import { lockBrainSourceLink } from "./brain-source-links";
 import { continueBrainSourceRemovals } from "./brain-source-removal";
 import { invariant } from "./errors";
+import { readableArtifactIds } from "./source-lineage";
 
 function documentId(metadata: Prisma.JsonValue | null) {
   return metadata && typeof metadata === "object" && !Array.isArray(metadata)
@@ -25,6 +26,8 @@ async function buildPreview(tx: Prisma.TransactionClient, actor: AppActor, works
   } });
   invariant(article, 404, "NOT_FOUND", "Article not found.");
   invariant(!article.archivedAt, 409, "ALREADY_ARCHIVED", "This article is already archived.");
+  invariant((await readableArtifactIds(actor, workspaceId, "BrainArticle", [article], tx)).has(article.id),
+    404, "NOT_FOUND", "Article not found.");
   const canRemoveSources = actor.kind === "agent" || membership?.role === "ADMIN";
   invariant(canRemoveSources || (article.ownerMemberId !== null && article.ownerMemberId === membership?.id),
     403, "FORBIDDEN", "Only the article owner or a workspace admin can remove this article.");
@@ -53,7 +56,8 @@ async function buildPreview(tx: Prisma.TransactionClient, actor: AppActor, works
   const impactedIds = [...new Set(activeIds.flatMap((id) => impacts.get(id)?.articles.map((item) => item.id) ?? []))]
     .filter((id) => id !== article.id).sort();
   const impactedArticles = await tx.brainArticle.findMany({ where: { workspaceId, id: { in: impactedIds }, archivedAt: null },
-    select: { id: true, title: true, updatedAt: true, bodyMd: true, sourceIds: true, derivationJson: true } });
+  });
+  const readableImpactedIds = await readableArtifactIds(actor, workspaceId, "BrainArticle", impactedArticles, tx);
   const relatedIds = [...new Set(impactedArticles.flatMap((item) => [
     ...item.sourceIds, ...sourceIdsInDerivation(item.derivationJson),
   ]))].filter((id) => !activeIds.includes(id)).sort();
@@ -67,6 +71,9 @@ async function buildPreview(tx: Prisma.TransactionClient, actor: AppActor, works
   const byArticleId = new Map(impactedArticles.map((item) => [item.id, item]));
   const byDocumentId = new Map(documents.map((item) => [item.id, item]));
   const blockReasons: Array<"source_missing" | "document_missing" | "restricted" | "unclassified" | "feature_disabled"> = [];
+  // A hidden or unproven linked article must still block source removal. Its
+  // identity and count stay out of the caller-facing shared article list.
+  if (impactedArticles.some((item) => !readableImpactedIds.has(item.id))) blockReasons.push("unclassified");
   if (directIds.length > 0 && !await isBrainSourceRemovalEnabled(tx, workspaceId)) blockReasons.push("feature_disabled");
   if (directIds.length !== directSources.length || directSources.some((source) => source.archivedAt)) {
     blockReasons.push("source_missing");
@@ -87,7 +94,7 @@ async function buildPreview(tx: Prisma.TransactionClient, actor: AppActor, works
     blockReasons.push("document_missing");
   }
   const sourceDetails = sources.map((source) => {
-    const related = (impacts.get(source.id)?.articles ?? []).filter((item) => item.id !== article.id);
+    const related = (impacts.get(source.id)?.articles ?? []).filter((item) => item.id !== article.id && readableImpactedIds.has(item.id));
     const sharedArticles = related.map((item) => {
       const record = byArticleId.get(item.id);
       const lineage = record ? readBrainArticleDerivation(record.derivationJson) : null;

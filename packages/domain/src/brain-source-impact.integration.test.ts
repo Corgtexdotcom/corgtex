@@ -4,6 +4,7 @@ import { prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { archiveWorkspaceArtifact, restoreWorkspaceArtifact } from "./archive";
 import { createArticle, publishArticle, updateArticle } from "./brain";
+import { captureArtifactInputProof, recordArtifactInputLineage } from "./source-lineage";
 import { brainSourceContentFingerprint } from "./brain-derivation";
 import { listBrainSourceArchiveImpacts } from "./brain-source-impact";
 import { deleteDocument } from "./documents";
@@ -24,24 +25,36 @@ describe("Brain source archive impact", () => {
       workspaceId: workspace.id, sourceType: "DOC", tier: 1, title: "Source document", content: "Source text",
       authorMemberId: member.id, metadata: { documentId: document.id },
     } });
-    await createArticle(agent, {
-      workspaceId: workspace.id, title: "Generated article", type: "PROJECT", bodyMd: "Generated body",
+    await prisma.$transaction(async tx => {
+      await recordArtifactInputLineage({ tx, actor: editor, workspaceId: workspace.id, artifact: { kind: "Document", id: document.id },
+        content: document, origin: "HUMAN_ORIGINAL", inputs: [] });
+      await recordArtifactInputLineage({ tx, actor: editor, workspaceId: workspace.id, artifact: { kind: "BrainSource", id: source.id },
+        content: source, origin: "DERIVED", inputs: [{ kind: "Document", id: document.id }] });
+    });
+    const generatedArticle = await createArticle(agent, {
+      workspaceId: workspace.id, isPrivate: false,
+      completeInputRoots: await captureArtifactInputProof(agent, workspace.id, [{ kind: "BrainSource", id: source.id }]), title: "Generated article", type: "PROJECT", bodyMd: "Generated body",
       sourceIds: [source.id], derivation: { sourceId: source.id,
         sourceFingerprint: brainSourceContentFingerprint(source), agentRunId: "synthetic-run" },
     });
-    const legacyArticle = await createArticle(editor, {
-      workspaceId: workspace.id, title: "Legacy linked article", type: "PROJECT", bodyMd: "Human body", sourceIds: [source.id],
-    });
+    const legacyArticle = await prisma.brainArticle.create({ data: {
+      workspaceId: workspace.id, slug: `legacy-${randomUUID()}`, title: "Legacy linked article",
+      type: "PROJECT", bodyMd: "Human body", sourceIds: [source.id],
+    } });
 
     const [impact] = await listBrainSourceArchiveImpacts(editor, { workspaceId: workspace.id, sourceIds: [source.id] });
     expect(impact).toMatchObject({ sourceId: source.id, blocked: true });
-    expect(impact.visibleArticles.map((article) => article.kind).sort()).toEqual(["derived", "unclassified"]);
+    expect(impact.visibleArticles.map((article) => article.kind)).toEqual(["derived"]);
+    expect(impact.hasHiddenArticles).toBe(true);
 
     const viewerUser = await prisma.user.create({ data: { email: `impact-viewer-${randomUUID()}@example.test`, passwordHash: "fixture" } });
     await prisma.member.create({ data: { workspaceId: workspace.id, userId: viewerUser.id, role: "CONTRIBUTOR" } });
     const viewer: AppActor = { kind: "user", user: { id: viewerUser.id, email: viewerUser.email, displayName: "Viewer" } };
     const [redacted] = await listBrainSourceArchiveImpacts(viewer, { workspaceId: workspace.id, sourceIds: [source.id] });
-    expect(redacted).toEqual({ sourceId: source.id, blocked: true, visibleArticles: [], hasHiddenArticles: true });
+    expect(redacted).toEqual({ sourceId: source.id, blocked: true,
+      visibleArticles: [{ id: generatedArticle.id, slug: generatedArticle.slug, title: generatedArticle.title, kind: "derived" }],
+      hasHiddenArticles: true });
+    expect(JSON.stringify(redacted)).not.toContain(legacyArticle.title);
 
     for (const [entityType, entityId] of [["BrainSource", source.id], ["Document", document.id]] as const) {
       await expect(archiveWorkspaceArtifact(editor, { workspaceId: workspace.id, entityType, entityId }))
@@ -71,7 +84,7 @@ describe("Brain source archive impact", () => {
     })).rejects.toMatchObject({ code: "SOURCE_CHANGED", status: 409 });
     await expect(updateArticle(editor, {
       workspaceId: workspace.id, slug: legacyArticle.slug, sourceIds: [source.id, unlinked.id],
-    })).rejects.toMatchObject({ code: "SOURCE_CHANGED", status: 409 });
+    })).rejects.toMatchObject({ code: "NOT_FOUND", status: 404 });
   });
 
   it("serializes article links with source archive before document archive", async () => {
@@ -221,6 +234,8 @@ describe("Brain source archive impact", () => {
     const source = await prisma.brainSource.create({ data: {
       workspaceId: workspace.id, sourceType: "DOC", tier: 1, content: "Recovery text",
     } });
+    await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: editor, workspaceId: workspace.id,
+      artifact: { kind: "BrainSource", id: source.id }, content: source, origin: "HUMAN_ORIGINAL", inputs: [] }));
     const article = await createArticle(editor, {
       workspaceId: workspace.id, title: "Recoverable article", type: "PROJECT", bodyMd: "Body", sourceIds: [source.id],
     });

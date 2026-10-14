@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { getPrismaClient, type AppActor } from "@corgtex/shared";
+import { recordArtifactInputLineage } from "./source-lineage";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { updateAction } from "./actions";
 import { updateGoal } from "./goals";
@@ -51,15 +52,36 @@ async function createItem(kind: Kind, workspaceId: string, userId: string) {
     publishedAt: new Date(),
   };
   switch (kind) {
-    case "Action": return prisma.action.create({ data });
-    case "Tension": return prisma.tension.create({ data });
-    case "Proposal": return prisma.proposal.create({ data: { ...data, bodyMd: "Original proposal body" } });
-    case "Goal": return prisma.goal.create({ data: {
+    case "Action":
+    case "Tension": {
+      const item = kind === "Action" ? await prisma.action.create({ data }) : await prisma.tension.create({ data });
+      await prisma.$transaction(tx => recordArtifactInputLineage({ tx,
+        actor: { kind: "user", user: { id: userId, email: `version-race-${userId}@example.test`, displayName: "Version editor" } }, workspaceId,
+        artifact: { kind, id: item.id }, content: item, origin: "HUMAN_ORIGINAL", inputs: [],
+      }));
+      return item;
+    }
+    case "Proposal": {
+      const item = await prisma.proposal.create({ data: { ...data, bodyMd: "Original proposal body" } });
+      await prisma.$transaction(async (tx) => recordArtifactInputLineage({ tx,
+        actor: { kind: "user", user: { id: userId, email: `version-race-${userId}@example.test`, displayName: "Version editor" } }, workspaceId,
+        artifact: { kind: "Proposal", id: item.id }, content: item, origin: "HUMAN_ORIGINAL", inputs: [],
+      }));
+      return item;
+    }
+    case "Goal": {
+      const item = await prisma.goal.create({ data: {
       ...data,
       status: "ACTIVE",
       descriptionMd: "Original goal body",
       progressPercent: 0,
-    } });
+      } });
+      await prisma.$transaction(async (tx) => recordArtifactInputLineage({ tx,
+        actor: { kind: "user", user: { id: userId, email: `version-race-${userId}@example.test`, displayName: "Version editor" } }, workspaceId,
+        artifact: { kind: "Goal", id: item.id }, content: item, origin: "HUMAN_ORIGINAL", inputs: [],
+      }));
+      return item;
+    }
   }
 }
 
@@ -105,7 +127,7 @@ describe("work-item observed-version concurrency", () => {
       ]);
       const winners = results.filter((result) => result.status === "fulfilled");
       const losers = results.filter((result) => result.status === "rejected");
-      expect(winners).toHaveLength(1);
+      expect(winners, JSON.stringify(losers.map(({ reason }) => ({ message: reason.message, code: reason.code })))).toHaveLength(1);
       expect(losers).toHaveLength(1);
       expect(losers[0]).toMatchObject({ reason: { status: 409, code: "VERSION_CONFLICT" } });
 

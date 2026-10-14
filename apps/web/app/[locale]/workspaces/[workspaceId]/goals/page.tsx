@@ -66,7 +66,7 @@ export default async function GoalsPage({
 
   const [allGoals, circles, members] = await Promise.all([
     listGoals(actor, { workspaceId }),
-    listCircles(workspaceId),
+    listCircles(actor, workspaceId),
     listHumanMembers(workspaceId),
   ]);
   const focusedGoal = goalId

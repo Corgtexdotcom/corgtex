@@ -6,9 +6,9 @@ import { handleRouteError } from "@/lib/http";
 export async function GET(request: NextRequest) {
   try {
     const sessionCtx = await requireGptAuth(request, "read");
-    const { workspaceId } = sessionCtx;
+    const { workspaceId, actor } = sessionCtx;
     
-    const circles = await listCircles(workspaceId);
+    const circles = await listCircles(actor, workspaceId);
 
     const simplified = circles.map((c) => ({
       id: c.id,

@@ -13,6 +13,16 @@ import {
   rankPersonalNewspaperItems,
   recordNewspaperDelivery,
   recordDemoWelcomeCrmActivity,
+  readableArtifactIds,
+  captureArtifactInputProof,
+  captureReadableDigestInputs,
+  isArtifactInputProofReadable,
+  isDigestInputProofShared,
+  mergeArtifactInputProofs,
+  loadReadableDigestQuery,
+  recordArtifactInputLineage,
+  requireWorkspaceMembership,
+  AppError,
   buildWorkspaceBriefingFromCandidates,
   buildWorkspaceBriefingFromDigest,
   collectWorkspaceBriefingCandidates,
@@ -23,7 +33,7 @@ import {
   workspaceBriefingPeriodFromCadence,
   workspaceBriefingToNewspaperDigest,
 } from "@corgtex/domain";
-import type { PersonalNewspaperItem } from "@corgtex/domain";
+import type { LineageKind, LineageRoot, PersonalNewspaperItem } from "@corgtex/domain";
 import { 
   batchIngestDailyConversations, 
   createArticle, 
@@ -184,6 +194,7 @@ type PendingAdviceDigestRequest = {
   preferredChannel: "IN_APP" | "SLACK" | "EMAIL" | "COPY";
   createdAt: Date;
   requestedBy: {
+    id: string;
     email: string;
     displayName: string | null;
   };
@@ -203,9 +214,10 @@ type AdviceSubjectPreview = {
   title: string;
 };
 
-type PersonalDigestItem = PersonalNewspaperItem & { text: string };
+type PersonalDigestItem = PersonalNewspaperItem & { text: string; lineageRoots?: LineageRoot[] };
 
 type OperatingDigestInputs = {
+  lineageRoots?: LineageRoot[];
   meetings: Array<{
     id: string;
     title: string | null;
@@ -658,6 +670,7 @@ function formatPendingAdviceRequestDigestItem(params: {
 async function loadPendingAdviceRequestsByMember(params: {
   workspaceId: string;
   recipientMembers: DigestRecipientMember[];
+  actor: AppActor;
 }) {
   const recipientMemberIds = params.recipientMembers.map((member) => member.id);
   if (recipientMemberIds.length === 0) return new Map<string, PersonalDigestItem[]>();
@@ -690,6 +703,7 @@ async function loadPendingAdviceRequestsByMember(params: {
     include: {
       requestedBy: {
         select: {
+          id: true,
           email: true,
           displayName: true,
         },
@@ -732,6 +746,16 @@ async function loadPendingAdviceRequestsByMember(params: {
     if (!subjectType) continue;
     const subject = subjectPreviews.get(`${subjectType}:${request.process.subjectId}`);
     if (!subject) continue;
+    const receipt = await captureReadableDigestInputs({ actor: params.actor, workspaceId: params.workspaceId,
+      kind: "AdviceRequest", records: [request], additionalInputs: () => [
+        { kind: subject.type === "PROPOSAL" ? "Proposal" : subject.type === "ACTION" ? "Action" : "Tension",
+          id: subject.id, snapshot: { title: subject.title } },
+        { kind: "User", id: request.requestedBy.id, snapshot: request.requestedBy },
+        ...(request.targetCircleId && request.targetCircle ? [{ kind: "Circle" as const,
+          id: request.targetCircleId, snapshot: request.targetCircle }] : []),
+      ] });
+    const lineageRoots = receipt.proofs.get(request.id);
+    if (!lineageRoots) continue;
 
     const explicitRecipientMemberIds = new Set(request.recipients.map((recipient) => recipient.memberId));
     for (const member of params.recipientMembers) {
@@ -754,6 +778,7 @@ async function loadPendingAdviceRequestsByMember(params: {
           request,
           subject,
         }),
+        lineageRoots,
       });
       itemsByMemberId.set(member.id, existing);
     }
@@ -766,7 +791,12 @@ async function loadOperatingDigestInputs(params: {
   workspaceId: string;
   since: Date;
   until: Date;
+  actor: AppActor;
+  audience: AppActor[];
 }): Promise<OperatingDigestInputs> {
+  const query = <T extends { id: string }>(kind: LineageKind, limit: number,
+    loadBatch: (page: { take: number; skip: number }) => Promise<T[]>) =>
+    loadReadableDigestQuery({ actor: params.actor, audience: params.audience, workspaceId: params.workspaceId, kind, limit, loadBatch });
   const windowRange = { gte: params.since, lte: params.until };
   const beforeCutoff = { lte: params.until };
   const [
@@ -783,7 +813,7 @@ async function loadOperatingDigestInputs(params: {
     activeWorkspaceAdviceRequests,
     completedWorkspaceAdviceRequests,
   ] = await Promise.all([
-    prisma.meeting.findMany({
+    query("Meeting", 20, (page) => prisma.meeting.findMany({
       where: {
         workspaceId: params.workspaceId,
         archivedAt: null,
@@ -795,8 +825,8 @@ async function loadOperatingDigestInputs(params: {
           { aiProcessedAt: windowRange },
         ],
       },
-      orderBy: { recordedAt: "desc" },
-      take: 20,
+      orderBy: [{ recordedAt: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: {
         id: true,
         title: true,
@@ -814,6 +844,7 @@ async function loadOperatingDigestInputs(params: {
           orderBy: [{ status: "asc" }, { createdAt: "desc" }],
           take: 10,
           select: {
+            id: true,
             type: true,
             operation: true,
             status: true,
@@ -823,8 +854,8 @@ async function loadOperatingDigestInputs(params: {
           },
         },
       },
-    }),
-    prisma.proposal.findMany({
+    })),
+    query("Proposal", 30, (page) => prisma.proposal.findMany({
       where: {
         workspaceId: params.workspaceId,
         archivedAt: null,
@@ -838,8 +869,8 @@ async function loadOperatingDigestInputs(params: {
           { decidedAt: windowRange },
         ],
       },
-      orderBy: [{ decidedAt: "desc" }, { updatedAt: "desc" }],
-      take: 30,
+      orderBy: [{ decidedAt: "desc" }, { updatedAt: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: {
         id: true,
         title: true,
@@ -851,8 +882,8 @@ async function loadOperatingDigestInputs(params: {
         updatedAt: true,
         createdAt: true,
       },
-    }),
-    prisma.tension.findMany({
+    })),
+    query("Tension", 30, (page) => prisma.tension.findMany({
       where: {
         workspaceId: params.workspaceId,
         archivedAt: null,
@@ -864,8 +895,8 @@ async function loadOperatingDigestInputs(params: {
           { updatedAt: windowRange },
         ],
       },
-      orderBy: [{ resolvedAt: "desc" }, { updatedAt: "desc" }],
-      take: 30,
+      orderBy: [{ resolvedAt: "desc" }, { updatedAt: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: {
         id: true,
         title: true,
@@ -875,8 +906,8 @@ async function loadOperatingDigestInputs(params: {
         priority: true,
         updatedAt: true,
       },
-    }),
-    prisma.action.findMany({
+    })),
+    query("Action", 50, (page) => prisma.action.findMany({
       where: {
         workspaceId: params.workspaceId,
         archivedAt: null,
@@ -885,8 +916,8 @@ async function loadOperatingDigestInputs(params: {
         createdAt: beforeCutoff,
         updatedAt: beforeCutoff,
       },
-      orderBy: [{ dueAt: "asc" }, { priority: "desc" }, { updatedAt: "desc" }],
-      take: 50,
+      orderBy: [{ dueAt: "asc" }, { priority: "desc" }, { updatedAt: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: {
         id: true,
         title: true,
@@ -897,8 +928,8 @@ async function loadOperatingDigestInputs(params: {
         priority: true,
         updatedAt: true,
       },
-    }),
-    prisma.goal.findMany({
+    })),
+    query("Goal", 25, (page) => prisma.goal.findMany({
       where: {
         workspaceId: params.workspaceId,
         archivedAt: null,
@@ -911,8 +942,8 @@ async function loadOperatingDigestInputs(params: {
           { status: { in: ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"] } },
         ],
       },
-      orderBy: [{ cadence: "asc" }, { updatedAt: "desc" }],
-      take: 25,
+      orderBy: [{ cadence: "asc" }, { updatedAt: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: {
         id: true,
         title: true,
@@ -926,6 +957,7 @@ async function loadOperatingDigestInputs(params: {
           orderBy: { createdAt: "desc" },
           take: 3,
           select: {
+            id: true,
             bodyMd: true,
             newProgress: true,
             statusChange: true,
@@ -933,22 +965,22 @@ async function loadOperatingDigestInputs(params: {
           },
         },
       },
-    }),
-    prisma.roleVersion.findMany({
+    })),
+    query("RoleVersion", 25, (page) => prisma.roleVersion.findMany({
       where: {
         workspaceId: params.workspaceId,
         createdAt: windowRange,
       },
-      orderBy: { createdAt: "desc" },
-      take: 25,
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: {
         id: true,
         name: true,
         changeType: true,
         createdAt: true,
       },
-    }),
-    prisma.roleHolderHistory.findMany({
+    })),
+    query("RoleHolderHistory", 25, (page) => prisma.roleHolderHistory.findMany({
       where: {
         workspaceId: params.workspaceId,
         OR: [
@@ -956,11 +988,13 @@ async function loadOperatingDigestInputs(params: {
           { endedAt: windowRange },
         ],
       },
-      orderBy: { startedAt: "desc" },
-      take: 25,
+      orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: {
         id: true,
         holderKind: true,
+        roleId: true,
+        memberId: true,
         startedAt: true,
         endedAt: true,
         role: { select: { name: true } },
@@ -970,22 +1004,22 @@ async function loadOperatingDigestInputs(params: {
           },
         },
       },
-    }),
-    prisma.member.findMany({
+    })),
+    query("Member", 25, (page) => prisma.member.findMany({
       where: {
         workspaceId: params.workspaceId,
         isActive: true,
         joinedAt: windowRange,
       },
-      orderBy: { joinedAt: "desc" },
-      take: 25,
+      orderBy: [{ joinedAt: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: {
         id: true,
         joinedAt: true,
         user: { select: { email: true, displayName: true } },
       },
-    }),
-    prisma.brainArticle.findMany({
+    })),
+    query("BrainArticle", 25, (page) => prisma.brainArticle.findMany({
       where: {
         workspaceId: params.workspaceId,
         archivedAt: null,
@@ -999,8 +1033,8 @@ async function loadOperatingDigestInputs(params: {
           { publishedAt: windowRange },
         ],
       },
-      orderBy: { updatedAt: "desc" },
-      take: 25,
+      orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: {
         id: true,
         title: true,
@@ -1009,8 +1043,8 @@ async function loadOperatingDigestInputs(params: {
         updatedAt: true,
         publishedAt: true,
       },
-    }),
-    prisma.document.findMany({
+    })),
+    query("Document", 25, (page) => prisma.document.findMany({
       where: {
         workspaceId: params.workspaceId,
         accessDomain: "WORKSPACE",
@@ -1022,16 +1056,16 @@ async function loadOperatingDigestInputs(params: {
           { updatedAt: windowRange },
         ],
       },
-      orderBy: { updatedAt: "desc" },
-      take: 25,
+      orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: {
         id: true,
         title: true,
         source: true,
         updatedAt: true,
       },
-    }),
-    prisma.adviceRequest.findMany({
+    })),
+    query("AdviceRequest", 30, (page) => prisma.adviceRequest.findMany({
       where: {
         workspaceId: params.workspaceId,
         audienceType: "WORKSPACE",
@@ -1039,8 +1073,8 @@ async function loadOperatingDigestInputs(params: {
         createdAt: beforeCutoff,
         updatedAt: beforeCutoff,
       },
-      orderBy: [{ deadlineAt: "asc" }, { updatedAt: "desc" }],
-      take: 30,
+      orderBy: [{ deadlineAt: "asc" }, { updatedAt: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: {
         id: true,
         messageMd: true,
@@ -1051,8 +1085,8 @@ async function loadOperatingDigestInputs(params: {
         updatedAt: true,
         process: { select: { subjectType: true, subjectId: true } },
       },
-    }),
-    prisma.adviceRequest.findMany({
+    })),
+    query("AdviceRequest", 10, (page) => prisma.adviceRequest.findMany({
       where: {
         workspaceId: params.workspaceId,
         audienceType: "WORKSPACE",
@@ -1064,8 +1098,8 @@ async function loadOperatingDigestInputs(params: {
           { updatedAt: windowRange },
         ],
       },
-      orderBy: [{ completedAt: "desc" }, { updatedAt: "desc" }],
-      take: 10,
+      orderBy: [{ completedAt: "desc" }, { updatedAt: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: {
         id: true,
         messageMd: true,
@@ -1076,7 +1110,7 @@ async function loadOperatingDigestInputs(params: {
         updatedAt: true,
         process: { select: { subjectType: true, subjectId: true } },
       },
-    }),
+    })),
   ]);
 
   const workspaceAdviceRequests = [
@@ -1100,19 +1134,44 @@ async function loadOperatingDigestInputs(params: {
     };
   });
 
+  const capture = <T extends { id: string }>(kind: LineageKind, records: T[],
+    additionalInputs?: Parameters<typeof captureReadableDigestInputs<T>>[0]["additionalInputs"]) =>
+    captureReadableDigestInputs({ actor: params.actor, audience: params.audience, workspaceId: params.workspaceId, kind, records, additionalInputs });
+  const [safeMeetings, safeProposals, safeTensions, safeActions, safeGoals, safeRoleVersions, safeRoleHistory,
+    safeMembers, safeArticles, safeDocuments, safeAdvice] = await Promise.all([
+    capture("Meeting", meetings), capture("Proposal", proposals), capture("Tension", resolvedTensions),
+    capture("Action", openActions), capture("Goal", goals), capture("RoleVersion", roleVersions),
+    capture("RoleHolderHistory", roleHolderHistory, (history) => [
+      { kind: "Role", id: history.roleId, snapshot: history.role },
+      ...(history.memberId && history.member ? [{ kind: "Member" as const, id: history.memberId, snapshot: history.member }] : []),
+    ]),
+    capture("Member", newMembers), capture("BrainArticle", brainArticles), capture("Document", documents),
+    capture("AdviceRequest", workspaceAdviceRequestsWithSubjects, (request) => request.subjectPreview ? [{
+      kind: request.subjectPreview.type === "PROPOSAL" ? "Proposal" : request.subjectPreview.type === "ACTION" ? "Action" : "Tension",
+      id: request.subjectPreview.id, snapshot: { title: request.subjectPreview.title },
+    }] : []),
+  ]);
+  const [safeInsights, safeGoalUpdates] = await Promise.all([
+    capture("MeetingInsight", safeMeetings.records.flatMap((meeting) => meeting.insights)),
+    capture("GoalUpdate", safeGoals.records.flatMap((goal) => goal.updates)),
+  ]);
+  const insightIds = new Set(safeInsights.records.map((insight) => insight.id));
+  const updateIds = new Set(safeGoalUpdates.records.map((update) => update.id));
   return {
-    meetings: meetings as OperatingDigestInputs["meetings"],
-    proposals: proposals as OperatingDigestInputs["proposals"],
-    resolvedTensions: resolvedTensions as OperatingDigestInputs["resolvedTensions"],
-    openActions: openActions as OperatingDigestInputs["openActions"],
-    goals: goals as OperatingDigestInputs["goals"],
-    roleVersions: roleVersions as OperatingDigestInputs["roleVersions"],
-    roleHolderHistory: roleHolderHistory as OperatingDigestInputs["roleHolderHistory"],
-    newMembers: newMembers as OperatingDigestInputs["newMembers"],
-    brainArticles: brainArticles as OperatingDigestInputs["brainArticles"],
-    documents: documents as OperatingDigestInputs["documents"],
-    workspaceAdviceRequests: workspaceAdviceRequestsWithSubjects as OperatingDigestInputs["workspaceAdviceRequests"],
-  };
+    meetings: safeMeetings.records.map((meeting) => ({ ...meeting, insights: meeting.insights.filter((insight) => insightIds.has(insight.id)) })),
+    proposals: safeProposals.records,
+    resolvedTensions: safeTensions.records,
+    openActions: safeActions.records,
+    goals: safeGoals.records.map((goal) => ({ ...goal, updates: goal.updates.filter((update) => updateIds.has(update.id)) })),
+    roleVersions: safeRoleVersions.records,
+    roleHolderHistory: safeRoleHistory.records,
+    newMembers: safeMembers.records,
+    brainArticles: safeArticles.records,
+    documents: safeDocuments.records,
+    workspaceAdviceRequests: safeAdvice.records,
+    lineageRoots: mergeArtifactInputProofs(...[safeMeetings, safeProposals, safeTensions, safeActions, safeGoals,
+      safeRoleVersions, safeRoleHistory, safeMembers, safeArticles, safeDocuments, safeAdvice, safeInsights, safeGoalUpdates].map((group) => group.roots)),
+  } as OperatingDigestInputs;
 }
 
 function buildDigestSourceCounts(params: {
@@ -1123,9 +1182,8 @@ function buildDigestSourceCounts(params: {
   pendingAdviceByMemberId: Map<string, PersonalDigestItem[]>;
 }): DigestSourceCounts {
   const adviceRequestIds = new Set<string>();
-  for (const items of params.pendingAdviceByMemberId.values()) {
-    for (const item of items) adviceRequestIds.add(item.id);
-  }
+  // Personal requests belong only to the recipient's supplement. Their existence
+  // must not influence shared model context or shared counts.
   for (const request of params.operatingInputs.workspaceAdviceRequests) {
     adviceRequestIds.add(request.id);
   }
@@ -1205,6 +1263,7 @@ function buildPersonalActionItemsByMember(params: {
   pendingAdviceByMemberId: Map<string, PersonalDigestItem[]>;
   openActions: OperatingDigestInputs["openActions"];
   now: Date;
+  actionProofs?: Map<string, LineageRoot[]>;
 }) {
   const itemsByMemberId = new Map<string, PersonalDigestItem[]>(
     [...params.pendingAdviceByMemberId.entries()].map(([memberId, items]) => [memberId, [...items]]),
@@ -1225,6 +1284,7 @@ function buildPersonalActionItemsByMember(params: {
         workspaceId: params.workspaceId,
         action,
       }),
+      lineageRoots: params.actionProofs?.get(action.id),
     });
     itemsByMemberId.set(action.assigneeMemberId, existing);
   }
@@ -1242,6 +1302,9 @@ export async function runDailyDigest(params: {
   dateKey?: string;
   cadence?: NewspaperCadence;
   model?: string;
+  /** Rebuild shared artifacts without ingestion, person-profile writes, or delivery. */
+  regenerationOnly?: boolean;
+  rebuildRef?: string;
 }) {
   const agentActor: AppActor = {
     kind: "agent",
@@ -1278,15 +1341,18 @@ export async function runDailyDigest(params: {
       user: { select: { email: true, displayName: true, id: true } },
       roleAssignments: {
         select: {
+          id: true,
           expiresAt: true,
           role: {
             select: {
               circleId: true,
+              id: true,
               name: true,
               archivedAt: true,
               circle: {
                 select: {
                   workspaceId: true,
+                  id: true,
                   name: true,
                   archivedAt: true,
                 },
@@ -1328,13 +1394,13 @@ export async function runDailyDigest(params: {
   );
 
   // 1. Batch ingest all raw conversations as tier-3 sources
-  await batchIngestDailyConversations({
+  if (!params.regenerationOnly) await batchIngestDailyConversations({
     workspaceId: params.workspaceId,
     since,
   });
 
   // 2. Load all conversations from past 24h to extract insights and build the digest
-  const sessions = await prisma.conversationSession.findMany({
+  const loadedSessions = await prisma.conversationSession.findMany({
     where: {
       workspaceId: params.workspaceId,
       turns: { some: { createdAt: windowRange } }
@@ -1349,8 +1415,28 @@ export async function runDailyDigest(params: {
       }
     }
   });
-  const slackMessages = await listSlackMessagesForDigest(params.workspaceId, since, generationDate);
-  const buildArtifacts = await prisma.buildArtifact.findMany({
+  const audience: AppActor[] = recipientMembers.map((member) => ({ kind: "user", user: member.user }));
+  const sessionReceipts = await Promise.all(loadedSessions.map(async (session) => {
+    const turns = await captureReadableDigestInputs({ actor: agentActor, workspaceId: params.workspaceId,
+      kind: "ConversationTurn", records: session.turns, additionalInputs: () => [
+        { kind: "User", id: session.userId, snapshot: session.user },
+      ] });
+    return { session, roots: turns.roots, complete: session.turns.length > 0 && turns.records.length === session.turns.length };
+  }));
+  const sessions = sessionReceipts.filter((receipt) => receipt.complete).map((receipt) => receipt.session);
+  const sharedSessionReceipts = [] as typeof sessionReceipts;
+  for (const receipt of sessionReceipts.filter((item) => item.complete)) {
+    if (await isDigestInputProofShared(audience, params.workspaceId, receipt.roots)) {
+      sharedSessionReceipts.push(receipt);
+    }
+  }
+  const sharedSessions = sharedSessionReceipts.map((receipt) => receipt.session);
+  const safeSlack = await captureReadableDigestInputs({ actor: agentActor, audience, workspaceId: params.workspaceId,
+    kind: "CommunicationMessage", records: await listSlackMessagesForDigest(agentActor, params.workspaceId, since, generationDate, audience) });
+  const slackMessages = safeSlack.records;
+  const loadedBuildArtifacts = await loadReadableDigestQuery<Omit<BuildArtifactDigestItem, "assets"> & { id: string;
+    assets: Array<BuildArtifactDigestItem["assets"][number] & { id: string }> }>({ actor: agentActor, audience, workspaceId: params.workspaceId,
+    kind: "BuildArtifact", limit: 40, loadBatch: ({ take, skip }) => prisma.buildArtifact.findMany({
     where: {
       workspaceId: params.workspaceId,
       updatedAt: { lte: generationDate },
@@ -1365,9 +1451,10 @@ export async function runDailyDigest(params: {
         { closedAt: windowRange },
       ],
     },
-    orderBy: { updatedAt: "desc" },
-    take: 40,
+    orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+    take, skip,
     select: {
+      id: true,
       repositoryOwner: true,
       repositoryName: true,
       pullRequestNumber: true,
@@ -1381,25 +1468,34 @@ export async function runDailyDigest(params: {
       updatedAt: true,
       assets: {
         select: {
+          id: true,
           kind: true,
           label: true,
           captionMd: true,
         },
         orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
-        take: 5,
       },
     },
+    }),
   });
+  const safeBuildArtifacts = await captureReadableDigestInputs({ actor: agentActor, audience, workspaceId: params.workspaceId,
+    kind: "BuildArtifact", records: loadedBuildArtifacts, additionalInputs: (artifact) => artifact.assets.map((asset) => ({
+      kind: "BuildArtifactAsset", id: asset.id, snapshot: asset,
+    })) });
+  const buildArtifacts = safeBuildArtifacts.records;
   const pendingAdviceByMemberId = await loadPendingAdviceRequestsByMember({
     workspaceId: params.workspaceId,
     recipientMembers,
+    actor: agentActor,
   });
   const operatingInputs = await loadOperatingDigestInputs({
     workspaceId: params.workspaceId,
     since,
     until: generationDate,
+    actor: agentActor,
+    audience,
   });
-  const assignedOpenActions = recipientMembers.length > 0
+  const loadedAssignedOpenActions = recipientMembers.length > 0
     ? await prisma.action.findMany({
       where: {
         workspaceId: params.workspaceId,
@@ -1423,6 +1519,9 @@ export async function runDailyDigest(params: {
       orderBy: [{ priority: "desc" }, { dueAt: "asc" }, { updatedAt: "desc" }],
     })
     : [];
+  const safeAssignedActions = await captureReadableDigestInputs({ actor: agentActor, workspaceId: params.workspaceId,
+    kind: "Action", records: loadedAssignedOpenActions });
+  const assignedOpenActions = safeAssignedActions.records;
   const [ownedOpenProposals, assignedOpenTensions] = recipientMembers.length > 0
     ? await Promise.all([
       prisma.proposal.findMany({
@@ -1443,21 +1542,28 @@ export async function runDailyDigest(params: {
       }),
     ])
     : [[], []];
-  const briefingCandidates = await collectWorkspaceBriefingCandidates({
+  const loadedBriefingCandidates = await collectWorkspaceBriefingCandidates({
     workspaceId: params.workspaceId,
     since: briefingSince,
     now: generationDate,
     until: generationDate,
+    actor: agentActor,
+    audience,
   });
+  const briefingCandidates = [] as typeof loadedBriefingCandidates;
+  for (const candidate of loadedBriefingCandidates) {
+    if (candidate.lineageRoots?.length && await isDigestInputProofShared(audience, params.workspaceId, candidate.lineageRoots)) briefingCandidates.push(candidate);
+  }
   const personalItemsByMemberId = buildPersonalActionItemsByMember({
     workspaceId: params.workspaceId,
     pendingAdviceByMemberId,
     openActions: assignedOpenActions,
     now: generationDate,
+    actionProofs: safeAssignedActions.proofs,
   });
   const sourceCounts = buildDigestSourceCounts({
     operatingInputs,
-    sessions,
+    sessions: sharedSessions,
     slackMessages,
     buildArtifacts,
     pendingAdviceByMemberId,
@@ -1465,7 +1571,9 @@ export async function runDailyDigest(params: {
   const digestDateKey = params.dateKey ?? params.dateISO.split("T")[0];
   const digestTitle = `${cadenceLabel(cadence)} Newspaper - ${digestDateKey}`;
   const digestSlug = `${cadence.toLowerCase()}-newspaper-${digestDateKey}`;
-  const runKey = params.workflowJobId ?? `${params.workspaceId}:${cadence.toLowerCase()}-newspaper:${digestDateKey}`;
+  const runKey = params.regenerationOnly && params.rebuildRef
+    ? `${params.workspaceId}:lineage-rebuild:${params.rebuildRef}:${cadence}`
+    : params.workflowJobId ?? `${params.workspaceId}:${cadence.toLowerCase()}-newspaper:${digestDateKey}`;
 
   const hasSourceInputs = hasDigestSourceInputs(sourceCounts);
   if (!hasSourceInputs) {
@@ -1478,13 +1586,15 @@ export async function runDailyDigest(params: {
   }
 
   // 3. Extract member insights and update PERSON profiles
-  const members = new Map<string, { user: { id: string; email: string; displayName: string | null }; transcripts: string[] }>();
-  for (const session of sessions) {
+  const members = new Map<string, { user: { id: string; email: string; displayName: string | null }; transcripts: string[]; lineageRoots: LineageRoot[] }>();
+  for (const session of params.regenerationOnly ? [] : sessions) {
     if (!members.has(session.userId)) {
-      members.set(session.userId, { user: session.user!, transcripts: [] });
+      members.set(session.userId, { user: session.user!, transcripts: [], lineageRoots: [] });
     }
     const transcript = session.turns.map(t => `User: ${t.userMessage}\nAssistant: ${t.assistantMessage}`).join("\n");
     members.get(session.userId)!.transcripts.push(transcript);
+    members.get(session.userId)!.lineageRoots = mergeArtifactInputProofs(members.get(session.userId)!.lineageRoots,
+      sessionReceipts.find((receipt) => receipt.session.id === session.id)!.roots);
   }
 
   // Pre-load existing PERSON articles for all conversing members in one query
@@ -1524,21 +1634,39 @@ export async function runDailyDigest(params: {
 
     const insights = extraction.output as any;
 
-    const source = await prisma.brainSource.create({
-      data: {
-        workspaceId: params.workspaceId,
-        sourceType: "CONVERSATION_INSIGHT",
-        tier: 3,
-        content: JSON.stringify(insights, null, 2),
-        title: `Daily Insights for ${data.user.displayName || data.user.email} - ${params.dateISO.split("T")[0]}`,
-        channel: "daily-digest",
-        metadata: { userId, date: params.dateISO },
-      }
+    const source = await prisma.$transaction(async (tx) => {
+      const source = await tx.brainSource.create({
+        data: {
+          workspaceId: params.workspaceId,
+          sourceType: "CONVERSATION_INSIGHT",
+          tier: 3,
+          content: JSON.stringify(insights, null, 2),
+          title: `Daily Insights for ${data.user.displayName || data.user.email} - ${params.dateISO.split("T")[0]}`,
+          channel: "daily-digest",
+          metadata: { userId, date: params.dateISO },
+        }
+      });
+      await recordArtifactInputLineage({ tx, actor: agentActor, workspaceId: params.workspaceId,
+        artifact: { kind: "BrainSource", id: source.id }, content: source, origin: "DERIVED", inputs: [],
+        inheritedRoots: data.lineageRoots });
+      return source;
     });
 
     // Check if PERSON article exists for this user
     const slug = `person-${userId}`;
     const existingArticle = existingPersonArticlesBySlug.get(slug) ?? null;
+    const existingProfileManifest = existingArticle ? await prisma.artifactInputLineage.findFirst({ where: {
+      workspaceId: params.workspaceId, artifactType: "BrainArticle", artifactId: existingArticle.id,
+    }, orderBy: { revision: "desc" } }) : null;
+    // Human originals and unknown historical profiles retain their bodies. A
+    // source receipt cannot certify the old profile's historical prompt inputs.
+    if (existingArticle && (existingArticle.authority !== "DRAFT" || existingArticle.ownerMemberId !== null
+      || existingArticle.humanEditedAt !== null
+      || existingProfileManifest?.origin !== "DERIVED"
+      || (existingArticle.frontmatterJson as Record<string, unknown> | null)?.generatedBy !== "daily-digest"
+      || !(await readableArtifactIds(agentActor, params.workspaceId, "BrainArticle", [existingArticle])).has(existingArticle.id))) continue;
+    const insightRoots = await captureArtifactInputProof(agentActor, params.workspaceId,
+      [{ kind: "BrainSource", id: source.id, snapshot: source }]);
 
     const profileMergeResult = await defaultModelGateway.chat({
       model,
@@ -1584,6 +1712,8 @@ Rules:
         sourceIds: [...(existingArticle.sourceIds || []), source.id],
         changeSummary: "Daily insight update",
         agentRunId: params.agentRunId ?? null,
+        expectedUpdatedAt: existingArticle.updatedAt,
+        additionalInputRoots: insightRoots,
       });
     } else {
       await createArticle(agentActor, {
@@ -1594,13 +1724,15 @@ Rules:
         authority: "DRAFT",
         bodyMd: `# ${data.user.displayName || data.user.email}\n\n` + newBodyMd,
         sourceIds: [source.id],
+        frontmatterJson: { generatedBy: "daily-digest" },
+        completeInputRoots: insightRoots,
       });
     }
     memberUpdates.push({ userId, insights });
   }
 
   // 4. Generate org-wide Digest
-  const conversationTranscripts = sessions.map(s => s.turns.map(t => `${s.user.displayName}: ${t.userMessage}\nAssistant: ${t.assistantMessage}`).join("\n")).join("\n\n---\n\n");
+  const conversationTranscripts = sharedSessions.map(s => s.turns.map(t => `${s.user.displayName}: ${t.userMessage}\nAssistant: ${t.assistantMessage}`).join("\n")).join("\n\n---\n\n");
   const slackTranscript = slackMessages.map((message) => {
     const speaker = message.externalUserId ?? "Slack";
     const channel = message.externalChannelId;
@@ -1614,6 +1746,11 @@ Rules:
     slackTranscript ? `Slack public-channel messages:\n${slackTranscript}` : "",
     buildArtifacts.length > 0 ? `Built / PR activity for accomplishments and shipped work:\n${formatBuildArtifactDigestInput(buildArtifacts)}` : "",
   ].filter(Boolean).join("\n\n---\n\n").slice(0, 22000);
+  const workspaceRoots = await captureArtifactInputProof(agentActor, params.workspaceId,
+    [{ kind: "Workspace", id: params.workspaceId, snapshot: workspace ?? undefined }]);
+  const sharedInputRoots = mergeArtifactInputProofs(workspaceRoots, operatingInputs.lineageRoots ?? [],
+    safeSlack.roots, safeBuildArtifacts.roots, ...sharedSessionReceipts.map((receipt) => receipt.roots),
+    ...briefingCandidates.map((candidate) => candidate.lineageRoots ?? []));
 
   const digest = hasSourceInputs
     ? normalizeNewspaperDigestPayload((await defaultModelGateway.extract({
@@ -1673,11 +1810,15 @@ Rules:
     briefing: workspaceBriefing,
     bodyMd: briefingBodyMd,
     sourceCounts,
+    actor: agentActor,
+    lineageRoots: sharedInputRoots,
   });
+  const briefingRoots = await captureArtifactInputProof(agentActor, params.workspaceId,
+    [{ kind: "WorkspaceBriefing", id: storedBriefing.id, snapshot: storedBriefing }]);
   const editionDigest = workspaceBriefingToNewspaperDigest({
     briefingJson: storedBriefing.briefingJson,
   });
-  const shouldPersistNewspaperEdition = recipientMembers.length > 0;
+  const shouldPersistNewspaperEdition = params.regenerationOnly || recipientMembers.length > 0;
 
   if (editionDigest.sections.length > 0 && shouldPersistNewspaperEdition) {
     const digestBodyMd = renderNewspaperDigestMarkdown({ title: digestTitle, digest: editionDigest });
@@ -1689,8 +1830,13 @@ Rules:
         },
       },
     });
+    const existingDigestManifest = existingDigestArticle ? await prisma.artifactInputLineage.findFirst({ where: {
+      workspaceId: params.workspaceId, artifactType: "BrainArticle", artifactId: existingDigestArticle.id,
+    }, orderBy: { revision: "desc" } }) : null;
 
-    if (existingDigestArticle?.authority && existingDigestArticle.authority !== "DRAFT") {
+    if (existingDigestArticle && (existingDigestArticle.authority !== "DRAFT" || existingDigestArticle.ownerMemberId !== null
+      || existingDigestArticle.humanEditedAt !== null || existingDigestManifest?.origin !== "DERIVED"
+      || (existingDigestArticle.frontmatterJson as Record<string, unknown> | null)?.generatedBy !== "daily-digest")) {
       logger.info("newspaper_digest_article_write_skipped", {
         workspaceId: params.workspaceId,
         workflowJobId: params.workflowJobId ?? null,
@@ -1704,6 +1850,11 @@ Rules:
         slug: digestSlug,
         title: digestTitle,
         bodyMd: digestBodyMd,
+        type: "DIGEST",
+        frontmatterJson: { generatedBy: "daily-digest" },
+        sourceIds: [],
+        completeInputRoots: briefingRoots,
+        expectedUpdatedAt: existingDigestArticle.updatedAt,
         changeSummary: `Regenerated ${cadence.toLowerCase()} newspaper for ${digestDateKey}`,
         agentRunId: params.agentRunId ?? null,
       });
@@ -1715,6 +1866,8 @@ Rules:
         type: "DIGEST" as BrainArticleType,
         authority: "DRAFT",
         bodyMd: digestBodyMd,
+        frontmatterJson: { generatedBy: "daily-digest" },
+        completeInputRoots: briefingRoots,
       });
     }
 
@@ -1729,6 +1882,8 @@ Rules:
       digestJson: editionDigest,
       bodyMd: digestBodyMd,
       sourceCounts,
+      actor: agentActor,
+      lineageRoots: briefingRoots,
     });
 
     // 5. Rebuild backlinks
@@ -1742,6 +1897,13 @@ Rules:
     });
   }
 
+  if (params.regenerationOnly) return {
+    success: true, digestSlug, briefingId: storedBriefing.id, cadence,
+    processedSessions: sessions.length, processedSlackMessages: slackMessages.length,
+    updatedProfiles: 0, sentEmails: 0, failedEmails: 0, skippedEmails: 0,
+    regenerationOnly: true, rebuildRef: params.rebuildRef ?? null,
+  };
+
   // 6. Send personalized digest emails
   let sentEmails = 0;
   let failedEmails = 0;
@@ -1753,87 +1915,15 @@ Rules:
   const sharedBriefing = normalizeWorkspaceBriefingPayload(storedBriefing.briefingJson);
 
   for (const member of recipientMembers) {
-    const personalItems = personalItemsByMemberId.get(member.id) ?? [];
-    const activeRoles = (member.roleAssignments ?? []).filter((assignment) => (
-      assignment.role?.archivedAt === null
-      && assignment.role.circle?.archivedAt === null
-      && assignment.role.circle.workspaceId === params.workspaceId
-      && (!assignment.expiresAt || assignment.expiresAt > generationDate)
-    ));
-    const recipientBriefing = personalizeWorkspaceBriefing(sharedBriefing, {
-      roleNames: activeRoles.flatMap((assignment) => assignment.role?.name ? [assignment.role.name] : []),
-      circleNames: activeRoles.flatMap((assignment) => assignment.role?.circle?.name ? [assignment.role.circle.name] : []),
-      personalSources: personalItems.map((item) => ({
-        type: item.kind === "ADVICE" ? "ADVICE_REQUEST" as const : item.kind,
-        id: item.id,
-        title: item.title,
-      })).concat(
-        ownedOpenProposals.filter((proposal) => proposal.ownerMemberId === member.id)
-          .map((proposal) => ({ type: "PROPOSAL" as const, id: proposal.id, title: proposal.title })),
-        assignedOpenTensions.filter((tension) => tension.assigneeMemberId === member.id)
-          .map((tension) => ({ type: "TENSION" as const, id: tension.id, title: tension.title })),
-      ),
-    });
-    const recipientDigest = withNewspaperAdviceRequests(
-      recipientBriefing === sharedBriefing ? emailDigest : workspaceBriefingToNewspaperDigest({ briefingJson: recipientBriefing }),
-      personalItems.map((item) => item.text),
-    );
-    const subject = `${storedBriefing.title} - Your Personal Briefing`;
-
-    if (recipientDigest.sections.length === 0) {
-      const reason = "No digest sections generated for this recipient.";
-      skippedEmails++;
-      await recordNewspaperDelivery({
-        workspaceId: params.workspaceId,
-        workflowJobId: params.workflowJobId ?? null,
-        memberId: member.id,
-        kind: "MEMBER_NEWSPAPER",
-        cadence,
-        runKey,
-        recipientEmail: member.user.email,
-        subject,
-        status: "SKIPPED",
-        error: reason,
-      });
-      continue;
-    }
-
-    const html = await instrumentNewspaperHtmlLinks({
-      workspaceId: params.workspaceId,
-      workflowJobId: params.workflowJobId ?? null,
-      runKey,
-      html: renderWorkspaceBriefingEmailHtml({
-        briefing: {
-          title: storedBriefing.title,
-          briefingJson: recipientBriefing,
-        },
-        workspaceName,
-        recipientName: member.user.displayName || member.user.email,
-        workspaceUrl: workspaceUrl(params.workspaceId),
-        digest: recipientDigest,
-      }),
-    });
-
+    const recipientActor: AppActor = { kind: "user", user: member.user };
     try {
-      const emailResult = await sendEmail({
-        to: member.user.email,
-        subject,
-        html,
-        tracking: {
-          emailType: "newspaper.member",
-          userId: member.user.id,
-          workspaceId: params.workspaceId,
-          metadata: {
-            workspaceId: params.workspaceId,
-            workflowJobId: params.workflowJobId ?? null,
-            runKey,
-            cadence,
-            kind: "MEMBER_NEWSPAPER",
-          },
-        },
-      });
-      if (emailResult.status === "SENT") {
-        sentEmails++;
+      await requireWorkspaceMembership({ actor: recipientActor, workspaceId: params.workspaceId });
+      const safeOutcomeRoots = mergeArtifactInputProofs(workspaceRoots, await captureArtifactInputProof(agentActor, params.workspaceId,
+        [{ kind: "Member", id: member.id, snapshot: { user: member.user } }]));
+      const readableBriefing = await readableArtifactIds(recipientActor, params.workspaceId,
+        "WorkspaceBriefing", [storedBriefing]);
+      if (!readableBriefing.has(storedBriefing.id)) {
+        skippedEmails++;
         await recordNewspaperDelivery({
           workspaceId: params.workspaceId,
           workflowJobId: params.workflowJobId ?? null,
@@ -1842,11 +1932,62 @@ Rules:
           cadence,
           runKey,
           recipientEmail: member.user.email,
-          subject,
-          status: "SENT",
-          providerMessageId: emailResult.providerMessageId,
+          subject: "Workspace briefing",
+          status: "SKIPPED",
+          error: "Briefing inputs cannot be verified for this recipient.",
+          actor: agentActor,
+          lineageRoots: safeOutcomeRoots,
         });
-      } else {
+        continue;
+      }
+      const personalItems: PersonalDigestItem[] = [];
+      for (const item of personalItemsByMemberId.get(member.id) ?? []) {
+        if (item.lineageRoots?.length && await isArtifactInputProofReadable(recipientActor, params.workspaceId, item.lineageRoots)) personalItems.push(item);
+      }
+      const activeRoleCandidates = (member.roleAssignments ?? []).filter((assignment) => (
+        assignment.role?.archivedAt === null
+        && assignment.role.circle?.archivedAt === null
+        && assignment.role.circle.workspaceId === params.workspaceId
+        && (!assignment.expiresAt || assignment.expiresAt > generationDate)
+      ));
+      const safeRoles = await captureReadableDigestInputs({ actor: recipientActor, workspaceId: params.workspaceId,
+        kind: "RoleAssignment", records: activeRoleCandidates, additionalInputs: (assignment) => [
+          { kind: "Role", id: assignment.role.id, snapshot: assignment.role },
+          { kind: "Circle", id: assignment.role.circle.id, snapshot: assignment.role.circle },
+        ] });
+      const activeRoles = safeRoles.records;
+      const [safeOwnedProposals, safeAssignedTensions] = await Promise.all([
+        captureReadableDigestInputs({ actor: recipientActor, workspaceId: params.workspaceId, kind: "Proposal",
+          records: ownedOpenProposals.filter((proposal) => proposal.ownerMemberId === member.id) }),
+        captureReadableDigestInputs({ actor: recipientActor, workspaceId: params.workspaceId, kind: "Tension",
+          records: assignedOpenTensions.filter((tension) => tension.assigneeMemberId === member.id) }),
+      ]);
+      const memberRoots = await captureArtifactInputProof(recipientActor, params.workspaceId,
+        [{ kind: "Member", id: member.id, snapshot: { user: member.user } }]);
+      const recipientRoots = mergeArtifactInputProofs(briefingRoots, memberRoots, safeRoles.roots,
+        safeOwnedProposals.roots, safeAssignedTensions.roots, ...personalItems.map((item) => item.lineageRoots!));
+      const recipientBriefing = personalizeWorkspaceBriefing(sharedBriefing, {
+        roleNames: activeRoles.flatMap((assignment) => assignment.role?.name ? [assignment.role.name] : []),
+        circleNames: activeRoles.flatMap((assignment) => assignment.role?.circle?.name ? [assignment.role.circle.name] : []),
+        personalSources: personalItems.map((item) => ({
+          type: item.kind === "ADVICE" ? "ADVICE_REQUEST" as const : item.kind,
+          id: item.id,
+          title: item.title,
+        })).concat(
+          safeOwnedProposals.records
+            .map((proposal) => ({ type: "PROPOSAL" as const, id: proposal.id, title: proposal.title })),
+          safeAssignedTensions.records
+            .map((tension) => ({ type: "TENSION" as const, id: tension.id, title: tension.title })),
+        ),
+      });
+      const recipientDigest = withNewspaperAdviceRequests(
+        recipientBriefing === sharedBriefing ? emailDigest : workspaceBriefingToNewspaperDigest({ briefingJson: recipientBriefing }),
+        personalItems.map((item) => item.text),
+      );
+      const subject = `${storedBriefing.title} - Your Personal Briefing`;
+
+      if (recipientDigest.sections.length === 0) {
+        const reason = "No digest sections generated for this recipient.";
         skippedEmails++;
         await recordNewspaperDelivery({
           workspaceId: params.workspaceId,
@@ -1858,31 +1999,129 @@ Rules:
           recipientEmail: member.user.email,
           subject,
           status: "SKIPPED",
-          error: emailResult.reason,
+          error: reason,
+          actor: agentActor,
+          lineageRoots: recipientRoots,
+        });
+        continue;
+      }
+
+      const html = await instrumentNewspaperHtmlLinks({
+        workspaceId: params.workspaceId,
+        workflowJobId: params.workflowJobId ?? null,
+        runKey,
+        html: renderWorkspaceBriefingEmailHtml({
+          briefing: {
+            title: storedBriefing.title,
+            briefingJson: recipientBriefing,
+          },
+          workspaceName,
+          recipientName: member.user.displayName || member.user.email,
+          workspaceUrl: workspaceUrl(params.workspaceId),
+          digest: recipientDigest,
+        }),
+        actor: recipientActor,
+        lineageRoots: recipientRoots,
+      });
+
+      try {
+        if (!await isArtifactInputProofReadable(recipientActor, params.workspaceId, recipientRoots)) {
+          skippedEmails++;
+          await recordNewspaperDelivery({ workspaceId: params.workspaceId, workflowJobId: params.workflowJobId ?? null,
+            memberId: member.id, kind: "MEMBER_NEWSPAPER", cadence, runKey, recipientEmail: member.user.email,
+            subject: "Workspace briefing", status: "SKIPPED", error: "Inputs changed before delivery.",
+            actor: agentActor, lineageRoots: safeOutcomeRoots });
+          continue;
+        }
+        const emailResult = await sendEmail({
+          to: member.user.email,
+          subject,
+          html,
+          tracking: {
+            emailType: "newspaper.member",
+            userId: member.user.id,
+            workspaceId: params.workspaceId,
+            metadata: {
+              workspaceId: params.workspaceId,
+              workflowJobId: params.workflowJobId ?? null,
+              runKey,
+              cadence,
+              kind: "MEMBER_NEWSPAPER",
+            },
+          },
+        });
+        if (emailResult.status === "SENT") {
+          sentEmails++;
+          await recordNewspaperDelivery({
+            workspaceId: params.workspaceId,
+            workflowJobId: params.workflowJobId ?? null,
+            memberId: member.id,
+            kind: "MEMBER_NEWSPAPER",
+            cadence,
+            runKey,
+            recipientEmail: member.user.email,
+            subject,
+            status: "SENT",
+            actor: agentActor,
+            lineageRoots: recipientRoots,
+            providerMessageId: emailResult.providerMessageId,
+          });
+        } else {
+          skippedEmails++;
+          await recordNewspaperDelivery({
+            workspaceId: params.workspaceId,
+            workflowJobId: params.workflowJobId ?? null,
+            memberId: member.id,
+            kind: "MEMBER_NEWSPAPER",
+            cadence,
+            runKey,
+            recipientEmail: member.user.email,
+            subject,
+            status: "SKIPPED",
+            actor: agentActor,
+            lineageRoots: recipientRoots,
+            error: emailResult.reason,
+          });
+        }
+      } catch (error) {
+        if (error instanceof AppError && error.code === "NOT_A_MEMBER") { skippedEmails++; continue; }
+        failedEmails++;
+        const message = error instanceof Error ? error.message : "Unknown email error";
+        await recordNewspaperDelivery({
+          workspaceId: params.workspaceId,
+          workflowJobId: params.workflowJobId ?? null,
+          memberId: member.id,
+          kind: "MEMBER_NEWSPAPER",
+          cadence,
+          runKey,
+          recipientEmail: member.user.email,
+          subject,
+          status: "FAILED",
+          actor: agentActor,
+          lineageRoots: recipientRoots,
+          error: message,
+        });
+        logger.error("newspaper_delivery_failed", {
+          workspaceId: params.workspaceId,
+          workflowJobId: params.workflowJobId ?? null,
+          cadence,
+          memberId: member.id,
+          error: message,
         });
       }
     } catch (error) {
-      failedEmails++;
-      const message = error instanceof Error ? error.message : "Unknown email error";
-      await recordNewspaperDelivery({
-        workspaceId: params.workspaceId,
-        workflowJobId: params.workflowJobId ?? null,
-        memberId: member.id,
-        kind: "MEMBER_NEWSPAPER",
-        cadence,
-        runKey,
-        recipientEmail: member.user.email,
-        subject,
-        status: "FAILED",
-        error: message,
-      });
-      logger.error("newspaper_delivery_failed", {
-        workspaceId: params.workspaceId,
-        workflowJobId: params.workflowJobId ?? null,
-        cadence,
-        memberId: member.id,
-        error: message,
-      });
+      if (error instanceof AppError && error.code === "NOT_A_MEMBER") { skippedEmails++; continue; }
+      // A recipient can disappear between the membership and identity receipt.
+      try { await requireWorkspaceMembership({ actor: recipientActor, workspaceId: params.workspaceId }); }
+      catch (membershipError) {
+        if (membershipError instanceof AppError && membershipError.code === "NOT_A_MEMBER") { skippedEmails++; continue; }
+        throw membershipError;
+      }
+      if (error instanceof AppError && ["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) {
+        skippedEmails++;
+        continue;
+      }
+      throw error;
     }
   }
 
@@ -1940,12 +2179,9 @@ export async function sendDemoWelcomeNewspaper(params: {
 
   const subject = "Welcome to Corgtex - your first newspaper";
   const runKey = params.workflowJobId ?? `demo-welcome:${lead.id}`;
-  const html = await instrumentNewspaperHtmlLinks({
-    workspaceId: params.workspaceId,
-    workflowJobId: params.workflowJobId ?? null,
-    runKey,
-    html: buildDemoWelcomeNewspaperHtml({ workspaceName: lead.workspace.name }),
-  });
+  // Demo welcome links are public onboarding links. They have no edition or
+  // member identity with which to authorize a tracked newspaper redirect.
+  const html = buildDemoWelcomeNewspaperHtml({ workspaceName: lead.workspace.name });
   let deliveryStatus: "SENT" | "SKIPPED" = "SENT";
   let providerMessageId: string | null = null;
   let deliveryError: string | null = null;

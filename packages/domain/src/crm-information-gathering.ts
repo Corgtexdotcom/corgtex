@@ -1,6 +1,11 @@
-import { createHash } from "node:crypto";
+import { assertMeetingTranscriptWorkerCurrent } from "./native-meeting-workflow-principal";
+import { createHash, randomUUID } from "node:crypto";
 import { CrmActivityType, type MeetingInsight, type OAuthProvider, type Prisma } from "@prisma/client";
-import { prisma } from "@corgtex/shared";
+import { prisma, type AppActor } from "@corgtex/shared";
+import { requireWorkspaceMembership } from "./auth";
+import { captureArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, readableArtifactIds, recordArtifactInputLineage, type LineageInput, type LineageRoot } from "./source-lineage";
+import { readCrmRows } from "./crm-lineage";
+import { meetingTranscriptInputProjection } from "./meeting-intelligence-context";
 import { lockCrmLinkClosure } from "./crm-archive-guards";
 import { invariant } from "./errors";
 
@@ -461,46 +466,99 @@ function crmMetadata(crm: CrmInsightPayload): Prisma.InputJsonValue {
   return { crm } as Prisma.InputJsonValue;
 }
 
-export async function createCrmMeetingReviewInsights(params: {
+export async function createCrmMeetingReviewInsights(actor: AppActor, params: {
   workspaceId: string;
   meetingId: string;
 }) {
-  const meeting = await prisma.meeting.findFirst({
-    where: { id: params.meetingId, workspaceId: params.workspaceId },
-    select: {
-      id: true,
-      title: true,
-      transcript: true,
-      summaryMd: true,
-      recordedAt: true,
-      participantEmails: true,
-    },
-  });
-  if (!meeting) return [] as MeetingInsight[];
-
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const original = await prisma.meeting.findFirst({ where: { id: params.meetingId, workspaceId: params.workspaceId, archivedAt: null } });
+  if (!original) return [] as MeetingInsight[];
+  const hasSummary = (await readableArtifactIds(actor, params.workspaceId, "Meeting", [original])).has(original.id);
+  const raw = meetingTranscriptInputProjection(original) as Record<string, unknown> & { id: string };
+  if (!(await readableArtifactIds(actor, params.workspaceId, "MeetingTranscript", [raw])).has(original.id)) return [] as MeetingInsight[];
+  const meeting = { ...original, summaryMd: hasSummary ? original.summaryMd : null };
+  const initialInputs = [{ kind: hasSummary ? "Meeting" as const : "MeetingTranscript" as const, id: meeting.id,
+    snapshot: hasSummary ? original : raw }];
+  const initialRoots = await captureArtifactInputProof(actor, params.workspaceId, initialInputs);
   const text = [meeting.title, meeting.summaryMd, meeting.transcript].filter(Boolean).join("\n\n");
   const emails = externalParticipantEmails(meeting);
   if (emails.length === 0) return [] as MeetingInsight[];
 
   return prisma.$transaction(async (tx) => {
+    await assertMeetingTranscriptWorkerCurrent(actor, params.workspaceId, tx);
+    await tx.$queryRaw`SELECT id FROM "Meeting" WHERE id = ${meeting.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    const current = await tx.meeting.findFirst({ where: { id: meeting.id, workspaceId: params.workspaceId, archivedAt: null } });
+    invariant(current && lineageContentFingerprint("Meeting", current) === lineageContentFingerprint("Meeting", original),
+      409, "SOURCE_CHANGED", "Meeting changed while gathering CRM suggestions.");
+    invariant(await isArtifactInputProofReadable(actor, params.workspaceId, initialRoots, tx),
+      409, "SOURCE_CHANGED", "Meeting CRM inputs changed before persistence.");
     const created: MeetingInsight[] = [];
     const matches: RelationshipMatch[] = [];
-
+    const inputs: LineageInput[] = initialInputs.map(({ kind, id }) => ({ kind, id }));
+    const roots: LineageRoot[] = [...initialRoots];
+    const capture = async (kind: "CrmContact" | "CrmAccount", row: Record<string, unknown> & { id: string }) => {
+      const input = { kind, id: row.id };
+      roots.push(...await captureArtifactInputProof(actor, params.workspaceId, [{ ...input, snapshot: row }], tx));
+      inputs.push(input);
+    };
+    const matchedRelationship = async (email: string): Promise<RelationshipMatch | null> => {
+      const contact = await tx.crmContact.findFirst({ where: { workspaceId: params.workspaceId, email, archivedAt: null,
+        OR: [{ accountId: null }, { account: { archivedAt: null } }] }, include: { account: true } });
+      if (contact && (await readableArtifactIds(actor, params.workspaceId, "CrmContact", [contact], tx)).has(contact.id)
+        && (!contact.account || (await readableArtifactIds(actor, params.workspaceId, "CrmAccount", [contact.account], tx)).has(contact.account.id))) {
+        await capture("CrmContact", contact);
+        if (contact.account) await capture("CrmAccount", contact.account);
+        return { accountId: contact.account?.id ?? null, accountName: contact.account?.name ?? null,
+          contactId: contact.id, contactName: contact.name, email: contact.email, company: contact.company,
+          domain: contact.account?.domain ?? emailDomain(email) };
+      }
+      const domain = emailDomain(email);
+      if (!isBusinessDomain(domain)) return null;
+      const account = await tx.crmAccount.findFirst({ where: { workspaceId: params.workspaceId, domain, archivedAt: null } });
+      if (!account || !(await readableArtifactIds(actor, params.workspaceId, "CrmAccount", [account], tx)).has(account.id)) return null;
+      await capture("CrmAccount", account);
+      return { accountId: account.id, accountName: account.name, contactId: null, contactName: null,
+        email, company: account.name, domain: account.domain ?? domain };
+    };
+    const outcomes: Array<{ email: string; match: RelationshipMatch | null; account: Awaited<ReturnType<typeof tx.crmAccount.findFirst>> }> = [];
     for (const email of emails) {
-      const match = await findRelationshipMatch(tx, params.workspaceId, email);
+      const match = await matchedRelationship(email);
       if (match) {
         matches.push(match);
+        outcomes.push({ email, match, account: null });
         continue;
       }
       const domain = emailDomain(email);
-      const account = domain
+      const candidateAccount = domain
         ? await tx.crmAccount.findFirst({
           where: { workspaceId: params.workspaceId, domain, archivedAt: null },
-          select: { id: true, name: true },
         })
         : null;
+      const account = candidateAccount && (await readableArtifactIds(actor, params.workspaceId, "CrmAccount", [candidateAccount], tx)).has(candidateAccount.id) ? candidateAccount : null;
+      if (account) await capture("CrmAccount", account);
+      outcomes.push({ email, match: null, account });
+    }
+    const receiptState = createHash("sha256").update(JSON.stringify([...new Map(roots.map((root) => [`${root.kind}:${root.id}:${root.fingerprint}`, root])).values()]
+      .sort((left, right) => `${left.kind}:${left.id}`.localeCompare(`${right.kind}:${right.id}`)))).digest("hex");
+    const activeKeys: string[] = [];
+    const keyFor = async (parts: string[]) => {
+      const base = meetingInsightDedupeKey(["receipt-v1", receiptState, ...parts]);
+      const priorRows = await readCrmRows(actor, params.workspaceId, "MeetingInsight", (page) => tx.meetingInsight.findMany({
+        where: { workspaceId: params.workspaceId, meetingId: meeting.id,
+          OR: [{ dedupeKey: base }, { dedupeKey: { startsWith: `${base}:` } }] },
+        orderBy: [{ createdAt: "desc" }, { id: "asc" }], ...page,
+      }), tx);
+      const prior = priorRows.find((row) => row.supersededAt == null);
+      // Unknown prior bodies never affect the generated body or visible replay counts.
+      const key = prior?.dedupeKey ?? `${base}:${randomUUID()}`;
+      activeKeys.push(key);
+      return key;
+    };
+    for (const { email, match, account } of outcomes) {
+      if (match) continue;
+      const domain = emailDomain(email);
       const company = account?.name ?? (domain ? titleFromDomain(domain) : null);
-      const dedupeKey = meetingInsightDedupeKey([meeting.id, "crm-contact", email]);
+      const dedupeKey = await keyFor([meeting.id, "crm-contact", email]);
       const count = await tx.meetingInsight.createMany({
         data: [{
           workspaceId: params.workspaceId,
@@ -533,10 +591,24 @@ export async function createCrmMeetingReviewInsights(params: {
       }
     }
 
+    const persist = async () => {
+      await tx.meetingInsight.updateMany({ where: { workspaceId: params.workspaceId, meetingId: meeting.id,
+        type: { in: ["CRM_CONTACT", "CRM_DEAL", "CRM_ACTIVITY"] }, status: "SUGGESTED", reviewedAt: null, supersededAt: null,
+        dedupeKey: { startsWith: "crm:", notIn: activeKeys }, metadataJson: { path: ["crm", "source"], equals: CRM_MEETING_INTELLIGENCE_SOURCE } },
+      data: { supersededAt: new Date() } });
+      invariant(await isArtifactInputProofReadable(actor, params.workspaceId, roots, tx),
+        409, "SOURCE_CHANGED", "CRM suggestion inputs changed during persistence.");
+      for (const insight of created) await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "MeetingInsight", id: insight.id }, content: insight, origin: "DERIVED", inputs,
+        inheritedRoots: roots, transitiveOnlyKinds: ["Meeting"],
+      });
+      await assertMeetingTranscriptWorkerCurrent(actor, params.workspaceId, tx);
+      return created;
+    };
     const primaryMatch = matches[0];
-    if (!primaryMatch) return created;
+    if (!primaryMatch) return persist();
 
-    const meetingActivityKey = meetingInsightDedupeKey([meeting.id, "crm-activity", primaryMatch.accountId ?? primaryMatch.contactId ?? primaryMatch.email]);
+    const meetingActivityKey = await keyFor([meeting.id, "crm-activity", primaryMatch.accountId ?? primaryMatch.contactId ?? primaryMatch.email]);
     const activityCount = await tx.meetingInsight.createMany({
       data: [{
         workspaceId: params.workspaceId,
@@ -564,7 +636,7 @@ export async function createCrmMeetingReviewInsights(params: {
     }
 
     if (hasOpportunitySignal(text) && primaryMatch.contactId) {
-      const dedupeKey = meetingInsightDedupeKey([meeting.id, "crm-deal", primaryMatch.contactId, meeting.title ?? ""]);
+      const dedupeKey = await keyFor([meeting.id, "crm-deal", primaryMatch.contactId, meeting.title ?? ""]);
       const count = await tx.meetingInsight.createMany({
         data: [{
           workspaceId: params.workspaceId,
@@ -593,7 +665,7 @@ export async function createCrmMeetingReviewInsights(params: {
     }
 
     if (hasFollowUpSignal(text)) {
-      const dedupeKey = meetingInsightDedupeKey([meeting.id, "crm-follow-up", primaryMatch.accountId ?? primaryMatch.contactId ?? primaryMatch.email]);
+      const dedupeKey = await keyFor([meeting.id, "crm-follow-up", primaryMatch.accountId ?? primaryMatch.contactId ?? primaryMatch.email]);
       const count = await tx.meetingInsight.createMany({
         data: [{
           workspaceId: params.workspaceId,
@@ -621,7 +693,7 @@ export async function createCrmMeetingReviewInsights(params: {
       }
     }
 
-    return created;
+    return persist();
   });
 }
 

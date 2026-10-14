@@ -153,7 +153,7 @@ export default async function MeetingDetailPage({
   const format = await getFormatter();
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
 
-  const meeting = await getMeeting(workspaceId, meetingId, { includeArchived: true });
+  const meeting = await getMeeting(actor, workspaceId, meetingId, { includeArchived: true });
   if (!meeting) {
     const archiveRecord = await getWorkspaceArchiveRecord(actor, {
       workspaceId,
@@ -205,7 +205,7 @@ export default async function MeetingDetailPage({
     recurrenceRule: meeting.series?.recurrenceRule,
   });
   const participants = meeting.participantIds?.length > 0 
-    ? await getMeetingParticipants(workspaceId, meeting.participantIds)
+    ? await getMeetingParticipants(actor, workspaceId, meeting.participantIds)
     : [];
   const activeTab = normalizeMeetingTab(resolvedSearch.tab, hasAgendaTab ? "agenda" : "summary", hasAgendaTab);
   const meetingHref = `/workspaces/${workspaceId}/meetings/${meetingId}`;

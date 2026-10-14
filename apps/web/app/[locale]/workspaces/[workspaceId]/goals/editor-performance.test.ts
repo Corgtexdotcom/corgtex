@@ -78,7 +78,7 @@ describe("Goals editor construction", () => {
         expect(result.goalOptions).toBe(count);
         expect(result.circleOptions).toBe(1);
         expect(result.ownerOptions).toBe(1);
-        expect(listCircles).toHaveBeenCalledWith("synthetic-workspace");
+        expect(listCircles).toHaveBeenCalledWith({ kind: "user", user: { id: "synthetic-author" } }, "synthetic-workspace");
       });
     }
   }

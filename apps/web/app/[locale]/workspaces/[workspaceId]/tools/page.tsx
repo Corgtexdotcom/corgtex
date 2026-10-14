@@ -26,7 +26,7 @@ export default async function ToolsPage({
 
   const [toolLinks, circles, catalog, catalogRequests, externalResources] = await Promise.all([
     listWorkspaceToolLinks(actor, { workspaceId }),
-    listCircles(workspaceId),
+    listCircles(actor, workspaceId),
     listCatalogItems(actor, workspaceId),
     listCatalogRequests(actor, { workspaceId, status: "PENDING" }),
     listWorkspaceExternalResources(actor, { workspaceId, take: 100 }),

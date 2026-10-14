@@ -4,6 +4,8 @@ import pg from "pg";
 import { readPgNotNullEvidence, capturePg16NotNullTarget, comparePg18ToPg16NotNull } from "./pg18-pg16-notnull";
 import { exportTenantSnapshot, hashCanonical } from "./shared-tenant-export";
 import { importTenantSnapshot, type TenantImportOptions } from "./shared-tenant-import";
+import { historicalAuthorityTables, transferScalarFieldKinds } from "./shared-tenant-transfer-contract";
+import { prepareTenantPublication } from "./shared-tenant-publication";
 import { inventorySharedTenantSource } from "./shared-tenant-inventory.mjs";
 import type { PgNotNullEvidence } from "./pg18-pg16-notnull";
 import type { TenantTransferManifest, TenantTransferSnapshot } from "./shared-tenant-transfer-contract";
@@ -91,11 +93,18 @@ test("fresh export is opt-in; stale target rejects inside importer and preserves
   await target.query(`INSERT INTO "Workspace" (id,slug,name,"updatedAt") VALUES ('existing','existing','Existing',now())`);
   const inventory = await inventorySharedTenantSource(source);
   const manifest: TenantTransferManifest = { formatVersion: 1, transferId: "guard-test", workspaceId: "fixture", workspaceSlug: "fixture", schemaSha256: inventory.schemaSha256,
-    tables: { _prisma_migrations: { disposition: "operator-control", reason: "Test control" }, Workspace: { disposition: "copy", reason: "Synthetic fixture",
-      fields: Object.fromEntries(inventory.schema.columns.filter((c: { table: string; type: string }) => c.table === "Workspace" && (/^jsonb?$/.test(c.type) || c.type.endsWith("[]"))).map((c: { name: string }) => [c.name, { kind: "content", reason: "Fixture content" }])) } } };
-  const old = await exportTenantSnapshot(source, manifest);
+    tables: Object.fromEntries(inventory.tables.filter((t: { rows: string }) => BigInt(t.rows) > 0n).map((t: { name: string }) => [t.name, {
+      disposition: t.name === "_prisma_migrations" ? "operator-control" : "copy", reason: "Explicit synthetic compatibility fixture",
+      fields: { ...Object.fromEntries(Object.entries(transferScalarFieldKinds[t.name] ?? {}).map(([name, kind]) => [name, { kind, reason: "Explicit scalar classification" }])),
+        ...Object.fromEntries(inventory.schema.columns.filter((c: { table: string; type: string }) => c.table === t.name && (/^jsonb?$/.test(c.type) || c.type.endsWith("[]"))).map((c: { name: string }) => [c.name, { kind: "content", reason: "Fixture content" }])) },
+    }])) };
+  function prepare(value: TenantTransferSnapshot) {
+    return prepareTenantPublication(value, { stagedRows: value.tables.filter((table) => table.rows.length && (historicalAuthorityTables.has(table.name) || table.name === "Event"))
+      .map((table) => ({ table: table.name, primaryKeys: table.rows.map((row) => table.primaryKey.map((key) => row[table.columns.findIndex((column) => column.name === key)])), reason: "Preserve source authority and pending work privately" })), detachReferences: [] }).publicationSnapshot;
+  }
+  const old = prepare(await exportTenantSnapshot(source, manifest));
   assert.equal(Object.hasOwn(old, "pg18ToPg16NotNullEvidence"), false);
-  const value = await exportTenantSnapshot(source, manifest, { pg18ToPg16NotNullEvidence: true });
+  const value = prepare(await exportTenantSnapshot(source, manifest, { pg18ToPg16NotNullEvidence: true }));
   const comparison = comparePg18ToPg16NotNull(value, await capturePg16NotNullTarget(target));
   function options(snapshot: TenantTransferSnapshot): TenantImportOptions {
     const body = { formatVersion: 1 as const, transferId: snapshot.manifest.transferId, sourceSnapshotSha256: snapshot.sha256, sourceStoreId: "empty-source", targetStoreId: "empty-target", entries: [] };

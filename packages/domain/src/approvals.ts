@@ -8,12 +8,14 @@ import type {
 } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
-import { invariant } from "./errors";
+import { AppError, invariant } from "./errors";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
 import { acquireWorkItemAdvisoryLock } from "./work-item-versions";
 import { acquireConstitutionCorpusAdvisoryLock } from "./constitutions";
 import { humanMemberIdentityWhere } from "./member-identity";
+import { advanceHumanArtifactInputLineage, captureArtifactInputProof, captureArtifactInputSnapshotProof, currentArtifactInputRoots,
+  invalidateArtifactInputLineage, lineageContentFingerprint, preserveUnknownArtifactInputSnapshot, readableArtifactIds, recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
 
 export type DecisionSummary = {
   approve: number;
@@ -32,17 +34,8 @@ export type ApprovalOutcome = {
 };
 
 type LoadedFlow = ApprovalFlow & {
-  decisions: Array<{
-    memberId: string;
-    choice: ApprovalDecisionChoice;
-  }>;
-  objections: Array<{
-    id: string;
-    userId: string;
-    bodyMd: string;
-    createdAt: Date;
-    resolvedAt: Date | null;
-  }>;
+  decisions: Prisma.ApprovalDecisionGetPayload<Record<string, never>>[];
+  objections: Prisma.ObjectionGetPayload<Record<string, never>>[];
 };
 
 const EXPIRING_FLOW_BATCH_SIZE = 25;
@@ -204,29 +197,52 @@ async function eligibleApproverIds(tx: Prisma.TransactionClient, workspaceId: st
 }
 
 async function loadFlow(tx: Prisma.TransactionClient, flowId: string) {
-  return tx.approvalFlow.findUnique({
-    where: { id: flowId },
-    include: {
-      decisions: {
-        select: {
-          memberId: true,
-          choice: true,
-        },
-      },
-      objections: {
-        where: {
-          resolvedAt: null,
-        },
-        select: {
-          id: true,
-          userId: true,
-          bodyMd: true,
-          createdAt: true,
-          resolvedAt: true,
-        },
-      },
-    },
-  });
+  return tx.approvalFlow.findUnique({ where: { id: flowId },
+    include: { decisions: true, objections: { where: { resolvedAt: null } } } });
+}
+
+async function approvalInputsReadable(actor: AppActor, workspaceId: string, flow: { id: string; decisions?: Array<{ id: string; [key: string]: unknown }>; objections?: Array<{ id: string; [key: string]: unknown }>; [key: string]: unknown }, tx: Prisma.TransactionClient | typeof prisma = prisma) {
+  const [flows, decisions, objections] = await Promise.all([
+    readableArtifactIds(actor, workspaceId, "ApprovalFlow", [flow], tx),
+    readableArtifactIds(actor, workspaceId, "ApprovalDecision", flow.decisions ?? [], tx),
+    readableArtifactIds(actor, workspaceId, "Objection", flow.objections ?? [], tx),
+  ]);
+  return flows.has(flow.id) && (flow.decisions ?? []).every((row) => decisions.has(row.id))
+    && (flow.objections ?? []).every((row) => objections.has(row.id));
+}
+
+async function outcomeInputRoots(tx: Prisma.TransactionClient, actor: AppActor, flow: LoadedFlow, approverIds: string[]) {
+  const previous = await currentArtifactInputRoots(tx, flow.workspaceId, { kind: "ApprovalFlow", id: flow.id }, flow);
+  invariant(previous, 409, "UNKNOWN_LINEAGE", "Approval inputs cannot be verified.");
+  const allMembers = await tx.member.findMany({ where: { workspaceId: flow.workspaceId, isActive: true, ...humanMemberIdentityWhere() }, include: { user: true } });
+  const authorUserId = await proposalAuthorUserIdForFlow(tx, flow);
+  const members = allMembers.filter((row) => !authorUserId || row.userId !== authorUserId);
+  invariant(members.length === approverIds.length && members.every((row) => approverIds.includes(row.id)), 409, "SOURCE_CHANGED", "Approval reviewers changed during the decision.");
+  const inputs = [
+    ...members.map((row) => ({ kind: "Member" as const, id: row.id, snapshot: row })),
+    ...eligibleFlowDecisions(flow, approverIds).map((row) => ({ kind: "ApprovalDecision" as const, id: row.id, snapshot: row })),
+    ...flow.objections.map((row) => ({ kind: "Objection" as const, id: row.id, snapshot: row })),
+  ];
+  // The outcome replaces resultJson completely. Retain config/subject provenance,
+  // then recapture all current reviewers and review rows instead of carrying a
+  // superseded choice or resolved objection into the new result.
+  const base = previous.filter((root) => !["Member", "ApprovalDecision", "Objection"].includes(root.kind));
+  return [...base, ...await captureArtifactInputProof(actor, flow.workspaceId, inputs, tx)];
+}
+
+async function writeFlowOutcome(tx: Prisma.TransactionClient, actor: AppActor, flow: LoadedFlow,
+  roots: LineageRoot[], data: Prisma.ApprovalFlowUpdateInput) {
+  const updated = await tx.approvalFlow.update({ where: { id: flow.id }, data });
+  await recordArtifactInputLineage({ tx, actor, workspaceId: flow.workspaceId,
+    artifact: { kind: "ApprovalFlow", id: flow.id }, content: updated, origin: "DERIVED", inputs: [], inheritedRoots: roots });
+  return updated;
+}
+
+async function approvalSubjectRoots(tx: Prisma.TransactionClient, actor: AppActor, flow: ApprovalFlow) {
+  const kind = flow.subjectType === "PROPOSAL" ? "Proposal" : flow.subjectType === "ACTION" ? "Action" : flow.subjectType === "TENSION" ? "Tension" : null;
+  if (kind) return captureArtifactInputSnapshotProof(actor, flow.workspaceId, { kind, id: flow.subjectId }, tx);
+  // Unsupported subjects cannot be assigned a complete receipt from a subject id.
+  invariant(false, 409, "UNKNOWN_LINEAGE", "Approval subject inputs cannot be verified.");
 }
 
 function eligibleFlowDecisions(flow: LoadedFlow, approverIds: string[]) {
@@ -295,13 +311,21 @@ function approvalDecisionMd(params: {
   );
 }
 
-async function applySubjectOutcome(tx: Prisma.TransactionClient, params: {
+async function applySubjectOutcome(tx: Prisma.TransactionClient, actor: AppActor, params: {
   flow: ApprovalFlow;
   status: "APPROVED" | "REJECTED";
   outcome: ApprovalOutcome;
   eligibleApprovers: number;
   openObjections: number;
 }) {
+  let previousRoots: LineageRoot[] = [];
+  if (params.flow.subjectType === "PROPOSAL") {
+    const before = await tx.proposal.findFirst({ where: { id: params.flow.subjectId, workspaceId: params.flow.workspaceId } });
+    invariant(before, 404, "NOT_FOUND", "Proposal not found.");
+    const roots = await currentArtifactInputRoots(tx, params.flow.workspaceId, { kind: "Proposal", id: before.id }, before);
+    invariant(roots, 409, "UNKNOWN_LINEAGE", "Proposal inputs cannot be verified.");
+    previousRoots = roots;
+  }
   if (params.status === "APPROVED" && params.flow.subjectType === "PROPOSAL") {
     const proposal = await tx.proposal.update({
       where: { id: params.flow.subjectId },
@@ -320,7 +344,10 @@ async function applySubjectOutcome(tx: Prisma.TransactionClient, params: {
       },
     });
 
-    await tx.policyCorpus.upsert({
+    await recordArtifactInputLineage({ tx, actor, workspaceId: proposal.workspaceId,
+      artifact: { kind: "Proposal", id: proposal.id }, content: proposal, origin: "DERIVED",
+      inputs: [{ kind: "ApprovalFlow", id: params.flow.id }], inheritedRoots: previousRoots });
+    const policy = await tx.policyCorpus.upsert({
       where: { proposalId: proposal.id },
       update: {
         title: proposal.title,
@@ -337,10 +364,13 @@ async function applySubjectOutcome(tx: Prisma.TransactionClient, params: {
         circleId: proposal.circleId,
       },
     });
+    await recordArtifactInputLineage({ tx, actor, workspaceId: proposal.workspaceId,
+      artifact: { kind: "PolicyCorpus", id: policy.id }, content: policy, origin: "DERIVED",
+      inputs: [{ kind: "Proposal", id: proposal.id }] });
   }
 
   if (params.status === "REJECTED" && params.flow.subjectType === "PROPOSAL") {
-    await tx.proposal.update({
+    const proposal = await tx.proposal.update({
       where: { id: params.flow.subjectId },
       data: {
         status: "RESOLVED",
@@ -356,11 +386,16 @@ async function applySubjectOutcome(tx: Prisma.TransactionClient, params: {
         }),
       },
     });
+    await recordArtifactInputLineage({ tx, actor, workspaceId: proposal.workspaceId,
+      artifact: { kind: "Proposal", id: proposal.id }, content: proposal, origin: "DERIVED",
+      inputs: [{ kind: "ApprovalFlow", id: params.flow.id }], inheritedRoots: previousRoots });
   }
 
 }
 
 async function finalizeApprovalFlow(tx: Prisma.TransactionClient, params: {
+  actor: AppActor;
+  roots: LineageRoot[];
   flow: LoadedFlow;
   nextStatus: "APPROVED" | "REJECTED";
   outcome: ApprovalOutcome;
@@ -375,16 +410,13 @@ async function finalizeApprovalFlow(tx: Prisma.TransactionClient, params: {
     }
   }
 
-  await tx.approvalFlow.update({
-    where: { id: params.flow.id },
-    data: {
+  await writeFlowOutcome(tx, params.actor, params.flow, params.roots, {
       status: params.nextStatus,
       closedAt: new Date(),
       resultJson: params.outcome as Prisma.InputJsonValue,
-    },
   });
 
-  await applySubjectOutcome(tx, {
+  await applySubjectOutcome(tx, params.actor, {
     flow: params.flow,
     status: params.nextStatus,
     outcome: params.outcome,
@@ -449,6 +481,7 @@ export async function getApprovalPolicy(workspaceId: string, subjectType: string
 }
 
 export async function ensureApprovalFlow(tx: Prisma.TransactionClient, params: {
+  actor?: AppActor;
   workspaceId: string;
   subjectType: string;
   subjectId: string;
@@ -468,7 +501,7 @@ export async function ensureApprovalFlow(tx: Prisma.TransactionClient, params: {
     return existing;
   }
 
-  return tx.approvalFlow.create({
+  const flow = await tx.approvalFlow.create({
     data: {
       workspaceId: params.workspaceId,
       subjectType: params.subjectType,
@@ -479,17 +512,25 @@ export async function ensureApprovalFlow(tx: Prisma.TransactionClient, params: {
       createdByUserId: params.createdByUserId ?? null,
     },
   });
+  if (params.actor && ["PROPOSAL", "ACTION", "TENSION"].includes(params.subjectType)) {
+    const roots = await approvalSubjectRoots(tx, params.actor, flow);
+    await recordArtifactInputLineage({ tx, actor: params.actor, workspaceId: params.workspaceId,
+      artifact: { kind: "ApprovalFlow", id: flow.id }, content: flow, origin: "DERIVED",
+      inputs: [{ kind: "ApprovalPolicy", id: params.policy.id }], inheritedRoots: roots });
+  } else {
+    await invalidateArtifactInputLineage({ tx, workspaceId: params.workspaceId,
+      artifact: { kind: "ApprovalFlow", id: flow.id }, content: flow });
+  }
+  return flow;
+
 }
 
 async function activeApprovalFlowsForWorkspace(workspaceId: string) {
   return prisma.approvalFlow.findMany({
     where: { workspaceId, status: "ACTIVE" },
     include: {
-      decisions: {
-        select: {
-          choice: true,
-        },
-      },
+      decisions: true,
+      objections: { where: { resolvedAt: null } },
     },
     orderBy: { createdAt: "desc" },
   });
@@ -509,14 +550,16 @@ export async function listActionableApprovalFlows(
   const proposals = proposalIds.length > 0
     ? await prisma.proposal.findMany({
       where: { id: { in: proposalIds } },
-      select: { id: true, title: true, status: true, isPrivate: true, archivedAt: true },
+
     })
     : [];
 
-  const proposalById = new Map(proposals.map((proposal) => [proposal.id, proposal]));
+  const permittedProposalIds = await readableArtifactIds(actor, workspaceId, "Proposal", proposals);
+  const proposalById = new Map(proposals.filter((row) => permittedProposalIds.has(row.id)).map((proposal) => [proposal.id, proposal]));
   const actionable: ActionableApprovalFlow[] = [];
 
   for (const flow of flows) {
+    if (!await approvalInputsReadable(actor, workspaceId, flow)) continue;
     if (flow.subjectType === "PROPOSAL") {
       const proposal = proposalById.get(flow.subjectId);
       if (!proposal || proposal.archivedAt || proposal.status !== "OPEN" || proposal.isPrivate) {
@@ -556,7 +599,7 @@ export async function listProposalDecisionStates(
   const [eligibleMembers, flows, proposals] = await Promise.all([
     prisma.member.findMany({
       where: { workspaceId: params.workspaceId, isActive: true, ...humanMemberIdentityWhere() },
-      select: { id: true, userId: true, user: { select: { displayName: true, email: true } } },
+      include: { user: true },
       orderBy: { joinedAt: "asc" },
     }),
     prisma.approvalFlow.findMany({
@@ -567,23 +610,12 @@ export async function listProposalDecisionStates(
         status: "ACTIVE",
       },
       include: {
-        decisions: {
-          select: {
-            memberId: true,
-            choice: true,
-            rationale: true,
-            updatedAt: true,
-          },
-        },
+        decisions: true,
         objections: {
           where: {
             resolvedAt: null,
           },
-          select: {
-            id: true,
-            userId: true,
-            bodyMd: true,
-            createdAt: true,
+          include: {
             user: {
               select: {
                 displayName: true,
@@ -601,18 +633,16 @@ export async function listProposalDecisionStates(
         workspaceId: params.workspaceId,
         id: { in: proposalIds },
       },
-      select: {
-        id: true,
-        authorUserId: true,
-      },
     }),
   ]);
 
   const states = new Map<string, ProposalDecisionState>();
-  const proposalAuthorById = new Map(proposals.map((proposal) => [proposal.id, proposal.authorUserId]));
+  const permittedIds = await readableArtifactIds(actor, params.workspaceId, "Proposal", proposals);
+  const proposalAuthorById = new Map(proposals.filter((row) => permittedIds.has(row.id)).map((proposal) => [proposal.id, proposal.authorUserId]));
   const actorUserId = actor.kind === "user" ? actor.user.id : null;
 
   for (const flow of flows) {
+    if (!permittedIds.has(flow.subjectId) || !await approvalInputsReadable(actor, params.workspaceId, flow)) continue;
     const authorUserId = proposalAuthorById.get(flow.subjectId);
     const reviewers = eligibleMembers
       .filter((member) => !authorUserId || member.userId !== authorUserId)
@@ -674,6 +704,29 @@ export async function listProposalDecisionStates(
   return states;
 }
 
+/** Keep immutable history before a workflow reset clears its live review rows. */
+export async function preserveApprovalFlowHistory(tx: Prisma.TransactionClient, actor: AppActor,
+  workspaceId: string, flow: ApprovalFlow) {
+  const [decisions, objections] = await Promise.all([
+    tx.approvalDecision.findMany({ where: { flowId: flow.id } }),
+    tx.objection.findMany({ where: { flowId: flow.id } }),
+  ]);
+  const inputs = [
+    { kind: "ApprovalFlow" as const, row: flow },
+    ...decisions.map((row) => ({ kind: "ApprovalDecision" as const, row })),
+    ...objections.map((row) => ({ kind: "Objection" as const, row })),
+  ];
+  for (const { kind, row } of inputs) {
+    try {
+      await captureArtifactInputSnapshotProof(actor, workspaceId,
+        { kind, id: row.id, fingerprint: lineageContentFingerprint(kind, row) }, tx);
+    } catch (error) {
+      if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
+      await preserveUnknownArtifactInputSnapshot(tx, workspaceId, { kind, id: row.id }, row);
+    }
+  }
+}
+
 export async function withdrawActiveApprovalFlowForSubject(tx: Prisma.TransactionClient, params: {
   workspaceId: string;
   subjectType: string;
@@ -689,18 +742,15 @@ export async function withdrawActiveApprovalFlowForSubject(tx: Prisma.Transactio
       subjectId: params.subjectId,
       status: "ACTIVE",
     },
-    select: {
-      id: true,
-      workspaceId: true,
-      subjectType: true,
-      subjectId: true,
-    },
   });
 
   if (!flow) {
     return null;
   }
 
+  // This legacy internal writer has no requester proof. Preserve its prior
+  // content as history and make the rewritten result explicitly unknown.
+  await preserveUnknownArtifactInputSnapshot(tx, params.workspaceId, { kind: "ApprovalFlow", id: flow.id }, flow);
   const closedAt = params.now ?? new Date();
   const updated = await tx.approvalFlow.updateMany({
     where: {
@@ -723,6 +773,11 @@ export async function withdrawActiveApprovalFlowForSubject(tx: Prisma.Transactio
     return null;
   }
 
+  const after = await tx.approvalFlow.findFirst({ where: { id: flow.id, workspaceId: params.workspaceId } });
+  invariant(after, 409, "SOURCE_CHANGED", "Approval flow changed during withdrawal.");
+  await invalidateArtifactInputLineage({ tx, workspaceId: params.workspaceId,
+    artifact: { kind: "ApprovalFlow", id: flow.id }, content: after });
+
   await tx.auditLog.create({
     data: {
       workspaceId: params.workspaceId,
@@ -738,7 +793,7 @@ export async function withdrawActiveApprovalFlowForSubject(tx: Prisma.Transactio
     },
   });
 
-  return flow;
+  return { id: flow.id, workspaceId: flow.workspaceId, subjectType: flow.subjectType, subjectId: flow.subjectId };
 }
 
 export async function recordApprovalDecision(actor: AppActor, params: {
@@ -760,13 +815,19 @@ export async function recordApprovalDecision(actor: AppActor, params: {
 
     invariant(current && current.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Approval flow not found.");
     invariant(current.status === "ACTIVE", 400, "INVALID_STATE", "Approval flow is not active.");
+    invariant(await approvalInputsReadable(actor, params.workspaceId, current, tx), 409, "UNKNOWN_LINEAGE", "Approval inputs cannot be verified.");
+    const subjectRoots = await approvalSubjectRoots(tx, actor, current);
     await assertProposalAuthorCanReview(tx, current, actorUserId);
     assertConsentWindowOpen(current);
     validateDecisionChoice(current.mode, params.choice);
     const approverIds = await eligibleApproverIds(tx, params.workspaceId, await proposalAuthorUserIdForFlow(tx, current));
     invariant(approverIds.includes(membership.id), 403, "FORBIDDEN", "Only active reviewers can submit a decision.");
 
-    await tx.approvalDecision.upsert({
+    const previousDecision = current.decisions.find((decision) => decision.memberId === membership.id);
+    if (previousDecision) await captureArtifactInputSnapshotProof(actor, params.workspaceId,
+      { kind: "ApprovalDecision", id: previousDecision.id, fingerprint: lineageContentFingerprint("ApprovalDecision", previousDecision) }, tx);
+
+    const decision = await tx.approvalDecision.upsert({
       where: {
         flowId_memberId: {
           flowId: current.id,
@@ -785,6 +846,10 @@ export async function recordApprovalDecision(actor: AppActor, params: {
       },
     });
 
+    await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "ApprovalDecision", id: decision.id }, content: decision,
+      origin: "DERIVED", inputs: [], inheritedRoots: subjectRoots });
+
     const flow = await loadFlow(tx, current.id);
     invariant(flow, 404, "NOT_FOUND", "Approval flow not found.");
 
@@ -797,20 +862,16 @@ export async function recordApprovalDecision(actor: AppActor, params: {
       openObjections: flow.objections.length,
     });
 
+    const roots = await outcomeInputRoots(tx, actor, flow, approverIds);
     let nextStatus: ApprovalFlowStatus = flow.status;
 
     if (flow.subjectType === "PROPOSAL") {
-      await tx.approvalFlow.update({
-        where: { id: flow.id },
-        data: {
-          resultJson: outcome as Prisma.InputJsonValue,
-        },
-      });
+      await writeFlowOutcome(tx, actor, flow, roots, { resultJson: outcome as Prisma.InputJsonValue });
     } else if (flow.mode !== "CONSENT") {
       if (outcome.approved) {
         nextStatus = "APPROVED";
         await finalizeApprovalFlow(tx, {
-          flow,
+          actor, roots, flow,
           nextStatus: "APPROVED",
           outcome,
           eligibleApprovers: approverIds.length,
@@ -823,7 +884,7 @@ export async function recordApprovalDecision(actor: AppActor, params: {
       ) {
         nextStatus = "REJECTED";
         await finalizeApprovalFlow(tx, {
-          flow,
+          actor, roots, flow,
           nextStatus: "REJECTED",
           outcome,
           eligibleApprovers: approverIds.length,
@@ -831,20 +892,10 @@ export async function recordApprovalDecision(actor: AppActor, params: {
           finalizedBy: "decision",
         });
       } else {
-        await tx.approvalFlow.update({
-          where: { id: flow.id },
-          data: {
-            resultJson: outcome as Prisma.InputJsonValue,
-          },
-        });
+        await writeFlowOutcome(tx, actor, flow, roots, { resultJson: outcome as Prisma.InputJsonValue });
       }
     } else {
-      await tx.approvalFlow.update({
-        where: { id: flow.id },
-        data: {
-          resultJson: outcome as Prisma.InputJsonValue,
-        },
-      });
+      await writeFlowOutcome(tx, actor, flow, roots, { resultJson: outcome as Prisma.InputJsonValue });
     }
 
     await tx.auditLog.create({
@@ -904,6 +955,7 @@ export async function createObjection(actor: AppActor, params: {
     const flow = await loadFlow(tx, params.flowId);
 
     invariant(flow && flow.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Approval flow not found.");
+    invariant(await approvalInputsReadable(actor, params.workspaceId, flow, tx), 409, "UNKNOWN_LINEAGE", "Approval inputs cannot be verified.");
     invariant(flow.status === "ACTIVE", 400, "INVALID_STATE", "Approval flow is not active.");
     invariant(flow.mode === "CONSENT", 400, "INVALID_STATE", "Objections are only supported on consent flows.");
     await assertProposalAuthorCanReview(tx, flow, membership.userId);
@@ -923,6 +975,7 @@ export async function createObjection(actor: AppActor, params: {
     });
     invariant(!existing, 409, "ALREADY_EXISTS", "You already have an open objection on this flow.");
 
+    const subjectRoots = await approvalSubjectRoots(tx, actor, flow);
     const objection = await tx.objection.create({
       data: {
         flowId: flow.id,
@@ -930,6 +983,10 @@ export async function createObjection(actor: AppActor, params: {
         bodyMd,
       },
     });
+
+    await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Objection", id: objection.id }, content: objection,
+      origin: "DERIVED", inputs: [], inheritedRoots: subjectRoots });
 
     const refreshed = await loadFlow(tx, flow.id);
     invariant(refreshed, 404, "NOT_FOUND", "Approval flow not found.");
@@ -942,12 +999,8 @@ export async function createObjection(actor: AppActor, params: {
       openObjections: refreshed.objections.length,
     });
 
-    await tx.approvalFlow.update({
-      where: { id: flow.id },
-      data: {
-        resultJson: outcome as Prisma.InputJsonValue,
-      },
-    });
+    const roots = await outcomeInputRoots(tx, actor, refreshed, approverIds);
+    await writeFlowOutcome(tx, actor, refreshed, roots, { resultJson: outcome as Prisma.InputJsonValue });
 
     await tx.auditLog.create({
       data: {
@@ -1001,18 +1054,13 @@ export async function resolveObjection(actor: AppActor, params: {
     const flow = await loadFlow(tx, params.flowId);
 
     invariant(flow && flow.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Approval flow not found.");
+    invariant(await approvalInputsReadable(actor, params.workspaceId, flow, tx), 409, "UNKNOWN_LINEAGE", "Approval inputs cannot be verified.");
     invariant(flow.status === "ACTIVE", 400, "INVALID_STATE", "Approval flow is not active.");
     invariant(flow.mode === "CONSENT", 400, "INVALID_STATE", "Objections are only supported on consent flows.");
     assertConsentWindowOpen(flow);
 
     const objection = await tx.objection.findUnique({
       where: { id: params.objectionId },
-      select: {
-        id: true,
-        flowId: true,
-        userId: true,
-        resolvedAt: true,
-      },
     });
 
     invariant(objection && objection.flowId === flow.id, 404, "NOT_FOUND", "Objection not found.");
@@ -1025,12 +1073,17 @@ export async function resolveObjection(actor: AppActor, params: {
 
     invariant(canResolve, 403, "FORBIDDEN", "You cannot resolve this objection.");
 
-    await tx.objection.update({
+    await captureArtifactInputSnapshotProof(actor, params.workspaceId,
+      { kind: "Objection", id: objection.id, fingerprint: lineageContentFingerprint("Objection", objection) }, tx);
+    const updatedObjection = await tx.objection.update({
       where: { id: objection.id },
       data: {
         resolvedAt: new Date(),
       },
     });
+
+    await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Objection", id: objection.id }, before: objection, after: updatedObjection });
 
     const refreshed = await loadFlow(tx, flow.id);
     invariant(refreshed, 404, "NOT_FOUND", "Approval flow not found.");
@@ -1044,12 +1097,10 @@ export async function resolveObjection(actor: AppActor, params: {
       openObjections: refreshed.objections.length,
     });
 
-    await tx.approvalFlow.update({
-      where: { id: flow.id },
-      data: {
-        resultJson: outcome as Prisma.InputJsonValue,
-      },
-    });
+    const roots = await outcomeInputRoots(tx, actor, refreshed, approverIds);
+    roots.push(...await captureArtifactInputProof(actor, params.workspaceId,
+      [{ kind: "Objection", id: updatedObjection.id, snapshot: updatedObjection }], tx));
+    await writeFlowOutcome(tx, actor, refreshed, roots, { resultJson: outcome as Prisma.InputJsonValue });
 
     await tx.auditLog.create({
       data: {
@@ -1115,6 +1166,8 @@ export async function finalizeExpiredApprovalFlows(batchSize = EXPIRING_FLOW_BAT
         continue;
       }
 
+      const actor: AppActor = { kind: "agent", authProvider: "bootstrap", label: "approval-resolution", workspaceIds: [flow.workspaceId] };
+      if (!await approvalInputsReadable(actor, flow.workspaceId, flow, tx)) continue;
       const approverIds = await eligibleApproverIds(tx, flow.workspaceId);
       const outcome = calculateApprovalOutcome({
         mode: flow.mode,
@@ -1125,8 +1178,9 @@ export async function finalizeExpiredApprovalFlows(batchSize = EXPIRING_FLOW_BAT
         openObjections: flow.objections.length,
       });
 
+      const roots = await outcomeInputRoots(tx, actor, flow, approverIds);
       await finalizeApprovalFlow(tx, {
-        flow,
+        actor, roots, flow,
         nextStatus: outcome.approved ? "APPROVED" : "REJECTED",
         outcome,
         eligibleApprovers: approverIds.length,

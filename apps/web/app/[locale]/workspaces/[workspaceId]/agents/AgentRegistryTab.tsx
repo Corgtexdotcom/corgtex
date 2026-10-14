@@ -1,10 +1,12 @@
 import {
   buildAgentAuthoritySummaries,
   getModelUsageBudget,
+  requireWorkspaceMembership,
   getModelUsageSummary,
   listAgentConfigs,
   listAgentCredentials,
   listAgentIdentities,
+  listAgentRuns,
   type AgentAuthoritySummary,
 } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
@@ -60,7 +62,9 @@ function AgentAuthorityRow({
   agent,
   workspaceId,
   format,
+  canReadFinancials,
 }: {
+  canReadFinancials: boolean;
   agent: AgentAuthoritySummary;
   workspaceId: string;
   format: Awaited<ReturnType<typeof getFormatter>>;
@@ -108,9 +112,9 @@ function AgentAuthorityRow({
 
         <div className="stack" style={{ gap: 4 }}>
           <strong style={{ fontSize: "0.72rem", textTransform: "uppercase", color: "var(--muted)" }}>Limits</strong>
-          <span style={{ fontSize: "0.85rem" }}>{formatCents(agent.limits.maxSpendPerRunCents)} per run</span>
+          {canReadFinancials && <span style={{ fontSize: "0.85rem" }}>{formatCents(agent.limits.maxSpendPerRunCents)} per run</span>}
           <span className="nr-item-meta" style={{ fontSize: "0.76rem" }}>
-            {formatCount(agent.limits.maxRunsPerDay, "runs/day")} / workspace {agent.limits.workspaceBudgetConfigured ? formatUsd(agent.limits.workspaceMonthlyCostCapUsd) : "No cap"}
+            {formatCount(agent.limits.maxRunsPerDay, "runs/day")}{canReadFinancials && <> / workspace {agent.limits.workspaceBudgetConfigured ? formatUsd(agent.limits.workspaceMonthlyCostCapUsd) : "No cap"}</>}
           </span>
         </div>
 
@@ -118,7 +122,7 @@ function AgentAuthorityRow({
           <strong style={{ fontSize: "0.72rem", textTransform: "uppercase", color: "var(--muted)" }}>Approval & activity</strong>
           <span style={{ fontSize: "0.85rem" }}>{policyLabel(agent)}</span>
           <span className="nr-item-meta" style={{ fontSize: "0.76rem" }}>
-            {agent.approval.pendingApprovalCount} pending / {agent.recentActivity.runCount30d} runs / {formatUsd(agent.recentActivity.spend30dUsd, 4)}
+            {agent.approval.pendingApprovalCount} pending / {agent.recentActivity.runCount30d} runs{canReadFinancials && <> / {formatUsd(agent.recentActivity.spend30dUsd, 4)}</>}
           </span>
         </div>
 
@@ -188,6 +192,8 @@ export async function AgentRegistryTab({
   workspaceId: string;
   actor: AppActor;
 }) {
+  const membership = await requireWorkspaceMembership({actor, workspaceId});
+  const canReadFinancials = actor.kind === "user" && membership?.role === "ADMIN";
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
   const [
     identities,
@@ -202,37 +208,12 @@ export async function AgentRegistryTab({
     format,
   ] = await Promise.all([
     listAgentIdentities(actor, workspaceId),
-    getModelUsageSummary(actor, workspaceId, { periodDays: 30 }),
+    canReadFinancials ? getModelUsageSummary(actor, workspaceId, { periodDays: 30 }) : null,
     listAgentConfigs(actor, workspaceId),
     listAgentCredentials(actor, workspaceId),
-    getModelUsageBudget(actor, workspaceId),
-    prisma.agentRun.findMany({
-      where: { workspaceId },
-      orderBy: { createdAt: "desc" },
-      take: 100,
-      select: {
-        id: true,
-        agentKey: true,
-        status: true,
-        goal: true,
-        approvalRequired: true,
-        createdAt: true,
-        startedAt: true,
-      },
-    }),
-    prisma.agentRun.findMany({
-      where: { workspaceId, status: "WAITING_APPROVAL" },
-      orderBy: { createdAt: "desc" },
-      select: {
-        id: true,
-        agentKey: true,
-        status: true,
-        goal: true,
-        approvalRequired: true,
-        createdAt: true,
-        startedAt: true,
-      },
-    }),
+    canReadFinancials ? getModelUsageBudget(actor, workspaceId) : null,
+    listAgentRuns(actor, workspaceId, { take: 100 }),
+    listAgentRuns(actor, workspaceId, { status: "WAITING_APPROVAL", take: null }),
     prisma.agentRun.groupBy({
       by: ["agentKey"],
       where: { workspaceId, createdAt: { gte: thirtyDaysAgo } },
@@ -248,7 +229,7 @@ export async function AgentRegistryTab({
     credentials,
     recentRuns,
     pendingApprovalRuns,
-    usageByAgent: usageSummary.byAgent,
+    usageByAgent: usageSummary?.byAgent ?? [],
     runCountsByAgent: (runCounts as Array<{ agentKey: string; _count: { _all: number } }>)
       .map((row) => ({ agentKey: row.agentKey, count: row._count._all })),
     workspaceBudget: budget
@@ -275,6 +256,7 @@ export async function AgentRegistryTab({
             agent={agent}
             workspaceId={workspaceId}
             format={format}
+            canReadFinancials={canReadFinancials}
           />
         ))}
         {authoritySummaries.length === 0 && (

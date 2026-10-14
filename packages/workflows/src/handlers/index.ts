@@ -4,3 +4,5 @@ export * from "./context-graph-maintenance";
 export * from "./agent-dispatch";
 export * from "./governance";
 export * from "./finance-report-import";
+
+export * from "./source-lineage-rebuild";

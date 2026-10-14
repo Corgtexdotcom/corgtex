@@ -105,7 +105,7 @@ describe("Meetings filters", () => {
       meeting("recovery", "SCHEDULED", null, 3),
       meeting("future", "SCHEDULED", null, 9),
     ];
-    mocks.listMeetings.mockReset().mockImplementation(async (_workspaceId, options: { status: string }) => (
+    mocks.listMeetings.mockReset().mockImplementation(async (_actor, _workspaceId, options: { status: string }) => (
       options.status === "COMPLETED" ? mocks.completed : mocks.scheduled
     ));
   });

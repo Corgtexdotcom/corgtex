@@ -32,12 +32,36 @@ describe("demo legacy credential retirement", () => {
       const recording = await prisma.meetingRecording.create({ data: { workspaceId: workspace.id, meetingId: meeting.id, provider: "RECALL_AI", externalBotId: key, meetingUrl: "https://example.test", status: "SCHEDULED" } });
       await expect(assertDemoWorkspaceDisconnected(prisma, workspace.id)).rejects.toThrow("recording authority");
       await prisma.meetingRecording.delete({ where: { id: recording.id } });
+      // Recorder retirement emits real permission work; neither pending nor
+      // dispatched history may be treated as a disconnected workspace.
+      await expect(assertDemoWorkspaceDisconnected(prisma, workspace.id)).rejects.toThrow("asynchronous authority");
+      const recordingEvents = await prisma.event.findMany({ where: { workspaceId: workspace.id,
+        type: "source-permission.changed", status: "PENDING",
+        payload: { path: ["governors"], array_contains: [{ kind: "MeetingRecording", id: recording.id }] } } });
+      expect(recordingEvents.length).toBeGreaterThan(0);
+      const recordingEventIds = recordingEvents.map(event => event.id);
+      const dispatched = await prisma.event.updateMany({ where: { workspaceId: workspace.id, type: "source-permission.changed",
+        id: { in: recordingEventIds }, status: "PENDING" }, data: { status: "DISPATCHED", dispatchedAt: new Date() } });
+      expect(dispatched.count).toBe(recordingEventIds.length);
+      await expect(assertDemoWorkspaceDisconnected(prisma, workspace.id)).rejects.toThrow("asynchronous authority");
+      // Remove only this synthetic recording's identified events to reach the independent billing negative.
+      await prisma.event.deleteMany({ where: { workspaceId: workspace.id, type: "source-permission.changed", id: { in: recordingEventIds } } });
       const billing = await prisma.workspaceBillingProfile.create({ data: { workspaceId: workspace.id, stripeCustomerId: `synthetic-${key}` } });
       await expect(assertDemoWorkspaceDisconnected(prisma, workspace.id)).rejects.toThrow("billing authority");
       await prisma.workspaceBillingProfile.delete({ where: { id: billing.id } });
       const anonymousAgent = await prisma.agentCredential.create({ data: { workspaceId: workspace.id, label: "Synthetic bootstrap", tokenHash: `bootstrap-${key}`, scopes: [] } });
       await expect(assertDemoWorkspaceDisconnected(prisma, workspace.id, [user.id])).rejects.toThrow("non-fixture credentials");
       await prisma.agentCredential.delete({ where: { id: anonymousAgent.id } });
+      // Removing live authority emits durable rebuild work. The disconnection
+      // guard must remain closed until that synthetic work has been settled.
+      await expect(assertDemoWorkspaceDisconnected(prisma, workspace.id)).rejects.toThrow("asynchronous authority");
+      const permissionEvents = await prisma.event.findMany({ where: { workspaceId: workspace.id, type: "source-permission.changed", status: "PENDING" } });
+      expect(permissionEvents.length).toBeGreaterThan(0);
+      await prisma.event.updateMany({ where: { id: { in: permissionEvents.map(event => event.id) } }, data: { status: "DISPATCHED", dispatchedAt: new Date() } });
+      await expect(assertDemoWorkspaceDisconnected(prisma, workspace.id)).rejects.toThrow("asynchronous authority");
+      // This guard intentionally refuses even dispatched history. Remove only
+      // these known synthetic events to isolate the credential retirement case.
+      await prisma.event.deleteMany({ where: { id: { in: permissionEvents.map(event => event.id) } } });
       await assertDemoWorkspaceDisconnected(prisma, workspace.id);
       const app = await prisma.oAuthApp.create({ data: { workspaceId: workspace.id, clientId: key, clientSecret: "unused", name: "Synthetic legacy app", redirectUris: [], scopes: [] } });
       const client = await prisma.mcpOAuthClient.create({ data: { clientId: key, name: "Synthetic legacy client", redirectUris: [], scopes: [] } });

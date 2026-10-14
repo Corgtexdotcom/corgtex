@@ -23,7 +23,13 @@ vi.mock("./pptx-extraction", async (importOriginal) => {
 });
 
 vi.mock("./retrieval", () => ({ invalidateKnowledgeCache: vi.fn() }));
+vi.mock("../../domain/src/source-lineage", () => ({
+  currentArtifactInputRoots: vi.fn().mockResolvedValue(null),
+}));
 
+vi.mock("../../domain/src/producer-lineage", () => ({
+  prepareProducerLineage: vi.fn(async () => ({ mode: "DERIVED", inputs: [], roots: [] })), finishProducerLineage: vi.fn(),
+}));
 vi.mock("@corgtex/shared", () => ({
   prisma: {
     $transaction: vi.fn((cb) => cb({
@@ -45,6 +51,13 @@ vi.mock("@corgtex/shared", () => ({
 
 vi.mock("@corgtex/domain", () => ({
   appendEvents: vi.fn(),
+  isArtifactInputProofReadable: vi.fn(async () => true),
+  mergeArtifactInputProofs: (...roots: any[][]) => roots.flat(),
+  captureArtifactInputProof: vi.fn(async (_actor, _ws, inputs) => inputs.map((input: any) => ({ kind: input.kind, id: input.id, fingerprint: "fixture" }))),
+  captureImmutableArtifactInputProof: vi.fn(async (_actor, _ws, roots) => roots),
+  readableArtifactIds: vi.fn(async (_actor, _ws, _kind, rows) => new Set(rows.map((row: any) => row.id))),
+  preserveUnknownArtifactInputSnapshot: vi.fn(), filterReadableDocuments: vi.fn(async (_actor, _ws, rows) => rows),
+  getDocument: vi.fn(async (_actor, _ws, id) => { const { prisma } = await import("@corgtex/shared"); return (prisma as any).document.findFirst({ where: { id } }); }),
   checkWorkspaceDuplicateGuard: vi.fn().mockResolvedValue(null),
   duplicateGuardAuditMeta: vi.fn(() => ({})),
   duplicateGuardContentHash: vi.fn((value?: string | null) => value?.trim() ? `hash:${value.trim()}` : null),
@@ -250,7 +263,7 @@ describe("file-ingestion", () => {
 
     expect(checkWorkspaceDuplicateGuard).toHaveBeenCalledWith(expect.objectContaining({
       contentHash: extracted.contentHash,
-    }), undefined);
+    }), undefined, undefined, expect.any(Function));
     const txCallback = vi.mocked(prisma.$transaction).mock.calls[0][0] as any;
     const txObj = {
       document: { create: vi.fn().mockResolvedValue({ id: "doc1", title: "Synthetic", source: "brain-upload" }) },
@@ -494,7 +507,7 @@ describe("file-ingestion", () => {
     );
     expect(checkWorkspaceDuplicateGuard).toHaveBeenCalledWith(expect.objectContaining({
       contentHash: createHash("sha256").update(fileBuffer).digest("hex"),
-    }), undefined);
+    }), undefined, undefined, expect.any(Function));
   });
 
   it("returns an existing document for duplicate file uploads without storing a new blob", async () => {
@@ -648,9 +661,7 @@ describe("file-ingestion", () => {
       where: expect.objectContaining({ metadata: { path: ["documentId"], equals: "doc-existing" } }),
     }));
     expect(txObj.brainArticle.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ OR: expect.arrayContaining([
-        { sourceIds: { hasSome: ["source-archived", "source-existing"] } },
-      ]) }),
+      where: { workspaceId: "ws_1", archivedAt: null },
     }));
     expect(archiveWorkspaceArtifact).not.toHaveBeenCalled();
     expect(txObj.knowledgeChunk.deleteMany).toHaveBeenCalledWith({

@@ -6,6 +6,8 @@ import { AppError, invariant } from "./errors";
 import { appendEvents } from "./events";
 import { requireFinanceReportImportHumanWriteAccess } from "./finance";
 import { createFinanceImportBatchWithArtifactOwnership } from "./finance-import-artifact-ownership";
+import { captureFinanceUploadInputs } from "./finance-import-lineage";
+import { advanceHumanArtifactInputLineage, captureArtifactInputProof, isArtifactInputProofReadable, recordArtifactInputLineage } from "./source-lineage";
 import { lockAndAssertTrialStorageCapacity } from "./trial-entitlements";
 
 export const FINANCE_REPORT_IMPORT_MAX_FILE_BYTES = 25 * 1024 * 1024;
@@ -89,7 +91,11 @@ async function reserveUpload(actor: Extract<AppActor, { kind: "user" }>, params:
       const winner = await tx.financeImportBatch.findUnique({
         where: { workspaceId_fileHash: { workspaceId: params.workspaceId, fileHash: params.fileHash } },
       });
-      if (winner) return { batch: winner, created: false };
+      if (winner) {
+        await captureFinanceUploadInputs(actor, winner, tx);
+        return { batch: winner, created: false };
+      }
+      await requireFinanceReportImportHumanWriteAccess(actor, params.workspaceId);
       await lockAndAssertTrialStorageCapacity(tx, params.workspaceId, params.fileSizeBytes);
       const batchId = randomUUID();
       const documentId = randomUUID();
@@ -102,12 +108,16 @@ async function reserveUpload(actor: Extract<AppActor, { kind: "user" }>, params:
         size: params.fileSizeBytes,
         extraction: { status: "pending" },
       } as Prisma.InputJsonObject;
-      await tx.document.create({ data: {
+      const document = await tx.document.create({ data: {
         id: documentId, workspaceId: params.workspaceId, accessDomain: "FINANCE",
         title: params.originalFilename, source: "finance-report-import", mimeType: params.mimeType,
         storageKey, metadata,
       } });
-      await tx.brainSource.create({ data: {
+      await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "Document", id: documentId }, content: document, origin: "HUMAN_ORIGINAL", inputs: [] });
+      const documentRoots = await captureArtifactInputProof(actor, params.workspaceId,
+        [{ kind: "Document", id: documentId, snapshot: document }], tx);
+      const source = await tx.brainSource.create({ data: {
         id: brainSourceId, workspaceId: params.workspaceId, accessDomain: "FINANCE",
         sourceType: "FILE_UPLOAD", tier: 2, title: params.originalFilename,
         channel: "finance-report-import", content: "Finance report upload pending extraction.",
@@ -121,6 +131,20 @@ async function reserveUpload(actor: Extract<AppActor, { kind: "user" }>, params:
         stage: "FAILED", safeErrorCode: STORAGE_PENDING,
         safeErrorMessage: "The report upload is being stored.",
       });
+      const input = await tx.financeReportUploadInput.create({ data: { workspaceId: params.workspaceId,
+        batchId, documentId, brainSourceId, uploadedByUserId: actor.user.id, fileHash: params.fileHash,
+        storageKey, mimeType: params.mimeType, fileSizeBytes: params.fileSizeBytes, originalFilename: params.originalFilename } });
+      const uploadRoots = await captureArtifactInputProof(actor, params.workspaceId,
+        [{ kind: "FinanceReportUploadInput", id: input.id, snapshot: input }], tx);
+      await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "BrainSource", id: brainSourceId }, content: source, origin: "DERIVED", inputs: [],
+        inheritedRoots: [...documentRoots, ...uploadRoots] });
+      const batchRoots = await captureArtifactInputProof(actor, params.workspaceId, [
+        { kind: "Document", id: documentId, snapshot: document }, { kind: "BrainSource", id: brainSourceId, snapshot: source },
+        { kind: "FinanceReportUploadInput", id: input.id, snapshot: input },
+      ], tx);
+      await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "FinanceImportBatch", id: batch.id }, content: batch, origin: "DERIVED", inputs: [], inheritedRoots: batchRoots });
       return { batch, created: true };
     });
   } catch (error) {
@@ -129,21 +153,33 @@ async function reserveUpload(actor: Extract<AppActor, { kind: "user" }>, params:
   }
 }
 
-async function markStorageUnavailable(batch: FinanceImportBatch) {
-  await prisma.financeImportBatch.updateMany({
-    where: { id: batch.id, workspaceId: batch.workspaceId, version: batch.version, stage: batch.stage, workflowJobId: batch.workflowJobId },
-    data: { stage: "FAILED", safeErrorCode: STORAGE_UNAVAILABLE, safeErrorMessage: "The report could not be stored. Please try again.", version: { increment: 1 } },
+async function markStorageUnavailable(batch: FinanceImportBatch, actor: Extract<AppActor, { kind: "user" }>) {
+  await prisma.$transaction(async tx => {
+    await captureFinanceUploadInputs(actor, batch, tx);
+    await captureArtifactInputProof(actor, batch.workspaceId, [{ kind: "FinanceImportBatch", id: batch.id, snapshot: batch }], tx);
+    const updated = await tx.financeImportBatch.updateMany({
+      where: { id: batch.id, workspaceId: batch.workspaceId, version: batch.version, stage: batch.stage, workflowJobId: batch.workflowJobId },
+      data: { stage: "FAILED", safeErrorCode: STORAGE_UNAVAILABLE, safeErrorMessage: "The report could not be stored. Please try again.", version: { increment: 1 } },
+    });
+    if (updated.count === 1) {
+      const after = await tx.financeImportBatch.findUniqueOrThrow({ where: { id_workspaceId: { id: batch.id, workspaceId: batch.workspaceId } } });
+      await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: batch.workspaceId,
+        artifact: { kind: "FinanceImportBatch", id: batch.id }, before: batch, after, allowSystemTransition: true });
+    }
   }).catch(() => undefined);
 }
 
-async function finalizeUpload(batch: FinanceImportBatch, actorUserId: string, format: FinanceFileFormat,
+async function finalizeUpload(batch: FinanceImportBatch, actor: Extract<AppActor, { kind: "user" }>, format: FinanceFileFormat,
   initialRecoveryJob: RecoverableExtractionJob | null) {
   let current = batch;
   let recoveryJob = initialRecoveryJob;
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    await captureFinanceUploadInputs(actor, current);
     if (current.stage === "UPLOADED" && !current.safeErrorCode && !recoveryJob) return current;
     invariant(resumable(current, recoveryJob), 409, "FINANCE_REPORT_UPLOAD_CONFLICT", "The report upload changed. Refresh and try again.");
     const updated = await prisma.$transaction(async (tx) => {
+      await captureFinanceUploadInputs(actor, current, tx);
+      await captureArtifactInputProof(actor, current.workspaceId, [{ kind: "FinanceImportBatch", id: current.id, snapshot: current }], tx);
       const where: Prisma.FinanceImportBatchWhereInput = recoveryJob
         ? { id: current.id, workspaceId: current.workspaceId, version: current.version,
             stage: current.stage, workflowJobId: current.workflowJobId }
@@ -172,17 +208,13 @@ async function finalizeUpload(batch: FinanceImportBatch, actorUserId: string, fo
         payload: { batchId: current.id },
       }]);
       await tx.auditLog.create({ data: {
-        workspaceId: current.workspaceId, actorUserId, action: "finance-report-import.uploaded",
+        workspaceId: current.workspaceId, actorUserId: actor.user.id, action: "finance-report-import.uploaded",
         entityType: "FinanceImportBatch", entityId: current.id,
         meta: { format, mimeType: current.mimeType, fileSizeBytes: current.fileSizeBytes },
       } });
-      const finalized: FinanceImportBatch = {
-        ...current,
-        stage: "UPLOADED", workflowJobId: null, retryCount: 0,
-        safeErrorCode: null,
-        safeErrorMessage: null,
-        version: current.version + 1,
-      };
+      const finalized = await tx.financeImportBatch.findUniqueOrThrow({ where: { id_workspaceId: { id: current.id, workspaceId: current.workspaceId } } });
+      await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: current.workspaceId,
+        artifact: { kind: "FinanceImportBatch", id: current.id }, before: current, after: finalized, allowSystemTransition: true });
       return finalized;
     });
     if (updated) return updated;
@@ -209,6 +241,7 @@ export async function createFinanceReportImportUpload(actor: AppActor, params: {
   const file = fileEnvelope(params.fileName, params.mimeType);
   const fileHash = createHash("sha256").update(snapshot).digest("hex");
   const existing = await prisma.financeImportBatch.findUnique({ where: { workspaceId_fileHash: { workspaceId: params.workspaceId, fileHash } } });
+  if (existing) await captureFinanceUploadInputs(actor, existing);
   const existingRecoveryJob = existing ? await recoverableExtractionJob(existing) : null;
   if (existing && !resumable(existing, existingRecoveryJob)) return { batch: existing, reused: true };
   const reservation = existing ? { batch: existing, created: false } : await reserveUpload(actor, {
@@ -218,22 +251,26 @@ export async function createFinanceReportImportUpload(actor: AppActor, params: {
   const recoveryJob = existing ? existingRecoveryJob
     : reservation.created ? null : await recoverableExtractionJob(reservation.batch);
   if (!resumable(reservation.batch, recoveryJob)) return { batch: reservation.batch, reused: true };
+  const captured = await captureFinanceUploadInputs(actor, reservation.batch);
   const storage = params.storage ?? defaultStorage;
   const storageKey = storageKeyFor(params.workspaceId, fileHash, reservation.batch.mimeType);
   try {
     await storage.put(storageKey, snapshot, { contentType: reservation.batch.mimeType });
   } catch {
-    await markStorageUnavailable(reservation.batch);
+    await markStorageUnavailable(reservation.batch, actor);
     const winner = await prisma.financeImportBatch.findUnique({
       where: { id_workspaceId: { id: reservation.batch.id, workspaceId: reservation.batch.workspaceId } },
     }).catch(() => null);
     if (winner?.stage === "UPLOADED" && !winner.safeErrorCode) {
+      await captureFinanceUploadInputs(actor, winner);
       return { batch: winner, reused: true };
     }
     throw new AppError(503, STORAGE_UNAVAILABLE, "The report could not be stored. Please try again.");
   }
   try {
-    const batch = await finalizeUpload(reservation.batch, actor.user.id,
+    invariant(await isArtifactInputProofReadable(actor, params.workspaceId, captured.roots),
+      409, "SOURCE_CHANGED", "The report inputs or permissions changed during upload.");
+    const batch = await finalizeUpload(reservation.batch, actor,
       formatForMimeType(reservation.batch.mimeType), recoveryJob);
     return { batch, reused: !reservation.created };
   } catch (error) {

@@ -1,4 +1,7 @@
 import type { Prisma } from "@prisma/client";
+import type { AppActor } from "@corgtex/shared";
+import { meetingTranscriptInputProjection, type LineageInput, type LineageRoot } from "@corgtex/domain";
+import { captureNotificationEventRoots, notificationProducerActor } from "./notification-event-lineage";
 
 type NotificationDraft = {
   type: string;
@@ -32,50 +35,6 @@ function isReplayEvent(payload: unknown) {
   }
 
   return typeof runtimeMeta.replayOfEventId === "string" && runtimeMeta.replayOfEventId.trim().length > 0;
-}
-
-async function visiblePublicationTitle(
-  tx: Prisma.TransactionClient,
-  event: { type: string; workspaceId: string | null; aggregateId: string | null },
-): Promise<string | null | undefined> {
-  if (event.type !== "action.published" && event.type !== "tension.published") {
-    return undefined;
-  }
-  if (!event.workspaceId || !event.aggregateId) {
-    return null;
-  }
-
-  if (event.type === "action.published") {
-    // Hold the row until notification intents are committed in the caller's
-    // transaction. A concurrent return to draft or archive must complete
-    // before this visibility read or wait until after the intents commit.
-    await tx.$queryRaw`SELECT "id" FROM "Action" WHERE "id" = ${event.aggregateId} AND "workspaceId" = ${event.workspaceId} FOR UPDATE`;
-    const action = await tx.action.findFirst({
-      where: {
-        id: event.aggregateId,
-        workspaceId: event.workspaceId,
-        isPrivate: false,
-        status: { not: "DRAFT" },
-        archivedAt: null,
-        duplicateOfActionId: null,
-      },
-      select: { title: true },
-    });
-    return action?.title ?? null;
-  }
-
-  await tx.$queryRaw`SELECT "id" FROM "Tension" WHERE "id" = ${event.aggregateId} AND "workspaceId" = ${event.workspaceId} FOR UPDATE`;
-  const tension = await tx.tension.findFirst({
-    where: {
-      id: event.aggregateId,
-      workspaceId: event.workspaceId,
-      isPrivate: false,
-      status: { not: "DRAFT" },
-      archivedAt: null,
-    },
-    select: { title: true },
-  });
-  return tension?.title ?? null;
 }
 
 export function deriveNotificationsForEvent(event: {
@@ -142,16 +101,33 @@ export function deriveNotificationsForEvent(event: {
 export async function deriveDispatchNotifications(
   tx: Prisma.TransactionClient,
   event: Parameters<typeof deriveNotificationsForEvent>[0] & { aggregateId: string | null },
-) {
-  if (isReplayEvent(event.payload)) {
-    return [] satisfies NotificationDraft[];
-  }
-
-  const publicationTitle = await visiblePublicationTitle(tx, event);
-  if (publicationTitle === null) {
-    return [] satisfies NotificationDraft[];
-  }
-  return deriveNotificationsForEvent(publicationTitle === undefined
-    ? event
-    : { ...event, payload: { ...(isObjectRecord(event.payload) ? event.payload : {}), title: publicationTitle } });
+): Promise<Array<NotificationDraft & { lineageActor: AppActor; lineageRoots: LineageRoot[] }>> {
+  if (!event.workspaceId || !event.aggregateId || isReplayEvent(event.payload)) return [];
+  const workspaceId = event.workspaceId, id = event.aggregateId;
+  let kind: LineageInput["kind"];
+  let row: { id: string; title: string | null; [key: string]: unknown } | null;
+  if (event.type === "action.published" && event.aggregateType === "Action") {
+    kind = "Action";
+    await tx.$queryRaw`SELECT id FROM "Action" WHERE id = ${id} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+    row = await tx.action.findFirst({ where: { id, workspaceId, isPrivate: false, status: { not: "DRAFT" }, archivedAt: null, duplicateOfActionId: null } });
+  } else if (event.type === "tension.published" && event.aggregateType === "Tension") {
+    kind = "Tension";
+    await tx.$queryRaw`SELECT id FROM "Tension" WHERE id = ${id} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+    row = await tx.tension.findFirst({ where: { id, workspaceId, isPrivate: false, status: { not: "DRAFT" }, archivedAt: null } });
+  } else if (["proposal.submitted", "proposal.opened"].includes(event.type) && event.aggregateType === "Proposal") {
+    kind = "Proposal";
+    await tx.$queryRaw`SELECT id FROM "Proposal" WHERE id = ${id} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+    row = await tx.proposal.findFirst({ where: { id, workspaceId, isPrivate: false, status: { not: "DRAFT" }, archivedAt: null } });
+  } else if (event.type === "meeting.created" && event.aggregateType === "Meeting") {
+    kind = "MeetingTranscript";
+    await tx.$queryRaw`SELECT id FROM "Meeting" WHERE id = ${id} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+    row = await tx.meeting.findFirst({ where: { id, workspaceId, archivedAt: null } });
+  } else return [];
+  if (!row) return [];
+  const snapshot = kind === "MeetingTranscript" ? meetingTranscriptInputProjection(row) : row;
+  const lineageRoots = await captureNotificationEventRoots(tx, workspaceId, [{ kind, id: row.id, snapshot }]);
+  if (!lineageRoots) return [];
+  return deriveNotificationsForEvent({ ...event, payload: { title: row.title } }).map((draft) => ({
+    ...draft, lineageActor: notificationProducerActor(workspaceId), lineageRoots,
+  }));
 }

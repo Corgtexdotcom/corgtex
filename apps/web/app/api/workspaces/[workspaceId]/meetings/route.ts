@@ -27,7 +27,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const actor = await resolveRequestActor(request);
     await requireWorkspaceMembership({ actor, workspaceId });
     const archiveFilter = request.nextUrl.searchParams.get("archiveFilter") as ArchiveFilter | null;
-    const meetings = await listMeetings(workspaceId, { archiveFilter: archiveFilter ?? undefined });
+    const meetings = await listMeetings(actor, workspaceId, { archiveFilter: archiveFilter ?? undefined });
     return NextResponse.json({ meetings });
   } catch (error) {
     return handleRouteError(error);

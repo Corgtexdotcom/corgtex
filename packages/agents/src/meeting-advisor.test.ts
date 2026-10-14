@@ -1,11 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { meetingContextFromReplayFixture, operationsTacticalReplayFixture } from "./meeting-transcript-replay-fixtures";
 
-const { buildMeetingIntelligenceContextMock, syncKnowledgeForSourceMock } = vi.hoisted(() => ({
+const { buildMeetingIntelligenceContextMock, syncKnowledgeForSourceMock, isArtifactInputProofReadableMock, persistMeetingSummaryWithLineageMock } = vi.hoisted(() => ({
   buildMeetingIntelligenceContextMock: vi.fn(),
   syncKnowledgeForSourceMock: vi.fn(),
+  isArtifactInputProofReadableMock: vi.fn(),
+  persistMeetingSummaryWithLineageMock: vi.fn(),
 }));
 
+const runtimeLineage = vi.hoisted(() => ({ capture: vi.fn(), snapshot: vi.fn(), immutable: vi.fn(), record: vi.fn(), invalidate: vi.fn(), observe: vi.fn() }));
 const prismaMock = {
   agentRun: {
     findFirst: vi.fn(),
@@ -14,11 +17,13 @@ const prismaMock = {
     update: vi.fn(),
   },
   agentStep: {
+    findMany: vi.fn(),
     create: vi.fn(),
     createMany: vi.fn(),
     update: vi.fn(),
   },
   agentToolCall: {
+    findMany: vi.fn(),
     create: vi.fn(),
     createMany: vi.fn(),
     update: vi.fn(),
@@ -60,7 +65,13 @@ vi.mock("@corgtex/domain", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@corgtex/domain")>();
   return {
     ...actual,
+    captureArtifactInputProof: runtimeLineage.capture, captureArtifactInputSnapshotProof: runtimeLineage.snapshot,
+    captureImmutableArtifactInputProof: runtimeLineage.immutable,
+    recordArtifactInputLineage: runtimeLineage.record, invalidateArtifactInputLineage: runtimeLineage.invalidate,
+    withArtifactInputReadCapture: runtimeLineage.observe,
     buildMeetingIntelligenceContext: buildMeetingIntelligenceContextMock,
+    isArtifactInputProofReadable: isArtifactInputProofReadableMock,
+    persistMeetingSummaryWithLineage: persistMeetingSummaryWithLineageMock,
     isAgentEnabled: vi.fn().mockResolvedValue(true),
     getAgentModelOverride: vi.fn().mockResolvedValue(undefined),
     resolveAgentIdentityLimits: vi.fn().mockResolvedValue(null),
@@ -88,7 +99,25 @@ vi.mock("@corgtex/models", async (importOriginal) => {
 
 describe("runMeetingSummaryAgent", () => {
   beforeEach(() => {
+    runtimeLineage.capture.mockReset().mockImplementation(async (_actor, _workspaceId, inputs) => inputs.map((input: { kind: string; id: string }) => ({ kind: input.kind, id: input.id, fingerprint: "a".repeat(64) })));
+    runtimeLineage.snapshot.mockReset().mockImplementation(async (_actor, _workspaceId, input) => [{ kind: "ArtifactInputSnapshot", id: `snapshot-${input.kind}-${input.id}`, fingerprint: input.fingerprint }]);
+    runtimeLineage.immutable.mockReset().mockImplementation(async (_actor, _workspaceId, roots) => structuredClone(roots));
+    runtimeLineage.record.mockReset().mockResolvedValue({}); runtimeLineage.invalidate.mockReset().mockResolvedValue({});
+    runtimeLineage.observe.mockReset().mockImplementation(async (_actor, _workspaceId, work) => ({ value: await work(), roots: [{ kind: "Workspace", id: "ws-1", fingerprint: "a".repeat(64) }] }));
     envMock.AGENT_KILL_SWITCH = false;
+    isArtifactInputProofReadableMock.mockReset().mockResolvedValue(true);
+    persistMeetingSummaryWithLineageMock.mockReset().mockImplementation(async (_actor, params) => {
+      // Existing summary formatting fixtures collect writes here; domain tests exercise the real atomic writer.
+      const loadedContext = await buildMeetingIntelligenceContextMock.mock.results.at(-1)?.value;
+      const meeting = loadedContext?.meeting;
+      const result = await prismaMock.meeting.updateMany({ where: {
+        id: params.meetingId, workspaceId: params.workspaceId, summaryMd: meeting?.summaryMd,
+        transcript: meeting?.transcript, ingestionGuidanceMd: meeting?.ingestionGuidanceMd,
+      }, data: { summaryMd: params.summaryMd, blocksJson: params.blocksJson } });
+      if (result.count) return result;
+      const current = await prismaMock.meeting.findUnique({ where: { id: params.meetingId } });
+      return { count: 0, reason: current?.workspaceId === params.workspaceId ? "source_changed" : "missing_meeting" };
+    });
     envMock.WORKSPACE_AGENT_MAX_CONCURRENCY = 4;
 
     prismaMock.agentRun.findFirst.mockReset().mockResolvedValue(null);
@@ -99,6 +128,8 @@ describe("runMeetingSummaryAgent", () => {
       ...data,
     }));
 
+    prismaMock.agentStep.findMany.mockImplementation(async () => prismaMock.agentStep.createMany.mock.calls.at(-1)?.[0].data ?? []);
+    prismaMock.agentToolCall.findMany.mockImplementation(async () => prismaMock.agentToolCall.createMany.mock.calls.at(-1)?.[0].data ?? []);
     prismaMock.agentStep.createMany.mockReset().mockResolvedValue({ count: 0 });
     prismaMock.agentToolCall.createMany.mockReset().mockResolvedValue({ count: 0 });
     prismaMock.event.create.mockReset().mockResolvedValue({ id: "event-1" });
@@ -106,6 +137,9 @@ describe("runMeetingSummaryAgent", () => {
     syncKnowledgeForSourceMock.mockReset().mockResolvedValue(1);
 
     buildMeetingIntelligenceContextMock.mockReset().mockResolvedValue({
+      lineageInputs: [{ kind: "MeetingTranscript", id: "meeting-1" }],
+      lineageRoots: [{ kind: "MeetingTranscript", id: "meeting-1", fingerprint: "a".repeat(64) }],
+      sourceStateHash: "fixture-state",
       contextualIntelligenceEnabled: true,
       meeting: {
         id: "meeting-1",
@@ -205,6 +239,9 @@ describe("runMeetingSummaryAgent", () => {
       usage: modelUsage,
     });
     buildMeetingIntelligenceContextMock.mockResolvedValueOnce({
+      lineageInputs: [{ kind: "MeetingTranscript", id: "meeting-1" }],
+      lineageRoots: [{ kind: "MeetingTranscript", id: "meeting-1", fingerprint: "a".repeat(64) }],
+      sourceStateHash: "fixture-state",
       contextualIntelligenceEnabled: true,
       meeting: {
         id: "meeting-1",
@@ -280,7 +317,9 @@ describe("runMeetingSummaryAgent", () => {
       content: fixture.expectedSummaryMd,
       usage: modelUsage,
     });
-    buildMeetingIntelligenceContextMock.mockResolvedValueOnce(meetingContextFromReplayFixture(fixture));
+    buildMeetingIntelligenceContextMock.mockResolvedValueOnce({ ...meetingContextFromReplayFixture(fixture),
+      lineageInputs: [{ kind: "MeetingTranscript", id: fixture.meetingId }],
+      lineageRoots: [{ kind: "MeetingTranscript", id: fixture.meetingId, fingerprint: "a".repeat(64) }], sourceStateHash: "fixture-state" });
 
     const { runMeetingSummaryAgent } = await import(".");
     await runMeetingSummaryAgent({
@@ -364,6 +403,9 @@ describe("runMeetingSummaryAgent", () => {
       usage: modelUsage,
     });
     buildMeetingIntelligenceContextMock.mockResolvedValueOnce({
+      lineageInputs: [{ kind: "MeetingTranscript", id: "meeting-1" }],
+      lineageRoots: [{ kind: "MeetingTranscript", id: "meeting-1", fingerprint: "a".repeat(64) }],
+      sourceStateHash: "fixture-state",
       contextualIntelligenceEnabled: false,
       meeting: {
         id: "meeting-long",
@@ -417,6 +459,9 @@ describe("runMeetingSummaryAgent", () => {
       usage: modelUsage,
     });
     buildMeetingIntelligenceContextMock.mockResolvedValueOnce({
+      lineageInputs: [{ kind: "MeetingTranscript", id: "meeting-1" }],
+      lineageRoots: [{ kind: "MeetingTranscript", id: "meeting-1", fingerprint: "a".repeat(64) }],
+      sourceStateHash: "fixture-state",
       contextualIntelligenceEnabled: false,
       meeting: {
         id: "meeting-1",
@@ -490,6 +535,9 @@ describe("runMeetingSummaryAgent", () => {
     vi.mocked(defaultModelGateway.extract).mockClear();
     vi.mocked(defaultModelGateway.chat).mockClear();
     buildMeetingIntelligenceContextMock.mockResolvedValueOnce({
+      lineageInputs: [{ kind: "MeetingTranscript", id: "meeting-1" }],
+      lineageRoots: [{ kind: "MeetingTranscript", id: "meeting-1", fingerprint: "a".repeat(64) }],
+      sourceStateHash: "fixture-state",
       contextualIntelligenceEnabled: true,
       meeting: {
         id: "meeting-empty",
@@ -616,7 +664,7 @@ describe("runMeetingSummaryAgent", () => {
         status: "COMPLETED",
         resultJson: expect.objectContaining({
           skipped: true,
-          reason: "summary_changed",
+          reason: "source_changed",
           meetingId: "meeting-1",
         }),
       }),
@@ -672,6 +720,35 @@ describe("runMeetingSummaryAgent", () => {
         }),
       }),
     }));
+  });
+
+  it("skips unknown context receipts before extraction or summary generation", async () => {
+    const { defaultModelGateway } = await import("@corgtex/models");
+    vi.mocked(defaultModelGateway.extract).mockClear(); vi.mocked(defaultModelGateway.chat).mockClear();
+    const context = await buildMeetingIntelligenceContextMock();
+    delete context.lineageInputs; delete context.lineageRoots;
+    buildMeetingIntelligenceContextMock.mockResolvedValueOnce(context);
+    const { runMeetingSummaryAgent } = await import(".");
+    await runMeetingSummaryAgent({ workspaceId: "ws-1", meetingId: "meeting-1", triggerRef: "unknown-receipt" });
+    expect(defaultModelGateway.extract).not.toHaveBeenCalled();
+    expect(defaultModelGateway.chat).not.toHaveBeenCalled();
+    expect(persistMeetingSummaryWithLineageMock).not.toHaveBeenCalled();
+    expect(prismaMock.agentRun.update).toHaveBeenLastCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ resultJson: expect.objectContaining({ reason: "unknown_lineage" }) }),
+    }));
+  });
+
+  it("aborts before model calls when a captured source permission is revoked", async () => {
+    const { defaultModelGateway } = await import("@corgtex/models");
+    vi.mocked(defaultModelGateway.extract).mockClear(); vi.mocked(defaultModelGateway.chat).mockClear();
+    isArtifactInputProofReadableMock.mockImplementation(async (_actor, _workspaceId, roots) => !roots.some((root: {kind:string}) => root.kind === "MeetingTranscript" || root.kind === "Meeting"));
+    const { runMeetingSummaryAgent } = await import(".");
+    await expect(runMeetingSummaryAgent({ workspaceId: "ws-1", meetingId: "meeting-1", triggerRef: "revoked-receipt" }))
+      .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(defaultModelGateway.extract).not.toHaveBeenCalled();
+    expect(defaultModelGateway.chat).not.toHaveBeenCalled();
+    expect(persistMeetingSummaryWithLineageMock).not.toHaveBeenCalled();
+    expect(prismaMock.agentRun.update).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "FAILED" }) }));
   });
 
 });

@@ -89,6 +89,10 @@ const MIN_CANDIDATE_LIMIT = 10;
 const MAX_CANDIDATE_LIMIT = 200;
 const LIKELY_MATCH_THRESHOLD = 0.78;
 const EXACT_LOOKUP_TAKE = 5;
+const SCAN_BATCH_SIZE = 100;
+const SCAN_ROW_BUDGET = 5_000;
+
+type CandidateFilter = (rows: unknown[]) => Promise<unknown[]>;
 
 const STOP_WORDS = new Set([
   "a",
@@ -301,7 +305,7 @@ function toLoadedCandidate(params: {
   };
 }
 
-async function latestRows(entityType: DuplicateGuardEntityType, workspaceId: string, limit: number, input: DuplicateGuardInput, client: Prisma.TransactionClient | typeof prisma = prisma) {
+async function latestRows(entityType: DuplicateGuardEntityType, workspaceId: string, limit: number, input: DuplicateGuardInput, client: Prisma.TransactionClient | typeof prisma = prisma, filter?: CandidateFilter) {
   const db = client as any;
   const privateWorkItemVisibility = input.includePrivate
     ? {}
@@ -320,18 +324,64 @@ async function latestRows(entityType: DuplicateGuardEntityType, workspaceId: str
       ],
     };
 
+  let scannedRows = 0;
+
+  // Count only permitted candidates. Capture scalar anchors before calling the
+  // filter so a concurrent edit/deletion cannot change the pagination boundary.
+  async function permittedRows(findMany: ((args: any) => Promise<any[]>) | undefined,
+    args: { where: any; orderBy: any; include?: any; take: number }) {
+    if (!findMany) return [];
+    const orderBy = [...(Array.isArray(args.orderBy) ? args.orderBy : [args.orderBy]), { id: "desc" }];
+    const fields = orderBy.map((part) => Object.keys(part)[0]);
+    const admitted = new Map<string, any>();
+    let after: Record<string, unknown> | undefined;
+    while (admitted.size < args.take) {
+      const boundary = after ? fields.map((field, index) => ({
+        ...Object.fromEntries(fields.slice(0, index).map((key) => [key, after![key]])),
+        [field]: { lt: after![field] },
+      })) : undefined;
+      const remaining = SCAN_ROW_BUDGET - scannedRows;
+      const take = Math.min(SCAN_BATCH_SIZE, Math.max(DEFAULT_CANDIDATE_LIMIT, args.take), Math.max(1, remaining));
+      const batch = await findMany({
+        ...args,
+        where: boundary ? { AND: [args.where, { OR: boundary }] } : args.where,
+        orderBy,
+        take,
+      });
+      if (remaining === 0) {
+        invariant(batch.length === 0, 503, "DUPLICATE_GUARD_SCAN_LIMIT", "Duplicate selection could not be completed within its scan budget.");
+        break;
+      }
+      scannedRows += batch.length;
+      if (batch.length === 0) break;
+      const last = batch[batch.length - 1];
+      const anchor = Object.fromEntries(fields.map((field) => [field, last[field] instanceof Date ? new Date(last[field].getTime()) : last[field]]));
+      const rawIds = new Set(batch.map((row) => row.id));
+      const visible = filter ? await filter(batch) : batch;
+      for (const row of visible as any[]) {
+        if (row?.id && rawIds.has(row.id) && !admitted.has(row.id)) admitted.set(row.id, row);
+        if (admitted.size === args.take) break;
+      }
+      if (admitted.size === args.take || batch.length < take) break;
+      invariant(fields.every((field) => anchor[field] != null), 503,
+        "DUPLICATE_GUARD_SCAN_LIMIT", "Duplicate selection could not establish a stable scan boundary.");
+      after = anchor;
+    }
+    return [...admitted.values()];
+  }
+
   async function exactRows(findMany: ((args: any) => Promise<any[]>) | undefined, params: {
     exactClauses: any[];
     orderBy: any;
   }) {
     if (!findMany || params.exactClauses.length === 0) return [];
-    const activeRows = await findMany({
+    const activeRows = await permittedRows(findMany, {
       where: { workspaceId, archivedAt: null, OR: params.exactClauses },
       orderBy: params.orderBy,
       take: EXACT_LOOKUP_TAKE,
     });
     if (activeRows.length > 0) return activeRows;
-    return await findMany({
+    return await permittedRows(findMany, {
       where: { workspaceId, archivedAt: { not: null }, OR: params.exactClauses },
       orderBy: params.orderBy,
       take: EXACT_LOOKUP_TAKE,
@@ -340,13 +390,13 @@ async function latestRows(entityType: DuplicateGuardEntityType, workspaceId: str
 
   switch (entityType) {
     case "Action": {
-      const recentActions = await db.action?.findMany?.({
+      const recentActions = await permittedRows(db.action?.findMany?.bind(db.action), {
         where: { workspaceId, archivedAt: null, duplicateOfActionId: null, status: { in: ["DRAFT", "OPEN", "IN_PROGRESS"] }, ...privateWorkItemVisibility },
         orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
         take: limit,
-      }) ?? [];
+      });
       if (!input.meetingId) return recentActions;
-      const meetingActions = await db.action?.findMany?.({
+      const meetingActions = await permittedRows(db.action?.findMany?.bind(db.action), {
         where: {
           workspaceId,
           archivedAt: null,
@@ -357,17 +407,17 @@ async function latestRows(entityType: DuplicateGuardEntityType, workspaceId: str
         },
         orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
         take: MAX_CANDIDATE_LIMIT,
-      }) ?? [];
+      });
       return [...meetingActions.map((row: any) => ({ ...row, meetingId: input.meetingId })), ...recentActions];
     }
     case "Tension":
-      return await db.tension?.findMany?.({
+      return await permittedRows(db.tension?.findMany?.bind(db.tension), {
         where: { workspaceId, archivedAt: null, status: { in: ["DRAFT", "OPEN"] }, ...privateWorkItemVisibility },
         orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
         take: limit,
-      }) ?? [];
+      });
     case "Proposal":
-      return await db.proposal?.findMany?.({
+      return await permittedRows(db.proposal?.findMany?.bind(db.proposal), {
         where: { workspaceId, archivedAt: null, status: { in: ["DRAFT", "OPEN"] }, ...privateWorkItemVisibility },
         include: {
           actions: { where: { archivedAt: null }, select: { id: true } },
@@ -375,19 +425,19 @@ async function latestRows(entityType: DuplicateGuardEntityType, workspaceId: str
         },
         orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
         take: limit,
-      }) ?? [];
+      });
     case "Goal":
-      return await db.goal?.findMany?.({
+      return await permittedRows(db.goal?.findMany?.bind(db.goal), {
         where: { workspaceId, archivedAt: null, status: { in: ["DRAFT", "ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"] }, ...privateWorkItemVisibility },
         orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
         take: limit,
-      }) ?? [];
+      });
     case "Document": {
-      const rows = await db.document?.findMany?.({
+      const rows = await permittedRows(db.document?.findMany?.bind(db.document), {
         where: { workspaceId, archivedAt: null },
         orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
         take: limit,
-      }) ?? [];
+      });
       const inputContentHash = input.contentHash ?? duplicateGuardContentHash(input.content ?? input.body);
       const exactClauses = [
         input.sourceUrl ? { metadata: { path: ["sourceUrl"], equals: input.sourceUrl } } : null,
@@ -403,11 +453,11 @@ async function latestRows(entityType: DuplicateGuardEntityType, workspaceId: str
       return [...exact, ...rows];
     }
     case "BrainSource": {
-      const rows = await db.brainSource?.findMany?.({
+      const rows = await permittedRows(db.brainSource?.findMany?.bind(db.brainSource), {
         where: { workspaceId, archivedAt: null },
         orderBy: { createdAt: "desc" },
         take: limit,
-      }) ?? [];
+      });
       const exactClauses = [
         input.externalId ? { externalId: input.externalId } : null,
         input.sourceUrl ? { metadata: { path: ["sourceUrl"], equals: input.sourceUrl } } : null,
@@ -422,32 +472,32 @@ async function latestRows(entityType: DuplicateGuardEntityType, workspaceId: str
       return [...exact, ...rows];
     }
     case "BrainArticle": {
-      const rows = await db.brainArticle?.findMany?.({
+      const rows = await permittedRows(db.brainArticle?.findMany?.bind(db.brainArticle), {
         where: { workspaceId, archivedAt: null, ...privateArticleVisibility },
         orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
         take: limit,
-      }) ?? [];
+      });
       if (!input.slug) return rows;
       const orderBy = [{ updatedAt: "desc" }, { createdAt: "desc" }];
-      const activeExactRows = await db.brainArticle?.findMany?.({
+      const activeExactRows = await permittedRows(db.brainArticle?.findMany?.bind(db.brainArticle), {
         where: { workspaceId, slug: input.slug, archivedAt: null, ...privateArticleVisibility },
         orderBy,
         take: EXACT_LOOKUP_TAKE,
-      }) ?? [];
+      });
       if (activeExactRows.length > 0) return [...activeExactRows, ...rows];
-      const archivedExactRows = await db.brainArticle?.findMany?.({
+      const archivedExactRows = await permittedRows(db.brainArticle?.findMany?.bind(db.brainArticle), {
         where: { workspaceId, slug: input.slug, archivedAt: { not: null }, ...privateArticleVisibility },
         orderBy,
         take: EXACT_LOOKUP_TAKE,
-      }) ?? [];
+      });
       return [...archivedExactRows, ...rows];
     }
     case "Meeting": {
-      const rows = await db.meeting?.findMany?.({
+      const rows = await permittedRows(db.meeting?.findMany?.bind(db.meeting), {
         where: { workspaceId, archivedAt: null },
         orderBy: [{ recordedAt: "desc" }, { createdAt: "desc" }],
         take: limit,
-      }) ?? [];
+      });
       const exactClauses = [
         input.externalId ? { externalId: input.externalId } : null,
         input.calendarExternalId ? { calendarExternalId: input.calendarExternalId } : null,
@@ -761,9 +811,10 @@ function candidateTime(candidate: DuplicateGuardCandidate) {
   return Number.isFinite(time) ? time : 0;
 }
 
-async function findDuplicateGuardMatch(input: DuplicateGuardInput, options?: DuplicateGuardOptions | null, client?: Prisma.TransactionClient) {
-  const rows = await latestRows(input.entityType, input.workspaceId, candidateLimit(options?.candidateLimit), input, client);
-  const candidates = mapRows(input.entityType, rows);
+async function findDuplicateGuardMatch(input: DuplicateGuardInput, options?: DuplicateGuardOptions | null,
+  client?: Prisma.TransactionClient, filter?: CandidateFilter) {
+  const loaded = await latestRows(input.entityType, input.workspaceId, candidateLimit(options?.candidateLimit), input, client, filter);
+  const candidates = mapRows(input.entityType, loaded);
   const matches = candidates
     .map((candidate) => scoreCandidate(input, candidate))
     .filter((candidate): candidate is DuplicateGuardCandidate => Boolean(candidate))
@@ -776,18 +827,19 @@ async function findDuplicateGuardMatch(input: DuplicateGuardInput, options?: Dup
   return matches.map(cleanCandidate);
 }
 
-export async function checkWorkspaceDuplicateGuard(input: DuplicateGuardInput, options?: DuplicateGuardOptions | null, client?: Prisma.TransactionClient): Promise<DuplicateGuardDecision | null> {
+export async function checkWorkspaceDuplicateGuard(input: DuplicateGuardInput, options?: DuplicateGuardOptions | null,
+  client?: Prisma.TransactionClient, filter?: CandidateFilter): Promise<DuplicateGuardDecision | null> {
   if (options == null) return null;
   const resolution = options?.resolution ?? null;
   if ((resolution === "use_existing" || resolution === "update_existing") && !options?.targetEntityId) {
     invariant(false, 400, "DUPLICATE_GUARD_TARGET_REQUIRED", "Duplicate resolution requires a target entity ID.");
   }
   if (resolution === "create_new") {
-    const [match] = await findDuplicateGuardMatch(input, options, client);
+    const [match] = await findDuplicateGuardMatch(input, options, client, filter);
     return match ? { resolution, match } : null;
   }
 
-  const matches = await findDuplicateGuardMatch(input, options, client);
+  const matches = await findDuplicateGuardMatch(input, options, client, filter);
   const match = options?.targetEntityId
     ? matches.find((candidate) => candidate.entityId === options.targetEntityId)
     : matches[0] ?? null;

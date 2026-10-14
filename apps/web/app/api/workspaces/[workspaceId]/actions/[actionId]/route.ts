@@ -39,7 +39,7 @@ export async function PATCH(request: NextRequest, { params }: Params) {
       dueAt: body.dueAt === undefined ? undefined : body.dueAt === null ? null : new Date(body.dueAt),
       expectedVersion: body.expectedVersion,
     });
-    const actionForResponse = await loadActionWorkItemResponse(workspaceId, action.id) ?? action;
+    const actionForResponse = await loadActionWorkItemResponse(actor, workspaceId, action.id) ?? action;
     return NextResponse.json({ action: serializeActionWorkItem(actionForResponse) });
   } catch (error) {
     return handleRouteError(error);

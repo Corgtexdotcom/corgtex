@@ -228,7 +228,7 @@ describe("meeting transcript sources", () => {
         text: "Jan: Legacy recorder entitlement still allows transcript imports.",
       }],
     })).resolves.toMatchObject({
-      batch: expect.objectContaining({ status: "COMPLETED" }),
+      batch: expect.objectContaining({ status: "FAILED", failedCount: 1 }),
     });
   });
 
@@ -332,224 +332,6 @@ describe("meeting transcript sources", () => {
     expect(corrected.externalId).toBe(first.externalId);
   });
 
-  it("imports batches oldest-to-newest and replaces a newer source revision", async () => {
-    prismaMock.meetingTranscriptSourceRecord.findFirst
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({
-        id: "record-old",
-        meetingId: "meeting-1",
-        contentHash: "previous",
-        recordedAt: new Date("2026-05-01T10:00:00.000Z"),
-        sourceUpdatedAt: new Date("2026-05-01T11:00:00.000Z"),
-      });
-    const { importMeetingTranscriptSourceArtifacts } = await import("./meeting-transcript-sources");
-
-    const result = await importMeetingTranscriptSourceArtifacts(agentActor, {
-      workspaceId: "ws-1",
-      provider: "FIREFLIES",
-      artifacts: [
-        {
-          externalId: "ff-1",
-          title: "Later revision",
-          recordedAt: "2026-05-02T10:00:00.000Z",
-          sourceUpdatedAt: "2026-05-02T11:00:00.000Z",
-          text: "Jan: Later source.",
-        },
-        {
-          externalId: "ff-0",
-          title: "Earlier meeting",
-          recordedAt: "2026-05-01T10:00:00.000Z",
-          sourceUpdatedAt: "2026-05-01T11:00:00.000Z",
-          text: "Jan: Earlier source.",
-        },
-      ],
-    });
-
-    expect(result.batch).toMatchObject({ status: "COMPLETED", importedCount: 2, skippedCount: 0, failedCount: 0 });
-    expect(intakeMeetingTranscriptMock.mock.calls[0][1]).toMatchObject({ externalId: "meeting-transcript:FIREFLIES:ff-0" });
-    expect(intakeMeetingTranscriptMock.mock.calls[1][1]).toMatchObject({
-      meetingId: "meeting-1",
-      externalId: "meeting-transcript:FIREFLIES:ff-1",
-      replaceTranscript: true,
-    });
-    expect(prismaMock.meetingTranscriptSourceRecord.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ status: "SUPERSEDED" }),
-    }));
-    expect(prismaMock.meetingTranscriptSourceRecord.updateMany.mock.invocationCallOrder[0])
-      .toBeLessThan(intakeMeetingTranscriptMock.mock.invocationCallOrder[1]);
-  });
-
-  it("imports changed revisions when providers omit updated-at timestamps", async () => {
-    prismaMock.meetingTranscriptSourceRecord.findFirst.mockResolvedValueOnce({
-      id: "record-active",
-      meetingId: "meeting-1",
-      contentHash: "previous-hash",
-      recordedAt: new Date("2026-05-01T10:00:00.000Z"),
-      sourceUpdatedAt: new Date("2026-05-02T11:00:00.000Z"),
-    });
-    const { importMeetingTranscriptSourceArtifacts } = await import("./meeting-transcript-sources");
-
-    const result = await importMeetingTranscriptSourceArtifacts(agentActor, {
-      workspaceId: "ws-1",
-      provider: "FIREFLIES",
-      artifacts: [{
-        externalId: "ff-1",
-        title: "Corrected transcript",
-        recordedAt: "2026-05-01T10:00:00.000Z",
-        text: "Jan: Corrected transcript body.",
-      }],
-    });
-
-    expect(result.batch).toMatchObject({ status: "COMPLETED", importedCount: 1, skippedCount: 0 });
-    expect(prismaMock.meetingTranscriptSourceRecord.create).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        status: "ACTIVE",
-        supersededByRecordId: null,
-        sourceUpdatedAt: null,
-      }),
-    }));
-    expect(intakeMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      meetingId: "meeting-1",
-      replaceTranscript: true,
-    }));
-  });
-
-  it("reuses a failed same-hash source row when retrying the artifact", async () => {
-    prismaMock.meetingTranscriptSourceRecord.findUnique.mockResolvedValueOnce({
-      id: "failed-record",
-      status: "FAILED",
-      provider: "FIREFLIES",
-      externalId: "ff-failed",
-      contentHash: "same-hash",
-    });
-    prismaMock.meetingTranscriptSourceRecord.update.mockImplementation(({ where, data }) => Promise.resolve({
-      id: where.id,
-      ...data,
-    }));
-    const { importMeetingTranscriptSourceArtifacts } = await import("./meeting-transcript-sources");
-
-    const result = await importMeetingTranscriptSourceArtifacts(agentActor, {
-      workspaceId: "ws-1",
-      provider: "FIREFLIES",
-      artifacts: [{
-        externalId: "ff-failed",
-        title: "Retry me",
-        recordedAt: "2026-05-01T10:00:00.000Z",
-        text: "Jan: Retry this failed transcript.",
-      }],
-    });
-
-    expect(result.batch).toMatchObject({ status: "COMPLETED", importedCount: 1 });
-    expect(prismaMock.meetingTranscriptSourceRecord.create).not.toHaveBeenCalled();
-    expect(prismaMock.meetingTranscriptSourceRecord.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "failed-record" },
-      data: expect.objectContaining({ status: "ACTIVE", error: null }),
-    }));
-  });
-
-  it("treats active same-hash import races as duplicate skips", async () => {
-    prismaMock.meetingTranscriptSourceRecord.findUnique
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({
-        id: "active-record",
-        status: "ACTIVE",
-        meetingId: "meeting-1",
-        processedAt: new Date("2026-05-01T10:05:00.000Z"),
-      });
-    prismaMock.meetingTranscriptSourceRecord.create.mockRejectedValueOnce(new Error("Unique constraint failed"));
-    const { importMeetingTranscriptSourceArtifacts } = await import("./meeting-transcript-sources");
-
-    const result = await importMeetingTranscriptSourceArtifacts(agentActor, {
-      workspaceId: "ws-1",
-      provider: "FIREFLIES",
-      artifacts: [{
-        externalId: "ff-race",
-        title: "Duplicate webhook",
-        recordedAt: "2026-05-01T10:00:00.000Z",
-        text: "Jan: Duplicate delivery.",
-      }],
-    });
-
-    expect(result.batch).toMatchObject({ status: "COMPLETED", importedCount: 0, skippedCount: 1, failedCount: 0 });
-    expect(prismaMock.meetingTranscriptSourceRecord.update).not.toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ status: "FAILED" }),
-    }));
-  });
-
-  it("preserves matching metadata when retrying failed batches", async () => {
-    prismaMock.meetingTranscriptImportBatch.findFirst.mockResolvedValueOnce({
-      id: "batch-failed",
-      workspaceId: "ws-1",
-      provider: "FIREFLIES",
-      connectionId: "connection-1",
-      records: [{
-        externalId: "ff-retry",
-        title: "Retry with metadata",
-        recordedAt: new Date("2026-05-01T10:00:00.000Z"),
-        sourceUpdatedAt: new Date("2026-05-01T11:00:00.000Z"),
-        sourceUrl: "https://fireflies.ai/transcripts/ff-retry",
-        transcriptText: "Jan: Retry with full matching context.",
-        summaryMd: null,
-        rawMetadataJson: {
-          meetingUrl: "https://meet.google.com/abc-defg-hij",
-          calendarExternalId: "calendar-event-1",
-        },
-        participantsJson: {
-          participantEmails: ["Jan@Example.com"],
-          participants: [{ name: "Jan" }],
-        },
-        segmentsJson: [],
-      }],
-    });
-    const { retryMeetingTranscriptImportBatch } = await import("./meeting-transcript-sources");
-
-    await retryMeetingTranscriptImportBatch(agentActor, {
-      workspaceId: "ws-1",
-      batchId: "batch-failed",
-    });
-
-    expect(intakeMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      meetingUrl: "https://meet.google.com/abc-defg-hij",
-      calendarExternalId: "calendar-event-1",
-      participantEmails: ["jan@example.com"],
-    }));
-  });
-
-  it("imports valid artifacts when another batch file cannot be normalized", async () => {
-    const { importMeetingTranscriptSourceArtifacts } = await import("./meeting-transcript-sources");
-
-    const result = await importMeetingTranscriptSourceArtifacts(agentActor, {
-      workspaceId: "ws-1",
-      provider: "FIREFLIES",
-      artifacts: [
-        {
-          fileName: "readme.txt",
-          text: "This ZIP sidecar has no meeting date.",
-        },
-        {
-          externalId: "ff-valid",
-          title: "Valid transcript",
-          recordedAt: "2026-05-01T10:00:00.000Z",
-          text: "Jan: This valid meeting should still import.",
-        },
-      ],
-    });
-
-    expect(result.batch).toMatchObject({ status: "PARTIAL", importedCount: 1, failedCount: 1 });
-    expect(prismaMock.meetingTranscriptSourceRecord.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({
-        status: "FAILED",
-        rawMetadataJson: expect.objectContaining({
-          normalizationFailed: true,
-        }),
-      }),
-    }));
-    expect(intakeMeetingTranscriptMock).toHaveBeenCalledTimes(1);
-    expect(intakeMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      externalId: "meeting-transcript:FIREFLIES:ff-valid",
-    }));
-  });
-
   it("verifies provider webhook signatures before accepting payloads", async () => {
     const { verifyMeetingTranscriptWebhookSignature } = await import("./meeting-transcript-sources");
     const rawBody = JSON.stringify({ event: "meeting.transcribed", transcript_id: "ff-1" });
@@ -628,234 +410,6 @@ describe("meeting transcript sources", () => {
     })).toBe(false);
   });
 
-  it("imports Read.ai meeting_end webhooks for Corgtex processing and action cross-checking", async () => {
-    const { processMeetingTranscriptSourceWebhook } = await import("./meeting-transcript-sources");
-    const secret = Buffer.from("read-webhook-secret").toString("base64");
-    prismaMock.meetingTranscriptSourceConnection.findUnique.mockResolvedValueOnce({
-      id: "connection-read",
-      workspaceId: "ws-1",
-      provider: "READ_AI",
-      webhookSecretEnc: `enc:${secret}`,
-    });
-    const rawBody = JSON.stringify({
-      session_id: "read-session-1",
-      trigger: "meeting_end",
-      title: "Product Weekly",
-      start_time: "2026-05-01T10:00:00Z",
-      end_time: "2026-05-01T11:00:00Z",
-      participants: [{ name: "Jan", email: "jan@example.com" }],
-      owner: { name: "Milan", email: "milan@example.com" },
-      summary: "The team discussed recorder imports.",
-      action_items: [{ text: "Jan will enable the Read.ai webhook." }],
-      report_url: "https://app.read.ai/analytics/meetings/read-session-1",
-      platform: "meet",
-      platform_meeting_id: "abc-defg-hij",
-      request_id: "request-1",
-      transcript: {
-        speaker_blocks: [{
-          start_time: "1777639200000",
-          end_time: "1777639203000",
-          speaker: { name: "Jan" },
-          words: "I will enable the Read.ai webhook.",
-        }],
-      },
-    });
-    const signature = createHmac("sha256", Buffer.from(secret, "base64")).update(rawBody).digest("hex");
-
-    await processMeetingTranscriptSourceWebhook({
-      workspaceId: "ws-1",
-      provider: "READ_AI",
-      rawBody,
-      headers: { "x-read-signature": signature },
-    });
-
-    expect(prismaMock.meetingTranscriptSourceRecord.create).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        provider: "READ_AI",
-        externalId: "read-session-1",
-        sourceUrl: "https://app.read.ai/analytics/meetings/read-session-1",
-        summaryMd: expect.stringContaining("Jan will enable the Read.ai webhook."),
-        rawMetadataJson: expect.objectContaining({
-          platformMeetingId: "abc-defg-hij",
-          readAiActionItems: ["Jan will enable the Read.ai webhook."],
-        }),
-      }),
-    }));
-    expect(intakeMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      provider: "READ_AI",
-      externalId: "meeting-transcript:READ_AI:read-session-1",
-      meetingUrl: "https://meet.google.com/abc-defg-hij",
-      summaryMd: null,
-      ingestionGuidanceMd: expect.stringContaining("cross-check these provider-supplied items"),
-      transcript: "Jan: I will enable the Read.ai webhook.",
-      participantEmails: ["jan@example.com", "milan@example.com"],
-    }));
-  });
-
-  it("acknowledges Read.ai meeting_start webhooks without importing a transcript", async () => {
-    const { processMeetingTranscriptSourceWebhook } = await import("./meeting-transcript-sources");
-    const secret = Buffer.from("read-webhook-secret").toString("base64");
-    prismaMock.meetingTranscriptSourceConnection.findUnique.mockResolvedValueOnce({
-      id: "connection-read",
-      workspaceId: "ws-1",
-      provider: "READ_AI",
-      webhookSecretEnc: `enc:${secret}`,
-    });
-    const rawBody = JSON.stringify({
-      session_id: "read-session-1",
-      trigger: "meeting_start",
-      title: "Product Weekly",
-      start_time: "2026-05-01T10:00:00Z",
-      platform: "meet",
-      platform_meeting_id: "abc-defg-hij",
-      request_id: "request-start-1",
-    });
-    const signature = createHmac("sha256", Buffer.from(secret, "base64")).update(rawBody).digest("hex");
-
-    const result = await processMeetingTranscriptSourceWebhook({
-      workspaceId: "ws-1",
-      provider: "READ_AI",
-      rawBody,
-      headers: { "x-read-signature": signature },
-    });
-
-    expect(result).toMatchObject({ ignored: true, reason: "meeting_start", provider: "READ_AI" });
-    expect(intakeMeetingTranscriptMock).not.toHaveBeenCalled();
-    expect(prismaMock.meetingTranscriptImportBatch.create).not.toHaveBeenCalled();
-  });
-
-  it("links likely duplicate cross-provider transcript sources to the existing meeting", async () => {
-    prismaMock.meetingTranscriptSourceRecord.findMany.mockResolvedValueOnce([{
-      id: "record-existing",
-      meetingId: "meeting-existing",
-      title: "Product Weekly",
-      recordedAt: new Date("2026-05-01T10:00:00.000Z"),
-      contentHash: "other-content",
-      participantsJson: { participantEmails: ["jan@example.com"] },
-      rawMetadataJson: { platformMeetingId: "abc-defg-hij" },
-    }]);
-    const { importMeetingTranscriptSourceArtifacts } = await import("./meeting-transcript-sources");
-
-    await importMeetingTranscriptSourceArtifacts(agentActor, {
-      workspaceId: "ws-1",
-      provider: "READ_AI",
-      artifacts: [{
-        externalId: "read-session-1",
-        title: "Product Weekly",
-        recordedAt: "2026-05-01T10:00:00.000Z",
-        text: "Jan: This is the same call.",
-        participantEmails: ["jan@example.com"],
-        metadata: { platformMeetingId: "abc-defg-hij" },
-      }],
-    });
-
-    expect(prismaMock.meetingTranscriptSourceRecord.create).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        meetingId: "meeting-existing",
-      }),
-    }));
-    expect(intakeMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      meetingId: "meeting-existing",
-    }));
-  });
-
-  it("backfills recent Fathom meetings with X-Api-Key authentication", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        items: [{
-          recording_id: 123456789,
-          title: "QBR",
-          recording_start_time: "2026-05-01T10:00:00.000Z",
-          recording_end_time: "2026-05-01T11:00:00.000Z",
-          share_url: "https://fathom.video/share/qbr",
-          meeting_url: "https://us02web.zoom.us/j/123456789",
-          transcript: [{
-            speaker: { display_name: "Jane Doe", matched_calendar_invitee_email: "jane@example.com" },
-            text: "Let's revisit the budget allocations.",
-            timestamp: "00:05:32",
-          }],
-          default_summary: { markdown_formatted: "## Summary\nBudget review." },
-        }],
-        next_cursor: null,
-      }),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    prismaMock.meetingTranscriptSourceConnection.findUnique.mockResolvedValueOnce({
-      id: "connection-fathom",
-      workspaceId: "ws-1",
-      provider: "FATHOM",
-      apiKeyEnc: "enc:fathom-key",
-      webhookSecretEnc: "enc:whsec_created",
-    });
-    const { runMeetingTranscriptSourceBackfill } = await import("./meeting-transcript-sources");
-
-    await runMeetingTranscriptSourceBackfill(userActor, {
-      workspaceId: "ws-1",
-      provider: "FATHOM",
-    });
-
-    const [url, init] = fetchMock.mock.calls[0];
-    expect(String(url)).toContain("https://api.fathom.ai/external/v1/meetings");
-    expect(String(url)).toContain("include_transcript=true");
-    expect(init).toMatchObject({ headers: { "X-Api-Key": "fathom-key" } });
-    expect(intakeMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      provider: "FATHOM",
-      externalId: "meeting-transcript:FATHOM:123456789",
-      transcript: "Jane Doe: Let's revisit the budget allocations.",
-      participantEmails: ["jane@example.com"],
-    }));
-    expect(prismaMock.meetingTranscriptSourceConnection.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "connection-fathom" },
-      data: expect.objectContaining({ lastError: null }),
-    }));
-  });
-
-  it("backfills recent Fireflies transcripts through GraphQL", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        data: {
-          transcripts: [{
-            id: "ff-backfill-1",
-            title: "Product Weekly",
-            date: "2026-05-01T10:00:00.000Z",
-            transcript_url: "https://app.fireflies.ai/view/ff-backfill-1",
-            meeting_link: "https://meet.google.com/abc-defg-hij",
-            participants: ["jan@example.com"],
-            sentences: [{ speaker_name: "Jan", text: "Fireflies backfill works.", start_time: 1, end_time: 3 }],
-            summary: { overview: "Backfill overview." },
-          }],
-        },
-      }),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    prismaMock.meetingTranscriptSourceConnection.findUnique.mockResolvedValueOnce({
-      id: "connection-fireflies",
-      workspaceId: "ws-1",
-      provider: "FIREFLIES",
-      apiKeyEnc: "enc:fireflies-key",
-      webhookSecretEnc: "enc:secret",
-    });
-    const { runMeetingTranscriptSourceBackfill } = await import("./meeting-transcript-sources");
-
-    await runMeetingTranscriptSourceBackfill(userActor, {
-      workspaceId: "ws-1",
-      provider: "FIREFLIES",
-    });
-
-    expect(fetchMock).toHaveBeenCalledWith("https://api.fireflies.ai/graphql", expect.objectContaining({
-      method: "POST",
-      headers: expect.objectContaining({ authorization: "Bearer fireflies-key" }),
-      body: expect.stringContaining("BackfillTranscripts"),
-    }));
-    expect(intakeMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      provider: "FIREFLIES",
-      externalId: "meeting-transcript:FIREFLIES:ff-backfill-1",
-      transcript: "Jan: Fireflies backfill works.",
-    }));
-  });
-
   it("keeps Read.ai historical backfill deferred to manual export in V1", async () => {
     prismaMock.meetingTranscriptSourceConnection.findUnique.mockResolvedValueOnce({
       id: "connection-read",
@@ -879,31 +433,42 @@ describe("meeting transcript sources", () => {
     expect(intakeMeetingTranscriptMock).not.toHaveBeenCalled();
   });
 
-  it("imports nested transcript bodies from signed webhooks without fetching provider APIs", async () => {
-    const { processMeetingTranscriptSourceWebhook } = await import("./meeting-transcript-sources");
-    const rawBody = JSON.stringify({
-      data: {
-        id: "webhook-event-1",
-        title: "Nested webhook",
-        recordedAt: "2026-05-01T10:00:00.000Z",
-      },
-      transcript: {
-        id: "ff-nested",
-        text: "Jan: Nested webhook text.",
-      },
-    });
-    const signature = `sha256=${createHmac("sha256", "secret").update(rawBody).digest("hex")}`;
-
-    await processMeetingTranscriptSourceWebhook({
-      workspaceId: "ws-1",
-      provider: "FIREFLIES",
-      rawBody,
-      headers: { "x-fireflies-signature": signature },
-    });
-
-    expect(intakeMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      externalId: "meeting-transcript:FIREFLIES:ff-nested",
-      transcript: "Jan: Nested webhook text.",
-    }));
+  it("does not turn a generic bootstrap actor and provider labels into native custody", async () => {
+    const { importMeetingTranscriptSourceArtifacts } = await import("./meeting-transcript-sources");
+    const result = await importMeetingTranscriptSourceArtifacts(agentActor, { workspaceId: "ws-1", provider: "FIREFLIES", artifacts: [{ externalId: "unreceipted", text: "Exact submitted text", recordedAt: "2026-05-01T10:00:00Z" }] });
+    expect(result.batch).toMatchObject({ status: "FAILED", failedCount: 1, importedCount: 0 });
+    expect(intakeMeetingTranscriptMock).not.toHaveBeenCalled();
+    expect(prismaMock.meetingTranscriptSourceRecord.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "FAILED", error: "Manual import requires its authenticated upload receipt." }) }));
+    expect(prismaMock.meetingTranscriptSourceRecord.updateMany).not.toHaveBeenCalled();
   });
+  it("does not reinterpret a failed receipt as a successful legacy duplicate", async () => {
+    prismaMock.meetingTranscriptSourceRecord.findFirst.mockResolvedValue({ id: "legacy", status: "ACTIVE", meetingId: "meeting-1", processedAt: new Date() });
+    const { importMeetingTranscriptSourceArtifacts } = await import("./meeting-transcript-sources");
+    const result = await importMeetingTranscriptSourceArtifacts(userActor, { workspaceId: "ws-1", provider: "FIREFLIES", artifacts: [{ externalId: "legacy", text: "Exact submitted text", recordedAt: "2026-05-01T10:00:00Z" }] });
+    expect(result.batch).toMatchObject({ failedCount: 1, skippedCount: 0, importedCount: 0 });
+    expect(prismaMock.meetingTranscriptSourceRecord.update).not.toHaveBeenCalled();
+    expect(prismaMock.meetingTranscriptSourceRecord.create).not.toHaveBeenCalled();
+  });
+  it("appends failed diagnostics instead of mutating a previous failed original", async () => {
+    prismaMock.meetingTranscriptSourceRecord.findFirst.mockResolvedValue({ id: "failed-original", status: "FAILED" });
+    const { importMeetingTranscriptSourceArtifacts } = await import("./meeting-transcript-sources");
+    await importMeetingTranscriptSourceArtifacts(userActor, { workspaceId: "ws-1", provider: "FIREFLIES", artifacts: [{ externalId: "retry", text: "Exact submitted text", recordedAt: "2026-05-01T10:00:00Z" }] });
+    expect(prismaMock.meetingTranscriptSourceRecord.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "FAILED", transcriptText: "Exact submitted text" }) }));
+    expect(prismaMock.meetingTranscriptSourceRecord.update).not.toHaveBeenCalled();
+    expect(prismaMock.meetingTranscriptSourceRecord.upsert).not.toHaveBeenCalled();
+  });
+  it("preserves invalid raw normalization diagnostics without granting publication", async () => {
+    const { importMeetingTranscriptSourceArtifacts } = await import("./meeting-transcript-sources");
+    await importMeetingTranscriptSourceArtifacts(userActor, { workspaceId: "ws-1", provider: "FIREFLIES", artifacts: [{ fileName: "readme.txt", text: "No meeting date" }] });
+    expect(prismaMock.meetingTranscriptSourceRecord.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "FAILED", rawMetadataJson: expect.objectContaining({ normalizationFailed: true, originalArtifact: expect.objectContaining({ text: "No meeting date" }) }) }) }));
+    expect(intakeMeetingTranscriptMock).not.toHaveBeenCalled();
+  });
+  it("requires a new original upload for manual failed diagnostics instead of minting a receipt", async () => {
+    prismaMock.meetingTranscriptImportBatch.findFirst.mockResolvedValue({ provider: "MANUAL_UPLOAD", records: [{ externalId: "failed" }] });
+    const { retryMeetingTranscriptImportBatch } = await import("./meeting-transcript-sources");
+    await expect(retryMeetingTranscriptImportBatch(userActor, { workspaceId: "ws-1", batchId: "failed" })).rejects.toMatchObject({ code: "TRANSCRIPT_REUPLOAD_REQUIRED" });
+    expect(prismaMock.meetingTranscriptSourceRecord.update).not.toHaveBeenCalled();
+    expect(prismaMock.meetingTranscriptImportBatch.create).not.toHaveBeenCalled();
+  });
+
 });

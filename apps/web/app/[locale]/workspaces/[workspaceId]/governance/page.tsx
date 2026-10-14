@@ -48,7 +48,7 @@ export default async function GovernancePage({
   const approvalPolicies = await getApprovalPolicies(actor, workspaceId).catch(() => []);
   const latestScore = await getLatestGovernanceScore(workspaceId).catch(() => null);
   const scoreHistory = await listGovernanceScores(actor, workspaceId, { take: 6 }).catch(() => []);
-  const currentConstitution = await getCurrentConstitution(workspaceId).catch(() => null);
+  const currentConstitution = await getCurrentConstitution(actor, workspaceId).catch(() => null);
   const currentWorkspace = await prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } });
   const isDemo = currentWorkspace?.slug === "jnj-demo";
 
@@ -225,7 +225,7 @@ export default async function GovernancePage({
                     {p.circle && <span className="tag">{p.circle.name}</span>}
                   </div>
                   <div className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 4 }}>
-                    {t("policyAccepted", { title: p.proposal.title, date: new Date(p.acceptedAt).toLocaleDateString() })}
+                    {t("policyAccepted", { title: p.proposal?.title ?? p.title, date: new Date(p.acceptedAt).toLocaleDateString() })}
                   </div>
                   <details style={{ marginTop: 8 }}>
                     <summary className="nr-meta" style={{ cursor: "pointer", fontSize: "0.82rem" }}>

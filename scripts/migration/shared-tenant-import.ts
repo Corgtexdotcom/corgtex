@@ -3,7 +3,7 @@ import { assertPg18NotNullSource, readPgNotNullEvidence, verifyPg18ToPg16NotNull
 import { validateObjectReceipt, type ObjectCopyReceipt } from "./shared-tenant-objects";
 import { hashCanonical, hashFrames } from "./shared-tenant-export";
 import { readSharedTenantSchema, quoteIdentifier } from "./shared-tenant-inventory.mjs";
-import { assertNoSourceImportMarker, assertTransferTableFieldPolicies, isRetainedInlineValue } from "./shared-tenant-transfer-contract";
+import { assertNoHistoricalAuthority, assertNoSourceImportMarker, assertTransferTableFieldPolicies, isRetainedInlineValue } from "./shared-tenant-transfer-contract";
 import type { TenantTransferSnapshot, TransferSqlClient, TransferTableData } from "./shared-tenant-transfer-contract";
 
 type IdentityLink = {
@@ -88,6 +88,7 @@ function validateSnapshot(snapshot: TenantTransferSnapshot, options: TenantImpor
   if (snapshot.formatVersion !== 1 || hashCanonical(body) !== sha256
     || hashCanonical(snapshot.manifest) !== snapshot.manifestSha256
     || snapshot.schemaSha256 !== snapshot.manifest.schemaSha256) fail("TRANSFER_SNAPSHOT_DIGEST_MISMATCH");
+  assertNoHistoricalAuthority(snapshot.tables);
   assertNoSourceImportMarker(snapshot.tables);
   for (const table of snapshot.tables) assertTransferTableFieldPolicies(table, snapshot.manifest.tables[table.name]);
   validateObjectReceipt(options.objectReceipt);
@@ -358,6 +359,7 @@ export async function verifyImportedTenant(client: TransferSqlClient, snapshot: 
     || receipt.sourceSnapshotSha256 !== sha256 || receipt.workspaceId !== snapshot.manifest.workspaceId) {
     fail("TRANSFER_VERIFICATION_IDENTITY_MISMATCH");
   }
+  assertNoHistoricalAuthority(snapshot.tables);
   assertNoSourceImportMarker(snapshot.tables);
   for (const table of snapshot.tables) assertTransferTableFieldPolicies(table, snapshot.manifest.tables[table.name]);
   const entries = receipt.tables as { name: string; count: number; sha256: string; primaryKeys: (string | null)[][] }[];

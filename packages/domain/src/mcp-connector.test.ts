@@ -40,6 +40,7 @@ function installSharedMock(prismaMock: Record<string, any>, envOverrides: Record
     hashPassword: vi.fn((value: string) => `hash:${value}`),
     parseAllowedWorkspaceIds: vi.fn(() => new Set<string>()),
     randomOpaqueToken: vi.fn(() => "opaque-token"),
+    captureMcpOAuthGrantEpoch: vi.fn().mockResolvedValue("0"),
     sha256: vi.fn((value: string) => `sha:${value}`),
     verifyPassword: vi.fn(() => true),
   }));
@@ -788,6 +789,7 @@ describe("MCP OAuth workspace membership revalidation", () => {
           userId: "user-1",
           workspaceId: "ws-1",
           instanceSlug: "corgtex",
+          tokenHash: "sha:mcp_at_valid",
           scopes: ["brain:read"],
           resource: "https://app.test/mcp",
           expiresAt: new Date(Date.now() + 60_000),

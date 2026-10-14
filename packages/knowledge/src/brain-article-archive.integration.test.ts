@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { beforeEach, expect, it, vi } from "vitest";
 import { getCacheVersion, prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
+import { createArticle } from "../../domain/src/brain";
 import { archiveWorkspaceArtifact } from "../../domain/src/archive";
 import { syncBrainArticleKnowledge } from "./chunks";
 import { defaultModelGateway } from "@corgtex/models";
@@ -13,9 +14,9 @@ it("does not let an in-flight Brain index job restore archived chunks", async ()
   const user = await prisma.user.create({ data: { email: `index-race-${randomUUID()}@example.test`, passwordHash: "fixture" } });
   await prisma.member.create({ data: { workspaceId: workspace.id, userId: user.id, role: "ADMIN" } });
   const actor: AppActor = { kind: "user", user: { id: user.id, email: user.email, displayName: "Admin" } };
-  const article = await prisma.brainArticle.create({ data: {
-    workspaceId: workspace.id, slug: "index-race", title: "Index race", type: "PROJECT", bodyMd: "Synthetic indexed article",
-  } });
+  const article = await createArticle(actor, {
+    workspaceId: workspace.id, slug: "index-race", title: "Index race", type: "PROJECT", bodyMd: "Synthetic indexed article", authority: "REFERENCE",
+  });
   let releaseEmbed!: () => void;
   let embedEntered!: () => void;
   const held = new Promise<void>((resolve) => { releaseEmbed = resolve; });
@@ -28,9 +29,10 @@ it("does not let an in-flight Brain index job restore archived chunks", async ()
       latencyMs: 0, estimatedCostUsd: "0", rawProviderCostUsd: "0", billableCostUsd: "0",
     } };
   });
+  let staleSync: ReturnType<typeof syncBrainArticleKnowledge> | undefined;
   try {
-    const staleSync = syncBrainArticleKnowledge({ workspaceId: workspace.id, articleId: article.id });
-    await entered;
+    staleSync = syncBrainArticleKnowledge({ workspaceId: workspace.id, articleId: article.id });
+    await Promise.race([entered, staleSync.then(() => { throw new Error("Proven source sync did not reach the embedding barrier."); })]);
     let archiveSettled = false;
     const cacheVersionBefore = await getCacheVersion(`knowledge:${workspace.id}`);
     const archive = archiveWorkspaceArtifact(actor, {
@@ -51,6 +53,7 @@ it("does not let an in-flight Brain index job restore archived chunks", async ()
     } })).toBe(0);
   } finally {
     releaseEmbed();
+    await staleSync?.catch(() => undefined);
     embed.mockRestore();
   }
 });
