@@ -50,6 +50,43 @@ async function fixture(stream: boolean, managed = false) {
 }
 
 describe("harness per-attempt authority through synthetic gateway transport", () => {
+  it.each((["SCOPE", "LIMIT"] as const).flatMap(primary => ["deadline", "admitted cancellation"].map(stop => ({ primary, stop }))))
+    ("retains error priorities for $primary with $stop during stream usage cleanup", async ({ primary, stop }) => {
+      const f = await fixture(true);
+      let releaseUsage!: () => void;
+      f.recordModelUsage.mockImplementationOnce(() => new Promise<void>(resolve => { releaseUsage = resolve; }));
+      const content = primary === "LIMIT" ? "x".repeat(5000) : "Denied";
+      let providerSignal!: AbortSignal;
+      f.fetchMock.mockImplementationOnce(async (_url, init) => {
+        providerSignal = init.signal;
+        return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
+      });
+      if (primary === "SCOPE") f.runtime.delivery = {
+        audience: { workspaceId: "ws", userId: "user", conversationId: "conversation" },
+        deliver: vi.fn(async () => "DENIED" as const),
+      };
+      let settled = false;
+      const pending = f.run().then(result => { settled = true; return result; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.recordModelUsage).toHaveBeenCalledOnce();
+      expect(settled).toBe(false);
+      expect(providerSignal.aborted).toBe(false);
+      expect(f.controller.signal.aborted).toBe(false);
+      if (stop === "admitted cancellation") f.controller.abort(new Error("private abort reason"));
+      else await vi.advanceTimersByTimeAsync(120000);
+      expect(providerSignal.aborted).toBe(true);
+      expect(f.controller.signal.aborted).toBe(stop === "admitted cancellation");
+      expect(settled).toBe(false);
+      releaseUsage();
+      const code = stop === "admitted cancellation" ? "CANCELLED" : primary;
+      expect(await pending).toMatchObject({ code, message: `Assistant harness: ${code}` });
+      expect(f.fetchMock).toHaveBeenCalledOnce();
+      expect(f.runtime.reserveDispatch).toHaveBeenCalledExactlyOnceWith("model", 2);
+      expect(f.recordModelUsage).toHaveBeenCalledOnce();
+      expect(f.recordModelUsage).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws", agentRunId: "run", workflowJobId: "job" }));
+      if (primary === "SCOPE") expect(f.runtime.delivery!.deliver).toHaveBeenCalledOnce();
+    });
+
   it.each([false, true].flatMap(stream => ["revocation", "cancellation", "lost claim", "budget"].flatMap(change => ["headers", "retry"].map(stage => ({ stream, change, stage })))))
     ("blocks $change during $stage (stream=$stream)", async ({ stream, change, stage }) => {
       let release!: (value: { token: string; expiresOnTimestamp: number }) => void;

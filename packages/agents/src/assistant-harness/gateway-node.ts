@@ -91,8 +91,10 @@ export async function callAssistantGateway(options: {
   } catch (error) {
     checkCancellation(runtime);
     if (error instanceof ModelAttemptAuthorizationError && attemptDenial) throw new AssistantHarnessError(attemptDenial);
-    if (attemptSignal?.aborted) throw new AssistantHarnessError("CANCELLED");
+    // A gateway deadline reached during awaited cleanup cannot replace an
+    // established harness failure. Admitted cancellation still takes priority.
     if (error instanceof AssistantHarnessError) throw error;
+    if (attemptSignal?.aborted) throw new AssistantHarnessError("CANCELLED");
     // Provider errors can include prompts, credentials and returned source text.
     throw new AssistantHarnessError("UNAVAILABLE");
   } finally {
