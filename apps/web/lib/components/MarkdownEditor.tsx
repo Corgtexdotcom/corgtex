@@ -45,11 +45,22 @@ export function MarkdownEditor({
   ariaLabel?: string;
 }) {
   const internalRef = useRef<HTMLTextAreaElement | null>(null);
+  const pendingValidationRef = useRef(false);
   const lastResetKeyRef = useRef(resetKey);
   const [internalValue, setInternalValue] = useState(defaultValue ?? "");
   const [preview, setPreview] = useState(false);
   const t = useTranslations("shared.markdownEditor");
   const editorValue = value ?? internalValue;
+
+  useEffect(() => {
+    if (preview || !pendingValidationRef.current) return;
+    pendingValidationRef.current = false;
+    const textarea = internalRef.current;
+    const frame = window.requestAnimationFrame(() => {
+      (textarea?.form ?? textarea)?.reportValidity();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [preview]);
 
   useEffect(() => {
     if (value !== undefined || resetKey === undefined || resetKey === lastResetKeyRef.current) return;
@@ -87,9 +98,16 @@ export function MarkdownEditor({
     updateValue(e.target.value, e);
   }, [updateValue]);
 
+  const handleInvalid = useCallback((event: React.InvalidEvent<HTMLTextAreaElement>) => {
+    if (!preview) return;
+    event.preventDefault();
+    pendingValidationRef.current = true;
+    setPreview(false);
+  }, [preview]);
+
   const replaceSelection = useCallback((replacement: string, selectStartOffset = replacement.length, selectEndOffset = replacement.length) => {
     const textarea = internalRef.current;
-    if (!textarea) return;
+    if (!textarea || textarea.disabled) return;
 
     const { selectionStart, selectionEnd } = textarea;
     const nextValue = `${editorValue.slice(0, selectionStart)}${replacement}${editorValue.slice(selectionEnd)}`;
@@ -143,6 +161,7 @@ export function MarkdownEditor({
   }, [editorValue, replaceSelection, t]);
 
   const handlePaste = useCallback((event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    if (event.currentTarget.disabled) return;
     const html = event.clipboardData.getData("text/html");
     const markdown = htmlToMarkdown(html);
     if (!markdown) return;
@@ -173,30 +192,33 @@ export function MarkdownEditor({
       </div>
       {!preview && (
         <div className="md-editor-toolbar" aria-label={t("toolbar")}>
-          <button type="button" title={t("bold")} aria-label={t("bold")} onClick={() => wrapSelection("**")}>B</button>
-          <button type="button" title={t("italic")} aria-label={t("italic")} onClick={() => wrapSelection("_")}>I</button>
-          <button type="button" title={t("headingOne")} aria-label={t("headingOne")} onClick={() => insertHeading(1)}>H1</button>
-          <button type="button" title={t("headingTwo")} aria-label={t("headingTwo")} onClick={() => insertHeading(2)}>H2</button>
-          <button type="button" title={t("bulletedList")} aria-label={t("bulletedList")} onClick={() => prefixLines("- ")}>•</button>
-          <button type="button" title={t("numberedList")} aria-label={t("numberedList")} onClick={() => prefixLines("1. ")}>1.</button>
-          <button type="button" title={t("quote")} aria-label={t("quote")} onClick={() => prefixLines("> ")}>&gt;</button>
-          <button type="button" title={t("link")} aria-label={t("link")} onClick={insertLink}>[]</button>
-          <button type="button" title={t("code")} aria-label={t("code")} onClick={() => wrapSelection("`")}>{"{}"}</button>
+          <button type="button" title={t("bold")} aria-label={t("bold")} disabled={disabled} onClick={() => wrapSelection("**")}>B</button>
+          <button type="button" title={t("italic")} aria-label={t("italic")} disabled={disabled} onClick={() => wrapSelection("_")}>I</button>
+          <button type="button" title={t("headingOne")} aria-label={t("headingOne")} disabled={disabled} onClick={() => insertHeading(1)}>H1</button>
+          <button type="button" title={t("headingTwo")} aria-label={t("headingTwo")} disabled={disabled} onClick={() => insertHeading(2)}>H2</button>
+          <button type="button" title={t("bulletedList")} aria-label={t("bulletedList")} disabled={disabled} onClick={() => prefixLines("- ")}>•</button>
+          <button type="button" title={t("numberedList")} aria-label={t("numberedList")} disabled={disabled} onClick={() => prefixLines("1. ")}>1.</button>
+          <button type="button" title={t("quote")} aria-label={t("quote")} disabled={disabled} onClick={() => prefixLines("> ")}>&gt;</button>
+          <button type="button" title={t("link")} aria-label={t("link")} disabled={disabled} onClick={insertLink}>[]</button>
+          <button type="button" title={t("code")} aria-label={t("code")} disabled={disabled} onClick={() => wrapSelection("`")}>{"{}"}</button>
         </div>
       )}
-      <div className="md-editor-preview" style={{ display: preview ? "block" : "none" }}>
-        {editorValue ? (
-          <MarkdownRenderer markdown={editorValue} variant="document" />
-        ) : (
-          <span className="muted">{t("emptyPreview")}</span>
-        )}
-      </div>
+      {preview && (
+        <div className="md-editor-preview">
+          {editorValue ? (
+            <MarkdownRenderer markdown={editorValue} variant="document" />
+          ) : (
+            <span className="muted">{t("emptyPreview")}</span>
+          )}
+        </div>
+      )}
       <textarea
         id={id}
         ref={setTextareaRef}
         name={name}
         value={editorValue}
         onChange={handleChange}
+        onInvalid={handleInvalid}
         onPaste={handlePaste}
         onSelect={onSelect}
         onClick={onClick}

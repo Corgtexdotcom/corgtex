@@ -1,6 +1,6 @@
 import type { MeetingEvidenceState } from "@corgtex/domain";
 
-export const MEETING_STATUS_FILTERS = ["COMPLETED", "TRANSCRIPT_NEEDED", "SCHEDULED"] as const;
+const MEETING_STATUS_FILTERS = ["COMPLETED", "TRANSCRIPT_NEEDED", "SCHEDULED"] as const;
 
 export type MeetingStatusFilter = "ALL" | (typeof MEETING_STATUS_FILTERS)[number];
 

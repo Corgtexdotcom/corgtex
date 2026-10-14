@@ -136,6 +136,7 @@ type Env = {
   readonly STRIPE_WEBHOOK_SECRET: string | undefined;
   readonly STRIPE_PRICE_AI_USAGE_ID: string | undefined;
   readonly AGENT_KILL_SWITCH: boolean;
+  readonly ASSISTANT_HARNESS_ENABLED: boolean;
   readonly WORKSPACE_AGENT_MAX_CONCURRENCY: number;
   readonly WORKER_POLL_INTERVAL_MS: number;
   readonly WORKER_EVENT_BATCH_SIZE: number;
@@ -352,6 +353,9 @@ export const env: Env = {
   },
   get AGENT_KILL_SWITCH() {
     return booleanFromEnv("AGENT_KILL_SWITCH", false);
+  },
+  get ASSISTANT_HARNESS_ENABLED() {
+    return booleanFromEnv("ASSISTANT_HARNESS_ENABLED", false);
   },
   get WORKSPACE_AGENT_MAX_CONCURRENCY() {
     return numberFromEnv("WORKSPACE_AGENT_MAX_CONCURRENCY", 4);
