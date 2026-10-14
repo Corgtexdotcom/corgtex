@@ -34,6 +34,7 @@ const LOADERS: Record<Exclude<LineageKind, "ExternalMcpConnectionSet">, Descript
   ExternalProviderFetchInput: direct("ExternalProviderFetchInput", "externalProviderFetchInput"), ExternalContentSource: direct("ExternalContentSource", "externalContentSource"),
   ExternalMcpResponseInput: direct("ExternalMcpResponseInput", "externalMcpResponseInput"),
   FinanceReport: direct("FinanceReport", "financeReport"),
+  FinanceReportFactRevision: direct("FinanceReportFactRevision", "financeReportFactRevision"),
   FinanceReportFact: direct("FinanceReportFact", "financeReportFact"),
   FinanceImportApplication: direct("FinanceImportApplication", "financeImportApplication"),
 
@@ -99,7 +100,7 @@ const NATIVE_INPUTS = new Set<LineageKind>(["NativeTranscriptInput", "Communicat
   "TensionUpvote", "ArtifactInputSnapshot"]);
 export const SOURCE_LINEAGE_BACKFILL_KINDS = (Object.keys(LOADERS) as LineageKind[]).filter((kind) => !NATIVE_INPUTS.has(kind));
 const GENERATED_ONLY = new Set<LineageKind>(["MeetingAudioAsset", "GenericDerivedArtifactVariant", "CommunicationMessage", "AgentMemory", "ConversationTurn", "CommunicationContextSummary", "WorkspaceBriefing",
-  "FinanceReport", "FinanceReportFact", "FinanceImportApplication", "FinanceImportBatch", "FinanceImportCandidate",
+  "FinanceReport", "FinanceReportFact", "FinanceReportFactRevision", "FinanceImportApplication", "FinanceImportBatch", "FinanceImportCandidate",
   "NewspaperEdition", "NewspaperDelivery", "NewspaperTrackedLink", "Notification", "AgentRun", "AgentStep", "AgentToolCall", "ConversationPendingOperation", "ConversationOperationOutcome", "ExecutionResult", "KnowledgeChunk"]);
 
 export type SourceLineageBackfillStatus = "VERIFIED_CURRENT" | "RECOVERABLE_SNAPSHOT" | "WITHHELD" | "MISSING" | "UNSUPPORTED";

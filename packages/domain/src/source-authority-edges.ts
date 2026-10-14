@@ -32,7 +32,7 @@ export const SOURCE_AUTHORITY_REGISTRY = freezeDescriptor({
   ConversationOperationOutcome: row("ConversationOperationOutcome"), FinanceReportUploadInput: row("FinanceReportUploadInput", "optional", { native: true }),
   CrmQualificationFormInput: row("CrmQualificationFormInput", "optional"), ExecutionRequest: row("ExecutionRequest"), ExecutionResult: row("ExecutionResult"),
   FinanceImportBatch: row("FinanceImportBatch"), FinanceImportCandidate: row("FinanceImportCandidate"), FinanceReport: row("FinanceReport"),
-  FinanceReportFact: row("FinanceReportFact"), FinanceImportApplication: row("FinanceImportApplication"),
+  FinanceReportFact: row("FinanceReportFact"), FinanceReportFactRevision: row("FinanceReportFactRevision"), FinanceImportApplication: row("FinanceImportApplication"),
   McpToolInput: row("McpToolInput", "optional"), ConversationIngressInput: row("ConversationIngressInput", "optional"),
   DemoLeadIntakeInput: row("DemoLead", "optional", { projection: ["id", "workspaceId", "email", "source", "createdAt"] }),
   CrmQualificationEmailInput: row("CrmQualification", "optional", { projection: ["id", "workspaceId", "demoLeadId", "responseChannel", "rawEmailReply", "rawEmailSubject", "createdAt"] }),
@@ -248,8 +248,9 @@ export async function discoverSourceAuthorityEdges(context: AuthorityDiscoveryCo
   if (kind === "FinanceReportUploadInput") { field("FinanceImportBatch", "batchId"); field("Document", "documentId"); field("BrainSource", "brainSourceId"); }
   if (kind === "FinanceImportBatch") await rows("FinanceReportUploadInput", { workspaceId, batchId: input.id }, `finance-upload:${input.id}`, "FinanceReportUploadInput", true);
   if (kind === "FinanceReport") field("FinanceImportBatch", "sourceBatchId");
-  if (kind === "FinanceReportFact") { field("FinanceReport", "reportId"); field("FinanceImportBatch", "sourceBatchId"); field("FinanceImportCandidate", "sourceCandidateId"); }
-  if (kind === "FinanceImportApplication") { field("FinanceImportBatch", "batchId"); field("FinanceImportCandidate", "candidateId"); field("FinanceReportFact", "targetFactId", false); }
+  if (["FinanceReportFact", "FinanceReportFactRevision"].includes(kind)) { field("FinanceReport", "reportId"); field("FinanceImportBatch", "sourceBatchId"); field("FinanceImportCandidate", "sourceCandidateId"); }
+  if (kind === "FinanceImportApplication") { field("FinanceImportBatch", "batchId"); field("FinanceImportCandidate", "candidateId"); field("FinanceReportFactRevision", "beforeRevisionId", false); field("FinanceReportFactRevision", "afterRevisionId", false); }
+  if (kind === "FinanceReportFactRevision") await rows("FinanceReportFact", { id: content.factId, workspaceId, kind: content.kind }, `finance-fact-lifecycle:${input.id}`, undefined, true);
   if (kind === "FinanceImportCandidate") field("FinanceImportBatch", "batchId");
   if (kind === "AgentFeedbackInput") { field("AgentRun", "agentRunId"); field("AgentStep", "stepId"); field("ArtifactInputSnapshot", "priorRunSnapshotId"); }
   if (["AgentStep", "AgentToolCall"].includes(kind)) field("AgentRun", "agentRunId");

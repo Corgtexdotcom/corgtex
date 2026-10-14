@@ -5,18 +5,17 @@ import { Prisma, type FinanceImportApplicationOutcome } from "@prisma/client";
 import { captureArtifactInputProof, captureImmutableArtifactInputProof, recordArtifactInputLineage, type LineageKind, type LineageRoot } from "./source-lineage";
 import { AppError, invariant } from "./errors";
 import { requireFinanceReportImportHumanWriteAccess } from "./finance";
-import { buildFinanceReportFactSemanticKey, captureFinanceCurrentFactProof } from "./finance-import-reconciliation";
+import { buildFinanceReportFactSemanticKey, captureFinanceCurrentFactValues } from "./finance-import-reconciliation";
+import { publishFinanceFactRevision } from "./finance-fact-revisions";
+import { financeRevisionValue } from "./finance-fact-value";
 import { FINANCE_IMPORT_HISTORICAL_MONTHS } from "./finance-import-review";
 import { buildFinanceImportApplicationIdempotencyKey, normalizeFinanceImportIsoCurrency } from "./finance-imports";
 
 const MAX_VERSION = 2_147_483_647;
 type Version = { id: string; expectedVersion: number };
-type Fact = { id: string; reportId: string; accountPath: string[]; kind: "LEAF" | "DERIVED"; periodStart: Date; periodEnd: Date;
-  amountCents: number; dimensions: Prisma.JsonValue | null; semanticKey: string; sourceBatchId: string; sourceCandidateId: string;
-  appliedByUserId: string; version: number };
 type Candidate = { id: string; sourceKey: string; proposedAccountPath: string[]; factKind: "LEAF" | "DERIVED"; periodStart: Date;
   periodEnd: Date; amountCents: number; dimensions: Prisma.JsonValue | null; action: "ADD" | "UPDATE" | "UNCHANGED" | "DUPLICATE" | "CONFLICT" | "SKIP";
-  reviewState: string; semanticKey: string | null; currentFactId: string | null; currentAmountCents: number | null; editedByUserId: string | null; editedAt: Date | null;
+  reviewState: string; semanticKey: string | null; currentFactId: string | null; currentFactRevisionId: string | null; currentAmountCents: number | null; editedByUserId: string | null; editedAt: Date | null;
   approvedByUserId: string | null; approvedAt: Date | null; version: number;
   application: { id: string; idempotencyKey: string; outcome: FinanceImportApplicationOutcome; targetFactId: string | null } | null };
 
@@ -31,9 +30,13 @@ function canonicalJson(value: Prisma.JsonValue): string {
 function hashJson(value: Prisma.JsonValue) { return createHash("sha256").update(canonicalJson(value)).digest("hex"); }
 function date(value: Date) { return value.toISOString().slice(0, 10); }
 function historical(periodEnd: Date, now: Date) { const cutoff = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())); cutoff.setUTCMonth(cutoff.getUTCMonth() - FINANCE_IMPORT_HISTORICAL_MONTHS); return periodEnd < cutoff; }
+function serializableConflict(error: unknown) {
+  return error instanceof Prisma.PrismaClientKnownRequestError
+    && (error.code === "P2034" || (error.code === "P2010" && error.meta?.code === "40001"));
+}
 async function retrySerializableConflict<T>(operation: () => Promise<T>) {
   try { return await operation(); } catch (error) {
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034") return operation();
+    if (serializableConflict(error)) return operation();
     throw error;
   }
 }
@@ -41,12 +44,6 @@ function proposal(candidate: Candidate): Prisma.InputJsonObject {
   return { action: candidate.action, semanticKey: candidate.semanticKey, accountPath: candidate.proposedAccountPath, kind: candidate.factKind,
     periodStart: date(candidate.periodStart), periodEnd: date(candidate.periodEnd), amountCents: candidate.amountCents,
     dimensions: candidate.dimensions ?? null } as Prisma.InputJsonObject;
-}
-function factSnapshot(fact: Fact): Prisma.InputJsonObject {
-  return { id: fact.id, reportId: fact.reportId, accountPath: fact.accountPath, kind: fact.kind, periodStart: date(fact.periodStart),
-    periodEnd: date(fact.periodEnd), amountCents: fact.amountCents, dimensions: fact.dimensions ?? null, semanticKey: fact.semanticKey,
-    sourceBatchId: fact.sourceBatchId, sourceCandidateId: fact.sourceCandidateId, appliedByUserId: fact.appliedByUserId,
-    version: fact.version } as Prisma.InputJsonObject;
 }
 function applicationKey(workspaceId: string, batchId: string, candidate: Candidate, expectedVersion: number) {
   return buildFinanceImportApplicationIdempotencyKey({ workspaceId, batchId, candidateId: candidate.id,
@@ -132,9 +129,11 @@ export async function applyFinanceReportImport(actor: AppActor, params: { worksp
       const sourceFacts = await tx.financeReportFact.findMany({ where: { workspaceId: params.workspaceId,
         semanticKey: { in: outstanding.flatMap(row => row.semanticKey ? [row.semanticKey] : []) } }, orderBy: { id: "asc" }, take: 5001 });
       invariant(sourceFacts.length <= 5000, 413, "FINANCE_READ_BUDGET", "Narrow the Finance import selection.");
-      const factRoots = await captureFinanceCurrentFactProof(tx, actor, params.workspaceId, sourceFacts);
+      const currentValues = await captureFinanceCurrentFactValues(tx, actor, params.workspaceId, sourceFacts);
+      const factRoots = currentValues.roots;
+      const revisionsByFact = new Map(currentValues.revisions.map(row => [row.factId, row]));
       const frozenRoots = await captureImmutableArtifactInputProof(actor, params.workspaceId, [...inputRoots, ...factRoots], tx);
-      const factsByKey = new Map(sourceFacts.map(row => [row.semanticKey, row]));
+      const factsByKey = new Map(currentValues.facts.map(row => [row.semanticKey, row]));
       const report = await tx.financeReport.upsert({ where: { sourceBatchId: batch.id }, update: { reportType: batch.reportType, basis: batch.basis,
         cadence: batch.cadence, currency, periodStart: batch.periodStart, periodEnd: batch.periodEnd, asOfDate: batch.asOfDate,
         title, status: "ACTIVE", version: { increment: 1 } }, create: { workspaceId: batch.workspaceId, sourceBatchId: batch.id,
@@ -143,8 +142,9 @@ export async function applyFinanceReportImport(actor: AppActor, params: { worksp
       const reportRoots = await recordOutput(tx, actor, params.workspaceId, "FinanceReport", report, frozenRoots);
       const receipts = [];
       for (const candidate of outstanding) {
-        let outputRoots = [...frozenRoots, ...reportRoots];
+        const outputRoots = [...frozenRoots, ...reportRoots];
         let before: Prisma.InputJsonObject | null = null; let after: Prisma.InputJsonObject | null = null;
+        let beforeRevisionId: string | null = null; let afterRevisionId: string | null = null;
         let targetFactId: string | null = null; let outcome: FinanceImportApplicationOutcome;
         const desired = { reportId: report.id, accountPath: candidate.proposedAccountPath, kind: candidate.factKind as "LEAF", periodStart: candidate.periodStart,
           periodEnd: candidate.periodEnd, amountCents: candidate.amountCents, dimensions: candidate.dimensions ?? Prisma.JsonNull,
@@ -154,34 +154,47 @@ export async function applyFinanceReportImport(actor: AppActor, params: { worksp
           invariant(!factsByKey.has(candidate.semanticKey),
             409, "FINANCE_REPORT_APPLICATION_CONFLICT", "A Reported Actuals fact now occupies this identity. Refresh and reconcile again.");
           const created = await tx.financeReportFact.create({ data: { workspaceId: batch.workspaceId, ...desired } });
-          outputRoots.push(...await recordOutput(tx, actor, params.workspaceId, "FinanceReportFact", created, outputRoots));
-          factsByKey.set(created.semanticKey, created);
-          targetFactId = created.id; after = factSnapshot(created); outcome = "CREATED";
+          const published = await publishFinanceFactRevision(tx, actor, created, candidate, outputRoots);
+          outputRoots.push(...published.roots);
+          await recordOutput(tx, actor, params.workspaceId, "FinanceReportFact", created, published.roots);
+          factsByKey.set(created.semanticKey, { ...created, currentFactRevisionId: published.revision.id });
+          revisionsByFact.set(created.id, published.revision);
+          targetFactId = created.id; after = published.value; afterRevisionId = published.revision.id; outcome = "CREATED";
         } else if (["UPDATE", "UNCHANGED"].includes(candidate.action)) {
           invariant(candidate.semanticKey && candidate.currentFactId, 409, "FINANCE_REPORT_APPLICATION_BLOCKED", "The approved target identity is invalid.");
           const current = factsByKey.get(candidate.semanticKey);
-          invariant(current && current.id === candidate.currentFactId && current.semanticKey === candidate.semanticKey && current.amountCents === candidate.currentAmountCents,
+          invariant(current && current.id === candidate.currentFactId && current.semanticKey === candidate.semanticKey && current.amountCents === candidate.currentAmountCents
+            && current.currentFactRevisionId === candidate.currentFactRevisionId,
             409, "FINANCE_REPORT_APPLICATION_CONFLICT", "The current Reported Actuals fact changed. Refresh and reconcile again.");
-          targetFactId = current.id; before = factSnapshot(current);
+          targetFactId = current.id;
+          const beforeRevision = revisionsByFact.get(current.id)!;
+          before = financeRevisionValue(beforeRevision); beforeRevisionId = beforeRevision.id;
           if (candidate.action === "UNCHANGED") invariant(current.amountCents === candidate.amountCents, 409, "FINANCE_REPORT_APPLICATION_CONFLICT", "The unchanged fact no longer matches.");
           const updated = await tx.financeReportFact.updateMany({ where: { id: current.id, workspaceId: batch.workspaceId, version: current.version,
             semanticKey: current.semanticKey, amountCents: current.amountCents }, data: { ...desired, version: { increment: 1 } } });
           invariant(updated.count === 1, 409, "FINANCE_REPORT_APPLICATION_CONFLICT", "The current Reported Actuals fact changed. Refresh and reconcile again.");
           const changed = await tx.financeReportFact.findUniqueOrThrow({ where: { id_workspaceId: { id: current.id, workspaceId: params.workspaceId } } });
-          outputRoots.push(...await recordOutput(tx, actor, params.workspaceId, "FinanceReportFact", changed, outputRoots));
-          factsByKey.set(changed.semanticKey, changed);
-          after = factSnapshot(changed); outcome = candidate.action === "UPDATE" ? "UPDATED" : "UNCHANGED";
+          const published = await publishFinanceFactRevision(tx, actor, changed, candidate, outputRoots);
+          outputRoots.push(...published.roots);
+          await recordOutput(tx, actor, params.workspaceId, "FinanceReportFact", changed, published.roots);
+          factsByKey.set(changed.semanticKey, { ...changed, currentFactRevisionId: published.revision.id });
+          revisionsByFact.set(changed.id, published.revision);
+          after = published.value; afterRevisionId = published.revision.id; outcome = candidate.action === "UPDATE" ? "UPDATED" : "UNCHANGED";
         } else if (candidate.action === "DUPLICATE") {
           invariant(candidate.semanticKey, 409, "FINANCE_REPORT_APPLICATION_BLOCKED", "The approved duplicate identity is invalid.");
           const target = factsByKey.get(candidate.semanticKey);
-          if (target) { invariant(target.amountCents === candidate.amountCents, 409, "FINANCE_REPORT_APPLICATION_CONFLICT", "The duplicate target changed. Refresh and reconcile again.");
-            targetFactId = target.id; before = factSnapshot(target); after = before;
-            outputRoots.push(...await captureImmutableArtifactInputProof(actor, params.workspaceId, await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "FinanceReportFact", id: target.id, snapshot: target }], tx), tx)); }
+          invariant(target, 409, "FINANCE_REPORT_APPLICATION_CONFLICT", "The duplicate needs a verified existing revision.");
+          invariant(target.amountCents === candidate.amountCents, 409, "FINANCE_REPORT_APPLICATION_CONFLICT", "The duplicate target changed. Refresh and reconcile again.");
+          const revision = revisionsByFact.get(target.id)!;
+          invariant(revision, 409, "FINANCE_REPORT_SOURCE_NOT_READY", "The duplicate needs a verified existing revision.");
+          targetFactId = target.id; before = financeRevisionValue(revision); after = before;
+          beforeRevisionId = revision.id; afterRevisionId = revision.id;
+          outputRoots.push(...await captureImmutableArtifactInputProof(actor, params.workspaceId, await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "FinanceReportFactRevision", id: revision.id, snapshot: revision }], tx), tx));
           outcome = "SKIPPED";
         } else { invariant(candidate.action === "SKIP", 409, "FINANCE_REPORT_APPLICATION_BLOCKED", "The candidate action cannot be applied."); outcome = "SKIPPED"; }
         const key = applicationKey(batch.workspaceId, batch.id, candidate, candidate.version);
         const receipt = await tx.financeImportApplication.create({ data: { workspaceId: batch.workspaceId, batchId: batch.id, candidateId: candidate.id,
-          idempotencyKey: key, targetType: "REPORT_FACT", targetFactId, beforeValueJson: before ?? Prisma.DbNull, afterValueJson: after ?? Prisma.DbNull,
+          idempotencyKey: key, targetType: "REPORT_FACT", targetFactId, beforeRevisionId, afterRevisionId, beforeValueJson: before ?? Prisma.DbNull, afterValueJson: after ?? Prisma.DbNull,
           beforeValueHash: before ? hashJson(before as Prisma.JsonObject) : null, afterValueHash: after ? hashJson(after as Prisma.JsonObject) : null,
           outcome, appliedByUserId: actor.user.id, appliedAt: now } });
         const receiptRoots = await recordOutput(tx, actor, params.workspaceId, "FinanceImportApplication", receipt, outputRoots);
@@ -216,7 +229,7 @@ export async function applyFinanceReportImport(actor: AppActor, params: { worksp
       return { batchId: batch.id, version: batch.version + 1, stage, appliedCount, appliedNow: receipts.length, noOp: false, receipts };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, maxWait: 10_000, timeout: 120_000 }));
   } catch (error) {
-    if (error instanceof Prisma.PrismaClientKnownRequestError && ["P2002", "P2034"].includes(error.code)) {
+    if (serializableConflict(error) || (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002")) {
       throw new AppError(409, "FINANCE_REPORT_APPLICATION_CONFLICT", "The Finance report application changed. Refresh and try again.");
     }
     throw error;

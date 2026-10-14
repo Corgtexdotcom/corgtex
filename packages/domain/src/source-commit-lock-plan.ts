@@ -27,7 +27,7 @@ declare const planBrand: unique symbol;
 declare const ownerBrand: unique symbol;
 export type SourceCommitLockPlan = { readonly [planBrand]: true };
 export type SourceCommitOwnerAttestation = { readonly [ownerBrand]: true };
-export const SOURCE_COMMIT_CONTROL_TABLES = ["MeetingRecording", "MeetingRecorderProviderEvent", "MeetingRecorderSmokeRun", "MeetingTranscriptProcessingProgress", "AuditLog", "Event", "RecorderTranscriptPublication", "RecorderTranscriptAttempt"] as const;
+export const SOURCE_COMMIT_CONTROL_TABLES = ["FinanceReportFact", "MeetingRecording", "MeetingRecorderProviderEvent", "MeetingRecorderSmokeRun", "MeetingTranscriptProcessingProgress", "AuditLog", "Event", "RecorderTranscriptPublication", "RecorderTranscriptAttempt"] as const;
 /** Typed exact before/after control projections. These confer no semantic input authority. */
 export type SourceCommitControlWriteTarget = { table: typeof SOURCE_COMMIT_CONTROL_TABLES[number]; id: string;
   before: Record<string, unknown> | null; after: Record<string, unknown> | null };
@@ -116,7 +116,7 @@ const GOVERNING_FIELDS = ["id", "workspaceId", "crmWorkspaceId", "ownerMemberId"
   "provider", "providerKey", "externalId", "externalWorkspaceId", "appId", "providerPrincipalId", "accessDomain", "credentialId", "agentCredentialId", "agentIdentityId", "audienceType",
   "goalId", "actionId", "tensionId", "articleId", "threadId", "mapViewId", "constitutionId", "proposalId", "artifactId", "executionRequestId", "meetingId", "sessionId", "conversationId",
   "flowId", "subjectType", "subjectId", "sourceType", "sourceId", "parentType", "parentId", "demoLeadId", "qualificationId", "accountId", "contactId", "dealId", "activityId", "targetWorkspaceId",
-  "batchId", "documentId", "brainSourceId", "sourceBatchId", "reportId", "sourceCandidateId", "candidateId", "targetFactId", "agentRunId", "stepId", "priorRunSnapshotId", "variantOfArticleId",
+  "batchId", "documentId", "brainSourceId", "sourceBatchId", "reportId", "sourceCandidateId", "candidateId", "targetFactId", "factId", "appliedByUserId", "approvedByUserId", "kind", "beforeRevisionId", "afterRevisionId", "agentRunId", "stepId", "priorRunSnapshotId", "variantOfArticleId",
   "variantTargetFingerprint", "variantSourceStateJson", "targetFingerprint", "targetKind", "targetId", "targetsJson", "scopeJson", "sourceStateJson", "metadata", "operation", "controlJson", "ingressInputId"];
 const envelope = (row: Record<string, unknown>) => Object.fromEntries(GOVERNING_FIELDS.filter(key => key in row).map(key => [key,row[key]]));
 const outputEnvelope=(row:Record<string,unknown>)=>Object.fromEntries(GOVERNING_FIELDS.map(key=>[key,row[key]??null]));

@@ -3,6 +3,7 @@ import type { AppActor } from "@corgtex/shared";
 import { prisma } from "@corgtex/shared";
 import type { FinanceAccountingBasis, FinanceImportCandidateAction, FinanceImportCandidateReviewState, FinanceReportType, FinanceReportFact, Prisma } from "@prisma/client";
 import { captureArtifactInputProof, captureImmutableArtifactInputProof, recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
+import { captureFinanceFactRevisions } from "./finance-fact-revisions";
 import { AppError, invariant } from "./errors";
 import { requireFinanceReportImportHumanWriteAccess } from "./finance";
 import { parseFinanceImportInterpretationV1 } from "./finance-import-interpretation";
@@ -10,9 +11,9 @@ import { normalizeFinanceImportIsoCurrency } from "./finance-imports";
 
 type Candidate = { id?: string; sourceKey: string; version?: number; proposedAccountPath: string[]; factKind: "LEAF" | "DERIVED";
   periodStart: Date; periodEnd: Date; amountCents: number; dimensions?: Prisma.JsonValue | null; proposalJson?: unknown };
-type CurrentFact = { id: string; semanticKey: string; kind: "LEAF" | "DERIVED"; amountCents: number };
+type CurrentFact = { id: string; semanticKey: string; kind: "LEAF" | "DERIVED"; amountCents: number; currentFactRevisionId?: string };
 export type FinanceImportReconciliationDecision = { candidate: Candidate; semanticKey: string | null; action: FinanceImportCandidateAction;
-  reviewState: FinanceImportCandidateReviewState; currentFactId: string | null; currentAmountCents: number | null; explanationMd: string | null };
+  reviewState: FinanceImportCandidateReviewState; currentFactId: string | null; currentFactRevisionId: string | null; currentAmountCents: number | null; explanationMd: string | null };
 
 function canonicalJson(value: Prisma.JsonValue | null): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -44,7 +45,7 @@ export function buildFinanceReportFactSemanticKey(params: { workspaceId: string;
 const outcome = (candidate: Candidate, semanticKey: string | null, action: FinanceImportCandidateAction,
   current: CurrentFact | null = null, explanationMd: string | null = null): FinanceImportReconciliationDecision => ({ candidate, semanticKey, action,
     reviewState: action === "CONFLICT" ? "BLOCKED" : ["UNCHANGED", "DUPLICATE", "SKIP"].includes(action) ? "VERIFIED" : "PROPOSED",
-    currentFactId: current?.id ?? null, currentAmountCents: current?.amountCents ?? null, explanationMd });
+    currentFactId: current?.id ?? null, currentFactRevisionId: current?.currentFactRevisionId ?? null, currentAmountCents: current?.amountCents ?? null, explanationMd });
 
 export function reconcileFinanceImportCandidates(params: { workspaceId: string; reportType: FinanceReportType; basis: FinanceAccountingBasis;
   currency: string; candidates: Candidate[]; currentFacts: CurrentFact[] }) {
@@ -84,22 +85,18 @@ export function reconcileFinanceImportCandidates(params: { workspaceId: string; 
 /** Matching unknown facts withhold reconciliation; absence must never be fabricated. */
 export async function captureFinanceCurrentFactProof(tx: Prisma.TransactionClient, actor: AppActor, workspaceId: string,
   facts: FinanceReportFact[]): Promise<LineageRoot[]> {
-  invariant(facts.length <= 5000, 413, "FINANCE_READ_BUDGET", "Narrow the Finance import selection.");
-  if (!facts.length) return [];
-  try {
-    const reportIds = [...new Set(facts.map(row => row.reportId))];
-    const reports = await tx.financeReport.findMany({ where: { workspaceId, id: { in: reportIds } }, orderBy: { id: "asc" }, take: 5001 });
-    invariant(reports.length === reportIds.length, 409, "FINANCE_REPORT_SOURCE_NOT_READY", "Finance reconciliation is unavailable.");
-    return await captureArtifactInputProof(actor, workspaceId, [
-      ...facts.map(row => ({ kind: "FinanceReportFact" as const, id: row.id, snapshot: row })),
-      ...reports.map(row => ({ kind: "FinanceReport" as const, id: row.id, snapshot: row })),
-    ], tx);
-  } catch (error) {
-    if (error instanceof AppError && ["SOURCE_CHANGED", "UNKNOWN_LINEAGE", "FORBIDDEN", "FINANCE_REPORT_SOURCE_NOT_READY"].includes(error.code))
+  return (await captureFinanceCurrentFactValues(tx, actor, workspaceId, facts)).roots;
+}
+export async function captureFinanceCurrentFactValues(tx: Prisma.TransactionClient, actor: AppActor, workspaceId: string,
+  facts: FinanceReportFact[]) {
+  try { return await captureFinanceFactRevisions(tx, actor, workspaceId, facts); }
+  catch (error) {
+    if (error instanceof AppError && ["SOURCE_CHANGED", "UNKNOWN_LINEAGE", "FORBIDDEN"].includes(error.code))
       throw new AppError(409, "FINANCE_REPORT_SOURCE_NOT_READY", "Finance reconciliation is unavailable.");
     throw error;
   }
 }
+
 export async function rerunFinanceReportImportReconciliation(actor: AppActor, params: { workspaceId: string; batchId: string;
   expectedVersion: number; candidateVersions: Array<{ id: string; expectedVersion: number }>; confirmedCurrency: string; confirmedAmountScale: number }) {
   await requireFinanceReportImportHumanWriteAccess(actor, params.workspaceId);
@@ -138,13 +135,14 @@ export async function rerunFinanceReportImportReconciliation(actor: AppActor, pa
     const currentFacts = await tx.financeReportFact.findMany({ where: { workspaceId: batch.workspaceId, semanticKey: { in: keys } },
       orderBy: { id: "asc" }, take: 5001 });
     invariant(currentFacts.length <= 5000, 413, "FINANCE_READ_BUDGET", "Narrow the Finance import selection.");
-    const factRoots = await captureFinanceCurrentFactProof(tx, actor, params.workspaceId, currentFacts);
+    const current = await captureFinanceCurrentFactValues(tx, actor, params.workspaceId, currentFacts);
+    const factRoots = current.roots;
     const frozenRoots = await captureImmutableArtifactInputProof(actor, params.workspaceId, [...roots, ...factRoots], tx);
-    const result = reconcileFinanceImportCandidates({ ...identity, candidates: batch.candidates, currentFacts });
+    const result = reconcileFinanceImportCandidates({ ...identity, candidates: batch.candidates, currentFacts: current.facts });
     for (const decision of result.decisions) {
       const updated = await tx.financeImportCandidate.updateMany({ where: { id: decision.candidate.id!, workspaceId: batch.workspaceId,
         batchId: batch.id, version: decision.candidate.version! }, data: { semanticKey: decision.semanticKey, action: decision.action,
-        reviewState: decision.reviewState, currentFactId: decision.currentFactId, currentAmountCents: decision.currentAmountCents,
+        reviewState: decision.reviewState, currentFactId: decision.currentFactId, currentFactRevisionId: decision.currentFactRevisionId, currentAmountCents: decision.currentAmountCents,
         explanationMd: decision.explanationMd, approvedByUserId: null, approvedAt: null, version: { increment: 1 } } });
       invariant(updated.count === 1, 409, "FINANCE_REPORT_RECONCILIATION_CONFLICT", "A Finance report candidate changed. Refresh and try again.");
     }
@@ -171,5 +169,5 @@ export async function rerunFinanceReportImportReconciliation(actor: AppActor, pa
     await tx.auditLog.create({ data: { workspaceId: batch.workspaceId, actorUserId: actor.user.id, action: "finance-report-import.reconciled",
       entityType: "FinanceImportBatch", entityId: batch.id, meta: { version: batch.version + 1, ...result.counts } } });
     return { batchId: batch.id, version: batch.version + 1, stage: "READY_FOR_REVIEW" as const, ...result.counts };
-  });
+  }, {maxWait: 10_000, timeout: 120_000});
 }

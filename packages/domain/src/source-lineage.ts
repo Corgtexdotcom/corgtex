@@ -1,3 +1,4 @@
+import { financeFactValue, financeValueHash, isFinanceFactRevisionIntact } from "./finance-fact-value";
 import { getRecorderTranscriptWorkerPurpose, nativeTranscriptPrincipalUserId } from "./native-transcript-principal";
 import { artifactPermissionEpochIdentities, capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, mergePermissionEpochProofs, parsePermissionEpochProof, withSourceCommitPermissionReadPass, type PermissionEpochProof } from "./source-permission-epochs";
 import { createHash } from "node:crypto";
@@ -73,7 +74,7 @@ export type LineageKind =
   | "ExternalMcpResponseInput" | "ExternalMcpConnectionSet"
   | "WorkspaceToolLink" | "WorkspaceToolLinkCredential" | "ConversationOperationOutcome"
   | "FinanceReportUploadInput" | "CrmQualificationFormInput" | "ExecutionRequest" | "ExecutionResult"
-  | "FinanceImportBatch" | "FinanceImportCandidate" | "FinanceReport" | "FinanceReportFact" | "FinanceImportApplication"
+  | "FinanceImportBatch" | "FinanceImportCandidate" | "FinanceReport" | "FinanceReportFact" | "FinanceReportFactRevision" | "FinanceImportApplication"
   | "McpToolInput" | "ConversationIngressInput" | "DemoLeadIntakeInput" | "CrmQualificationEmailInput" | "DemoLead" | "CrmQualification" | "WorkflowJobInput"
   | "AgentRequestInput" | "AgentFeedbackInput" | "ConversationPendingOperation" | "BrainDiscussionThread" | "BrainDiscussionComment"
   | "AgentRun" | "AgentStep" | "AgentToolCall"
@@ -120,11 +121,12 @@ const CONTENT_FIELDS: Record<LineageKind, string[]> = {
   ExternalMcpConnectionSet: ["workspaceId", "localUserId", "epoch"],
   ExternalContentSource: ["workspaceId", "connectionId", "selectedByUserId", "providerKey", "sourceKind", "externalId", "title", "externalUrl", "syncMode", "status", "lastRemoteVersion", "lastSyncedAt", "lastSyncError", "metadata", "archivedAt", "archivedByUserId", "archiveReason"],
   FinanceReport: ["workspaceId", "reportType", "basis", "cadence", "currency", "periodStart", "periodEnd", "asOfDate", "title", "status", "sourceBatchId", "version"],
+  FinanceReportFactRevision: ["workspaceId", "factId", "factVersion", "reportId", "accountPath", "kind", "periodStart", "periodEnd", "amountCents", "dimensions", "semanticKey", "sourceBatchId", "sourceCandidateId", "appliedByUserId", "approvedByUserId", "approvedAt", "candidateVersion", "valueHash", "recipeJson", "recipeHash"],
   FinanceReportFact: ["workspaceId", "reportId", "accountPath", "kind", "periodStart", "periodEnd", "amountCents", "dimensions", "semanticKey", "sourceBatchId", "sourceCandidateId", "appliedByUserId", "version"],
-  FinanceImportApplication: ["workspaceId", "batchId", "candidateId", "idempotencyKey", "targetType", "targetFactId", "beforeValueJson", "afterValueJson", "beforeValueHash", "afterValueHash", "outcome", "appliedByUserId", "appliedAt"],
+  FinanceImportApplication: ["workspaceId", "batchId", "candidateId", "idempotencyKey", "targetType", "targetFactId", "beforeRevisionId", "afterRevisionId", "beforeValueJson", "afterValueJson", "beforeValueHash", "afterValueHash", "outcome", "appliedByUserId", "appliedAt"],
 
   FinanceImportBatch: ["workspaceId", "uploadedByUserId", "documentId", "brainSourceId", "workflowJobId", "agentRunId", "fileHash", "mimeType", "originalFilename", "fileSizeBytes", "stage", "safeErrorCode", "safeErrorMessage", "retryCount", "reportType", "basis", "cadence", "periodStart", "periodEnd", "asOfDate", "title", "currencyState", "resolvedCurrency", "currencyResolutionSource", "currencyConfirmedByUserId", "currencyConfirmedAt", "interpretationJson", "addCount", "updateCount", "unchangedCount", "duplicateCount", "conflictCount", "skippedCount", "warningCount", "blockerCount", "rejectedCount", "appliedCount", "approvedByUserId", "approvedAt", "appliedByUserId", "appliedAt", "version"],
-  FinanceImportCandidate: ["workspaceId", "batchId", "sourceKey", "sourceLocation", "sourceLabel", "sourcePath", "proposedAccountPath", "factKind", "periodStart", "periodEnd", "amountCents", "dimensions", "extractionJson", "proposalJson", "action", "reviewState", "semanticKey", "currentFactId", "currentAmountCents", "confidenceBps", "evidenceMd", "explanationMd", "editedByUserId", "editedAt", "approvedByUserId", "approvedAt", "version"],
+  FinanceImportCandidate: ["workspaceId", "batchId", "sourceKey", "sourceLocation", "sourceLabel", "sourcePath", "proposedAccountPath", "factKind", "periodStart", "periodEnd", "amountCents", "dimensions", "extractionJson", "proposalJson", "action", "reviewState", "semanticKey", "currentFactId", "currentFactRevisionId", "currentAmountCents", "confidenceBps", "evidenceMd", "explanationMd", "editedByUserId", "editedAt", "approvedByUserId", "approvedAt", "version"],
   FinanceReportUploadInput: ["workspaceId", "batchId", "documentId", "brainSourceId", "uploadedByUserId", "fileHash", "storageKey", "mimeType", "fileSizeBytes", "originalFilename"],
   CrmQualificationFormInput: ["workspaceId", "demoLeadId", "qualificationId", "companyName", "website", "roleTitle", "aiExperience", "helpNeeded"],
   ExecutionRequest: ["workspaceId", "createdByUserId", "agentCredentialId", "provider", "status", "goal", "actorJson", "contextJson", "allowedScopes", "policyConstraintsJson", "expectedOutputJson", "approvalRule", "writebackTargetType", "writebackTargetId", "writebackTargetLabel", "packetJson", "idempotencyKey", "claimedAt", "completedAt", "failedAt", "cancelledAt"],
@@ -239,7 +241,7 @@ function snapshotContentFields(kind: LineageKind, row?: Record<string, unknown>)
 
 function fingerprintFields(kind: LineageKind) {
   return [...new Set([...CONTENT_FIELDS[kind], "createdAt",
-    ...(["NativeTranscriptInput", "CommunicationMessageNativeInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "ConversationOperationOutcome", "DemoLeadIntakeInput", "CrmQualificationEmailInput", "WorkflowJobInput", "McpToolInput", "ConversationIngressInput", "NewspaperTrackedLink", "Meeting", "ModelUsageBudget", "ConversationSession", "ConversationPendingOperation", "AgentRun", "AgentStep", "AgentToolCall"].includes(kind) ? [] : ["updatedAt"])])];
+    ...(["FinanceReportFactRevision", "NativeTranscriptInput", "CommunicationMessageNativeInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "ConversationOperationOutcome", "DemoLeadIntakeInput", "CrmQualificationEmailInput", "WorkflowJobInput", "McpToolInput", "ConversationIngressInput", "NewspaperTrackedLink", "Meeting", "ModelUsageBudget", "ConversationSession", "ConversationPendingOperation", "AgentRun", "AgentStep", "AgentToolCall"].includes(kind) ? [] : ["updatedAt"])])];
 }
 
 export function lineageContentFingerprint(kind: LineageKind, row: unknown): string {
@@ -318,6 +320,7 @@ async function loadArtifact(db: LineageClient, workspaceId: string, input: Linea
     case "ExternalMcpConnectionSet": return loadExternalMcpConnectionSetInput(workspaceId, input.id, db);
     case "ExternalContentSource": return db.externalContentSource.findFirst({ where });
     case "FinanceReport": return db.financeReport.findFirst({ where });
+    case "FinanceReportFactRevision": return db.financeReportFactRevision.findFirst({ where });
     case "FinanceReportFact": return db.financeReportFact.findFirst({ where });
     case "FinanceImportApplication": return db.financeImportApplication.findFirst({ where });
 
@@ -436,7 +439,7 @@ export function isLineageKind(value: unknown): value is LineageKind {
 }
 
 function knownSnapshotOrigin(row: Record<string, unknown>) {
-  if (["MeetingAudioAsset", "KnowledgeChunk", "CommunicationMessage", "GenericDerivedArtifactVariant"].includes(String(row.sourceKind)) && row.origin !== "DERIVED") return false;
+  if (["MeetingAudioAsset", "KnowledgeChunk", "CommunicationMessage", "GenericDerivedArtifactVariant", "FinanceReportFactRevision"].includes(String(row.sourceKind)) && row.origin !== "DERIVED") return false;
   return row.origin === "HUMAN_ORIGINAL" || row.origin === "DERIVED"
     || (row.origin === "NATIVE_ORIGINAL" && (["SqlNativeRunInput", "NativeTranscriptInput", "CommunicationMessageNativeInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "ConversationIngressInput", "McpToolInput"].includes(String(row.sourceKind))
       || (row.sourceKind === "ConversationOperationOutcome" && isRecord(row.contentJson) && isNativeControlOutcome(row.contentJson))));
@@ -478,7 +481,7 @@ function actorCanReadRecord(actor: AppActor, workspaceId: string, membership: { 
     const principalUserId = getExternalProviderPrincipalUserId(actor, workspaceId);
     return Boolean(principalUserId && principalUserId === row[kind === "ExternalProviderFetchInput" ? "localUserId" : "selectedByUserId"]);
   }
-  if (["FinanceReport", "FinanceReportFact", "FinanceImportApplication", "FinanceImportBatch", "FinanceImportCandidate"].includes(kind)) return actor.kind === "user";
+  if (["FinanceReport", "FinanceReportFact", "FinanceReportFactRevision", "FinanceImportApplication", "FinanceImportBatch", "FinanceImportCandidate"].includes(kind)) return actor.kind === "user";
   if (kind === "FinanceReportUploadInput") return actor.kind === "user";
   if (kind === "BuildArtifact" && row.visibility === "PRIVATE") return actor.kind === "user"
     && (membership?.role === "ADMIN" || row.createdByUserId === actor.user.id);
@@ -890,11 +893,26 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
           { kind, id: String(id), fingerprint: lineageContentFingerprint(kind, parent) }, visited, memo, true)) return false;
     }
   }
-  if (["FinanceReport", "FinanceReportFact", "FinanceImportApplication"].includes(root.kind)) {
+  if (["FinanceReport", "FinanceReportFact", "FinanceReportFactRevision", "FinanceImportApplication"].includes(root.kind)) {
     if (!domains.includes("FINANCE") || actor.kind !== "user") return false;
+    if (root.kind === "FinanceReport" && row.status === "ARCHIVED") return false;
+    if (root.kind === "FinanceReportFact") {
+      if (!(row.periodStart instanceof Date) || !Number.isFinite(row.periodStart.valueOf())
+        || !(row.periodEnd instanceof Date) || !Number.isFinite(row.periodEnd.valueOf())) return false;
+      const revision = await db.financeReportFactRevision.findFirst({where: {workspaceId, factId: root.id, factVersion: Number(row.version)}});
+      const manifest = await latestManifest(db, workspaceId, root);
+      if (!revision || !isFinanceFactRevisionIntact(revision)
+        || revision.valueHash !== financeValueHash(financeFactValue(row as unknown as import("@prisma/client").FinanceReportFact))
+        || !parseRoots(manifest?.rootsJson ?? null)?.some(input => input.kind === "FinanceReportFactRevision" && input.id === revision.id)) return false;
+    }
+    if (root.kind === "FinanceReportFactRevision") {
+      if (!permissionOnly && !isFinanceFactRevisionIntact(row)) return false;
+      const fact = await db.financeReportFact.findFirst({ where: { id: String(row.factId), workspaceId }, select: { id: true, kind: true } });
+      if (!fact || fact.kind !== row.kind) return false;
+    }
     const parents: LineageInput[] = root.kind === "FinanceReport" ? [{ kind: "FinanceImportBatch", id: String(row.sourceBatchId) }]
-      : root.kind === "FinanceReportFact" ? [{ kind: "FinanceReport", id: String(row.reportId) }, { kind: "FinanceImportBatch", id: String(row.sourceBatchId) }, { kind: "FinanceImportCandidate", id: String(row.sourceCandidateId) }]
-      : [{ kind: "FinanceImportBatch", id: String(row.batchId) }, { kind: "FinanceImportCandidate", id: String(row.candidateId) }, ...(row.targetFactId ? [{ kind: "FinanceReportFact" as const, id: String(row.targetFactId) }] : [])];
+      : ["FinanceReportFact", "FinanceReportFactRevision"].includes(root.kind) ? [{ kind: "FinanceReport", id: String(row.reportId) }, { kind: "FinanceImportBatch", id: String(row.sourceBatchId) }, { kind: "FinanceImportCandidate", id: String(row.sourceCandidateId) }]
+      : [{ kind: "FinanceImportBatch", id: String(row.batchId) }, { kind: "FinanceImportCandidate", id: String(row.candidateId) }, ...[row.beforeRevisionId, row.afterRevisionId].flatMap(id => id ? [{ kind: "FinanceReportFactRevision" as const, id: String(id) }] : [])];
     for (const parentInput of parents) {
       const parent = await loadArtifact(db, workspaceId, parentInput);
       if (!parent || !await evaluateRoot(db, actor, workspaceId, membership, domains,
@@ -907,6 +925,7 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
     if (!upload || !await evaluateRoot(db, actor, workspaceId, membership, domains,
       { kind: "FinanceReportUploadInput", id: upload.id, fingerprint: lineageContentFingerprint("FinanceReportUploadInput", upload) }, visited, memo, true)) return false;
   }
+  if (root.kind === "FinanceImportApplication" && row.targetFactId && !row.afterRevisionId) return false;
   if (root.kind === "FinanceImportCandidate") {
     if (!domains.includes("FINANCE") || actor.kind !== "user") return false;
     const batch = await loadArtifact(db, workspaceId, { kind: "FinanceImportBatch", id: String(row.batchId) });
@@ -1174,7 +1193,7 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
     }
     // A member's expressly contributed company answer can be an original source.
     // Copied/model-produced sources require a nonempty upstream proof.
-    if (manifest.origin === "HUMAN_ORIGINAL") return !["MeetingAudioAsset", "GenericDerivedArtifactVariant", "KnowledgeChunk", "CommunicationMessage", "FinanceReport", "FinanceReportFact", "FinanceImportApplication", "FinanceImportBatch", "FinanceImportCandidate", "ExecutionResult", "ConversationOperationOutcome", "AgentRun", "AgentStep", "AgentToolCall"].includes(root.kind)
+    if (manifest.origin === "HUMAN_ORIGINAL") return !["MeetingAudioAsset", "GenericDerivedArtifactVariant", "KnowledgeChunk", "CommunicationMessage", "FinanceReport", "FinanceReportFact", "FinanceReportFactRevision", "FinanceImportApplication", "FinanceImportBatch", "FinanceImportCandidate", "ExecutionResult", "ConversationOperationOutcome", "AgentRun", "AgentStep", "AgentToolCall"].includes(root.kind)
       && !(root.kind === "BrainSource" && ["DOC", "FILE_UPLOAD"].includes(String(row.sourceType)) && isRecord(row.metadata) && typeof row.metadata.documentId === "string")
       && upstream?.length === 0 && Array.isArray(manifest.inputsJson) && manifest.inputsJson.length === 0;
     if (manifest.origin !== "DERIVED" || !upstream?.length || manifest.epochProofVersion !== 1
@@ -1631,7 +1650,7 @@ export async function isArtifactInputProofPubliclyShareable(actor: AppActor, wor
   const seen = new Set<string>();
   const publicAuthorities = new Set<string>();
   const privateEnvelope = (kind: LineageKind, row: Record<string, unknown>) => row.isPrivate === true || row.isRestricted === true
-    || row.accessDomain === "FINANCE" || ["ExternalDataSource", "SqlNativeRunInput", "MeetingAudioAsset", "NativeTranscriptInput", "CommunicationMessageNativeInput", "GenericDerivedArtifactVariant", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "ExternalContentSource", "FinanceReport", "FinanceReportFact", "FinanceImportApplication", "FinanceImportBatch", "FinanceImportCandidate", "FinanceReportUploadInput", "ExecutionRequest", "ExecutionResult", "ConversationOperationOutcome", "WorkspaceToolLinkCredential", "McpToolInput", "ConversationIngressInput", "AgentRequestInput", "AgentFeedbackInput", "ConversationPendingOperation", "ConversationPromptInput", "ConversationSession", "ConversationTurn", "RoleOnboardingSession", "CheckIn", "Notification", "NewspaperDelivery"].includes(kind)
+    || row.accessDomain === "FINANCE" || ["ExternalDataSource", "SqlNativeRunInput", "MeetingAudioAsset", "NativeTranscriptInput", "CommunicationMessageNativeInput", "GenericDerivedArtifactVariant", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "ExternalContentSource", "FinanceReport", "FinanceReportFact", "FinanceReportFactRevision", "FinanceImportApplication", "FinanceImportBatch", "FinanceImportCandidate", "FinanceReportUploadInput", "ExecutionRequest", "ExecutionResult", "ConversationOperationOutcome", "WorkspaceToolLinkCredential", "McpToolInput", "ConversationIngressInput", "AgentRequestInput", "AgentFeedbackInput", "ConversationPendingOperation", "ConversationPromptInput", "ConversationSession", "ConversationTurn", "RoleOnboardingSession", "CheckIn", "Notification", "NewspaperDelivery"].includes(kind)
     || (kind === "Recognition" && row.visibility !== "WORKSPACE")
     || (kind === "AdviceRequest" && row.audienceType !== "WORKSPACE")
     || (kind === "ContextMapView" && row.createdByUserId != null)
@@ -1842,7 +1861,7 @@ export async function recordArtifactInputLineage(params: {
   const membership = await requireWorkspaceMembership({ actor, workspaceId, tx });
   invariant(params.origin !== "HUMAN_ORIGINAL" || (actor.kind === "user" && params.inputs.length === 0 && !params.inheritedRoots?.length),
     409, "UNKNOWN_LINEAGE", "Only a direct human original can have an empty input manifest.");
-  invariant(params.origin !== "HUMAN_ORIGINAL" || !["MeetingAudioAsset", "GenericDerivedArtifactVariant", "KnowledgeChunk", "CommunicationMessage", "FinanceReport", "FinanceReportFact", "FinanceImportApplication", "FinanceImportBatch", "FinanceImportCandidate", "ExecutionResult", "ConversationOperationOutcome", "ConversationPendingOperation", "WorkflowJobInput", "AgentMemory", "ConversationTurn", "CommunicationContextSummary", "WorkspaceBriefing",
+  invariant(params.origin !== "HUMAN_ORIGINAL" || !["MeetingAudioAsset", "GenericDerivedArtifactVariant", "KnowledgeChunk", "CommunicationMessage", "FinanceReport", "FinanceReportFact", "FinanceReportFactRevision", "FinanceImportApplication", "FinanceImportBatch", "FinanceImportCandidate", "ExecutionResult", "ConversationOperationOutcome", "ConversationPendingOperation", "WorkflowJobInput", "AgentMemory", "ConversationTurn", "CommunicationContextSummary", "WorkspaceBriefing",
     "NewspaperEdition", "NewspaperDelivery", "NewspaperTrackedLink", "Notification", "AgentRun", "AgentStep", "AgentToolCall"].includes(artifact.kind),
   409, "UNKNOWN_LINEAGE", "Generated or copied content requires its complete input receipt.");
   const domains = await resolveKnowledgeAccessDomains(actor, workspaceId, tx);

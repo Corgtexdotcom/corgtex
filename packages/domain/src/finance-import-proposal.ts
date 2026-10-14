@@ -9,7 +9,7 @@ import { mergeArtifactInputProofs } from "./digest-lineage";
 import { invariant } from "./errors";
 import { lockFinanceImportArtifactLinkTargets } from "./finance-import-artifact-ownership";
 import { parseFinanceImportInterpretationV1 } from "./finance-import-interpretation";
-import { reconcileFinanceImportCandidates, captureFinanceCurrentFactProof } from "./finance-import-reconciliation";
+import { reconcileFinanceImportCandidates, captureFinanceCurrentFactValues } from "./finance-import-reconciliation";
 import { normalizeFinanceImportAmountCents, normalizeFinanceImportIsoCurrency, validateFinanceImportReportingWindow } from "./finance-imports";
 const FORMAT_BY_MIME = { "text/csv": "CSV", "application/pdf": "PDF", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "XLSX" } as const;
 const FINISHED = new Set(["RECONCILING", "READY_FOR_REVIEW", "NEEDS_INPUT", "APPLYING", "APPLIED", "PARTIALLY_APPLIED", "FAILED", "CANCELLED"]);
@@ -161,14 +161,14 @@ export async function persistFinanceReportImportProposal(params: { workspaceId: 
       const currentFacts = await tx.financeReportFact.findMany({ where: { workspaceId: params.workspaceId,
         semanticKey: { in: preliminary.decisions.flatMap(({ semanticKey }) => semanticKey ? [semanticKey] : []) } },
       orderBy: { id: "asc" }, take: 5001 });
-      const factRoots = await captureFinanceCurrentFactProof(tx, authority.actor, params.workspaceId, currentFacts);
-      if (factRoots.length) frozenRoots.push(...await captureImmutableArtifactInputProof(authority.actor, params.workspaceId, factRoots, tx));
-      const reconciled = reconcileFinanceImportCandidates({ ...identity, candidates, currentFacts });
+      const current = await captureFinanceCurrentFactValues(tx, authority.actor, params.workspaceId, currentFacts);
+      if (current.roots.length) frozenRoots.push(...await captureImmutableArtifactInputProof(authority.actor, params.workspaceId, current.roots, tx));
+      const reconciled = reconcileFinanceImportCandidates({ ...identity, candidates, currentFacts: current.facts });
       counts = reconciled.counts;
       const bySource = new Map(reconciled.decisions.map((decision) => [decision.candidate.sourceKey, decision]));
       await tx.financeImportCandidate.createMany({ data: candidates.map((candidate) => { const decision = bySource.get(candidate.sourceKey)!;
         return { ...candidate, semanticKey: decision.semanticKey, action: decision.action, reviewState: decision.reviewState,
-          currentFactId: decision.currentFactId, currentAmountCents: decision.currentAmountCents, explanationMd: decision.explanationMd }; }) });
+          currentFactId: decision.currentFactId, currentFactRevisionId: decision.currentFactRevisionId, currentAmountCents: decision.currentAmountCents, explanationMd: decision.explanationMd }; }) });
     } else if (candidates.length) await tx.financeImportCandidate.createMany({ data: candidates });
     const nextVersion = params.expectedVersion + 1, stage = needsInput ? "NEEDS_INPUT" as const : "READY_FOR_REVIEW" as const;
     const blockerCount = needsInput ? params.blockerCount : counts.conflictCount;
@@ -197,7 +197,7 @@ export async function persistFinanceReportImportProposal(params: { workspaceId: 
     await tx.auditLog.create({ data: { workspaceId: params.workspaceId, action: "finance-report-import.proposed", entityType: "FinanceImportBatch",
       entityId: params.batchId, meta: { stage, candidateCount: candidates.length, warningCount: params.warningCount, blockerCount, ...counts } } });
     return { batchId: params.batchId, version: nextVersion, stage, candidateCount: candidates.length, lineageRoots };
-  });
+  }, {maxWait: 10_000, timeout: 120_000});
 }
 
 export async function failFinanceReportImportProposal(params: ProposalJob & {

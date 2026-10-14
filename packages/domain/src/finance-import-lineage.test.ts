@@ -26,7 +26,8 @@ const fixture = vi.hoisted(() => {
     if (args.select) result = Object.fromEntries(Object.keys(args.select).map((key) => [key, result[key]]));
     return result;
   };
-  const names = ["document", "brainSource", "artifactInputLineage", "artifactInputSnapshot", "workspace", "user", "financeImportBatch", "financeReportUploadInput", "workflowJob", "event", "financeImportCandidate", "financeReportFact", "agentRun", "agentIdentity", "financeReport", "financeImportApplication"];
+  const sqlJson = (value: any) => ["JsonNull", "DbNull"].includes(value?.constructor?.name) ? null : value;
+  const names = ["document", "brainSource", "artifactInputLineage", "artifactInputSnapshot", "workspace", "user", "financeImportBatch", "financeReportUploadInput", "workflowJob", "event", "financeImportCandidate", "financeReportFact", "financeReportFactRevision", "agentRun", "agentIdentity", "financeReport", "financeImportApplication"];
   const permissionEpochs = new Map<string, bigint>();
   const epochKey = (workspaceId: unknown, kind: unknown, id: unknown) => JSON.stringify([workspaceId, kind, id]);
   const rawSql = (query: any) => Array.isArray(query?.strings) ? query.strings.join("?") : String(query);
@@ -70,23 +71,24 @@ const fixture = vi.hoisted(() => {
       upsert: vi.fn(async ({ where, create, update }: any) => { const existing = tables[name].find(row => match(row, where)); return existing ? prisma[name].update({ where, data: update }) : prisma[name].create({ data: create }); }),
       createMany: vi.fn(async ({ data }: any) => { for (const row of data) await prisma[name].create({ data: row }); return { count: data.length }; }),
       create: vi.fn(async ({ data }: any) => {
+        data = Object.fromEntries(Object.entries(data).map(([key, value]) => [key, sqlJson(value)]));
         const row = { id: `${name}-${tables[name].length + 1}`, archivedAt: null, createdAt: time,
           ...(name === "financeImportBatch" ? { version: 1, retryCount: 0, workflowJobId: null } : {}),
           ...(name === "financeReport" || name === "financeReportFact" ? { version: 1, status: "ACTIVE" } : {}),
-          ...(name === "financeImportCandidate" ? { version: 1, currentFactId: null, currentAmountCents: null, approvedByUserId: null, approvedAt: null } : {}),
+          ...(name === "financeImportCandidate" ? { version: 1, currentFactId: null, currentFactRevisionId: null, currentAmountCents: null, approvedByUserId: null, approvedAt: null } : {}),
           ...(name === "document" ? { textContent: null } : {}),
           ...(name !== "crmActivity" && name !== "crmDealStageTransition" ? { updatedAt: time } : {}), ...data };
         tables[name].push(row); return { ...row };
       }),
       update: vi.fn(async ({ where, data }: any) => {
         const index = tables[name].findIndex((row) => match(row, where));
-        const patched = Object.fromEntries(Object.entries(data).map(([key, value]: [string, any]) => [key, value && typeof value === "object" && "increment" in value ? tables[name][index][key] + value.increment : value]));
+        const patched = Object.fromEntries(Object.entries(data).map(([key, value]: [string, any]) => [key, value && typeof value === "object" && "increment" in value ? tables[name][index][key] + value.increment : sqlJson(value)]));
         tables[name][index] = { ...tables[name][index], ...patched }; return { ...tables[name][index] };
       }),
       updateMany: vi.fn(async ({ where, data }: any) => {
         const matches = tables[name].filter((row) => match(row, where));
         for (const row of matches) for (const [key, value] of Object.entries(data) as Array<[string, any]>) {
-          row[key] = value && typeof value === "object" && "increment" in value ? row[key] + value.increment : value;
+          row[key] = value && typeof value === "object" && "increment" in value ? row[key] + value.increment : sqlJson(value);
         }
         return { count: matches.length };
       }),
@@ -381,8 +383,8 @@ describe("Finance canonical application with actual lineage helpers", () => {
       candidateVersions: [{ id: candidate.id, expectedVersion: candidate.version }] });
     expect(applied.receipts[0]?.outcome).toBe("UPDATED");
     expect(fixture.tables.financeReportFact).toHaveLength(1); expect(fixture.tables.financeReportFact[0].amountCents).toBe(20_000);
-    const factSnapshots = fixture.tables.artifactInputSnapshot.filter(row => row.sourceKind === "FinanceReportFact"
-      && row.sourceId === oldFact.id);
+    const factSnapshots = fixture.tables.artifactInputSnapshot.filter(row => row.sourceKind === "FinanceReportFactRevision"
+      && row.contentJson.factId === oldFact.id);
     const currentBatch = fixture.tables.financeImportBatch.find(row => row.id === saved.batchId);
     const currentBatchManifest = [...fixture.tables.artifactInputLineage].reverse().find((row: any) => row.artifactType === "FinanceImportBatch"
       && row.artifactId === saved.batchId);
@@ -435,10 +437,10 @@ describe("Finance canonical application with actual lineage helpers", () => {
     expect(fixture.tables.financeReport[0]).toMatchObject({ periodStart: new Date("2026-01-01"), periodEnd: new Date("2026-01-31") });
     await expect(captureArtifactInputProof(alice, ws, [{ kind: "FinanceReport", id: fixture.tables.financeReport[0].id }])).resolves.toBeTruthy();
   });
-  it("withholds unknown current facts and reports before decisions or writes", async () => {
+  it("withholds missing immutable revision provenance before decisions or writes", async () => {
     await approveAndApply(await modelClaim());
     const next = await modelClaim(alice, ws, Buffer.from(bytes.toString().replace("100", "300")));
-    fixture.tables.artifactInputLineage = fixture.tables.artifactInputLineage.filter(row => row.artifactType !== "FinanceReport");
+    fixture.tables.artifactInputLineage = fixture.tables.artifactInputLineage.filter(row => row.artifactType !== "FinanceReportFactRevision");
     const before = structuredClone(fixture.tables.financeReportFact);
     await expect(persistFinanceReportImportProposal(next.persist)).rejects.toMatchObject({ code: "FINANCE_REPORT_SOURCE_NOT_READY" });
     expect(fixture.tables.financeReportFact).toEqual(before);

@@ -83,7 +83,7 @@ export const historicalAuthorityTables: ReadonlySet<string> = new Set([
   "RecorderTranscriptBinding", "RecorderTranscriptClaim", "RecorderTranscriptAttempt", "RecorderTranscriptPublication",
   "SqlIngestionSourceClaim", "SqlIngestionAttempt", "SqlNativeRunInput", "SqlNativeCapturePart",
   "SqlKnowledgePublication", "SqlKnowledgeStagedChunk", "ExternalProviderFetchInput", "ExternalMcpResponseInput",
-  "ConversationIngressInput", "McpToolInput", "ConversationOperationOutcome", "CrmQualificationFormInput", "FinanceReportUploadInput",
+  "ConversationIngressInput", "McpToolInput", "ConversationOperationOutcome", "CrmQualificationFormInput", "FinanceReportUploadInput", "FinanceReportFactRevision",
 ]);
 
 export function assertHistoricalAuthorityPreserved(table: string, populated: boolean, policy: TransferTablePolicy | undefined) {
@@ -130,10 +130,11 @@ const scalarReferenceFields: Record<string, readonly string[]> = {
   FinanceTimeEntry: ["createdByUserId", "approvedByUserId"],
   FinanceExpense: ["createdByUserId", "approvedByUserId"],
   FinanceContributionEntry: ["contributorUserId", "submittedByUserId", "paidByUserId"],
+  FinanceReportFactRevision: ["factId", "reportId", "sourceBatchId", "sourceCandidateId", "appliedByUserId", "approvedByUserId"],
   FinanceReportFact: ["sourceBatchId", "sourceCandidateId", "appliedByUserId"],
   FinanceImportBatch: ["uploadedByUserId", "currencyConfirmedByUserId", "approvedByUserId", "appliedByUserId"],
-  FinanceImportCandidate: ["editedByUserId", "approvedByUserId"],
-  FinanceImportApplication: ["appliedByUserId"],
+  FinanceImportCandidate: ["editedByUserId", "approvedByUserId", "currentFactRevisionId"],
+  FinanceImportApplication: ["appliedByUserId", "beforeRevisionId", "afterRevisionId"],
   FinanceImportProfile: ["approvedByUserId"],
   WorkspaceModuleGrant: ["principalId", "createdByUserId"],
   WorkspaceModuleAccessRequest: ["requesterUserId", "decidedByUserId"],

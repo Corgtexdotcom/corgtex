@@ -76,6 +76,16 @@ describe("closed source authority edge registry",()=>{
     expect((await edges("FinanceReportUploadInput",{batchId:"batch",documentId:"doc",brainSourceId:"source"})).artifacts)
       .toEqual(expect.arrayContaining([{kind:"FinanceImportBatch",id:"batch"},{kind:"Document",id:"doc"},{kind:"BrainSource",id:"source"}]));
   });
+  it("locks the live Finance Fact only as control and retains immutable revision parents", async () => {
+    tables.FinanceReportFact = [{id: "fact", workspaceId: "ws", kind: "LEAF", reportId: "new-report"}];
+    const result = await edges("FinanceReportFactRevision", {factId: "fact", kind: "LEAF", reportId: "original-report", sourceBatchId: "batch", sourceCandidateId: "candidate"});
+    expect(result.rows).toContainEqual({table: "FinanceReportFact", id: "fact"});
+    expect(result.artifacts).toEqual(expect.arrayContaining([{kind: "FinanceReport", id: "original-report"}, {kind: "FinanceImportBatch", id: "batch"}, {kind: "FinanceImportCandidate", id: "candidate"}]));
+    expect(result.artifacts.some(root => root.kind === "FinanceReportFact")).toBe(false);
+    expect(result.policies).toContainEqual({kind: "FinanceReportFactLifecycle", id: "fact"});
+    tables.FinanceReportFact = [];
+    await expect(edges("FinanceReportFactRevision", {factId: "fact", kind: "LEAF", reportId: "original-report", sourceBatchId: "batch", sourceCandidateId: "candidate"})).rejects.toMatchObject({code: "SOURCE_LOCK_INCOMPLETE"});
+  });
   it("covers Advice recipients and circle-role predicate including currently absent recipients",async()=>{
     tables.Member=[{id:"member",workspaceId:"ws",userId:"owner"}];tables.Circle=[{id:"circle",workspaceId:"ws"}];
     tables.Role=[{id:"role",circleId:"circle"}];tables.RoleAssignment=[{id:"assignment",memberId:"member",roleId:"role"}];

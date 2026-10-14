@@ -896,6 +896,7 @@ model Workspace {
   financeExpenses                FinanceExpense[]
   financeContributionEntries     FinanceContributionEntry[]
   financeReports                 FinanceReport[]
+  financeReportFactRevisions      FinanceReportFactRevision[]
   financeImportBatches           FinanceImportBatch[]
   financeImportApplications      FinanceImportApplication[]
   financeImportProfiles          FinanceImportProfile[]
@@ -1144,6 +1145,37 @@ model FinanceReportFact {
   @@index([sourceBatchId])
 }
 
+/// Immutable published value and original approval/recipe. No Fact/Report FK:
+/// deleting or rebinding canonical rows must not erase historical evidence.
+model FinanceReportFactRevision {
+  id String @id @default(uuid())
+  workspaceId String
+  factId String
+  factVersion Int
+  reportId String
+  accountPath String[]
+  kind FinanceReportFactKind
+  periodStart DateTime @db.Date
+  periodEnd DateTime @db.Date
+  amountCents Int
+  dimensions Json?
+  semanticKey String @db.VarChar(64)
+  sourceBatchId String
+  sourceCandidateId String
+  appliedByUserId String
+  approvedByUserId String
+  approvedAt DateTime
+  candidateVersion Int
+  valueHash String @db.VarChar(64)
+  recipeJson Json
+  recipeHash String @db.VarChar(64)
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@unique([workspaceId, factId, factVersion])
+  @@index([workspaceId, semanticKey])
+  @@index([workspaceId, reportId])
+}
+
 model FinanceImportBatch {
   id                        String                      @id @default(uuid())
   workspaceId               String
@@ -1227,6 +1259,7 @@ model FinanceImportCandidate {
   action                  FinanceImportCandidateAction
   reviewState             FinanceImportCandidateReviewState @default(PROPOSED)
   semanticKey             String?                           @db.VarChar(64)
+  currentFactRevisionId   String?
   currentFactId           String?
   currentAmountCents      Int?
   confidenceBps           Int
@@ -1259,6 +1292,8 @@ model FinanceImportApplication {
   idempotencyKey   String                             @db.VarChar(64)
   targetType       FinanceImportApplicationTargetType
   targetFactId     String?
+  beforeRevisionId String?
+  afterRevisionId  String?
   beforeValueJson  Json?
   afterValueJson   Json?
   beforeValueHash  String?                            @db.VarChar(64)
