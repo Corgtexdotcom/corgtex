@@ -21,7 +21,7 @@ export const brainExportHash = (value: unknown) => createHash("sha256").update(J
 export type BrainExportRequest = { workspaceId: string; conversationId: string; outputTurnId: string; expectedOutputHash: string;
   title: string; transcriptMode: BrainTranscriptMode; selectedTurns: Array<{ id: string; hash: string }>; requestId: string };
 export type BrainExportPrivateInput = { kind: "ConversationPromptInput" | "ConversationSession" | "ConversationTurn"; id: string; fingerprint: string };
-type Capsule = { version: 1; receiptId: string; workspaceId: string; userId: string; conversationId: string;
+type Capsule = { version: 1; requestHash?: string; receiptId: string; workspaceId: string; userId: string; conversationId: string;
   sourceId: string; sourceHash: string; outputTurnId: string; outputHash: string; transcriptMode: BrainTranscriptMode;
   selectedTurns: Array<{ id: string; hash: string }>; roots: LineageRoot[]; privateInputs: BrainExportPrivateInput[]; epochs: PermissionEpochProof };
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -69,9 +69,35 @@ export async function exportConversationAnswerToBrain(actor: AppActor, submissio
   400, "INVALID_INPUT", "Choose an answer, a title and the transcript to include.");
   invariant(request.transcriptMode === "NONE" ? request.selectedTurns.length === 0 : request.selectedTurns.length > 0,
     400, "INVALID_INPUT", "The transcript selection does not match the sharing option.");
-  return prisma.$transaction(async tx => {
+  const requestKey = brainExportHash([request.workspaceId, userId, BRAIN_EXPORT_CONSENT, request.requestId]);
+  const requestHash = brainExportHash({...request, title: request.title.trim()});
+  const persist = () => prisma.$transaction(async tx => {
+    // Serialize one actor's exact request identity. A Serializable waiter may
+    // need a fresh transaction snapshot before it can see the winning receipt.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${requestKey}, 0))`;
     const membership = await requireWorkspaceMembership({ actor, workspaceId: request.workspaceId, tx });
     invariant(membership, 403, "FORBIDDEN", "A current member must confirm sharing.");
+    const existing = await tx.conversationOperationOutcome.findUnique({where: {
+      workspaceId_requestKey: {workspaceId: request.workspaceId, requestKey}}});
+    if (existing) {
+      const capsule = decodeBrainExportConsent(existing);
+      const source = capsule && await tx.brainSource.findFirst({where: {id: capsule.sourceId, workspaceId: request.workspaceId}});
+      invariant(capsule && capsule.userId === userId && source, 409, "BRAIN_EXPORT_CONFLICT", "This sharing request cannot be reused.");
+      // Older receipts predate requestHash; their sealed source and capsule
+      // retain every effective field of the original explicit sharing choice.
+      const originalHash = capsule.requestHash ?? brainExportHash({
+        ...request, workspaceId: capsule.workspaceId, conversationId: capsule.conversationId,
+        outputTurnId: capsule.outputTurnId, expectedOutputHash: capsule.outputHash, title: source.title,
+        transcriptMode: capsule.transcriptMode, selectedTurns: capsule.selectedTurns,
+      });
+      invariant(originalHash === requestHash, 409, "BRAIN_EXPORT_CONFLICT", "This request ID already belongs to a different sharing choice.");
+      const root: LineageRoot = {kind: "ConversationOperationOutcome", id: existing.id,
+        fingerprint: lineageContentFingerprint("ConversationOperationOutcome", existing)};
+      invariant(await currentBrainExportConsent(actor, existing, request.workspaceId, tx)
+        && await isArtifactInputProofReadable(actor, request.workspaceId, [root], tx),
+      409, "SOURCE_CHANGED", "The original shared answer is no longer available with these permissions.");
+      return {sourceId: capsule.sourceId, receiptId: existing.id};
+    }
     await tx.$queryRaw`SELECT id FROM "ConversationSession" WHERE id=${request.conversationId}
       AND "workspaceId"=${request.workspaceId} AND "userId"=${userId} FOR SHARE`;
     const session = await tx.conversationSession.findFirst({ where: { id: request.conversationId, workspaceId: request.workspaceId, userId } });
@@ -113,12 +139,12 @@ export async function exportConversationAnswerToBrain(actor: AppActor, submissio
       content: output.assistantMessage, title: request.title.trim(), metadata, authorMemberId: membership.id, channel: "chat-consent" } });
     const sourceRoot: LineageRoot = { kind: "BrainSource", id: source.id, fingerprint: lineageContentFingerprint("BrainSource", source) };
     const epochs = await captureArtifactPermissionEpochs(actor, request.workspaceId, [...roots, sourceRoot], tx);
-    const capsule: Capsule = { version: 1, receiptId, workspaceId: request.workspaceId, userId, conversationId: session.id,
+    const capsule: Capsule = { version: 1, requestHash, receiptId, workspaceId: request.workspaceId, userId, conversationId: session.id,
       sourceId: source.id, sourceHash: brainExportSourceHash(source), outputTurnId: output.id, outputHash: request.expectedOutputHash,
       transcriptMode: request.transcriptMode, selectedTurns: request.selectedTurns, roots, privateInputs, epochs };
     const outcome: ConversationOperationOutcome = await tx.conversationOperationOutcome.create({ data: {
       id: receiptId, workspaceId: request.workspaceId, actorKind: "user", userId, operation: BRAIN_EXPORT_CONSENT,
-      requestKey: brainExportHash([request.workspaceId, userId, BRAIN_EXPORT_CONSENT, request.requestId]), requiredScopes: [],
+      requestKey, requiredScopes: [],
       controlJson: { version: 1, ciphertext: encryptSecret(JSON.stringify(capsule)) } } });
     const root: LineageRoot = { kind: "ConversationOperationOutcome", id: receiptId, fingerprint: lineageContentFingerprint("ConversationOperationOutcome", outcome) };
     const receiptEpochs = await captureArtifactPermissionEpochs(actor, request.workspaceId, [root, ...roots, sourceRoot], tx);
@@ -134,4 +160,14 @@ export async function exportConversationAnswerToBrain(actor: AppActor, submissio
     invariant(await isArtifactInputProofReadable(actor, request.workspaceId, [root], tx), 409, "SOURCE_CHANGED", "Answer permissions changed before sharing.");
     return { sourceId: source.id, receiptId };
   }, { isolationLevel: "Serializable", timeout: 120_000, maxWait: 10_000 });
+  for (let attempt = 0; ; attempt++) {
+    try { return await persist(); } catch (error) {
+      const uniqueRequestRace = error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002"
+        && Array.isArray(error.meta?.target) && error.meta.target.length === 2
+        && error.meta.target.includes("workspaceId") && error.meta.target.includes("requestKey");
+      const serializationRace = error instanceof Prisma.PrismaClientKnownRequestError
+        && (error.code === "P2034" || error.code === "P2010" && error.meta?.code === "40001");
+      if (attempt >= 2 || !uniqueRequestRace && !serializationRace) throw error;
+    }
+  }
 }

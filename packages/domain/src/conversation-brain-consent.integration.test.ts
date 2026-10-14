@@ -39,7 +39,7 @@ describe("authenticated output-specific Brain consent", () => {
     expect(prompt.content).toBe(first.userMessage);
     await expect(exportConversationAnswerToBrain(reader, {...request, requestId: randomUUID()})).rejects.toMatchObject({code: "NOT_FOUND"});
     await expect(exportConversationAnswerToBrain(owner, {...request, expectedOutputHash: "0".repeat(64), requestId: randomUUID()})).rejects.toMatchObject({code: "BRAIN_EXPORT_STALE"});
-    await expect(exportConversationAnswerToBrain(owner, request)).rejects.toThrow();
+    await expect(exportConversationAnswerToBrain(owner, request)).resolves.toEqual(result);
     expect(await db.brainSource.count({where: {workspaceId: workspace.id}})).toBe(1);
     const native = await db.conversationOperationOutcome.findUniqueOrThrow({where: {id: result.receiptId}});
     const receiptProof = [{kind: "ConversationOperationOutcome" as const, id: native.id, fingerprint: lineageContentFingerprint("ConversationOperationOutcome", native)}];
@@ -47,6 +47,35 @@ describe("authenticated output-specific Brain consent", () => {
     expect(await isArtifactInputProofReadable(reader, workspace.id, receiptProof)).toBe(false);
     await db.brainSource.update({where: {id: source.id}, data: {informationCategory: "GENERAL"}});
     expect(await isArtifactInputProofReadable(reader, workspace.id, receiptProof)).toBe(false);
+  }, 120_000);
+  it("replays concurrent exact requests once and rejects conflicting or no-longer-authorized replay", async () => {
+    const {owner, workspace, request} = await fixture();
+    const [first, second] = await Promise.all([exportConversationAnswerToBrain(owner, request), exportConversationAnswerToBrain(owner, request)]);
+    expect(second).toEqual(first);
+    expect(await db.brainSource.count({where: {workspaceId: workspace.id}})).toBe(1);
+    expect(await db.conversationOperationOutcome.count({where: {workspaceId: workspace.id, operation: "BRAIN_EXPORT_CONSENT"}})).toBe(1);
+    expect(await db.event.count({where: {workspaceId: workspace.id, type: "brain-source.created"}})).toBe(1);
+    expect(await db.auditLog.count({where: {workspaceId: workspace.id, action: "brain-source.created"}})).toBe(1);
+    const before = await db.conversationOperationOutcome.findUniqueOrThrow({where: {id: first.receiptId}});
+    await expect(exportConversationAnswerToBrain(owner, {...request, title: "A different choice"})).rejects.toMatchObject({code: "BRAIN_EXPORT_CONFLICT"});
+    await db.brainSource.update({where: {id: first.sourceId}, data: {archivedAt: new Date()}});
+    await expect(exportConversationAnswerToBrain(owner, request)).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+    await db.brainSource.update({where: {id: first.sourceId}, data: {archivedAt: null}});
+    await expect(exportConversationAnswerToBrain(owner, request)).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+    expect(await db.conversationOperationOutcome.findUniqueOrThrow({where: {id: first.receiptId}})).toEqual(before);
+    expect(await db.event.count({where: {workspaceId: workspace.id, type: "brain-source.created"}})).toBe(1);
+  }, 120_000);
+  it("does not revive an exact request after exporter membership loss and restoration", async () => {
+    const {owner, workspace, request} = await fixture();
+    if (owner.kind !== "user") throw new Error("Expected human exporter");
+    const exported = await exportConversationAnswerToBrain(owner, request);
+    const member = await db.member.findFirstOrThrow({where: {workspaceId: workspace.id, userId: owner.user.id}});
+    await db.member.update({where: {id: member.id}, data: {isActive: false}});
+    await expect(exportConversationAnswerToBrain(owner, request)).rejects.toThrow();
+    await db.member.update({where: {id: member.id}, data: {isActive: true}});
+    await expect(exportConversationAnswerToBrain(owner, request)).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+    expect(await db.brainSource.count({where: {workspaceId: workspace.id}})).toBe(1);
+    expect((await db.conversationOperationOutcome.findUniqueOrThrow({where: {id: exported.receiptId}})).operation).toBe("BRAIN_EXPORT_CONSENT");
   }, 120_000);
   it("binds partial/full metadata to exact selected turns and rejects stale, foreign and forged consent", async () => {
     const {owner, reader, workspace, first, turn, request} = await fixture();
