@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { renderSqlNativeRow } from "@corgtex/domain/sql-native-driver";
 import { decrypt } from "./encryption";
 import { connectReadOnly, describeTable, pullPage, usesTemporalTextDecoding } from "./postgres";
 import { assertBookmarkDefinition, CursorError, orderColumns, parseCursor, serializeCursor } from "./cursor";
@@ -177,7 +178,7 @@ export async function capturePostgresScan(source: ScanConfiguration, assertCurre
       capturedPages.push({ table, definition, previous, rowCount: page.rows.length, tail: tail ? [...tail] : null });
       totalRows += page.rows.length;
       for (let index = 0; index < page.rows.length; index++) {
-        const content = Object.entries(page.rows[index].row).map(([key, value]) => `${key}: ${value}`).join("\n");
+        const content = renderSqlNativeRow(page.rows[index].row, definition.columns);
         const pk = identities[index];
         plannedRows.push({
           row: page.rows[index].row, table, definition, values: [...page.rows[index].values], primaryKey: pk, content,

@@ -321,7 +321,7 @@ describe("authenticated PostgreSQL current access", () => {
     await expect(validatePostgresNativeAccess({ ...input, parents: {
       rows: input.parents.rows.map((row) => ({ ...row, definition: legacy })),
       pages: input.parents.pages.map((page) => ({ ...page, definition: legacy })),
-    } })).rejects.toThrow(/column metadata is unproved/);
+    } } as unknown as SqlNativeAccessInput)).rejects.toThrow(/column metadata is unproved/);
   });
 
   it("checks empty-page SELECT privileges without asserting any row authority", async () => {

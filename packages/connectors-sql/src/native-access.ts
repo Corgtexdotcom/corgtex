@@ -8,8 +8,7 @@ import type { CapturedSqlDefinition } from "./native-definition";
 import { decrypt } from "./encryption";
 import { connectReadOnly, describeTable, readAccessibleTuples, SqlTableDefinitionUnavailableError } from "./postgres";
 
-// Structural form of the agreed access-validator contract. The new registry
-// overload is not published yet; this implementation grants no capture rights.
+// Native access proof grants no capture or publication authority on its own.
 export interface SqlNativeAccessInput {
   source: SqlSourceConfiguration;
   parents: Readonly<{

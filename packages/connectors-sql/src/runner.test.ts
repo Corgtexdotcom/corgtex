@@ -11,6 +11,10 @@ vi.mock("@corgtex/shared", () => ({ prisma: {
   externalDataSyncLog: { create: mocked.createLog, updateMany: mocked.failLog },
 } }));
 
+vi.mock("@corgtex/domain", async () => ({
+  sqlIngestionConfigurationFingerprint: (await import("../../domain/src/sql-ingestion-attempt")).sqlIngestionConfigurationFingerprint,
+}));
+
 import { createSqlIngestionRunner } from "./runner";
 import { scanFingerprint } from "./native-scan";
 

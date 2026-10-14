@@ -1,6 +1,9 @@
 import { execFile } from "node:child_process";
 import { createCipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
+import { writeFile } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
+import pg from "pg";
 import { PrismaClient } from "@prisma/client";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createSqlTestFixture } from "./postgres-test-fixture";
@@ -13,6 +16,7 @@ let fixture: SqlTestFixture;
 let db: PrismaClient;
 const children: ReturnType<typeof startSqlIngestionProcess>[] = [];
 const workspaces: string[] = [];
+const users: string[] = [];
 
 beforeAll(async () => {
   fixture = await createSqlTestFixture();
@@ -26,7 +30,10 @@ beforeAll(async () => {
 
 afterEach(async () => {
   await Promise.all(children.splice(0).map((child) => child.close()));
-  if (db) await db.workspace.deleteMany({ where: { id: { in: workspaces.splice(0) } } });
+  if (db) {
+    await db.workspace.deleteMany({ where: { id: { in: workspaces.splice(0) } } });
+    await db.user.deleteMany({ where: { id: { in: users.splice(0) } } });
+  }
 });
 
 afterAll(async () => {
@@ -34,10 +41,10 @@ afterAll(async () => {
   await fixture?.close();
 });
 
-function encryptedConnection() {
+function encryptedConnection(connectionString = fixture.connectionString) {
   const iv = randomBytes(16);
   const cipher = createCipheriv("aes-256-gcm", Buffer.from(encryptionKey, "hex"), iv);
-  const encrypted = Buffer.concat([cipher.update(fixture.connectionString, "utf8"), cipher.final()]);
+  const encrypted = Buffer.concat([cipher.update(connectionString, "utf8"), cipher.final()]);
   return [iv.toString("hex"), cipher.getAuthTag().toString("hex"), encrypted.toString("hex")].join(":");
 }
 
@@ -74,9 +81,20 @@ async function cacheVersion(workspaceId: string) {
   return (await db.sharedCacheVersion.findUnique({ where: { id } }))?.version ?? 0;
 }
 
+async function expireLease(sourceId: string) {
+  const expired = new Date(Date.now() - 1000);
+  await db.$transaction([
+    db.sqlIngestionSourceClaim.updateMany({ where: { sourceId, status: "RUNNING" }, data: { leaseExpiresAt: expired } }),
+    db.sqlIngestionAttempt.updateMany({ where: { sourceId, status: "RUNNING" }, data: { leaseExpiresAt: expired } }),
+  ]);
+}
+
 describe("native SQL publication across independent processes", () => {
   it("commits native rows, cursor, log and cache together", async () => {
     const { source } = await setup();
+    const user = await db.user.create({ data: { email: `${randomUUID()}@example.test`, passwordHash: "synthetic", displayName: "Reader" } });
+    users.push(user.id);
+    await db.member.create({ data: { workspaceId: source.workspaceId, userId: user.id, role: "ADMIN" } });
     const worker = await child();
     await worker.run(source.id);
     await worker.prepared();
@@ -95,18 +113,49 @@ describe("native SQL publication across independent processes", () => {
     expect(await db.externalDataSyncLog.findFirst({ where: { sourceId: source.id } })).toMatchObject({
       rowsProcessed: 1, chunksCreated: 1, error: null, completedAt: expect.any(Date),
     });
+    expect((await worker.read(source.workspaceId, user.id, chunks[0].id)).read).toEqual({
+      fetched: true, count: 1, searchIds: [chunks[0].id], downstreamReadable: true,
+    });
   });
 
-  it("publishes the full bounded run when row and chunk output counts exceed ten thousand", async () => {
+  it("publishes and serves the full bounded run when combined row and chunk counts exceed ten thousand", async () => {
     const { source, table } = await setup();
     await fixture.writer.query(`DELETE FROM ${table}`);
     await fixture.writer.query(`INSERT INTO ${table} SELECT n, n, repeat('synthetic ', 180) FROM generate_series(1, 4000) AS n`);
     const worker = await child();
-    await worker.run(source.id);
-    await worker.prepared();
-    expect(await db.knowledgeChunk.count({ where: { workspaceId: source.workspaceId } })).toBe(0);
-    await worker.release();
-    await worker.complete(180_000);
+    const capacityUser = await db.user.create({ data: { email: `${randomUUID()}@example.test`, passwordHash: "synthetic", displayName: "Capacity reader" } });
+    users.push(capacityUser.id);
+    await db.member.create({ data: { workspaceId: source.workspaceId, userId: capacityUser.id, role: "ADMIN" } });
+    const observer = new pg.Client({ connectionString: fixture.connectionString });
+    await observer.connect();
+    const hasStatistics = (await observer.query("SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'")).rowCount === 1;
+    const queryCount = async () => hasStatistics ? Number((await observer.query("SELECT coalesce(sum(calls),0) AS calls FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())")).rows[0].calls) : null;
+    const beforeQueries = await queryCount();
+    let stopped = false, longestChunkTransactionMs = 0;
+    const observation = (async () => {
+      while (!stopped) {
+        const result = await observer.query(`SELECT max(extract(epoch from (clock_timestamp()-a.xact_start))*1000) AS age
+          FROM pg_stat_activity a WHERE a.datname=current_database() AND a.pid<>pg_backend_pid()
+          AND EXISTS (SELECT 1 FROM pg_locks l WHERE l.pid=a.pid AND l.relation='"KnowledgeChunk"'::regclass AND l.mode='RowExclusiveLock' AND l.granted)`);
+        longestChunkTransactionMs = Math.max(longestChunkTransactionMs, Number(result.rows[0].age ?? 0));
+        await delay(50);
+      }
+    })();
+    let completed, afterQueries: number | null = null;
+    try {
+      await worker.run(source.id);
+      await worker.prepared();
+      expect(await db.knowledgeChunk.count({ where: { workspaceId: source.workspaceId } })).toBe(0);
+      await worker.release();
+      completed = await worker.complete(180_000);
+    } finally {
+      stopped = true;
+      try { await observation; afterQueries = await queryCount(); } finally { await observer.end(); }
+    }
+    const metrics = { ...completed.metrics, longestChunkTransactionMs,
+      databaseQueries: afterQueries !== null && beforeQueries !== null ? afterQueries - beforeQueries : null };
+    if (process.env.PUN85_METRICS_FILE) await writeFile(process.env.PUN85_METRICS_FILE, JSON.stringify(metrics, null, 2));
+    expect(longestChunkTransactionMs).toBeLessThan(120_000);
     const chunks = await db.knowledgeChunk.findMany({ where: { workspaceId: source.workspaceId }, select: { sourceId: true } });
     expect(new Set(chunks.map((chunk) => chunk.sourceId)).size).toBe(4000);
     expect(chunks.length).toBeGreaterThanOrEqual(8000);
@@ -114,7 +163,100 @@ describe("native SQL publication across independent processes", () => {
     expect(log).toMatchObject({ rowsProcessed: 4000, chunksCreated: chunks.length, error: null, completedAt: expect.any(Date) });
     const stored = await db.externalDataSource.findUniqueOrThrow({ where: { id: source.id } });
     expect(Object.values(JSON.parse(stored.lastCursorValue!).tables)).toContainEqual(expect.objectContaining({ values: ["4000", "4000"] }));
+    const first = await db.knowledgeChunk.findFirstOrThrow({ where: { workspaceId: source.workspaceId } });
+    const startedRead = performance.now();
+    const read = await worker.read(source.workspaceId, capacityUser.id, first.id);
+    if (process.env.PUN85_METRICS_FILE) await writeFile(process.env.PUN85_METRICS_FILE,
+      JSON.stringify({ ...metrics, readDurationMs: performance.now() - startedRead, read: read.read }, null, 2));
+    expect(read.read).toMatchObject({ fetched: true, count: chunks.length, downstreamReadable: true });
+    expect(read.read?.searchIds.length).toBeGreaterThan(0);
   }, 240_000);
+
+  it("serializes a concurrent source permission change behind the complete publication transaction", async () => {
+    const { source } = await setup(), worker = await child();
+    const key = randomBytes(4).readUInt32BE() % 2_000_000_000;
+    const name = `pause_${randomBytes(6).toString("hex")}`, fn = fixture.table(name);
+    const observer = new pg.Client({ connectionString: fixture.connectionString });
+    const policyWriter = new pg.Client({ connectionString: fixture.connectionString });
+    await Promise.all([observer.connect(), policyWriter.connect()]);
+    let mutation: Promise<pg.QueryResult> | undefined;
+    async function eventually(check: () => Promise<boolean>) {
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) { if (await check()) return; await delay(20); }
+      throw new Error("Expected concurrent PostgreSQL lock was not observed");
+    }
+    try {
+      await fixture.writer.query(`SELECT pg_advisory_lock($1)`, [key]);
+      await fixture.writer.query(`CREATE FUNCTION ${fn}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        IF NEW."workspaceId" = '${source.workspaceId}' THEN PERFORM pg_advisory_xact_lock(${key}); END IF; RETURN NEW; END $$`);
+      await fixture.writer.query(`CREATE TRIGGER "${name}" BEFORE INSERT ON "KnowledgeChunk" FOR EACH ROW EXECUTE FUNCTION ${fn}()`);
+      await worker.run(source.id, false);
+      let publisherPid = 0;
+      await eventually(async () => {
+        const result = await observer.query(`SELECT pid FROM pg_stat_activity WHERE wait_event='advisory' AND query LIKE 'INSERT INTO "public"."KnowledgeChunk"%'`);
+        publisherPid = Number(result.rows[0]?.pid ?? 0); return publisherPid > 0;
+      });
+      const epoch = await db.sourcePermissionEpoch.findUniqueOrThrow({ where: { workspaceId_sourceKind_sourceId: {
+        workspaceId: source.workspaceId, sourceKind: "ExternalDataSource", sourceId: source.id } } });
+      mutation = policyWriter.query(`UPDATE "SourcePermissionEpoch" SET epoch=epoch+1 WHERE id=$1`, [epoch.id]);
+      const policyPid = Number((policyWriter as pg.Client & { processID: number }).processID);
+      await eventually(async () => (await observer.query("SELECT $1::int = ANY(pg_blocking_pids($2)) AS blocked", [publisherPid, policyPid])).rows[0].blocked);
+      expect(await db.knowledgeChunk.count({ where: { workspaceId: source.workspaceId } })).toBe(0);
+      await fixture.writer.query(`SELECT pg_advisory_unlock($1)`, [key]);
+      await worker.complete();
+      expect((await mutation).rowCount).toBe(1);
+      expect(await db.knowledgeChunk.count({ where: { workspaceId: source.workspaceId } })).toBe(1);
+      expect((await db.sourcePermissionEpoch.findUniqueOrThrow({ where: { id: epoch.id } })).epoch).toBe(epoch.epoch + 1n);
+      expect(await db.externalDataSyncLog.findFirst({ where: { sourceId: source.id } })).toMatchObject({ chunksCreated: 1, error: null });
+    } finally {
+      await fixture.writer.query(`SELECT pg_advisory_unlock($1)`, [key]);
+      await worker.close();
+      await mutation?.catch(() => undefined);
+      await fixture.writer.query(`DROP TRIGGER IF EXISTS "${name}" ON "KnowledgeChunk"`);
+      await fixture.writer.query(`DROP FUNCTION IF EXISTS ${fn}()`);
+      await Promise.all([observer.end(), policyWriter.end()]);
+    }
+  });
+
+  it.each(["grant", "rls"] as const)("withholds stored publication after a provider %s denial at the final replay barrier, including restore", async (denial) => {
+    const { source, table } = await setup();
+    const role = `pun85_reader_${randomBytes(6).toString("hex")}`;
+    const user = await db.user.create({ data: { email: `${randomUUID()}@example.test`, passwordHash: "synthetic", displayName: "SQL reader" } });
+    await db.member.create({ data: { workspaceId: source.workspaceId, userId: user.id, role: "ADMIN" } });
+    await fixture.writer.query(`CREATE ROLE "${role}" LOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT`);
+    try {
+      await fixture.writer.query(`GRANT USAGE ON SCHEMA "${fixture.schema}" TO "${role}"`);
+      await fixture.writer.query(`GRANT SELECT ON ${table} TO "${role}"`);
+      if (denial === "rls") {
+        await fixture.writer.query(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
+        await fixture.writer.query(`CREATE POLICY readable ON ${table} FOR SELECT TO "${role}" USING (true)`);
+      }
+      const connection = new URL(fixture.connectionString); connection.username = role;
+      await db.externalDataSource.update({ where: { id: source.id }, data: { connectionStringEnc: encryptedConnection(connection.toString()) } });
+      const worker = await child(), reader = await child();
+      await worker.run(source.id, false, true);
+      await worker.publicationReady();
+      expect(await db.knowledgeChunk.count({ where: { workspaceId: source.workspaceId } })).toBe(0);
+      if (denial === "grant") await fixture.writer.query(`REVOKE SELECT ON ${table} FROM "${role}"`);
+      else await fixture.writer.query(`ALTER POLICY readable ON ${table} USING (false)`);
+      await worker.releasePublication();
+      await worker.complete();
+      const chunks = await db.knowledgeChunk.findMany({ where: { workspaceId: source.workspaceId } });
+      expect(chunks).toHaveLength(1);
+      const denied = { fetched: false, count: 0, searchIds: [], downstreamReadable: false };
+      expect((await reader.read(source.workspaceId, user.id, chunks[0].id)).read).toEqual(denied);
+      if (denial === "grant") await fixture.writer.query(`GRANT SELECT ON ${table} TO "${role}"`);
+      else await fixture.writer.query(`ALTER POLICY readable ON ${table} USING (true)`);
+      expect((await reader.read(source.workspaceId, user.id, chunks[0].id)).read).toEqual(denied);
+      expect(await db.knowledgeChunk.findMany({ where: { workspaceId: source.workspaceId } })).toEqual(chunks);
+      expect((await db.externalDataSource.findUniqueOrThrow({ where: { id: source.id } })).lastCursorValue).not.toBeNull();
+    } finally {
+      await Promise.all(children.splice(0).map((worker) => worker.close()));
+      await fixture.writer.query(`DROP OWNED BY "${role}"`);
+      await fixture.writer.query(`DROP ROLE "${role}"`);
+      await db.user.delete({ where: { id: user.id } });
+    }
+  }, 120_000);
 
   it("rejects a second active owner before provider/model preparation without changing its status", async () => {
     const { source } = await setup();
@@ -134,6 +276,63 @@ describe("native SQL publication across independent processes", () => {
     expect((await db.externalDataSource.findUniqueOrThrow({ where: { id: source.id } })).lastSyncError).toBeNull();
   });
 
+  it.each(["obsolete-first", "current-first"] as const)("reclaims an expired identical cursor/configuration and fences status (%s)", async (order) => {
+    const { source, table } = await setup();
+    const obsolete = await child(), current = await child();
+    await current.run(source.id, false);
+    await current.complete();
+    const initial = await db.externalDataSource.findUniqueOrThrow({ where: { id: source.id } });
+    await fixture.writer.query(`UPDATE ${table} SET seq = 2, payload = 'obsolete capture'`);
+    await obsolete.run(source.id);
+    await obsolete.prepared();
+    await expireLease(source.id);
+    await fixture.writer.query(`UPDATE ${table} SET payload = 'current reclaimed capture'`);
+    await current.run(source.id);
+    await current.prepared();
+    const inputs = await db.sqlNativeRunInput.findMany({ where: { sourceId: source.id }, orderBy: { generation: "desc" }, take: 2 });
+    expect(inputs[0].nextCursor).toBe(inputs[1].nextCursor);
+    const attempts = await db.sqlIngestionAttempt.findMany({ where: { sourceId: source.id }, orderBy: { generation: "desc" }, take: 2 });
+    expect(attempts[0].expectedCursor).toBe(initial.lastCursorValue);
+    expect(attempts[1].expectedCursor).toBe(initial.lastCursorValue);
+    expect(attempts[0].configurationFingerprint).toBe(attempts[1].configurationFingerprint);
+    if (order === "obsolete-first") {
+      await obsolete.release();
+      expect((await obsolete.failed()).error).toMatch(/current|fence|attempt/i);
+      expect((await db.externalDataSource.findUniqueOrThrow({ where: { id: source.id } })).lastSyncError).toBeNull();
+      await current.release();
+      await current.complete();
+    } else {
+      await current.release();
+      await current.complete();
+      const version = await cacheVersion(source.workspaceId);
+      await obsolete.release();
+      expect((await obsolete.failed()).error).toMatch(/current|fence|attempt/i);
+      expect(await cacheVersion(source.workspaceId)).toBe(version);
+    }
+    const chunks = await db.knowledgeChunk.findMany({ where: { workspaceId: source.workspaceId } });
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0].content).toContain("current reclaimed capture");
+    const stored = await db.externalDataSource.findUniqueOrThrow({ where: { id: source.id } });
+    expect(stored.lastCursorValue).toBe(inputs[0].nextCursor);
+    expect(stored.lastSyncError).toBeNull();
+    expect((await db.sqlIngestionSourceClaim.findUniqueOrThrow({ where: { workspaceId_sourceId: { workspaceId: source.workspaceId, sourceId: source.id } } })).status).toBe("SUCCEEDED");
+  });
+
+  it("acknowledges a verified empty run without replacing chunks or resetting the typed cursor", async () => {
+    const { source } = await setup();
+    const worker = await child();
+    await worker.run(source.id, false);
+    await worker.complete();
+    const before = await db.externalDataSource.findUniqueOrThrow({ where: { id: source.id } });
+    const chunks = await db.knowledgeChunk.findMany({ where: { workspaceId: source.workspaceId } });
+    await worker.run(source.id, false);
+    await worker.complete();
+    expect((await db.externalDataSource.findUniqueOrThrow({ where: { id: source.id } })).lastCursorValue).toBe(before.lastCursorValue);
+    expect(await db.knowledgeChunk.findMany({ where: { workspaceId: source.workspaceId } })).toEqual(chunks);
+    expect(await db.sqlKnowledgePublication.findFirst({ where: { sourceId: source.id, rowsProcessed: 0 } }))
+      .toMatchObject({ status: "COMMITTED", chunksCreated: 0 });
+  });
+
   it.each(["obsolete-first", "current-first"] as const)("fences changed credentials with identical cursors when publishing %s", async (order) => {
     const { source, table } = await setup();
     const obsolete = await child();
@@ -143,6 +342,7 @@ describe("native SQL publication across independent processes", () => {
     await obsolete.prepared();
     await fixture.writer.query(`UPDATE ${table} SET payload = 'new credential generation payload'`);
     await db.externalDataSource.update({ where: { id: source.id }, data: { connectionStringEnc: encryptedConnection() } });
+    await expireLease(source.id);
     // Both attempts start with NULL and eventually propose the identical native
     // cursor. The credential/attempt fence, not cursor text, chooses the owner.
     expect((await db.externalDataSource.findUniqueOrThrow({ where: { id: source.id } })).lastCursorValue).toBeNull();
@@ -186,6 +386,7 @@ describe("native SQL publication across independent processes", () => {
       connectionStringEnc: source.connectionStringEnc, selectedTables: source.selectedTables,
       cursorColumn: source.cursorColumn,
     } });
+    await expireLease(source.id);
     await fixture.writer.query(`UPDATE ${table} SET payload = 'recreated source payload'`);
     await current.run(source.id);
     await current.prepared();

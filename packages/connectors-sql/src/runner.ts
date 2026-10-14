@@ -1,10 +1,10 @@
 import { prisma } from "@corgtex/shared";
+import { sqlIngestionConfigurationFingerprint } from "@corgtex/domain";
 import type {
   AuthenticatedSqlRunReceipt, SqlIngestionAttempt, SqlIngestionAttemptPort,
   SqlKnowledgePublicationPort, SqlPublicationIdentity,
 } from "@corgtex/domain/sql-ingestion-contract";
 import { startAttemptHeartbeat } from "./attempt-heartbeat";
-import { scanFingerprint } from "./native-scan";
 import "./native-driver";
 
 /** Typed orchestration; production binds the authority's actual runtime ports. */
@@ -15,7 +15,7 @@ export function createSqlIngestionRunner(ports: SqlIngestionAttemptPort & SqlKno
       throw new Error(`Data source not found or inactive: ${sourceId}`);
     }
     const log = await prisma.externalDataSyncLog.create({ data: { sourceId } });
-    const fingerprint = scanFingerprint(source);
+    const fingerprint = sqlIngestionConfigurationFingerprint(source);
     let attempt: SqlIngestionAttempt | undefined;
     let receipt: AuthenticatedSqlRunReceipt | undefined;
     let heartbeat: ReturnType<typeof startAttemptHeartbeat> | undefined;

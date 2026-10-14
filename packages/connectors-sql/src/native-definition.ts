@@ -1,7 +1,7 @@
 import { assertBookmarkDefinition, CursorError, orderColumns } from "./cursor";
 import type { TableDefinition } from "./cursor";
 
-// Structural counterpart of the forthcoming additive domain native contract.
+// Native declaration matches the domain receipt contract.
 // Cursor bookmarks retain their existing ordering-only wire format.
 export interface CapturedSqlColumn {
   name: string;
