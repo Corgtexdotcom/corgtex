@@ -14,7 +14,7 @@ const origin = z.string().url().max(2048).refine((value) => {
   const url = new URL(value);
   return url.protocol === "https:" && !url.username && !url.password && !url.port && url.origin === value;
 });
-export const managedAzureTargetSchema = z.object({
+const managedAzureTargetSchema = z.object({
   deploymentId: uuid, customerAccountId: databaseId, deploymentKind: z.enum(["HOSTED_DEDICATED", "REMOTE_MANAGED"]),
   origin, subscriptionId: uuid, resourceGroup: group, webAppName: app, workerAppName: app,
   acrName: z.string().min(5).max(50).regex(/^[a-z0-9]+$/), acrServer: z.string(), acrResourceGroup: group,
