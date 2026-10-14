@@ -4,7 +4,7 @@ import { prisma, encryptSecret, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 
 const provider = vi.hoisted(() => ({ transport: vi.fn(), body: { text: "The product team owns onboarding.", etag: "same-version" },
-  transactionDepth: 0, callsInTransaction: 0 }));
+  transactionDepth: 0, callsInTransaction: 0, measureApply: false, applyOperations: 0, applySnapshotReads: 0 }));
 vi.mock("./external-mcp", async importOriginal => ({ ...await importOriginal<typeof import("./external-mcp")>(),
   readBoxExternalMcpNativeResponse: provider.transport }));
 vi.mock("@corgtex/shared", async importOriginal => {
@@ -19,7 +19,25 @@ vi.mock("@corgtex/shared", async importOriginal => {
       const callback = args[0];
       return original(async (tx: any) => {
         provider.transactionDepth++;
-        try { return await callback(tx); } finally { provider.transactionDepth--; }
+        const delegates = new Map<PropertyKey, unknown>();
+        const observed = !provider.measureApply ? tx : new Proxy(tx, { get(client, name) {
+          const value = Reflect.get(client, name, client);
+          const count = (receiver: any, method: any, operation: PropertyKey) => (...params: any[]) => {
+            provider.applyOperations++;
+            if (name === "artifactInputSnapshot" && operation === "findFirst") provider.applySnapshotReads++;
+            return Reflect.apply(method, receiver, params);
+          };
+          if (typeof value === "function") return count(client, value, name);
+          if (!value || typeof value !== "object") return value;
+          if (!delegates.has(name)) delegates.set(name, new Proxy(value, { get(model, operation) {
+            const method = Reflect.get(model, operation, model);
+            return typeof method === "function" ? count(model, method, operation) : method;
+          } }));
+          return delegates.get(name);
+        } });
+        try { return await callback(observed); } finally {
+          provider.transactionDepth--;
+        }
       }, ...args.slice(1));
     };
   } });
@@ -109,6 +127,7 @@ describe("Box phase authority in real disposable database transactions", () => {
   beforeEach(async () => {
     await truncateAllTables();
     provider.transactionDepth = 0; provider.callsInTransaction = 0;
+    provider.measureApply = false; provider.applyOperations = 0; provider.applySnapshotReads = 0;
     provider.body = { text: "The product team owns onboarding.", etag: "same-version" };
     provider.transport.mockClear().mockImplementation(async () => {
       if (provider.transactionDepth) { provider.callsInTransaction++; throw new Error("Provider inside interactive transaction"); }
@@ -141,7 +160,15 @@ describe("Box phase authority in real disposable database transactions", () => {
     const variant = await prisma.genericDerivedArtifactVariant.findUniqueOrThrow({ where: { id: result.variantId } });
     const id = (variant.payloadJson as any).proposedDiff.id;
     await reviewContextGraphProposedDiff(f.actor, { workspaceId: f.workspace.id, proposedDiffId: id, status: "approved" });
-    expect(await applyContextGraphProposedDiff(f.actor, { workspaceId: f.workspace.id, proposedDiffId: id })).toMatchObject({ status: "applied" });
+    provider.measureApply = true;
+    try {
+      expect(await applyContextGraphProposedDiff(f.actor, { workspaceId: f.workspace.id, proposedDiffId: id })).toMatchObject({ status: "applied" });
+    } finally { provider.measureApply = false; }
+    // This two-object native proposal previously issued 6,573 transaction
+    // operations / 2,516 snapshot reads and repeatedly exceeded the default 5s.
+    // Count work rather than relaxing the timeout or asserting host timing.
+    expect(provider.applyOperations).toBeLessThan(6_000);
+    expect(provider.applySnapshotReads).toBeLessThan(1_500);
     expect(provider.callsInTransaction).toBe(0);
     const objects = await prisma.contextGraphObject.findMany({ where: { workspaceId: f.workspace.id, id: { notIn: f.targets.map(row => row.id) } } });
     expect(objects).toHaveLength(2);

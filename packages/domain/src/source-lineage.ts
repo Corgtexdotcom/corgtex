@@ -1,3 +1,4 @@
+import type { BoundedSnapshotReads } from "./source-snapshot-read-pass";
 import { getBrainExportWorkerPurpose, isBrainExportWorkerCurrent } from "./brain-export-worker";
 import { canReadInformationCategory, categoryGovernorIdentities, CATEGORY_BOUND_SOURCE_KINDS } from "./information-category-policy";
 import { financeFactValue, financeValueHash, isFinanceFactRevisionIntact } from "./finance-fact-value";
@@ -686,7 +687,9 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
   if (!isRecord(loaded) || (isArchived(loaded) && !archivedMetadataOnly)) return false;
   // Bind admission, serving and the final local fence to the same exact heads.
   // Same-body ancestry changes cannot add a locally admitted, unreplayed leaf.
-  const bindHeads = db === prisma || Boolean(expectedReadHeads.getStore());
+  // Snapshots authenticate their inline ancestry, never an external mutable
+  // manifest. Fresh bytes/fingerprint/epochs below remain mandatory.
+  const bindHeads = root.kind !== "ArtifactInputSnapshot" && (db === prisma || Boolean(expectedReadHeads.getStore()));
   const readManifest = bindHeads ? await latestManifest(db, workspaceId, root) : undefined;
   if (bindHeads && !bindReadHead(memo, root, readManifest ?? null)) return false;
   const row: Record<string, unknown> = loaded;
@@ -1760,7 +1763,7 @@ async function latestManifest(db: LineageClient, workspaceId: string, input: Lin
 
 /** Internal dependency discovery grants no read access and returns no source content. */
 export async function inspectStoredArtifactInputDependencies(db: LineageClient, workspaceId: string,
-  inputs: readonly LineageRoot[], options?: { maxNodes: number }) {
+  inputs: readonly LineageRoot[], options?: { maxNodes: number; snapshotReads?: BoundedSnapshotReads }) {
   assertSourceCommitTransactionCompatible(db);
   const dependencies = new Map<string, LineageRoot>();
   const memo = new Map<string, boolean>();
@@ -1787,6 +1790,7 @@ export async function inspectStoredArtifactInputDependencies(db: LineageClient, 
       if (lineageContentFingerprint(root.kind, row) !== root.fingerprint || typeof row.sourceKind !== "string"
         || !(row.sourceKind in CONTENT_FIELDS) || row.sourceKind === "ArtifactInputSnapshot") return false;
       if (row.epochProofVersion !== 1 || !parsePermissionEpochProof(row.permissionEpochsJson)) return false;
+      options?.snapshotReads?.retain(row as unknown as import("@prisma/client").ArtifactInputSnapshot);
       const source = { kind: row.sourceKind as LineageKind, id: String(row.sourceId), fingerprint: String(row.sourceFingerprint) };
       dependencies.set(`${source.kind}:${source.id}:${source.fingerprint}`, source);
       upstream = parseRoots(row.rootsJson as Prisma.JsonValue);
