@@ -36,6 +36,7 @@ beforeEach(async () => {
   await resetFixture();
   resetLocalCacheStore();
   fixture.rows.knowledgeChunk = [];
+  fixture.prisma.externalContentSource = { findMany: vi.fn(async () => []) };
   fixture.prisma.$queryRaw = vi.fn(async () => []);
   fixture.prisma.$transaction.mockImplementation(async (work: any) => {
     const before = structuredClone(fixture.rows);

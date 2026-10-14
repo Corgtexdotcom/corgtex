@@ -1,4 +1,4 @@
-import { nativeTranscriptPrincipalUserId } from "./native-transcript-principal";
+import { getRecorderTranscriptWorkerPurpose, nativeTranscriptPrincipalUserId } from "./native-transcript-principal";
 import { artifactPermissionEpochIdentities, capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, mergePermissionEpochProofs, parsePermissionEpochProof, withSourceCommitPermissionReadPass, type PermissionEpochProof } from "./source-permission-epochs";
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -232,7 +232,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** Hash only fields that can convey information or change visibility. */
-function snapshotContentFields(kind: LineageKind) {
+function snapshotContentFields(kind: LineageKind, row?: Record<string, unknown>) {
+  if (kind === "NativeTranscriptInput" && row?.mode === "RECORDER") return [...fingerprintFields(kind), "recorderAttemptId", "recorderMeetingId", "recorderBindingId", "recorderProvider"];
   return kind === "BrainSource" ? ["id", "workspaceId", "accessDomain", "sourceType", "tier", "title", "channel", "content", "ingestionGuidanceMd", "fileStorageKey", "fileMimeType", "metadata", "authorMemberId", "fileName", "fileSizeBytes", "externalId", "createdAt"] : fingerprintFields(kind);
 }
 
@@ -247,6 +248,7 @@ export function lineageContentFingerprint(kind: LineageKind, row: unknown): stri
     return brainSourceContentFingerprint(row as Parameters<typeof brainSourceContentFingerprint>[0]);
   }
   const fields = fingerprintFields(kind);
+  if (kind === "NativeTranscriptInput" && row.mode === "RECORDER") fields.push("recorderAttemptId", "recorderMeetingId", "recorderBindingId", "recorderProvider");
   if (kind === "SqlNativeRunInput") {
     // Preserve the existing JSON fingerprint byte for byte while avoiding
     // several complete copies of a potentially 100MiB encrypted run header.
@@ -466,7 +468,9 @@ function actorCanReadRecord(actor: AppActor, workspaceId: string, membership: { 
       && row.credentialVersion == null && row.scopeHash == null
       && Array.isArray(row.requiredScopes) && row.requiredScopes.length === 0;
   if (kind === "MeetingAudioAsset") return nativeTranscriptPrincipalUserId(actor, workspaceId) === row.uploadedByUserId;
-  if (kind === "NativeTranscriptInput") return nativeTranscriptPrincipalUserId(actor, workspaceId) === row.submittedByUserId;
+  if (kind === "NativeTranscriptInput") return row.mode === "RECORDER"
+    ? Boolean(membership || getRecorderTranscriptWorkerPurpose(actor, workspaceId))
+    : nativeTranscriptPrincipalUserId(actor, workspaceId) === row.submittedByUserId;
   if (kind === "GenericDerivedArtifactVariant") return actor.kind === "user" && membership?.id === row.ownerMemberId;
   if (kind === "ExternalMcpResponseInput" || kind === "ExternalMcpConnectionSet") return actor.kind === "user" && actor.user.id === row.localUserId;
   if (internalSourcePermission(actor, workspaceId, kind, row)) return true;
@@ -1269,7 +1273,7 @@ async function snapshotInput(actor: AppActor, tx: Prisma.TransactionClient, work
     const snapshot = await saveAllocatedInputSnapshot(actor, tx, workspaceId, root, {
       workspaceId, sourceKind: root.kind, sourceId: root.id, sourceFingerprint: root.fingerprint, origin: "DERIVED",
       epochProofVersion: 1, permissionEpochsJson: permissionEpochs as unknown as Prisma.InputJsonValue,
-      contentJson: JSON.parse(JSON.stringify(Object.fromEntries(snapshotContentFields(root.kind)
+      contentJson: JSON.parse(JSON.stringify(Object.fromEntries(snapshotContentFields(root.kind, content)
         .map(field => [field, content[field] ?? null])))) as Prisma.InputJsonValue,
       accessEnvelopeJson: { ...accessEnvelope, credentialParentPurposeVersion: 1 } as Prisma.InputJsonObject,
       rootsJson: [parentReceipt.root] as Prisma.InputJsonArray,
@@ -1298,11 +1302,15 @@ async function snapshotInput(actor: AppActor, tx: Prisma.TransactionClient, work
     invariant(session, 409, "SOURCE_CHANGED", "The conversation is unavailable.");
     envelope = { ...record, requesterUserId: session.userId };
   }
-  const contentJson = Object.fromEntries(snapshotContentFields(root.kind)
+  const contentJson = Object.fromEntries(snapshotContentFields(root.kind, content)
     .map((field) => [field, record[field] ?? null]));
   const accessEnvelope = Object.fromEntries(["permissionKind", "kind", "isPrivate", "ownerMemberId", "authorUserId", "status", "createdByUserId",
     "localUserId", "selectedByUserId", "connectionId", "providerKey", "sourceKind", "externalId", "submittedByUserId", "agentCredentialId", "actorKind", "credentialId", "credentialVersion", "scopeHash", "visibility", "classification", "publicEnabledAt", "publicRevokedAt", "isActive", "agentKey", "userId", "sessionId", "conversationId", "memberId", "authorMemberId", "recipientMemberId", "archivedAt", "accessDomain", "requesterUserId", "variantOfArticleId", "variantTargetFingerprint", "variantInputSetHash"]
     .map((field) => [field, envelope[field] ?? null]));
+  if (root.kind === "NativeTranscriptInput" && record.mode === "RECORDER") Object.assign(accessEnvelope, {
+    mode: record.mode, recordingId: record.recordingId, recorderAttemptId: record.recorderAttemptId,
+    recorderMeetingId: record.recorderMeetingId, recorderBindingId: record.recorderBindingId, recorderProvider: record.recorderProvider,
+  });
   if (manifest.origin === "HUMAN_ORIGINAL" && "id" in manifest && typeof manifest.id === "string") {
     accessEnvelope.humanOriginalManifestId = manifest.id;
     accessEnvelope.humanOriginalManifestRevision = manifest.revision;
@@ -1379,7 +1387,7 @@ export async function preserveUnknownArtifactInputSnapshot(tx: Prisma.Transactio
   const current = await loadArtifact(tx, workspaceId, input);
   invariant(current && isRecord(content) && lineageContentFingerprint(input.kind, current) === lineageContentFingerprint(input.kind, content),
     409, "SOURCE_CHANGED", "Legacy content changed before it could be preserved.");
-  const contentJson = Object.fromEntries(snapshotContentFields(input.kind).map((field) => [field, content[field] ?? null]));
+  const contentJson = Object.fromEntries(snapshotContentFields(input.kind, content).map((field) => [field, content[field] ?? null]));
   return tx.artifactInputSnapshot.create({ data: {
     workspaceId, sourceKind: input.kind, sourceId: input.id, sourceFingerprint: lineageContentFingerprint(input.kind, content),
     origin: "UNKNOWN", contentJson: JSON.parse(JSON.stringify(contentJson)) as Prisma.InputJsonValue,
@@ -1417,7 +1425,7 @@ export async function captureArtifactInputProof(actor: AppActor, workspaceId: st
     invariant(isRecord(loaded), 409, "SOURCE_CHANGED", "A prompt input is unavailable.");
     const row: Record<string, unknown> = loaded;
     if (input.snapshot) {
-      for (const field of snapshotContentFields(input.kind)) {
+      for (const field of snapshotContentFields(input.kind, row)) {
         if (field in input.snapshot) invariant(snapshotMatches(input.snapshot[field], row[field]),
           409, "SOURCE_CHANGED", "A prompt input changed before generation.");
       }
@@ -1819,6 +1827,7 @@ export async function recordArtifactInputLineage(params: {
   workspaceId: string;
   artifact: LineageInput;
   content: unknown;
+  manifestId?: string;
   origin: "HUMAN_ORIGINAL" | "DERIVED";
   inputs: LineageInput[];
   inheritedRoots?: LineageRoot[];
@@ -1909,6 +1918,7 @@ export async function recordArtifactInputLineage(params: {
   const permissionEpochs = await captureArtifactPermissionEpochs(actor, workspaceId,
     [{...artifact, fingerprint: lineageContentFingerprint(artifact.kind, content)}, ...roots.values()], tx);
   const recorded = await tx.artifactInputLineage.create({ data: {
+    ...(params.manifestId ? { id: params.manifestId } : {}),
     epochProofVersion: 1, permissionEpochsJson: permissionEpochs as unknown as Prisma.InputJsonValue,
     workspaceId, artifactType: artifact.kind, artifactId: artifact.id,
     revision: (previous?.revision ?? 0) + 1, origin: params.origin,

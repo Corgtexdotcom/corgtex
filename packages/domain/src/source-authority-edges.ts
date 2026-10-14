@@ -4,7 +4,7 @@ import type { LineageInput, LineageKind, LineageRoot } from "./source-lineage";
 import { invariant } from "./errors";
 import { artifactPermissionEpochIdentities, type PermissionEpochIdentity } from "./source-permission-epochs";
 import { getExternalProviderWorkerPurpose } from "./external-provider-principal";
-import { getAudioTranscriptWorkerPurpose } from "./native-transcript-principal";
+import { getRecorderTranscriptWorkerPurpose, getAudioTranscriptWorkerPurpose } from "./native-transcript-principal";
 
 export type SourceAuthorityClient = Prisma.TransactionClient;
 export type SourceAuthorityRow = { table: string; id: string; mode?: "SHARE" | "UPDATE" };
@@ -76,7 +76,7 @@ export const SOURCE_AUTHORITY_REGISTRY = freezeDescriptor({
 // Physical governors which are not themselves model inputs still need explicit allowlisted SQL identifiers.
 export const SOURCE_AUTHORITY_GOVERNOR_TABLES = ["CommunicationInstallation", "CommunicationIngressInput", "WorkspaceIntegrationBinding", "ExternalMcpConnection",
   "SqlKnowledgePublication", "SqlKnowledgeStagedChunk", "InformationCategoryPolicy", "WorkspaceSupportGrant", "AgentCredential", "McpOAuthAccessToken", "McpOAuthClient", "WorkspaceFeatureFlag", "WorkspaceModuleGrant",
-  "AdviceRequestRecipient", "WorkspaceArchiveRecord", "WorkspaceToolLinkCircleTag", "ArtifactInputLineage", "WorkflowJob"] as const;
+  "AdviceRequestRecipient", "WorkspaceArchiveRecord", "WorkspaceToolLinkCircleTag", "ArtifactInputLineage", "WorkflowJob", "RecorderTranscriptBinding", "RecorderTranscriptAttempt", "RecorderTranscriptClaim", "RecorderTranscriptPublication", "WorkspaceMeetingRecorderConfig", "MeetingRecording", "MeetingRecorderProviderEvent", "MeetingRecorderSmokeRun", "MeetingTranscriptProcessingProgress", "AuditLog", "Event"] as const;
 export const SOURCE_AUTHORITY_TABLES:readonly string[] = Object.freeze([...new Set([...Object.values(SOURCE_AUTHORITY_REGISTRY).flatMap(d => d.table ? [d.table] : []), ...SOURCE_AUTHORITY_GOVERNOR_TABLES])]);
 export function sourceAuthorityDescriptor(kind: LineageKind): Descriptor {
   invariant(Object.prototype.hasOwnProperty.call(SOURCE_AUTHORITY_REGISTRY, kind), 409, "SOURCE_LOCK_UNSUPPORTED", "Source kind has no closed authority policy.");
@@ -255,13 +255,49 @@ export async function discoverSourceAuthorityEdges(context: AuthorityDiscoveryCo
   if (["AgentStep", "AgentToolCall"].includes(kind)) field("AgentRun", "agentRunId");
   if (kind === "MeetingAudioAsset") await rows("NativeTranscriptInput", { workspaceId, mode: "AUDIO_UPLOAD", meetingAudioAssetId: input.id }, `audio-native:${input.id}`, "NativeTranscriptInput", true);
   if (kind === "NativeTranscriptInput") {
-    invariant(["AUDIO_UPLOAD", "DIRECT_MEMBER_UPLOAD"].includes(String(content.mode)), 409, "SOURCE_LOCK_UNSUPPORTED", "Provider transcript authority is unsupported.");
-    field("Member", "ownerMemberId");
-    if (content.mode === "AUDIO_UPLOAD") field("MeetingAudioAsset", "meetingAudioAssetId");
-    const purpose = getAudioTranscriptWorkerPurpose(actor, workspaceId);
-    if (actor.kind === "agent") {
-      invariant(purpose, 409, "SOURCE_LOCK_UNSUPPORTED", "Native transcript worker authority is unavailable.");
-      await rows("WorkflowJob", { id: purpose.workflowJobId, workspaceId }, `audio-job:${purpose.workflowJobId}`, undefined, true);
+    invariant(["AUDIO_UPLOAD", "DIRECT_MEMBER_UPLOAD", "RECORDER"].includes(String(content.mode)), 409, "SOURCE_LOCK_UNSUPPORTED", "Provider transcript authority is unsupported.");
+    if (content.mode === "RECORDER") {
+      invariant(content.ownerMemberId == null && content.submittedByUserId == null && content.recorderProvider === "RECALL_AI",
+        409, "SOURCE_LOCK_UNSUPPORTED", "Recorder custody cannot borrow a human or unsupported provider grant.");
+      field("Meeting", "recorderMeetingId");
+      await rows("RecorderTranscriptBinding", { id: authorityIdentity(content.recorderBindingId), workspaceId }, `recorder-binding:${content.recorderBindingId}`, undefined, true);
+      await rows("RecorderTranscriptAttempt", { id: authorityIdentity(content.recorderAttemptId), workspaceId }, `recorder-attempt:${content.recorderAttemptId}`, undefined, true);
+      const recordingRows = await rows("MeetingRecording", { id: authorityIdentity(content.recordingId), workspaceId }, `recorder-recording:${content.recordingId}`, undefined, true);
+      await rows("WorkspaceMeetingRecorderConfig", { workspaceId }, `recorder-config:${workspaceId}`, undefined, true);
+      const purpose = getRecorderTranscriptWorkerPurpose(actor, workspaceId);
+      if (purpose?.attemptId === content.recorderAttemptId) {
+        const canonicalRows = await rows("MeetingRecording", {
+          workspaceId, meetingId: authorityIdentity(content.recorderMeetingId), provider: content.recorderProvider,
+          id: { not: content.recordingId }, transcriptProcessedAt: { not: null }, failureCode: null,
+          ...(recordingRows[0]?.joinAt ? { joinAt: recordingRows[0].joinAt } : {}),
+        }, `recorder-canonical:${content.recorderAttemptId}`);
+        for (const canonical of canonicalRows) {
+          const receipts = await rows("RecorderTranscriptPublication", { workspaceId, recordingId: canonical.id, meetingId: content.recorderMeetingId }, `recorder-canonical-publications:${canonical.id}`);
+          for (const receipt of receipts) {
+            await rows("RecorderTranscriptAttempt", { workspaceId, id: receipt.attemptId }, `recorder-canonical-attempt:${receipt.attemptId}`, undefined, true);
+            await rows("NativeTranscriptInput", { workspaceId, id: receipt.nativeInputId }, `recorder-canonical-native:${receipt.nativeInputId}`, undefined, true);
+          }
+        }
+      }
+      // Discovery adds proof/locks for already readable committed ancestry; it never changes the read gate.
+      if (purpose?.attemptId !== content.recorderAttemptId) {
+        const publications = await rows("RecorderTranscriptPublication",
+          { attemptId: authorityIdentity(content.recorderAttemptId), nativeInputId: input.id,
+            recordingId: authorityIdentity(content.recordingId), meetingId: authorityIdentity(content.recorderMeetingId), workspaceId },
+          `recorder-publication:${content.recorderAttemptId}`, undefined, true);
+        for (const publication of publications) await rows("ArtifactInputLineage", {
+          id: authorityIdentity(publication.transcriptManifestId), workspaceId, artifactType: "MeetingTranscript",
+          artifactId: authorityIdentity(content.recorderMeetingId),
+        }, `recorder-original-manifest:${publication.id}`, undefined, true);
+      }
+    } else {
+      field("Member", "ownerMemberId");
+      if (content.mode === "AUDIO_UPLOAD") field("MeetingAudioAsset", "meetingAudioAssetId");
+      const purpose = getAudioTranscriptWorkerPurpose(actor, workspaceId);
+      if (actor.kind === "agent") {
+        invariant(purpose, 409, "SOURCE_LOCK_UNSUPPORTED", "Native transcript worker authority is unavailable.");
+        await rows("WorkflowJob", { id: purpose.workflowJobId, workspaceId }, `audio-job:${purpose.workflowJobId}`, undefined, true);
+      }
     }
   }
   if (kind === "GenericDerivedArtifactVariant") {

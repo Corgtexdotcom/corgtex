@@ -12,7 +12,7 @@ export const TENANT_PURGE_GLOBAL_STATE_MODELS = ["SharedRateLimit", "SharedCache
 export const TENANT_PURGE_MODEL_DISPOSITIONS = {
   TARGET: ["Workspace", "CustomerAccount", "CustomerDeployment", "ProcurementTrial"],
   CASCADE: [
-    "NativeTranscriptInput", "CommunicationIngressInput", "CommunicationMessageNativeInput", "SourcePermissionEpoch", "GenericDerivedArtifactVariant", "DerivedArtifactRebuildState", "Action", "ActionChecklistItem", "ActionCreationSource", "AdviceProcess", "AdviceRequest", "AdviceRequestRecipient", "AgentCredential", "AgentIdentity", "AgentFeedbackInput", "AgentRequestInput", "AgentMemory", "AgentRun", "AgentStep", "AgentToolCall",
+    "RecorderTranscriptBinding", "RecorderTranscriptClaim", "RecorderTranscriptAttempt", "RecorderTranscriptPublication", "NativeTranscriptInput", "CommunicationIngressInput", "CommunicationMessageNativeInput", "SourcePermissionEpoch", "GenericDerivedArtifactVariant", "DerivedArtifactRebuildState", "Action", "ActionChecklistItem", "ActionCreationSource", "AdviceProcess", "AdviceRequest", "AdviceRequestRecipient", "AgentCredential", "AgentIdentity", "AgentFeedbackInput", "AgentRequestInput", "AgentMemory", "AgentRun", "AgentStep", "AgentToolCall",
     "AiUsageLedgerEntry", "AiWorkspaceConnection", "AppInstallation", "AppSession", "AppSurfaceAssignment", "ApprovalDecision", "ApprovalFlow", "ApprovalPolicy", "ArtifactInputLineage", "ArtifactInputSnapshot", "AuditLog",
     "BrainArticle", "BrainArticleVersion", "BrainBacklink", "BrainDiscussionComment", "BrainDiscussionThread", "BrainSource", "BuildArtifact", "BuildArtifactAsset",
     "CatalogFavorite", "CatalogItem", "CatalogRequest", "CatalogSettings", "CheckIn", "Circle", "CircleAgentAssignment", "CommunicationChannel", "CommunicationContextSummary",
@@ -67,6 +67,7 @@ export interface TenantPurgeDirectRelation {
 }
 
 const DIRECT_RELATION_DSL = `
+RecorderTranscriptBinding|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;RecorderTranscriptClaim|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;RecorderTranscriptAttempt|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;RecorderTranscriptPublication|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;
 SqlNativeRunInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;SqlNativeCapturePart|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;SqlKnowledgePublication|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;InformationCategoryPolicy|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;
 SqlIngestionSourceClaim|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;SqlIngestionAttempt|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;
 NativeTranscriptInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;CommunicationIngressInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;CommunicationMessageNativeInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;SourcePermissionEpoch|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;GenericDerivedArtifactVariant|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;DerivedArtifactRebuildState|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;
@@ -132,7 +133,7 @@ export function decodeDirectRelations(dsl: string, sourceBits: string): TenantPu
 }
 
 // Each row has delete/update source bits: 1 is explicit, 0 is the verified PostgreSQL default.
-const DIRECT_RELATION_SOURCE_BITS = `${"10".repeat(178)}${"11".repeat(3)}1010101010`;
+const DIRECT_RELATION_SOURCE_BITS = `${"10".repeat(182)}${"11".repeat(3)}1010101010`;
 export const TENANT_PURGE_DIRECT_RELATIONS = decodeDirectRelations(DIRECT_RELATION_DSL, DIRECT_RELATION_SOURCE_BITS);
 
 function stripPrismaComments(schema: string) {

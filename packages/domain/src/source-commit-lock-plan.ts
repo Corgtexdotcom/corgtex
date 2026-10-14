@@ -8,7 +8,7 @@ import type { ArtifactStructuralAuthority } from "./artifact-structural-authorit
 import type { LineageInput, LineageKind, LineageRoot } from "./source-lineage";
 import { sealArtifactInputActor } from "./artifact-input-actor";
 import { getExternalProviderWorkerPurpose } from "./external-provider-principal";
-import { getAudioTranscriptWorkerPurpose } from "./native-transcript-principal";
+import { getRecorderTranscriptWorkerPurpose, getAudioTranscriptWorkerPurpose } from "./native-transcript-principal";
 import { invariant } from "./errors";
 import { assertOutsideArtifactNativeCommitPhase, withArtifactNativeCommitPhase } from "./artifact-native-commit-phase";
 import { artifactPermissionEpochIdentities, capturePermissionEpochs, mergePermissionEpochProofs, parsePermissionEpochProof, type PermissionEpochIdentity, type PermissionEpochProof } from "./source-permission-epochs";
@@ -17,7 +17,7 @@ import { authorityIdentity, authorityRecord, discoverAmbientSourceAuthority, dis
   SOURCE_AUTHORITY_REGISTRY, SOURCE_AUTHORITY_TABLES,
   type SourceAuthorityBudget, type SourceAuthorityClient, type SourceAuthorityEdges, type SourceAuthorityRow } from "./source-authority-edges";
 
-export type SourceCommitOwnerBinding = Readonly<{ kind: "WORKFLOW_JOB" | "AGENT_RUN" | "CONVERSATION_GENERATION" | "HUMAN_REQUEST";
+export type SourceCommitOwnerBinding = Readonly<{ kind: "WORKFLOW_JOB" | "AGENT_RUN" | "CONVERSATION_GENERATION" | "HUMAN_REQUEST" | "RECORDER_TRANSCRIPT";
   id: string; generation: number; [key: string]: unknown }>;
 export type SourceCommitWriteTarget = LineageInput & { /** Declare changed governing bindings BEFORE opening the transaction. */
   projectedAuthority?: Record<string, unknown>;
@@ -27,8 +27,13 @@ declare const planBrand: unique symbol;
 declare const ownerBrand: unique symbol;
 export type SourceCommitLockPlan = { readonly [planBrand]: true };
 export type SourceCommitOwnerAttestation = { readonly [ownerBrand]: true };
+export const SOURCE_COMMIT_CONTROL_TABLES = ["MeetingRecording", "MeetingRecorderProviderEvent", "MeetingRecorderSmokeRun", "MeetingTranscriptProcessingProgress", "AuditLog", "Event", "RecorderTranscriptPublication", "RecorderTranscriptAttempt"] as const;
+/** Typed exact before/after control projections. These confer no semantic input authority. */
+export type SourceCommitControlWriteTarget = { table: typeof SOURCE_COMMIT_CONTROL_TABLES[number]; id: string;
+  before: Record<string, unknown> | null; after: Record<string, unknown> | null };
 export type SourceCommitLockPlanOptions = { writeTargets: readonly SourceCommitWriteTarget[]; ownerBinding: SourceCommitOwnerBinding;
   /** Test-only injectable primary read client; planning never invokes a supplied production interactive transaction. */
+  controlWriteTargets?: readonly SourceCommitControlWriteTarget[];
   db?: SourceAuthorityClient; maxNodes?: number; structuralAuthorities?:readonly ArtifactStructuralAuthority[] };
 type PhysicalLock = SourceAuthorityRow & { mode: "SHARE" | "UPDATE" };
 type Discovery = { rows: PhysicalLock[]; advisories: Array<{key: string; mode: "SHARE" | "UPDATE"}>;
@@ -40,7 +45,7 @@ type Discovery = { rows: PhysicalLock[]; advisories: Array<{key: string; mode: "
   semanticRoots:LineageRoot[]; snapshotBindings:Array<{id:string;input:LineageRoot;source:LineageRoot}> };
 type StructuralAuthorityState=Pick<ReturnType<typeof import("./artifact-structural-authority").consumeArtifactStructuralAuthority>,"target"|"observation"|"permissionEpochs">;
 type PlanState = { structural:StructuralAuthorityState[]; actor: AppActor; actorHash: string; origin: unknown; workspaceId: string; roots: LineageRoot[];
-  nativePurposeHash: string; writeTargets: SourceCommitWriteTarget[]; ownerBinding: SourceCommitOwnerBinding; maxNodes: number; discovered: Discovery };
+  nativePurposeHash: string; controlWriteTargets: SourceCommitControlWriteTarget[]; writeTargets: SourceCommitWriteTarget[]; ownerBinding: SourceCommitOwnerBinding; maxNodes: number; discovered: Discovery };
 type AttestationState = { plan: SourceCommitLockPlan; tx: Prisma.TransactionClient; connection: string;
   assertOwner: (tx: Prisma.TransactionClient, binding: SourceCommitOwnerBinding) => Promise<void> };
 const plans = new WeakMap<object, PlanState>();
@@ -69,13 +74,13 @@ export function sourceCommitHeadAdvisoryKey(workspaceId:string,input:LineageInpu
   invariant(row,409,"SOURCE_LOCK_UNSUPPORTED","Virtual control inputs have no writable source head.");
   return `source-head:${workspaceId}:${rowKey(row)}`;
 }
-const nativePurposeHash=(actor:AppActor,workspaceId:string)=>hash([getExternalProviderWorkerPurpose(actor)??null,getAudioTranscriptWorkerPurpose(actor,workspaceId)??null]);
+const nativePurposeHash=(actor:AppActor,workspaceId:string)=>hash([getExternalProviderWorkerPurpose(actor)??null,getAudioTranscriptWorkerPurpose(actor,workspaceId)??null,getRecorderTranscriptWorkerPurpose(actor,workspaceId)??null]);
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === "object") { for (const item of Object.values(value)) deepFreeze(item); Object.freeze(value); }
   return value;
 }
 function validBinding(binding: SourceCommitOwnerBinding) {
-  invariant(binding && ["WORKFLOW_JOB", "AGENT_RUN", "CONVERSATION_GENERATION", "HUMAN_REQUEST"].includes(binding.kind)
+  invariant(binding && ["WORKFLOW_JOB", "AGENT_RUN", "CONVERSATION_GENERATION", "HUMAN_REQUEST", "RECORDER_TRANSCRIPT"].includes(binding.kind)
     && typeof binding.id === "string" && binding.id.length > 0 && Number.isSafeInteger(binding.generation) && binding.generation > 0,
   409, "SOURCE_OWNER_UNAVAILABLE", "Commit requires an exact typed owner and generation binding.");
   // Bind only finite serializable scalar/object data; no executable or object-identity authority can be serialized here.
@@ -188,7 +193,7 @@ async function discover(state: Omit<PlanState,"discovered">, db: SourceAuthority
   const pending: Array<{input:LineageInput; root?:LineageRoot; output?:boolean;structural?:boolean}> = state.roots.map(root => ({input:root,root}));
   const visited = new Set<string>();
   const targetKeys = new Set(writeTargets.map(logicalKey));
-  const targetRows = new Set(writeTargets.flatMap(input => { const row = sourceAuthorityPhysicalRow(input); return row ? [rowKey(row)] : []; }));
+  const targetRows = new Set([...state.controlWriteTargets.map(rowKey), ...writeTargets.flatMap(input => { const row = sourceAuthorityPhysicalRow(input); return row ? [rowKey(row)] : []; })]);
   const addRow = (row:SourceAuthorityRow, mode:"SHARE"|"UPDATE" = "SHARE") => {
     remaining.consume(`physical:${rowKey(row)}`);
     const old = physical.get(rowKey(row)); physical.set(rowKey(row),{...row,mode:mode === "UPDATE" || row.mode === "UPDATE" || old?.mode === "UPDATE" || targetRows.has(rowKey(row)) ? "UPDATE" : "SHARE"});
@@ -199,6 +204,15 @@ async function discover(state: Omit<PlanState,"discovered">, db: SourceAuthority
       const key = `workspace_archive:${row.table}:${row.id}`; advisory.set(key,{key,mode:targetRows.has(rowKey(row)) ? "UPDATE" : "SHARE"});
     }
   };
+  for (const control of state.controlWriteTargets) {
+    addRow(control, "UPDATE");
+    const actual = await sourceAuthorityDelegate(db, control.table).findFirst({ where: { id: control.id } });
+    const expected = afterWork ? control.after : control.before;
+    const fields = Object.keys(expected ?? control.before ?? control.after ?? {});
+    const projected = actual && Object.fromEntries(fields.map(field => [field, actual[field] ?? null]));
+    invariant(hash(projected) === hash(expected), 409, "SOURCE_CHANGED", "Planned control state changed.");
+    if (actual) invariant(actual.workspaceId === workspaceId, 409, "SOURCE_CHANGED", "Control row belongs to another workspace.");
+  }
   const addVector = (value:unknown) => {
     const parsed = parsePermissionEpochProof(value); invariant(parsed,409,"SOURCE_LOCK_INCOMPLETE","A saved original permission vector is unavailable."); vectors.push(parsed);
     for (const entry of parsed.entries) remaining.consume(`epoch:${JSON.stringify([entry.kind,entry.id])}`);
@@ -447,10 +461,18 @@ export async function prepareSourceCommitLockPlan(actor:AppActor,workspaceId:str
   const maxNodes = options.maxNodes ?? MAX_NODES;
   invariant(submitted.length>0 && submitted.length<=maxNodes && Number.isSafeInteger(maxNodes)&&maxNodes>0&&maxNodes<=MAX_NODES,
     409,"SOURCE_LOCK_LIMIT","Source lock plan requires bounded complete inputs.");
+  for (const control of options.controlWriteTargets ?? []) {
+    invariant(SOURCE_COMMIT_CONTROL_TABLES.includes(control.table) && typeof control.id === "string" && control.id.length > 0
+      && (control.before !== null || control.after !== null)
+      && [control.before, control.after].every(row => row === null || (row.id === control.id && row.workspaceId === workspaceId)),
+      409, "SOURCE_LOCK_UNCOVERED", "Control output identity or tenant binding is invalid.");
+  }
+  invariant(new Set((options.controlWriteTargets ?? []).map(rowKey)).size === (options.controlWriteTargets ?? []).length,
+    409, "SOURCE_LOCK_UNCOVERED", "Control outputs must be unique.");
   const tokens=Object.freeze([...(options.structuralAuthorities??[])]);
   invariant(new Set(tokens).size===tokens.length,409,"SOURCE_CHANGED","Structural receipts cannot be duplicated.");
   const state:Omit<PlanState,"discovered"> = {structural:[],actor,actorHash:hash(actor),origin:deepFreeze(structuredClone(getMcpOrigin() ?? null)),workspaceId,
-    nativePurposeHash:nativePurposeHash(actor,workspaceId),roots:deepFreeze(submitted),writeTargets:deepFreeze(structuredClone([...options.writeTargets])),ownerBinding:deepFreeze(structuredClone(options.ownerBinding)),maxNodes};
+    controlWriteTargets:deepFreeze(structuredClone([...(options.controlWriteTargets ?? [])])),nativePurposeHash:nativePurposeHash(actor,workspaceId),roots:deepFreeze(submitted),writeTargets:deepFreeze(structuredClone([...options.writeTargets])),ownerBinding:deepFreeze(structuredClone(options.ownerBinding)),maxNodes};
   const structural:StructuralAuthorityState[]=[];
   if(tokens.length) {
     const {consumeArtifactStructuralAuthority}=await import("./artifact-structural-authority");
@@ -519,10 +541,11 @@ async function rewalk(state:PlanState,tx:Prisma.TransactionClient,afterWork=fals
     throw error;
   }
 }
-function stableAfterWork(before:Discovery,after:Discovery,targets:readonly SourceCommitWriteTarget[]) {
+function stableAfterWork(before:Discovery,after:Discovery,targets:readonly SourceCommitWriteTarget[],controls:readonly SourceCommitControlWriteTarget[]) {
   // Declared output bodies/heads can change. Their newly created manifest rows do not need a late lock:
   // exclusive output-head ownership already serializes them. Other rows and every governing edge must be unchanged.
   const keys=targets.map(logicalKey),physical=targets.flatMap(target=>{const row=sourceAuthorityPhysicalRow(target);return row?[rowKey(row)]:[];});
+  physical.push(...controls.map(rowKey));
   const outputLedger=(key:string)=>key.startsWith("output:")||key.startsWith("output-head:")
     ||keys.some(target=>key===`head:${target}`||key.startsWith(`content:${target}:`))
     ||physical.some(target=>key===`governor:${target}`);
@@ -562,7 +585,7 @@ export async function withSourceCommitLockPlan<T>(actor:AppActor,workspaceId:str
     const ids=await tx.$queryRaw<Array<{id:string}>>(Prisma.sql`SELECT "id" FROM ${Prisma.raw(`"${row.table}"`)} WHERE "id"=${row.id}
       ${Prisma.raw(row.mode==="UPDATE"?"FOR UPDATE":"FOR SHARE")}`);
     // Missing preallocated outputs are fenced by their reserved head. Every existing/input row must still exist.
-    const declared=state.writeTargets.some(target=>sourceAuthorityPhysicalRow(target)?.table===row.table&&target.id===row.id);
+    const declared=state.controlWriteTargets.some(control=>control.table===row.table&&control.id===row.id)||state.writeTargets.some(target=>sourceAuthorityPhysicalRow(target)?.table===row.table&&target.id===row.id);
     invariant(ids.length===1||declared,409,"SOURCE_CHANGED","Planned source row disappeared before locking.");
   }
   const locked=await rewalk(state,tx);
@@ -574,7 +597,7 @@ export async function withSourceCommitLockPlan<T>(actor:AppActor,workspaceId:str
     try {
       const result=await work();await checkOwner();
       const current=await rewalk(state,tx,true);
-      invariant(stableAfterWork(state.discovered,current,state.writeTargets),409,"SOURCE_CHANGED","Commit introduced an unplanned source authority edge.");
+      invariant(stableAfterWork(state.discovered,current,state.writeTargets,state.controlWriteTargets),409,"SOURCE_CHANGED","Commit introduced an unplanned source authority edge.");
       // Other transactions cannot change a SHARE-locked vector, but this transaction's own DML triggers can.
       // Rechecking the held union takes no additional lock and catches those transitions.
       await verifyOriginalEpochUnion(tx,workspaceId,state.discovered,false);

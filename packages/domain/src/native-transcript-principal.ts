@@ -31,3 +31,18 @@ export function nativeTranscriptPrincipalUserId(actor: AppActor, workspaceId: st
   return actor.kind === "user" ? actor.user.id
     : getAudioTranscriptWorkerPurpose(actor, workspaceId)?.uploadedByUserId ?? null;
 }
+
+
+export type RecorderTranscriptWorkerPurpose = Readonly<{
+  workspaceId: string; recordingId: string; meetingId: string; attemptId: string;
+  claimId: string; generation: number; nonce: string; bindingId: string;
+}>;
+const recorderWorkers = new WeakMap<AppActor, RecorderTranscriptWorkerPurpose>();
+export function registerRecorderTranscriptWorker(actor: AppActor, purpose: RecorderTranscriptWorkerPurpose) {
+  recorderWorkers.set(actor, Object.freeze({ ...purpose }));
+}
+export function revokeRecorderTranscriptWorker(actor: AppActor) { recorderWorkers.delete(actor); }
+export function getRecorderTranscriptWorkerPurpose(actor: AppActor, workspaceId: string) {
+  const purpose = recorderWorkers.get(actor);
+  return purpose?.workspaceId === workspaceId ? purpose : null;
+}

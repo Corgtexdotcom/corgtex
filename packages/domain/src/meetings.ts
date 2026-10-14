@@ -14,6 +14,7 @@ import { meetingAgendaInputProjection, meetingTranscriptInputProjection, readMee
 import { requireMeetingProcessedContentEditor } from "./collaborative-permissions";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { extractSupportedMeetingUrlFromText, meetingUrlHash, normalizeMeetingUrl, normalizeRecorderMeetingUrl } from "./meeting-urls";
+import { getRecorderTranscriptWorkerPurpose } from "./native-transcript-principal";
 import { resetMeetingTranscriptProcessingProgress } from "./meeting-transcript-processing";
 import {
   checkWorkspaceDuplicateGuard,
@@ -80,7 +81,7 @@ function normalizeTranscriptForCompare(value?: string | null) {
   return (value ?? "").trim().replace(/\s+/g, " ");
 }
 
-function mergeTranscript(existing: string | null | undefined, incoming: string) {
+export function mergeMeetingTranscript(existing: string | null | undefined, incoming: string) {
   const current = existing?.trim() ?? "";
   const next = incoming.trim();
   if (!current) return next;
@@ -599,15 +600,14 @@ async function updateMeetingWithTranscriptTx(
 
   const hasExistingTranscript = Boolean(existing.transcript?.trim());
   const trustedTranscriptAppend = params.allowTranscriptAppend === true
-    && actor.kind === "agent"
-    && params.source?.startsWith("recorder:");
+    && Boolean(getRecorderTranscriptWorkerPurpose(actor, params.workspaceId));
   invariant(
     !hasExistingTranscript || (trustedTranscriptAppend && !params.replaceTranscript),
     400,
     "INVALID_STATE",
     "Meeting already has source transcript evidence. Edit the processed summary or guidance instead.",
   );
-  const transcript = params.replaceTranscript ? params.transcript.trim() : mergeTranscript(existing.transcript, params.transcript);
+  const transcript = params.replaceTranscript ? params.transcript.trim() : mergeMeetingTranscript(existing.transcript, params.transcript);
   const ingestionGuidanceMd = mergeMarkdownNote(existing.ingestionGuidanceMd, params.ingestionGuidanceMd);
   const participantIds = normalizeIds([
     ...existing.participantIds,

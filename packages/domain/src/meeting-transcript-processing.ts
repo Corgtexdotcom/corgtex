@@ -342,9 +342,8 @@ export function deriveMeetingTranscriptProcessingState(params: {
   };
 }
 
-export async function resetMeetingTranscriptProcessingProgress(
-  client: ProgressClient,
-  params: { workspaceId: string; meetingId: string; now?: Date },
+export function prepareMeetingTranscriptProcessingReset(
+  params: { workspaceId: string; meetingId: string; now?: Date; id?: string },
 ) {
   const now = params.now ?? new Date();
   const nowIso = now.toISOString();
@@ -362,7 +361,7 @@ export async function resetMeetingTranscriptProcessingProgress(
     updatedAt: nowIso,
   };
 
-  return client.meetingTranscriptProcessingProgress.upsert({
+  return {
     where: { meetingId: params.meetingId },
     update: {
       workspace: { connect: { id: params.workspaceId } },
@@ -379,13 +378,20 @@ export async function resetMeetingTranscriptProcessingProgress(
       failedAt: null,
     },
     create: {
+      ...(params.id ? { id: params.id } : {}),
       workspace: { connect: { id: params.workspaceId } },
       meeting: { connect: { id: params.meetingId } },
       currentStage: "SUMMARIZING",
       stageStatuses: jsonInput(stageStatuses),
       startedAt: now,
     },
-  });
+  } satisfies Parameters<ProgressClient["meetingTranscriptProcessingProgress"]["upsert"]>[0];
+}
+
+
+export async function resetMeetingTranscriptProcessingProgress(client: ProgressClient,
+  params: { workspaceId: string; meetingId: string; now?: Date; id?: string }) {
+  return client.meetingTranscriptProcessingProgress.upsert(prepareMeetingTranscriptProcessingReset(params));
 }
 
 export async function markMeetingTranscriptProcessingStage(params: {

@@ -825,6 +825,10 @@ model Workspace {
   derivedArtifactRebuildStates DerivedArtifactRebuildState[]
   sourcePermissionEpochs SourcePermissionEpoch[]
   nativeTranscriptInputs NativeTranscriptInput[]
+  recorderTranscriptBindings RecorderTranscriptBinding[]
+  recorderTranscriptClaims RecorderTranscriptClaim[]
+  recorderTranscriptAttempts RecorderTranscriptAttempt[]
+  recorderTranscriptPublications RecorderTranscriptPublication[]
   communicationIngressInputs CommunicationIngressInput[]
   communicationMessageNativeInputs CommunicationMessageNativeInput[]
   externalContentSyncLogs        ExternalContentSyncLog[]
@@ -6868,12 +6872,16 @@ model NativeTranscriptInput {
   id String @id @default(uuid())
   workspaceId String
   mode String
-  ownerMemberId String
-  submittedByUserId String
+  ownerMemberId String?
+  submittedByUserId String?
   meetingAudioAssetId String?
   sourceRecordId String?
   connectionId String?
   recordingId String?
+  recorderAttemptId String?
+  recorderMeetingId String?
+  recorderBindingId String?
+  recorderProvider String?
   storageKey String?
   fileHash String? @db.VarChar(64)
   fileSizeBytes Int?
@@ -6886,4 +6894,69 @@ model NativeTranscriptInput {
   @@index([workspaceId, ownerMemberId])
   @@unique([workspaceId, mode, meetingAudioAssetId])
   @@index([workspaceId, sourceRecordId])
+}
+
+
+// Recorder custody is never a human submission or a semantic permission grant.
+model RecorderTranscriptBinding {
+  id String @id @default(uuid())
+  workspaceId String
+  provider String
+  configurationHash String @db.VarChar(64)
+  active Boolean @default(true)
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, provider, active])
+}
+model RecorderTranscriptClaim {
+  id String @id @default(uuid())
+  workspaceId String
+  recordingId String @unique
+  attemptId String @unique
+  generation Int
+  nonce String
+  leaseUntil DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, leaseUntil])
+}
+model RecorderTranscriptAttempt {
+  id String @id
+  workspaceId String
+  claimId String
+  recordingId String
+  meetingId String
+  provider String
+  externalBotId String
+  bindingId String
+  configurationHash String @db.VarChar(64)
+  generation Int
+  nonce String
+  providerEventId String?
+  originHash String @db.VarChar(64)
+  encryptedOriginJson String @db.Text
+  nativeInputId String? @unique
+  failureCode String?
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@unique([claimId, generation])
+  @@index([workspaceId, recordingId])
+}
+model RecorderTranscriptPublication {
+  id String @id
+  workspaceId String
+  attemptId String @unique
+  nativeInputId String @unique
+  recordingId String
+  meetingId String
+  providerEventId String?
+  eventId String @unique
+  transcriptManifestId String
+  meetingManifestId String
+  completePlanHash String @db.VarChar(64)
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, recordingId])
 }

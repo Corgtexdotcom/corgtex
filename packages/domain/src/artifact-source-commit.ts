@@ -6,7 +6,7 @@ import { withArtifactNativeCommitPhase } from "./artifact-native-commit-phase";
 import { prepareArtifactCommitPreflight, withArtifactCommitPreflight,
   type ArtifactCommitPreflight } from "./artifact-commit-preflight";
 import { prepareSourceCommitAmbientFences, prepareSourceCommitLockPlan, prepareSourceCommitOwnerAttestation, withSourceCommitLockPlan,
-  type SourceCommitLockPlan, type SourceCommitOwnerBinding, type SourceCommitWriteTarget } from "./source-commit-lock-plan";
+  type SourceCommitControlWriteTarget, type SourceCommitLockPlan, type SourceCommitOwnerBinding, type SourceCommitWriteTarget } from "./source-commit-lock-plan";
 import type { LineageRoot } from "./source-lineage";
 import type { ArtifactStructuralAuthority } from "./artifact-structural-authority";
 
@@ -17,9 +17,10 @@ export type ArtifactSourceCommitOptions = {
   writeTargets: readonly SourceCommitWriteTarget[];
   ownerBinding: SourceCommitOwnerBinding;
   structuralAuthorities?: readonly ArtifactStructuralAuthority[];
+  controlWriteTargets?: readonly SourceCommitControlWriteTarget[];
 };
 type Prepared = { actor: AppActor; workspaceId: string; roots: LineageRoot[];
-  targets: SourceCommitWriteTarget[]; binding: SourceCommitOwnerBinding;
+  controls: SourceCommitControlWriteTarget[]; targets: SourceCommitWriteTarget[]; binding: SourceCommitOwnerBinding;
   structural: readonly ArtifactStructuralAuthority[];
   source: SourceCommitLockPlan; native: ArtifactCommitPreflight };
 const prepared = new WeakMap<object, Prepared>();
@@ -37,16 +38,17 @@ export async function prepareArtifactSourceCommit(actor: AppActor, workspaceId: 
   originalRoots: readonly LineageRoot[], options: ArtifactSourceCommitOptions): Promise<ArtifactSourceCommit> {
   const roots = freeze(structuredClone([...originalRoots]));
   const targets = freeze(structuredClone([...options.writeTargets]));
+  const controls = freeze(structuredClone([...(options.controlWriteTargets ?? [])]));
   const binding = freeze(structuredClone(options.ownerBinding));
   // Opaque capabilities must retain identity; cloning turns them into forgeries.
   const structural = Object.freeze([...(options.structuralAuthorities ?? [])]);
   const native = await prepareArtifactCommitPreflight(actor, workspaceId, roots);
   await prepareSourceCommitAmbientFences(actor, workspaceId);
   const source = await prepareSourceCommitLockPlan(actor, workspaceId, roots,
-    { writeTargets: targets, ownerBinding: binding,
+    { writeTargets: targets, ...(controls.length ? { controlWriteTargets: controls } : {}), ownerBinding: binding,
       ...(structural.length ? { structuralAuthorities: structural } : {}) });
   const token = Object.freeze({}) as ArtifactSourceCommit;
-  prepared.set(token, { actor, workspaceId, roots, targets, binding, structural, source, native });
+  prepared.set(token, { actor, workspaceId, roots, targets, controls, binding, structural, source, native });
   return token;
 }
 
@@ -61,6 +63,7 @@ export async function withArtifactSourceCommit<T>(actor: AppActor, workspaceId: 
   const state = prepared.get(token);
   invariant(state && state.actor === actor && state.workspaceId === workspaceId && tx !== prisma
     && isDeepStrictEqual(state.roots, originalRoots) && isDeepStrictEqual(state.targets, options.writeTargets)
+    && isDeepStrictEqual(state.controls, options.controlWriteTargets ?? [])
     && state.structural.length === (options.structuralAuthorities?.length ?? 0)
     && state.structural.every((receipt, index) => receipt === options.structuralAuthorities![index])
     && isDeepStrictEqual(state.binding, options.ownerBinding),

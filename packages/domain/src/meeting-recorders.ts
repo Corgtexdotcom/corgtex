@@ -16,7 +16,8 @@ import {
   meetingEndFromDurationMinutes,
   parseMeetingDurationMinutes,
 } from "./meeting-durations";
-import { intakeMeetingTranscript } from "./meeting-transcript-intake";
+import { readRecorderProviderResponse, bindRecorderTranscriptArtifact, captureRecorderProviderWire, reserveRecorderProviderWire, publishEmptyRecorderTranscript, prepareRecorderTranscript, publishRecorderTranscript, withRecorderTranscriptAttempt,
+  type RecorderTranscriptAttemptReceipt } from "./recorder-transcript-input";
 import { createScheduledMeeting } from "./meetings";
 import {
   extractRecorderMeetingUrlFromText,
@@ -298,6 +299,7 @@ type RecordingCancelContext = {
 };
 
 type ProviderFetchOptions = {
+  onRecorderWire?: (ordinal: number | undefined) => void;
   okStatuses?: number[];
 };
 
@@ -598,15 +600,18 @@ export function buildMeetingBaasCreateBotRequest(input: MeetingRecorderScheduleI
 }
 
 async function fetchJson(url: string, init: RequestInit, options: ProviderFetchOptions = {}) {
+  const ordinal = reserveRecorderProviderWire();
   const response = await fetch(url, init);
-  const text = await response.text();
+  const text = await readRecorderProviderResponse(response, ordinal);
+  captureRecorderProviderWire(url, init, response.status, text, ordinal);
+  options.onRecorderWire?.(ordinal);
   if (!response.ok && !options.okStatuses?.includes(response.status)) {
     throw new ProviderRequestError(url.includes("meetingbaas") ? "MEETING_BAAS" : "RECALL_AI", response.status, text);
   }
   if (!response.ok) {
     return null;
   }
-  return text ? JSON.parse(text) as unknown : null;
+  return text ? JSON.parse(text.replace(/^\uFEFF/, "")) as unknown : null;
 }
 
 function extractBotId(provider: MeetingRecorderProvider, response: unknown) {
@@ -799,7 +804,7 @@ function combineRecallTranscriptPayloads(payloads: unknown[]) {
   });
 }
 
-async function fetchRecallTranscriptDownload(downloadUrl: string, apiKey: string, region: string) {
+async function fetchRecallTranscriptDownload(downloadUrl: string, apiKey: string, region: string, onRecorderWire: (ordinal: number | undefined) => void) {
   const url = new URL(downloadUrl);
   invariant(url.protocol === "https:" && !url.username && !url.password, 502, "RECORDER_TRANSCRIPT_URL_INVALID", "Recall returned an invalid transcript URL.");
   const authenticatedApiDownload = url.origin === `https://${region}.recall.ai` && !recallSignedDownloadUrl(downloadUrl);
@@ -811,7 +816,7 @@ async function fetchRecallTranscriptDownload(downloadUrl: string, apiKey: string
           Authorization: recallAuthorization(apiKey),
           accept: "application/json",
         },
-  });
+  }, { onRecorderWire });
   return transcriptPayload;
 }
 
@@ -836,8 +841,16 @@ async function fetchRecallTranscriptArtifact(params: { workspaceId?: string; tra
       metadata = await fetchRecallBot(params.externalBotId, params.workspaceId);
       const downloadUrls = recallBotTranscriptDownloadUrls(metadata);
       if (downloadUrls.length > 0) {
-        const transcriptPayloads = await Promise.all(downloadUrls.map((url) => fetchRecallTranscriptDownload(url, apiKey, binding.region)));
-        return { transcriptPayload: combineRecallTranscriptPayloads(transcriptPayloads), metadata };
+        const ordinals: Array<number | undefined> = [];
+        // Settle every download before fallback so no discarded wire arrives after custody is sealed.
+        const downloads = await Promise.allSettled(downloadUrls.map((url, index) => fetchRecallTranscriptDownload(url, apiKey, binding.region, ordinal => { ordinals[index] = ordinal; })));
+        const failed = downloads.find(result => result.status === "rejected");
+        if (failed?.status === "rejected") throw failed.reason;
+        const transcriptPayloads = downloads.map(result => {
+          invariant(result.status === "fulfilled", 502, "RECORDER_TRANSCRIPT_FETCH_FAILED", "Recall transcript download failed.");
+          return result.value;
+        });
+        return bindRecorderTranscriptArtifact({ transcriptPayload: combineRecallTranscriptPayloads(transcriptPayloads), metadata }, ordinals);
       }
     } catch (error) {
       recorderLog("warn", "recall_bot_metadata_fetch_failed", {
@@ -848,24 +861,26 @@ async function fetchRecallTranscriptArtifact(params: { workspaceId?: string; tra
   }
 
   if (!downloadUrl && params.externalBotId) {
+    let ordinal: number | undefined;
     const transcriptPayload = await fetchJson(`https://${binding.region}.recall.ai/api/v1/bot/${params.externalBotId}/transcript/`, {
       headers: {
         Authorization: recallAuthorization(apiKey),
         accept: "application/json",
       },
-    });
-    return {
+    }, { onRecorderWire: value => { ordinal = value; } });
+    return bindRecorderTranscriptArtifact({
       transcriptPayload,
       metadata: {
         source: "bot_transcript_endpoint",
         externalBotId: params.externalBotId,
       },
-    };
+    }, [ordinal]);
   }
 
   invariant(downloadUrl, 404, "RECORDER_TRANSCRIPT_NOT_READY", "Recall transcript is not ready.");
-  const transcriptPayload = await fetchRecallTranscriptDownload(downloadUrl, apiKey, binding.region);
-  return { transcriptPayload, metadata };
+  let ordinal: number | undefined;
+  const transcriptPayload = await fetchRecallTranscriptDownload(downloadUrl, apiKey, binding.region, value => { ordinal = value; });
+  return bindRecorderTranscriptArtifact({ transcriptPayload, metadata }, [ordinal]);
 }
 
 async function fetchRecallBot(externalBotId: string, workspaceId?: string) {
@@ -879,27 +894,7 @@ async function fetchRecallBot(externalBotId: string, workspaceId?: string) {
   });
 }
 
-async function fetchMeetingBaasTranscriptArtifact(externalBotId: string, transcriptUrl?: string | null) {
-  const apiKey = requireVendorSecret("MEETING_BAAS");
-  let downloadUrl = transcriptUrl ?? null;
-  let metadata: unknown = null;
-  if (!downloadUrl) {
-    metadata = await fetchJson(`https://api.meetingbaas.com/v2/bots/${externalBotId}`, {
-      headers: {
-        "x-meeting-baas-api-key": apiKey,
-      },
-    });
-    const data = isRecord(metadata) && isRecord(metadata.data) ? metadata.data : metadata;
-    downloadUrl = readString(isRecord(data) ? data.transcription : null);
-  }
-  invariant(downloadUrl, 404, "RECORDER_TRANSCRIPT_NOT_READY", "Meeting BaaS transcript is not ready.");
-  const transcriptPayload = await fetchJson(downloadUrl, {
-    headers: {
-      accept: "application/json",
-    },
-  });
-  return { transcriptPayload, metadata };
-}
+
 
 function providerSchedule(provider: MeetingRecorderProvider, input: MeetingRecorderScheduleInput) {
   return provider === "RECALL_AI" ? scheduleRecallBot(input) : scheduleMeetingBaasBot(input);
@@ -3526,7 +3521,8 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
   }
 
   if (shouldFetchTranscript(provider, event)) {
-    await ingestProviderTranscript(provider, recording, event);
+    const committed = await ingestProviderTranscript(provider, recording, event, { ...params, providerEventId: providerEvent.id });
+    if (committed && committed.committed) return { processed: true, duplicate: false, recordingId: recording.id };
   } else {
     await updateSmokeRunsForTerminalRecording(recording);
   }
@@ -3639,211 +3635,21 @@ function shouldFetchTranscript(provider: MeetingRecorderProvider, event: Provide
   return event.eventType === "bot.completed" || event.status === "COMPLETED";
 }
 
-async function markRecordingTranscriptEmpty(
-  provider: MeetingRecorderProvider,
-  recording: MeetingRecording,
-  artifact: { metadata: unknown },
-  tx: Prisma.TransactionClient,
-) {
-  await tx.meetingRecording.update({
-    where: { id: recording.id },
-    data: {
-      status: "COMPLETED",
-      activeDedupeKey: null,
-      transcriptProcessedAt: new Date(),
-      failureCode: "RECORDER_TRANSCRIPT_EMPTY",
-      failureMessage: "Provider transcript was empty.",
-      providerMetadata: redactProviderArtifactUrls(artifact.metadata),
-    },
-  });
-  await tx.meetingRecorderSmokeRun.updateMany({
-    where: {
-      recordingId: recording.id,
-      status: { in: ["PENDING", "SCHEDULED"] },
-    },
-    data: {
-      status: "FAILED",
-      failureMessage: "Provider transcript was empty.",
-      completedAt: new Date(),
-    },
-  });
-  recorderLog("info", "transcript_empty", {
-    workspaceId: recording.workspaceId,
-    meetingId: recording.meetingId,
-    recordingId: recording.id,
-    provider,
-  });
+async function completeRecordingWithTranscriptArtifact(_provider: MeetingRecorderProvider, _recording: MeetingRecording,
+  artifact: { transcriptPayload: unknown; metadata: unknown }, nativeAttempt: RecorderTranscriptAttemptReceipt) {
+  const metadata = redactProviderArtifactUrls(artifact.metadata);
+  if (!normalizeProviderTranscript(artifact.transcriptPayload).trim()) return publishEmptyRecorderTranscript(nativeAttempt, artifact, metadata);
+  return publishRecorderTranscript(await prepareRecorderTranscript(nativeAttempt, artifact, metadata));
 }
 
-async function completeRecordingWithTranscriptArtifact(
-  provider: MeetingRecorderProvider,
-  recording: MeetingRecording,
-  artifact: { transcriptPayload: unknown; metadata: unknown },
-) {
-  const transcript = normalizeProviderTranscript(artifact.transcriptPayload);
-  const completed = await prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`${recording.workspaceId}:${recording.meetingId}:${provider}:transcript`}, 0))`;
-    const current = await tx.meetingRecording.findUnique({
-      where: { id: recording.id },
-      select: {
-        id: true,
-        workspaceId: true,
-        meetingId: true,
-        provider: true,
-        joinAt: true,
-        failureCode: true,
-        failureMessage: true,
-        transcriptProcessedAt: true,
-        meeting: {
-          select: {
-            workspaceId: true,
-            transcript: true,
-          },
-        },
-      },
-    });
-    const isLateRecoveryOverride = (current?.transcriptProcessedAt !== null
-      && (current?.failureCode === "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" || current?.failureCode === "RECORDER_TRANSCRIPT_FETCH_FAILED")) ||
-      current?.failureCode === "STALE_RECORDER";
-    if (!current || (current.transcriptProcessedAt && !isLateRecoveryOverride)) {
-      return false;
-    }
-    if (current.failureCode === DUPLICATE_RECORDER_FAILURE_CODE) {
-      recorderLog("info", "transcript_duplicate_ignored", {
-        workspaceId: current.workspaceId,
-        meetingId: current.meetingId,
-        recordingId: current.id,
-        provider,
-        failureCode: DUPLICATE_RECORDER_FAILURE_CODE,
-      });
-      return false;
-    }
-
-    invariant(
-      current.workspaceId === recording.workspaceId
-      && current.meetingId === recording.meetingId
-      && current.meeting?.workspaceId === recording.workspaceId,
-      409,
-      "RECORDER_WORKSPACE_MISMATCH",
-      "Recorder transcript target does not match the recording workspace.",
-    );
-
-    const alreadyProcessedDuplicate = await tx.meetingRecording.findFirst({
-      where: {
-        workspaceId: current.workspaceId,
-        meetingId: current.meetingId,
-        provider: current.provider,
-        id: { not: current.id },
-        transcriptProcessedAt: { not: null },
-        failureCode: null,
-        ...(current.joinAt ? { joinAt: current.joinAt } : {}),
-      },
-      select: { id: true },
-    });
-    if (alreadyProcessedDuplicate) {
-      await tx.meetingRecording.update({
-        where: { id: current.id },
-        data: {
-          status: "SKIPPED",
-          activeDedupeKey: null,
-          endedAt: new Date(),
-          failureCode: DUPLICATE_RECORDER_FAILURE_CODE,
-          failureMessage: duplicateRecorderFailureMessage(alreadyProcessedDuplicate.id),
-        },
-      });
-      recorderLog("warn", "transcript_duplicate_skipped", {
-        workspaceId: current.workspaceId,
-        meetingId: current.meetingId,
-        recordingId: current.id,
-        provider,
-        canonicalRecordingId: alreadyProcessedDuplicate.id,
-        failureCode: DUPLICATE_RECORDER_FAILURE_CODE,
-      });
-      return false;
-    }
-
-    if (transcript.trim().length === 0) {
-      if (isLateRecoveryOverride) {
-        await tx.meetingRecording.update({
-          where: { id: recording.id },
-          data: {
-            status: "FAILED",
-            failureCode: current.failureCode,
-            failureMessage: current.failureMessage,
-          },
-        });
-        return false;
-      }
-      await markRecordingTranscriptEmpty(provider, recording, artifact, tx);
-      return false;
-    }
-
-    const actor = systemRecorderActor(recording.workspaceId);
-    const normalizedTranscript = transcript.trim().replace(/\s+/g, " ");
-    const intakeAlreadyCommitted = (current.meeting?.transcript ?? "").trim().replace(/\s+/g, " ").includes(normalizedTranscript);
-    if (!intakeAlreadyCommitted) {
-      await intakeMeetingTranscript(actor, {
-        workspaceId: recording.workspaceId,
-        meetingId: recording.meetingId,
-        source: `recorder:${provider.toLowerCase()}`,
-        recordedAt: recording.startedAt ?? recording.joinAt ?? recording.createdAt,
-        transcript,
-        allowTranscriptAppend: true,
-      });
-    }
-
-    await tx.meetingRecording.update({
-      where: { id: recording.id },
-      data: {
-        status: "COMPLETED",
-        activeDedupeKey: null,
-        transcriptProcessedAt: new Date(),
-        failureCode: null,
-        failureMessage: null,
-        providerMetadata: redactProviderArtifactUrls(artifact.metadata),
-      },
-    });
-    await tx.meetingRecorderSmokeRun.updateMany({
-      where: {
-        recordingId: recording.id,
-        status: { in: isLateRecoveryOverride ? ["PENDING", "SCHEDULED", "FAILED"] : ["PENDING", "SCHEDULED"] },
-      },
-      data: {
-        status: "COMPLETED",
-        completedAt: new Date(),
-        failureMessage: null,
-      },
-    });
-    return true;
-  }, { timeout: 120_000 });
-
-  if (completed) {
-    recorderLog("info", "transcript_ingested", {
-      workspaceId: recording.workspaceId,
-      meetingId: recording.meetingId,
-      recordingId: recording.id,
-      provider,
-    });
-  }
-  return completed;
-}
-
-async function ingestProviderTranscript(provider: MeetingRecorderProvider, recording: MeetingRecording, event: ProviderWebhookEvent) {
-  const isLateRecoveryOverride = (recording.transcriptProcessedAt !== null
-    && (recording.failureCode === "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" || recording.failureCode === "RECORDER_TRANSCRIPT_FETCH_FAILED")) ||
-    recording.failureCode === "STALE_RECORDER";
-  if ((recording.transcriptProcessedAt !== null && !isLateRecoveryOverride) || recording.failureCode === DUPLICATE_RECORDER_FAILURE_CODE) {
-    return;
-  }
-  const artifact = provider === "RECALL_AI"
-    ? await fetchRecallTranscriptArtifact({
-      workspaceId: recording.workspaceId,
-      transcriptId: event.transcriptId,
-      transcriptUrl: event.transcriptUrl,
-      externalBotId: recording.externalBotId,
-    })
-    : await fetchMeetingBaasTranscriptArtifact(recording.externalBotId ?? event.externalBotId ?? "", event.transcriptUrl);
-  await completeRecordingWithTranscriptArtifact(provider, recording, artifact);
+async function ingestProviderTranscript(provider: MeetingRecorderProvider, recording: MeetingRecording, event: ProviderWebhookEvent,
+  origin: { rawBody: string; headers: Headers | Record<string, string>; providerEventId: string; workspaceId?: string }) {
+  invariant(provider === "RECALL_AI", 409, "UNKNOWN_LINEAGE", "This provider requires authenticated native recorder intake.");
+  return withRecorderTranscriptAttempt(recording, origin, async receipt => {
+    const artifact = await fetchRecallTranscriptArtifact({ workspaceId: recording.workspaceId, transcriptId: event.transcriptId,
+      transcriptUrl: event.transcriptUrl, externalBotId: recording.externalBotId });
+    return completeRecordingWithTranscriptArtifact(provider, recording, artifact, receipt);
+  });
 }
 
 export function calendarEventIsEligible(event: CalendarEventForRecorder, now = new Date()) {
@@ -4230,7 +4036,6 @@ async function recoverRecallTranscripts(workspaceId: string) {
     where: {
       workspaceId,
       provider: "RECALL_AI",
-      transcriptProcessedAt: null,
       externalBotId: { not: null },
       OR: [
         { status: { in: RECOVERABLE_RECALL_RECORDING_STATUSES } },
@@ -4278,14 +4083,15 @@ async function recoverRecallTranscripts(workspaceId: string) {
 
       try {
         const current = await findRecoverableRecallRecording(recording.id);
-        if (!current || current.transcriptProcessedAt || !current.externalBotId) {
+        if (!current || !current.externalBotId) {
           continue;
         }
 
+        const completed = await withRecorderTranscriptAttempt(current, null, async receipt => {
         try {
-          const bot = await fetchRecallBot(current.externalBotId, current.workspaceId);
+          const bot = await fetchRecallBot(current.externalBotId!, current.workspaceId);
           if (!recallBotIsDone(bot)) {
-            continue;
+            return false;
           }
         } catch (error) {
           if (transcriptRecoveryIsPending(error)) {
@@ -4296,25 +4102,26 @@ async function recoverRecallTranscripts(workspaceId: string) {
               provider: recording.provider,
               failureCode: providerFailureCode(error),
             });
-            continue;
+            return false;
           }
           throw error;
         }
         const artifact = await fetchRecallTranscriptArtifact({ externalBotId: current.externalBotId, workspaceId: current.workspaceId });
         const latest = await findRecoverableRecallRecording(recording.id);
-        if (!latest || latest.transcriptProcessedAt || !latest.externalBotId) {
-          continue;
+        if (!latest || !latest.externalBotId) {
+          return false;
         }
 
-        const completed = await completeRecordingWithTranscriptArtifact("RECALL_AI", latest, artifact);
-        if (completed) {
+        return completeRecordingWithTranscriptArtifact("RECALL_AI", latest, artifact, receipt);
+        });
+        if (completed && completed.committed && !("empty" in completed)) {
           recovered += 1;
-          const skipped = await markDuplicateRecoveredRecordingsSkipped(group, latest.id);
+          const skipped = await markDuplicateRecoveredRecordingsSkipped(group, current.id);
           recorderLog("info", "reconcile_recall_transcript_recovered", {
             workspaceId,
-            meetingId: latest.meetingId,
-            recordingId: latest.id,
-            provider: latest.provider,
+            meetingId: current.meetingId,
+            recordingId: current.id,
+            provider: current.provider,
             duplicateRecordersSkipped: skipped,
           });
           break;
