@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
+import type { Prisma } from "@prisma/client";
 import { serialize, deserialize } from "node:v8";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { prisma, type AppActor } from "@corgtex/shared";
+import { getPrismaClient, prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { registerSqlNativeDriver } from "../../domain/src/sql-native-driver";
 import { claimSqlIngestionAttempt, failSqlIngestionAttempt, sqlIngestionConfigurationFingerprint } from "../../domain/src/sql-ingestion-attempt";
@@ -14,6 +15,8 @@ import { captureArtifactInputProof, captureImmutableArtifactInputProof, isArtifa
   isArtifactInputProofPubliclyShareable, recordArtifactInputLineage } from "../../domain/src/source-lineage";
 import { prepareArtifactSourceCommit, withArtifactSourceCommit } from "../../domain/src/artifact-source-commit";
 import { isArtifactNativeCommitPhase } from "../../domain/src/artifact-native-commit-phase";
+import { createDocument } from "../../domain/src/documents";
+import { syncDocumentKnowledge } from "./chunks";
 import { withArtifactInputSnapshotAllocations } from "../../domain/src/artifact-input-snapshot-allocations";
 import type { SourceCommitWriteTarget } from "../../domain/src/source-commit-lock-plan";
 import { captureSqlKnowledgeInputProof, isSqlKnowledgeInputProofReadable } from "../../domain/src/sql-knowledge-read-proof";
@@ -178,6 +181,38 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
     expect(await prisma.sqlNativeRunInput.count()).toBe(1); // Preserve the original native receipt.
     await failSqlIngestionAttempt({attempt: p.attempt, logId: p.attempt.logId, error: "Synthetic completion log failure"});
   });
+  it("a later model batch failure preserves non-serving staging and a fresh independent retry publishes the complete run", async () => {
+    transport.rows = Array.from({length: 600}, (_, index) => row(index + 1));
+    const f = await fixture(), attempt = await f.claim(), receipt = await captureSqlIngestionAttempt(attempt);
+    models.embed.mockImplementationOnce(async ({input}) => ({embeddings: input.map(() => [1, 0]), usage: {model: "synthetic-sql-embedding"}}))
+      .mockRejectedValueOnce(new Error("Synthetic second model batch failed"));
+    await expect(prepareSqlKnowledgeAttempt({attempt, receipt})).rejects.toThrow("Synthetic second model batch failed");
+    const incomplete = await prisma.sqlKnowledgePublication.findFirstOrThrow({where: {attemptId: attempt.attemptId}});
+    expect(incomplete).toMatchObject({status: "PREPARING", chunksCreated: 600, outputSetHash: ""});
+    expect(await prisma.sqlKnowledgeStagedChunk.count({where: {publicationId: incomplete.id}})).toBe(500);
+    expect(await prisma.knowledgeChunk.count()).toBe(0);
+    expect((await prisma.externalDataSource.findUniqueOrThrow({where: {id: f.source.id}})).lastCursorValue).toBeNull();
+    await failSqlIngestionAttempt({attempt, error: "Synthetic second model batch failed", logId: attempt.logId});
+    const retry = await f.prepare();
+    expect(await publishPreparedSqlKnowledgeAttempt({...retry, commit: f.commit})).toMatchObject({committed: true, chunksCreated: 600});
+    expect(await countReadableKnowledgeChunks(f.bobActor, f.workspace.id, ["EXTERNAL_DATABASE"])).toBe(600);
+    expect(await prisma.sqlKnowledgeStagedChunk.count({where: {publicationId: incomplete.id}})).toBe(500);
+    await expect(prisma.sqlKnowledgePublication.update({where: {id: retry.prepared.preparationId}, data: {outputSetHash: ""}})).rejects.toThrow();
+  });
+  it("immutable ciphertext cannot update and same-id native replacement cannot reuse the original publisher epoch", async () => {
+    const f = await fixture(), p = await f.prepare();
+    const original = await prisma.sqlNativeRunInput.findUniqueOrThrow({where: {id: p.receipt.receiptId}});
+    await expect(prisma.sqlNativeRunInput.update({where: {id: original.id}, data: {encryptedPayload: "synthetic tampered ciphertext"}})).rejects.toThrow();
+    expect((await prisma.sqlNativeRunInput.findUniqueOrThrow({where: {id: original.id}})).encryptedPayload).toBe(original.encryptedPayload);
+    await prisma.sqlNativeRunInput.delete({where: {id: original.id}});
+    await prisma.sqlNativeRunInput.create({data: {...original, permissionEpochsJson: original.permissionEpochsJson as Prisma.InputJsonValue,
+      encryptedPayload: "synthetic replacement ciphertext"}});
+    const commit = vi.fn(f.commit);
+    await expect(publishPreparedSqlKnowledgeAttempt({...p, commit})).rejects.toMatchObject({code: "SQL_INGESTION_FENCE_LOST"});
+    expect(commit).not.toHaveBeenCalled(); expect(await prisma.knowledgeChunk.count()).toBe(0);
+    expect((await prisma.externalDataSource.findUniqueOrThrow({where: {id: f.source.id}})).lastCursorValue).toBeNull();
+    expect((await prisma.externalDataSyncLog.findUniqueOrThrow({where: {id: p.attempt.logId}})).completedAt).toBeNull();
+  });
   it("mandatory post-model native DDL check cannot be replaced by a caller hook", async () => {
     const f = await fixture(), p = await f.prepare(); transport.failFinal = true;
     const hook = vi.fn(async () => undefined), commit = vi.fn(f.commit);
@@ -239,6 +274,119 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
     console.info("Synthetic registered native 10k run / real app PG timings", {
       prepareMs: Math.round(preparedAt - start), publishMs: Math.round(committedAt - preparedAt),
       searchMs: Math.round(performance.now() - committedAt)});
+  });
+  it("counts the complete 4,000-row publication with at least 8,000 chunks beyond the search scan limit", async () => {
+    transport.rows = Array.from({length: 4_000}, (_, index) => row(index + 1, "synthetic ".repeat(180)));
+    const f = await fixture(), start = performance.now(), p = await f.prepare();
+    const result = await publishPreparedSqlKnowledgeAttempt({...p, commit: f.commit}), committedAt = performance.now();
+    process.stdout.write(`Complete SQL capacity publication ${JSON.stringify({chunks: result.chunksCreated, publicationMs: Math.round(committedAt - start)})}\n`);
+    expect(result.chunksCreated).toBeGreaterThanOrEqual(8_000);
+    expect(await prisma.knowledgeChunk.findMany({where: {workspaceId: f.workspace.id}, select: {sourceId: true}, distinct: ["sourceId"]})).toHaveLength(4_000);
+    expect(await countReadableKnowledgeChunks(f.bobActor, f.workspace.id, ["EXTERNAL_DATABASE"])).toBe(result.chunksCreated);
+    expect(transport.accessInsideCommit).toBe(0);
+    console.info("Complete synthetic SQL count / real app PG", {chunks: result.chunksCreated,
+      publicationMs: Math.round(committedAt - start), countMs: Math.round(performance.now() - committedAt),
+      rssMiB: Math.round(process.memoryUsage().rss / 1024 / 1024)});
+  });
+  it.each(["epoch", "manifest", "content"])("count rejects an earlier page %s change during final-page native replay", async target => {
+    transport.rows = Array.from({length: 600}, (_, index) => row(index + 1));
+    const f = await fixture(), p = await f.prepare(); await publishPreparedSqlKnowledgeAttempt({...p, commit: f.commit});
+    const first = await prisma.knowledgeChunk.findFirstOrThrow({orderBy: [{createdAt: "desc"}, {chunkIndex: "asc"}, {id: "asc"}]});
+    let scans = 0, changed = false;
+    const original = prisma.knowledgeChunk.findMany.bind(prisma.knowledgeChunk);
+    const spy = vi.spyOn(prisma.knowledgeChunk, "findMany").mockImplementation((async args => {
+      if (args?.take === 500) scans++;
+      return original(args);
+    }) as typeof prisma.knowledgeChunk.findMany);
+    transport.afterAccess = async () => {
+      if (scans !== 2 || changed) return;
+      changed = true;
+      if (target === "manifest") await prisma.artifactInputLineage.updateMany({where: {artifactType: "KnowledgeChunk", artifactId: first.id}, data: {rootsJson: []}});
+      else await prisma.knowledgeChunk.update({where: {id: first.id}, data: target === "epoch" ? {accessDomain: "FINANCE"} : {content: "Synthetic changed original"}});
+    };
+    try {
+      await expect(countReadableKnowledgeChunks(f.bobActor, f.workspace.id, ["EXTERNAL_DATABASE"])).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+      expect(changed).toBe(true);
+    } finally {spy.mockRestore(); transport.afterAccess = undefined;}
+  });
+  it.each(["manifest", "document", "empty"])("mixed count fences %s changes across SQL provider awaits", async target => {
+    const f = await fixture(), p = await f.prepare(); await publishPreparedSqlKnowledgeAttempt({...p, commit: f.commit});
+    const document = await createDocument(f.aliceActor, {workspaceId: f.workspace.id, title: "Synthetic mixed count document",
+      source: "upload", storageKey: `synthetic/${randomUUID()}`, textContent: "Synthetic independent document content"});
+    expect(await syncDocumentKnowledge({workspaceId: f.workspace.id, documentId: document.id, lineageActor: f.aliceActor})).toBeGreaterThan(0);
+    const chunk = await prisma.knowledgeChunk.findFirstOrThrow({where: {sourceType: "DOCUMENT", sourceId: document.id}});
+    let checks = 0, changed = false;
+    transport.afterAccess = async () => {
+      checks++;
+      // Empty source admission changes other inputs immediately; otherwise
+      // mutate only during final replay after complete local SQL page admission.
+      if (changed || (target !== "empty" && checks < 3)) return;
+      changed = true;
+      if (target === "document") await prisma.document.update({where: {id: document.id}, data: {textContent: "Synthetic changed source"}});
+      else await prisma.artifactInputLineage.updateMany({where: {artifactType: "KnowledgeChunk", artifactId: chunk.id}, data: {origin: "UNKNOWN", rootsJson: []}});
+      if (target === "empty") transport.access = false;
+    };
+    try {
+      await expect(countReadableKnowledgeChunks(f.bobActor, f.workspace.id)).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+      expect(changed).toBe(true);
+    } finally {transport.afterAccess = undefined;}
+  });
+  it("count withholds one unknown child independently and never treats restored own epochs as fresh lineage", async () => {
+    transport.rows = [row(1), row(2), row(3)]; const f = await fixture(), p = await f.prepare();
+    await publishPreparedSqlKnowledgeAttempt({...p, commit: f.commit});
+    const children = await prisma.knowledgeChunk.findMany({orderBy: {id: "asc"}});
+    await prisma.artifactInputLineage.updateMany({where: {artifactId: children[0].id}, data: {origin: "UNKNOWN", rootsJson: []}});
+    await prisma.knowledgeChunk.update({where: {id: children[1].id}, data: {accessDomain: "FINANCE"}});
+    await prisma.knowledgeChunk.update({where: {id: children[1].id}, data: {accessDomain: "WORKSPACE"}});
+    expect(await countReadableKnowledgeChunks(f.bobActor, f.workspace.id, ["EXTERNAL_DATABASE"])).toBe(1);
+  });
+  it("final count snapshot rejects a selected role expiring after native replay without an epoch change", async () => {
+    const f = await fixture();
+    const circle = await prisma.circle.create({data: {workspaceId: f.workspace.id, name: "Synthetic expiry circle"}});
+    const role = await prisma.role.create({data: {circleId: circle.id, name: "Expiring reader", accountabilities: [], artifacts: []}});
+    const expiresAt = new Date(Date.now() + 10_000);
+    await prisma.roleAssignment.create({data: {roleId: role.id, memberId: f.members[1].id, expiresAt}});
+    await prisma.externalDataSource.update({where: {id: f.source.id}, data: {isRestricted: true, allowedRoleIds: [role.id]}});
+    const p = await f.prepare(); await publishPreparedSqlKnowledgeAttempt({...p, commit: f.commit});
+    let delayed = false;
+    const client = getPrismaClient(), original = client.$transaction.bind(client);
+    const spy = vi.spyOn(client, "$transaction").mockImplementation((async (callback: (tx: Prisma.TransactionClient) => Promise<unknown>,
+      options?: {isolationLevel?: Prisma.TransactionIsolationLevel; timeout?: number; maxWait?: number}) => {
+      if (options?.isolationLevel === "RepeatableRead") {
+        expect(Date.now()).toBeLessThan(expiresAt.getTime()); delayed = true;
+        await new Promise(resolve => setTimeout(resolve, Math.max(0, expiresAt.getTime() - Date.now() + 50)));
+      }
+      return original(callback, options);
+    }) as typeof prisma.$transaction);
+    try {
+      await expect(countReadableKnowledgeChunks(f.bobActor, f.workspace.id, ["EXTERNAL_DATABASE"])).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+      expect(delayed).toBe(true);
+    } finally {spy.mockRestore();}
+  });
+  it("empty native admission rejects a new independent source committed during its provider await", async () => {
+    const f = await fixture(), p = await f.prepare(); await publishPreparedSqlKnowledgeAttempt({...p, commit: f.commit});
+    let added = false;
+    transport.afterAccess = async () => {
+      if (added) return; added = true; transport.afterAccess = undefined;
+      const source = await prisma.externalDataSource.create({data: {workspaceId: f.workspace.id, label: "Synthetic newly added source",
+        connectionStringEnc: "synthetic-registered-driver", selectedTables: ["public.rows"]}});
+      const log = await prisma.externalDataSyncLog.create({data: {sourceId: source.id}});
+      const attempt = await claimSqlIngestionAttempt({workspaceId: f.workspace.id, sourceId: source.id, logId: log.id,
+        expectedConfigurationFingerprint: sqlIngestionConfigurationFingerprint(source), expectedCursor: null});
+      const receipt = await captureSqlIngestionAttempt(attempt), prepared = await prepareSqlKnowledgeAttempt({attempt, receipt});
+      await publishPreparedSqlKnowledgeAttempt({attempt, prepared, commit: async (tx, identity) => {
+        await tx.externalDataSource.update({where: {id: source.id}, data: {lastCursorValue: identity.nextCursor}});
+        await tx.externalDataSyncLog.update({where: {id: log.id}, data: {completedAt: new Date(), error: null,
+          rowsProcessed: identity.rowsProcessed, chunksCreated: identity.chunksCreated}});
+      }});
+      transport.access = false;
+    };
+    try {
+      await expect(countReadableKnowledgeChunks(f.bobActor, f.workspace.id, ["EXTERNAL_DATABASE"])).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+      expect(added).toBe(true);
+      transport.access = true;
+      expect(await countReadableKnowledgeChunks(f.bobActor, f.workspace.id, ["EXTERNAL_DATABASE"])).toBe(1);
+    } finally {transport.afterAccess = undefined; transport.access = true;}
   });
   it.each(["chunk", "manifest"])("callback %s mutation invalidates the final complete set and rolls everything back", async target => {
     const f = await fixture(), p = await f.prepare();

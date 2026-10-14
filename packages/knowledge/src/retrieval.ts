@@ -6,6 +6,10 @@ import type { AppActor } from "@corgtex/shared";
 import { captureArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, readableArtifactIds, resolveKnowledgeAccessDomains, type LineageKind, type LineageRoot } from "@corgtex/domain";
 import type { SensitivityLabel } from "./sensitivity";
 import { getKnowledgeSearchProvider, isAzureKnowledgeSearchConfigured, normalizeKnowledgeAccessDomains, searchAzureKnowledge } from "./azure-search";
+import { captureSqlCountCollection, captureSqlCountPageProof, captureSqlCountStamps, isSqlCountLedgerCurrent, retainSqlCountEpochs,
+  type SqlCountEpoch, type SqlCountStamp } from "./sql-count-proof";
+import { withArtifactCountReleaseSnapshot } from "../../domain/src/source-lineage";
+import { isSqlNativeRunInputLocallyCurrent } from "../../domain/src/sql-native-input";
 
 const sensitivityOrder: SensitivityLabel[] = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "PII"];
 
@@ -311,7 +315,8 @@ const chunkProjection = {
 type PermissionChunk = Prisma.KnowledgeChunkGetPayload<{ select: typeof chunkProjection }>;
 
 /** The child's own manifest can restrict it further than its readable parent. */
-async function admitKnowledgeChunks(params: RetrievalAccess, chunks: PermissionChunk[], sources: Map<string, ReadableSource>) {
+async function admitKnowledgeChunks(params: RetrievalAccess, chunks: PermissionChunk[], sources: Map<string, ReadableSource>,
+  retainProof?: (roots: LineageRoot[]) => void) {
   const current = chunks.filter((chunk) => {
     const source = sources.get(knowledgeSourceKey(chunk));
     return !!source && (chunk.metadata as Record<string, unknown> | null)?.sourceContentHash === source.contentHash;
@@ -319,12 +324,18 @@ async function admitKnowledgeChunks(params: RetrievalAccess, chunks: PermissionC
   if (current.length) {
     const {captureSqlKnowledgeInputProof} = await import("../../domain/src/sql-knowledge-read-proof");
     const sql = await captureSqlKnowledgeInputProof(params.actor, params.workspaceId, current);
-    if (sql) return current;
+    if (sql) { retainProof?.(sql); return current; }
     // One withheld child must not hide independent permitted candidates. If
     // the complete fast set cannot be proven, use the ordinary per-child gate.
   }
   const readable = await readableArtifactIds(params.actor, params.workspaceId, "KnowledgeChunk", current);
-  return current.filter((chunk) => readable.has(chunk.id));
+  const permitted = current.filter((chunk) => readable.has(chunk.id));
+  if (retainProof) {
+    const proof = await captureKnowledgeInputs(params, permitted, sources);
+    if (!proof) throw Object.assign(new Error("Knowledge count inputs changed during admission."), {code: "SOURCE_CHANGED", status: 409});
+    retainProof(proof);
+  }
+  return permitted;
 }
 
 /** Shared count/search admission. Raw rows never set a candidate cap or visible count. */
@@ -374,6 +385,83 @@ export async function scanReadableKnowledgeChunks(params: RetrievalAccess, perTy
   const roots = await captureKnowledgeInputs(params, chunks, sources);
   if (!roots) throw Object.assign(new Error("Knowledge inputs changed during admission."), { code: "SOURCE_CHANGED", status: 409 });
   return { chunks, roots };
+}
+
+/** Complete bounded SQL count, independent of search's candidate window. Keep
+ * vector/body working memory to one page and retain only exact child identities
+ * and hashes across a complete admission pass. Current native/caller proof
+ * fences the whole request; no partial count escapes on a changed collection. */
+export async function countReadableSqlKnowledgeCollection(params: RetrievalAccess, otherRoots: LineageRoot[] = []) {
+  const access = {...params, sourceTypes: ["EXTERNAL_DATABASE" as const]};
+  const collection = await captureSqlCountCollection(access.workspaceId, access.accessDomains);
+  const sources = await readableKnowledgeSources(access);
+  if (!sources.size) {
+    await withArtifactCountReleaseSnapshot(access.actor, access.workspaceId, otherRoots,
+      async () => undefined, async tx => {
+        if (!await isSqlCountLedgerCurrent(access.workspaceId, access.accessDomains, collection, [], [], [], tx)) {
+          throw Object.assign(new Error("SQL count collection changed during empty admission."), {code: "SOURCE_CHANGED", status: 409});
+        }
+      });
+    return 0;
+  }
+  const sourceRoots = await captureArtifactInputProof(access.actor, access.workspaceId,
+    [...sources.values()].map(source => ({kind: source.kind, id: String(source.record.id), snapshot: source.record})));
+  const ledger = new Map<string, string>();
+  let count = 0;
+  const epochs = new Map<string, SqlCountEpoch>();
+  retainSqlCountEpochs(epochs, [...sourceRoots, ...otherRoots.filter(root =>
+    root.kind !== "ArtifactInputSnapshot" || root.permissionEpochs !== undefined)]);
+  const COUNT_LIMIT = 100_000;
+  let cursor: Pick<PermissionChunk, "id" | "createdAt" | "chunkIndex"> | undefined;
+  let scanned = 0;
+  while (true) {
+    const page = await prisma.knowledgeChunk.findMany({where: {
+      workspaceId: access.workspaceId, sourceType: "EXTERNAL_DATABASE", accessDomain: {in: access.accessDomains},
+      OR: [...sources.values()].map(source => ({AND: [
+        {metadata: {path: ["nativeInputId"], equals: source.record.id}},
+        {metadata: {path: ["sourceContentHash"], equals: source.contentHash}},
+      ]})),
+      ...(cursor ? {AND: [{OR: [
+        {createdAt: {lt: cursor.createdAt}},
+        {createdAt: cursor.createdAt, chunkIndex: {gt: cursor.chunkIndex}},
+        {createdAt: cursor.createdAt, chunkIndex: cursor.chunkIndex, id: {gt: cursor.id}},
+      ]}]} : {}),
+    }, orderBy: [{createdAt: "desc"}, {chunkIndex: "asc"}, {id: "asc"}],
+    take: Math.min(POSTGRES_SEARCH_WINDOW, COUNT_LIMIT - scanned + 1), select: {id: true, createdAt: true, chunkIndex: true}});
+    scanned += page.length;
+    if (scanned > COUNT_LIMIT) throw Object.assign(new Error("SQL count requires a bounded complete collection."),
+      {code: "KNOWLEDGE_COUNT_LIMIT", status: 409});
+    const stamps = new Map((await captureSqlCountStamps(access.workspaceId, page.map(row => row.id)))
+      .map(row => [row.id, row.stamp]));
+    for (const row of page) {
+      const stamp = stamps.get(row.id);
+      if (!stamp || ledger.has(row.id)) throw Object.assign(new Error("SQL count row changed during admission."), {code: "SOURCE_CHANGED", status: 409});
+      ledger.set(row.id, stamp);
+    }
+    const proof = access.actor.kind === "user" ? await captureSqlCountPageProof(access.workspaceId, page.map(row => row.id), sourceRoots) : undefined;
+    if (proof) {retainSqlCountEpochs(epochs, proof); count += proof.length;}
+    else {
+      const full = await prisma.knowledgeChunk.findMany({where: {workspaceId: access.workspaceId, id: {in: page.map(row => row.id)}}, select: chunkProjection});
+      count += (await admitKnowledgeChunks(access, full, sources, roots => retainSqlCountEpochs(epochs, roots))).length;
+    }
+    if (page.length < POSTGRES_SEARCH_WINDOW) break;
+    cursor = page.at(-1);
+  }
+  await withArtifactCountReleaseSnapshot(access.actor, access.workspaceId, otherRoots, async () => {
+    if (!await currentInputProof(access, sourceRoots)) throw Object.assign(new Error("SQL count source permissions changed."),
+      {code: "SOURCE_CHANGED", status: 409});
+  }, async tx => {
+    for (const source of sources.values()) if (!await isSqlNativeRunInputLocallyCurrent(access.actor, access.workspaceId,
+      source.record as unknown as import("@prisma/client").SqlNativeRunInput, tx)) {
+      throw Object.assign(new Error("SQL count current source authority changed."), {code: "SOURCE_CHANGED", status: 409});
+    }
+    if (!await isSqlCountLedgerCurrent(access.workspaceId, access.accessDomains, collection,
+      [...ledger].map(([id, stamp]): SqlCountStamp => ({id, stamp})), [...epochs.values()],
+      [...sources.values()].map(source => ({id: source.record.id, hash: source.contentHash})), tx)) {
+      throw Object.assign(new Error("SQL count inputs changed before aggregate release."), {code: "SOURCE_CHANGED", status: 409});
+    }
+  });
+  return count;
 }
 
 // SQL receipts and live source inputs are authoritative over cached/Azure text.

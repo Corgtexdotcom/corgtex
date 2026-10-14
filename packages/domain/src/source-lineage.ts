@@ -644,8 +644,9 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
   if (!isRecord(loaded) || (isArchived(loaded) && !archivedMetadataOnly)) return false;
   // Bind admission, serving and the final local fence to the same exact heads.
   // Same-body ancestry changes cannot add a locally admitted, unreplayed leaf.
-  const readManifest = db === prisma ? await latestManifest(db, workspaceId, root) : undefined;
-  if (db === prisma && !bindReadHead(memo, root, readManifest ?? null)) return false;
+  const bindHeads = db === prisma || Boolean(expectedReadHeads.getStore());
+  const readManifest = bindHeads ? await latestManifest(db, workspaceId, root) : undefined;
+  if (bindHeads && !bindReadHead(memo, root, readManifest ?? null)) return false;
   const row: Record<string, unknown> = loaded;
   if (root.kind === "ArtifactInputSnapshot") {
     if (row.epochProofVersion !== 1 || !await isArtifactPermissionEpochProofCurrent(workspaceId, row.permissionEpochsJson, db)) return false;
@@ -1509,6 +1510,27 @@ export async function assertArtifactInputClosureLocallyAdmissible(actor: AppActo
   await localCommitAdmission.run(true, async () => {
     invariant(await isArtifactInputProofReadable(actor, workspaceId, roots), 409, "SOURCE_CHANGED",
       "Commit caller cannot access the complete input closure.");
+  });
+}
+
+/** Fixed count release boundary: ordinary authorization observes all generic
+ * heads before remote work; a fresh shared database snapshot then checks those
+ * exact heads/bodies and caller permissions together with the SQL count ledger.
+ * This creates no reusable read, native, model or publication capability. */
+export async function withArtifactCountReleaseSnapshot<T>(actor: AppActor, workspaceId: string,
+  roots: readonly LineageRoot[], remote: () => Promise<void>, finish: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+  invariant(roots.length <= 10_000, 409, "KNOWLEDGE_COUNT_LIMIT", "Generic count closure requires a bounded collection.");
+  const binding: ReadHeadBinding = {heads: new Map(), sealed: false};
+  return expectedReadHeads.run(binding, async () => {
+    if (roots.length) invariant(await isArtifactInputProofReadable(actor, workspaceId, roots),
+      409, "SOURCE_CHANGED", "Knowledge count inputs changed before native replay.");
+    const sealed: ReadHeadBinding = {heads: new Map(binding.heads), sealed: true};
+    await remote();
+    return prisma.$transaction(tx => expectedReadHeads.run(sealed, () => localCommitAdmission.run(true, async () => {
+      if (roots.length) invariant(await isArtifactInputProofReadable(actor, workspaceId, roots, tx),
+        409, "SOURCE_CHANGED", "Knowledge count inputs changed before aggregate release.");
+      return finish(tx);
+    })), {isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 30_000});
   });
 }
 
