@@ -19,7 +19,10 @@ import { chunkText } from "./chunks";
 import { classifyChunkSensitivity } from "./sensitivity";
 import { invalidateKnowledgeCache } from "./retrieval";
 
-const BATCH_SIZE = 500;
+// Vector batches also bound JSON copies and persisted-row verification. Identity-only
+// pages can stay larger without retaining embeddings across an application query.
+const VECTOR_BATCH_SIZE = 128;
+const IDENTITY_BATCH_SIZE = 500;
 const MAX_CHUNKS = 100_000;
 type Output = {row: KnowledgeChunk; rowIndex: number; hash: string};
 type OutputIdentity = {id: string; rowIndex: number; hash: string};
@@ -63,8 +66,8 @@ export async function prepareSqlKnowledgeAttempt(input: {attempt: SqlIngestionAt
         generation: BigInt(attempt.generation), configurationFingerprint: attempt.configurationFingerprint,
         outputSetHash: "", chunksCreated: outputs.length, rowsProcessed: capture.payload.rowsProcessed, nextCursor: capture.payload.nextCursor}});
     }, {timeout: 10_000});
-    for (let offset = 0; offset < outputs.length; offset += BATCH_SIZE) {
-      const batch = outputs.slice(offset, offset + BATCH_SIZE);
+    for (let offset = 0; offset < outputs.length; offset += VECTOR_BATCH_SIZE) {
+      const batch = outputs.slice(offset, offset + VECTOR_BATCH_SIZE);
       await assertSqlIngestionAttemptCurrent(attempt);
       const embedded = await defaultModelGateway.embed({workspaceId: attempt.workspaceId, input: batch.map(output => output.row.content)});
       await assertSqlIngestionAttemptCurrent(attempt);
@@ -135,10 +138,10 @@ export async function publishPreparedSqlKnowledgeAttempt(input: Parameters<SqlKn
         && digest(outputs) === publication.outputSetHash, "SQL_PUBLICATION_SET_CHANGED", "SQL output set changed before publication.");
       // Native identities remain the historical namespace. This incremental run
       // replaces only the rows it actually captured; it never invents a resync.
-      for (let offset = 0; offset < state.rowIds.length; offset += BATCH_SIZE) await tx.knowledgeChunk.deleteMany({where: {
-        workspaceId: attempt.workspaceId, sourceType: "EXTERNAL_DATABASE", sourceId: {in: state.rowIds.slice(offset, offset + BATCH_SIZE)}}});
-      for (let offset = 0; offset < outputs.length; offset += BATCH_SIZE) {
-        const planned = outputs.slice(offset, offset + BATCH_SIZE);
+      for (let offset = 0; offset < state.rowIds.length; offset += IDENTITY_BATCH_SIZE) await tx.knowledgeChunk.deleteMany({where: {
+        workspaceId: attempt.workspaceId, sourceType: "EXTERNAL_DATABASE", sourceId: {in: state.rowIds.slice(offset, offset + IDENTITY_BATCH_SIZE)}}});
+      for (let offset = 0; offset < outputs.length; offset += VECTOR_BATCH_SIZE) {
+        const planned = outputs.slice(offset, offset + VECTOR_BATCH_SIZE);
         const stored = await tx.sqlKnowledgeStagedChunk.findMany({where: {publicationId: publication.id,
           ordinal: {gte: offset, lt: offset + planned.length}}, orderBy: {ordinal: "asc"}});
         invariant(stored.length === planned.length && stored.every((entry, index) => entry.id === planned[index].id
@@ -173,8 +176,8 @@ export async function publishPreparedSqlKnowledgeAttempt(input: Parameters<SqlKn
       await assertArtifactInputWriteFence(tx);
       await assertSqlNativeCaptureCurrent(attempt, receipt, tx);
       await assertSqlIngestionAttemptCurrent(attempt, tx, {publishedCursor: identity.nextCursor});
-      for (let offset = 0; offset < outputs.length; offset += BATCH_SIZE) {
-        const batch = outputs.slice(offset, offset + BATCH_SIZE), ids = batch.map(output => output.id);
+      for (let offset = 0; offset < outputs.length; offset += VECTOR_BATCH_SIZE) {
+        const batch = outputs.slice(offset, offset + VECTOR_BATCH_SIZE), ids = batch.map(output => output.id);
         const [rows, manifests] = await Promise.all([
           tx.knowledgeChunk.findMany({where: {workspaceId: attempt.workspaceId, id: {in: ids}}}),
           capturePublicationManifestStamps(tx, attempt.workspaceId, ids),

@@ -185,19 +185,31 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
   it("a later model batch failure preserves non-serving staging and a fresh independent retry publishes the complete run", async () => {
     transport.rows = Array.from({length: 600}, (_, index) => row(index + 1));
     const f = await fixture(), attempt = await f.claim(), receipt = await captureSqlIngestionAttempt(attempt);
-    models.embed.mockImplementationOnce(async ({input}) => ({embeddings: input.map(() => [1, 0]), usage: {model: "synthetic-sql-embedding"}}))
+    const embed = async ({input}: {input: string[]}) => ({embeddings: input
+      .map(() => Array.from({length: 1536}, (_, index) => ((index % 31) - 15) / 100)), usage: {model: "synthetic-sql-embedding"}});
+    models.embed.mockImplementation(embed).mockImplementationOnce(embed)
       .mockRejectedValueOnce(new Error("Synthetic second model batch failed"));
+    const beforeCache = await prisma.sharedCacheVersion.findMany();
     await expect(prepareSqlKnowledgeAttempt({attempt, receipt})).rejects.toThrow("Synthetic second model batch failed");
     const incomplete = await prisma.sqlKnowledgePublication.findFirstOrThrow({where: {attemptId: attempt.attemptId}});
     expect(incomplete).toMatchObject({status: "PREPARING", chunksCreated: 600, outputSetHash: ""});
-    expect(await prisma.sqlKnowledgeStagedChunk.count({where: {publicationId: incomplete.id}})).toBe(500);
+    const stagedCount = await prisma.sqlKnowledgeStagedChunk.count({where: {publicationId: incomplete.id}});
+    expect(stagedCount).toBe(models.embed.mock.calls[0][0].input.length);
+    expect(stagedCount).toBeGreaterThan(0); expect(stagedCount).toBeLessThan(600);
     expect(await prisma.knowledgeChunk.count()).toBe(0);
     expect((await prisma.externalDataSource.findUniqueOrThrow({where: {id: f.source.id}})).lastCursorValue).toBeNull();
+    expect((await prisma.externalDataSyncLog.findUniqueOrThrow({where: {id: attempt.logId}})).completedAt).toBeNull();
+    expect((await prisma.sqlIngestionAttempt.findUniqueOrThrow({where: {id: attempt.attemptId}})).status).toBe("RUNNING");
+    expect(await prisma.artifactInputLineage.count()).toBe(0);
+    expect(await prisma.sharedCacheVersion.findMany()).toEqual(beforeCache);
     await failSqlIngestionAttempt({attempt, error: "Synthetic second model batch failed", logId: attempt.logId});
     const retry = await f.prepare();
     expect(await publishPreparedSqlKnowledgeAttempt({...retry, commit: f.commit})).toMatchObject({committed: true, chunksCreated: 600});
     expect(await countReadableKnowledgeChunks(f.bobActor, f.workspace.id, ["EXTERNAL_DATABASE"])).toBe(600);
-    expect(await prisma.sqlKnowledgeStagedChunk.count({where: {publicationId: incomplete.id}})).toBe(500);
+    expect(await prisma.sqlKnowledgeStagedChunk.count({where: {publicationId: incomplete.id}})).toBe(stagedCount);
+    expect(await prisma.sqlKnowledgeStagedChunk.count({where: {publicationId: retry.prepared.preparationId}})).toBe(600);
+    expect((await prisma.knowledgeChunk.findFirstOrThrow()).embedding).toHaveLength(1536);
+    expect(Math.max(...models.embed.mock.calls.map(([request]) => request.input.length))).toBeLessThanOrEqual(128);
     await expect(prisma.sqlKnowledgePublication.update({where: {id: retry.prepared.preparationId}, data: {outputSetHash: ""}})).rejects.toThrow();
   });
   it("immutable ciphertext cannot update and same-id native replacement cannot reuse the original publisher epoch", async () => {
@@ -473,17 +485,26 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
       expect(await countReadableKnowledgeChunks(f.bobActor, f.workspace.id, ["EXTERNAL_DATABASE"])).toBe(1);
     } finally {transport.afterAccess = undefined; transport.access = true;}
   });
-  it.each(["chunk", "manifest"])("callback %s mutation invalidates the final complete set and rolls everything back", async target => {
+  it.each(["chunk", "manifest"])("callback final-batch %s mutation invalidates the complete set and rolls everything back", async target => {
+    transport.rows = Array.from({length: 257}, (_, index) => row(index + 1));
     const f = await fixture(), p = await f.prepare();
+    const beforeCache = await prisma.sharedCacheVersion.findMany();
     await expect(publishPreparedSqlKnowledgeAttempt({...p, commit: async (tx, identity) => {
       await f.commit(tx, identity);
-      if (target === "chunk") await tx.knowledgeChunk.deleteMany({where: {workspaceId: f.workspace.id}});
-      else await tx.artifactInputLineage.updateMany({where: {workspaceId: f.workspace.id}, data: {rootsJson: []}});
+      const last = await tx.sqlKnowledgeStagedChunk.findFirstOrThrow({where: {publicationId: identity.publicationId},
+        orderBy: {ordinal: "desc"}, select: {id: true, ordinal: true}});
+      expect(last.ordinal).toBe(256);
+      if (target === "chunk") await tx.knowledgeChunk.delete({where: {id: last.id}});
+      else await tx.artifactInputLineage.updateMany({where: {workspaceId: f.workspace.id, artifactType: "KnowledgeChunk",
+        artifactId: last.id}, data: {rootsJson: []}});
     }})).rejects.toMatchObject({code: "SQL_PUBLICATION_SET_CHANGED"});
     expect(await prisma.knowledgeChunk.count()).toBe(0); expect(await prisma.artifactInputLineage.count()).toBe(0);
     expect((await prisma.externalDataSource.findUniqueOrThrow({where: {id: f.source.id}})).lastCursorValue).toBeNull();
     expect((await prisma.externalDataSyncLog.findUniqueOrThrow({where: {id: p.attempt.logId}})).completedAt).toBeNull();
     expect((await prisma.sqlKnowledgePublication.findUniqueOrThrow({where: {id: p.prepared.preparationId}})).status).toBe("PREPARED");
+    expect((await prisma.sqlIngestionAttempt.findUniqueOrThrow({where: {id: p.attempt.attemptId}})).status).toBe("RUNNING");
+    expect(await prisma.sharedCacheVersion.findMany()).toEqual(beforeCache);
+    expect(await prisma.sqlNativeRunInput.count()).toBe(1);
   });
   it("post-model provider denial cannot publish or advance a cursor", async () => {
     const f = await fixture(), p = await f.prepare(); transport.access = false;
