@@ -10,6 +10,7 @@ import { captureSqlIngestionAttempt } from "../../domain/src/sql-native-input";
 import type { AuthenticatedSqlRunReceipt, SqlNativeDefinition, SqlNativeRow, SqlPublicationIdentity } from "../../domain/src/sql-ingestion-contract";
 import { prepareSqlKnowledgeAttempt, publishPreparedSqlKnowledgeAttempt } from "./sql-publication";
 import { countReadableKnowledgeChunks } from "./counts";
+import { captureSqlCountPageProof } from "./sql-count-proof";
 import { fetchReadableKnowledgeChunk, searchIndexedKnowledge } from "./retrieval";
 import { captureArtifactInputProof, captureImmutableArtifactInputProof, isArtifactInputProofReadable,
   isArtifactInputProofPubliclyShareable, recordArtifactInputLineage } from "../../domain/src/source-lineage";
@@ -274,6 +275,37 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
     console.info("Synthetic registered native 10k run / real app PG timings", {
       prepareMs: Math.round(preparedAt - start), publishMs: Math.round(committedAt - preparedAt),
       searchMs: Math.round(performance.now() - committedAt)});
+  });
+  it.each(["cipher", "header"])("rolls back a native issuer when an insert trigger substitutes its authenticated %s", async target => {
+    const f = await fixture(), attempt = await f.claim();
+    await prisma.$executeRawUnsafe(`CREATE FUNCTION pun68_synthetic_native_substitution() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN ${target === "cipher" ? 'NEW."encryptedPayload" := NEW."encryptedPayload" || \'changed\';'
+        : 'NEW."nextCursor" := \'changed synthetic header\';'} RETURN NEW; END $$`);
+    await prisma.$executeRawUnsafe(`CREATE TRIGGER pun68_synthetic_native_substitution BEFORE INSERT ON "SqlNativeRunInput"
+      FOR EACH ROW EXECUTE FUNCTION pun68_synthetic_native_substitution()`);
+    try {
+      await expect(captureSqlIngestionAttempt(attempt)).rejects.toMatchObject({code: "SQL_NATIVE_RECEIPT_INVALID"});
+      expect(await prisma.sqlNativeRunInput.count({where: {workspaceId: f.workspace.id}})).toBe(0);
+      expect(models.embed).not.toHaveBeenCalled();
+    } finally {
+      await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS pun68_synthetic_native_substitution ON "SqlNativeRunInput"');
+      await prisma.$executeRawUnsafe("DROP FUNCTION IF EXISTS pun68_synthetic_native_substitution()");
+    }
+  });
+  it("counts immutable staged timestamps in a non-UTC application database session", async () => {
+    models.embed.mockImplementation(async ({input}) => ({embeddings: (typeof input === "string" ? [input] : input)
+      .map(() => Array.from({length: 1536}, (_, index) => ((index % 31) - 15) / 100)), usage: {model: "synthetic-sql-embedding"}}));
+    const f = await fixture(), p = await f.prepare();
+    await publishPreparedSqlKnowledgeAttempt({...p, commit: f.commit});
+    const chunks = await prisma.knowledgeChunk.findMany({where: {workspaceId: f.workspace.id}});
+    const native = await prisma.sqlNativeRunInput.findUniqueOrThrow({where: {id: p.receipt.receiptId}});
+    const roots = await captureArtifactInputProof(f.bobActor, f.workspace.id,
+      [{kind: "SqlNativeRunInput", id: native.id, snapshot: native}]);
+    const proof = await prisma.$transaction(async tx => {
+      await tx.$executeRawUnsafe("SET LOCAL TIME ZONE 'America/New_York'");
+      return captureSqlCountPageProof(f.workspace.id, chunks.map(chunk => chunk.id), roots, tx);
+    });
+    expect(proof).toHaveLength(1);
   });
   it("counts the complete 4,000-row publication with at least 8,000 chunks beyond the search scan limit", async () => {
     transport.rows = Array.from({length: 4_000}, (_, index) => row(index + 1, "synthetic ".repeat(180)));

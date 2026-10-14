@@ -17,7 +17,10 @@ import type { AuthenticatedSqlRunReceipt, SqlIngestionAttempt, SqlNativeDriverRe
 type Db = Prisma.TransactionClient | typeof prisma;
 type Payload = Pick<SqlNativeDriverResult, "rows" | "pages" | "rowsProcessed" | "nextCursor"> & {renderingVersion: 1};
 type Capture = {attempt: SqlIngestionAttempt; input: SqlNativeRunInput; payload: Payload;
-  native: SqlNativeDriverResult; disposed: boolean; finalized: boolean};
+  native: Pick<SqlNativeDriverResult, "beforePublication" | "dispose">; disposed: boolean; finalized: boolean};
+const nativeHeaderSelect = {id: true, workspaceId: true, sourceId: true, attemptId: true, generation: true,
+  configurationFingerprint: true, sourcePermissionEpoch: true, permissionEpochsJson: true,
+  payloadHash: true, rowsProcessed: true, nextCursor: true, createdAt: true} as const;
 const captures = new WeakMap<AuthenticatedSqlRunReceipt, Capture>();
 // Cache only authenticated immutable bytes/shape, never access or permissions.
 // Every lookup below still checks current source, caller, epochs and attempt;
@@ -163,27 +166,48 @@ export async function captureSqlIngestionAttempt(attempt: SqlIngestionAttempt): 
     const bytes = serialize(payload);
     invariant(bytes.length <= 64 * 1024 * 1024, 413, "SQL_NATIVE_RUN_TOO_LARGE", "Native SQL run exceeds the bounded payload size.");
     const id = randomUUID(), original = sqlIngestionOriginalPermissions(attempt);
+    const encryptedPayload = encryptSecret(bytes.toString("base64"));
+    const encryptedHash = createHash("sha256").update(encryptedPayload).digest("hex");
     const input = await prisma.$transaction(async tx => {
       await lockSqlIngestionAttempt(attempt, tx);
       const own = await capturePermissionEpochs(tx, attempt.workspaceId,
         artifactPermissionEpochIdentities("SqlNativeRunInput", {id, workspaceId: attempt.workspaceId, sourceId: attempt.sourceId}));
-      return tx.sqlNativeRunInput.create({data: {id, workspaceId: attempt.workspaceId, sourceId: attempt.sourceId,
+      const data = {id, workspaceId: attempt.workspaceId, sourceId: attempt.sourceId,
         attemptId: attempt.attemptId, generation: BigInt(attempt.generation), configurationFingerprint: attempt.configurationFingerprint,
         sourcePermissionEpoch: BigInt(original.entries.find(entry => entry.kind === "ExternalDataSource" && entry.id === attempt.sourceId)!.epoch),
-        permissionEpochsJson: mergePermissionEpochProofs(original, own)!, encryptedPayload: encryptSecret(bytes.toString("base64")),
-        payloadHash: hash(bytes), rowsProcessed: payload.rowsProcessed, nextCursor: payload.nextCursor}});
+        permissionEpochsJson: mergePermissionEpochProofs(original, own)!, encryptedPayload,
+        payloadHash: hash(bytes), rowsProcessed: payload.rowsProcessed, nextCursor: payload.nextCursor};
+      // Returning the full encrypted run duplicates a large native engine/JSON
+      // response. Verify the complete original ciphertext on the server in this
+      // same transaction; only small immutable headers cross back to Node.
+      const header = await tx.sqlNativeRunInput.create({data, select: nativeHeaderSelect});
+      const [stored] = await tx.$queryRaw<Array<{matches: boolean}>>`SELECT
+        encode(sha256(convert_to("encryptedPayload", 'UTF8')), 'hex') = ${encryptedHash} AS matches
+        FROM "SqlNativeRunInput" WHERE id = ${id} AND "workspaceId" = ${attempt.workspaceId}`;
+      invariant(stored?.matches && Object.keys(data).filter(key => key !== "encryptedPayload").every(key =>
+        isDeepStrictEqual(header[key as keyof typeof header], data[key as keyof typeof data])),
+      409, "SQL_NATIVE_RECEIPT_INVALID", "Persisted native SQL receipt differs from its authenticated original.");
+      return {...header, encryptedPayload};
     }, {timeout: 10_000});
     const receipt = Object.freeze({receiptId: id}) as AuthenticatedSqlRunReceipt;
-    captures.set(receipt, {attempt, input, payload: freeze(payload), native, disposed: false, finalized: false});
+    captures.set(receipt, {attempt, input, payload: freeze(payload),
+      native: {beforePublication: native.beforePublication, dispose: native.dispose}, disposed: false, finalized: false});
     return receipt;
   } catch (error) {await native.dispose().catch(() => undefined); throw error;}
 }
 
-/** Dedicated Knowledge preparation reads only the private, exact capture. */
+/** Dedicated Knowledge preparation receives immutable rendering descriptors,
+ * never a second full copy of native cells or encrypted original bytes. */
 export async function sqlNativeCaptureForPreparation(attempt: SqlIngestionAttempt, receipt: AuthenticatedSqlRunReceipt) {
   const capture = captureOf(attempt, receipt);
   await assertSqlIngestionAttemptCurrent(attempt);
-  return {input: structuredClone(capture.input), payload: deserialize(serialize(capture.payload)) as Payload};
+  const {lineageContentFingerprint} = await import("./source-lineage");
+  await assertSqlIngestionAttemptCurrent(attempt);
+  return {input: {id: capture.input.id, permissionEpochsJson: structuredClone(capture.input.permissionEpochsJson)},
+    fingerprint: lineageContentFingerprint("SqlNativeRunInput", capture.input),
+    payload: Object.freeze({rows: Object.freeze(capture.payload.rows.map(({table, primaryKey, content}) =>
+      Object.freeze({table, primaryKey, content}))), rowsProcessed: capture.payload.rowsProcessed,
+      nextCursor: capture.payload.nextCursor})};
 }
 
 /** Native DDL/owner recheck is mandatory after model work and outside SQL. */
@@ -273,9 +297,7 @@ export async function assertSqlNativeCaptureCurrent(attempt: SqlIngestionAttempt
   // The authenticated ciphertext is immutable by database trigger. A held row,
   // exact original header/hash and monotonic original epochs fence delete/recreate
   // without transferring the complete encrypted run for every staged batch.
-  const select = {id: true, workspaceId: true, sourceId: true, attemptId: true, generation: true,
-    configurationFingerprint: true, sourcePermissionEpoch: true, permissionEpochsJson: true,
-    payloadHash: true, rowsProcessed: true, nextCursor: true, createdAt: true} as const;
+  const select = nativeHeaderSelect;
   const stored = await tx.sqlNativeRunInput.findUnique({where: {id: capture.input.id}, select});
   const expected = Object.fromEntries(Object.keys(select).map(key => [key, capture.input[key as keyof SqlNativeRunInput]]));
   const original = parsePermissionEpochProof(capture.input.permissionEpochsJson);

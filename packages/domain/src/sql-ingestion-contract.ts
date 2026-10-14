@@ -34,7 +34,9 @@ export type SqlNativePage = Readonly<{table: string; definition: SqlNativeDefini
   previous: readonly string[] | null; rowCount: number; tail: readonly string[] | null}>;
 export type SqlNativeDriverResult = Readonly<{rows: readonly SqlNativeRow[]; pages: readonly SqlNativePage[];
   rowsProcessed: number; nextCursor: string | null;
-  /** Recheck actual DDL and current attempt AFTER models, then close provider. */
+  /** Receiver-independent trusted closures: capture retains hooks independently
+   * of the returned row container. Recheck actual DDL and current attempt AFTER
+   * models, then close provider. */
   beforePublication(): Promise<void>;
   /** Idempotent close on success, preparation error, lease loss or cancellation. */
   dispose(): Promise<void>;

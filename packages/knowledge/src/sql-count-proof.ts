@@ -18,11 +18,12 @@ const latestManifest = Prisma.sql`LEFT JOIN LATERAL (
  * Node. Staging was authenticated and sealed by the fixed publisher; compare
  * every persisted field to those original staged bytes and validate the exact
  * original native/child vector. Final live native authorization is mandatory. */
-export async function captureSqlCountPageProof(workspaceId: string, ids: readonly string[], sourceRoots: readonly LineageRoot[]) {
+export async function captureSqlCountPageProof(workspaceId: string, ids: readonly string[], sourceRoots: readonly LineageRoot[],
+  db: Prisma.TransactionClient = prisma) {
   if (getMcpOrigin()) return undefined;
   if (!ids.length) return [] as LineageRoot[];
   if (ids.length > 500) throw Object.assign(new Error("SQL count requires bounded pages."), {code: "KNOWLEDGE_COUNT_LIMIT", status: 409});
-  const rows = await prisma.$queryRaw<Array<{id: string; metadata: Prisma.JsonValue; workspaceId: string;
+  const rows = await db.$queryRaw<Array<{id: string; metadata: Prisma.JsonValue; workspaceId: string;
     sourceId: string; sourceType: string; accessDomain: string; hash: string; roots: LineageRoot[];
     epochs: unknown; nativeEpochs: unknown}>>(Prisma.sql`SELECT k.id, k.metadata, k."workspaceId", k."sourceId",
       k."sourceType", k."accessDomain", s."contentHash" AS hash, m."rootsJson" AS roots,
@@ -39,7 +40,10 @@ export async function captureSqlCountPageProof(workspaceId: string, ids: readonl
     WHERE k."workspaceId" = ${workspaceId} AND k.id IN (${Prisma.join(ids)})
       AND k."sourceType" = 'EXTERNAL_DATABASE'
       AND to_jsonb(k)-'createdAt'-'vectorEmbedding' = s."contentJson"-'createdAt'
-      AND k."createdAt" = (s."contentJson"->>'createdAt')::timestamptz
+      -- Prisma stores UTC instants in timestamp-without-zone columns. The
+      -- staged ISO instant must use that same UTC representation, independently
+      -- of the application's PostgreSQL session TimeZone.
+      AND k."createdAt" = ((s."contentJson"->>'createdAt')::timestamptz AT TIME ZONE 'UTC')
       AND m.origin = 'DERIVED' AND m."contentHash" = s."contentHash" AND m."epochProofVersion" = 1
       AND m."inputsJson" = jsonb_build_array(jsonb_build_object('kind','SqlNativeRunInput','id',i.id))
       AND m."permissionEpochsJson"->'entries' @> jsonb_build_array(jsonb_build_object(

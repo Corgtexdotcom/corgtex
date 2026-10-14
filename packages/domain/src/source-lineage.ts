@@ -247,12 +247,37 @@ export function lineageContentFingerprint(kind: LineageKind, row: unknown): stri
     return brainSourceContentFingerprint(row as Parameters<typeof brainSourceContentFingerprint>[0]);
   }
   const fields = fingerprintFields(kind);
+  if (kind === "SqlNativeRunInput") {
+    // Preserve the existing JSON fingerprint byte for byte while avoiding
+    // several complete copies of a potentially 100MiB encrypted run header.
+    const digest = createHash("sha256").update(`[${JSON.stringify(kind)}`);
+    for (const field of fields) {
+      const value = row[field] ?? null;
+      digest.update(",");
+      if (typeof value !== "string") {
+        digest.update(JSON.stringify(JSON.parse(sourceCommitCanonical(value))));
+        continue;
+      }
+      digest.update('"');
+      for (let offset = 0; offset < value.length;) {
+        let end = Math.min(value.length, offset + 65_536);
+        // JSON encodes isolated surrogates differently from a complete pair.
+        // Never split a valid pair at the bounded string boundary.
+        if (end < value.length && value.charCodeAt(end - 1) >= 0xd800 && value.charCodeAt(end - 1) <= 0xdbff
+          && value.charCodeAt(end) >= 0xdc00 && value.charCodeAt(end) <= 0xdfff) end++;
+        digest.update(JSON.stringify(value.slice(offset, end)).slice(1, -1));
+        offset = end;
+      }
+      digest.update('"');
+    }
+    return digest.update("]").digest("hex");
+  }
   return createHash("sha256").update(JSON.stringify([kind, ...fields.map((field) => kind === "Member" && field === "user" && isRecord(row.user)
     ? { id: row.userId ?? row.user.id ?? null, email: row.user.email ?? null, displayName: row.user.displayName ?? null }
     : kind === "WorkspaceToolLink" && field === "circleTags" && Array.isArray(row.circleTags)
       ? row.circleTags.map(tag => isRecord(tag) ? { id: tag.id ?? null, toolLinkId: tag.toolLinkId ?? null, circleId: tag.circleId ?? null, createdAt: tag.createdAt ?? null } : null)
         .sort((left, right) => String(left?.id).localeCompare(String(right?.id)))
-      : (kind === "SqlNativeRunInput" || kind === "KnowledgeChunk" && row.sourceType === "EXTERNAL_DATABASE")
+      : kind === "KnowledgeChunk" && row.sourceType === "EXTERNAL_DATABASE"
         ? JSON.parse(sourceCommitCanonical(row[field] ?? null)) : row[field] ?? null)])).digest("hex");
 }
 
