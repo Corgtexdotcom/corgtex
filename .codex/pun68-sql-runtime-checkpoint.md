@@ -83,6 +83,18 @@ seal PREPARED. Publication loads at most500 staged vectors per batch; private
 preparation state keeps compact identities/hashes, and a compact SHA256 manifest
 ledger preserves complete post-callback rollback checks.
 
+Capture avoids a complete ciphertext RETURNING response: the insertion returns
+small immutable headers, and the same real transaction checks server SHA256 of
+the stored ciphertext against the issuer's exact encrypted original, plus every
+submitted header. A substitution rejects and rolls back before model admission.
+Private custody still retains complete original native cells/pages and original
+ciphertext. Knowledge receives frozen table/PK/content descriptors and original
+fingerprint/proof, without full native/cipher clones. Trusted driver hooks are
+receiver-independent closures and are retained separately from its row container.
+Native header hashing streams bounded strings with exactly the prior canonical
+JSON bytes, including escaped text and UTF16 surrogate boundaries; existing
+receipt fingerprints remain compatible. No schema or public port changed.
+
 Full ordered captured columns are `{name,type,typeOid,typeModifier,collationOid,
 position,isNullable,identity,generated}`: declared pg_type/pg_attribute metadata,
 position=attnum. Raw records require the exact key set; JS integer-like property
@@ -191,6 +203,40 @@ model-sized vectors, complete legal output sets, peak memory, query count, lock
 duration and competing policy writes. Full-vector retention has been replaced by
 bounded500-vector batches; actual worker1Gi resource acceptance remains open
 until the connector reruns the composed production path.
+
+Actual connector composition at7c92532b proved a remaining resource failure:
+unchanged4000 rows/12000 chunks with1536-vector models, a512MiB V8 heap cap and
+complete-process1GiB RSS guard fails BEFORE the first model call. Native wire
+length15,156,145B, encrypted stored length26,944,314B; production worker startup
+peak454,901,760B, child startup420,675,584B, capture-phase peak1,079,508,992B.
+The capture/header copy correction above is therefore required; its actual
+complete-worker budget acceptance is still a connector-owned gate, not inferred
+from local small-vector correctness tests.
+
+The actual connector also reproduced positive count0 with successful fetch,
+search and downstream proof: its application PostgreSQL session uses
+America/Los_Angeles while KnowledgeChunk.createdAt is timestamp WITHOUT time
+zone. Count now compares the original staged ISO instant AT TIME ZONE UTC to
+Prisma's stored UTC timestamp, retaining complete JSON/vector/epoch predicates.
+Real non-UTC application-PG regression uses1536-dimensional vectors. Exact-head
+CI38504483543 failed at the default4GiB TypeScript heap BEFORE tests; local8GiB
+compile passes with4,082,802K reported type memory. Hosted compile capacity is a
+separate unresolved gate; no worker/CI resource settings changed here.
+
+Corrected capture/count aggregate:47/47 real application-PG regressions pass,
+including the full10000-row run, complete4000-row/12000-chunk publication/count,
+non-UTC staged timestamp admission with1536-dimensional vectors, and SAME-TX
+issuer rollback for cipher/header INSERT substitutions. Four deterministic
+fingerprint/rendering units pass. Final repository TypeScript, affected ESLint
+and diff checks pass; independent Sol found no bounded authority/hash/custody
+blocker and confirmed actual connector hooks are receiver independent. Evidence:
+`/tmp/pun68-capture-corrected-aggregate-result.json`,
+`/tmp/pun68-capture-corrected-aggregate-pg.log`,
+`/tmp/pun68-count-timezone-before.log` (red reproduction),
+`/tmp/pun68-count-timezone-after.log`,
+`/tmp/pun68-capture-bounded-fingerprint-unit.log`,
+`/tmp/pun68-capture-corrected-types.log`,
+`/tmp/pun68-capture-corrected-lint-final.log`.
 
 Ordinary SQL counts scan the complete bounded100000-child collection in500
 identity pages. PostgreSQL compares canonical children to immutable staged bytes

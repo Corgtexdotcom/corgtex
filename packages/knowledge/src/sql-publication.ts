@@ -39,7 +39,7 @@ export async function prepareSqlKnowledgeAttempt(input: {attempt: SqlIngestionAt
     const capture = await sqlNativeCaptureForPreparation(attempt, receipt);
     const source = await prisma.externalDataSource.findFirstOrThrow({where: {id: attempt.sourceId, workspaceId: attempt.workspaceId}});
     const publicationId = randomUUID(), createdAt = new Date();
-    const sourceContentHash = lineageContentFingerprint("SqlNativeRunInput", capture.input);
+    const sourceContentHash = capture.fingerprint;
     const root: LineageRoot = {kind: "SqlNativeRunInput", id: capture.input.id, fingerprint: sourceContentHash,
       permissionEpochs: parsePermissionEpochProof(capture.input.permissionEpochsJson)!};
     const rowIds = capture.payload.rows.map(row => `byodb:${attempt.sourceId}:${row.table}:${row.primaryKey}`);
