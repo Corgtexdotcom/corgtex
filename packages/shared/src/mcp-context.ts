@@ -1,9 +1,21 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { Prisma } from "@prisma/client";
+import { Prisma, type AgentCredential } from "@prisma/client";
 import { createHash, randomUUID } from "node:crypto";
 
 export type McpOrigin = { kind: "oauth" | "agent"; id: string; workspaceId: string; credentialVersion?: string;
   scopeHash?: string; grantEpoch?: string; requiredScopes?: string[]; canonical?: true };
+// Compare only these existing queries and their generated payloads. Comparing
+// whole generic model delegates expands unrelated include/select result types
+// for the query interceptor's configured PrismaClient.
+type McpOriginReadClient = Pick<Prisma.TransactionClient, "$queryRaw"> & {
+  mcpOAuthAccessToken: {
+    findUnique(args: { where: { id: string }; include: { client: true } }):
+      PromiseLike<Prisma.McpOAuthAccessTokenGetPayload<{ include: { client: true } }> | null>;
+  };
+  agentCredential: {
+    findUnique(args: { where: { id: string } }): PromiseLike<AgentCredential | null>;
+  };
+};
 const OAUTH_GRANT_POLICY = "McpOAuthGrantPolicy";
 const validEpoch = (value: unknown): value is string => typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value);
 const context = new AsyncLocalStorage<McpOrigin | undefined>();
@@ -45,7 +57,7 @@ export async function captureMcpOAuthGrantEpoch(tx: Prisma.TransactionClient, wo
   return rows[0]!.epoch.toString();
 }
 
-async function assertMcpOAuthGrantEpoch(tx: Prisma.TransactionClient, origin: McpOrigin, workspaceId: string, lock: boolean) {
+async function assertMcpOAuthGrantEpoch(tx: Pick<McpOriginReadClient, "$queryRaw">, origin: McpOrigin, workspaceId: string, lock: boolean) {
   if (!validEpoch(origin.grantEpoch)) throw new Error("MCP_AUTHORIZATION_REVOKED");
   const identity = Prisma.sql`WHERE "workspaceId" = ${workspaceId} AND "sourceKind" = ${OAUTH_GRANT_POLICY} AND "sourceId" = ${origin.id}`;
   const rows = lock
@@ -85,14 +97,14 @@ export async function withMcpRequiredScopes<T>(db: Prisma.TransactionClient, exp
 
 // Domain membership and every manifested write reuse this live origin check.
 // Scope changes do not require token rotation to revoke in-flight or queued work.
-async function assertMcpOriginActiveUsing(db: Prisma.TransactionClient, origin: McpOrigin, workspaceId: string,
+async function assertMcpOriginActiveUsing(db: McpOriginReadClient, origin: McpOrigin, workspaceId: string,
   lockEpoch: boolean): Promise<void> {
   if (origin.workspaceId !== workspaceId || !/^[a-f0-9]{64}$/.test(origin.scopeHash ?? "")) throw new Error("MCP_AUTHORIZATION_REVOKED");
   // A standalone check needs one short transaction so the epoch lock protects
   // the subsequent token/client read. A supplied writer tx retains that lock
   // through its own commit.
   if (origin.kind === "oauth" && lockEpoch) {
-    const client = db as Prisma.TransactionClient & { $transaction?: <T>(fn: (tx: Prisma.TransactionClient) => Promise<T>) => Promise<T> };
+    const client = db as McpOriginReadClient & { $transaction?: <T>(fn: (tx: Prisma.TransactionClient) => Promise<T>) => Promise<T> };
     if (typeof client.$transaction === "function") {
       return client.$transaction(tx => assertMcpOriginActiveUsing(tx, origin, workspaceId, lockEpoch));
     }
@@ -122,6 +134,6 @@ export async function assertMcpOriginActive(db: Prisma.TransactionClient, origin
 /** A nonlocking, read–token–read observation for the Prisma query interceptor.
  * It is only a diagnostic around mutations; callers must fence writes in their
  * own transaction with assertMcpOriginActive. */
-export async function assertMcpOriginActiveAdvisory(db: Prisma.TransactionClient, origin: McpOrigin, workspaceId: string): Promise<void> {
+export async function assertMcpOriginActiveAdvisory(db: McpOriginReadClient, origin: McpOrigin, workspaceId: string): Promise<void> {
   return assertMcpOriginActiveUsing(db, origin, workspaceId, false);
 }

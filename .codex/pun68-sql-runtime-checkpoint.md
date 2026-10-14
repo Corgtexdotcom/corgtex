@@ -164,6 +164,37 @@ are `/tmp/pun68-cold-ts-diagnostics.log`,
 `/tmp/pun68-cold-ts-trace-summary.json` and `/tmp/pun68-cold-ts-hotspots.json`.
 No shared DB/MCP guard, workflow, provider or resource setting changed here.
 
+The fixture-only `2f4b7479` hosted run 38518341397 also OOMs at typecheck with
+exit134 before tests; its ARM64 preparation passes. The identical local cold
+4096MiB baseline reproduces OOM. Per-source attribution then identifies a second
+whole-client comparison at the shared-state factory's custom-datasource callers.
+The correction describes only the MCP checker's exact existing read queries and
+generated payloads, and gives the shared-state factory its four actual generated
+query/transaction/version capabilities. Canonical MCP writer/capture/scope ports,
+complete transaction overloads and caller-owned invalidation transactions retain
+their original generated types. No runtime statement, query, option or test
+fixture changes: emitted JS matches `2f4b7479` byte-for-byte. The constructor
+experiment is removed; `db.ts` itself is unchanged.
+
+Full cold repository TypeScript now passes at the unchanged 4096MiB heap with
+incremental disabled and no trace: 5,460 files, 1,337,742 types, 5,159,998
+instantiations, 3,715,144K reported memory, 57.90s wall time and 3,992,600,576B
+maximum RSS. All type assertions are included: configured/default/transaction
+compatibility, required query shapes/full authority payloads, missing capability
+negatives and unchanged transaction writer ports. Affected MCP/database/shared
+state units pass 39/39, scoped lint/diff pass, and independent Sol accepts the
+bounded correction. Evidence: `/tmp/pun68-types-4g-shared-state-boundary.log`,
+`/tmp/pun68-shared-typing-unit.log`, `/tmp/pun68-shared-typing-lint.log` and
+`/tmp/pun68-mcp-typing-runtime-proof.json`. Exact correction-head hosted CI remains
+required; this local compile does not clear the held full PR/source integration.
+No checked-in compiler configuration, workflow, resource, permission or provider change.
+
+The coordinator confirms sole source-lane ownership of recorder/intake/native
+transcript receipt/principal, Recall bindings/webhook callers and matching tests,
+with no known competing editor. Connector ownership stays SQL/outbox/bootstrap;
+Brain conversation remains separate. Authenticated Recall intake starts only
+after this compiler checkpoint settles; no intake change is part of this diff.
+
 Capture avoids a complete ciphertext RETURNING response: the insertion returns
 small immutable headers, and the same real transaction checks server SHA256 of
 the stored ciphertext against the issuer's exact encrypted original, plus every
