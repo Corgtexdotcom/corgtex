@@ -56,25 +56,57 @@ export async function listConversations(actor: AppActor, workspaceId: string, op
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
 
-  const items = await prisma.conversationSession.findMany({
-    where: { workspaceId, userId },
-    include: { roleOnboarding: { include: { role: true } }, turns: { orderBy: { sequenceNumber: "desc" }, take: 5001 } },
-    orderBy: [{ updatedAt: "desc" }, { id: "desc" }], take: 5001,
-  });
-  invariant(items.length <= 5000 && items.every((item) => item.turns.length <= 5000), 503, "INPUT_SCAN_LIMIT", "Conversation history needs a lineage rebuild before listing.");
-  const readableSessions = await readableArtifactIds(actor, workspaceId, "ConversationSession", items);
+  const pageSize = 100;
+  const latestReadableTurn = async (conversationId: string) => {
+    let cursor: string | undefined;
+    let scanned = 0;
+    for (;;) {
+      const turns = await prisma.conversationTurn.findMany({ where: { conversationId },
+        orderBy: [{ sequenceNumber: "desc" }, { id: "desc" }], take: pageSize,
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      });
+      scanned += turns.length;
+      invariant(scanned <= 5000, 503, "INPUT_SCAN_LIMIT", "Conversation history needs a lineage rebuild before listing.");
+      const safe = await redactConversationTurns(actor, workspaceId, turns);
+      if (safe.length) return safe.slice(0, 1);
+      if (turns.length < pageSize) return [];
+      cursor = turns[turns.length - 1].id;
+    }
+  };
   const safeItems = [];
-  for (const item of items) {
-    const turns = (await redactConversationTurns(actor, workspaceId, item.turns)).slice(0, 1);
-    // Independently authored prompts prove a private session's existence, even when its generated topic is withheld.
-    if (!readableSessions.has(item.id) && !turns.length) continue;
-    const onboardingRows = item.roleOnboarding ? [item.roleOnboarding] : [];
-    const onboardingProof = await readableArtifactIds(actor, workspaceId, "RoleOnboardingSession", onboardingRows);
-    const roleProof = await readableArtifactIds(actor, workspaceId, "Role", onboardingRows.map((row) => row.role));
-    safeItems.push({ ...item, topic: readableSessions.has(item.id) ? item.topic : null,
-      systemPrompt: null, roleOnboarding: item.roleOnboarding && onboardingProof.has(item.roleOnboarding.id) && roleProof.has(item.roleOnboarding.roleId) ? item.roleOnboarding : null, turns });
+  let total = 0;
+  let scanned = 0;
+  let cursor: string | undefined;
+  for (;;) {
+    const items = await prisma.conversationSession.findMany({
+      where: { workspaceId, userId },
+      include: { roleOnboarding: { include: { role: true } } },
+      orderBy: [{ updatedAt: "desc" }, { id: "desc" }], take: pageSize,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    });
+    scanned += items.length;
+    invariant(scanned <= 5000, 503, "INPUT_SCAN_LIMIT", "Conversation history needs a lineage rebuild before listing.");
+    const readableSessions = await readableArtifactIds(actor, workspaceId, "ConversationSession", items);
+    for (const item of items) {
+      const readableSession = readableSessions.has(item.id);
+      const isPageCandidate = total >= skip && total < skip + take;
+      // A proved session already qualifies for the total. Read its body only if
+      // displayed; unproved sessions require an independently readable prompt.
+      const turns = !readableSession || isPageCandidate ? await latestReadableTurn(item.id) : [];
+      if (!readableSession && !turns.length) continue;
+      const position = total++;
+      if (position < skip || position >= skip + take) continue;
+      const onboardingRows = item.roleOnboarding ? [item.roleOnboarding] : [];
+      const onboardingProof = await readableArtifactIds(actor, workspaceId, "RoleOnboardingSession", onboardingRows);
+      const roleProof = await readableArtifactIds(actor, workspaceId, "Role", onboardingRows.map((row) => row.role));
+      safeItems.push({ ...item, topic: readableSession ? item.topic : null,
+        systemPrompt: null, roleOnboarding: item.roleOnboarding && onboardingProof.has(item.roleOnboarding.id) && roleProof.has(item.roleOnboarding.roleId) ? item.roleOnboarding : null, turns });
+    }
+    if (items.length < pageSize) break;
+    cursor = items[items.length - 1].id;
   }
-  return { items: safeItems.slice(skip, skip + take), total: safeItems.length, take, skip };
+  return { items: safeItems, total, take, skip };
+
 }
 
 export async function getConversation(actor: AppActor, workspaceId: string, conversationId: string) {

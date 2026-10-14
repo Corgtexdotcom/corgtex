@@ -238,31 +238,33 @@ export async function POST(
             // Auto-name: generate a title from the first message if none exists
             if (!conversation.topic) {
               try {
-                if (!finalResult?.lineageRoots.length || !await isArtifactInputProofReadable(actor, workspaceId, finalResult.lineageRoots)) return;
-                const titleResponse = await defaultModelGateway.chat({
-                  workspaceId,
-                  ...catalogUsageContext(actor),
-                  taskType: "CLASSIFICATION",
-                  messages: [
-                    {
-                      role: "system",
-                      content: "Generate a very short title (max 6 words) for this conversation based on the user's message. Return ONLY the title text, nothing else. No quotes, no punctuation at the end.",
-                    },
-                    { role: "user", content: userMessage },
-                  ],
-                  signal: modelAbortController.signal,
-                });
-                if (!await isArtifactInputProofReadable(actor, workspaceId, finalResult.lineageRoots)) return;
-                const generatedTopic = titleResponse.content.trim().slice(0, 80);
-                if (generatedTopic) {
-                  await renameConversation(actor, {
+                if (finalResult?.lineageRoots.length && await isArtifactInputProofReadable(actor, workspaceId, finalResult.lineageRoots)) {
+                  const titleResponse = await defaultModelGateway.chat({
                     workspaceId,
-                    conversationId,
-                    topic: generatedTopic,
-                    lineageRoots: finalResult.lineageRoots,
+                    ...catalogUsageContext(actor),
+                    taskType: "CLASSIFICATION",
+                    messages: [
+                      {
+                        role: "system",
+                        content: "Generate a very short title (max 6 words) for this conversation based on the user's message. Return ONLY the title text, nothing else. No quotes, no punctuation at the end.",
+                      },
+                      { role: "user", content: userMessage },
+                    ],
+                    signal: modelAbortController.signal,
                   });
-                  if (cancellation.cancelled) return;
-                  controller.enqueue(encodeStreamPayload(encoder, { topic: generatedTopic }));
+                  if (await isArtifactInputProofReadable(actor, workspaceId, finalResult.lineageRoots)) {
+                    const generatedTopic = titleResponse.content.trim().slice(0, 80);
+                    if (generatedTopic) {
+                      await renameConversation(actor, {
+                        workspaceId,
+                        conversationId,
+                        topic: generatedTopic,
+                        lineageRoots: finalResult.lineageRoots,
+                      });
+                      if (cancellation.cancelled) return;
+                      controller.enqueue(encodeStreamPayload(encoder, { topic: generatedTopic }));
+                    }
+                  }
                 }
               } catch {
                 // Auto-naming is best-effort; don't break the stream

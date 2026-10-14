@@ -169,23 +169,23 @@ describe("strict verified file delivery", () => {
     expect(cancel).toHaveBeenCalledOnce();
   });
 
-  it("rechecks a paused consumer before and after every small delivery", async () => {
+  it("rechecks a paused consumer once immediately before every small delivery", async () => {
     const bytes = new Uint8Array(128 * 1024); let revoked = false;
     const authorize = vi.fn(async () => { if (revoked) throw denied(); });
     const source = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(bytes); controller.close(); } });
     const reader = (await authorizedDownloadStream(source, authorize, signal(), strictOptions(bytes))).getReader();
     const before = authorize.mock.calls.length;
     expect((await reader.read()).value!.byteLength).toBe(64 * 1024);
-    expect(authorize.mock.calls.length - before).toBe(2);
+    expect(authorize.mock.calls.length - before).toBe(1);
     revoked = true;
     await expect(reader.read()).rejects.toMatchObject({ code: "SUPPORT_AUTHORIZATION_REVOKED" });
   });
 
-  it("does not enqueue a copied chunk if its second delivery permission check is revoked", async () => {
+  it("does not enqueue a copied chunk if its delivery permission check is revoked", async () => {
     const bytes = new Uint8Array([1, 2]); const authorize = vi.fn().mockResolvedValue(undefined);
     const source = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(bytes); controller.close(); } });
     const reader = (await authorizedDownloadStream(source, authorize, signal(), strictOptions(bytes))).getReader();
-    authorize.mockResolvedValueOnce(undefined).mockRejectedValueOnce(denied());
+    authorize.mockRejectedValueOnce(denied());
     await expect(reader.read()).rejects.toMatchObject({ code: "SUPPORT_AUTHORIZATION_REVOKED" });
   });
 
