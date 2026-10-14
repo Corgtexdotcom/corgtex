@@ -5,14 +5,14 @@ import { fileURLToPath } from "node:url";
 import pg from "pg";
 
 interface Message {
-  event: "ready" | "prepared" | "complete" | "failed" | "publication-ready" | "read";
+  event: "ready" | "prepared" | "complete" | "failed" | "publication-ready" | "read" | "dispatch-complete";
   read?: { fetched: boolean; count: number; searchIds: string[]; downstreamReadable: boolean };
   error?: string;
   metrics?: { durationMs: number; peakRssBytes: number; modelBatches: number; embeddedChunks: number; dimensions: number; osMaxRssBytes: number; rssLimitBytes: number | null; phasePeakRssBytes: Record<string, number> };
 }
 
 /** A separate Node process, module cache, model gateway and Prisma pool per run. */
-export function startSqlIngestionProcess(environment: Record<string, string>, mode: "ingestion" | "web-reader" | "mcp-reader" = "ingestion") {
+export function startSqlIngestionProcess(environment: Record<string, string>, mode: "ingestion" | "web-reader" | "mcp-reader" | "outbox" = "ingestion") {
   const child = fork(fileURLToPath(import.meta.url), ["sql-ingestion-child", mode], {
     execArgv: ["--import", "tsx", ...(environment.SQL_TEST_HEAP_MB ? [`--max-old-space-size=${Number(environment.SQL_TEST_HEAP_MB)}`] : [])],
     env: { ...process.env, ...environment },
@@ -62,6 +62,8 @@ export function startSqlIngestionProcess(environment: Record<string, string>, mo
     pid: child.pid,
     ready: () => waitFor("ready"),
     run: (sourceId: string, gatePreparation = true, gatePublication = false) => send(child, { command: "run", sourceId, gatePreparation, gatePublication }),
+    dispatchAgain: () => send(child, { command: "dispatch-again" }),
+    dispatchComplete: () => waitFor("dispatch-complete", 120_000),
     publicationReady: () => waitFor("publication-ready"),
     releasePublication: () => send(child, { command: "release-publication" }),
     read: async (workspaceId: string, userId: string, chunkId: string) => {
@@ -103,9 +105,12 @@ async function runChild() {
   }, 10);
   rssGuard.unref();
   const { defaultModelGateway } = await import("@corgtex/models");
+  let runPendingJobs: typeof import("../../workflows/src/outbox")["runPendingJobs"] | undefined;
   let syncExternalDataSource: typeof import("./puller")["syncExternalDataSource"] | undefined;
   if (mode === "ingestion") {
     syncExternalDataSource = (await import("./puller")).syncExternalDataSource;
+  } else if (mode === "outbox") {
+    runPendingJobs = (await import("../../workflows/src/outbox")).runPendingJobs;
   } else if (mode === "web-reader") {
     // A genuine cold serving process: no ingestion module has run. Exercise the
     // production Next Node bootstrap, then the ordinary Knowledge entrypoint.
@@ -218,6 +223,11 @@ async function runChild() {
     } else if (message.command === "release") {
       releasePreparation?.(message.error);
       releasePreparation = undefined;
+    } else if (message.command === "dispatch-again" && runPendingJobs) {
+      void runPendingJobs("sql-process-worker", 25, 5).then(
+        () => process.send?.({ event: "dispatch-complete" }),
+        (error: unknown) => process.send?.({ event: "failed", error: String(error) }),
+      );
     } else if (message.command === "run" && message.sourceId) {
       phase = "claim-and-native-capture";
       gatePreparation = message.gatePreparation ?? true;
@@ -230,8 +240,8 @@ async function runChild() {
         process.send?.({ event, error, metrics: { durationMs: performance.now() - started,
           peakRssBytes: Math.max(peakRssBytes, process.memoryUsage().rss), osMaxRssBytes: osMaxRssBytes(), rssLimitBytes, phasePeakRssBytes, modelBatches, embeddedChunks, dimensions } });
       };
-      if (!syncExternalDataSource) throw new Error("Cold reader cannot start ingestion");
-      void syncExternalDataSource(message.sourceId).then(
+      if (!syncExternalDataSource && !runPendingJobs) throw new Error("Cold reader cannot start ingestion");
+      void (runPendingJobs ? runPendingJobs("sql-process-worker", 25, 5) : syncExternalDataSource!(message.sourceId)).then(
         () => finish("complete"),
         (error: unknown) => finish("failed", error instanceof Error ? error.message : String(error)),
       );

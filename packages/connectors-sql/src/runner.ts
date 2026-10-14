@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import { sqlIngestionConfigurationFingerprint } from "@corgtex/domain";
 import type {
@@ -7,12 +8,24 @@ import type {
 import { startAttemptHeartbeat } from "./attempt-heartbeat";
 import "./native-driver";
 
+export interface SqlIngestionExecution {
+  workspaceId: string;
+  signal: AbortSignal;
+  assertCurrent(tx?: Prisma.TransactionClient): Promise<void>;
+  beforePublication(): Promise<void>;
+}
+
 /** Typed orchestration; production binds the authority's actual runtime ports. */
 export function createSqlIngestionRunner(ports: SqlIngestionAttemptPort & SqlKnowledgePublicationPort) {
-  return async function syncExternalDataSource(sourceId: string) {
+  return async function syncExternalDataSource(sourceId: string, execution?: SqlIngestionExecution) {
+    await execution?.assertCurrent();
     const source = await prisma.externalDataSource.findUnique({ where: { id: sourceId } });
     if (!source || !source.isActive || source.archivedAt) {
       throw new Error(`Data source not found or inactive: ${sourceId}`);
+    }
+    if (source.driverType !== "postgres") throw new Error(`Unsupported driver: ${source.driverType}`);
+    if (execution && source.workspaceId !== execution.workspaceId) {
+      throw new Error("SQL source workspace does not match admitted execution.");
     }
     const log = await prisma.externalDataSyncLog.create({ data: { sourceId } });
     const fingerprint = sqlIngestionConfigurationFingerprint(source);
@@ -21,7 +34,12 @@ export function createSqlIngestionRunner(ports: SqlIngestionAttemptPort & SqlKno
     let heartbeat: ReturnType<typeof startAttemptHeartbeat> | undefined;
     let publication: SqlPublicationIdentity | undefined;
     let preparationStopped = false;
+    const cancelAttempt = () => {
+      if (attempt) void ports.failSqlIngestionAttempt({ attempt, error: "SQL_WORKFLOW_LEASE_LOST", logId: log.id }).catch(() => undefined);
+    };
+    execution?.signal.addEventListener("abort", cancelAttempt, { once: true });
     try {
+      await execution?.assertCurrent();
       // Claim precedes parsing, decryption and native I/O. Even unchanged cursor
       // text cannot let an obsolete attempt own terminal status or publication.
       attempt = await ports.claimSqlIngestionAttempt({
@@ -29,19 +47,27 @@ export function createSqlIngestionRunner(ports: SqlIngestionAttemptPort & SqlKno
         expectedCursor: source.lastCursorValue, logId: log.id,
       });
       const claimed = attempt;
-      heartbeat = startAttemptHeartbeat(() => ports.renewSqlIngestionAttempt(claimed));
+      heartbeat = startAttemptHeartbeat(async () => {
+        await execution?.assertCurrent();
+        return ports.renewSqlIngestionAttempt(claimed);
+      });
+      await execution?.assertCurrent();
       receipt = await ports.captureSqlIngestionAttempt(claimed);
       await heartbeat.assertHealthy();
+      await execution?.assertCurrent();
       const prepared = await ports.prepareSqlKnowledgeAttempt({ attempt: claimed, receipt });
       await heartbeat.assertHealthy();
+      await execution?.assertCurrent();
       const result = await ports.publishPreparedSqlKnowledgeAttempt({
         attempt: claimed,
         prepared,
         async beforePublication() {
           await heartbeat!.stop();
+          await execution?.beforePublication();
           preparationStopped = true;
         },
         async commit(tx, identity) {
+          await execution?.assertCurrent(tx);
           if (!preparationStopped || identity.workspaceId !== source.workspaceId || identity.sourceId !== sourceId
             || identity.attemptId !== claimed.attemptId || identity.generation !== claimed.generation
             || identity.configurationFingerprint !== fingerprint || !identity.publicationId
@@ -89,6 +115,7 @@ export function createSqlIngestionRunner(ports: SqlIngestionAttemptPort & SqlKno
       }
       throw error;
     } finally {
+      execution?.signal.removeEventListener("abort", cancelAttempt);
       await heartbeat?.stop().catch(() => undefined);
       if (receipt) await ports.disposeSqlIngestionCapture(receipt).catch(() => undefined);
     }

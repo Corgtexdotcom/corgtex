@@ -25,6 +25,9 @@ vi.mock("@corgtex/shared", () => ({
     externalDataSyncLog: { create: mocked.logCreate, update: mocked.logUpdate, updateMany: mocked.logUpdate },
   },
 }));
+vi.mock("@corgtex/domain", async () => ({
+  sqlIngestionConfigurationFingerprint: (await import("../../domain/src/sql-ingestion-attempt")).sqlIngestionConfigurationFingerprint,
+}));
 vi.mock("@corgtex/knowledge", () => ({ syncKnowledgeForSource: mocked.knowledge }));
 vi.mock("./encryption", () => ({ decrypt: mocked.decrypt }));
 vi.mock("./postgres", () => ({

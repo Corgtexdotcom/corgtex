@@ -131,3 +131,50 @@ describe("typed SQL publication orchestration", () => {
     expect(ports.failSqlIngestionAttempt).toHaveBeenCalledWith({ attempt, logId: "log", error: expect.stringContaining("FENCE_LOST") });
   });
 });
+
+describe("outbox execution ownership", () => {
+  function execution() {
+    const controller = new AbortController();
+    return { controller, workspaceId: source.workspaceId, signal: controller.signal,
+      assertCurrent: vi.fn().mockResolvedValue(undefined), beforePublication: vi.fn().mockResolvedValue(undefined) };
+  }
+  it("rejects driver or workspace changes before native claim", async () => {
+    const lease = execution();
+    mocked.find.mockResolvedValue({ ...source, driverType: "unknown" });
+    await expect(createSqlIngestionRunner(ports)(source.id, lease)).rejects.toThrow(/driver|workspace/);
+    mocked.find.mockResolvedValue({ ...source, workspaceId: "other" });
+    await expect(createSqlIngestionRunner(ports)(source.id, lease)).rejects.toThrow(/driver|workspace/);
+    expect(ports.claimSqlIngestionAttempt).not.toHaveBeenCalled();
+  });
+  it("checks execution after capture before any models", async () => {
+    const lease = execution();
+    vi.mocked(ports.captureSqlIngestionAttempt).mockImplementation(async () => {
+      lease.assertCurrent.mockRejectedValue(new Error("SQL_WORKFLOW_LEASE_LOST"));
+      return receipt;
+    });
+    await expect(createSqlIngestionRunner(ports)(source.id, lease)).rejects.toThrow("SQL_WORKFLOW_LEASE_LOST");
+    expect(ports.prepareSqlKnowledgeAttempt).not.toHaveBeenCalled();
+  });
+  it("fences the real publication callback before checkpoint and log writes", async () => {
+    const lease = execution();
+    lease.assertCurrent.mockImplementation(async (transaction?: Prisma.TransactionClient) => {
+      if (transaction) throw new Error("SQL_WORKFLOW_LEASE_LOST");
+    });
+    await expect(createSqlIngestionRunner(ports)(source.id, lease)).rejects.toThrow("SQL_WORKFLOW_LEASE_LOST");
+    expect(lease.beforePublication).toHaveBeenCalledOnce();
+    expect(lease.assertCurrent).toHaveBeenCalledWith(tx);
+    expect(updateCheckpoint).not.toHaveBeenCalled();
+    expect(completeLog).not.toHaveBeenCalled();
+  });
+  it("invalidates the same native attempt on workflow heartbeat loss during models", async () => {
+    const lease = execution();
+    vi.mocked(ports.prepareSqlKnowledgeAttempt).mockImplementation(async () => {
+      lease.controller.abort(new Error("SQL_WORKFLOW_LEASE_LOST"));
+      lease.assertCurrent.mockRejectedValue(new Error("SQL_WORKFLOW_LEASE_LOST"));
+      return prepared;
+    });
+    await expect(createSqlIngestionRunner(ports)(source.id, lease)).rejects.toThrow("SQL_WORKFLOW_LEASE_LOST");
+    expect(ports.failSqlIngestionAttempt).toHaveBeenCalledWith({ attempt, error: "SQL_WORKFLOW_LEASE_LOST", logId: "log" });
+    expect(ports.publishPreparedSqlKnowledgeAttempt).not.toHaveBeenCalled();
+  });
+});

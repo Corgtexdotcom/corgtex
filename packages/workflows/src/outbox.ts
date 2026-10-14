@@ -1,3 +1,4 @@
+import { startSqlJobLease, withSqlJobAdmission } from "./sql-job-admission";
 import { captureCurrentAdviceNotification } from "./notification-event-lineage";
 import { enqueueCrmLineageJob } from "./crm-job-lineage";
 import type { EventStatus, NewspaperCadence, Prisma, WorkflowJobStatus } from "@prisma/client";
@@ -510,8 +511,8 @@ async function claimPendingJobs(workerId: string, batchSize: number) {
 
   return prisma.$transaction(async (tx) => {
     return tx.$queryRaw<ClaimedJob[]>`
-      WITH candidates AS (
-        SELECT job.id
+      WITH eligible AS (
+        SELECT job.id, job.type, job."createdAt"
         FROM "WorkflowJob" AS job
         LEFT JOIN "WorkflowJob" AS dep ON dep.id = job."dependsOnJobId"
         WHERE (
@@ -524,8 +525,14 @@ async function claimPendingJobs(workerId: string, batchSize: number) {
           WHERE flag."workspaceId" = job."workspaceId"
             AND flag.flag = ${OPERATOR_IMPORT_INACTIVE_FLAG} AND flag.enabled = true
         )
-        ORDER BY job."createdAt" ASC
-        LIMIT ${batchSize}
+      ), head AS (
+        SELECT job.id, job.type FROM "WorkflowJob" AS job JOIN eligible USING (id)
+        ORDER BY job."createdAt", job.id LIMIT 1 FOR UPDATE OF job SKIP LOCKED
+      ), candidates AS (
+        SELECT job.id FROM "WorkflowJob" AS job JOIN eligible USING (id) CROSS JOIN head
+        WHERE (head.type = 'data-source.sync' AND job.id = head.id)
+           OR (head.type <> 'data-source.sync' AND job.type <> 'data-source.sync')
+        ORDER BY job."createdAt", job.id LIMIT ${batchSize}
         FOR UPDATE OF job SKIP LOCKED
       )
       UPDATE "WorkflowJob" AS job
@@ -651,7 +658,7 @@ async function scheduleRecurringRecorderCalendarSync(workspaceId: string, source
   });
 }
 
-async function handleJob(job: ClaimedJob, workerId: string) {
+async function handleJob(job: ClaimedJob, workerId: string, sqlLease?: ReturnType<typeof startSqlJobLease>) {
   const payload = job.payload as Record<string, unknown>;
 
   if (job.type === FINANCE_REPORT_IMPORT_EXTRACTION_JOB_TYPE) {
@@ -817,7 +824,8 @@ async function handleJob(job: ClaimedJob, workerId: string) {
 
   if (job.type === "data-source.sync") {
     const { syncExternalDataSource } = await import("@corgtex/connectors-sql");
-    await syncExternalDataSource((payload as { sourceId: string }).sourceId);
+    if (!sqlLease) throw new Error("SQL workflow has no exclusive admission lease.");
+    await syncExternalDataSource((payload as { sourceId: string }).sourceId, sqlLease);
     return;
   }
 
@@ -1229,11 +1237,21 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
   let failed = false;
   let failure: unknown = null;
   let superseded = false;
+  let sqlLease: ReturnType<typeof startSqlJobLease> | undefined;
   try {
+    if (job.type === "data-source.sync") {
+      const sourceId = (job.payload as { sourceId?: unknown } | null)?.sourceId;
+      if (!job.workspaceId || typeof sourceId !== "string" || !sourceId || job.lockedBy !== workerId) {
+        throw new Error("Invalid SQL workflow identity.");
+      }
+      sqlLease = startSqlJobLease({ id: job.id, workspaceId: job.workspaceId,
+        lockedBy: workerId, attempts: job.attempts, sourceId });
+      await sqlLease.assertCurrent();
+    }
     const diagnostic = job.type === RELEASE_DIAGNOSTIC_JOB_TYPE;
     await withWorkspaceSupportExecution(job, () => withMcpConnectionExecution(job, async () => {
       await recordMeetingProgressForJob(job, "ACTIVE");
-      const result = await (diagnostic ? handleReleaseDiagnostic(job, workerId) : handleJob(job, workerId));
+      const result = await (diagnostic ? handleReleaseDiagnostic(job, workerId) : handleJob(job, workerId, sqlLease));
       superseded = job.type === "agent.brain-source-regenerate"
         && !!result && typeof result === "object" && "phase" in result && result.phase === "SUPERSEDED";
       await recordMeetingProgressForJob(job, resultWasSkipped(result) ? "SKIPPED" : "COMPLETED");
@@ -1241,6 +1259,13 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
     if (!diagnostic) {
       if (job.type === "agent.brain-source-regenerate" && !superseded) {
         // A reclaimed job may still have an older model call in flight.
+        await prisma.workflowJob.updateMany({
+          where: { id: job.id, workspaceId: job.workspaceId, type: job.type,
+            status: "RUNNING", lockedBy: workerId, attempts: job.attempts },
+          data: { status: "COMPLETED", completedAt: new Date(), error: null, lockedAt: null, lockedBy: null },
+        });
+      } else if (job.type === "data-source.sync") {
+        await sqlLease?.stop();
         await prisma.workflowJob.updateMany({
           where: { id: job.id, workspaceId: job.workspaceId, type: job.type,
             status: "RUNNING", lockedBy: workerId, attempts: job.attempts },
@@ -1263,7 +1288,7 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
         where: { id: job.id, workspaceId: job.workspaceId, type: RELEASE_DIAGNOSTIC_JOB_TYPE, status: "RUNNING", lockedBy: workerId },
         data: { status: "FAILED", lockedAt: null, lockedBy: null, error: "Release diagnostic failed; reconcile the exact operation." },
       });
-    } else if (job.type === "agent.brain-source-regenerate") {
+    } else if (job.type === "agent.brain-source-regenerate" || job.type === "data-source.sync") {
       const status: WorkflowJobStatus = job.attempts >= MAX_ATTEMPTS || executionAuthorizationRevoked(error) ? "FAILED" : "PENDING";
       await prisma.workflowJob.updateMany({
         where: { id: job.id, workspaceId: job.workspaceId, type: job.type,
@@ -1276,6 +1301,8 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
     } else {
       await failJob(job, error);
     }
+  } finally {
+    await sqlLease?.stop();
   }
 
   // Emit per-job timing outside the try/catch so a logging error can never be
@@ -1308,9 +1335,14 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
 }
 
 export async function runPendingJobs(workerId: string, batchSize = DEFAULT_BATCH_SIZE, concurrency = DEFAULT_JOB_CONCURRENCY) {
-  const jobs = await claimPendingJobs(workerId, batchSize);
-  await runWithBoundedConcurrency(jobs, concurrency, (job) => processClaimedJob(workerId, job));
-  return jobs.length;
+  return withSqlJobAdmission(async () => {
+    // The oldest eligible job selects this turn's lane. SQL claims exactly one
+    // job; ordinary turns retain configured concurrency. Excess SQL stays pending
+    // without consuming a lease/attempt, and FIFO turns prevent lane starvation.
+    const jobs = await claimPendingJobs(workerId, batchSize);
+    await runWithBoundedConcurrency(jobs, concurrency, (job) => processClaimedJob(workerId, job));
+    return jobs.length;
+  });
 }
 
 export async function scheduleDripCampaigns() {

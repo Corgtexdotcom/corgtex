@@ -31,6 +31,7 @@ beforeAll(async () => {
 afterEach(async () => {
   await Promise.all(children.splice(0).map((child) => child.close()));
   if (db) {
+    await db.workflowJob.deleteMany({ where: { workspaceId: { in: workspaces } } });
     await db.workspace.deleteMany({ where: { id: { in: workspaces.splice(0) } } });
     await db.user.deleteMany({ where: { id: { in: users.splice(0) } } });
   }
@@ -61,7 +62,7 @@ async function setup() {
   return { source, table };
 }
 
-async function child(mode: "ingestion" | "web-reader" | "mcp-reader" = "ingestion", budgeted = false) {
+async function child(mode: "ingestion" | "web-reader" | "mcp-reader" | "outbox" = "ingestion", budgeted = false) {
   const process = startSqlIngestionProcess({
     DATABASE_URL: fixture.connectionString,
     ENCRYPTION_KEY: encryptionKey,
@@ -132,7 +133,15 @@ describe("native SQL publication across independent processes", () => {
     const { source, table } = await setup();
     await fixture.writer.query(`DELETE FROM ${table}`);
     await fixture.writer.query(`INSERT INTO ${table} SELECT n, n, repeat('synthetic ', 180) FROM generate_series(1, 4000) AS n`);
-    const worker = await child("ingestion", true);
+    const second = await setup();
+    const createdAt = new Date(Date.now() - 60_000);
+    const firstJob = await db.workflowJob.create({ data: { workspaceId: source.workspaceId, type: "data-source.sync", runAfter: new Date(Date.now() - 86_400_000),
+      payload: { sourceId: source.id }, createdAt } });
+    const waitingSql = await db.workflowJob.create({ data: { workspaceId: second.source.workspaceId, type: "data-source.sync", runAfter: new Date(Date.now() - 86_400_000),
+      payload: { sourceId: second.source.id }, createdAt: new Date(createdAt.getTime() + 1) } });
+    const waitingNormal = await db.workflowJob.create({ data: { workspaceId: source.workspaceId, type: "synthetic.noop", runAfter: new Date(Date.now() - 86_400_000),
+      payload: {}, createdAt: new Date(createdAt.getTime() + 2) } });
+    const worker = await child("outbox", true);
     const capacityUser = await db.user.create({ data: { email: `${randomUUID()}@example.test`, passwordHash: "synthetic", displayName: "Capacity reader" } });
     users.push(capacityUser.id);
     await db.member.create({ data: { workspaceId: source.workspaceId, userId: capacityUser.id, role: "ADMIN" } });
@@ -157,12 +166,19 @@ describe("native SQL publication across independent processes", () => {
       await worker.run(source.id);
       await worker.prepared();
       expect(await db.knowledgeChunk.count({ where: { workspaceId: source.workspaceId } })).toBe(0);
+      expect(await db.workflowJob.findMany({ where: { id: { in: [waitingSql.id, waitingNormal.id] } } }))
+        .toEqual(expect.arrayContaining([expect.objectContaining({ id: waitingSql.id, status: "PENDING", attempts: 0, lockedAt: null }),
+          expect.objectContaining({ id: waitingNormal.id, status: "PENDING", attempts: 0, lockedAt: null })]));
       await worker.release();
       completed = await worker.complete(180_000);
     } finally {
       stopped = true;
       try { await observation; afterQueries = await queryCount(); } finally { await observer.end(); }
     }
+    expect(await db.workflowJob.findUniqueOrThrow({ where: { id: firstJob.id } })).toMatchObject({ status: "COMPLETED", attempts: 1 });
+    expect(await db.workflowJob.findMany({ where: { id: { in: [waitingSql.id, waitingNormal.id] } } }))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ id: waitingSql.id, status: "PENDING", attempts: 0 }),
+        expect.objectContaining({ id: waitingNormal.id, status: "PENDING", attempts: 0 })]));
     const metrics = { ...completed.metrics, longestChunkTransactionMs,
       databaseQueries: afterQueries && beforeQueries ? {
         topLevel: afterQueries.top - beforeQueries.top - observationQueries - 1,
@@ -180,10 +196,21 @@ describe("native SQL publication across independent processes", () => {
     const stored = await db.externalDataSource.findUniqueOrThrow({ where: { id: source.id } });
     expect(Object.values(JSON.parse(stored.lastCursorValue!).tables)).toContainEqual(expect.objectContaining({ values: ["4000", "4000"] }));
     const first = await db.knowledgeChunk.findFirstOrThrow({ where: { workspaceId: source.workspaceId } });
+    const readObserver = new pg.Client({ connectionString: fixture.connectionString });
+    await readObserver.connect();
+    const readQueryCount = async () => hasStatistics ? Number((await readObserver.query(
+      "SELECT coalesce(sum(calls),0)::float8 AS calls FROM pg_stat_statements WHERE toplevel AND dbid = (SELECT oid FROM pg_database WHERE datname=current_database())")).rows[0].calls) : null;
+    const readQueriesBefore = await readQueryCount();
     const startedRead = performance.now();
-    const read = await worker.read(source.workspaceId, capacityUser.id, first.id);
+    let read;
+    try { read = await worker.read(source.workspaceId, capacityUser.id, first.id); }
+    finally { if (!read) await readObserver.end(); }
+    const readQueriesAfter = await readQueryCount();
+    await readObserver.end();
     if (process.env.PUN85_METRICS_FILE) await writeFile(process.env.PUN85_METRICS_FILE,
-      JSON.stringify({ ...metrics, readDurationMs: performance.now() - startedRead, read: read.read, readProcessMetrics: read.metrics }, null, 2));
+      JSON.stringify({ ...metrics, readDurationMs: performance.now() - startedRead,
+        readTopLevelQueries: readQueriesAfter !== null && readQueriesBefore !== null ? readQueriesAfter - readQueriesBefore - 1 : null,
+        read: read.read, readProcessMetrics: read.metrics }, null, 2));
     expect(read.metrics?.osMaxRssBytes).toBeLessThan(1024 ** 3);
     expect(read.read).toMatchObject({ fetched: true, count: chunks.length, downstreamReadable: true });
     expect(read.read?.searchIds.length).toBeGreaterThan(0);
@@ -446,5 +473,99 @@ describe("native SQL publication across independent processes", () => {
       await fixture.writer.query(`DROP TRIGGER "${trigger}" ON "${target}"`);
       await fixture.writer.query(`DROP FUNCTION ${functionName}()`);
     }
+  });
+});
+
+
+describe("exclusive SQL outbox admission", () => {
+  it("keeps five ordinary jobs concurrent and quiesces all before the SQL turn", async () => {
+    const { source } = await setup();
+    const born = Date.now() - 60_000, key = randomBytes(4).readUInt32BE() % 2_000_000_000;
+    const name = `normal_pause_${randomBytes(6).toString("hex")}`, fn = fixture.table(name);
+    await db.workflowJob.createMany({ data: Array.from({ length: 5 }, (_, index) => ({ workspaceId: source.workspaceId,
+      type: "synthetic.noop", payload: {}, createdAt: new Date(born + index), runAfter: new Date(Date.now() - 86_400_000) })) });
+    const sql = await db.workflowJob.create({ data: { workspaceId: source.workspaceId, type: "data-source.sync",
+      payload: { sourceId: source.id }, createdAt: new Date(born + 10), runAfter: new Date(Date.now() - 86_400_000) } });
+    const worker = await child("outbox");
+    const observer = new pg.Client({ connectionString: fixture.connectionString });
+    await observer.connect();
+    try {
+      await fixture.writer.query("SELECT pg_advisory_lock($1)", [key]);
+      await fixture.writer.query(`CREATE FUNCTION ${fn}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        IF NEW."workspaceId" = '${source.workspaceId}' AND NEW.type = 'synthetic.noop' AND NEW.status = 'COMPLETED'
+        THEN PERFORM pg_advisory_xact_lock(${key}); END IF; RETURN NEW; END $$`);
+      await fixture.writer.query(`CREATE TRIGGER "${name}" BEFORE UPDATE ON "WorkflowJob" FOR EACH ROW EXECUTE FUNCTION ${fn}()`);
+      await worker.run(source.id, false);
+      const deadline = Date.now() + 15_000;
+      let active = 0;
+      while (Date.now() < deadline) {
+        active = Number((await observer.query(`SELECT count(*) FROM pg_stat_activity WHERE wait_event='advisory' AND query LIKE '%WorkflowJob%'`)).rows[0].count);
+        if (active === 5) break;
+        await delay(20);
+      }
+      expect(active).toBe(5);
+      await worker.dispatchAgain();
+      await delay(100);
+      expect(await db.workflowJob.findUniqueOrThrow({ where: { id: sql.id } })).toMatchObject({ status: "PENDING", attempts: 0, lockedAt: null });
+      expect(await db.sqlIngestionAttempt.count({ where: { sourceId: source.id } })).toBe(0);
+      await fixture.writer.query("SELECT pg_advisory_unlock($1)", [key]);
+      await worker.complete();
+      await worker.dispatchComplete();
+      expect(await db.workflowJob.findUniqueOrThrow({ where: { id: sql.id } })).toMatchObject({ status: "COMPLETED", attempts: 1 });
+    } finally {
+      await fixture.writer.query("SELECT pg_advisory_unlock($1)", [key]);
+      await worker.close();
+      await fixture.writer.query(`DROP TRIGGER IF EXISTS "${name}" ON "WorkflowJob"`);
+      await fixture.writer.query(`DROP FUNCTION IF EXISTS ${fn}()`);
+      await observer.end();
+    }
+  });
+
+  it("leaves other work unclaimed during SQL and fairly releases overlapping dispatch calls", async () => {
+    const first = await setup(), second = await setup();
+    const born = Date.now() - 60_000;
+    const jobs = [];
+    for (const [index, source] of [first.source, second.source].entries()) {
+      jobs.push(await db.workflowJob.create({ data: { workspaceId: source.workspaceId, type: "data-source.sync", runAfter: new Date(Date.now() - 86_400_000),
+        payload: { sourceId: source.id }, createdAt: new Date(born + index * 2) } }));
+    }
+    const normal = await db.workflowJob.create({ data: { workspaceId: first.source.workspaceId,
+      type: "synthetic.noop", runAfter: new Date(Date.now() - 86_400_000), payload: {}, createdAt: new Date(born + 1) } });
+    const worker = await child("outbox");
+    await worker.run(first.source.id);
+    await worker.prepared();
+    await worker.dispatchAgain();
+    await delay(100);
+    expect(await db.workflowJob.findMany({ where: { id: { in: [jobs[1].id, normal.id] } } }))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ id: jobs[1].id, status: "PENDING", attempts: 0, lockedAt: null }),
+        expect.objectContaining({ id: normal.id, status: "PENDING", attempts: 0, lockedAt: null })]));
+    await worker.release();
+    await worker.complete();
+    await worker.dispatchComplete();
+    expect(await db.workflowJob.findUniqueOrThrow({ where: { id: normal.id } })).toMatchObject({ status: "COMPLETED", attempts: 1 });
+    expect(await db.workflowJob.findUniqueOrThrow({ where: { id: jobs[1].id } })).toMatchObject({ status: "PENDING", attempts: 0 });
+    await worker.dispatchAgain();
+    await worker.dispatchComplete();
+    expect(await db.workflowJob.findUniqueOrThrow({ where: { id: jobs[1].id } })).toMatchObject({ status: "COMPLETED", attempts: 1 });
+    expect(await db.sqlIngestionAttempt.count({ where: { sourceId: second.source.id } })).toBe(1);
+  });
+
+  it("rolls back publication and never overwrites a workflow reclaimed after provider replay", async () => {
+    const { source } = await setup();
+    const job = await db.workflowJob.create({ data: { workspaceId: source.workspaceId, type: "data-source.sync", runAfter: new Date(Date.now() - 86_400_000), payload: { sourceId: source.id } } });
+    const worker = await child("outbox");
+    await worker.run(source.id, true, true);
+    await worker.prepared();
+    await worker.release();
+    await worker.publicationReady();
+    await db.workflowJob.update({ where: { id: job.id }, data: { lockedBy: "replacement-worker", attempts: { increment: 1 }, lockedAt: new Date() } });
+    await worker.releasePublication();
+    await worker.complete(); // Dispatcher records the owned failure instead of rejecting its cycle.
+    expect(await db.workflowJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ status: "RUNNING", lockedBy: "replacement-worker", attempts: 2, error: null });
+    expect(await db.knowledgeChunk.count({ where: { workspaceId: source.workspaceId } })).toBe(0);
+    expect(await cacheVersion(source.workspaceId)).toBe(0);
+    expect(await db.externalDataSource.findUniqueOrThrow({ where: { id: source.id } })).toMatchObject({ lastCursorValue: null, lastSyncAt: null });
+    expect(await db.externalDataSyncLog.findFirstOrThrow({ where: { sourceId: source.id } })).toMatchObject({ chunksCreated: 0, error: "SQL_WORKFLOW_LEASE_LOST" });
+    expect(await db.sqlKnowledgePublication.findFirstOrThrow({ where: { sourceId: source.id } })).toMatchObject({ status: "PREPARED" });
   });
 });
