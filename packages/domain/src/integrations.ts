@@ -538,110 +538,200 @@ export async function enqueueExternalDataSourceSync(actor: AppActor, params: {
   });
 }
 
-export async function refreshOAuthTokenIfNeeded(connectionId: string): Promise<OAuthConnection> {
-  let connection = await prisma.oAuthConnection.findUnique({
-    where: { id: connectionId },
-  });
+type CalendarConnectionScope = {
+  userId: string;
+  workspaceId: string;
+  provider: OAuthProvider;
+};
 
-  if (!connection) throw new Error("Connection not found");
+function isCalendarAvailabilityConnection(connection: OAuthConnection, scope: CalendarConnectionScope) {
+  const calendar = syncSettingsRecord(syncSettingsRecord(connection.syncSettings).calendar);
+  return connection.userId === scope.userId && connection.workspaceId === scope.workspaceId
+    && connection.provider === scope.provider && connection.status === "ACTIVE"
+    && hasCalendarSyncScope(scope.provider, connection.scopes) && calendar.enabled !== false;
+}
+
+function assertOAuthConnectionActive(connection: OAuthConnection | null, scope?: CalendarConnectionScope): asserts connection is OAuthConnection {
+  invariant(connection?.status === "ACTIVE" && (!scope || isCalendarAvailabilityConnection(connection, scope)),
+    409, "CALENDAR_CONNECTION_UNAVAILABLE", "The calendar connection is no longer eligible.");
+}
+
+function activeOAuthConnectionWhere(connection: OAuthConnection) {
+  // A refresh started before pause/disconnect/reconnect must not overwrite the new row.
+  return {
+    id: connection.id, status: "ACTIVE" as const, updatedAt: connection.updatedAt,
+    userId: connection.userId, workspaceId: connection.workspaceId, provider: connection.provider,
+    accessToken: connection.accessToken, refreshToken: connection.refreshToken,
+    tokenStorageVersion: connection.tokenStorageVersion,
+  };
+}
+
+async function updateActiveOAuthTokens(connection: OAuthConnection, data: Prisma.OAuthConnectionUpdateManyMutationInput, scope?: CalendarConnectionScope) {
+  const written = await prisma.oAuthConnection.updateMany({ where: activeOAuthConnectionWhere(connection), data });
+  invariant(written.count === 1, 409, "CALENDAR_CONNECTION_UNAVAILABLE", "The calendar connection changed during refresh.");
+  const current = await prisma.oAuthConnection.findUnique({ where: { id: connection.id } });
+  assertOAuthConnectionActive(current, scope);
+  invariant(current.accessToken === data.accessToken && current.tokenStorageVersion === ENCRYPTED_TOKEN_STORAGE_VERSION,
+    409, "CALENDAR_CONNECTION_UNAVAILABLE", "The calendar connection changed during refresh.");
+  return current;
+}
+
+export async function refreshOAuthTokenIfNeeded(connectionId: string, calendarScope?: CalendarConnectionScope): Promise<OAuthConnection> {
+  let connection = await prisma.oAuthConnection.findUnique({ where: { id: connectionId } });
+  assertOAuthConnectionActive(connection, calendarScope);
 
   if (connection.tokenStorageVersion !== ENCRYPTED_TOKEN_STORAGE_VERSION) {
     const refreshToken = oauthRefreshToken(connection);
-    const accessTokenEnc = encryptOAuthToken(oauthAccessToken(connection));
-    const refreshTokenEnc = refreshToken ? encryptOAuthToken(refreshToken) : null;
-    await prisma.oAuthConnection.update({
-      where: { id: connection.id },
-      data: {
-        accessToken: accessTokenEnc,
-        refreshToken: refreshTokenEnc,
-        tokenStorageVersion: ENCRYPTED_TOKEN_STORAGE_VERSION,
-      },
-    });
-    connection = {
-      ...connection,
-      accessToken: accessTokenEnc,
-      refreshToken: refreshTokenEnc,
+    connection = await updateActiveOAuthTokens(connection, {
+      accessToken: encryptOAuthToken(oauthAccessToken(connection)),
+      refreshToken: refreshToken ? encryptOAuthToken(refreshToken) : null,
       tokenStorageVersion: ENCRYPTED_TOKEN_STORAGE_VERSION,
-    };
+    }, calendarScope);
   }
 
-  // Refresh if less than 5 minutes remain
+  // Refresh if less than 5 minutes remain. The return contract remains an encrypted row.
   if (connection.expiresAt && connection.expiresAt.getTime() - Date.now() < 5 * 60 * 1000) {
     const refreshToken = oauthRefreshToken(connection);
-    if (!refreshToken) {
-      throw new Error("Cannot refresh token without refresh_token");
+    invariant(refreshToken, 409, "CALENDAR_CONNECTION_UNAVAILABLE", "Cannot refresh token without refresh_token.");
+    const google = connection.provider === "GOOGLE";
+    const response = await fetch(google
+      ? "https://oauth2.googleapis.com/token"
+      : "https://login.microsoftonline.com/organizations/oauth2/v2.0/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: (google ? process.env.GOOGLE_CLIENT_ID : process.env.MICROSOFT_CLIENT_ID) || "",
+        client_secret: (google ? process.env.GOOGLE_CLIENT_SECRET : process.env.MICROSOFT_CLIENT_SECRET) || "",
+        refresh_token: refreshToken,
+        grant_type: "refresh_token",
+      }),
+    });
+    if (!response.ok) {
+      await prisma.oAuthConnection.updateMany({
+        where: activeOAuthConnectionWhere(connection),
+        data: { status: "ERROR", lastSyncError: "Failed to refresh calendar token" },
+      });
+      throw new Error("Failed to refresh calendar token");
     }
-
-    if (connection.provider === "GOOGLE") {
-      const response = await fetch("https://oauth2.googleapis.com/token", {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          client_id: process.env.GOOGLE_CLIENT_ID || "",
-          client_secret: process.env.GOOGLE_CLIENT_SECRET || "",
-          refresh_token: refreshToken,
-          grant_type: "refresh_token",
-        }),
-      });
-
-      if (!response.ok) {
-        await prisma.oAuthConnection.update({
-          where: { id: connection.id },
-          data: { status: "ERROR", lastSyncError: "Failed to refresh Google token" },
-        });
-        throw new Error("Failed to refresh Google token");
-      }
-      const data = await response.json();
-
-      return prisma.oAuthConnection.update({
-        where: { id: connection.id },
-        data: {
-          accessToken: encryptOAuthToken(data.access_token),
-          tokenStorageVersion: ENCRYPTED_TOKEN_STORAGE_VERSION,
-          expiresAt: data.expires_in ? new Date(Date.now() + data.expires_in * 1000) : null,
-          status: "ACTIVE",
-          lastSyncError: null,
-          ...(data.refresh_token && { refreshToken: encryptOAuthToken(data.refresh_token) }),
-        },
-      });
-    }
-
-    if (connection.provider === "MICROSOFT") {
-      const response = await fetch("https://login.microsoftonline.com/organizations/oauth2/v2.0/token", {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          client_id: process.env.MICROSOFT_CLIENT_ID || "",
-          client_secret: process.env.MICROSOFT_CLIENT_SECRET || "",
-          refresh_token: refreshToken,
-          grant_type: "refresh_token",
-        }),
-      });
-
-      if (!response.ok) {
-        await prisma.oAuthConnection.update({
-          where: { id: connection.id },
-          data: { status: "ERROR", lastSyncError: "Failed to refresh Microsoft token" },
-        });
-        throw new Error("Failed to refresh Microsoft token");
-      }
-      const data = await response.json();
-
-      return prisma.oAuthConnection.update({
-        where: { id: connection.id },
-        data: {
-          accessToken: encryptOAuthToken(data.access_token),
-          tokenStorageVersion: ENCRYPTED_TOKEN_STORAGE_VERSION,
-          expiresAt: data.expires_in ? new Date(Date.now() + data.expires_in * 1000) : null,
-          status: "ACTIVE",
-          lastSyncError: null,
-          ...(data.refresh_token && { refreshToken: encryptOAuthToken(data.refresh_token) }),
-        },
-      });
-    }
+    const data = await response.json();
+    invariant(typeof data.access_token === "string" && data.access_token.length > 0,
+      502, "CALENDAR_PROVIDER_ERROR", "Calendar token refresh failed.");
+    return updateActiveOAuthTokens(connection, {
+      accessToken: encryptOAuthToken(data.access_token),
+      tokenStorageVersion: ENCRYPTED_TOKEN_STORAGE_VERSION,
+      expiresAt: typeof data.expires_in === "number" && Number.isFinite(data.expires_in) && data.expires_in > 0
+        ? new Date(Date.now() + data.expires_in * 1000) : null,
+      lastSyncError: null,
+      ...(typeof data.refresh_token === "string" && data.refresh_token && { refreshToken: encryptOAuthToken(data.refresh_token) }),
+    }, calendarScope);
   }
 
   return connection;
+}
+
+function availabilityRecord(value: unknown): Record<string, unknown> {
+  invariant(value !== null && typeof value === "object" && !Array.isArray(value),
+    502, "CALENDAR_PROVIDER_ERROR", "Incomplete calendar availability.");
+  return value as Record<string, unknown>;
+}
+
+function availabilityTime(value: unknown) {
+  invariant(typeof value === "string" && Number.isFinite(Date.parse(value)),
+    502, "CALENDAR_PROVIDER_ERROR", "Incomplete calendar availability.");
+  return new Date(value).toISOString();
+}
+
+export type CalendarAvailabilityResult =
+  | { provider: "GOOGLE"; calendars: Record<string, { busy: Array<{ start: string; end: string }> }> }
+  | { provider: "MICROSOFT"; schedules: Record<string, Array<{
+    status: string; start: { dateTime: string; timeZone: "UTC" }; end: { dateTime: string; timeZone: "UTC" };
+  }>> }
+  | { error: string };
+
+export async function getCalendarAvailability(actor: AppActor, params: {
+  workspaceId: string; provider: OAuthProvider; emails: string[]; timeMin: string; timeMax: string;
+}): Promise<CalendarAvailabilityResult> {
+  try {
+    invariant(actor.kind === "user", 403, "FORBIDDEN", "Calendar availability requires an authenticated user.");
+    if (params.provider !== "GOOGLE" && params.provider !== "MICROSOFT") {
+      return { error: "Choose GOOGLE or MICROSOFT explicitly before checking calendar availability." };
+    }
+    invariant(Array.isArray(params.emails) && params.emails.length > 0 && params.emails.length <= 20
+      && params.emails.every(email => typeof email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)),
+    400, "INVALID_INPUT", "Provide calendar email addresses.");
+    const timeMin = availabilityTime(params.timeMin);
+    const timeMax = availabilityTime(params.timeMax);
+    invariant(timeMin < timeMax, 400, "INVALID_INPUT", "Provide a valid availability interval.");
+    const emails = [...new Set(params.emails)];
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+    const scope: CalendarConnectionScope = { userId: actor.user.id, workspaceId: params.workspaceId, provider: params.provider };
+    // Never fall back to another workspace, an unbound legacy row, or an implicit provider.
+    const candidates = await prisma.oAuthConnection.findMany({
+      where: { ...scope, status: "ACTIVE" }, take: 2,
+    });
+    invariant(candidates.length === 1 && isCalendarAvailabilityConnection(candidates[0], scope),
+      409, "CALENDAR_CONNECTION_UNAVAILABLE", "Connect an active calendar with read consent in this workspace.");
+    await refreshOAuthTokenIfNeeded(candidates[0].id, scope);
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+    const current = await prisma.oAuthConnection.findUnique({ where: { id: candidates[0].id } });
+    assertOAuthConnectionActive(current, scope);
+    const accessToken = oauthAccessToken(current);
+    const google = params.provider === "GOOGLE";
+    const response = await fetch(google
+      ? "https://www.googleapis.com/calendar/v3/freeBusy"
+      : "https://graph.microsoft.com/v1.0/me/calendar/getSchedule", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json",
+        ...(!google && { Prefer: 'outlook.timezone="UTC"' }),
+      },
+      body: JSON.stringify(google ? { timeMin, timeMax, items: emails.map(id => ({ id })) } : {
+        schedules: emails, startTime: { dateTime: timeMin, timeZone: "UTC" },
+        endTime: { dateTime: timeMax, timeZone: "UTC" }, availabilityViewInterval: 30,
+      }),
+    });
+    invariant(response.ok, 502, "CALENDAR_PROVIDER_ERROR", "Calendar availability request failed.");
+    const data = availabilityRecord(await response.json());
+    if (google) {
+      const raw = availabilityRecord(data.calendars);
+      const calendars: Extract<CalendarAvailabilityResult, { provider: "GOOGLE" }>["calendars"] = {};
+      for (const email of emails) {
+        const item = availabilityRecord(raw[email]);
+        invariant((item.errors === undefined || (Array.isArray(item.errors) && item.errors.length === 0)) && Array.isArray(item.busy),
+          502, "CALENDAR_PROVIDER_ERROR", "Incomplete calendar availability.");
+        calendars[email] = { busy: item.busy.map(value => {
+          const interval = availabilityRecord(value);
+          const start = availabilityTime(interval.start), end = availabilityTime(interval.end);
+          invariant(start < end, 502, "CALENDAR_PROVIDER_ERROR", "Invalid busy interval.");
+          return { start, end };
+        }) };
+      }
+      return { provider: "GOOGLE", calendars };
+    }
+    invariant(Array.isArray(data.value), 502, "CALENDAR_PROVIDER_ERROR", "Incomplete calendar availability.");
+    const schedules: Extract<CalendarAvailabilityResult, { provider: "MICROSOFT" }>["schedules"] = {};
+    for (const email of emails) {
+      const matches = data.value.map(availabilityRecord).filter(item => typeof item.scheduleId === "string" && item.scheduleId.toLowerCase() === email.toLowerCase());
+      invariant(matches.length === 1, 502, "CALENDAR_PROVIDER_ERROR", "Incomplete calendar availability.");
+      const item = matches[0];
+      invariant(!item.error && Array.isArray(item.scheduleItems), 502, "CALENDAR_PROVIDER_ERROR", "Incomplete calendar availability.");
+      schedules[email] = item.scheduleItems.map(value => {
+        const interval = availabilityRecord(value);
+        invariant(typeof interval.status === "string" && ["free", "tentative", "busy", "oof", "workingElsewhere"].includes(interval.status),
+          502, "CALENDAR_PROVIDER_ERROR", "Unknown calendar availability.");
+        const start = availabilityRecord(interval.start), end = availabilityRecord(interval.end);
+        invariant(start.timeZone === "UTC" && end.timeZone === "UTC", 502, "CALENDAR_PROVIDER_ERROR", "Unknown calendar time zone.");
+        const startTime = availabilityTime(parseMicrosoftDateTime(start as { dateTime?: string; timeZone?: string }).toISOString());
+        const endTime = availabilityTime(parseMicrosoftDateTime(end as { dateTime?: string; timeZone?: string }).toISOString());
+        invariant(startTime < endTime, 502, "CALENDAR_PROVIDER_ERROR", "Invalid busy interval.");
+        return { status: interval.status, start: { dateTime: startTime, timeZone: "UTC" }, end: { dateTime: endTime, timeZone: "UTC" } };
+      });
+    }
+    return { provider: "MICROSOFT", schedules };
+  } catch {
+    // Provider bodies, exceptions and token envelopes must never reach a tool/model/log.
+    return { error: "Calendar availability is unavailable. Check workspace membership, provider connection and calendar read consent, then retry." };
+  }
 }
 
 export interface CalendarEvent {
