@@ -326,14 +326,46 @@ async function readableNewspaperRunKeys(actor: AppActor, workspaceId: string, ru
 export async function listNewspaperDeliverySummaries(actor: AppActor, workspaceId: string, opts?: { take?: number }) {
   await requireWorkspaceMembership({ actor, workspaceId });
 
-  // Counts need every permitted row in a run. A bounded complete scan fails
-  // explicitly when history requires an indexed rebuild instead of truncating it.
-  const deliveries = await loadReadableDigestQuery<NewspaperDelivery>({ actor, workspaceId, kind: "NewspaperDelivery",
-    limit: opts?.take ?? 20, completeScan: true, keyset: true,
-    loadBatch: ({ take, after }) => prisma.newspaperDelivery.findMany({ where: { workspaceId,
-      ...(after ? { OR: [{ createdAt: { lt: after.createdAt } }, { createdAt: after.createdAt, id: { lt: after.id } }] } : {}) },
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }], take }),
-  });
+  const limit = opts?.take ?? 20;
+  invariant(Number.isInteger(limit) && limit >= 0 && limit <= 5_000, 400, "INVALID_INPUT", "Delivery summary limit is invalid.");
+  if (limit === 0) return [];
+  // Group identities are discovery only. Every count below still comes from
+  // complete, permission-admitted rows, never from raw database aggregates.
+  const deliveries: NewspaperDelivery[] = [];
+  const latestReadable = new Map<string, number>();
+  let scannedGroups = 0, scannedDeliveries = 0, complete = false;
+  while (!complete) {
+    const candidates = await prisma.newspaperDelivery.groupBy({by: ["runKey"], where: {workspaceId},
+      _max: {createdAt: true}, orderBy: [{_max: {createdAt: "desc"}}, {runKey: "desc"}],
+      take: Math.min(50, 5_001 - scannedGroups), skip: scannedGroups});
+    for (const candidate of candidates) {
+      const threshold = [...latestReadable.values()].sort((a, b) => b - a)[limit - 1];
+      // A group's raw latest timestamp is an upper bound on any permitted row.
+      // Once it falls below the requested visible groups, older runs cannot win.
+      if (threshold !== undefined && candidate._max.createdAt && candidate._max.createdAt.getTime() < threshold) {
+        complete = true; break;
+      }
+      invariant(++scannedGroups <= 5_000, 503, "INPUT_SCAN_LIMIT", "Narrow the requested delivery history to complete its permission scan.");
+      const rows = await loadReadableDigestQuery<NewspaperDelivery>({actor, workspaceId, kind: "NewspaperDelivery",
+        limit: 100, completeScan: true, keyset: true,
+        loadBatch: async ({take, after}) => {
+          const batch = await prisma.newspaperDelivery.findMany({where: {workspaceId, runKey: candidate.runKey,
+            ...(after ? {OR: [{createdAt: {lt: after.createdAt}}, {createdAt: after.createdAt, id: {lt: after.id}}]} : {})},
+            orderBy: [{createdAt: "desc"}, {id: "desc"}], take: Math.min(take, 5_001 - scannedDeliveries)});
+          scannedDeliveries += batch.length;
+          invariant(scannedDeliveries <= 5_000, 503, "INPUT_SCAN_LIMIT", "The requested delivery groups exceed the complete permission scan limit.");
+          return batch;
+        },
+      });
+      if (rows.length) {
+        deliveries.push(...rows);
+        latestReadable.set(candidate.runKey, Math.max(...rows.map(row => row.createdAt.getTime())));
+      }
+    }
+    if (candidates.length < 50) complete = true;
+  }
+  const selectedKeys = new Set([...latestReadable].sort(([a, left], [b, right]) => right - left || b.localeCompare(a))
+    .slice(0, limit).map(([key]) => key));
 
   const groups = new Map<string, {
     runKey: string;
@@ -354,6 +386,7 @@ export async function listNewspaperDeliverySummaries(actor: AppActor, workspaceI
   }>();
 
   for (const delivery of deliveries) {
+    if (!selectedKeys.has(delivery.runKey)) continue;
     const group = groups.get(delivery.runKey) ?? {
       runKey: delivery.runKey,
       kind: delivery.kind,
@@ -408,8 +441,8 @@ export async function listNewspaperDeliverySummaries(actor: AppActor, workspaceI
   }
 
   return Array.from(groups.values())
-    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
-    .slice(0, opts?.take ?? 20);
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || b.runKey.localeCompare(a.runKey))
+    .slice(0, limit);
 }
 
 export async function listNewspaperDeliveryDetails(actor: AppActor, workspaceId: string, opts?: { take?: number }) {

@@ -68,6 +68,7 @@ const {
       findMany: vi.fn(),
     },
     newspaperDelivery: {
+      groupBy: vi.fn(),
       create: vi.fn(),
       findMany: vi.fn(),
     },
@@ -266,6 +267,7 @@ describe("newspaper delivery", () => {
   });
 
   it("returns aggregate run summaries with clicked link counts", async () => {
+    prismaMock.newspaperDelivery.groupBy.mockResolvedValue([{runKey: "run-1", _max: {createdAt: new Date("2026-05-01T12:02:00.000Z")}}]);
     const { listNewspaperDeliverySummaries } = await import("./newspaper-delivery");
     prismaMock.newspaperDelivery.findMany.mockResolvedValue([
       {
@@ -329,6 +331,32 @@ describe("newspaper delivery", () => {
       actor: { kind: "user", user: { id: "u-1" } },
       workspaceId: "ws-1",
     });
+  });
+
+  it("reads only complete recent permitted groups even with more than 5,000 older deliveries", async () => {
+    const {listNewspaperDeliverySummaries} = await import("./newspaper-delivery");
+    const time = new Date("2026-10-14T00:00:00Z");
+    const hidden = {id: "hidden", runKey: "hidden-run", createdAt: time, status: "SENT"};
+    const recent = Array.from({length: 120}, (_, index) => ({id: `recent-${index}`, runKey: "recent-run",
+      createdAt: new Date(time.getTime() - 1000 - index), status: index % 2 ? "FAILED" : "SENT"}));
+    const older = Array.from({length: 5_100}, (_, index) => ({id: `old-${index}`, runKey: `old-run-${index}`,
+      createdAt: new Date(time.getTime() - 100_000 - index), status: "SENT"}));
+    const all = [hidden, ...recent, ...older];
+    prismaMock.newspaperDelivery.groupBy.mockResolvedValue([
+      {runKey: hidden.runKey, _max: {createdAt: hidden.createdAt}},
+      {runKey: "recent-run", _max: {createdAt: recent[0].createdAt}},
+      {runKey: older[0].runKey, _max: {createdAt: older[0].createdAt}},
+    ]);
+    prismaMock.newspaperDelivery.findMany.mockImplementation(async ({where, take}) => {
+      const before = where.OR?.[0].createdAt.lt;
+      return all.filter(row => row.runKey === where.runKey && (!before || row.createdAt < before)).slice(0, take);
+    });
+    prismaMock.newspaperTrackedLink.findMany.mockResolvedValue([]);
+    readableArtifactIdsMock.mockImplementation(async (_actor, _workspace, _kind, rows) => new Set(rows.filter(row => row.id !== hidden.id).map(row => row.id)));
+    const result = await listNewspaperDeliverySummaries({kind: "user", user: {id: "u-1"}} as any, "ws-1", {take: 1});
+    expect(result).toEqual([expect.objectContaining({runKey: "recent-run", recipientCount: 120, sentCount: 60, failedCount: 60})]);
+    expect(prismaMock.newspaperDelivery.findMany.mock.calls.every(([query]) => ["hidden-run", "recent-run"].includes(query.where.runKey))).toBe(true);
+    expect(prismaMock.newspaperTrackedLink.findMany).toHaveBeenCalledWith(expect.objectContaining({where: {workspaceId: "ws-1", runKey: {in: ["recent-run"]}}}));
   });
 
   it("returns recipient delivery rows without recipient-level click behavior", async () => {
