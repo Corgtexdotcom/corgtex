@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ModelGateway, ModelRequestControls } from "./contracts";
 
 const azureIdentityMock = vi.hoisted(() => ({
   getToken: vi.fn(),
@@ -22,6 +23,238 @@ vi.mock("./usage", () => ({
 }));
 
 const ORIGINAL_ENV = { ...process.env };
+
+describe("optional model attempt authorization", () => {
+  const methods = ["chat", "chatEventStream", "chatStream", "extract", "embed", "rerank", "transcribeAudio"] as const;
+  type Method = typeof methods[number];
+  const chat = { workspaceId: "ws-guard", taskType: "CHAT" as const, messages: [{ role: "user" as const, content: "Synthetic question" }] };
+  const lineage = { workflowJobId: "job-guard", agentRunId: "run-guard" };
+
+  async function invoke(gateway: ModelGateway, method: Method, controls: ModelRequestControls = {}) {
+    const common = { workspaceId: chat.workspaceId, ...lineage, ...controls };
+    if (method === "chat") return gateway.chat({ ...chat, ...common });
+    if (method === "extract") return gateway.extract({ ...common, instruction: "Extract", input: "Synthetic", schemaHint: "{ summary: string }" });
+    if (method === "embed") return gateway.embed({ ...common, input: "Synthetic query" });
+    if (method === "rerank") return gateway.rerank({ ...common, query: "Synthetic query", documents: ["Synthetic document"] });
+    if (method === "transcribeAudio") return gateway.transcribeAudio({ ...common, fileName: "fixture.wav", data: Buffer.from("synthetic audio") });
+    const stream = gateway[method]({ ...chat, ...common });
+    while (true) {
+      const next = await stream.next();
+      if (next.done) return next.value;
+    }
+  }
+
+  function response(method: Method, content = "Synthetic answer") {
+    if (method === "chatStream" || method === "chatEventStream") {
+      return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
+    }
+    if (method === "embed" || method === "rerank") return Response.json({ data: [{ embedding: [1, 0] }, { embedding: [1, 0] }], usage: { prompt_tokens: 4 } });
+    if (method === "transcribeAudio") return Response.json({ text: content });
+    return Response.json({ choices: [{ message: { content: method === "extract" ? '{"summary":"Synthetic"}' : content } }], usage: { prompt_tokens: 4, completion_tokens: 2 } });
+  }
+
+  async function setup(provider = "openai", extra: Record<string, string> = {}) {
+    Object.assign(process.env, {
+      MODEL_PROVIDER: provider, MODEL_API_KEY: "synthetic-key", MODEL_BASE_URL: "https://models.example.test/v1",
+      MODEL_CHAT_DEFAULT: "guard-fixture", MODEL_EMBEDDING_DEFAULT: "guard-fixture", MODEL_TRANSCRIPTION_DEFAULT: "guard-fixture",
+      MODEL_REQUEST_TIMEOUT_MS: "180000", MODEL_PROVIDER_ROUTES_JSON: "[]",
+      MODEL_PRICE_OVERRIDES_JSON: JSON.stringify([{ provider, model: "guard-fixture", inputUsdPerToken: 0.000001, outputUsdPerToken: 0.000002 }]),
+      ...extra,
+    });
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const { openAICompatibleModelGateway: gateway } = await import("./openai-compatible-gateway");
+    const { recordModelUsage } = await import("./usage");
+    vi.mocked(recordModelUsage).mockClear();
+    return { gateway, recordModelUsage };
+  }
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each(methods)("authorizes each %s send including retries and preserves lineage", async (method) => {
+    const { gateway, recordModelUsage } = await setup();
+    const authorizeAttempt = vi.fn().mockResolvedValue(undefined);
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response("retry", { status: 503 })).mockImplementationOnce(async (_url, init) => {
+      expect(authorizeAttempt).toHaveBeenCalledTimes(2);
+      expect(authorizeAttempt.mock.calls[1][0].signal).toBe(init.signal);
+      return response(method);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = invoke(gateway, method, { authorizeAttempt });
+    await vi.runAllTimersAsync();
+    await result;
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(recordModelUsage).toHaveBeenCalledOnce();
+    expect(recordModelUsage).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: chat.workspaceId, ...lineage }));
+    expect(Object.isFrozen(authorizeAttempt.mock.calls[0][0])).toBe(true);
+  });
+
+  it.each(methods)("sanitizes a %s guard rejection without sends, retries or usage", async (method) => {
+    const { gateway, recordModelUsage } = await setup();
+    const authorizeAttempt = vi.fn().mockRejectedValue(new TypeError("private guard details"));
+    vi.stubGlobal("fetch", vi.fn());
+    const error = await invoke(gateway, method, { authorizeAttempt }).catch(error => error);
+    const { ModelAttemptAuthorizationError } = await import("./contracts");
+    expect(error).toBeInstanceOf(ModelAttemptAuthorizationError);
+    expect(error.message).toBe("Model request attempt was not authorized.");
+    expect(error.cause).toBeUndefined();
+    expect(error.stack).not.toContain("private guard details");
+    expect(authorizeAttempt).toHaveBeenCalledOnce();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(recordModelUsage).not.toHaveBeenCalled();
+  });
+
+  it("checks authorization after awaited managed-identity headers", async () => {
+    let resolveToken!: (token: { token: string; expiresOnTimestamp: number }) => void;
+    azureIdentityMock.getToken.mockImplementation(() => new Promise(resolve => { resolveToken = resolve; }));
+    const { gateway, recordModelUsage } = await setup("azure-openai", {
+      MODEL_BASE_URL: "https://synthetic.openai.azure.com/openai/v1", AZURE_OPENAI_AUTH_MODE: "managed_identity",
+    });
+    let permitted = true;
+    const authorizeAttempt = vi.fn(async () => { if (!permitted) throw new Error("revoked while acquiring headers"); });
+    vi.stubGlobal("fetch", vi.fn());
+    const pending = invoke(gateway, "chat", { authorizeAttempt }).catch(error => error);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(azureIdentityMock.getToken).toHaveBeenCalledOnce();
+    expect(authorizeAttempt).not.toHaveBeenCalled();
+    permitted = false;
+    resolveToken({ token: "synthetic-token", expiresOnTimestamp: Date.now() + 3_600_000 });
+    expect(await pending).toMatchObject({ code: "MODEL_ATTEMPT_DENIED" });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(recordModelUsage).not.toHaveBeenCalled();
+  });
+
+  it("denies a retry after revocation during its delay", async () => {
+    const { gateway, recordModelUsage } = await setup();
+    let permitted = true;
+    const authorizeAttempt = vi.fn(async () => { if (!permitted) throw new DOMException("private revoked", "AbortError"); });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("busy", { status: 429, headers: { "Retry-After": "30" } })));
+    const pending = invoke(gateway, "chat", { authorizeAttempt }).catch(error => error);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetch).toHaveBeenCalledOnce();
+    permitted = false;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await pending).toMatchObject({ code: "MODEL_ATTEMPT_DENIED" });
+    expect(authorizeAttempt).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(recordModelUsage).not.toHaveBeenCalled();
+  });
+
+  it.each(methods)("cancels %s promptly while authorization is pending", async (method) => {
+    const { gateway, recordModelUsage } = await setup();
+    let rejectGuard!: (error: Error) => void;
+    const authorizeAttempt = vi.fn((_context: Readonly<{ signal: AbortSignal }>) => new Promise<void>((_resolve, reject) => { rejectGuard = reject; }));
+    const controller = new AbortController();
+    const reason = new Error("synthetic cancellation");
+    vi.stubGlobal("fetch", vi.fn());
+    const pending = invoke(gateway, method, { authorizeAttempt, signal: controller.signal }).catch(error => error);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(authorizeAttempt).toHaveBeenCalledOnce();
+    controller.abort(reason);
+    expect(await pending).toBe(reason);
+    expect(authorizeAttempt.mock.calls[0][0].signal.aborted).toBe(true);
+    rejectGuard(new TypeError("late private rejection"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(recordModelUsage).not.toHaveBeenCalled();
+  });
+
+  it("expires a stalled guard at the existing operation deadline", async () => {
+    const { gateway, recordModelUsage } = await setup("openai", { MODEL_REQUEST_TIMEOUT_MS: "1000" });
+    const authorizeAttempt = vi.fn(() => new Promise<void>(() => {}));
+    vi.stubGlobal("fetch", vi.fn());
+    const pending = invoke(gateway, "chat", { authorizeAttempt }).catch(error => error);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await pending).toMatchObject({ name: "TimeoutError" });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(recordModelUsage).not.toHaveBeenCalled();
+  });
+
+  it("does not send when a successful guard synchronously cancels its caller", async () => {
+    const { gateway, recordModelUsage } = await setup();
+    const controller = new AbortController();
+    const reason = new Error("cancelled during final authorization");
+    const authorizeAttempt = vi.fn(async () => { controller.abort(reason); });
+    vi.stubGlobal("fetch", vi.fn());
+    await expect(invoke(gateway, "chat", { authorizeAttempt, signal: controller.signal })).rejects.toBe(reason);
+    expect(authorizeAttempt).toHaveBeenCalledOnce();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(recordModelUsage).not.toHaveBeenCalled();
+  });
+
+  it("sanitizes a synchronous guard exception without retrying", async () => {
+    const { gateway, recordModelUsage } = await setup();
+    const authorizeAttempt = vi.fn(() => { throw new TypeError("private synchronous rejection"); });
+    vi.stubGlobal("fetch", vi.fn());
+    await expect(invoke(gateway, "chat", { authorizeAttempt })).rejects.toMatchObject({
+      code: "MODEL_ATTEMPT_DENIED", message: "Model request attempt was not authorized.",
+    });
+    expect(authorizeAttempt).toHaveBeenCalledOnce();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(recordModelUsage).not.toHaveBeenCalled();
+  });
+
+  it("reauthorizes extraction repair and retains usage from the completed first call", async () => {
+    const { gateway, recordModelUsage } = await setup();
+    const authorizeAttempt = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("repair revoked"));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response("chat", "invalid JSON")));
+    const error = await invoke(gateway, "extract", { authorizeAttempt }).catch(error => error);
+    expect(error).toMatchObject({ code: "MODEL_ATTEMPT_DENIED" });
+    expect(authorizeAttempt).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(recordModelUsage).toHaveBeenCalledOnce();
+  });
+
+  it.each(["chat", "chatEventStream", "chatStream", "extract", "embed", "rerank"] as const)("disables opaque fallbacks only for guarded OpenRouter %s", async (method) => {
+    const { gateway } = await setup("openrouter");
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, _init: RequestInit) => response(method));
+    vi.stubGlobal("fetch", fetchMock);
+    await invoke(gateway, method, { authorizeAttempt: async () => {} });
+    await invoke(gateway, method);
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1].body)).provider.allow_fallbacks).toBe(false);
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1].body)).provider.allow_fallbacks).toBe(true);
+    expect(String(fetchMock.mock.calls[0][1].body)).not.toContain("authorizeAttempt");
+  });
+
+  it("rejects only guarded OpenRouter multipart transcription before send or usage", async () => {
+    const { gateway, recordModelUsage } = await setup("openrouter");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response("transcribeAudio")));
+    await expect(invoke(gateway, "transcribeAudio", { authorizeAttempt: async () => {} }))
+      .rejects.toThrow("Guarded OpenRouter audio transcription is not supported.");
+    expect(fetch).not.toHaveBeenCalled();
+    expect(recordModelUsage).not.toHaveBeenCalled();
+    await invoke(gateway, "transcribeAudio");
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(recordModelUsage).toHaveBeenCalledOnce();
+  });
+
+  it.each(methods)("honors the guard in fake %s before synthetic output or usage", async (method) => {
+    const { recordModelUsage } = await setup("fake");
+    const { fakeModelGateway } = await import("./fake-gateway");
+    const authorizeAttempt = vi.fn().mockRejectedValue(new Error("private fake details"));
+    await expect(invoke(fakeModelGateway, method, { authorizeAttempt })).rejects.toMatchObject({ code: "MODEL_ATTEMPT_DENIED" });
+    expect(authorizeAttempt).toHaveBeenCalledOnce();
+    expect(recordModelUsage).not.toHaveBeenCalled();
+  });
+
+  it("detaches a cancelled fake guard and consumes its late rejection", async () => {
+    const { recordModelUsage } = await setup("fake");
+    const { fakeModelGateway } = await import("./fake-gateway");
+    const controller = new AbortController();
+    let rejectGuard!: (error: Error) => void;
+    const authorizeAttempt = vi.fn(() => new Promise<void>((_resolve, reject) => { rejectGuard = reject; }));
+    const remove = vi.spyOn(controller.signal, "removeEventListener");
+    const pending = invoke(fakeModelGateway, "embed", { authorizeAttempt, signal: controller.signal }).catch(error => error);
+    await vi.advanceTimersByTimeAsync(0);
+    const reason = new Error("cancelled synthetic embed");
+    controller.abort(reason);
+    expect(await pending).toBe(reason);
+    expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
+    rejectGuard(new Error("late private fake error"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(recordModelUsage).not.toHaveBeenCalled();
+  });
+});
 
 function restoreEnv() {
   for (const key of Object.keys(process.env)) {

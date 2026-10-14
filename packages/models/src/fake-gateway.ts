@@ -9,7 +9,9 @@ import type {
   ModelUsageInput,
   RerankRequest,
   AudioTranscriptionRequest,
+  ModelRequestControls,
 } from "./contracts";
+import { ModelAttemptAuthorizationError } from "./contracts";
 import { assertCatalogModelBudget, assertWorkspaceModelBudget, recordModelUsage } from "./usage";
 
 function usageDetails(input: ModelUsageInput) {
@@ -46,6 +48,28 @@ function throwIfAborted(signal?: AbortSignal) {
   if (signal?.aborted) {
     throw abortedError(signal);
   }
+}
+
+/** One synthetic attempt, after budgets and before output/accounting. */
+async function authorizeFakeAttempt(request: ModelRequestControls) {
+  const signal = request.signal ?? new AbortController().signal;
+  throwIfAborted(signal);
+  let abort = () => {};
+  try {
+    await new Promise<void>((resolve, reject) => {
+      abort = () => reject(abortedError(signal));
+      signal.addEventListener("abort", abort, { once: true });
+      // Both handlers remain attached if cancellation wins, including late rejection.
+      Promise.resolve().then(() => {
+        throwIfAborted(signal);
+        return request.authorizeAttempt!(Object.freeze({ signal }));
+      }).then(resolve, () => reject(signal.aborted ? abortedError(signal) : new ModelAttemptAuthorizationError()));
+      if (signal.aborted) abort();
+    });
+  } finally {
+    signal.removeEventListener("abort", abort);
+  }
+  throwIfAborted(signal);
 }
 
 async function delay(ms: number, signal?: AbortSignal) {
@@ -154,6 +178,7 @@ export const fakeModelGateway: ModelGateway = {
       ...usageContext(request),
     });
     throwIfAborted(request.signal);
+    if (request.authorizeAttempt) await authorizeFakeAttempt(request);
     const content = groundedResponse(request)
       ?? `FAKE_MODEL_RESPONSE\n\n${request.messages.map((message) => `${message.role}: ${message.content}`).join("\n\n")}`;
     const latencyMs = Date.now() - startedAt;
@@ -189,6 +214,7 @@ export const fakeModelGateway: ModelGateway = {
       workspaceId: request.workspaceId,
       ...usageContext(request),
     });
+    if (request.authorizeAttempt) await authorizeFakeAttempt(request);
     let output: Record<string, unknown>;
     if (/actions/i.test(request.schemaHint) || /action/i.test(request.instruction)) {
       output = {
@@ -242,6 +268,7 @@ export const fakeModelGateway: ModelGateway = {
       workspaceId: request.workspaceId,
       ...usageContext(request),
     });
+    if (request.authorizeAttempt) await authorizeFakeAttempt(request);
     const inputs = Array.isArray(request.input) ? request.input : [request.input];
     const embeddings = inputs.map((input) => fakeEmbeddingVector(input));
     const latencyMs = Date.now() - startedAt;
@@ -272,6 +299,7 @@ export const fakeModelGateway: ModelGateway = {
       workspaceId: request.workspaceId,
       ...usageContext(request),
     });
+    if (request.authorizeAttempt) await authorizeFakeAttempt(request);
     const queryEmbedding = fakeEmbeddingVector(request.query);
     const ranked = request.documents
       .map((document, index) => ({
@@ -309,6 +337,7 @@ export const fakeModelGateway: ModelGateway = {
       workspaceId: request.workspaceId,
       ...usageContext(request),
     });
+    if (request.authorizeAttempt) await authorizeFakeAttempt(request);
     const text = `Fake transcript for ${request.fileName} (${request.data.byteLength} bytes).`;
     const usage = await recordUsage({
       workspaceId: request.workspaceId,
