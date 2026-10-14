@@ -14,6 +14,7 @@ import { assertArtifactInputWriteFence, captureArtifactInputProof, captureArtifa
 import { isArtifactPermissionEpochProofCurrent, type PermissionEpochProof } from "./source-permission-epochs";
 import { mergeArtifactInputProofs } from "./digest-lineage";
 import type { ExternalProviderCommitPreflight } from "./external-provider-authority";
+import { recordAudit } from "./audit-trail";
 
 export const GRAPH_SOURCE_VARIANT_JOB_TYPE = "agent.graph-source-variant";
 export const GRAPH_SOURCE_VARIANT_GENERATOR_VERSION = "1";
@@ -30,6 +31,47 @@ export type GraphVariantMode = "MEMBER_VARIANT" | "CANONICAL_CANDIDATE";
 type UserActor = Extract<AppActor, { kind: "user" }>;
 type Target = { kind: GraphTargetKind; id: string; fingerprint: string; manifestId: string; recipeManifestId: string };
 type Fields = { properties?: Record<string, unknown>; confidence?: number };
+
+/** Compare reviewed meaning and endpoint identity, never generated refs or evidence
+ * selection. Unsupported edits/layout/temporal semantics need a new review. */
+export function graphDiffMeaningHash(value: unknown): string | null {
+  if (!record(value) || Object.keys(value).some(key => !["objects", "relationships", "evidenceRefs"].includes(key))
+    || !Array.isArray(value.objects) || !Array.isArray(value.relationships ?? [])) return null;
+  const refs = new Map<string, string>();
+  const objects: string[] = [];
+  for (const item of value.objects) {
+    if (!record(item) || Object.keys(item).some(key => !["ref", "objectType", "title", "summary", "properties", "confidence", "status"].includes(key))
+      || typeof item.ref !== "string" || refs.has(item.ref) || typeof item.objectType !== "string" || typeof item.title !== "string"
+      || (item.status !== undefined && !["proposed", "approved"].includes(String(item.status)))) return null;
+    const hash = derivationHash([item.objectType, item.title.trim(), typeof item.summary === "string" ? item.summary.trim() || null : null,
+      item.properties ?? {}, item.confidence ?? null]);
+    // Ambiguous identical endpoints cannot prove unchanged reviewed targets.
+    if (objects.includes(hash)) return null;
+    refs.set(item.ref, hash); objects.push(hash);
+  }
+  const relationships: string[] = [];
+  for (const item of (value.relationships ?? []) as unknown[]) {
+    if (!record(item) || Object.keys(item).some(key => !["ref", "sourceRef", "targetRef", "relationshipType", "properties", "confidence", "status"].includes(key))
+      || typeof item.sourceRef !== "string" || typeof item.targetRef !== "string" || !refs.has(item.sourceRef) || !refs.has(item.targetRef)
+      || typeof item.relationshipType !== "string" || (item.status !== undefined && !["proposed", "approved"].includes(String(item.status)))) return null;
+    relationships.push(derivationHash([refs.get(item.sourceRef), refs.get(item.targetRef), item.relationshipType, item.properties ?? {}, item.confidence ?? null]));
+  }
+  return derivationHash([objects.sort(), relationships.sort()]);
+}
+
+/** This value grants nothing on its own. Only an audit row written by the actual
+ * authorized review transition authenticates it; client evidenceJson is ignored. */
+export async function captureGraphReviewApproval(tx: Prisma.TransactionClient, actor: AppActor, workspaceId: string,
+  proposal: { id: string; diffJson: unknown; reviewedAt: Date | null }) {
+  if (actor.kind !== "user" || !proposal.reviewedAt) return null;
+  const member = await requireWorkspaceMembership({ actor, workspaceId, tx, allowedRoles: ["ADMIN", "FACILITATOR"] });
+  const meaningHash = graphDiffMeaningHash(proposal.diffJson);
+  if (!member || !meaningHash) return null;
+  const authority = await captureArtifactPermissionEpochs(actor, workspaceId,
+    [{ kind: "Member", id: member.id, fingerprint: lineageContentFingerprint("Member", member) }], tx);
+  return { version: 1, proposalId: proposal.id, workspaceId, reviewerUserId: actor.user.id, memberId: member.id,
+    reviewedAt: proposal.reviewedAt.toISOString(), meaningHash, authority };
+}
 export type GraphVariantCandidate = {
   objects: Array<Fields & { ref: string; objectType: typeof GRAPH_VARIANT_OBJECT_TYPES[number]; title: string; summary?: string }>;
   relationships: Array<Fields & { ref: string; sourceRef: string; targetRef: string; relationshipType: typeof GRAPH_VARIANT_RELATIONSHIP_TYPES[number] }>;
@@ -278,6 +320,67 @@ export function createGraphVariantBundle(value: unknown, sources: readonly Permi
     reason: candidate.reason?.trim() || "Fresh graph proposal from currently permitted sources.", diffJson: { objects, relationships, evidenceRefs } } };
 }
 
+/** Native proposals use local refs, not virtual IDs as existing database rows. */
+function nativeVariantDiff(bundle: GraphVariantBundle) {
+  return {
+    objects: bundle.objects.map(({ id, status: _status, ...object }) => ({ ...object, ref: id })),
+    relationships: bundle.relationships.map(({ id, sourceObjectId, targetObjectId, status: _status, ...relationship }) => ({
+      ...relationship, ref: id, sourceRef: sourceObjectId, targetRef: targetObjectId,
+    })),
+    evidenceRefs: bundle.evidenceRefs.map(({ id: _id, objectId, relationshipId, ...evidence }) => ({ ...evidence,
+      ...(objectId ? { objectRef: objectId } : { relationshipRef: relationshipId! }),
+    })),
+  };
+}
+
+async function carriedGraphApproval(tx: Prisma.TransactionClient, workspaceId: string, recipe: Recipe, diff: unknown) {
+  const meaningHash = graphDiffMeaningHash(diff);
+  if (!meaningHash) return null;
+  for (const target of recipe.targets) {
+    if (target.kind !== "ContextGraphProposedDiff") continue;
+    const original = await tx.contextGraphProposedDiff.findFirst({ where: { id: target.id, workspaceId } });
+    if (!original || !["approved", "applied"].includes(original.status) || !original.reviewedByUserId || !original.reviewedAt
+      || graphDiffMeaningHash(original.diffJson) !== meaningHash) continue;
+    // Only this server-owned transition, never client-editable evidenceJson,
+    // authenticates who approved these exact bytes and under which authority.
+    const audit = await tx.auditLog.findFirst({ where: { workspaceId, entityType: "ContextGraphProposedDiff", entityId: original.id,
+      action: "context-graph.diff.approved", actorUserId: original.reviewedByUserId }, orderBy: [{ createdAt: "desc" }, { id: "desc" }] });
+    const receipt = record(audit?.meta) && record(audit.meta.graphApproval) ? audit.meta.graphApproval : null;
+    if (!receipt || receipt.version !== 1 || receipt.workspaceId !== workspaceId || receipt.proposalId !== original.id
+      || receipt.reviewerUserId !== original.reviewedByUserId || receipt.reviewedAt !== original.reviewedAt.toISOString()
+      || receipt.meaningHash !== meaningHash || typeof receipt.memberId !== "string"
+      || !await isArtifactPermissionEpochProofCurrent(workspaceId, receipt.authority, tx)) continue;
+    const reviewer = await tx.member.findFirst({ where: { id: receipt.memberId, workspaceId, userId: original.reviewedByUserId,
+      isActive: true, role: { in: ["ADMIN", "FACILITATOR"] } } });
+    if (!reviewer) continue;
+    return { original, auditId: audit!.id, receipt, meaningHash };
+  }
+  return null;
+}
+
+async function publishVariantProposal(tx: Prisma.TransactionClient, actor: UserActor, workspaceId: string,
+  recipe: Recipe, variant: GenericDerivedArtifactVariant, bundle: GraphVariantBundle) {
+  const diff = nativeVariantDiff(bundle);
+  const carried = await carriedGraphApproval(tx, workspaceId, recipe, diff);
+  const proposal = await tx.contextGraphProposedDiff.create({ data: {
+    id: bundle.proposedDiff.id, workspaceId, proposedByType: "agent", proposedByUserId: actor.user.id,
+    diffJson: json(diff), reason: bundle.proposedDiff.reason, status: carried ? "approved" : "pending",
+    reviewedByUserId: carried?.original.reviewedByUserId, reviewedAt: carried?.original.reviewedAt,
+    evidenceJson: { graphVariantId: variant.id, approvalDisposition: carried ? "UNCHANGED_REVIEWED_MEANING" : "REVIEW_REQUIRED",
+      ...(carried ? { priorApprovalAuditId: carried.auditId, meaningHash: carried.meaningHash } : {}) },
+  } });
+  await recordArtifactInputLineage({ tx, actor, workspaceId, artifact: { kind: "ContextGraphProposedDiff", id: proposal.id },
+    content: proposal, origin: "DERIVED", inputs: [{ kind: "GenericDerivedArtifactVariant", id: variant.id }] });
+  await recordAudit(tx, actor, { workspaceId, action: "context-graph.diff.proposed", entityType: "ContextGraphProposedDiff",
+    entityId: proposal.id, meta: { graphVariantId: variant.id, approvalDisposition: carried ? "UNCHANGED_REVIEWED_MEANING" : "REVIEW_REQUIRED" } });
+  // Keep the authentic reviewer, original authority vector and the exact source
+  // audit identity. Carrying approval never creates fresh reviewer authority.
+  if (carried) await tx.auditLog.create({ data: { workspaceId, actorUserId: carried.original.reviewedByUserId,
+    action: "context-graph.diff.approved", entityType: "ContextGraphProposedDiff", entityId: proposal.id,
+    meta: json({ graphApproval: { ...carried.receipt, proposalId: proposal.id }, priorApprovalAuditId: carried.auditId,
+      comparison: { meaningHash: carried.meaningHash, targetId: carried.original.id, variantId: variant.id } }) } });
+}
+
 async function variantReadable(tx: Prisma.TransactionClient, actor: UserActor, workspaceId: string, variant: GenericDerivedArtifactVariant, current?: Prepared) {
   const stored = payload(variant.scopeJson);
   if (variant.recipeVersion !== stored.version || variant.generatorVersion !== stored.generatorVersion
@@ -291,8 +394,18 @@ async function variantReadable(tx: Prisma.TransactionClient, actor: UserActor, w
   if (!prepared || variant.ownerMemberId !== prepared.recipe.memberId || variant.inputSetHash !== prepared.recipe.inputSetHash
     || variant.targetFingerprint !== prepared.recipe.targetFingerprint || !sameRecipe(prepared.recipe, stored)) return null;
   const roots = await captureArtifactInputProof(actor, workspaceId, [{ kind: "GenericDerivedArtifactVariant", id: variant.id, snapshot: variant }], tx);
+  const bundle = variant.payloadJson as unknown as GraphVariantBundle;
+  const proposal = await tx.contextGraphProposedDiff.findFirst({ where: { id: bundle.proposedDiff.id, workspaceId } });
+  if (!proposal) {
+    // Upgrade only never-materialized legacy bundles. An existing epoch proves
+    // this native proposal was removed; absence must not revive that tombstone.
+    const tombstones = await tx.$queryRaw<Array<{ sourceId: string }>>`SELECT "sourceKind", "sourceId", "epoch" FROM "SourcePermissionEpoch"
+      WHERE "workspaceId" = ${workspaceId} AND ("sourceKind", "sourceId") IN ((${"ContextGraphProposedDiff"}, ${bundle.proposedDiff.id}))`;
+    if (tombstones.length) return null;
+    await publishVariantProposal(tx, actor, workspaceId, prepared.recipe, variant, bundle);
+  }
   return { id: variant.id, ownerMemberId: variant.ownerMemberId, createdAt: variant.createdAt, cohortKey: prepared.recipe.cohortKey,
-    targets: prepared.recipe.targets, scope: prepared.recipe.scope, bundle: variant.payloadJson as unknown as GraphVariantBundle, roots };
+    targets: prepared.recipe.targets, scope: prepared.recipe.scope, bundle, roots };
 }
 async function ownerActor(tx: Prisma.TransactionClient, workspaceId: string, recipe: Recipe): Promise<UserActor> {
   const member = await tx.member.findFirst({ where: { id: recipe.memberId, workspaceId, userId: recipe.userId, isActive: true }, include: { user: true } });
@@ -517,6 +630,7 @@ export async function generateGraphSourceVariant(params: { workspaceId: string; 
         scopeJson: json({ ...recipe, phase: "APPLIED" }), payloadJson: json(bundle), generationJobId: job.id } });
       await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId, artifact: { kind: "GenericDerivedArtifactVariant", id: variant.id },
         content: variant, origin: "DERIVED", inputs: [], inheritedRoots: prepared.inputs.roots });
+      await publishVariantProposal(tx, actor, params.workspaceId, recipe, variant, bundle);
       if (recipe.mode === "CANONICAL_CANDIDATE") {
         await tx.derivedArtifactRebuildState.upsert({ where: { workspaceId_targetKind_targetId_targetManifestId: {
           workspaceId: params.workspaceId, targetKind: recipe.target.kind, targetId: recipe.target.id, targetManifestId: recipe.targets.find(target => target.kind === recipe.target.kind && target.id === recipe.target.id)!.recipeManifestId } },

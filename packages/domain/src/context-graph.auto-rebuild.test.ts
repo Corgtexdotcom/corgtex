@@ -39,7 +39,7 @@ function transport(name: string) {
 }
 beforeEach(async () => {
   await resetFixture(); epochs.clear(); sequence = 0;
-  for (const name of ["contextGraphObject", "contextGraphRelationship", "contextGraphEvidenceRef", "contextGraphProposedDiff", "genericDerivedArtifactVariant", "derivedArtifactRebuildState", "workflowJob", "workspaceArchiveRecord", "brainArticleVersion", "contextMapView", "contextMapLayoutItem"]) transport(name);
+  for (const name of ["auditLog", "contextGraphObject", "contextGraphRelationship", "contextGraphEvidenceRef", "contextGraphProposedDiff", "genericDerivedArtifactVariant", "derivedArtifactRebuildState", "workflowJob", "workspaceArchiveRecord", "brainArticleVersion", "contextMapView", "contextMapLayoutItem"]) transport(name);
   fixture.prisma.$executeRaw = vi.fn(async (sql: any) => {
     if (sql.strings?.join("").includes('INSERT INTO "SourcePermissionEpoch"')) for (let i = 0; i < sql.values.length; i += 4) {
       const [, ws, kind, id] = sql.values.slice(i, i + 4); const key = JSON.stringify([ws, kind, id]); if (!epochs.has(key)) epochs.set(key, 0n);
@@ -103,7 +103,7 @@ describe("automatic graph fallback with actual provenance and recipe helpers", (
     expect(JSON.stringify(pending)).not.toContain("PRIVATE");
     expect(fixture.rows.contextGraphObject).toEqual(originals);
     expect(generate).toHaveBeenCalledOnce();
-    const childId = (pending[0].diffJson as any).objects[0].id;
+    const childId = (pending[0].diffJson as any).objects[0].ref;
     const region = await buildSelectedRegionContext(alpha, { workspaceId, objectIds: [childId], depth: 0 });
     expect(region.objects[0].id).toBe(childId);
     expect(region.lineageInputs).toEqual([]);

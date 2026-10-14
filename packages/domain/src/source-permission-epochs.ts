@@ -88,10 +88,14 @@ export function artifactPermissionEpochIdentities(kind: string, row: Record<stri
   };
   const sourceKind = ["MeetingTranscript", "MeetingAgenda"].includes(kind) ? "Meeting" : kind;
   add(sourceKind, row.id);
+  if (kind === "FinanceReportFactRevision") {
+    add("FinanceReportFactLifecycle", row.factId);
+    for (const id of [row.appliedByUserId, row.approvedByUserId]) { add("MemberUserPolicy", id); add("WorkspaceSupportPolicy", id); }
+  }
   if (kind === "BrainArticleVersion") add("BrainArticle", row.articleId);
   if (kind === "WorkflowJobInput") add("WorkflowJobInput", row.id);
   add("Workspace", row.workspaceId);
-  if (kind === "ExternalDataSource") {
+  if (["ExternalDataSource", "BrainSource", "Document", "Meeting", "MeetingTranscript", "MeetingAgenda"].includes(kind)) {
     add("InformationCategoryPolicy", row.informationCategory);
     if (row.isRestricted === true) {
       for (const id of Array.isArray(row.allowedRoleIds) ? row.allowedRoleIds : []) add("Role", id);

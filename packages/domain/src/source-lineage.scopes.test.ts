@@ -11,7 +11,7 @@ const f = vi.hoisted(() => {
     return row[field] === value;
   });
   const insert = (table: string, row: any) => {
-    const value = { createdAt: new Date("2026-10-13T12:00:00Z"), ...row };
+    const value = { createdAt: new Date("2026-10-13T12:00:00Z"), ...(["document", "brainSource", "meeting"].includes(table) ? {informationCategory: "GENERAL"} : {}), ...row };
     if (!tables.has(table)) tables.set(table, new Map());
     tables.get(table)!.set(value.id, value); return value;
   };

@@ -84,11 +84,11 @@ export function artifactPermissionParents(kind: LineageKind, row: Record<string,
     field("FinanceImportBatch", "batchId"); field("Document", "documentId"); field("BrainSource", "brainSourceId");
   }
   if (kind === "FinanceReport") field("FinanceImportBatch", "sourceBatchId");
-  if (kind === "FinanceReportFact") {
+  if (["FinanceReportFact", "FinanceReportFactRevision"].includes(kind)) {
     field("FinanceReport", "reportId"); field("FinanceImportBatch", "sourceBatchId"); field("FinanceImportCandidate", "sourceCandidateId");
   }
   if (kind === "FinanceImportApplication") {
-    field("FinanceImportBatch", "batchId"); field("FinanceImportCandidate", "candidateId"); field("FinanceReportFact", "targetFactId");
+    field("FinanceImportBatch", "batchId"); field("FinanceImportCandidate", "candidateId"); field("FinanceReportFactRevision", "beforeRevisionId"); field("FinanceReportFactRevision", "afterRevisionId");
   }
   if (kind === "FinanceImportCandidate") field("FinanceImportBatch", "batchId");
   return parents;
@@ -107,7 +107,7 @@ const METADATA_FIELDS = new Set([
   "mapViewId", "constitutionId", "proposalId", "artifactId", "executionRequestId", "meetingId", "mode", "meetingAudioAssetId", "recordingId", "recorderAttemptId", "recorderMeetingId", "recorderBindingId", "recorderProvider",
   "sessionId", "conversationId", "flowId", "subjectType", "subjectId", "sourceType", "sourceId", "parentType", "parentId",
   "demoLeadId", "qualificationId", "accountId", "contactId", "dealId", "activityId", "targetWorkspaceId", "batchId", "documentId",
-  "brainSourceId", "sourceBatchId", "reportId", "sourceCandidateId", "candidateId", "targetFactId", "roleId",
+  "brainSourceId", "sourceBatchId", "reportId", "sourceCandidateId", "candidateId", "targetFactId", "factId", "appliedByUserId", "approvedByUserId", "kind", "beforeRevisionId", "afterRevisionId", "roleId", "status",
   "informationCategory", "isRestricted", "allowedRoleIds", "allowedCircleIds", "isPrivate", "visibility", "classification", "publicRevokedAt", "archivedAt", "isActive",
 ]);
 const RELATION_WORKSPACES: Partial<Record<LineageKind, object>> = {

@@ -558,3 +558,20 @@ export async function isRecorderTranscriptInputCurrent(actor: AppActor, workspac
       && claim.generation === attempt.generation && claim.nonce === attempt.nonce && claim.leaseUntil.getTime() > Date.now());
   } catch { return false; }
 }
+
+/** Existing recorder custody may capture its exact restricted meeting; this
+ * process-local active attempt conveys no ordinary reader or agent permission. */
+export async function isRecorderCategoryCaptureCurrent(actor: AppActor, workspaceId: string, meetingId: string, db: Db) {
+  const purpose = getRecorderTranscriptWorkerPurpose(actor, workspaceId);
+  if (!purpose || purpose.meetingId !== meetingId) return false;
+  const [claim, attempt, binding] = await Promise.all([
+    db.recorderTranscriptClaim.findFirst({where: {id: purpose.claimId, workspaceId}}),
+    db.recorderTranscriptAttempt.findFirst({where: {id: purpose.attemptId, workspaceId}}),
+    db.recorderTranscriptBinding.findFirst({where: {id: purpose.bindingId, workspaceId}}),
+  ]);
+  if (!claim || !attempt || !binding?.active || binding.revokedAt || claim.attemptId !== purpose.attemptId
+    || claim.generation !== purpose.generation || claim.nonce !== purpose.nonce || claim.leaseUntil.getTime() <= Date.now()
+    || attempt.meetingId !== meetingId || attempt.recordingId !== purpose.recordingId || attempt.bindingId !== binding.id
+    || attempt.generation !== purpose.generation || attempt.nonce !== purpose.nonce) return false;
+  try { return binding.configurationHash === bindingHash(workspaceId, await configCurrent(workspaceId, db)); } catch { return false; }
+}

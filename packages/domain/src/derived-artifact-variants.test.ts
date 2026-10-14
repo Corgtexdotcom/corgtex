@@ -7,7 +7,7 @@ vi.mock("./auth", () => ({ requireWorkspaceMembership: fixture.membership, isGlo
 vi.mock("./brain-access", () => ({ resolveKnowledgeAccessDomains: async (actor: any) => fixture.domains.get(actor.user.id) ?? [] }));
 vi.mock("./external-mcp", async importOriginal => ({ ...await importOriginal<typeof import("./external-mcp")>(),
   readBoxExternalMcpNativeResponse: remote.transport }));
-import { createGraphVariantBundle, graphVariantScopeKey, requestGraphSourceVariant, generateGraphSourceVariant, getReadableGraphSourceVariants, revalidateGraphSourceVariants } from "./derived-artifact-variants";
+import { createGraphVariantBundle, graphDiffMeaningHash, graphVariantScopeKey, requestGraphSourceVariant, generateGraphSourceVariant, getReadableGraphSourceVariants, revalidateGraphSourceVariants } from "./derived-artifact-variants";
 import { AppError } from "./errors";
 import { captureArtifactInputProof, readableArtifactIds } from "./source-lineage";
 import { captureExternalProviderFetchInput } from "./external-provider-authority";
@@ -30,6 +30,23 @@ describe("fresh pending graph bundle validation", () => {
     expect(a.objects[0].id).not.toBe(b.objects[0].id);
     expect(a.proposedDiff.id).not.toBe(b.proposedDiff.id);
     expect(a.proposedDiff.diffJson).toEqual({ objects: a.objects, relationships: a.relationships, evidenceRefs: a.evidenceRefs });
+  });
+  it("compares exact reviewed meaning independently of local refs and evidence, while retaining semantic uncertainty", () => {
+    const first = candidate();
+    const second = { ...candidate(), objects: [
+      { ref: "b", objectType: "Process", title: "Onboarding", summary: null, properties: {} },
+      { ref: "a", objectType: "Team", title: " Product team ", status: "approved" },
+    ], relationships: [{ sourceRef: "a", targetRef: "b", relationshipType: "owns" }], evidenceRefs: [] };
+    // The generator's explanation is not part of the graph diff.
+    const { reason: _reason, ...diff } = first;
+    const { reason: _otherReason, ...otherDiff } = second;
+    expect(graphDiffMeaningHash(diff)).not.toBeNull();
+    expect(graphDiffMeaningHash(otherDiff)).toBe(graphDiffMeaningHash(diff));
+    expect(graphDiffMeaningHash({ ...otherDiff, relationships: [{ sourceRef: "b", targetRef: "a", relationshipType: "owns" }] }))
+      .not.toBe(graphDiffMeaningHash(diff));
+    expect(graphDiffMeaningHash({ ...diff, objectUpdates: [] })).toBeNull();
+    expect(graphDiffMeaningHash({ ...diff, objects: diff.objects.map(row => ({ ...row, status: "rejected" })) })).toBeNull();
+    expect(graphDiffMeaningHash({ ...diff, objects: [...diff.objects, { ...diff.objects[0], ref: "duplicate" }] })).toBeNull();
   });
   it.each(["status", "id", "dedupeKey", "sourceEntityId", "reviewedAt", "approvedByUserId", "layout"])("rejects old %s copied onto a fresh object", field => {
     const input = candidate(); Object.assign(input.objects[0], { [field]: "OLD PRIVATE VALUE" });
@@ -98,7 +115,7 @@ beforeEach(async () => {
     if (remote.transactionDepth) { remote.callsInTransaction++; throw new Error("Provider called while interactive transaction is open"); }
     return structuredClone(remote.body);
   });
-  for (const name of ["contextGraphObject", "contextGraphRelationship", "contextGraphEvidenceRef", "contextGraphProposedDiff", "genericDerivedArtifactVariant", "derivedArtifactRebuildState", "workflowJob", "workspaceArchiveRecord", "brainArticleVersion", "externalProviderFetchInput", "externalMcpConnection", "externalContentSource"]) transport(name);
+  for (const name of ["auditLog", "contextGraphObject", "contextGraphRelationship", "contextGraphEvidenceRef", "contextGraphProposedDiff", "genericDerivedArtifactVariant", "derivedArtifactRebuildState", "workflowJob", "workspaceArchiveRecord", "brainArticleVersion", "externalProviderFetchInput", "externalMcpConnection", "externalContentSource"]) transport(name);
   fixture.prisma.$executeRaw = vi.fn(async () => 1);
   fixture.prisma.$queryRaw = vi.fn(async () => []);
   epochFixture = installSourcePermissionEpochFixture(fixture.prisma);
@@ -174,6 +191,30 @@ function boxCandidate(sources: any[]) {
   return { objects: [{ ref: "new-team", objectType: "Team" as const, title: "Product team" }], relationships: [],
     evidenceRefs: [{ objectRef: "new-team", sourceKind: "BrainSource" as const, sourceId: "box-source", quote: "product team" }] };
 }
+describe("legacy graph bundle native publication", () => {
+  it("materializes a never-published legacy proposal only after the complete immutable variant proof remains current", async () => {
+    const f = await setup(); const lease = await claimRequest(f.request);
+    const result = await generateGraphSourceVariant({ ...lease, generate: async () => generated([]) });
+    expect(result.phase).toBe("APPLIED");
+    const variant = structuredClone(fixture.rows.genericDerivedArtifactVariant[0]);
+    const id = variant.payloadJson.proposedDiff.id;
+    // Model the old writer's database shape: immutable variant present, native
+    // proposal and its tombstone absent. All normal source proof queries remain real.
+    fixture.rows.contextGraphProposedDiff = [];
+    const query = fixture.prisma.$queryRaw.getMockImplementation();
+    fixture.prisma.$queryRaw.mockImplementation(async (...args: any[]) => {
+      if (Array.isArray(args[0]) && args[0].join("").includes('FROM "SourcePermissionEpoch"')) return [];
+      return query(...args);
+    });
+    expect(await getReadableGraphSourceVariants(alpha, { workspaceId, scope: f.request.scope })).toHaveLength(1);
+    expect(fixture.rows.contextGraphProposedDiff).toHaveLength(1);
+    expect(fixture.rows.contextGraphProposedDiff[0]).toMatchObject({ id, status: "pending", proposedByUserId: "alpha" });
+    expect(fixture.rows.genericDerivedArtifactVariant[0]).toEqual(variant);
+    expect(fixture.rows.contextGraphProposedDiff[0].diffJson.objects[0]).toHaveProperty("ref");
+    expect(fixture.rows.contextGraphProposedDiff[0].diffJson.objects[0]).not.toHaveProperty("id");
+  });
+});
+
 describe("Box graph phase authority with actual lineage helpers", () => {
   it("rebuilds a whole coherent variant while old semantic lineage is unreadable, with zero provider calls in request/claim/publication/read transactions", async () => {
     const f = await setupBox(); const oldTargets = structuredClone(f.targets);

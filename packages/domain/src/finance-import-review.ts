@@ -5,7 +5,7 @@ import { captureArtifactInputProof, captureImmutableArtifactInputProof, recordAr
 import { AppError, invariant } from "./errors";
 import { requireFinanceReportImportHumanWriteAccess, requireFinanceReportImportReadAccess } from "./finance";
 import { parseFinanceImportInterpretationV1 } from "./finance-import-interpretation";
-import { captureFinanceCurrentFactProof, reconcileFinanceImportCandidates, type FinanceImportReconciliationDecision } from "./finance-import-reconciliation";
+import { captureFinanceCurrentFactValues, reconcileFinanceImportCandidates, type FinanceImportReconciliationDecision } from "./finance-import-reconciliation";
 import { normalizeFinanceImportAmountCents, parseFinanceImportDate } from "./finance-imports";
 export const FINANCE_IMPORT_HISTORICAL_MONTHS = 12;
 const MAX_VERSION = 2_147_483_647, HISTORICAL_POLICY_CODES = new Set(["HISTORICAL_ADDITION", "HISTORICAL_UPDATE"]);
@@ -82,8 +82,8 @@ async function reconcile(tx: Prisma.TransactionClient, actor: AppActor, identity
   rows: Parameters<typeof reconcileFinanceImportCandidates>[0]["candidates"]) {
   const keys = reconcileFinanceImportCandidates({ ...identity, candidates: rows, currentFacts: [] }).decisions.flatMap(({ semanticKey }) => semanticKey ? [semanticKey] : []);
   const facts = await tx.financeReportFact.findMany({ where: { workspaceId: identity.workspaceId, semanticKey: { in: keys } }, orderBy: { id: "asc" }, take: 5001 });
-  const lineageRoots = await captureFinanceCurrentFactProof(tx, actor, identity.workspaceId, facts);
-  return { ...reconcileFinanceImportCandidates({ ...identity, candidates: rows, currentFacts: facts }), lineageRoots };
+  const current = await captureFinanceCurrentFactValues(tx, actor, identity.workspaceId, facts);
+  return { ...reconcileFinanceImportCandidates({ ...identity, candidates: rows, currentFacts: current.facts }), lineageRoots: current.roots };
 }
 export async function listFinanceReportImports(actor: AppActor, workspaceId: string, now = new Date()) {
   await requireFinanceReportImportReadAccess(actor, workspaceId);
@@ -206,13 +206,13 @@ export async function editFinanceReportImportCandidate(actor: AppActor, params: 
     const now = new Date(); const rejectedCount = batch.candidates.filter(({ reviewState }) => reviewState === "REJECTED").length;
     const editedDecision = result.decisions.find(({ candidate }) => candidate.id === edited.id)!; const affectedKeys = new Set([target.semanticKey, editedDecision.semanticKey]);
     const affected = result.decisions.filter((decision) => batch.candidates.find(({ id }) => id === decision.candidate.id)?.reviewState !== "APPLIED" && (decision.candidate.id === edited.id || (decision.semanticKey && affectedKeys.has(decision.semanticKey))));
-    const signature = (decision: FinanceImportReconciliationDecision) => JSON.stringify([decision.candidate.id === edited.id ? edited.id : null, decision.semanticKey, decision.action, candidateState(decision, now), decision.currentFactId, decision.currentAmountCents, decision.explanationMd]);
+    const signature = (decision: FinanceImportReconciliationDecision) => JSON.stringify([decision.candidate.id === edited.id ? edited.id : null, decision.semanticKey, decision.action, candidateState(decision, now), decision.currentFactId, decision.currentFactRevisionId, decision.currentAmountCents, decision.explanationMd]);
     for (const key of new Set(affected.map(signature))) {
       const decisions = affected.filter((decision) => signature(decision) === key); const decision = decisions[0]!; const state = candidateState(decision, now);
       const priors = decisions.map(({ candidate }) => batch.candidates.find(({ id }) => id === candidate.id)!);
       const updated = await tx.financeImportCandidate.updateMany({ where: { workspaceId: batch.workspaceId, batchId: batch.id, OR: priors.map(({ id, version }) => ({ id, version })) }, data: {
         ...(decision.candidate.id === edited.id ? { proposedAccountPath: edited.proposedAccountPath, amountCents: edited.amountCents, periodStart: edited.periodStart, periodEnd: edited.periodEnd, editedByUserId: actor.user.id, editedAt: now } : {}),
-        semanticKey: decision.semanticKey, action: decision.action, reviewState: state, currentFactId: decision.currentFactId, currentAmountCents: decision.currentAmountCents, explanationMd: decision.explanationMd, approvedByUserId: null, approvedAt: null, version: { increment: 1 } } });
+        semanticKey: decision.semanticKey, action: decision.action, reviewState: state, currentFactId: decision.currentFactId, currentFactRevisionId: decision.currentFactRevisionId, currentAmountCents: decision.currentAmountCents, explanationMd: decision.explanationMd, approvedByUserId: null, approvedAt: null, version: { increment: 1 } } });
       invariant(updated.count === priors.length, 409, "FINANCE_REPORT_REVIEW_CONFLICT", "A Finance report candidate changed. Refresh and try again.");
     }
     const reportWarningCount = reportWarnings(batch.interpretationJson).length;
@@ -227,7 +227,7 @@ export async function editFinanceReportImportCandidate(actor: AppActor, params: 
     await tx.auditLog.create({ data: { workspaceId: batch.workspaceId, actorUserId: actor.user.id, action: "finance-report-import.candidate-edited",
       entityType: "FinanceImportCandidate", entityId: target.id, meta: { batchId: batch.id, version: batch.version + 1 } } });
     return { batchId: batch.id, version: batch.version + 1, candidateId: target.id, candidateVersion: target.version + 1 };
-  });
+  }, {maxWait: 10_000, timeout: 120_000});
 }
 export async function reviewFinanceReportImport(actor: AppActor, params: { workspaceId: string; batchId: string; expectedVersion: number;
   mode: ReviewMode; candidateVersions: Version[]; candidateId?: string; acceptWarnings?: boolean }) {
@@ -303,7 +303,7 @@ export async function reviewFinanceReportImport(actor: AppActor, params: { works
         const priors = decisions.map(({ candidate }) => batch.candidates.find(({ id }) => id === candidate.id)!);
         const updated = await tx.financeImportCandidate.updateMany({ where: { workspaceId: batch.workspaceId, batchId: batch.id,
           OR: priors.map(({ id, version }) => ({ id, version })) }, data: { semanticKey: decision.semanticKey, action, reviewState: state,
-          currentFactId: decision.currentFactId, currentAmountCents: decision.currentAmountCents, explanationMd: decision.explanationMd,
+          currentFactId: decision.currentFactId, currentFactRevisionId: decision.currentFactRevisionId, currentAmountCents: decision.currentAmountCents, explanationMd: decision.explanationMd,
           approvedByUserId: null, approvedAt: null, version: { increment: 1 } } });
         invariant(updated.count === priors.length, 409, "FINANCE_REPORT_REVIEW_CONFLICT", "A Finance report candidate changed. Refresh and try again.");
         priors.forEach(({ id }) => reconciledStates.set(id, state));
@@ -337,5 +337,5 @@ export async function reviewFinanceReportImport(actor: AppActor, params: { works
     await tx.auditLog.create({ data: { workspaceId: batch.workspaceId, actorUserId: actor.user.id, action: `finance-report-import.review.${params.mode.toLowerCase()}`,
       entityType: "FinanceImportBatch", entityId: batch.id, meta: { version: batch.version + 1, reviewedCount: targets.length, complete } } });
     return { batchId: batch.id, version: batch.version + 1, reviewedCount: targets.length, rejectedCount, complete };
-  });
+  }, {maxWait: 10_000, timeout: 120_000});
 }

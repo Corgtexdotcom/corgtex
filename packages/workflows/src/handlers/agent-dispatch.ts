@@ -1,8 +1,8 @@
-import type { AppActor } from "@corgtex/shared";
+import { prisma, type AppActor } from "@corgtex/shared";
 import { runInboxTriageAgent, runDailyCheckInAgent, runMeetingSummaryAgent, runActionExtractionAgent, runProposalDraftingAgent, runConstitutionUpdateTriggerAgent, runConstitutionSynthesisAgent, runCrmDripFollowupAgent, runCrmEmailExtractionAgent, runCrmLeadEnrichmentAgent, runCompanyUnderstandingAgent } from "@corgtex/agents";
 import { executeAgentRun } from "@corgtex/agents";
 import { runBrainMaintenance, absorbSource, runBrainSourceRegenerationJob, runBrainArticleVariantJob, runGraphSourceVariantJob } from "@corgtex/agents";
-import { assertBrainSourceRecoveryJob, captureArtifactInputProof } from "@corgtex/domain";
+import { assertBrainSourceRecoveryJob, captureArtifactInputProof, withBrainExportWorker } from "@corgtex/domain";
 
 function asString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -125,31 +125,32 @@ export async function runAgentWorkflowJob(job: {
       const admission = await assertBrainSourceRecoveryJob({ workspaceId: job.workspaceId, sourceId, workflowJobId: job.id, expectedSourceIdentity });
       if (admission?.alreadyCompleted) return admission;
     }
-    const result = await executeAgentRun({
-      agentKey: "brain-absorb",
-      workspaceId: job.workspaceId,
-      triggerType: "EVENT",
-      triggerRef: job.id,
-      goal: "Absorb a new source into the brain — update or create articles.",
-      payload: { sourceId },
-      plan: ["load-source", "classify", "match-articles", "absorb", "sync-knowledge", "rebuild-backlinks"],
-      buildContext: async (helpers) =>
-        helpers.tool("brain.load-source", { sourceId }, async () => ({ sourceId })),
-      execute: async (_context, helpers, runId, model) =>
-        helpers.step("absorb", { sourceId }, async () => {
-          const result = await absorbSource({
-            workspaceId: job.workspaceId!,
-            sourceId,
-            agentRunId: runId,
-            model,
-            ...(expectedSourceIdentity ? { expectedSourceIdentity } : {}),
-          });
+    const workspaceId = job.workspaceId;
+    const executeAbsorption = async (lineageActor?: AppActor) => {
+      const lineageRoots = lineageActor ? await captureArtifactInputProof(lineageActor, workspaceId, [{kind: "BrainSource", id: sourceId}]) : undefined;
+      return executeAgentRun({
+        ...(lineageActor && lineageRoots ? {lineageActor, lineageRoots, contextLineageRoots: () => lineageRoots} : {}),
+        agentKey: "brain-absorb", workspaceId, triggerType: "EVENT", triggerRef: job.id,
+        goal: "Absorb a new source into the brain — update or create articles.", payload: {sourceId},
+        plan: ["load-source", "classify", "match-articles", "absorb", "sync-knowledge", "rebuild-backlinks"],
+        buildContext: async helpers => helpers.tool("brain.load-source", {sourceId}, async () => ({sourceId}),
+          {receipt: helpers.plannedInputReceipt}),
+        execute: async (_context, helpers, runId, model) => helpers.step("absorb", {sourceId}, async () => {
+          const result = await absorbSource({workspaceId, sourceId, agentRunId: runId, model,
+            ...(lineageActor ? {actor: lineageActor} : {}), ...(expectedSourceIdentity ? {expectedSourceIdentity} : {})});
           if (payload.supportRecovery === true && "skipped" in result && result.skipped === true) {
             throw new Error("Brain source recovery did not complete absorption.");
           }
-          return { resultJson: result };
-        }),
-    });
+          const lineageReceipt = lineageActor && "lineageRoots" in result && result.lineageRoots?.length
+            ? await helpers.captureInputs(result.lineageRoots) : undefined;
+          return {resultJson: result, ...(lineageReceipt ? {lineageReceipt} : {})};
+        }, {receipt: helpers.plannedInputReceipt}),
+      });
+    };
+    const source = await prisma.brainSource.findFirst({where: {id: sourceId, workspaceId}, select: {channel: true}});
+    const result = source?.channel === "chat-consent"
+      ? await withBrainExportWorker({workspaceId, sourceId, jobId: job.id, owner: claimOwner ?? "", attempt: job.attempts ?? 0}, executeAbsorption)
+      : await executeAbsorption();
     if (payload.supportRecovery === true && result && "skipped" in result && result.skipped === true) {
       throw new Error("Brain source recovery was skipped by agent runtime before processing.");
     }

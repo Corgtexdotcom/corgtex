@@ -1,141 +1,96 @@
-# Finance restatement: immutable value evidence
+# Finance immutable value revisions
 
-## Current defect and boundary
+Finance restatement now consumes a typed immutable value revision rather than an
+old snapshot of the mutable canonical Fact. The live Fact is locked in stable ID
+order and checked for exact version/value parity. Its parent-binding epoch still
+advances on a legitimate restatement; historical value proofs are never rebased.
 
-`finance-import-application.ts` captures the current Fact and Report, preserves
-their immutable snapshots, then changes Fact `reportId`, `sourceBatchId` and
-`sourceCandidateId`. The real `pun68_permission_FinanceReportFact` trigger advances
-the Fact own epoch on these parent changes. The old snapshot correctly fails its
-saved vector, so publishing the changed Fact aborts SOURCE_CHANGED. The synthetic
-unit adapter does not model this trigger; its successful restatement is insufficient.
+## Publication and review
 
-The actual PostgreSQL safety case uses two genuine native uploads and
-two active Finance writers, applies123.45 then attempts234.56 on the same semantic
-Fact, and asserts rollback of Fact, candidate, batch, manifest/snapshots, receipt,
-Report and audit. The final phase probe passed1/1 in55510ms
-(`/tmp/pun68-real-finance-historical-final-pg.log`); domain types and scoped lint passed.
-It observes successful real Fact DML/new parent bindings and the actual own epoch
-advance on the same transaction before rejection, then compares complete saved
-snapshot/manifest/epoch/Event/audit rows after rollback. January2024 exercises the
-twelve-month historical peer-approval boundary with Bob distinct from uploader
-Alice. Independent GPT-6.1 Sol xhigh cleared this bounded corrected test.
-An initial fixture transaction expired before the boundary; its timeout now
-matches the existing120s product transaction. This proves safety, not successful
-restatement or performance acceptance.
+Migration 189 adds `FinanceReportFactRevision`, candidate comparison revision IDs,
+and receipt before/after revision IDs. Every ADD, UPDATE and UNCHANGED publishes
+an immutable typed value, exact original recipe/hash, approving writer/time and
+candidate version in the same transaction as the Fact and application receipt.
+DUPLICATE requires a verified existing revision and creates no new value revision.
+Before-value JSON and hashes come from the immutable revision, never mutable Fact
+ancestry. The constructor rechecks the exact approved candidate before publication.
 
-Do not refresh the old Fact epoch, omit a saved dependency, trust a same-body
-latest manifest or treat an old snapshot as a new native original.
+Proposal, review and reconciliation all use the revision-derived comparison.
+Candidate comparison IDs are fingerprinted semantic content, not live permission
+parents; their original consumed revisions remain in preserved snapshot ancestry.
+No stored recipe, snapshot, epoch or historical approval is rewritten.
 
-## Proposed coordinated design
+Application retains its Serializable transaction, complete original epoch SHARE
+locks, sorted Fact FOR UPDATE parity checks, bounded single conflict retry, and
+final lineage checks. Raw PostgreSQL serialization failure 40001 is normalized
+alongside Prisma P2034. Under an active complete source plan the helper requires
+predeclared Fact UPDATE coverage. The source registry exposes the Fact as a required
+control row and permits explicit control-write projections; it never traverses
+that mutable Fact as a revision's semantic parent. The application itself has not
+been migrated to the dynamic-newborn complete-plan orchestration API.
 
-Emit an immutable typed Fact value revision in the SAME transaction as every
-new canonical Fact publication. Its stored value includes semantic key, full
-value/dimensions/period, original Report/Batch/Candidate identities and exact
-version/hash. Its complete lineage comes from the actual independently permitted
-inputs used to compute that value. Each revision has a distinct immutable own
-identity; mutable canonical Fact parent changes cannot rewrite its source recipe.
+Owned proposal publication, reconciliation, candidate editing and review use the
+same explicit 120-second transaction / 10-second maximum wait as application.
+Global transaction defaults, row limits 5000, selected-output limit 1000 and the
+4 GiB compiler budget remain unchanged.
 
-Restatement reads the existing immutable value revision and validates exact parity
-with the live Fact version/value under the complete source plan. The prior value
-used in beforeValueJson comes from that revision. The mutable Fact is held for
-current control/optimistic comparison, while the semantic old-value input is the
-typed immutable revision. All new upload inputs, old revision inputs and current
-Finance policy must remain permitted before publication and serving.
+## Permission and lifecycle behavior
 
-This path must replace mutable Fact+Report ancestry in reconciliation as well as
-application: current reconciliation snapshots those values into Candidate and
-Batch manifests, which application subsequently inherits. Changing only the final
-Fact writer still leaves a stale old-Fact ancestor. Pending pre-migration batches
-must be freshly reconciled from independently proven inputs, never have their
-ancestors silently removed. ADD, UPDATE and UNCHANGED publish exact new revisions
-(UNCHANGED currently also increments/rebinds the Fact); DUPLICATE references the
-verified existing revision. Receipt beforeValueJson/hash must match the prior
-revision and retain the actual approval input.
+A revision requires its original Report, Batch, Candidate and native upload
+ancestry, current Finance policy and original writer permission epochs. A separate
+Fact lifecycle identity advances on deletion/recreation, tenant or kind changes,
+not ordinary parent/value/version rebinding. Revisions cannot be updated. They
+have only a Workspace cascade FK so deleting/rebinding business parents cannot
+erase the immutable evidence; existing Fact reference restrictions remain.
 
-Deletion, archive, explicit revocation and tenant movement need a reviewed live
-lifecycle governor for revisions. A separate policy/lifecycle epoch may be needed
-whose trigger distinguishes removal from an authorized canonical parent rebind.
-It must not let restoration reactivate an old revoked proof. Current capability,
-feature, membership, role/circle/support permissions still gate every read.
-The schema currently has no Fact archive/status field; Report delete cascades
-Fact, while application/candidate references constrain deletion. Parent must
-resolve FK, tombstone and purge behavior. FinanceReport's uppercase ARCHIVED is
-not covered by the current lowercase archive helper or Report permission trigger;
-its intended lifecycle effect needs an explicit rule. No active Report archive
-domain writer was found in this checkout; this is a design dependency.
+Report ARCHIVED is explicitly denied and advances the Report permission epoch.
+Archive, source revocation, membership or feature loss withhold dependent values
+and descendants. Restoring a prior state does not revive a saved proof. Original
+bytes and immutable revision rows remain retained. Independently permitted older
+values can survive revocation of a later upload; dependent newer values cannot
+survive revocation of an earlier value they actually consumed.
 
-Legacy Facts have no birth-time revision. Keep them withheld unless their value
-can be independently reconstructed from authenticated original uploads and a
-complete preserved recipe. An exact value/hash match is necessary but cannot by
-itself create history authority. Preserve original manifests/snapshots unchanged.
+Revision records are generated-only Finance authority, never public or human
+originals. Transfer archives them byte-exact in private staging and does not
+publish their historical authority. Purge ownership follows Workspace policy.
 
-## Ownership and acceptance before implementation
+## Legacy limit
 
-Batch coordination assigns PUN68 additive schema/migration, Workspace/purge
-relations, lifecycle policy and rollback implementation. PUN68 owns the typed
-source constructor, registry/coverage/epochs,
-read/write source-plan integration and regressions. No new schema or runtime
-activation is made by this proposal. Bloop PUN85/PUN94/PUN95 stays separate.
+Legacy Facts without independently issued birth revisions are withheld from
+comparison and serving, including hash-matching rows and copied old manifests.
+`FINANCE_REPORT_SOURCE_NOT_READY` explains that verified original-source recovery
+is required. A fresh upload with the same semantic key cannot restate such a Fact.
+A separate authenticated recovery workflow is required; this delta deliberately
+adds no fabricated historical revision, before-value or approval, and no new
+recovery/grant operation. Existing pending legacy ancestry is not stripped.
 
-Required evidence: two actual uploads, old/new values and retained source bytes;
-same semantic identity across revision/Fact; historical second-writer approval;
-old-source and new-source revocation independently; Finance membership/feature
-loss; delete/restore; forged/legacy revision denial; exact retry/replay rollback;
-two concurrent restatements; source-lock/owner order and bounded operations.
-Successful restatement must preserve the immutable old value and every original
-source permission vector, and must not mint a refreshed historical Fact vector.
+## Validation and delivery
 
-## Next bounded slice and consumer reservations
+The owned synthetic PG17 database is `corgtex_finance_revision_test` on localhost
+port 55479, separate from source-planner fixture 55468. Full migrations through 189 applied
+with migrate deploy; Prisma generation succeeded. Tests exercise real uploads,
+historical peer review, application, reads and PostgreSQL epoch triggers. Evidence
+is retained under ignored `.artifacts/finance-*` paths. No customer database,
+GitHub publication, merge or deployment was performed. Parent coordinates the
+existing PR #1517 integration and independent Astra review.
 
-Proposal at source head `2c73321c`; no Finance runtime/schema implementation or
-new authority is authorized by this note. Source owner remains the recovery lane;
-the existing batch coordinator confirms reservations before any overlapping edit.
+Validation receipts on this Finance delta:
 
-- Finance source consumers: `finance-import-proposal.ts`,
-  `finance-import-reconciliation.ts` (`captureFinanceCurrentFactProof` and rerun),
-  `finance-import-review.ts`, `finance-import-application.ts`
-  (`applyFinanceReportImport`) and `finance-import-lineage.ts`, with their matching
-  tests. Integrate immutable before-value ancestry across ALL four consumers in
-  one slice; changing only application leaves old mutable ancestry in candidates.
-- Source infrastructure: typed revision constructor and source registry/lineage,
-  authority edges, permission coverage/epochs/parents, source commit plan,
-  schema/migration and tenant ownership/purge selectors. Reserve the next additive
-  migration only after order is confirmed; no renumbering or production DDL.
-- Public Finance consumer:
-  `apps/web/app/api/workspaces/[workspaceId]/finance/imports/[batchId]/route.ts`.
-  Preserve POST apply and PATCH clarify/review contracts. Coordinate any route/test
-  change; no UI, grant or workflow expansion is assumed.
-- Following lifecycle consumers: `brain-source-removal.ts`,
-  `brain-source-removal-outcome.ts`, `brain-article-variants.ts`,
-  `derived-artifact-variants.ts` and their existing tests. Reserve `brain.ts`,
-  `context-graph.ts` and agent adapters `brain-source-regenerate.ts`,
-  `brain-article-variant.ts`, `graph-source-variant.ts` separately before edits.
-  Bloop's `conversation.ts`/Brain continuation, connector outbox/bootstrap/runner,
-  parent PR1523 harness/approval UI and PUN89 CI/root package remain excluded.
+- Complete PostgreSQL suite: 4/4, 457.19 seconds of tests, covering real native
+  uploads and peer review, 123.45 -> 234.56 restatement, immutable original recipes,
+  independent source/policy/archive denial, non-revival, unchanged/duplicate,
+  complete rollback, concurrent birth/restatement, exact replay and legacy denial.
+- Final affected PostgreSQL case: 1/1, 148.77 seconds, additionally proves that the
+  losing pending import re-reconciles to the winning revision and clears approval
+  without another publication. Every product transaction remains bounded at 120s.
+- Focused Finance/lineage/authority/purge/transfer units: 143/143; source-plan,
+  epoch coverage and backfill seams: 85/85; typed revision custody: 9/9. Subsequent
+  affected Finance units passed 51/51 and 29/29; counts overlap, not additive.
+- Final cold TypeScript: exit 0, Node 22.22.1 / TypeScript 5.9.3, nonincremental
+  with 4096 MiB V8 heap, 55.89 seconds and 4,009,590,784 bytes maximum RSS.
+  Scoped ESLint, Prisma validation and diff whitespace checks passed.
 
-Finance acceptance must prove a successful same-Fact 123.45 to 234.56 restatement
-from two real authenticated uploads with a different historical approving writer,
-retaining exact old/new immutable values, original bytes, recipe, approval identity
-and permission vectors. Cover ADD/UPDATE/UNCHANGED/DUPLICATE, exact live-Fact parity,
-independent old/new-source revocation, Finance/member/feature loss, forged/legacy
-revision denial, pending-batch re-reconciliation, complete retry/replay rollback,
-two concurrent restatements and source/owner lock order. Keep current row/output
-bounds, the 120-second transaction limit and 4 GiB compiler budget unchanged.
-The current safety rollback test remains a negative; success must not be achieved
-by refreshing historical epochs or dropping an ancestor.
-
-Lifecycle acceptance uses the approved remaining-source policy: regenerate only
-from independently permitted surviving sources, preserve standalone originals and
-private records, create separate member variants, and retain graph approval only
-when reviewed meaning/targets/authority remain valid. Test source removal and
-restore races, reclaimed jobs, deleted/recreated owners, stale outputs, complete
-atomic rollback, denied source content/count/search, narrower-member variants and
-approval retention versus material-change withholding. No generic-agent recorder
-read grant is introduced.
-
-Parent decisions still block lifecycle schema/activation: whether FinanceReport
-ARCHIVED invalidates all historical value revisions; Report/Fact deletion FK and
-tombstone behavior while preserving immutable evidence; the exact restoration
-rule requiring fresh authenticated regeneration; and treatment of legacy Facts
-whose original recipe cannot be reconstructed. Recommend retaining/withholding
-such evidence pending decisions; do not implement new permissions or data cleanup.
+These are synthetic local acceptance receipts, not independent approval, hosted
+CI, protected merge or production verification. The raw Serializable application
+boundary described above and legacy recovery limitation remain explicit review
+items. The disposable fixture and ignored evidence are preserved for QA.

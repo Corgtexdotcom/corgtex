@@ -36,7 +36,7 @@ export {
   mergeLineageInputRoot, brainSourceNeedsLineage, lineageContentFingerprint, isLineageKind,
   captureArtifactInputSnapshotProof, captureImmutableArtifactInputProof, preserveUnknownArtifactInputSnapshot,
   captureArtifactInputProof, isArtifactInputProofReadable, assertArtifactInputClosureLocallyAdmissible,
-  rebaseArtifactInputProofToSnapshots, isArtifactInputProofPubliclyShareable, inspectStoredArtifactInputDependencies,
+  rebaseArtifactInputProofToSnapshots, isArtifactInputProofPubliclyShareable, isBrainExportProofWorkspaceShareable, inspectStoredArtifactInputDependencies,
   captureArtifactPermissionEpochs, recordArtifactInputLineage, copyArtifactInputLineage,
   advanceHumanArtifactInputLineage, advanceArchivedArtifactEnvelopeLineage, invalidateArtifactInputLineage,
   hasCurrentArtifactInputLineage, currentArtifactInputRoots, isArtifactArchiveMetadataReadable,
@@ -206,3 +206,9 @@ export { SOURCE_PERMISSION_POLICY_VERSION, parsePermissionEpochProof,
 export type { PermissionEpochIdentity, PermissionEpochProof } from "./source-permission-epochs";
 
 export * from "./native-transcript-input";
+
+export * from "./conversation-brain-consent";
+
+export { configureInformationCategory, classifyInformationSource } from "./information-category-policy";
+
+export { withBrainExportWorker, getBrainExportWorkerPurpose, assertBrainExportWorkerCurrent } from "./brain-export-worker";

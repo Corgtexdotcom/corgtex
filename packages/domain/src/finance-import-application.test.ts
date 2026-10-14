@@ -7,6 +7,17 @@ const mocks = vi.hoisted(() => ({ write: vi.fn(), prisma: { $transaction: vi.fn(
 vi.mock("@corgtex/shared", () => ({ prisma: mocks.prisma }));
 vi.mock("./source-lineage", () => ({ captureArtifactInputProof: vi.fn(async () => []), captureImmutableArtifactInputProof: vi.fn(async () => []), recordArtifactInputLineage: vi.fn() }));
 vi.mock("./finance", () => ({ requireFinanceReportImportHumanWriteAccess: mocks.write }));
+// Application branching is isolated here; real revision custody, hashes, permissions
+// and transaction rollback are exercised against PostgreSQL in the integration suite.
+vi.mock("./finance-fact-revisions", async () => {
+  const { financeRevisionValue } = await import("./finance-fact-value");
+  const revision = (row: any) => ({ ...row, id: `revision-${row.id}-${row.version}`, factId: row.id, factVersion: row.version });
+  return {
+    captureFinanceFactRevisions: async (_tx: unknown, _actor: unknown, _workspace: string, facts: any[]) => ({ roots: [],
+      revisions: facts.map(revision), facts: facts.map(row => ({ ...row, currentFactRevisionId: revision(row).id })) }),
+    publishFinanceFactRevision: async (_tx: unknown, _actor: unknown, fact: any) => ({ revision: revision(fact), value: financeRevisionValue(revision(fact)), roots: [] }),
+  };
+});
 import { applyFinanceReportImport } from "./finance-import-application";
 import { buildFinanceReportFactSemanticKey } from "./finance-import-reconciliation";
 const actor: AppActor = { kind: "user", user: { id: "writer-1", email: "writer@example.com", displayName: "Writer", globalRole: "USER" } };
@@ -75,11 +86,11 @@ describe("Finance report application", () => {
       sourceBatchId: "batch-1", sourceCandidateId: "add", appliedByUserId: "writer-1" }) }));
     expect(mocks.prisma.financeReport.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ title: "synthetic.csv" }) })); expect(mocks.prisma.financeImportApplication.create).toHaveBeenCalledTimes(3); expect(mocks.prisma.financeTransaction.create).not.toHaveBeenCalled(); expect(mocks.prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ timeout: 120_000 }));
     expect(mocks.prisma.financeImportBatch.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ stage: "APPLIED", appliedCount: 3, appliedByUserId: "writer-1" }) }));
-    const orphan = candidate("orphan", { action: "DUPLICATE" }); mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([orphan])); mocks.prisma.financeReportFact.findUnique.mockResolvedValue(null); await expect(applyFinanceReportImport(actor, input([orphan]))).resolves.toMatchObject({ receipts: [{ outcome: "SKIPPED", targetFactId: null }] });
+    const orphan = candidate("orphan", { action: "DUPLICATE" }); mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([orphan])); mocks.prisma.financeReportFact.findUnique.mockResolvedValue(null); await expect(applyFinanceReportImport(actor, input([orphan]))).rejects.toMatchObject({ code: "FINANCE_REPORT_APPLICATION_CONFLICT" });
   });
   it("restates with optimistic versions and records unchanged before/after receipts", async () => {
-    const update = candidate("update", { action: "UPDATE", currentFactId: "fact-u", currentAmountCents: 50 });
-    const unchanged = candidate("same", { action: "UNCHANGED", currentFactId: "fact-s", currentAmountCents: 100 });
+    const update = candidate("update", { action: "UPDATE", currentFactId: "fact-u", currentFactRevisionId: "revision-fact-u-3", currentAmountCents: 50 });
+    const unchanged = candidate("same", { action: "UNCHANGED", currentFactId: "fact-s", currentFactRevisionId: "revision-fact-s-3", currentAmountCents: 100 });
     const oldUpdate = fact("fact-u", { semanticKey: update.semanticKey, amountCents: 50 }); const oldSame = fact("fact-s", { semanticKey: unchanged.semanticKey });
     mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([update, unchanged])); mocks.prisma.financeReportFact.findMany.mockResolvedValue([oldUpdate, oldSame]); mocks.prisma.financeImportApplication.count.mockResolvedValue(2);
     const result = await applyFinanceReportImport(actor, input([update, unchanged]));
@@ -100,7 +111,7 @@ describe("Finance report application", () => {
     mocks.prisma.financeImportApplication.count.mockResolvedValue(2); await expect(applyFinanceReportImport(actor, input([pending], 5))).resolves.toMatchObject({ stage: "APPLIED", appliedNow: 1, appliedCount: 2 }); expect(mocks.prisma.financeReport.upsert).toHaveBeenCalledTimes(2); expect(mocks.prisma.financeReportFact.create).toHaveBeenCalledTimes(2);
   });
   it("rolls back the wave when the optimistic current-fact write loses", async () => {
-    const update = candidate("update", { action: "UPDATE", currentFactId: "fact-u", currentAmountCents: 50 });
+    const update = candidate("update", { action: "UPDATE", currentFactId: "fact-u", currentFactRevisionId: "revision-fact-u-3", currentAmountCents: 50 });
     mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([update])); mocks.prisma.financeReportFact.findMany.mockResolvedValue([fact("fact-u", { semanticKey: update.semanticKey, amountCents: 50 })]);
     mocks.prisma.financeReportFact.updateMany.mockResolvedValue({ count: 0 });
     await expect(applyFinanceReportImport(actor, input([update]))).rejects.toMatchObject({ code: "FINANCE_REPORT_APPLICATION_CONFLICT" });
@@ -109,7 +120,7 @@ describe("Finance report application", () => {
   it("revalidates version-safe historical peer approval and the canonical semantic identity", async () => {
     const staleWarning = candidate("add", { periodStart: new Date("2025-07-01Z"), periodEnd: new Date("2025-07-31Z"), approvedAt: new Date("2025-08-01Z") }); mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([staleWarning]));
     await expect(applyFinanceReportImport(actor, input([staleWarning]))).rejects.toMatchObject({ code: "FINANCE_REPORT_APPLICATION_BLOCKED" });
-    const stalePeer = candidate("update", { action: "UPDATE", currentFactId: "fact-u", currentAmountCents: 50,
+    const stalePeer = candidate("update", { action: "UPDATE", currentFactId: "fact-u", currentFactRevisionId: "revision-fact-u-3", currentAmountCents: 50,
       periodStart: new Date("2024-01-01Z"), periodEnd: new Date("2024-01-31Z"),
       editedByUserId: "writer-1", editedAt: new Date("2026-02-02Z"), approvedByUserId: "reviewer-1", approvedAt: new Date("2026-02-01Z") });
     mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([stalePeer]));

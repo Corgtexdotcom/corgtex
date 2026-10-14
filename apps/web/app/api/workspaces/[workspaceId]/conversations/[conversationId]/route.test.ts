@@ -93,6 +93,7 @@ describe("POST /api/workspaces/[workspaceId]/conversations/[conversationId]", ()
   beforeEach(() => {
     vi.clearAllMocks();
     resolveRequestActor.mockResolvedValue(actor);
+    addConversationTurn.mockResolvedValue({id: "persisted-turn-1", sequenceNumber: 1, createdAt: new Date("2026-10-14T00:00:00Z")});
     getConversation.mockResolvedValue({
       agentKey: "assistant",
       systemPrompt: null,
@@ -145,6 +146,7 @@ describe("POST /api/workspaces/[workspaceId]/conversations/[conversationId]", ()
     const remaining = await readRemainingBody(reader);
     expect(remaining).toContain("Assistant reply");
     expect(remaining).toContain("data: [DONE]");
+    expect(remaining).toContain('"committedTurn":{"id":"persisted-turn-1","sequenceNumber":1');
     expect(addConversationTurn).toHaveBeenCalledWith(actor, expect.objectContaining({
       workspaceId: "ws-1",
       conversationId: "conversation-1",

@@ -19,8 +19,11 @@ import { lineageContentFingerprint } from "./source-lineage";
 import { createArticle, getArticle, listArticles, publishArticle, updateArticle } from "./brain";
 import { archiveWorkspaceArtifact, restoreWorkspaceArtifact } from "./archive";
 import { brainSourceContentFingerprint } from "./brain-derivation";
-import { captureArtifactInputProof, captureImmutableArtifactInputProof, readableArtifactIds, recordArtifactInputLineage, type LineageKind } from "./source-lineage";
+import { lockSourceAuthorityRow } from "./source-commit-row-locks";
+import { prepareArtifactSourceCommit, withArtifactSourceCommit } from "./artifact-source-commit";
+import { captureArtifactInputProof, captureImmutableArtifactInputProof, isArtifactInputProofReadable, readableArtifactIds, recordArtifactInputLineage, type LineageKind } from "./source-lineage";
 import { prepareArtifactCommitPreflight, withArtifactCommitPreflight } from "./artifact-commit-preflight";
+import { captureRecorderProviderWire, prepareRecorderTranscript, publishRecorderTranscript, withRecorderTranscriptAttempt } from "./recorder-transcript-input";
 import { BRAIN_ARTICLE_VARIANT_JOB_TYPE, generateBrainArticleVariant, getReadableBrainArticleVariant,
   requestBrainArticleVariant, type PermittedVariantSource } from "./brain-article-variants";
 
@@ -55,6 +58,38 @@ async function fixture() {
     frontmatterJson: { also: ["PRIVATE CANONICAL ALIAS CANARY"] } });
   return { workspace, foreign, owner, reader, ownerMember, readerMember, ownerActor, readerActor,
     publicSource, financeSource, financeOriginal, canonical };
+}
+
+async function recorderVariantFixture() {
+  vi.stubEnv("RECALL_API_KEY", "synthetic-variant-recall-key");
+  vi.stubEnv("RECALL_REGION", "us-west-2");
+  vi.stubEnv("RECALL_WEBHOOK_SECRET", "synthetic-variant-signing");
+  vi.stubEnv("RECALL_WORKSPACE_BINDINGS_JSON", undefined);
+  const f = await fixture();
+  const meeting = await prisma.meeting.create({ data: { workspaceId: f.workspace.id, title: "Authenticated recorder meeting",
+    source: "manual", recordedAt: new Date(), status: "SCHEDULED" } });
+  await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: f.ownerActor, workspaceId: f.workspace.id,
+    artifact: { kind: "Meeting", id: meeting.id }, content: meeting, origin: "HUMAN_ORIGINAL", inputs: [] }));
+  await prisma.workspaceMeetingRecorderConfig.create({ data: { workspaceId: f.workspace.id, enabled: true } });
+  const recording = await prisma.meetingRecording.create({ data: { workspaceId: f.workspace.id, meetingId: meeting.id,
+    provider: "RECALL_AI", externalBotId: `synthetic-variant-bot-${randomUUID()}`,
+    meetingUrl: "https://meet.google.com/synthetic-variant", status: "COMPLETED" } });
+  const transcriptPayload = [{ speaker: "Synthetic speaker", start: 0, text: "AUTHENTIC RECORDER CANARY" }];
+  const publication = await withRecorderTranscriptAttempt(recording, null, async receipt => {
+    captureRecorderProviderWire(`https://us-west-2.recall.ai/api/v1/bot/${recording.externalBotId}/transcript/`,
+      { headers: { Authorization: "Token synthetic-variant-recall-key" } }, 200, JSON.stringify(transcriptPayload));
+    return publishRecorderTranscript(await prepareRecorderTranscript(receipt, { transcriptPayload, metadata: {} }, {}));
+  });
+  expect(publication).toMatchObject({ committed: true, meetingId: meeting.id });
+  const nativeInput = await prisma.nativeTranscriptInput.findFirstOrThrow({ where: { workspaceId: f.workspace.id, mode: "RECORDER" } });
+  const completeInputRoots = await captureArtifactInputProof(f.ownerActor, f.workspace.id, [
+    { kind: "BrainSource", id: f.publicSource.id }, { kind: "BrainSource", id: f.financeSource.id },
+    { kind: "MeetingTranscript", id: meeting.id },
+  ]);
+  const canonical = await createArticle(f.ownerActor, { workspaceId: f.workspace.id, slug: "authenticated-recorder-canonical",
+    title: "PRIVATE RECORDER CANONICAL TITLE CANARY", bodyMd: `${f.publicSource.content}\nPRIVATE FINANCE FACT CANARY\nAUTHENTIC RECORDER CANARY`,
+    type: "PROJECT", authority: "REFERENCE", sourceIds: [f.publicSource.id, f.financeSource.id], completeInputRoots });
+  return { ...f, meeting, recording, nativeInput, canonical };
 }
 
 async function mixedFixture() {
@@ -242,6 +277,7 @@ describe("permitted article variants across real read/write boundaries", () => {
   });
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     if (previousEncryptionKey === undefined) delete process.env.ENCRYPTION_KEY;
     else process.env.ENCRYPTION_KEY = previousEncryptionKey;
   });
@@ -288,6 +324,206 @@ describe("permitted article variants across real read/write boundaries", () => {
       .rejects.toMatchObject({ code: "IMMUTABLE_VARIANT" });
     await expect(publishArticle(f.readerActor, { workspaceId: f.workspace.id, slug: variant.slug }))
       .rejects.toMatchObject({ code: "IMMUTABLE_VARIANT" });
+  });
+
+  it("regenerates from independent survivors when an authenticated recorder input becomes unavailable", async () => {
+    const f = await recorderVariantFixture();
+    const roots = await captureArtifactInputProof(f.readerActor, f.workspace.id,
+      [{ kind: "MeetingTranscript", id: f.meeting.id }]);
+    expect(await isArtifactInputProofReadable(f.readerActor, f.workspace.id, roots)).toBe(true);
+    const genericAgent: AppActor = { kind: "agent", authProvider: "bootstrap", label: "brain-article-variant", workspaceIds: [f.workspace.id] };
+    expect(await isArtifactInputProofReadable(genericAgent, f.workspace.id, roots)).toBe(false);
+    await prisma.workspaceMeetingRecorderConfig.update({ where: { workspaceId: f.workspace.id }, data: { enabled: false } });
+    expect(await isArtifactInputProofReadable(f.readerActor, f.workspace.id, roots)).toBe(false);
+    const { variant, generate } = await generateVariant(f);
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(generate.mock.calls)).not.toContain("RECORDER CANARY");
+    const manifest = await prisma.artifactInputLineage.findFirstOrThrow({ where: { artifactId: variant.id }, orderBy: { revision: "desc" } });
+    expect(manifest.rootsJson).toEqual([{ kind: "BrainSource", id: f.publicSource.id,
+      fingerprint: brainSourceContentFingerprint(f.publicSource),
+      permissionEpochs: expect.objectContaining({ version: 1, entries: expect.any(Array) }) }]);
+    expect((await getArticle(f.readerActor, { workspaceId: f.workspace.id, slug: f.canonical.slug })).id).toBe(variant.id);
+    expect(await prisma.brainArticle.findUniqueOrThrow({ where: { id: f.canonical.id } })).toMatchObject({ bodyMd: f.canonical.bodyMd });
+    expect(await prisma.nativeTranscriptInput.findUniqueOrThrow({ where: { id: f.nativeInput.id } }))
+      .toMatchObject({ encryptedPayloadJson: f.nativeInput.encryptedPayloadJson });
+    expect(await prisma.recorderTranscriptPublication.count({ where: { nativeInputId: f.nativeInput.id } })).toBe(1);
+  });
+
+  it("keeps restored recorder proof and its previous member variant withheld while creating a survivor-only variant", async () => {
+    const f = await recorderVariantFixture();
+    const lease = await claim(f);
+    const generate = vi.fn(async (sources: PermittedVariantSource[]) => {
+      expect(sources.map(source => source.kind).sort()).toEqual(["BrainSource", "MeetingTranscript"].sort());
+      expect(sources.find(source => source.kind === "MeetingTranscript")?.content).toContain("AUTHENTIC RECORDER CANARY");
+      expect(JSON.stringify(sources)).not.toContain("PRIVATE");
+      return { title: "Allowed recorder and launch facts", bodyMd: "AUTHENTIC RECORDER CANARY and public launch facts." };
+    });
+    const generated = await generateBrainArticleVariant({ ...lease, generate });
+    expect(generated.phase).toBe("APPLIED");
+    if (generated.phase !== "APPLIED") throw new Error("Expected an authenticated recorder variant");
+    const oldVariant = await prisma.brainArticle.findUniqueOrThrow({ where: { id: generated.articleId } });
+    expect((await getArticle(f.readerActor, { workspaceId: f.workspace.id, slug: f.canonical.slug })).id).toBe(oldVariant.id);
+    await prisma.workspaceMeetingRecorderConfig.update({ where: { workspaceId: f.workspace.id }, data: { enabled: false } });
+    expect(await getReadableBrainArticleVariant(f.readerActor, { workspaceId: f.workspace.id, articleId: f.canonical.id })).toBeNull();
+    await prisma.workspaceMeetingRecorderConfig.update({ where: { workspaceId: f.workspace.id }, data: { enabled: true } });
+    expect(await getReadableBrainArticleVariant(f.readerActor, { workspaceId: f.workspace.id, articleId: f.canonical.id })).toBeNull();
+    expect(await readableArtifactIds(f.readerActor, f.workspace.id, "BrainArticle", [oldVariant])).toEqual(new Set());
+    const { variant: fresh } = await generateVariant(f);
+    expect(fresh.id).not.toBe(oldVariant.id);
+    expect(fresh.bodyMd).not.toContain("RECORDER CANARY");
+    expect(await prisma.brainArticle.findUniqueOrThrow({ where: { id: oldVariant.id } })).toMatchObject({ bodyMd: oldVariant.bodyMd });
+    expect(await prisma.nativeTranscriptInput.findUniqueOrThrow({ where: { id: f.nativeInput.id } }))
+      .toMatchObject({ encryptedPayloadJson: f.nativeInput.encryptedPayloadJson });
+  });
+
+  it("denies recorder planner roots and targets in another tenant and denies a nonmember before generation", async () => {
+    const f = await recorderVariantFixture();
+    const roots = await captureArtifactInputProof(f.readerActor, f.workspace.id,
+      [{ kind: "MeetingTranscript", id: f.meeting.id }]);
+    expect(await isArtifactInputProofReadable(f.readerActor, f.foreign.id, roots)).toBe(false);
+    expect(await requestBrainArticleVariant(f.readerActor, { workspaceId: f.foreign.id, articleId: f.canonical.id }))
+      .toEqual({ status: "unavailable" });
+    expect(await prisma.workflowJob.count({ where: { workspaceId: f.foreign.id, type: BRAIN_ARTICLE_VARIANT_JOB_TYPE } })).toBe(0);
+    await prisma.member.update({ where: { id: f.readerMember.id }, data: { isActive: false } });
+    await expect(isArtifactInputProofReadable(f.readerActor, f.workspace.id, roots))
+      .rejects.toMatchObject({ code: "NOT_A_MEMBER" });
+    await expect(requestBrainArticleVariant(f.readerActor, { workspaceId: f.workspace.id, articleId: f.canonical.id }))
+      .rejects.toMatchObject({ code: "NOT_A_MEMBER" });
+    expect(await prisma.workflowJob.count({ where: { workspaceId: f.workspace.id, type: BRAIN_ARTICLE_VARIANT_JOB_TYPE } })).toBe(0);
+  });
+
+  it.each(["configuration", "binding", "membership", "meeting"] as const)(
+    "rejects a recorder candidate across %s revocation and attempted restoration during generation", async boundary => {
+      const f = await recorderVariantFixture();
+      const lease = await claim(f);
+      const generate = vi.fn(async (sources: PermittedVariantSource[]) => {
+        expect(sources.find(source => source.kind === "MeetingTranscript")?.content).toContain("AUTHENTIC RECORDER CANARY");
+        expect(JSON.stringify(sources)).not.toContain("PRIVATE");
+        if (boundary === "configuration") {
+          await prisma.workspaceMeetingRecorderConfig.update({ where: { workspaceId: f.workspace.id }, data: { enabled: false } });
+          await prisma.workspaceMeetingRecorderConfig.update({ where: { workspaceId: f.workspace.id }, data: { enabled: true } });
+        } else if (boundary === "binding") {
+          await prisma.recorderTranscriptBinding.update({ where: { id: f.nativeInput.recorderBindingId! },
+            data: { active: false, revokedAt: new Date() } });
+          await expect(prisma.recorderTranscriptBinding.update({ where: { id: f.nativeInput.recorderBindingId! },
+            data: { active: true, revokedAt: null } })).rejects.toThrow("cannot be revived or rewritten");
+        } else if (boundary === "membership") {
+          await prisma.member.update({ where: { id: f.readerMember.id }, data: { isActive: false } });
+          await prisma.member.update({ where: { id: f.readerMember.id }, data: { isActive: true } });
+        } else {
+          await archiveWorkspaceArtifact(f.ownerActor, { workspaceId: f.workspace.id, entityType: "Meeting", entityId: f.meeting.id });
+          await restoreWorkspaceArtifact(f.ownerActor, { workspaceId: f.workspace.id, entityType: "Meeting", entityId: f.meeting.id });
+        }
+        return { title: "Stale recorder candidate", bodyMd: "AUTHENTIC RECORDER CANARY" };
+      });
+      expect(await generateBrainArticleVariant({ ...lease, generate })).toEqual({ phase: "STALE" });
+      expect(generate).toHaveBeenCalledOnce();
+      expect(await prisma.brainArticle.count({ where: { variantOfArticleId: f.canonical.id } })).toBe(0);
+      expect(await prisma.workflowJob.findUniqueOrThrow({ where: { id: lease.jobId } })).toMatchObject({ payload: { phase: "STALE" } });
+      expect(await prisma.brainArticle.findUniqueOrThrow({ where: { id: f.canonical.id } })).toMatchObject({ bodyMd: f.canonical.bodyMd });
+      expect(await prisma.nativeTranscriptInput.findUniqueOrThrow({ where: { id: f.nativeInput.id } }))
+        .toMatchObject({ encryptedPayloadJson: f.nativeInput.encryptedPayloadJson });
+      expect(await prisma.recorderTranscriptPublication.count({ where: { nativeInputId: f.nativeInput.id } })).toBe(1);
+      const next = await claim(f);
+      expect(next.jobId).not.toBe(lease.jobId);
+      const fresh = await generateBrainArticleVariant({ ...next, generate: async sources => {
+        const transcript = sources.find(source => source.kind === "MeetingTranscript");
+        // Restored membership can make an independently current recorder input
+        // available again. Restored source policy cannot revive its old proof.
+        if (boundary === "membership") expect(transcript?.content).toContain("AUTHENTIC RECORDER CANARY");
+        else expect(transcript).toBeUndefined();
+        return { title: "Fresh permitted facts", bodyMd: "Public launch planning facts." };
+      } });
+      expect(fresh.phase).toBe("APPLIED");
+    });
+
+  it("shares immutable native custody with a concurrent canonical source reader without upgrading its lock", async () => {
+    const f = await recorderVariantFixture();
+    let ready!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>(resolve => { ready = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const reader = prisma.$transaction(async tx => {
+      await lockSourceAuthorityRow(tx, "NativeTranscriptInput", f.nativeInput.id, f.workspace.id);
+      ready();
+      await held;
+    }, { timeout: 15_000 });
+    await entered;
+    try {
+      expect(await requestBrainArticleVariant(f.readerActor, { workspaceId: f.workspace.id, articleId: f.canonical.id }))
+        .toMatchObject({ status: "pending" });
+    } finally { release(); await reader; }
+  });
+
+  it("holds native custody before waiting for the local BrainSource row, matching canonical native source order", async () => {
+    const f = await recorderVariantFixture();
+    let ready!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>(resolve => { ready = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const blocker = prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM "BrainSource" WHERE id = ${f.publicSource.id} AND "workspaceId" = ${f.workspace.id} FOR UPDATE`;
+      ready();
+      await held;
+    }, { timeout: 15_000 });
+    await entered;
+    const request = requestBrainArticleVariant(f.readerActor, { workspaceId: f.workspace.id, articleId: f.canonical.id });
+    try {
+      await vi.waitFor(async () => {
+        const waiting = await prisma.$queryRaw<Array<{ query: string }>>`SELECT query FROM pg_stat_activity
+          WHERE datname = current_database() AND cardinality(pg_blocking_pids(pid)) > 0`;
+        expect(waiting.some(row => row.query.includes('FROM "BrainSource"') && row.query.includes("FOR UPDATE"))).toBe(true);
+      }, { timeout: 5_000, interval: 20 });
+      await expect(prisma.$transaction(tx => tx.$queryRaw`SELECT id FROM "NativeTranscriptInput"
+        WHERE id = ${f.nativeInput.id} AND "workspaceId" = ${f.workspace.id} FOR UPDATE NOWAIT`))
+        .rejects.toMatchObject({ meta: { code: "55P03" } });
+    } finally { release(); await blocker; }
+    expect(await request).toMatchObject({ status: "pending" });
+  });
+
+  it("reserves archive advisories before authority rows when a canonical recorder source plan is already admitted", async () => {
+    const f = await recorderVariantFixture();
+    const roots = await captureArtifactInputProof(f.ownerActor, f.workspace.id, [
+      { kind: "BrainSource", id: f.publicSource.id }, { kind: "MeetingTranscript", id: f.meeting.id },
+    ]);
+    const options = { writeTargets: [], ownerBinding: { kind: "HUMAN_REQUEST" as const, id: f.ownerMember.id, generation: 1 } };
+    const token = await prepareArtifactSourceCommit(f.ownerActor, f.workspace.id, roots, options);
+    let ready!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>(resolve => { ready = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let backendPid = 0;
+    let first = true;
+    const reader = prisma.$transaction(tx => withArtifactSourceCommit(f.ownerActor, f.workspace.id, tx, roots, options, token,
+      async current => {
+        if (first) {
+          first = false;
+          const [backend] = await current.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+          backendPid = backend.pid;
+          ready();
+          await held;
+        }
+        expect(await current.member.findFirst({ where: { id: options.ownerBinding.id, workspaceId: f.workspace.id,
+          userId: f.owner.id, isActive: true } })).not.toBeNull();
+      }, async () => "canonical-reader-finished"), { timeout: 15_000 }).then(
+      value => ({ ok: true, value }), error => ({ ok: false, error }));
+    await Promise.race([entered, reader.then(() => { throw new Error("Canonical plan ended before reserving its archive union."); })]);
+    const request = requestBrainArticleVariant(f.readerActor, { workspaceId: f.workspace.id, articleId: f.canonical.id }).then(
+      value => ({ ok: true, value }), error => ({ ok: false, error }));
+    try {
+      await vi.waitFor(async () => {
+        const waiting = await prisma.$queryRaw<Array<{ query: string }>>`SELECT query FROM pg_stat_activity
+          WHERE datname = current_database() AND ${backendPid} = ANY(pg_blocking_pids(pid))`;
+        expect(waiting.some(row => row.query.includes("pg_advisory_xact_lock"))).toBe(true);
+      }, { timeout: 5_000, interval: 20 });
+      // A waiting planner must not retain Workspace UPDATE. Otherwise the
+      // canonical plan's later Workspace SHARE would close a deadlock cycle.
+      await expect(prisma.$transaction(tx => tx.$queryRaw`SELECT id FROM "Workspace"
+        WHERE id = ${f.workspace.id} FOR SHARE NOWAIT`)).resolves.toEqual([{ id: f.workspace.id }]);
+    } finally { release(); }
+    const [canonicalResult, plannerResult] = await Promise.all([reader, request]);
+    expect(canonicalResult).toEqual({ ok: true, value: "canonical-reader-finished" });
+    expect(plannerResult).toMatchObject({ ok: true, value: { status: "pending" } });
   });
 
   it("excludes a readable source copied from the canonical's historical original body", async () => {

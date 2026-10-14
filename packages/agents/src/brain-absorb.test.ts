@@ -69,6 +69,8 @@ vi.mock("@corgtex/domain", () => ({
   captureImmutableArtifactInputProof: vi.fn(async (_actor, _workspaceId, roots) => roots),
   isArtifactInputProofReadable: vi.fn(async () => true),
   isArtifactInputProofPubliclyShareable: vi.fn(async () => true),
+  getBrainExportWorkerPurpose: vi.fn(() => null),
+  assertBrainExportWorkerCurrent: vi.fn(async () => undefined),
   scanSourceReadableRecords: vi.fn(async ({load}) => (await load(undefined, 100)).filter((row: {isPrivate?: boolean}) => !row.isPrivate)),
   invariant: (condition: unknown, _status: number, code: string, message: string) => {if (!condition) throw Object.assign(new Error(message), {code});},
   resolveKnowledgeAccessDomains: vi.fn(async () => ["WORKSPACE"]),

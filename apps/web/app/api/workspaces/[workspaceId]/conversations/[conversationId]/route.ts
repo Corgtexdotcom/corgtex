@@ -221,7 +221,7 @@ export async function POST(
               controller.enqueue(encodeStreamPayload(encoder, { text: missingText }));
             }
 
-            await addConversationTurn(actor, {
+            const committedTurn = await addConversationTurn(actor, {
               workspaceId,
               conversationId,
               userMessage,
@@ -230,6 +230,10 @@ export async function POST(
               promptInputId: finalResult?.promptInputId,
               lineageRoots: finalResult?.lineageRoots,
             });
+
+            if (!cancellation.cancelled) controller.enqueue(encodeStreamPayload(encoder, { committedTurn: {
+              id: committedTurn.id, sequenceNumber: committedTurn.sequenceNumber, createdAt: committedTurn.createdAt,
+            } }));
 
             // Auto-name: generate a title from the first message if none exists
             if (!conversation.topic) {

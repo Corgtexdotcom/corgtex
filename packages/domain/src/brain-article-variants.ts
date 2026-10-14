@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { Prisma, type BrainArticle } from "@prisma/client";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
-import { lockActiveArticleSources, lockBrainSourceLink } from "./brain-source-links";
+import { lockActiveArticleSources } from "./brain-source-links";
 import { AppError, invariant } from "./errors";
 import { appendEvents } from "./events";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
@@ -137,8 +137,12 @@ async function prepareNativeVariantScope(actor: UserActor, workspaceId: string,
   catch (error) { if (isStaleError(error)) return null; throw error; }
 }
 
-function withNativeVariantScope<T>(actor: UserActor, workspaceId: string, tx: Prisma.TransactionClient,
-  scope: NativeVariantScope, beforeSourceEpochs: () => Promise<void>, work: () => Promise<T>): Promise<T> {
+async function withNativeVariantScope<T>(actor: UserActor, workspaceId: string, tx: Prisma.TransactionClient,
+  scope: NativeVariantScope, plan: VariantLockPlan | null, beforeSourceEpochs: () => Promise<void>, work: () => Promise<T>): Promise<T> {
+  invariant(plan, 409, "SOURCE_CHANGED", "Article input locks could not be planned.");
+  // Canonical plans reserve archive heads before physical rows. Reserve the
+  // complete local union before native adapters or Workspace/authority locks.
+  await reserveVariantArchiveLocks(tx, plan.lockRoots);
   return scope ? withArtifactCommitPreflight(actor, workspaceId, tx, scope.roots, scope.preflight, work, { beforeSourceEpochs })
     : beforeSourceEpochs().then(work);
 }
@@ -154,7 +158,8 @@ const INPUT_TABLES: Readonly<Partial<Record<string, string>>> = {
   ...ARCHIVE_ENTITY_TYPES, CommunicationMessage: "CommunicationMessage", ConversationPromptInput: "ConversationPromptInput",
   ConversationIngressInput: "ConversationIngressInput", ConversationSession: "ConversationSession",
   AgentRequestInput: "AgentRequestInput", ArtifactInputSnapshot: "ArtifactInputSnapshot", MeetingAudioAsset: "MeetingAudioAsset",
-  BrainArticleVersion: "BrainArticleVersion",
+  // Immutable native custody still requires existing member and source proof.
+  NativeTranscriptInput: "NativeTranscriptInput", BrainArticleVersion: "BrainArticleVersion",
 };
 function hash(value: unknown) { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
 function rootSignature(roots: readonly LineageRoot[]) {
@@ -255,30 +260,37 @@ function sourceProjection(kind: BrainArticleVariantSourceKind, row: CandidateRow
   return { kind, id: row.id, title, content, ingestionGuidanceMd: guidance,
     ...(kind === "BrainSource" ? { sourceType: String(row.sourceType), tier: Number(row.tier) } : {}) };
 }
+async function reserveVariantArchiveLocks(tx: Prisma.TransactionClient, roots: readonly LineageRoot[]) {
+  const archiveTables = new Set(Object.values(ARCHIVE_ENTITY_TYPES));
+  const keys = new Set<string>();
+  for (const root of roots) {
+    const table = INPUT_TABLES[root.kind];
+    if (table && archiveTables.has(table)) keys.add(`workspace_archive:${table}:${root.id}`);
+  }
+  for (const key of [...keys].sort())
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+}
 async function lockVariantInputs(tx: Prisma.TransactionClient, workspaceId: string, roots: readonly LineageRoot[]) {
   const identities = new Map<string, { table: string; id: string }>();
   for (const root of roots) {
     const table = INPUT_TABLES[root.kind];
     if (table) identities.set(JSON.stringify([table, root.id]), { table, id: root.id });
   }
-  // Source removal owns Source -> Document -> Article. Native adapters already
-  // hold their own input/governor rows before this local union is acquired.
-  const phase = (table: string) => table === "BrainSource" ? 0 : table === "Document" ? 1
+  // Source removal owns Source -> Document -> Article. Immutable native
+  // custody precedes those rows, matching canonical source-plan ordering.
+  const phase = (table: string) => table === "NativeTranscriptInput" ? -1 : table === "BrainSource" ? 0 : table === "Document" ? 1
     : table === "BrainArticle" ? 3 : 2;
   for (const { table, id } of [...identities.values()].sort((left, right) =>
     phase(left.table) - phase(right.table) || left.table.localeCompare(right.table) || left.id.localeCompare(right.id))) {
-    const archiveEntityType = Object.values(ARCHIVE_ENTITY_TYPES).includes(table) ? table : null;
-    if (archiveEntityType === "BrainSource") await lockBrainSourceLink(tx, id);
-    else if (archiveEntityType) await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`workspace_archive:${archiveEntityType}:${id}`}, 0))`;
     // Identifiers originate only in the static table allowlist; values remain SQL parameters.
     if (table === "Role") {
       await tx.$queryRaw`SELECT r.id FROM "Role" r JOIN "Circle" c ON c.id = r."circleId" WHERE r.id = ${id} AND c."workspaceId" = ${workspaceId} FOR UPDATE OF r`;
     } else if (table === "BrainArticleVersion") {
       await tx.$queryRaw`SELECT v.id FROM "BrainArticleVersion" v JOIN "BrainArticle" a ON a.id = v."articleId" WHERE v.id = ${id} AND a."workspaceId" = ${workspaceId} FOR UPDATE OF v`;
     } else {
-      // The Slack adapter already holds Message FOR SHARE. An UPDATE upgrade
-      // here would let two concurrent permitted readers deadlock each other.
-      const mode = table === "CommunicationMessage" ? "FOR SHARE" : "FOR UPDATE";
+      // Match native input SHARE locks; upgrading a held read lock could
+      // deadlock concurrent permitted readers of the same immutable custody.
+      const mode = table === "CommunicationMessage" || table === "NativeTranscriptInput" ? "FOR SHARE" : "FOR UPDATE";
       await tx.$queryRaw(Prisma.sql`SELECT id FROM ${Prisma.raw(`"${table}"`)} WHERE id = ${id} AND "workspaceId" = ${workspaceId} ${Prisma.raw(mode)}`);
     }
   }
@@ -527,7 +539,7 @@ export async function requestBrainArticleVariant(actor: AppActor, params: { work
   const lockPlan = await planVariantLocks(prisma, params.workspaceId, params.articleId);
   const nativeScope = await prepareNativeVariantScope(actor, params.workspaceId, params.articleId, lockPlan);
   try { return await prisma.$transaction(async (tx) => {
-    return withNativeVariantScope(actor, params.workspaceId, tx, nativeScope,
+    return withNativeVariantScope(actor, params.workspaceId, tx, nativeScope, lockPlan,
       () => lockVariantAuthorityBeforeEpochs(tx, actor, params.workspaceId, params.articleId, lockPlan), async () => {
     let prepared: Preparation;
     try { prepared = await prepareVariant(tx, actor, params.workspaceId, params.articleId, lockPlan!); }
@@ -562,7 +574,7 @@ export async function getReadableBrainArticleVariant(actor: AppActor, params: { 
   const lockPlan = await planVariantLocks(prisma, params.workspaceId, params.articleId);
   const nativeScope = await prepareNativeVariantScope(actor, params.workspaceId, params.articleId, lockPlan);
   try { return await prisma.$transaction(async (tx) => {
-    return withNativeVariantScope(actor, params.workspaceId, tx, nativeScope,
+    return withNativeVariantScope(actor, params.workspaceId, tx, nativeScope, lockPlan,
       () => lockVariantAuthorityBeforeEpochs(tx, actor, params.workspaceId, params.articleId, lockPlan), async () => {
     try {
       const prepared = await prepareVariant(tx, actor, params.workspaceId, params.articleId, lockPlan!);
@@ -647,7 +659,7 @@ export async function generateBrainArticleVariant(params: {
     try {
       if (!nativeContext || nativeContext.payloadHash !== hash(payload)) return stale();
       const actor = nativeContext.actor;
-      return await withNativeVariantScope(actor, params.workspaceId, tx, nativeContext?.scope ?? null,
+      return await withNativeVariantScope(actor, params.workspaceId, tx, nativeContext?.scope ?? null, nativeContext.lockPlan,
         () => lockVariantAuthorityBeforeEpochs(tx, actor, params.workspaceId, payload.articleId, nativeContext.lockPlan), async () => {
       const currentOwner = await ownerActor(tx, params.workspaceId, payload);
       invariant(actor.user.id === currentOwner.user.id && hash(actor) === hash(currentOwner),
@@ -695,7 +707,7 @@ export async function generateBrainArticleVariant(params: {
       await tx.workflowJob.update({ where: { id: job.id }, data: { payload: { ...payload, phase: "STALE" } as Prisma.InputJsonObject } });
       return { phase: "STALE" as const };
     };
-    return withNativeVariantScope(claim.actor, params.workspaceId, tx, finalNativeScope,
+    return withNativeVariantScope(claim.actor, params.workspaceId, tx, finalNativeScope, finalLockPlan,
       () => lockVariantAuthorityBeforeEpochs(tx, claim.actor, params.workspaceId, payload.articleId, finalLockPlan), async () => {
     let actor: UserActor;
     let current: Preparation;
