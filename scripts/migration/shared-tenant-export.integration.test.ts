@@ -234,3 +234,44 @@ test("pending permission events and executable jobs must be exported for exact p
     }
   } finally { await db.query('DELETE FROM "WorkflowJob" WHERE id=$1', [job]); }
 });
+
+for (const name of ["Event", "WorkflowJob"] as const) {
+  test(`${name} preservation checks only the selected tenant, including terminal leased work`, async () => {
+    const selectedTenant = randomUUID(), unrelatedTenant = randomUUID();
+    await db.query('INSERT INTO "Workspace" (id,slug,name,"updatedAt") VALUES ($1,$1,\'Selected empty fixture\',now()),($2,$2,\'Unrelated work fixture\',now())', [selectedTenant, unrelatedTenant]);
+    // Establish an empty queue in these two newly created synthetic fixtures.
+    // All other workspaces and their automatically generated events stay intact.
+    await db.query('DELETE FROM "Event" WHERE "workspaceId"=ANY($1::text[])', [[selectedTenant, unrelatedTenant]]);
+    const table = `"${name}"`;
+    const terminal = name === "Event" ? "DISPATCHED" : "COMPLETED";
+    const insert = async (workspace: string, status: string, leased: boolean) => {
+      const id = randomUUID();
+      await db.query(`INSERT INTO ${table} (id,"workspaceId",type,payload,status,"lockedBy","lockedAt"${name === "WorkflowJob" ? ',"updatedAt"' : ''})
+        VALUES ($1,$2,'synthetic.tenant-guard','{}',$3,$4,$5${name === "WorkflowJob" ? ',now()' : ''})`,
+      [id, workspace, status, leased ? "synthetic-lease-owner" : null, leased ? new Date("2026-01-01") : null]);
+      return id;
+    };
+    try {
+      for (const [status, leased] of [["PENDING", false], [terminal, true]] as const) {
+        const unrelatedId = await insert(unrelatedTenant, status, leased);
+        const before = (await db.query(`SELECT row_to_json(r)::text AS row FROM ${table} r WHERE "workspaceId"=$1 ORDER BY id`, [unrelatedTenant])).rows;
+        const value = await fixtureManifest(); value.workspaceId = selectedTenant; value.workspaceSlug = selectedTenant;
+        for (const disposition of ["discard", "rebuild", "operator-control"] as const) {
+          value.tables[name].disposition = disposition;
+          const exported = await exportTenantSnapshot(db, value);
+          assert.equal(exported.tables.find((entry) => entry.name === name), undefined);
+          assert.equal(exported.dispositions.find((entry) => entry.table === name)?.selectedRows, "0");
+          await assertIdle();
+        }
+        assert.deepEqual((await db.query(`SELECT row_to_json(r)::text AS row FROM ${table} r WHERE "workspaceId"=$1 ORDER BY id`, [unrelatedTenant])).rows, before);
+        const selectedId = await insert(selectedTenant, status, leased);
+        try {
+          await assert.rejects(exportTenantSnapshot(db, value), new RegExp(`TRANSFER_SOURCE_WORK_PRESERVATION_REQUIRED:${name}`));
+          await assertIdle();
+          assert.deepEqual((await db.query(`SELECT row_to_json(r)::text AS row FROM ${table} r WHERE "workspaceId"=$1 ORDER BY id`, [unrelatedTenant])).rows, before);
+        } finally { await db.query(`DELETE FROM ${table} WHERE id=$1`, [selectedId]); }
+        await db.query(`DELETE FROM ${table} WHERE id=$1`, [unrelatedId]);
+      }
+    } finally { await db.query('DELETE FROM "Workspace" WHERE id=ANY($1::text[])', [[selectedTenant, unrelatedTenant]]); }
+  });
+}
