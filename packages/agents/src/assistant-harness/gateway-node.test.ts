@@ -73,6 +73,23 @@ function fixture() {
 }
 
 describe("assistant stream delivery authority", () => {
+
+  it.each(["SCOPE", "LIMIT"] as const)("preserves %s when generator cleanup also fails", async code => {
+    const f = fixture();
+    vi.mocked(f.gateway.chatEventStream).mockImplementation(async function* () {
+      try {
+        if (code === "LIMIT") yield { type: "content_delta", content: "x".repeat(5000) };
+        else yield { type: "content_delta", content: "Denied" };
+        return response;
+      } finally { f.cleanup(); throw new Error("private cleanup failure"); }
+    });
+    if (code === "SCOPE") f.beforeHandoff(async () => { throw new AssistantHarnessError("SCOPE"); });
+    await expect(f.run()).rejects.toThrow(code);
+    expect(f.cleanup).toHaveBeenCalledTimes(1);
+    expect(f.sent).toEqual([]);
+    expect(f.runtime.reserveDispatch).toHaveBeenCalledTimes(1);
+  });
+
   it.each([1, 1000])("accepts the same bounded content streamed in chunks of %i characters", async chunkSize => {
     const f = fixture();
     const content = "a".repeat(1000);

@@ -3,7 +3,7 @@ import { Command, END, START, StateGraph, interrupt, isGraphInterrupt } from "@l
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons";
 import { z } from "zod";
 import type { ModelTool, ToolCall } from "@corgtex/models";
-import { ASSISTANT_GRAPH_VERSION, AssistantHarnessError, authorize, checkCancellation, deliver } from "./contracts";
+import { ASSISTANT_GRAPH_VERSION, AssistantHarnessError, authorize, checkCancellation, deliver, snapshotRuntime } from "./contracts";
 import type { AssistantCapabilities, AssistantGateway, AssistantInput, AssistantLimits, AssistantRuntime } from "./contracts";
 import { AssistantCheckpointStore } from "./checkpoint-store";
 import type { ClaimedCheckpointPort } from "./checkpoint-store";
@@ -33,6 +33,22 @@ export type AssistantHarnessOptions = {
 
 /** Build one claim-bound runner per execution segment. No actor, signal or app handle is checkpointed. */
 export function createAssistantHarness(options: AssistantHarnessOptions, runtime: AssistantRuntime) {
+  runtime = snapshotRuntime(runtime);
+  options = {
+    enabled: options.enabled, workspaceEnabled: options.workspaceEnabled,
+    gateway: options.gateway, checkpoints: options.checkpoints,
+    model: options.model, stream: options.stream, limits: options.limits,
+    capabilities: {
+      reads: options.capabilities.reads.map(read => ({
+        name: read.name, description: read.description, arguments: read.arguments,
+        execute: read.execute.bind(read), parameters: structuredClone(read.parameters),
+      })),
+      publication: options.capabilities.publication,
+      artifact: options.capabilities.artifact ? {
+        schema: options.capabilities.artifact.schema, instruction: options.capabilities.artifact.instruction,
+      } : undefined,
+    },
+  };
   const limits = { ...defaultLimits, ...options.limits };
   for (const [key, value] of Object.entries(limits)) {
     if (!Number.isSafeInteger(value) || value < (key === "corrections" ? 0 : 1) || value > (key === "contentBytes" ? 524_288 : 100)) {
@@ -68,6 +84,10 @@ export function createAssistantHarness(options: AssistantHarnessOptions, runtime
     if (!parsed.success || parsed.data.configurationDigest !== configurationDigest) throw new AssistantHarnessError("VERSION");
     if (Object.entries(binding).some(([key, value]) => parsed.data.binding[key as keyof typeof binding] !== value)) throw new AssistantHarnessError("SCOPE");
     if (Buffer.byteLength(JSON.stringify(parsed.data), "utf8") > limits.contentBytes) throw new AssistantHarnessError("LIMIT");
+    if (parsed.data.pending) {
+      Object.freeze(parsed.data.pending.selection);
+      Object.freeze(parsed.data.pending.reference);
+    }
     return parsed.data;
   };
   const update = (data: AssistantState) => ({ data: validateState(data) });
@@ -124,7 +144,7 @@ export function createAssistantHarness(options: AssistantHarnessOptions, runtime
         await authorize(runtime, "approval", data.sources);
         const operationId = `${runtime.scope.runId}:publication:${next.toolCalls}`;
         const sources = Object.freeze(data.sources.map(source => Object.freeze({ ...source })));
-        const reference = await publication.prepare(runtime, operationId, parsed.data, sources);
+        const reference = { ...await publication.prepare(runtime, operationId, Object.freeze(parsed.data), sources) };
         // Preparation owns its atomic write fence; recheck before saving its result.
         await authorize(runtime, "approval", data.sources);
         return update({ ...next, status: "approval", pending: { operationId, call, selection: parsed.data, reference } });
@@ -139,17 +159,20 @@ export function createAssistantHarness(options: AssistantHarnessOptions, runtime
       // Neither the awaited reservation nor delivery acknowledgement is a read lease.
       await authorize(runtime, "read", data.sources);
       let result: Awaited<ReturnType<typeof read.execute>>;
-      try { result = await read.execute(parsed.data, runtime); } catch {
+      try { result = await read.execute(parsed.data, runtime); } catch (error) {
         checkCancellation(runtime);
+        if (error instanceof AssistantHarnessError) throw error;
         await deliver(runtime, { type: "tool_end", name: read.name, outcome: "error" }, data.sources);
         return update(reply(next, call, '{"error":"READ_FAILED"}'));
       }
       checkCancellation(runtime);
-      const sources = [...next.sources, ...result.sources];
+      // The adapter may retain its result; take ownership before the next await.
+      const content = result.content;
+      const sources = [...next.sources, ...result.sources.map(source => ({ ...source }))];
       // Exact returned sources are checked before being included in the next prompt.
       await authorize(runtime, "read", sources);
       await deliver(runtime, { type: "tool_end", name: read.name, outcome: "ok" }, sources);
-      return update(reply({ ...next, sources }, call, JSON.stringify({ untrustedEvidence: result.content })));
+      return update(reply({ ...next, sources }, call, JSON.stringify({ untrustedEvidence: content })));
     }))
     .addNode("approval", safeNode(async ({ data: raw }) => {
       const data = validateState(raw);
@@ -168,12 +191,14 @@ export function createAssistantHarness(options: AssistantHarnessOptions, runtime
       if (!publication || !data.pending) throw new AssistantHarnessError("INPUT");
       await authorize(runtime, "effect", data.sources);
       const { operationId, reference, selection, call } = data.pending;
-      let knowledge = await publication.inspect(runtime, operationId, reference);
+      let knowledge = { ...await publication.inspect(runtime, operationId, reference) };
+      await authorize(runtime, "effect", data.sources);
       if (knowledge.status === "NOT_COMMITTED") {
         const decision = await publication.decision(runtime, reference, selection);
         if (decision !== "APPROVED") throw new AssistantHarnessError("SCOPE");
-        checkCancellation(runtime);
-        knowledge = await publication.commit(runtime, operationId, reference, selection);
+        await authorize(runtime, "effect", data.sources);
+        knowledge = { ...await publication.commit(runtime, operationId, reference, selection) };
+        await authorize(runtime, "effect", data.sources);
       }
       if (knowledge.status === "UNKNOWN") return update({ ...data, status: "unknown" });
       return update(reply({ ...data, receiptIds: [...data.receiptIds, knowledge.receiptId] }, call, '{"publication":"COMMITTED"}'));
@@ -185,9 +210,12 @@ export function createAssistantHarness(options: AssistantHarnessOptions, runtime
     .addConditionalEdges("effect", ({ data }) => data.status, { model: "model", tools: "tools", unknown: END })
     .compile({ checkpointer });
 
+  let running = false;
   return {
     /** Omit input on retries/resume. No raw SDK Command, checkpoint ID or graph state accepted. */
     async run(input?: AssistantInput): Promise<AssistantOutcome> {
+      if (running) throw new AssistantHarnessError("UNAVAILABLE");
+      running = true;
       try {
         if (!options.enabled || !options.workspaceEnabled) throw new AssistantHarnessError("DISABLED");
         if (runtime.actor.kind !== "user" || runtime.actor.user.id !== runtime.scope.userId || !runtime.scope.runId || !runtime.scope.job.owner || !Number.isSafeInteger(runtime.scope.job.attempt) || runtime.scope.job.attempt < 1) throw new AssistantHarnessError("SCOPE");
@@ -255,6 +283,8 @@ export function createAssistantHarness(options: AssistantHarnessOptions, runtime
         checkCancellation(runtime);
         if (error instanceof AssistantHarnessError) throw error;
         throw new AssistantHarnessError("UNAVAILABLE");
+      } finally {
+        running = false;
       }
     },
   };
