@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { Prisma, type ContextGraphObject, type ContextGraphRelationship, type ContextGraphEvidenceRef, type ContextGraphProposedDiff } from "@prisma/client";
-import { getReadableGraphSourceVariants, requestGraphSourceVariant, revalidateGraphSourceVariants, type GraphTargetKind, type GraphVariantScope } from "./derived-artifact-variants";
+import { GRAPH_SOURCE_VARIANT_JOB_TYPE, captureGraphReviewApproval, getReadableGraphSourceVariants, requestGraphSourceVariant, revalidateGraphSourceVariants, type GraphTargetKind, type GraphVariantScope } from "./derived-artifact-variants";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
@@ -9,6 +9,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
 import { invariant } from "./errors";
 import { getMcpToolInputRoots } from "./mcp-tool-input-context";
+import { prepareArtifactCommitPreflight, withArtifactCommitPreflight } from "./artifact-commit-preflight";
 import {
   currentArtifactInputRoots,
   captureArtifactInputProof,
@@ -29,6 +30,10 @@ type GraphLineageCapture = {
   lineageRoots?: NonNullable<Awaited<ReturnType<typeof currentArtifactInputRoots>>>;
   humanOriginal?: boolean;
 };
+// A native apply freezes the complete proposal once. Reusing that exact private
+// array in the same transaction avoids recursively freezing it for every child;
+// each child's normal lineage writer still checks all current source permissions.
+const frozenGraphInputs = new WeakMap<object, { tx: Prisma.TransactionClient; actor: AppActor; workspaceId: string }>();
 
 async function readableGraphRecords<T extends { id: string }>(actor: AppActor, workspaceId: string,
   kind: LineageInput["kind"], records: T[], db: Prisma.TransactionClient | typeof prisma = prisma): Promise<T[]> {
@@ -81,8 +86,13 @@ async function prepareGraphLineage(tx: Prisma.TransactionClient, actor: AppActor
   if (capture.lineageInputs === undefined && !capture.humanOriginal) return capture;
   const roots = await captureArtifactInputProof(actor, workspaceId,
     [...(capture.lineageInputs ?? []), ...requiredInputs, ...(previous ? [previous] : [])], tx);
-  const immutable = await captureImmutableArtifactInputProof(actor, workspaceId,
-    [...roots, ...(capture.lineageRoots ?? [])], tx);
+  const inherited = capture.lineageRoots ?? [];
+  const frozen = frozenGraphInputs.get(inherited);
+  const reusable = frozen?.tx === tx && frozen.actor === actor && frozen.workspaceId === workspaceId;
+  const immutable = reusable
+    ? roots.length ? [...inherited, ...await captureImmutableArtifactInputProof(actor, workspaceId, roots, tx)] : inherited
+    : await captureImmutableArtifactInputProof(actor, workspaceId, [...roots, ...inherited], tx);
+  frozenGraphInputs.set(immutable, { tx, actor, workspaceId });
   return { lineageInputs: [], lineageRoots: immutable, humanOriginal: capture.humanOriginal } satisfies GraphLineageCapture;
 }
 
@@ -1036,6 +1046,10 @@ async function effectiveGraphVariantProjection(actor: AppActor, workspaceId: str
   for (const variant of variants) {
     if (asOf && variant.createdAt > asOf) continue;
     const bundle = variant.bundle;
+    const nativeProposal = await prisma.contextGraphProposedDiff.findFirst({ where: { id: bundle.proposedDiff.id, workspaceId } });
+    // Applied native rows carry the immutable private variant's proof. Do not
+    // render a second virtual copy, or resurrect a rejected proposal.
+    if (nativeProposal && ["applied", "rejected"].includes(nativeProposal.status)) continue;
     const childIds = [...bundle.objects, ...bundle.relationships, ...bundle.evidenceRefs, bundle.proposedDiff].map(row => row.id);
     // Reject collisions as a whole; do not silently substitute an old or other-bundle endpoint.
     if (new Set(childIds).size !== childIds.length || childIds.some(id => virtualIds.has(id) || variant.targets.some(target => target.id === id))) continue;
@@ -1050,14 +1064,14 @@ async function effectiveGraphVariantProjection(actor: AppActor, workspaceId: str
     const common = { workspaceId, createdByType: "agent", createdByUserId: null, createdByAgentRunId: null,
       sourceEntityType: null, sourceEntityId: null, dedupeKey: null, validFrom: null, validTo: null,
       recordedAt: variant.createdAt, lastVerifiedAt: null, createdAt: variant.createdAt, updatedAt: variant.createdAt };
-    objects.push(...ownObjects.map(row => ({ ...common, ...row, properties: (row.properties ?? {}) as Prisma.JsonValue,
+    objects.push(...ownObjects.map(row => ({ ...common, ...row, ...(nativeProposal?.status === "approved" ? { status: "approved" } : {}), properties: (row.properties ?? {}) as Prisma.JsonValue,
       confidence: row.confidence ?? null, supersededByObjectId: null })));
-    relationships.push(...ownRelationships.map(row => ({ ...common, ...row, properties: (row.properties ?? {}) as Prisma.JsonValue,
+    relationships.push(...ownRelationships.map(row => ({ ...common, ...row, ...(nativeProposal?.status === "approved" ? { status: "approved" } : {}), properties: (row.properties ?? {}) as Prisma.JsonValue,
       confidence: row.confidence ?? null, supersededByRelationshipId: null })));
     evidenceRefs.push(...bundle.evidenceRefs.filter(row => (row.objectId ? ownIds.has(row.objectId) : false)
       || (row.relationshipId ? ownRelationshipIds.has(row.relationshipId) : false)).map(row => ({ ...row, workspaceId,
       knowledgeChunkId: null, metadata: row.metadata as Prisma.JsonValue, createdAt: variant.createdAt })));
-    proposedDiffs.push({ ...bundle.proposedDiff, workspaceId, proposedByType: "agent", proposedByUserId: null,
+    if (!nativeProposal) proposedDiffs.push({ ...bundle.proposedDiff, workspaceId, proposedByType: "agent", proposedByUserId: null,
       proposedByAgentRunId: null, diffJson: bundle.proposedDiff.diffJson as Prisma.JsonValue, evidenceJson: null,
       reviewedByUserId: null, reviewedAt: null, appliedAt: null, createdAt: variant.createdAt, updatedAt: variant.createdAt });
     childIds.forEach(id => virtualIds.add(id)); variantIds.push(variant.id); lineageRoots.push(...variant.roots);
@@ -2002,6 +2016,32 @@ export async function updateContextGraphProposedDiff(actor: AppActor, params: Gr
   });
 }
 
+/** Regenerated proposals retain their immutable variant as source authority.
+ * Replay providers outside SQL, then bind the same proposal and complete roots
+ * around the ordinary native transition. Neither metadata nor a virtual ID grants access. */
+async function withVariantProposalTransaction<T>(actor: AppActor, params: { workspaceId: string; proposedDiffId: string },
+  work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+  const variant = await prisma.genericDerivedArtifactVariant.findFirst({ where: { workspaceId: params.workspaceId,
+    generatorKey: GRAPH_SOURCE_VARIANT_JOB_TYPE, payloadJson: { path: ["proposedDiff", "id"], equals: params.proposedDiffId } } });
+  if (!variant) return prisma.$transaction(work);
+  const member = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  invariant(actor.kind === "user" && member?.id === variant.ownerMemberId,
+    404, "NOT_FOUND", "Proposed graph diff not found.");
+  const row = await prisma.contextGraphProposedDiff.findFirst({ where: { id: params.proposedDiffId, workspaceId: params.workspaceId } });
+  invariant(row, 404, "NOT_FOUND", "Proposed graph diff not found.");
+  const roots = await currentArtifactInputRoots(prisma, params.workspaceId, { kind: "ContextGraphProposedDiff", id: row.id }, row);
+  invariant(roots?.length, 409, "UNKNOWN_LINEAGE", "Graph proposal has no complete input receipt.");
+  const token = await prepareArtifactCommitPreflight(actor, params.workspaceId, roots);
+  return prisma.$transaction(tx => withArtifactCommitPreflight(actor, params.workspaceId, tx, roots, token, () => work(tx), {
+    beforeSourceEpochs: async () => {
+      await tx.$queryRaw`SELECT id FROM "ContextGraphProposedDiff" WHERE id = ${row.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+      const locked = await tx.contextGraphProposedDiff.findFirst({ where: { id: row.id, workspaceId: params.workspaceId } });
+      invariant(locked && lineageContentFingerprint("ContextGraphProposedDiff", locked) === lineageContentFingerprint("ContextGraphProposedDiff", row),
+        409, "SOURCE_CHANGED", "Graph proposal changed before its native transition.");
+    },
+  }));
+}
+
 export async function reviewContextGraphProposedDiff(actor: AppActor, params: {
   workspaceId: string;
   proposedDiffId: string;
@@ -2009,7 +2049,9 @@ export async function reviewContextGraphProposedDiff(actor: AppActor, params: {
 }) {
   await requireGraphApprove(actor, params.workspaceId);
   const reviewedByUserId = actor.kind === "user" ? actor.user.id : null;
-  return prisma.$transaction(async (tx) => {
+  return withVariantProposalTransaction(actor, params, async (tx) => {
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx,
+      ...(actor.kind === "user" ? { allowedRoles: ["ADMIN", "FACILITATOR"] } : {}) });
     await tx.$queryRaw`SELECT id FROM "ContextGraphProposedDiff" WHERE id = ${params.proposedDiffId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const proposedDiff = await tx.contextGraphProposedDiff.findFirst({
       where: { id: params.proposedDiffId, workspaceId: params.workspaceId },
@@ -2033,7 +2075,9 @@ export async function reviewContextGraphProposedDiff(actor: AppActor, params: {
       action: `context-graph.diff.${params.status}`,
       entityType: "ContextGraphProposedDiff",
       entityId: proposedDiff.id,
-      meta: { status: params.status },
+      meta: { status: params.status, ...(params.status === "approved" ? {
+        graphApproval: await captureGraphReviewApproval(tx, actor, params.workspaceId, updated),
+      } : {}) },
     });
     return updated;
   });
@@ -2046,7 +2090,9 @@ export async function applyContextGraphProposedDiff(actor: AppActor, params: {
   await requireGraphApprove(actor, params.workspaceId);
   const reviewedByUserId = actor.kind === "user" ? actor.user.id : null;
 
-  return prisma.$transaction(async (tx) => {
+  return withVariantProposalTransaction(actor, params, async (tx) => {
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx,
+      ...(actor.kind === "user" ? { allowedRoles: ["ADMIN", "FACILITATOR"] } : {}) });
     await tx.$queryRaw`SELECT id FROM "ContextGraphProposedDiff" WHERE id = ${params.proposedDiffId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const proposedDiff = await tx.contextGraphProposedDiff.findFirst({
       where: { id: params.proposedDiffId, workspaceId: params.workspaceId },
@@ -2127,7 +2173,7 @@ export async function applyContextGraphProposedDiff(actor: AppActor, params: {
       where: { id: proposedDiff.id },
       data: {
         status: "applied",
-        reviewedByUserId,
+        reviewedByUserId: proposedDiff.reviewedByUserId ?? reviewedByUserId,
         reviewedAt: proposedDiff.reviewedAt ?? new Date(),
         appliedAt: new Date(),
       },
@@ -2135,6 +2181,10 @@ export async function applyContextGraphProposedDiff(actor: AppActor, params: {
 
     await captureGraphLineage(tx, actor, params.workspaceId,
       { kind: "ContextGraphProposedDiff", id: updated.id }, updated, capture);
+    if (proposedDiff.status === "pending") await recordAudit(tx, actor, {
+      workspaceId: params.workspaceId, action: "context-graph.diff.approved", entityType: "ContextGraphProposedDiff", entityId: updated.id,
+      meta: { graphApproval: await captureGraphReviewApproval(tx, actor, params.workspaceId, updated) },
+    });
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
       action: "context-graph.diff.applied",

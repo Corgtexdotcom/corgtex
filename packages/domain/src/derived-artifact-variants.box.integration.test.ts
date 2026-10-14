@@ -33,6 +33,7 @@ import { captureArtifactInputProof, readableArtifactIds, recordArtifactInputLine
 import { requestGraphSourceVariant, generateGraphSourceVariant, getReadableGraphSourceVariants,
   revalidateGraphSourceVariants, type GraphVariantCandidate } from "./derived-artifact-variants";
 import type { PermittedDerivationSource } from "./permitted-derivation-inputs";
+import { reviewContextGraphProposedDiff, applyContextGraphProposedDiff } from "./context-graph";
 
 // Only the external transport is synthetic. Every row, native constructor,
 // permission transition trigger, manifest, snapshot and commit scope is real.
@@ -132,6 +133,21 @@ describe("Box phase authority in real disposable database transactions", () => {
       .toEqual([...f.targets].sort((a, b) => a.id.localeCompare(b.id)));
     expect(await prisma.externalProviderFetchInput.count()).toBe(1);
     expect(provider.transport).toHaveBeenCalled(); expect(provider.callsInTransaction).toBe(0);
+  });
+  it("reviews and applies a native provider variant with all replay outside SQL", async () => {
+    const f = await fixture(); const lease = await claim(f);
+    const result = await generateGraphSourceVariant({ ...lease, generate: async sources => candidate(f, sources) });
+    if (result.phase !== "APPLIED") throw new Error("Expected generated variant");
+    const variant = await prisma.genericDerivedArtifactVariant.findUniqueOrThrow({ where: { id: result.variantId } });
+    const id = (variant.payloadJson as any).proposedDiff.id;
+    await reviewContextGraphProposedDiff(f.actor, { workspaceId: f.workspace.id, proposedDiffId: id, status: "approved" });
+    expect(await applyContextGraphProposedDiff(f.actor, { workspaceId: f.workspace.id, proposedDiffId: id })).toMatchObject({ status: "applied" });
+    expect(provider.callsInTransaction).toBe(0);
+    const objects = await prisma.contextGraphObject.findMany({ where: { workspaceId: f.workspace.id, id: { notIn: f.targets.map(row => row.id) } } });
+    expect(objects).toHaveLength(2);
+    expect((await readableArtifactIds(f.actor, f.workspace.id, "ContextGraphObject", objects)).size).toBe(2);
+    provider.body.text = "Changed after publication";
+    expect((await readableArtifactIds(f.actor, f.workspace.id, "ContextGraphObject", objects)).size).toBe(0);
   });
   it("rejects changed real provider bytes after model with no partial bundle despite an unchanged provider version label", async () => {
     const f = await fixture(); const lease = await claim(f);

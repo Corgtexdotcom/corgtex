@@ -31,6 +31,7 @@ const { requestGraphVariantMock, graphVariantsMock, revalidateGraphVariantsMock,
     $transaction: vi.fn(async (callback: (tx: any) => Promise<unknown>) => callback(prismaMock)),
     artifactInputLineage: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn() },
     artifactInputSnapshot: { findFirst: vi.fn(), create: vi.fn() },
+    genericDerivedArtifactVariant: { findFirst: vi.fn().mockResolvedValue(null) },
     brainSource: { findFirst: vi.fn() },
     contextGraphObject: {
       create: vi.fn(),
@@ -91,7 +92,9 @@ const { requestGraphVariantMock, graphVariantsMock, revalidateGraphVariantsMock,
   };
 });
 
-vi.mock("./derived-artifact-variants", () => ({ requestGraphSourceVariant: requestGraphVariantMock, getReadableGraphSourceVariants: graphVariantsMock, revalidateGraphSourceVariants: revalidateGraphVariantsMock }));
+vi.mock("./derived-artifact-variants", () => ({
+  GRAPH_SOURCE_VARIANT_JOB_TYPE: "agent.graph-source-variant",
+  captureGraphReviewApproval: vi.fn(async () => null), requestGraphSourceVariant: requestGraphVariantMock, getReadableGraphSourceVariants: graphVariantsMock, revalidateGraphSourceVariants: revalidateGraphVariantsMock }));
 
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,

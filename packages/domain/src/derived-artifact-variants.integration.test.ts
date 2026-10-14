@@ -6,6 +6,8 @@ import { advanceHumanArtifactInputLineage, captureArtifactInputProof, readableAr
 import { GRAPH_SOURCE_VARIANT_JOB_TYPE, generateGraphSourceVariant, getReadableGraphSourceVariants,
   requestGraphSourceVariant, revalidateGraphSourceVariants, type GraphVariantCandidate } from "./derived-artifact-variants";
 import type { PermittedDerivationSource } from "./permitted-derivation-inputs";
+import { applyContextGraphProposedDiff, createContextGraphProposedDiff, getContextMapData, listContextGraphProposedDiffs,
+  reviewContextGraphProposedDiff } from "./context-graph";
 
 // Exclusive disposable local database only; no gateway, provider, customer or external fixtures.
 async function fixture() {
@@ -166,5 +168,132 @@ describe("mixed-source private graph bundles with real SQL receipts", () => {
     expect((await requestGraphSourceVariant(f.readerActor, { ...f.request, target: { kind: "ContextGraphObject", id: original.id } })).status).toBe("NOT_NEEDED");
     expect((await requestGraphSourceVariant(f.readerActor, { ...f.request, target: { kind: "ContextGraphObject", id: unknown.id } })).status).toBe("UNAVAILABLE");
     expect(await prisma.workflowJob.count({ where: { type: GRAPH_SOURCE_VARIANT_JOB_TYPE } })).toBe(0);
+  });
+});
+
+describe("regenerated graph native review and publication", () => {
+  beforeEach(async () => { await truncateAllTables(); });
+  async function approverFixture() {
+    const f = await fixture();
+    await prisma.member.update({ where: { id: f.readerMember.id }, data: { role: "FACILITATOR" } });
+    return f;
+  }
+  async function reviewedOriginal(f: Fixture, changed = false) {
+    const diff = { objects: [{ ref: "a", objectType: "Team", title: changed ? "Different team" : "Product team" },
+      { ref: "b", objectType: "Process", title: "Onboarding" }],
+    relationships: [{ ref: "r", sourceRef: "a", targetRef: "b", relationshipType: "owns" }], evidenceRefs: [] };
+    const proposal = await createContextGraphProposedDiff(f.ownerActor, { workspaceId: f.workspace.id, diff,
+      lineageInputs: [{ kind: "Document", id: f.document.id }, { kind: "BrainArticle", id: f.privateArticle.id }] });
+    return reviewContextGraphProposedDiff(f.ownerActor, { workspaceId: f.workspace.id, proposedDiffId: proposal.id, status: "approved" });
+  }
+  it("reviews and applies the actual generated proposal through ordinary APIs, retaining private materialized rows", async () => {
+    const f = await approverFixture(); const { variant } = await generate(f);
+    const id = (variant.payloadJson as any).proposedDiff.id;
+    expect((await listContextGraphProposedDiffs(f.readerActor, { workspaceId: f.workspace.id })).some(row => row.id === id)).toBe(true);
+    await reviewContextGraphProposedDiff(f.readerActor, { workspaceId: f.workspace.id, proposedDiffId: id, status: "approved" });
+    const applied = await applyContextGraphProposedDiff(f.readerActor, { workspaceId: f.workspace.id, proposedDiffId: id });
+    expect(applied).toMatchObject({ id, status: "applied", reviewedByUserId: f.reader.id });
+    const objects = await prisma.contextGraphObject.findMany({ where: { workspaceId: f.workspace.id, id: { notIn: f.targets.map(row => row.id) } } });
+    expect(objects).toHaveLength(2);
+    expect(objects.every(row => row.status === "approved")).toBe(true);
+    expect((await readableArtifactIds(f.readerActor, f.workspace.id, "ContextGraphObject", objects)).size).toBe(2);
+    expect((await readableArtifactIds(f.ownerActor, f.workspace.id, "ContextGraphObject", objects)).size).toBe(0);
+    expect(await prisma.contextGraphRelationship.count({ where: { workspaceId: f.workspace.id } })).toBe(1);
+    expect(await prisma.contextGraphEvidenceRef.count({ where: { workspaceId: f.workspace.id } })).toBe(1);
+    const map = await getContextMapData(f.readerActor, { workspaceId: f.workspace.id });
+    expect(map.objects.map(row => row.id).sort()).toEqual(objects.map(row => row.id).sort());
+    expect(map.relationships).toHaveLength(1);
+    expect(map.relationships[0].evidenceRefs).toHaveLength(1);
+    expect(map.proposedDiffs).toHaveLength(0);
+    await expect(applyContextGraphProposedDiff(f.readerActor, { workspaceId: f.workspace.id, proposedDiffId: id })).rejects.toMatchObject({ code: "INVALID_STATE" });
+    await updateOriginalDocument(f, { accessDomain: "FINANCE" });
+    await updateOriginalDocument(f, { accessDomain: "WORKSPACE" });
+    expect((await readableArtifactIds(f.readerActor, f.workspace.id, "ContextGraphObject", objects)).size).toBe(0);
+    expect(await prisma.genericDerivedArtifactVariant.findUnique({ where: { id: variant.id } })).toEqual(variant);
+  });
+  it("denies ordinary contributors, foreign tenants, other admins and membership revoke/restore", async () => {
+    const f = await fixture(); const { variant } = await generate(f); const id = (variant.payloadJson as any).proposedDiff.id;
+    await expect(reviewContextGraphProposedDiff(f.readerActor, { workspaceId: f.workspace.id, proposedDiffId: id, status: "approved" })).rejects.toBeDefined();
+    await expect(reviewContextGraphProposedDiff(f.ownerActor, { workspaceId: f.workspace.id, proposedDiffId: id, status: "approved" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(applyContextGraphProposedDiff(f.readerActor, { workspaceId: f.foreign.id, proposedDiffId: id })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await prisma.member.update({ where: { id: f.readerMember.id }, data: { isActive: false } });
+    await prisma.member.update({ where: { id: f.readerMember.id }, data: { isActive: true, role: "FACILITATOR" } });
+    await expect(applyContextGraphProposedDiff(f.readerActor, { workspaceId: f.workspace.id, proposedDiffId: id })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(await prisma.contextGraphObject.count({ where: { workspaceId: f.workspace.id } })).toBe(f.targets.length);
+  });
+  it("carries the authentic reviewer for identical reviewed meaning and targets without another approval cycle", async () => {
+    const f = await approverFixture(); const original = await reviewedOriginal(f);
+    await applyContextGraphProposedDiff(f.ownerActor, { workspaceId: f.workspace.id, proposedDiffId: original.id });
+    const { variant } = await generate(f); const id = (variant.payloadJson as any).proposedDiff.id;
+    const proposal = await prisma.contextGraphProposedDiff.findUniqueOrThrow({ where: { id } });
+    expect(proposal).toMatchObject({ status: "approved", reviewedByUserId: f.owner.id, reviewedAt: original.reviewedAt });
+    expect(proposal.evidenceJson).toMatchObject({ approvalDisposition: "UNCHANGED_REVIEWED_MEANING" });
+    const applied = await applyContextGraphProposedDiff(f.readerActor, { workspaceId: f.workspace.id, proposedDiffId: id });
+    expect(applied.reviewedByUserId).toBe(f.owner.id);
+  });
+  it("keeps materially changed meaning pending and rejects client-forged approval metadata", async () => {
+    const f = await approverFixture(); const original = await reviewedOriginal(f, true);
+    const audit = await prisma.auditLog.findFirstOrThrow({ where: { entityId: original.id, action: "context-graph.diff.approved" } });
+    // Even copying genuine metadata to a different proposal does not copy its server review.
+    await createContextGraphProposedDiff(f.ownerActor, { workspaceId: f.workspace.id,
+      diff: { objects: [{ ref: "a", objectType: "Team", title: "Product team" }, { ref: "b", objectType: "Process", title: "Onboarding" }],
+        relationships: [{ ref: "r", sourceRef: "a", targetRef: "b", relationshipType: "owns" }], evidenceRefs: [] },
+      evidence: audit.meta as any, lineageInputs: [{ kind: "Document", id: f.document.id }, { kind: "BrainArticle", id: f.privateArticle.id }] });
+    const { variant } = await generate(f);
+    expect(await prisma.contextGraphProposedDiff.findUniqueOrThrow({ where: { id: (variant.payloadJson as any).proposedDiff.id } }))
+      .toMatchObject({ status: "pending", reviewedByUserId: null });
+  });
+  it("does not refresh reviewer authority after demotion and restoration", async () => {
+    const f = await approverFixture(); await reviewedOriginal(f);
+    await prisma.member.update({ where: { id: f.ownerMember.id }, data: { role: "CONTRIBUTOR" } });
+    await prisma.member.update({ where: { id: f.ownerMember.id }, data: { role: "ADMIN" } });
+    const { variant } = await generate(f);
+    expect(await prisma.contextGraphProposedDiff.findUniqueOrThrow({ where: { id: (variant.payloadJson as any).proposedDiff.id } }))
+      .toMatchObject({ status: "pending", reviewedByUserId: null });
+  });
+  it("serializes competing apply attempts and preserves one committed effect", async () => {
+    const f = await approverFixture(); const { variant } = await generate(f); const id = (variant.payloadJson as any).proposedDiff.id;
+    await reviewContextGraphProposedDiff(f.readerActor, { workspaceId: f.workspace.id, proposedDiffId: id, status: "approved" });
+    const attempts = await Promise.allSettled([1, 2].map(() => applyContextGraphProposedDiff(f.readerActor, { workspaceId: f.workspace.id, proposedDiffId: id })));
+    expect(attempts.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(await prisma.event.count({ where: { workspaceId: f.workspace.id, type: "context-graph.diff.applied", aggregateId: id } })).toBe(1);
+    // Idempotent generation retains the same committed effect, never a second proposal.
+    expect(await requestGraphSourceVariant(f.readerActor, f.request)).toMatchObject({ status: "READY", variantId: variant.id });
+    await updateOriginalDocument(f, { accessDomain: "FINANCE" });
+    await expect(applyContextGraphProposedDiff(f.readerActor, { workspaceId: f.workspace.id, proposedDiffId: id })).rejects.toBeDefined();
+    expect(await prisma.event.count({ where: { workspaceId: f.workspace.id, type: "context-graph.diff.applied", aggregateId: id } })).toBe(1);
+  });
+  it("withholds approval and publication when source authority is withdrawn and restored between review and apply", async () => {
+    const f = await approverFixture(); const { variant } = await generate(f); const id = (variant.payloadJson as any).proposedDiff.id;
+    await reviewContextGraphProposedDiff(f.readerActor, { workspaceId: f.workspace.id, proposedDiffId: id, status: "approved" });
+    await updateOriginalDocument(f, { accessDomain: "FINANCE" });
+    await updateOriginalDocument(f, { accessDomain: "WORKSPACE" });
+    await expect(applyContextGraphProposedDiff(f.readerActor, { workspaceId: f.workspace.id, proposedDiffId: id })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(await prisma.contextGraphObject.count({ where: { workspaceId: f.workspace.id } })).toBe(f.targets.length);
+    expect(await prisma.contextGraphRelationship.count({ where: { workspaceId: f.workspace.id } })).toBe(0);
+    expect(await prisma.event.count({ where: { workspaceId: f.workspace.id, type: "context-graph.diff.applied", aggregateId: id } })).toBe(0);
+  });
+  it("does not recreate a deleted native proposal from its retained immutable variant", async () => {
+    const f = await approverFixture(); const { variant } = await generate(f); const id = (variant.payloadJson as any).proposedDiff.id;
+    await prisma.contextGraphProposedDiff.delete({ where: { id } });
+    expect(await getReadableGraphSourceVariants(f.readerActor, { workspaceId: f.workspace.id, scope: f.request.scope })).toEqual([]);
+    expect(await prisma.contextGraphProposedDiff.findUnique({ where: { id } })).toBeNull();
+    expect(await prisma.genericDerivedArtifactVariant.findUniqueOrThrow({ where: { id: variant.id } })).toEqual(variant);
+  });
+  it("rolls materialization, proposal status, audit and outbox back together on a late failure", async () => {
+    const f = await approverFixture(); const { variant } = await generate(f); const id = (variant.payloadJson as any).proposedDiff.id;
+    const before = await prisma.contextGraphProposedDiff.findUniqueOrThrow({ where: { id } });
+    await prisma.$executeRawUnsafe(`CREATE FUNCTION graph_test_reject_applied_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.type = 'context-graph.diff.applied' THEN RAISE EXCEPTION 'synthetic final outbox failure'; END IF; RETURN NEW; END $$`);
+    await prisma.$executeRawUnsafe(`CREATE TRIGGER graph_test_reject_applied_event BEFORE INSERT ON "Event" FOR EACH ROW EXECUTE FUNCTION graph_test_reject_applied_event()`);
+    try {
+      await expect(applyContextGraphProposedDiff(f.readerActor, { workspaceId: f.workspace.id, proposedDiffId: id })).rejects.toThrow("synthetic final outbox failure");
+      expect(await prisma.contextGraphObject.count({ where: { workspaceId: f.workspace.id } })).toBe(f.targets.length);
+      expect(await prisma.contextGraphRelationship.count({ where: { workspaceId: f.workspace.id } })).toBe(0);
+      expect(await prisma.contextGraphProposedDiff.findUniqueOrThrow({ where: { id } })).toEqual(before);
+      expect(await prisma.auditLog.count({ where: { entityId: id, action: "context-graph.diff.applied" } })).toBe(0);
+    } finally {
+      await prisma.$executeRawUnsafe(`DROP TRIGGER graph_test_reject_applied_event ON "Event"`);
+      await prisma.$executeRawUnsafe(`DROP FUNCTION graph_test_reject_applied_event()`);
+    }
   });
 });
