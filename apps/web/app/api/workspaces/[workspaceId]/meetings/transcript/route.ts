@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AppError, captureDirectMemberTranscriptInput, intakeMeetingTranscript, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, captureCompanyMemberTranscriptInput, intakeMeetingTranscript, requireWorkspaceMembership } from "@corgtex/domain";
 import { extractMeetingTranscriptFile, validateMeetingTranscriptText } from "@/lib/meeting-transcript-file";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
@@ -67,7 +67,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         ...fields,
         ...(rawFileBase64 ? { rawFileBase64, rawFileMimeType } : {}),
       };
-      const nativeReceipt = await captureDirectMemberTranscriptInput(actor, { workspaceId, submission });
+      const nativeReceipt = await captureCompanyMemberTranscriptInput(actor, { workspaceId, submission });
       const result = await intakeMeetingTranscript(actor, { ...submission, nativeReceipt });
 
       return NextResponse.json(result, { status: result.status === "needs_clarification" ? 409 : 201 });
@@ -115,7 +115,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       participantIds: Array.isArray(body.participantIds) ? body.participantIds.map((value) => String(value)) : [],
       participantEmails: Array.isArray(body.participantEmails) ? body.participantEmails.map((value) => String(value)) : [],
     };
-    const nativeReceipt = await captureDirectMemberTranscriptInput(actor, { workspaceId, submission });
+    const nativeReceipt = await captureCompanyMemberTranscriptInput(actor, { workspaceId, submission });
     const result = await intakeMeetingTranscript(actor, { ...submission, nativeReceipt });
 
     return NextResponse.json(result, { status: result.status === "needs_clarification" ? 409 : 201 });

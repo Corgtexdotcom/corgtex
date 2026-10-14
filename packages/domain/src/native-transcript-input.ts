@@ -1,10 +1,12 @@
+import type { CompanyTranscriptPublicationHooks } from "./native-transcript-publication";
+import { capturePermissionEpochs, type PermissionEpochProof } from "./source-permission-epochs";
 import { createHash } from "node:crypto";
 import type { MeetingAudioAsset, Prisma, WorkflowJob } from "@prisma/client";
 import { decryptSecret, encryptSecret, prisma, type AppActor } from "@corgtex/shared";
 import { extractTextFromFileBuffer } from "@corgtex/knowledge";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
-import { captureArtifactInputProof, isArtifactInputProofReadable, type LineageRoot } from "./source-lineage";
+import { captureArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, type LineageRoot } from "./source-lineage";
 import { getAudioTranscriptWorkerPurpose, nativeTranscriptPrincipalUserId, registerAudioTranscriptWorker,
   revokeAudioTranscriptWorker } from "./native-transcript-principal";
 
@@ -40,6 +42,9 @@ const directReceipts = new WeakMap<DirectMemberTranscriptReceipt, {
   workspaceId: string;
   payloadHash: string;
   roots: readonly LineageRoot[];
+  company: boolean;
+  hooks?: CompanyTranscriptPublicationHooks;
+  callerEpochs: PermissionEpochProof | null;
 }>();
 const audioReceipts = new WeakMap<AudioTranscriptIntakeReceipt, {
   actor: AppActor; workspaceId: string; payloadHash: string; roots: readonly LineageRoot[];
@@ -79,10 +84,10 @@ function audioJobLeaseHash(job: WorkflowJob) {
 /** This is an authenticated direct user submission, never a model tool argument.
  * The adapter must pass the complete raw request, including raw file bytes when
  * a file was uploaded, before extraction or any metadata model call. */
-export async function captureDirectMemberTranscriptInput(actor: AppActor, params: {
+async function captureMemberTranscriptInput(actor: AppActor, params: {
   workspaceId: string;
   submission: Record<string, unknown>;
-}) {
+}, company: boolean) {
   invariant(actor.kind === "user", 403, "SOURCE_RESTRICTED", "A direct transcript upload requires a human member.");
   const workspaceId = params.workspaceId;
   const userId = actor.user.id;
@@ -120,23 +125,52 @@ export async function captureDirectMemberTranscriptInput(actor: AppActor, params
     const membership = await requireWorkspaceMembership({ actor, workspaceId, tx });
     invariant(membership && membership.id !== "global-operator" && membership.userId === userId,
       403, "SOURCE_RESTRICTED", "A direct transcript upload requires an active member.");
+    const callerEpochs = company ? await capturePermissionEpochs(tx, workspaceId, [
+      { kind: "Member", id: membership.id }, { kind: "MemberRolePolicy", id: membership.id }, { kind: "MemberUserPolicy", id: userId }, { kind: "WorkspaceSupportPolicy", id: userId },
+    ]) : null;
     const input = await tx.nativeTranscriptInput.create({ data: {
       workspaceId,
-      mode: "DIRECT_MEMBER_UPLOAD",
+      mode: company ? "COMPANY_MEMBER_UPLOAD" : "DIRECT_MEMBER_UPLOAD",
       ownerMemberId: membership.id,
       submittedByUserId: userId,
       mimeType: typeof submission.rawFileMimeType === "string" ? submission.rawFileMimeType : null,
       encryptedPayloadJson: encryptSecret(plaintext),
       payloadHash,
     } });
-    const roots = await captureArtifactInputProof(actor, workspaceId,
+    const capture = () => captureArtifactInputProof(actor, workspaceId,
       [{ kind: "NativeTranscriptInput", id: input.id, snapshot: input }], tx);
-    return { input, roots };
+    const roots = company && callerEpochs ? await (await import("./native-transcript-publication")).withCompanyTranscriptPublication({
+      actor, workspaceId, inputId: input.id, fingerprint: lineageContentFingerprint("NativeTranscriptInput", input), roots: [], callerEpochs,
+    }, capture) : await capture();
+    return { input, roots, callerEpochs };
   });
   const receipt: DirectMemberTranscriptReceipt = Object.freeze({ inputId: result.input.id });
-  directReceipts.set(receipt, { actor, workspaceId, payloadHash,
+  directReceipts.set(receipt, { actor, workspaceId, payloadHash, company, callerEpochs: result.callerEpochs,
     roots: Object.freeze(result.roots.map(root => Object.freeze({ ...root }))) });
   return receipt;
+}
+
+export function captureDirectMemberTranscriptInput(actor: AppActor, params: { workspaceId: string; submission: Record<string, unknown> }) {
+  return captureMemberTranscriptInput(actor, params, false);
+}
+/** Standalone Meetings upload adapter only; existing private receipts stay private. */
+export function captureCompanyMemberTranscriptInput(actor: AppActor, params: { workspaceId: string; submission: Record<string, unknown> }) {
+  return captureMemberTranscriptInput(actor, params, true);
+}
+/** Internal adapter-only transaction hooks; receipt identity is never serializable. */
+export function bindCompanyTranscriptPublicationHooks(actor: AppActor, receipt: DirectMemberTranscriptReceipt, hooks: CompanyTranscriptPublicationHooks) {
+  const captured = directReceipts.get(receipt);
+  invariant(captured?.company && captured.actor === actor && !captured.hooks, 409, "UNKNOWN_LINEAGE", "Manual import requires its exact new member receipt.");
+  captured.hooks = hooks;
+}
+export async function withMemberTranscriptReceipt<T>(actor: AppActor, workspaceId: string, submission: Record<string, unknown>, receipt: DirectMemberTranscriptReceipt | undefined, work: () => Promise<T>) {
+  const captured = receipt && directReceipts.get(receipt);
+  if (!captured?.company) return work();
+  invariant(captured.callerEpochs && captured.actor === actor && captured.workspaceId === workspaceId && captured.payloadHash === nativeTranscriptPayloadHash(submission),
+    409, "UNKNOWN_LINEAGE", "Transcript submission has no exact authenticated upload receipt.");
+  const root = captured.roots.find(item => item.kind === "NativeTranscriptInput" && item.id === receipt!.inputId)!;
+  return (await import("./native-transcript-publication")).withCompanyTranscriptPublication({ actor, workspaceId,
+    inputId: receipt!.inputId, fingerprint: root.fingerprint!, roots: captured.roots, hooks: captured.hooks, callerEpochs: captured.callerEpochs }, work);
 }
 
 export async function directMemberTranscriptRoots(actor: AppActor, workspaceId: string,
@@ -247,6 +281,13 @@ export async function isNativeTranscriptInputCurrent(actor: AppActor, workspaceI
     if (input.workspaceId !== workspaceId || !/^[a-f0-9]{64}$/.test(input.payloadHash)
       || !payload || Array.isArray(payload) || typeof payload !== "object"
       || nativeTranscriptPayloadHash(payload) !== input.payloadHash) return false;
+    if (input.mode === "COMPANY_MEMBER_UPLOAD") {
+      return (await import("./native-transcript-publication")).isCompanyTranscriptInputCurrent(actor, workspaceId, input as import("@prisma/client").NativeTranscriptInput, db);
+    }
+    if (input.mode === "PROVIDER_IMPORT") {
+      const { isProviderTranscriptInputCurrent } = await import("./transcript-source-native-input");
+      return isProviderTranscriptInputCurrent(actor, workspaceId, input as import("@prisma/client").NativeTranscriptInput, db);
+    }
     if (input.mode === "RECORDER") {
       const { isRecorderTranscriptInputCurrent } = await import("./recorder-transcript-input");
       return isRecorderTranscriptInputCurrent(actor, workspaceId, input, payload, db);

@@ -37,6 +37,8 @@ export function artifactPermissionParents(kind: LineageKind, row: Record<string,
     }
   }
   if (["MeetingInsight", "MeetingFollowUpReview"].includes(kind)) field("Meeting", "meetingId");
+  if (kind === "NativeTranscriptInput" && row.mode === "COMPANY_MEMBER_UPLOAD") field("Meeting", "companyMeetingId");
+  if (kind === "NativeTranscriptInput" && row.mode === "PROVIDER_IMPORT") field("Meeting", "providerMeetingId");
   if (kind === "NativeTranscriptInput" && row.mode === "RECORDER") field("Meeting", "recorderMeetingId");
   if (kind === "NativeTranscriptInput" && row.mode === "AUDIO_UPLOAD") field("MeetingAudioAsset", "meetingAudioAssetId");
   if (kind === "CircleAgentAssignment") { field("AgentIdentity", "agentIdentityId"); field("Circle", "circleId"); }
@@ -104,7 +106,7 @@ const METADATA_FIELDS = new Set([
   "circleId", "parentCircleId", "targetCircleId", "agentIdentityId", "credentialId", "agentCredentialId", "accessDomain",
   "installationId", "externalChannelId", "communicationMessageId", "messageId", "connectionId", "externalContentSourceId",
   "variantOfArticleId", "targetKind", "targetId", "audienceType", "goalId", "actionId", "tensionId", "articleId", "threadId",
-  "mapViewId", "constitutionId", "proposalId", "artifactId", "executionRequestId", "meetingId", "mode", "meetingAudioAssetId", "recordingId", "recorderAttemptId", "recorderMeetingId", "recorderBindingId", "recorderProvider",
+  "mapViewId", "constitutionId", "proposalId", "artifactId", "executionRequestId", "meetingId", "mode", "meetingAudioAssetId", "connectionId", "sourceRecordId", "recordingId", "transportArchiveId", "recorderAttemptId", "recorderMeetingId", "recorderBindingId", "recorderProvider",
   "sessionId", "conversationId", "flowId", "subjectType", "subjectId", "sourceType", "sourceId", "parentType", "parentId",
   "demoLeadId", "qualificationId", "accountId", "contactId", "dealId", "activityId", "targetWorkspaceId", "batchId", "documentId",
   "brainSourceId", "sourceBatchId", "reportId", "sourceCandidateId", "candidateId", "targetFactId", "factId", "appliedByUserId", "approvedByUserId", "kind", "beforeRevisionId", "afterRevisionId", "roleId", "status",
@@ -152,6 +154,18 @@ export async function loadArtifactPermissionMetadata(tx: Prisma.TransactionClien
   } | undefined;
   if (!delegate) return null;
   const result = await delegate.findFirst({ where, select });
+  if (result?.mode === "COMPANY_MEMBER_UPLOAD") {
+    const binding = await tx.nativeTranscriptPublication.findFirst({ where: { workspaceId, nativeInputId: input.id }, select: { id: true, meetingId: true } });
+    if (binding) {
+      if (hasActiveSourceCommitLockPlan(tx)) assertSourceCommitRowCovered(tx, "NativeTranscriptPublication", binding.id);
+      result.companyMeetingId = binding.meetingId;
+    }
+  }
+  if (result?.mode === "PROVIDER_IMPORT" && typeof result.sourceRecordId === "string") {
+    if (hasActiveSourceCommitLockPlan(tx)) assertSourceCommitRowCovered(tx, "MeetingTranscriptSourceRecord", result.sourceRecordId);
+    const record = await tx.meetingTranscriptSourceRecord.findFirst({ where: { id: result.sourceRecordId, workspaceId }, select: { meetingId: true } });
+    if (record?.meetingId) result.providerMeetingId = record.meetingId;
+  }
   if (result?.metadata && typeof result.metadata === "object" && !Array.isArray(result.metadata)) {
     const metadata = result.metadata as Record<string, unknown>;
     result.metadata = { documentId: metadata.documentId, nativeInputId: metadata.nativeInputId, sqlPublicationId: metadata.sqlPublicationId };

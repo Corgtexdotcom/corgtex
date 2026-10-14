@@ -7,7 +7,7 @@ import { asString, asOptional, refresh } from "../action-utils";
 import { redirect } from "next/navigation";
 import {
   AppError,
-  captureDirectMemberTranscriptInput,
+  captureCompanyMemberTranscriptInput,
   createMeetingSeries,
   deleteMeeting,
   enqueueMeetingAgendaPreparation,
@@ -464,7 +464,7 @@ export async function uploadMeetingTranscriptStateAction(
       participantEmails: payload.participantEmails,
       duplicateGuard: duplicateGuardOptionsFromTranscriptFormData(formData),
     };
-    const nativeReceipt = await captureDirectMemberTranscriptInput(actor, { workspaceId, submission });
+    const nativeReceipt = await captureCompanyMemberTranscriptInput(actor, { workspaceId, submission });
     const result = await intakeMeetingTranscript(actor, { ...submission, nativeReceipt });
 
     if (result.status === "needs_clarification") {

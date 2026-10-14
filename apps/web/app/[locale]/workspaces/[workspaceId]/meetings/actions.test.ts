@@ -23,7 +23,7 @@ const applyInsight = vi.fn();
 const syncSlackMeetingActionReviewAfterWebApply = vi.fn();
 const intakeMeetingTranscript = vi.fn();
 const nativeReceipt = Object.freeze({ inputId: "native-member-input" });
-const captureDirectMemberTranscriptInput = vi.fn(async (_actor: typeof actor, _params: { workspaceId: string; submission: Record<string, unknown> }) => nativeReceipt);
+const captureCompanyMemberTranscriptInput = vi.fn(async (_actor: typeof actor, _params: { workspaceId: string; submission: Record<string, unknown> }) => nativeReceipt);
 const extractTextFromFileBuffer = vi.fn();
 const requireWorkspaceMembership = vi.fn();
 const captureTelemetryEvent = vi.fn();
@@ -101,7 +101,7 @@ vi.mock("@corgtex/domain", () => ({
   enqueueMeetingAgendaPreparation: vi.fn(),
   importMeetingInvite: vi.fn(),
   intakeMeetingTranscript,
-  captureDirectMemberTranscriptInput,
+  captureCompanyMemberTranscriptInput,
   isDuplicateGuardMatchError: (error: any) => error?.code === "DUPLICATE_GUARD_MATCH",
   postDeliberationEntry: vi.fn(),
   requireWorkspaceMembership,
@@ -160,7 +160,7 @@ describe("meeting server actions", () => {
     first.set("file", new File([bytes], "exact.txt", { type: "text/plain" }));
     const state = await uploadMeetingTranscriptStateAction(initialTranscriptState, first);
     expect(state.status).toBe("needs_clarification");
-    const captured = captureDirectMemberTranscriptInput.mock.calls[0];
+    const captured = captureCompanyMemberTranscriptInput.mock.calls[0];
     expect(captured).toEqual([actor, { workspaceId: "workspace-1", submission: expect.objectContaining({
       rawFileBase64: bytes.toString("base64"), rawFileMimeType: "text/plain", fileName: "exact.txt", transcript: "Jan: Exact original.",
     }) }]);
@@ -173,7 +173,7 @@ describe("meeting server actions", () => {
     await uploadMeetingTranscriptStateAction(state, formData({
       workspaceId: "workspace-1", pendingTranscriptToken: state.pendingTranscriptToken!, recordedAt: "2026-07-15T09:00", timeZone: "UTC",
     }));
-    expect(captureDirectMemberTranscriptInput.mock.calls[1][1].submission).toMatchObject({
+    expect(captureCompanyMemberTranscriptInput.mock.calls[1][1].submission).toMatchObject({
       rawFileBase64: bytes.toString("base64"), fileName: "exact.txt", recordedAt: new Date("2026-07-15T09:00:00Z"),
     });
   });
@@ -188,7 +188,7 @@ describe("meeting server actions", () => {
     expect(await uploadMeetingTranscriptStateAction(initialTranscriptState, formData({
       workspaceId: "workspace-1", pendingTranscriptToken: "other-member-token",
     }))).toMatchObject({ status: "error", retryRequiresTranscriptUpload: true });
-    expect(captureDirectMemberTranscriptInput).not.toHaveBeenCalled();
+    expect(captureCompanyMemberTranscriptInput).not.toHaveBeenCalled();
     expect(intakeMeetingTranscript).not.toHaveBeenCalled();
   });
 
@@ -202,7 +202,7 @@ describe("meeting server actions", () => {
     await uploadMeetingTranscriptStateAction(initialTranscriptState, formData({
       workspaceId: "workspace-1", pendingTranscriptToken: "token", transcript: "New member text",
     }));
-    expect(captureDirectMemberTranscriptInput.mock.calls[0][1].submission).toMatchObject({
+    expect(captureCompanyMemberTranscriptInput.mock.calls[0][1].submission).toMatchObject({
       transcript: "New member text", fileName: null, rawFileBase64: null, rawFileMimeType: null,
     });
   });

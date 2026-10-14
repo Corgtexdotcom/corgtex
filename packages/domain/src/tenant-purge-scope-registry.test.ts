@@ -72,8 +72,8 @@ describe("tenant purge scope registry", () => {
 
   it("matches every current owning direct target relation and preserves named composite selectors", () => {
     expect(() => assertTenantPurgeScopeRegistry(schema)).not.toThrow();
-    expect(TENANT_PURGE_DIRECT_RELATIONS).toHaveLength(191);
-    for (const model of ["ConversationIngressInput", "McpToolInput", "ConversationOperationOutcome", "CrmQualificationFormInput", "FinanceReportUploadInput", "FinanceReportFactRevision", "ExternalMcpResponseInput"]) {
+    expect(TENANT_PURGE_DIRECT_RELATIONS).toHaveLength(193);
+    for (const model of ["NativeTranscriptPublication", "TranscriptTransportArchive", "ConversationIngressInput", "McpToolInput", "ConversationOperationOutcome", "CrmQualificationFormInput", "FinanceReportUploadInput", "FinanceReportFactRevision", "ExternalMcpResponseInput"]) {
       expect(TENANT_PURGE_DIRECT_RELATIONS.find((entry) => entry.model === model)).toMatchObject({ target: "Workspace", fields: ["workspaceId"], onDelete: "Cascade" });
     }
     expect(TENANT_PURGE_DIRECT_RELATIONS.find((entry) => entry.model === "DecisionRecord")).toMatchObject({ target: "Workspace", fields: ["workspaceId"], onDelete: "Cascade" });

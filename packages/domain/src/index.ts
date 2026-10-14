@@ -158,7 +158,7 @@ export * from "./meeting-evidence-state";
 export * from "./meeting-transcript-chunks";
 export * from "./meeting-transcript-processing";
 export * from "./meeting-transcript-intake";
-export { captureDirectMemberTranscriptInput } from "./native-transcript-input";
+export { captureDirectMemberTranscriptInput, captureCompanyMemberTranscriptInput } from "./native-transcript-input";
 export * from "./meeting-transcript-sources";
 export * from "./meeting-audio-assets";
 export * from "./meeting-recorders";
@@ -217,3 +217,4 @@ export { withMeetingTranscriptWorker, getMeetingTranscriptWorkerPurpose, isMeeti
   assertMeetingTranscriptWorkerCurrent, isMeetingTranscriptWorkerJob } from "./native-meeting-workflow-principal";
 
 export * from "./workspace-initial-knowledge";
+export { captureManualTranscriptSourceArtifact } from "./manual-transcript-source-input";
