@@ -1412,4 +1412,28 @@ describe("execution plumbing domain", () => {
     prismaMock.executionRequest.findMany.mockResolvedValue(Array.from({ length: 5001 }, () => requestFixture()));
     await expect(listExecutionRequests(actor, { workspaceId: "workspace-1" })).rejects.toMatchObject({ code: "SOURCE_READ_SCAN_CHANGED" });
   });
+  it("replenishes title-matching targets beyond 5000 unrelated rows without a lifetime cap", async () => {
+    const rows=Array.from({length:5002},(_,index)=>({id:String(index).padStart(5,"0"),title:index<5001?"Unrelated":"Late MATCH",updatedAt:new Date("2026-01-01"),status:"OPEN"}));
+    prismaMock.action.findMany.mockImplementation(async args=>{
+      expect(args.take).toBe(100);
+      const after=args.where.AND?.[1]?.OR?.[1]?.id?.gt;
+      return rows.filter(row=>!after||row.id>after).slice(0,args.take);
+    });
+    const {listWritebackTargets}=await import("./execution-plumbing");
+    expect((await listWritebackTargets(actor,{workspaceId:"workspace-1",targetTypes:["ACTION"],query:"match",take:1})).items.map(row=>row.id)).toEqual(["05001"]);
+    expect(prismaMock.action.findMany).toHaveBeenCalledTimes(51);
+  });
+
+  it("keeps coalesced Meeting ranking while hydrating only canonical pages", async () => {
+    const rows=Array.from({length:101},(_,index)=>({id:String(index).padStart(3,"0"),title:"Meeting",updatedAt:new Date("2026-01-01"),recordedAt:index===100?new Date("2026-02-01"):null,status:"COMPLETED"}));
+    prismaMock.meeting.findMany.mockImplementation(async args=>{
+      expect(args.take).toBe(100);
+      const after=args.where.AND?.[1]?.id?.gt;
+      return rows.filter(row=>!after||row.id>after).slice(0,args.take);
+    });
+    const {listWritebackTargets}=await import("./execution-plumbing");
+    expect((await listWritebackTargets(actor,{workspaceId:"workspace-1",targetTypes:["MEETING"],take:1})).items[0].id).toBe("100");
+    expect(prismaMock.meeting.findMany).toHaveBeenCalledTimes(2);
+  });
+
 });

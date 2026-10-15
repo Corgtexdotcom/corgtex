@@ -88,6 +88,38 @@ export async function captureReadableDigestInputs<T extends { id: string }>(para
   return { records, proofs, roots: mergeArtifactInputProofs(...proofs.values()) };
 }
 
+/** Ordered keyset pages replenish denied candidates without retaining a corpus.
+ * The caller releases all selected original proofs together after its joins. */
+export async function loadReadableArtifactSample<T extends { id: string }>(params: {
+  actor: AppActor;
+  workspaceId: string;
+  kind: LineageKind;
+  limit: number;
+  release: DigestReadRelease;
+  loadBatch: (after: NoInfer<T> | undefined, take: number) => Promise<T[]>;
+}) {
+  invariant(Number.isSafeInteger(params.limit) && params.limit > 0, 400, "INVALID_INPUT", "Invalid source sample size.");
+  const records: T[] = [];
+  const proofs = new Map<string, LineageRoot[]>();
+  let after: T | undefined;
+  while (records.length < params.limit) {
+    const batch = await params.loadBatch(after, 100);
+    invariant(batch.length <= 100 && (!batch.length || batch.at(-1)!.id !== after?.id),
+      409, "SOURCE_CHANGED", "Source sample changed during pagination.");
+    const next = batch.length ? structuredClone(batch.at(-1)!) : undefined;
+    const captured = await params.release.observeRead(() => captureReadableDigestInputs({ ...params, records: batch }));
+    for (const row of captured.records.slice(0, params.limit - records.length)) {
+      records.push(row);
+      const proof = captured.proofs.get(row.id)!;
+      proofs.set(row.id, proof);
+      params.release.add(proof);
+    }
+    if (batch.length < 100) break;
+    after = next;
+  }
+  return { records, proofs, roots: mergeArtifactInputProofs(...proofs.values()) };
+}
+
 /** Apply the editorial sample size to permitted records, with bounded database batches. */
 export async function loadReadableDigestQuery<T extends { id: string }>(params: {
   actor: AppActor;

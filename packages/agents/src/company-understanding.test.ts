@@ -1,3 +1,4 @@
+import { AppError } from "../../domain/src/errors";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
@@ -14,6 +15,7 @@ const {
   currentRootsMock,
   sourceFingerprintMock,
   artifactFingerprintMock,
+  releaseProofMock,
 } = vi.hoisted(() => ({
   prismaMock: {
     brainSource: { findMany: vi.fn(), count: vi.fn() },
@@ -37,6 +39,7 @@ const {
   currentRootsMock: vi.fn(),
   sourceFingerprintMock: vi.fn(),
   artifactFingerprintMock: vi.fn(),
+  releaseProofMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -47,7 +50,15 @@ vi.mock("@corgtex/models", () => ({
   defaultModelGateway: modelGatewayMock,
 }));
 
-vi.mock("@corgtex/domain", () => ({
+vi.mock("../../domain/src/auth", () => ({ requireWorkspaceMembership: async () => ({id: "member-1"}) }));
+vi.mock("../../domain/src/source-lineage", () => ({
+  captureArtifactInputProof: captureProofMock,
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
+  mergeLineageInputRoot: (_previous: unknown, root: unknown) => root,
+  withArtifactCountReleaseSnapshot: async (_actor: unknown, _workspace: string, roots: unknown, _remote: unknown, finish: (tx: unknown) => Promise<unknown>) => { await releaseProofMock(roots); return finish({}); },
+}));
+vi.mock("@corgtex/domain", async () => ({
+  ...await import("../../domain/src/digest-lineage"),
   AGENT_REGISTRY: {
     "company-understanding": { defaultModelTier: "quality" },
   },
@@ -108,6 +119,7 @@ vi.mock("@corgtex/domain", () => ({
 describe("company understanding synthesis", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    releaseProofMock.mockReset().mockResolvedValue(undefined);
     prismaMock.brainSource.findMany.mockResolvedValue([
       {
         id: "source-1",
@@ -149,11 +161,15 @@ describe("company understanding synthesis", () => {
     captureProofMock.mockImplementation(async (_actor, _workspaceId, inputs) => {
       const roots = [];
       for (const input of inputs) {
+        const permitted = input.kind === "BrainSource"
+          ? await readableSourcesMock(_actor, _workspaceId, [input.snapshot])
+          : await readableArtifactIdsMock(_actor, _workspaceId, input.kind, [input.snapshot]);
+        if (!permitted.has(input.id)) throw new AppError(409, "UNKNOWN_LINEAGE", "Not permitted.");
         roots.push({ kind: input.kind, id: input.id, fingerprint: input.kind === "BrainSource"
           ? sourceFingerprintMock(input.snapshot) : artifactFingerprintMock(input.kind, input.snapshot) });
         if (input.kind !== "BrainSource") {
           const inherited = await currentRootsMock(null, null, input, input.snapshot);
-          if (!inherited) throw { code: "UNKNOWN_LINEAGE" };
+          if (!inherited) throw new AppError(409, "UNKNOWN_LINEAGE", "No original manifest.");
           roots.push(...inherited);
         }
       }
@@ -646,7 +662,7 @@ describe("company understanding synthesis", () => {
   });
 
   it("does not send an artifact whose manifest disappeared during input capture to the model", async () => {
-    currentRootsMock.mockResolvedValue(null);
+    releaseProofMock.mockRejectedValueOnce(new AppError(409, "SOURCE_CHANGED", "Original manifest changed."));
     const { runCompanyUnderstandingSynthesis } = await import("./company-understanding");
     await expect(runCompanyUnderstandingSynthesis({ workspaceId: "workspace-1", agentRunId: "run-1", model: "synthetic" }))
       .resolves.toEqual({ skipped: true, reason: "input_changed" });
@@ -694,6 +710,45 @@ describe("company understanding synthesis", () => {
     const prompt = JSON.parse(modelGatewayMock.extract.mock.calls[0][0].input);
     expect(prompt.sources.map((row: { id: string }) => row.id)).toEqual(["source-1"]);
     expect(modelGatewayMock.extract.mock.calls[0][0].input).not.toContain("unproven copied");
+  });
+
+it("collects only bounded newest permitted synthesis samples including existing goals", async () => {
+  const now = new Date("2026-01-01T00:00:00Z");
+  const fixtures = [
+    [prismaMock.brainSource.findMany, "source", 140, 20],
+    [prismaMock.brainArticle.findMany, "article", 160, 40],
+    [prismaMock.goal.findMany, "goal", 320, 200],
+  ] as const;
+  for (const [load, prefix, count] of fixtures) {
+    const rows = Array.from({length: count}, (_, index) => ({id: `${prefix}-${String(index).padStart(4,"0")}`,
+      createdAt: now, updatedAt: now, accessDomain: "WORKSPACE", archivedAt: null, content: "original", bodyMd: "original",
+      sourceIds: [], title: "Original", links: []}));
+    load.mockImplementation(async args => {
+      expect(args.take).toBeLessThanOrEqual(100);
+      expect(args.orderBy).toHaveLength(2);
+      const after = args.where.OR?.[1]?.id?.gt;
+      return rows.filter(row => !after || row.id > after).slice(0,args.take);
+    });
+  }
+  readableSourcesMock.mockImplementation(async (_a,_w,rows) => new Set(rows.filter(row=>Number(row.id.split("-")[1])>=110).map(row=>row.id)));
+  readableArtifactIdsMock.mockImplementation(async (_a,_w,_k,rows) => new Set(rows.filter(row=>Number(row.id.split("-")[1])>=110).map(row=>row.id)));
+  modelGatewayMock.extract.mockResolvedValue({output:{}});
+  const {runCompanyUnderstandingSynthesis}=await import("./company-understanding");
+  await runCompanyUnderstandingSynthesis({workspaceId:"workspace-1",agentRunId:"run",model:"synthetic"});
+  const input=JSON.parse(modelGatewayMock.extract.mock.calls.at(-1)![0].input);
+  expect(input.sources).toHaveLength(20);expect(input.articles).toHaveLength(40);expect(input.existingGoals).toHaveLength(200);
+  expect(input.sources[0].id).toBe("source-0110");expect(input.articles[0].id).toBe("article-0110");
+  expect(prismaMock.goal.findMany.mock.calls.at(-1)![0].include.links.take).toBe(1);
+});
+
+  it("checks selected original proofs after the last pre-model configuration await", async () => {
+    getApplyModeMock.mockImplementationOnce(async()=>{
+      releaseProofMock.mockRejectedValueOnce(new AppError(409,"SOURCE_CHANGED","Revoked while awaiting configuration"));
+      return "AUTO";
+    });
+    const {runCompanyUnderstandingSynthesis}=await import("./company-understanding");
+    await expect(runCompanyUnderstandingSynthesis({workspaceId:"workspace-1",agentRunId:"run",model:"synthetic"})).resolves.toEqual({skipped:true,reason:"input_changed"});
+    expect(modelGatewayMock.extract).not.toHaveBeenCalled();
   });
 
 });

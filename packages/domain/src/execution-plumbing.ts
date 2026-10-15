@@ -18,6 +18,7 @@ import {
   type Proposal,
   type Meeting,
   type BrainArticle,
+  type CrmCommunicationSuggestion,
   type ExecutionRequest,
   type ExecutionResult,
 } from "@prisma/client";
@@ -954,14 +955,6 @@ export async function getExecutionPacket(actor: AppActor, params: { workspaceId:
   return packet;
 }
 
-const SOURCE_SCAN_LIMIT = 5000;
-const SOURCE_SCAN = { orderBy: { id: "asc" as const }, take: SOURCE_SCAN_LIMIT + 1 };
-
-async function readableExecutionRows<T extends { id: string }>(actor: AppActor, workspaceId: string, kind: LineageKind, candidates: T[]) {
-  invariant(candidates.length <= SOURCE_SCAN_LIMIT, 503, "SOURCE_READ_SCAN_LIMIT", "Execution input permission scan exceeds its supported size.");
-  return captureReadableDigestInputs({ actor, workspaceId, kind, records: candidates });
-}
-
 function recentRows<T extends { id: string; updatedAt?: Date; recordedAt?: Date | null }>(records: T[], take: number) {
   return [...records].sort((a, b) => ((b.recordedAt ?? b.updatedAt)?.getTime() ?? 0) - ((a.recordedAt ?? a.updatedAt)?.getTime() ?? 0)
     || a.id.localeCompare(b.id)).slice(0, take);
@@ -991,6 +984,8 @@ async function recentExecutionInputs<T extends { id: string; updatedAt: Date; re
   actor: AppActor; workspaceId: string; kind: LineageKind; take: number;
   load: (after: NoInfer<T> | undefined) => Promise<T[]>; fold?: boolean;
   release: WorkItemReadRelease;
+  matches?: (row: T) => boolean;
+  admit?: (row: T, proof: LineageRoot[]) => Promise<LineageRoot[] | null>;
 }) {
   let after: T | undefined;
   let selected: T[] = [];
@@ -999,16 +994,19 @@ async function recentExecutionInputs<T extends { id: string; updatedAt: Date; re
     const batch = await params.load(after);
     invariant(batch.length <= 100 && (!batch.length || batch.at(-1)!.id !== after?.id),
       503, "SOURCE_READ_SCAN_CHANGED", "Execution context page changed; retry.");
-    const read = await params.release.observeRead(() => captureReadableDigestInputs({ ...params, records: batch }));
+    const next = batch.length ? structuredClone(batch.at(-1)!) : undefined;
+    const read = await params.release.observeRead(() => captureReadableDigestInputs({ ...params, records: batch.filter(row => !params.matches || params.matches(row)) }));
     for (const row of read.records) {
+      const proof = params.admit ? await params.release.observeRead(() => params.admit!(row, read.proofs.get(row.id)!)) : read.proofs.get(row.id)!;
+      if (!proof) continue;
       selected.push(row);
-      proofs.set(row.id, read.proofs.get(row.id)!);
+      proofs.set(row.id, proof);
     }
     selected = recentRows(selected, params.take);
     const ids = new Set(selected.map(row => row.id));
     for (const id of proofs.keys()) if (!ids.has(id)) proofs.delete(id);
     if (batch.length < 100 || !params.fold && selected.length === params.take) break;
-    after = batch.at(-1);
+    after = next;
   }
   return { records: selected, proofs };
 }
@@ -1081,7 +1079,9 @@ export async function listWritebackTargets(actor: AppActor, params: ListWritebac
   const take = Math.min(Math.max(params.take ?? 10, 1), 50);
   const query = params.query?.trim().toLocaleLowerCase() ?? "";
   const items: WritebackTargetSummary[] = [];
-  const roots = await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "Workspace", id: params.workspaceId }]);
+  sealArtifactInputActor(actor);
+  const release = new WorkItemReadRelease(actor, params.workspaceId);
+  const roots = await release.observeRead(() => captureArtifactInputProof(actor, params.workspaceId, [{ kind: "Workspace", id: params.workspaceId }]));
   const includeType = (type: ExecutionWritebackTargetType) => !selectedTypes || selectedTypes.has(type);
   const native = [
     ["ACTION", "Action", prisma.action, "/actions/"],
@@ -1097,32 +1097,43 @@ export async function listWritebackTargets(actor: AppActor, params: ListWritebac
     const where = type === "BUILD_ARTIFACT" ? { workspaceId: params.workspaceId, NOT: OPERATIONAL_ARTIFACT_FILTER }
       : type === "BRAIN_ARTICLE" ? { AND: [{ workspaceId: params.workspaceId, archivedAt: null }, { OR: brainArticlePrivacyFilter(actor, membership) }] }
       : { workspaceId: params.workspaceId, archivedAt: null, ...(["ACTION", "TENSION", "PROPOSAL"].includes(type) ? privacyFilter(actor, membership) : {}) };
-    // All delegates share a scalar query boundary. Gate complete rows before title matches and samples.
-    const candidates = await (delegate.findMany as (args: unknown) => Promise<Array<{ id: string; title: string | null; status?: string; authority?: string; slug?: string; updatedAt: Date; recordedAt?: Date | null }>>)({ where, ...SOURCE_SCAN });
-    const readable = await readableExecutionRows(actor, params.workspaceId, kind, candidates);
-    const records = recentRows(readable.records.filter((row) => !query || row.title?.toLocaleLowerCase().includes(query)), take);
+    type TargetRow = { id: string; title: string | null; status?: string; authority?: string; slug?: string; updatedAt: Date; recordedAt?: Date | null };
+    const readable = await recentExecutionInputs<TargetRow>({ actor, workspaceId: params.workspaceId, kind, take, release,
+      fold: type === "MEETING",
+      matches: row => !query || Boolean(row.title?.toLocaleLowerCase().includes(query)),
+      load: after => (delegate.findMany as (args: unknown) => Promise<TargetRow[]>)({
+        where: after ? { AND: [where, type === "MEETING" ? { id: { gt: after.id } }
+          : { OR: [{ updatedAt: { lt: after.updatedAt } }, { updatedAt: after.updatedAt, id: { gt: after.id } }] }] } : where,
+        orderBy: type === "MEETING" ? { id: "asc" } : [{ updatedAt: "desc" }, { id: "asc" }], take: 100,
+      }),
+    });
+    const records = readable.records;
     for (const row of records) roots.push(...(readable.proofs.get(row.id) ?? []));
     items.push(...records.map((row) => ({ type, id: row.id, title: row.title ?? "Untitled meeting", status: row.status ?? row.authority ?? null, webPath: `${path}${type === "BRAIN_ARTICLE" ? row.slug : row.id}` })));
   }
   if (includeType("CRM_COMMUNICATION")) {
     requireExecutionScope(actor, "relationships:read");
-    const candidates = await prisma.crmCommunicationSuggestion.findMany({ where: { workspaceId: params.workspaceId,
-      ...activeCrmParentWhere(["account", "contact", "deal", "activity"]) }, ...SOURCE_SCAN });
-    const readable = await readableExecutionRows(actor, params.workspaceId, "CrmCommunicationSuggestion", candidates);
-    const records: typeof candidates = [];
-    for (const row of readable.records) {
-      if (!await isArtifactInputProofPubliclyShareable(actor, params.workspaceId, readable.proofs.get(row.id) ?? [])) continue;
-      // The affiliation path is an independent current input, even when the suggestion body is original.
-      if (row.accountId) {
-        try { roots.push(...await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "CrmAccount", id: row.accountId }])); }
-        catch (error) {
-          if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
-          continue;
+    const readable = await recentExecutionInputs<CrmCommunicationSuggestion>({ actor, workspaceId: params.workspaceId, kind: "CrmCommunicationSuggestion", take, release,
+      load: after => prisma.crmCommunicationSuggestion.findMany({
+        where: { workspaceId: params.workspaceId, ...activeCrmParentWhere(["account", "contact", "deal", "activity"]),
+          ...(after ? { OR: [{ updatedAt: { lt: after.updatedAt } }, { updatedAt: after.updatedAt, id: { gt: after.id } }] } : {}) },
+        orderBy: [{ updatedAt: "desc" }, { id: "asc" }], take: 100,
+      }),
+      matches: row => !query || [row.title, row.subject, row.recipientEmail, row.recipientName].some(value => value?.toLocaleLowerCase().includes(query)),
+      admit: async (row, proof) => {
+        if (!await isArtifactInputProofPubliclyShareable(actor, params.workspaceId, proof)) return null;
+        // Only sampled suggestions retain their independently admitted affiliation.
+        if (row.accountId) {
+          try { return [...proof, ...await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "CrmAccount", id: row.accountId }])]; }
+          catch (error) {
+            if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
+            return null;
+          }
         }
-      }
-      if (!query || [row.title, row.subject, row.recipientEmail, row.recipientName].some((v) => v?.toLocaleLowerCase().includes(query))) records.push(row);
-    }
-    const sampled = recentRows(records, take);
+        return proof;
+      },
+    });
+    const sampled = readable.records;
     for (const row of sampled) roots.push(...(readable.proofs.get(row.id) ?? []));
     items.push(...sampled.map((row) => ({ type: "CRM_COMMUNICATION" as const, id: row.id,
       title: row.subject ?? row.title, status: row.status, webPath: row.accountId ? `/leads/accounts/${row.accountId}?view=review` : "/leads?view=review" })));
@@ -1131,8 +1142,8 @@ export async function listWritebackTargets(actor: AppActor, params: ListWritebac
     roots.push(...await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "Workspace", id: params.workspaceId }]));
     items.push({ type: "COMMENT", id: null, title: "Comment on execution request", status: null, webPath: "" });
   }
-  invariant(await isArtifactInputProofReadable(actor, params.workspaceId, roots), 409, "SOURCE_CHANGED", "Execution targets changed during collection.");
-  return { items: items.slice(0, take * 6) };
+  release.add(roots);
+  return release.finish({ items: items.slice(0, take * 6) });
 }
 
 async function validateCrmCommunicationResultOutput(actor: AppActor, workspaceId: string, targetId: string | null, output: JsonRecord,

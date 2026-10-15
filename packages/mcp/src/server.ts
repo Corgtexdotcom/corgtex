@@ -16,6 +16,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
   withMcpToolInput,
+  DigestReadRelease,
+  loadReadableArtifactSample,
   createConversation,
   listProposals,
   getProposal,
@@ -987,18 +989,22 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       const owner = objectId
         ? await prisma.contextGraphObject.findFirst({ where: { id: objectId, workspaceId } })
         : await prisma.contextGraphRelationship.findFirst({ where: { id: relationshipId, workspaceId } });
-      if (!owner || !(await readableArtifactIds(actor, workspaceId, ownerKind, [owner])).has(owner.id))
-        return structuredJsonResult({ evidenceRefs: [] });
-      const candidates = await prisma.contextGraphEvidenceRef.findMany({
-        where: {
-          workspaceId,
-          ...(objectId ? { objectId } : { relationshipId }),
-        },
-        orderBy: { createdAt: "desc" },
+      const release = new DigestReadRelease(actor, workspaceId);
+      const ownerProof = owner ? await release.capture(ownerKind, [owner]) : null;
+      if (!ownerProof?.records.length) return structuredJsonResult(await release.finish({ evidenceRefs: [] }));
+      const selected = await loadReadableArtifactSample({
+        actor, workspaceId, kind: "ContextGraphEvidenceRef", release,
+        limit: Math.min(Math.max(Math.trunc(take ?? 20), 1), 50),
+        loadBatch: (after, pageSize) => prisma.contextGraphEvidenceRef.findMany({
+          where: {
+            workspaceId, knowledgeChunkId: null,
+            ...(objectId ? { objectId } : { relationshipId }),
+            ...(after ? { OR: [{ createdAt: { lt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] } : {}),
+          },
+          orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: pageSize,
+        }),
       });
-      const visibleEvidenceIds = await readableArtifactIds(actor, workspaceId, "ContextGraphEvidenceRef", candidates.filter((ref) => !ref.knowledgeChunkId));
-      const evidenceRefs = candidates.filter((ref) => visibleEvidenceIds.has(ref.id)).slice(0, Math.min(Math.max(take ?? 20, 1), 50));
-      return structuredJsonResult({ evidenceRefs });
+      return structuredJsonResult(await release.finish({ evidenceRefs: selected.records }));
     },
   );
 
@@ -4628,7 +4634,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       take: z.number().optional(),
       skip: z.number().optional(),
       includeRestored: z.boolean().optional(),
-      includePurged: z.boolean().optional(),
+      includePurged: z.boolean().optional().describe("Retained for compatibility; purged source identities remain withheld by current source permissions."),
     },
     async (params: {
       entityType?: string;

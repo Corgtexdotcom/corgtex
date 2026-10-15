@@ -1,4 +1,4 @@
-import type { AgentTriggerType, GoalCadence, GoalStatus, Prisma } from "@prisma/client";
+import type { AgentTriggerType, BrainArticle, BrainSource, Goal, GoalCadence, GoalStatus, Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
 import type { AppActor } from "@corgtex/shared";
@@ -9,8 +9,9 @@ import {
   createContextGraphProposedDiff,
   createGoal,
   createGoalLink,
-  captureArtifactInputProof,
-  readableBrainSourceIds,
+  DigestReadRelease,
+  loadReadableArtifactSample,
+  mergeArtifactInputProofs,
   type LineageRoot,
   readableArtifactIds,
   resolveKnowledgeAccessDomains,
@@ -698,67 +699,46 @@ export async function runCompanyUnderstandingSynthesis(params: {
 }) {
   const actor = companyUnderstandingActor(params.workspaceId);
   const accessDomains = await resolveKnowledgeAccessDomains(actor, params.workspaceId);
-  const [candidateSources, candidateArticles] = await Promise.all([
-    prisma.brainSource.findMany({
-      where: {
-        workspaceId: params.workspaceId,
-        archivedAt: null,
-        absorbedAt: { not: null },
-        accessDomain: { in: accessDomains },
-        ...(params.sourceId ? { id: params.sourceId } : {}),
-      },
-      orderBy: { createdAt: "desc" },
-      ...(params.sourceId ? { take: 1 } : {}),
-    }),
-    prisma.brainArticle.findMany({
-      where: { workspaceId: params.workspaceId, archivedAt: null },
-      orderBy: { updatedAt: "desc" },
-    }),
+  const release = new DigestReadRelease(actor, params.workspaceId);
+  const [sourceSample, articleSample] = await Promise.all([
+    loadReadableArtifactSample<BrainSource>({ actor, workspaceId: params.workspaceId, kind: "BrainSource", release, limit: params.sourceId ? 1 : 20,
+      loadBatch: (after, take) => prisma.brainSource.findMany({
+        where: { workspaceId: params.workspaceId, archivedAt: null, absorbedAt: { not: null },
+          accessDomain: { in: accessDomains }, ...(params.sourceId ? { id: params.sourceId } : {}),
+          ...(after ? { OR: [{ createdAt: { lt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] } : {}) },
+        orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: params.sourceId ? 1 : take,
+      }) }),
+    loadReadableArtifactSample<BrainArticle>({ actor, workspaceId: params.workspaceId, kind: "BrainArticle", release, limit: 40,
+      loadBatch: (after, take) => prisma.brainArticle.findMany({
+        where: { workspaceId: params.workspaceId, archivedAt: null,
+          ...(after ? { OR: [{ updatedAt: { lt: after.updatedAt } }, { updatedAt: after.updatedAt, id: { gt: after.id } }] } : {}) },
+        orderBy: [{ updatedAt: "desc" }, { id: "asc" }], take,
+      }) }),
   ]);
-
-  const readableArticles = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", candidateArticles);
-  const readableSources = await readableBrainSourceIds(actor, params.workspaceId, candidateSources);
-  const sources = candidateSources.filter((source) => readableSources.has(source.id)).slice(0, 20);
-  const articles = candidateArticles.filter((article) => readableArticles.has(article.id)).slice(0, 40);
-
-  if (params.sourceId && sources.length === 0) {
-    return { skipped: true, reason: "source_unavailable" };
-  }
-
-  if (sources.length === 0 && articles.length === 0) {
-    return { skipped: true, reason: "no_brain_evidence" };
-  }
-
-  const candidateGoals = await prisma.goal.findMany({
-    where: { workspaceId: params.workspaceId, archivedAt: null },
-    orderBy: { updatedAt: "desc" },
-    include: {
-      links: {
-        where: { source: COMPANY_UNDERSTANDING_SOURCE },
-        select: { id: true },
-      },
-    },
-  });
-  const readableGoals = await readableArtifactIds(actor, params.workspaceId, "Goal", candidateGoals);
-  const existingGoals = candidateGoals.filter((goal) => readableGoals.has(goal.id)).slice(0, 200);
-  const capturedInputs = [
-    ...sources.map((snapshot) => ({ kind: "BrainSource" as const, id: snapshot.id, snapshot })),
-    ...articles.map((snapshot) => ({ kind: "BrainArticle" as const, id: snapshot.id, snapshot })),
-    ...existingGoals.map((snapshot) => ({ kind: "Goal" as const, id: snapshot.id, snapshot })),
-  ];
+  const sources = sourceSample.records, articles = articleSample.records;
+  if (params.sourceId && sources.length === 0) return release.finish({ skipped: true, reason: "source_unavailable" });
+  if (sources.length === 0 && articles.length === 0) return release.finish({ skipped: true, reason: "no_brain_evidence" });
+  const goalSample = await loadReadableArtifactSample<Goal & {links: {id: string}[]}>({ actor, workspaceId: params.workspaceId, kind: "Goal", release, limit: 200,
+    loadBatch: (after, take) => prisma.goal.findMany({
+      where: { workspaceId: params.workspaceId, archivedAt: null,
+        ...(after ? { OR: [{ updatedAt: { lt: after.updatedAt } }, { updatedAt: after.updatedAt, id: { gt: after.id } }] } : {}) },
+      orderBy: [{ updatedAt: "desc" }, { id: "asc" }], take,
+      include: { links: { where: { source: COMPANY_UNDERSTANDING_SOURCE }, select: { id: true }, take: 1 } },
+    }) });
+  const existingGoals = goalSample.records;
   const lineage: SynthesisLineage = {
-    lineageInputs: capturedInputs.map(({ kind, id }) => ({ kind, id })),
-    lineageRoots: [],
+    lineageInputs: [...sources.map(row => ({ kind: "BrainSource" as const, id: row.id })),
+      ...articles.map(row => ({ kind: "BrainArticle" as const, id: row.id })),
+      ...existingGoals.map(row => ({ kind: "Goal" as const, id: row.id }))],
+    lineageRoots: mergeArtifactInputProofs(sourceSample.roots, articleSample.roots, goalSample.roots),
   };
-  try {
-    lineage.lineageRoots = await captureArtifactInputProof(actor, params.workspaceId, capturedInputs);
-  } catch (error) {
+  const goalApplyMode = await getCompanyUnderstandingGoalApplyMode(params.workspaceId);
+  try { await release.finish(undefined); }
+  catch (error) {
     if (typeof error !== "object" || error === null || !("code" in error)
       || !["SOURCE_CHANGED", "UNKNOWN_LINEAGE", "SOURCE_RESTRICTED"].includes(String(error.code))) throw error;
     return { skipped: true, reason: "input_changed" };
   }
-  const goalApplyMode = await getCompanyUnderstandingGoalApplyMode(params.workspaceId);
-
   const extraction = await defaultModelGateway.extract({
     model: params.model,
     workspaceId: params.workspaceId,
@@ -823,6 +803,12 @@ Expected JSON shape:
     }),
   });
 
+  try { await release.finish(undefined); }
+  catch (error) {
+    if (typeof error !== "object" || error === null || !("code" in error)
+      || !["SOURCE_CHANGED", "UNKNOWN_LINEAGE", "SOURCE_RESTRICTED"].includes(String(error.code))) throw error;
+    return { skipped: true, reason: "input_changed" };
+  }
   const normalized = normalizeCompanyUnderstandingOutput(extraction.output, params.sourceId);
   const admittedInputs = new Set(lineage.lineageInputs.map((input) => `${input.kind}:${input.id}`));
   for (const insight of [...normalized.goals, ...normalized.mapProposals]) {

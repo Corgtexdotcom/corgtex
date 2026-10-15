@@ -106,6 +106,15 @@ const postDeliberationEntryMock = vi.fn();
 const resolveDeliberationEntryMock = vi.fn();
 const getWorkspacePermanentPathForEntityMock = vi.fn();
 
+const { evidenceCapture, evidenceRelease } = vi.hoisted(() => ({evidenceCapture: vi.fn(), evidenceRelease: vi.fn()}));
+vi.mock("../../domain/src/auth", () => ({requireWorkspaceMembership: async () => ({id:"member"})}));
+vi.mock("../../domain/src/source-lineage", () => ({
+  captureArtifactInputProof: evidenceCapture,
+  captureArtifactReadHeadObservation: async (read:()=>Promise<unknown>)=>({value:await read(),heads:new Map()}),
+  mergeLineageInputRoot: (_previous:unknown,root:unknown)=>root,
+  withArtifactCountReleaseSnapshot: async (_a:unknown,_w:string,roots:unknown,_r:unknown,finish:(tx:unknown)=>Promise<unknown>)=>{await evidenceRelease(roots);return finish({});},
+}));
+
 vi.mock("@corgtex/domain", async () => {
   const { releaseDiagnosticDispatchSchema, releaseDiagnosticRequestSchema } = await import("../../domain/src/release-diagnostics");
   const { MCP_TOOL_CAPABILITIES } = await import("../../domain/src/mcp-tool-capabilities");
@@ -118,6 +127,7 @@ vi.mock("@corgtex/domain", async () => {
   } = await import("../../domain/src/work-item-normalization");
 
   return {
+  ...await import("../../domain/src/digest-lineage"),
   // This routing fixture verifies handler wiring; native permission/encryption behavior is exercised by mcp-tool-input.test.ts.
   withMcpToolInput: vi.fn(async (_actor, params, work) => work(structuredClone(params.args))),
   readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map((row: {id: string}) => row.id))),
@@ -313,7 +323,8 @@ vi.mock("@corgtex/shared", async () => {
       return kind === "McpOAuthGrantPolicy" && row?.workspaceId === workspaceId && row.grantEpoch !== undefined
         ? [{ epoch: row.grantEpoch }] : [];
     }),
-    contextGraphObject: {findMany: vi.fn()},
+    contextGraphObject: {findMany: vi.fn(), findFirst: vi.fn()},
+    contextGraphEvidenceRef: {findMany: vi.fn()},
     contextGraphRelationship: {findMany: vi.fn()},
     action: {
       findFirst: vi.fn(),
@@ -3641,4 +3652,31 @@ describe("context graph bounded permission scan", () => {
       expect(prisma.contextGraphObject.findMany).toHaveBeenLastCalledWith(expect.objectContaining({take: 1}));
     } finally {vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspace, _kind, rows) => new Set(rows.map(row => row.id)));}
   });
+});
+
+
+it("pages context evidence after owner admission and releases original owner plus selected refs", async () => {
+  const { AppError }=await import("../../domain/src/errors");
+  const { prisma }=await import("@corgtex/shared");
+  const { createCorgtexMcpServer }=await import("./server");
+  const now=new Date("2026-01-01");
+  const rows=Array.from({length:150},(_,index)=>({id:String(index).padStart(3,"0"),createdAt:now,knowledgeChunkId:null}));
+  vi.mocked(prisma.contextGraphObject.findFirst).mockResolvedValue({id:"owner"} as never);
+  vi.mocked(prisma.contextGraphEvidenceRef.findMany).mockImplementation(async args=>{
+    expect(args?.take).toBe(100);expect(args?.where?.knowledgeChunkId).toBeNull();
+    const after=(args?.where?.OR as any)?.[1]?.id?.gt;
+    return rows.filter(row=>!after||row.id>after).slice(0,args?.take ?? 0) as never;
+  });
+  evidenceCapture.mockImplementation(async (_a,_w,inputs)=>{
+    if(inputs[0].id!=="owner"&&Number(inputs[0].id)<100)throw new AppError(409,"UNKNOWN_LINEAGE","Unproved");
+    return [{kind:inputs[0].kind,id:inputs[0].id,fingerprint:"a".repeat(64)}];
+  });
+  evidenceRelease.mockResolvedValue(undefined);
+  const server=createTestServer(createCorgtexMcpServer,{actor:{kind:"agent",authProvider:"bootstrap"} as any,workspaceId:"ws-1",authKind:"agent"});
+  const result=await (server as any)._registeredTools.get_context_evidence.handler({objectId:"owner",take:2});
+  expect(JSON.parse(result.content[0].text).evidenceRefs.map((row:any)=>row.id)).toEqual(["100","101"]);
+  expect(evidenceRelease.mock.calls.at(-1)![0].map((root:any)=>root.id)).toEqual(["owner","100","101"]);
+  expect(prisma.contextGraphEvidenceRef.findMany).toHaveBeenCalledTimes(2);
+  evidenceRelease.mockRejectedValueOnce(new AppError(409,"SOURCE_CHANGED","Owner changed"));
+  await expect((server as any)._registeredTools.get_context_evidence.handler({objectId:"owner",take:2})).rejects.toMatchObject({code:"SOURCE_CHANGED"});
 });

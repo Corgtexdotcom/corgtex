@@ -1,4 +1,5 @@
 import React from "react";
+import { brainArticleVisibility, listBrainArticleTypeCounts } from "./article-type-counts";
 import { getBrainStatus, listArticles, readableArtifactIds, requireWorkspaceMembership, listMeetings, listDocuments, resolveKnowledgeAccessDomains } from "@corgtex/domain";
 import { answerKnowledgeQuestion, searchIndexedKnowledge } from "@corgtex/knowledge";
 import { prisma } from "@corgtex/shared";
@@ -404,26 +405,6 @@ function authorityTagClass(authority: string) {
   return "tag neutral";
 }
 
-async function listBrainArticleTypeCounts(params: {
-  workspaceId: string;
-  actor: AppActor;
-  membership: { id?: string | null; role?: string | null } | null | undefined;
-}) {
-  const candidates = await prisma.brainArticle.findMany({
-    where: {
-      AND: [
-        { workspaceId: params.workspaceId, archivedAt: null },
-        { OR: brainArticleVisibility(params.actor, params.membership) },
-      ],
-    },
-  });
-  const readableIds = await readableArtifactIds(params.actor, params.workspaceId, "BrainArticle", candidates);
-  const counts = new Map<string, number>();
-  for (const article of candidates) if (readableIds.has(article.id))
-    counts.set(article.type, (counts.get(article.type) ?? 0) + 1);
-  return [...counts].map(([type, count]) => ({ type, count }));
-}
-
 async function listSearchResultArticleRefs(params: {
   workspaceId: string;
   actor: AppActor;
@@ -451,19 +432,4 @@ async function listSearchResultArticleRefs(params: {
   const readableIds = await readableArtifactIds(params.actor, params.workspaceId, "BrainArticle", candidates);
   return candidates.filter((article) => readableIds.has(article.id))
     .map(({ id, slug }) => ({ id, slug }));
-}
-
-function brainArticleVisibility(
-  actor: AppActor,
-  membership: { id?: string | null; role?: string | null } | null | undefined,
-) {
-  if (actor.kind === "agent" || membership?.role === "ADMIN") {
-    return [{ isPrivate: false }, { isPrivate: true, authority: "DRAFT" as const }];
-  }
-
-  if (actor.kind === "user" && membership?.id) {
-    return [{ isPrivate: false }, { isPrivate: true, ownerMemberId: membership.id }];
-  }
-
-  return [{ isPrivate: false }];
 }

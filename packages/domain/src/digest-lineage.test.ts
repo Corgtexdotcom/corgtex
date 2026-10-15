@@ -6,7 +6,7 @@ vi.mock("./source-lineage", async importOriginal => ({
   mergeLineageInputRoot: (await importOriginal<typeof import("./source-lineage")>()).mergeLineageInputRoot,
   captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
   withArtifactCountReleaseSnapshot: async (_actor: unknown, _ws: string, _roots: unknown, remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => {await remote();return finish({});}, captureArtifactInputProof: capture, isArtifactInputProofReadable: readable }));
-import { isDigestInputProofShared, loadReadableDigestQuery, mergeArtifactInputProofs } from "./digest-lineage";
+import { DigestReadRelease, isDigestInputProofShared, loadReadableArtifactSample, loadReadableDigestQuery, mergeArtifactInputProofs } from "./digest-lineage";
 vi.mock("./auth", () => ({requireWorkspaceMembership: async () => ({id: "member"})}));
 import { SOURCE_PERMISSION_POLICY_VERSION, type PermissionEpochProof } from "./source-permission-epochs";
 
@@ -81,4 +81,20 @@ describe("digest permission selection", () => {
       .mockResolvedValueOnce(false);
     expect(await isDigestInputProofShared([{} as any, {} as any], "ws", [])).toBe(false);
   });
+});
+
+
+it("replenishes a bounded sample beyond 5000 denied candidates and keeps only its original roots", async () => {
+  capture.mockImplementation(async (_actor, _ws, inputs) => {
+    if (Number(inputs[0].id) < 5001) throw new AppError(409, "UNKNOWN_LINEAGE", "Unproved");
+    return [{kind: "BrainArticle", id: inputs[0].id, fingerprint: "a".repeat(64)}];
+  });
+  const rows = Array.from({length: 5004}, (_, id) => ({id: String(id)}));
+  const loadBatch = vi.fn(async (after, take) => rows.slice(after ? Number(after.id)+1 : 0, (after ? Number(after.id)+1 : 0)+take));
+  const release = new DigestReadRelease({} as any, "ws");
+  const sample = await loadReadableArtifactSample({actor: {} as any, workspaceId: "ws", kind: "BrainArticle", limit: 2, release, loadBatch});
+  expect(sample.records.map(row => row.id)).toEqual(["5001", "5002"]);
+  expect(sample.roots.map(root => root.id)).toEqual(["5001", "5002"]);
+  expect(loadBatch).toHaveBeenCalledTimes(51);
+  expect(loadBatch.mock.calls.every(([, take]) => take === 100)).toBe(true);
 });
