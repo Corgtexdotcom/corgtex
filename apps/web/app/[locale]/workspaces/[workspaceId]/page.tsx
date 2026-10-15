@@ -1,5 +1,6 @@
 import type { BrainArticle, Meeting, Prisma } from "@prisma/client";
 import {
+  countUnreadNotifications,
   filterWorkspaceBriefingSources,
   normalizeNewspaperEditionDigest,
   normalizeWorkspaceBriefingPayload,
@@ -12,7 +13,7 @@ import {
 } from "@corgtex/domain";
 import type { MemberBriefingContext, PersonalNewspaperItem } from "@corgtex/domain";
 import { prisma, workspaceBranding } from "@corgtex/shared";
-import { countReadableKnowledgeChunks } from "@corgtex/knowledge";
+import { countReadableKnowledgeChunkAggregate } from "@corgtex/knowledge";
 import { requirePageActor } from "@/lib/auth";
 import Link from "next/link";
 import { getFormatter, getTranslations } from "next-intl/server";
@@ -22,7 +23,7 @@ import {
   capDashboardUnreadNotificationCount,
   isDashboardUnreadNotificationCountCapped,
 } from "@/lib/dashboard-briefing";
-import { scanReadableArtifactPages } from "@/lib/readable-artifact-pages";
+import { findLatestReadableArtifact, scanReadableArtifactPages } from "@/lib/readable-artifact-pages";
 import { getDashboardWorkAttentionCountsFromMetrics } from "@/lib/dashboard-attention";
 
 export const dynamic = "force-dynamic";
@@ -274,115 +275,56 @@ export default async function WorkspaceDashboard({
     })
     : [];
   const memberCircleIds = memberCircleAssignments.map((assignment) => assignment.role.circleId);
-  const personalAdviceRequests = actor.kind === "user" && currentMember?.id
-    ? await prisma.adviceRequest.findMany({
-      where: {
-        workspaceId,
-        status: "ACTIVE",
-        requestedByUserId: { not: actor.user.id },
-        OR: [
-          { audienceType: "MEMBERS", recipients: { some: { memberId: currentMember.id } } },
-          { audienceType: "WORKSPACE" },
-          ...(memberCircleIds.length > 0
-            ? [{ audienceType: "CIRCLE" as const, targetCircleId: { in: memberCircleIds } }]
-            : []),
-        ],
-      },
-      select: {
-        deadlineAt: true,
-        process: { select: { subjectType: true, subjectId: true } },
-      },
-    })
-    : [];
+  const pageArgs = (cursor: string | undefined, take: number) => ({
+    orderBy: { id: "asc" as const }, take, ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+  });
   const adviceDeadlinesByKind = {
     ACTION: new Map<string, Date | null>(),
     PROPOSAL: new Map<string, Date | null>(),
     TENSION: new Map<string, Date | null>(),
   };
-  for (const request of personalAdviceRequests) {
-    const kind = request.process.subjectType;
-    if (kind !== "ACTION" && kind !== "PROPOSAL" && kind !== "TENSION") continue;
-    const deadlines = adviceDeadlinesByKind[kind];
-    const previous = deadlines.get(request.process.subjectId);
-    if (previous === undefined || (request.deadlineAt && (!previous || request.deadlineAt < previous))) {
-      deadlines.set(request.process.subjectId, request.deadlineAt);
-    }
+  if (actor.kind === "user" && currentMember?.id) {
+    await scanReadableArtifactPages({ actor, workspaceId, kind: "AdviceRequest",
+      loadPage: (cursor, take) => prisma.adviceRequest.findMany({
+        ...pageArgs(cursor, take),
+        where: { workspaceId, status: "ACTIVE", requestedByUserId: { not: actor.user.id },
+          OR: [
+            { audienceType: "MEMBERS", recipients: { some: { memberId: currentMember.id } } },
+            { audienceType: "WORKSPACE" },
+            ...(memberCircleIds.length ? [{ audienceType: "CIRCLE" as const, targetCircleId: { in: memberCircleIds } }] : []),
+          ],
+        },
+        include: { process: { select: { subjectType: true, subjectId: true } } },
+      }),
+      visit: (request) => {
+        const kind = request.process.subjectType;
+        if (kind !== "ACTION" && kind !== "PROPOSAL" && kind !== "TENSION") return;
+        const deadlines = adviceDeadlinesByKind[kind];
+        const previous = deadlines.get(request.process.subjectId);
+        if (previous === undefined || (request.deadlineAt && (!previous || request.deadlineAt < previous))) {
+          deadlines.set(request.process.subjectId, request.deadlineAt);
+        }
+      },
+    });
   }
-  const [unreadNotificationsCount, latestDailyWorkspaceBriefing,
-    latestWeeklyWorkspaceBriefing, newspaperEditions, workspaceData, membersCount,
-  ] = await prisma.$transaction([
-    prisma.notification.count({ where: { workspaceId,
-      userId: actor.kind === "user" ? actor.user.id : "__agent_actor__", readAt: null } }),
-    prisma.workspaceBriefing.findFirst({
-      where: {
-        workspaceId,
-        status: "GENERATED",
-        period: "DAILY",
-      },
-      orderBy: { generatedAt: "desc" },
-      select: {
-        id: true,
-        workflowJobId: true,
-        period: true,
-        dateKey: true,
-        runKey: true,
-        title: true,
-        status: true,
-        modelUsed: true,
-        introMd: true,
-        bodyMd: true,
-        briefingJson: true,
-        sourceRefsJson: true,
-        sourceCounts: true,
-        generatedAt: true,
-        createdAt: true,
-        updatedAt: true,
+  const latestPageArgs = (cursor: { id: string; generatedAt: Date } | undefined, take: number) => ({
+    orderBy: [{ generatedAt: "desc" as const }, { id: "desc" as const }], take,
+    ...(cursor ? { OR: [{ generatedAt: { lt: cursor.generatedAt } }, { generatedAt: cursor.generatedAt, id: { lt: cursor.id } }] } : {}),
+  });
+  const [unreadNotificationsCount, latestWorkspaceBriefing, latestNewspaperEdition, workspaceData, membersCount] = await Promise.all([
+    countUnreadNotifications(actor, workspaceId),
+    findLatestReadableArtifact({ actor, workspaceId, kind: "WorkspaceBriefing",
+      loadPage: (cursor, take) => {
+        const { OR, ...paging } = latestPageArgs(cursor, take);
+        return prisma.workspaceBriefing.findMany({ ...paging,
+          where: { workspaceId, status: "GENERATED", period: { in: ["DAILY", "WEEKLY"] }, ...(OR ? { OR } : {}) },
+        });
       },
     }),
-    prisma.workspaceBriefing.findFirst({
-      where: {
-        workspaceId,
-        status: "GENERATED",
-        period: "WEEKLY",
-      },
-      orderBy: { generatedAt: "desc" },
-      select: {
-        id: true,
-        workflowJobId: true,
-        period: true,
-        dateKey: true,
-        runKey: true,
-        title: true,
-        status: true,
-        modelUsed: true,
-        introMd: true,
-        bodyMd: true,
-        briefingJson: true,
-        sourceRefsJson: true,
-        sourceCounts: true,
-        generatedAt: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    }),
-    prisma.newspaperEdition.findMany({
-      where: { workspaceId },
-      orderBy: { generatedAt: "desc" },
-      take: 1,
-      select: {
-        id: true,
-        workflowJobId: true,
-        cadence: true,
-        dateKey: true,
-        runKey: true,
-        title: true,
-        slug: true,
-        digestJson: true,
-        bodyMd: true,
-        sourceCounts: true,
-        generatedAt: true,
-        createdAt: true,
-        updatedAt: true,
+    findLatestReadableArtifact({ actor, workspaceId, kind: "NewspaperEdition",
+      loadPage: (cursor, take) => {
+        const { OR, ...paging } = latestPageArgs(cursor, take);
+        return prisma.newspaperEdition.findMany({ ...paging, where: { workspaceId, ...(OR ? { OR } : {}) } });
       },
     }),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true, name: true } }),
@@ -398,9 +340,6 @@ export default async function WorkspaceDashboard({
     personalSources.push({ type: item.kind === "ADVICE" ? "ADVICE_REQUEST" : item.kind, id: item.id, title: item.title });
     personalItems = rankPersonalNewspaperItems([...personalItems, item], rankingTime).slice(0, 8);
   };
-  const pageArgs = (cursor: string | undefined, take: number) => ({
-    orderBy: { id: "asc" as const }, take, ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-  });
   const [articleTotalCount, actionTotalCount, proposalTotalCount, tensionTotalCount, meetingTotalCount] = await Promise.all([
     scanReadableArtifactPages({ actor, workspaceId, kind: "BrainArticle",
       loadPage: (cursor, take) => prisma.brainArticle.findMany({ where: { workspaceId, archivedAt: null }, ...pageArgs(cursor, take) }),
@@ -456,7 +395,7 @@ export default async function WorkspaceDashboard({
       },
     }),
   ]);
-  const chunksCount = await countReadableKnowledgeChunks(actor, workspaceId);
+  const chunksCount = await countReadableKnowledgeChunkAggregate(actor, workspaceId);
   const branding = workspaceData
     ? workspaceBranding(workspaceData)
     : { primaryName: "Corgtex", secondaryLabel: "powered by Corgtex" };
@@ -474,19 +413,6 @@ export default async function WorkspaceDashboard({
     circleNames: memberCircleAssignments.map((assignment) => assignment.role.circle.name),
     personalSources,
   } : null;
-  const briefingCandidates = [latestDailyWorkspaceBriefing, latestWeeklyWorkspaceBriefing]
-    .filter((briefing): briefing is NonNullable<typeof latestDailyWorkspaceBriefing> => Boolean(briefing))
-    .sort((left, right) => right.generatedAt.getTime() - left.generatedAt.getTime());
-  const [briefingRows, editionRows] = await Promise.all([
-    prisma.workspaceBriefing.findMany({ where: { workspaceId, id: { in: briefingCandidates.map((item) => item.id) } } }),
-    prisma.newspaperEdition.findMany({ where: { workspaceId, id: { in: newspaperEditions.map((item) => item.id) } } }),
-  ]);
-  const [visibleBriefingIds, visibleEditionIds] = await Promise.all([
-    readableArtifactIds(actor, workspaceId, "WorkspaceBriefing", briefingRows),
-    readableArtifactIds(actor, workspaceId, "NewspaperEdition", editionRows),
-  ]);
-  const latestWorkspaceBriefing = briefingCandidates.find((item) => visibleBriefingIds.has(item.id)) ?? null;
-  const latestNewspaperEdition = newspaperEditions.find((item) => visibleEditionIds.has(item.id)) ?? null;
   const latestEditionDigest = latestNewspaperEdition
     ? normalizeNewspaperEditionDigest(latestNewspaperEdition)
     : null;
@@ -515,8 +441,11 @@ export default async function WorkspaceDashboard({
         .then((items) => items.map((item) => `GOAL:${item.id}`)),
       prisma.recognition.findMany({ where: { workspaceId, id: { in: idsFor("RECOGNITION") }, visibility: "WORKSPACE" }, select: { id: true } })
         .then((items) => items.map((item) => `RECOGNITION:${item.id}`)),
-      prisma.adviceRequest.findMany({ where: { workspaceId, id: { in: idsFor("ADVICE_REQUEST") }, audienceType: "WORKSPACE" }, select: { id: true } })
-        .then((items) => items.map((item) => `ADVICE_REQUEST:${item.id}`)),
+      prisma.adviceRequest.findMany({ where: { workspaceId, id: { in: idsFor("ADVICE_REQUEST") }, audienceType: "WORKSPACE" } })
+        .then(async (items) => {
+          const readable = await readableArtifactIds(actor, workspaceId, "AdviceRequest", items);
+          return items.filter((item) => readable.has(item.id)).map((item) => `ADVICE_REQUEST:${item.id}`);
+        }),
     ])
     : [];
   const workspaceBriefing = storedBriefing

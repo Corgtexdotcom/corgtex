@@ -91,6 +91,8 @@ vi.mock("./source-lineage", async (original) => ({
   brainSourceNeedsLineage: (source: { sourceType?: string; channel?: string | null }) =>
     source.sourceType === "CONVERSATION" || source.sourceType === "CONVERSATION_INSIGHT"
       || ["chat-demand", "daily-batch", "daily-digest", "daily-question"].includes(source.channel ?? ""),
+  captureArtifactInputProof: vi.fn().mockResolvedValue([]),
+  withArtifactCountReleaseSnapshot: vi.fn(async (_actor, _workspaceId, _roots, _remote, finish) => finish({})),
   recordArtifactInputLineage: vi.fn(),
   copyArtifactInputLineage: vi.fn().mockResolvedValue(true),
   createBrainArticleHistoryVersion: vi.fn(async ({tx, article, version, reason, preserveKnownHistory}) => ({
@@ -995,7 +997,7 @@ describe("Brain discussions with actual complete lineage receipts", () => {
     vi.clearAllMocks();
     source = await vi.importActual<typeof import("./source-lineage")>("./source-lineage");
     const mocked = await import("./source-lineage");
-    for (const name of ["readableArtifactIds", "recordArtifactInputLineage", "copyArtifactInputLineage", "createBrainArticleHistoryVersion", "currentArtifactInputRoots", "captureArtifactInputSnapshotProof"] as const) vi.mocked(mocked[name]).mockImplementation(source[name] as any);
+    for (const name of ["readableArtifactIds", "recordArtifactInputLineage", "copyArtifactInputLineage", "createBrainArticleHistoryVersion", "currentArtifactInputRoots", "captureArtifactInputSnapshotProof", "captureArtifactInputProof", "withArtifactCountReleaseSnapshot"] as const) vi.mocked(mocked[name]).mockImplementation(source[name] as any);
     for (const name of ["brainArticle", "brainArticleVersion", "auditLog", "brainSource", "brainDiscussionThread", "brainDiscussionComment", "member", "user", "action", "artifactInputLineage", "artifactInputSnapshot"]) {
       rows[name] = [];
       const delegate: any = (prismaMock as any)[name];

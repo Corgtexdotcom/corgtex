@@ -1,3 +1,4 @@
+import { WorkItemReadRelease, readableWorkItemPage, rankedReadableTensionPage, workItemAfter } from "./work-item-readable-page";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
@@ -135,11 +136,13 @@ function workItemOrderBy(sort: WorkItemSort | undefined): Prisma.TensionOrderByW
   ];
 }
 
-async function readableTensionVotes<T extends { id: string; userId: string }>(actor: AppActor, workspaceId: string, votes: T[]) {
+async function readableTensionVotes<T extends { id: string; userId: string }>(actor: AppActor, workspaceId: string, votes: T[], release?: WorkItemReadRelease) {
   invariant(votes.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Vote permission scan exceeds its supported size.");
-  return (await captureReadableDigestInputs({ actor, workspaceId, kind: "TensionUpvote", records: votes,
+  const captured = await captureReadableDigestInputs({ actor, workspaceId, kind: "TensionUpvote", records: votes,
     additionalInputs: (vote) => [{ kind: "User", id: vote.userId }],
-  })).records;
+  });
+  release?.add(captured.roots);
+  return captured.records;
 }
 
 async function redactTensionJoins<T extends {
@@ -210,8 +213,23 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
     });
   }
 
-  const candidates = await prisma.tension.findMany({
-      where,
+  const release = new WorkItemReadRelease(actor,workspaceId);
+  const page= !opts?.sort || opts.sort==="priority"
+    ? await rankedReadableTensionPage({actor,workspaceId,release,take,skip,
+      load:afterId=>prisma.tension.findMany({where:afterId?{AND:[where,{id:{gt:afterId}}]}:where,orderBy:{id:"asc"},take:100}),
+      votes:async row=>{
+        let count=0,afterId:string|undefined;
+        for(;;) {
+          const votes=await prisma.tensionUpvote.findMany({where:{tensionId:row.id,...(afterId?{id:{gt:afterId}}:{})},orderBy:{id:"asc"},take:100});
+          const visible=await readableTensionVotes(actor,workspaceId,votes,release);
+          count+=visible.length;
+          if(votes.length<100) return count;
+          afterId=votes.at(-1)!.id;
+        }
+      }})
+    : await readableWorkItemPage({actor,workspaceId,release,kind:"Tension",take,skip,
+      load:after=>prisma.tension.findMany({where:after?{AND:[where,workItemAfter(after,opts.sort)]}:where,orderBy:workItemOrderBy(opts.sort),take:100})});
+  const hydrated=page.items.length?await prisma.tension.findMany({where:{AND:[where,{id:{in:page.items.map(row=>row.id)}}]},
       include: {
         author: {
           select: {
@@ -243,42 +261,35 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
           },
         },
         circle: true,
-        upvotes: true,
+        upvotes: { take: 5001 },
         proposal: true,
       },
-      orderBy: workItemOrderBy(opts?.sort),
-      take: 5001,
-    });
-  invariant(candidates.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Source permission scan exceeds its supported size.");
-  const permitted = await readableArtifactIds(actor, workspaceId, "Tension", candidates);
-  const admitted = candidates.filter((candidate) => permitted.has(candidate.id));
-  const votes = await readableTensionVotes(actor, workspaceId, admitted.flatMap((candidate) => candidate.upvotes ?? []));
-  const voteIds = new Set(votes.map((vote) => vote.id));
-  const withVotes = admitted.map((candidate) => ({ ...candidate,
-    upvotes: (candidate.upvotes ?? []).filter((vote) => voteIds.has(vote.id)),
-  }));
-  if (!opts?.sort || opts.sort === "priority") withVotes.sort((left, right) =>
-    (right.priority ?? 0) - (left.priority ?? 0) || right.upvotes.length - left.upvotes.length
-    || (right.createdAt?.getTime() ?? 0) - (left.createdAt?.getTime() ?? 0) || right.id.localeCompare(left.id));
-  const total = admitted.length;
-  const items = withVotes.slice(skip, skip + take);
+  }):[];
+  const byId=new Map(hydrated.map(row=>[row.id,row]));
+  const selected=page.items.flatMap(row=>{const loaded=byId.get(row.id);return loaded?[{...loaded,...row}]:[];});
+  const votes=await readableTensionVotes(actor,workspaceId,selected.flatMap(row=>row.upvotes??[]));
+  const voteIds=new Set(votes.map(vote=>vote.id));
+  const items=selected.map(row=>({...row,upvotes:(row.upvotes??[]).filter(vote=>voteIds.has(vote.id))}));
+  const total=page.total-(page.items.length-items.length);
   const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "TENSION", items.map((item) => item.id));
-  const redactedItems = await redactTensionJoins(actor, workspaceId, items);
+  const redactedItems = await redactTensionJoins(actor, workspaceId, items, release);
   const linkedProposals = items.flatMap((item) => item.proposal ? [item.proposal] : []);
   const visibleProposalIds = linkedProposals.length
     ? await readableArtifactIds(actor, workspaceId, "Proposal", linkedProposals) : new Set<string>();
-  return {
-    items: redactedItems.map((item) => ({
+  await release.observe("Proposal",linkedProposals.filter(row=>visibleProposalIds.has(row.id)));
+  const finalIds=await readableArtifactIds(actor,workspaceId,"Tension",items);
+  return release.finish({
+    items: redactedItems.filter(item=>finalIds.has(item.id)).map((item) => ({
       ...item,
       proposalId: item.proposal && visibleProposalIds.has(item.proposal.id) ? item.proposalId : null,
       proposal: item.proposal && visibleProposalIds.has(item.proposal.id)
         ? { id: item.proposal.id, title: item.proposal.title } : null,
       ...requestCountSummaries.get(item.id),
     })),
-    total,
+    total:total-items.filter(item=>!finalIds.has(item.id)).length,
     take,
     skip,
-  };
+  });
 }
 
 async function applyTensionDuplicateUpdate(actor: AppActor, params: CreateTensionParams, tensionId: string) {

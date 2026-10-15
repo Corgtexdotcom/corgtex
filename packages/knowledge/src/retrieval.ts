@@ -3,7 +3,7 @@ import { Prisma, type KnowledgeAccessDomain, type KnowledgeSourceType } from "@p
 import { getCacheJson, getCacheVersion, incrementCacheVersion, prisma, cosineSimilarity, logger, setCacheJson } from "@corgtex/shared";
 import { CatalogBudgetError, defaultModelGateway, ModelProviderHttpError, WorkspaceModelBudgetError } from "@corgtex/models";
 import type { AppActor } from "@corgtex/shared";
-import { captureArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, readableArtifactIds, resolveKnowledgeAccessDomains, type LineageKind, type LineageRoot } from "@corgtex/domain";
+import { mergeLineageInputRoot, captureArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, readableArtifactIds, resolveKnowledgeAccessDomains, type LineageKind, type LineageRoot } from "@corgtex/domain";
 import type { SensitivityLabel } from "./sensitivity";
 import { getKnowledgeSearchProvider, isAzureKnowledgeSearchConfigured, normalizeKnowledgeAccessDomains, searchAzureKnowledge } from "./azure-search";
 import { captureSqlCountCollection, captureSqlCountPageProof, captureSqlCountStamps, isSqlCountLedgerCurrent, retainSqlCountEpochs,
@@ -286,7 +286,7 @@ async function readableKnowledgeSources(params: RetrievalAccess, sourceIds?: Map
       continue;
     }
     const where = { workspaceId: params.workspaceId, ...(ids ? { id: { in: ids } } : {}), archivedAt: null };
-    const scan = { take: KNOWLEDGE_SCAN_LIMIT - scanned + 1 };
+    const scan = { take: ids ? Math.min(ids.length, KNOWLEDGE_SCAN_LIMIT - scanned + 1) : KNOWLEDGE_SCAN_LIMIT - scanned + 1 };
     const records = sourceType === "BRAIN_ARTICLE"
       ? await prisma.brainArticle.findMany({ ...scan, where: { ...where, OR: [{ isPrivate: false }, { variantOfArticleId: { not: null }, isPrivate: true }] } })
       : sourceType === "DOCUMENT"
@@ -336,6 +336,46 @@ async function admitKnowledgeChunks(params: RetrievalAccess, chunks: PermissionC
     retainProof(proof);
   }
   return permitted;
+}
+
+/** A paginated aggregate, independent of search's candidate ceiling. Each page
+ * uses the same canonical parent, child receipt and current proof gates as search.
+ * Retain only original proof metadata for the shared final release fence; no
+ * bodies, vectors or successful-authorization cache accumulate across pages. */
+export async function countReadableNonSqlKnowledgeChunks(params: RetrievalAccess) {
+  let cursor: string | undefined;
+  let count = 0;
+  const retainedRoots = new Map<string, LineageRoot>();
+  const sourceTypes = (params.sourceTypes?.length ? params.sourceTypes : Object.keys(knowledgeLineageKinds) as KnowledgeSourceType[])
+    .filter(type => type !== "EXTERNAL_DATABASE");
+  if (!sourceTypes.length || !params.accessDomains.length) return {count: 0, roots: [] as LineageRoot[]};
+  for (;;) {
+    const chunks = await prisma.knowledgeChunk.findMany({
+      where: { workspaceId: params.workspaceId, accessDomain: { in: params.accessDomains },
+        sourceType: { in: sourceTypes }, ...(cursor ? { id: { gt: cursor } } : {}) },
+      orderBy: { id: "asc" }, take: 100, select: chunkProjection,
+    });
+    if (!chunks.length) return {count, roots: [...retainedRoots.values()]};
+    const sourceIds = new Map<KnowledgeSourceType, string[]>();
+    for (const chunk of chunks) {
+      const ids = sourceIds.get(chunk.sourceType) ?? [];
+      if (!ids.includes(chunk.sourceId)) ids.push(chunk.sourceId);
+      sourceIds.set(chunk.sourceType, ids);
+    }
+    const sources = await readableKnowledgeSources({ ...params, sourceTypes }, sourceIds);
+    let roots: LineageRoot[] = [];
+    const admitted = await admitKnowledgeChunks(params, chunks, sources, proof => { roots = proof; });
+    if (roots.length && !await currentInputProof(params, roots)) {
+      throw Object.assign(new Error("Knowledge inputs changed before count page release."), {code: "SOURCE_CHANGED", status: 409});
+    }
+    for (const root of roots) {
+      const key = `${root.kind}:${root.id}`;
+      retainedRoots.set(key, mergeLineageInputRoot(retainedRoots.get(key), root));
+    }
+    count += admitted.length;
+    if (chunks.length < 100) return {count, roots: [...retainedRoots.values()]};
+    cursor = chunks[chunks.length - 1].id;
+  }
 }
 
 /** Shared count/search admission. Raw rows never set a candidate cap or visible count. */

@@ -1,7 +1,7 @@
 import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations, listDailyCompanyUnderstandingQuestions, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig, getUserWorkspaceOnboardingState, getAiWorkspaceSelectionState, resolveWorkspaceModuleAccess, hasWorkspaceInitialKnowledgeSource, SELF_SERVE_WORKSPACE_TOUR_KEY, SELF_SERVE_WORKSPACE_TOUR_VERSION } from "@corgtex/domain";
 import { workspaceBranding, prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
-import { countReadableKnowledgeChunks } from "@corgtex/knowledge";
+import { countReadableKnowledgeChunkAggregate } from "@corgtex/knowledge";
 import type { Metadata } from "next";
 import { logoutAction, requirePageActor } from "@/lib/auth";
 import { filterWorkspacesForDeploymentScope } from "@/lib/deployment-workspace-scope";
@@ -43,7 +43,7 @@ function localizedPath(path: string, locale: string) {
 
 async function hasWorkspaceInitialKnowledge(actor: AppActor, workspaceId: string) {
   return await hasWorkspaceInitialKnowledgeSource(actor, workspaceId)
-    || await countReadableKnowledgeChunks(actor, workspaceId, ["DOCUMENT", "MEETING"]) > 0;
+    || await countReadableKnowledgeChunkAggregate(actor, workspaceId, ["DOCUMENT", "MEETING"]) > 0;
 }
 
 function syncSettingsRecord(value: unknown) {

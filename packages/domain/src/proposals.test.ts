@@ -29,6 +29,7 @@ vi.mock("@corgtex/shared", () => ({
       findUniqueOrThrow: vi.fn(),
     },
     member: {
+      findMany: vi.fn().mockResolvedValue([]),
       findFirst: vi.fn(),
     },
     circle: {
@@ -96,6 +97,7 @@ vi.mock("./source-lineage", async () => ({
   assertArtifactInputWriteFence: vi.fn().mockResolvedValue(undefined),
   advanceArchivedArtifactEnvelopeLineage: vi.fn().mockResolvedValue(false),
   isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
+  withArtifactCountReleaseSnapshot: vi.fn(async (_actor, _workspaceId, _roots, _remote, finish) => finish({})),
   advanceHumanArtifactInputLineage: vi.fn(),
   captureArtifactInputProof: vi.fn().mockResolvedValue([]),
   captureArtifactInputSnapshotProof: vi.fn().mockResolvedValue([]),
@@ -1527,22 +1529,7 @@ describe("listProposals", () => {
         { createdAt: "desc" },
         { id: "desc" },
       ],
-      include: expect.objectContaining({
-        tensions: expect.objectContaining({ where: { OR: [
-          { isPrivate: false },
-          { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
-        ] } }),
-        actions: expect.objectContaining({ where: { OR: [
-          { isPrivate: false },
-          { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
-        ] } }),
-        adviceProcess: {
-          include: {
-            requests: true,
-          },
-        },
-      }),
-      take: 5001,
+      take: 100,
     }));
     expect(prisma.proposal.count).not.toHaveBeenCalled();
   });

@@ -1,3 +1,4 @@
+import { WorkItemReadRelease, readableWorkItemPage, workItemAfter } from "./work-item-readable-page";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { prisma } from "@corgtex/shared";
 import { Prisma, type ProposalResolutionOutcome, type ProposalStatus } from "@prisma/client";
@@ -420,7 +421,7 @@ async function readableProposalRelations<T extends {
   tensions: Array<{ id: string; title: string; status: unknown }>;
   actions: Array<{ id: string; title: string; status: unknown }>;
   adviceProcess: { requests: Array<{ id: string; status: unknown }> } | null;
-}>(actor: AppActor, workspaceId: string, proposal: T) {
+}>(actor: AppActor, workspaceId: string, proposal: T, release?: WorkItemReadRelease) {
   invariant((proposal.tensions?.length ?? 0) <= 5000 && (proposal.actions?.length ?? 0) <= 5000
     && (proposal.adviceProcess?.requests?.length ?? 0) <= 5000,
   503, "SOURCE_READ_SCAN_LIMIT", "Proposal relation permission scan exceeds its supported size.");
@@ -435,6 +436,19 @@ async function readableProposalRelations<T extends {
     readableArtifactIds(actor, workspaceId, "User", proposal.ownerMember?.user ? [proposal.ownerMember.user] : []),
     readableArtifactIds(actor, workspaceId, "Meeting", meeting ? [meeting] : []),
   ]);
+  if (release) {
+    await release.observe("Tension",(proposal.tensions??[]).filter(row=>tensions.has(row.id)));
+    await release.observe("Action",(proposal.actions??[]).filter(row=>actions.has(row.id)));
+    await release.observe("AdviceRequest",(proposal.adviceProcess?.requests??[]).filter(row=>requests.has(row.id)));
+    if(proposal.circle && circles.has(proposal.circle.id)) await release.observe("Circle",[proposal.circle]);
+    if(proposal.author && authors.has(proposal.author.id)) await release.observe("User",[proposal.author]);
+    if(proposal.ownerMember && owners.has(proposal.ownerMember.id) && ownerUsers.has(proposal.ownerMember.user.id)) {
+      const member=proposal.ownerMember;
+      await release.observe("Member",[{...member,user:{id:member.user.id,email:member.user.email,displayName:member.user.displayName}}]);
+      await release.observe("User",[member.user]);
+    }
+    if(meeting && meetings.has(meeting.id)) await release.observe("Meeting",[meeting]);
+  }
   const circle = proposal.circle && circles.has(proposal.circle.id) ? { id: proposal.circle.id, name: proposal.circle.name } : null;
   const ownerMember = proposal.ownerMember && owners.has(proposal.ownerMember.id) && ownerUsers.has(proposal.ownerMember.user.id)
     ? { id: proposal.ownerMember.id, user: { id: proposal.ownerMember.user.id,
@@ -474,8 +488,36 @@ export async function listProposals(actor: AppActor, workspaceId: string, opts?:
   if (opts?.status) where.status = opts.status;
   const memberIds = listFilterValues([...(opts?.memberIds ?? []), opts?.memberId]);
   invariant(memberIds.length <= 5000, 400, "INVALID_INPUT", "Too many proposal member filters.");
-  const candidates = await prisma.proposal.findMany({
-      where,
+  const release = new WorkItemReadRelease(actor,workspaceId);
+  const members = memberIds.length ? await prisma.member.findMany({where:{id:{in:memberIds},workspaceId,isActive:true},
+    include:{user:{select:{id:true,email:true,displayName:true,bio:true,avatarUrl:true,linkedinUrl:true,websiteUrl:true,createdAt:true,updatedAt:true}}}}) : [];
+  const [visibleMembers,visibleUsers]=await Promise.all([
+    readableArtifactIds(actor,workspaceId,"Member",members),readableArtifactIds(actor,workspaceId,"User",members.map(member=>member.user))]);
+  const permittedMembers=members.filter(member=>visibleMembers.has(member.id)&&visibleUsers.has(member.userId));
+  await release.observe("Member",permittedMembers.map(member=>({...member,user:{id:member.user.id,email:member.user.email,displayName:member.user.displayName}})));
+  await release.observe("User",permittedMembers.map(member=>member.user));
+  const memberSet=new Set(permittedMembers.map(member=>member.id)),authorUsers=new Set(permittedMembers.map(member=>member.userId));
+  const actionMemberFilter:Prisma.ActionWhereInput={OR:[{assigneeMemberId:{in:[...memberSet]}},{authorUserId:{in:[...authorUsers]}}]};
+  const tensionMemberFilter:Prisma.TensionWhereInput={OR:[{assigneeMemberId:{in:[...memberSet]}},{raisedByMemberId:{in:[...memberSet]}},{authorUserId:{in:[...authorUsers]}}]};
+  const page=await readableWorkItemPage({actor,workspaceId,release,kind:"Proposal",take,skip,
+    load:after=>prisma.proposal.findMany({where:after?{AND:[where,workItemAfter(after,opts?.sort)]}:where,
+      orderBy:workItemOrderBy(opts?.sort),take:100}),
+    admit:async candidate=>{
+      if(circleIds.length || opts?.circleId) {
+        const circle=candidate.circleId?await prisma.circle.findFirst({where:{id:candidate.circleId,workspaceId}}):null;
+        if(!circle || !(await readableArtifactIds(actor,workspaceId,"Circle",[circle])).has(circle.id)) return false;
+        await release.observe("Circle",[circle]);
+      }
+      if(!memberIds.length || memberSet.has(candidate.ownerMemberId??"") || authorUsers.has(candidate.authorUserId)) return true;
+      if(!memberSet.size) return false;
+      if(await release.has("Action",(afterId,take)=>prisma.action.findMany({
+        where:{AND:[{workspaceId,proposalId:candidate.id,...privacyFilter(actor,membership)},actionMemberFilter,
+          ...(afterId?[{id:{gt:afterId}}]:[])]},orderBy:{id:"asc"},take}))) return true;
+      return release.has("Tension",(afterId,take)=>prisma.tension.findMany({
+        where:{AND:[{workspaceId,proposalId:candidate.id,...privacyFilter(actor,membership)},tensionMemberFilter,
+          ...(afterId?[{id:{gt:afterId}}]:[])]},orderBy:{id:"asc"},take}));
+    }});
+  const hydrated=page.items.length?await prisma.proposal.findMany({where:{AND:[where,{id:{in:page.items.map(row=>row.id)}}]},
       include: {
         author: {
           select: {
@@ -508,53 +550,21 @@ export async function listProposals(actor: AppActor, workspaceId: string, opts?:
           },
         },
         circle: true,
-        tensions: { where: privacyFilter(actor, membership) },
-        actions: { where: privacyFilter(actor, membership) },
+        tensions: { where: privacyFilter(actor, membership), take: 5001 },
+        actions: { where: privacyFilter(actor, membership), take: 5001 },
         adviceProcess: {
           include: {
-            requests: true,
+            requests: { take: 5001 },
           },
         },
       },
-      orderBy: workItemOrderBy(opts?.sort),
-      take: 5001,
-    });
-  invariant(candidates.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Proposal permission scan exceeds its supported size.");
-  const visibleIds = await readableArtifactIds(actor, workspaceId, "Proposal", candidates);
-  const admitted = candidates.filter((candidate) => visibleIds.has(candidate.id));
-  let related = admitted;
-  if (circleIds.length > 0 || opts?.circleId) {
-    const requestedCircles = related.flatMap((candidate) => candidate.circle ? [candidate.circle] : []);
-    const visibleCircles = await readableArtifactIds(actor, workspaceId, "Circle", requestedCircles);
-    related = related.filter((candidate) => candidate.circle && visibleCircles.has(candidate.circle.id));
-  }
-  if (memberIds.length > 0 && related.length > 0) {
-    const members = await prisma.member.findMany({ where: { id: { in: memberIds }, workspaceId, isActive: true },
-      include: { user: { select: { id: true, email: true, displayName: true, bio: true, avatarUrl: true,
-        linkedinUrl: true, websiteUrl: true, createdAt: true, updatedAt: true } } } });
-    const [visibleMembers, visibleUsers] = await Promise.all([
-      readableArtifactIds(actor, workspaceId, "Member", members),
-      readableArtifactIds(actor, workspaceId, "User", members.map((member) => member.user)),
-    ]);
-    const permittedMembers = members.filter((member) => visibleMembers.has(member.id) && visibleUsers.has(member.userId));
-    const memberSet = new Set(permittedMembers.map((member) => member.id));
-    const authorUsers = new Set(permittedMembers.map((member) => member.userId));
-    const actionRows = related.flatMap((candidate) => candidate.actions);
-    const tensionRows = related.flatMap((candidate) => candidate.tensions);
-    invariant(actionRows.length <= 5000 && tensionRows.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Proposal relation permission scan exceeds its supported size.");
-    const [visibleActions, visibleTensions] = await Promise.all([
-      readableArtifactIds(actor, workspaceId, "Action", actionRows),
-      readableArtifactIds(actor, workspaceId, "Tension", tensionRows),
-    ]);
-    related = related.filter((candidate) =>
-      memberSet.has(candidate.ownerMemberId ?? "") || authorUsers.has(candidate.authorUserId)
-      || candidate.actions.some((action) => visibleActions.has(action.id)
-        && (memberSet.has(action.assigneeMemberId ?? "") || authorUsers.has(action.authorUserId)))
-      || candidate.tensions.some((tension) => visibleTensions.has(tension.id)
-        && (memberSet.has(tension.assigneeMemberId ?? "") || memberSet.has(tension.raisedByMemberId ?? "") || authorUsers.has(tension.authorUserId))));
-  }
-  const total = related.length;
-  return { items: await Promise.all(related.slice(skip, skip + take).map((proposal) => readableProposalRelations(actor, workspaceId, proposal))), total, take, skip };
+  }):[];
+  const byId=new Map(hydrated.map(row=>[row.id,row]));
+  const selected=page.items.flatMap(row=>{const loaded=byId.get(row.id);return loaded?[{...loaded,...row}]:[];});
+  const items=await Promise.all(selected.map(proposal=>readableProposalRelations(actor,workspaceId,proposal,release)));
+  const finalIds=await readableArtifactIds(actor,workspaceId,"Proposal",selected);
+  const admitted=items.filter(row=>finalIds.has(row.id));
+  return release.finish({items:admitted,total:page.total-(page.items.length-admitted.length),take,skip});
 }
 
 export async function getProposal(actor: AppActor, params: {

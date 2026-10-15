@@ -25,6 +25,7 @@ const { prismaMock } = vi.hoisted(() => {
       findMany: vi.fn(),
     },
     tensionUpvote: {
+      findMany: vi.fn(),
       findUnique: vi.fn().mockResolvedValue(null),
       upsert: vi.fn(),
     },
@@ -74,6 +75,7 @@ vi.mock("./auth", () => ({
 vi.mock("./source-lineage", () => ({
   assertArtifactInputWriteFence: vi.fn(),
   isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
+  withArtifactCountReleaseSnapshot: vi.fn(async (_actor, _workspaceId, _roots, _remote, finish) => finish({})),
   captureArtifactInputProof: vi.fn().mockResolvedValue([]),
   readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) =>
     new Set(records.map((record: { id: string }) => record.id))),
@@ -132,6 +134,12 @@ describe("tensions domain", () => {
       title: "Test tension",
     });
     prismaMock.tension.findMany.mockResolvedValue([{ id: "t-1" }]);
+    prismaMock.tensionUpvote.findMany.mockImplementation(async query => {
+      const rows = await prismaMock.tension.findMany.mock.results.at(-1)?.value ?? [];
+      return rows.flatMap((row: {id: string; upvotes?: Array<{id: string}>}) => row.id === query.where.tensionId ? row.upvotes ?? [] : [])
+        .filter((vote: {id: string}) => !query.where.id?.gt || vote.id > query.where.id.gt)
+        .sort((a: {id: string}, b: {id: string}) => a.id.localeCompare(b.id)).slice(0, query.take);
+    });
     prismaMock.adviceProcess.findMany.mockResolvedValue([]);
     prismaMock.tension.findUnique.mockResolvedValue({
       id: "t-1",
@@ -1042,11 +1050,7 @@ describe("tensions domain", () => {
           },
         },
       }),
-      orderBy: [
-        { priority: "desc" },
-        { createdAt: "desc" },
-        { id: "desc" },
-      ],
+
     }));
     expect(prismaMock.adviceProcess.findMany).toHaveBeenCalledWith({
       where: {
@@ -1064,7 +1068,7 @@ describe("tensions domain", () => {
   it("adds tension input-request counts from advice processes", async () => {
     const { listTensions } = await import("./tensions");
 
-    prismaMock.tension.findMany.mockResolvedValueOnce([{ id: "t-1" }]);
+    prismaMock.tension.findMany.mockResolvedValue([{ id: "t-1" }]);
     prismaMock.adviceProcess.findMany.mockResolvedValueOnce([
       {
         subjectId: "t-1",
@@ -1582,7 +1586,10 @@ describe("tensions domain", () => {
     const { getTension, listTensions } = await import("./tensions");
     const read = async () => surface === "list" ? (await listTensions(actor, "ws-1")).items[0] : getTension(actor, { workspaceId: "ws-1", tensionId: tension.id });
     expect(await read()).toMatchObject({ author: tension.author, raisedByMember: tension.raisedByMember });
-    vi.mocked(captureArtifactInputProof).mockRejectedValue(new AppError(403, "SOURCE_RESTRICTED", "Source unavailable."));
+    vi.mocked(captureArtifactInputProof).mockImplementation(async (_actor,_workspace,inputs)=>{
+      if(inputs.some(input=>["User","Member","Circle"].includes(input.kind))) throw new AppError(403,"SOURCE_RESTRICTED","Source unavailable.");
+      return [];
+    });
     const output = await read();
     expect(output).toMatchObject({ title: tension.title, bodyMd: tension.bodyMd, authorUserId: null,
       author: { id: "", displayName: null, email: "" }, assigneeMemberId: null, assigneeMember: null,
@@ -1612,7 +1619,10 @@ describe("tensions domain", () => {
     ]);
     prismaMock.tension.findFirst.mockResolvedValue(rawWinner);
     expect((await getTension(actor, { workspaceId: "ws-1", tensionId: rawWinner.id })).upvotes).toEqual([]);
-    vi.mocked(captureArtifactInputProof).mockRejectedValue(new AppError(403, "SOURCE_RESTRICTED", "Voter membership revoked."));
+    vi.mocked(captureArtifactInputProof).mockImplementation(async (_actor,_workspace,inputs)=>{
+      if(inputs.some(input=>input.kind==="User")) throw new AppError(403,"SOURCE_RESTRICTED","Voter membership revoked.");
+      return [];
+    });
     const afterRevocation = await listTensions(actor, "ws-1", { take: 1 });
     expect(afterRevocation.items[0]).toMatchObject({ id: "raw-winner", upvotes: [] });
     expect(JSON.stringify(afterRevocation)).not.toContain("other-workspace-user");

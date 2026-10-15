@@ -1,7 +1,8 @@
+import { WorkItemReadRelease } from "./work-item-readable-page";
 import { getReadableBrainArticleVariant, requestBrainArticleVariant } from "./brain-article-variants";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { captureReadableDigestInputs } from "./digest-lineage";
-import { countSourceReadableRecords } from "./source-scoped-read";
+import { visitSourceReadableRecords } from "./source-scoped-read";
 import type { BrainArticle, BrainArticleAuthority, BrainArticleType, BrainDiscussionTargetType, BrainSource, BrainSourceType } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { isDeepStrictEqual } from "node:util";
@@ -1274,54 +1275,45 @@ export async function getBrainStatus(actor: AppActor, params: {
   });
   const accessDomains = await resolveKnowledgeAccessDomains(actor, params.workspaceId);
 
-  const [articles, sources, articlesWithBacklinks] = await Promise.all([
-    prisma.brainArticle.findMany({ where: { workspaceId: params.workspaceId } }),
-    countSourceReadableRecords({ actor, workspaceId: params.workspaceId, kind: "BrainSource", load: (afterId, take) => prisma.brainSource.findMany({
-      where: {
-        workspaceId: params.workspaceId,
-        accessDomain: { in: accessDomains },
-        archivedAt: null,
-        absorbedAt: null,
-        ...(afterId ? { id: { gt: afterId } } : {}),
-      },
-      orderBy: { id: "asc" }, take,
-    }) }),
-    prisma.brainBacklink.findMany({
-      where: { workspaceId: params.workspaceId },
-      select: { fromArticleId: true, toArticleId: true },
-    }),
-  ]);
-  const unabsorbedSources = sources;
-  const visibleIds = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", articles);
-  const visibleArticles = articles.filter((article) => visibleIds.has(article.id));
-  const linkedIds = new Set(articlesWithBacklinks
-    .filter((backlink) => visibleIds.has(backlink.fromArticleId) && visibleIds.has(backlink.toArticleId))
-    .map((backlink) => backlink.toArticleId));
-  const orphanArticles = visibleArticles.filter((article) => !linkedIds.has(article.id)).length;
-  const staleArticles = visibleArticles.filter((article) =>
-    (article.lastVerifiedAt ?? article.createdAt).getTime() < Date.now() - 90 * 24 * 60 * 60 * 1000).length;
-  const unownedArticles = visibleArticles.filter((article) => article.ownerMemberId === null).length;
-  const openDiscussionThreads = (await readableDiscussionRows(actor, params.workspaceId, await prisma.brainDiscussionThread.findMany({
-    where: { articleId: { in: [...visibleIds] }, status: "OPEN" }, include: { comments: true },
-  }))).length;
-
-  const articleCountByType: Record<string, number> = {};
-  const articleCountByAuthority: Record<string, number> = {};
-  for (const article of visibleArticles) {
-    articleCountByType[article.type] = (articleCountByType[article.type] ?? 0) + 1;
-    articleCountByAuthority[article.authority] = (articleCountByAuthority[article.authority] ?? 0) + 1;
-  }
-
-  return {
-    articleCountByType,
-    articleCountByAuthority,
-    totalArticles: visibleArticles.length,
-    staleArticles,
-    unabsorbedSources,
-    openDiscussionThreads,
-    orphanArticles,
-    unownedArticles,
-  };
+  const release = new WorkItemReadRelease(actor,params.workspaceId);
+  const status: BrainStatus = {articleCountByType:{},articleCountByAuthority:{},totalArticles:0,
+    staleArticles:0,unabsorbedSources:0,openDiscussionThreads:0,orphanArticles:0,unownedArticles:0};
+  const staleBefore=Date.now()-90*24*60*60*1000;
+  await visitSourceReadableRecords({actor,workspaceId:params.workspaceId,kind:"BrainArticle",
+    load:(afterId,take)=>prisma.brainArticle.findMany({where:{workspaceId:params.workspaceId,...(afterId?{id:{gt:afterId}}:{})},orderBy:{id:"asc"},take}),
+    visit:async articles=>{
+      const ids=articles.map(article=>article.id),linked=new Set<string>();
+      let afterLink:string|undefined;
+      if(ids.length) for(;;) {
+        const links=await prisma.brainBacklink.findMany({where:{workspaceId:params.workspaceId,toArticleId:{in:ids},
+          ...(afterLink?{id:{gt:afterLink}}:{})},include:{fromArticle:true},orderBy:{id:"asc"},take:100});
+        const readable=await readableArtifactIds(actor,params.workspaceId,"BrainArticle",links.map(link=>link.fromArticle));
+        await release.observe("BrainArticle",links.map(link=>link.fromArticle).filter(row=>readable.has(row.id)));
+        for(const link of links) if(readable.has(link.fromArticleId)) linked.add(link.toArticleId);
+        if(links.length<100) break;
+        afterLink=links.at(-1)!.id;
+      }
+      const current=await readableArtifactIds(actor,params.workspaceId,"BrainArticle",articles);
+      await release.observe("BrainArticle",articles.filter(row=>current.has(row.id)));
+      for(const article of articles) if(current.has(article.id)) {
+        status.totalArticles++;
+        status.articleCountByType[article.type]=(status.articleCountByType[article.type]??0)+1;
+        status.articleCountByAuthority[article.authority]=(status.articleCountByAuthority[article.authority]??0)+1;
+        if((article.lastVerifiedAt??article.createdAt).getTime()<staleBefore) status.staleArticles++;
+        if(article.ownerMemberId===null) status.unownedArticles++;
+        if(!linked.has(article.id)) status.orphanArticles++;
+      }
+    }});
+  await visitSourceReadableRecords({actor,workspaceId:params.workspaceId,kind:"BrainSource",
+    visit:async rows=>{ await release.observe("BrainSource",rows);status.unabsorbedSources+=rows.length; },
+    load:(afterId,take)=>prisma.brainSource.findMany({where:{workspaceId:params.workspaceId,accessDomain:{in:accessDomains},
+      archivedAt:null,absorbedAt:null,...(afterId?{id:{gt:afterId}}:{})},orderBy:{id:"asc"},take})});
+  // Thread proof includes its current parent Article; comments never affect this count.
+  await visitSourceReadableRecords({actor,workspaceId:params.workspaceId,kind:"BrainDiscussionThread",
+    visit:async rows=>{ await release.observe("BrainDiscussionThread",rows);status.openDiscussionThreads+=rows.length; },
+    load:(afterId,take)=>prisma.brainDiscussionThread.findMany({where:{article:{workspaceId:params.workspaceId},status:"OPEN",
+      ...(afterId?{id:{gt:afterId}}:{})},orderBy:{id:"asc"},take})});
+  return release.finish(status);
 }
 
 export async function publishArticle(actor: AppActor, params: {
