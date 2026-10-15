@@ -2,7 +2,7 @@ import { prisma } from "@corgtex/shared";
 import { authorizeConversationTool } from "../conversation-capabilities";
 import type { ModelTool } from "@corgtex/models";
 import type { AppActor } from "@corgtex/shared";
-import { AppError, listCircles, listRoleAssignments, listGoals, privacyFilter, requireWorkspaceMembership, scanSourceReadableRecords, captureReadableDigestInputs } from "@corgtex/domain";
+import { AppError, listCircles, listRoleAssignments, listGoals, privacyFilter, requireWorkspaceMembership, scanSourceReadableRecords, captureReadableDigestInputs, DigestReadRelease, loadReadableArtifactSample } from "@corgtex/domain";
 import type { Prisma, TensionStatus, ActionStatus, ProposalStatus, GoalCadence, GoalLevel, GoalStatus } from "@prisma/client";
 
 export const getWorkspaceOverviewTool: ModelTool = {
@@ -119,6 +119,14 @@ export async function getWorkspaceOverview(workspaceId: string, actor?: AppActor
   return { memberCount, circleCount, openTensions, openActions, activeProposals, activeGoals };
 }
 
+const workspaceAuthorSelect = { id: true, displayName: true, email: true, bio: true, avatarUrl: true,
+  linkedinUrl: true, websiteUrl: true, createdAt: true, updatedAt: true } satisfies Prisma.UserSelect;
+const workspaceMemberInclude = { user: { select: { id: true, displayName: true, email: true } } } satisfies Prisma.MemberInclude;
+const tensionIncludes = { author: { select: workspaceAuthorSelect }, assigneeMember: { include: workspaceMemberInclude },
+  raisedByMember: { include: workspaceMemberInclude } } satisfies Prisma.TensionInclude;
+const actionIncludes = { author: { select: workspaceAuthorSelect }, assigneeMember: { include: workspaceMemberInclude } } satisfies Prisma.ActionInclude;
+const proposalIncludes = { author: { select: workspaceAuthorSelect } } satisfies Prisma.ProposalInclude;
+
 export async function queryTensions(workspaceId: string, status?: TensionStatus, assigneeId?: string, tensionId?: string, actor?: AppActor) {
   if (actor) await authorizeConversationTool(actor, workspaceId, "query_tensions");
   const where: Prisma.TensionWhereInput = await workspaceReaderWhere(workspaceId, actor);
@@ -126,18 +134,21 @@ export async function queryTensions(workspaceId: string, status?: TensionStatus,
   if (status) where.status = status;
   if (assigneeId) where.assigneeMemberId = assigneeId;
 
-  const tensions = (await scanSourceReadableRecords({ actor: actor!, workspaceId, kind: "Tension", load: (afterId, take) => prisma.tension.findMany({
-    where: { AND: [where, ...(afterId ? [{ id: { gt: afterId } }] : [])] },
-    orderBy: { id: "asc" }, take, include: { author: { select: { id: true, displayName: true, email: true, bio: true } }, assigneeMember: { include: { user: { select: { id: true, displayName: true, email: true } } } }, raisedByMember: { include: { user: { select: { id: true, displayName: true, email: true } } } } },
-  }) })).sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime() || right.id.localeCompare(left.id)).slice(0, 20);
+  const release = new DigestReadRelease(actor!, workspaceId);
+  const { records: tensions } = await loadReadableArtifactSample<Prisma.TensionGetPayload<{ include: typeof tensionIncludes }>>({ actor: actor!, workspaceId, kind: "Tension", limit: 20, release,
+    loadBatch: (after, take) => prisma.tension.findMany({
+      where: { AND: [where, ...(after ? [{ OR: [{ createdAt: { lt: after.createdAt } }, { createdAt: after.createdAt, id: { lt: after.id } }] }] : [])] },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }], take, include: tensionIncludes,
+    }),
+  });
 
-  const authors = await captureReadableDigestInputs({ actor: actor!, workspaceId, kind: "User", records: tensions.map((row) => row.author) });
+  const authors = await release.capture("User", tensions.map((row) => row.author));
   const authorIds = new Set(authors.records.map((row) => row.id));
-  const assigneeMemberInputs = await captureReadableDigestInputs({ actor: actor!, workspaceId, kind: "Member", records: tensions.flatMap((row) => row.assigneeMember ? [row.assigneeMember] : []) });
+  const assigneeMemberInputs = await release.capture("Member", tensions.flatMap((row) => row.assigneeMember ? [row.assigneeMember] : []));
   const assigneeMemberIds = new Set(assigneeMemberInputs.records.map((row) => row.id));
-  const raisedByMemberInputs = await captureReadableDigestInputs({ actor: actor!, workspaceId, kind: "Member", records: tensions.flatMap((row) => row.raisedByMember ? [row.raisedByMember] : []) });
+  const raisedByMemberInputs = await release.capture("Member", tensions.flatMap((row) => row.raisedByMember ? [row.raisedByMember] : []));
   const raisedByMemberIds = new Set(raisedByMemberInputs.records.map((row) => row.id));
-  return tensions.map(t => ({
+  return release.finish(tensions.map(t => ({
     id: t.id,
     version: t.version,
     title: t.title,
@@ -148,7 +159,7 @@ export async function queryTensions(workspaceId: string, status?: TensionStatus,
     raisedBy: t.raisedByMember && raisedByMemberIds.has(t.raisedByMember.id) ? t.raisedByMember.user.displayName : null,
     createdAt: t.createdAt,
     bodySnippet: t.bodyMd?.substring(0, 200) + (t.bodyMd && t.bodyMd.length > 200 ? "..." : ""),
-  }));
+  })));
 }
 
 export async function queryActions(workspaceId: string, status?: ActionStatus, assigneeId?: string, actionId?: string, actor?: AppActor) {
@@ -158,16 +169,19 @@ export async function queryActions(workspaceId: string, status?: ActionStatus, a
   if (status) where.status = status;
   if (assigneeId) where.assigneeMemberId = assigneeId;
 
-  const actions = (await scanSourceReadableRecords({ actor: actor!, workspaceId, kind: "Action", load: (afterId, take) => prisma.action.findMany({
-    where: { AND: [where, ...(afterId ? [{ id: { gt: afterId } }] : [])] },
-    orderBy: { id: "asc" }, take, include: { author: { select: { id: true, displayName: true, email: true, bio: true } }, assigneeMember: { include: { user: { select: { id: true, displayName: true, email: true } } } } },
-  }) })).sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime() || right.id.localeCompare(left.id)).slice(0, 20);
+  const release = new DigestReadRelease(actor!, workspaceId);
+  const { records: actions } = await loadReadableArtifactSample<Prisma.ActionGetPayload<{ include: typeof actionIncludes }>>({ actor: actor!, workspaceId, kind: "Action", limit: 20, release,
+    loadBatch: (after, take) => prisma.action.findMany({
+      where: { AND: [where, ...(after ? [{ OR: [{ createdAt: { lt: after.createdAt } }, { createdAt: after.createdAt, id: { lt: after.id } }] }] : [])] },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }], take, include: actionIncludes,
+    }),
+  });
 
-  const authors = await captureReadableDigestInputs({ actor: actor!, workspaceId, kind: "User", records: actions.map((row) => row.author) });
+  const authors = await release.capture("User", actions.map((row) => row.author));
   const authorIds = new Set(authors.records.map((row) => row.id));
-  const assigneeMemberInputs = await captureReadableDigestInputs({ actor: actor!, workspaceId, kind: "Member", records: actions.flatMap((row) => row.assigneeMember ? [row.assigneeMember] : []) });
+  const assigneeMemberInputs = await release.capture("Member", actions.flatMap((row) => row.assigneeMember ? [row.assigneeMember] : []));
   const assigneeMemberIds = new Set(assigneeMemberInputs.records.map((row) => row.id));
-  return actions.map(a => ({
+  return release.finish(actions.map(a => ({
     id: a.id,
     version: a.version,
     title: a.title,
@@ -177,7 +191,7 @@ export async function queryActions(workspaceId: string, status?: ActionStatus, a
     dueAt: a.dueAt,
     createdAt: a.createdAt,
     bodySnippet: a.bodyMd?.substring(0, 200) + (a.bodyMd && a.bodyMd.length > 200 ? "..." : ""),
-  }));
+  })));
 }
 
 export async function queryProposals(workspaceId: string, status?: ProposalStatus, actor?: AppActor) {
@@ -185,20 +199,23 @@ export async function queryProposals(workspaceId: string, status?: ProposalStatu
   const where: Prisma.ProposalWhereInput = await workspaceReaderWhere(workspaceId, actor);
   if (status) where.status = status;
 
-  const proposals = (await scanSourceReadableRecords({ actor: actor!, workspaceId, kind: "Proposal", load: (afterId, take) => prisma.proposal.findMany({
-    where: { AND: [where, ...(afterId ? [{ id: { gt: afterId } }] : [])] },
-    orderBy: { id: "asc" }, take, include: { author: { select: { id: true, displayName: true, email: true, bio: true } } },
-  }) })).sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime() || right.id.localeCompare(left.id)).slice(0, 20);
+  const release = new DigestReadRelease(actor!, workspaceId);
+  const { records: proposals } = await loadReadableArtifactSample<Prisma.ProposalGetPayload<{ include: typeof proposalIncludes }>>({ actor: actor!, workspaceId, kind: "Proposal", limit: 20, release,
+    loadBatch: (after, take) => prisma.proposal.findMany({
+      where: { AND: [where, ...(after ? [{ OR: [{ createdAt: { lt: after.createdAt } }, { createdAt: after.createdAt, id: { lt: after.id } }] }] : [])] },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }], take, include: proposalIncludes,
+    }),
+  });
 
-  const authors = await captureReadableDigestInputs({ actor: actor!, workspaceId, kind: "User", records: proposals.map((row) => row.author) });
+  const authors = await release.capture("User", proposals.map((row) => row.author));
   const authorIds = new Set(authors.records.map((row) => row.id));
-  return proposals.map(p => ({
+  return release.finish(proposals.map(p => ({
     id: p.id,
     title: p.title,
     status: p.status,
     author: authorIds.has(p.author.id) ? p.author.displayName : null,
     createdAt: p.createdAt,
-  }));
+  })));
 }
 
 export async function queryOrgStructure(workspaceId: string, actor?: AppActor) {

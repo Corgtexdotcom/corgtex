@@ -1,3 +1,4 @@
+import type { ConversationTurn } from "@prisma/client";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { AppError, buildRoleOnboardingContextWithLineageForConversation, createConversationPromptInput, createConversationIngressInput } from "@corgtex/domain";
 import { createConversationLineageCollector } from "./conversation-lineage";
@@ -84,12 +85,29 @@ export async function prepareConversationInputs(params: { actor: AppActor; works
 }
 
 export async function loadConversationHistory(actor: AppActor, workspaceId: string, sessionId: string, limit: number, collector: ConversationInputCollector) {
-  const rows = await prisma.conversationTurn.findMany({ where: { conversationId: sessionId, conversation: { workspaceId, userId: actor.kind === "user" ? actor.user.id : "" } },
-    orderBy: { sequenceNumber: "desc" }, take: 5001 });
-  if (rows.length > 5000) throw new AppError(503, "INPUT_SCAN_LIMIT", "Conversation history needs a lineage rebuild before it can complete.");
-  // Permission filtering happens before the editorial history limit.
-  const permitted = await collector.admitRecords("ConversationTurn", rows);
-  return permitted.slice(0, limit).reverse();
+  if (!Number.isSafeInteger(limit) || limit < 0) throw new AppError(400, "INVALID_INPUT", "Invalid conversation history size.");
+  const permitted: ConversationTurn[] = [];
+  let after: { sequenceNumber: number; id: string } | undefined;
+  while (permitted.length < limit) {
+    const rows = await prisma.conversationTurn.findMany({ where: {
+      conversationId: sessionId, conversation: { workspaceId, userId: actor.kind === "user" ? actor.user.id : "" },
+      ...(after ? { OR: [{ sequenceNumber: { lt: after.sequenceNumber } }, { sequenceNumber: after.sequenceNumber, id: { lt: after.id } }] } : {}),
+    }, orderBy: [{ sequenceNumber: "desc" }, { id: "desc" }], take: 100 });
+    const last = rows.at(-1);
+    // Freeze the raw cursor before authorization awaits; denied rows still advance it.
+    const next = last ? { sequenceNumber: last.sequenceNumber, id: last.id } : undefined;
+    for (const row of rows) {
+      permitted.push(...await collector.admitRecords("ConversationTurn", [row]));
+      if (permitted.length === limit) break;
+    }
+    if (rows.length < 100) break;
+    if (next?.id === after?.id) throw new AppError(409, "SOURCE_CHANGED", "Conversation history changed during pagination.");
+    after = next;
+  }
+  // Only consumed turns enter the collector; its original receipts also fence
+  // earlier admitted pages against changes during later authorization awaits.
+  await collector.assertReadable();
+  return permitted.reverse();
 }
 
 export async function loadConversationOnboarding(workspaceId: string, conversationId: string, userId: string, collector: ConversationInputCollector) {
