@@ -26,6 +26,7 @@ type State = { actor: AppActor; workspaceId: string; origin: string; entries: En
 export type CrmDirectReadSession = Readonly<{ directPresentation: true }>;
 const sessions = new WeakMap<CrmDirectReadSession, State>();
 const boundRows = new WeakSet<object>();
+const discardedRows = new WeakSet<object>();
 const originIdentity = () => {
   const origin = getMcpOrigin();
   return JSON.stringify(origin ? [origin.kind, origin.id, origin.workspaceId, origin.credentialVersion ?? null,
@@ -252,6 +253,7 @@ export async function admitCrmDirectOriginalRows<T extends { id: string }>(sessi
 export function discardCrmDirectReadProjections(session: CrmDirectReadSession, rows: Array<{id:string}>) {
   const discarded=new Set(rows);
   for(const entry of stateFor(session).entries) if(entry.projected&&discarded.has(entry.projected)) {
+    boundRows.delete(entry.projected);discardedRows.add(entry.projected);
     entry.projected=undefined;entry.projectionHash=undefined;
   }
 }
@@ -324,6 +326,14 @@ export async function trackCrmDirectOrdinaryRows(session: CrmDirectReadSession, 
 const results = new WeakMap<object, {session: CrmDirectReadSession; hash: string}>();
 /** The trusted delivery boundary must reuse this exact result, not a cloned/cache blob. */
 export async function finalizeCrmDirectReadResult<T extends object>(session: CrmDirectReadSession, result: T): Promise<T> {
+  const seen = new WeakSet<object>();
+  const assertNoDiscardedProjection = (value: unknown) => {
+    if (!value || typeof value !== "object" || seen.has(value)) return;
+    invariant(!discardedRows.has(value),409,"SOURCE_CHANGED","A discarded direct presentation cannot be delivered.");
+    seen.add(value);
+    for (const child of Object.values(value)) assertNoDiscardedProjection(child);
+  };
+  assertNoDiscardedProjection(result);
   const hash = JSON.stringify(result);
   await assertCrmDirectReadCurrent(session);
   invariant(JSON.stringify(result) === hash, 409, "SOURCE_CHANGED", "The direct presentation changed.");

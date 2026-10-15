@@ -35,7 +35,7 @@ vi.mock("./brain-access", () => ({resolveKnowledgeAccessDomains: vi.fn(async()=>
 vi.mock("./archive", async importOriginal => ({...await importOriginal<typeof import("./archive")>(),lockWorkspaceArchiveArtifact: vi.fn(async()=>{})}));
 import { mcpCredentialVersion, mcpScopesHash, runWithMcpOrigin } from "@corgtex/shared";
 import { captureArtifactInputProof, lineageContentFingerprint, recordArtifactInputLineage, withArtifactInputReadCapture } from "./source-lineage";
-import { admitCrmDirectOriginalRows, assertCrmDirectReadCurrent, createCrmDirectReadSession, captureCrmDirectReadContributors, finalizeCrmDirectReadResult, serializeCrmDirectReadResult } from "./crm-direct-original-read";
+import { admitCrmDirectOriginalRows, discardCrmDirectReadProjections, isCrmDirectOriginalRow, assertCrmDirectReadCurrent, createCrmDirectReadSession, captureCrmDirectReadContributors, finalizeCrmDirectReadResult, serializeCrmDirectReadResult } from "./crm-direct-original-read";
 import { listDeals } from "./crm";
 const actor = () => ({kind:"user",user:{id:"author",email:"author@synthetic.test"}} as AppActor);
 async function seed(kind = "CrmAccount", data: any = {}) {
@@ -52,7 +52,15 @@ beforeEach(() => {
   for(const name of Object.keys(f.tables))f.tables[name]=[];
   f.revoked=false;vi.clearAllMocks();
   f.tables.workspace.push({id:"ws"}); f.tables.member.push({id:"member",workspaceId:"ws",userId:"author",isActive:true});
-  f.db.$queryRaw.mockReset().mockResolvedValue([]);f.db.$executeRaw.mockReset().mockResolvedValue(1);
+  f.db.$queryRaw.mockReset().mockImplementation(async (query:any) => {
+    const sql=query.sql??"", values=new Set(query.values??[]);
+    const table=/SELECT id FROM "(CrmAccount|CrmContact|CrmDeal|CrmActivity)"/.exec(sql)?.[1];
+    if(table&&sql.includes("FOR SHARE")) {
+      const model=`${table[0].toLowerCase()}${table.slice(1)}`;
+      return f.tables[model].filter(row=>values.has(row.workspaceId)&&values.has(row.id)).map(row=>({id:row.id}));
+    }
+    return [];
+  });f.db.$executeRaw.mockReset().mockResolvedValue(1);
   installSourcePermissionEpochFixture(f.db);
 });
 describe("direct archived CRM originals with actual lineage gates",()=>{
@@ -177,4 +185,13 @@ describe("direct archived CRM originals with actual lineage gates",()=>{
     await expect(assertCrmDirectReadCurrent(session)).rejects.toMatchObject({code:"SOURCE_CHANGED"});
     expect(f.tables.artifactInputLineage[0].contentHash).toBe(lineageContentFingerprint("CrmAccount",row));
   });
+});
+
+it("cannot finalize a retained discarded alias after its original body is changed",async()=>{
+  const row=await seed(),user=actor(),session=createCrmDirectReadSession(user,"ws");
+  const [view]=await admitCrmDirectOriginalRows(session,"CrmAccount",[row]);
+  discardCrmDirectReadProjections(session,[view]);
+  expect(isCrmDirectOriginalRow(view)).toBe(false);
+  view.name="Forged discarded body";
+  await expect(finalizeCrmDirectReadResult(session,{items:[view]})).rejects.toMatchObject({code:"SOURCE_CHANGED"});
 });

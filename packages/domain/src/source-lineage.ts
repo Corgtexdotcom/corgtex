@@ -428,7 +428,10 @@ export async function captureReadableWorkItemInputs(actor: AppActor, workspaceId
         for (const row of admitted) ids.add(row.id);
       }
     });
-    for (const [key,stamp] of observed.heads) heads.set(key,stamp);
+    for (const [key,stamp] of observed.heads) {
+      invariant(!heads.has(key) || heads.get(key) === stamp,409,"SOURCE_CHANGED","A work item lineage head changed during admission.");
+      heads.set(key,stamp);
+    }
   }
   observeArtifactRead(actor,workspaceId,roots);
   return {ids,roots,heads};

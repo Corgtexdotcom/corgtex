@@ -1,6 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
+const transactionProbe=vi.hoisted(()=>({after:undefined as undefined|(()=>Promise<void>)}));
+vi.mock("@corgtex/shared",async importOriginal=>{
+  const actual=await importOriginal<typeof import("@corgtex/shared")>();
+  return {...actual,prisma:new Proxy(actual.prisma,{get(target,key){
+    if(key!=="$transaction")return Reflect.get(target,key,target);
+    return async(...args:any[])=>{
+      const result=await (target.$transaction.bind(target) as (...args:any[])=>Promise<any>)(...args);
+      await transactionProbe.after?.();return result;
+    };
+  }})};
+});
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { capturePermissionEpochs } from "./source-permission-epochs";
 import { captureArtifactInputProof, captureReadableWorkItemInputs, lineageContentFingerprint, recordArtifactInputLineage } from "./source-lineage";
@@ -10,7 +21,7 @@ import { createCrmAccount, createContact, createDeal, createActivity, getCrmAcco
   listCrmAccounts, listContacts, listDeals, listCrmActivities } from "./crm";
 
 beforeEach(truncateAllTables);
-afterEach(()=>vi.restoreAllMocks());
+afterEach(()=>{transactionProbe.after=undefined;vi.restoreAllMocks();});
 async function fixture() {
   const workspace=await prisma.workspace.create({data:{name:"CRM page fixture",slug:randomUUID()}});
   const user=await prisma.user.create({data:{email:`crm-page-${randomUUID()}@example.test`,passwordHash:"synthetic"}});
@@ -67,7 +78,7 @@ it("returns exact permission-aware totals and a deep page across5001 persisted r
 
 it.each(["body","head","revoke-restore"] as const)("retains off-page count observations across %s changes",async change=>{
   const f=await fixture();
-  const accounts=[];
+  const accounts:Awaited<ReturnType<typeof createCrmAccount>>[]=[];
   for(let index=0;index<3;index++) accounts.push(await createCrmAccount(f.actor,{workspaceId:f.workspaceId,name:`Account ${index}`}));
   await expect(withCrmReadSnapshot(f.actor,f.workspaceId,async()=>{
     const page=await listCrmAccounts(f.actor,f.workspaceId,{take:1});
@@ -210,4 +221,18 @@ it("retains actual linked ancestor fences on direct original presentations",asyn
   expect(result.total).toBe(1);
   await prisma.crmAccount.update({where:{id:account.id},data:{name:"Changed linked parent"}});
   await expect(serializeCrmDirectReadResult(f.actor,result)).rejects.toMatchObject({code:"SOURCE_CHANGED"});
+});
+
+it("does not overwrite an original head observed before a derived fallback reads it",async()=>{
+  const f=await fixture(),original=await createCrmAccount(f.actor,{workspaceId:f.workspaceId,name:"Original"});
+  const roots=await captureArtifactInputProof(f.actor,f.workspaceId,[{kind:"CrmAccount",id:original.id}]);
+  const derived=await createCrmAccount(f.actor,{workspaceId:f.workspaceId,name:"Derived",lineageRoots:roots});
+  let completed=0;
+  transactionProbe.after=async()=>{
+    if(++completed===2) {
+      const {id:_,recordedAt:__,...head}=await prisma.artifactInputLineage.findFirstOrThrow({where:{artifactType:"CrmAccount",artifactId:original.id},orderBy:{revision:"desc"}});
+      await prisma.artifactInputLineage.create({data:{...head,revision:head.revision+1,inputsJson:head.inputsJson as never,rootsJson:head.rootsJson as never,permissionEpochsJson:head.permissionEpochsJson as never}});
+    }
+  };
+  await expect(captureReadableWorkItemInputs(f.actor,f.workspaceId,"CrmAccount",[original,derived])).rejects.toMatchObject({code:"SOURCE_CHANGED"});
 });

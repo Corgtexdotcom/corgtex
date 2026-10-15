@@ -1452,7 +1452,12 @@ export async function backfillCrmAccountsForWorkspace(actor: AppActor, params: {
 
 // --- CONTACTS ---
 
-export async function listContacts(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; query?: string; accountId?: string; archiveFilter?: ArchiveFilter }) {
+type CrmContactReadOptions = { take?: number; skip?: number; query?: string; accountId?: string; archiveFilter?: ArchiveFilter };
+type CrmContactListRow = Prisma.CrmContactGetPayload<{include: {account: true}}>;
+type CrmContactActiveListRow = CrmContactListRow & {_count: {deals: number; activities: number}};
+export function listContacts(actor: AppActor, workspaceId: string, opts?: Omit<CrmContactReadOptions,"archiveFilter"> & {archiveFilter?: "active"}): Promise<{items: CrmContactActiveListRow[]; total: number; take: number; skip: number}>;
+export function listContacts(actor: AppActor, workspaceId: string, opts?: CrmContactReadOptions): Promise<{items: (CrmContactListRow | CrmContactActiveListRow)[]; total: number; take: number; skip: number}>;
+export async function listContacts(actor: AppActor, workspaceId: string, opts?: CrmContactReadOptions) {
   return withCrmReadSnapshot(actor,workspaceId,async()=>{
   opts = opts ? structuredClone(opts) : undefined;
   const direct = opts?.archiveFilter && opts.archiveFilter !== "active" ? createCrmDirectReadSession(actor, workspaceId) : undefined;
