@@ -605,7 +605,7 @@ export async function listNotifications(actor: AppActor, workspaceId: string, op
 }
 
 async function visitReadableNotifications(actor: AppActor & { kind: "user" }, workspaceId: string,
-  unreadOnly: boolean, visit: (rows: Awaited<ReturnType<typeof prisma.notification.findMany>>) => false | void) {
+  unreadOnly: boolean, visit: (rows: Awaited<ReturnType<typeof prisma.notification.findMany>>) => false | void | Promise<false | void>) {
   let after: { id: string; createdAt: Date } | undefined;
   while (true) {
     const rows = await prisma.notification.findMany({ where: {
@@ -613,10 +613,11 @@ async function visitReadableNotifications(actor: AppActor & { kind: "user" }, wo
       ...(after ? { OR: [{ createdAt: { lt: after.createdAt } },
         { createdAt: after.createdAt, id: { lt: after.id } }] } : {}),
     }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 100 });
+    const last = rows.at(-1);
+    const next = last ? { id: last.id, createdAt: last.createdAt } : undefined;
     const readable = await readableArtifactIds(actor, workspaceId, "Notification", rows);
-    if (visit(rows.filter(row => readable.has(row.id))) === false || rows.length < 100) return;
-    const last = rows.at(-1)!;
-    after = { id: last.id, createdAt: last.createdAt };
+    if (await visit(rows.filter(row => readable.has(row.id))) === false || rows.length < 100) return;
+    after = next;
   }
 }
 
@@ -644,14 +645,14 @@ export async function markNotificationRead(actor: AppActor, workspaceId: string,
 }
 
 export async function markAllNotificationsRead(actor: AppActor, workspaceId: string) {
-  const userId = actor.kind === "user" ? actor.user.id : null;
-  if (!userId) return;
-
+  if (actor.kind !== "user") return;
+  const userId = actor.user.id;
   await requireWorkspaceMembership({ actor, workspaceId });
-  const rows = await prisma.notification.findMany({ where: { workspaceId, userId, readAt: null } });
-  const readable = await readableArtifactIds(actor, workspaceId, "Notification", rows);
-  await prisma.notification.updateMany({
-    where: { id: { in: [...readable] }, workspaceId, userId, readAt: null },
-    data: { readAt: new Date() },
+  await visitReadableNotifications(actor, workspaceId, true, async rows => {
+    if (!rows.length) return;
+    await prisma.notification.updateMany({
+      where: { id: { in: rows.map(row => row.id) }, workspaceId, userId, readAt: null },
+      data: { readAt: new Date() },
+    });
   });
 }

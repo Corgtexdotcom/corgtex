@@ -21,6 +21,7 @@ import {
   captureImmutableArtifactInputProof,
   isArtifactInputProofReadable,
   isArtifactInputProofPubliclyShareable,
+  isLegacyRecoveryProofWorkspaceShareable,
   isBrainExportProofWorkspaceShareable,
   getBrainExportWorkerPurpose,
   assertBrainExportWorkerCurrent,
@@ -30,6 +31,7 @@ import {
 import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
 import type { AppActor } from "@corgtex/shared";
 import type { BrainArticleAuthority, BrainArticleType, Prisma } from "@prisma/client";
+import { assertLegacyRecoveryProjection, withLegacyRecoveryDerivation } from "../../domain/src/legacy-recovery";
 import { getMcpToolInputRoots } from "../../domain/src/mcp-tool-input-context";
 
 function isDocumentLikeSource(sourceType: string) {
@@ -51,10 +53,10 @@ function sourceSkipReason(source: {
   workspaceId: string;
   absorbedAt: Date | null;
   archivedAt: Date | null;
-} | null, workspaceId: string) {
+} | null, workspaceId: string, recoveredAbsorbedAt?: string | null) {
   if (!source || source.workspaceId !== workspaceId) return "not_found";
   if (source.archivedAt) return "archived";
-  if (source.absorbedAt) return "already_absorbed";
+  if (source.absorbedAt && source.absorbedAt.toISOString() !== recoveredAbsorbedAt) return "already_absorbed";
   return null;
 }
 
@@ -93,6 +95,8 @@ export async function absorbSource(params: {
   agentRunId: string;
   model?: string;
   expectedSourceIdentity?: string;
+  /** Current human recovery only; validated against the immutable exact source receipt. */
+  recoveryReceiptId?: string;
   /** Trusted server principal; never reconstructed from a source's author. */
   actor?: AppActor;
 }) {
@@ -117,7 +121,10 @@ export async function absorbSource(params: {
     return { skipped: true, reason: "not_found" };
   }
 
-  const initialSkipReason = sourceSkipReason(source, params.workspaceId);
+  const recovery = params.recoveryReceiptId ? await assertLegacyRecoveryProjection(agentActor,params.workspaceId,
+    params.recoveryReceiptId,"BrainSource",source.id) : null;
+  const recoveredAbsorbedAt = recovery ? typeof recovery.content.absorbedAt === "string" ? recovery.content.absorbedAt : null : undefined;
+  const initialSkipReason = sourceSkipReason(source, params.workspaceId,recoveredAbsorbedAt);
   if (initialSkipReason) {
     return { skipped: true, reason: initialSkipReason };
   }
@@ -130,9 +137,11 @@ export async function absorbSource(params: {
     invariant(await isArtifactInputProofReadable(agentActor, params.workspaceId, liveRoots, client),
       409, "SOURCE_CHANGED", "Absorption inputs changed before publication.");
     await assertBrainExportWorkerCurrent(agentActor, params.workspaceId, client);
+    if (params.recoveryReceiptId) await assertLegacyRecoveryProjection(agentActor,params.workspaceId,params.recoveryReceiptId,"BrainSource",sourceId,client);
     invariant(await (getBrainExportWorkerPurpose(agentActor, params.workspaceId)
       ? isBrainExportProofWorkspaceShareable(agentActor, params.workspaceId, immutableRoots, client)
-      : isArtifactInputProofPubliclyShareable(agentActor, params.workspaceId, immutableRoots, client)),
+      : isArtifactInputProofPubliclyShareable(agentActor, params.workspaceId, immutableRoots, client)
+        .then(async publicProof => publicProof || await isLegacyRecoveryProofWorkspaceShareable(agentActor,params.workspaceId,immutableRoots,client))),
       409, "SOURCE_RESTRICTED", "Absorption inputs cannot be published to the workspace.");
   }
   // Fresh opaque suffixes avoid probing private article names to choose the output slug.
@@ -144,7 +153,7 @@ export async function absorbSource(params: {
   async function currentSkipReason(client: Pick<typeof prisma, "brainSource"> = prisma) {
     const current = await client.brainSource.findUnique({ where: { id: params.sourceId } });
     assertRecoveryIdentity(current);
-    const reason = sourceSkipReason(current, params.workspaceId);
+    const reason = sourceSkipReason(current, params.workspaceId,recoveredAbsorbedAt);
     if (reason) return reason;
     if (!(await readableBrainSourceIds(agentActor, params.workspaceId, [current!], client as typeof prisma)).has(sourceId)) {
       return "source_restricted";
@@ -434,7 +443,7 @@ Rules:
     let publicTouchedArticleCount = 0;
 
     for (const plan of initialWritePlans) {
-      const article = await createArticle(agentActor, {
+      const create = () => createArticle(agentActor, {
         workspaceId: params.workspaceId,
         slug: plan.slug,
         title: plan.title,
@@ -451,6 +460,8 @@ Rules:
         },
         tx,
       });
+      const article = params.recoveryReceiptId ? await withLegacyRecoveryDerivation({actor:agentActor,workspaceId:params.workspaceId,
+        sourceId:source.id,sourceFingerprint:brainSourceContentFingerprint(source),receiptId:params.recoveryReceiptId,agentRunId:params.agentRunId},tx,create) : await create();
       touchedArticleIds.push(article.id);
       if (!article.isPrivate) publicTouchedArticleCount += 1;
       createdArticleSlug = article.isPrivate ? null : article.slug;

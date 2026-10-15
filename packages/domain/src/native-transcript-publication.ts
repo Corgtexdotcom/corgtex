@@ -1,40 +1,18 @@
+import { currentCompanyTranscriptPublicationScope } from "./native-transcript-publication-context";
 import { getMeetingTranscriptWorkerPurpose, isMeetingTranscriptWorkerCurrent } from "./native-meeting-workflow-principal";
-import { AsyncLocalStorage } from "node:async_hooks";
 import type { ArtifactInputLineage, NativeTranscriptInput, Prisma } from "@prisma/client";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { invariant } from "./errors";
-import { nativeTranscriptPayloadHash } from "./native-transcript-input";
-import { lineageContentFingerprint, type LineageRoot } from "./source-lineage";
-import { isArtifactPermissionEpochProofCurrent, type PermissionEpochProof } from "./source-permission-epochs";
+import { nativeTranscriptPayloadHash } from "./native-transcript-payload";
+import { lineageContentFingerprint } from "./source-lineage";
+import { isArtifactPermissionEpochProofCurrent } from "./source-permission-epochs";
 import { canReadInformationCategory } from "./information-category-policy";
 import { hasActiveSourceCommitLockPlan, assertSourceCommitRowCovered } from "./source-commit-lock-plan";
-
-export type CompanyTranscriptPublicationHooks = { before(tx: Prisma.TransactionClient): Promise<void>; after(tx: Prisma.TransactionClient, meetingId: string): Promise<void> };
-type Scope = { actor: AppActor; workspaceId: string; inputId: string; fingerprint: string;
-  roots: readonly LineageRoot[]; hooks?: CompanyTranscriptPublicationHooks; callerEpochs: PermissionEpochProof; active: boolean; published: boolean };
-const scopes = new AsyncLocalStorage<Scope>();
-
-/** Internal authenticated receipt scope. No serialized input can mint this purpose. */
-export async function withCompanyTranscriptPublication<T>(params: Omit<Scope, "active" | "published">, work: () => Promise<T>) {
-  const scope: Scope = { ...params, active: true, published: false };
-  try { return await scopes.run(scope, work); }
-  finally { scope.active = false; }
-}
-function currentScope(actor: AppActor, workspaceId: string, inputId?: string) {
-  const scope = scopes.getStore();
-  return scope?.active && scope.actor === actor && scope.workspaceId === workspaceId
-    && (!inputId || scope.inputId === inputId) ? scope : null;
-}
-export function hasCompanyTranscriptPublicationScope(actor: AppActor, workspaceId: string) { return Boolean(currentScope(actor, workspaceId)); }
-export function hasPendingCompanyTranscript(actor: AppActor, workspaceId: string, inputId: string) {
-  const scope = currentScope(actor, workspaceId, inputId);
-  return Boolean(scope && !scope.published);
-}
 
 /** Legacy meeting writers have a real interactive transaction, not a complete
  * source lock plan. Lock their native receipt, uploader and chosen target here. */
 export async function lockCompanyTranscriptPublication(tx: Prisma.TransactionClient, actor: AppActor, workspaceId: string, meetingId?: string) {
-  const scope = currentScope(actor, workspaceId);
+  const scope = currentCompanyTranscriptPublicationScope(actor, workspaceId);
   if (!scope) return;
   await scope.hooks?.before(tx);
   invariant(!hasActiveSourceCommitLockPlan(tx), 409, "SOURCE_LOCK_UNSUPPORTED", "Company transcript publication requires its declared writer transaction.");
@@ -53,7 +31,7 @@ export async function lockCompanyTranscriptPublication(tx: Prisma.TransactionCli
 }
 
 export async function finishCompanyTranscriptPublication(tx: Prisma.TransactionClient, actor: AppActor, workspaceId: string, manifest: ArtifactInputLineage | boolean | null | undefined) {
-  const scope = currentScope(actor, workspaceId);
+  const scope = currentCompanyTranscriptPublicationScope(actor, workspaceId);
   if (!scope) return;
   invariant(manifest && typeof manifest === "object" && manifest.workspaceId === workspaceId && manifest.artifactType === "MeetingTranscript"
     && manifest.origin === "DERIVED" && manifest.epochProofVersion === 1
@@ -75,7 +53,7 @@ export async function isCompanyTranscriptInputCurrent(actor: AppActor, workspace
     || input.sourceRecordId || input.connectionId || input.recordingId || input.meetingAudioAssetId || input.grantHash
     || input.storageKey || input.fileHash || input.fileSizeBytes) return false;
   const binding = await db.nativeTranscriptPublication.findFirst({ where: { workspaceId, nativeInputId: input.id } });
-  const scope = currentScope(actor, workspaceId, input.id);
+  const scope = currentCompanyTranscriptPublicationScope(actor, workspaceId, input.id);
   if (!binding) return Boolean(scope && !scope.published && actor.kind === "user" && actor.user.id === input.submittedByUserId
     && scope.fingerprint === lineageContentFingerprint("NativeTranscriptInput", input)
     && await db.member.findFirst({ where: { id: input.ownerMemberId, workspaceId, userId: input.submittedByUserId, isActive: true } })

@@ -1,3 +1,5 @@
+import { MAX_AUDIO_FILE_BYTES } from "./meeting-audio-limits";
+export { MAX_AUDIO_FILE_BYTES } from "./meeting-audio-limits";
 import { createHash, randomUUID } from "node:crypto";
 import type { MeetingAudioAsset, MeetingAudioAssetStatus, MeetingTranscriptSourceProvider, Prisma } from "@prisma/client";
 import { defaultModelGateway, type ModelGateway } from "@corgtex/models";
@@ -16,7 +18,6 @@ import { meetingTranscriptInputProjection } from "./meeting-intelligence-context
 
 export const MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE = "meeting-audio.transcribe";
 
-const MAX_AUDIO_FILE_BYTES = 500 * 1024 * 1024;
 const MEETING_AUDIO_SOURCE = "meeting-audio-upload";
 const MEETING_AUDIO_TRANSCRIPT_PROVIDER: MeetingTranscriptSourceProvider = "MANUAL_UPLOAD";
 
@@ -100,13 +101,14 @@ export async function createMeetingAudioAsset(actor: AppActor, params: {
 }) {
   invariant(actor.kind === "user", 403, "SOURCE_RESTRICTED", "Audio upload requires a human workspace member.");
   const originalUserId = actor.user.id;
+  invariant(params.fileBuffer.byteLength > 0, 400, "INVALID_INPUT", "Audio file is required.");
+  invariant(params.fileBuffer.byteLength <= MAX_AUDIO_FILE_BYTES, 413, "AUDIO_TOO_LARGE", "Audio file is too large.");
   params = { ...params, fileBuffer: Buffer.from(params.fileBuffer),
     recordedAt: params.recordedAt ? new Date(params.recordedAt) : null,
     participantEmails: params.participantEmails ? [...params.participantEmails] : null };
+  const originalFileHash = createHash("sha256").update(params.fileBuffer).digest("hex");
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   invariant(actor.kind === "user" && actor.user.id === originalUserId, 409, "SOURCE_CHANGED", "Audio uploader changed.");
-  invariant(params.fileBuffer.byteLength > 0, 400, "INVALID_INPUT", "Audio file is required.");
-  invariant(params.fileBuffer.byteLength <= MAX_AUDIO_FILE_BYTES, 413, "AUDIO_TOO_LARGE", "Audio file is too large.");
   if (params.recordedAt) {
     invariant(!Number.isNaN(params.recordedAt.valueOf()), 400, "INVALID_INPUT", "recordedAt must be a valid date.");
   }
@@ -149,6 +151,7 @@ export async function createMeetingAudioAsset(actor: AppActor, params: {
 
       const nativeInput = await captureAudioUploadInput(actor, { workspaceId: params.workspaceId, asset: audioAsset,
         fileBuffer: params.fileBuffer, tx });
+      invariant(nativeInput.input.fileHash === originalFileHash, 409, "SOURCE_CHANGED", "Audio bytes changed during storage.");
 
       const job = await tx.workflowJob.upsert({
         where: { dedupeKey: workflowDedupeKey(audioAsset.id) },

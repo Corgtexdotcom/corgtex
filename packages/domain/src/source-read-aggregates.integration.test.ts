@@ -3,9 +3,9 @@ import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { recordArtifactInputLineage } from "./source-lineage";
-import { getBrainStatus } from "./brain";
+import { getBrainStatus, listArticles } from "./brain";
 import { hasWorkspaceInitialKnowledgeSource } from "./workspace-initial-knowledge";
-import { listNotifications, countUnreadNotifications } from "./notifications";
+import { listNotifications, countUnreadNotifications, markAllNotificationsRead } from "./notifications";
 
 beforeEach(truncateAllTables);
 afterEach(() => vi.restoreAllMocks());
@@ -100,4 +100,123 @@ it("bases initial context on admitted Documents and Meetings beyond hidden first
   expect(await hasWorkspaceInitialKnowledgeSource(f.actor, f.workspaceId)).toBe(true);
   await prisma.meeting.update({ where: {id: meeting.id}, data: {archivedAt: new Date()} });
   expect(await hasWorkspaceInitialKnowledgeSource(f.actor, f.workspaceId)).toBe(false);
+}, 120_000);
+
+
+it("lists articles beyond 5000 hidden rows with selected-only relations and bounded variant requests", async () => {
+  const f = await fixture();
+  const timestamp = new Date("2026-10-01T12:00:00Z");
+  await prisma.brainArticle.createMany({ data: Array.from({ length: 5001 }, (_, index) => ({
+    id: `z-hidden-${String(index).padStart(5, "0")}`, workspaceId: f.workspaceId, slug: `hidden-${index}`,
+    title: "Unproved article", bodyMd: "Unproved synthetic body", type: "PRODUCT" as const,
+    sourceIds: [], updatedAt: timestamp,
+  })) });
+  for (const id of ["v3", "v2", "v1"]) {
+    const row = await prisma.brainArticle.create({ data: { id, workspaceId: f.workspaceId, slug: id,
+      title: id, bodyMd: "Authenticated original", type: "PRODUCT", sourceIds: [], updatedAt: timestamp } });
+    await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: f.actor, workspaceId: f.workspaceId,
+      artifact: { kind: "BrainArticle", id }, content: row, origin: "HUMAN_ORIGINAL", inputs: [] }));
+  }
+  await prisma.brainBacklink.createMany({data: ["v1", "z-hidden-00000"].map(fromArticleId => ({
+    workspaceId: f.workspaceId, fromArticleId, toArticleId: "v2",
+  }))});
+  const author = await prisma.member.findFirstOrThrow({where: {workspaceId: f.workspaceId, userId: f.user.id}});
+  const thread = await prisma.brainDiscussionThread.create({data: {articleId: "v2", authorMemberId: author.id, targetType: "ARTICLE"}});
+  await prisma.$transaction(tx => recordArtifactInputLineage({tx, actor: f.actor, workspaceId: f.workspaceId,
+    artifact: {kind: "BrainDiscussionThread", id: thread.id}, content: thread, origin: "HUMAN_ORIGINAL", inputs: []}));
+  await prisma.brainDiscussionThread.create({data: {articleId: "v2", authorMemberId: author.id,
+    targetType: "SECTION", targetRef: "Hidden thread metadata"}});
+  await prisma.brainDiscussionComment.createMany({data: Array.from({length: 105}, () => ({
+    threadId: thread.id, authorMemberId: author.id, bodyMd: "Hidden comment body must never be loaded for a count",
+  }))});
+  const comments = vi.spyOn(prisma.brainDiscussionComment, "findMany");
+  const variant = vi.spyOn(await import("./brain-article-variants"), "requestBrainArticleVariant");
+  const queries = vi.spyOn(prisma.brainArticle, "findMany");
+  const threads = vi.spyOn(prisma.brainDiscussionThread, "findMany");
+  const links = vi.spyOn(prisma.brainBacklink, "findMany");
+  expect(await listArticles(f.actor, { workspaceId: f.workspaceId, take: 0 })).toMatchObject({ items: [], total: 3 });
+  expect(variant).not.toHaveBeenCalled();
+  expect(threads).not.toHaveBeenCalled();
+  expect(links).not.toHaveBeenCalled();
+  expect(queries.mock.calls.length).toBe(51);
+  expect(queries.mock.calls.every(([args]) => args?.take === 100 && args.include === undefined && args.select === undefined)).toBe(true);
+  queries.mockClear();
+  const result = await listArticles(f.actor, { workspaceId: f.workspaceId, skip: 1, take: 1 });
+  expect(result).toMatchObject({ total: 3, items: [{ id: "v2", variantOfArticleId: null, variantSourceStateJson: null }] });
+  expect(result.items).toHaveLength(1);
+  expect(result.items[0]._count).toEqual({discussions: 1, backlinksTo: 1});
+  expect(comments).not.toHaveBeenCalled();
+  expect(JSON.stringify(result)).not.toContain("Hidden comment");
+  expect(variant).toHaveBeenCalledTimes(1);
+  expect(threads.mock.calls.every(([args]) => args?.where?.articleId === "v2" && !args.include && args.take === 100)).toBe(true);
+  expect(links.mock.calls.every(([args]) => args?.where?.toArticleId === "v2" && args.take === 100)).toBe(true);
+  await prisma.brainArticle.update({ where: { id: "v2" }, data: { bodyMd: "Unreceipted replacement" } });
+  expect(await listArticles(f.actor, { workspaceId: f.workspaceId, take: 0 })).toMatchObject({ total: 2 });
+}, 120_000);
+
+it("marks admitted notification history in awaited100-row batches without skipping after readAt changes", async () => {
+  const f = await fixture();
+  const timestamp = new Date("2026-10-01T12:00:00Z");
+  await prisma.notification.createMany({ data: Array.from({ length: 120 }, (_, index) => ({
+    id: `z-hidden-${index}`, workspaceId: f.workspaceId, userId: f.user.id,
+    type: "SYNTHETIC", title: "Unknown notification", createdAt: timestamp,
+  })) });
+  const source = await prisma.brainSource.create({ data: { workspaceId: f.workspaceId,
+    sourceType: "DOC", tier: 1, content: "Authenticated notification input" } });
+  await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: f.actor, workspaceId: f.workspaceId,
+    artifact: { kind: "BrainSource", id: source.id }, content: source, origin: "HUMAN_ORIGINAL", inputs: [] }));
+  for (let index = 0; index < 205; index++) {
+    const row = await prisma.notification.create({ data: { id: `visible-${String(index).padStart(3, "0")}`,
+      workspaceId: f.workspaceId, userId: f.user.id, type: "SYNTHETIC", title: "Proved notification", createdAt: timestamp } });
+    await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: f.actor, workspaceId: f.workspaceId,
+      artifact: { kind: "Notification", id: row.id }, content: row, origin: "DERIVED", inputs: [{kind: "BrainSource", id: source.id}] }));
+  }
+  const reads = vi.spyOn(prisma.notification, "findMany");
+  const writes = vi.spyOn(prisma.notification, "updateMany");
+  await markAllNotificationsRead(f.actor, f.workspaceId);
+  expect(await prisma.notification.count({ where: { workspaceId: f.workspaceId, readAt: { not: null } } })).toBe(205);
+  expect(await prisma.notification.count({ where: { workspaceId: f.workspaceId, readAt: null } })).toBe(120);
+  expect(reads.mock.calls.every(([args]) => args?.take === 100 && args.select === undefined)).toBe(true);
+  expect(writes.mock.calls.map(([args]) => (args.where?.id as {in: string[]}).in.length)).toEqual([80, 100, 25]);
+  expect(await countUnreadNotifications(f.actor, f.workspaceId)).toBe(0);
+}, 120_000);
+
+it("returns only current visible workspace counts and never queries categories outside a real credential's scopes", async () => {
+  const f = await fixture();
+  const { mcpCredentialVersion, mcpScopesHash } = await import("@corgtex/shared");
+  const { createCorgtexMcpServer } = await import("../../mcp/src/server");
+  for (const state of ["visible", "private", "archived", "unproved"] as const) {
+    const data = {workspaceId: f.workspaceId, authorUserId: f.user.id, title: state, bodyMd: "Synthetic original",
+      isPrivate: state === "private", archivedAt: state === "archived" ? new Date() : null};
+    const action = await prisma.action.create({data: {...data, status: state === "private" ? "DRAFT" : "OPEN"}});
+    const tension = await prisma.tension.create({data: {...data, status: state === "private" ? "DRAFT" : "OPEN"}});
+    const proposal = await prisma.proposal.create({data: {...data, status: state === "private" ? "DRAFT" : "OPEN"}});
+    if (state !== "unproved") for (const [kind, row] of [["Action", action], ["Tension", tension], ["Proposal", proposal]] as const) {
+      await prisma.$transaction(tx => recordArtifactInputLineage({tx, actor: f.actor, workspaceId: f.workspaceId,
+        artifact: {kind, id: row.id}, content: row, origin: "HUMAN_ORIGINAL", inputs: []}));
+    }
+  }
+  const read = async (scopes: string[]) => {
+    const credential = await prisma.agentCredential.create({data: {workspaceId: f.workspaceId,
+      label: "Synthetic count reader", tokenHash: `synthetic-${randomUUID()}`, scopes}});
+    const version = mcpCredentialVersion(credential.tokenHash);
+    const actor: AppActor = {kind: "agent", authProvider: "credential", label: credential.label, workspaceIds: [f.workspaceId],
+      credentialId: credential.id, credentialVersion: version, scopes};
+    const server = createCorgtexMcpServer({actor, workspaceId: f.workspaceId, authKind: "agent", scopes,
+      mcpOrigin: {kind: "agent", id: credential.id, workspaceId: f.workspaceId,
+        credentialVersion: version, scopeHash: mcpScopesHash(scopes), requiredScopes: []}});
+    const tools = (server as unknown as {_registeredTools: Record<string, {handler(args: object): Promise<{content: {text: string}[]}>}>})._registeredTools;
+    const response = await tools.get_workspace_info.handler({});
+    await server.close();
+    return JSON.parse(response.content[0].text).counts;
+  };
+  expect(await read(["workspace:read", "actions:read", "tensions:read", "proposals:read"]))
+    .toMatchObject({actions: 1, tensions: 1, proposals: 1});
+  const actions = vi.spyOn(prisma.action, "findMany"), tensions = vi.spyOn(prisma.tension, "findMany");
+  const proposals = vi.spyOn(prisma.proposal, "findMany");
+  expect(await read(["workspace:read"])).toMatchObject({actions: 0, tensions: 0, proposals: 0});
+  expect(actions).not.toHaveBeenCalled(); expect(tensions).not.toHaveBeenCalled(); expect(proposals).not.toHaveBeenCalled();
+  await prisma.action.updateMany({where: {workspaceId: f.workspaceId, title: "visible"}, data: {bodyMd: "Unreceipted replacement"}});
+  expect(await read(["workspace:read", "actions:read", "tensions:read", "proposals:read"]))
+    .toMatchObject({actions: 0, tensions: 1, proposals: 1});
 }, 120_000);

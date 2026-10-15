@@ -1,9 +1,11 @@
-import type { CompanyTranscriptPublicationHooks } from "./native-transcript-publication";
+import { MAX_AUDIO_FILE_BYTES } from "./meeting-audio-limits";
+import { withCompanyTranscriptPublication, type CompanyTranscriptPublicationHooks } from "./native-transcript-publication-context";
+import { nativeTranscriptCanonicalPayload, nativeTranscriptPayloadHash } from "./native-transcript-payload";
+export { nativeTranscriptPayloadHash } from "./native-transcript-payload";
 import { capturePermissionEpochs, type PermissionEpochProof } from "./source-permission-epochs";
 import { createHash } from "node:crypto";
 import type { MeetingAudioAsset, Prisma, WorkflowJob } from "@prisma/client";
 import { decryptSecret, encryptSecret, prisma, type AppActor } from "@corgtex/shared";
-import { extractTextFromFileBuffer } from "@corgtex/knowledge";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 import { captureArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, type LineageRoot } from "./source-lineage";
@@ -49,17 +51,6 @@ const directReceipts = new WeakMap<DirectMemberTranscriptReceipt, {
 const audioReceipts = new WeakMap<AudioTranscriptIntakeReceipt, {
   actor: AppActor; workspaceId: string; payloadHash: string; roots: readonly LineageRoot[];
 }>();
-
-function canonical(value: unknown): string {
-  if (value instanceof Date) return JSON.stringify(value.toISOString());
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  if (value && typeof value === "object") return `{${Object.entries(value as Record<string, unknown>)
-    .filter(([, entry]) => entry !== undefined).sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, entry]) => `${JSON.stringify(key)}:${canonical(entry)}`).join(",")}}`;
-  return JSON.stringify(value) ?? "null";
-}
-
-export const nativeTranscriptPayloadHash = (payload: unknown) => createHash("sha256").update(canonical(payload)).digest("hex");
 
 function audioUploadPayload(asset: MeetingAudioAsset, fileHash: string) {
   return { audioAssetId: asset.id, workspaceId: asset.workspaceId, uploadedByUserId: asset.uploadedByUserId,
@@ -107,6 +98,7 @@ async function captureMemberTranscriptInput(actor: AppActor, params: {
     const bytes = Buffer.from(rawFileBase64, "base64");
     invariant(bytes.byteLength > 0 && bytes.byteLength <= 5 * 1024 * 1024
       && bytes.toString("base64") === rawFileBase64, 413, "TRANSCRIPT_TOO_LARGE", "Transcript file is invalid or too large.");
+    const { extractTextFromFileBuffer } = await import("@corgtex/knowledge");
     const extracted = await extractTextFromFileBuffer({ fileBuffer: bytes, fileName,
       mimeType: typeof submission.rawFileMimeType === "string" ? submission.rawFileMimeType : "application/octet-stream",
       maxExtractBytes: 5 * 1024 * 1024, maxTextLength: 1_000_001 });
@@ -114,7 +106,7 @@ async function captureMemberTranscriptInput(actor: AppActor, params: {
       && extracted.textContent?.trim() === submission.transcript.trim(),
     409, "SOURCE_CHANGED", "Transcript text does not match the uploaded file.");
   }
-  const plaintext = canonical(submission);
+  const plaintext = nativeTranscriptCanonicalPayload(submission);
   invariant(plaintext.length <= 20 * 1024 * 1024, 413, "TRANSCRIPT_TOO_LARGE", "Transcript submission is too large.");
   const payloadHash = nativeTranscriptPayloadHash(submission);
   invariant(actor.kind === "user" && actor.user.id === userId, 409, "SOURCE_CHANGED", "Transcript uploader changed.");
@@ -139,7 +131,7 @@ async function captureMemberTranscriptInput(actor: AppActor, params: {
     } });
     const capture = () => captureArtifactInputProof(actor, workspaceId,
       [{ kind: "NativeTranscriptInput", id: input.id, snapshot: input }], tx);
-    const roots = company && callerEpochs ? await (await import("./native-transcript-publication")).withCompanyTranscriptPublication({
+    const roots = company && callerEpochs ? await withCompanyTranscriptPublication({
       actor, workspaceId, inputId: input.id, fingerprint: lineageContentFingerprint("NativeTranscriptInput", input), roots: [], callerEpochs,
     }, capture) : await capture();
     return { input, roots, callerEpochs };
@@ -169,7 +161,7 @@ export async function withMemberTranscriptReceipt<T>(actor: AppActor, workspaceI
   invariant(captured.callerEpochs && captured.actor === actor && captured.workspaceId === workspaceId && captured.payloadHash === nativeTranscriptPayloadHash(submission),
     409, "UNKNOWN_LINEAGE", "Transcript submission has no exact authenticated upload receipt.");
   const root = captured.roots.find(item => item.kind === "NativeTranscriptInput" && item.id === receipt!.inputId)!;
-  return (await import("./native-transcript-publication")).withCompanyTranscriptPublication({ actor, workspaceId,
+  return withCompanyTranscriptPublication({ actor, workspaceId,
     inputId: receipt!.inputId, fingerprint: root.fingerprint!, roots: captured.roots, hooks: captured.hooks, callerEpochs: captured.callerEpochs }, work);
 }
 
@@ -190,17 +182,21 @@ export async function captureAudioUploadInput(actor: AppActor, params: {
 }) {
   const workspaceId = params.workspaceId;
   const asset = structuredClone(params.asset);
-  const fileBuffer = Buffer.from(params.fileBuffer);
+  const fileSizeBytes = params.fileBuffer.byteLength;
+  invariant(fileSizeBytes > 0, 400, "INVALID_INPUT", "Audio file is required.");
+  invariant(fileSizeBytes <= MAX_AUDIO_FILE_BYTES, 413, "AUDIO_TOO_LARGE", "Audio file is too large.");
+  // Seal before the first await. The upload owner already holds its isolated
+  // storage copy; hashing synchronously avoids a second full audio allocation.
+  const fileHash = createHash("sha256").update(params.fileBuffer).digest("hex");
   const tx = params.tx;
   const userId = actor.kind === "user" ? actor.user.id : null;
   invariant(userId && asset.workspaceId === workspaceId
-    && asset.uploadedByUserId === userId && asset.sizeBytes === fileBuffer.byteLength,
+    && asset.uploadedByUserId === userId && asset.sizeBytes === fileSizeBytes,
   403, "SOURCE_RESTRICTED", "Audio upload requires its active human owner and exact bytes.");
   const membership = await requireWorkspaceMembership({ actor, workspaceId, tx });
   invariant(actor.kind === "user" && actor.user.id === userId
     && membership && membership.id !== "global-operator" && membership.userId === userId,
     403, "SOURCE_RESTRICTED", "Audio upload requires an active member.");
-  const fileHash = createHash("sha256").update(fileBuffer).digest("hex");
   const payload = audioUploadPayload(asset, fileHash);
   const binding = { workspaceId, meetingAudioAssetId: asset.id,
     ownerMemberId: membership.id, submittedByUserId: userId,
@@ -208,8 +204,8 @@ export async function captureAudioUploadInput(actor: AppActor, params: {
   const input = await tx.nativeTranscriptInput.create({ data: {
     workspaceId, mode: "AUDIO_UPLOAD", ownerMemberId: membership.id,
     submittedByUserId: userId, meetingAudioAssetId: asset.id,
-    encryptedPayloadJson: encryptSecret(canonical(payload)), payloadHash: nativeTranscriptPayloadHash(payload),
-    fileHash, storageKey: asset.storageKey, fileSizeBytes: fileBuffer.byteLength,
+    encryptedPayloadJson: encryptSecret(nativeTranscriptCanonicalPayload(payload)), payloadHash: nativeTranscriptPayloadHash(payload),
+    fileHash, storageKey: asset.storageKey, fileSizeBytes,
     mimeType: asset.mimeType,
     grantHash: audioAssetBindingHash(binding),
   } });

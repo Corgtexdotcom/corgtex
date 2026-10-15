@@ -26,7 +26,9 @@ export function artifactPermissionParents(kind: LineageKind, row: Record<string,
   if (kind === "WorkspaceToolLinkCredential") add("WorkspaceToolLink", row.id);
   if (kind === "ConversationOperationOutcome" && row.controlJson && typeof row.controlJson === "object" && !Array.isArray(row.controlJson)) {
     const control = row.controlJson as Record<string, unknown>;
-    if (control.version === 1 && row.operation === "BRAIN_SOURCE_REMOVAL_COMPLETED") {
+    if (control.version === 1 && row.operation === "LEGACY_RECOVERY_PUBLICATION" && ["Action", "ConversationSession", "ConversationTurn", "Document", "BrainSource"].includes(String(control.targetKind))) {
+      add(control.targetKind as LineageKind, control.targetId);
+    } else if (control.version === 1 && row.operation === "BRAIN_SOURCE_REMOVAL_COMPLETED") {
       add("BrainSource", control.sourceId); add("Document", control.documentId); add("BrainSource", control.pendingSourceId);
     } else if (control.version === 1 && row.operation === "ACTION_COMPLETED") {
       add("Action", control.actionId); add("McpToolInput", control.inputId); add("Member", control.assigneeMemberId);
@@ -174,7 +176,7 @@ export async function loadArtifactPermissionMetadata(tx: Prisma.TransactionClien
     const control = result.controlJson as Record<string, unknown>;
     result.controlJson = Object.fromEntries(["version", "sourceId", "documentId", "pendingSourceId", "actionId", "inputId", "assigneeMemberId",
       "publicationPolicyVersion", "audience", "publishedActionRevision", "completedActionFingerprint",
-      "oldActionSnapshotId", "oldActionSnapshotFingerprint"]
+      "oldActionSnapshotId", "oldActionSnapshotFingerprint", "targetKind", "targetId"]
       .map(field => [field, control[field]]));
   }
   return result;
