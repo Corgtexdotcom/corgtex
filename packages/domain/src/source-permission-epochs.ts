@@ -1,3 +1,4 @@
+import { isCompanyLegacyRecoveryOutcome } from "./legacy-recovery-context";
 import { createHash, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Prisma } from "@prisma/client";
@@ -194,7 +195,8 @@ export function artifactPermissionEpochIdentities(kind: string, row: Record<stri
     if (!(kind === "NativeTranscriptInput" && row.mode === "COMPANY_MEMBER_UPLOAD" && key === "ownerMemberId")) add("Member", row[key]);
   }
   for (const key of ["userId", "authorUserId", "createdByUserId", "submittedByUserId", "requesterUserId", "requestedByUserId", "localUserId", "selectedByUserId", "uploadedByUserId"]) {
-    if (kind === "NativeTranscriptInput" && row.mode === "COMPANY_MEMBER_UPLOAD" && key === "submittedByUserId") continue;
+    if (kind === "NativeTranscriptInput" && row.mode === "COMPANY_MEMBER_UPLOAD" && key === "submittedByUserId"
+      || key === "userId" && isCompanyLegacyRecoveryOutcome(kind,row)) continue;
     add("MemberUserPolicy", row[key]);
     add("WorkspaceSupportPolicy", row[key]);
   }

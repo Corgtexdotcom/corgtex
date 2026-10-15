@@ -181,7 +181,9 @@ export async function createArticle(actor: AppActor, params: {
     let derivation: BrainArticleDerivationV1 | null = null;
     await lockActiveArticleSources(tx, params.workspaceId, params.sourceIds ?? []);
     if (params.derivation) {
-      invariant(actor.kind === "agent" && actor.label === "brain-absorb", 403, "FORBIDDEN", "Only source absorption can record article derivation.");
+      invariant(actor.kind === "agent" && actor.label === "brain-absorb"
+        || await (await import("./legacy-recovery")).isLegacyRecoveryDerivationCurrent(actor,params.workspaceId,params.derivation,tx),
+      403,"FORBIDDEN","Only source absorption can record article derivation.");
       invariant(params.sourceIds?.includes(params.derivation.sourceId), 400, "INVALID_INPUT", "Derived source must be linked to the article.");
       await tx.$queryRaw`SELECT id FROM "BrainSource" WHERE id = ${params.derivation.sourceId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
       const source = await tx.brainSource.findFirst({

@@ -3,14 +3,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { brainSourceContentFingerprint } from "../../../../../../../../../../packages/domain/src/brain-derivation";
 
 const mocks = vi.hoisted(() => ({
-  source: vi.fn(), upload: vi.fn(), document: vi.fn(), signed: vi.fn(), stream: vi.fn(), error: vi.fn(),
+  recovery: vi.fn(), source: vi.fn(), upload: vi.fn(), document: vi.fn(), signed: vi.fn(), stream: vi.fn(), error: vi.fn(),
   domains: vi.fn(), actor: vi.fn(), support: vi.fn(), supportContext: vi.fn(), runSupport: vi.fn(), capture: vi.fn(), readable: vi.fn(),
 }));
 class MockAppError extends Error {
   constructor(public status: number, public code: string, message: string) { super(message); }
 }
 vi.mock("@corgtex/domain", () => ({ AppError: MockAppError, resolveKnowledgeAccessDomains: mocks.domains,
-  getWorkspaceSupportGrant: mocks.support, captureArtifactInputProof: mocks.capture, isArtifactInputProofReadable: mocks.readable }));
+  getWorkspaceSupportGrant: mocks.support, legacyRecoveryFileBinding: mocks.recovery, captureArtifactInputProof: mocks.capture, isArtifactInputProofReadable: mocks.readable }));
 vi.mock("@corgtex/shared", () => ({ getSupportAuthorizationContext: mocks.supportContext, runWithSupportOrigin: mocks.runSupport,
   prisma: { brainSource: { findFirst: mocks.source }, financeReportUploadInput: { findFirst: mocks.upload }, document: { findFirst: mocks.document } } }));
 vi.mock("@corgtex/storage", () => ({ defaultStorage: { getSignedUrl: mocks.signed, getStream: mocks.stream } }));
@@ -46,7 +46,7 @@ beforeEach(() => {
     return run();
   });
   mocks.source.mockImplementation(async () => source);
-  mocks.upload.mockResolvedValue(null); mocks.document.mockResolvedValue(null);
+  mocks.recovery.mockResolvedValue(null); mocks.upload.mockResolvedValue(null); mocks.document.mockResolvedValue(null);
   mocks.stream.mockImplementation(async () => ({ body: body() }));
   mocks.capture.mockImplementation(async (_actor, _workspaceId, inputs) => {
     if (!known) throw new MockAppError(409, "UNKNOWN_LINEAGE", "Unproved source.");
