@@ -1,13 +1,13 @@
 import type { BrainArticle, Meeting, Prisma } from "@prisma/client";
 import {
   countUnreadNotifications,
+  DigestReadRelease,
   filterWorkspaceBriefingSources,
   normalizeNewspaperEditionDigest,
   normalizeWorkspaceBriefingPayload,
   personalizeWorkspaceBriefing,
   privacyFilter,
   rankPersonalNewspaperItems,
-  readableArtifactIds,
   requireWorkspaceMembership,
   scoreMemberBriefingItem,
 } from "@corgtex/domain";
@@ -208,6 +208,7 @@ export default async function WorkspaceDashboard({
   const t = await getTranslations("dashboard");
   const format = await getFormatter();
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const release = new DigestReadRelease(actor, workspaceId);
   const currentMember = actor.kind === "user" && actor.user.globalRole !== "OPERATOR"
     ? membership
     : actor.kind === "user"
@@ -284,7 +285,7 @@ export default async function WorkspaceDashboard({
     TENSION: new Map<string, Date | null>(),
   };
   if (actor.kind === "user" && currentMember?.id) {
-    await scanReadableArtifactPages({ actor, workspaceId, kind: "AdviceRequest",
+    await scanReadableArtifactPages({ actor, workspaceId, release, kind: "AdviceRequest",
       loadPage: (cursor, take) => prisma.adviceRequest.findMany({
         ...pageArgs(cursor, take),
         where: { workspaceId, status: "ACTIVE", requestedByUserId: { not: actor.user.id },
@@ -313,7 +314,7 @@ export default async function WorkspaceDashboard({
   });
   const [unreadNotificationsCount, latestWorkspaceBriefing, latestNewspaperEdition, workspaceData, membersCount] = await Promise.all([
     countUnreadNotifications(actor, workspaceId),
-    findLatestReadableArtifact({ actor, workspaceId, kind: "WorkspaceBriefing",
+    findLatestReadableArtifact({ actor, workspaceId, release, kind: "WorkspaceBriefing",
       loadPage: (cursor, take) => {
         const { OR, ...paging } = latestPageArgs(cursor, take);
         return prisma.workspaceBriefing.findMany({ ...paging,
@@ -321,7 +322,7 @@ export default async function WorkspaceDashboard({
         });
       },
     }),
-    findLatestReadableArtifact({ actor, workspaceId, kind: "NewspaperEdition",
+    findLatestReadableArtifact({ actor, workspaceId, release, kind: "NewspaperEdition",
       loadPage: (cursor, take) => {
         const { OR, ...paging } = latestPageArgs(cursor, take);
         return prisma.newspaperEdition.findMany({ ...paging, where: { workspaceId, ...(OR ? { OR } : {}) } });
@@ -341,7 +342,7 @@ export default async function WorkspaceDashboard({
     personalItems = rankPersonalNewspaperItems([...personalItems, item], rankingTime).slice(0, 8);
   };
   const [articleTotalCount, actionTotalCount, proposalTotalCount, tensionTotalCount, meetingTotalCount] = await Promise.all([
-    scanReadableArtifactPages({ actor, workspaceId, kind: "BrainArticle",
+    scanReadableArtifactPages({ actor, workspaceId, release, kind: "BrainArticle",
       loadPage: (cursor, take) => prisma.brainArticle.findMany({ where: { workspaceId, archivedAt: null }, ...pageArgs(cursor, take) }),
       visit: (article) => {
         if (article.isPrivate || article.type === "DIGEST" || article.type === "PERSON") return;
@@ -350,7 +351,7 @@ export default async function WorkspaceDashboard({
         articles.length = Math.min(articles.length, 50);
       },
     }),
-    scanReadableArtifactPages({ actor, workspaceId, kind: "Action",
+    scanReadableArtifactPages({ actor, workspaceId, release, kind: "Action",
       loadPage: (cursor, take) => prisma.action.findMany({ where: visibleOpenActionWhere, ...pageArgs(cursor, take) }),
       visit: (action) => {
         if (!currentMember || (action.assigneeMemberId !== currentMember.id && !adviceDeadlinesByKind.ACTION.has(action.id))) return;
@@ -363,7 +364,7 @@ export default async function WorkspaceDashboard({
           href: `/workspaces/${workspaceId}/actions/${action.id}` });
       },
     }),
-    scanReadableArtifactPages({ actor, workspaceId, kind: "Proposal",
+    scanReadableArtifactPages({ actor, workspaceId, release, kind: "Proposal",
       loadPage: (cursor, take) => prisma.proposal.findMany({ where: visibleOpenProposalWhere, ...pageArgs(cursor, take) }),
       visit: (proposal) => {
         if (!currentMember || (proposal.ownerMemberId !== currentMember.id && !adviceDeadlinesByKind.PROPOSAL.has(proposal.id))) return;
@@ -374,7 +375,7 @@ export default async function WorkspaceDashboard({
           href: `/workspaces/${workspaceId}/proposals/${proposal.id}` });
       },
     }),
-    scanReadableArtifactPages({ actor, workspaceId, kind: "Tension",
+    scanReadableArtifactPages({ actor, workspaceId, release, kind: "Tension",
       loadPage: (cursor, take) => prisma.tension.findMany({ where: visibleOpenTensionWhere, ...pageArgs(cursor, take) }),
       visit: (tension) => {
         if (!currentMember || (tension.assigneeMemberId !== currentMember.id && !adviceDeadlinesByKind.TENSION.has(tension.id))) return;
@@ -385,7 +386,7 @@ export default async function WorkspaceDashboard({
           href: `/workspaces/${workspaceId}/tensions/${tension.id}` });
       },
     }),
-    scanReadableArtifactPages({ actor, workspaceId, kind: "Meeting",
+    scanReadableArtifactPages({ actor, workspaceId, release, kind: "Meeting",
       loadPage: (cursor, take) => prisma.meeting.findMany({ where: { workspaceId, status: "COMPLETED", archivedAt: null }, ...pageArgs(cursor, take) }),
       visit: (meeting) => {
         meetings.push(meeting);
@@ -443,8 +444,8 @@ export default async function WorkspaceDashboard({
         .then((items) => items.map((item) => `RECOGNITION:${item.id}`)),
       prisma.adviceRequest.findMany({ where: { workspaceId, id: { in: idsFor("ADVICE_REQUEST") }, audienceType: "WORKSPACE" } })
         .then(async (items) => {
-          const readable = await readableArtifactIds(actor, workspaceId, "AdviceRequest", items);
-          return items.filter((item) => readable.has(item.id)).map((item) => `ADVICE_REQUEST:${item.id}`);
+          const captured = await release.capture("AdviceRequest", items);
+          return captured.records.map((item) => `ADVICE_REQUEST:${item.id}`);
         }),
     ])
     : [];
@@ -523,6 +524,9 @@ export default async function WorkspaceDashboard({
       counts: workAttentionCounts.tensions,
     },
   ];
+
+  // Release all original page and family observations together after the final async join.
+  await release.finish(undefined);
 
   return (
     <>
