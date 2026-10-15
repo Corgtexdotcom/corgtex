@@ -1,3 +1,4 @@
+import { hasPendingCompanyTranscript } from "./native-transcript-publication-context";
 import { getMeetingTranscriptWorkerPurpose } from "./native-meeting-workflow-principal";
 import { categoryGovernorIdentities } from "./information-category-policy";
 import type { Prisma } from "@prisma/client";
@@ -282,7 +283,6 @@ export async function discoverSourceAuthorityEdges(context: AuthorityDiscoveryCo
   if (kind === "NativeTranscriptInput") {
     invariant(["AUDIO_UPLOAD", "DIRECT_MEMBER_UPLOAD", "RECORDER", "PROVIDER_IMPORT", "COMPANY_MEMBER_UPLOAD"].includes(String(content.mode)), 409, "SOURCE_LOCK_UNSUPPORTED", "Provider transcript authority is unsupported.");
     if (content.mode === "COMPANY_MEMBER_UPLOAD") {
-      const { hasPendingCompanyTranscript } = await import("./native-transcript-publication");
       if (!hasPendingCompanyTranscript(actor, workspaceId, input.id)) {
         const bindings = await rows("NativeTranscriptPublication", { workspaceId, nativeInputId: input.id }, `company-publication:${input.id}`, undefined, true);
         invariant(bindings.length === 1, 409, "SOURCE_LOCK_UNSUPPORTED", "Company transcript publication is unavailable.");

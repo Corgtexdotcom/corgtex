@@ -113,7 +113,10 @@ describe("native direct transcript capture", () => {
       participantEmails: [] } as never;
     const bytes = Buffer.from("audio");
     const args = { workspaceId: "ws-1", asset, fileBuffer: bytes, tx: db as never };
+    const copy = vi.spyOn(Buffer, "from");
     const pending = captureAudioUploadInput(actor, args);
+    expect(copy.mock.calls.some(call => call[0] === bytes)).toBe(false);
+    copy.mockRestore();
     await vi.waitFor(() => expect(requireWorkspaceMembership).toHaveBeenCalled());
     (asset as { title: string }).title = "Changed title";
     bytes.write("other");
@@ -125,6 +128,16 @@ describe("native direct transcript capture", () => {
     expect(saved.fileHash).toBe(createHash("sha256").update("audio").digest("hex"));
     expect(saved.encryptedPayloadJson).toContain("Original title");
     expect(saved.encryptedPayloadJson).not.toContain("Changed title");
+  });
+
+  it("rejects oversized audio before hashing, copying or awaiting membership", async () => {
+    const { captureAudioUploadInput } = await import("./native-transcript-input");
+    const oversized = Buffer.from("small allocation");
+    Object.defineProperty(oversized, "byteLength", { value: 500 * 1024 * 1024 + 1 });
+    await expect(captureAudioUploadInput(actor, { workspaceId: "ws-1", fileBuffer: oversized,
+      asset: {} as never, tx: db as never })).rejects.toMatchObject({ code: "AUDIO_TOO_LARGE" });
+    expect(requireWorkspaceMembership).not.toHaveBeenCalled();
+    expect(db.nativeTranscriptInput.create).not.toHaveBeenCalled();
   });
 
   it("does not let an older worker adopt a newly claimed audio job", async () => {

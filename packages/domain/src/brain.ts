@@ -2,7 +2,7 @@ import { getReadableBrainArticleVariant, requestBrainArticleVariant } from "./br
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { captureReadableDigestInputs } from "./digest-lineage";
 import { countSourceReadableRecords } from "./source-scoped-read";
-import type { BrainArticleAuthority, BrainArticleType, BrainDiscussionTargetType, BrainSource, BrainSourceType } from "@prisma/client";
+import type { BrainArticle, BrainArticleAuthority, BrainArticleType, BrainDiscussionTargetType, BrainSource, BrainSourceType } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { isDeepStrictEqual } from "node:util";
 import { prisma } from "@corgtex/shared";
@@ -631,46 +631,83 @@ export async function listArticles(actor: AppActor, params: {
     ];
   }
 
-  const candidates = await prisma.brainArticle.findMany({ where,
-    include: {
-      ownerMember: { include: { user: { select: { id: true, displayName: true, email: true, bio: true,
-        avatarUrl: true, linkedinUrl: true, websiteUrl: true, createdAt: true, updatedAt: true } } } },
-      discussions: { include: { comments: true } },
-    }, orderBy: { updatedAt: "desc" } });
-  const initiallyReadable = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", candidates);
-  if (actor.kind === "user") for (const candidate of candidates) {
-    if (!initiallyReadable.has(candidate.id) && !candidate.variantOfArticleId && !candidate.archivedAt) {
-      await requestBrainArticleVariant(actor, { workspaceId: params.workspaceId, articleId: candidate.id });
+  type ListedArticle = Omit<BrainArticle, keyof Awaited<ReturnType<typeof articleListRelations>>>
+    & Awaited<ReturnType<typeof articleListRelations>>;
+  const items: ListedArticle[] = [];
+  const selected: BrainArticle[] = [];
+  let total = 0;
+  let variantRequests = 0;
+  let after: { id: string; updatedAt: Date } | undefined;
+  while (true) {
+    // Full canonical rows are needed for fingerprint validation; relations are
+    // loaded only for the requested visible page, never for the scanned corpus.
+    const candidates: BrainArticle[] = await prisma.brainArticle.findMany({
+      where: after ? { AND: [where, { OR: [{ updatedAt: { lt: after.updatedAt } },
+        { updatedAt: after.updatedAt, id: { lt: after.id } }] }] } : where,
+      orderBy: [{ updatedAt: "desc" }, { id: "desc" }], take: 100,
+    });
+    const last = candidates.at(-1);
+    const next = last ? { id: last.id, updatedAt: last.updatedAt } : undefined;
+    const initial = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", candidates);
+    if (actor.kind === "user" && variantRequests < take) for (const candidate of candidates) {
+      if (variantRequests >= take) break;
+      if (!initial.has(candidate.id) && !candidate.variantOfArticleId && !candidate.archivedAt) {
+        variantRequests++;
+        await requestBrainArticleVariant(actor, { workspaceId: params.workspaceId, articleId: candidate.id });
+      }
     }
+    const current = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", candidates);
+    for (const article of candidates) {
+      if (!initial.has(article.id) || !current.has(article.id)) continue;
+      if (total >= skip && items.length < take) {
+        const related = await articleListRelations(actor, params.workspaceId, article, where);
+        // Related reads may have awaited a policy/content change. Never return
+        // a new row using an old receipt or count a now-withheld selected row.
+        if (!(await readableArtifactIds(actor, params.workspaceId, "BrainArticle", [article])).has(article.id)) continue;
+        items.push({ ...article, ...related });
+        selected.push(article);
+      }
+      total++;
+    }
+    if (candidates.length < 100) break;
+    after = next;
   }
-  const backlinks = await prisma.brainBacklink.findMany({ where: { workspaceId: params.workspaceId,
-    toArticleId: { in: [...initiallyReadable] }, fromArticleId: { in: [...initiallyReadable] } },
-    select: { fromArticleId: true, toArticleId: true } });
-  const discussionRows = await readableDiscussionRows(actor, params.workspaceId,
-    candidates.filter((article) => initiallyReadable.has(article.id)).flatMap((article) => article.discussions));
-  const owners = new Map(await Promise.all(candidates.filter((article) => initiallyReadable.has(article.id))
-    .map(async (article) => [article.id, await readableDiscussionAuthor(actor, params.workspaceId, article.ownerMember)] as const)));
-  // The response, total and related counts all use these exact captured rows.
-  // A changed revision or source grant during the joined reads is withheld.
-  const readableIds = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", candidates);
-  const admitted = candidates.filter((article) => initiallyReadable.has(article.id) && readableIds.has(article.id));
-  const items = admitted.slice(skip, skip + take);
-  const backlinkCounts = new Map<string, number>();
-  for (const link of backlinks) if (readableIds.has(link.fromArticleId) && readableIds.has(link.toArticleId)) {
-    backlinkCounts.set(link.toArticleId, (backlinkCounts.get(link.toArticleId) ?? 0) + 1);
+  const finalIds = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", selected);
+  const admitted = items.filter(article => finalIds.has(article.id));
+  return { items: admitted, total: total - (items.length - admitted.length), take, skip };
+}
+
+async function articleListRelations(actor: AppActor, workspaceId: string, article: BrainArticle,
+  articleWhere: Prisma.BrainArticleWhereInput) {
+  const member = article.ownerMemberId ? await prisma.member.findFirst({ where: { id: article.ownerMemberId, workspaceId },
+    include: { user: { select: { id: true, displayName: true, email: true, bio: true,
+      avatarUrl: true, linkedinUrl: true, websiteUrl: true, createdAt: true, updatedAt: true } } },
+  }) : null;
+  const ownerMember = await readableDiscussionAuthor(actor, workspaceId, member);
+  let discussions = 0;
+  let afterThread: string | undefined;
+  while (true) {
+    const rows = await prisma.brainDiscussionThread.findMany({ where: { articleId: article.id,
+      ...(afterThread ? { id: { gt: afterThread } } : {}) }, orderBy: { id: "asc" }, take: 100 });
+    discussions += (await readableArtifactIds(actor, workspaceId, "BrainDiscussionThread", rows)).size;
+    if (rows.length < 100) break;
+    afterThread = rows.at(-1)!.id;
   }
-  const discussionCounts = new Map<string, number>();
-  for (const thread of discussionRows) if (readableIds.has(thread.articleId)) {
-    discussionCounts.set(thread.articleId, (discussionCounts.get(thread.articleId) ?? 0) + 1);
+  let backlinksTo = 0;
+  let afterLink: string | undefined;
+  while (true) {
+    const links = await prisma.brainBacklink.findMany({ where: { workspaceId, toArticleId: article.id,
+      fromArticle: articleWhere, ...(afterLink ? { id: { gt: afterLink } } : {}) },
+      include: { fromArticle: true }, orderBy: { id: "asc" }, take: 100 });
+    const readable = await readableArtifactIds(actor, workspaceId, "BrainArticle", links.map(link => link.fromArticle));
+    backlinksTo += links.filter(link => readable.has(link.fromArticleId)).length;
+    if (links.length < 100) break;
+    afterLink = links.at(-1)!.id;
   }
-  return { items: items.map((article) => ({ ...article,
-    ownerMember: owners.get(article.id) ?? null,
-    isPermissionVariant: Boolean(article.variantOfArticleId),
+  return { ownerMember, isPermissionVariant: Boolean(article.variantOfArticleId),
     variantOfArticleId: null, variantTargetFingerprint: null, variantInputSetHash: null,
-    variantSourceStateJson: null, variantGenerationJobId: null,
-    discussions: undefined,
-    _count: { discussions: discussionCounts.get(article.id) ?? 0, backlinksTo: backlinkCounts.get(article.id) ?? 0 },
-  })), total: admitted.length, take, skip };
+    variantSourceStateJson: null, variantGenerationJobId: null, discussions: undefined,
+    _count: { discussions, backlinksTo } };
 }
 
 export async function deleteArticle(actor: AppActor, params: {

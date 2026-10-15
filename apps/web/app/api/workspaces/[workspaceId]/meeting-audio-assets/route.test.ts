@@ -27,7 +27,7 @@ class MockAppError extends Error {
   }
 }
 
-vi.mock("@corgtex/domain", () => ({ AppError: MockAppError, createMeetingAudioAsset, isPlausibleMeetingRecordedAt, readableArtifactIds, requireWorkspaceMembership }));
+vi.mock("@corgtex/domain", () => ({ AppError: MockAppError, MAX_AUDIO_FILE_BYTES: 500 * 1024 * 1024, createMeetingAudioAsset, isPlausibleMeetingRecordedAt, readableArtifactIds, requireWorkspaceMembership }));
 vi.mock("@corgtex/shared", () => {
   const tx = { $queryRaw: vi.fn().mockResolvedValue([{ id: "member-1" }]),
     meetingAudioAsset: { findMany: findManyMeetingAudioAssets }, nativeTranscriptInput: { findMany: findManyNativeInputs } };
@@ -181,6 +181,22 @@ describe("/api/workspaces/[workspaceId]/meeting-audio-assets", () => {
     expect(json.audioAsset).toMatchObject({ id: "audio-1", workflowJobId: "job-1" });
     expect(json.audioAsset).not.toHaveProperty("storageKey");
     expect(json.audioAsset).not.toHaveProperty("transcriptText");
+  });
+
+  it("rejects a parsed oversized File before arrayBuffer allocation", async () => {
+    const { POST } = await import("./route");
+    const file = new File(["audio"], "large.m4a", { type: "audio/mp4" });
+    Object.defineProperty(file, "size", { value: 500 * 1024 * 1024 + 1 });
+    const readBytes = vi.spyOn(file, "arrayBuffer");
+    const formData = new FormData();
+    formData.set("file", file);
+    const uploadRequest = request({ method: "POST", headers: { "Content-Type": "multipart/form-data" } });
+    vi.spyOn(uploadRequest, "formData").mockResolvedValue(formData);
+    await POST(uploadRequest, context());
+    expect(readBytes).not.toHaveBeenCalled();
+    expect(createMeetingAudioAsset).not.toHaveBeenCalled();
+    expect(handleRouteError).toHaveBeenCalledWith(expect.objectContaining({ status: 413, code: "AUDIO_TOO_LARGE" }),
+      expect.objectContaining({ workspaceId: "workspace-1" }));
   });
 
   it("rejects invalid upload input before domain creation", async () => {

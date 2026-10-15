@@ -1357,14 +1357,22 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     {},
     async () => {
       requireScope(sessionCtx, "workspace:read");
+      // Optional counts must not reveal categories outside this connection's scopes.
+      const scopedCount = (scope: string, read: () => Promise<number>) => {
+        if ((sessionCtx.authKind === "oauth" || (actor.kind === "agent" && actor.authProvider === "credential"))
+          && (!sessionCtx.scopes?.includes(scope)
+            || (actor.kind === "agent" && !actor.scopes?.includes(scope)))) return Promise.resolve(0);
+        requireScope(sessionCtx, scope);
+        return read();
+      };
       const [workspace, proposalCount, actionCount, tensionCount, memberCount] = await Promise.all([
         prisma.workspace.findUnique({
           where: { id: workspaceId },
           select: { id: true, slug: true, name: true, description: true, createdAt: true },
         }),
-        listProposals(actor, workspaceId, { take: 0 }).then((result) => result.total),
-        prisma.action.count({ where: { workspaceId } }),
-        prisma.tension.count({ where: { workspaceId } }),
+        scopedCount("proposals:read", () => listProposals(actor, workspaceId, { take: 0 }).then(result => result.total)),
+        scopedCount("actions:read", () => listActions(actor, workspaceId, { take: 0 }).then(result => result.total)),
+        scopedCount("tensions:read", () => listTensions(actor, workspaceId, { take: 0 }).then(result => result.total)),
         prisma.member.count({ where: { workspaceId, isActive: true } }),
       ]);
       return jsonResult({
