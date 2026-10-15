@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { setImmediate } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Prisma } from "@prisma/client";
+import { Prisma, type ModelUsage } from "@prisma/client";
 import { prisma as db, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { getAgentRunOperationalCounts, listAgentRuns } from "./agent-runs";
@@ -120,8 +120,8 @@ describe("agent run final content release", () => {
     const first = new Promise<void>(resolve => { firstDone = resolve; });
     vi.spyOn(db.modelUsage, "findMany").mockImplementation((async args => {
       const rows = await original(args);
-      if (rows.some(row => row.id === early.usage.id)) firstDone();
-      if (rows.some(row => row.id === slow.usage.id)) {
+      if ((rows as Pick<ModelUsage, "id">[]).some(row => row.id === early.usage.id)) firstDone();
+      if ((rows as Pick<ModelUsage, "id">[]).some(row => row.id === slow.usage.id)) {
         await first;
         await setImmediate();
         await db.action.update({ where: { id: early.source.id }, data: { archivedAt: new Date() } });
