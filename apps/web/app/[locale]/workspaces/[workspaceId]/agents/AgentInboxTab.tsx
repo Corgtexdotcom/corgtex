@@ -87,7 +87,7 @@ export async function AgentInboxTab({
   return AgentInboxView({ workspaceId, cards });
 }
 
-export async function AgentInboxView({
+async function AgentInboxView({
   workspaceId,
   cards,
 }: {
