@@ -8,7 +8,7 @@ import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, isGlobalOperator, requireWorkspaceMembership } from "./auth";
 import { getApprovalPolicy, ensureApprovalFlow, preserveApprovalFlowHistory, withdrawActiveApprovalFlowForSubject } from "./approvals";
 import { AppError, invariant } from "./errors";
-import { advanceHumanArtifactInputLineage, assertArtifactInputWriteFence, captureArtifactInputProof, captureArtifactInputSnapshotProof, captureImmutableArtifactInputProof, invalidateArtifactInputLineage, isArtifactInputProofReadable, lineageContentFingerprint, preserveUnknownArtifactInputSnapshot, currentArtifactInputRoots, currentArtifactInputRootsBatch, readableArtifactIds, recordArtifactInputLineage, type LineageInput, type LineageRoot } from "./source-lineage";
+import { captureHumanArtifactInputAdvance, advanceHumanArtifactInputLineage, assertArtifactInputWriteFence, captureArtifactInputProof, captureArtifactInputSnapshotProof, captureImmutableArtifactInputProof, invalidateArtifactInputLineage, isArtifactInputProofReadable, lineageContentFingerprint, preserveUnknownArtifactInputSnapshot, currentArtifactInputRoots, currentArtifactInputRootsBatch, readableArtifactIds, recordArtifactInputLineage, type LineageInput, type LineageRoot } from "./source-lineage";
 import type { ProducerLineageParams } from "./producer-lineage";
 import { getMcpToolInputRoots } from "./mcp-tool-input-context";
 import { parsePermissionEpochProof } from "./source-permission-epochs";
@@ -1914,12 +1914,14 @@ export async function publishProposal(actor: AppActor, params: {
     invariant(proposal.isPrivate, 400, "INVALID_STATE", "Proposal is already public.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: proposal, resolvedMembership: membership });
 
+    const admission = await captureHumanArtifactInputAdvance({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Proposal", id: proposal.id }, before: proposal });
     const updated = await tx.proposal.update({
       where: { id: params.proposalId },
       data: { isPrivate: false, publishedAt: new Date() },
     });
     await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
-      artifact: { kind: "Proposal", id: proposal.id }, before: proposal, after: updated });
+      artifact: { kind: "Proposal", id: proposal.id }, before: proposal, after: updated, admission });
 
     await tx.auditLog.create({
       data: {

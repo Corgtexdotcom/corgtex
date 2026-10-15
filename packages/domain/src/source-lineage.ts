@@ -32,6 +32,7 @@ import { sourceAuthorityPhysicalRow } from "./source-authority-edges";
 import { assertSourceCommitMcpOriginCovered } from "./source-commit-row-locks";
 import { allocateArtifactInputSnapshotId } from "./artifact-input-snapshot-allocations";
 import { reserveArtifactWriteHeads } from "./artifact-write-heads";
+import { sealArtifactInputActor } from "./artifact-input-actor";
 export { sealArtifactInputActor } from "./artifact-input-actor";
 
 type ArtifactReadCapture = { actor: AppActor; workspaceId: string; roots: Map<string, LineageRoot>; preserveConsumedRevisions: boolean };
@@ -2349,6 +2350,56 @@ export async function copyArtifactInputLineage(params: {
   return true;
 }
 
+type HumanAdvanceAdmission = {
+  tx: Prisma.TransactionClient; actor: AppActor; workspaceId: string; artifact: LineageInput;
+  fingerprint: string; manifestStamp: string; epochs: PermissionEpochProof;
+};
+const humanAdvanceAdmissions = new WeakMap<object, HumanAdvanceAdmission>();
+const manifestAdvanceStamp = (manifest: NonNullable<Awaited<ReturnType<typeof latestManifest>>>) =>
+  createHash("sha256").update(sourceCommitCanonical(manifest)).digest("hex");
+const artifactOwnEpochKind = (kind: LineageKind) => ["MeetingTranscript", "MeetingAgenda"].includes(kind) ? "Meeting" : kind;
+
+/** Admit the original derived body BEFORE its governed edit. The opaque, single-use
+ * receipt never refreshes upstream permissions or accepts an already stale body. */
+export async function captureHumanArtifactInputAdvance(params: {
+  tx: Prisma.TransactionClient; actor: AppActor; workspaceId: string; artifact: LineageInput;
+  before: unknown; allowSystemTransition?: boolean;
+}): Promise<object | undefined> {
+  const { tx, actor, workspaceId, artifact, before } = params;
+  await assertArtifactInputWriteFence(tx);
+  await assertPlannedArtifactPublication(tx, workspaceId, artifact);
+  if (actor.kind !== "user" && !params.allowSystemTransition) return undefined;
+  const initial = await latestManifest(tx, workspaceId, artifact);
+  const saved = initial?.epochProofVersion === 1 ? parsePermissionEpochProof(initial.permissionEpochsJson) : null;
+  if (initial?.origin !== "DERIVED" || !saved || !parseRoots(initial.rootsJson)?.length) return undefined;
+  const physical = sourceAuthorityPhysicalRow(artifact);
+  if (!physical) return undefined;
+  if (hasActiveSourceCommitLockPlan(tx)) assertSourceCommitRowCovered(tx, physical.table, physical.id, "UPDATE");
+  else await tx.$queryRaw(Prisma.sql`SELECT id FROM ${Prisma.raw(`"${physical.table}"`)} WHERE id = ${physical.id} FOR UPDATE`);
+  const actual = await loadArtifact(tx, workspaceId, artifact);
+  const fingerprint = lineageContentFingerprint(artifact.kind, before);
+  invariant(actual && lineageContentFingerprint(artifact.kind, actual) === fingerprint,
+    409, "SOURCE_CHANGED", "Artifact changed before the governed edit.");
+  const previous = await latestManifest(tx, workspaceId, artifact);
+  invariant(previous && manifestAdvanceStamp(previous) === manifestAdvanceStamp(initial)
+    && previous.contentHash === fingerprint, 409, "SOURCE_CHANGED", "Artifact lineage changed before the governed edit.");
+  if (!(await readableArtifactIds(actor, workspaceId, artifact.kind, [actual], tx)).has(artifact.id)) return undefined;
+  invariant(await isArtifactPermissionEpochProofCurrent(workspaceId, saved, tx),
+    409, "SOURCE_CHANGED", "Artifact permissions changed before the governed edit.");
+  const own = saved.entries.find(entry => entry.kind === artifactOwnEpochKind(artifact.kind) && entry.id === artifact.id);
+  if (!own) return undefined;
+  const currentOwn = await capturePermissionEpochs(tx, workspaceId, [{ kind: own.kind, id: own.id }]);
+  invariant(currentOwn.entries[0].epoch === own.epoch, 409, "SOURCE_CHANGED", "Artifact permission episode changed.");
+  const checkedHead = await latestManifest(tx, workspaceId, artifact);
+  invariant(checkedHead && manifestAdvanceStamp(checkedHead) === manifestAdvanceStamp(previous),
+    409, "SOURCE_CHANGED", "Artifact lineage changed during admission.");
+  const receipt = Object.freeze({});
+  humanAdvanceAdmissions.set(receipt, { tx, actor: sealArtifactInputActor(actor), workspaceId,
+    artifact: { kind: artifact.kind, id: artifact.id }, fingerprint,
+    manifestStamp: manifestAdvanceStamp(previous), epochs: structuredClone(saved) });
+  return receipt;
+}
+
 /** Carry verified input permissions across a direct human edit of the same artifact. */
 export async function advanceHumanArtifactInputLineage(params: {
   tx: Prisma.TransactionClient;
@@ -2357,6 +2408,8 @@ export async function advanceHumanArtifactInputLineage(params: {
   artifact: LineageInput;
   before: unknown;
   after: unknown;
+  /** Original pre-edit admission; cannot be forged, reused or moved across transactions. */
+  admission?: object;
   /** Only for a deterministic workflow transition with no new permission-bearing input. */
   allowSystemTransition?: boolean;
 }) {
@@ -2366,6 +2419,15 @@ export async function advanceHumanArtifactInputLineage(params: {
   if (hasActiveSourceCommitLockPlan(tx)) assertSourceCommitSemanticRootCovered(tx, workspaceId,
     { ...artifact, fingerprint: lineageContentFingerprint(artifact.kind, before) });
   const previous = await latestManifest(tx, workspaceId, artifact);
+  const admission = params.admission ? humanAdvanceAdmissions.get(params.admission) : undefined;
+  if (params.admission) {
+    humanAdvanceAdmissions.delete(params.admission);
+    invariant(admission && admission.tx === tx && admission.actor === actor && admission.workspaceId === workspaceId
+      && admission.artifact.kind === artifact.kind && admission.artifact.id === artifact.id
+      && admission.fingerprint === lineageContentFingerprint(artifact.kind, before)
+      && previous && admission.manifestStamp === manifestAdvanceStamp(previous),
+    409, "SOURCE_CHANGED", "Governed edit admission belongs to another artifact, head or transaction.");
+  }
   const roots = await currentArtifactInputRoots(tx, workspaceId, artifact, before);
   if ((actor.kind !== "user" && !params.allowSystemTransition) || !previous || !roots) {
     invariant(!getMcpToolInputRoots(actor, workspaceId).length, 409, "UNKNOWN_LINEAGE", "A partial MCP edit cannot prove the prior body safe.");
@@ -2394,10 +2456,32 @@ export async function advanceHumanArtifactInputLineage(params: {
       inheritedRoots: [receipt.root, ...receipt.roots, ...submissionRoots] });
     return true;
   }
+  let permissionEpochs = previous.permissionEpochsJson;
+  const saved = previous.epochProofVersion === 1 ? parsePermissionEpochProof(previous.permissionEpochsJson) : null;
+  if (previous.origin === "DERIVED" && saved) {
+    const ownKind = artifactOwnEpochKind(artifact.kind);
+    const own = saved.entries.find(entry => entry.kind === ownKind && entry.id === artifact.id);
+    if (own) {
+      const current = await capturePermissionEpochs(tx, workspaceId, [{ kind: own.kind, id: own.id }]);
+      if (current.entries[0].epoch !== own.epoch) {
+        invariant(admission, 409, "SOURCE_CHANGED", "A changed artifact permission episode requires pre-edit admission.");
+        const nonOwn = { ...saved, entries: saved.entries.filter(entry => entry.kind !== own.kind || entry.id !== own.id) };
+        invariant(nonOwn.entries.length > 0 && await isArtifactPermissionEpochProofCurrent(workspaceId, nonOwn, tx),
+          409, "SOURCE_RESTRICTED", "An original upstream permission episode changed.");
+        const actual = await loadArtifact(tx, workspaceId, artifact);
+        invariant(actual && lineageContentFingerprint(artifact.kind, actual) === lineageContentFingerprint(artifact.kind, after),
+          409, "SOURCE_CHANGED", "Artifact changed during its governed edit.");
+        await requireWorkspaceMembership({ actor, workspaceId, tx });
+        permissionEpochs = mergePermissionEpochProofs(nonOwn, current) as unknown as Prisma.JsonValue;
+      }
+    }
+  }
+  // Exact optimistic head CAS: a concurrent manifest-only writer conflicts on
+  // this original revision+1. Never reread/retry against its replacement head.
   await tx.artifactInputLineage.create({ data: {
     workspaceId, artifactType: artifact.kind, artifactId: artifact.id,
     revision: previous.revision + 1, origin: previous.origin,
-    epochProofVersion: previous.epochProofVersion, permissionEpochsJson: previous.permissionEpochsJson ?? Prisma.JsonNull,
+    epochProofVersion: previous.epochProofVersion, permissionEpochsJson: permissionEpochs ?? Prisma.JsonNull,
     contentHash: lineageContentFingerprint(artifact.kind, after),
     inputsJson: previous.inputsJson as Prisma.InputJsonValue,
     rootsJson: previous.rootsJson as Prisma.InputJsonValue,
