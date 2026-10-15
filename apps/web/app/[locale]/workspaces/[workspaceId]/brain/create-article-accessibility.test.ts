@@ -31,6 +31,13 @@ vi.mock("@corgtex/domain", () => ({
   readableArtifactIds: async () => new Set(),
 }));
 
+// This render fixture supplies an empty backend result. The real count helper's
+// admission/release behavior is covered by article-type-counts and PG tests.
+vi.mock("./article-type-counts", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./article-type-counts")>(),
+  listBrainArticleTypeCounts: vi.fn(async () => []),
+}));
+
 vi.mock("@corgtex/knowledge", () => ({
   answerKnowledgeQuestion: async () => null,
   searchIndexedKnowledge: async () => [],

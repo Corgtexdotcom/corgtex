@@ -78,11 +78,13 @@ vi.mock("@corgtex/models", async (importOriginal) => ({
   resolveModel: vi.fn().mockReturnValue("fake-model"),
 }));
 
-vi.mock("@corgtex/domain", () => {
+vi.mock("@corgtex/domain", async () => {
+  const { mergeLineageInputRoot } = await import("../../domain/src/source-lineage");
   // Cache/gateway cases use synthetic source proofs. Actual source authority and
   // native provider publication are covered by the lineage and PG caller suites.
   const preflights = new WeakMap<object, { actor: unknown; workspaceId: string; roots: unknown }>();
   return {
+    mergeLineageInputRoot,
     assertArtifactInputWriteFence: vi.fn().mockResolvedValue(undefined),
     recordArtifactInputLineage: vi.fn().mockResolvedValue(undefined),
     resolveKnowledgeAccessDomains: vi.fn(async () => ["WORKSPACE", "FINANCE"]),
@@ -483,13 +485,23 @@ describe("knowledge retrieval cache", () => {
       id: "stale-azure-chunk", sourceType: "BRAIN_ARTICLE", sourceId: "archived-article",
       sourceTitle: "Archived article", chunkIndex: 0, content: "Withdrawn claim", "@search.score": 2,
     }] }), { status: 200 })));
+    // Retain the stale chunk in SQL as well as Azure: the current parent gate,
+    // rather than absence of a candidate, must reject the withdrawn content.
+    prismaMock.knowledgeChunk.findMany.mockResolvedValue(certifyRows([{
+      id: "stale-azure-chunk", workspaceId: "ws-1", sourceType: "BRAIN_ARTICLE", sourceId: "archived-article",
+      sourceTitle: "Archived article", chunkIndex: 0, content: "Withdrawn claim", embedding: [1, 0],
+    }]));
     prismaMock.brainArticle.findMany.mockResolvedValue(certifyRows([]));
 
     expect(await searchIndexedKnowledge({ actor, workspaceId: "ws-1", query: "Withdrawn claim" })).toEqual([]);
-    expect(prismaMock.brainArticle.findMany).toHaveBeenCalledWith({ take: 5001, where: {
-      workspaceId: "ws-1", archivedAt: null, OR: [{ isPrivate: false }, { variantOfArticleId: { not: null }, isPrivate: true }],
+    expect(prismaMock.brainArticle.findMany).toHaveBeenCalledWith({ take: 1, where: {
+      workspaceId: "ws-1", id: { in: ["archived-article"] }, archivedAt: null,
+      OR: [{ isPrivate: false }, { variantOfArticleId: { not: null }, isPrivate: true }],
     } });
-    expect(prismaMock.knowledgeChunk.findMany).not.toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ sourceType: "BRAIN_ARTICLE" }) }));
+    expect(prismaMock.brainArticle.findMany.mock.calls.every(([args]) =>
+      args.take === 1 && args.where.id.in.length === 1)).toBe(true);
+    expect(prismaMock.knowledgeChunk.findMany.mock.invocationCallOrder[0])
+      .toBeLessThan(prismaMock.brainArticle.findMany.mock.invocationCallOrder[0]);
   });
 
   it("returns authorized positive lexical matches when query embedding is rate limited", async () => {
