@@ -260,6 +260,43 @@ describe("notifications domain", () => {
     expect(prismaMock.notification.create).toHaveBeenCalledWith({ data: expect.objectContaining({ userId: "user-2", type: "deliberation.mention" }) });
   });
 
+  it.each([
+    new Error("Synthetic proof database unavailable"),
+    new AppError(503, "DATABASE_UNAVAILABLE", "Synthetic proof outage"),
+    new AppError(409, "SOURCE_CHANGED", "Original proof changed"),
+  ])("propagates retryable intent proof failure instead of reporting success: %s", async failure => {
+    lineageMocks.readable.mockRejectedValueOnce(failure);
+    prismaMock.notificationPreference.findMany.mockResolvedValue([
+      { userId: "user-1", notifType: "deliberation.mention", channel: "EMAIL" },
+      { userId: "user-2", notifType: "deliberation.mention", channel: "EMAIL" },
+    ]);
+    const { createNotificationIntent } = await import("./notifications");
+    await expect(createNotificationIntent(prismaMock as any, {
+      lineageActor: actor, lineageRoots: [{ kind: "Tension", id: "tension-1", fingerprint: "a".repeat(64) }],
+      workspaceId: "workspace-1", type: "deliberation.mention", recipientUserIds: ["user-1", "user-2"], title: "Retry intent",
+    })).rejects.toBe(failure);
+    expect(prismaMock.notificationDelivery.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalled();
+  });
+
+  it.each(["AUTH_REQUIRED", "NOT_A_MEMBER", "SOURCE_RESTRICTED", "UNKNOWN_LINEAGE"])(
+    "keeps other recipients eligible when one intent recipient is definitively denied: %s", async code => {
+      lineageMocks.readable.mockRejectedValueOnce(new AppError(403, code, "Denied recipient"));
+      prismaMock.notificationPreference.findMany.mockResolvedValue([
+        { userId: "user-1", notifType: "deliberation.mention", channel: "EMAIL" },
+        { userId: "user-2", notifType: "deliberation.mention", channel: "EMAIL" },
+      ]);
+      const { createNotificationIntent } = await import("./notifications");
+      expect(await createNotificationIntent(prismaMock as any, {
+        lineageActor: actor, lineageRoots: [{ kind: "Tension", id: "tension-1", fingerprint: "a".repeat(64) }],
+        workspaceId: "workspace-1", type: "deliberation.mention", recipientUserIds: ["user-1", "user-2"], title: "Mixed recipients",
+      })).toEqual({ count: 2 });
+      expect(prismaMock.notificationDelivery.upsert).toHaveBeenCalledTimes(1);
+      expect(prismaMock.notificationDelivery.upsert).toHaveBeenCalledWith(expect.objectContaining({
+        create: expect.objectContaining({ notificationId: "notification-user-2", userId: "user-2" }),
+      }));
+    });
+
   it("createNotificationIntent dedupes recipients, excludes the actor, and trusts the active human member query", async () => {
     prismaMock.member.findMany.mockResolvedValue([{ userId: "user-2" }]);
 

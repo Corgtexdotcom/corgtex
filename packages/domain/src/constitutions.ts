@@ -324,17 +324,19 @@ export async function createConstitutionVersion(params: ProducerLineageParams & 
 export async function listPolicyCorpus(actor: AppActor, workspaceId: string) {
   await requireWorkspaceMembership({ actor, workspaceId });
 
+  const release = new DigestReadRelease(actor, workspaceId);
   const policies = await prisma.policyCorpus.findMany({ where: { workspaceId }, include: { proposal: true, circle: true } });
-  const readable = await readableArtifactIds(actor, workspaceId, "PolicyCorpus", policies);
-  const visible = policies.filter((policy) => readable.has(policy.id));
-  const readableProposals = await readableArtifactIds(actor, workspaceId, "Proposal", visible.map((policy) => policy.proposal));
-  const readableCircles = await readableArtifactIds(actor, workspaceId, "Circle", visible.flatMap((policy) => policy.circle ? [policy.circle] : []));
-  return visible.sort((left, right) => right.acceptedAt.getTime() - left.acceptedAt.getTime()).map((policy) => ({ ...policy,
+  // Bind policy bodies before admitting their joined labels. Every displayed
+  // contribution retains its original proof and head until the final release.
+  const visible = (await release.capture("PolicyCorpus", policies)).records;
+  const readableProposals = new Set((await release.capture("Proposal", visible.map(policy => policy.proposal))).records.map(proposal => proposal.id));
+  const readableCircles = new Set((await release.capture("Circle", visible.flatMap(policy => policy.circle ? [policy.circle] : []))).records.map(circle => circle.id));
+  return release.finish(visible.sort((left, right) => right.acceptedAt.getTime() - left.acceptedAt.getTime()).map((policy) => ({ ...policy,
     proposalId: readableProposals.has(policy.proposalId) ? policy.proposalId : null,
     proposal: readableProposals.has(policy.proposalId) ? { id: policy.proposal.id, title: policy.proposal.title, status: policy.proposal.status } : null,
     circleId: policy.circleId && readableCircles.has(policy.circleId) ? policy.circleId : null,
     circle: policy.circle && readableCircles.has(policy.circle.id) ? { id: policy.circle.id, name: policy.circle.name } : null,
-  }));
+  })));
 }
 
 export async function getApprovalPolicies(actor: AppActor, workspaceId: string) {

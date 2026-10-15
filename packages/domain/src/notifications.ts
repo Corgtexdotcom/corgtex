@@ -260,6 +260,11 @@ async function createSlackDeliveryIntent(
   await createNotificationDeliveryIntent(tx, notification, NOTIFICATION_DELIVERY_SLACK_CHANNEL);
 }
 
+function isDefinitiveNotificationDenial(error: unknown) {
+  return error instanceof AppError
+    && ["AUTH_REQUIRED", "NOT_A_MEMBER", "SOURCE_RESTRICTED", "UNKNOWN_LINEAGE"].includes(error.code);
+}
+
 export async function createNotificationIntent(
   tx: Prisma.TransactionClient,
   params: NotificationIntentParams,
@@ -346,7 +351,11 @@ export async function createNotificationIntent(
     let readable = false;
     try {
       readable = (await readableArtifactIds(recipientActor, params.workspaceId, "Notification", [notification], tx)).has(notification.id);
-    } catch { /* A concurrently revoked recipient must not block other recipients. */ }
+    } catch (error) {
+      // A revoked recipient does not block other recipients. Infrastructure or
+      // proof drift must abort the producer transaction so its intent can retry.
+      if (!isDefinitiveNotificationDenial(error)) throw error;
+    }
     if (!readable) continue;
     if (shouldCreateEmailDelivery(recipient)) await createEmailDeliveryIntent(tx, notification);
     if (shouldCreateSlackDelivery(recipient)) await createSlackDeliveryIntent(tx, notification);
@@ -373,8 +382,7 @@ async function refreshReadableDelivery(delivery: NotificationDeliveryWithRecipie
     catch (error) {
       // Unavailable proof infrastructure must leave the queued intent retryable.
       // A current denial still permanently withholds this outbound content.
-      if (!(error instanceof AppError)
-        || !["AUTH_REQUIRED", "NOT_A_MEMBER", "SOURCE_RESTRICTED", "UNKNOWN_LINEAGE"].includes(error.code)) throw error;
+      if (!isDefinitiveNotificationDenial(error)) throw error;
     }
   }
   if (!readable || !notification || actor?.kind !== "user") {
