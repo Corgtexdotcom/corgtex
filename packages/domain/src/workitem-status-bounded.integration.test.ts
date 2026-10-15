@@ -1,3 +1,4 @@
+import type { Action } from "@prisma/client";
 import { writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
@@ -84,7 +85,8 @@ it("folds large Brain status from canonical pages without loading comment bodies
 
 
 it("measures a genuine 100-original release and rejects revocation across the final release boundary", async()=>{
-  const f=await fixture(),rows=[];
+  const f=await fixture();
+  const rows: Action[]=[];
   const size=process.env.WORKITEM_RELEASE_CAPACITY==="10002"?10002:100;
   const start=performance.now();
   for(let i=0;i<size;i++) {
@@ -134,10 +136,10 @@ it("refuses an early admitted count when a later canonical page withdraws it",as
   }
   await prisma.action.createMany({data:Array.from({length:100},(_,i)=>({id:`m-${i}`,workspaceId:f.workspaceId,authorUserId:f.user.id,title:"Unknown",bodyMd:"Unproved",status:"OPEN",isPrivate:false,createdAt:new Date("2026-01-01")}))});
   const read=prisma.action.findMany.bind(prisma.action);let pages=0;
-  vi.spyOn(prisma.action,"findMany").mockImplementation(async args=>{
+  vi.spyOn(prisma.action,"findMany").mockImplementation(args=>(async()=>{
     if(args?.take===100 && ++pages===2) await prisma.action.update({where:{id:"z-original"},data:{archivedAt:new Date()}});
     return read(args);
-  });
+  })() as ReturnType<typeof read>);
   await expect(listActions(f.actor,f.workspaceId,{take:0,sort:"date"})).rejects.toMatchObject({code:"SOURCE_CHANGED"});
   expect(pages).toBe(2);
 },60_000);

@@ -499,7 +499,7 @@ export async function listProposals(actor: AppActor, workspaceId: string, opts?:
   const memberSet=new Set(permittedMembers.map(member=>member.id)),authorUsers=new Set(permittedMembers.map(member=>member.userId));
   const actionMemberFilter:Prisma.ActionWhereInput={OR:[{assigneeMemberId:{in:[...memberSet]}},{authorUserId:{in:[...authorUsers]}}]};
   const tensionMemberFilter:Prisma.TensionWhereInput={OR:[{assigneeMemberId:{in:[...memberSet]}},{raisedByMemberId:{in:[...memberSet]}},{authorUserId:{in:[...authorUsers]}}]};
-  const page=await readableWorkItemPage({actor,workspaceId,release,kind:"Proposal",take,skip,
+  const page=await readableWorkItemPage<import("@prisma/client").Proposal>({actor,workspaceId,release,kind:"Proposal",take,skip,
     load:after=>prisma.proposal.findMany({where:after?{AND:[where,workItemAfter(after,opts?.sort)]}:where,
       orderBy:workItemOrderBy(opts?.sort),take:100}),
     admit:async candidate=>{
