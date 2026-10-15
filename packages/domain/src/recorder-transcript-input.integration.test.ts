@@ -89,6 +89,36 @@ describe("authenticated recorder native custody and atomic publication", () => {
     expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, roots)).toBe(true);
     await expect(prisma.nativeTranscriptInput.update({ where: { id: input.id }, data: { encryptedPayloadJson: "replacement" } })).rejects.toThrow("Immutable");
   });
+  it.each(["startedAt", "joinAt", "createdAt"] as const)("publishes original recording %s consistently in Meeting, event, audit and proved output", async field => {
+    const f = await fixture();
+    const startedAt = new Date("2026-01-03T12:05:00Z"), joinAt = new Date("2026-01-03T12:00:00Z"), createdAt = new Date("2026-01-02T12:00:00Z");
+    f.recording = await prisma.meetingRecording.update({where: {id: f.recording.id}, data: {
+      startedAt: field === "startedAt" ? startedAt : null, joinAt: field !== "createdAt" ? joinAt : null, createdAt,
+    }});
+    const expected = {startedAt, joinAt, createdAt}[field];
+    await ingest(f);
+    const meeting = await prisma.meeting.findUniqueOrThrow({where: {id: f.meeting.id}});
+    expect(meeting.recordedAt).toEqual(expected);
+    expect(meeting.recordedAt).not.toEqual(f.meeting.recordedAt);
+    expect(await prisma.event.findFirstOrThrow({where: {workspaceId: f.workspace.id, type: "meeting.transcript-uploaded"}}))
+      .toMatchObject({payload: expect.objectContaining({recordedAt: expected.toISOString()})});
+    expect(await prisma.auditLog.findFirstOrThrow({where: {workspaceId: f.workspace.id, action: "meeting.transcript-uploaded"}}))
+      .toMatchObject({meta: expect.objectContaining({recordedAt: expected.toISOString()})});
+    const roots = await captureArtifactInputProof(f.actor, f.workspace.id, [{kind: "Meeting", id: meeting.id}]);
+    expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, roots)).toBe(true);
+  });
+  it.each(["during fetch", "after preparation"])("rejects timestamp replacement %s without refreshing original recording authority", async phase => {
+    const f = await fixture();
+    await expect(withRecorderTranscriptAttempt(f.recording, null, async receipt => {
+      const fetched = provider(f.recording);
+      const prepared = phase === "after preparation" ? await prepareRecorderTranscript(receipt, fetched, {}) : null;
+      await prisma.meetingRecording.update({where: {id: f.recording.id}, data: {startedAt: new Date("2026-01-03T12:05:00Z")}});
+      return publishRecorderTranscript(prepared ?? await prepareRecorderTranscript(receipt, fetched, {}));
+    })).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+    expect(await prisma.meeting.findUniqueOrThrow({where: {id: f.meeting.id}})).toMatchObject({recordedAt: f.meeting.recordedAt, transcript: null});
+    expect(await prisma.recorderTranscriptPublication.count()).toBe(0);
+    expect(await prisma.event.count({where: {type: "meeting.transcript-uploaded"}})).toBe(0);
+  });
   it("a real transaction failure leaves immutable original custody and no transcript, terminal receipt or outbox advancement", async () => {
     const f = await fixture(); probe.failPublication = true;
     await expect(ingest(f)).rejects.toThrow("synthetic publication rollback");

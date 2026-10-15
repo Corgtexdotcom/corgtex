@@ -166,6 +166,9 @@ async function assertOwner(state: AttemptState, db: Db) {
     && claim.generation === attempt.generation && claim.nonce === attempt.nonce && claim.leaseUntil.getTime() > Date.now()
     && recording && recording.workspaceId === attempt.workspaceId && recording.meetingId === attempt.meetingId
     && recording.provider === attempt.provider && recording.externalBotId === attempt.externalBotId
+    && (recording.startedAt?.getTime() ?? null) === (state.recording.startedAt?.getTime() ?? null)
+    && (recording.joinAt?.getTime() ?? null) === (state.recording.joinAt?.getTime() ?? null)
+    && recording.createdAt.getTime() === state.recording.createdAt.getTime()
     && (sameMarkers || exactTerminalMarkers)
     && binding?.provider === attempt.provider && binding.workspaceId === attempt.workspaceId && binding.active && !binding.revokedAt && binding.configurationHash === attempt.configurationHash
     && bindingHash(attempt.workspaceId, attempt.provider, config) === attempt.configurationHash
@@ -290,7 +293,7 @@ type PreparedState = { state: AttemptState; roots: LineageRoot[]; source: Artifa
   controls: SourceCommitControlWriteTarget[]; before: Awaited<ReturnType<typeof prisma.meeting.findFirst>> & {}; transcript: string;
   event: Prisma.EventUncheckedCreateInput; audit: Prisma.AuditLogUncheckedCreateInput;
   progress: ReturnType<typeof prepareMeetingTranscriptProcessingReset>; progressId: string;
-  insightIds: string[]; smokeIds: string[]; now: Date; publication: Prisma.RecorderTranscriptPublicationUncheckedCreateInput };
+  insightIds: string[]; smokeIds: string[]; recordedAt: Date; now: Date; publication: Prisma.RecorderTranscriptPublicationUncheckedCreateInput };
 declare const preparedBrand: unique symbol;
 export type PreparedRecorderTranscript = { readonly [preparedBrand]: true };
 const prepared = new WeakMap<object, PreparedState>();
@@ -358,6 +361,8 @@ export async function prepareRecorderTranscript(receipt: RecorderTranscriptAttem
   const { state, input, incoming } = await captureRecorderOriginal(receipt, artifact);
   invariant(incoming.length > 0, 409, "UNKNOWN_LINEAGE", "Empty recorder custody is not a transcript publication.");
   const { actor, attempt } = state;
+  // The claimed pre-transport recording is the original timestamp observation.
+  const recordedAt = new Date((state.recording.startedAt ?? state.recording.joinAt ?? state.recording.createdAt).getTime());
   const before = await prisma.meeting.findFirst({ where: { id: attempt.meetingId, workspaceId: attempt.workspaceId, archivedAt: null } });
   invariant(before, 409, "SOURCE_CHANGED", "Recorder target meeting is unavailable.");
   const roots = await prisma.$transaction(async tx => {
@@ -381,10 +386,10 @@ export async function prepareRecorderTranscript(receipt: RecorderTranscriptAttem
   const progress = prepareMeetingTranscriptProcessingReset({ workspaceId: attempt.workspaceId, meetingId: before.id, id: progressId, now });
   const event: Prisma.EventUncheckedCreateInput = { id: eventId, workspaceId: attempt.workspaceId, type: "meeting.transcript-uploaded",
     aggregateType: "Meeting", aggregateId: before.id, payload: { meetingId: before.id, title: before.title, source: `recorder:${attempt.provider.toLowerCase()}`,
-      status: "COMPLETED", nativeInputId: state.attempt.nativeInputId, hasTranscript: true, hasIngestionGuidance: Boolean(before.ingestionGuidanceMd), sourceRecordId: null }, availableAt: now, createdAt: now, status: "PENDING", attempts: 0, mcpOrigin: Prisma.JsonNull, supportOriginUserId: null, supportGrantVersion: null, lockedAt: null, lockedBy: null, dispatchedAt: null, error: null };
+      status: "COMPLETED", recordedAt: recordedAt.toISOString(), nativeInputId: state.attempt.nativeInputId, hasTranscript: true, hasIngestionGuidance: Boolean(before.ingestionGuidanceMd), sourceRecordId: null }, availableAt: now, createdAt: now, status: "PENDING", attempts: 0, mcpOrigin: Prisma.JsonNull, supportOriginUserId: null, supportGrantVersion: null, lockedAt: null, lockedBy: null, dispatchedAt: null, error: null };
   const audit: Prisma.AuditLogUncheckedCreateInput = { id: auditId, workspaceId: attempt.workspaceId, actorUserId: null,
     action: "meeting.transcript-uploaded", entityType: "Meeting", entityId: before.id,
-    meta: { title: before.title, recordedAt: before.recordedAt.toISOString(), hasIngestionGuidance: Boolean(before.ingestionGuidanceMd) }, createdAt: now };
+    meta: { title: before.title, recordedAt: recordedAt.toISOString(), hasIngestionGuidance: Boolean(before.ingestionGuidanceMd) }, createdAt: now };
   const publication = { id: randomUUID(), workspaceId: attempt.workspaceId, attemptId: attempt.id, nativeInputId: state.attempt.nativeInputId!,
     recordingId: attempt.recordingId, meetingId: attempt.meetingId, providerEventId: attempt.providerEventId,
     eventId, transcriptManifestId: randomUUID(), meetingManifestId: randomUUID(), completePlanHash: "", createdAt: now };
@@ -405,14 +410,14 @@ export async function prepareRecorderTranscript(receipt: RecorderTranscriptAttem
   ];
   const targets: SourceCommitWriteTarget[] = [{ kind: "Meeting", id: before.id, projectedAuthority: { status: "COMPLETED" } }, { kind: "MeetingTranscript", id: before.id },
     ...insights.map(insight => ({ kind: "MeetingInsight" as const, id: insight.id, projectedAuthority: insight as unknown as Record<string, unknown> }))];
-  publication.completePlanHash = hash({ roots, targets, controls, publication: { ...publication, completePlanHash: undefined }, transcript });
+  publication.completePlanHash = hash({ roots, targets, controls, publication: { ...publication, completePlanHash: undefined }, transcript, recordedAt });
   controls.push(control("RecorderTranscriptPublication", null, publication));
   state.terminal = { kind: "PUBLICATION", id: publication.id, processedAt: now, failureCode: null };
   const source = await prepareArtifactSourceCommit(actor, attempt.workspaceId, roots, { writeTargets: targets, controlWriteTargets: controls,
     ownerBinding: { kind: "RECORDER_TRANSCRIPT", id: attempt.claimId, generation: attempt.generation, attemptId: attempt.id, nonce: attempt.nonce } });
   const token = Object.freeze({}) as PreparedRecorderTranscript;
   prepared.set(token, { state, roots, source, targets, controls, before, transcript, event, audit, progress, progressId,
-    insightIds: insights.map(row=>row.id).sort(), smokeIds: smokes.map(row=>row.id).sort(), now, publication });
+    insightIds: insights.map(row=>row.id).sort(), smokeIds: smokes.map(row=>row.id).sort(), recordedAt, now, publication });
   return token;
 }
 
@@ -434,7 +439,7 @@ export async function publishRecorderTranscript(token: PreparedRecorderTranscrip
     ]);
     invariant(hash(insights.map(row=>row.id).sort()) === hash(value.insightIds) && hash(smokes.map(row=>row.id).sort()) === hash(value.smokeIds),
       409, "SOURCE_CHANGED", "Recorder publication control membership changed.");
-    const meeting = await tx.meeting.update({ where: { id: before.id }, data: { status: "COMPLETED", source: `recorder:${attempt.provider.toLowerCase()}`, transcript: value.transcript, aiProcessedAt: null } });
+    const meeting = await tx.meeting.update({ where: { id: before.id }, data: { status: "COMPLETED", source: `recorder:${attempt.provider.toLowerCase()}`, transcript: value.transcript, recordedAt: value.recordedAt, aiProcessedAt: null } });
     await recordArtifactInputLineage({ tx, actor, workspaceId: attempt.workspaceId, artifact: { kind: "MeetingTranscript", id: before.id }, content: meetingTranscriptInputProjection(meeting),
       manifestId: publication.transcriptManifestId, origin: "DERIVED", inputs: [], inheritedRoots: roots });
     await recordArtifactInputLineage({ tx, actor, workspaceId: attempt.workspaceId, artifact: { kind: "Meeting", id: before.id }, content: meeting,
@@ -476,7 +481,7 @@ export async function publishRecorderTranscript(token: PreparedRecorderTranscrip
           roots, permissionEpochs: manifest.permissionEpochsJson, db: tx }),
         409, "SOURCE_CHANGED", "Recorder complete manifest or its original permissions differ from the prepared plan.");
     }
-    const expected = { ...before, status: "COMPLETED", source: `recorder:${attempt.provider.toLowerCase()}`, transcript: value.transcript, aiProcessedAt: null };
+    const expected = { ...before, status: "COMPLETED", source: `recorder:${attempt.provider.toLowerCase()}`, transcript: value.transcript, recordedAt: value.recordedAt, aiProcessedAt: null };
     invariant(actualMeeting && lineageContentFingerprint("Meeting", actualMeeting) === lineageContentFingerprint("Meeting", expected)
       && meetingManifest?.contentHash === lineageContentFingerprint("Meeting", expected)
       && transcriptManifest?.contentHash === lineageContentFingerprint("MeetingTranscript", meetingTranscriptInputProjection(expected)),
