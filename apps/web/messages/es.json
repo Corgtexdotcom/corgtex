@@ -679,6 +679,8 @@
       "partial": "Turnos seleccionados",
       "full": "Conversación completa",
       "chooseTurns": "Elige los turnos que quieres incluir",
+      "fullUnavailable": "Las transcripciones completas están disponibles para conversaciones de hasta {limit} turnos. Elige turnos seleccionados en su lugar.",
+      "selectionLimit": "Elige hasta {limit} turnos ({count} seleccionados).",
       "includesPrompts": "La transcripción seleccionada incluye tus mensajes y las respuestas del asistente.",
       "confirm": "Confirmar y guardar",
       "saving": "Guardando…",

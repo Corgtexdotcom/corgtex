@@ -388,10 +388,11 @@ export async function listNewspaperDeliverySummaries(actor: AppActor, workspaceI
   const release = new DigestReadRelease(actor, workspaceId);
   const latestReadable = new Map<string, number>();
   let scannedGroups = 0, complete = false;
+  const visitedRunKeys = new Set<string>();
   while (!complete) {
     const candidates = await prisma.newspaperDelivery.groupBy({by: ["runKey"], where: {workspaceId},
       _max: {createdAt: true}, orderBy: [{_max: {createdAt: "desc"}}, {runKey: "desc"}],
-      take: Math.min(50, 5_001 - scannedGroups), skip: scannedGroups});
+      take: 50, skip: scannedGroups});
     for (const candidate of candidates) {
       const threshold = [...latestReadable.values()].sort((a, b) => b - a)[limit - 1];
       // A group's raw latest timestamp is an upper bound on any permitted row.
@@ -399,7 +400,9 @@ export async function listNewspaperDeliverySummaries(actor: AppActor, workspaceI
       if (threshold !== undefined && candidate._max.createdAt && candidate._max.createdAt.getTime() < threshold) {
         complete = true; break;
       }
-      invariant(++scannedGroups <= 5_000, 503, "INPUT_SCAN_LIMIT", "Narrow the requested delivery history to complete its permission scan.");
+      invariant(!visitedRunKeys.has(candidate.runKey), 409, "SOURCE_CHANGED", "Delivery groups changed during pagination.");
+      visitedRunKeys.add(candidate.runKey);
+      scannedGroups++;
       let after: NewspaperDelivery | undefined;
       while (true) {
         const batch: NewspaperDelivery[] = await prisma.newspaperDelivery.findMany({

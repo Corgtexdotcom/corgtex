@@ -368,6 +368,33 @@ describe("newspaper delivery", () => {
     expect(prismaMock.newspaperTrackedLink.findMany).toHaveBeenCalledWith(expect.objectContaining({where: {workspaceId: "ws-1", runKey: {in: ["recent-run"]}}}));
   });
 
+  it("replenishes after 5,001 denied run keys using bounded deterministic pages", async () => {
+    const {listNewspaperDeliverySummaries} = await import("./newspaper-delivery");
+    const rows = Array.from({length: 5_003}, (_, index) => ({id: `delivery-${index}`,
+      runKey: `run-${String(5_003 - index).padStart(5, "0")}`, createdAt: new Date(1_800_000_000_000),
+      status: "SENT", sentAt: null}));
+    prismaMock.newspaperDelivery.groupBy.mockImplementation(async ({take, skip}) =>
+      rows.slice(skip, skip + take).map(row => ({runKey: row.runKey, _max: {createdAt: row.createdAt}})));
+    prismaMock.newspaperDelivery.findMany.mockImplementation(async ({where}) => rows.filter(row => row.runKey === where.runKey));
+    prismaMock.newspaperTrackedLink.findMany.mockResolvedValue([]);
+    readableArtifactIdsMock.mockImplementation(async (_actor, _workspace, _kind, batch) =>
+      new Set(batch.filter(row => rows.slice(5_001).some(visible => visible.id === row.id)).map(row => row.id)));
+    const result = await listNewspaperDeliverySummaries({kind: "user", user: {id: "u-1"}} as any, "ws-1", {take: 1});
+    expect(result).toEqual([expect.objectContaining({runKey: rows[5_001].runKey, recipientCount: 1})]);
+    expect(prismaMock.newspaperDelivery.groupBy.mock.calls).toHaveLength(101);
+    expect(prismaMock.newspaperDelivery.groupBy.mock.calls.every(([query]) => query.take === 50
+      && JSON.stringify(query.orderBy) === JSON.stringify([{_max: {createdAt: "desc"}}, {runKey: "desc"}]))).toBe(true);
+  });
+
+  it("rejects repeated run keys when group offsets shift during discovery", async () => {
+    const {listNewspaperDeliverySummaries} = await import("./newspaper-delivery");
+    const page = Array.from({length: 50}, (_, index) => ({runKey: `run-${index}`, _max: {createdAt: new Date()}}));
+    prismaMock.newspaperDelivery.groupBy.mockResolvedValueOnce(page).mockResolvedValueOnce([page[49]]);
+    prismaMock.newspaperDelivery.findMany.mockResolvedValue([]);
+    await expect(listNewspaperDeliverySummaries({kind: "user", user: {id: "u-1"}} as any, "ws-1", {take: 1}))
+      .rejects.toMatchObject({code: "SOURCE_CHANGED"});
+  });
+
   it("counts all 20 runs with 251 recipients each without a corpus row budget", async () => {
     const {listNewspaperDeliverySummaries} = await import("./newspaper-delivery");
     const rows = Array.from({length: 20}, (_, run) => Array.from({length: 251}, (_, recipient) => ({

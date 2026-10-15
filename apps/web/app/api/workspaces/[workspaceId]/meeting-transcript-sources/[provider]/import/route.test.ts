@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { transcriptArtifactByteBudget } from "@/lib/meeting-transcript-source-artifacts";
 
 const {
   captureManualTranscriptSourceArtifact,
@@ -96,6 +97,34 @@ describe("POST /api/workspaces/[workspaceId]/meeting-transcript-sources/[provide
     }));
     expect(handleRouteError).not.toHaveBeenCalled();
   });
+  it.each([null, false, 123, "primitive", []])("rejects invalid artifact %j before any custody or import", async invalid => {
+    resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
+    normalizeMeetingTranscriptSourceProvider.mockReturnValue("FIREFLIES");
+    handleRouteError.mockImplementation((error: MockAppError) => Response.json({ code: error.code ?? "INTERNAL_ERROR" }, { status: error.status ?? 500 }));
+    const { POST } = await import("./route");
+    const response = await POST(new Request("http://localhost/import", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ artifacts: [{ externalId: "valid-first", text: "Synthetic transcript" }, invalid] }),
+    }) as never, { params: Promise.resolve({ workspaceId: "ws-1", provider: "fireflies" }) });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ code: "INVALID_INPUT" });
+    expect(transcriptArtifactByteBudget).not.toHaveBeenCalled();
+    expect(captureManualTranscriptSourceArtifact).not.toHaveBeenCalled();
+    expect(importMeetingTranscriptSourceArtifacts).not.toHaveBeenCalled();
+  });
+
+  it.each(["null", "{broken json", '{"artifacts":null}', '{"artifacts":{}}'])("rejects malformed request %s with INVALID_INPUT", async body => {
+    resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
+    normalizeMeetingTranscriptSourceProvider.mockReturnValue("FIREFLIES");
+    handleRouteError.mockImplementation((error: MockAppError) => Response.json({ code: error.code ?? "INTERNAL_ERROR" }, { status: error.status ?? 500 }));
+    const { POST } = await import("./route");
+    const response = await POST(new Request("http://localhost/import", { method: "POST", headers: { "content-type": "application/json" }, body }) as never,
+      { params: Promise.resolve({ workspaceId: "ws-1", provider: "fireflies" }) });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ code: "INVALID_INPUT" });
+    expect(captureManualTranscriptSourceArtifact).not.toHaveBeenCalled();
+    expect(importMeetingTranscriptSourceArtifacts).not.toHaveBeenCalled();
+  });
+
   it("rejects repeated raw JSON custody before creating any native receipt or import batch", async () => {
     resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
     normalizeMeetingTranscriptSourceProvider.mockReturnValue("FIREFLIES");

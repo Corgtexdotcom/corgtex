@@ -87,10 +87,24 @@ async function markAudioAssetFailed(params: {
   });
 }
 
+/** Consume a dedicated upload backing store before the first await, detaching
+ * retained aliases. Pooled, sliced, shared or nontransferable bytes need one copy. */
+function takeAudioUploadBytes(source: Buffer): Buffer {
+  if (source.buffer instanceof ArrayBuffer && source.byteOffset === 0 && source.byteLength === source.buffer.byteLength) {
+    try {
+      return Buffer.from(structuredClone(source.buffer, { transfer: [source.buffer] }));
+    } catch {
+      // Node marks pooled/untransferable backing stores as nontransferable.
+    }
+  }
+  return Buffer.from(source);
+}
+
 export async function createMeetingAudioAsset(actor: AppActor, params: {
   workspaceId: string;
   fileName: string;
   mimeType?: string | null;
+  /** Dedicated backing stores are consumed; callers must relinquish these bytes. */
   fileBuffer: Buffer;
   meetingId?: string | null;
   title?: string | null;
@@ -103,7 +117,7 @@ export async function createMeetingAudioAsset(actor: AppActor, params: {
   const originalUserId = actor.user.id;
   invariant(params.fileBuffer.byteLength > 0, 400, "INVALID_INPUT", "Audio file is required.");
   invariant(params.fileBuffer.byteLength <= MAX_AUDIO_FILE_BYTES, 413, "AUDIO_TOO_LARGE", "Audio file is too large.");
-  params = { ...params, fileBuffer: Buffer.from(params.fileBuffer),
+  params = { ...params, fileBuffer: takeAudioUploadBytes(params.fileBuffer),
     recordedAt: params.recordedAt ? new Date(params.recordedAt) : null,
     participantEmails: params.participantEmails ? [...params.participantEmails] : null };
   const originalFileHash = createHash("sha256").update(params.fileBuffer).digest("hex");

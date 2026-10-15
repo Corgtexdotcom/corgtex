@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 import { createHash } from "node:crypto";
+import { markAsUntransferable } from "node:worker_threads";
 
 const { prismaMock, defaultStorageMock, defaultModelGatewayMock, intakeMeetingTranscriptMock,
   captureAudioUploadInputMock, createAudioWorkerMock, captureAudioTranscriptReceiptMock,
@@ -191,6 +192,57 @@ describe("meeting audio assets", () => {
       expect(defaultStorageMock.put).not.toHaveBeenCalled();
       expect(prismaMock.meetingAudioAsset.create).not.toHaveBeenCalled();
     } finally { copy.mockRestore(); }
+  });
+
+  it("transfers owned audio without a full-file copy and detaches every uploader alias before admission", async () => {
+    const { createMeetingAudioAsset } = await import("./meeting-audio-assets");
+    const size = 64 * 1024;
+    const bytes = Buffer.from(new ArrayBuffer(size)).fill(73); // Same dedicated backing as File.arrayBuffer().
+    const alias = new Uint8Array(bytes.buffer);
+    const expectedHash = createHash("sha256").update(bytes).digest("hex");
+    const from = vi.spyOn(Buffer, "from");
+    const clone = vi.spyOn(globalThis, "structuredClone");
+    try {
+      prismaMock.member.findUnique.mockImplementationOnce(async () => {
+        expect(alias.byteLength).toBe(0);
+        alias[0] = 0;
+        return { id: "member-1", workspaceId: "ws-1", userId: "user-1", role: "ADMIN", isActive: true };
+      });
+      const pending = createMeetingAudioAsset(actor, { workspaceId: "ws-1", fileName: "owned.m4a", fileBuffer: bytes });
+      expect.soft(bytes.byteLength).toBe(0);
+      expect.soft(alias.byteLength).toBe(0);
+      await pending;
+      const stored = defaultStorageMock.put.mock.calls[0][1] as Buffer;
+      expect(stored.byteLength).toBe(size);
+      expect(createHash("sha256").update(stored).digest("hex")).toBe(expectedHash);
+      expect(from.mock.calls.filter(args => ArrayBuffer.isView(args[0]))).toHaveLength(0);
+      expect(clone).toHaveBeenCalledOnce();
+      expect(stored.buffer).toBe(clone.mock.results[0].value);
+      expect(prismaMock.meetingAudioAsset.create).toHaveBeenCalledWith({ data: expect.objectContaining({ sizeBytes: size }) });
+      expect(captureAudioUploadInputMock.mock.calls[0][1].fileBuffer).toBe(stored);
+    } finally { from.mockRestore(); clone.mockRestore(); }
+  });
+
+  it.each(["slice", "shared", "untransferable"] as const)("isolates %s backing with exactly one fallback copy", async kind => {
+    const { createMeetingAudioAsset } = await import("./meeting-audio-assets");
+    const backing = kind === "shared" ? new SharedArrayBuffer(64 * 1024) : new ArrayBuffer(64 * 1024);
+    const whole = Buffer.from(backing).fill(73);
+    const bytes = kind === "slice" ? whole.subarray(512, 4096) : whole;
+    if (kind === "untransferable") markAsUntransferable(backing);
+    const size = bytes.byteLength;
+    const expectedHash = createHash("sha256").update(bytes).digest("hex");
+    const from = vi.spyOn(Buffer, "from");
+    try {
+      const pending = createMeetingAudioAsset(actor, { workspaceId: "ws-1", fileName: "fallback.m4a", fileBuffer: bytes });
+      whole.fill(0);
+      await pending;
+      const stored = defaultStorageMock.put.mock.calls[0][1] as Buffer;
+      expect(stored.byteLength).toBe(size);
+      expect(createHash("sha256").update(stored).digest("hex")).toBe(expectedHash);
+      expect(from.mock.calls.filter(args => args[0] === bytes)).toHaveLength(1);
+      expect(whole.byteLength).toBe(64 * 1024);
+      expect(captureAudioUploadInputMock.mock.calls[0][1].fileBuffer).toBe(stored);
+    } finally { from.mockRestore(); }
   });
 
   it("keeps one isolated storage copy across uploader mutation", async () => {

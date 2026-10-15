@@ -110,6 +110,19 @@ function transport(name: string) {
 }
 beforeEach(async () => {
   await resetFixture(); sequence = 0;
+  fixture.prisma.artifactInputLineage.groupBy = vi.fn(async ({where, take}: any) => {
+    const latest = new Map<string, any>();
+    for (const row of fixture.rows.artifactInputLineage) {
+      if (row.workspaceId !== where.workspaceId || !where.artifactType.in.includes(row.artifactType)) continue;
+      if (where.OR && !(row.artifactType > where.OR[0].artifactType.gt
+        || (row.artifactType === where.OR[1].artifactType && row.artifactId > where.OR[1].artifactId.gt))) continue;
+      const key = JSON.stringify([row.artifactType, row.artifactId]);
+      if (!latest.has(key) || row.revision > latest.get(key).revision) latest.set(key, row);
+    }
+    return [...latest.values()].sort((a, b) => a.artifactType.localeCompare(b.artifactType)
+      || a.artifactId.localeCompare(b.artifactId)).slice(0, take)
+      .map(row => ({artifactType: row.artifactType, artifactId: row.artifactId, _max: {revision: row.revision}}));
+  });
   remote.transactionDepth = 0; remote.callsInTransaction = 0; remote.body = { text: "The product team owns onboarding." };
   remote.transport.mockImplementation(async () => {
     if (remote.transactionDepth) { remote.callsInTransaction++; throw new Error("Provider called while interactive transaction is open"); }
@@ -310,6 +323,18 @@ describe("graph bundle generation with actual lineage and worker lease", () => {
     expect(await getReadableGraphSourceVariants(alpha, { workspaceId, scope: { kind: "default", mapKey: "org-structure" } })).toEqual([]);
     expect((await requestGraphSourceVariant(alpha, { ...f.request, target: { kind: "ContextGraphObject", id: "cohort-sibling" } })).status).toBe("READY");
   });
+  it("never revives an older derived sibling behind its latest unknown head", async () => {
+    const f = await setup();
+    const old = fixture.manifest("ContextGraphObject", "cohort-sibling");
+    fixture.rows.artifactInputLineage.push({...old, id: "latest-unknown-sibling", revision: old.revision + 1, origin: "UNKNOWN"});
+    const lease = await claimRequest(f.request);
+    expect((await generateGraphSourceVariant({...lease, generate: async (sources: any[]) => generated(sources)})).phase).toBe("APPLIED");
+    const views = await getReadableGraphSourceVariants(alpha, {workspaceId, scope: f.request.scope});
+    expect(views).toHaveLength(1);
+    expect(views[0].targets.map(target => target.id)).toEqual(["canonical"]);
+    expect(fixture.prisma.artifactInputLineage.groupBy.mock.calls.every(([query]: any[]) => query.take === 100)).toBe(true);
+  });
+
   it("does not model UNKNOWN targets or proven human originals", async () => {
     const f = await setup(); fixture.rows.artifactInputLineage = fixture.rows.artifactInputLineage.filter(row => row.artifactId !== "canonical");
     expect((await requestGraphSourceVariant(alpha, f.request)).status).toBe("UNAVAILABLE");

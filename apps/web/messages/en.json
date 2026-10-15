@@ -679,6 +679,8 @@
       "partial": "Selected turns",
       "full": "Full conversation",
       "chooseTurns": "Choose turns to include",
+      "fullUnavailable": "Full transcripts are available for conversations with up to {limit} turns. Choose selected turns instead.",
+      "selectionLimit": "Choose up to {limit} turns ({count} selected).",
       "includesPrompts": "The selected transcript includes both your prompts and the assistant’s answers.",
       "confirm": "Confirm and save",
       "saving": "Saving…",

@@ -183,26 +183,42 @@ async function discover(tx: Prisma.TransactionClient, actor: UserActor, workspac
   const cohortKey = dependencyKey(discovery.dependencies);
   // Cohorts use historical field-bearing source identities, never old graph semantic text.
   const targets: Target[] = [{ ...params.target, fingerprint, manifestId: current.id, recipeManifestId }];
-  const manifests = await tx.artifactInputLineage.findMany({ where: { workspaceId, artifactType: { in: TARGET_KINDS } },
-    orderBy: { revision: "desc" }, take: LIMIT + 1, select: { id: true, artifactType: true, artifactId: true, contentHash: true, origin: true } });
-  invariant(manifests.length <= LIMIT, 503, "INPUT_SCAN_LIMIT", "Graph cohort dependency collection is too large.");
-  const visited = new Set<string>([JSON.stringify([params.target.kind, params.target.id])]);
-  for (const manifest of manifests) {
-    if (!targetKind(manifest.artifactType)) continue;
-    const key = JSON.stringify([manifest.artifactType, manifest.artifactId]);
-    if (visited.has(key)) continue; visited.add(key);
-    let originalId = manifest.id;
-    if (manifest.origin === "UNKNOWN") {
-      const state = await tx.derivedArtifactRebuildState.findFirst({ where: { workspaceId, targetKind: manifest.artifactType,
-        targetId: manifest.artifactId, targetFingerprint: manifest.contentHash, state: { in: ["REBUILD_REQUIRED", "CANDIDATE_READY"] } }, orderBy: { updatedAt: "desc" } });
-      if (!state) continue; originalId = state.targetManifestId;
-    } else if (manifest.origin !== "DERIVED") continue;
-    const other = { kind: manifest.artifactType, id: manifest.artifactId };
-    const ancestry = await inspectStoredArtifactInputDependencyIdentities(tx, workspaceId, other, originalId);
-    if (!ancestry.complete || dependencyKey(ancestry.dependencies) !== cohortKey) continue;
-    const otherRow = await targetRow(tx, workspaceId, other);
-    if (!otherRow || lineageContentFingerprint(other.kind, otherRow) !== manifest.contentHash) continue;
-    targets.push({ ...other, fingerprint: manifest.contentHash, manifestId: manifest.id, recipeManifestId: originalId });
+  // Page artifact identities, not revisions: unrelated history must not consume
+  // the matching cohort's size budget. Each bounded page selects its latest head.
+  let after: { artifactType: string; artifactId: string } | undefined;
+  while (true) {
+    const identities: Array<{ artifactType: string; artifactId: string; _max: { revision: number | null } }> = await tx.artifactInputLineage.groupBy({
+      by: ["artifactType", "artifactId"],
+      where: { workspaceId, artifactType: { in: TARGET_KINDS }, ...(after ? { OR: [
+        { artifactType: { gt: after.artifactType } },
+        { artifactType: after.artifactType, artifactId: { gt: after.artifactId } },
+      ] } : {}) },
+      _max: { revision: true }, orderBy: [{ artifactType: "asc" }, { artifactId: "asc" }], take: 100,
+    });
+    if (!identities.length) break;
+    const manifests = await tx.artifactInputLineage.findMany({ where: { workspaceId,
+      OR: identities.map(identity => ({ artifactType: identity.artifactType, artifactId: identity.artifactId,
+        revision: identity._max.revision! })) },
+      select: { id: true, artifactType: true, artifactId: true, contentHash: true, origin: true }, take: 100 });
+    invariant(manifests.length === identities.length, 409, "SOURCE_CHANGED", "Graph cohort heads changed during discovery.");
+    for (const manifest of manifests) {
+      if (!targetKind(manifest.artifactType) || (manifest.artifactType === params.target.kind && manifest.artifactId === params.target.id)) continue;
+      let originalId = manifest.id;
+      if (manifest.origin === "UNKNOWN") {
+        const state = await tx.derivedArtifactRebuildState.findFirst({ where: { workspaceId, targetKind: manifest.artifactType,
+          targetId: manifest.artifactId, targetFingerprint: manifest.contentHash, state: { in: ["REBUILD_REQUIRED", "CANDIDATE_READY"] } }, orderBy: { updatedAt: "desc" } });
+        if (!state) continue; originalId = state.targetManifestId;
+      } else if (manifest.origin !== "DERIVED") continue;
+      const other = { kind: manifest.artifactType, id: manifest.artifactId };
+      const ancestry = await inspectStoredArtifactInputDependencyIdentities(tx, workspaceId, other, originalId);
+      if (!ancestry.complete || dependencyKey(ancestry.dependencies) !== cohortKey) continue;
+      const otherRow = await targetRow(tx, workspaceId, other);
+      if (!otherRow || lineageContentFingerprint(other.kind, otherRow) !== manifest.contentHash) continue;
+      invariant(targets.length < LIMIT, 503, "INPUT_SCAN_LIMIT", "Graph cohort dependency collection is too large.");
+      targets.push({ ...other, fingerprint: manifest.contentHash, manifestId: manifest.id, recipeManifestId: originalId });
+    }
+    if (identities.length < 100) break;
+    after = identities.at(-1);
   }
   targets.sort((a, b) => JSON.stringify([a.kind, a.id]).localeCompare(JSON.stringify([b.kind, b.id])));
   const additional = [{ kind: "Workspace" as const, id: workspaceId }, { kind: "Member" as const, id: member.id }, { kind: "User" as const, id: actor.user.id },
