@@ -106,6 +106,26 @@ vi.mock("./source-lineage", () => ({
     new Set(records.map((record) => record.id))),
 }));
 
+// This legacy domain suite controls admission through its existing readable-ID mock.
+// Actual original-head/epoch release behavior is exercised by goals.read.integration.test.ts.
+vi.mock("./digest-lineage", () => {
+  const capture = async ({ actor, workspaceId, kind, records }: { actor: unknown; workspaceId: string; kind: string; records: Array<{ id: string }> }) => {
+    const ids = await readableArtifactIds(actor as never, workspaceId, kind as never, records);
+    const admitted = records.filter(row => ids.has(row.id));
+    return { records: admitted, roots: [], proofs: new Map(admitted.map(row => [row.id, []])) };
+  };
+  return {
+    captureReadableDigestInputs: capture,
+    DigestReadRelease: class {
+      constructor(readonly actor: unknown, readonly workspaceId: string) {}
+      capture(kind: string, records: Array<{ id: string }>) { return capture({ actor: this.actor, workspaceId: this.workspaceId, kind, records }); }
+      observeRead<T>(read: () => Promise<T>) { return read(); }
+      add() {}
+      finish<T>(value: T) { return Promise.resolve(value); }
+    },
+  };
+});
+
 vi.mock("./brain-access", () => ({
   resolveKnowledgeAccessDomains: vi.fn(async () => ["WORKSPACE"]),
 }));
@@ -2456,3 +2476,25 @@ it("filters source-restricted goals before pagination", async () => {
     expect(finishProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ tx: prisma,
       artifact: { kind: "Recognition", id: "recognition-proof" } }));
   });
+
+it("replenishes a bounded ordered page for visible skip/take in a 5001-goal corpus", async () => {
+  vi.clearAllMocks();
+  const rows = Array.from({ length: 5001 }, (_, index) => ({
+    id: `goal-${String(index).padStart(5, "0")}`, sortOrder: 0, createdAt: new Date("2026-01-01"),
+    title: `Goal ${index}`, ownerMember: null, keyResults: [], circle: null,
+  }));
+  const query = vi.mocked(prisma.goal.findMany);
+  query.mockImplementation((async (args?: { where?: { AND?: Array<{ OR?: Array<{ id?: { gt?: string } }> }> }; take?: number }) => {
+    const after = args?.where?.AND?.[1]?.OR?.[2]?.id?.gt;
+    const start = after ? rows.findIndex(row => row.id === after) + 1 : 0;
+    return rows.slice(start, args?.take === undefined ? undefined : start + args.take);
+  }) as typeof prisma.goal.findMany);
+  vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspace, _kind, records) =>
+    new Set(records.filter(row => Number(row.id.slice(-5)) >= 100).map(row => row.id)));
+  const actor = { kind: "user", user: { id: "user-1" } } as Parameters<typeof listGoals>[0];
+  const selected = await listGoals(actor, { workspaceId: "ws-1", skip: 5, take: 20 });
+  expect(selected.map(row => row.id)).toEqual(rows.slice(105, 125).map(row => row.id));
+  expect(query).toHaveBeenCalledTimes(2);
+  expect(query.mock.calls.every(([args]) => args?.take === 100)).toBe(true);
+  expect(query).toHaveBeenLastCalledWith(expect.objectContaining({ orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }, { id: "asc" }] }));
+});

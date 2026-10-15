@@ -10,6 +10,7 @@ import { archiveFilterWhere, type ArchiveFilter } from "./archive";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import { invariant } from "./errors";
 import { advanceHumanArtifactInputLineage, readableArtifactIds, readableBrainSourceIds, type LineageInput, type LineageRoot } from "./source-lineage";
+import { DigestReadRelease, captureReadableDigestInputs } from "./digest-lineage";
 import { privacyFilter } from "./privacy";
 import { resolveKnowledgeAccessDomains } from "./brain-access";
 import {
@@ -988,6 +989,22 @@ export async function deleteGoal(
   });
 }
 
+const goalReaderUserSelect = {
+  id: true, displayName: true, email: true, bio: true, avatarUrl: true,
+  linkedinUrl: true, websiteUrl: true, createdAt: true, updatedAt: true,
+} satisfies Prisma.UserSelect;
+const goalReaderMemberInclude = { user: { select: goalReaderUserSelect } } satisfies Prisma.MemberInclude;
+type GoalReaderMember = Prisma.MemberGetPayload<{ include: typeof goalReaderMemberInclude }>;
+
+async function readableGoalMember(release: DigestReadRelease, member: GoalReaderMember | null) {
+  if (!member) return null;
+  const user = member.user;
+  const canonical = { ...member, user: { id: user.id, displayName: user.displayName, email: user.email } };
+  if (!(await release.capture("Member", [canonical])).records.length) return null;
+  if (!(await release.capture("User", [user])).records.length) return null;
+  return { ...member, user: { displayName: user.displayName, email: user.email } };
+}
+
 export async function getGoal(
   actor: AppActor,
   params: {
@@ -1011,43 +1028,23 @@ export async function getGoal(
       ...(params.includeArchived ? {} : { archivedAt: null }),
     },
     include: {
-      ownerMember: {
-        include: {
-          user: {
-            select: { displayName: true, email: true },
-          },
-        },
-      },
-      childGoals: {
-        where: {
-          ...privacyFilter(actor, membership),
-          archivedAt: null,
-        },
-      },
-      keyResults: {
-        orderBy: { sortOrder: "asc" },
-      },
-      updates: {
-        orderBy: { createdAt: "desc" },
-        include: {
-          authorMember: {
-            include: {
-              user: {
-                select: { displayName: true, email: true },
-              },
-            },
-          },
-        },
-      },
+      ownerMember: { include: goalReaderMemberInclude },
+      childGoals: { where: { ...privacyFilter(actor, membership), archivedAt: null } },
+      keyResults: { orderBy: { sortOrder: "asc" } },
+      updates: { orderBy: { createdAt: "desc" }, include: { authorMember: { include: goalReaderMemberInclude } } },
     },
   });
 
   invariant(goal, 404, "NOT_FOUND", "Goal not found.");
-  invariant((await readableArtifactIds(actor, params.workspaceId, "Goal", [goal])).has(goal.id),
-    404, "NOT_FOUND", "Goal not found.");
-  const children = goal.childGoals ?? [];
-  const visibleChildren = await readableArtifactIds(actor, params.workspaceId, "Goal", children);
-  return { ...goal, childGoals: children.filter((child) => visibleChildren.has(child.id)) };
+  const release = new DigestReadRelease(actor, params.workspaceId);
+  invariant((await release.capture("Goal", [goal])).records.length, 404, "NOT_FOUND", "Goal not found.");
+  const childGoals = (await release.capture("Goal", goal.childGoals ?? [])).records;
+  const keyResults = (await release.capture("KeyResult", goal.keyResults ?? [])).records;
+  const admittedUpdates = (await release.capture("GoalUpdate", goal.updates ?? [])).records;
+  const ownerMember = await readableGoalMember(release, goal.ownerMember);
+  const updates = [];
+  for (const update of admittedUpdates) updates.push({ ...update, authorMember: await readableGoalMember(release, update.authorMember) });
+  return release.finish({ ...goal, ownerMember, childGoals, keyResults, updates });
 }
 
 export async function listGoals(
@@ -1072,7 +1069,7 @@ export async function listGoals(
     resolvedMembership: params._membership,
   });
 
-  const query: any = { workspaceId: params.workspaceId, ...privacyFilter(actor, membership), ...archiveFilterWhere(params.archiveFilter) };
+  const query: Prisma.GoalWhereInput = { workspaceId: params.workspaceId, ...privacyFilter(actor, membership), ...archiveFilterWhere(params.archiveFilter) };
   if (params.level !== undefined) query.level = params.level;
   if (params.cadence !== undefined) query.cadence = params.cadence;
   if (params.circleId !== undefined) query.circleId = params.circleId;
@@ -1080,22 +1077,44 @@ export async function listGoals(
   if (params.status !== undefined) query.status = params.status;
   if (params.parentGoalId !== undefined) query.parentGoalId = params.parentGoalId;
 
-  const goals = await prisma.goal.findMany({
-    where: query,
-    orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }],
-    include: {
-      ownerMember: {
-        include: {
-          user: { select: { displayName: true, email: true } },
-        },
-      },
-      keyResults: true,
-      circle: true,
-    },
+  const skip = params.skip ?? 0;
+  invariant(Number.isSafeInteger(skip) && skip >= 0 && (params.take === undefined || Number.isSafeInteger(params.take) && params.take >= 0),
+    400, "INVALID_INPUT", "Invalid goal pagination.");
+  const release = new DigestReadRelease(actor, params.workspaceId);
+  const include = { ownerMember: { include: goalReaderMemberInclude }, keyResults: true, circle: true } satisfies Prisma.GoalInclude;
+  type Row = Prisma.GoalGetPayload<{ include: typeof include }>;
+  const selected: Row[] = [];
+  let after: Pick<Row, "sortOrder" | "createdAt" | "id"> | undefined;
+  let visible = 0;
+  while (params.take === undefined || selected.length < params.take) {
+    const page: Row[] = await prisma.goal.findMany({
+      where: { AND: [query, ...(after ? [{ OR: [
+        { sortOrder: { gt: after.sortOrder } },
+        { sortOrder: after.sortOrder, createdAt: { lt: after.createdAt } },
+        { sortOrder: after.sortOrder, createdAt: after.createdAt, id: { gt: after.id } },
+      ] }] : [])] },
+      orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }, { id: "asc" }], take: 100, include,
+    });
+    const last = page.at(-1);
+    const next = last ? { sortOrder: last.sortOrder, createdAt: new Date(last.createdAt), id: last.id } : undefined;
+    invariant(!next || next.id !== after?.id, 409, "SOURCE_CHANGED", "Goals changed during pagination.");
+    const captured = await release.observeRead(() => captureReadableDigestInputs({ actor, workspaceId: params.workspaceId, kind: "Goal", records: page }));
+    for (const goal of captured.records) {
+      if (visible++ < skip) continue;
+      selected.push(goal);
+      release.add(captured.proofs.get(goal.id)!);
+      if (params.take !== undefined && selected.length === params.take) break;
+    }
+    if (page.length < 100) break;
+    after = next;
+  }
+  const result = [];
+  for (const goal of selected) result.push({ ...goal,
+    ownerMember: await readableGoalMember(release, goal.ownerMember),
+    circle: goal.circle && (await release.capture("Circle", [goal.circle])).records[0] || null,
+    keyResults: (await release.capture("KeyResult", goal.keyResults ?? [])).records,
   });
-  const visible = await readableArtifactIds(actor, params.workspaceId, "Goal", goals);
-  return goals.filter((goal) => visible.has(goal.id)).slice(params.skip ?? 0,
-    params.take == null ? undefined : (params.skip ?? 0) + params.take);
+  return release.finish(result);
 }
 
 export async function listCompanyDirectionFromBrain(
