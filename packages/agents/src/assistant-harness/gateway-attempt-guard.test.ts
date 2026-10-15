@@ -54,7 +54,7 @@ describe("harness per-attempt authority through synthetic gateway transport", ()
     ("retains error priorities for $primary with $stop during stream usage cleanup", async ({ primary, stop }) => {
       const f = await fixture(true);
       let releaseUsage!: () => void;
-      f.recordModelUsage.mockImplementationOnce(() => new Promise<void>(resolve => { releaseUsage = resolve; }));
+      vi.mocked(f.recordModelUsage).mockImplementationOnce(() => new Promise<void>(resolve => { releaseUsage = resolve; }));
       const content = primary === "LIMIT" ? "x".repeat(5000) : "Denied";
       let providerSignal!: AbortSignal;
       f.fetchMock.mockImplementationOnce(async (_url, init) => {
