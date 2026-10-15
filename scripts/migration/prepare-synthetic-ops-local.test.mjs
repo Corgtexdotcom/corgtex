@@ -157,7 +157,7 @@ describe("secretless PR workflow contract", () => {
     expect(download.run).toContain("verifyBundle(process.env.LOCAL_BUNDLE)");
     expect(download.run).not.toMatch(/Authorization|GH_TOKEN|gh release/u);
     expect(prep.steps.find(s => s.name?.startsWith("Cache pinned")).run)
-      .toBe("docker pull public.ecr.aws/docker/library/postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280");
+      .toBe("docker pull docker.io/library/postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280");
     expect(prep.steps.find(s => s.name?.startsWith("Install locked")).run).toBe("npm ci --ignore-scripts");
   });
   it("always attempts bounded owned cleanup and uploads only the sanitized summary, never treats absence as success", () => {
