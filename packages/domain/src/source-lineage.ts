@@ -2526,9 +2526,14 @@ export async function readableArtifactIds(actor: AppActor, workspaceId: string,
   assertSourceCommitTransactionCompatible(db);
   const membership = await requireWorkspaceMembership({ actor, workspaceId, tx: db });
   const domains = await resolveKnowledgeAccessDomains(actor, workspaceId, db);
-  const manifests = await db.artifactInputLineage.findMany({ where: {
-    workspaceId, artifactType: kind, artifactId: { in: records.map((record) => record.id) },
-  }, orderBy: { revision: "desc" } });
+  // Select the actual latest row in PostgreSQL; histories grow independently of
+  // the canonical candidate page. Never fall back to an older matching proof.
+  const manifests = records.length ? await db.$queryRaw<Prisma.ArtifactInputLineageGetPayload<Record<string, never>>[]>(Prisma.sql`
+    SELECT DISTINCT ON ("artifactId") * FROM "ArtifactInputLineage"
+    WHERE "workspaceId" = ${workspaceId} AND "artifactType" = ${kind}
+      AND "artifactId" IN (${Prisma.join(records.map(record => record.id))})
+    ORDER BY "artifactId", revision DESC
+  `) : [];
   const latest = new Map<string, typeof manifests[number]>();
   for (const manifest of manifests) if (!latest.has(manifest.artifactId)) latest.set(manifest.artifactId, manifest);
   const rootCache = new Map<string, boolean>();

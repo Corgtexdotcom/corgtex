@@ -1,3 +1,4 @@
+import { captureReadableDigestInputs } from "./digest-lineage";
 import { WorkItemReadRelease, readableWorkItemPage, workItemAfter } from "./work-item-readable-page";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { prisma } from "@corgtex/shared";
@@ -7,7 +8,7 @@ import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, isGlobalOperator, requireWorkspaceMembership } from "./auth";
 import { getApprovalPolicy, ensureApprovalFlow, preserveApprovalFlowHistory, withdrawActiveApprovalFlowForSubject } from "./approvals";
 import { AppError, invariant } from "./errors";
-import { advanceHumanArtifactInputLineage, assertArtifactInputWriteFence, captureArtifactInputProof, captureArtifactInputSnapshotProof, captureImmutableArtifactInputProof, invalidateArtifactInputLineage, isArtifactInputProofReadable, lineageContentFingerprint, preserveUnknownArtifactInputSnapshot, currentArtifactInputRoots, readableArtifactIds, recordArtifactInputLineage, type LineageInput, type LineageRoot } from "./source-lineage";
+import { advanceHumanArtifactInputLineage, assertArtifactInputWriteFence, captureArtifactInputProof, captureArtifactInputSnapshotProof, captureImmutableArtifactInputProof, invalidateArtifactInputLineage, isArtifactInputProofReadable, lineageContentFingerprint, preserveUnknownArtifactInputSnapshot, currentArtifactInputRoots, currentArtifactInputRootsBatch, readableArtifactIds, recordArtifactInputLineage, type LineageInput, type LineageRoot } from "./source-lineage";
 import type { ProducerLineageParams } from "./producer-lineage";
 import { getMcpToolInputRoots } from "./mcp-tool-input-context";
 import { parsePermissionEpochProof } from "./source-permission-epochs";
@@ -414,58 +415,62 @@ function workItemOrderBy(sort: WorkItemSort | undefined): Prisma.ProposalOrderBy
 }
 
 async function readableProposalRelations<T extends {
-  circleId: string | null; ownerMemberId: string | null; authorUserId: string; meetingId: string | null;
+  id: string; circleId: string | null; ownerMemberId: string | null; authorUserId: string; meetingId: string | null;
   circle: ({ id: string; workspaceId: string; name: string } & Record<string, unknown>) | null;
   ownerMember: ({ id: string; workspaceId: string; isActive: boolean; user: { id: string; email: string; displayName: string | null } } & Record<string, unknown>) | null;
   author: ({ id: string; email: string; displayName: string | null } & Record<string, unknown>) | null;
-  tensions: Array<{ id: string; title: string; status: unknown }>;
-  actions: Array<{ id: string; title: string; status: unknown }>;
-  adviceProcess: { requests: Array<{ id: string; status: unknown }> } | null;
-}>(actor: AppActor, workspaceId: string, proposal: T, release?: WorkItemReadRelease) {
-  invariant((proposal.tensions?.length ?? 0) <= 5000 && (proposal.actions?.length ?? 0) <= 5000
-    && (proposal.adviceProcess?.requests?.length ?? 0) <= 5000,
-  503, "SOURCE_READ_SCAN_LIMIT", "Proposal relation permission scan exceeds its supported size.");
-  const meeting = proposal.meetingId ? await prisma.meeting.findFirst({ where: { id: proposal.meetingId, workspaceId } }) : null;
-  const [tensions, actions, requests, circles, owners, authors, ownerUsers, meetings] = await Promise.all([
-    readableArtifactIds(actor, workspaceId, "Tension", (proposal.tensions ?? []) as Array<{ id: string; [key: string]: unknown }>),
-    readableArtifactIds(actor, workspaceId, "Action", (proposal.actions ?? []) as Array<{ id: string; [key: string]: unknown }>),
-    readableArtifactIds(actor, workspaceId, "AdviceRequest", (proposal.adviceProcess?.requests ?? []) as Array<{ id: string; [key: string]: unknown }>),
-    readableArtifactIds(actor, workspaceId, "Circle", proposal.circle && proposal.circle.workspaceId === workspaceId ? [proposal.circle] : []),
-    readableArtifactIds(actor, workspaceId, "Member", proposal.ownerMember && proposal.ownerMember.workspaceId === workspaceId && proposal.ownerMember.isActive ? [proposal.ownerMember] : []),
-    readableArtifactIds(actor, workspaceId, "User", proposal.author ? [proposal.author] : []),
-    readableArtifactIds(actor, workspaceId, "User", proposal.ownerMember?.user ? [proposal.ownerMember.user] : []),
-    readableArtifactIds(actor, workspaceId, "Meeting", meeting ? [meeting] : []),
-  ]);
-  if (release) {
-    await release.observe("Tension",(proposal.tensions??[]).filter(row=>tensions.has(row.id)));
-    await release.observe("Action",(proposal.actions??[]).filter(row=>actions.has(row.id)));
-    await release.observe("AdviceRequest",(proposal.adviceProcess?.requests??[]).filter(row=>requests.has(row.id)));
-    if(proposal.circle && circles.has(proposal.circle.id)) await release.observe("Circle",[proposal.circle]);
-    if(proposal.author && authors.has(proposal.author.id)) await release.observe("User",[proposal.author]);
-    if(proposal.ownerMember && owners.has(proposal.ownerMember.id) && ownerUsers.has(proposal.ownerMember.user.id)) {
-      const member=proposal.ownerMember;
-      await release.observe("Member",[{...member,user:{id:member.user.id,email:member.user.email,displayName:member.user.displayName}}]);
-      await release.observe("User",[member.user]);
-    }
-    if(meeting && meetings.has(meeting.id)) await release.observe("Meeting",[meeting]);
+}>(actor: AppActor, workspaceId: string, proposal: T, membership: MembershipSummary | null, release: WorkItemReadRelease) {
+  async function capture<R extends {id: string}>(kind: import("./source-lineage").LineageKind, rows: R[]) {
+    const captured = await release.observeRead(() => captureReadableDigestInputs({actor, workspaceId, kind, records: rows}));
+    release.add(captured.roots);
+    return captured.records;
   }
-  const circle = proposal.circle && circles.has(proposal.circle.id) ? { id: proposal.circle.id, name: proposal.circle.name } : null;
-  const ownerMember = proposal.ownerMember && owners.has(proposal.ownerMember.id) && ownerUsers.has(proposal.ownerMember.user.id)
-    ? { id: proposal.ownerMember.id, user: { id: proposal.ownerMember.user.id,
-      email: proposal.ownerMember.user.email, displayName: proposal.ownerMember.user.displayName } } : null;
-  const author = proposal.author && authors.has(proposal.author.id)
-    ? { id: proposal.author.id, email: proposal.author.email, displayName: proposal.author.displayName }
-    : { id: "", email: "", displayName: null };
-  return { ...proposal,
-    circleId: circle ? proposal.circleId : null,
-    ownerMemberId: ownerMember ? proposal.ownerMemberId : null,
-    authorUserId: author.id,
-    meetingId: meeting && meetings.has(meeting.id) ? proposal.meetingId : null,
-    circle, ownerMember, author,
-    tensions: (proposal.tensions ?? []).filter((row) => tensions.has(row.id)).map((row) => ({ id: row.id, title: row.title, status: row.status })),
-    actions: (proposal.actions ?? []).filter((row) => actions.has(row.id)).map((row) => ({ id: row.id, title: row.title, status: row.status })),
-    adviceProcess: { requests: (proposal.adviceProcess?.requests ?? []).filter((row) => requests.has(row.id)).map((row) => ({ status: row.status })) },
-  };
+  async function relations<R extends {id: string}, S>(kind: "Action" | "Tension" | "AdviceRequest",
+    load: (after: string | undefined) => Promise<R[]>, project: (row: R) => S) {
+    const result: S[] = [];
+    let after: string | undefined;
+    for (;;) {
+      const rows = await load(after);
+      invariant(rows.length <= 100 && rows.every(row => !after || row.id > after),
+        409, "SOURCE_CHANGED", "Proposal relations changed during pagination.");
+      const next = rows.at(-1)?.id;
+      // Negative discovery only: every surviving canonical row still passes the
+      // full evaluator and retains its original proof through the final release.
+      const heads = await currentArtifactInputRootsBatch(prisma, workspaceId, kind, rows);
+      const candidates = rows.filter(row => heads.get(row.id) != null);
+      const admitted = kind === "AdviceRequest" ? await capture(kind, candidates) : await release.admit(kind, candidates);
+      result.push(...admitted.map(project));
+      if (rows.length < 100) break;
+      after = next;
+    }
+    return result;
+  }
+  const tensions = await relations("Tension", after => prisma.tension.findMany({where: {
+    workspaceId, proposalId: proposal.id, ...privacyFilter(actor, membership), ...(after ? {id: {gt: after}} : {}),
+  }, orderBy: {id: "asc"}, take: 100}), row => ({id: row.id, title: row.title, status: row.status}));
+  const actions = await relations("Action", after => prisma.action.findMany({where: {
+    workspaceId, proposalId: proposal.id, ...privacyFilter(actor, membership), ...(after ? {id: {gt: after}} : {}),
+  }, orderBy: {id: "asc"}, take: 100}), row => ({id: row.id, title: row.title, status: row.status}));
+  const requests = await relations("AdviceRequest", after => prisma.adviceRequest.findMany({where: {
+    workspaceId, process: {workspaceId, proposalId: proposal.id}, ...(after ? {id: {gt: after}} : {}),
+  }, orderBy: {id: "asc"}, take: 100}), row => ({status: row.status}));
+  const meeting = proposal.meetingId ? await prisma.meeting.findFirst({where: {id: proposal.meetingId, workspaceId}}) : null;
+  const [circles, owners, authors, ownerUsers, meetings] = await Promise.all([
+    capture("Circle", proposal.circle?.workspaceId === workspaceId ? [proposal.circle] : []),
+    capture("Member", proposal.ownerMember?.workspaceId === workspaceId && proposal.ownerMember.isActive
+      ? [{...proposal.ownerMember, user: {id: proposal.ownerMember.user.id, email: proposal.ownerMember.user.email, displayName: proposal.ownerMember.user.displayName}}] : []),
+    capture("User", proposal.author ? [proposal.author] : []),
+    capture("User", proposal.ownerMember?.user ? [proposal.ownerMember.user] : []),
+    capture("Meeting", meeting ? [meeting] : []),
+  ]);
+  const circle = circles[0] ? {id: circles[0].id, name: circles[0].name} : null;
+  const ownerMember = owners[0] && ownerUsers[0] ? {id: owners[0].id, user: {
+    id: ownerUsers[0].id, email: ownerUsers[0].email, displayName: ownerUsers[0].displayName}} : null;
+  const author = authors[0] ? {id: authors[0].id, email: authors[0].email, displayName: authors[0].displayName}
+    : {id: "", email: "", displayName: null};
+  return {...proposal, circleId: circle ? proposal.circleId : null, ownerMemberId: ownerMember ? proposal.ownerMemberId : null,
+    authorUserId: author.id, meetingId: meetings.length ? proposal.meetingId : null, circle, ownerMember, author,
+    tensions, actions, adviceProcess: {requests}};
 }
 
 export async function listProposals(actor: AppActor, workspaceId: string, opts?: ListProposalsOptions) {
@@ -550,18 +555,11 @@ export async function listProposals(actor: AppActor, workspaceId: string, opts?:
           },
         },
         circle: true,
-        tensions: { where: privacyFilter(actor, membership), take: 5001 },
-        actions: { where: privacyFilter(actor, membership), take: 5001 },
-        adviceProcess: {
-          include: {
-            requests: { take: 5001 },
-          },
-        },
       },
   }):[];
   const byId=new Map(hydrated.map(row=>[row.id,row]));
   const selected=page.items.flatMap(row=>{const loaded=byId.get(row.id);return loaded?[{...loaded,...row}]:[];});
-  const items=await Promise.all(selected.map(proposal=>readableProposalRelations(actor,workspaceId,proposal,release)));
+  const items=await Promise.all(selected.map(proposal=>readableProposalRelations(actor,workspaceId,proposal,membership,release)));
   const finalIds=await readableArtifactIds(actor,workspaceId,"Proposal",selected);
   const admitted=items.filter(row=>finalIds.has(row.id));
   return release.finish({items:admitted,total:page.total-(page.items.length-admitted.length),take,skip});
@@ -590,19 +588,12 @@ export async function getProposal(actor: AppActor, params: {
         },
       },
       circle: true,
-      tensions: { where: privacyFilter(actor, membership) },
-      actions: { where: privacyFilter(actor, membership) },
-      adviceProcess: {
-        include: {
-          requests: true,
-        },
-      },
     },
   });
   invariant(proposal, 404, "NOT_FOUND", "Proposal not found.");
-  invariant((await readableArtifactIds(actor, params.workspaceId, "Proposal", [proposal])).has(proposal.id),
-    404, "NOT_FOUND", "Proposal not found.");
-  return readableProposalRelations(actor, params.workspaceId, proposal);
+  const release = new WorkItemReadRelease(actor, params.workspaceId);
+  invariant((await release.admit("Proposal", [proposal])).length === 1, 404, "NOT_FOUND", "Proposal not found.");
+  return release.finish(await readableProposalRelations(actor, params.workspaceId, proposal, membership, release));
 }
 
 type SourceTensionForLinking = NonNullable<Awaited<ReturnType<typeof loadVisibleSourceTension>>>;
