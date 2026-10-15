@@ -7,7 +7,7 @@ import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { registerSqlNativeDriver } from "../../domain/src/sql-native-driver";
 import { claimSqlIngestionAttempt, failSqlIngestionAttempt, sqlIngestionConfigurationFingerprint } from "../../domain/src/sql-ingestion-attempt";
 import { captureSqlIngestionAttempt, loadSqlNativeRunInput } from "../../domain/src/sql-native-input";
-import type { AuthenticatedSqlRunReceipt, SqlNativeDefinition, SqlNativeRow, SqlPublicationIdentity } from "../../domain/src/sql-ingestion-contract";
+import type { AuthenticatedSqlRunReceipt, SqlNativeDefinition, SqlNativePage, SqlNativeRow, SqlPublicationIdentity } from "../../domain/src/sql-ingestion-contract";
 import { prepareSqlKnowledgeAttempt, publishPreparedSqlKnowledgeAttempt } from "./sql-publication";
 import { countReadableKnowledgeChunks } from "./counts";
 import { captureSqlCountPageProof } from "./sql-count-proof";
@@ -26,7 +26,7 @@ const models = vi.hoisted(() => ({embed: vi.fn()}));
 vi.mock("@corgtex/models", async original => ({...await original<typeof import("@corgtex/models")>(),
   defaultModelGateway: {embed: models.embed, rerank: async ({documents, topK}: {documents: string[]; topK: number}) => ({
     results: documents.slice(0, topK).map((_, index) => ({index, score: 1}))})}}));
-const transport = {rows: [] as SqlNativeRow[], fetches: 0, checks: 0, closes: 0, failFinal: false, access: true, accessChecks: 0,
+const transport = {rows: [] as SqlNativeRow[], pages: undefined as SqlNativePage[] | undefined, fetches: 0, checks: 0, closes: 0, failFinal: false, access: true, accessChecks: 0,
   unproved: false, accessInsideCommit: 0, afterScan: undefined as (() => Promise<void>) | undefined,
   afterAccess: undefined as (() => Promise<void>) | undefined, nextCursor: "synthetic-verified-native-tail" as string | null};
 const definition: SqlNativeDefinition = {schema: "public", name: "rows", relationOid: 123,
@@ -48,7 +48,7 @@ const row = (id: number, description = "Synthetic independently fetched source r
 registerSqlNativeDriver("postgres", async ({assertCurrentSource}) => {
   await assertCurrentSource(); transport.fetches++;
   const rows = deserialize(serialize(transport.rows)) as SqlNativeRow[];
-  const pages = Array.from({length: Math.max(1, Math.ceil(rows.length / 1000))}, (_, page) => ({table: "public.rows", definition: rows[0]?.definition ?? definition,
+  const pages = transport.pages ? deserialize(serialize(transport.pages)) as SqlNativePage[] : Array.from({length: Math.max(1, Math.ceil(rows.length / 1000))}, (_, page) => ({table: "public.rows", definition: rows[0]?.definition ?? definition,
     previous: page ? rows[page * 1000 - 1].values : null, rowCount: rows.slice(page * 1000, (page + 1) * 1000).length,
     tail: rows.slice(page * 1000, (page + 1) * 1000).at(-1)?.values ?? null}));
   let closed = false;
@@ -104,7 +104,7 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
     transport.closes = 0; transport.failFinal = false;
     transport.access = true; transport.accessChecks = 0;
     transport.unproved = false; transport.accessInsideCommit = 0;
-    transport.afterScan = undefined; transport.afterAccess = undefined;
+    transport.afterScan = undefined; transport.afterAccess = undefined; transport.pages = undefined;
     transport.nextCursor = "synthetic-verified-native-tail";
     models.embed.mockReset().mockImplementation(async ({input}) => ({embeddings: (typeof input === "string" ? [input] : input)
       .map(() => [1, 0]), usage: {model: "synthetic-sql-embedding"}}));
@@ -125,6 +125,55 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
     const roots = await captureArtifactInputProof(f.aliceActor, f.workspace.id, [{kind: "KnowledgeChunk", id: chunk.id}]);
     expect(await isArtifactInputProofPubliclyShareable(f.aliceActor, f.workspace.id, roots)).toBe(false);
     expect((await searchIndexedKnowledge({actor: f.bobActor, workspaceId: f.workspace.id, query: "independently fetched", sourceTypes: ["EXTERNAL_DATABASE"]})).length).toBeGreaterThan(0);
+  });
+  it("distinct native table/key tuples retain independent chunks and original read proofs across replacement and an empty incremental run", async () => {
+    const textRow = (tableName: string, primaryKey: string, description: string): SqlNativeRow => {
+      const native = {id: primaryKey, updated_at: "2026-10-13T00:00:00.000Z", description};
+      const textKey = {...definition.key[0], type: "text", typeOid: 25, collationOid: 100};
+      return {row: native, table: `public.${tableName}`, primaryKey, values: [native.updated_at, primaryKey],
+        definition: {...definition, name: tableName, relationOid: tableName === "a:b" ? 124 : 125,
+          key: [textKey], columns: [{...definition.columns[0], ...textKey}, ...definition.columns.slice(1)]},
+        content: Object.entries(native).map(([key, value]) => `${key}: ${value}`).join("\n")};
+    };
+    const setRows = (rows: SqlNativeRow[]) => {
+      transport.rows = rows;
+      transport.pages = rows.map(native => ({table: native.table, definition: native.definition,
+        previous: null, rowCount: 1, tail: native.values}));
+    };
+    const first = textRow("a:b", "c", "Synthetic first tuple"), second = textRow("a", "b:c", "Synthetic second tuple");
+    const f = await fixture();
+    await prisma.externalDataSource.update({where: {id: f.source.id}, data: {selectedTables: [first.table, second.table]}});
+    setRows([first, second]);
+    const initial = await f.prepare();
+    expect(await publishPreparedSqlKnowledgeAttempt({...initial, commit: f.commit})).toMatchObject({rowsProcessed: 2, chunksCreated: 2});
+    const chunks = await prisma.knowledgeChunk.findMany({where: {workspaceId: f.workspace.id}});
+    const originalFirst = chunks.find(chunk => (chunk.metadata as Prisma.JsonObject).table === first.table)!;
+    const retained = chunks.find(chunk => (chunk.metadata as Prisma.JsonObject).table === second.table)!;
+    expect.soft(originalFirst.sourceId).not.toBe(retained.sourceId);
+    const manifest = await prisma.artifactInputLineage.findMany({where: {artifactId: retained.id}});
+    const proof = (await captureSqlKnowledgeInputProof(f.aliceActor, f.workspace.id, [retained]))!;
+    expect(proof).toBeTruthy();
+    expect(await isSqlKnowledgeInputProofReadable(f.aliceActor, f.workspace.id, proof)).toBe(true);
+    setRows([textRow("a:b", "c", "Synthetic updated first tuple")]);
+    transport.nextCursor = "synthetic-updated-native-tail";
+    const update = await f.prepare();
+    expect(await publishPreparedSqlKnowledgeAttempt({...update, commit: f.commit})).toMatchObject({rowsProcessed: 1, chunksCreated: 1});
+    expect.soft(await prisma.knowledgeChunk.count({where: {workspaceId: f.workspace.id}})).toBe(2);
+    expect.soft(await prisma.knowledgeChunk.findUnique({where: {id: retained.id}})).toEqual(retained);
+    expect(await prisma.knowledgeChunk.findUnique({where: {id: originalFirst.id}})).toBeNull();
+    const replacement = await prisma.knowledgeChunk.findFirstOrThrow({where: {sourceId: originalFirst.sourceId}});
+    expect(replacement.content).toContain("Synthetic updated first tuple");
+    expect(await prisma.artifactInputLineage.findMany({where: {artifactId: retained.id}})).toEqual(manifest);
+    expect.soft(await isSqlKnowledgeInputProofReadable(f.aliceActor, f.workspace.id, proof)).toBe(true);
+    expect.soft(await fetchReadableKnowledgeChunk(f.bobActor, f.workspace.id, retained.id)).toMatchObject({id: retained.id});
+    transport.rows = [];
+    transport.pages = [{table: first.table, definition: first.definition, previous: null, rowCount: 0, tail: null}];
+    const empty = await f.prepare();
+    expect(await publishPreparedSqlKnowledgeAttempt({...empty, commit: f.commit})).toMatchObject({rowsProcessed: 0, chunksCreated: 0,
+      nextCursor: "synthetic-updated-native-tail"});
+    expect(await countReadableKnowledgeChunks(f.aliceActor, f.workspace.id, ["EXTERNAL_DATABASE"])).toBe(2);
+    expect(await isSqlKnowledgeInputProofReadable(f.aliceActor, f.workspace.id, proof)).toBe(true);
+    expect(await prisma.knowledgeChunk.findUnique({where: {id: replacement.id}})).toEqual(replacement);
   });
   it("issuer rejects ownership loss across the native await and disposes before mint/model admission", async () => {
     const f = await fixture(), attempt = await f.claim();
@@ -606,8 +655,8 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
   it("one unproved child does not hide a separately published readable child in counts or search", async () => {
     transport.rows = [row(1, "Synthetic withheld first input"), row(2, "Synthetic independently readable second input")];
     const f = await fixture(), p = await f.prepare(); await publishPreparedSqlKnowledgeAttempt({...p, commit: f.commit});
-    const first = await prisma.knowledgeChunk.findFirstOrThrow({where: {sourceId: {endsWith: ":1"}}});
-    const second = await prisma.knowledgeChunk.findFirstOrThrow({where: {sourceId: {endsWith: ":2"}}});
+    const first = await prisma.knowledgeChunk.findFirstOrThrow({where: {workspaceId: f.workspace.id, metadata: {path: ["nativeRowIndex"], equals: 0}}});
+    const second = await prisma.knowledgeChunk.findFirstOrThrow({where: {workspaceId: f.workspace.id, metadata: {path: ["nativeRowIndex"], equals: 1}}});
     await prisma.artifactInputLineage.updateMany({where: {workspaceId: f.workspace.id, artifactId: first.id}, data: {rootsJson: []}});
     expect(await fetchReadableKnowledgeChunk(f.bobActor, f.workspace.id, first.id)).toBeNull();
     expect(await fetchReadableKnowledgeChunk(f.bobActor, f.workspace.id, second.id)).not.toBeNull();

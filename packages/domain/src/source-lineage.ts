@@ -17,7 +17,7 @@ import { prisma, mcpCredentialVersion, mcpScopesHash, type AppActor } from "@cor
 import { requireWorkspaceMembership } from "./auth";
 import { resolveKnowledgeAccessDomains } from "./brain-access";
 import { brainSourceContentFingerprint } from "./brain-derivation";
-import { invariant } from "./errors";
+import { AppError, invariant } from "./errors";
 import { internalSourcePermission } from "./internal-source-principal";
 import { getMcpToolInputRoots } from "./mcp-tool-input-context";
 import { isMcpToolInputEncryptedPayload } from "./mcp-tool-input-cipher";
@@ -443,6 +443,8 @@ type LocalDeliveryBatch = LocalDeliveryRows & {db: LineageClient; workspaceId: s
 const localDeliveryReadBatch = new AsyncLocalStorage<LocalDeliveryBatch>();
 const deliveryInputKey = (input: LineageInput) => JSON.stringify([input.kind, input.id]);
 const LOCAL_CRM_KINDS = new Set<LineageKind>(["CrmAccount", "CrmContact", "CrmActivity", "CrmDeal"]);
+const LOCAL_APPROVAL_KINDS = new Set<LineageKind>(["ApprovalFlow", "ApprovalDecision", "Objection", "Proposal", "Member"]);
+const APPROVAL_READ_KINDS = new Set<LineageKind>(["ApprovalFlow", "ApprovalDecision", "Objection"]);
 const LOCAL_DELIVERY_KINDS = new Set<LineageKind>(["NewspaperDelivery", "Workspace", "Member", "Action", "Proposal", "Tension"]);
 function localDeliveryBatch(db: LineageClient, workspaceId: string, input: LineageInput) {
   const batch = localDeliveryReadBatch.getStore();
@@ -459,6 +461,9 @@ async function loadLocalDeliveryRows(db: LineageClient, workspaceId: string, inp
     const found = kind === "NewspaperDelivery" ? await db.newspaperDelivery.findMany({where})
       : kind === "Workspace" ? await db.workspace.findMany({where: {id: {in: ids.filter(id => id === workspaceId)}}})
       : kind === "Member" ? await db.member.findMany({where, include: {user: {select: {id: true, email: true, displayName: true}}}})
+      : kind === "ApprovalFlow" ? await db.approvalFlow.findMany({where})
+      : kind === "ApprovalDecision" ? await db.approvalDecision.findMany({where: {id: {in: ids}, flow: {workspaceId}}})
+      : kind === "Objection" ? await db.objection.findMany({where: {id: {in: ids}, flow: {workspaceId}}})
       : kind === "Action" ? await db.action.findMany({where})
       : kind === "Proposal" ? await db.proposal.findMany({where})
       : kind === "CrmAccount" ? await db.crmAccount.findMany({where})
@@ -478,7 +483,8 @@ async function loadLocalDeliveryRows(db: LineageClient, workspaceId: string, inp
  * Unsupported kinds (especially snapshots/native inputs) keep the ordinary path. */
 async function prepareLocalDeliveryBatch(db: LineageClient, workspaceId: string, inputs: readonly LineageInput[]) {
   const crm = inputs.every(input => LOCAL_CRM_KINDS.has(input.kind));
-  if (!inputs.length || inputs.length > 100 || !crm && !inputs.some(input => input.kind === "NewspaperDelivery")
+  const approvals = inputs.some(input => APPROVAL_READ_KINDS.has(input.kind));
+  if (!inputs.length || inputs.length > 100 || !crm && !approvals && !inputs.some(input => input.kind === "NewspaperDelivery")
     || hasActiveSourceCommitLockPlan(db) || localDeliveryReadBatch.getStore() || workItemReadBatch.getStore()) return null;
   const loaded: LocalDeliveryRows = {rows:new Map(),heads:new Map()};
   let pending = [...inputs];
@@ -492,7 +498,7 @@ async function prepareLocalDeliveryBatch(db: LineageClient, workspaceId: string,
     pending = [...new Map(pending.filter(input => !loaded.rows.has(deliveryInputKey(input)))
       .map(input => [deliveryInputKey(input),input])).values()];
     if (!pending.length) break;
-    if (loaded.rows.size + pending.length > 256 || pending.some(input => !(crm ? LOCAL_CRM_KINDS : LOCAL_DELIVERY_KINDS).has(input.kind))) return null;
+    if (loaded.rows.size + pending.length > 256 || pending.some(input => !(crm ? LOCAL_CRM_KINDS : approvals ? LOCAL_APPROVAL_KINDS : LOCAL_DELIVERY_KINDS).has(input.kind))) return null;
     const page = await loadLocalDeliveryRows(db,workspaceId,pending);
     if (page.rows.size !== pending.length) return null;
     const next: LineageInput[] = [];
@@ -500,7 +506,7 @@ async function prepareLocalDeliveryBatch(db: LineageClient, workspaceId: string,
       const key = deliveryInputKey(input), row = page.rows.get(key)!, head = page.heads.get(key);
       const fingerprint = lineageContentFingerprint(input.kind,row);
       const parents = artifactPermissionParents(input.kind,row);
-      if (!crm && parents.length || revisions.has(key) && revisions.get(key) !== fingerprint
+      if (!crm && !approvals && parents.length || revisions.has(key) && revisions.get(key) !== fingerprint
         || head && head.contentHash !== fingerprint) return null;
       if (crm) {
         if (!head || head.origin !== "HUMAN_ORIGINAL" || !Array.isArray(head.inputsJson) || head.inputsJson.length
@@ -509,9 +515,11 @@ async function prepareLocalDeliveryBatch(db: LineageClient, workspaceId: string,
       } else if (needsManifest(input.kind,row) || head) {
         const roots = head && parseRoots(head.rootsJson);
         if (!head || !roots || !["HUMAN_ORIGINAL","DERIVED"].includes(head.origin)
-          || roots.some(root => !root.permissionEpochs)) return null;
+          || roots.some(root => !root.permissionEpochs) && (!approvals || head.epochProofVersion !== 1
+            || !parsePermissionEpochProof(head.permissionEpochsJson))) return null;
         next.push(...roots);
       }
+      if (approvals) next.push(...parents);
       loaded.rows.set(key,row);
       if (head) loaded.heads.set(key,head);
     }
@@ -528,9 +536,18 @@ async function readLocalDeliveryBatch(db: LineageClient, workspaceId: string, lo
   roots: readonly LineageRoot[], read: () => Promise<boolean>) {
   const stamp = localDeliveryStamp(loaded);
   const crm = [...loaded.rows.keys()].every(key => LOCAL_CRM_KINDS.has(JSON.parse(key)[0]));
+  const approvals = [...loaded.rows.keys()].some(key => APPROVAL_READ_KINDS.has(JSON.parse(key)[0]));
   const proofs = [...roots.flatMap(root => root.permissionEpochs ? [root.permissionEpochs] : []),
-    ...(crm ? [] : [...loaded.heads.values()].flatMap(head => [parsePermissionEpochProof(head.permissionEpochsJson),
+    ...(crm ? [] : [...loaded.heads.values()].flatMap(head => [approvals && head.origin === "HUMAN_ORIGINAL"
+      ? undefined : parsePermissionEpochProof(head.permissionEpochsJson),
       ...(parseRoots(head.rootsJson) ?? []).map(root => root.permissionEpochs)].filter((proof): proof is PermissionEpochProof => Boolean(proof))))];
+  // Original human content does not inherit its publisher's historical epochs.
+  // A page containing conflicting derived receipts needs ordinary per-row
+  // admission; a batch cache must not turn one denied sibling into a page error.
+  if (approvals) try { mergePermissionEpochProofs(...proofs); } catch (error) {
+    if (error instanceof AppError && ["SOURCE_CHANGED", "UNKNOWN_LINEAGE", "PERMISSION_PROOF_LIMIT"].includes(error.code)) return false;
+    throw error;
+  }
   const batch: LocalDeliveryBatch = {...loaded,db,workspaceId,active:true};
   const valid = await localDeliveryReadBatch.run(batch, () => withArtifactPermissionMetadataRead(db,workspaceId,loaded.rows,async () => {
     try { return await withArtifactPermissionBatchRead(db,workspaceId,proofs,read); }
@@ -1964,8 +1981,16 @@ export async function withArtifactCountReleaseSnapshot<T>(actor: AppActor, works
   // Keep only compact original receipts across the aggregate. Bound each proof
   // traversal's hydration/memos, not the workspace's total number of inputs.
   const assertPages = async (db: LineageClient, message: string) => {
-    for (let offset = 0; offset < roots.length; offset += 100) {
-      const page = roots.slice(offset, offset + 100);
+    const approvals = roots.some(root => APPROVAL_READ_KINDS.has(root.kind));
+    for (let offset = 0; offset < roots.length;) {
+      // A child page also loads its flow and proposal. Keep that complete
+      // closure within the existing 256-row local observation budget.
+      const kind = roots[offset].kind;
+      const limit = approvals && ["ApprovalDecision", "Objection"].includes(kind) ? 75 : 100;
+      let end = Math.min(offset + limit, roots.length);
+      if (approvals) for (let index = offset + 1; index < end; index++) if (roots[index].kind !== kind) { end = index; break; }
+      const page = roots.slice(offset, end);
+      offset = end;
       const loaded = await prepareLocalDeliveryBatch(db,workspaceId,page);
       const read = () => isArtifactInputProofReadable(actor,workspaceId,page,db);
       invariant(await (loaded ? readLocalDeliveryBatch(db,workspaceId,loaded,page,read)
@@ -2879,8 +2904,22 @@ export async function isArtifactArchiveMetadataProofReadable(actor: AppActor, wo
 
 /** Returns only ids whose current content and every permission-bearing input are provably safe. */
 export async function readableArtifactIds(actor: AppActor, workspaceId: string,
-  kind: LineageKind, records: Array<{ id: string; [key: string]: unknown }>, db: LineageClient = prisma) {
+  kind: LineageKind, records: Array<{ id: string; [key: string]: unknown }>, db: LineageClient = prisma): Promise<Set<string>> {
   assertSourceCommitTransactionCompatible(db);
+  if (APPROVAL_READ_KINDS.has(kind) && !artifactReadCapture.getStore() && !localDeliveryReadBatch.getStore()) {
+    const roots = records.map(record => ({kind, id: record.id, fingerprint: lineageContentFingerprint(kind, record)}));
+    const loaded = await prepareLocalDeliveryBatch(db, workspaceId, roots);
+    if (loaded) {
+      let ids = new Set<string>();
+      const valid = await readLocalDeliveryBatch(db, workspaceId, loaded, roots, async () => {
+        ids = await readableArtifactIds(actor, workspaceId, kind, records, db);
+        return true;
+      });
+      if (valid) return ids;
+      // A denied saved vector can share a page with readable siblings. The
+      // ordinary path decides those independently using the original records.
+    }
+  }
   const membership = await requireWorkspaceMembership({ actor, workspaceId, tx: db });
   const domains = await resolveKnowledgeAccessDomains(actor, workspaceId, db);
   // Select the actual latest row in PostgreSQL; histories grow independently of
