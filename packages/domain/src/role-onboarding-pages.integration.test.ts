@@ -94,7 +94,7 @@ it.each(["head", "source-revoke-restore", "caller-revoke-restore"] as const)("wi
   const changeInput = async () => {
     if (change === "head") {
       const head = await prisma.artifactInputLineage.findFirstOrThrow({ where: { artifactType: "Action", artifactId: "action-000000" }, orderBy: { revision: "desc" } });
-      const { id: _id, createdAt: _createdAt, ...data } = head;
+      const { id: _id, ...data } = head;
       await prisma.artifactInputLineage.create({ data: { ...data, revision: head.revision + 1, inputsJson: [], rootsJson: [], permissionEpochsJson: head.permissionEpochsJson! } });
     } else if (change === "source-revoke-restore") {
       await prisma.action.update({ where: { id: "action-000000" }, data: { isPrivate: true } });
