@@ -3666,7 +3666,7 @@ describe("context graph bounded permission scan", () => {
       const result = await (server as any)._registeredTools.query_context_graph.handler({take: 1});
       expect(result.structuredContent.objects.map((row: {id: string}) => row.id)).toEqual(["05001"]);
       expect(prisma.contextGraphObject.findMany).toHaveBeenCalledTimes(51);
-      expect(prisma.contextGraphObject.findMany.mock.calls.every(([args]: any) => args.take === 100)).toBe(true);
+      expect(vi.mocked(prisma.contextGraphObject.findMany).mock.calls.every(([args]: any) => args.take === 100)).toBe(true);
       expect(evidenceRelease.mock.calls.at(-1)?.[0].map((root: any) => root.id)).toEqual(["05001"]);
       evidenceRelease.mockRejectedValueOnce(new AppError(409, "SOURCE_CHANGED", "Original authority changed"));
       await expect((server as any)._registeredTools.query_context_graph.handler({take: 1})).rejects.toMatchObject({code: "SOURCE_CHANGED"});

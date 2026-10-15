@@ -21,7 +21,7 @@ async function fixture() {
   }
   async function rewriteHead(kind: string,id: string) {
     const head = await prisma.artifactInputLineage.findFirstOrThrow({where:{workspaceId:workspace.id,artifactType:kind,artifactId:id},orderBy:{revision:"desc"}});
-    const {id: _id,createdAt: _created,...data} = head;
+    const {id: _id,recordedAt: _recorded,...data} = head;
     return prisma.artifactInputLineage.create({data:{...data,revision:head.revision+1,
       inputsJson:data.inputsJson as never,rootsJson:data.rootsJson as never,permissionEpochsJson:data.permissionEpochsJson as never}});
   }
@@ -70,14 +70,14 @@ it.each(["body","head","ancestor","caller-restore","ancestor-restore"] as const)
 it.each(["head","body","ancestor"] as const)("freshly compares %s mutated during the raw read scope",async(change)=>{
   const f=await fixture(), row=await f.delivery();
   const find=prisma.newspaperDelivery.findMany.bind(prisma.newspaperDelivery); let calls=0;
-  vi.spyOn(prisma.newspaperDelivery,"findMany").mockImplementation(async args=>{
+  vi.spyOn(prisma.newspaperDelivery,"findMany").mockImplementation((async (args: Parameters<typeof find>[0])=>{
     if(++calls===2) {
       if(change==="head") await f.rewriteHead("NewspaperDelivery",row.id);
       if(change==="body") await prisma.newspaperDelivery.update({where:{id:row.id},data:{subject:"Interleaved body"}});
       if(change==="ancestor") await prisma.member.update({where:{id:f.members[0].id},data:{role:"ADMIN"}});
     }
     return find(args);
-  });
+  }) as typeof prisma.newspaperDelivery.findMany);
   expect(await captureReadableNewspaperDeliveryInputs(f.actor,f.workspaceId,[row])).toBeNull();
 });
 
