@@ -1,3 +1,4 @@
+import { ModelAttemptAuthorizationError } from "@corgtex/models";
 import type { ChatCompletionRequest, ChatCompletionResponse } from "@corgtex/models";
 import { AssistantHarnessError, authorize, checkCancellation, deliver, snapshotRuntime, snapshotSources } from "./contracts";
 import type { AssistantGateway, AssistantRuntime, SourceReference } from "./contracts";
@@ -19,6 +20,9 @@ export async function callAssistantGateway(options: {
   // The awaited reservation is not an authority lease: revalidate before invoking
   // the gateway. Its internal provider attempts remain gateway-owned.
   await authorize(runtime, "model", sources);
+  let attemptDenial: "CANCELLED" | "SCOPE" | "LIMIT" | undefined;
+  let attemptSignal: AbortSignal | undefined;
+  let active = true;
   const request: ChatCompletionRequest = {
     ...options.request,
     workspaceId: runtime.scope.workspaceId,
@@ -26,6 +30,25 @@ export async function callAssistantGateway(options: {
     agentRunId: runtime.scope.runId,
     taskType: "CHAT",
     signal: runtime.signal,
+    authorizeAttempt: async ({ signal }) => {
+      // The operation signal adds the gateway deadline; authority still uses the
+      // original admitted runtime and its complete, immutable source vector.
+      if (!active) throw new AssistantHarnessError("SCOPE");
+      attemptSignal = signal;
+      try {
+        if (signal.aborted) throw new AssistantHarnessError("CANCELLED");
+        await authorize(runtime, "model", sources);
+        if (signal.aborted) throw new AssistantHarnessError("CANCELLED");
+      } catch (error) {
+        const code = signal.aborted || runtime.signal.aborted ? "CANCELLED"
+          : error instanceof AssistantHarnessError && error.code === "LIMIT" ? "LIMIT"
+          : error instanceof AssistantHarnessError && error.code === "CANCELLED" ? "CANCELLED" : "SCOPE";
+        // A noncooperative authorization can settle after gateway cancellation.
+        // Never let that late completion change the invocation's result.
+        if (active) attemptDenial = code;
+        throw new AssistantHarnessError(code);
+      }
+    },
   };
   try {
     if (!options.stream) {
@@ -67,8 +90,14 @@ export async function callAssistantGateway(options: {
     }
   } catch (error) {
     checkCancellation(runtime);
+    if (error instanceof ModelAttemptAuthorizationError && attemptDenial) throw new AssistantHarnessError(attemptDenial);
+    // A gateway deadline reached during awaited cleanup cannot replace an
+    // established harness failure. Admitted cancellation still takes priority.
     if (error instanceof AssistantHarnessError) throw error;
+    if (attemptSignal?.aborted) throw new AssistantHarnessError("CANCELLED");
     // Provider errors can include prompts, credentials and returned source text.
     throw new AssistantHarnessError("UNAVAILABLE");
+  } finally {
+    active = false;
   }
 }
