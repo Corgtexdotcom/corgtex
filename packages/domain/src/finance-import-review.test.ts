@@ -7,7 +7,11 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("@corgtex/shared", () => ({ prisma: mocks.prisma }));
 vi.mock("./source-lineage", () => ({ captureArtifactInputProof: vi.fn(async () => []), captureImmutableArtifactInputProof: vi.fn(async () => []),
+  captureArtifactReadHeadObservation: vi.fn(async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()})),
+  mergeLineageInputRoot: vi.fn((prior, root) => { if (prior && JSON.stringify(prior) !== JSON.stringify(root)) throw new Error("Changed fixture root"); return root; }),
+  withArtifactCountReleaseSnapshot: vi.fn(async (_actor, _workspace, _roots, remote, finish) => {await remote(); return finish(mocks.prisma);}),
   recordArtifactInputLineage: vi.fn(), readableArtifactIds: vi.fn(async (_actor, _ws, _kind, rows) => new Set(rows.map((row: { id: string }) => row.id))) }));
+vi.mock("./auth", () => ({requireWorkspaceMembership: vi.fn(async () => ({id: "fixture-member"}))}));
 vi.mock("./finance", () => ({ requireFinanceReportImportReadAccess: mocks.read, requireFinanceReportImportHumanWriteAccess: mocks.write }));
 import { editFinanceReportImportCandidate, getFinanceReportImport, getFinanceReportImportSummary, listFinanceReportImports, reviewFinanceReportImport } from "./finance-import-review";
 import { buildFinanceReportFactSemanticKey } from "./finance-import-reconciliation";
@@ -41,7 +45,7 @@ describe("Finance import review", () => {
     const reportWarning = { code: "HISTORICAL_DATA_QUALITY", severity: "WARNING", message: "Review the source.", evidenceClaimIds: ["type"] };
     mocks.prisma.financeImportBatch.findMany.mockResolvedValue([batch([], { interpretationJson: { ...interpretation, exceptions: [reportWarning] }, warningCount: 1, candidates: [candidate()] })]); mocks.prisma.$queryRaw.mockResolvedValue([{ id: "batch-1", count: 2 }]);
     await expect(listFinanceReportImports(actor, "workspace-1", new Date("2026-08-02Z"))).resolves.toEqual([expect.objectContaining({ id: "batch-1", warningCount: 2 })]);
-    expect(mocks.read).toHaveBeenCalledWith(actor, "workspace-1"); expect(mocks.prisma.financeImportBatch.findMany.mock.calls[0][0]).toMatchObject({ take: 5001 });
+    expect(mocks.read).toHaveBeenCalledWith(actor, "workspace-1"); expect(mocks.prisma.financeImportBatch.findMany.mock.calls[0][0]).toMatchObject({ take: 100 });
     expect(mocks.prisma.financeImportBatch.findMany.mock.calls[0][0]).not.toHaveProperty("select");
     mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([candidate()], { interpretationJson: { ...interpretation, exceptions: [reportWarning] } }));
     await expect(getFinanceReportImportSummary(actor, { workspaceId: "workspace-1", batchId: "batch-1" }, new Date("2026-08-02Z")))
@@ -70,6 +74,27 @@ describe("Finance import review", () => {
     await expect(getFinanceReportImport(actor, { workspaceId: "workspace-1", batchId: "batch-1" }))
       .resolves.toMatchObject({ stage: "EXTRACTING", warnings: [], clarification: { canConfirm: false,
         numericFormat: { status: "UNRESOLVED", decimalSeparator: null, groupingSeparator: null, amountScale: null } } });
+  });
+  it("preserves all 5002 permitted detail candidates and application summaries with bounded joins", async () => {
+    const rows = Array.from({length: 5002}, (_, index) => candidate(`candidate-${String(index).padStart(6, "0")}`));
+    mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch(rows));
+    mocks.prisma.financeImportCandidate.findMany.mockImplementation(async query => {
+      const after = query.where.OR?.[1]?.id.gt;
+      return rows.filter(row => !after || row.id > after).slice(0, query.take);
+    });
+    mocks.prisma.financeImportApplication.findMany.mockImplementation(async query => query.where.id ? [] :
+      query.where.candidateId.in.map((id: string) => ({id: `application-${id}`, candidateId: id,
+        workspaceId: "workspace-1", batchId: "batch-1", outcome: "SKIPPED", targetFactId: null,
+        appliedByUserId: "writer-1", appliedAt: new Date("2026-09-01Z")})));
+    const result = await getFinanceReportImport(actor, {workspaceId: "workspace-1", batchId: "batch-1"});
+    expect(result.candidates).toHaveLength(5002);
+    expect(result.addCount).toBe(5002);
+    expect(result.candidates.at(-1)).toMatchObject({id: rows.at(-1)!.id,
+      application: {id: `application-${rows.at(-1)!.id}`}});
+    for (const [query] of mocks.prisma.financeImportCandidate.findMany.mock.calls) expect(query.take).toBe(100);
+    for (const [query] of mocks.prisma.financeImportApplication.findMany.mock.calls) {
+      expect(query.take).toBe(100); expect(query.where.candidateId.in.length).toBeLessThanOrEqual(100);
+    }
   });
   it("edits and rereconciles exact versions while clearing approvals and creating no canonical records", async () => {
     mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([candidate("candidate-1", { approvedByUserId: "writer-2", approvedAt: new Date() }),
