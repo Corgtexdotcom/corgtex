@@ -92,7 +92,7 @@ jobs:
           node --input-type=module -e 'import { verifyBundle } from "./scripts/migration/synthetic-ops-source.mjs"; verifyBundle(process.env.LOCAL_BUNDLE);'
       - name: Cache pinned official PostgreSQL client
         timeout-minutes: 3
-        run: docker pull public.ecr.aws/docker/library/postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+        run: docker pull docker.io/library/postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
       - name: Exercise native local source and actual client transport
         timeout-minutes: 13
         run: node scripts/migration/prepare-synthetic-ops-local.mjs prepare "$LOCAL_BUNDLE" "$LOCAL_EVIDENCE"
@@ -152,6 +152,13 @@ jobs:
 
       - run: npx prisma migrate deploy
 
+      - name: Prepare custody fixture images on this runner
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          docker pull docker.io/library/postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+          docker pull mcr.microsoft.com/azure-storage/azurite:3.35.0
+
       - run: npx vitest run --project unit --project integration
 
       - name: Test guarded validation owner adoption
@@ -166,13 +173,6 @@ jobs:
 
       - name: Test Azure site image release and read-only Ops receipt
         run: node --test scripts/azure-site-image-release.node-test.mjs scripts/release/ops-readiness-receipt.node-test.mjs
-
-      - name: Prepare custody fixture images on this runner
-        timeout-minutes: 5
-        run: |
-          set -euo pipefail
-          docker pull public.ecr.aws/docker/library/postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
-          docker pull mcr.microsoft.com/azure-storage/azurite:3.35.0
 
       - name: Test Ops and Core migration custody, fences and retained restore
         timeout-minutes: 15
