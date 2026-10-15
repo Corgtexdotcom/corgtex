@@ -773,6 +773,13 @@ const nativeReplayMemos = new WeakSet<Map<string, boolean>>();
 type ReadHeadBinding = { heads: Map<string, string>; sealed: boolean; nativeReplay?: boolean };
 const readHeadMemos = new WeakMap<Map<string, boolean>, ReadHeadBinding>();
 const expectedReadHeads = new AsyncLocalStorage<ReadHeadBinding>();
+/** Retain the exact heads observed by a trusted read, without granting read authority. */
+export async function captureArtifactReadHeadObservation<T>(read: () => Promise<T>) {
+  const binding = expectedReadHeads.getStore() ?? { heads: new Map<string, string>(), sealed: false };
+  const value = await expectedReadHeads.run(binding, read);
+  return { value, heads: new Map(binding.heads) };
+}
+
 function readHeadBinding(memo: Map<string, boolean>) {
   let binding = readHeadMemos.get(memo);
   if (!binding) { binding = expectedReadHeads.getStore() ?? { heads: new Map(), sealed: false }; readHeadMemos.set(memo, binding); }

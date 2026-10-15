@@ -1,7 +1,8 @@
 import type { AppActor } from "@corgtex/shared";
 import { visitSourceReadableRecords } from "./source-scoped-read";
+import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
-import { captureArtifactInputProof, captureReadableWorkItemInputs, mergeLineageInputRoot, readableArtifactIds, withArtifactCountReleaseSnapshot,
+import { captureArtifactInputProof, captureArtifactReadHeadObservation, captureReadableWorkItemInputs, mergeLineageInputRoot, readableArtifactIds, withArtifactCountReleaseSnapshot,
   type LineageKind, type LineageRoot } from "./source-lineage";
 
 /** Compact original observations only. Bodies stay in their canonical page. */
@@ -9,6 +10,14 @@ export class WorkItemReadRelease {
   private readonly roots = new Map<string, LineageRoot>();
   private readonly heads = new Map<string,string>();
   constructor(private readonly actor: AppActor, private readonly workspaceId: string) {}
+  async observeRead<T>(read: () => Promise<T>): Promise<T> {
+    const observed = await captureArtifactReadHeadObservation(read);
+    for (const [key, stamp] of observed.heads) {
+      invariant(!this.heads.has(key) || this.heads.get(key) === stamp, 409, "SOURCE_CHANGED", "Source lineage changed during collection.");
+      this.heads.set(key, stamp);
+    }
+    return observed.value;
+  }
   async admit<T extends {id: string}>(kind: "Action" | "Proposal" | "Tension", rows: T[]) {
     const proof = await captureReadableWorkItemInputs(this.actor, this.workspaceId, kind, rows);
     this.add(proof.roots);
@@ -27,8 +36,8 @@ export class WorkItemReadRelease {
         invariant(admitted.length === page.length,409,"SOURCE_CHANGED","A selected work item changed before release.");
         continue;
       }
-      const proof = await captureArtifactInputProof(this.actor, this.workspaceId,
-        rows.slice(offset,offset+100).map(row => ({kind, id: row.id, snapshot: row})));
+      const proof = await this.observeRead(() => captureArtifactInputProof(this.actor, this.workspaceId,
+        rows.slice(offset,offset+100).map(row => ({kind, id: row.id, snapshot: row}))));
       this.add(proof);
     }
   }
@@ -46,7 +55,10 @@ export class WorkItemReadRelease {
   }
   finish<T>(value: T) {
     return withArtifactCountReleaseSnapshot(this.actor, this.workspaceId, [...this.roots.values()],
-      async () => {}, async () => value, this.heads);
+      async () => {}, async tx => {
+        await requireWorkspaceMembership({actor: this.actor, workspaceId: this.workspaceId, tx});
+        return value;
+      }, this.heads);
   }
 }
 
