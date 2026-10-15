@@ -110,7 +110,10 @@ vi.mock("./auth", async (importOriginal) => {
   } };
 });
 
-vi.mock("./source-lineage", () => ({
+vi.mock("./source-lineage", async importOriginal => ({
+  mergeLineageInputRoot: (await importOriginal<typeof import("./source-lineage")>()).mergeLineageInputRoot,
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
+  withArtifactCountReleaseSnapshot: async (_actor: unknown, _ws: string, _roots: unknown, remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => {await remote();return finish(prismaMock);},
   readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) => new Set(records.filter((row: { lineageReadable?: boolean }) => row.lineageReadable !== false).map((row: { id: string }) => row.id))),
   captureArtifactInputProof: vi.fn(async (_actor, _workspaceId, inputs) => inputs.map((input: { kind: string; id: string }) => ({ ...input, fingerprint: "a".repeat(64) }))),
 }));
@@ -834,6 +837,8 @@ describe("members domain", () => {
             bio: true,
             linkedinUrl: true,
             websiteUrl: true,
+            createdAt: true,
+            updatedAt: true,
           },
         },
         roleAssignments: expect.objectContaining({
@@ -860,6 +865,8 @@ describe("members domain", () => {
         globalRole: "USER",
       },
     };
+    // The final release snapshot independently rechecks the viewer's membership.
+    prismaMock.member.findUnique.mockResolvedValue({id: "viewer-member", workspaceId: "workspace-1", userId: "viewer-user", role: "CONTRIBUTOR", isActive: true});
     prismaMock.member.findUnique
       .mockResolvedValueOnce({
         id: "viewer-member",
@@ -890,17 +897,17 @@ describe("members domain", () => {
       ],
     };
     expect(prismaMock.action.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: { AND: [expect.objectContaining({ workspaceId: "workspace-1", assigneeMemberId: "member-1", status: "OPEN", ...visibleWhere })] },
-      orderBy: { id: "asc" }, take: 100,
+      where: { AND: [expect.objectContaining({ workspaceId: "workspace-1", assigneeMemberId: "member-1", status: "OPEN", ...visibleWhere }), {}] },
+      orderBy: [{createdAt: "desc"}, {id: "desc"}], take: 100,
     }));
     expect(prismaMock.tension.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: { AND: [expect.objectContaining({ workspaceId: "workspace-1", assigneeMemberId: "member-1", status: "OPEN", ...visibleWhere })] },
+      where: { AND: [expect.objectContaining({ workspaceId: "workspace-1", assigneeMemberId: "member-1", status: "OPEN", ...visibleWhere }), {}] },
     }));
     expect(prismaMock.proposal.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: { AND: [expect.objectContaining({ workspaceId: "workspace-1", authorUserId: "profile-user", ...visibleWhere })] },
+      where: { AND: [expect.objectContaining({ workspaceId: "workspace-1", authorUserId: "profile-user", ...visibleWhere }), {}] },
     }));
     expect(prismaMock.tension.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: { AND: [expect.objectContaining({ workspaceId: "workspace-1", authorUserId: "profile-user", status: "OPEN", ...visibleWhere })] },
+      where: { AND: [expect.objectContaining({ workspaceId: "workspace-1", authorUserId: "profile-user", status: "OPEN", ...visibleWhere }), {}] },
     }));
   });
 });

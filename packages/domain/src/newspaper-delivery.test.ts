@@ -105,7 +105,15 @@ vi.mock("./auth", () => ({
 
 vi.mock("./source-lineage", async () => {
   const { AppError } = await import("./errors");
-  return { readableArtifactIds: readableArtifactIdsMock,
+  return {
+    // These orchestration fixtures have no epoch vectors; avoid loading the real
+    // source module through its newspaper dependency cycle.
+    mergeLineageInputRoot: (previous: {fingerprint: string} | undefined, root: {fingerprint: string}) => {
+      if (previous && previous.fingerprint !== root.fingerprint) throw new AppError(409, "SOURCE_CHANGED", "Fixture revision changed.");
+      return root;
+    },
+    captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
+    withArtifactCountReleaseSnapshot: async (_actor: unknown, _ws: string, _roots: unknown, remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => {await remote();return finish(prismaMock);}, readableArtifactIds: readableArtifactIdsMock,
     captureArtifactInputProof: vi.fn(async (actor, workspaceId, inputs) => {
       const input = inputs[0];
       const readable = await readableArtifactIdsMock(actor, workspaceId, input.kind, [input.snapshot]);
