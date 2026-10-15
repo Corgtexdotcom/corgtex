@@ -49,7 +49,7 @@ for (const [name, list] of [["company", listCompanyUnderstandingQuestions], ["da
       const pages: Array<{ size: number; ids: string[] }> = [];
       const query = vi.spyOn(prisma.checkIn, "findMany").mockImplementation((async args => {
         const rows = await original(args);
-        pages.push({ size: rows.length, ids: rows.map(row => row.id) });
+        pages.push({ size: rows.length, ids: rows.map(row => (row as { id: string }).id) });
         // Assert at the actual hydration boundary, before a baseline full-history
         // admission scan could hide its unbounded query behind the final slice.
         expect(args?.take).toBe(100);
