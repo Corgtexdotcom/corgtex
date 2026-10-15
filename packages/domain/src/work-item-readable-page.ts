@@ -71,7 +71,11 @@ export function workItemAfter(row: WorkItemPosition, sort?: string) {
   return { OR: [{ priority: { lt: row.priority } }, ...date.map(after => ({ priority: row.priority, ...after }))] };
 }
 
-/** Canonical, sorted keyset pages; the corpus is never retained for a total. */
+/** Canonical, sorted keyset pages with the existing exact readable-total contract.
+ * `take` bounds returned bodies, not permission evaluation: even take: 0 must
+ * admit the full matching corpus to compute its total. Each SQL page holds at
+ * most 100 bodies; compact original proofs also bind off-page count contributors.
+ */
 export async function readableWorkItemPage<T extends WorkItemPosition>(params: {
   actor: AppActor; workspaceId: string; kind: "Action" | "Proposal" | "Tension";
   take: number; skip: number; release: WorkItemReadRelease;

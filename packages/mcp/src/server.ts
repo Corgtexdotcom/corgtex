@@ -908,47 +908,38 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     async ({ objectType, status, take }: { objectType?: string; status?: string; take?: number }) => {
       requireToolCapability("query_context_graph");
       const limit = Math.trunc(Math.min(Math.max(take ?? 50, 1), 100));
-      const scan = async (kind: "ContextGraphObject" | "ContextGraphRelationship", wanted: number,
-        load: (page: {take: number; cursor?: {id: string}; skip?: number}) => Promise<Array<{id: string}>>) => {
-        const result: Array<{id: string}> = [];
-        const seen = new Set<string>();
-        let cursor: {id: string} | undefined;
-        let scanned = 0;
-        while (result.length < wanted) {
-          const take = Math.min(100, 5_001 - scanned);
-          const rows = await load({take, ...(cursor ? {cursor, skip: 1} : {})});
-          if (scanned + rows.length > 5_000) throw new AppError(413, "CONTEXT_GRAPH_SCAN_LIMIT", "Narrow the context graph query to complete its permission scan.");
-          const fresh = rows.filter(row => !seen.has(row.id));
-          if (rows.length > take || fresh.length !== rows.length) throw new AppError(409, "SOURCE_CHANGED", "Context graph changed while reading.");
-          const visible = await readableArtifactIds(actor, workspaceId, kind, rows);
-          result.push(...rows.filter(row => visible.has(row.id)).slice(0, wanted - result.length));
-          rows.forEach(row => seen.add(row.id));
-          scanned += rows.length;
-          if (rows.length < take) break;
-          cursor = {id: rows.at(-1)!.id};
-        }
-        return result;
-      };
-      const objects = await scan("ContextGraphObject", limit, page => prisma.contextGraphObject.findMany({
-        where: {
-          workspaceId,
-          ...(objectType ? { objectType } : {}),
-          ...(status ? { status } : { status: { not: "archived" } }),
-        },
-        orderBy: [{ objectType: "asc" }, { updatedAt: "desc" }, {id: "asc"}],
-        ...page,
-      }));
-      const relationships = objects.length ? await scan("ContextGraphRelationship", limit * 2, page => prisma.contextGraphRelationship.findMany({
-        where: {
-          workspaceId,
-          sourceObjectId: { in: objects.map((object) => object.id) },
-          targetObjectId: { in: objects.map((object) => object.id) },
-          status: { not: "archived" },
-        },
-        orderBy: {id: "asc"},
-        ...page,
-      })) : [];
-      return structuredJsonResult({ objects, relationships, webUrl: webUrl(workspaceId, "/maps") });
+      const release = new DigestReadRelease(actor, workspaceId);
+      const objects = (await loadReadableArtifactSample({
+        actor, workspaceId, kind: "ContextGraphObject", limit, release,
+        loadBatch: (after, take) => prisma.contextGraphObject.findMany({
+          where: { AND: [{
+            workspaceId,
+            ...(objectType ? { objectType } : {}),
+            ...(status ? { status } : { status: { not: "archived" } }),
+          }, ...(after ? [{ OR: [
+            { objectType: { gt: after.objectType } },
+            { objectType: after.objectType, updatedAt: { lt: after.updatedAt } },
+            { objectType: after.objectType, updatedAt: after.updatedAt, id: { gt: after.id } },
+          ] }] : [])] },
+          orderBy: [{ objectType: "asc" }, { updatedAt: "desc" }, { id: "asc" }],
+          take,
+        }),
+      })).records;
+      const relationships = objects.length ? (await loadReadableArtifactSample({
+        actor, workspaceId, kind: "ContextGraphRelationship", limit: limit * 2, release,
+        loadBatch: (after, take) => prisma.contextGraphRelationship.findMany({
+          where: {
+            workspaceId,
+            sourceObjectId: { in: objects.map(object => object.id) },
+            targetObjectId: { in: objects.map(object => object.id) },
+            status: { not: "archived" },
+            ...(after ? { id: { gt: after.id } } : {}),
+          },
+          orderBy: { id: "asc" },
+          take,
+        }),
+      })).records : [];
+      return structuredJsonResult(await release.finish({ objects, relationships, webUrl: webUrl(workspaceId, "/maps") }));
     },
   );
 
