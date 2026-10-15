@@ -81,6 +81,30 @@ describe("bounded exact native commit epoch observations", () => {
     const final = f.tx.$queryRaw.mock.calls.at(-1)[0];
     expect(final.values).toHaveLength(1 + 512 * 2);
   });
+  it("keeps overflow checks fresh and still fences retained keys after overflow", async () => {
+    const fill = async () => {
+      for (let i = 0; i < 512; i++) { const id = `retained-${i}`; f.current.set(key(id), 1n); await read(id); }
+      f.current.set(key("overflow"), 1n);
+      expect(await read("overflow")).toBe(true);
+    };
+    expect(await pass(async () => {
+      await fill();
+      const before = f.tx.$queryRaw.mock.calls.length;
+      f.current.set(key("overflow"), 2n);
+      expect(await read("overflow")).toBe(false);
+      expect(f.tx.$queryRaw).toHaveBeenCalledTimes(before + 1); // Fresh ordinary SQL, no retained observation.
+      return false;
+    })).toBe(false);
+    expect(await pass(async () => {
+      await fill();
+      const before = f.tx.$queryRaw.mock.calls.length;
+      f.current.set(key("retained-0"), 2n);
+      expect(await read("retained-0")).toBe(true);
+      expect(f.tx.$queryRaw).toHaveBeenCalledTimes(before); // The retained hit still needs the final fence.
+      return true;
+    })).toBe(false);
+  });
+
   it("rejects foreign clients, workspaces, actors, expired claim and epoch capture", async () => {
     await expect(pass(async () => { await read(); return isArtifactPermissionEpochProofCurrent("other", proof(), f.tx); }))
       .rejects.toMatchObject({ code: "SOURCE_CHANGED" });

@@ -80,8 +80,11 @@ function assertNativePermissionReadPass(pass: NativePermissionReadPass, db: Epoc
 /** Only a real claimed provider commit may reuse its physically SHARE-locked
  * epoch observations within one pure validation pass. This is not a source plan
  * or an authority cache. Ordinary readers allocate nothing; overflow stays SQL.
- * Every positive pass freshly compares all retained keys before disposal, so
- * own-transaction writes cannot hide behind a lock held by this transaction. */
+ * Every positive pass freshly compares retained/reused keys before disposal,
+ * so own-transaction writes cannot hide behind those observations. Overflow
+ * keys are never reused: each check retains the ordinary fresh SQL semantics,
+ * without promising a final recheck after the last uncached observation. The
+ * production callbacks are pure root validation, never writer callbacks. */
 export async function withExternalProviderPermissionReadPass(actor: AppActor, db: EpochClient,
   workspaceId: string, mode: "local" | "full", read: () => Promise<boolean>): Promise<boolean> {
   const inherited = nativePermissionReadPass.getStore();
