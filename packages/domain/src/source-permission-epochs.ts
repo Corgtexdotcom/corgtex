@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Prisma } from "@prisma/client";
-import { prisma } from "@corgtex/shared";
+import { prisma, type AppActor } from "@corgtex/shared";
+import { isArtifactNativeCommitPhase } from "./artifact-native-commit-phase";
 import { invariant } from "./errors";
 import { assertSourceCommitEpochCaptureCovered, assertSourceCommitPermissionReadCovered,
   assertSourceCommitTransactionCompatible,
@@ -62,6 +63,82 @@ export async function withSourceCommitPermissionReadPass(db: EpochClient, worksp
       return [...pass.checked].every(([key, epoch]) => current.get(key) === epoch);
     } finally { pass.active = false; }
   });
+}
+
+type NativePermissionReadPass = { db: EpochClient; workspaceId: string; actor: AppActor;
+  mode: "local" | "full"; active: boolean; isCurrent: () => boolean;
+  observed: Map<string, PermissionEpochProof["entries"][number]>; bytes: number };
+const nativePermissionReadPass = new AsyncLocalStorage<NativePermissionReadPass>();
+const MAX_NATIVE_PASS_EPOCHS = 512;
+const MAX_NATIVE_PASS_BYTES = 128 * 1024;
+
+function assertNativePermissionReadPass(pass: NativePermissionReadPass, db: EpochClient, workspaceId: string) {
+  invariant(pass.active && pass.db === db && pass.workspaceId === workspaceId && pass.isCurrent(),
+    409, "SOURCE_CHANGED", "Native permission read pass belongs to another client or expired commit.");
+}
+
+/** Only a real claimed provider commit may reuse its physically SHARE-locked
+ * epoch observations within one pure validation pass. This is not a source plan
+ * or an authority cache. Ordinary readers allocate nothing; overflow stays SQL.
+ * Every positive pass freshly compares retained/reused keys before disposal,
+ * so own-transaction writes cannot hide behind those observations. Overflow
+ * keys are never reused: each check retains the ordinary fresh SQL semantics,
+ * without promising a final recheck after the last uncached observation. The
+ * production callbacks are pure root validation, never writer callbacks. */
+export async function withExternalProviderPermissionReadPass(actor: AppActor, db: EpochClient,
+  workspaceId: string, mode: "local" | "full", read: () => Promise<boolean>): Promise<boolean> {
+  const inherited = nativePermissionReadPass.getStore();
+  if (inherited) {
+    assertNativePermissionReadPass(inherited, db, workspaceId);
+    invariant(inherited.actor === actor, 409, "SOURCE_CHANGED", "Native permission reader changed.");
+    if (inherited.mode === mode) return read();
+  }
+  if (db === prisma || hasActiveSourceCommitLockPlan(db) || !isArtifactNativeCommitPhase()) return read();
+  const { isActiveExternalProviderCommit } = await import("./external-provider-authority");
+  const isCurrent = () => isActiveExternalProviderCommit(actor, workspaceId, db);
+  if (!isCurrent()) return read();
+  const pass: NativePermissionReadPass = { db, workspaceId, actor, mode, active: true,
+    isCurrent, observed: new Map(), bytes: 0 };
+  return nativePermissionReadPass.run(pass, async () => {
+    try {
+      if (!await read()) return false;
+      assertNativePermissionReadPass(pass, db, workspaceId);
+      if (!pass.observed.size) return true;
+      const identities = [...pass.observed.values()].sort((a, b) => epochKey(a) < epochKey(b) ? -1 : 1);
+      const rows = await readCoveredEpochUnion(db, workspaceId, identities);
+      assertNativePermissionReadPass(pass, db, workspaceId);
+      const current = new Map(rows.map(entry => [epochKey(entry), entry.epoch]));
+      return current.size === identities.length && identities.every(entry => current.get(epochKey(entry)) === entry.epoch);
+    } finally { pass.active = false; pass.observed.clear(); }
+  });
+}
+
+async function readNativePermissionProof(pass: NativePermissionReadPass, db: EpochClient,
+  workspaceId: string, proof: PermissionEpochProof): Promise<boolean> {
+  assertNativePermissionReadPass(pass, db, workspaceId);
+  const unseen = [] as PermissionEpochProof["entries"];
+  for (const entry of proof.entries) {
+    const prior = pass.observed.get(epochKey(entry));
+    if (prior && prior.epoch !== entry.epoch) return false;
+    if (!prior) unseen.push(entry);
+  }
+  if (!unseen.length) return true;
+  const rows = await db.$queryRaw<Array<{ sourceKind: string; sourceId: string; epoch: bigint }>>(Prisma.sql`
+    SELECT "sourceKind", "sourceId", "epoch" FROM "SourcePermissionEpoch" WHERE "workspaceId" = ${workspaceId}
+    AND ("sourceKind", "sourceId") IN (${Prisma.join(unseen.map(entry => Prisma.sql`(${entry.kind}, ${entry.id})`))})
+    ORDER BY "sourceKind" COLLATE "C", "sourceId" COLLATE "C" FOR SHARE`);
+  assertNativePermissionReadPass(pass, db, workspaceId);
+  const current = new Map(rows.map(row => [epochKey({kind: row.sourceKind, id: row.sourceId}), row.epoch.toString()]));
+  if (rows.length !== unseen.length || !unseen.every(entry => current.get(epochKey(entry)) === entry.epoch)) return false;
+  for (const entry of unseen) {
+    const key = epochKey(entry), prior = pass.observed.get(key);
+    if (prior) { if (prior.epoch !== entry.epoch) return false; continue; }
+    // Conservative UTF-16 strings plus key/object overhead; never retain payloads.
+    const bytes = 2 * (entry.kind.length + entry.id.length + entry.epoch.length + key.length) + 128;
+    if (pass.observed.size >= MAX_NATIVE_PASS_EPOCHS || pass.bytes + bytes > MAX_NATIVE_PASS_BYTES) continue;
+    pass.observed.set(key, { ...entry }); pass.bytes += bytes;
+  }
+  return true;
 }
 
 export function parsePermissionEpochProof(value: unknown): PermissionEpochProof | null {
@@ -157,7 +234,7 @@ export function artifactPermissionEpochIdentities(kind: string, row: Record<stri
 export async function capturePermissionEpochs(tx: Prisma.TransactionClient, workspaceId: string,
   identities: readonly PermissionEpochIdentity[]): Promise<PermissionEpochProof> {
   assertSourceCommitTransactionCompatible(tx);
-  invariant(!permissionReadPass.getStore(), 409, "SOURCE_LOCK_UNCOVERED",
+  invariant(!permissionReadPass.getStore() && !nativePermissionReadPass.getStore(), 409, "SOURCE_LOCK_UNCOVERED",
     "Epoch capture cannot mutate a read-only permission proof pass.");
   const sorted = [...new Map(identities.map((identity) => [JSON.stringify([identity.kind, identity.id]), identity])).entries()]
     .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0).map(([, identity]) => identity);
@@ -195,6 +272,8 @@ export async function isArtifactPermissionEpochProofCurrent(workspaceId: string,
     }
     return true;
   }
+  const nativePass = nativePermissionReadPass.getStore();
+  if (nativePass) return readNativePermissionProof(nativePass, db, workspaceId, proof);
   const query = Prisma.sql`SELECT "sourceKind", "sourceId", "epoch" FROM "SourcePermissionEpoch" WHERE "workspaceId" = ${workspaceId}
     AND ("sourceKind", "sourceId") IN (${Prisma.join(proof.entries.map((entry) => Prisma.sql`(${entry.kind}, ${entry.id})`))})
     ORDER BY "sourceKind" COLLATE "C", "sourceId" COLLATE "C"`;

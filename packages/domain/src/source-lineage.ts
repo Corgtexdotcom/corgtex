@@ -1,10 +1,11 @@
+import { hasCompanyTranscriptPublicationScope } from "./native-transcript-publication-context";
 import { getMeetingTranscriptWorkerPurpose, isMeetingTranscriptWorkerCurrent } from "./native-meeting-workflow-principal";
 import type { BoundedSnapshotReads } from "./source-snapshot-read-pass";
 import { getBrainExportWorkerPurpose, isBrainExportWorkerCurrent } from "./brain-export-worker";
 import { canReadInformationCategory, categoryGovernorIdentities, CATEGORY_BOUND_SOURCE_KINDS } from "./information-category-policy";
 import { financeFactValue, financeValueHash, isFinanceFactRevisionIntact } from "./finance-fact-value";
 import { getTranscriptSourceImportPurpose, getRecorderTranscriptWorkerPurpose, nativeTranscriptPrincipalUserId } from "./native-transcript-principal";
-import { artifactPermissionEpochIdentities, capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, mergePermissionEpochProofs, parsePermissionEpochProof, withSourceCommitPermissionReadPass, type PermissionEpochProof } from "./source-permission-epochs";
+import { artifactPermissionEpochIdentities, capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, mergePermissionEpochProofs, parsePermissionEpochProof, withSourceCommitPermissionReadPass, withExternalProviderPermissionReadPass, type PermissionEpochProof } from "./source-permission-epochs";
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { assertArtifactInputWriteFence } from "./artifact-input-write-fence";
@@ -1574,19 +1575,20 @@ export async function isArtifactInputProofReadable(actor: AppActor, workspaceId:
     localReadAdmissionMemos.set(memo, localMemo);
     if (db === prisma) readHeadMemos.set(localMemo, readHeadBinding(memo));
     const locallyAdmitted = await withSourceCommitPermissionReadPass(db, workspaceId,
-      () => localCommitAdmission.run(true, async () => {
+      () => withExternalProviderPermissionReadPass(actor, db, workspaceId, "local", () => localCommitAdmission.run(true, async () => {
         for (const root of roots) if (!await rootIsReadable(db, actor, workspaceId,
           membership, domains, root, new Set(), localMemo)) return false;
         return roots.length > 0;
-      }));
+      })));
     if (!locallyAdmitted) return false;
   }
-  const readable = await withSourceCommitPermissionReadPass(db, workspaceId, async () => {
+  const readable = await withSourceCommitPermissionReadPass(db, workspaceId, () => withExternalProviderPermissionReadPass(
+    actor, db, workspaceId, localCommitAdmission.getStore() ? "local" : "full", async () => {
     for (const root of roots) {
       if (!await rootIsReadable(db, actor, workspaceId, membership, domains, root, new Set(), memo)) return false;
     }
     return roots.length > 0;
-  });
+  }));
   if (!readable) return false;
   // A provider await may outlive another contributor's permission. Discard the
   // earlier memo and recheck the complete local closure before releasing proof.
@@ -1876,7 +1878,7 @@ export async function inspectStoredArtifactInputDependencies(db: LineageClient, 
 export async function captureArtifactPermissionEpochs(actor: AppActor, workspaceId: string,
   fullAncestorRoots: readonly LineageRoot[], tx: Prisma.TransactionClient): Promise<PermissionEpochProof> {
   const identities = [{kind: "Workspace", id: workspaceId}];
-  const companyPublication = (await import("./native-transcript-publication")).hasCompanyTranscriptPublicationScope(actor, workspaceId);
+  const companyPublication = hasCompanyTranscriptPublicationScope(actor, workspaceId);
   if (actor.kind === "user" && !companyPublication) {
     identities.push({ kind: "MemberUserPolicy", id: actor.user.id }, { kind: "WorkspaceSupportPolicy", id: actor.user.id });
   } else if (actor.kind === "agent") {

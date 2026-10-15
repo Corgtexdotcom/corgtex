@@ -362,6 +362,15 @@ function claimExternalProviderCommitPreflight(actor: AppActor, workspaceId: stri
   return claim;
 }
 
+/** Eligibility only: no authority/token escapes the active, exact native commit. */
+export function isActiveExternalProviderCommit(actor: AppActor, workspaceId: string, tx: Prisma.TransactionClient) {
+  const scope = commitScope.getStore();
+  return Boolean(scope?.active && scope.actor === actor && scope.workspaceId === workspaceId && scope.tx === tx
+    && scope.principal === getExternalProviderPrincipalUserId(actor, workspaceId)
+    && scope.actorHash === externalProviderResponseHash(actor)
+    && scope.purposeHash === externalProviderResponseHash(getExternalProviderWorkerPurpose(actor)));
+}
+
 /** Read-only peer lookup; a claimed plan is inert unless the safe provider wrapper is active. */
 export function getActiveExternalMcpPeerClaim(actor: AppActor, workspaceId: string, tx: Prisma.TransactionClient) {
   const scope = commitScope.getStore();

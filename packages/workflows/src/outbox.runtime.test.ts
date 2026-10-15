@@ -42,6 +42,7 @@ const {
     workspaceSupportGrant: { findUnique: vi.fn() },
     $transaction: vi.fn(),
     workflowJob: {
+      findFirst: vi.fn(),
       updateMany: vi.fn(),
       update: vi.fn(),
       upsert: vi.fn(),
@@ -148,6 +149,7 @@ vi.mock("@corgtex/knowledge", () => ({
 }));
 
 vi.mock("@corgtex/domain", async () => ({
+  ...await import("../../domain/src/native-meeting-workflow-principal"),
   ...await import("../../domain/src/source-lineage-rebuild"),
   withWorkspaceSupportExecution: (await import("../../domain/src/workspace-support-access")).withWorkspaceSupportExecution,
   withMcpConnectionExecution: (await import("../../domain/src/mcp-execution")).withMcpConnectionExecution,
@@ -162,6 +164,7 @@ vi.mock("@corgtex/domain", async () => ({
   syncSlackPublicArchiveForWorkspace: syncSlackPublicArchiveForWorkspaceMock,
   slackPublicArchiveEnabled: (settings: {publicArchiveSyncEnabled?:boolean} | null) => settings?.publicArchiveSyncEnabled !== false,
   runMeetingAgendaThreadEdit: runMeetingAgendaThreadEditMock,
+  postMeetingSummaryToAgendaThread: vi.fn(async () => ({ posted: true })),
   runMeetingAgendaPreparation: runMeetingAgendaPreparationMock,
   ensureMeetingSeriesOccurrences: ensureMeetingSeriesOccurrencesMock,
   CONTROL_PLANE_CLIENT_MIGRATION_VERIFY_JOB_TYPE: "control-plane.client-migration.verify",
@@ -277,8 +280,8 @@ describe("runPendingJobs", () => {
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
     expect(runAgentWorkflowJobMock).not.toHaveBeenCalled();
     expect(recordMeetingTranscriptProcessingStageMock).not.toHaveBeenCalled();
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "mcp-job" }, data: expect.objectContaining({ status: "FAILED" }),
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "mcp-job", workspaceId: "ws-1", type: "agent.meeting-summary", status: "RUNNING", lockedBy: "worker-1", attempts: 1, payload: { equals: { meetingId: "meeting-1" } }, lockedAt: { gt: expect.any(Date) } }), data: expect.objectContaining({ status: "FAILED" }),
     }));
   });
   it("rejects a queued OAuth origin that predates the grant epoch", async () => {
@@ -287,8 +290,8 @@ describe("runPendingJobs", () => {
         scopeHash: mcpScopesHash(["workspace:read"]) } }]);
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
     expect(runAgentWorkflowJobMock).not.toHaveBeenCalled();
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "legacy-mcp-job" }, data: expect.objectContaining({ status: "FAILED" }),
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "legacy-mcp-job", workspaceId: "ws-1", type: "agent.meeting-summary", status: "RUNNING", lockedBy: "worker-1", attempts: 1, payload: { equals: { meetingId: "meeting-1" } }, lockedAt: { gt: expect.any(Date) } }), data: expect.objectContaining({ status: "FAILED" }),
     }));
   });
   it.each([null, { isActive: false, role: "FULL", version: 1 }, { isActive: true, role: "SETUP", version: 1 },
@@ -299,12 +302,14 @@ describe("runPendingJobs", () => {
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
     expect(runAgentWorkflowJobMock).not.toHaveBeenCalled();
     expect(recordMeetingTranscriptProcessingStageMock).not.toHaveBeenCalled();
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "support-job" }, data: expect.objectContaining({ status: "FAILED" }),
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "support-job", workspaceId: "ws-1", type: "agent.meeting-summary", status: "RUNNING", lockedBy: "worker-1", attempts: 1, payload: { equals: { meetingId: "meeting-1" } }, lockedAt: { gt: expect.any(Date) } }), data: expect.objectContaining({ status: "FAILED" }),
     }));
   });
   beforeEach(() => {
     prismaMock.$transaction.mockReset().mockImplementation(async (callback: (tx: typeof txMock) => Promise<unknown>) => callback(txMock));
+    prismaMock.workflowJob.findFirst.mockReset().mockResolvedValue(null);
+    prismaMock.workflowJob.updateMany.mockReset().mockResolvedValue({ count: 1 });
     prismaMock.workflowJob.update.mockReset().mockResolvedValue({ id: "job-1" });
     prismaMock.workflowJob.upsert.mockReset().mockResolvedValue({ id: "job-next" });
     prismaMock.meetingSeries.findMany.mockReset().mockResolvedValue([]);
@@ -366,7 +371,7 @@ describe("runPendingJobs", () => {
       {
         id: "job-1",
         workspaceId: "ws-1",
-        type: "agent.meeting-summary",
+        type: "agent.proposal-drafting",
         payload: { meetingId: "meeting-1" },
         attempts: 1,
       },
@@ -381,7 +386,7 @@ describe("runPendingJobs", () => {
     expect(runAgentWorkflowJobMock).toHaveBeenCalledWith({
       id: "job-1",
       workspaceId: "ws-1",
-      type: "agent.meeting-summary",
+      type: "agent.proposal-drafting",
       payload: { meetingId: "meeting-1" },
       attempts: 1,
     });
@@ -393,6 +398,22 @@ describe("runPendingJobs", () => {
         lockedAt: null,
         lockedBy: null,
       }),
+    });
+  });
+
+  it("does not run a Meeting handler or progress from current-looking labels without its database claim", async () => {
+    const job = { id: "missing-meeting-claim", workspaceId: "ws-1", type: "agent.meeting-summary",
+      payload: { meetingId: "meeting-1" }, attempts: 1, lockedBy: "worker-1", lockedAt: new Date() };
+    txMock.$queryRaw.mockResolvedValueOnce([job]);
+    prismaMock.workflowJob.findFirst.mockResolvedValue(null);
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+    expect(runAgentWorkflowJobMock).not.toHaveBeenCalled();
+    expect(recordMeetingTranscriptProcessingStageMock).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.update).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: { id: job.id, workspaceId: job.workspaceId, type: job.type, status: "RUNNING",
+        lockedBy: "worker-1", attempts: 1, payload: { equals: job.payload }, lockedAt: { gt: expect.any(Date) } },
+      data: expect.objectContaining({ status: "PENDING", error: "The claimed workflow does not select this Meeting." }),
     });
   });
 
@@ -428,12 +449,12 @@ describe("runPendingJobs", () => {
     expect(runFinanceReportImportProposalJobMock).not.toHaveBeenCalled();
   });
 
-  it("records meeting transcript progress around completed meeting jobs", async () => {
+  it("records meeting transcript progress around completed summary-post jobs", async () => {
     txMock.$queryRaw.mockResolvedValue([
       {
         id: "job-1",
         workspaceId: "ws-1",
-        type: "agent.meeting-summary",
+        type: "meeting.summary.post",
         payload: { meetingId: "meeting-1" },
         attempts: 1,
       },
@@ -445,19 +466,19 @@ describe("runPendingJobs", () => {
     expect(recordMeetingTranscriptProcessingStageMock).toHaveBeenNthCalledWith(1, expect.objectContaining({
       workspaceId: "ws-1",
       meetingId: "meeting-1",
-      stage: "SUMMARIZING",
+      stage: "SYNCING_OUTPUTS",
       status: "ACTIVE",
       workflowJobId: "job-1",
-      workflowJobType: "agent.meeting-summary",
+      workflowJobType: "meeting.summary.post",
       workflowJobStatus: "RUNNING",
     }));
     expect(recordMeetingTranscriptProcessingStageMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
       workspaceId: "ws-1",
       meetingId: "meeting-1",
-      stage: "SUMMARIZING",
+      stage: "SYNCING_OUTPUTS",
       status: "COMPLETED",
       workflowJobId: "job-1",
-      workflowJobType: "agent.meeting-summary",
+      workflowJobType: "meeting.summary.post",
       workflowJobStatus: "COMPLETED",
     }));
   });

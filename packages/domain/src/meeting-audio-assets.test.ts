@@ -120,7 +120,10 @@ describe("meeting audio assets", () => {
       id: "audio-1",
       ...data,
     }));
-    captureAudioUploadInputMock.mockResolvedValue({ input: { id: "native-1" }, roots: [] });
+    captureAudioUploadInputMock.mockImplementation(async (_actor, params) => ({ input: { id: "native-1",
+      fileHash: createHash("sha256").update(params.fileBuffer).digest("hex") }, roots: [] }));
+    defaultStorageMock.put.mockResolvedValue(undefined);
+    defaultStorageMock.delete.mockResolvedValue(undefined);
     captureAudioTranscriptReceiptMock.mockResolvedValue({ inputId: "native-1" });
     readableProofMock.mockResolvedValue(true);
     readableArtifactIdsMock.mockResolvedValue(new Set(["audio-1"]));
@@ -174,6 +177,46 @@ describe("meeting audio assets", () => {
     expect(recordArtifactInputLineageMock).toHaveBeenCalledWith(expect.objectContaining({
       artifact: { kind: "MeetingAudioAsset", id: "audio-1" }, origin: "DERIVED",
     }));
+  });
+
+  it("rejects oversized bytes before making a copy or contacting storage", async () => {
+    const { createMeetingAudioAsset, MAX_AUDIO_FILE_BYTES } = await import("./meeting-audio-assets");
+    const oversized = Buffer.from("small synthetic allocation");
+    Object.defineProperty(oversized, "byteLength", { value: MAX_AUDIO_FILE_BYTES + 1 });
+    const copy = vi.spyOn(Buffer, "from");
+    try {
+      await expect(createMeetingAudioAsset(actor, { workspaceId: "ws-1", fileName: "large.m4a", fileBuffer: oversized }))
+        .rejects.toMatchObject({ code: "AUDIO_TOO_LARGE" });
+      expect(copy.mock.calls.some(args => args[0] === oversized)).toBe(false);
+      expect(defaultStorageMock.put).not.toHaveBeenCalled();
+      expect(prismaMock.meetingAudioAsset.create).not.toHaveBeenCalled();
+    } finally { copy.mockRestore(); }
+  });
+
+  it("keeps one isolated storage copy across uploader mutation", async () => {
+    const { createMeetingAudioAsset } = await import("./meeting-audio-assets");
+    const bytes = Buffer.from("audio");
+    const copy = vi.spyOn(Buffer, "from");
+    try {
+      const pending = createMeetingAudioAsset(actor, { workspaceId: "ws-1", fileName: "audio.m4a", fileBuffer: bytes });
+      bytes.write("other");
+      await pending;
+      const stored = defaultStorageMock.put.mock.calls[0][1];
+      expect(stored).not.toBe(bytes);
+      expect(stored.toString()).toBe("audio");
+      expect(copy.mock.calls.filter(args => args[0] === bytes)).toHaveLength(1);
+      expect(captureAudioUploadInputMock.mock.calls[0][1].fileBuffer).toBe(stored);
+    } finally { copy.mockRestore(); }
+  });
+
+  it("rejects storage mutation before publishing an audio job or lineage", async () => {
+    const { createMeetingAudioAsset } = await import("./meeting-audio-assets");
+    defaultStorageMock.put.mockImplementationOnce(async (_key, bytes) => { bytes.write("other"); });
+    await expect(createMeetingAudioAsset(actor, { workspaceId: "ws-1", fileName: "audio.m4a", fileBuffer: Buffer.from("audio") }))
+      .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalled();
+    expect(recordArtifactInputLineageMock).not.toHaveBeenCalled();
+    expect(defaultStorageMock.delete).toHaveBeenCalledOnce();
   });
 
   it("rejects an unreadable selected Meeting before storing audio", async () => {

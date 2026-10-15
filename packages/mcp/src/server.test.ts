@@ -327,6 +327,7 @@ vi.mock("@corgtex/shared", async () => {
     workspace: {
       findUnique: vi.fn(),
     },
+    member: { count: vi.fn(async () => 2) },
     workspaceFeatureFlag: {
       findMany: vi.fn(),
       upsert: vi.fn(),
@@ -1216,6 +1217,23 @@ describe("createCorgtexMcpServer", () => {
       ownerMemberName: "Owner",
       owner: "Owner",
     })]);
+  });
+
+  it.each(["oauth", "agent"] as const)("gates workspace category counts for %s connections and delegates visible totals", async authKind => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { prisma } = await import("@corgtex/shared");
+    vi.mocked(prisma.workspace.findUnique).mockResolvedValue({ id: "ws-1", name: "Synthetic" } as never);
+    const scopes = ["workspace:read", "actions:read"];
+    const actor = authKind === "oauth" ? {kind: "user", user: {id: "user-1"}}
+      : {kind: "agent", authProvider: "credential", workspaceIds: ["ws-1"], scopes};
+    const server = createTestServer(createCorgtexMcpServer, {workspaceId: "ws-1", authKind, actor, scopes});
+    listActionsMock.mockResolvedValue({items: [], total: 7});
+    listProposalsMock.mockClear(); listTensionsMock.mockClear(); listActionsMock.mockClear();
+    const response = await (server as any)._registeredTools.get_workspace_info.handler({});
+    expect(JSON.parse(response.content[0].text).counts).toEqual({actions: 7, proposals: 0, tensions: 0, members: 2});
+    expect(listActionsMock).toHaveBeenCalledWith(actor, "ws-1", {take: 0});
+    expect(listProposalsMock).not.toHaveBeenCalled();
+    expect(listTensionsMock).not.toHaveBeenCalled();
   });
 
   it("enforces all five legitimate daily overview scopes during invocation and never requires finance:read", async () => {
