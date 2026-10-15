@@ -490,14 +490,20 @@ describe("exclusive SQL outbox admission", () => {
     const observer = new pg.Client({ connectionString: fixture.connectionString });
     await observer.connect();
     try {
-      await fixture.writer.query("SELECT pg_advisory_lock($1)", [key]);
+      const holderPid = Number((await fixture.writer.query("SELECT pg_backend_pid() AS pid, pg_advisory_lock($1)", [key])).rows[0].pid);
       await fixture.writer.query(`CREATE FUNCTION ${fn}() RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN
         PERFORM pg_advisory_xact_lock(${key}); RETURN true; END $$`);
       await worker.run(source.id, false, false, `${fixture.schema}.${name}`);
       const deadline = Date.now() + 15_000;
       let blocked = false;
       while (Date.now() < deadline) {
-        blocked = Number((await observer.query(`SELECT count(*) FROM pg_stat_activity WHERE wait_event='advisory' AND query LIKE '%admission_barrier%'`)).rows[0].count) > 0;
+        // Activity SQL is truncated (normally at 1024 bytes); identify the
+        // actual unique barrier lock and its holder, never a query-text suffix.
+        blocked = Number((await observer.query(`SELECT count(*) FROM pg_stat_activity a
+          JOIN pg_locks l ON l.pid=a.pid
+          WHERE a.datname=current_database() AND a.wait_event='advisory'
+            AND l.locktype='advisory' AND l.classid=0 AND l.objid=$1 AND l.objsubid=1
+            AND NOT l.granted AND $2=ANY(pg_blocking_pids(a.pid))`, [key, holderPid])).rows[0].count) > 0;
         if (blocked) break;
         await delay(20);
       }
