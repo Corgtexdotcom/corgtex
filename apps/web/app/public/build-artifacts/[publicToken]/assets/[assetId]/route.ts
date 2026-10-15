@@ -8,11 +8,11 @@ export const dynamic = "force-dynamic";
 
 export const GET = withRoute(async (request, { params }) => {
   const { publicToken, assetId } = await params;
-  const { file, mimeType, authorize } = await resolvePublicBuildArtifactAsset({
+  const { file, mimeType, authorize, byteBinding } = await resolvePublicBuildArtifactAsset({
     publicToken,
     assetId,
   });
   const source = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array(file.data)); controller.close(); } });
-  const body = await authorizedDownloadStream(source, authorize, request.signal, { authorizeEveryDelivery: true });
+  const body = await authorizedDownloadStream(source, authorize, request.signal, { authorizeEveryDelivery: true, byteBinding });
   return new NextResponse(body, { headers: buildAssetResponseHeaders(mimeType) });
 });

@@ -944,7 +944,8 @@ export async function resolvePublicBuildArtifactAsset(params: {
   invariant(typeof asset.sha256 === "string" && createHash("sha256").update(file.data).digest("hex") === asset.sha256,
     409, "SOURCE_CHANGED", "Public proof asset changed.");
   await authorize();
-  return { signedUrl: null, file, mimeType: asset.mimeType, authorize };
+  return { signedUrl: null, file, mimeType: asset.mimeType, authorize,
+    byteBinding: { sha256: asset.sha256, sizeBytes: asset.sizeBytes } };
 }
 
 export async function markBuildArtifactClosedFromGitHub(params: {

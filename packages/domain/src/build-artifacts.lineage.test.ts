@@ -196,6 +196,7 @@ describe("Build artifact producer/read closure with actual input receipts", () =
     expect(normal.mimeType).toBe(uploaded.asset.mimeType);
     const publicFile = await resolvePublicBuildArtifactAsset({ publicToken: "synthetic-bearer", assetId: uploaded.asset.id });
     expect(publicFile.signedUrl).toBeNull(); expect(publicFile.mimeType).toBe(uploaded.asset.mimeType);
+    expect(publicFile.byteBinding).toEqual({ sha256: createHash("sha256").update("synthetic bytes").digest("hex"), sizeBytes: uploaded.asset.sizeBytes });
     expect(storage.getSignedUrl).not.toHaveBeenCalled();
     fixture.rows.member.find((m) => m.userId === "beta").isActive = false;
     await expect(publicFile.authorize()).rejects.toMatchObject({ code: "NOT_A_MEMBER" });
