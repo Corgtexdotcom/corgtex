@@ -129,7 +129,7 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
   it("distinct native table/key tuples retain independent chunks and original read proofs across replacement and an empty incremental run", async () => {
     const textRow = (tableName: string, primaryKey: string, description: string): SqlNativeRow => {
       const native = {id: primaryKey, updated_at: "2026-10-13T00:00:00.000Z", description};
-      const textKey = {...definition.key[0], type: "text", typeOid: 25, collationOid: 100};
+      const textKey = {...definition.key[0], type: "text" as const, typeOid: 25, collationOid: 100};
       return {row: native, table: `public.${tableName}`, primaryKey, values: [native.updated_at, primaryKey],
         definition: {...definition, name: tableName, relationOid: tableName === "a:b" ? 124 : 125,
           key: [textKey], columns: [{...definition.columns[0], ...textKey}, ...definition.columns.slice(1)]},
