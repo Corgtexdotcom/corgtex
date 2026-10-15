@@ -29,7 +29,8 @@ function visibleFocusableControls(panel: HTMLElement, selector: string) {
   return Array.from(panel.querySelectorAll<HTMLElement>(selector)).filter(
     (control) =>
       control.tabIndex >= 0 &&
-      !control.matches(":disabled") &&
+      !control.matches(":disabled, [aria-disabled='true']") &&
+      control.closest(".action-menu-panel") === panel &&
       !control.closest("[hidden], [inert]") &&
       control.getClientRects().length > 0 &&
       getComputedStyle(control).visibility === "visible",
@@ -53,6 +54,7 @@ export function ActionMenu({
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const focusedOnOpen = useRef(false);
+  const focusLastOnOpen = useRef(false);
   const [pos, setPos] = useState<{
     top: number;
     left: number;
@@ -73,10 +75,12 @@ export function ActionMenu({
     if (open && pos && pos.top >= 0 && !focusedOnOpen.current) {
       const panel = panelRef.current;
       if (!panel) return;
-      for (const control of visibleFocusableControls(
+      const controls = visibleFocusableControls(
         panel,
         "input:not([type='hidden']), textarea, select, button, a[href], [tabindex]",
-      )) {
+      );
+      if (focusLastOnOpen.current) controls.reverse();
+      for (const control of controls) {
         control.focus();
         if (document.activeElement === control) {
           focusedOnOpen.current = true;
@@ -151,9 +155,10 @@ export function ActionMenu({
       setOpen(false);
     }
     function handleKey(event: KeyboardEvent) {
-      if (event.key === "Escape") {
+      if (event.key === "Escape" && !event.defaultPrevented &&
+          (panelRef.current?.contains(event.target as Node) || event.target === triggerRef.current)) {
+        event.preventDefault();
         close();
-        triggerRef.current?.focus();
       }
     }
     window.addEventListener("scroll", handleScrollOrResize, true);
@@ -185,12 +190,14 @@ export function ActionMenu({
   // (the `submit` event only fires once required fields / patterns are satisfied).
   const handlePanelClick = (event: React.MouseEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement;
-    if (target.closest("a[href]")) {
+    if (target.closest(".action-menu-panel") === event.currentTarget && target.closest("a[href]")) {
       requestAnimationFrame(close);
     }
   };
-  const handlePanelSubmit = () => {
-    requestAnimationFrame(close);
+  const handlePanelSubmit = (event: React.FormEvent<HTMLDivElement>) => {
+    if ((event.target as HTMLElement).closest(".action-menu-panel") === event.currentTarget) {
+      requestAnimationFrame(close);
+    }
   };
 
   return (
@@ -206,12 +213,15 @@ export function ActionMenu({
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
         onClick={() => {
+          focusLastOnOpen.current = false;
           if (!open) onOpen?.();
           setOpen(!open);
         }}
         onKeyDown={(event) => {
           if (event.key === "ArrowDown" || event.key === "ArrowUp") {
             event.preventDefault();
+            event.stopPropagation();
+            focusLastOnOpen.current = event.key === "ArrowUp";
             if (!open) onOpen?.();
             setOpen(true);
           }
@@ -258,6 +268,13 @@ export function ActionMenu({
                 setOpen(false);
             }}
             onKeyDown={(event) => {
+              if (event.defaultPrevented) return;
+              if (event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                close();
+                return;
+              }
               if (
                 event.target instanceof HTMLInputElement ||
                 event.target instanceof HTMLTextAreaElement ||
@@ -272,6 +289,7 @@ export function ActionMenu({
               );
               if (!items.length) return;
               event.preventDefault();
+              event.stopPropagation();
               const index = items.indexOf(
                 document.activeElement as HTMLElement,
               );
@@ -289,7 +307,9 @@ export function ActionMenu({
           >
             {typeof children === "function" ? children(close) : children}
           </div>,
-          document.body,
+          // Keep panels inside their modal/focus boundary. A body portal is
+          // inert behind a native dialog and looks outside a parent menu on blur.
+          triggerRef.current?.closest(".action-menu-panel, dialog") ?? document.body,
         )}
     </div>
   );
