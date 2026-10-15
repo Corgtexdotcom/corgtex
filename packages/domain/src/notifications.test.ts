@@ -71,9 +71,16 @@ vi.mock("./communication", () => ({
   sendSlackMessage: sendSlackMessageMock,
 }));
 
-const lineageMocks = vi.hoisted(() => ({ prepare: vi.fn(), finish: vi.fn(), readable: vi.fn() }));
+const lineageMocks = vi.hoisted(() => ({ prepare: vi.fn(), finish: vi.fn(), readable: vi.fn(), capture: vi.fn(), release: vi.fn() }));
 vi.mock("./producer-lineage", () => ({ prepareProducerLineage: lineageMocks.prepare, finishProducerLineage: lineageMocks.finish }));
-vi.mock("./source-lineage", () => ({ readableArtifactIds: lineageMocks.readable }));
+vi.mock("./source-lineage", () => ({
+  readableArtifactIds: lineageMocks.readable,
+  captureArtifactInputProof: lineageMocks.capture,
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({ value: await read(), heads: new Map() }),
+  mergeLineageInputRoot: (_previous: unknown, root: unknown) => root,
+  sealArtifactInputActor: (reader: AppActor) => reader,
+  withArtifactCountReleaseSnapshot: lineageMocks.release,
+}));
 
 const actor: AppActor = {
   kind: "user" as const,
@@ -92,6 +99,13 @@ describe("notifications domain", () => {
       ? { mode: "DERIVED", inputs: [], roots: capture.lineageRoots } : { mode: "UNKNOWN" });
     lineageMocks.finish.mockReset().mockResolvedValue(undefined);
     lineageMocks.readable.mockReset().mockImplementation(async (_actor, _workspace, _kind, rows) => new Set(rows.map((row: { id: string }) => row.id)));
+    lineageMocks.capture.mockReset().mockImplementation(async (_actor, _workspace, inputs) => inputs.map((input: { kind: string; id: string }) => ({
+      kind: input.kind, id: input.id, fingerprint: input.id,
+    })));
+    lineageMocks.release.mockReset().mockImplementation(async (_actor, _workspace, _roots, remote, finish) => {
+      await remote();
+      return finish(prismaMock);
+    });
     prismaMock.notification.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.notification.findMany.mockReset().mockResolvedValue([{ id: "notification-1" }]);
     prismaMock.user.findFirst.mockReset().mockResolvedValue({ id: "user-1", email: "user-1@example.com", displayName: "User", globalRole: "USER" });
@@ -170,6 +184,18 @@ describe("notifications domain", () => {
       where: { id: { in: ["notification-1"] }, workspaceId: "workspace-1", userId: "user-1", readAt: null },
       data: { readAt: new Date("2026-04-24T12:00:00.000Z") },
     });
+  });
+
+  it("withholds retained rows, counts and mark-all writes when final release rejects original proofs", async () => {
+    lineageMocks.release.mockRejectedValue(new Error("Synthetic authority changed"));
+    const { listNotifications, countUnreadNotifications, markAllNotificationsRead } = await import("./notifications");
+    await expect(listNotifications(actor, "workspace-1")).rejects.toThrow("Synthetic authority changed");
+    expect(await countUnreadNotifications(actor, "workspace-1")).toBe(0);
+    await expect(markAllNotificationsRead(actor, "workspace-1")).rejects.toThrow("Synthetic authority changed");
+    expect(prismaMock.notification.updateMany).not.toHaveBeenCalled();
+    expect(lineageMocks.release).toHaveBeenCalledWith(actor, "workspace-1", [{
+      kind: "Notification", id: "notification-1", fingerprint: "notification-1",
+    }], expect.any(Function), expect.any(Function), expect.any(Map));
   });
 
   it("createNotificationIntent creates in-app rows for active human recipients", async () => {

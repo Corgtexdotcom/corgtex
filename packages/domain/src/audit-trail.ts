@@ -43,7 +43,7 @@ const AUDIT_OPERATIONS: Partial<Record<LineageKind, readonly string[]>> = {
   BuildArtifactAsset: ["build_artifact_asset.created", "managed_release.inventory_frozen"],
   Circle: ["circle.created", "circle.updated"],
   ContextGraphObject: ["context-graph.object.upserted"],
-  ContextGraphProposedDiff: ["context-graph.diff.applied", "context-graph.diff.edited", "context-graph.diff.proposed"],
+  ContextGraphProposedDiff: ["context-graph.diff.applied", "context-graph.diff.approved", "context-graph.diff.edited", "context-graph.diff.proposed"],
   ContextGraphRelationship: ["context-graph.relationship.upserted"],
   ContextMapView: ["context-graph.map.imported", "context-map.layout.updated", "context-map.view.personal.created"],
   CrmAccount: ["crm.account.converted_to_client", "crm.account.created", "crm.account.customer_lifecycle_registered", "crm.account.updated"],

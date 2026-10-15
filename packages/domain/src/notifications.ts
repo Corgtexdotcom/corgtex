@@ -3,7 +3,9 @@ import { env, prisma, sendEmail } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { humanMemberIdentityWhere } from "./member-identity";
-import { readableArtifactIds } from "./source-lineage";
+import { captureArtifactInputProof, captureArtifactReadHeadObservation, mergeLineageInputRoot,
+  readableArtifactIds, sealArtifactInputActor, withArtifactCountReleaseSnapshot, type LineageRoot } from "./source-lineage";
+import { invariant } from "./errors";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 
 export const DEFAULT_NOTIFICATION_CHANNEL = "IN_APP";
@@ -595,17 +597,20 @@ export async function listNotifications(actor: AppActor, workspaceId: string, op
   const result: Awaited<ReturnType<typeof prisma.notification.findMany>> = [];
   if (!take) return result;
   let visible = 0;
-  await visitReadableNotifications(actor, workspaceId, Boolean(opts?.unreadOnly), rows => {
+  return visitReadableNotifications(actor, workspaceId, Boolean(opts?.unreadOnly), rows => {
     for (const row of rows) {
       if (visible++ >= skip) result.push(row);
       if (result.length >= take) return false;
     }
-  });
-  return result;
+  }, async () => result);
 }
 
-async function visitReadableNotifications(actor: AppActor & { kind: "user" }, workspaceId: string,
-  unreadOnly: boolean, visit: (rows: Awaited<ReturnType<typeof prisma.notification.findMany>>) => false | void | Promise<false | void>) {
+async function visitReadableNotifications<T>(actor: AppActor & { kind: "user" }, workspaceId: string,
+  unreadOnly: boolean, visit: (rows: Awaited<ReturnType<typeof prisma.notification.findMany>>) => false | void,
+  finish: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+  sealArtifactInputActor(actor);
+  const roots = new Map<string, LineageRoot>();
+  const heads = new Map<string, string>();
   let after: { id: string; createdAt: Date } | undefined;
   while (true) {
     const rows = await prisma.notification.findMany({ where: {
@@ -615,18 +620,36 @@ async function visitReadableNotifications(actor: AppActor & { kind: "user" }, wo
     }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 100 });
     const last = rows.at(-1);
     const next = last ? { id: last.id, createdAt: last.createdAt } : undefined;
-    const readable = await readableArtifactIds(actor, workspaceId, "Notification", rows);
-    if (await visit(rows.filter(row => readable.has(row.id))) === false || rows.length < 100) return;
+    const observed = await captureArtifactReadHeadObservation(async () => {
+      const readable = await readableArtifactIds(actor, workspaceId, "Notification", rows);
+      const admitted = rows.filter(row => readable.has(row.id));
+      if (admitted.length) for (const root of await captureArtifactInputProof(actor, workspaceId,
+        admitted.map(row => ({ kind: "Notification", id: row.id, snapshot: row })))) {
+        const key = `${root.kind}:${root.id}`;
+        roots.set(key, mergeLineageInputRoot(roots.get(key), root));
+      }
+      return admitted;
+    });
+    for (const [key, stamp] of observed.heads) {
+      invariant(!heads.has(key) || heads.get(key) === stamp, 409, "SOURCE_CHANGED", "Notification inputs changed during collection.");
+      heads.set(key, stamp);
+    }
+    if (visit(observed.value) === false || rows.length < 100) break;
     after = next;
   }
+  // Earlier pages retain their original bodies, epochs and manifest heads. Check
+  // all of them and current membership together before releasing a result/write.
+  return withArtifactCountReleaseSnapshot(actor, workspaceId, [...roots.values()], async () => {}, async tx => {
+    await requireWorkspaceMembership({ actor, workspaceId, tx });
+    return finish(tx);
+  }, heads);
 }
 
 export async function countUnreadNotifications(actor: AppActor, workspaceId: string) {
   if (actor.kind !== "user") return 0;
   try {
     let count = 0;
-    await visitReadableNotifications(actor, workspaceId, true, rows => { count += rows.length; });
-    return count;
+    return await visitReadableNotifications(actor, workspaceId, true, rows => { count += rows.length; }, async () => count);
   } catch { return 0; }
 }
 
@@ -648,10 +671,12 @@ export async function markAllNotificationsRead(actor: AppActor, workspaceId: str
   if (actor.kind !== "user") return;
   const userId = actor.user.id;
   await requireWorkspaceMembership({ actor, workspaceId });
-  await visitReadableNotifications(actor, workspaceId, true, async rows => {
-    if (!rows.length) return;
-    await prisma.notification.updateMany({
-      where: { id: { in: rows.map(row => row.id) }, workspaceId, userId, readAt: null },
+  const pages: string[][] = [];
+  await visitReadableNotifications(actor, workspaceId, true, rows => {
+    if (rows.length) pages.push(rows.map(row => row.id));
+  }, async tx => {
+    for (const ids of pages) await tx.notification.updateMany({
+      where: { id: { in: ids }, workspaceId, userId, readAt: null },
       data: { readAt: new Date() },
     });
   });

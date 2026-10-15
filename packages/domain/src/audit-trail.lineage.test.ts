@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const { db, authorize } = vi.hoisted(() => ({ db: {
   auditLog: { findMany: vi.fn(), create: vi.fn() }, event: { findMany: vi.fn() }, workflowJob: { findFirst: vi.fn(), findMany: vi.fn() },
+  contextGraphProposedDiff: { findFirst: vi.fn() },
   action: { findFirst: vi.fn(), findMany: vi.fn() }, brainArticle: { findFirst: vi.fn() },
   modelUsage: { findMany: vi.fn(), findFirst: vi.fn() }, agentRun: { findFirst: vi.fn() }, workspace: { findFirst: vi.fn() },
   artifactInputLineage: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn() }, $executeRaw: vi.fn(), $queryRaw: vi.fn(), $transaction: vi.fn(),
@@ -157,6 +158,35 @@ describe("audit and timeline source admission", () => {
     expect(await getEntityTimeline(owner, "ws-1", "Action", source.id)).toEqual({
       auditLogs: [{ ...audit, meta: null }], relatedEvents: [{ ...event, jobs: [visibleJob], payload: null }],
     });
+  });
+
+  it.each(["list", "timeline"] as const)("retains graph approval identity in %s only for readable targets", async surface => {
+    const { source, audit } = await privateSource("Action");
+    const diff = { id: "graph-diff", workspaceId: "ws-1", proposedByType: "user", proposedByUserId: "owner",
+      proposedByAgentRunId: null, diffJson: { objects: [] }, reason: "Private proposal", evidenceJson: null,
+      status: "applied", reviewedByUserId: "owner", reviewedAt: date, appliedAt: date };
+    db.contextGraphProposedDiff.findFirst.mockImplementation(async ({ where }) =>
+      where.id === diff.id && where.workspaceId === diff.workspaceId ? diff : null);
+    await recordArtifactInputLineage({ tx: db as any, actor: owner, workspaceId: "ws-1",
+      artifact: { kind: "ContextGraphProposedDiff", id: diff.id }, content: diff, origin: "DERIVED",
+      inputs: [{ kind: "Action", id: source.id }] });
+    const approval = { ...audit, id: "graph-approval", action: "context-graph.diff.approved",
+      entityType: "ContextGraphProposedDiff", entityId: diff.id, meta: { graphApproval: { private: "proof" } } };
+    const operations = ["proposed", "approved", "applied"].map(operation => ({ ...approval,
+      id: `graph-${operation}`, action: `context-graph.diff.${operation}` }));
+    db.auditLog.findMany.mockResolvedValue([...operations, { ...approval, id: "unknown", action: "context-graph.diff.unknown" }]);
+    db.event.findMany.mockResolvedValue([]);
+    const expected = operations.map(row => ({ ...row, meta: null }));
+    if (surface === "list") {
+      expect(await listAuditLogs(owner, "ws-1")).toEqual(expected);
+      expect(await listAuditLogs(other, "ws-1")).toEqual([]);
+    } else {
+      expect(await getEntityTimeline(owner, "ws-1", "ContextGraphProposedDiff", diff.id))
+        .toEqual({ auditLogs: expected, relatedEvents: [] });
+      expect(await getEntityTimeline(other, "ws-1", "ContextGraphProposedDiff", diff.id))
+        .toEqual({ auditLogs: [], relatedEvents: [] });
+    }
+    expect(expected[1].actorUserId).toBe("owner");
   });
 
   it("does not let hidden targets crowd out a permitted audit row before the page limit", async () => {

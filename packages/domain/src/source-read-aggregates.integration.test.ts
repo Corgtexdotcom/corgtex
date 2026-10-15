@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
+import type { Prisma } from "@prisma/client";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
+import { getPrismaClient } from "../../shared/src/db";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { recordArtifactInputLineage } from "./source-lineage";
 import { getBrainStatus, listArticles } from "./brain";
@@ -172,12 +174,24 @@ it("marks admitted notification history in awaited100-row batches without skippi
       artifact: { kind: "Notification", id: row.id }, content: row, origin: "DERIVED", inputs: [{kind: "BrainSource", id: source.id}] }));
   }
   const reads = vi.spyOn(prisma.notification, "findMany");
-  const writes = vi.spyOn(prisma.notification, "updateMany");
+  const writeBatches: number[] = [];
+  const client = getPrismaClient();
+  const transaction = client.$transaction.bind(client);
+  const observeTransaction = async (work: (tx: Prisma.TransactionClient) => Promise<unknown>,
+    options?: { isolationLevel?: Prisma.TransactionIsolationLevel; timeout?: number }) => transaction(async tx => {
+    const write = tx.notification.updateMany.bind(tx.notification);
+    vi.spyOn(tx.notification, "updateMany").mockImplementation(args => {
+      writeBatches.push((args.where?.id as { in: string[] }).in.length);
+      return write(args);
+    });
+    return work(tx);
+  }, options);
+  vi.spyOn(client, "$transaction").mockImplementation(observeTransaction as typeof client.$transaction);
   await markAllNotificationsRead(f.actor, f.workspaceId);
   expect(await prisma.notification.count({ where: { workspaceId: f.workspaceId, readAt: { not: null } } })).toBe(205);
   expect(await prisma.notification.count({ where: { workspaceId: f.workspaceId, readAt: null } })).toBe(120);
   expect(reads.mock.calls.every(([args]) => args?.take === 100 && args.select === undefined)).toBe(true);
-  expect(writes.mock.calls.map(([args]) => (args.where?.id as {in: string[]}).in.length)).toEqual([80, 100, 25]);
+  expect(writeBatches).toEqual([80, 100, 25]);
   expect(await countUnreadNotifications(f.actor, f.workspaceId)).toBe(0);
 }, 120_000);
 
