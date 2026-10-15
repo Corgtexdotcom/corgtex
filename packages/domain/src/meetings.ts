@@ -14,6 +14,8 @@ import { finishProducerLineage, prepareProducerLineage, type ProducerLineagePara
 import { meetingAgendaInputProjection, meetingTranscriptInputProjection, readMeetingInputBatches } from "./meeting-intelligence-context";
 import { requireMeetingProcessedContentEditor } from "./collaborative-permissions";
 import { humanMemberIdentityWhere } from "./member-identity";
+import { DigestReadRelease } from "./digest-lineage";
+import { sealArtifactInputActor } from "./artifact-input-actor";
 import { extractSupportedMeetingUrlFromText, meetingUrlHash, normalizeMeetingUrl, normalizeRecorderMeetingUrl } from "./meeting-urls";
 import { getRecorderTranscriptWorkerPurpose } from "./native-transcript-principal";
 import { resetMeetingTranscriptProcessingProgress } from "./meeting-transcript-processing";
@@ -28,6 +30,14 @@ const DEFAULT_OCCURRENCE_LOOKAHEAD_DAYS = 60;
 const TRANSCRIPT_MATCH_WINDOW_MS = 2 * 60 * 60 * 1000;
 const TRANSCRIPT_AUTO_MATCH_THRESHOLD = 0.65;
 const TRANSCRIPT_MATCH_MARGIN = 0.1;
+
+// Proofs compare the complete canonical profile fingerprint. Only the existing
+// public label fields are projected into meeting responses after admission.
+const MEETING_PROFILE_INPUT_SELECT = { id: true, email: true, displayName: true,
+  bio: true, avatarUrl: true, linkedinUrl: true, websiteUrl: true, createdAt: true, updatedAt: true } satisfies Prisma.UserSelect;
+function meetingProfileLabel(user: { id: string; email: string; displayName: string | null }) {
+  return { id: user.id, displayName: user.displayName, email: user.email };
+}
 
 type MeetingCandidate = {
   meetingId: string;
@@ -506,14 +516,10 @@ async function findTranscriptMeetingCandidatesInternal(actor: AppActor, params: 
           { userId: { in: candidateParticipantIds } },
         ],
       },
-      select: {
-        id: true,
-        userId: true,
-        user: { select: { id: true, email: true, displayName: true } },
-      },
+      include: { user: { select: MEETING_PROFILE_INPUT_SELECT } },
     });
     const [visibleMembers, visibleUsers] = await Promise.all([
-      readableArtifactIds(actor, params.workspaceId, "Member", members, db),
+      readableArtifactIds(actor, params.workspaceId, "Member", members.map((member) => ({ ...member, user: meetingProfileLabel(member.user) })), db),
       readableArtifactIds(actor, params.workspaceId, "User", members.map((member) => member.user), db),
     ]);
     for (const member of members) {
@@ -846,10 +852,10 @@ export async function getMeeting(actor: AppActor, workspaceId: string, meetingId
       orderBy: [{ sourceRecordedAt: { sort: "desc", nulls: "last" } }, { createdAt: "desc" }, { id: "asc" }], ...page }),
     admit("MeetingInsight")) : Promise.resolve([]),
     readMeetingInputBatches((page) => prisma.proposal.findMany({ where: { workspaceId, meetingId, archivedAt: null },
-      include: { author: { select: { id: true, displayName: true, email: true } } },
+      include: { author: { select: MEETING_PROFILE_INPUT_SELECT } },
       orderBy: [{ createdAt: "desc" }, { id: "asc" }], ...page }), admit("Proposal")),
     readMeetingInputBatches((page) => prisma.tension.findMany({ where: { workspaceId, meetingId, archivedAt: null },
-      include: { author: { select: { id: true, displayName: true, email: true } } },
+      include: { author: { select: MEETING_PROFILE_INPUT_SELECT } },
       orderBy: [{ createdAt: "desc" }, { id: "asc" }], ...page }), admit("Tension")),
     meeting.series ? readableArtifactIds(actor, workspaceId, "MeetingSeries", [meeting.series]) : Promise.resolve(new Set<string>()),
   ]);
@@ -868,37 +874,43 @@ export async function getMeeting(actor: AppActor, workspaceId: string, meetingId
     && (insight.type === "ACTION_ITEM" || insight.type === "FOLLOW_UP")).map((insight) => insight.appliedEntityId as string))];
   const raisedActions = raisedActionIds.length ? await readMeetingInputBatches((page) => prisma.action.findMany({
     where: { workspaceId, id: { in: raisedActionIds }, archivedAt: null },
-    include: { author: { select: { id: true, displayName: true, email: true } },
-      assigneeMember: { include: { user: { select: { id: true, displayName: true, email: true } } } } },
+    include: { author: { select: MEETING_PROFILE_INPUT_SELECT },
+      assigneeMember: { include: { user: { select: MEETING_PROFILE_INPUT_SELECT } } } },
     orderBy: [{ createdAt: "desc" }, { id: "asc" }], ...page,
   }), admit("Action")) : [];
   // The labels are native profile inputs, whose current workspace membership is checked independently.
   const users = [...proposals.map((row) => row.author), ...tensions.map((row) => row.author),
     ...raisedActions.flatMap((row) => [row.author, row.assigneeMember?.user])].filter((row): row is NonNullable<typeof row> => Boolean(row));
   const userIds = await readableArtifactIds(actor, workspaceId, "User", users);
-  const redactAuthor = <T extends { author: { id: string } | null }>(row: T) => ({ ...row, ...(row.author ? { author: userIds.has(row.author.id) ? row.author : null } : {}) });
+  const redactAuthor = <T extends { author: { id: string; email: string; displayName: string | null } | null }>(row: T) => ({ ...row,
+    author: row.author && userIds.has(row.author.id) ? meetingProfileLabel(row.author) : null });
   for (const row of raisedActions) if (row.assigneeMember && !userIds.has(row.assigneeMember.user.id)) row.assigneeMember = null;
-  return { ...projectedMeeting, insights, proposals: proposals.map(redactAuthor), tensions: tensions.map(redactAuthor), raisedActions: raisedActions.map(redactAuthor) };
+  return { ...projectedMeeting, insights, proposals: proposals.map(redactAuthor), tensions: tensions.map(redactAuthor),
+    raisedActions: raisedActions.map((row) => ({ ...redactAuthor(row), assigneeMember: row.assigneeMember
+      ? { ...row.assigneeMember, user: meetingProfileLabel(row.assigneeMember.user) } : null })) };
 }
 
 export async function getMeetingParticipants(actor: AppActor, workspaceId: string, participantIds: string[]) {
   await requireWorkspaceMembership({ actor, workspaceId });
+  sealArtifactInputActor(actor);
+  const release = new DigestReadRelease(actor, workspaceId);
   const participants = await readMeetingInputBatches((page) => prisma.member.findMany({
     where: { workspaceId, OR: [{ id: { in: participantIds } }, { userId: { in: participantIds } }] },
-    include: { user: { select: { id: true, displayName: true, email: true } }, roleAssignments: { include: { role: true } } },
+    include: { user: { select: MEETING_PROFILE_INPUT_SELECT }, roleAssignments: { include: { role: true } } },
     orderBy: { id: "asc" }, ...page,
   }), async (rows) => {
     const [members, users, assignments, roles] = await Promise.all([
-      readableArtifactIds(actor, workspaceId, "Member", rows),
-      readableArtifactIds(actor, workspaceId, "User", rows.map((row) => row.user)),
-      readableArtifactIds(actor, workspaceId, "RoleAssignment", rows.flatMap((row) => row.roleAssignments)),
-      readableArtifactIds(actor, workspaceId, "Role", rows.flatMap((row) => row.roleAssignments.map((assignment) => assignment.role))),
+      release.capture("Member", rows.map((row) => ({ ...row, user: meetingProfileLabel(row.user) }))),
+      release.capture("User", rows.map((row) => row.user)),
+      release.capture("RoleAssignment", rows.flatMap((row) => row.roleAssignments)),
+      release.capture("Role", rows.flatMap((row) => row.roleAssignments.map((assignment) => assignment.role))),
     ]);
-    return rows.filter((row) => members.has(row.id) && users.has(row.user.id)).map((row) => ({ ...row,
-      roleAssignments: row.roleAssignments.filter((assignment) => assignments.has(assignment.id) && roles.has(assignment.role.id)),
+    return rows.filter((row) => members.proofs.has(row.id) && users.proofs.has(row.user.id)).map((row) => ({ ...row,
+      roleAssignments: row.roleAssignments.filter((assignment) => assignments.proofs.has(assignment.id) && roles.proofs.has(assignment.role.id)),
     }));
   });
-  return participants.map((row) => ({ ...row, roleAssignments: row.roleAssignments.map((assignment) => ({ ...assignment, role: { name: assignment.role.name } })) }));
+  return release.finish(participants.map((row) => ({ ...row, user: meetingProfileLabel(row.user),
+    roleAssignments: row.roleAssignments.map((assignment) => ({ ...assignment, role: { name: assignment.role.name } })) })));
 }
 
 export async function createMeetingSeries(actor: AppActor, params: {

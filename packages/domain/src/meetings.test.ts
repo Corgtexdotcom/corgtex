@@ -82,6 +82,10 @@ vi.mock("./source-lineage", async () => ({
   advanceHumanArtifactInputLineage: vi.fn().mockResolvedValue(true),
   captureArtifactInputProof: vi.fn(async (_actor: unknown, _workspace: string, inputs: Array<{ kind: string; id: string }>) =>
     inputs.map((input) => ({ ...input, fingerprint: "a".repeat(64) }))),
+  captureArtifactReadHeadObservation: vi.fn(async (read: () => Promise<unknown>) => ({ value: await read(), heads: new Map() })),
+  mergeLineageInputRoot: (_previous: unknown, root: unknown) => root,
+  withArtifactCountReleaseSnapshot: vi.fn(async (_actor: unknown, _workspace: string, _roots: unknown, _before: unknown,
+    release: (tx: typeof prismaMock) => Promise<unknown>) => release(prismaMock)),
   captureArtifactInputSnapshotProof: vi.fn().mockResolvedValue([{ kind: "ArtifactInputSnapshot", id: "meeting-prior-snapshot", fingerprint: "b".repeat(64) }]),
   captureImmutableArtifactInputProof: vi.fn().mockResolvedValue([{ kind: "ArtifactInputSnapshot", id: "frozen-prior", fingerprint: "c".repeat(64) }]),
   currentArtifactInputRoots: vi.fn(async () => [{ kind: "MeetingTranscript", id: "meeting-1", fingerprint: "a".repeat(64) }]),
@@ -212,12 +216,12 @@ describe("meetings domain", () => {
     const record = await prismaMock.meeting.findFirst();
     prismaMock.meetingInsight.findMany.mockResolvedValue(record.insights);
     prismaMock.meeting.findFirst.mockClear();
-    prismaMock.action.findMany.mockResolvedValue([{ id: "action-1", title: "Follow up" }]);
+    prismaMock.action.findMany.mockResolvedValue([{ id: "action-1", title: "Follow up", author: null, assigneeMember: null }]);
 
     const { getMeeting } = await import("./meetings");
     await expect(getMeeting(actor, "workspace-1", "meeting-1")).resolves.toEqual(expect.objectContaining({
       id: "meeting-1",
-      raisedActions: [{ id: "action-1", title: "Follow up" }],
+      raisedActions: [{ id: "action-1", title: "Follow up", author: null, assigneeMember: null }],
     }));
     expect(prismaMock.meetingInsight.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: { workspaceId: "workspace-1", meetingId: "meeting-1" }, take: 100,
@@ -540,7 +544,8 @@ describe("meetings domain", () => {
   });
 
   it("withholds unproven participant roles and departed profiles", async () => {
-    const { readableArtifactIds } = await import("./source-lineage");
+    const { captureArtifactInputProof } = await import("./source-lineage");
+    const { AppError } = await import("./errors");
     const { getMeetingParticipants } = await import("./meetings");
     prismaMock.member.findMany.mockResolvedValue([
       { id: "member-visible", user: { id: "user-visible", displayName: "Public", email: "public@example.test" },
@@ -548,15 +553,18 @@ describe("meetings domain", () => {
           { id: "assignment-public", role: { id: "role-public", name: "Public role" } }] },
       { id: "member-departed", user: { id: "user-departed", displayName: "Departed", email: "departed@example.test" }, roleAssignments: [] },
     ]);
-    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _ws, kind, rows) => new Set(rows
-      .filter((row) => !(kind === "Role" && row.id === "role-secret") && !(kind === "User" && row.id === "user-departed"))
-      .map((row) => row.id)));
+    vi.mocked(captureArtifactInputProof).mockImplementation(async (_actor, _ws, inputs) => {
+      if (inputs.some((input) => (input.kind === "Role" && input.id === "role-secret") || (input.kind === "User" && input.id === "user-departed"))) {
+        throw new AppError(409, "UNKNOWN_LINEAGE", "Synthetic unavailable profile or role.");
+      }
+      return inputs.map((input) => ({ ...input, fingerprint: "a".repeat(64) }));
+    });
     const participants = await getMeetingParticipants(actor, "workspace-1", ["member-visible", "member-departed"]);
     expect(participants).toHaveLength(1);
     expect(participants[0].roleAssignments).toEqual([{ id: "assignment-public", role: { name: "Public role" } }]);
     expect(JSON.stringify(participants)).not.toContain("Finance");
     expect(JSON.stringify(participants)).not.toContain("Departed");
-    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _ws, _kind, rows) => new Set(rows.map((row) => row.id)));
+    vi.mocked(captureArtifactInputProof).mockImplementation(async (_actor, _ws, inputs) => inputs.map((input) => ({ ...input, fingerprint: "a".repeat(64) })));
   });
 
   it("createMeetingSeries stores a supported recorder URL for inherited occurrences", async () => {
