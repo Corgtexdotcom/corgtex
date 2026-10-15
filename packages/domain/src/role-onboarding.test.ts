@@ -3,6 +3,9 @@ import { finishProducerLineage } from "./producer-lineage";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./source-lineage", () => ({
+  mergeLineageInputRoot: (_earlier: unknown, root: unknown) => root,
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({ value: await read(), heads: new Map() }),
+  withArtifactCountReleaseSnapshot: async (_actor: unknown, _workspaceId: string, _roots: unknown, _remote: unknown, finish: (tx: unknown) => Promise<unknown>) => finish(prismaMock),
   captureArtifactInputProof: vi.fn(async (_actor, _workspaceId, inputs) => inputs.map((input: { kind: string; id: string }) => ({ kind: input.kind, id: input.id, fingerprint: "a".repeat(64) }))),
   readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map((row: { id: string }) => row.id))),
 }));
@@ -49,6 +52,7 @@ const { prismaMock } = vi.hoisted(() => {
 vi.mock("./auth", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./auth")>();
   return { ...actual, requireWorkspaceMembership: (params: Parameters<typeof actual.requireWorkspaceMembership>[0]) => {
+    if (params.actor.kind === "user" && params.actor.user.id === "user-1") return { id: "member-1", role: "CONTRIBUTOR" };
     // Operator fixtures also have an explicit ADMIN membership.
     if (params.actor.kind === "user" && params.actor.user.globalRole === "OPERATOR") {
       return actual.requireWorkspaceMembership({ ...params, resolvedMembership: {
@@ -318,6 +322,42 @@ describe("role onboarding domain", () => {
     await createRoleOnboardingIntro({ workspaceId: "workspace-1", onboardingSessionId: "onboarding-1" });
     expect(finishProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ tx: prismaMock,
       artifact: { kind: "ConversationTurn", id: "intro-turn-1" } }));
+  });
+
+  it("bounds all five candidate queries and stops after the readable sample", async () => {
+    const { buildRoleOnboardingContextWithLineageForConversation } = await import("./role-onboarding");
+    await buildRoleOnboardingContextWithLineageForConversation({ workspaceId: "workspace-1", conversationId: "conversation-1", userId: "user-1" });
+    for (const delegate of [prismaMock.policyCorpus, prismaMock.action, prismaMock.tension, prismaMock.proposal, prismaMock.meeting]) {
+      expect(delegate.findMany).toHaveBeenCalledWith(expect.objectContaining({take: 100,
+        orderBy: expect.arrayContaining([{id: "asc"}])}));
+      expect(delegate.findMany).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("continues canonical pages through denied rows and does not scan the tail after filling each sample", async () => {
+    const delegates = [prismaMock.policyCorpus, prismaMock.action, prismaMock.tension, prismaMock.proposal, prismaMock.meeting];
+    for (const delegate of delegates) {
+      const rows = Array.from({length: 1000}, (_, index) => ({ id: `candidate-${index}`, title: `Candidate ${index}`,
+        bodyMd: "Policy", recordedAt: new Date("2026-01-01"), status: "OPEN", priority: 1 }));
+      delegate.findMany.mockImplementation(async ({take, cursor}: {take: number; cursor?: {id: string}}) => {
+        const start = cursor ? rows.findIndex(row => row.id === cursor.id) + 1 : 0;
+        return rows.slice(start, start + take);
+      });
+    }
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, _kind, rows) => new Set(rows
+      .filter(row => !row.id.startsWith("candidate-") || Number(row.id.slice(10)) >= 101).map(row => row.id)));
+    const { buildRoleOnboardingContextWithLineageForConversation } = await import("./role-onboarding");
+    const result = await buildRoleOnboardingContextWithLineageForConversation({workspaceId: "workspace-1", conversationId: "conversation-1", userId: "user-1"});
+    for (const delegate of delegates) {
+      expect(delegate.findMany).toHaveBeenCalledTimes(2);
+      expect(delegate.findMany.mock.calls[1][0]).toMatchObject({take: 100, cursor: {id: "candidate-99"}, skip: 1});
+    }
+    for (const [kind, take] of [["PolicyCorpus", 5], ["Action", 8], ["Tension", 8], ["Proposal", 5], ["Meeting", 5]]) {
+      expect(result?.lineageInputs.filter(input => input.kind === kind).map(input => input.id))
+        .toEqual(Array.from({length: Number(take)}, (_, index) => `candidate-${101 + index}`));
+    }
+    const captured = vi.mocked(captureArtifactInputProof).mock.calls.flatMap(call => call[2]);
+    expect(captured.filter(input => input.id === "candidate-199")).toEqual([]);
   });
 
 });

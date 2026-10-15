@@ -1,4 +1,4 @@
-import { captureArtifactInputProof, readableArtifactIds, type LineageInput, type LineageRoot } from "./source-lineage";
+import { captureArtifactInputProof, captureArtifactReadHeadObservation, mergeLineageInputRoot, readableArtifactIds, withArtifactCountReleaseSnapshot, type LineageInput, type LineageRoot } from "./source-lineage";
 import { prepareProducerLineage, finishProducerLineage } from "./producer-lineage";
 import { Prisma, type RoleOnboardingStatus } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
@@ -516,121 +516,160 @@ async function loadRoleOnboardingContext(params: {
       { isPrivate: true, status: "DRAFT" as const, authorUserId: params.userId },
     ];
 
-  const [candidatePolicies, candidateActions, candidateTensions, candidateProposals, candidateMeetings] = await Promise.all([
-    prisma.policyCorpus.findMany({
-      where: {
-        workspaceId: params.workspaceId,
-        OR: [
-          { circleId: null },
-          { circleId: session.role.circleId },
-        ],
-      },
-      orderBy: { acceptedAt: "desc" },
-    }),
-    prisma.action.findMany({
-      where: {
-        workspaceId: params.workspaceId,
-        archivedAt: null,
-        status: { not: "COMPLETED" },
-        AND: [
-          { OR: privateDraftVisibility },
-          {
-            OR: [
-              { assigneeMemberId: session.memberId },
-              { circleId: session.role.circleId },
-            ],
-          },
-        ],
-      },
-      orderBy: { updatedAt: "desc" },
-    }),
-    prisma.tension.findMany({
-      where: {
-        workspaceId: params.workspaceId,
-        archivedAt: null,
-        status: "OPEN",
-        AND: [
-          { OR: privateDraftVisibility },
-          {
-            OR: [
-              { assigneeMemberId: session.memberId },
-              { raisedByMemberId: session.memberId },
-              { circleId: session.role.circleId },
-            ],
-          },
-        ],
-      },
-      orderBy: [{ priority: "desc" }, { updatedAt: "desc" }],
-    }),
-    prisma.proposal.findMany({
-      where: {
-        workspaceId: params.workspaceId,
-        archivedAt: null,
-        status: "OPEN",
-        circleId: session.role.circleId,
-        OR: privateDraftVisibility,
-      },
-      orderBy: { updatedAt: "desc" },
-    }),
-    prisma.meeting.findMany({
-      where: {
-        workspaceId: params.workspaceId,
-        archivedAt: null,
-        OR: [
-          { participantIds: { has: session.memberId } },
-          { participantIds: { has: params.userId } },
-        ],
-      },
-      orderBy: { recordedAt: "desc" },
-    }),
-  ]);
-
   const actor: AppActor = params.actor ?? { kind: "user", user: {
     id: params.userId, email: session.member.user.email,
     displayName: session.member.user.displayName, globalRole: "USER",
   } };
   invariant(actor.kind === "user" && actor.user.id === params.userId, 403, "FORBIDDEN", "Onboarding context requires its owner.");
+  const roots = new Map<string, LineageRoot>();
+  const heads = new Map<string, string>();
   async function admitted<T extends { id: string }>(kind: LineageInput["kind"], records: T[], take?: number) {
     const visible = await readableArtifactIds(actor, params.workspaceId, kind, records);
-    return records.filter((record) => visible.has(record.id)).slice(0, take);
+    const selected = records.filter((record) => visible.has(record.id)).slice(0, take);
+    if (!selected.length) return selected;
+    const observed = await captureArtifactReadHeadObservation(async () => {
+      const proof = await captureArtifactInputProof(actor, params.workspaceId,
+        selected.map((snapshot) => ({ kind, id: snapshot.id, snapshot })));
+      for (const root of proof) {
+        const key = JSON.stringify([root.kind, root.id]);
+        roots.set(key, mergeLineageInputRoot(roots.get(key), root));
+      }
+      return selected;
+    });
+    // Retain exact original heads across awaited pages and joins. Never refresh
+    // an earlier selected input's proof from a later permission observation.
+    for (const [key, stamp] of observed.heads) {
+      invariant(!heads.has(key) || heads.get(key) === stamp, 409, "SOURCE_CHANGED", "Onboarding inputs changed during collection.");
+      heads.set(key, stamp);
+    }
+    return observed.value;
   }
-  const [sessions, roles, circles, members] = await Promise.all([
-    admitted("RoleOnboardingSession", [session]), admitted("Role", [session.role]),
-    admitted("Circle", [session.role.circle]), admitted("Member", [session.member]),
-  ]);
-  if (!sessions.length || !roles.length || !circles.length || !members.length) return null;
-  const [policies, actions, tensions, proposals, meetings, versions, humanAssignments, agentIdentities, agentAssignments] = await Promise.all([
-    admitted("PolicyCorpus", candidatePolicies, 5), admitted("Action", candidateActions, 8),
-    admitted("Tension", candidateTensions, 8), admitted("Proposal", candidateProposals, 5),
-    admitted("Meeting", candidateMeetings, 5), admitted("RoleVersion", session.role.versions, 3),
-    admitted("RoleAssignment", session.role.assignments.filter((assignment) => isRoleAssignmentActive(assignment))),
-    admitted("AgentIdentity", session.role.agentAssignments.map((assignment) => assignment.agentIdentity)),
-    admitted("CircleAgentAssignment", session.role.agentAssignments),
-  ]);
-  const holderMembers = await admitted("Member", humanAssignments.map((assignment) => assignment.member));
-  const memberIds = new Set(holderMembers.map((member) => member.id));
-  const identityIds = new Set(agentIdentities.map((identity) => identity.id));
-  const assignments = humanAssignments.filter((assignment) => memberIds.has(assignment.member.id));
-  const safeSession = { ...session, role: { ...session.role, assignments, versions,
-    agentAssignments: agentAssignments.filter((assignment) => identityIds.has(assignment.agentIdentity.id)),
-  } };
-  const captured: Array<LineageInput & { snapshot: Record<string, unknown> }> = [];
-  function append(kind: LineageInput["kind"], records: Array<{ id: string }>) {
-    records.forEach((snapshot) => captured.push({ kind, id: snapshot.id, snapshot }));
+  async function sample<T extends { id: string }>(kind: LineageInput["kind"], take: number,
+    fetch: (page: { take: number; cursor?: { id: string }; skip?: number }) => Promise<T[]>) {
+    const selected: T[] = [];
+    let cursor: { id: string } | undefined;
+    for (;;) {
+      const page = await fetch({ take: 100, ...(cursor ? { cursor, skip: 1 } : {}) });
+      invariant(page.length <= 100, 409, "SOURCE_CHANGED", "Invalid onboarding candidate page.");
+      selected.push(...await admitted(kind, page, take - selected.length));
+      if (selected.length === take || page.length < 100) return selected;
+      const last = page.at(-1)!;
+      invariant(last.id !== cursor?.id, 409, "SOURCE_CHANGED", "Onboarding candidates changed during collection.");
+      cursor = { id: last.id };
+    }
   }
-  append("RoleOnboardingSession", [session]); append("Role", [session.role]);
-  append("Circle", [session.role.circle]); append("Member", [session.member, ...holderMembers]);
-  append("RoleAssignment", assignments); append("AgentIdentity", agentIdentities);
-  append("CircleAgentAssignment", safeSession.role.agentAssignments); append("RoleVersion", versions);
-  append("PolicyCorpus", policies); append("Action", actions); append("Tension", tensions);
-  append("Proposal", proposals); append("Meeting", meetings);
   try {
-    const lineageRoots = await captureArtifactInputProof(actor, params.workspaceId, captured);
-    return { session: safeSession, policies, actions, tensions, proposals, meetings,
-      lineageInputs: captured.map(({ kind, id }) => ({ kind, id })), lineageRoots };
+    const [sessions, roles, circles, members] = await Promise.all([
+      admitted("RoleOnboardingSession", [session]), admitted("Role", [session.role]),
+      admitted("Circle", [session.role.circle]), admitted("Member", [session.member]),
+    ]);
+    if (!sessions.length || !roles.length || !circles.length || !members.length) return null;
+    const [policies, actions, tensions, proposals, meetings] = await Promise.all([
+      sample("PolicyCorpus", 5, (page) => prisma.policyCorpus.findMany({
+        ...page,
+        where: {
+          workspaceId: params.workspaceId,
+          OR: [
+            { circleId: null },
+            { circleId: session.role.circleId },
+          ],
+        },
+        orderBy: [{ acceptedAt: "desc" }, { id: "asc" }],
+      })),
+      sample("Action", 8, (page) => prisma.action.findMany({
+        ...page,
+        where: {
+          workspaceId: params.workspaceId,
+          archivedAt: null,
+          status: { not: "COMPLETED" },
+          AND: [
+            { OR: privateDraftVisibility },
+            {
+              OR: [
+                { assigneeMemberId: session.memberId },
+                { circleId: session.role.circleId },
+              ],
+            },
+          ],
+        },
+        orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
+      })),
+      sample("Tension", 8, (page) => prisma.tension.findMany({
+        ...page,
+        where: {
+          workspaceId: params.workspaceId,
+          archivedAt: null,
+          status: "OPEN",
+          AND: [
+            { OR: privateDraftVisibility },
+            {
+              OR: [
+                { assigneeMemberId: session.memberId },
+                { raisedByMemberId: session.memberId },
+                { circleId: session.role.circleId },
+              ],
+            },
+          ],
+        },
+        orderBy: [{ priority: "desc" }, { updatedAt: "desc" }, { id: "asc" }],
+      })),
+      sample("Proposal", 5, (page) => prisma.proposal.findMany({
+        ...page,
+        where: {
+          workspaceId: params.workspaceId,
+          archivedAt: null,
+          status: "OPEN",
+          circleId: session.role.circleId,
+          OR: privateDraftVisibility,
+        },
+        orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
+      })),
+      sample("Meeting", 5, (page) => prisma.meeting.findMany({
+        ...page,
+        where: {
+          workspaceId: params.workspaceId,
+          archivedAt: null,
+          OR: [
+            { participantIds: { has: session.memberId } },
+            { participantIds: { has: params.userId } },
+          ],
+        },
+        orderBy: [{ recordedAt: "desc" }, { id: "asc" }],
+      })),
+    ]);
+
+    const [versions, humanAssignments, agentIdentities, agentAssignments] = await Promise.all([
+      admitted("RoleVersion", session.role.versions, 3),
+      admitted("RoleAssignment", session.role.assignments.filter((assignment) => isRoleAssignmentActive(assignment))),
+      admitted("AgentIdentity", session.role.agentAssignments.map((assignment) => assignment.agentIdentity)),
+      admitted("CircleAgentAssignment", session.role.agentAssignments),
+    ]);
+    const holderMembers = await admitted("Member", humanAssignments.map((assignment) => assignment.member));
+    const memberIds = new Set(holderMembers.map((member) => member.id));
+    const identityIds = new Set(agentIdentities.map((identity) => identity.id));
+    const assignments = humanAssignments.filter((assignment) => memberIds.has(assignment.member.id));
+    const safeSession = { ...session, role: { ...session.role, assignments, versions,
+      agentAssignments: agentAssignments.filter((assignment) => identityIds.has(assignment.agentIdentity.id)),
+    } };
+    const captured: Array<LineageInput & { snapshot: Record<string, unknown> }> = [];
+    function append(kind: LineageInput["kind"], records: Array<{ id: string }>) {
+      records.forEach((snapshot) => captured.push({ kind, id: snapshot.id, snapshot }));
+    }
+    append("RoleOnboardingSession", [session]); append("Role", [session.role]);
+    append("Circle", [session.role.circle]); append("Member", [session.member, ...holderMembers]);
+    append("RoleAssignment", assignments); append("AgentIdentity", agentIdentities);
+    append("CircleAgentAssignment", safeSession.role.agentAssignments); append("RoleVersion", versions);
+    append("PolicyCorpus", policies); append("Action", actions); append("Tension", tensions);
+    append("Proposal", proposals); append("Meeting", meetings);
+    const lineageRoots = [...roots.values()];
+    return await withArtifactCountReleaseSnapshot(actor, params.workspaceId, lineageRoots, async () => {}, async (tx) => {
+      await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
+      return { session: safeSession, policies, actions, tensions, proposals, meetings,
+        lineageInputs: captured.map(({ kind, id }) => ({ kind, id })), lineageRoots };
+    }, heads);
   } catch (error) {
     if (typeof error !== "object" || error === null || !("code" in error)
-      || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(String(error.code))) throw error;
+      || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED", "PERMISSION_CHANGED"].includes(String(error.code))) throw error;
     return null;
   }
 }
