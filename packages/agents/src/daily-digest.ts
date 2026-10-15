@@ -35,7 +35,6 @@ import {
 } from "@corgtex/domain";
 import type { LineageKind, LineageRoot, PersonalNewspaperItem } from "@corgtex/domain";
 import { 
-  batchIngestDailyConversations, 
   createArticle, 
   listSlackMessagesForDigest,
   updateArticle, 
@@ -1393,11 +1392,8 @@ export async function runDailyDigest(params: {
     await getAgentModelOverride(params.workspaceId, "daily-digest"),
   );
 
-  // 1. Batch ingest all raw conversations as tier-3 sources
-  if (!params.regenerationOnly) await batchIngestDailyConversations({
-    workspaceId: params.workspaceId,
-    since,
-  });
+  // Private conversations enter Brain only through authenticated Save to Brain
+  // consent. Daily generation must not run the retired automatic batch exporter.
 
   // 2. Load all conversations from past 24h to extract insights and build the digest
   const loadedSessions = await prisma.conversationSession.findMany({

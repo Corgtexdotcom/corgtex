@@ -309,41 +309,6 @@ export async function renameConversation(actor: AppActor, params: {
   });
 }
 
-export async function getUningestedConversations(workspaceId: string, since: Date) {
-  const actor: AppActor = { kind: "agent", authProvider: "bootstrap", label: "conversation-batch", workspaceIds: [workspaceId] };
-  await requireWorkspaceMembership({ actor, workspaceId });
-  const sessions = await prisma.conversationSession.findMany({
-    where: {
-      workspaceId,
-      updatedAt: { gte: since },
-      turns: { some: { createdAt: { gte: since } } }
-    },
-    include: {
-      turns: {
-        where: { createdAt: { gte: since } },
-        orderBy: { sequenceNumber: "asc" }
-      },
-      user: {
-        select: { id: true, email: true, displayName: true }
-      }
-    },
-    take: 5001,
-  });
-  invariant(sessions.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Conversation input scan exceeds its supported size.");
-  const safe = [];
-  for (const session of sessions) {
-    const visible = await readableArtifactIds(actor, workspaceId, "ConversationTurn", session.turns);
-    if (session.turns.some((turn) => !visible.has(turn.id))) continue;
-    const hasTopic = (await readableArtifactIds(actor, workspaceId, "ConversationSession", [session])).has(session.id);
-    const lineageRoots = await captureArtifactInputProof(actor, workspaceId, [
-      ...session.turns.map((turn) => ({ kind: "ConversationTurn" as const, id: turn.id, snapshot: turn })),
-      ...(hasTopic ? [{ kind: "ConversationSession" as const, id: session.id, snapshot: session }] : []),
-    ]);
-    safe.push({ ...session, topic: hasTopic ? session.topic : null, systemPrompt: null, lineageRoots });
-  }
-  return safe;
-}
-
 export async function deleteConversation(actor: AppActor, params: {
   workspaceId: string;
   conversationId: string;

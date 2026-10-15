@@ -500,6 +500,38 @@ describe("runDailyDigest", () => {
     prismaMock.workspace.findUnique.mockResolvedValue({ name: "Workspace One" });
   });
 
+  it.each(["DAILY", "WEEKLY"] as const)("completes %s digests and retries above the retired private-ingestion limit", async (cadence) => {
+    getWorkspaceNewspaperCadenceMock.mockResolvedValue(cadence);
+    prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
+    const sessions = Array.from({ length: 5001 }, (_, index) => ({
+      id: `private-session-${index}`, userId: "user-1", user: { id: "user-1" },
+      turns: [{ id: `private-turn-${index}`, userMessage: "PRIVATE_PROMPT_CANARY", assistantMessage: "PRIVATE_ANSWER_CANARY" }],
+    }));
+    prismaMock.conversationSession.findMany.mockResolvedValue(sessions);
+    batchIngestDailyConversationsMock.mockRejectedValue(Object.assign(new Error("Retired batch scan exceeds its supported size"), { code: "SOURCE_READ_SCAN_LIMIT" }));
+    const domain = await import("@corgtex/domain");
+    const capture = vi.mocked(domain.captureReadableDigestInputs);
+    const original = capture.getMockImplementation()!;
+    const { runDailyDigest } = await import("./daily-digest");
+    await capture.withImplementation(async (params: any) => params.kind === "ConversationTurn"
+      ? { records: [], proofs: new Map(), roots: [] } : original(params), async () => {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await expect(runDailyDigest({ workspaceId: "workspace-1", dateISO: "2026-04-30T12:00:00.000Z", cadence }))
+          .resolves.toMatchObject({ success: true, processedSessions: 0, updatedProfiles: 0 });
+      }
+    });
+    expect(batchIngestDailyConversationsMock).not.toHaveBeenCalled();
+    // Only the separately permission-filtered digest input read remains. The
+    // retired automatic ingestion performs no additional raw-body hydration.
+    expect(prismaMock.conversationSession.findMany).toHaveBeenCalledTimes(2);
+    expect(prismaMock.brainSource.create).not.toHaveBeenCalled();
+    expect(txMock.brainSource.create).not.toHaveBeenCalled();
+    expect(chatMock).not.toHaveBeenCalled();
+    expect(upsertWorkspaceBriefingMock).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(extractMock.mock.calls)).not.toContain("PRIVATE_");
+    expect(extractMock.mock.calls.some(([request]) => request.instruction.startsWith("Generate a structured"))).toBe(true);
+  });
+
   it("regenerates permitted shared artifacts without ingestion, profile writes, or outbound delivery", async () => {
     getWorkspaceNewspaperCadenceMock.mockResolvedValue("DAILY");
     prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
@@ -1101,9 +1133,7 @@ describe("runDailyDigest", () => {
       briefingId: "briefing-1",
       processedSessions: 0,
     }));
-    expect(batchIngestDailyConversationsMock).toHaveBeenCalledWith(expect.objectContaining({
-      workspaceId: "workspace-1",
-    }));
+    expect(batchIngestDailyConversationsMock).not.toHaveBeenCalled();
     expect(upsertWorkspaceBriefingMock).toHaveBeenCalledWith(expect.objectContaining({
       period: "DAILY",
     }));
@@ -1740,10 +1770,9 @@ describe("runDailyDigest", () => {
       cadence: "WEEKLY",
     });
 
-    expect(batchIngestDailyConversationsMock).toHaveBeenCalledWith({
-      workspaceId: "workspace-1",
-      since: new Date("2026-04-23T12:00:00.000Z"),
-    });
+    expect(batchIngestDailyConversationsMock).not.toHaveBeenCalled();
+    expect(listSlackMessagesForDigestMock).toHaveBeenCalledWith(expect.anything(), "workspace-1",
+      new Date("2026-04-23T12:00:00.000Z"), new Date("2026-04-30T12:00:00.000Z"), expect.any(Array));
     expect(createArticleMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       slug: "weekly-newspaper-2026-04-30",
       title: "Weekly Newspaper - 2026-04-30",
