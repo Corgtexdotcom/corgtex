@@ -21,7 +21,7 @@ const fields: Record<Kind, string[]> = {
 };
 const links = [["dealId", "CrmDeal"], ["contactId", "CrmContact"], ["accountId", "CrmAccount"]] as const;
 type Entry = { kind: Kind; id: string; fingerprint: string; manifestId: string; revision: number;
-  parents: Array<{ kind: Kind; id: string; fingerprint: string }>; epochs: PermissionEpochProof; projected: Row; projectionHash: string };
+  parents: Array<{ kind: Kind; id: string; fingerprint: string }>; epochs: PermissionEpochProof; projected?: Row; projectionHash?: string };
 type State = { actor: AppActor; workspaceId: string; origin: string; entries: Entry[]; ordinary: Array<{kind: Kind; id: string; fingerprint: string; manifestId: string; revision: number}>; roots: LineageRoot[] };
 export type CrmDirectReadSession = Readonly<{ directPresentation: true }>;
 const sessions = new WeakMap<CrmDirectReadSession, State>();
@@ -106,6 +106,84 @@ async function lockedClosure(tx: Prisma.TransactionClient, workspaceId: string, 
   }
   return rows;
 }
+function parentFree(kind: Kind, stored: Row) {
+  return kind !== "CrmDeal" && links.every(([field]) => stored[field] == null);
+}
+function actualParents(kind: Kind, stored: Row, closure: Map<string, Row>): Entry["parents"] {
+  const parents = new Map<string, Entry["parents"][number]>();
+  const visit = (value: Row) => {
+    for (const [field, parentKind] of links) {
+      if (value[field] == null) continue;
+      const key = `${parentKind}:${String(value[field])}`;
+      if (key === `${kind}:${stored.id}` || parents.has(key)) continue;
+      const parent = closure.get(key);
+      invariant(parent, 409, "SOURCE_CHANGED", "A direct read relationship changed.");
+      parents.set(key, {kind: parentKind, id: parent.id, fingerprint: lineageContentFingerprint(parentKind, parent)});
+      visit(parent);
+    }
+  };
+  visit(stored);
+  return [...parents.values()];
+}
+async function latestPage(tx: Prisma.TransactionClient, workspaceId: string, kind: Kind, ids: string[]) {
+  if (!ids.length) return new Map<string, NonNullable<Awaited<ReturnType<typeof latest>>>>();
+  const manifests = await tx.$queryRaw<Array<NonNullable<Awaited<ReturnType<typeof latest>>>>>(Prisma.sql`
+    SELECT DISTINCT ON ("artifactId") * FROM "ArtifactInputLineage"
+    WHERE "workspaceId" = ${workspaceId} AND "artifactType" = ${kind} AND "artifactId" IN (${Prisma.join(ids)})
+    ORDER BY "artifactId", revision DESC`);
+  return new Map(manifests.map(manifest => [manifest.artifactId, manifest]));
+}
+/** Parent-free originals use precisely the same archive mutex identities and
+ * scoped row locks as the ordinary closure, in kind/ID order. No payloads are
+ * retained by this locking pass; all locks live until the delivery transaction ends. */
+async function lockParentFreeEntries(state: State, tx: Prisma.TransactionClient) {
+  for (const kind of kinds) {
+    const ids = [...new Set(state.entries.filter(entry => entry.kind === kind).map(entry => entry.id))].sort();
+    for (let offset = 0; offset < ids.length; offset += 100) {
+      const page = ids.slice(offset, offset + 100);
+      await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(identity, 0))
+        FROM (SELECT identity FROM unnest(ARRAY[${Prisma.join(page.map(id => `workspace_archive:${kind}:${id}`))}]::text[]) AS ids(identity) ORDER BY identity COLLATE "C") ordered`);
+      const locked = await tx.$queryRaw<Array<{id: string}>>(Prisma.sql`SELECT id FROM ${Prisma.raw(`"${kind}"`)}
+        WHERE "workspaceId" = ${state.workspaceId} AND id IN (${Prisma.join(page)}) ORDER BY id COLLATE "C" FOR SHARE`);
+      invariant(locked.length === page.length, 409, "SOURCE_CHANGED", "A direct read relationship changed.");
+    }
+  }
+}
+function canBatchDirect(state: State) {
+  return !state.ordinary.length && !state.roots.length && state.entries.every(entry => entry.kind !== "CrmDeal" && !entry.parents.length);
+}
+async function checkParentFreeEntries(state: State, tx: Prisma.TransactionClient) {
+  const epochs = new Map<string, PermissionEpochProof["entries"][number]>();
+  for (const entry of state.entries) {
+    invariant(!entry.projected || JSON.stringify(entry.projected) === entry.projectionHash, 409, "SOURCE_CHANGED", "The direct presentation changed.");
+    for (const epoch of entry.epochs.entries) {
+      const key = JSON.stringify([epoch.kind, epoch.id]);
+      invariant(!epochs.has(key) || epochs.get(key)!.epoch === epoch.epoch, 409, "SOURCE_CHANGED", "Direct read authority changed.");
+      epochs.set(key, epoch);
+    }
+  }
+  const saved = [...epochs].sort(([a],[b]) => a < b ? -1 : a > b ? 1 : 0).map(([,epoch]) => epoch);
+  for (let offset = 0; offset < saved.length; offset += 100) {
+    const proof = {...state.entries[0].epochs, entries: saved.slice(offset, offset + 100)};
+    invariant(await isArtifactPermissionEpochProofCurrent(state.workspaceId, proof, tx), 409, "SOURCE_CHANGED", "Direct read authority changed.");
+  }
+  for (const kind of kinds) {
+    const entries = state.entries.filter(entry => entry.kind === kind);
+    for (let offset = 0; offset < entries.length; offset += 100) {
+      const page = entries.slice(offset, offset + 100), ids = page.map(entry => entry.id);
+      const storedRows: Row[] = await (tx[models[kind]] as any).findMany({where: {workspaceId: state.workspaceId, id: {in: ids}}});
+      const rows = new Map(storedRows.map(stored => [stored.id, stored]));
+      const heads = await latestPage(tx, state.workspaceId, kind, ids);
+      for (const entry of page) {
+        const stored = rows.get(entry.id), head = heads.get(entry.id);
+        invariant(stored && parentFree(kind, stored) && original(head ?? null, kind, stored, state.workspaceId)
+          && head!.id === entry.manifestId && head!.revision === entry.revision
+          && lineageContentFingerprint(kind, stored) === entry.fingerprint,
+        409, "SOURCE_CHANGED", "The original CRM body changed before delivery.");
+      }
+    }
+  }
+}
 function project(kind: Kind, stored: Row): Row {
   return { id: stored.id, workspaceId: stored.workspaceId,
     ...Object.fromEntries(fields[kind].map(field => [field, structuredClone(stored[field] ?? null)])),
@@ -125,42 +203,67 @@ export async function admitCrmDirectOriginalRows<T extends { id: string }>(sessi
   const typedKind = kind as Kind;
   return inTransaction(db, async tx => {
     const eligible: Row[] = [];
+    const candidateHeads = await latestPage(tx, state.workspaceId, typedKind, candidates.map(candidate => candidate.id));
     for (const candidate of candidates) {
       const stored = candidate as unknown as Row;
-      if (original(await latest(tx, state.workspaceId, typedKind, stored.id), typedKind, stored, state.workspaceId)) eligible.push(stored);
+      if (original(candidateHeads.get(stored.id) ?? null, typedKind, stored, state.workspaceId)) eligible.push(stored);
     }
     if (!eligible.length) return [];
-    const closure = await lockedClosure(tx, state.workspaceId, typedKind, eligible.map(value => value.id));
+    const pageState: State = {...state, entries: [], ordinary: [], roots: []};
+    const fast = eligible.every(stored => parentFree(typedKind, stored));
+    let closure: Map<string, Row>;
+    if (fast) {
+      await lockParentFreeEntries({...pageState, entries: eligible.map(stored => ({kind: typedKind, id: stored.id}) as Entry)}, tx);
+      const rows: Row[] = await (tx[models[typedKind]] as any).findMany({where: {workspaceId: state.workspaceId, id: {in: eligible.map(stored => stored.id)}}});
+      invariant(rows.every(stored => parentFree(typedKind, stored)), 409, "SOURCE_CHANGED", "A direct read relationship changed.");
+      closure = new Map(rows.map(stored => [`${kind}:${stored.id}`, stored]));
+    } else closure = await lockedClosure(tx, state.workspaceId, typedKind, eligible.map(value => value.id));
     await authority(state, tx);
+    const heads = await latestPage(tx, state.workspaceId, typedKind, eligible.map(stored => stored.id));
+    const common = [{kind: "Workspace", id: state.workspaceId}];
+    if (state.actor.kind === "user") common.push({kind: "MemberUserPolicy", id: state.actor.user.id}, {kind: "WorkspaceSupportPolicy", id: state.actor.user.id});
+    else common.push({kind: "AgentCredential", id: state.actor.credentialId!});
+    const origin = getMcpOrigin();
+    if (origin?.kind === "oauth") common.push({kind: "McpOAuthGrantPolicy", id: origin.id});
+    const pageEpochs = fast ? await capturePermissionEpochs(tx, state.workspaceId, [...common, ...eligible.map(stored => ({kind: typedKind, id: stored.id}))]) : undefined;
     const result: T[] = [];
     for (const candidate of eligible) {
       const stored = closure.get(`${kind}:${candidate.id}`)!;
-      const manifest = await latest(tx, state.workspaceId, typedKind, stored.id);
-      if (!original(manifest, typedKind, stored, state.workspaceId)) continue;
-      const parents = [...closure.entries()].filter(([key]) => key !== `${kind}:${stored.id}`)
-        .map(([key, parent]) => ({ kind: key.split(":")[0] as Kind, id: parent.id, fingerprint: lineageContentFingerprint(key.split(":")[0] as Kind, parent) }));
-      const identities = [{ kind: "Workspace", id: state.workspaceId }, { kind: typedKind, id: stored.id }, ...parents];
-      if (state.actor.kind === "user") identities.push({ kind: "MemberUserPolicy", id: state.actor.user.id }, { kind: "WorkspaceSupportPolicy", id: state.actor.user.id });
-      else identities.push({ kind: "AgentCredential", id: state.actor.credentialId! });
-      const origin = getMcpOrigin();
-      if (origin?.kind === "oauth") identities.push({ kind: "McpOAuthGrantPolicy", id: origin.id });
-      const epochs = await capturePermissionEpochs(tx, state.workspaceId, identities);
+      const manifest = heads.get(stored.id);
+      if (!original(manifest ?? null, typedKind, stored, state.workspaceId)) continue;
+      const parents = actualParents(typedKind, stored, closure);
+      const identities = [...common, {kind: typedKind, id: stored.id}, ...parents];
+      const keys = new Set(identities.map(value => JSON.stringify([value.kind, value.id])));
+      const epochs = pageEpochs ? {...pageEpochs, entries: pageEpochs.entries.filter(value => keys.has(JSON.stringify([value.kind, value.id])))}
+        : await capturePermissionEpochs(tx, state.workspaceId, identities);
       const projected = project(typedKind, stored);
       const entry: Entry = { projected, projectionHash: JSON.stringify(projected), kind: typedKind, id: stored.id, fingerprint: lineageContentFingerprint(typedKind, stored),
         manifestId: manifest!.id, revision: manifest!.revision, parents, epochs };
-      boundRows.add(projected); state.entries.push(entry); result.push(projected as unknown as T);
+      pageState.entries.push(entry); result.push(projected as unknown as T);
     }
-    await checkCurrent(state, tx, true);
+    await checkCurrent(pageState, tx, true, true);
+    state.entries.push(...pageState.entries);
+    for (const projected of result) boundRows.add(projected);
     return result;
   });
 }
+/** Count-only contributors retain their original authority/body stamps, not
+ * their discarded presentation payload. Selected output projections stay bound. */
+export function discardCrmDirectReadProjections(session: CrmDirectReadSession, rows: Array<{id:string}>) {
+  const discarded=new Set(rows);
+  for(const entry of stateFor(session).entries) if(entry.projected&&discarded.has(entry.projected)) {
+    entry.projected=undefined;entry.projectionHash=undefined;
+  }
+}
 async function lockContributors(state: State, tx: Prisma.TransactionClient) {
+  if (canBatchDirect(state)) return lockParentFreeEntries(state, tx);
   await lockedClosure(tx, state.workspaceId, "CrmActivity", [], [...state.entries.flatMap(entry => [{kind: entry.kind, id: entry.id}, ...entry.parents]), ...state.ordinary, ...state.roots.flatMap(root => controlKinds.includes(root.kind as ControlKind) ? [{kind: root.kind as ControlKind, id: root.id}] : [])]);
 }
 async function checkCurrent(state: State, tx: Prisma.TransactionClient, directOnly = false, locked = false) {
   // Lock every contributor before any saved delivery epoch is checked.
   if (!locked) await lockContributors(state, tx);
   await authority(state, tx);
+  if (canBatchDirect(state)) return checkParentFreeEntries(state, tx);
   for (const entry of directOnly ? [] : state.ordinary) {
     const stored = await row(tx, state.workspaceId, entry.kind, entry.id);
     const manifest = await latest(tx, state.workspaceId, entry.kind, entry.id);
@@ -171,7 +274,7 @@ async function checkCurrent(state: State, tx: Prisma.TransactionClient, directOn
   invariant(directOnly || !state.roots.length || await isArtifactInputProofReadable(state.actor, state.workspaceId, state.roots, tx),
     409, "SOURCE_CHANGED", "CRM input permissions changed before delivery.");
   for (const entry of state.entries) {
-    invariant(JSON.stringify(entry.projected) === entry.projectionHash, 409, "SOURCE_CHANGED", "The direct presentation changed.");
+    invariant(!entry.projected || JSON.stringify(entry.projected) === entry.projectionHash, 409, "SOURCE_CHANGED", "The direct presentation changed.");
     invariant(await isArtifactPermissionEpochProofCurrent(state.workspaceId, entry.epochs, tx), 409, "SOURCE_CHANGED", "Direct read authority changed.");
     const stored = await row(tx, state.workspaceId, entry.kind, entry.id);
     const manifest = await latest(tx, state.workspaceId, entry.kind, entry.id);

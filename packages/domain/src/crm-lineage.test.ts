@@ -27,7 +27,14 @@ const fixture = vi.hoisted(() => {
   const names = ["informationCategoryPolicy", "crmAccount", "crmContact", "crmDeal", "crmActivity", "crmDealStageTransition", "crmConversation", "crmConversationMessage",
     "crmProspectWorkspace", "crmCommunicationSuggestion", "document", "meeting", "meetingInsight", "artifactInputLineage", "artifactInputSnapshot", "workspace", "executionRequest", "executionResult"];
   const prisma: any = { $queryRaw: vi.fn(async (query: any) => {
-    if (!query.strings?.join("").includes('FROM "SourcePermissionEpoch"')) return [];
+    const sql=query.strings?.join("")??"";
+    if(sql.includes('FROM "ArtifactInputLineage"')) {
+      const values=new Set(query.values);
+      const matches=tables.artifactInputLineage.filter(row=>values.has(row.workspaceId)&&values.has(row.artifactType)&&values.has(row.artifactId))
+        .sort((a,b)=>b.revision-a.revision);
+      return [...new Map(matches.map(row=>[row.artifactId,matches.find(candidate=>candidate.artifactId===row.artifactId)!])).values()];
+    }
+    if (!sql.includes('FROM "SourcePermissionEpoch"')) return [];
     const [workspaceId, ...pairs] = query.values; const result = [];
     for (let index = 0; index < pairs.length; index += 2) {
       const [sourceKind, sourceId] = pairs.slice(index, index + 2); const epoch = epochs.get(JSON.stringify([workspaceId, sourceKind, sourceId]));
@@ -178,7 +185,7 @@ describe("CRM input receipts", () => {
     expect(fixture.tables.crmAccount).toEqual([]); expect(fixture.tables.crmContact).toEqual([]);
   });
 
-  it("scans past hidden pages before pagination and refuses incomplete totals at its budget", async () => {
+  it("scans past hidden pages before pagination without a corpus budget", async () => {
     const rows = Array.from({ length: 102 }, (_, index) => ({ id: `raw-${index}` }));
     const fetch = vi.fn(async (page) => { const start = page.cursor ? rows.findIndex((row) => row.id === page.cursor.id) + page.skip : 0;
       return rows.slice(start, start + page.take); });
@@ -191,23 +198,25 @@ describe("CRM input receipts", () => {
     });
     expect(crmPage(admitted, 1, 1)).toMatchObject({ total: 2, items: [{ id: "raw-101" }] });
     expect(fetch.mock.calls[1][0]).toEqual({ take: 100, cursor: { id: "raw-99" }, skip: 1 });
-    let pageIndex = 0;
-    const endless = vi.fn(async (_page: {take: number}) => Array.from({ length: 100 }, (_, index) => ({ id: `unknown-${pageIndex++}-${index}` })));
-    await expect(readCrmRows(general, "ws-crm", "CrmAccount", endless)).rejects.toMatchObject({ code: "CRM_READ_BUDGET", status: 413 });
-    expect(endless).toHaveBeenCalledTimes(51);
-    expect(endless.mock.calls.at(-1)?.[0]).toMatchObject({take: 1, skip: 1});
+    let offset=0;
+    const complete=vi.fn(async (_page:{take:number})=>{
+      const rows=Array.from({length:Math.min(100,5070-offset)},(_,index)=>({id:`unknown-${offset+index}`}));
+      offset+=rows.length;return rows;
+    });
+    expect(await readCrmRows(general,"ws-crm","CrmAccount",complete)).toEqual([]);
+    expect(complete).toHaveBeenCalledTimes(51);
+    expect(complete.mock.calls.every(([page])=>page.take===100)).toBe(true);
   });
 
-  it.each([4_999, 5_000, 5_001])("distinguishes a complete %i-row collection from one beyond the CRM budget", async count => {
+  it.each([4_999, 5_000, 5_001])("completes a %i-row collection in bounded canonical pages", async count => {
     const rows = Array.from({length: count}, (_, index) => ({id: `unknown-${index}`}));
     const fetch = vi.fn(async (page: {take: number; cursor?: {id: string}; skip?: number}) => {
       const start = page.cursor ? rows.findIndex(row => row.id === page.cursor!.id) + (page.skip ?? 0) : 0;
       return rows.slice(start, start + page.take);
     });
     const result = readCrmRows(general, "ws-crm", "CrmAccount", fetch);
-    if (count > 5_000) await expect(result).rejects.toMatchObject({code: "CRM_READ_BUDGET"});
-    else expect(crmPage(await result, 50, 0)).toEqual({items: [], total: 0, take: 50, skip: 0});
-    if (count >= 5_000) expect(fetch.mock.calls.at(-1)?.[0]).toEqual({take: 1, cursor: {id: "unknown-4999"}, skip: 1});
+    expect(crmPage(await result,50,0)).toEqual({items:[],total:0,take:50,skip:0});
+    expect(fetch.mock.calls.every(([page])=>page.take===100)).toBe(true);
   });
 
   it("records full prompt and recipient receipts through suggestion edits, state transitions and sent activity copies", async () => {

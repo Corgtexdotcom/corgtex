@@ -307,7 +307,7 @@ function parseRoots(value: Prisma.JsonValue): LineageRoot[] | null {
   return roots;
 }
 
-type BatchedWorkItemKind = "Action" | "Proposal" | "Tension";
+type BatchedWorkItemKind = "Action" | "Proposal" | "Tension" | "CrmAccount" | "CrmContact" | "CrmActivity" | "CrmDeal";
 type WorkItemRows = {rows: Map<string, Record<string, unknown>>; heads: Map<string, import("@prisma/client").ArtifactInputLineage>};
 type WorkItemReadBatch = WorkItemRows & {db: LineageClient; workspaceId: string; kind: BatchedWorkItemKind; active: boolean};
 const workItemReadBatch = new AsyncLocalStorage<WorkItemReadBatch>();
@@ -319,12 +319,16 @@ function workItemBatch(db: LineageClient, workspaceId: string, input: LineageInp
   return batch;
 }
 function isBatchedWorkItemKind(kind: LineageKind | undefined): kind is BatchedWorkItemKind {
-  return kind === "Action" || kind === "Proposal" || kind === "Tension";
+  return kind === "Action" || kind === "Proposal" || kind === "Tension" || kind === "CrmAccount" || kind === "CrmContact" || kind === "CrmActivity" || kind === "CrmDeal";
 }
 async function loadWorkItemBatch(db: LineageClient, workspaceId: string, kind: BatchedWorkItemKind, ids: string[]): Promise<WorkItemRows> {
   const where = {workspaceId, id: {in: ids}};
   const rows = kind === "Action" ? await db.action.findMany({where})
-    : kind === "Proposal" ? await db.proposal.findMany({where}) : await db.tension.findMany({where});
+    : kind === "Proposal" ? await db.proposal.findMany({where})
+      : kind === "CrmAccount" ? await db.crmAccount.findMany({where})
+      : kind === "CrmContact" ? await db.crmContact.findMany({where})
+      : kind === "CrmActivity" ? await db.crmActivity.findMany({where})
+      : kind === "CrmDeal" ? await db.crmDeal.findMany({where}) : await db.tension.findMany({where});
   // Latest only, even when a selected source has an arbitrarily long history.
   const heads = await db.$queryRaw<import("@prisma/client").ArtifactInputLineage[]>(Prisma.sql`
     SELECT manifest.* FROM unnest(ARRAY[${Prisma.join(ids)}]::text[]) AS selected(id)
@@ -371,6 +375,10 @@ export async function captureReadableWorkItemInputs(actor: AppActor, workspaceId
   records: Array<{id: string; [key: string]: unknown}>) {
   invariant(records.length <= 100, 400, "INVALID_INPUT", "Capture one bounded work item page.");
   if (!records.length) return {ids: new Set<string>(), roots: [] as LineageRoot[], heads: new Map<string,string>()};
+  if (LOCAL_CRM_KINDS.has(kind)) {
+    const captured = await captureLocalCrmOriginalInputs(actor,workspaceId,kind,records);
+    if (captured) return captured;
+  }
   const ids = new Set<string>(), roots: LineageRoot[] = [], heads = new Map<string,string>();
   const fallback: typeof records = [];
   await prisma.$transaction(async tx => {
@@ -412,12 +420,15 @@ export async function captureReadableWorkItemInputs(actor: AppActor, workspaceId
     }
   });
   if (fallback.length) {
-    const readable = await readableArtifactIds(actor,workspaceId,kind,fallback);
-    const admitted = fallback.filter(row => readable.has(row.id));
-    if (admitted.length) {
-      roots.push(...await captureArtifactInputProof(actor,workspaceId,admitted.map(row => ({kind,id:row.id,snapshot:row}))));
-      for (const row of admitted) ids.add(row.id);
-    }
+    const observed = await captureArtifactReadHeadObservation(async () => {
+      const readable = await readableArtifactIds(actor,workspaceId,kind,fallback);
+      const admitted = fallback.filter(row => readable.has(row.id));
+      if (admitted.length) {
+        roots.push(...await captureArtifactInputProof(actor,workspaceId,admitted.map(row => ({kind,id:row.id,snapshot:row}))));
+        for (const row of admitted) ids.add(row.id);
+      }
+    });
+    for (const [key,stamp] of observed.heads) heads.set(key,stamp);
   }
   observeArtifactRead(actor,workspaceId,roots);
   return {ids,roots,heads};
@@ -428,6 +439,7 @@ type LocalDeliveryRows = {rows: Map<string, Record<string, unknown>>;
 type LocalDeliveryBatch = LocalDeliveryRows & {db: LineageClient; workspaceId: string; active: boolean};
 const localDeliveryReadBatch = new AsyncLocalStorage<LocalDeliveryBatch>();
 const deliveryInputKey = (input: LineageInput) => JSON.stringify([input.kind, input.id]);
+const LOCAL_CRM_KINDS = new Set<LineageKind>(["CrmAccount", "CrmContact", "CrmActivity", "CrmDeal"]);
 const LOCAL_DELIVERY_KINDS = new Set<LineageKind>(["NewspaperDelivery", "Workspace", "Member", "Action", "Proposal", "Tension"]);
 function localDeliveryBatch(db: LineageClient, workspaceId: string, input: LineageInput) {
   const batch = localDeliveryReadBatch.getStore();
@@ -445,7 +457,11 @@ async function loadLocalDeliveryRows(db: LineageClient, workspaceId: string, inp
       : kind === "Workspace" ? await db.workspace.findMany({where: {id: {in: ids.filter(id => id === workspaceId)}}})
       : kind === "Member" ? await db.member.findMany({where, include: {user: {select: {id: true, email: true, displayName: true}}}})
       : kind === "Action" ? await db.action.findMany({where})
-      : kind === "Proposal" ? await db.proposal.findMany({where}) : await db.tension.findMany({where});
+      : kind === "Proposal" ? await db.proposal.findMany({where})
+      : kind === "CrmAccount" ? await db.crmAccount.findMany({where})
+      : kind === "CrmContact" ? await db.crmContact.findMany({where})
+      : kind === "CrmActivity" ? await db.crmActivity.findMany({where})
+      : kind === "CrmDeal" ? await db.crmDeal.findMany({where}) : await db.tension.findMany({where});
     for (const row of found) rows.set(deliveryInputKey({kind,id:row.id}), row);
     const manifests = await db.$queryRaw<import("@prisma/client").ArtifactInputLineage[]>(Prisma.sql`
       SELECT manifest.* FROM unnest(ARRAY[${Prisma.join(ids)}]::text[]) AS selected(id)
@@ -458,7 +474,8 @@ async function loadLocalDeliveryRows(db: LineageClient, workspaceId: string, inp
 /** Eligibility follows the complete stored closure, including same-body heads.
  * Unsupported kinds (especially snapshots/native inputs) keep the ordinary path. */
 async function prepareLocalDeliveryBatch(db: LineageClient, workspaceId: string, inputs: readonly LineageInput[]) {
-  if (!inputs.length || inputs.length > 100 || !inputs.some(input => input.kind === "NewspaperDelivery")
+  const crm = inputs.every(input => LOCAL_CRM_KINDS.has(input.kind));
+  if (!inputs.length || inputs.length > 100 || !crm && !inputs.some(input => input.kind === "NewspaperDelivery")
     || hasActiveSourceCommitLockPlan(db) || localDeliveryReadBatch.getStore() || workItemReadBatch.getStore()) return null;
   const loaded: LocalDeliveryRows = {rows:new Map(),heads:new Map()};
   let pending = [...inputs];
@@ -472,16 +489,21 @@ async function prepareLocalDeliveryBatch(db: LineageClient, workspaceId: string,
     pending = [...new Map(pending.filter(input => !loaded.rows.has(deliveryInputKey(input)))
       .map(input => [deliveryInputKey(input),input])).values()];
     if (!pending.length) break;
-    if (loaded.rows.size + pending.length > 256 || pending.some(input => !LOCAL_DELIVERY_KINDS.has(input.kind))) return null;
+    if (loaded.rows.size + pending.length > 256 || pending.some(input => !(crm ? LOCAL_CRM_KINDS : LOCAL_DELIVERY_KINDS).has(input.kind))) return null;
     const page = await loadLocalDeliveryRows(db,workspaceId,pending);
     if (page.rows.size !== pending.length) return null;
     const next: LineageInput[] = [];
     for (const input of pending) {
       const key = deliveryInputKey(input), row = page.rows.get(key)!, head = page.heads.get(key);
       const fingerprint = lineageContentFingerprint(input.kind,row);
-      if (artifactPermissionParents(input.kind,row).length || revisions.has(key) && revisions.get(key) !== fingerprint
+      const parents = artifactPermissionParents(input.kind,row);
+      if (!crm && parents.length || revisions.has(key) && revisions.get(key) !== fingerprint
         || head && head.contentHash !== fingerprint) return null;
-      if (needsManifest(input.kind,row) || head) {
+      if (crm) {
+        if (!head || head.origin !== "HUMAN_ORIGINAL" || !Array.isArray(head.inputsJson) || head.inputsJson.length
+          || !Array.isArray(head.rootsJson) || head.rootsJson.length) return null;
+        next.push(...parents);
+      } else if (needsManifest(input.kind,row) || head) {
         const roots = head && parseRoots(head.rootsJson);
         if (!head || !roots || !["HUMAN_ORIGINAL","DERIVED"].includes(head.origin)
           || roots.some(root => !root.permissionEpochs)) return null;
@@ -502,9 +524,10 @@ function localDeliveryStamp(loaded: LocalDeliveryRows) {
 async function readLocalDeliveryBatch(db: LineageClient, workspaceId: string, loaded: LocalDeliveryRows,
   roots: readonly LineageRoot[], read: () => Promise<boolean>) {
   const stamp = localDeliveryStamp(loaded);
+  const crm = [...loaded.rows.keys()].every(key => LOCAL_CRM_KINDS.has(JSON.parse(key)[0]));
   const proofs = [...roots.flatMap(root => root.permissionEpochs ? [root.permissionEpochs] : []),
-    ...[...loaded.heads.values()].flatMap(head => [parsePermissionEpochProof(head.permissionEpochsJson),
-      ...(parseRoots(head.rootsJson) ?? []).map(root => root.permissionEpochs)].filter((proof): proof is PermissionEpochProof => Boolean(proof)))];
+    ...(crm ? [] : [...loaded.heads.values()].flatMap(head => [parsePermissionEpochProof(head.permissionEpochsJson),
+      ...(parseRoots(head.rootsJson) ?? []).map(root => root.permissionEpochs)].filter((proof): proof is PermissionEpochProof => Boolean(proof))))];
   const batch: LocalDeliveryBatch = {...loaded,db,workspaceId,active:true};
   const valid = await localDeliveryReadBatch.run(batch, () => withArtifactPermissionMetadataRead(db,workspaceId,loaded.rows,async () => {
     try { return await withArtifactPermissionBatchRead(db,workspaceId,proofs,read); }
@@ -512,6 +535,50 @@ async function readLocalDeliveryBatch(db: LineageClient, workspaceId: string, lo
   }));
   const inputs = [...loaded.rows.keys()].map(key => { const [kind,id] = JSON.parse(key); return {kind,id} as LineageInput; });
   return valid && stamp === localDeliveryStamp(await loadLocalDeliveryRows(db,workspaceId,inputs));
+}
+
+/** Local CRM originals retain the ordinary parent-envelope evaluator. The
+ * complete current parent closure is loaded and compared before/after the read;
+ * any derived/native/historical input uses the ordinary uncached path. */
+async function captureLocalCrmOriginalInputs(actor: AppActor, workspaceId: string, kind: BatchedWorkItemKind,
+  records: Array<{id: string; [key: string]: unknown}>) {
+  return prisma.$transaction(async tx => {
+    const loaded = await prepareLocalDeliveryBatch(tx,workspaceId,records.map(record => ({kind,id:record.id})));
+    if (!loaded || records.some(record => lineageContentFingerprint(kind,record)
+      !== lineageContentFingerprint(kind,loaded.rows.get(deliveryInputKey({kind,id:record.id}))!))) return null;
+    const membership = await requireWorkspaceMembership({actor,workspaceId,tx});
+    const domains = await resolveKnowledgeAccessDomains(actor,workspaceId,tx);
+    const ambient = await captureArtifactPermissionEpochs(actor,workspaceId,[],tx);
+    const identities = new Map(records.map(record => {
+      const pending: LineageInput[] = [{kind,id:record.id}], seen = new Set<string>();
+      const own: Array<{kind: string; id: string}> = [];
+      for (const input of pending) {
+        const key = deliveryInputKey(input);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const row = loaded.rows.get(key)!;
+        own.push(...artifactPermissionEpochIdentities(input.kind,row));
+        pending.push(...artifactPermissionParents(input.kind,row));
+      }
+      return [record.id,own] as const;
+    }));
+    const target = await capturePermissionEpochs(tx,workspaceId,[...identities.values()].flat());
+    const candidates: LineageRoot[] = records.map(record => {
+      const keys = new Set(identities.get(record.id)!.map(identity => JSON.stringify([identity.kind,identity.id])));
+      const own = {...target,entries:target.entries.filter(entry => keys.has(JSON.stringify([entry.kind,entry.id])))};
+      return {kind,id:record.id,fingerprint:lineageContentFingerprint(kind,record),permissionEpochs:mergePermissionEpochProofs(ambient,own)!};
+    });
+    const binding: ReadHeadBinding = {heads:new Map(),sealed:false};
+    const memo = new Map<string,boolean>(); readHeadMemos.set(memo,binding);
+    const roots: LineageRoot[] = [];
+    const valid = await expectedReadHeads.run(binding,()=>readLocalDeliveryBatch(tx,workspaceId,loaded,candidates,async()=>{
+      for (const root of candidates) if (await rootIsReadable(tx,actor,workspaceId,membership,domains,root,new Set(),memo)) roots.push(root);
+      return true;
+    }));
+    invariant(valid,409,"SOURCE_CHANGED","CRM original inputs changed during admission.");
+    observeArtifactRead(actor,workspaceId,roots);
+    return {ids:new Set(roots.map(root=>root.id)),roots,heads:binding.heads};
+  });
 }
 
 /** Bounded delivery capture with ordinary per-root admission and original
