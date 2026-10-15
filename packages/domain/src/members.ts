@@ -1,7 +1,6 @@
 import { readableArtifactIds, captureArtifactInputProof, mergeLineageInputRoot, withArtifactCountReleaseSnapshot, type LineageKind, type LineageRoot } from "./source-lineage";
-import { scanSourceReadableRecords } from "./source-scoped-read";
 import { requireUnreservedPublicDemoEmail } from "./public-demo-identity";
-import type { MemberInviteRequestStatus, MemberKind, MemberRole } from "@prisma/client";
+import type { AuditLog, MemberInviteRequestStatus, MemberKind, MemberRole } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
 import { env, prisma, hashPassword, randomOpaqueToken, sendEmail, sha256 } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
@@ -962,7 +961,7 @@ export async function getMemberProfile(actor: AppActor, workspaceId: string, mem
     avatarUrl: member.user.avatarUrl, bio: member.user.bio, linkedinUrl: member.user.linkedinUrl, websiteUrl: member.user.websiteUrl,
   }, assignedActions, assignedTensions };
   const kinds: Record<string, LineageKind> = { Action: "Action", Tension: "Tension", Proposal: "Proposal", Goal: "Goal", BrainArticle: "BrainArticle", BrainSource: "BrainSource", Circle: "Circle", Role: "Role", Member: "Member", Meeting: "Meeting" };
-  const recentActivity = [];
+  const recentActivity: Array<Omit<AuditLog, "meta"> & {meta: null}> = [];
   let afterActivity: RecentCursor | undefined;
   while (recentActivity.length < 10) {
     const logs = await prisma.auditLog.findMany({where: {workspaceId, actorUserId: member.user.id, ...createdBefore(afterActivity)}, orderBy: createdOrder, take: 100});

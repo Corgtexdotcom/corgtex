@@ -9,7 +9,7 @@ export const BRAIN_MAINTENANCE_JOB = "agent.brain-maintenance";
 export class MaintenanceDeferred extends Error {
   constructor(readonly reason: string) { super(`Brain maintenance deferred: ${reason}`); }
 }
-export type MaintenanceClaimedJob = {id: string; workspaceId: string | null; type: string; payload: unknown; attempts?: number; lockedAt?: Date};
+export type MaintenanceClaimedJob = {id: string; workspaceId: string | null; type: string; payload: unknown; attempts?: number; lockedAt?: Date | null};
 type Envelope = {request: MaintenanceState; completion?: {next: MaintenanceState | null; dedupeKey: string | null}};
 const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 function envelope(payload: unknown): Envelope | null {

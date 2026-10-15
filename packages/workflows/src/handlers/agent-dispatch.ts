@@ -15,7 +15,7 @@ export async function runAgentWorkflowJob(job: {
   type: string;
   payload: unknown;
   attempts?: number;
-  lockedAt?: Date;
+  lockedAt?: Date | null;
 }, claimOwner?: string, meetingActor?: AppActor) {
   if (!job.workspaceId) {
     return null;

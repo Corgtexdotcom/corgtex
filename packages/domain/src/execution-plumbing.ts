@@ -13,6 +13,11 @@ import {
   ExecutionResultStatus,
   ExecutionWritebackTargetType,
   Prisma,
+  type Action,
+  type Tension,
+  type Proposal,
+  type Meeting,
+  type BrainArticle,
   type ExecutionRequest,
   type ExecutionResult,
 } from "@prisma/client";
@@ -1023,12 +1028,12 @@ export async function getCompanyContext(actor: AppActor, workspaceId: string) {
   });
   const read = { actor, workspaceId, take: MAX_CONTEXT_ITEMS, release };
   const [actions, tensions, proposals, meetings, articles] = await Promise.all([
-    recentExecutionInputs({ ...read, kind: "Action", load: after => prisma.action.findMany(recentQuery(after)) }),
-    recentExecutionInputs({ ...read, kind: "Tension", load: after => prisma.tension.findMany(recentQuery(after)) }),
-    recentExecutionInputs({ ...read, kind: "Proposal", load: after => prisma.proposal.findMany(recentQuery(after)) }),
-    recentExecutionInputs({ ...read, kind: "Meeting", take: 10, fold: true,
+    recentExecutionInputs<Action>({ ...read, kind: "Action", load: after => prisma.action.findMany(recentQuery(after)) }),
+    recentExecutionInputs<Tension>({ ...read, kind: "Tension", load: after => prisma.tension.findMany(recentQuery(after)) }),
+    recentExecutionInputs<Proposal>({ ...read, kind: "Proposal", load: after => prisma.proposal.findMany(recentQuery(after)) }),
+    recentExecutionInputs<Meeting>({ ...read, kind: "Meeting", take: 10, fold: true,
       load: after => prisma.meeting.findMany({ where: { workspaceId, archivedAt: null, ...(after ? { id: { gt: after.id } } : {}) }, orderBy: { id: "asc" }, take: 100 }) }),
-    recentExecutionInputs({ ...read, kind: "BrainArticle", load: after => prisma.brainArticle.findMany(recentQuery(after)) }),
+    recentExecutionInputs<BrainArticle>({ ...read, kind: "BrainArticle", load: after => prisma.brainArticle.findMany(recentQuery(after)) }),
   ]);
   const select = <T extends { id: string; updatedAt?: Date; recordedAt?: Date | null }>(read: { records: T[]; proofs: Map<string, LineageRoot[]> }, take = MAX_CONTEXT_ITEMS) => {
     const rows = recentRows(read.records, take);

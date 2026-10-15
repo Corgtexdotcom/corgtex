@@ -1,3 +1,4 @@
+import { Prisma, type ConversationTurn, type ExecutionResult } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
@@ -24,9 +25,10 @@ it("retains the counted session's original epoch across a later turn query and r
   const f=await fixture();
   const session=await createConversation(f.actor,{workspaceId:f.workspaceId,topic:"Original private conversation"});
   // This query occurs only after the session was admitted to the total/page.
-  const query=prisma.conversationTurn.findMany.bind(prisma.conversationTurn);
+  const delegate=prisma.conversationTurn as unknown as {findMany:(args?:Prisma.ConversationTurnFindManyArgs)=>Promise<ConversationTurn[]>};
+  const query=delegate.findMany.bind(delegate);
   let changed=false;
-  const barrier=vi.spyOn(prisma.conversationTurn,"findMany").mockImplementation(async args=>{
+  const barrier=vi.spyOn(delegate,"findMany").mockImplementation(async args=>{
     if(!changed && args?.where?.conversationId===session.id){changed=true;await f.revokeRestore();}
     return query(args);
   });
@@ -39,9 +41,10 @@ it("retains a selected request's original epoch across its result query and revo
   const request=await prisma.executionRequest.create({data:{workspaceId:f.workspaceId,createdByUserId:f.user.id,goal:"Synthetic original request"}});
   await prisma.$transaction(tx=>recordArtifactInputLineage({tx,actor:f.actor,workspaceId:f.workspaceId,
     artifact:{kind:"ExecutionRequest",id:request.id},content:request,origin:"HUMAN_ORIGINAL",inputs:[]}));
-  const query=prisma.executionResult.findMany.bind(prisma.executionResult);
+  const delegate=prisma.executionResult as unknown as {findMany:(args?:Prisma.ExecutionResultFindManyArgs)=>Promise<ExecutionResult[]>};
+  const query=delegate.findMany.bind(delegate);
   let changed=false;
-  const barrier=vi.spyOn(prisma.executionResult,"findMany").mockImplementation(async args=>{
+  const barrier=vi.spyOn(delegate,"findMany").mockImplementation(async args=>{
     if(!changed && args?.where?.executionRequestId===request.id){changed=true;await f.revokeRestore();}
     return query(args);
   });
@@ -52,14 +55,16 @@ it("retains a selected request's original epoch across its result query and revo
 it("retains a counted session's original manifest head when the body is unchanged",async()=>{
   const f=await fixture();
   const session=await createConversation(f.actor,{workspaceId:f.workspaceId,topic:"Unchanged body"});
-  const query=prisma.conversationTurn.findMany.bind(prisma.conversationTurn);
+  const delegate=prisma.conversationTurn as unknown as {findMany:(args?:Prisma.ConversationTurnFindManyArgs)=>Promise<ConversationTurn[]>};
+  const query=delegate.findMany.bind(delegate);
   let changed=false;
-  vi.spyOn(prisma.conversationTurn,"findMany").mockImplementation(async args=>{
+  vi.spyOn(delegate,"findMany").mockImplementation(async args=>{
     if(!changed){
       changed=true;
       const head=await prisma.artifactInputLineage.findFirstOrThrow({where:{workspaceId:f.workspaceId,artifactType:"ConversationSession",artifactId:session.id},orderBy:{revision:"desc"}});
-      const {id: _id,createdAt: _createdAt,...data}=head;
-      await prisma.artifactInputLineage.create({data:{...data,revision:head.revision+1,inputsJson:[],rootsJson:[]}});
+      await prisma.artifactInputLineage.create({data:{workspaceId:head.workspaceId,artifactType:head.artifactType,artifactId:head.artifactId,
+        revision:head.revision+1,origin:head.origin,contentHash:head.contentHash,inputsJson:[],rootsJson:[],
+        epochProofVersion:head.epochProofVersion,permissionEpochsJson:head.permissionEpochsJson ?? Prisma.DbNull}});
     }
     return query(args);
   });
