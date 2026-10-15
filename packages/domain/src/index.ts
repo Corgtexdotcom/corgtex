@@ -222,3 +222,6 @@ export { captureManualTranscriptSourceArtifact } from "./manual-transcript-sourc
 export { inspectLegacyRecovery, recoverLegacyArtifact, legacyRecoveryFileBinding, LEGACY_RECOVERY_KINDS, type LegacyRecoveryKind } from "./legacy-recovery";
 
 export { isLegacyRecoveryProofWorkspaceShareable } from "./source-lineage";
+
+export { WorkItemReadRelease } from "./work-item-readable-page";
+export { captureReadableDigestInputs } from "./digest-lineage";
