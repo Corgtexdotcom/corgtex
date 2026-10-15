@@ -1626,16 +1626,21 @@ export async function assertArtifactInputClosureLocallyAdmissible(actor: AppActo
  * This creates no reusable read, native, model or publication capability. */
 export async function withArtifactCountReleaseSnapshot<T>(actor: AppActor, workspaceId: string,
   roots: readonly LineageRoot[], remote: () => Promise<void>, finish: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
-  invariant(roots.length <= 10_000, 409, "KNOWLEDGE_COUNT_LIMIT", "Generic count closure requires a bounded collection.");
+  // Keep only compact original receipts across the aggregate. Bound each proof
+  // traversal's hydration/memos, not the workspace's total number of inputs.
+  const assertPages = async (db: LineageClient, message: string) => {
+    for (let offset = 0; offset < roots.length; offset += 100) {
+      invariant(await isArtifactInputProofReadable(actor, workspaceId, roots.slice(offset, offset + 100), db),
+        409, "SOURCE_CHANGED", message);
+    }
+  };
   const binding: ReadHeadBinding = {heads: new Map(), sealed: false};
   return expectedReadHeads.run(binding, async () => {
-    if (roots.length) invariant(await isArtifactInputProofReadable(actor, workspaceId, roots),
-      409, "SOURCE_CHANGED", "Knowledge count inputs changed before native replay.");
+    await assertPages(prisma, "Knowledge count inputs changed before native replay.");
     const sealed: ReadHeadBinding = {heads: new Map(binding.heads), sealed: true};
     await remote();
     return prisma.$transaction(tx => expectedReadHeads.run(sealed, () => localCommitAdmission.run(true, async () => {
-      if (roots.length) invariant(await isArtifactInputProofReadable(actor, workspaceId, roots, tx),
-        409, "SOURCE_CHANGED", "Knowledge count inputs changed before aggregate release.");
+      await assertPages(tx, "Knowledge count inputs changed before aggregate release.");
       return finish(tx);
     })), {isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 30_000});
   });
