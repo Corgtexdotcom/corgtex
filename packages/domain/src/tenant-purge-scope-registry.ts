@@ -48,8 +48,8 @@ export const TENANT_PURGE_MODEL_DISPOSITIONS = {
 export const TENANT_PURGE_TARGET_MODELS = ["Workspace", "CustomerDeployment", "CustomerAccount", "ProcurementTrial"] as const;
 export type TenantPurgeTargetModel = typeof TENANT_PURGE_TARGET_MODELS[number];
 export const PRISMA_REFERENTIAL_ACTIONS = ["Cascade", "SetNull", "Restrict", "NoAction", "SetDefault"] as const;
-export type PrismaReferentialAction = typeof PRISMA_REFERENTIAL_ACTIONS[number];
-export type ReferentialActionSource = "EXPLICIT" | "POSTGRESQL_DEFAULT";
+type PrismaReferentialAction = typeof PRISMA_REFERENTIAL_ACTIONS[number];
+type ReferentialActionSource = "EXPLICIT" | "POSTGRESQL_DEFAULT";
 
 export interface TenantPurgeDirectRelation {
   model: Prisma.ModelName;
