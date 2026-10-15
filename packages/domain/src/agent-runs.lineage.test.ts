@@ -130,6 +130,15 @@ describe("agent run source lineage", () => {
     expect((await listAgentRuns(actor, "ws-1"))[0].modelUsageSummary).toEqual([]);
   });
 
+  it.each(["list", "trace"] as const)("rejects %s content revoked while loading cost rows", async surface => {
+    const { run, step, call, source } = await fixture();
+    for (const [kind, row] of [["AgentRun", run], ["AgentStep", step], ["AgentToolCall", call]] as const) await manifest(kind, row, [root("Action", source)]);
+    run.modelUsage[0].id = "usage-1";
+    db.modelUsage.findMany.mockImplementation(async () => { source.archivedAt = now; return []; });
+    await expect(surface === "list" ? listAgentRuns(actor, "ws-1") : getAgentRunTrace(actor, "ws-1", run.id))
+      .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+  });
+
   it("does not reuse a parent receipt for unknown or changed children", async () => {
     const { run, call, source } = await fixture();
     await manifest("AgentRun", run, [root("Action", source)]);

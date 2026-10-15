@@ -4,7 +4,7 @@ import type { AppActor } from "@corgtex/shared";
 import { checkRateLimit, prisma, RATE_LIMITS } from "@corgtex/shared";
 import { withAgentRunModelUsageSummary } from "./agent-run-usage";
 import { requireWorkspaceMembership } from "./auth";
-import { mergeArtifactInputProofs } from "./digest-lineage";
+import { DigestReadRelease, mergeArtifactInputProofs } from "./digest-lineage";
 import { invariant } from "./errors";
 import { getProposal } from "./proposals";
 
@@ -61,23 +61,33 @@ function jobTypeForAgent(agentKey: AgentKey) {
 export async function redactAgentRunContent<TUsage>(actor: AppActor, workspaceId: string,
   run: AgentRun & { steps: AgentStep[]; toolCalls: AgentToolCall[]; modelUsage: TUsage[] },
   db: Prisma.TransactionClient = prisma) {
+  const release = new DigestReadRelease(actor, workspaceId);
+  return release.finish(await collectAgentRunContent(actor, workspaceId, run, db, release));
+}
+
+async function collectAgentRunContent<TUsage>(actor: AppActor, workspaceId: string,
+  run: AgentRun & { steps: AgentStep[]; toolCalls: AgentToolCall[]; modelUsage: TUsage[] },
+  db: Prisma.TransactionClient, release: DigestReadRelease) {
   await requireWorkspaceMembership({ actor, workspaceId, tx: db });
   invariant(run.workspaceId === workspaceId, 404, "NOT_FOUND", "Agent run not found in this workspace.");
   const steps = run.steps.filter(step => step.agentRunId === run.id);
   const toolCalls = run.toolCalls.filter(call => call.agentRunId === run.id);
   const [runsReadable, stepsReadable, toolsReadable] = await Promise.all([
-    readableArtifactIds(actor, workspaceId, "AgentRun", [run], db),
-    steps.length ? readableArtifactIds(actor, workspaceId, "AgentStep", steps, db) : new Set<string>(),
-    toolCalls.length ? readableArtifactIds(actor, workspaceId, "AgentToolCall", toolCalls, db) : new Set<string>(),
+    release.capture("AgentRun", [run]),
+    release.capture("AgentStep", steps),
+    release.capture("AgentToolCall", toolCalls),
   ]);
-  const readable = runsReadable.has(run.id);
+  const readable = runsReadable.records.some(row => row.id === run.id);
+  const stepIds = new Set(stepsReadable.records.map(row => row.id));
+  const toolIds = new Set(toolsReadable.records.map(row => row.id));
   // Cost and model breakdowns have a separate current financial permission boundary.
   const usageIds = run.modelUsage.map(row => (row as { id?: string }).id).filter((id): id is string => Boolean(id));
   const costRows = readable && usageIds.length ? await db.modelUsage.findMany({ where: { workspaceId, id: { in: usageIds } },
     select: { id: true, workspaceId: true, estimatedCostUsd: true, billableCostUsd: true, createdAt: true } }) : [];
-  const costReadable = costRows.length ? await readableArtifactIds(actor, workspaceId, "ModelUsageCost", costRows, db) : new Set<string>();
+  const costReadable = await release.capture("ModelUsageCost", costRows);
+  const costIds = new Set(costReadable.records.map(row => row.id));
   const usageReadable = readable && usageIds.length === run.modelUsage.length && costRows.length === usageIds.length
-    && costRows.every(row => costReadable.has(row.id));
+    && costRows.every(row => costIds.has(row.id));
   return {
     id: run.id, workspaceId: run.workspaceId, agentKey: run.agentKey, triggerType: run.triggerType,
     status: run.status, approvalRequired: run.approvalRequired, startedAt: run.startedAt,
@@ -88,7 +98,7 @@ export async function redactAgentRunContent<TUsage>(actor: AppActor, workspaceId
     planJson: readable ? run.planJson : null, contextJson: readable ? run.contextJson : null,
     resultJson: readable ? run.resultJson : null,
     steps: steps.map(step => {
-      const visible = stepsReadable.has(step.id);
+      const visible = stepIds.has(step.id);
       return { id: step.id, agentRunId: step.agentRunId, status: step.status, startedAt: step.startedAt,
         completedAt: step.completedAt, createdAt: step.createdAt, contentReadable: visible,
         name: visible ? step.name : "Content unavailable", inputJson: visible ? step.inputJson : null,
@@ -96,7 +106,7 @@ export async function redactAgentRunContent<TUsage>(actor: AppActor, workspaceId
         humanFeedback: visible ? step.humanFeedback : null };
     }),
     toolCalls: toolCalls.map(call => {
-      const visible = toolsReadable.has(call.id);
+      const visible = toolIds.has(call.id);
       return { id: call.id, agentRunId: call.agentRunId, status: call.status, startedAt: call.startedAt,
         completedAt: call.completedAt, createdAt: call.createdAt, contentReadable: visible,
         name: visible ? call.name : "Content unavailable", inputJson: visible ? call.inputJson : null,
@@ -166,7 +176,11 @@ export async function listAgentRuns(actor: AppActor, workspaceId: string, opts?:
     take: opts?.take === null ? undefined : opts?.take ?? 25,
   });
 
-  return Promise.all(runs.map(async (run) => withAgentRunModelUsageSummary(await redactAgentRunContent(actor, workspaceId, run))));
+  // Hold every run's original proofs until all runs and cost joins are assembled.
+  const release = new DigestReadRelease(actor, workspaceId);
+  const result = await Promise.all(runs.map(async run =>
+    withAgentRunModelUsageSummary(await collectAgentRunContent(actor, workspaceId, run, prisma, release))));
+  return release.finish(result);
 }
 
 export async function triggerAgentRun(actor: AppActor, params: {
