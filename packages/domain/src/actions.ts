@@ -1,6 +1,5 @@
 import { WorkItemReadRelease, readableWorkItemPage, workItemAfter } from "./work-item-readable-page";
 import { completeActionWithNativeRequest } from "./action-completion";
-import { visitSourceReadableRecords } from "./source-scoped-read";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { createHash } from "node:crypto";
 import { prisma } from "@corgtex/shared";
@@ -325,9 +324,16 @@ export async function countActionsByStatus(actor: AppActor, workspaceId: string,
   const where = actionListWhere(actor, membership, workspaceId, { ...opts, status: undefined, statuses: undefined });
   const release = new WorkItemReadRelease(actor,workspaceId);
   const counts = { DRAFT: 0, OPEN: 0, IN_PROGRESS: 0, COMPLETED: 0, ALL: 0 };
-  await visitSourceReadableRecords({ actor, workspaceId, kind: "Action", load: (afterId, take) => prisma.action.findMany({
-    where: { AND: [where, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take,
-  }), visit: async rows => { await release.observe("Action",rows); for(const row of rows) {counts[row.status]++; counts.ALL++;} } });
+  let afterId: string | undefined;
+  for (;;) {
+    const page: import("@prisma/client").Action[] = await prisma.action.findMany({
+      where: { AND: [where, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take: 100,
+    });
+    const rows = await release.admit("Action",page);
+    for (const row of rows) { counts[row.status]++; counts.ALL++; }
+    if (page.length < 100) break;
+    afterId = page.at(-1)!.id;
+  }
   return release.finish(counts);
 }
 

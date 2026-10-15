@@ -1,16 +1,32 @@
 import type { AppActor } from "@corgtex/shared";
 import { visitSourceReadableRecords } from "./source-scoped-read";
 import { invariant } from "./errors";
-import { captureArtifactInputProof, mergeLineageInputRoot, readableArtifactIds, withArtifactCountReleaseSnapshot,
+import { captureArtifactInputProof, captureReadableWorkItemInputs, mergeLineageInputRoot, readableArtifactIds, withArtifactCountReleaseSnapshot,
   type LineageKind, type LineageRoot } from "./source-lineage";
 
 /** Compact original observations only. Bodies stay in their canonical page. */
 export class WorkItemReadRelease {
   private readonly roots = new Map<string, LineageRoot>();
+  private readonly heads = new Map<string,string>();
   constructor(private readonly actor: AppActor, private readonly workspaceId: string) {}
+  async admit<T extends {id: string}>(kind: "Action" | "Proposal" | "Tension", rows: T[]) {
+    const proof = await captureReadableWorkItemInputs(this.actor, this.workspaceId, kind, rows);
+    this.add(proof.roots);
+    for (const [key,stamp] of proof.heads) {
+      invariant(!this.heads.has(key) || this.heads.get(key) === stamp,409,"SOURCE_CHANGED","Work item lineage changed during collection.");
+      this.heads.set(key,stamp);
+    }
+    return rows.filter(row => proof.ids.has(row.id));
+  }
   async observe<T extends {id: string}>(kind: LineageKind, rows: T[]) {
     if (!rows.length) return;
     for (let offset=0;offset<rows.length;offset+=100) {
+      if (kind === "Action" || kind === "Proposal" || kind === "Tension") {
+        const page = rows.slice(offset,offset+100);
+        const admitted = await this.admit(kind,page);
+        invariant(admitted.length === page.length,409,"SOURCE_CHANGED","A selected work item changed before release.");
+        continue;
+      }
       const proof = await captureArtifactInputProof(this.actor, this.workspaceId,
         rows.slice(offset,offset+100).map(row => ({kind, id: row.id, snapshot: row})));
       this.add(proof);
@@ -30,7 +46,7 @@ export class WorkItemReadRelease {
   }
   finish<T>(value: T) {
     return withArtifactCountReleaseSnapshot(this.actor, this.workspaceId, [...this.roots.values()],
-      async () => {}, async () => value);
+      async () => {}, async () => value, this.heads);
   }
 }
 
@@ -59,7 +75,9 @@ export async function readableWorkItemPage<T extends WorkItemPosition>(params: {
     const rows=await params.load(after);
     invariant(rows.length <= 100 && (!rows.length || rows.at(-1)!.id !== after?.id),503,"SOURCE_READ_SCAN_CHANGED","Source page changed; retry.");
     const next=rows.at(-1);
-    const readable=await readableArtifactIds(params.actor,params.workspaceId,params.kind,rows);
+    const readable = params.admit
+      ? await readableArtifactIds(params.actor,params.workspaceId,params.kind,rows)
+      : new Set((await params.release.admit(params.kind,rows)).map(row => row.id));
     const admitted:T[]=[];
     for(const row of rows) {
       if(!readable.has(row.id) || params.admit && !await params.admit(row)) continue;
@@ -67,7 +85,7 @@ export async function readableWorkItemPage<T extends WorkItemPosition>(params: {
       if(total >= params.skip && items.length < params.take) items.push(row);
       total++;
     }
-    await params.release.observe(params.kind,admitted);
+    if (params.admit) await params.release.observe(params.kind,admitted);
     if(rows.length<100) break;
     after=next;
   }
@@ -96,8 +114,7 @@ export async function rankedReadableTensionPage<T extends WorkItemPosition>(para
     for(;;) {
       const rows=await params.load(afterId);
       invariant(rows.length<=100,503,"SOURCE_READ_SCAN_CHANGED","Source page changed; retry.");
-      const readable=await readableArtifactIds(params.actor,params.workspaceId,"Tension",rows);
-      await params.release.observe("Tension",rows.filter(row=>readable.has(row.id)));
+      const readable=new Set((await params.release.admit("Tension",rows)).map(row => row.id));
       for(const row of rows) {
         invariant(!afterId || row.id>afterId,503,"SOURCE_READ_SCAN_CHANGED","Source page changed; retry.");
         if(!readable.has(row.id)) continue;

@@ -236,7 +236,7 @@ export function artifactPermissionEpochIdentities(kind: string, row: Record<stri
 export async function capturePermissionEpochs(tx: Prisma.TransactionClient, workspaceId: string,
   identities: readonly PermissionEpochIdentity[]): Promise<PermissionEpochProof> {
   assertSourceCommitTransactionCompatible(tx);
-  invariant(!permissionReadPass.getStore() && !nativePermissionReadPass.getStore(), 409, "SOURCE_LOCK_UNCOVERED",
+  invariant(!permissionReadPass.getStore() && !nativePermissionReadPass.getStore() && !batchPermissionRead.getStore(), 409, "SOURCE_LOCK_UNCOVERED",
     "Epoch capture cannot mutate a read-only permission proof pass.");
   const sorted = [...new Map(identities.map((identity) => [JSON.stringify([identity.kind, identity.id]), identity])).entries()]
     .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0).map(([, identity]) => identity);
@@ -256,6 +256,31 @@ export async function capturePermissionEpochs(tx: Prisma.TransactionClient, work
     entries: sorted.map((identity) => ({...identity, epoch: epochs.get(JSON.stringify([identity.kind, identity.id]))!})) };
 }
 
+type BatchPermissionRead = {db: EpochClient; workspaceId: string; active: boolean; epochs: Map<string, string>};
+const batchPermissionRead = new AsyncLocalStorage<BatchPermissionRead>();
+
+/** A bounded pure validation callback. These are raw epoch observations, never
+ * authority decisions. Unknown keys stay fresh; every retained key is compared
+ * again before success, including writes made on the same transaction. */
+export async function withArtifactPermissionBatchRead(db: EpochClient, workspaceId: string,
+  proofs: readonly PermissionEpochProof[], read: () => Promise<boolean>): Promise<boolean> {
+  const keys = new Set<string>();
+  for (const value of proofs) for (const entry of value.entries) {
+    keys.add(epochKey(entry));
+    if (keys.size > MAX_EPOCH_IDENTITIES) return read();
+  }
+  const proof = mergePermissionEpochProofs(...proofs);
+  if (!proof || proof.entries.length > MAX_EPOCH_IDENTITIES || hasActiveSourceCommitLockPlan(db)
+    || permissionReadPass.getStore() || nativePermissionReadPass.getStore()) return read();
+  if (!await isArtifactPermissionEpochProofCurrent(workspaceId, proof, db)) return false;
+  const pass: BatchPermissionRead = {db, workspaceId, active: true,
+    epochs: new Map(proof.entries.map(entry => [epochKey(entry), entry.epoch]))};
+  const result = await batchPermissionRead.run(pass, async () => {
+    try { return await read(); } finally { pass.active = false; pass.epochs.clear(); }
+  });
+  return result && await isArtifactPermissionEpochProofCurrent(workspaceId, proof, db);
+}
+
 export async function isArtifactPermissionEpochProofCurrent(workspaceId: string, value: unknown,
   db: EpochClient = prisma): Promise<boolean> {
   assertSourceCommitTransactionCompatible(db);
@@ -263,6 +288,14 @@ export async function isArtifactPermissionEpochProofCurrent(workspaceId: string,
   if (!proof) return false;
   const planned = hasActiveSourceCommitLockPlan(db);
   if (planned) assertSourceCommitPermissionReadCovered(db, workspaceId, proof);
+  const batch = batchPermissionRead.getStore();
+  if (batch) {
+    invariant(batch.active && batch.db === db && batch.workspaceId === workspaceId,
+      409, "SOURCE_CHANGED", "Permission batch belongs to another or expired read.");
+    if (proof.entries.every(entry => batch.epochs.has(epochKey(entry)))) {
+      return proof.entries.every(entry => batch.epochs.get(epochKey(entry)) === entry.epoch);
+    }
+  }
   const pass = permissionReadPass.getStore();
   if (pass) {
     invariant(pass.active && planned && pass.db === db && pass.workspaceId === workspaceId,

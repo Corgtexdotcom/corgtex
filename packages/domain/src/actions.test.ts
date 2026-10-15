@@ -84,6 +84,14 @@ vi.mock("./events", () => ({
 }));
 
 vi.mock("./source-lineage", () => ({
+  captureReadableWorkItemInputs: vi.fn(async (reader: import("@corgtex/shared").AppActor, workspaceId: string,
+    kind: "Action" | "Proposal" | "Tension", records: Array<{id: string; [key: string]: unknown}>) => {
+    const lineage = await import("./source-lineage");
+    const ids = await lineage.readableArtifactIds(reader, workspaceId, kind, records);
+    const roots = await lineage.captureArtifactInputProof(reader, workspaceId,
+      records.filter(row => ids.has(row.id)).map(row => ({kind,id:row.id,snapshot:row})));
+    return {ids,roots,heads:new Map<string,string>()};
+  }),
   isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
   withArtifactCountReleaseSnapshot: vi.fn(async (_actor, _workspaceId, _roots, _remote, finish) => finish({})),
   captureArtifactInputProof: vi.fn().mockResolvedValue([]),
