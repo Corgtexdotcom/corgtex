@@ -1,0 +1,143 @@
+import { writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { beforeEach, afterEach, expect, it, vi } from "vitest";
+import { prisma, type AppActor } from "@corgtex/shared";
+import { truncateAllTables } from "../../shared/src/db-test-utils";
+import { listActions, countActionsByStatus } from "./actions";
+import { listProposals } from "./proposals";
+import { listTensions, upvoteTension } from "./tensions";
+import { getBrainStatus } from "./brain";
+import { captureArtifactInputProof, withArtifactCountReleaseSnapshot, recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
+
+beforeEach(truncateAllTables);
+afterEach(()=>vi.restoreAllMocks());
+async function fixture() {
+  const workspace=await prisma.workspace.create({data:{name:"Bounded synthetic history",slug:randomUUID()}});
+  const user=await prisma.user.create({data:{email:`${randomUUID()}@example.test`,passwordHash:"synthetic"}});
+  const member=await prisma.member.create({data:{workspaceId:workspace.id,userId:user.id,role:"CONTRIBUTOR"}});
+  const other=await prisma.user.create({data:{email:`${randomUUID()}@example.test`,passwordHash:"synthetic"}});
+  await prisma.member.create({data:{workspaceId:workspace.id,userId:other.id,role:"ADMIN"}});
+  return {workspaceId:workspace.id,user,member,other,actor:{kind:"user",user} as AppActor};
+}
+
+it.each(["Action","Proposal","Tension"] as const)("keeps %s lists and zero-take counts usable at and beyond 5000 canonical candidates",async kind=>{
+  const f=await fixture();
+  const hidden=Array.from({length:5000},(_,i)=>({id:`z-${String(i).padStart(5,"0")}`,workspaceId:f.workspaceId,
+    authorUserId:f.user.id,title:"Unknown copied history",bodyMd:"unproved ".repeat(64),isPrivate:false,createdAt:new Date("2026-10-01")}));
+  if(kind==="Action") await prisma.action.createMany({data:hidden.map(row=>({...row,status:"OPEN"}))});
+  if(kind==="Proposal") await prisma.proposal.createMany({data:hidden.map(row=>({...row,status:"OPEN"}))});
+  if(kind==="Tension") await prisma.tension.createMany({data:hidden.map(row=>({...row,status:"OPEN"}))});
+  const list=(take:number,skip=0)=>kind==="Action"?listActions(f.actor,f.workspaceId,{take,skip,sort:"date"})
+    :kind==="Proposal"?listProposals(f.actor,f.workspaceId,{take,skip,sort:"date"}):listTensions(f.actor,f.workspaceId,{take,skip,sort:"date"});
+  expect(await list(0)).toMatchObject({items:[],total:0});
+  for(const id of ["v3","v2","v1"]) {
+    const data={id,workspaceId:f.workspaceId,authorUserId:f.user.id,title:id,bodyMd:"Authentic original",isPrivate:false,createdAt:new Date("2026-09-01")};
+    const row=kind==="Action"?await prisma.action.create({data:{...data,status:"OPEN"}})
+      :kind==="Proposal"?await prisma.proposal.create({data:{...data,status:"OPEN"}}):await prisma.tension.create({data:{...data,status:"OPEN"}});
+    await prisma.$transaction(tx=>recordArtifactInputLineage({tx,actor:f.actor,workspaceId:f.workspaceId,
+      artifact:{kind,id},content:row,origin:"HUMAN_ORIGINAL",inputs:[]}));
+  }
+  const args={workspaceId:f.workspaceId,authorUserId:f.other.id,title:"Private",bodyMd:"Private body",isPrivate:true};
+  if(kind==="Action") await prisma.action.create({data:args});
+  if(kind==="Proposal") await prisma.proposal.create({data:args});
+  if(kind==="Tension") await prisma.tension.create({data:args});
+  const queries=kind==="Action"?vi.spyOn(prisma.action,"findMany"):kind==="Proposal"?vi.spyOn(prisma.proposal,"findMany"):vi.spyOn(prisma.tension,"findMany");
+  const page=await list(1,1);
+  expect(page.total).toBe(3);expect(page.items.map(row=>row.id)).toEqual(["v2"]);
+  expect(queries.mock.calls.filter(([query])=>query?.take===100).length).toBeGreaterThan(50);
+  expect(queries.mock.calls.every(([query])=>query?.take===100 || query?.include && JSON.stringify(query.where).includes('"v2"'))).toBe(true);
+  queries.mockClear();
+  expect(await list(0)).toMatchObject({items:[],total:3});
+  expect(queries.mock.calls.every(([query])=>query?.take===100 && !query.include)).toBe(true);
+  if(kind==="Action") expect(await countActionsByStatus(f.actor,f.workspaceId)).toMatchObject({OPEN:3,ALL:3});
+  if(kind==="Action") await prisma.action.update({where:{id:"v2"},data:{archivedAt:new Date()}});
+  if(kind==="Proposal") await prisma.proposal.update({where:{id:"v2"},data:{archivedAt:new Date()}});
+  if(kind==="Tension") await prisma.tension.update({where:{id:"v2"},data:{archivedAt:new Date()}});
+  expect((await list(1,1)).items.map(row=>row.id)).toEqual(["v1"]);
+  expect((await list(0)).total).toBe(2);
+},180_000);
+
+it("folds large Brain status from canonical pages without loading comment bodies or all backlinks",async()=>{
+  const f=await fixture();
+  await prisma.brainArticle.createMany({data:Array.from({length:5001},(_,i)=>({id:`a-hidden-${String(i).padStart(5,"0")}`,
+    workspaceId:f.workspaceId,title:"Unknown article",slug:`hidden-${i}`,type:"PROJECT",authority:"REFERENCE",bodyMd:"unknown ".repeat(64)}))});
+  for(const id of ["visible-a","visible-b","visible-c"]) {
+    const row=await prisma.brainArticle.create({data:{id,workspaceId:f.workspaceId,title:id,slug:id,type:"PROJECT",authority:"REFERENCE",bodyMd:"Original company knowledge",createdAt:new Date("2020-01-01")}});
+    await prisma.$transaction(tx=>recordArtifactInputLineage({tx,actor:f.actor,workspaceId:f.workspaceId,artifact:{kind:"BrainArticle",id},content:row,origin:"HUMAN_ORIGINAL",inputs:[]}));
+  }
+  await prisma.brainBacklink.createMany({data:[{workspaceId:f.workspaceId,fromArticleId:"visible-a",toArticleId:"visible-b"},
+    {workspaceId:f.workspaceId,fromArticleId:"a-hidden-00000",toArticleId:"visible-c"}]});
+  await prisma.brainDiscussionThread.createMany({data:Array.from({length:105},(_,i)=>({id:`hidden-thread-${i}`,articleId:"visible-a",authorMemberId:f.member.id,targetType:"ARTICLE"}))});
+  const thread=await prisma.brainDiscussionThread.create({data:{id:"visible-thread",articleId:"visible-a",authorMemberId:f.member.id,targetType:"ARTICLE"}});
+  await prisma.$transaction(tx=>recordArtifactInputLineage({tx,actor:f.actor,workspaceId:f.workspaceId,artifact:{kind:"BrainDiscussionThread",id:thread.id},content:thread,origin:"DERIVED",inputs:[{kind:"BrainArticle",id:"visible-a"}]}));
+  await prisma.brainDiscussionComment.createMany({data:Array.from({length:205},(_,i)=>({threadId:thread.id,authorMemberId:f.member.id,bodyMd:`Comment ${i} `+"not needed ".repeat(256)}))});
+  const articles=vi.spyOn(prisma.brainArticle,"findMany"),links=vi.spyOn(prisma.brainBacklink,"findMany"),threads=vi.spyOn(prisma.brainDiscussionThread,"findMany"),comments=vi.spyOn(prisma.brainDiscussionComment,"findMany");
+  expect(await getBrainStatus(f.actor,f)).toMatchObject({totalArticles:3,staleArticles:3,unownedArticles:3,orphanArticles:2,openDiscussionThreads:1,articleCountByType:{PROJECT:3},articleCountByAuthority:{REFERENCE:3}});
+  expect(articles.mock.calls.length).toBeGreaterThan(50);
+  expect(articles.mock.calls.every(([query])=>query?.take===100 && query.select===undefined)).toBe(true);
+  expect(links.mock.calls.every(([query])=>query?.take===100 && query.include?.fromArticle===true)).toBe(true);
+  expect(threads.mock.calls.every(([query])=>query?.take===100 && query.include===undefined)).toBe(true);
+  expect(comments).not.toHaveBeenCalled();
+  await prisma.brainArticle.update({where:{id:"visible-a"},data:{archivedAt:new Date()}});
+  expect(await getBrainStatus(f.actor,f)).toMatchObject({totalArticles:2,orphanArticles:2,openDiscussionThreads:0});
+},180_000);
+
+
+it("measures a genuine 100-original release and rejects revocation across the final release boundary", async()=>{
+  const f=await fixture(),rows=[];
+  const size=process.env.WORKITEM_RELEASE_CAPACITY==="10002"?10002:100;
+  const start=performance.now();
+  for(let i=0;i<size;i++) {
+    const row=await prisma.action.create({data:{workspaceId:f.workspaceId,authorUserId:f.user.id,title:`Original ${i}`,bodyMd:"Actual original",isPrivate:false,status:"OPEN"}});
+    await prisma.$transaction(tx=>recordArtifactInputLineage({tx,actor:f.actor,workspaceId:f.workspaceId,artifact:{kind:"Action",id:row.id},content:row,origin:"HUMAN_ORIGINAL",inputs:[]}));
+    rows.push(row);
+  }
+  const created=performance.now();
+  const proof:LineageRoot[]=[];
+  for(let i=0;i<rows.length;i+=100) proof.push(...await captureArtifactInputProof(f.actor,f.workspaceId,rows.slice(i,i+100).map(row=>({kind:"Action",id:row.id,snapshot:row}))));
+  const captured=performance.now();
+  const txStart: number[]=[];
+  const value=await withArtifactCountReleaseSnapshot(f.actor,f.workspaceId,proof,async()=>{txStart.push(performance.now());},async()=>size);
+  const released=performance.now();
+  expect(value).toBe(size);
+  expect(new Set(proof.map(root=>`${root.kind}:${root.id}`)).size).toBe(size);
+  expect(proof.every(root=>root.permissionEpochs)).toBe(true);
+  writeFileSync(`.artifacts/workitem-original-release-${size}-metrics.json`,JSON.stringify({metric:"actual-original-release",rows:size,roots:proof.length,createMs:created-start,captureMs:captured-created,releaseMs:released-captured,finalTxMs:released-txStart[0]}));
+  await expect(withArtifactCountReleaseSnapshot(f.actor,f.workspaceId,proof,async()=>{
+    await prisma.action.update({where:{id:rows[0].id},data:{archivedAt:new Date()}});
+  },async()=>size)).rejects.toMatchObject({code:"SOURCE_CHANGED"});
+},600_000);
+
+
+it("ranks readable votes across multiple canonical and rank windows before selecting a deep page",async()=>{
+  const f=await fixture();
+  await prisma.tension.createMany({data:Array.from({length:105},(_,i)=>({id:`a-unknown-${i}`,workspaceId:f.workspaceId,authorUserId:f.user.id,title:"Unknown",bodyMd:"Unproved",priority:99,status:"OPEN",isPrivate:false}))});
+  for(let i=0;i<105;i++) {
+    const row=await prisma.tension.create({data:{id:`t${String(i).padStart(3,"0")}`,workspaceId:f.workspaceId,authorUserId:f.user.id,title:"Same title",bodyMd:"Original",priority:1,createdAt:new Date("2026-01-01"),status:"OPEN",isPrivate:false}});
+    await prisma.$transaction(tx=>recordArtifactInputLineage({tx,actor:f.actor,workspaceId:f.workspaceId,artifact:{kind:"Tension",id:row.id},content:row,origin:"HUMAN_ORIGINAL",inputs:[]}));
+  }
+  await upvoteTension(f.actor,{workspaceId:f.workspaceId,tensionId:"t000"});
+  expect((await listTensions(f.actor,f.workspaceId,{take:1})).items.map(row=>row.id)).toEqual(["t000"]);
+  const queries=vi.spyOn(prisma.tension,"findMany");
+  const page=await listTensions(f.actor,f.workspaceId,{take:3,skip:100});
+  expect(page.total).toBe(105);
+  expect(page.items.map(row=>row.id)).toEqual(["t005","t004","t003"]);
+  expect(queries.mock.calls.filter(([query])=>query?.take===100).length).toBeGreaterThan(3);
+  expect(queries.mock.calls.every(([query])=>query?.take===100 || query?.include && JSON.stringify(query.where).includes('"t005"'))).toBe(true);
+},180_000);
+
+it("refuses an early admitted count when a later canonical page withdraws it",async()=>{
+  const f=await fixture();
+  for(const id of ["a-original","z-original"]) {
+    const row=await prisma.action.create({data:{id,workspaceId:f.workspaceId,authorUserId:f.user.id,title:id,bodyMd:"Original",isPrivate:false,status:"OPEN",createdAt:new Date("2026-01-01")}});
+    await prisma.$transaction(tx=>recordArtifactInputLineage({tx,actor:f.actor,workspaceId:f.workspaceId,artifact:{kind:"Action",id},content:row,origin:"HUMAN_ORIGINAL",inputs:[]}));
+  }
+  await prisma.action.createMany({data:Array.from({length:100},(_,i)=>({id:`m-${i}`,workspaceId:f.workspaceId,authorUserId:f.user.id,title:"Unknown",bodyMd:"Unproved",status:"OPEN",isPrivate:false,createdAt:new Date("2026-01-01")}))});
+  const read=prisma.action.findMany.bind(prisma.action);let pages=0;
+  vi.spyOn(prisma.action,"findMany").mockImplementation(async args=>{
+    if(args?.take===100 && ++pages===2) await prisma.action.update({where:{id:"z-original"},data:{archivedAt:new Date()}});
+    return read(args);
+  });
+  await expect(listActions(f.actor,f.workspaceId,{take:0,sort:"date"})).rejects.toMatchObject({code:"SOURCE_CHANGED"});
+  expect(pages).toBe(2);
+},60_000);

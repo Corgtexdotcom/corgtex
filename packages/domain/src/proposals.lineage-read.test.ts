@@ -21,11 +21,13 @@ beforeEach(async () => {
       ? withRelations(row) : null;
   });
   vi.mocked(fixture.prisma.proposal.findMany).mockImplementation(async (args: any) => {
-    const rows = fixture.rows.proposal.filter((row: any) => row.workspaceId === args.where.workspaceId
-      && (args.where.circleId == null || row.circleId === args.where.circleId)
-      && (args.where.status == null || row.status === args.where.status)
-      && (args.where.archivedAt !== null || row.archivedAt == null)
-      && (!row.isPrivate || row.authorUserId === args.where.OR?.[1]?.authorUserId));
+    const where = args.where.AND?.[0] ?? args.where;
+    const selectedIds = args.where.AND?.find((clause: any) => clause.id?.in)?.id.in;
+    const rows = fixture.rows.proposal.filter((row: any) => row.workspaceId === where.workspaceId && (!selectedIds || selectedIds.includes(row.id))
+      && (where.circleId == null || row.circleId === where.circleId)
+      && (where.status == null || row.status === where.status)
+      && (where.archivedAt !== null || row.archivedAt == null)
+      && (!row.isPrivate || row.authorUserId === where.OR?.[1]?.authorUserId));
     return rows.sort((left: any, right: any) => right.id.localeCompare(left.id))
       .slice(0, args.take ?? rows.length).map(withRelations);
   });

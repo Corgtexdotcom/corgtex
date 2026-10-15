@@ -1,5 +1,6 @@
+import { WorkItemReadRelease, readableWorkItemPage, workItemAfter } from "./work-item-readable-page";
 import { completeActionWithNativeRequest } from "./action-completion";
-import { scanSourceReadableRecords } from "./source-scoped-read";
+import { visitSourceReadableRecords } from "./source-scoped-read";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { createHash } from "node:crypto";
 import { prisma } from "@corgtex/shared";
@@ -321,12 +322,12 @@ function actionListWhere(actor: AppActor, membership: MembershipSummary | null, 
 export async function countActionsByStatus(actor: AppActor, workspaceId: string, opts?: ListActionsOptions) {
   const membership = await requireWorkspaceOperation({ operation: "list_actions", actor, workspaceId });
   const where = actionListWhere(actor, membership, workspaceId, { ...opts, status: undefined, statuses: undefined });
-  const rows = await scanSourceReadableRecords({ actor, workspaceId, kind: "Action", load: (afterId, take) => prisma.action.findMany({
-    where: { AND: [where, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take,
-  }) });
+  const release = new WorkItemReadRelease(actor,workspaceId);
   const counts = { DRAFT: 0, OPEN: 0, IN_PROGRESS: 0, COMPLETED: 0, ALL: 0 };
-  for (const row of rows) { counts[row.status] += 1; counts.ALL += 1; }
-  return counts;
+  await visitSourceReadableRecords({ actor, workspaceId, kind: "Action", load: (afterId, take) => prisma.action.findMany({
+    where: { AND: [where, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take,
+  }), visit: async rows => { await release.observe("Action",rows); for(const row of rows) {counts[row.status]++; counts.ALL++;} } });
+  return release.finish(counts);
 }
 
 async function redactActionJoins<T extends {
@@ -355,14 +356,25 @@ async function redactActionJoins<T extends {
   }));
 }
 
+function actionPageAfter(row: import("@prisma/client").Action, sort: ListActionsOptions["sort"]): Prisma.ActionWhereInput {
+  if(sort!=="due_asc" && sort!=="due_desc") return workItemAfter(row,sort);
+  const tied=workItemAfter(row,"date");
+  if(row.dueAt===null) return {dueAt:null,...tied};
+  return {OR:[{dueAt:null},{dueAt:sort==="due_asc"?{gt:row.dueAt}:{lt:row.dueAt}},{dueAt:row.dueAt,...tied}]};
+}
+
 export async function listActions(actor: AppActor, workspaceId: string, opts?: ListActionsOptions) {
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
   const membership = await requireWorkspaceOperation({ operation: "list_actions", actor, workspaceId });
   const where = actionListWhere(actor, membership, workspaceId, opts);
 
-  const candidates = await prisma.action.findMany({
-      where,
+  const release = new WorkItemReadRelease(actor,workspaceId);
+  const page=await readableWorkItemPage({actor,workspaceId,release,kind:"Action",take,skip,
+    load: after => prisma.action.findMany({where:after?{AND:[where,actionPageAfter(after,opts?.sort)]}:where,
+      orderBy:workItemOrderBy(opts?.sort),take:100})});
+  const selected = page.items;
+  const hydrated = selected.length ? await prisma.action.findMany({where:{AND:[where,{id:{in:selected.map(row=>row.id)}}]},
       include: {
         author: {
           select: {
@@ -385,25 +397,23 @@ export async function listActions(actor: AppActor, workspaceId: string, opts?: L
         circle: true,
         proposal: true,
       },
-      orderBy: workItemOrderBy(opts?.sort),
-      take: 5001,
-    });
-  invariant(candidates.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Source permission scan exceeds its supported size.");
-  const permitted = await readableArtifactIds(actor, workspaceId, "Action", candidates);
-  const admitted = candidates.filter((candidate) => permitted.has(candidate.id));
-  const total = admitted.length;
-  const items = admitted.slice(skip, skip + take);
+  }) : [];
+  const byId=new Map(hydrated.map(row=>[row.id,row]));
+  const items=selected.flatMap(row=>{const loaded=byId.get(row.id);return loaded?[{...loaded,...row}]:[];});
+  const total=page.total-(selected.length-items.length);
   const itemIds = items.map((item) => item.id);
   const [requestCountSummaries, checklistSummaries] = await Promise.all([
     loadAdviceRequestCountSummaries(actor, workspaceId, "ACTION", itemIds),
     loadActionChecklistSummaries(actor, workspaceId, itemIds),
   ]);
-  const redactedItems = await redactActionJoins(actor, workspaceId, items);
+  const redactedItems = await redactActionJoins(actor, workspaceId, items, release);
   const linkedProposals = items.flatMap((item) => item.proposal ? [item.proposal] : []);
   const visibleProposalIds = linkedProposals.length
     ? await readableArtifactIds(actor, workspaceId, "Proposal", linkedProposals) : new Set<string>();
-  return {
-    items: redactedItems.map((item) => ({
+  await release.observe("Proposal",linkedProposals.filter(row=>visibleProposalIds.has(row.id)));
+  const finalIds=await readableArtifactIds(actor,workspaceId,"Action",items);
+  return release.finish({
+    items: redactedItems.filter(item=>finalIds.has(item.id)).map((item) => ({
       ...item,
       proposalId: item.proposal && visibleProposalIds.has(item.proposal.id) ? item.proposalId : null,
       proposal: item.proposal && visibleProposalIds.has(item.proposal.id)
@@ -412,10 +422,10 @@ export async function listActions(actor: AppActor, workspaceId: string, opts?: L
       checklistItemCount: checklistSummaries.get(item.id)?.checklistItemCount ?? 0,
       checklistCompletedCount: checklistSummaries.get(item.id)?.checklistCompletedCount ?? 0,
     })),
-    total,
+    total:total-items.filter(item=>!finalIds.has(item.id)).length,
     take,
     skip,
-  };
+  });
 }
 
 export async function getAction(actor: AppActor, params: Parameters<typeof readAction>[1]) {
