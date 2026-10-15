@@ -110,6 +110,72 @@ export async function authorizedDownloadStream(
     throw error;
   }
   if (options?.byteBinding) source = await verifiedDownloadSnapshot(source, authorize, signal, options.byteBinding);
+  return downloadDeliveryStream(source, authorize, signal, options);
+}
+
+/**
+ * Consume a trusted storage.get() result: the caller relinquishes its bytes.
+ * Dedicated backing stores are transferred synchronously before the first await,
+ * detaching ALL retained aliases. Pooled, shared or nontransferable stores get one
+ * defensive copy. Neither authorization callbacks nor consumers can mutate the
+ * private snapshot. Untrusted provider streams must use authorizedDownloadStream.
+ */
+export async function authorizedOwnedDownloadStream(
+  source: Uint8Array,
+  authorize: () => Promise<void>,
+  signal: AbortSignal,
+  binding: DownloadByteBinding,
+): Promise<ReadableStream<Uint8Array>> {
+  signal.throwIfAborted();
+  if (!/^[a-f0-9]{64}$/i.test(binding.sha256) || !Number.isSafeInteger(binding.sizeBytes) || binding.sizeBytes < 0) {
+    throw new AppError(404, "SOURCE_FILE_UNPROVEN", "The file has no verified byte identity.");
+  }
+  if (binding.sizeBytes > MAX_BOUND_DOWNLOAD_BYTES) {
+    throw new AppError(413, "DOWNLOAD_TOO_LARGE", "The file exceeds the download byte limit.");
+  }
+  if (source.byteLength !== binding.sizeBytes) {
+    throw new AppError(404, "SOURCE_FILE_CHANGED", "The stored file version is unavailable.");
+  }
+  let bytes: Uint8Array | null = null;
+  if (source.buffer instanceof ArrayBuffer && source.byteOffset === 0 && source.byteLength === source.buffer.byteLength) {
+    try {
+      bytes = new Uint8Array(structuredClone(source.buffer, { transfer: [source.buffer] }));
+    } catch {
+      // Node marks pooled/untransferable backing stores as nontransferable.
+    }
+  }
+  bytes ??= new Uint8Array(source);
+  const discard = () => { bytes?.fill(0); bytes = null; };
+  try {
+    if (createHash("sha256").update(bytes).digest("hex") !== binding.sha256.toLowerCase()) {
+      throw new AppError(404, "SOURCE_FILE_CHANGED", "The stored file version is unavailable.");
+    }
+    await authorize();
+    signal.throwIfAborted();
+  } catch (error) {
+    discard();
+    throw error;
+  }
+  let offset = 0;
+  const snapshot = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (!bytes || offset === bytes.byteLength) { discard(); controller.close(); return; }
+      const end = Math.min(bytes.byteLength, offset + DOWNLOAD_AUTH_BYTES);
+      // Internal-only view: downloadDeliveryStream copies before its next await.
+      controller.enqueue(bytes.subarray(offset, end));
+      offset = end;
+    },
+    cancel: discard,
+  }, { highWaterMark: 0 });
+  return downloadDeliveryStream(snapshot, authorize, signal, { authorizeEveryDelivery: true, byteBinding: binding });
+}
+
+function downloadDeliveryStream(
+  source: ReadableStream<Uint8Array>,
+  authorize: () => Promise<void>,
+  signal: AbortSignal,
+  options?: { authorizeEveryDelivery?: boolean; byteBinding?: DownloadByteBinding },
+): ReadableStream<Uint8Array> {
   const reader = source.getReader();
   let stopped = false;
   let checkedAt = performance.now();

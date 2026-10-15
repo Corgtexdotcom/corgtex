@@ -493,6 +493,22 @@ describe("External provider live authority and copied lineage with real helpers"
     const syncKnowledge = vi.fn(); const result = await syncExternalContentSource({ workspaceId: ws, sourceId: source.id, workflowJobId: next.id, syncKnowledge });
     expect(result.status).toBe("UNCHANGED"); expect(syncKnowledge).not.toHaveBeenCalled(); expect(fixture.tables.brainSource).toHaveLength(1);
   });
+  it("retries indexing after copying succeeded but indexing failed, then becomes unchanged", async () => {
+    const source = await setup(); const job = claimJob();
+    const run = (syncKnowledge: (input: any) => Promise<number>) => syncExternalContentSource({
+      workspaceId: ws, sourceId: source.id, workflowJobId: job.id, syncKnowledge,
+    });
+    await expect(run(async () => { throw new Error("Synthetic index failure"); })).rejects.toMatchObject({ code: "EXTERNAL_CONTENT_SYNC_FAILED" });
+    expect(fixture.tables.brainSource).toHaveLength(1);
+    expect(fixture.tables.externalContentSyncLog.at(-1).status).toBe("ERROR");
+    const index = vi.fn(async () => 1);
+    await expect(run(index)).resolves.toMatchObject({ status: "SYNCED", chunksCreated: 1 });
+    expect(index).toHaveBeenCalledTimes(1);
+    expect(fixture.tables.externalContentSyncLog.at(-1).status).toBe("SYNCED");
+    await expect(run(index)).resolves.toMatchObject({ status: "UNCHANGED", chunksCreated: 0 });
+    expect(index).toHaveBeenCalledTimes(1);
+    expect(fixture.tables.brainSource).toHaveLength(2);
+  });
   it("preserves prior copies and withholds raw errors on failed refetch", async () => {
     const source = await setup(); const job = claimJob(); remote.fail = true;
     await expect(syncExternalContentSource({ workspaceId: ws, sourceId: source.id, workflowJobId: job.id, syncKnowledge: vi.fn() })).rejects.toThrow("External content synchronization failed.");

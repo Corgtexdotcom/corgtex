@@ -334,19 +334,25 @@ export async function recoverLegacyArtifact(actor: AppActor, submission: Selecti
 }
 
 export async function legacyRecoveryFileBinding(actor: AppActor, workspaceId: string, sourceId: string): Promise<ByteBinding | null> {
-  const rows = await prisma.conversationOperationOutcome.findMany({where:{workspaceId,operation:LEGACY_RECOVERY_OPERATION,
-    controlJson:{path:["targetId"],equals:sourceId}},orderBy:{createdAt:"desc"},take:101});
-  if(rows.length>100) return null;
-  for(const row of rows) {
-    const capsule = await currentLegacyRecoveryPublication(actor,workspaceId,row,prisma);
-    if(capsule?.targetKind!=="BrainSource" || !capsule.file) continue;
-    const source = await prisma.brainSource.findFirst({where:{id:sourceId,workspaceId}});
-    if(!source || lineageContentFingerprint("BrainSource",source)!==capsule.targetFingerprint
-      || source.fileStorageKey!==capsule.file.storageKey || source.fileSizeBytes!==capsule.file.sizeBytes) continue;
-    await captureArtifactInputProof(actor,workspaceId,[{kind:"ConversationOperationOutcome",id:row.id}]);
-    return capsule.file;
+  let after: { createdAt: Date; id: string } | undefined;
+  for (;;) {
+    const rows = await prisma.conversationOperationOutcome.findMany({where:{workspaceId,operation:LEGACY_RECOVERY_OPERATION,
+      controlJson:{path:["targetId"],equals:sourceId},
+      ...(after ? { OR: [{ createdAt: { lt: after.createdAt } }, { createdAt: after.createdAt, id: { lt: after.id } }] } : {}),
+    },orderBy:[{createdAt:"desc"},{id:"desc"}],take:100});
+    for(const row of rows) {
+      const capsule = await currentLegacyRecoveryPublication(actor,workspaceId,row,prisma);
+      if(capsule?.targetKind!=="BrainSource" || !capsule.file) continue;
+      const source = await prisma.brainSource.findFirst({where:{id:sourceId,workspaceId}});
+      if(!source || lineageContentFingerprint("BrainSource",source)!==capsule.targetFingerprint
+        || source.fileStorageKey!==capsule.file.storageKey || source.fileSizeBytes!==capsule.file.sizeBytes) continue;
+      await captureArtifactInputProof(actor,workspaceId,[{kind:"ConversationOperationOutcome",id:row.id}]);
+      return capsule.file;
+    }
+    if(rows.length < 100) return null;
+    const last = rows[rows.length - 1];
+    after = { createdAt: last.createdAt, id: last.id };
   }
-  return null;
 }
 
 async function assertRecoveryOperatorCurrent(actor:AppActor,workspaceId:string,userId:string,epochs:PermissionEpochProof,db:Db) {

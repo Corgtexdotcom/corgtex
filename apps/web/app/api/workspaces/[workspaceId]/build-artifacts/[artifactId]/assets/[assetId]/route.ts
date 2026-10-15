@@ -3,7 +3,7 @@ import { buildAssetResponseHeaders } from "@/lib/build-asset-response-headers";
 import { getBuildArtifactAssetSignedUrl } from "@corgtex/domain";
 import { withWorkspaceRoute } from "@/lib/route-handler";
 import { disabledWorkspaceFeatureResponse } from "@/lib/workspace-feature-route";
-import { authorizedDownloadStream } from "@/lib/authorized-download-stream";
+import { authorizedOwnedDownloadStream } from "@/lib/authorized-download-stream";
 import { getSupportAuthorizationContext, runWithSupportOrigin } from "@corgtex/shared";
 
 export const dynamic = "force-dynamic";
@@ -18,8 +18,7 @@ export const GET = withWorkspaceRoute(async (request, { actor, workspaceId, para
     assetId: params.assetId,
   });
   const origin = getSupportAuthorizationContext()?.origin ?? (actor.kind === "agent" ? actor.supportOrigin : undefined);
-  const source = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array(file.data)); controller.close(); } });
-  const body = await authorizedDownloadStream(source, () => origin ? runWithSupportOrigin(origin, authorize) : authorize(),
-    request.signal, { authorizeEveryDelivery: true, byteBinding });
+  const body = await authorizedOwnedDownloadStream(file.data, () => origin ? runWithSupportOrigin(origin, authorize) : authorize(),
+    request.signal, byteBinding);
   return new NextResponse(body, { headers: buildAssetResponseHeaders(mimeType) });
 });

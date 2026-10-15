@@ -7,7 +7,7 @@ import { appendEvents } from "./events";
 import { currentArtifactInputRoots, recordArtifactInputLineage, readableArtifactIds, type LineageInput, type LineageRoot,
   assertArtifactInputWriteFence, captureArtifactInputProof, captureImmutableArtifactInputProof, isArtifactInputProofReadable } from "./source-lineage";
 import { AppError } from "./errors";
-import { mergeArtifactInputProofs } from "./digest-lineage";
+import { captureReadableDigestInputs, DigestReadRelease, mergeArtifactInputProofs } from "./digest-lineage";
 import { prepareProducerLineage, finishProducerLineage } from "./producer-lineage";
 
 const COMPANY_UNDERSTANDING_TYPE = "COMPANY_UNDERSTANDING";
@@ -128,6 +128,19 @@ export async function createCompanyUnderstandingQuestion(actor: AppActor, params
   });
 }
 
+async function releaseCompanyUnderstandingQuestions<T extends { id: string }>(actor: AppActor,
+  workspaceId: string, questions: T[], take: number) {
+  const release = new DigestReadRelease(actor, workspaceId);
+  const captured = await release.observeRead(() => captureReadableDigestInputs({
+    actor, workspaceId, kind: "CheckIn", records: questions,
+  }));
+  const selected = captured.records.slice(0, take);
+  // Preserve the selected rows' original bodies, caller epochs and observed
+  // heads across the complete admission scan, then replay before releasing.
+  for (const question of selected) release.add(captured.proofs.get(question.id)!);
+  return release.finish(selected);
+}
+
 export async function listCompanyUnderstandingQuestions(actor: AppActor, params: {
   workspaceId: string;
   memberId?: string | null;
@@ -147,8 +160,8 @@ export async function listCompanyUnderstandingQuestions(actor: AppActor, params:
     },
     orderBy: [{ priority: "desc" }, { createdAt: "desc" }],
   });
-  const visible = await readableArtifactIds(actor, params.workspaceId, "CheckIn", questions);
-  return questions.filter((question) => visible.has(question.id)).slice(0, Math.min(Math.max(params.take ?? 20, 1), 50));
+  return releaseCompanyUnderstandingQuestions(actor, params.workspaceId, questions,
+    Math.min(Math.max(params.take ?? 20, 1), 50));
 }
 
 export async function listDailyCompanyUnderstandingQuestions(actor: AppActor, params: {
@@ -167,9 +180,8 @@ export async function listDailyCompanyUnderstandingQuestions(actor: AppActor, pa
     },
     orderBy: [{ priority: "desc" }, { createdAt: "desc" }],
   });
-  const visible = await readableArtifactIds(actor, params.workspaceId, "CheckIn", questions);
-  return questions.filter((question) => visible.has(question.id))
-    .slice(0, Math.min(Math.max(params.take ?? DAILY_COMPANY_QUESTION_CAP, 1), DAILY_COMPANY_QUESTION_CAP));
+  return releaseCompanyUnderstandingQuestions(actor, params.workspaceId, questions,
+    Math.min(Math.max(params.take ?? DAILY_COMPANY_QUESTION_CAP, 1), DAILY_COMPANY_QUESTION_CAP));
 }
 
 export async function createDailyCompanyUnderstandingQuestions(actor: AppActor, params: {

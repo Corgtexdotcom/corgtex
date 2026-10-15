@@ -2930,6 +2930,28 @@ describe("createCorgtexMcpServer", () => {
     });
   });
 
+  it.each([403, 409, 503, 0])("preserves get_proposal non-404 failure %i", async status => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { AppError } = await import("@corgtex/domain");
+    const failure = status ? new AppError(status, "SOURCE_CHANGED", "Synthetic failure") : new Error("Synthetic database outage");
+    getProposalMock.mockRejectedValueOnce(failure);
+    const server = createTestServer(createCorgtexMcpServer, {
+      actor: { kind: "agent", authProvider: "bootstrap" } as any, workspaceId: "ws-1", authKind: "agent",
+    });
+    await expect((server as any)._registeredTools.get_proposal.handler({ proposalId: "proposal-1" })).rejects.toBe(failure);
+  });
+
+  it("keeps the get_proposal missing-record response for expected 404", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { AppError } = await import("@corgtex/domain");
+    getProposalMock.mockRejectedValueOnce(new AppError(404, "NOT_FOUND", "Missing"));
+    const server = createTestServer(createCorgtexMcpServer, {
+      actor: { kind: "agent", authProvider: "bootstrap" } as any, workspaceId: "ws-1", authKind: "agent",
+    });
+    const response = await (server as any)._registeredTools.get_proposal.handler({ proposalId: "proposal-1" });
+    expect(JSON.parse(response.content[0].text)).toEqual({ error: "Not found" });
+  });
+
   it("keeps MCP get_proposal advice counts aligned with list responses", async () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");

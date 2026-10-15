@@ -521,6 +521,21 @@ export async function enqueueExternalContentSourceSync(actor: AppActor, params: 
   });
 }
 
+async function hasCompletedExternalContentCopy(source: ExternalContentSyncSourceRecord, recipe: LineageRoot, hashes: string[]) {
+  const syncLogId = asString(asRecord(source.metadata).externalContentSyncLogId);
+  if (!syncLogId) return false;
+  const completed = await prisma.externalContentSyncLog.findFirst({ where: {
+    id: syncLogId, workspaceId: source.workspaceId, sourceId: source.id, status: "SYNCED", completedAt: { not: null },
+  }, select: { brainSourceId: true } });
+  if (!completed?.brainSourceId) return false;
+  const copy = await prisma.brainSource.findFirst({ where: { id: completed.brainSourceId, workspaceId: source.workspaceId,
+    sourceType: "EXTERNAL_CONTENT", archivedAt: null }, select: { metadata: true } });
+  const metadata = asRecord(copy?.metadata);
+  return metadata.externalContentSyncLogId === syncLogId
+    && stableJson(metadata.fetchResponseHashes) === stableJson(hashes)
+    && stableJson(metadata.selectionInputRoot) === stableJson(recipe);
+}
+
 export async function syncExternalContentSource(params: {
   workspaceId: string;
   sourceId: string;
@@ -555,8 +570,10 @@ export async function syncExternalContentSource(params: {
       materialized.receipts.map(receipt => ({ kind: "ExternalProviderFetchInput", id: receipt.input.id, snapshot: receipt.input })));
     const roots = [recipe, ...jobRoots, ...fetchRoots];
     const hashes = materialized.receipts.map(receipt => receipt.input.responseHash);
-    // Version labels alone cannot prove that every consumed response is unchanged.
+    // Matching copied bytes are not proof of completed indexing. Bind the shortcut
+    // to this copy's successful log, never an older success for the same source.
     if (stableJson(asRecord(source.metadata).fetchResponseHashes) === stableJson(hashes)
+      && await hasCompletedExternalContentCopy(source, recipe, hashes)
       && await isArtifactInputProofReadable(actor, params.workspaceId, [
         { kind: "ExternalContentSource", id: source.id, fingerprint: lineageContentFingerprint("ExternalContentSource", source) }, ...roots])) {
       await assertExternalProviderActorCurrent(actor, params.workspaceId, source.connectionId);
@@ -567,7 +584,8 @@ export async function syncExternalContentSource(params: {
     const metadata = { ...asRecord(originalContent.metadata), ...materialized.metadata, providerKey: source.providerKey,
       sourceKind: source.sourceKind, externalId: source.externalId, externalUrl: materialized.externalUrl,
       remoteVersion: materialized.remoteVersion, externalContentSourceId: source.id, snapshotType: "box_synced_snapshot",
-      selectionInputRoot: recipe, fetchResponseHashes: hashes, materializedContent: materialized.content };
+      selectionInputRoot: recipe, fetchResponseHashes: hashes, materializedContent: materialized.content,
+      externalContentSyncLogId: log.id };
     const preflight = await prepareExternalProviderCommitPreflight(actor, params.workspaceId, { roots, receipts: materialized.receipts });
     const written = await prisma.$transaction(async tx => withExternalProviderCommitPreflight(actor, params.workspaceId, tx, preflight, async () => {
       await tx.$queryRaw`SELECT "id" FROM "ExternalContentSource" WHERE "id" = ${source.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;

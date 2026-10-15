@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { NextRequest } from "next/server";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const resolvePublicBuildArtifactAsset = vi.fn();
 const authorize = vi.fn();
@@ -18,6 +18,8 @@ vi.mock("@corgtex/domain", () => ({
     }
   },
 }));
+
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 function publicAsset(bytes: Buffer, mimeType?: string) {
   return { signedUrl: null, file: { data: bytes }, mimeType, authorize,
@@ -42,7 +44,7 @@ describe("public build artifact asset route", () => {
     expect(response.headers.get("location")).toBeNull();
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(await response.text()).toBe("synthetic proof");
-    expect(authorize).toHaveBeenCalledTimes(5); // initial, byte verification and final delivery fences
+    expect(authorize).toHaveBeenCalledTimes(2); // verified response and fresh delivery fences
     expect(resolvePublicBuildArtifactAsset).toHaveBeenCalledWith({
       publicToken: "token",
       assetId: "asset-1",
@@ -75,7 +77,7 @@ describe("public build artifact asset route", () => {
     expect(response.headers.get("content-disposition")).toBe("inline");
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     expect(await response.text()).toBe("synthetic image");
-    expect(authorize).toHaveBeenCalledTimes(5);
+    expect(authorize).toHaveBeenCalledTimes(2);
   });
   it.each(["text/html", "image/svg+xml", "application/pdf"])("keeps executable or non-preview %s downloadable", async (mimeType) => {
     resolvePublicBuildArtifactAsset.mockResolvedValue(publicAsset(Buffer.from("synthetic upload"), mimeType));
@@ -88,11 +90,20 @@ describe("public build artifact asset route", () => {
     expect(await response.text()).toBe("synthetic upload");
   });
 
-  it("bounds complete authorization calls for a verified 64 MiB public asset", async () => {
-    const bytes = Buffer.alloc(64 * 1024 * 1024, 65);
+  it.each([50, 64])("bounds allocations and delivery proofs for a %i MiB public asset", async (mib) => {
+    const sizeBytes = mib * 1024 * 1024;
+    const bytes = Buffer.alloc(sizeBytes, 65);
     resolvePublicBuildArtifactAsset.mockResolvedValue({ file: { data: bytes }, authorize,
       byteBinding: { sha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: bytes.byteLength } });
     const { GET } = await import("./route");
+    const allocations: number[] = [];
+    vi.stubGlobal("Uint8Array", new Proxy(Uint8Array, {
+      construct(target, args) {
+        const result = Reflect.construct(target, args) as Uint8Array;
+        if (typeof args[0] === "number" || ArrayBuffer.isView(args[0])) allocations.push(result.byteLength);
+        return result;
+      },
+    }));
     const response = await GET(new NextRequest("http://localhost/public/build-artifacts/token/assets/asset-1"),
       { params: Promise.resolve({ publicToken: "token", assetId: "asset-1" }) });
     let size = 0, deliveries = 0;
@@ -104,9 +115,12 @@ describe("public build artifact asset route", () => {
       expect(next.value[0]).toBe(65);
       size += next.value.byteLength; deliveries++;
     }
-    expect(size).toBe(bytes.byteLength);
-    expect(deliveries).toBe(16);
-    expect(authorize.mock.calls.length).toBeLessThanOrEqual(40);
+    expect(size).toBe(sizeBytes);
+    const fullFileAllocations = allocations.filter(length => length >= sizeBytes);
+    expect(fullFileAllocations).toEqual([]);
+    expect(bytes.byteLength).toBe(0); // storage ownership was transferred, invalidating aliases
+    expect(deliveries).toBe(Math.ceil(mib / 4));
+    expect(authorize.mock.calls.length).toBe(deliveries + 1);
   });
 
   it("rejects a mismatched bound asset before returning any response", async () => {

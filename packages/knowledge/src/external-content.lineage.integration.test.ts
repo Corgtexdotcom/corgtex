@@ -134,6 +134,61 @@ describe("Box source indexing with real PostgreSQL receipts and commit scopes", 
     expect(remote.callsInTransaction).toBe(0);
   });
 
+  it("retries the same copied hashes after indexing fails and becomes unchanged only after indexing succeeds", async () => {
+    const f = await fixture();
+    remote.embed.mockRejectedValueOnce(new Error("Synthetic embedding failure"));
+    await expect(sync(f)).rejects.toMatchObject({ code: "EXTERNAL_CONTENT_SYNC_FAILED" });
+    expect(await prisma.brainSource.count({ where: { workspaceId: f.workspace.id } })).toBe(1);
+    expect(await prisma.knowledgeChunk.count({ where: { workspaceId: f.workspace.id } })).toBe(0);
+    const failed = await prisma.externalContentSyncLog.findFirstOrThrow({ where: { sourceId: f.source.id, status: "ERROR" } });
+    expect(failed.brainSourceId).toBeTruthy();
+    await expect(sync(f)).resolves.toMatchObject({ status: "SYNCED", chunksCreated: 1 });
+    expect(await prisma.knowledgeChunk.count({ where: { workspaceId: f.workspace.id, sourceId: f.source.id } })).toBe(1);
+    expect(await prisma.brainSource.count({ where: { workspaceId: f.workspace.id } })).toBe(2);
+    await expect(sync(f)).resolves.toMatchObject({ status: "UNCHANGED", chunksCreated: 0 });
+    expect(remote.embed).toHaveBeenCalledTimes(2);
+    expect(await prisma.brainSource.count({ where: { workspaceId: f.workspace.id } })).toBe(2);
+    expect(remote.callsInTransaction).toBe(0);
+  });
+
+  it("does not reuse an older successful same-hash copy after a newer copy failed indexing", async () => {
+    const f = await fixture(), original = remote.content.text;
+    await expect(sync(f)).resolves.toMatchObject({ status: "SYNCED" });
+    remote.content.text = "Synthetic changed provider bytes";
+    remote.embed.mockRejectedValueOnce(new Error("Synthetic changed index failure"));
+    await expect(sync(f)).rejects.toMatchObject({ code: "EXTERNAL_CONTENT_SYNC_FAILED" });
+    remote.content.text = original;
+    remote.embed.mockRejectedValueOnce(new Error("Synthetic original index failure"));
+    await expect(sync(f)).rejects.toMatchObject({ code: "EXTERNAL_CONTENT_SYNC_FAILED" });
+    await expect(sync(f)).resolves.toMatchObject({ status: "SYNCED", chunksCreated: 1 });
+    await expect(sync(f)).resolves.toMatchObject({ status: "UNCHANGED" });
+    expect(remote.embed).toHaveBeenCalledTimes(4);
+    const chunks = await prisma.knowledgeChunk.findMany({ where: { workspaceId: f.workspace.id, sourceId: f.source.id } });
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0].content).toContain(original);
+    expect(await prisma.externalContentSyncLog.count({ where: { sourceId: f.source.id, status: "SYNCED" } })).toBe(2);
+    expect(remote.callsInTransaction).toBe(0);
+  });
+
+  it.each(["membership", "job-head"] as const)("withholds failed-copy retry when its original %s authority is revoked", async change => {
+    const f = await fixture();
+    remote.embed.mockRejectedValueOnce(new Error("Synthetic indexing failure"));
+    await expect(sync(f)).rejects.toMatchObject({ code: "EXTERNAL_CONTENT_SYNC_FAILED" });
+    if (change === "membership") await prisma.member.updateMany({ where: { workspaceId: f.workspace.id, userId: f.actor.kind === "user" ? f.actor.user.id : "" }, data: { isActive: false } });
+    else {
+      const head = await prisma.artifactInputLineage.findFirstOrThrow({ where: { workspaceId: f.workspace.id,
+        artifactType: "WorkflowJobInput", artifactId: f.job.id }, orderBy: { revision: "desc" } });
+      await prisma.artifactInputLineage.create({ data: { workspaceId: f.workspace.id, artifactType: head.artifactType,
+        artifactId: head.artifactId, revision: head.revision + 1, origin: "UNKNOWN", contentHash: head.contentHash,
+        inputsJson: [], rootsJson: [] } });
+    }
+    await expect(sync(f)).rejects.toMatchObject({ code: expect.stringMatching(/SOURCE_|UNKNOWN_LINEAGE|NOT_A_MEMBER|FORBIDDEN/) });
+    expect(remote.embed).toHaveBeenCalledTimes(1);
+    expect(await prisma.knowledgeChunk.count({ where: { workspaceId: f.workspace.id, sourceId: f.source.id } })).toBe(0);
+    expect(await prisma.externalContentSyncLog.count({ where: { sourceId: f.source.id, status: "SYNCED" } })).toBe(0);
+    expect(remote.callsInTransaction).toBe(0);
+  });
+
   it("waits on the Document row before source epochs while a privacy writer commits", async () => {
     const workspace = await prisma.workspace.create({ data: { name: "Synthetic document privacy race", slug: `doc-race-${randomUUID()}` } });
     const user = await prisma.user.create({ data: { email: `doc-race-${randomUUID()}@example.test`, passwordHash: "synthetic" } });

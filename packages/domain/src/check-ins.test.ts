@@ -5,13 +5,16 @@ import {
   createCompanyUnderstandingQuestion,
   getOverwhelmSignals,
   listCompanyUnderstandingQuestions,
+  listDailyCompanyUnderstandingQuestions,
   respondToCheckIn,
   startCompanyUnderstandingQuestionConversation,
   skipCompanyUnderstandingQuestion,
 } from "./check-ins";
 import { prisma } from "@corgtex/shared";
 import { appendEvents } from "./events";
-import { readableArtifactIds } from "./source-lineage";
+import { captureArtifactInputProof, withArtifactCountReleaseSnapshot } from "./source-lineage";
+import { requireWorkspaceMembership } from "./auth";
+import { AppError } from "./errors";
 
 vi.mock("@corgtex/shared", () => ({
   prisma: {
@@ -52,6 +55,9 @@ vi.mock("./events", () => ({
 }));
 
 vi.mock("./source-lineage", () => ({
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({ value: await read(), heads: new Map() }),
+  mergeLineageInputRoot: (_previous: unknown, root: unknown) => root,
+  withArtifactCountReleaseSnapshot: vi.fn(async (_actor, _workspaceId, _roots, remote, finish) => { await remote(); return finish(prisma); }),
   assertArtifactInputWriteFence: vi.fn(),
   captureArtifactInputProof: vi.fn(async (_actor, _ws, inputs) => inputs.map((input: { kind: string; id: string }) => ({ kind: input.kind, id: input.id, fingerprint: "a".repeat(64) }))),
   captureArtifactInputSnapshotProof: vi.fn(async (_actor, _ws, input) => [{ kind: "ArtifactInputSnapshot", id: `snapshot-${input.id}`, fingerprint: "a".repeat(64) }]),
@@ -222,10 +228,31 @@ describe("getOverwhelmSignals", () => {
       { id: "restricted", questionText: "Restricted" },
       { id: "safe", questionText: "Safe" },
     ] as any);
-    vi.mocked(readableArtifactIds).mockResolvedValueOnce(new Set(["safe"]));
+    vi.mocked(captureArtifactInputProof).mockRejectedValueOnce(new AppError(409, "UNKNOWN_LINEAGE", "Restricted input"));
     const questions = await listCompanyUnderstandingQuestions(actor, { workspaceId, take: 1 });
     expect(questions.map((question) => question.id)).toEqual(["safe"]);
     expect(prisma.checkIn.findMany).toHaveBeenCalledWith(expect.not.objectContaining({ take: 1 }));
+  });
+
+  it("releases only selected original proofs while preserving daily question limits", async () => {
+    const rows = Array.from({ length: 4 }, (_, i) => ({ id: `daily-${i}`, questionText: `Question ${i}` }));
+    vi.mocked(prisma.checkIn.findMany).mockResolvedValueOnce(rows as any);
+    expect(await listDailyCompanyUnderstandingQuestions(actor, { workspaceId, take: 100 })).toEqual(rows.slice(0, 3));
+    expect(captureArtifactInputProof).toHaveBeenCalledWith(actor, workspaceId, [
+      { kind: "CheckIn", id: rows[0].id, snapshot: rows[0] },
+    ]);
+    const call = vi.mocked(withArtifactCountReleaseSnapshot).mock.calls.at(-1)!;
+    expect(call[2].map(root => root.id)).toEqual(rows.slice(0, 3).map(row => row.id));
+    expect(call[5]).toBeInstanceOf(Map);
+    expect(requireWorkspaceMembership).toHaveBeenLastCalledWith({ actor, workspaceId, tx: prisma });
+  });
+
+  it("checks current membership even when the readable question list is empty", async () => {
+    vi.mocked(prisma.checkIn.findMany).mockResolvedValueOnce([]);
+    vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce({ id: memberId } as any)
+      .mockRejectedValueOnce(new AppError(403, "NOT_A_MEMBER", "Departed"));
+    await expect(listCompanyUnderstandingQuestions(actor, { workspaceId })).rejects.toMatchObject({ code: "NOT_A_MEMBER" });
+    expect(requireWorkspaceMembership).toHaveBeenLastCalledWith({ actor, workspaceId, tx: prisma });
   });
 
   it("marks regular check-ins answered when a member responds", async () => {

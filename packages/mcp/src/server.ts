@@ -2497,7 +2497,10 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
     async ({ proposalId }: { proposalId: string }) => {
       requireScope(sessionCtx, "proposals:read");
-      const proposal = await getProposal(actor, { workspaceId, proposalId }).catch(() => null);
+      const proposal = await getProposal(actor, { workspaceId, proposalId }).catch((error: unknown) => {
+        if (error instanceof AppError && error.status === 404) return null;
+        throw error;
+      });
       if (!proposal) return jsonResult({ error: "Not found" });
       const item = normalizeProposalWorkItem(proposal);
       return jsonResult({
