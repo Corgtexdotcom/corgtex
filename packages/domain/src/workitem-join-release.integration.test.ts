@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { listActions } from "./actions";
-import { listTensions, upvoteTension } from "./tensions";
+import { getTension, listTensions, upvoteTension } from "./tensions";
 import { recordArtifactInputLineage } from "./source-lineage";
 import { WorkItemReadRelease } from "./work-item-readable-page";
 
@@ -54,6 +54,18 @@ it.each(["date", "alpha"] as const)("withholds selected %s-sort votes after vote
     await f.withdrawProfile();
   });
   await expect(listTensions(f.actor, f.workspaceId, { take: 1, sort })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+  expect(barrier).toHaveBeenCalledTimes(1);
+});
+
+it("withholds paged detail votes after their admitted voter authority is withdrawn", async () => {
+  const f = await setup("Tension");
+  const vote = await upvoteTension(f.otherActor, { workspaceId: f.workspaceId, tensionId: f.target.id });
+  const barrier = beforeRelease(async value => {
+    expect(value).toMatchObject({ upvotes: [{ id: vote.id }] });
+    await f.withdrawProfile();
+  });
+  await expect(getTension(f.actor, { workspaceId: f.workspaceId, tensionId: f.target.id }))
+    .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
   expect(barrier).toHaveBeenCalledTimes(1);
 });
 

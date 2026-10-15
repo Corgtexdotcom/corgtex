@@ -1335,7 +1335,6 @@ describe("tensions domain", () => {
         assigneeMember: { include: { user: { select: { id: true, displayName: true, email: true } } } },
         raisedByMember: { include: { user: { select: { id: true, displayName: true, email: true } } } },
         proposal: true,
-        upvotes: true,
       },
     });
 
@@ -1595,6 +1594,38 @@ describe("tensions domain", () => {
       author: { id: "", displayName: null, email: "" }, assigneeMemberId: null, assigneeMember: null,
       raisedByMemberId: null, raisedByMember: null, circleId: null, circle: null });
     expect(JSON.stringify(output)).not.toMatch(/Private profile|Private circle|private@example|departed|restricted-circle/);
+  });
+
+  it.each(["date", "priority", "detail"] as const)("pages complete readable votes beyond 5,001 for %s", async (surface) => {
+    const votes = Array.from({ length: 5_104 }, (_, index) => ({
+      id: `vote-${String(index).padStart(6, "0")}`,
+      tensionId: "many-votes",
+      userId: index < 5_101 ? `member-${index}` : `withheld-${index}`,
+      createdAt: new Date("2026-10-01"),
+    }));
+    const tension = { id: "many-votes", workspaceId: "ws-1", title: "Complete votes", priority: 1,
+      createdAt: new Date("2026-10-01"), upvotes: votes };
+    prismaMock.tension.findMany.mockResolvedValue([tension]);
+    prismaMock.tension.findFirst.mockResolvedValue(tension);
+    prismaMock.tensionUpvote.findMany.mockImplementation(async query => votes
+      .filter(vote => !query.where.id?.gt || vote.id > query.where.id.gt)
+      .slice(0, query.take));
+    vi.mocked(captureArtifactInputProof).mockImplementation(async (_actor, _workspace, inputs) => {
+      if (inputs.some(input => input.kind === "User" && input.id.startsWith("withheld-"))) {
+        throw new AppError(403, "SOURCE_RESTRICTED", "Voter is unavailable.");
+      }
+      return [];
+    });
+    const { getTension, listTensions } = await import("./tensions");
+    const result = surface === "detail"
+      ? await getTension(actor, { workspaceId: "ws-1", tensionId: tension.id })
+      : (await listTensions(actor, "ws-1", { sort: surface, take: 1 })).items[0];
+    expect(result.upvotes).toHaveLength(5_101);
+    expect(new Set(result.upvotes.map(vote => vote.id)).size).toBe(5_101);
+    expect(result.upvotes.at(-1)?.id).toBe("vote-005100");
+    expect(prismaMock.tensionUpvote.findMany.mock.calls.every(([query]) => query.take === 100 && query.orderBy.id === "asc")).toBe(true);
+    expect(prismaMock.tensionUpvote.findMany.mock.calls.length).toBeGreaterThan(50);
+    expect(JSON.stringify(result.upvotes)).not.toContain("withheld-");
   });
 
   it("filters exact votes and voter access before priority ranking and pagination", async () => {

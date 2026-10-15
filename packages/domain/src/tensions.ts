@@ -137,12 +137,28 @@ function workItemOrderBy(sort: WorkItemSort | undefined): Prisma.TensionOrderByW
 }
 
 async function readableTensionVotes<T extends { id: string; userId: string }>(actor: AppActor, workspaceId: string, votes: T[], release?: WorkItemReadRelease) {
-  invariant(votes.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Vote permission scan exceeds its supported size.");
   const captured = await captureReadableDigestInputs({ actor, workspaceId, kind: "TensionUpvote", records: votes,
     additionalInputs: (vote) => [{ kind: "User", id: vote.userId }],
   });
   release?.add(captured.roots);
   return captured.records;
+}
+
+async function loadReadableTensionVotes(actor: AppActor, workspaceId: string, tensionId: string, release: WorkItemReadRelease) {
+  const result: import("@prisma/client").TensionUpvote[] = [];
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await prisma.tensionUpvote.findMany({
+      where: { tensionId, tension: { workspaceId }, ...(cursor ? { id: { gt: cursor } } : {}) },
+      orderBy: { id: "asc" },
+      take: 100,
+    });
+    invariant(page.length <= 100 && page.every((vote) => !cursor || vote.id > cursor),
+      409, "SOURCE_CHANGED", "Tension votes changed during the scan.");
+    result.push(...await readableTensionVotes(actor, workspaceId, page, release));
+    if (page.length < 100) return result;
+    cursor = page.at(-1)!.id;
+  }
 }
 
 async function redactTensionJoins<T extends {
@@ -262,15 +278,15 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
           },
         },
         circle: true,
-        upvotes: { take: 5001 },
         proposal: true,
       },
   }):[];
   const byId=new Map(hydrated.map(row=>[row.id,row]));
   const selected=page.items.flatMap(row=>{const loaded=byId.get(row.id);return loaded?[{...loaded,...row}]:[];});
-  const votes=await readableTensionVotes(actor,workspaceId,selected.flatMap(row=>row.upvotes??[]),release);
-  const voteIds=new Set(votes.map(vote=>vote.id));
-  const items=selected.map(row=>({...row,upvotes:(row.upvotes??[]).filter(vote=>voteIds.has(vote.id))}));
+  const items: Array<(typeof selected)[number] & { upvotes: import("@prisma/client").TensionUpvote[] }> = [];
+  for (const row of selected) items.push({ ...row,
+    upvotes: await loadReadableTensionVotes(actor, workspaceId, row.id, release),
+  });
   const total=page.total-(page.items.length-items.length);
   const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "TENSION", items.map((item) => item.id), rows => release.observe("AdviceRequest", rows));
   const redactedItems = await redactTensionJoins(actor, workspaceId, items, release);
@@ -928,19 +944,21 @@ export async function getTension(actor: AppActor, params: { workspaceId: string;
       assigneeMember: { include: { user: { select: { id: true, displayName: true, email: true } } } },
       raisedByMember: { include: { user: { select: { id: true, displayName: true, email: true } } } },
       proposal: true,
-      upvotes: true,
     },
   });
   invariant(tension, 404, "NOT_FOUND", "Tension not found.");
   invariant((await readableArtifactIds(actor, params.workspaceId, "Tension", [tension])).has(tension.id),
     404, "NOT_FOUND", "Tension not found.");
+  const release = new WorkItemReadRelease(actor, params.workspaceId);
+  await release.observe("Tension", [tension]);
   const visibleProposalIds = tension.proposal
     ? await readableArtifactIds(actor, params.workspaceId, "Proposal", [tension.proposal]) : new Set<string>();
-  return {
-    ...(await redactTensionJoins(actor, params.workspaceId, [tension]))[0],
-    upvotes: await readableTensionVotes(actor, params.workspaceId, tension.upvotes ?? []),
+  if (tension.proposal && visibleProposalIds.has(tension.proposal.id)) await release.observe("Proposal", [tension.proposal]);
+  return release.finish({
+    ...(await redactTensionJoins(actor, params.workspaceId, [tension], release))[0],
+    upvotes: await loadReadableTensionVotes(actor, params.workspaceId, tension.id, release),
     proposalId: tension.proposal && visibleProposalIds.has(tension.proposal.id) ? tension.proposalId : null,
     proposal: tension.proposal && visibleProposalIds.has(tension.proposal.id)
       ? { id: tension.proposal.id, title: tension.proposal.title, status: tension.proposal.status } : null,
-  };
+  });
 }
