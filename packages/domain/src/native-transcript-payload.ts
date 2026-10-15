@@ -10,4 +10,3 @@ export function nativeTranscriptCanonicalPayload(value: unknown): string {
 }
 
 export const nativeTranscriptPayloadHash = (payload: unknown) => createHash("sha256").update(nativeTranscriptCanonicalPayload(payload)).digest("hex");
-

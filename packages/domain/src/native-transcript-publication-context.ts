@@ -27,4 +27,3 @@ export function hasPendingCompanyTranscript(actor: AppActor, workspaceId: string
   const scope = currentCompanyTranscriptPublicationScope(actor, workspaceId, inputId);
   return Boolean(scope && !scope.published);
 }
-
