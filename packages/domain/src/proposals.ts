@@ -109,10 +109,10 @@ async function preserveProposalResetHistory(tx: Prisma.TransactionClient, actor:
 }
 
 async function advanceProposalResetProof(tx: Prisma.TransactionClient, actor: AppActor, workspaceId: string,
-  before: { id: string; [key: string]: unknown }, after: unknown) {
+  before: { id: string; [key: string]: unknown }, after: unknown, admission?: object) {
   try {
     return await advanceHumanArtifactInputLineage({ tx, actor, workspaceId,
-      artifact: { kind: "Proposal", id: before.id }, before, after, allowSystemTransition: true });
+      artifact: { kind: "Proposal", id: before.id }, before, after, admission, allowSystemTransition: true });
   } catch (error) {
     if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
     await invalidateArtifactInputLineage({ tx, workspaceId,
@@ -1495,6 +1495,8 @@ export async function submitProposal(actor: AppActor, params: { workspaceId: str
     invariant(proposal.status === "DRAFT", 400, "INVALID_STATE", "Only draft proposals can be opened.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: proposal, resolvedMembership: membership });
 
+    const admission = await captureHumanArtifactInputAdvance({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Proposal", id: proposal.id }, before: proposal });
     const openedAt = new Date();
     const flow = await activateProposalApprovalFlow(tx, {
       actor,
@@ -1514,7 +1516,7 @@ export async function submitProposal(actor: AppActor, params: { workspaceId: str
       },
     });
     await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
-      artifact: { kind: "Proposal", id: proposal.id }, before: proposal, after: openedProposal });
+      artifact: { kind: "Proposal", id: proposal.id }, before: proposal, after: openedProposal, admission });
 
     await recordProposalOpened(tx, actor, {
       workspaceId: params.workspaceId,
@@ -1553,6 +1555,8 @@ export async function returnProposalToDraft(actor: AppActor, params: {
     invariant(proposal.status === "OPEN" || proposal.status === "RESOLVED", 400, "INVALID_STATE", "Only open or resolved proposals can be returned to draft.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: proposal, resolvedMembership: membership });
 
+    const admission = await captureHumanArtifactInputAdvance({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Proposal", id: proposal.id }, before: proposal, allowSystemTransition: true });
     await preserveProposalResetHistory(tx, actor, params.workspaceId, proposal);
 
     const flow = await tx.approvalFlow.findUnique({
@@ -1605,7 +1609,7 @@ export async function returnProposalToDraft(actor: AppActor, params: {
         autoApproveAt: null,
       },
     });
-    const contentReadable = await advanceProposalResetProof(tx, actor, params.workspaceId, proposal, updated);
+    const contentReadable = await advanceProposalResetProof(tx, actor, params.workspaceId, proposal, updated, admission);
 
     await tx.auditLog.create({
       data: {
@@ -1657,6 +1661,8 @@ export async function reopenProposal(actor: AppActor, params: {
     invariant(!proposal.archivedAt, 400, "INVALID_STATE", "Archived proposals cannot be reopened.");
     invariant(proposal.status === "RESOLVED", 400, "INVALID_STATE", "Only resolved proposals can be reopened.");
 
+    const admission = await captureHumanArtifactInputAdvance({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Proposal", id: proposal.id }, before: proposal, allowSystemTransition: true });
     await preserveProposalResetHistory(tx, actor, params.workspaceId, proposal);
 
     const existingFlow = await tx.approvalFlow.findUnique({
@@ -1703,7 +1709,7 @@ export async function reopenProposal(actor: AppActor, params: {
         publishedAt: proposal.publishedAt ?? now,
       },
     });
-    const contentReadable = await advanceProposalResetProof(tx, actor, params.workspaceId, proposal, updated);
+    const contentReadable = await advanceProposalResetProof(tx, actor, params.workspaceId, proposal, updated, admission);
 
     await tx.auditLog.create({
       data: {
@@ -1789,7 +1795,9 @@ export async function supportReopenResolvedProposals(actor: AppActor, params: {
       invariant(!proposal.archivedAt, 400, "INVALID_STATE", `Archived proposal cannot be reopened: ${proposal.id}.`);
       invariant(proposal.status === "RESOLVED", 400, "INVALID_STATE", `Only resolved proposals can be reopened: ${proposal.id}.`);
 
-      await preserveProposalResetHistory(tx, actor, params.workspaceId, proposal);
+      const admission = await captureHumanArtifactInputAdvance({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Proposal", id: proposal.id }, before: proposal, allowSystemTransition: true });
+    await preserveProposalResetHistory(tx, actor, params.workspaceId, proposal);
 
       const existingFlow = await tx.approvalFlow.findUnique({
         where: {
@@ -1836,7 +1844,7 @@ export async function supportReopenResolvedProposals(actor: AppActor, params: {
           publishedAt: proposal.publishedAt ?? now,
         },
       });
-      const contentReadable = await advanceProposalResetProof(tx, actor, params.workspaceId, proposal, updated);
+      const contentReadable = await advanceProposalResetProof(tx, actor, params.workspaceId, proposal, updated, admission);
 
       await tx.auditLog.create({
         data: {

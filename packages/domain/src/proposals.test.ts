@@ -121,6 +121,7 @@ vi.mock("./source-lineage", async () => ({
   isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
   withArtifactCountReleaseSnapshot: vi.fn(async (_actor, _workspaceId, _roots, _remote, finish) => finish({})),
   advanceHumanArtifactInputLineage: vi.fn(),
+  captureHumanArtifactInputAdvance: vi.fn(),
   captureArtifactInputProof: lineageReadMocks.capture,
   captureArtifactInputSnapshotProof: vi.fn().mockResolvedValue([]),
   captureImmutableArtifactInputProof: vi.fn(async (_actor, _workspaceId, roots) => roots),

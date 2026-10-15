@@ -2472,7 +2472,12 @@ export async function advanceHumanArtifactInputLineage(params: {
         invariant(actual && lineageContentFingerprint(artifact.kind, actual) === lineageContentFingerprint(artifact.kind, after),
           409, "SOURCE_CHANGED", "Artifact changed during its governed edit.");
         await requireWorkspaceMembership({ actor, workspaceId, tx });
-        permissionEpochs = mergePermissionEpochProofs(nonOwn, current) as unknown as Prisma.JsonValue;
+        const next = mergePermissionEpochProofs(nonOwn, current);
+        const { isArtifactInputPermissionEpochCoverageComplete } = await import("./source-permission-coverage");
+        invariant(await isArtifactInputPermissionEpochCoverageComplete({ workspaceId, artifact, content: actual,
+          roots, permissionEpochs: next, db: tx }),
+        409, "SOURCE_RESTRICTED", "The governed edit introduces an uncaptured permission governor.");
+        permissionEpochs = next as unknown as Prisma.JsonValue;
       }
     }
   }
