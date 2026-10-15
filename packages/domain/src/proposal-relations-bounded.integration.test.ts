@@ -29,7 +29,7 @@ it("transfers only actual latest full heads, never older valid histories or a fo
   await prisma.$transaction(tx => recordArtifactInputLineage({tx, actor: f.actor, workspaceId: f.workspaceId,
     artifact: {kind: "Proposal", id: f.proposal.id}, content: f.proposal, origin: "HUMAN_ORIGINAL", inputs: []}));
   const raw = prisma.$queryRaw.bind(prisma);
-  const transferred: Array<{artifactId: string; revision: number}>[] = [];
+  const transferred: Array<{artifactId: string; revision: number}> = [];
   const db = new Proxy(prisma, {get(target, property, receiver) {
     if (property === "$queryRaw") return async (...args: Parameters<typeof prisma.$queryRaw>) => {
       const rows = await raw(...args);
