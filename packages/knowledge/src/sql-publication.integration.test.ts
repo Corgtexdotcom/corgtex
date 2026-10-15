@@ -146,7 +146,7 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
   });
   it("accepts an empty text primary key through native custody, publication and ordinary serving", async () => {
     const textKey = {name: "id", type: "text" as const, typeOid: 25, typeModifier: -1, collationOid: 100};
-    const native = {...row(1).row, id: ""};
+    const native: Record<string, unknown> = {...row(1).row, id: ""};
     transport.rows = [{...row(1), row: native, primaryKey: "", values: [String(native.updated_at), ""],
       definition: {...definition, key: [textKey], columns: [{...definition.columns[0], ...textKey}, ...definition.columns.slice(1)]},
       content: Object.entries(native).map(([key, value]) => `${key}: ${value}`).join("\n")}];
