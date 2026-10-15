@@ -9,7 +9,7 @@ import { recordAudit } from "./audit-trail";
 import { archiveFilterWhere, type ArchiveFilter } from "./archive";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import { invariant } from "./errors";
-import { advanceHumanArtifactInputLineage, readableArtifactIds, readableBrainSourceIds, type LineageInput, type LineageRoot } from "./source-lineage";
+import { captureHumanArtifactInputAdvance, advanceHumanArtifactInputLineage, readableArtifactIds, readableBrainSourceIds, type LineageInput, type LineageRoot } from "./source-lineage";
 import { DigestReadRelease, captureReadableDigestInputs } from "./digest-lineage";
 import { privacyFilter } from "./privacy";
 import { resolveKnowledgeAccessDomains } from "./brain-access";
@@ -1569,6 +1569,11 @@ export async function postGoalUpdate(
       );
     }
 
+    const admission = params.statusChange || newProgress !== null
+      ? await captureHumanArtifactInputAdvance({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "Goal", id: goal.id }, before: goal, allowSystemTransition: true })
+      : undefined;
+
     await lockGoalForAuthorizedMutation(tx, goal);
 
     const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
@@ -1662,7 +1667,7 @@ export async function postGoalUpdate(
       }
 
       await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
-        artifact: { kind: "Goal", id: goal.id }, before: goal, after: updatedGoal,
+        artifact: { kind: "Goal", id: goal.id }, before: goal, after: updatedGoal, admission,
         allowSystemTransition: true });
 
       await recomputeGoalParentsInTransaction(tx, parentGoalIdsToRecompute, actor);

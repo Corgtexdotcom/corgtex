@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
-import { getGoal, listGoals } from "./goals";
+import { getGoal, listGoals, postGoalUpdate } from "./goals";
 import { recordArtifactInputLineage } from "./source-lineage";
 import { DigestReadRelease } from "./digest-lineage";
 
@@ -93,4 +93,25 @@ it("preserves tenant isolation and take-zero behavior", async () => {
   const query = vi.spyOn(prisma.goal, "findMany");
   expect(await listGoals(f.actors[1], { workspaceId: f.workspace.id, take: 0 })).toEqual([]);
   expect(query).not.toHaveBeenCalled();
+});
+
+it("retains the original derived goal authority through its own governed draft transition", async () => {
+  const f = await fixture();
+  await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: f.actors[0], workspaceId: f.workspace.id,
+    artifact: { kind: "Goal", id: f.goal.id }, content: f.goal, origin: "DERIVED", inputs: [{ kind: "Action", id: f.source.id }] }));
+  await postGoalUpdate(f.actors[0], { workspaceId: f.workspace.id, goalId: f.goal.id,
+    bodyMd: "Governed draft transition", statusChange: "DRAFT" });
+  expect(await getGoal(f.actors[0], { workspaceId: f.workspace.id, goalId: f.goal.id })).toMatchObject({ status: "DRAFT", isPrivate: true });
+  await expect(getGoal(f.actors[1], { workspaceId: f.workspace.id, goalId: f.goal.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
+});
+it("does not refresh revoked and restored upstream authority through a goal transition", async () => {
+  const f = await fixture();
+  await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: f.actors[0], workspaceId: f.workspace.id,
+    artifact: { kind: "Goal", id: f.goal.id }, content: f.goal, origin: "DERIVED", inputs: [{ kind: "Action", id: f.source.id }] }));
+  await prisma.action.update({ where: { id: f.source.id }, data: { isPrivate: true } });
+  await prisma.action.update({ where: { id: f.source.id }, data: { isPrivate: false } });
+  await expect(postGoalUpdate(f.actors[0], { workspaceId: f.workspace.id, goalId: f.goal.id,
+    bodyMd: "Must not refresh", statusChange: "DRAFT" })).rejects.toBeDefined();
+  expect(await prisma.goal.findUnique({ where: { id: f.goal.id } })).toMatchObject({ status: "ACTIVE", isPrivate: false });
+  expect(await prisma.goalUpdate.count({ where: { goalId: f.goal.id, bodyMd: "Must not refresh" } })).toBe(0);
 });

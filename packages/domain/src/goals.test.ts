@@ -16,7 +16,7 @@ import {
   updateGoal,
 } from "./goals";
 import { prisma } from "@corgtex/shared";
-import { readableArtifactIds } from "./source-lineage";
+import { captureHumanArtifactInputAdvance, advanceHumanArtifactInputLineage, readableArtifactIds } from "./source-lineage";
 
 vi.mock("./producer-lineage", () => ({
   prepareProducerLineage: vi.fn().mockResolvedValue({ mode: "HUMAN_ORIGINAL", inputs: [], roots: [] }),
@@ -98,6 +98,7 @@ vi.mock("./auth", () => ({
 
 vi.mock("./source-lineage", () => ({
   isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
+  captureHumanArtifactInputAdvance: vi.fn().mockResolvedValue(undefined),
   advanceHumanArtifactInputLineage: vi.fn(),
   recordArtifactInputLineage: vi.fn(),
   readableArtifactIds: vi.fn(async (_actor: unknown, _workspaceId: string, _kind: string, records: Array<{ id: string }>) =>
@@ -1764,10 +1765,13 @@ describe("Goals Domain", () => {
     });
 
     it("atomically records history and advances version in postGoalUpdate on successful progress update", async () => {
+      const admission = Object.freeze({});
+      vi.mocked(captureHumanArtifactInputAdvance).mockResolvedValueOnce(admission);
       const activeGoal = makeGoalFixture("goal-post", { progressPercent: 20, version: 2 });
       vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce(activeGoal as any);
       vi.mocked(prisma.goalUpdate.create).mockResolvedValueOnce({ id: "gu-1" } as any);
-      vi.mocked(prisma.goal.update).mockResolvedValueOnce({ ...activeGoal, progressPercent: 60, version: 3 } as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce(activeGoal as any)
+        .mockResolvedValueOnce({ ...activeGoal, progressPercent: 60, version: 3 } as any);
 
       await postGoalUpdate(actor, {
         workspaceId: "ws-1",
@@ -1777,6 +1781,14 @@ describe("Goals Domain", () => {
         expectedVersion: 2,
       });
 
+      expect(captureHumanArtifactInputAdvance).toHaveBeenCalledWith(expect.objectContaining({
+        tx: prisma, actor, artifact: { kind: "Goal", id: activeGoal.id }, before: activeGoal,
+      }));
+      expect(vi.mocked(captureHumanArtifactInputAdvance).mock.invocationCallOrder[0])
+        .toBeLessThan(vi.mocked(prisma.goal.update).mock.invocationCallOrder[0]);
+      expect(advanceHumanArtifactInputLineage).toHaveBeenCalledWith(expect.objectContaining({
+        admission, before: activeGoal, after: expect.objectContaining({ progressPercent: 60, version: 3 }),
+      }));
       expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
         data: expect.objectContaining({ entityType: "Goal", entityId: "goal-post", version: 2, changedFields: ["progressPercent"] }),
       }));
