@@ -3167,7 +3167,7 @@ describe("proposal lineage integration", () => {
     vi.mocked(prisma.proposal.findFirst).mockResolvedValueOnce(makeProposal("many-relations") as any);
     const actions = vi.mocked(prisma.action.findMany).mockImplementation(page as typeof prisma.action.findMany);
     const tensions = vi.mocked(prisma.tension.findMany).mockImplementation(page as typeof prisma.tension.findMany);
-    const requests = vi.mocked(prisma.adviceRequest.findMany).mockImplementation(page as typeof prisma.adviceRequest.findMany);
+    const requests = vi.mocked(prisma.adviceRequest.findMany).mockImplementation(page as unknown as typeof prisma.adviceRequest.findMany);
     try {
       const result = await getProposal(actor, {workspaceId: "ws-1", proposalId: "many-relations"});
       expect(result.actions).toHaveLength(5101);
