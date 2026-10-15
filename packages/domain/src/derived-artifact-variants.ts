@@ -187,7 +187,7 @@ async function discover(tx: Prisma.TransactionClient, actor: UserActor, workspac
   // the matching cohort's size budget. Each bounded page selects its latest head.
   let after: { artifactType: string; artifactId: string } | undefined;
   while (true) {
-    const identities: Array<{ artifactType: string; artifactId: string; _max: { revision: number | null } }> = await tx.artifactInputLineage.groupBy({
+    const identities = await tx.artifactInputLineage.groupBy({
       by: ["artifactType", "artifactId"],
       where: { workspaceId, artifactType: { in: TARGET_KINDS }, ...(after ? { OR: [
         { artifactType: { gt: after.artifactType } },
