@@ -24,9 +24,10 @@ it("finds an owner-private proven upload behind 5,100 legacy rows and withholds 
   const peer = await prisma.user.create({data: {email: `peer-${randomUUID()}@example.test`, passwordHash: "synthetic"}});
   const member = await prisma.member.create({data: {workspaceId: workspace.id, userId: owner.id, role: "CONTRIBUTOR"}});
   await prisma.member.create({data: {workspaceId: workspace.id, userId: peer.id, role: "CONTRIBUTOR"}});
-  requestActor.current = {kind: "user", user: {id: owner.id, email: owner.email}};
+  const ownerActor: AppActor = {kind: "user", user: {id: owner.id, email: owner.email, displayName: owner.displayName}};
+  requestActor.current = ownerActor;
   const storage = {put: async () => ({key: "synthetic"}), get: async () => null, delete: async () => undefined} as never;
-  const visible = await createMeetingAudioAsset(requestActor.current, {workspaceId: workspace.id,
+  const visible = await createMeetingAudioAsset(ownerActor, {workspaceId: workspace.id,
     fileName: "owner-private.m4a", mimeType: "audio/mp4", fileBuffer: Buffer.from("synthetic audio"), storage});
   await prisma.meetingAudioAsset.createMany({data: Array.from({length: 5100}, (_, index) => ({
     workspaceId: workspace.id, uploadedByUserId: owner.id, fileName: `legacy-${index}.m4a`,
@@ -42,9 +43,9 @@ it("finds an owner-private proven upload behind 5,100 legacy rows and withholds 
   expect(body.audioAssets[0]).not.toHaveProperty("storageKey");
   expect(body.audioAssets[0]).not.toHaveProperty("transcriptText");
 
-  requestActor.current = {kind: "user", user: {id: peer.id, email: peer.email}};
+  requestActor.current = {kind: "user", user: {id: peer.id, email: peer.email, displayName: peer.displayName}};
   expect(await (await GET(request(), {params: Promise.resolve({workspaceId: workspace.id})})).json()).toEqual({audioAssets: []});
-  requestActor.current = {kind: "user", user: {id: owner.id, email: owner.email}};
+  requestActor.current = ownerActor;
   requestActor.beforeRelease = async () => {
     await prisma.member.update({where: {id: member.id}, data: {isActive: false}});
     await prisma.member.update({where: {id: member.id}, data: {isActive: true}});
