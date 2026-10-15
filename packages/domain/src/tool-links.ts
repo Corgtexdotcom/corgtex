@@ -10,7 +10,7 @@ import { findConversationToolLinkArchiveOutcome, recordConversationToolLinkArchi
   getConversationOperationOutcomeInputRoots } from "./conversation-operation-outcome";
 import { getMcpToolInputRoots } from "./mcp-tool-input-context";
 import { captureConversationInputReceipt, validateConversationInputReceipt, type ConversationInputReceipt } from "./conversation-lineage";
-import { loadReadableDigestQuery, mergeArtifactInputProofs } from "./digest-lineage";
+import { DigestReadRelease, mergeArtifactInputProofs } from "./digest-lineage";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { captureArtifactInputProof, captureArtifactInputSnapshotProof, currentArtifactInputRoots, isArtifactInputProofReadable, lineageContentFingerprint, sealArtifactInputActor, type LineageKind, type LineageRoot } from "./source-lineage";
 import {
@@ -88,7 +88,7 @@ function toolLinkInputSnapshot(kind: LineageKind, row: Record<string, unknown>) 
 async function captureReadableToolLinkInputs<T extends { id: string }>(actor: AppActor, workspaceId: string,
   kind: LineageKind, records: T[], tx?: Prisma.TransactionClient, writtenRevision = false) {
   const admitted: T[] = [];
-  const proofs: LineageRoot[][] = [];
+  const proofs = new Map<string, LineageRoot[]>();
   for (const row of records) {
     try {
       let roots: LineageRoot[];
@@ -101,12 +101,12 @@ async function captureReadableToolLinkInputs<T extends { id: string }>(actor: Ap
         invariant(await isArtifactInputProofReadable(actor, workspaceId, roots, tx), 409, "SOURCE_CHANGED", "Tool link output changed.");
       } else roots = await captureArtifactInputProof(actor, workspaceId, [{ kind, id: row.id, snapshot: toolLinkInputSnapshot(kind, row) }], tx);
       admitted.push(row);
-      proofs.push(roots);
+      proofs.set(row.id, roots);
     } catch (error) {
       if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
     }
   }
-  return { records: admitted, roots: mergeArtifactInputProofs(...proofs) };
+  return { records: admitted, roots: mergeArtifactInputProofs(...proofs.values()), proofs };
 }
 
 async function serializeReadableToolLinks(actor: AppActor, workspaceId: string,
@@ -119,7 +119,7 @@ async function serializeReadableToolLinks(actor: AppActor, workspaceId: string,
   ]);
   const credentialCaps = actor.kind === "agent"
     ? await captureReadableToolLinkInputs(actor, workspaceId, "WorkspaceToolLinkCredential", admitted.records, tx)
-    : { records: admitted.records.filter((link) => canManageToolLinkCredential(actor, membership, link)), roots: [] };
+    : { records: admitted.records.filter((link) => canManageToolLinkCredential(actor, membership, link)), roots: [], proofs: new Map<string, LineageRoot[]>() };
   const credentialManagerIds = new Set(credentialCaps.records.map((row) => row.id));
   const creatorIds = new Set(creators.records.map((row) => row.id));
   const circleIds = new Set(circles.records.map((row) => row.id));
@@ -129,7 +129,13 @@ async function serializeReadableToolLinks(actor: AppActor, workspaceId: string,
     circleTags: link.circleTags.filter((tag) => circleIds.has(tag.circleId)),
   }, credentialManagerIds.has(link.id)));
   invariant(await isArtifactInputProofReadable(actor, workspaceId, roots, tx), 409, "SOURCE_CHANGED", "Tool link inputs changed before return.");
-  for (const value of result) await bindToolLinkOutput(actor, workspaceId, value, roots, tx);
+  for (let index = 0; index < result.length; index++) {
+    const link = admitted.records[index];
+    const ownRoots = mergeArtifactInputProofs(readerRoots, admitted.proofs.get(link.id) ?? [],
+      creators.proofs.get(link.createdBy?.id ?? "") ?? [], credentialCaps.proofs.get(link.id) ?? [],
+      ...link.circleTags.filter(tag => circleIds.has(tag.circleId)).map(tag => circles.proofs.get(tag.circleId) ?? []));
+    await bindToolLinkOutput(actor, workspaceId, result[index], ownRoots, tx);
+  }
   return { result, roots };
 }
 
@@ -232,18 +238,28 @@ export async function listWorkspaceToolLinks(actor: AppActor, params: {
   archiveFilter?: ArchiveFilter;
 }) {
   const membership = await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "list_tool_links" });
-  const links = await loadReadableDigestQuery<ToolLinkRecord>({
-    actor, workspaceId: params.workspaceId, kind: "WorkspaceToolLink", limit: 100, completeScan: true, keyset: true,
-    loadBatch: ({ take, after }) => prisma.workspaceToolLink.findMany({
-      where: { workspaceId: params.workspaceId, ...archiveFilterWhere(params.archiveFilter),
-        ...(after ? { id: { gt: after.id } } : {}) },
-      orderBy: { id: "asc" }, select: toolLinkSelect, take,
-    }),
-  });
-  const { result: visible, roots } = await serializeReadableToolLinks(actor, params.workspaceId, membership, links);
+  const release = new DigestReadRelease(actor, params.workspaceId);
+  const visible: ReturnType<typeof serializeToolLink>[] = [];
+  const allRoots = new Map<string, LineageRoot>();
+  let afterId: string | undefined;
+  while (true) {
+    const links = await prisma.workspaceToolLink.findMany({
+      where: { workspaceId: params.workspaceId, ...archiveFilterWhere(params.archiveFilter), ...(afterId ? {id: {gt: afterId}} : {}) },
+      orderBy: {id: "asc"}, select: toolLinkSelect, take: 100,
+    });
+    const {result, roots} = await release.observeRead(() => serializeReadableToolLinks(actor, params.workspaceId, membership, links));
+    release.add(roots);
+    for (const root of roots) {
+      const key = `${root.kind}:${root.id}`;
+      allRoots.set(key, mergeArtifactInputProofs(allRoots.has(key) ? [allRoots.get(key)!] : [], [root])[0]);
+    }
+    visible.push(...result);
+    if (links.length < 100) break;
+    afterId = links.at(-1)!.id;
+  }
   visible.sort((a, b) => a.category.localeCompare(b.category) || a.title.localeCompare(b.title) || a.id.localeCompare(b.id));
-  await bindToolLinkOutput(actor, params.workspaceId, visible, roots);
-  return visible;
+  await release.observeRead(() => bindToolLinkOutput(actor, params.workspaceId, visible, [...allRoots.values()]));
+  return release.finish(visible);
 }
 
 export async function getWorkspaceToolLink(actor: AppActor, params: {

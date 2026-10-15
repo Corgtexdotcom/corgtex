@@ -84,6 +84,7 @@ vi.mock("./events", () => ({
 }));
 
 vi.mock("./source-lineage", () => ({
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
   captureReadableWorkItemInputs: vi.fn(async (reader: import("@corgtex/shared").AppActor, workspaceId: string,
     kind: "Action" | "Proposal" | "Tension", records: Array<{id: string; [key: string]: unknown}>) => {
     const lineage = await import("./source-lineage");

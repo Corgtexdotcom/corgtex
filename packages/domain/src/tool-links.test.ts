@@ -35,6 +35,13 @@ const finishProducerLineage = vi.fn();
 const currentArtifactInputRoots = vi.fn();
 
 vi.mock("./source-lineage", async importOriginal => ({
+  mergeLineageInputRoot: (await importOriginal<typeof import("./source-lineage")>()).mergeLineageInputRoot,
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
+  withArtifactCountReleaseSnapshot: async (_actor: unknown, _ws: string, roots: unknown, remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => {
+    await remote();
+    if (!await isArtifactInputProofReadable(_actor,_ws,roots)) throw new Error("SOURCE_CHANGED");
+    return finish(prismaMock);
+  },
   sealArtifactInputActor: (await importOriginal<typeof import("./source-lineage")>()).sealArtifactInputActor,
   captureArtifactInputProof, captureArtifactInputSnapshotProof, isArtifactInputProofReadable, currentArtifactInputRoots,
   lineageContentFingerprint: vi.fn(() => "a".repeat(64)),
@@ -389,6 +396,24 @@ describe("workspace tool links", () => {
     expect(prismaMock.workspaceToolLink.findMany.mock.calls[1][0]).toMatchObject({
       where: { id: { gt: "hidden-99" } }, orderBy: { id: "asc" }, take: 100,
     });
+  });
+
+  it("completes more than 5000 links and gives each item only its own source receipt", async () => {
+    const rows = Array.from({length:5001},(_,index) => toolLinkFixture({id:`a-${String(index).padStart(5,"0")}`,createdBy:null,circleTags:[]}));
+    rows.push(toolLinkFixture({id:"z-first"}),toolLinkFixture({id:"z-second"}));
+    prismaMock.workspaceToolLink.findMany.mockImplementation(async ({where,take}) => rows.filter(row => !where.id || row.id > where.id.gt).slice(0,take));
+    captureArtifactInputProof.mockImplementation(async (_actor,_ws,inputs) => {
+      if(inputs.some((input: {id:string}) => input.id.startsWith("a-"))) {
+        const {AppError}=await import("./errors"); throw new AppError(409,"UNKNOWN_LINEAGE","Unknown");
+      }
+      return inputs.map((input: {kind:string;id:string}) => ({...input,fingerprint:"a".repeat(64)}));
+    });
+    const {listWorkspaceToolLinks,getWorkspaceToolLinkInputRoots}=await import("./tool-links");
+    const result=await listWorkspaceToolLinks(actor,{workspaceId:"workspace-1"});
+    expect(result.map(row => row.id)).toEqual(["z-first","z-second"]);
+    const first=await getWorkspaceToolLinkInputRoots(actor,"workspace-1",result[0]);
+    expect(first.filter(root => root.kind === "WorkspaceToolLink").map(root => root.id)).toEqual(["z-first"]);
+    expect(prismaMock.workspaceToolLink.findMany.mock.calls.every(([args]) => args.take === 100)).toBe(true);
   });
 
   it("withholds unknown creator and circle labels before names and counts are serialized", async () => {

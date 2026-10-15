@@ -6,6 +6,7 @@ const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => ({
       findFirst: vi.fn(),
       findMany: vi.fn(),
     },
+    constitutionSourceReference: {findMany: vi.fn()},
     policyCorpus: {
       findMany: vi.fn(),
     },
@@ -30,7 +31,10 @@ const lineage = vi.hoisted(() => ({
   capture: vi.fn(async (_actor, _workspaceId, inputs) => inputs.map((input: { kind: string; id: string }) => ({ kind: input.kind, id: input.id, fingerprint: "a".repeat(64) }))),
   readable: vi.fn(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map((row: { id: string }) => row.id))),
 }));
-vi.mock("./source-lineage", () => ({
+vi.mock("./source-lineage", async importOriginal => ({
+  mergeLineageInputRoot: (await importOriginal<typeof import("./source-lineage")>()).mergeLineageInputRoot,
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
+  withArtifactCountReleaseSnapshot: async (_actor: unknown, _ws: string, _roots: unknown, remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => {await remote();return finish({});},
   captureArtifactInputProof: lineage.capture,
   isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
   readableArtifactIds: lineage.readable,
@@ -58,6 +62,7 @@ describe("listWorkspaceAgreements", () => {
       isActive: true,
     });
     prismaMock.constitution.findMany.mockResolvedValue([{ id: "constitution-current", version: 3 }]);
+    prismaMock.constitutionSourceReference.findMany.mockImplementation(async () => (await prismaMock.constitution.findMany.mock.results.at(-1)?.value ?? []).flatMap((row: {sourceReferences?: unknown[]}) => row.sourceReferences ?? []));
     prismaMock.policyCorpus.findMany.mockResolvedValue([{
       id: "policy-1", title: "Advice process", bodyMd: "Accepted policy", acceptedAt: new Date("2026-08-10"),
       proposalId: "public-proposal", circle: null,
@@ -80,7 +85,6 @@ describe("listWorkspaceAgreements", () => {
     });
     expect(prismaMock.constitution.findMany).toHaveBeenCalledWith({
       where: { workspaceId: "ws-1" },
-      include: { sourceReferences: { orderBy: [{ pointOrder: "asc" }, { sourceOrder: "asc" }] } },
       orderBy: [{ version: "desc" }, { id: "desc" }],
       take: 50,
     });
@@ -190,6 +194,21 @@ describe("listWorkspaceAgreements", () => {
 
     expect(result.policyCorpus[0]?.proposal).toBeNull();
     expect(JSON.stringify(result)).not.toContain("hidden-proposal");
+  });
+
+  it("keeps complete policy history beyond 5000 unknown policies and bounds joined title queries", async () => {
+    const {AppError}=await import("./errors");
+    const rows=Array.from({length:5001},(_,index) => ({id:`hidden-${String(index).padStart(5,"0")}`,proposalId:`proposal-${index}`,title:"Hidden",bodyMd:"Unknown",acceptedAt:new Date(5002-index),circle:null}));
+    rows.push({id:"visible-last",proposalId:"public-proposal",title:"Permitted",bodyMd:"Proved",acceptedAt:new Date(0),circle:null});
+    prismaMock.policyCorpus.findMany.mockImplementation(async ({where,take}) => rows.filter(row => !where.OR || row.acceptedAt < where.OR[0].acceptedAt.lt).slice(0,take));
+    lineage.capture.mockImplementation(async (_actor,_ws,inputs) => {
+      if(inputs.some((input:{id:string}) => input.id.startsWith("hidden-"))) throw new AppError(409,"UNKNOWN_LINEAGE","Unknown");
+      return inputs.map((input:{kind:string;id:string}) => ({kind:input.kind,id:input.id,fingerprint:"a".repeat(64)}));
+    });
+    const result=await listWorkspaceAgreements(actor,{workspaceId:"ws-1"});
+    expect(result.policyCorpus.map(row => row.id)).toEqual(["visible-last"]);
+    expect(prismaMock.policyCorpus.findMany.mock.calls.every(([args]) => args.take === 100)).toBe(true);
+    expect(prismaMock.proposal.findMany.mock.calls.every(([args]) => args.where.id.in.length <= 100)).toBe(true);
   });
 
   it("performs no agreement reads when workspace membership fails", async () => {

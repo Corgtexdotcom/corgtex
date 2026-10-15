@@ -20,6 +20,7 @@ import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
 import { AppError, invariant } from "./errors";
+import { DigestReadRelease } from "./digest-lineage";
 import { OPERATIONAL_ARTIFACT_FILTER } from "./operational-artifacts";
 import { captureArtifactInputProof, invalidateArtifactInputLineage, isArtifactInputProofReadable, isArtifactInputProofPubliclyShareable, lineageContentFingerprint, readableArtifactIds, recordArtifactInputLineage } from "./source-lineage";
 import { finishProducerLineage, prepareProducerLineage, type ProducerLineageParams } from "./producer-lineage";
@@ -425,23 +426,26 @@ export async function listBuildArtifacts(actor: AppActor, params: {
   status?: BuildArtifactStatus;
 }) {
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  const artifacts = await prisma.buildArtifact.findMany({
-    where: {
-      workspaceId: params.workspaceId,
-      ...(params.status ? { status: params.status } : {}),
-      NOT: OPERATIONAL_ARTIFACT_FILTER,
-    },
-    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
-    select: buildArtifactSelect,
-    take: 5001,
-  });
-  invariant(artifacts.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Build artifact permission scan exceeds its supported size.");
+  const release = new DigestReadRelease(actor, params.workspaceId);
   const permitted: BuildArtifactRecord[] = [];
-  for (const artifact of artifacts) {
-    const readable = await readableArtifact(actor, artifact);
-    if (readable) permitted.push(readable);
+  let afterId: string | undefined;
+  while (true) {
+    const artifacts = await prisma.buildArtifact.findMany({
+      where: {workspaceId: params.workspaceId, ...(params.status ? {status: params.status} : {}),
+        NOT: OPERATIONAL_ARTIFACT_FILTER, ...(afterId ? {id: {gt: afterId}} : {})},
+      orderBy: {id: "asc"}, select: buildArtifactSelect, take: 100,
+    });
+    const captured = await release.capture("BuildArtifact", artifacts);
+    for (const artifact of captured.records) {
+      const assets = await release.capture("BuildArtifactAsset", artifact.assets);
+      const creators = await release.capture("User", artifact.createdBy ? [artifact.createdBy] : []);
+      permitted.push({...artifact, assets: assets.records, createdBy: creators.records[0] ?? null});
+    }
+    if (artifacts.length < 100) break;
+    afterId = artifacts.at(-1)!.id;
   }
-  return permitted.map((artifact) => serializeArtifact(actor, membership, artifact));
+  permitted.sort((a,b) => b.updatedAt.getTime()-a.updatedAt.getTime() || b.createdAt.getTime()-a.createdAt.getTime() || a.id.localeCompare(b.id));
+  return release.finish(permitted.map(artifact => serializeArtifact(actor, membership, artifact)));
 }
 
 export async function listBuildArtifactWorkspaceIdsForGithubRepository(params: {
