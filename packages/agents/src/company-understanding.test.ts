@@ -730,8 +730,8 @@ it("collects only bounded newest permitted synthesis samples including existing 
       return rows.filter(row => !after || row.id > after).slice(0,args.take);
     });
   }
-  readableSourcesMock.mockImplementation(async (_a,_w,rows) => new Set(rows.filter(row=>Number(row.id.split("-")[1])>=110).map(row=>row.id)));
-  readableArtifactIdsMock.mockImplementation(async (_a,_w,_k,rows) => new Set(rows.filter(row=>Number(row.id.split("-")[1])>=110).map(row=>row.id)));
+  readableSourcesMock.mockImplementation(async (_a,_w,rows: Array<{id: string}>) => new Set(rows.filter(row=>Number(row.id.split("-")[1])>=110).map(row=>row.id)));
+  readableArtifactIdsMock.mockImplementation(async (_a,_w,_k,rows: Array<{id: string}>) => new Set(rows.filter(row=>Number(row.id.split("-")[1])>=110).map(row=>row.id)));
   modelGatewayMock.extract.mockResolvedValue({output:{}});
   const {runCompanyUnderstandingSynthesis}=await import("./company-understanding");
   await runCompanyUnderstandingSynthesis({workspaceId:"workspace-1",agentRunId:"run",model:"synthetic"});

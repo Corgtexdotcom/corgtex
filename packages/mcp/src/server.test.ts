@@ -3662,11 +3662,12 @@ it("pages context evidence after owner admission and releases original owner plu
   const now=new Date("2026-01-01");
   const rows=Array.from({length:150},(_,index)=>({id:String(index).padStart(3,"0"),createdAt:now,knowledgeChunkId:null}));
   vi.mocked(prisma.contextGraphObject.findFirst).mockResolvedValue({id:"owner"} as never);
-  vi.mocked(prisma.contextGraphEvidenceRef.findMany).mockImplementation(async args=>{
+  // This handler awaits the delegate; its fixture returns the same resolved rows.
+  vi.mocked(prisma.contextGraphEvidenceRef.findMany).mockImplementation((async args=>{
     expect(args?.take).toBe(100);expect(args?.where?.knowledgeChunkId).toBeNull();
     const after=(args?.where?.OR as any)?.[1]?.id?.gt;
     return rows.filter(row=>!after||row.id>after).slice(0,args?.take ?? 0) as never;
-  });
+  }) as typeof prisma.contextGraphEvidenceRef.findMany);
   evidenceCapture.mockImplementation(async (_a,_w,inputs)=>{
     if(inputs[0].id!=="owner"&&Number(inputs[0].id)<100)throw new AppError(409,"UNKNOWN_LINEAGE","Unproved");
     return [{kind:inputs[0].kind,id:inputs[0].id,fingerprint:"a".repeat(64)}];
