@@ -2,8 +2,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppError } from "./errors";
 
 const { capture, readable } = vi.hoisted(() => ({ capture: vi.fn(), readable: vi.fn() }));
-vi.mock("./source-lineage", () => ({ captureArtifactInputProof: capture, isArtifactInputProofReadable: readable }));
+vi.mock("./source-lineage", async importOriginal => ({
+  mergeLineageInputRoot: (await importOriginal<typeof import("./source-lineage")>()).mergeLineageInputRoot,
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
+  withArtifactCountReleaseSnapshot: async (_actor: unknown, _ws: string, _roots: unknown, remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => {await remote();return finish({});}, captureArtifactInputProof: capture, isArtifactInputProofReadable: readable }));
 import { isDigestInputProofShared, loadReadableDigestQuery, mergeArtifactInputProofs } from "./digest-lineage";
+vi.mock("./auth", () => ({requireWorkspaceMembership: async () => ({id: "member"})}));
 import { SOURCE_PERMISSION_POLICY_VERSION, type PermissionEpochProof } from "./source-permission-epochs";
 
 describe("digest permission selection", () => {
@@ -32,14 +36,16 @@ describe("digest permission selection", () => {
     expect(loadBatch.mock.calls.map(([page]) => page)).toEqual([{ take: 50, skip: 0 }, { take: 50, skip: 50 }]);
   });
 
-  it("fails instead of returning partial counts when a complete history scan exceeds its budget", async () => {
-    capture.mockImplementation(async (_actor, _workspaceId, inputs) => [
-      { kind: "NewspaperDelivery", id: inputs[0].id, fingerprint: "a".repeat(64) },
-    ]);
-    const loadBatch = vi.fn(async ({ take, skip }) => Array.from({ length: take }, (_, index) => ({ id: String(skip + index) })));
-    await expect(loadReadableDigestQuery({ actor: {} as any, workspaceId: "ws", kind: "NewspaperDelivery",
-      limit: 1, completeScan: true, loadBatch })).rejects.toMatchObject({ code: "INPUT_SCAN_LIMIT" });
-    expect(loadBatch).toHaveBeenCalledTimes(101);
+  it("completes full lists beyond 5000 candidates while sampled input budgets remain", async () => {
+    capture.mockImplementation(async (_actor, _workspaceId, inputs) => {
+      if (Number(inputs[0].id) < 5001) throw new AppError(409, "UNKNOWN_LINEAGE", "Unknown history");
+      return [{kind: "NewspaperDelivery", id: inputs[0].id, fingerprint: "a".repeat(64)}];
+    });
+    const rows = Array.from({length: 5003}, (_, index) => ({id: String(index)}));
+    const loadBatch = vi.fn(async ({take,skip}) => rows.slice(skip,skip+take));
+    expect(await loadReadableDigestQuery({actor: {} as any,workspaceId: "ws",kind: "NewspaperDelivery",limit: 1,completeScan: true,loadBatch})).toEqual([{id:"5001"},{id:"5002"}]);
+    expect(loadBatch.mock.calls.every(([page]) => page.take <= 100)).toBe(true);
+    await expect(loadReadableDigestQuery({actor: {} as any,workspaceId: "ws",kind: "NewspaperDelivery",limit: 1,loadBatch})).rejects.toMatchObject({code:"INPUT_SCAN_LIMIT"});
   });
 
   it("accepts an exact-budget history after an empty terminator query", async () => {

@@ -14,7 +14,7 @@ import { withCompanyLegacyRecoveryCapture } from "./legacy-recovery-context";
 import { inspectSourceLineageBackfill } from "./source-lineage-backfill";
 
 export const LEGACY_RECOVERY_OPERATION = "LEGACY_RECOVERY_PUBLICATION";
-export const LEGACY_RECOVERY_KINDS = ["Action", "ConversationSession", "ConversationTurn", "Document", "BrainSource"] as const;
+export const LEGACY_RECOVERY_KINDS = ["Action", "ConversationSession", "ConversationTurn", "Document", "BrainSource", "Role", "Circle"] as const;
 export type LegacyRecoveryKind = typeof LEGACY_RECOVERY_KINDS[number];
 type Row = Record<string, unknown> & { id: string };
 type Db = Prisma.TransactionClient;
@@ -32,6 +32,8 @@ async function load(db: Db, selection: Selection): Promise<Row | null> {
   const where = { id: selection.id, workspaceId: selection.workspaceId };
   switch (selection.kind) {
     case "Action": return db.action.findFirst({ where });
+    case "Role": return db.role.findFirst({ where: { id: selection.id, circle: { workspaceId: selection.workspaceId } } });
+    case "Circle": return db.circle.findFirst({ where });
     case "Document": return db.document.findFirst({ where });
     case "BrainSource": return db.brainSource.findFirst({ where });
     case "ConversationSession": return db.conversationSession.findFirst({ where });
@@ -47,14 +49,18 @@ async function targetAudience(actor: AppActor, selection: Selection, row: Row, d
     if (actor.authProvider !== "credential" || !actor.credentialId || !actor.credentialVersion
       || !actor.workspaceIds?.includes(selection.workspaceId) || selection.kind.startsWith("Conversation") || row.isPrivate === true) return false;
     const credential = await db.agentCredential.findFirst({where:{id:actor.credentialId,workspaceId:selection.workspaceId,isActive:true}});
-    const scopes = selection.kind === "Action" ? ["actions:read", "brain:read"] : ["brain:read"];
+    const scopes = selection.kind === "Role" || selection.kind === "Circle" ? ["circles:read"]
+      : selection.kind === "Action" ? ["actions:read", "brain:read"] : ["brain:read"];
     if (!credential || mcpCredentialVersion(credential.tokenHash) !== actor.credentialVersion
       || mcpScopesHash(credential.scopes) !== mcpScopesHash(actor.scopes ?? []) || !scopes.some(scope=>credential.scopes.includes(scope))) return false;
-    return selection.kind === "Action" || row.accessDomain === "WORKSPACE" && typeof row.informationCategory === "string"
+    if (selection.kind === "Role") return Boolean(await db.circle.findFirst({ where: { id: String(row.circleId), workspaceId: selection.workspaceId, archivedAt: null } }));
+    return selection.kind === "Circle" || selection.kind === "Action" || row.accessDomain === "WORKSPACE" && typeof row.informationCategory === "string"
       && await canReadInformationCategory(actor,selection.workspaceId,row.informationCategory,db);
   }
   const member = await db.member.findFirst({ where: { workspaceId: selection.workspaceId, userId: actor.user.id, isActive: true } });
   if (!member) return false;
+  if (selection.kind === "Role") return Boolean(await db.circle.findFirst({ where: { id: String(row.circleId), workspaceId: selection.workspaceId, archivedAt: null } }));
+  if (selection.kind === "Circle") return true;
   if (selection.kind === "ConversationSession") return row.userId === actor.user.id;
   if (selection.kind === "ConversationTurn") return Boolean(await db.conversationSession.findFirst({ where: {
     id: String(row.conversationId), workspaceId: selection.workspaceId, userId: actor.user.id } }));
@@ -73,7 +79,7 @@ export function decodeLegacyRecovery(row: Record<string, unknown>): Capsule | nu
       || typeof value.targetFingerprint !== "string" || typeof value.requestHash !== "string" || !["EXISTING_EVIDENCE", "CURRENT_ATTESTATION"].includes(String(value.basis)) || !record(value.content)
       || value.content.id !== value.targetId || !Array.isArray(value.roots) || value.roots.length > 1000
       || !parsePermissionEpochProof(value.operationEpochs) || !["COMPANY","OWNER"].includes(String(value.audience))
-      || (value.audience === "COMPANY") !== (["Action","Document","BrainSource"].includes(value.targetKind) && value.content.isPrivate !== true)
+      || (value.audience === "COMPANY") !== (["Action","Document","BrainSource","Role","Circle"].includes(value.targetKind) && value.content.isPrivate !== true)
       || row.controlJson.audience !== value.audience || !parsePermissionEpochProof(value.epochs) || row.workspaceId !== value.workspaceId || row.userId !== value.userId
       || row.actorKind !== "user" || row.credentialId != null || row.credentialVersion != null || row.scopeHash != null
       || row.controlJson.targetKind !== value.targetKind || row.controlJson.targetId !== value.targetId
@@ -224,7 +230,7 @@ export async function recoverLegacyArtifact(actor: AppActor, submission: Selecti
   const row = await selectionForRecovery(actor, request, prisma);
   invariant(actor.kind === "user", 403, "RECOVERY_HUMAN_REQUIRED", "A human recovery session is required.");
   invariant(lineageContentFingerprint(request.kind, row) === request.expectedFingerprint, 409, "RECOVERY_STALE", "The selected record changed.");
-  const company = ["Action","Document","BrainSource"].includes(request.kind) && row.isPrivate !== true;
+  const company = ["Action","Document","BrainSource","Role","Circle"].includes(request.kind) && row.isPrivate !== true;
   const perform = async () => {
   const userId = actor.user.id, requestKey = hash([LEGACY_RECOVERY_OPERATION, request.workspaceId, userId, request.requestId]);
   const requestHash = hash(request);

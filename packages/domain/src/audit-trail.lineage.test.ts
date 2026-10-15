@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const { db, authorize } = vi.hoisted(() => ({ db: {
   auditLog: { findMany: vi.fn(), create: vi.fn() }, event: { findMany: vi.fn() }, workflowJob: { findFirst: vi.fn(), findMany: vi.fn() },
-  action: { findFirst: vi.fn() }, brainArticle: { findFirst: vi.fn() },
+  action: { findFirst: vi.fn(), findMany: vi.fn() }, brainArticle: { findFirst: vi.fn() },
   modelUsage: { findMany: vi.fn(), findFirst: vi.fn() }, agentRun: { findFirst: vi.fn() }, workspace: { findFirst: vi.fn() },
   artifactInputLineage: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn() }, $executeRaw: vi.fn(), $queryRaw: vi.fn(), $transaction: vi.fn(),
 }, authorize: vi.fn() }));
@@ -29,7 +29,9 @@ beforeEach(() => {
     }
     return 1;
   });
+  db.action.findMany.mockImplementation(async ({where}) => Promise.all(where.id.in.map((id:string)=>db.action.findFirst({where:{id,workspaceId:where.workspaceId}}))));
   db.$queryRaw.mockImplementation(async (query: any) => {
+    if (query.sql?.includes('FROM "ArtifactInputLineage"')) return [...new Map(manifests.filter(row => query.values.includes(row.artifactId)).map(row => [row.artifactId,row])).values()];
     if (!query.sql?.includes('FROM "SourcePermissionEpoch"')) return [];
     const [ws, ...pairs] = query.values; const rows = [];
     for (let i = 0; i < pairs.length; i += 2) {
@@ -44,7 +46,9 @@ beforeEach(() => {
     if (workspaceId !== "ws-1") throw new Error("workspace denied");
     return actor.kind === "user" ? {id: "member-admin", role: "ADMIN"} : null;
   });
-  db.modelUsage.findMany.mockImplementation(async () => costs);
+  db.modelUsage.findMany.mockImplementation(async ({where, take}) => costs.filter(row => row.workspaceId === where.workspaceId
+    && (!where.id?.gt || row.id > where.id.gt) && (!where.createdAt?.gte || row.createdAt >= where.createdAt.gte))
+    .sort((left, right) => left.id.localeCompare(right.id)).slice(0, take));
   db.modelUsage.findFirst.mockImplementation(async ({where}) => costs.find(row => row.id === where.id && row.workspaceId === where.workspaceId) ?? null);
   db.agentRun.findFirst.mockImplementation(async ({where}) => runs.find(row => row.id === where.id && row.workspaceId === where.workspaceId) ?? null);
   db.workspace.findFirst.mockImplementation(async ({where}) => where.id === workspace.id ? workspace : null);
@@ -77,10 +81,22 @@ describe("model usage summary source boundaries", () => {
     expect(result.byAgent.map(row => row.agentKey)).toEqual(["unknown", "known-agent"]);
   });
 
-  it("rejects incomplete financial scans instead of returning partial totals", async () => {
-    costs = Array.from({length: 5001}, (_, i) => usage(String(i), 1));
-    await expect(getModelUsageSummary(admin, "ws-1")).rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
-    expect(db.modelUsage.findMany).toHaveBeenCalledWith(expect.objectContaining({take: 5001}));
+  it("rejects an earlier admitted cost changed during a later canonical page", async () => {
+    costs = Array.from({length: 101}, (_, i) => usage(String(i).padStart(5, "0"), 1));
+    const query = db.modelUsage.findMany.getMockImplementation()!;
+    db.modelUsage.findMany.mockImplementation(async args => {
+      if (args.where.id?.gt) costs[0].estimatedCostUsd = 999;
+      return query(args);
+    });
+    await expect(getModelUsageSummary(admin, "ws-1")).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+  });
+
+  it("completes the usual reporting period beyond five thousand usage rows with bounded hydration", async () => {
+    costs = Array.from({length: 5001}, (_, i) => usage(String(i).padStart(5, "0"), 1));
+    const result = await getModelUsageSummary(admin, "ws-1");
+    expect(result).toMatchObject({totalCalls: 5001, totalCostUsd: 5001, totalTokens: 150030, periodDays: 30});
+    expect(db.modelUsage.findMany).toHaveBeenCalledTimes(51);
+    expect(db.modelUsage.findMany.mock.calls.every(([query]) => query.take === 100 && query.where.workspaceId === "ws-1")).toBe(true);
   });
 });
 
@@ -137,7 +153,7 @@ describe("audit and timeline source admission", () => {
     db.auditLog.findMany.mockResolvedValue([{ ...audit, id: "unproved-text", action: "Private historical free text" }, audit]);
     db.event.findMany.mockResolvedValue([{ ...event, id: "unproved-event", type: "Private event free text" }, event]);
     expect(await listAuditLogs(owner, "ws-1", { take: 1 })).toEqual([{ ...audit, meta: null }]);
-    expect(db.auditLog.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ take: 5001 }));
+    expect(db.auditLog.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ take: 100 }));
     expect(await getEntityTimeline(owner, "ws-1", "Action", source.id)).toEqual({
       auditLogs: [{ ...audit, meta: null }], relatedEvents: [{ ...event, jobs: [visibleJob], payload: null }],
     });
@@ -154,7 +170,21 @@ describe("audit and timeline source admission", () => {
     expect(await listAuditLogs(other, "ws-1", { take: 1 })).toEqual([{ ...publicAudit, meta: null }]);
   });
 
-  it("withholds unknown, deleted and unsupported audit targets and fails an incomplete scan", async () => {
+  it("replenishes the recent sample after over five thousand denied audit rows", async () => {
+    const { source, audit } = await privateSource("Action");
+    const publicSource = { ...source, id: "permitted-late", isPrivate: false };
+    db.action.findFirst.mockImplementation(async ({ where }) => [source, publicSource].find(row => row.id === where.id && row.workspaceId === where.workspaceId) ?? null);
+    await recordArtifactInputLineage({ tx: db as any, actor: owner, workspaceId: "ws-1", artifact: { kind: "Action", id: publicSource.id },
+      content: publicSource, origin: "HUMAN_ORIGINAL", inputs: [] });
+    const rows = Array.from({length: 5001}, (_, i) => ({...audit, id: String(6000-i).padStart(5,"0"), createdAt: date}));
+    rows.push({...audit, id: "00001", entityId: publicSource.id, createdAt: date});
+    db.auditLog.findMany.mockImplementation(async ({where,take}) => rows.filter(row => !where.OR || row.id < where.OR[1].id.lt).slice(0,take));
+    expect(await listAuditLogs(other,"ws-1",{take:1})).toEqual([{...rows.at(-1),meta:null}]);
+    expect(db.auditLog.findMany).toHaveBeenCalledTimes(51);
+    expect(db.auditLog.findMany.mock.calls.every(([query]) => query.take===100)).toBe(true);
+  });
+
+  it("withholds unknown, deleted and unsupported audit targets and rejects malformed pages", async () => {
     const { source, audit } = await privateSource("Action");
     manifests = [];
     expect(await listAuditLogs(owner, "ws-1")).toEqual([]);
@@ -163,7 +193,7 @@ describe("audit and timeline source admission", () => {
     db.auditLog.findMany.mockResolvedValue([{ ...audit, entityType: "UnsupportedSecretType" }]);
     expect(await listAuditLogs(owner, "ws-1")).toEqual([]);
     db.auditLog.findMany.mockResolvedValue(Array.from({ length: 5001 }, (_, i) => ({ ...audit, id: `audit-${i}` })));
-    await expect(listAuditLogs(owner, "ws-1")).rejects.toMatchObject({ code: "SOURCE_READ_SCAN_LIMIT" });
+    await expect(listAuditLogs(owner, "ws-1")).rejects.toMatchObject({ code: "SOURCE_READ_SCAN_CHANGED" });
   });
 
   it("withholds a public target with private source ancestry", async () => {

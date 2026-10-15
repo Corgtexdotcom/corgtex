@@ -10,6 +10,7 @@ import { AppError, invariant } from "./errors";
 import { assertArtifactInputWriteFence, captureArtifactInputProof, captureImmutableArtifactInputProof,
   isArtifactInputProofReadable, preserveUnknownArtifactInputSnapshot, recordArtifactInputLineage,
   lineageContentFingerprint, type LineageRoot } from "./source-lineage";
+import { DigestReadRelease } from "./digest-lineage";
 import { scanSourceReadableRecords } from "./source-scoped-read";
 import { captureExternalProviderFetchInput, createExternalProviderSyncActor, assertExternalProviderActorCurrent,
   getExternalProviderPrincipalUserId, isExternalProviderSelectionCurrent, registerExternalProviderRefetchCallback,
@@ -389,25 +390,21 @@ export async function listExternalContentSources(actor: AppActor, params: {
   const providerKey = params.providerKey ? validateProviderKey(params.providerKey) : undefined;
   const userId = getExternalProviderPrincipalUserId(actor, params.workspaceId);
   if (!userId) return [];
-  const rows = await scanSourceReadableRecords({ actor, workspaceId: params.workspaceId, kind: "ExternalContentSource",
+  const release = new DigestReadRelease(actor, params.workspaceId);
+  const rows = await scanSourceReadableRecords({ actor, workspaceId: params.workspaceId, kind: "ExternalContentSource", release,
     load: (afterId, take) => prisma.externalContentSource.findMany({
       where: { workspaceId: params.workspaceId, selectedByUserId: userId, ...(providerKey ? { providerKey } : {}),
         ...(params.includeArchived ? {} : { archivedAt: null, status: { not: "ARCHIVED" as ExternalContentSourceStatus } }),
         ...(afterId ? { id: { gt: afterId } } : {}) }, orderBy: { id: "asc" }, take,
     }) });
-  if (!rows.length) return [];
+  if (!rows.length) return release.finish([]);
   const safe: ExternalContentSourceListRecord[] = [];
-  for (const row of rows) {
-    const labels = await prisma.user.findFirst({ where: { id: row.selectedByUserId! }, select: { id: true, email: true, displayName: true } });
-    let selectedByUser: typeof labels = null;
-    if (labels) {
-      try { await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "User", id: labels.id, snapshot: labels }]); selectedByUser = labels; }
-      catch { /* A revoked label contributes no source identity or text. */ }
-    }
-    safe.push({ ...row, lastSyncError: row.lastSyncError ? "Synchronization failed." : null, selectedByUser, syncLogs: [] });
-  }
-  await captureArtifactInputProof(actor, params.workspaceId, rows.map(row => ({ kind: "ExternalContentSource", id: row.id, snapshot: row })));
-  return safe.sort((left, right) => left.status.localeCompare(right.status) || right.updatedAt.getTime() - left.updatedAt.getTime());
+  // The selection is bound to one current user; read and retain that label once.
+  const labels = await prisma.user.findFirst({ where: { id: userId }, select: { id: true, email: true, displayName: true } });
+  const capturedLabels = await release.capture("User", labels ? [labels] : []);
+  const selectedByUser = capturedLabels.records[0] ?? null;
+  for (const row of rows) safe.push({ ...row, lastSyncError: row.lastSyncError ? "Synchronization failed." : null, selectedByUser, syncLogs: [] });
+  return release.finish(safe.sort((left, right) => left.status.localeCompare(right.status) || right.updatedAt.getTime() - left.updatedAt.getTime()));
 }
 
 function selectionRoot(source: { metadata?: unknown }): LineageRoot | null {

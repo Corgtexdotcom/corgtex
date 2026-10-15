@@ -26,7 +26,7 @@ export function artifactPermissionParents(kind: LineageKind, row: Record<string,
   if (kind === "WorkspaceToolLinkCredential") add("WorkspaceToolLink", row.id);
   if (kind === "ConversationOperationOutcome" && row.controlJson && typeof row.controlJson === "object" && !Array.isArray(row.controlJson)) {
     const control = row.controlJson as Record<string, unknown>;
-    if (control.version === 1 && row.operation === "LEGACY_RECOVERY_PUBLICATION" && ["Action", "ConversationSession", "ConversationTurn", "Document", "BrainSource"].includes(String(control.targetKind))) {
+    if (control.version === 1 && row.operation === "LEGACY_RECOVERY_PUBLICATION" && ["Action", "ConversationSession", "ConversationTurn", "Document", "BrainSource", "Role", "Circle"].includes(String(control.targetKind))) {
       add(control.targetKind as LineageKind, control.targetId);
     } else if (control.version === 1 && row.operation === "BRAIN_SOURCE_REMOVAL_COMPLETED") {
       add("BrainSource", control.sourceId); add("Document", control.documentId); add("BrainSource", control.pendingSourceId);

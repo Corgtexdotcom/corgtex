@@ -124,10 +124,11 @@ describe("cost budget notifications", () => {
     expect(txMock.modelUsageBudget.update).not.toHaveBeenCalled();
   });
 
-  it("fails explicitly when complete cost inputs exceed the bounded scan", async () => {
+  it.each([85, 100, 150])("preserves exact quota admission at %s USD while deferring an oversized alert", async (usedUsd) => {
     txMock.modelUsage.findMany.mockResolvedValue(Array.from({ length: 5001 }, (_, i) => ({ ...usages[0], id: `usage-${i}` })));
     const { checkBudget } = await import("./cost-budget");
-    await expect(checkBudget("workspace-1")).rejects.toMatchObject({ code: "INPUT_SCAN_LIMIT" });
+    getWorkspaceMonthlyUsageMock.mockResolvedValue(usedUsd);
+    await expect(checkBudget("workspace-1")).resolves.toMatchObject({ allowed: usedUsd < 100, usedUsd, usedPct: usedUsd, capUsd: 100 });
     expect(captureArtifactInputProofMock).not.toHaveBeenCalled();
     expect(createNotificationIntentMock).not.toHaveBeenCalled();
     expect(txMock.modelUsageBudget.update).not.toHaveBeenCalled();

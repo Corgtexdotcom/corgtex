@@ -16,10 +16,10 @@ import { captureSlackNativeMessageFetch, communicationInstallationGrantHash, isC
   withSlackNativeCommitReceipt, slackNativeMessageProjection, type SlackNativeFetchReceipt } from "./communication-native-authority";
 import { artifactPermissionEpochIdentities, capturePermissionEpochs } from "./source-permission-epochs";
 import { requireWorkspaceMembership } from "./auth";
-import { loadReadableDigestQuery, isDigestInputProofShared } from "./digest-lineage";
+import { loadReadableDigestQuery, captureReadableDigestInputs, isDigestInputProofShared } from "./digest-lineage";
 import { createAction, publishAction } from "./actions";
 import { ingestSource } from "./brain";
-import { captureArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, recordArtifactInputLineage, preserveUnknownArtifactInputSnapshot, type LineageRoot } from "./source-lineage";
+import { mergeLineageInputRoot, withArtifactCountReleaseSnapshot, captureArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, recordArtifactInputLineage, preserveUnknownArtifactInputSnapshot, type LineageRoot } from "./source-lineage";
 import { AppError, invariant } from "./errors";
 import {
   assertMeetingReviewPublicPublication,
@@ -313,17 +313,26 @@ export async function listCommunicationInstallations(actor: AppActor, workspaceI
       _count: { select: { channels: true, externalUsers: true } },
     },
   });
-  const messages = await loadReadableDigestQuery<CommunicationMessage>({ actor, workspaceId, kind: "CommunicationMessage", limit: 5000,
-    keyset: true, completeScan: true, loadBatch: ({take,after}) => prisma.communicationMessage.findMany({
-      where: {workspaceId, ...(after?{id:{gt:after.id}}:{})}, orderBy:{id:"asc"},take,
-    }) });
-  if (messages.length) {
-    const proof = await captureArtifactInputProof(actor,workspaceId,messages.map(row=>({kind:"CommunicationMessage",id:row.id,snapshot:row})));
-    invariant(await isArtifactInputProofReadable(actor,workspaceId,proof),409,"SOURCE_CHANGED","Slack message permissions changed before counting.");
+  const counts = new Map<string, number>();
+  const roots = new Map<string, LineageRoot>();
+  let afterId: string | undefined;
+  for (;;) {
+    const batch = await prisma.communicationMessage.findMany({
+      where: { workspaceId, ...(afterId ? {id: {gt: afterId}} : {}) }, orderBy: {id: "asc"}, take: 100,
+    });
+    const admitted = await captureReadableDigestInputs({ actor, workspaceId, kind: "CommunicationMessage", records: batch });
+    for (const root of admitted.roots) {
+      const key = `${root.kind}:${root.id}`;
+      roots.set(key, mergeLineageInputRoot(roots.get(key), root));
+    }
+    for (const message of admitted.records) counts.set(message.installationId, (counts.get(message.installationId) ?? 0) + 1);
+    if (batch.length < 100) break;
+    afterId = batch[batch.length - 1].id;
   }
-  const counts = new Map<string,number>();
-  for (const message of messages) counts.set(message.installationId,(counts.get(message.installationId)??0)+1);
-  return installations.map(installation=>({...installation,_count:{...installation._count,messages:counts.get(installation.id)??0}}));
+  return withArtifactCountReleaseSnapshot(actor, workspaceId, [...roots.values()], async () => undefined, async tx => {
+    await requireWorkspaceMembership({actor, workspaceId, allowedRoles: ["ADMIN"], tx});
+    return installations.map(installation => ({...installation, _count: {...installation._count, messages: counts.get(installation.id) ?? 0}}));
+  });
 
 }
 

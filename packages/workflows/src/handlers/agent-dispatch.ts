@@ -1,3 +1,4 @@
+import { prepareMaintenanceClaim, MaintenanceDeferred } from "../brain-maintenance-jobs";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { runInboxTriageAgent, runDailyCheckInAgent, runMeetingSummaryAgent, runActionExtractionAgent, runProposalDraftingAgent, runConstitutionUpdateTriggerAgent, runConstitutionSynthesisAgent, runCrmDripFollowupAgent, runCrmEmailExtractionAgent, runCrmLeadEnrichmentAgent, runCompanyUnderstandingAgent } from "@corgtex/agents";
 import { executeAgentRun } from "@corgtex/agents";
@@ -14,6 +15,7 @@ export async function runAgentWorkflowJob(job: {
   type: string;
   payload: unknown;
   attempts?: number;
+  lockedAt?: Date | null;
 }, claimOwner?: string, meetingActor?: AppActor) {
   if (!job.workspaceId) {
     return null;
@@ -107,26 +109,45 @@ export async function runAgentWorkflowJob(job: {
   }
 
   if (job.type === "agent.brain-maintenance") {
+    const claim = await prepareMaintenanceClaim(job, claimOwner ?? "");
+    if (await claim.recoverOrVerifyExisting()) return {status: "COMPLETED"};
     const lineageActor: AppActor = {kind: "agent", authProvider: "bootstrap", label: "brain-maintenance", workspaceIds: [job.workspaceId]};
     const lineageRoots = await captureArtifactInputProof(lineageActor, job.workspaceId, [{kind: "Workspace", id: job.workspaceId}]);
-    return executeAgentRun({
+    let prepared: Awaited<ReturnType<typeof runBrainMaintenance>> | undefined;
+    const result = await executeAgentRun({
       lineageActor, lineageRoots,
       contextLineageRoots: () => lineageRoots,
-      agentKey: "brain-maintenance",
-      workspaceId: job.workspaceId,
-      triggerType: payload.triggerType === "MANUAL" ? "MANUAL" : "SCHEDULE",
-      triggerRef: job.id,
-      goal: "Run weekly brain maintenance: freshness, dead links, orphans, Tier 3 cleanup, backlinks, discussions.",
-      payload: {},
-      plan: ["freshness-scan", "dead-link-scan", "orphan-detection", "tier3-cleanup", "backlink-rebuild", "discussion-maintenance"],
-      buildContext: async (helpers) =>
-        helpers.tool("brain.workspace-info", {}, async () => ({ workspaceId: job.workspaceId }), {receipt: helpers.plannedInputReceipt}),
-      execute: async (_context, helpers, runId, _model) => {
-        const {lineageRoots: consumedRoots, ...result} = await runBrainMaintenance({workspaceId: job.workspaceId!, agentRunId: runId, actor: lineageActor});
-        const receipt = await helpers.captureInputs(consumedRoots);
-        return helpers.step("maintenance", {}, async () => ({resultJson: result, lineageReceipt: receipt}), {receipt});
+      agentKey: "brain-maintenance", workspaceId: job.workspaceId,
+      triggerType: payload.triggerType === "MANUAL" ? "MANUAL" : "SCHEDULE", triggerRef: job.id,
+      goal: "Observe and maintain one admitted Brain batch.", payload: {scope: "BATCH", phase: claim.state.phase},
+      plan: ["observe-current-batch", "apply-proved-batch", "handoff"],
+      buildContext: async helpers => helpers.tool("brain.maintenance-batch", {scope: "BATCH", phase: claim.state.phase},
+        async () => ({scope: "BATCH", phase: claim.state.phase}), {receipt: helpers.plannedInputReceipt}),
+      execute: async (_context, helpers) => {
+        prepared = await runBrainMaintenance({workspaceId: job.workspaceId!, actor: lineageActor, state: claim.state});
+        await prepared.assertCurrent();
+        const receipt = prepared.lineageRoots.length ? await helpers.captureInputs(prepared.lineageRoots) : helpers.plannedInputReceipt;
+        const report = prepared.lineageRoots.length || claim.state.phase === "RETENTION" ? prepared.report : {scope: "BATCH", phase: claim.state.phase,
+          observation: "Operational phase completion only; no source-derived counts", status: "OPERATION_COMPLETED"};
+        return helpers.step("maintenance-batch", {scope: "BATCH", phase: claim.state.phase},
+          async () => ({resultJson: report, lineageReceipt: receipt}), {receipt});
+      },
+      beforeComplete: async tx => {
+        await claim.assertCurrent(tx);
+        invariant(prepared, 409, "MAINTENANCE_STATE_INVALID", "Maintenance observation is missing.");
+        await prepared.apply(tx);
+        await claim.finish(tx, prepared.next);
       },
     });
+    if ("skipped" in result && result.skipped) {
+      if (["agent_disabled", "kill_switch", "budget_exceeded", "agent_identity_inactive", "daily_rate_limit", "hourly_rate_limit", "concurrency_limit"].includes(result.reason)) {
+        throw new MaintenanceDeferred(result.reason);
+      }
+      throw new Error("Maintenance did not reach a source-proven batch checkpoint.");
+    }
+    invariant("status" in result && result.status === "COMPLETED", 409, "MAINTENANCE_STATE_INVALID", "Maintenance batch did not complete.");
+    claim.acknowledgeCommit();
+    return result;
   }
 
   if (job.type === "agent.brain-absorb") {

@@ -1,7 +1,6 @@
-import { readableArtifactIds, captureArtifactInputProof, type LineageKind } from "./source-lineage";
-import { scanSourceReadableRecords } from "./source-scoped-read";
+import { readableArtifactIds, captureArtifactInputProof, mergeLineageInputRoot, withArtifactCountReleaseSnapshot, type LineageKind, type LineageRoot } from "./source-lineage";
 import { requireUnreservedPublicDemoEmail } from "./public-demo-identity";
-import type { MemberInviteRequestStatus, MemberKind, MemberRole } from "@prisma/client";
+import type { AuditLog, MemberInviteRequestStatus, MemberKind, MemberRole } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
 import { env, prisma, hashPassword, randomOpaqueToken, sendEmail, sha256 } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
@@ -880,6 +879,8 @@ export async function getMemberProfile(actor: AppActor, workspaceId: string, mem
           bio: true,
           linkedinUrl: true,
           websiteUrl: true,
+          createdAt: true,
+          updatedAt: true,
         },
       },
       roleAssignments: {
@@ -904,39 +905,89 @@ export async function getMemberProfile(actor: AppActor, workspaceId: string, mem
 
   invariant(member && member.workspaceId === workspaceId, 404, "NOT_FOUND", "Member not found.");
 
-  const load = <T extends { id: string }>(kind: LineageKind, query: (afterId: string | undefined, take: number) => Promise<T[]>) =>
-    scanSourceReadableRecords({ actor, workspaceId, kind, load: query });
-  const [allActions, allAssignedTensions, allMeetings, allProposals, allAuthoredTensions] = await Promise.all([
-    load("Action", (afterId, take) => prisma.action.findMany({ where: { AND: [{ workspaceId, assigneeMemberId: member.id, status: "OPEN", ...visibleWorkspaceRecordWhere }, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take })),
-    load("Tension", (afterId, take) => prisma.tension.findMany({ where: { AND: [{ workspaceId, assigneeMemberId: member.id, status: "OPEN", ...visibleWorkspaceRecordWhere }, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take })),
-    load("Meeting", (afterId, take) => prisma.meeting.findMany({ where: { workspaceId, participantIds: { has: member.user.id }, archivedAt: null, ...(afterId ? { id: { gt: afterId } } : {}) }, orderBy: { id: "asc" }, take })),
-    load("Proposal", (afterId, take) => prisma.proposal.findMany({ where: { AND: [{ workspaceId, authorUserId: member.user.id, ...visibleWorkspaceRecordWhere }, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take })),
-    load("Tension", (afterId, take) => prisma.tension.findMany({ where: { AND: [{ workspaceId, authorUserId: member.user.id, status: "OPEN", ...visibleWorkspaceRecordWhere }, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take })),
+  const roots = new Map<string, LineageRoot>();
+  const retain = (proof: LineageRoot[]) => {
+    for (const root of proof) {
+      const key = `${root.kind}:${root.id}`;
+      roots.set(key, mergeLineageInputRoot(roots.get(key), root));
+    }
+  };
+  retain(await captureArtifactInputProof(actor, workspaceId, [
+    {kind: "Member", id: member.id, snapshot: {...member, user: {
+      id: member.user.id, email: member.user.email, displayName: member.user.displayName,
+    }}},
+    {kind: "User", id: member.user.id, snapshot: member.user},
+  ]));
+  type RecentCursor = {id: string; at: Date};
+  const createdBefore = (after?: RecentCursor) => after ? { OR: [
+    {createdAt: {lt: after.at}}, {createdAt: after.at, id: {lt: after.id}},
+  ] } : {};
+  const recordedBefore = (after?: RecentCursor) => after ? { OR: [
+    {recordedAt: {lt: after.at}}, {recordedAt: after.at, id: {lt: after.id}},
+  ] } : {};
+  const createdOrder = [{createdAt: "desc" as const}, {id: "desc" as const}];
+  const recent = async <T extends {id: string; createdAt: Date; recordedAt?: Date}>(kind: LineageKind,
+    dateField: "createdAt" | "recordedAt", load: (after: RecentCursor | undefined, take: number) => Promise<T[]>) => {
+    const selected: T[] = [];
+    let after: RecentCursor | undefined;
+    for (;;) {
+      const batch = await load(after, 100);
+      const readable = await readableArtifactIds(actor, workspaceId, kind, batch);
+      const admitted = batch.filter(row => readable.has(row.id)).slice(0, 5 - selected.length);
+      if (admitted.length) retain(await captureArtifactInputProof(actor, workspaceId,
+        admitted.map(row => ({kind, id: row.id, snapshot: row}))));
+      selected.push(...admitted);
+      if (selected.length === 5 || batch.length < 100) return selected;
+      const last = batch[batch.length - 1], at = last[dateField];
+      invariant(at instanceof Date, 409, "SOURCE_CHANGED", "Recent source ordering is unavailable.");
+      after = {id: last.id, at};
+    }
+  };
+  const [assignedActions, assignedTensions, meetings, proposals, authoredTensions] = await Promise.all([
+    recent("Action", "createdAt", (after, take) => prisma.action.findMany({ where: { AND: [{workspaceId, assigneeMemberId: member.id, status: "OPEN", ...visibleWorkspaceRecordWhere}, createdBefore(after)] }, orderBy: createdOrder, take })),
+    recent("Tension", "createdAt", (after, take) => prisma.tension.findMany({ where: { AND: [{workspaceId, assigneeMemberId: member.id, status: "OPEN", ...visibleWorkspaceRecordWhere}, createdBefore(after)] }, orderBy: createdOrder, take })),
+    recent("Meeting", "recordedAt", (after, take) => prisma.meeting.findMany({ where: {workspaceId, participantIds: {has: member.user.id}, archivedAt: null, ...recordedBefore(after)}, orderBy: [{recordedAt: "desc"}, {id: "desc"}], take })),
+    recent("Proposal", "createdAt", (after, take) => prisma.proposal.findMany({ where: {AND: [{workspaceId, authorUserId: member.user.id, ...visibleWorkspaceRecordWhere}, createdBefore(after)]}, orderBy: createdOrder, take })),
+    recent("Tension", "createdAt", (after, take) => prisma.tension.findMany({ where: {AND: [{workspaceId, authorUserId: member.user.id, status: "OPEN", ...visibleWorkspaceRecordWhere}, createdBefore(after)]}, orderBy: createdOrder, take })),
   ]);
-  const latest = <T extends { id: string; createdAt: Date }>(rows: T[]) => rows.sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime() || right.id.localeCompare(left.id)).slice(0, 5);
-  const meetings = allMeetings.sort((left, right) => right.recordedAt.getTime() - left.recordedAt.getTime() || right.id.localeCompare(left.id)).slice(0, 5);
-  const proposals = latest(allProposals), authoredTensions = latest(allAuthoredTensions);
   const safeMembers = await redactMemberRoleAssignments(actor, workspaceId, [member]);
-  const safeMember = { ...safeMembers[0], assignedActions: latest(allActions), assignedTensions: latest(allAssignedTensions) };
-  const logs = await prisma.auditLog.findMany({ where: { workspaceId, actorUserId: member.user.id }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 5001 });
-  invariant(logs.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Activity permission scan exceeds its supported size.");
+  for (const assignment of safeMembers[0].roleAssignments) retain(await captureArtifactInputProof(actor, workspaceId, [
+    {kind: "RoleAssignment", id: assignment.id, snapshot: assignment},
+    {kind: "Role", id: assignment.role.id, snapshot: assignment.role},
+    {kind: "Circle", id: assignment.role.circle.id, snapshot: assignment.role.circle},
+  ]));
+  const safeMember = { ...safeMembers[0], user: {
+    id: member.user.id, email: member.user.email, displayName: member.user.displayName,
+    avatarUrl: member.user.avatarUrl, bio: member.user.bio, linkedinUrl: member.user.linkedinUrl, websiteUrl: member.user.websiteUrl,
+  }, assignedActions, assignedTensions };
   const kinds: Record<string, LineageKind> = { Action: "Action", Tension: "Tension", Proposal: "Proposal", Goal: "Goal", BrainArticle: "BrainArticle", BrainSource: "BrainSource", Circle: "Circle", Role: "Role", Member: "Member", Meeting: "Meeting" };
-  const recentActivity = [];
-  for (const log of logs) {
-    const kind = log.entityType ? kinds[log.entityType] : null;
-    if (!kind || !log.entityId) continue;
-    try { await captureArtifactInputProof(actor, workspaceId, [{ kind, id: log.entityId }]); }
-    catch (error) { if (error instanceof AppError && ["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) continue; throw error; }
-    // Historical audit payloads are not proof-bearing copies of today's artifact.
-    recentActivity.push({ ...log, meta: null });
-    if (recentActivity.length === 10) break;
+  const recentActivity: Array<Omit<AuditLog, "meta"> & {meta: null}> = [];
+  let afterActivity: RecentCursor | undefined;
+  while (recentActivity.length < 10) {
+    const logs = await prisma.auditLog.findMany({where: {workspaceId, actorUserId: member.user.id, ...createdBefore(afterActivity)}, orderBy: createdOrder, take: 100});
+    for (const log of logs) {
+      const kind = log.entityType ? kinds[log.entityType] : null;
+      if (!kind || !log.entityId) continue;
+      try { retain(await captureArtifactInputProof(actor, workspaceId, [{ kind, id: log.entityId }])); }
+      catch (error) { if (error instanceof AppError && ["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) continue; throw error; }
+      // Historical audit payloads are not proof-bearing copies of today's artifact.
+      recentActivity.push({ ...log, meta: null });
+      if (recentActivity.length === 10) break;
+    }
+
+    if (recentActivity.length === 10 || logs.length < 100) break;
+    const last = logs[logs.length - 1];
+    afterActivity = {id: last.id, at: last.createdAt};
   }
 
-  return {
-    member: safeMember,
-    meetings,
-    recentActivity,
-    proposals,
-    authoredTensions,
-  };
+  return withArtifactCountReleaseSnapshot(actor, workspaceId, [...roots.values()], async () => undefined, async tx => {
+    await requireWorkspaceMembership({actor, workspaceId, tx});
+    return {
+      member: safeMember,
+      meetings,
+      recentActivity,
+      proposals,
+      authoredTensions,
+    };
+  });
 }

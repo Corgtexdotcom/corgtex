@@ -1,3 +1,4 @@
+import { WorkItemReadRelease } from "./work-item-readable-page";
 import { randomUUID } from "node:crypto";
 import { prisma } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
@@ -12,6 +13,11 @@ import {
   ExecutionResultStatus,
   ExecutionWritebackTargetType,
   Prisma,
+  type Action,
+  type Tension,
+  type Proposal,
+  type Meeting,
+  type BrainArticle,
   type ExecutionRequest,
   type ExecutionResult,
 } from "@prisma/client";
@@ -417,20 +423,27 @@ async function findExistingExecutionRequestByIdempotency(actor: AppActor, worksp
   });
 }
 
-async function loadExecutionRequest(actor: AppActor, workspaceId: string, requestId: string) {
+async function loadExecutionRequest(actor: AppActor, workspaceId: string, requestId: string, release?: WorkItemReadRelease) {
   const request = await prisma.executionRequest.findFirst({
     where: executionRequestAccessWhere(actor, workspaceId, requestId),
     include: executionRequestInclude,
   });
   invariant(request, 404, "NOT_FOUND", "Execution request not found.");
   await requireCrmPacketProof(actor, workspaceId, request);
-  await requireExecutionRequestProof(actor, workspaceId, request);
+  if (release) {
+    release.add(crmPacketRoots(request) ?? []);
+    const admitted = await captureReadableDigestInputs({actor,workspaceId,kind:"ExecutionRequest",records:[request]});
+    invariant(admitted.records.length,404,"NOT_FOUND","Execution request not found.");
+    release.add(admitted.roots);
+  } else await requireExecutionRequestProof(actor, workspaceId, request);
   const candidates = await prisma.executionResult.findMany({ where: { workspaceId, executionRequestId: request.id },
     orderBy: { id: "asc" }, take: 5001 });
   invariant(candidates.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Execution result permission scan exceeds its supported size.");
-  const allowed = await readableArtifactIds(actor, workspaceId, "ExecutionResult", candidates);
+  const captured = release ? await captureReadableDigestInputs({actor,workspaceId,kind:"ExecutionResult",records:candidates}) : null;
+  const allowed = captured ? new Set(captured.records.map(row=>row.id)) : await readableArtifactIds(actor, workspaceId, "ExecutionResult", candidates);
   const results = candidates.filter((result) => allowed.has(result.id))
     .sort((a, b) => b.submittedAt.getTime() - a.submittedAt.getTime() || a.id.localeCompare(b.id)).slice(0, 10);
+  if (release && captured) for (const result of results) release.add(captured.proofs.get(result.id)!);
   await requireExecutionRequestProof(actor, workspaceId, request);
   invariant((await readableArtifactIds(actor, workspaceId, "ExecutionResult", results)).size === results.length,
     409, "SOURCE_CHANGED", "Execution result inputs changed during collection.");
@@ -869,36 +882,42 @@ export async function listExecutionRequests(actor: AppActor, params: {
   status?: string | ExecutionRequestStatus | null;
   take?: number | null;
 }) {
+  sealArtifactInputActor(actor);
+  params = {...params};
   requireExecutionScope(actor, "execution:read");
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const status = params.status ? String(params.status).trim().toUpperCase() : null;
   invariant(!status || status in ExecutionRequestStatus, 400, "INVALID_INPUT", "Unsupported execution request status.");
-  const requests = await prisma.executionRequest.findMany({
-    where: {
-      ...executionRequestAccessWhere(actor, params.workspaceId),
-    },
-    include: executionRequestInclude,
-    orderBy: { id: "asc" },
-    take: 5001,
-  });
-  invariant(requests.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Execution source permission scan exceeds its supported size.");
-  const visible: typeof requests = [];
-  for (const request of requests) {
-    try { await requireCrmPacketProof(actor, params.workspaceId, request);
-      await requireExecutionRequestProof(actor, params.workspaceId, request);
-      if (!status || request.status === status) visible.push(await loadExecutionRequest(actor, params.workspaceId, request.id)); }
-    catch (error) {
-      if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED", "NOT_FOUND"].includes(error.code)) throw error;
+  const take = Math.min(Math.max(params.take ?? 20, 1), 100);
+  const release = new WorkItemReadRelease(actor, params.workspaceId);
+  const visible: ExecutionRequestRecord[] = [];
+  let after: { id: string; createdAt: Date } | undefined;
+  while (visible.length < take) {
+    const requests = await prisma.executionRequest.findMany({
+      where: { ...executionRequestAccessWhere(actor, params.workspaceId),
+        ...(status ? { status: status as ExecutionRequestStatus } : {}),
+        ...(after ? { OR: [{ createdAt: { lt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] } : {}),
+      }, include: executionRequestInclude, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: 100,
+    });
+    invariant(requests.length <= 100 && (!requests.length || requests.at(-1)!.id !== after?.id),
+      503, "SOURCE_READ_SCAN_CHANGED", "Execution page changed; retry.");
+    for (const candidate of requests) {
+      let request: ExecutionRequestRecord;
+      try { request = await release.observeRead(() => loadExecutionRequest(actor, params.workspaceId, candidate.id, release)); }
+      catch (error) {
+        if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED", "NOT_FOUND"].includes(error.code)) throw error;
+        continue;
+      }
+      // A concurrently changed status must not enter the requested sample.
+      if (status && request.status !== status) continue;
+      visible.push(request);
+      if (visible.length === take) break;
     }
+    if (requests.length < 100) break;
+    after = requests.at(-1);
   }
-  visible.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || a.id.localeCompare(b.id));
-  const selected = visible.slice(0, Math.min(Math.max(params.take ?? 20, 1), 100));
-  invariant((await readableArtifactIds(actor, params.workspaceId, "ExecutionRequest", selected)).size === selected.length,
-    409, "SOURCE_CHANGED", "Execution request inputs changed during collection.");
-  const results = selected.flatMap((request) => request.results);
-  invariant((await readableArtifactIds(actor, params.workspaceId, "ExecutionResult", results)).size === results.length,
-    409, "SOURCE_CHANGED", "Execution result inputs changed during collection.");
-  return selected.map(serializeExecutionRequest);
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  return release.finish(visible.map(serializeExecutionRequest));
 }
 
 export async function getExecutionPacket(actor: AppActor, params: { workspaceId: string; requestId: string }) {
@@ -965,31 +984,63 @@ async function readableExecutionMember(actor: AppActor, workspaceId: string, mem
   }
 }
 
+/** Keep only the permitted recent sample and its original receipts. Canonical
+ * pages replenish denied rows; coalesced meeting dates require a bounded top-N
+ * fold rather than Prisma's different nullable-column ordering. */
+async function recentExecutionInputs<T extends { id: string; updatedAt: Date; recordedAt?: Date | null }>(params: {
+  actor: AppActor; workspaceId: string; kind: LineageKind; take: number;
+  load: (after: NoInfer<T> | undefined) => Promise<T[]>; fold?: boolean;
+  release: WorkItemReadRelease;
+}) {
+  let after: T | undefined;
+  let selected: T[] = [];
+  const proofs = new Map<string, LineageRoot[]>();
+  for (;;) {
+    const batch = await params.load(after);
+    invariant(batch.length <= 100 && (!batch.length || batch.at(-1)!.id !== after?.id),
+      503, "SOURCE_READ_SCAN_CHANGED", "Execution context page changed; retry.");
+    const read = await params.release.observeRead(() => captureReadableDigestInputs({ ...params, records: batch }));
+    for (const row of read.records) {
+      selected.push(row);
+      proofs.set(row.id, read.proofs.get(row.id)!);
+    }
+    selected = recentRows(selected, params.take);
+    const ids = new Set(selected.map(row => row.id));
+    for (const id of proofs.keys()) if (!ids.has(id)) proofs.delete(id);
+    if (batch.length < 100 || !params.fold && selected.length === params.take) break;
+    after = batch.at(-1);
+  }
+  return { records: selected, proofs };
+}
+
 export async function getCompanyContext(actor: AppActor, workspaceId: string) {
   for (const scope of ["execution:read", "workspace:read", "actions:read", "tensions:read", "proposals:read", "meetings:read", "brain:read"] as const) requireExecutionScope(actor, scope);
   await requireWorkspaceMembership({ actor, workspaceId });
-  const [workspace, actionRows, tensionRows, proposalRows, meetingRows, articleRows] = await Promise.all([
-    prisma.workspace.findUnique({ where: { id: workspaceId } }),
-    prisma.action.findMany({ where: { workspaceId, archivedAt: null, isPrivate: false }, ...SOURCE_SCAN }),
-    prisma.tension.findMany({ where: { workspaceId, archivedAt: null, isPrivate: false }, ...SOURCE_SCAN }),
-    prisma.proposal.findMany({ where: { workspaceId, archivedAt: null, isPrivate: false }, ...SOURCE_SCAN }),
-    prisma.meeting.findMany({ where: { workspaceId, archivedAt: null }, ...SOURCE_SCAN }),
-    prisma.brainArticle.findMany({ where: { workspaceId, archivedAt: null, isPrivate: false }, ...SOURCE_SCAN }),
-  ]);
+  sealArtifactInputActor(actor);
+  const release = new WorkItemReadRelease(actor, workspaceId);
+  const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId } });
   invariant(workspace, 404, "NOT_FOUND", "Workspace not found.");
-  const roots = await captureArtifactInputProof(actor, workspaceId, [{ kind: "Workspace", id: workspaceId, snapshot: workspace }]);
+  const roots = await release.observeRead(() => captureArtifactInputProof(actor, workspaceId, [{ kind: "Workspace", id: workspaceId, snapshot: workspace }]));
+  const recentQuery = (after: { id: string; updatedAt: Date } | undefined) => ({
+    where: { workspaceId, archivedAt: null, isPrivate: false,
+      ...(after ? { OR: [{ updatedAt: { lt: after.updatedAt } }, { updatedAt: after.updatedAt, id: { gt: after.id } }] } : {}),
+    }, orderBy: [{ updatedAt: "desc" as const }, { id: "asc" as const }], take: 100,
+  });
+  const read = { actor, workspaceId, take: MAX_CONTEXT_ITEMS, release };
   const [actions, tensions, proposals, meetings, articles] = await Promise.all([
-    readableExecutionRows(actor, workspaceId, "Action", actionRows),
-    readableExecutionRows(actor, workspaceId, "Tension", tensionRows),
-    readableExecutionRows(actor, workspaceId, "Proposal", proposalRows),
-    readableExecutionRows(actor, workspaceId, "Meeting", meetingRows),
-    readableExecutionRows(actor, workspaceId, "BrainArticle", articleRows),
+    recentExecutionInputs<Action>({ ...read, kind: "Action", load: after => prisma.action.findMany(recentQuery(after)) }),
+    recentExecutionInputs<Tension>({ ...read, kind: "Tension", load: after => prisma.tension.findMany(recentQuery(after)) }),
+    recentExecutionInputs<Proposal>({ ...read, kind: "Proposal", load: after => prisma.proposal.findMany(recentQuery(after)) }),
+    recentExecutionInputs<Meeting>({ ...read, kind: "Meeting", take: 10, fold: true,
+      load: after => prisma.meeting.findMany({ where: { workspaceId, archivedAt: null, ...(after ? { id: { gt: after.id } } : {}) }, orderBy: { id: "asc" }, take: 100 }) }),
+    recentExecutionInputs<BrainArticle>({ ...read, kind: "BrainArticle", load: after => prisma.brainArticle.findMany(recentQuery(after)) }),
   ]);
   const select = <T extends { id: string; updatedAt?: Date; recordedAt?: Date | null }>(read: { records: T[]; proofs: Map<string, LineageRoot[]> }, take = MAX_CONTEXT_ITEMS) => {
     const rows = recentRows(read.records, take);
     for (const row of rows) roots.push(...(read.proofs.get(row.id) ?? []));
     return rows;
   };
+  const mapped = await release.observeRead(async () => {
   const mappedActions = await Promise.all(select(actions).map(async (row) => {
     const assignee = await readableExecutionMember(actor, workspaceId, row.assigneeMemberId, roots);
     return { id: row.id, title: row.title, status: row.status, priority: row.priority, priorityLabel: formatWorkItemPriority(row.priority),
@@ -1009,10 +1060,13 @@ export async function getCompanyContext(actor: AppActor, workspaceId: string) {
   }));
   const mappedMeetings = select(meetings, 10).map((row) => ({ id: row.id, title: row.title, status: row.status, recordedAt: row.recordedAt, summaryMd: row.summaryMd }));
   const mappedArticles = select(articles).map((row) => ({ id: row.id, title: row.title, slug: row.slug, type: row.type, authority: row.authority, updatedAt: row.updatedAt }));
-  invariant(await isArtifactInputProofReadable(actor, workspaceId, roots), 409, "SOURCE_CHANGED", "Execution context inputs changed during collection.");
-  return redactJson({ workspace: { id: workspace.id, slug: workspace.slug, name: workspace.name, description: workspace.description, plan: workspace.plan },
-    recent: { actions: mappedActions, tensions: mappedTensions, proposals: mappedProposals, meetings: mappedMeetings, articles: mappedArticles },
-    policy: { externalExecution: "External AI workspaces execute; Corgtex supplies scoped context, policy constraints, audit, and reviewable write-back.", defaultWritebackMode: "draft_or_comment" } });
+  return { actions: mappedActions, tensions: mappedTensions, proposals: mappedProposals, meetings: mappedMeetings, articles: mappedArticles };
+  });
+  release.add(roots);
+  await requireWorkspaceMembership({ actor, workspaceId });
+  return release.finish(redactJson({ workspace: { id: workspace.id, slug: workspace.slug, name: workspace.name, description: workspace.description, plan: workspace.plan },
+    recent: mapped,
+    policy: { externalExecution: "External AI workspaces execute; Corgtex supplies scoped context, policy constraints, audit, and reviewable write-back.", defaultWritebackMode: "draft_or_comment" } }));
 }
 
 function targetTypeSet(targetTypes?: Array<string | ExecutionWritebackTargetType> | null) {

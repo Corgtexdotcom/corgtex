@@ -1,7 +1,7 @@
 # Selected legacy history recovery
 
 An authenticated workspace admin can recover existing company Actions, Documents,
-and BrainSources through `/api/workspaces/{workspaceId}/history-recovery`.
+BrainSources, Roles, and Circles through `/api/workspaces/{workspaceId}/history-recovery`.
 Conversation sessions and turns are recoverable only by their actual owner and
 remain private. Finance records are excluded.
 
@@ -15,12 +15,14 @@ content or another record returns a conflict.
 
 An operator can process an explicitly selected list sequentially, keeping one
 request UUID per selection and recording each result. Recover a parent Document
-before its bound file BrainSource, and a private conversation session before its
-turns. Do not batch by rewriting database rows or historical lineage. There is no
+before its bound file BrainSource, a Circle before its Roles, and a private
+conversation session before its turns. Role recovery is scoped through its
+current Circle workspace; no Role or Circle assignments, memberships, or
+permissions are created. Known restricted contributors stay restricted. Do not batch by rewriting database rows or historical lineage. There is no
 automatic migration over customer history or privileged background recovery job.
 
 Successful recovery preserves the original row and old lineage, adds an immutable
-current attestation, and makes normal Action/conversation/file readers available
+current attestation, and makes normal Action/conversation/file and Role/Circle readers available
 subject to all current category, circle, private-contributor and tenant controls.
 A known unavailable contributor remains a concrete rejection; regenerate that
 record from currently authorized sources instead of replacing its old proof.

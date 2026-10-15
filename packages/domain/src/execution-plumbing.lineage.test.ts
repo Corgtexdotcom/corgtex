@@ -131,7 +131,7 @@ describe("execution lineage closure with real current permissions", () => {
     expect(JSON.stringify(captured.value)).not.toContain("CANARY");
     expect(captured.roots.some((root) => root.kind === kind && root.id === visible.id)).toBe(true);
     expect(captured.roots.some((root) => root.id.startsWith("aa-hidden"))).toBe(false);
-    expect(fixture.prisma[model].findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 5001 }));
+    expect(fixture.prisma[model].findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 100 }));
     expect(fixture.prisma[model].findMany.mock.calls.every(([args]: any) => !args.select && !args.where.title)).toBe(true);
     await expect(request({ writebackTargetType: type, writebackTargetId: "aa-hidden-1" }, alpha)).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
     fixture.add("member", { id: "foreign-member", workspaceId: "ws-b", userId: "alpha", isActive: true, role: "ADMIN" });

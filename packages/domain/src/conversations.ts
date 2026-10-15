@@ -1,3 +1,5 @@
+import { captureReadableDigestInputs } from "./digest-lineage";
+import { WorkItemReadRelease } from "./work-item-readable-page";
 import { assertArtifactInputWriteFence, readableArtifactIds, recordArtifactInputLineage, advanceHumanArtifactInputLineage, currentArtifactInputRoots, captureArtifactInputProof, sealArtifactInputActor, type LineageRoot } from "./source-lineage";
 import { prisma, toInputJson } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
@@ -31,30 +33,45 @@ export async function createConversationPromptInput(actor: AppActor, params: { w
   return suppliedTx ? persist(suppliedTx) : prisma.$transaction(persist);
 }
 
-async function redactConversationTurns(actor: AppActor, workspaceId: string, turns: Array<import("@prisma/client").ConversationTurn>) {
-  const readable = await readableArtifactIds(actor, workspaceId, "ConversationTurn", turns);
+async function redactConversationTurns(actor: AppActor, workspaceId: string, turns: Array<import("@prisma/client").ConversationTurn>, release?: WorkItemReadRelease) {
+  const admittedTurns = release ? await captureReadableDigestInputs({ actor, workspaceId, kind: "ConversationTurn", records: turns }) : null;
+  const readable = admittedTurns ? new Set(admittedTurns.records.map(row => row.id)) : await readableArtifactIds(actor, workspaceId, "ConversationTurn", turns);
   const originalIds = turns.flatMap((turn) => turn.promptInputId ? [turn.promptInputId] : []);
   const originals = originalIds.length ? await prisma.conversationPromptInput.findMany({ where: { workspaceId, id: { in: originalIds } } }) : [];
-  const originalProof = await readableArtifactIds(actor, workspaceId, "ConversationPromptInput", originals);
+  const admittedPrompts = release ? await captureReadableDigestInputs({ actor, workspaceId, kind: "ConversationPromptInput", records: originals }) : null;
+  const originalProof = admittedPrompts ? new Set(admittedPrompts.records.map(row => row.id)) : await readableArtifactIds(actor, workspaceId, "ConversationPromptInput", originals);
   const byId = new Map(originals.map((row) => [row.id, row]));
-  return turns.flatMap((turn) => {
-    if (readable.has(turn.id)) return [{ ...turn, assistantContentWithheld: false }];
+  const safe = [];
+  for (const turn of turns) {
+    if (readable.has(turn.id)) {
+      if (release) release.add(admittedTurns!.proofs.get(turn.id)!);
+      safe.push({ ...turn, assistantContentWithheld: false });
+      if (release) break;
+      continue;
+    }
     const original = turn.promptInputId ? byId.get(turn.promptInputId) : null;
-    if (!original || !originalProof.has(original.id) || original.content !== turn.userMessage) return [];
-    return [{ ...turn, assistantMessage: "", contextJson: null, assistantContentWithheld: true }];
-  });
+    if (!original || !originalProof.has(original.id) || original.content !== turn.userMessage) continue;
+    if (release) release.add(admittedPrompts!.proofs.get(original.id)!);
+    safe.push({ ...turn, assistantMessage: "", contextJson: null, assistantContentWithheld: true });
+    if (release) break;
+  }
+  return safe;
 }
 
 export async function listConversations(actor: AppActor, workspaceId: string, opts?: {
   take?: number;
   skip?: number;
 }) {
+  sealArtifactInputActor(actor);
   const userId = actor.kind === "user" ? actor.user.id : null;
   invariant(userId, 401, "AUTH_REQUIRED", "Conversations require a user actor.");
   await requireWorkspaceMembership({ actor, workspaceId });
 
+  const release = new WorkItemReadRelease(actor, workspaceId);
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
+  invariant(Number.isSafeInteger(take) && take >= 0 && take <= 5000 && Number.isSafeInteger(skip) && skip >= 0,
+    400, "INVALID_INPUT", "Conversation pagination is invalid.");
 
   const pageSize = 100;
   const latestReadableTurn = async (conversationId: string) => {
@@ -67,7 +84,7 @@ export async function listConversations(actor: AppActor, workspaceId: string, op
       });
       scanned += turns.length;
       invariant(scanned <= 5000, 503, "INPUT_SCAN_LIMIT", "Conversation history needs a lineage rebuild before listing.");
-      const safe = await redactConversationTurns(actor, workspaceId, turns);
+      const safe = await release.observeRead(() => redactConversationTurns(actor, workspaceId, turns, release));
       if (safe.length) return safe.slice(0, 1);
       if (turns.length < pageSize) return [];
       cursor = turns[turns.length - 1].id;
@@ -75,18 +92,22 @@ export async function listConversations(actor: AppActor, workspaceId: string, op
   };
   const safeItems = [];
   let total = 0;
-  let scanned = 0;
-  let cursor: string | undefined;
+  let after: {id: string; updatedAt: Date} | undefined;
   for (;;) {
     const items = await prisma.conversationSession.findMany({
-      where: { workspaceId, userId },
+      where: { workspaceId, userId,
+        ...(after ? {OR:[{updatedAt:{lt:after.updatedAt}},{updatedAt:after.updatedAt,id:{lt:after.id}}]} : {}),
+      },
       include: { roleOnboarding: { include: { role: true } } },
       orderBy: [{ updatedAt: "desc" }, { id: "desc" }], take: pageSize,
-      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     });
-    scanned += items.length;
-    invariant(scanned <= 5000, 503, "INPUT_SCAN_LIMIT", "Conversation history needs a lineage rebuild before listing.");
-    const readableSessions = await readableArtifactIds(actor, workspaceId, "ConversationSession", items);
+    invariant(items.length <= pageSize && (!items.length || items.at(-1)!.id !== after?.id),
+      503, "SOURCE_READ_SCAN_CHANGED", "Conversation page changed; retry.");
+    const readableSessions = await release.observeRead(async () => {
+      const admitted = await captureReadableDigestInputs({actor,workspaceId,kind:"ConversationSession",records:items});
+      release.add(admitted.roots);
+      return new Set(admitted.records.map(row => row.id));
+    });
     for (const item of items) {
       const readableSession = readableSessions.has(item.id);
       const isPageCandidate = total >= skip && total < skip + take;
@@ -97,15 +118,18 @@ export async function listConversations(actor: AppActor, workspaceId: string, op
       const position = total++;
       if (position < skip || position >= skip + take) continue;
       const onboardingRows = item.roleOnboarding ? [item.roleOnboarding] : [];
-      const onboardingProof = await readableArtifactIds(actor, workspaceId, "RoleOnboardingSession", onboardingRows);
-      const roleProof = await readableArtifactIds(actor, workspaceId, "Role", onboardingRows.map((row) => row.role));
+      const onboarding = await release.observeRead(() => captureReadableDigestInputs({actor,workspaceId,kind:"RoleOnboardingSession",records:onboardingRows,
+        additionalInputs: row => [{kind:"Role",id:row.role.id,snapshot:row.role}],
+      }));
+      release.add(onboarding.roots);
       safeItems.push({ ...item, topic: readableSession ? item.topic : null,
-        systemPrompt: null, roleOnboarding: item.roleOnboarding && onboardingProof.has(item.roleOnboarding.id) && roleProof.has(item.roleOnboarding.roleId) ? item.roleOnboarding : null, turns });
+        systemPrompt: null, roleOnboarding: onboarding.records[0] ?? null, turns });
     }
     if (items.length < pageSize) break;
-    cursor = items[items.length - 1].id;
+    after = { id: items.at(-1)!.id, updatedAt: items.at(-1)!.updatedAt };
   }
-  return { items: safeItems, total, take, skip };
+  await requireWorkspaceMembership({ actor, workspaceId });
+  return release.finish({ items: safeItems, total, take, skip });
 
 }
 

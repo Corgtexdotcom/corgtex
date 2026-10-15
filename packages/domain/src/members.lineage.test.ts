@@ -26,6 +26,7 @@ const fixture = vi.hoisted(() => {
     if (relatedKind(key)) return matches(relatedKind(key), relation(kind, row, key), value);
     if (value && typeof value === "object" && !(value instanceof Date)) {
       if ("gt" in value) return row[key] > value.gt;
+      if ("lt" in value) return row[key] < value.lt;
       if ("in" in value) return value.in.includes(row[key]);
       if ("notIn" in value) return !value.notIn.includes(row[key]);
       if ("not" in value) return row[key] !== value.not;
@@ -33,7 +34,7 @@ const fixture = vi.hoisted(() => {
       if (key === "memberships") return rows.member.some((member) => member.userId === row.id && matches("member", member, value.some));
       throw new Error(`Unsupported synthetic predicate: ${kind}.${key}`);
     }
-    return row[key] === value;
+    return value instanceof Date ? row[key] instanceof Date && row[key].getTime() === value.getTime() : row[key] === value;
   });
   const project = (kind: string, row: any, args: any = {}): any => {
     if (!row) return null;
@@ -59,7 +60,16 @@ const fixture = vi.hoisted(() => {
         return project(kind, kind === "artifactInputLineage" ? found.at(-1) : found[0], args); }),
       findUnique: vi.fn(async (args: any) => project(kind, rows[kind].find((row) => matches(kind, row, args.where)), args)),
       findMany: vi.fn(async (args: any) => rows[kind].filter((row) => matches(kind, row, args.where))
-        .sort((left, right) => kind === "artifactInputLineage" ? right.revision - left.revision : left.id.localeCompare(right.id))
+        .sort((left, right) => {
+          if (kind === "artifactInputLineage") return right.revision - left.revision;
+          for (const order of Array.isArray(args.orderBy) ? args.orderBy : [args.orderBy ?? {id: "asc"}]) {
+            for (const [field, direction] of Object.entries(order)) {
+              const difference = left[field] instanceof Date ? left[field].getTime() - right[field].getTime() : String(left[field]).localeCompare(String(right[field]));
+              if (difference) return direction === "desc" ? -difference : difference;
+            }
+          }
+          return 0;
+        })
         .slice(args.skip ?? 0, (args.skip ?? 0) + (args.take ?? rows[kind].length)).map((row) => project(kind, row, args))),
       count: vi.fn(async (args: any) => rows[kind].filter((row) => matches(kind, row, args.where)).length),
       create: vi.fn(async ({ data }: any) => { const row = { id: `${kind}-${rows[kind].length + 1}`, createdAt: timestamp, updatedAt: timestamp, ...data };
@@ -166,7 +176,53 @@ describe("member readers with current source receipts", () => {
     expect(result.member.assignedActions).toHaveLength(5);
     expect(result.member.assignedActions.every((row) => row.title.startsWith("Visible"))).toBe(true);
     const pages = fixture.prisma.action.findMany.mock.calls.map(([args]: any[]) => args);
-    expect(pages.some((page: any) => page.where.AND?.some((clause: any) => clause.id?.gt))).toBe(true);
+    expect(pages.some((page: any) => page.where.AND?.some((clause: any) => clause.OR?.some((condition: any) => condition.id?.lt)))).toBe(true);
+  });
+
+  it("replenishes recent audit references and rejects selected content changed during later audit reads", async () => {
+    const {publicAction, privateSource} = await seed();
+    for (let i = 0; i < 101; i++) add("auditLog", {id: `hidden-audit-${String(i).padStart(3, "0")}`, workspaceId,
+      actorUserId: "alpha", entityType: "Action", entityId: privateSource.id, action: "action.updated", createdAt: new Date("2026-10-12")});
+    add("auditLog", {id: "visible-audit", workspaceId, actorUserId: "alpha", entityType: "Action", entityId: publicAction.id,
+      action: "action.updated", meta: {private: "never deliver"}, createdAt: new Date("2026-10-01")});
+    const profile = await getMemberProfile(alpha, workspaceId, "member-alpha");
+    expect(profile.recentActivity.map(row => row.id)).toEqual(["visible-audit"]);
+    expect(profile.recentActivity[0].meta).toBeNull();
+    expect(fixture.prisma.auditLog.findMany).toHaveBeenCalledTimes(2);
+    const query = fixture.prisma.auditLog.findMany.getMockImplementation()!;
+    fixture.prisma.auditLog.findMany.mockImplementationOnce(async (args: any) => {
+      publicAction.bodyMd = "Changed after assigned-action admission";
+      return query(args);
+    });
+    await expect(getMemberProfile(alpha, workspaceId, "member-alpha")).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+  });
+
+  it.each(["role", "circle", "caller"])("does not release profile joins after late %s withdrawal", async kind => {
+    const {publicRole, publicCircle} = await seed();
+    // Keep all recent collections empty, so the profile itself supplies the fence.
+    fixture.rows.action = []; fixture.rows.roleAssignment = kind === "caller" ? [] : fixture.rows.roleAssignment;
+    const query = fixture.prisma.auditLog.findMany.getMockImplementation()!;
+    fixture.prisma.auditLog.findMany.mockImplementationOnce(async (args: any) => {
+      if (kind === "role") publicRole.archivedAt = new Date();
+      else if (kind === "circle") publicCircle.archivedAt = new Date();
+      else fixture.rows.member.find(row => row.id === "member-alpha").isActive = false;
+      return query(args);
+    });
+    await expect(getMemberProfile(alpha, workspaceId, "member-alpha")).rejects.toMatchObject({code: kind === "caller" ? "FORBIDDEN" : "SOURCE_CHANGED"});
+  });
+
+  it("loads only recent bounded pages even with over five thousand lifetime records", async () => {
+    const {publicAction} = await seed();
+    for (let index = 0; index < 5001; index++) add("action", {...publicAction, id: `old-${index}`, createdAt: new Date("2025-01-01"), title: "Old unproven"});
+    const expected: string[] = [];
+    for (let index = 0; index < 5; index++) {
+      const row = add("action", {...publicAction, id: `new-${index}`, createdAt: new Date("2026-10-12")});
+      await known("Action", row); expected.unshift(row.id);
+    }
+    const result = await getMemberProfile(alpha, workspaceId, "member-alpha");
+    expect(result.member.assignedActions.map(row => row.id)).toEqual(expected);
+    expect(fixture.prisma.action.findMany).toHaveBeenCalledTimes(1);
+    expect(fixture.prisma.action.findMany.mock.calls[0][0]).toMatchObject({take: 100, orderBy: [{createdAt: "desc"}, {id: "desc"}]});
   });
 
   it("rejects other workspace profiles and reacts immediately to membership loss", async () => {

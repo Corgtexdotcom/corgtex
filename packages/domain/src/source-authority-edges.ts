@@ -423,7 +423,8 @@ export async function discoverSourceAuthorityEdges(context: AuthorityDiscoveryCo
       const { decodeLegacyRecovery } = await import("./legacy-recovery");
       const recovery = decodeLegacyRecovery(content);
       invariant(recovery, 409, "SOURCE_LOCK_INCOMPLETE", "Recovery authority is malformed.");
-      const where = recovery.targetKind === "ConversationTurn" ? {id: recovery.targetId, conversation: {workspaceId}} : {id: recovery.targetId, workspaceId};
+      const where = recovery.targetKind === "ConversationTurn" ? {id: recovery.targetId, conversation: {workspaceId}}
+        : recovery.targetKind === "Role" ? {id: recovery.targetId, circle: {workspaceId}} : {id: recovery.targetId, workspaceId};
       const targets = await rows(recovery.targetKind, where, `recovery-target:${input.id}`, undefined, true);
       await rows("ArtifactInputLineage",{id:recovery.targetManifestId,workspaceId,artifactType:recovery.targetKind,artifactId:recovery.targetId,
         contentHash:recovery.targetFingerprint,origin:"DERIVED"},`recovery-original:${input.id}`,undefined,true);
