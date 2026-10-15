@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
-import { AppError, MAX_AUDIO_FILE_BYTES, createMeetingAudioAsset, isPlausibleMeetingRecordedAt, readableArtifactIds, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, MAX_AUDIO_FILE_BYTES, createMeetingAudioAsset, isPlausibleMeetingRecordedAt, readableArtifactIds, captureReadableDigestInputs, captureArtifactReadHeadObservation, mergeArtifactInputProofs, withArtifactCountReleaseSnapshot, requireWorkspaceMembership, type LineageRoot } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
@@ -12,7 +12,6 @@ type RouteContext = {
 const DEFAULT_LIST_TAKE = 25;
 const MAX_LIST_TAKE = 50;
 const LIST_SCAN_PAGE = 100;
-const LIST_SCAN_LIMIT = 5_000;
 
 const audioAssetSelect = {
   id: true,
@@ -166,37 +165,47 @@ export async function GET(request: NextRequest, { params }: RouteContext) {
     const ownerUserId = actor.user.id;
     await requireWorkspaceMembership({ actor, workspaceId: authorizedWorkspaceId });
     const requestedTake = clampTake(request.nextUrl.searchParams.get("take"));
-    const audioAssets = await prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT "id" FROM "Workspace" WHERE "id" = ${authorizedWorkspaceId} FOR SHARE`;
-      await tx.$queryRaw`SELECT "id" FROM "Member" WHERE "workspaceId" = ${authorizedWorkspaceId}
-        AND "userId" = ${ownerUserId} FOR SHARE`;
+    const admitted: MeetingAudioAssetSummary[] = [];
+    let roots: LineageRoot[] = [];
+    const heads = new Map<string, string>();
+    let after: { id: string; createdAt: Date } | undefined;
+    while (admitted.length < requestedTake) {
+      const page = await prisma.meetingAudioAsset.findMany({
+        where: { workspaceId: authorizedWorkspaceId, uploadedByUserId: ownerUserId,
+          ...(after ? { OR: [{createdAt: {lt: after.createdAt}}, {createdAt: after.createdAt, id: {lt: after.id}}] } : {}) },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: LIST_SCAN_PAGE,
+        select: audioAssetProofSelect,
+      });
+      if (!page.length) break;
+      if (after && page.some(asset => asset.createdAt > after!.createdAt ||
+        (asset.createdAt.getTime() === after!.createdAt.getTime() && asset.id >= after!.id))) {
+        throw new AppError(409, "SOURCE_CHANGED", "Audio history changed during pagination.");
+      }
+      // Batched discovery skips unknown/revoked history cheaply. Selected rows
+      // still receive original proofs and fresh final admission before release.
+      const readable = await readableArtifactIds(actor, authorizedWorkspaceId, "MeetingAudioAsset", page);
+      const candidates = page.filter(asset => readable.has(asset.id));
+      const observed = await captureArtifactReadHeadObservation(() => captureReadableDigestInputs({
+        actor, workspaceId: authorizedWorkspaceId, kind: "MeetingAudioAsset", records: candidates,
+      }));
+      for (const [key, stamp] of observed.heads) {
+        if (heads.has(key) && heads.get(key) !== stamp) throw new AppError(409, "SOURCE_CHANGED", "Audio source changed during collection.");
+        heads.set(key, stamp);
+      }
+      const selected = observed.value.records.slice(0, requestedTake - admitted.length);
+      admitted.push(...selected);
+      roots = mergeArtifactInputProofs(roots, ...selected.map(asset => observed.value.proofs.get(asset.id)!));
+      after = {id: page[page.length - 1].id, createdAt: page[page.length - 1].createdAt};
+      if (page.length < LIST_SCAN_PAGE) break;
+    }
+    const audioAssets = await withArtifactCountReleaseSnapshot(actor, authorizedWorkspaceId, roots, async () => {}, async tx => {
       const currentMembership = await requireWorkspaceMembership({ actor, workspaceId: authorizedWorkspaceId, tx });
-      if (!currentMembership || currentMembership.id === "global-operator"
-        || currentMembership.userId !== ownerUserId) {
+      if (!currentMembership || currentMembership.id === "global-operator" || currentMembership.userId !== ownerUserId) {
         throw new AppError(403, "SOURCE_RESTRICTED", "Audio uploads require their active human owner.");
       }
-      const admitted: MeetingAudioAssetSummary[] = [];
-      let cursor: string | undefined;
-      let scanned = 0;
-      while (admitted.length < requestedTake) {
-        const pageTake = Math.min(LIST_SCAN_PAGE, LIST_SCAN_LIMIT + 1 - scanned);
-        const page = await tx.meetingAudioAsset.findMany({
-          where: { workspaceId: authorizedWorkspaceId, uploadedByUserId: ownerUserId },
-          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-          take: pageTake,
-          ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-          select: audioAssetProofSelect,
-        });
-        if (!page.length) break;
-        scanned += page.length;
-        if (scanned > LIST_SCAN_LIMIT) throw new AppError(409, "SOURCE_PROOF_SCAN_LIMIT", "Audio history exceeds the safe source scan limit.");
-        const readable = await readableArtifactIds(actor, authorizedWorkspaceId, "MeetingAudioAsset", page, tx);
-        admitted.push(...page.filter(asset => readable.has(asset.id)).slice(0, requestedTake - admitted.length));
-        cursor = page[page.length - 1]?.id;
-        if (page.length < pageTake) break;
-      }
       return admitted;
-    });
+    }, heads);
 
     return NextResponse.json({ audioAssets: audioAssets.map(serializeAudioAsset) });
   } catch (error) {

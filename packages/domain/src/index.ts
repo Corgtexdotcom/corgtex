@@ -40,7 +40,7 @@ export {
   captureArtifactPermissionEpochs, recordArtifactInputLineage, copyArtifactInputLineage,
   advanceHumanArtifactInputLineage, advanceArchivedArtifactEnvelopeLineage, invalidateArtifactInputLineage,
   hasCurrentArtifactInputLineage, currentArtifactInputRoots, isArtifactArchiveMetadataReadable,
-  readableArtifactIds, readableBrainSourceIds,
+  readableArtifactIds, readableBrainSourceIds, captureArtifactReadHeadObservation, withArtifactCountReleaseSnapshot,
 } from "./source-lineage";
 export type { ArtifactInputWriteFence, LineageKind, LineageInput, LineageRoot } from "./source-lineage";
 export { prepareArtifactSourceCommit, withArtifactSourceCommit } from "./artifact-source-commit";

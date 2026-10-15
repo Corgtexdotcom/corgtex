@@ -6,6 +6,7 @@ const {
   findManyMeetingAudioAssets,
   findManyNativeInputs,
   readableArtifactIds,
+  releaseSnapshot,
   handleRouteError,
   isPlausibleMeetingRecordedAt,
   requireWorkspaceMembership,
@@ -15,6 +16,7 @@ const {
   findManyMeetingAudioAssets: vi.fn(),
   findManyNativeInputs: vi.fn(),
   readableArtifactIds: vi.fn(),
+  releaseSnapshot: vi.fn(),
   handleRouteError: vi.fn((error: unknown) => NextResponse.json({ error: String(error) }, { status: 500 })),
   isPlausibleMeetingRecordedAt: vi.fn((value: Date | null) => Boolean(value && value.getUTCFullYear() >= 2016 && value.getUTCFullYear() <= 2026)),
   requireWorkspaceMembership: vi.fn(),
@@ -27,7 +29,17 @@ class MockAppError extends Error {
   }
 }
 
-vi.mock("@corgtex/domain", () => ({ AppError: MockAppError, MAX_AUDIO_FILE_BYTES: 500 * 1024 * 1024, createMeetingAudioAsset, isPlausibleMeetingRecordedAt, readableArtifactIds, requireWorkspaceMembership }));
+vi.mock("@corgtex/domain", () => ({ AppError: MockAppError, MAX_AUDIO_FILE_BYTES: 500 * 1024 * 1024,
+  createMeetingAudioAsset, isPlausibleMeetingRecordedAt, readableArtifactIds, requireWorkspaceMembership,
+  captureReadableDigestInputs: async ({actor, workspaceId, kind, records}: any) => {
+    const selected = records;
+    return {records: selected, proofs: new Map(selected.map((row: any) => [row.id,
+      [{kind, id: row.id, fingerprint: `original-${row.id}`}]]))};
+  },
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map([["synthetic-head", "original-head"]])}),
+  mergeArtifactInputProofs: (...proofs: any[][]) => proofs.flat(),
+  withArtifactCountReleaseSnapshot: releaseSnapshot,
+}));
 vi.mock("@corgtex/shared", () => {
   const tx = { $queryRaw: vi.fn().mockResolvedValue([{ id: "member-1" }]),
     meetingAudioAsset: { findMany: findManyMeetingAudioAssets }, nativeTranscriptInput: { findMany: findManyNativeInputs } };
@@ -74,6 +86,7 @@ function audioAsset(overrides = {}) {
 describe("/api/workspaces/[workspaceId]/meeting-audio-assets", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    releaseSnapshot.mockImplementation(async (_actor, _workspaceId, _roots, remote, finish) => {await remote(); return finish({syntheticTransaction: true});});
     resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
     requireWorkspaceMembership.mockResolvedValue({ id: "member-1", userId: "user-1" });
     findManyNativeInputs.mockResolvedValue([{ id: "native-1", meetingAudioAssetId: "audio-1" }]);
@@ -125,7 +138,7 @@ describe("/api/workspaces/[workspaceId]/meeting-audio-assets", () => {
 
   it("withholds legacy and revoked inputs, then replenishes the requested page", async () => {
     const hidden = Array.from({ length: 100 }, (_, index) => audioAsset({
-      id: `hidden-${index}`, fileName: `secret-${index}.m4a`,
+      id: `hidden-${index}`, fileName: `secret-${index}.m4a`, createdAt: new Date(1800000000000 - index),
     }));
     const visible = audioAsset({ id: "audio-allowed", fileName: "allowed.m4a" });
     findManyMeetingAudioAssets.mockResolvedValueOnce(hidden).mockResolvedValueOnce([visible]);
@@ -137,6 +150,49 @@ describe("/api/workspaces/[workspaceId]/meeting-audio-assets", () => {
     expect(response.status).toBe(200);
     expect((await response.json()).audioAssets).toEqual([expect.objectContaining({ id: "audio-allowed", fileName: "allowed.m4a" })]);
     expect(findManyMeetingAudioAssets).toHaveBeenCalledTimes(2);
+  });
+
+  it("replenishes a visible page beyond 5,000 denied rows using stable keysets", async () => {
+    const hidden = Array.from({length: 5100}, (_, index) => audioAsset({
+      id: `hidden-${index}`, createdAt: new Date(1800000000000 - index),
+    }));
+    const visible = audioAsset({id: "audio-allowed", createdAt: new Date(1700000000000)});
+    const all = [...hidden, visible];
+    findManyMeetingAudioAssets.mockImplementation(async ({where, take, cursor, skip}) => {
+      // Also model the former cursor implementation so the regression fails
+      // specifically at its global scan budget on the original route.
+      const before = where.OR?.[0].createdAt.lt;
+      const offset = cursor ? all.findIndex(row => row.id === cursor.id) + skip : 0;
+      return all.filter(row => !before || row.createdAt < before).slice(offset, offset + take);
+    });
+    readableArtifactIds.mockImplementation(async (_actor, _workspace, _kind, records) =>
+      new Set(records.filter((row: any) => row.id === visible.id).map((row: any) => row.id)));
+    const {GET} = await import("./route");
+    const response = await GET(new NextRequest("http://localhost/api/workspaces/workspace-1/meeting-audio-assets?take=1"), context());
+    expect(response.status).toBe(200);
+    expect((await response.json()).audioAssets.map((row: any) => row.id)).toEqual([visible.id]);
+    expect(findManyMeetingAudioAssets).toHaveBeenCalledTimes(52);
+    expect(findManyMeetingAudioAssets.mock.calls.every(([query]) => query.take === 100 && !query.cursor && !query.skip)).toBe(true);
+    expect(releaseSnapshot).toHaveBeenCalledWith(expect.anything(), "workspace-1",
+      [{kind: "MeetingAudioAsset", id: visible.id, fingerprint: `original-${visible.id}`}],
+      expect.any(Function), expect.any(Function), new Map([["synthetic-head", "original-head"]]));
+  });
+
+  it("withholds a collected page when the final current caller is no longer its active human owner", async () => {
+    findManyMeetingAudioAssets.mockResolvedValue([audioAsset()]);
+    requireWorkspaceMembership.mockResolvedValueOnce({id: "member-1", userId: "user-1"})
+      .mockResolvedValueOnce({id: "global-operator", userId: "user-1"});
+    const {GET} = await import("./route");
+    await GET(request(), context());
+    expect(handleRouteError).toHaveBeenCalledWith(expect.objectContaining({code: "SOURCE_RESTRICTED"}), expect.anything());
+  });
+
+  it("does not release a page when its original proof fails final validation", async () => {
+    findManyMeetingAudioAssets.mockResolvedValue([audioAsset()]);
+    releaseSnapshot.mockRejectedValueOnce(new MockAppError(409, "SOURCE_CHANGED", "Original receipt revoked"));
+    const {GET} = await import("./route");
+    await GET(request(), context());
+    expect(handleRouteError).toHaveBeenCalledWith(expect.objectContaining({code: "SOURCE_CHANGED"}), expect.anything());
   });
 
   it("rejects credentials before querying audio history", async () => {
