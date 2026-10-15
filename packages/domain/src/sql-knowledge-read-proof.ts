@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
 import { serialize } from "node:v8";
 import { prisma, type AppActor } from "@corgtex/shared";
-import type { KnowledgeChunk, SqlNativeRunInput } from "@prisma/client";
+import { Prisma, type KnowledgeChunk, type SqlKnowledgeStagedChunk, type SqlNativeRunInput } from "@prisma/client";
 import { getMcpOrigin } from "../../shared/src/mcp-context";
 import { isArtifactNativeCommitPhase } from "./artifact-native-commit-phase";
 import { lineageContentFingerprint, type LineageRoot } from "./source-lineage";
@@ -10,6 +10,18 @@ import { isPublishedSqlKnowledgeVector } from "./source-permission-coverage";
 import { capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, mergePermissionEpochProofs, parsePermissionEpochProof } from "./source-permission-epochs";
 import { areSqlNativeRunInputsUnchanged, isSqlNativeRunInputCurrent, isSqlNativeRunInputLocallyCurrent, loadSqlNativeRunInputs } from "./sql-native-input";
 import { requireWorkspaceMembership } from "./auth";
+
+/** Transport vector-bearing JSON as one text value rather than thousands of
+ * Prisma numeric values. Parse without a reviver: JSON types and every staged
+ * field remain unchanged. The temporary wire strings do not survive this read.
+ */
+async function loadSqlKnowledgeStages(ids: readonly string[]): Promise<SqlKnowledgeStagedChunk[]> {
+  const wire = await prisma.$queryRaw<Array<Omit<SqlKnowledgeStagedChunk, "contentJson"> & {contentJson: string}>>(Prisma.sql`
+    SELECT id, "publicationId", ordinal, "rowIndex", "contentHash", "contentJson"::text AS "contentJson"
+    FROM "SqlKnowledgeStagedChunk" WHERE id IN (${Prisma.join([...ids])})
+  `);
+  return wire.map(row => ({...row, contentJson: JSON.parse(row.contentJson) as Prisma.JsonValue}));
+}
 
 /** Capture original vectors for actual current SQL candidates in one bounded
  * read. A submitted projection supplies expected bytes only; SQL rows, sealed
@@ -110,7 +122,7 @@ export async function isSqlKnowledgeInputProofReadable(actor: AppActor, workspac
     const [rows, manifests, staged, publications, nativeUnchanged] = await Promise.all([
       prisma.knowledgeChunk.findMany({where: {workspaceId, id: {in: ids}}}),
       prisma.artifactInputLineage.findMany({where: {workspaceId, artifactType: "KnowledgeChunk", artifactId: {in: ids}}, orderBy: {revision: "desc"}}),
-      prisma.sqlKnowledgeStagedChunk.findMany({where: {id: {in: ids}}}),
+      loadSqlKnowledgeStages(ids),
       prisma.sqlKnowledgePublication.findMany({where: {workspaceId, id: {in: publicationIds as string[]}, status: "COMMITTED", committedAt: {not: null}}}),
       areSqlNativeRunInputsUnchanged(workspaceId, originals),
     ]);
@@ -150,7 +162,9 @@ export async function isSqlKnowledgeInputProofReadable(actor: AppActor, workspac
     if (!await isArtifactPermissionEpochProofCurrent(workspaceId, union, prisma)) return null;
     // Keep complete observation identity, not the semantic content fingerprint:
     // timestamps, original manifests, staging ordinals and all vector bytes must
-    // also match after the native await. Serialize one tuple at a time so neither
+    // also match after the native await. These stamps are request-local: both
+    // observations use the same stage transport/key order; no persisted digest
+    // or native fingerprint changes. Serialize one tuple at a time so neither
     // the entry ledger nor the exit ledger retains vector-bearing ORM objects.
     return ids.map(id => createHash("sha256").update(serialize([
       byId.get(id), latest.get(id), stages.get(id),
