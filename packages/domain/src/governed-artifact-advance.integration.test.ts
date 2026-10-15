@@ -9,12 +9,20 @@ import { meetingAgendaInputProjection, meetingTranscriptInputProjection } from "
 
 beforeEach(truncateAllTables);
 afterEach(() => vi.restoreAllMocks());
-async function fixture() {
+async function fixture(options: { raceFullSupport?: boolean } = {}) {
   const workspace = await prisma.workspace.create({ data: { name: "Synthetic governed epoch", slug: `epoch-${randomUUID()}` } });
   const owner = await prisma.user.create({ data: { email: `epoch-owner-${randomUUID()}@example.test`, passwordHash: "synthetic" } });
   const reader = await prisma.user.create({ data: { email: `epoch-reader-${randomUUID()}@example.test`, passwordHash: "synthetic" } });
   const member = await prisma.member.create({ data: { workspaceId: workspace.id, userId: owner.id, role: "ADMIN" } });
   await prisma.member.create({ data: { workspaceId: workspace.id, userId: reader.id, role: "CONTRIBUTOR" } });
+  if (options.raceFullSupport) {
+    // Missing Finance/support rows intentionally take Workspace FOR UPDATE,
+    // serializing lineage INSERTs through the Workspace FK. This supported
+    // explicit policy fixture instead exercises the late unique-revision CAS.
+    await prisma.workspaceFeatureFlag.create({ data: { workspaceId: workspace.id, flag: "FINANCE", enabled: false } });
+    await prisma.workspaceSupportGrant.create({ data: { workspaceId: workspace.id, userId: owner.id,
+      grantedByUserId: owner.id, role: "FULL", isActive: true } });
+  }
   const actor: AppActor = { kind: "user", user: { id: owner.id, email: owner.email, displayName: null } };
   const otherActor: AppActor = { kind: "user", user: { id: reader.id, email: reader.email, displayName: null } };
   const source = await prisma.brainSource.create({ data: { workspaceId: workspace.id, sourceType: "ARTICLE", tier: 1, title: "Public original", content: "Public source body", authorMemberId: member.id } });
@@ -79,7 +87,7 @@ it.each(["own-aba", "upstream-aba", "malformed"] as const)("does not revive a pr
   expect((await manifest(f.proposal.id)).revision).toBe(before.revision);
 });
 
-it.each(["forged", "other-actor", "other-artifact", "reuse", "caller-withdrawal", "upstream-aba", "new-circle"] as const)(
+it.each(["forged", "missing", "other-actor", "other-artifact", "reuse", "caller-withdrawal", "upstream-aba", "new-circle"] as const)(
   "rolls back a governed edit with %s", async mode => {
     const f = await fixture(); const beforeManifest = await manifest(f.proposal.id);
     const circle = mode === "new-circle" ? await prisma.circle.create({ data: { workspaceId: f.workspace.id, name: "New governor" } }) : null;
@@ -95,7 +103,7 @@ it.each(["forged", "other-actor", "other-artifact", "reuse", "caller-withdrawal"
       const after = await tx.proposal.update({ where: { id: artifact.id }, data: { isPrivate: false, ...(circle ? { circleId: circle.id } : {}) } });
       const args = { tx, actor: mode === "other-actor" ? f.otherActor : f.actor, workspaceId: f.workspace.id,
         artifact: mode === "other-artifact" ? { ...artifact, id: "different-artifact" } : artifact, before: f.proposal, after,
-        admission: mode === "forged" ? Object.freeze({}) : admission };
+        admission: mode === "forged" ? Object.freeze({}) : mode === "missing" ? undefined : admission };
       await lineage.advanceHumanArtifactInputLineage(args);
       if (mode === "reuse") await lineage.advanceHumanArtifactInputLineage(args);
     })).rejects.toMatchObject({ code: mode === "caller-withdrawal" ? "NOT_A_MEMBER"
@@ -116,7 +124,7 @@ it("rejects a receipt moved to a later transaction", async () => {
 });
 
 it("rolls back if a manifest-only writer wins the original revision during final insertion", async () => {
-  const f = await fixture(); const original = await manifest(f.proposal.id);
+  const f = await fixture({ raceFullSupport: true }); const original = await manifest(f.proposal.id);
   await expect(prisma.$transaction(async rawTx => {
     let externalInserted = false;
     const create = rawTx.artifactInputLineage.create.bind(rawTx.artifactInputLineage);
@@ -140,6 +148,7 @@ it("rolls back if a manifest-only writer wins the original revision during final
     } });
     const artifact = { kind: "Proposal" as const, id: f.proposal.id };
     const admission = await lineage.captureHumanArtifactInputAdvance({ tx, actor: f.actor, workspaceId: f.workspace.id, artifact, before: f.proposal });
+    expect(admission).toBeDefined();
     const after = await tx.proposal.update({ where: { id: artifact.id }, data: { isPrivate: false } });
     await lineage.advanceHumanArtifactInputLineage({ tx, actor: f.actor, workspaceId: f.workspace.id, artifact, before: f.proposal, after, admission });
   }, { timeout: 10000 })).rejects.toMatchObject({ code: "P2002" });
