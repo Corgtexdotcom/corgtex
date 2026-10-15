@@ -26,6 +26,23 @@ async function fixture() {
 describe("digest input receipts", () => {
   beforeEach(async () => { await truncateAllTables(); });
 
+  it("completely counts 20 delivery runs of 251 recipients in PostgreSQL", async () => {
+    const { workspace, ownerActor, ownerMember } = await fixture();
+    const roots = await captureArtifactInputProof(ownerActor, workspace.id,
+      [{kind: "Workspace", id: workspace.id}, {kind: "Member", id: ownerMember.id}]);
+    for (let run = 0; run < 20; run++) {
+      for (let recipient = 0; recipient < 251; recipient++) {
+        await recordNewspaperDelivery({workspaceId: workspace.id, runKey: `synthetic-scale-${run}`,
+          kind: "MEMBER_NEWSPAPER", memberId: ownerMember.id, recipientEmail: `recipient-${recipient}@example.test`,
+          subject: "Synthetic scale", status: "SENT", actor: ownerActor, lineageRoots: roots});
+      }
+    }
+    expect(await prisma.newspaperDelivery.count({where: {workspaceId: workspace.id}})).toBe(5020);
+    const result = await listNewspaperDeliverySummaries(ownerActor, workspace.id);
+    expect(result).toHaveLength(20);
+    expect(result.every(run => run.recipientCount === 251 && run.sentCount === 251)).toBe(true);
+  }, 300_000);
+
   it("keeps the former owner's private article body out of the new owner's history", async () => {
     const { workspace, ownerActor, readerActor, readerMember } = await fixture();
     const original = await createArticle(ownerActor, { workspaceId: workspace.id, title: "Private synthetic original",

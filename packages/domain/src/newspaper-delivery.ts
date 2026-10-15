@@ -5,7 +5,7 @@ import { createHmac } from "node:crypto";
 import { AppError, invariant } from "./errors";
 import { requireWorkspaceMembership } from "./auth";
 import { invalidateArtifactInputLineage, readableArtifactIds, recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
-import { loadReadableDigestQuery } from "./digest-lineage";
+import { DigestReadRelease, loadReadableDigestQuery } from "./digest-lineage";
 import {
   getNextNewspaperRunISO,
   isHumanNewspaperRecipientIdentity,
@@ -331,42 +331,6 @@ export async function listNewspaperDeliverySummaries(actor: AppActor, workspaceI
   if (limit === 0) return [];
   // Group identities are discovery only. Every count below still comes from
   // complete, permission-admitted rows, never from raw database aggregates.
-  const deliveries: NewspaperDelivery[] = [];
-  const latestReadable = new Map<string, number>();
-  let scannedGroups = 0, scannedDeliveries = 0, complete = false;
-  while (!complete) {
-    const candidates = await prisma.newspaperDelivery.groupBy({by: ["runKey"], where: {workspaceId},
-      _max: {createdAt: true}, orderBy: [{_max: {createdAt: "desc"}}, {runKey: "desc"}],
-      take: Math.min(50, 5_001 - scannedGroups), skip: scannedGroups});
-    for (const candidate of candidates) {
-      const threshold = [...latestReadable.values()].sort((a, b) => b - a)[limit - 1];
-      // A group's raw latest timestamp is an upper bound on any permitted row.
-      // Once it falls below the requested visible groups, older runs cannot win.
-      if (threshold !== undefined && candidate._max.createdAt && candidate._max.createdAt.getTime() < threshold) {
-        complete = true; break;
-      }
-      invariant(++scannedGroups <= 5_000, 503, "INPUT_SCAN_LIMIT", "Narrow the requested delivery history to complete its permission scan.");
-      const rows = await loadReadableDigestQuery<NewspaperDelivery>({actor, workspaceId, kind: "NewspaperDelivery",
-        limit: 100, completeScan: true, keyset: true,
-        loadBatch: async ({take, after}) => {
-          const batch = await prisma.newspaperDelivery.findMany({where: {workspaceId, runKey: candidate.runKey,
-            ...(after ? {OR: [{createdAt: {lt: after.createdAt}}, {createdAt: after.createdAt, id: {lt: after.id}}]} : {})},
-            orderBy: [{createdAt: "desc"}, {id: "desc"}], take: Math.min(take, 5_001 - scannedDeliveries)});
-          scannedDeliveries += batch.length;
-          invariant(scannedDeliveries <= 5_000, 503, "INPUT_SCAN_LIMIT", "The requested delivery groups exceed the complete permission scan limit.");
-          return batch;
-        },
-      });
-      if (rows.length) {
-        deliveries.push(...rows);
-        latestReadable.set(candidate.runKey, Math.max(...rows.map(row => row.createdAt.getTime())));
-      }
-    }
-    if (candidates.length < 50) complete = true;
-  }
-  const selectedKeys = new Set([...latestReadable].sort(([a, left], [b, right]) => right - left || b.localeCompare(a))
-    .slice(0, limit).map(([key]) => key));
-
   const groups = new Map<string, {
     runKey: string;
     kind: NewspaperDeliveryKind;
@@ -385,8 +349,7 @@ export async function listNewspaperDeliverySummaries(actor: AppActor, workspaceI
     totalClickCount: number;
   }>();
 
-  for (const delivery of deliveries) {
-    if (!selectedKeys.has(delivery.runKey)) continue;
+  const addDelivery = (delivery: NewspaperDelivery) => {
     const group = groups.get(delivery.runKey) ?? {
       runKey: delivery.runKey,
       kind: delivery.kind,
@@ -420,29 +383,74 @@ export async function listNewspaperDeliverySummaries(actor: AppActor, workspaceI
       group.lastSentAt = !group.lastSentAt || delivery.sentAt > group.lastSentAt ? delivery.sentAt : group.lastSentAt;
     }
     groups.set(delivery.runKey, group);
+  };
+
+  const release = new DigestReadRelease(actor, workspaceId);
+  const latestReadable = new Map<string, number>();
+  let scannedGroups = 0, complete = false;
+  while (!complete) {
+    const candidates = await prisma.newspaperDelivery.groupBy({by: ["runKey"], where: {workspaceId},
+      _max: {createdAt: true}, orderBy: [{_max: {createdAt: "desc"}}, {runKey: "desc"}],
+      take: Math.min(50, 5_001 - scannedGroups), skip: scannedGroups});
+    for (const candidate of candidates) {
+      const threshold = [...latestReadable.values()].sort((a, b) => b - a)[limit - 1];
+      // A group's raw latest timestamp is an upper bound on any permitted row.
+      // Once it falls below the requested visible groups, older runs cannot win.
+      if (threshold !== undefined && candidate._max.createdAt && candidate._max.createdAt.getTime() < threshold) {
+        complete = true; break;
+      }
+      invariant(++scannedGroups <= 5_000, 503, "INPUT_SCAN_LIMIT", "Narrow the requested delivery history to complete its permission scan.");
+      let after: NewspaperDelivery | undefined;
+      while (true) {
+        const batch: NewspaperDelivery[] = await prisma.newspaperDelivery.findMany({
+          where: {workspaceId, runKey: candidate.runKey,
+            ...(after ? {OR: [{createdAt: {lt: after.createdAt}}, {createdAt: after.createdAt, id: {lt: after.id}}]} : {})},
+          orderBy: [{createdAt: "desc"}, {id: "desc"}], take: 100,
+        });
+        if (after) invariant(batch.every(row => row.createdAt < after!.createdAt ||
+          (row.createdAt.getTime() === after!.createdAt.getTime() && row.id < after!.id)),
+          409, "SOURCE_CHANGED", "Delivery collection changed during pagination.");
+        const captured = await release.capture("NewspaperDelivery", batch);
+        for (const row of captured.records) addDelivery(row);
+        if (batch.length < 100) break;
+        after = batch.at(-1);
+      }
+      const group = groups.get(candidate.runKey);
+      if (group) latestReadable.set(candidate.runKey, group.createdAt.getTime());
+    }
+    if (candidates.length < 50) complete = true;
   }
+  const selectedKeys = new Set([...latestReadable].sort(([a, left], [b, right]) => right - left || b.localeCompare(a))
+    .slice(0, limit).map(([key]) => key));
+
+  for (const key of groups.keys()) if (!selectedKeys.has(key)) groups.delete(key);
 
   const runKeys = Array.from(groups.keys());
   if (runKeys.length > 0) {
-    const links = await loadReadableDigestQuery<NewspaperTrackedLink>({ actor, workspaceId, kind: "NewspaperTrackedLink",
-      limit: 100, completeScan: true, keyset: true,
-      loadBatch: ({ take, after }) => prisma.newspaperTrackedLink.findMany({
-        where: { workspaceId, runKey: { in: runKeys }, ...(after ? { id: { gt: after.id } } : {}) }, orderBy: { id: "asc" }, take }),
-    });
-    for (const link of links) {
-      const group = groups.get(link.runKey);
-      if (!group) continue;
-      group.trackedLinkCount += 1;
-      group.totalClickCount += link.clickCount;
-      if (link.clickCount > 0) {
-        group.clickedLinkCount += 1;
+    let after: NewspaperTrackedLink | undefined;
+    while (true) {
+      const batch: NewspaperTrackedLink[] = await prisma.newspaperTrackedLink.findMany({
+        where: { workspaceId, runKey: { in: runKeys }, ...(after ? { id: { gt: after.id } } : {}) },
+        orderBy: { id: "asc" }, take: 100,
+      });
+      if (after) invariant(batch.every(link => link.id > after!.id),
+        409, "SOURCE_CHANGED", "Delivery link collection changed during pagination.");
+      const captured = await release.capture("NewspaperTrackedLink", batch);
+      for (const link of captured.records) {
+        const group = groups.get(link.runKey);
+        if (!group) continue;
+        group.trackedLinkCount += 1;
+        group.totalClickCount += link.clickCount;
+        if (link.clickCount > 0) group.clickedLinkCount += 1;
       }
+      if (batch.length < 100) break;
+      after = batch.at(-1);
     }
   }
 
-  return Array.from(groups.values())
+  return release.finish(Array.from(groups.values())
     .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || b.runKey.localeCompare(a.runKey))
-    .slice(0, limit);
+    .slice(0, limit));
 }
 
 export async function listNewspaperDeliveryDetails(actor: AppActor, workspaceId: string, opts?: { take?: number }) {

@@ -367,6 +367,22 @@ describe("newspaper delivery", () => {
     expect(prismaMock.newspaperTrackedLink.findMany).toHaveBeenCalledWith(expect.objectContaining({where: {workspaceId: "ws-1", runKey: {in: ["recent-run"]}}}));
   });
 
+  it("counts all 20 runs with 251 recipients each without a corpus row budget", async () => {
+    const {listNewspaperDeliverySummaries} = await import("./newspaper-delivery");
+    const rows = Array.from({length: 20}, (_, run) => Array.from({length: 251}, (_, recipient) => ({
+      id: `delivery-${run}-${recipient}`, runKey: `run-${run}`, status: "SENT",
+      createdAt: new Date(1_800_000_000_000 - run * 1000 - recipient), sentAt: null,
+    })));
+    prismaMock.newspaperDelivery.groupBy.mockResolvedValue(rows.map(run => ({runKey: run[0].runKey, _max: {createdAt: run[0].createdAt}})));
+    prismaMock.newspaperDelivery.findMany.mockImplementation(async ({where, take}) => rows.flat()
+      .filter(row => row.runKey === where.runKey && (!where.OR || row.createdAt < where.OR[0].createdAt.lt)).slice(0, take));
+    prismaMock.newspaperTrackedLink.findMany.mockResolvedValue([]);
+    const summaries = await listNewspaperDeliverySummaries({kind: "user", user: {id: "u-1"}} as any, "ws-1");
+    expect(summaries).toHaveLength(20);
+    expect(summaries.every(run => run.recipientCount === 251 && run.sentCount === 251)).toBe(true);
+    expect(prismaMock.newspaperDelivery.findMany.mock.calls.every(([query]) => query.take === 100)).toBe(true);
+  });
+
   it("returns recipient delivery rows without recipient-level click behavior", async () => {
     const { listNewspaperDeliveryDetails } = await import("./newspaper-delivery");
     prismaMock.newspaperDelivery.findMany.mockResolvedValue([
