@@ -1,7 +1,7 @@
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
-import { captureArtifactInputProof, captureArtifactReadHeadObservation, mergeLineageInputRoot, withArtifactCountReleaseSnapshot, isArtifactInputProofReadable, type LineageInput, type LineageKind, type LineageRoot } from "./source-lineage";
+import { captureReadableNewspaperDeliveryInputs, captureArtifactInputProof, captureArtifactReadHeadObservation, mergeLineageInputRoot, withArtifactCountReleaseSnapshot, isArtifactInputProofReadable, type LineageInput, type LineageKind, type LineageRoot } from "./source-lineage";
 import { mergePermissionEpochProofs } from "./source-permission-epochs";
 
 /** One request's original compact observations, released together in a fresh snapshot. */
@@ -70,6 +70,14 @@ export async function captureReadableDigestInputs<T extends { id: string }>(para
   audience?: AppActor[];
   additionalInputs?: (record: T) => Array<LineageInput & { snapshot?: Record<string, unknown> }>;
 }) {
+  if (params.kind === "NewspaperDelivery" && !params.audience && !params.additionalInputs && params.records.length <= 100) {
+    try {
+      const batched = await captureReadableNewspaperDeliveryInputs(params.actor,params.workspaceId,params.records);
+      if (batched) return batched;
+    } catch (error) {
+      if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
+    }
+  }
   const records: T[] = [];
   const proofs = new Map<string, LineageRoot[]>();
   for (const record of params.records) {

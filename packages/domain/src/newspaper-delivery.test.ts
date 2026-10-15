@@ -114,6 +114,7 @@ vi.mock("./source-lineage", async () => {
     },
     captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
     withArtifactCountReleaseSnapshot: async (_actor: unknown, _ws: string, _roots: unknown, remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => {await remote();return finish(prismaMock);}, readableArtifactIds: readableArtifactIdsMock,
+    captureReadableNewspaperDeliveryInputs: async () => null,
     captureArtifactInputProof: vi.fn(async (actor, workspaceId, inputs) => {
       const input = inputs[0];
       const readable = await readableArtifactIdsMock(actor, workspaceId, input.kind, [input.snapshot]);

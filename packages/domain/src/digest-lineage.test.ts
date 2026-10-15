@@ -4,6 +4,7 @@ import { AppError } from "./errors";
 const { capture, readable } = vi.hoisted(() => ({ capture: vi.fn(), readable: vi.fn() }));
 vi.mock("./source-lineage", async importOriginal => ({
   mergeLineageInputRoot: (await importOriginal<typeof import("./source-lineage")>()).mergeLineageInputRoot,
+  captureReadableNewspaperDeliveryInputs: async () => null,
   captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
   withArtifactCountReleaseSnapshot: async (_actor: unknown, _ws: string, _roots: unknown, remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => {await remote();return finish({});}, captureArtifactInputProof: capture, isArtifactInputProofReadable: readable }));
 import { DigestReadRelease, isDigestInputProofShared, loadReadableArtifactSample, loadReadableDigestQuery, mergeArtifactInputProofs } from "./digest-lineage";

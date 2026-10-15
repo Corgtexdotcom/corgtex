@@ -22,7 +22,7 @@ import { internalSourcePermission } from "./internal-source-principal";
 import { getMcpToolInputRoots } from "./mcp-tool-input-context";
 import { isMcpToolInputEncryptedPayload } from "./mcp-tool-input-cipher";
 import { getExternalProviderPrincipalUserId } from "./external-provider-principal";
-import { artifactPermissionParents, loadArtifactPermissionMetadata } from "./source-permission-parents";
+import { artifactPermissionParents, loadArtifactPermissionMetadata, withArtifactPermissionMetadataRead } from "./source-permission-parents";
 import { loadExternalMcpConnectionSetInput } from "./external-mcp-connection-set";
 import { assertMcpOriginActive, getMcpOrigin } from "../../shared/src/mcp-context";
 import { assertSourceCommitRowCovered, assertSourceCommitTransactionCompatible,
@@ -423,12 +423,142 @@ export async function captureReadableWorkItemInputs(actor: AppActor, workspaceId
   return {ids,roots,heads};
 }
 
+type LocalDeliveryRows = {rows: Map<string, Record<string, unknown>>;
+  heads: Map<string, import("@prisma/client").ArtifactInputLineage>};
+type LocalDeliveryBatch = LocalDeliveryRows & {db: LineageClient; workspaceId: string; active: boolean};
+const localDeliveryReadBatch = new AsyncLocalStorage<LocalDeliveryBatch>();
+const deliveryInputKey = (input: LineageInput) => JSON.stringify([input.kind, input.id]);
+const LOCAL_DELIVERY_KINDS = new Set<LineageKind>(["NewspaperDelivery", "Workspace", "Member", "Action", "Proposal", "Tension"]);
+function localDeliveryBatch(db: LineageClient, workspaceId: string, input: LineageInput) {
+  const batch = localDeliveryReadBatch.getStore();
+  if (!batch?.rows.has(deliveryInputKey(input))) return undefined;
+  invariant(batch.active && batch.db === db && batch.workspaceId === workspaceId,
+    409, "SOURCE_CHANGED", "Delivery batch belongs to another or expired read.");
+  return batch;
+}
+async function loadLocalDeliveryRows(db: LineageClient, workspaceId: string, inputs: readonly LineageInput[]): Promise<LocalDeliveryRows> {
+  const rows: LocalDeliveryRows["rows"] = new Map(), heads: LocalDeliveryRows["heads"] = new Map();
+  for (const kind of new Set(inputs.map(input => input.kind))) {
+    const ids = [...new Set(inputs.filter(input => input.kind === kind).map(input => input.id))];
+    const where = {workspaceId, id: {in: ids}};
+    const found = kind === "NewspaperDelivery" ? await db.newspaperDelivery.findMany({where})
+      : kind === "Workspace" ? await db.workspace.findMany({where: {id: {in: ids.filter(id => id === workspaceId)}}})
+      : kind === "Member" ? await db.member.findMany({where, include: {user: {select: {id: true, email: true, displayName: true}}}})
+      : kind === "Action" ? await db.action.findMany({where})
+      : kind === "Proposal" ? await db.proposal.findMany({where}) : await db.tension.findMany({where});
+    for (const row of found) rows.set(deliveryInputKey({kind,id:row.id}), row);
+    const manifests = await db.$queryRaw<import("@prisma/client").ArtifactInputLineage[]>(Prisma.sql`
+      SELECT manifest.* FROM unnest(ARRAY[${Prisma.join(ids)}]::text[]) AS selected(id)
+      CROSS JOIN LATERAL (SELECT * FROM "ArtifactInputLineage" WHERE "workspaceId"=${workspaceId}
+        AND "artifactType"=${kind} AND "artifactId"=selected.id ORDER BY revision DESC LIMIT 1) AS manifest`);
+    for (const head of manifests) heads.set(deliveryInputKey({kind,id:head.artifactId}), head);
+  }
+  return {rows,heads};
+}
+/** Eligibility follows the complete stored closure, including same-body heads.
+ * Unsupported kinds (especially snapshots/native inputs) keep the ordinary path. */
+async function prepareLocalDeliveryBatch(db: LineageClient, workspaceId: string, inputs: readonly LineageInput[]) {
+  if (!inputs.length || inputs.length > 100 || !inputs.some(input => input.kind === "NewspaperDelivery")
+    || hasActiveSourceCommitLockPlan(db) || localDeliveryReadBatch.getStore() || workItemReadBatch.getStore()) return null;
+  const loaded: LocalDeliveryRows = {rows:new Map(),heads:new Map()};
+  let pending = [...inputs];
+  const revisions = new Map<string,string>();
+  while (pending.length) {
+    for (const input of pending) if ("fingerprint" in input && typeof input.fingerprint === "string") {
+      const key = deliveryInputKey(input), previous = revisions.get(key), row = loaded.rows.get(key);
+      if (previous && previous !== input.fingerprint || row && lineageContentFingerprint(input.kind,row) !== input.fingerprint) return null;
+      revisions.set(key,input.fingerprint);
+    }
+    pending = [...new Map(pending.filter(input => !loaded.rows.has(deliveryInputKey(input)))
+      .map(input => [deliveryInputKey(input),input])).values()];
+    if (!pending.length) break;
+    if (loaded.rows.size + pending.length > 256 || pending.some(input => !LOCAL_DELIVERY_KINDS.has(input.kind))) return null;
+    const page = await loadLocalDeliveryRows(db,workspaceId,pending);
+    if (page.rows.size !== pending.length) return null;
+    const next: LineageInput[] = [];
+    for (const input of pending) {
+      const key = deliveryInputKey(input), row = page.rows.get(key)!, head = page.heads.get(key);
+      const fingerprint = lineageContentFingerprint(input.kind,row);
+      if (artifactPermissionParents(input.kind,row).length || revisions.has(key) && revisions.get(key) !== fingerprint
+        || head && head.contentHash !== fingerprint) return null;
+      if (needsManifest(input.kind,row) || head) {
+        const roots = head && parseRoots(head.rootsJson);
+        if (!head || !roots || !["HUMAN_ORIGINAL","DERIVED"].includes(head.origin)
+          || roots.some(root => !root.permissionEpochs)) return null;
+        next.push(...roots);
+      }
+      loaded.rows.set(key,row);
+      if (head) loaded.heads.set(key,head);
+    }
+    pending = next;
+  }
+  return loaded;
+}
+function localDeliveryStamp(loaded: LocalDeliveryRows) {
+  return createHash("sha256").update(sourceCommitCanonical([
+    [...loaded.rows].sort(([a],[b]) => a.localeCompare(b)), [...loaded.heads].sort(([a],[b]) => a.localeCompare(b)),
+  ])).digest("hex");
+}
+async function readLocalDeliveryBatch(db: LineageClient, workspaceId: string, loaded: LocalDeliveryRows,
+  roots: readonly LineageRoot[], read: () => Promise<boolean>) {
+  const stamp = localDeliveryStamp(loaded);
+  const proofs = [...roots.flatMap(root => root.permissionEpochs ? [root.permissionEpochs] : []),
+    ...[...loaded.heads.values()].flatMap(head => [parsePermissionEpochProof(head.permissionEpochsJson),
+      ...(parseRoots(head.rootsJson) ?? []).map(root => root.permissionEpochs)].filter((proof): proof is PermissionEpochProof => Boolean(proof)))];
+  const batch: LocalDeliveryBatch = {...loaded,db,workspaceId,active:true};
+  const valid = await localDeliveryReadBatch.run(batch, () => withArtifactPermissionMetadataRead(db,workspaceId,loaded.rows,async () => {
+    try { return await withArtifactPermissionBatchRead(db,workspaceId,proofs,read); }
+    finally { batch.active = false; }
+  }));
+  const inputs = [...loaded.rows.keys()].map(key => { const [kind,id] = JSON.parse(key); return {kind,id} as LineageInput; });
+  return valid && stamp === localDeliveryStamp(await loadLocalDeliveryRows(db,workspaceId,inputs));
+}
+
+/** Bounded delivery capture with ordinary per-root admission and original
+ * ancestry. Null requests the per-record fallback, including denied inputs. */
+export async function captureReadableNewspaperDeliveryInputs<T extends {id: string}>(actor: AppActor,
+  workspaceId: string, records: T[]) {
+  const inputs = records.map(record => ({kind:"NewspaperDelivery" as const,id:record.id}));
+  const loaded = await prepareLocalDeliveryBatch(prisma,workspaceId,inputs);
+  if (!loaded) return null;
+  for (const record of records) {
+    const row = loaded.rows.get(deliveryInputKey({kind:"NewspaperDelivery",id:record.id}))!;
+    if (snapshotContentFields("NewspaperDelivery",row).some(field => field in record
+      && !snapshotMatches((record as Record<string,unknown>)[field],row[field]))) return null;
+  }
+  const epochs = await prisma.$transaction(async tx => {
+    await requireWorkspaceMembership({actor,workspaceId,tx});
+    const ambient = await captureArtifactPermissionEpochs(actor,workspaceId,[],tx);
+    const own = await capturePermissionEpochs(tx,workspaceId,records.flatMap(record =>
+      artifactPermissionEpochIdentities("NewspaperDelivery",loaded.rows.get(deliveryInputKey({kind:"NewspaperDelivery",id:record.id}))!)));
+    return {ambient,own};
+  });
+  const proofs = new Map<string,LineageRoot[]>();
+  for (const record of records) {
+    const key = deliveryInputKey({kind:"NewspaperDelivery",id:record.id}), row = loaded.rows.get(key)!;
+    const identities = new Set(artifactPermissionEpochIdentities("NewspaperDelivery",row).map(identity => JSON.stringify([identity.kind,identity.id])));
+    const own = {...epochs.own,entries:epochs.own.entries.filter(entry => identities.has(JSON.stringify([entry.kind,entry.id])))};
+    proofs.set(record.id,[{kind:"NewspaperDelivery",id:record.id,fingerprint:lineageContentFingerprint("NewspaperDelivery",row),
+      permissionEpochs:mergePermissionEpochProofs(epochs.ambient,own)!}, ...parseRoots(loaded.heads.get(key)!.rootsJson)!]);
+  }
+  const roots = new Map<string,LineageRoot>();
+  for (const proof of proofs.values()) for (const root of proof) roots.set(deliveryInputKey(root),mergeLineageInputRoot(roots.get(deliveryInputKey(root)),root));
+  const all = [...roots.values()];
+  const valid = await readLocalDeliveryBatch(prisma,workspaceId,loaded,all,
+    () => isArtifactInputProofReadable(actor,workspaceId,all));
+  if (!valid) return null;
+  observeArtifactRead(actor,workspaceId,all);
+  return {records,proofs,roots:all};
+}
+
 async function loadArtifact(db: LineageClient, workspaceId: string, input: LineageInput): Promise<Record<string, unknown> | null> {
   assertSourceCommitTransactionCompatible(db);
   if (hasActiveSourceCommitLockPlan(db)) {
     const physical = sourceAuthorityPhysicalRow(input);
     if (physical) assertSourceCommitRowCovered(db, physical.table, physical.id);
   }
+  const deliveryBatch = localDeliveryBatch(db,workspaceId,input);
+  if (deliveryBatch) return structuredClone(deliveryBatch.rows.get(deliveryInputKey(input))!);
   const batch = workItemBatch(db, workspaceId, input);
   if (batch) return structuredClone(batch.rows.get(input.id)!);
   const where = { id: input.id, workspaceId };
@@ -1766,7 +1896,10 @@ export async function withArtifactCountReleaseSnapshot<T>(actor: AppActor, works
   const assertPages = async (db: LineageClient, message: string) => {
     for (let offset = 0; offset < roots.length; offset += 100) {
       const page = roots.slice(offset, offset + 100);
-      invariant(await withWorkItemBatchRead(db, workspaceId, page, () => isArtifactInputProofReadable(actor, workspaceId, page, db)),
+      const loaded = await prepareLocalDeliveryBatch(db,workspaceId,page);
+      const read = () => isArtifactInputProofReadable(actor,workspaceId,page,db);
+      invariant(await (loaded ? readLocalDeliveryBatch(db,workspaceId,loaded,page,read)
+        : withWorkItemBatchRead(db,workspaceId,page,read)),
         409, "SOURCE_CHANGED", message);
     }
   };
@@ -1937,6 +2070,8 @@ async function artifactInputProofAudience(actor: AppActor, workspaceId: string,
 
 async function latestManifest(db: LineageClient, workspaceId: string, input: LineageInput) {
   assertSourceCommitTransactionCompatible(db);
+  const deliveryBatch = localDeliveryBatch(db,workspaceId,input);
+  if (deliveryBatch) return structuredClone(deliveryBatch.heads.get(deliveryInputKey(input)) ?? null);
   const batch = workItemBatch(db, workspaceId, input);
   if (batch) return structuredClone(batch.heads.get(input.id) ?? null);
   return db.artifactInputLineage.findFirst({ where: {
@@ -2001,8 +2136,14 @@ export async function inspectStoredArtifactInputDependencies(db: LineageClient, 
     } else {
       // Follow the revision that was actually consumed, including preserved
       // historical manifests. A newer revision cannot redefine old ancestry.
-      const manifest = await db.artifactInputLineage.findFirst({ where: { workspaceId,
-        artifactType: root.kind, artifactId: root.id, contentHash: root.fingerprint }, orderBy: { revision: "desc" } });
+      const batch = localDeliveryBatch(db,workspaceId,root);
+      const head = batch?.heads.get(deliveryInputKey(root));
+      // The exact latest matching revision is also the latest historical match.
+      // Absence is reusable only for non-manifest local rows in this batch.
+      const manifest = head?.contentHash === root.fingerprint ? structuredClone(head)
+        : batch && !head && !needsManifest(root.kind,row) ? null
+          : await db.artifactInputLineage.findFirst({ where: { workspaceId,
+            artifactType: root.kind, artifactId: root.id, contentHash: root.fingerprint }, orderBy: { revision: "desc" } });
       if (manifest) {
         upstream = parseRoots(manifest.rootsJson);
         if (!upstream || (manifest.origin === "HUMAN_ORIGINAL"
