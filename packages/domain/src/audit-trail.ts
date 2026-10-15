@@ -1,6 +1,7 @@
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { Prisma, EventStatus, WorkflowJobStatus } from "@prisma/client";
+import { WorkItemReadRelease } from "./work-item-readable-page";
 import { redactAgentRunContent } from "./agent-runs";
 import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
@@ -134,33 +135,41 @@ export async function listAuditLogs(actor: AppActor, workspaceId: string, opts?:
   await requireWorkspaceMembership({ actor, workspaceId });
   if (opts?.entityType && !isLineageKind(opts.entityType)) return [];
   if (opts?.entityType && opts.entityId && !await captureAuditTarget(actor, workspaceId, opts.entityType, opts.entityId)) return [];
-  const rows = await prisma.auditLog.findMany({
-    where: { workspaceId,
-      ...(opts?.entityType ? { entityType: opts.entityType } : {}),
-      ...(opts?.entityId ? { entityId: opts.entityId } : {}),
-      ...(opts?.action ? { action: { contains: opts.action } } : {}),
-      ...(opts?.actorUserId ? { actorUserId: opts.actorUserId } : {}),
-    },
-    select: AUDIT_SELECT,
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    take: AUDIT_SCAN_LIMIT + 1,
-  });
-  invariant(rows.length <= AUDIT_SCAN_LIMIT, 409, "SOURCE_READ_SCAN_LIMIT", "Audit selection exceeds the safe scan limit; narrow the filters.");
-  const proofs = new Map<string, LineageRoot[] | null>();
-  const candidates = [];
-  for (const row of rows) {
-    if (!isLineageKind(row.entityType) || !(AUDIT_OPERATIONS[row.entityType]?.includes(row.action) || ARCHIVE_OPERATIONS.has(row.action))) continue;
-    const key = JSON.stringify([row.entityType, row.entityId]);
-    if (!proofs.has(key)) proofs.set(key, await captureAuditTarget(actor, workspaceId, row.entityType, row.entityId));
-    const roots = proofs.get(key);
-    if (roots) candidates.push({ row, roots });
+  const take = Math.max(0, Math.min(opts?.take ?? 50, AUDIT_SCAN_LIMIT));
+  const release = new WorkItemReadRelease(actor, workspaceId);
+  const visible = [];
+  let after: AuditOperationalRow | undefined;
+  while (visible.length < take) {
+    const rows = await prisma.auditLog.findMany({
+      where: { workspaceId,
+        ...(opts?.entityType ? { entityType: opts.entityType } : {}),
+        ...(opts?.entityId ? { entityId: opts.entityId } : {}),
+        ...(opts?.action ? { action: { contains: opts.action } } : {}),
+        ...(opts?.actorUserId ? { actorUserId: opts.actorUserId } : {}),
+        ...(after ? { OR: [{ createdAt: { lt: after.createdAt } }, { createdAt: after.createdAt, id: { lt: after.id } }] } : {}),
+      },
+      select: AUDIT_SELECT,
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 100,
+    });
+    invariant(rows.length <= 100 && (!rows.length || rows.at(-1)!.id !== after?.id),
+      503, "SOURCE_READ_SCAN_CHANGED", "Audit page changed; retry.");
+    // Denied candidates do not consume the visible sample or accumulate bodies.
+    const proofs = new Map<string, LineageRoot[] | null>();
+    for (const row of rows) {
+      if (!isLineageKind(row.entityType) || !(AUDIT_OPERATIONS[row.entityType]?.includes(row.action) || ARCHIVE_OPERATIONS.has(row.action))) continue;
+      const key = JSON.stringify([row.entityType, row.entityId]);
+      if (!proofs.has(key)) proofs.set(key, await release.observeRead(() => captureAuditTarget(actor, workspaceId, row.entityType, row.entityId)));
+      const roots = proofs.get(key);
+      if (!roots) continue;
+      release.add(roots);
+      visible.push(auditOperationalFields(row));
+      if (visible.length === take) break;
+    }
+    if (rows.length < 100) break;
+    after = rows.at(-1);
   }
   await requireWorkspaceMembership({ actor, workspaceId });
-  const visible = [];
-  for (const { row, roots } of candidates) {
-    if (await isArtifactInputProofReadable(actor, workspaceId, roots)) visible.push(auditOperationalFields(row));
-  }
-  return visible.slice(0, Math.max(0, Math.min(opts?.take ?? 50, AUDIT_SCAN_LIMIT)));
+  return release.finish(visible);
 }
 
 export async function getEntityTimeline(actor: AppActor, workspaceId: string, entityType: string, entityId: string) {

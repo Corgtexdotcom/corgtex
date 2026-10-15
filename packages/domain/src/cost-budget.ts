@@ -168,7 +168,13 @@ export async function checkBudget(workspaceId: string): Promise<{
           select: { id: true, workspaceId: true, estimatedCostUsd: true, billableCostUsd: true, createdAt: true },
           orderBy: { id: "asc" }, take: 5001,
         });
-        if (usages.length > 5000) throw new AppError(503, "INPUT_SCAN_LIMIT", "Budget alert input collection exceeds its complete scan limit.");
+        if (usages.length > 5000) {
+          // Alert delivery is optional; quota admission above uses the exact SQL
+          // total. Do not publish a truncated cost receipt or consume the period
+          // marker when this notification exceeds its individual proof budget.
+          console.warn("Budget threshold alert deferred: complete receipt exceeds the notification input budget.");
+          return;
+        }
         const lineageActor = createBudgetAlertActor(workspaceId);
         const lineageRoots = await captureArtifactInputProof(lineageActor, workspaceId, [
           { kind: "ModelUsageBudget", id: currentBudget.id, snapshot: currentBudget },

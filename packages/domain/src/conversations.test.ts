@@ -1,3 +1,4 @@
+import { AppError } from "./errors";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 import type { Prisma } from "@prisma/client";
@@ -35,6 +36,9 @@ const lineage = vi.hoisted(() => ({ assertArtifactInputWriteFence: vi.fn(), read
   advanceHumanArtifactInputLineage: vi.fn(), currentArtifactInputRoots: vi.fn(), captureArtifactInputProof: vi.fn() }));
 vi.mock("./source-lineage", async () => ({ ...lineage,
   sealArtifactInputActor: (await import("./artifact-input-actor")).sealArtifactInputActor,
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({ value: await read(), heads: new Map() }),
+  mergeLineageInputRoot: (_previous: unknown, root: unknown) => root,
+  withArtifactCountReleaseSnapshot: async (_actor: unknown, _ws: unknown, _roots: unknown, remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => { await remote(); return finish(prismaMock); },
 }));
 vi.mock("./role-onboarding", () => ({ updateRoleOnboardingStatusByConversation: vi.fn() }));
 
@@ -79,7 +83,13 @@ describe("conversations domain", () => {
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
     prismaMock.roleOnboardingSession.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.conversationPendingOperation.deleteMany.mockResolvedValue({ count: 2 });
-    lineage.captureArtifactInputProof.mockResolvedValue([{ kind: "ConversationPromptInput", id: "prompt-1", fingerprint: "a".repeat(64) }]);
+    lineage.captureArtifactInputProof.mockImplementation(async (_actor, _ws, inputs) => {
+      for (const input of inputs) {
+        const allowed = await lineage.readableArtifactIds(_actor,_ws,input.kind,[{id:input.id}]);
+        if (!allowed.has(input.id)) throw new AppError(409,"UNKNOWN_LINEAGE","Denied fixture");
+      }
+      return inputs.map((input: {kind: string; id: string}) => ({kind:input.kind,id:input.id,fingerprint:"a".repeat(64)}));
+    });
     lineage.currentArtifactInputRoots.mockResolvedValue([]);
     lineage.readableArtifactIds.mockImplementation(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map((row: { id: string }) => row.id)));
     prismaMock.conversationPromptInput.findFirst.mockResolvedValue({ id: "prompt-1", workspaceId: "workspace-1", sessionId: "conversation-1", userId: "user-1", content: "What should I do first?" });
@@ -269,17 +279,17 @@ describe("conversations domain", () => {
   });
 
   it("pages summaries without loading turns for every proved session outside the requested page", async () => {
-    const sessions = Array.from({ length: 205 }, (_, index) => ({ id: `session-${index}`, topic: `Topic ${index}`, roleOnboarding: null }));
-    prismaMock.conversationSession.findMany.mockImplementation(async ({ cursor, take }) => {
-      const start = cursor ? Number(cursor.id.slice(8)) + 1 : 0;
+    const sessions = Array.from({ length: 5005 }, (_, index) => ({ id: `session-${index}`, topic: `Topic ${index}`, roleOnboarding: null }));
+    prismaMock.conversationSession.findMany.mockImplementation(async ({ where, take }) => {
+      const start = where.OR ? Number(where.OR[1].id.lt.slice(8)) + 1 : 0;
       return sessions.slice(start, start + take);
     });
     prismaMock.conversationTurn.findMany.mockResolvedValue([]);
     const { listConversations } = await import("./conversations");
     const result = await listConversations(actor, "workspace-1", { take: 2, skip: 200 });
-    expect(result.total).toBe(205);
+    expect(result.total).toBe(5005);
     expect(result.items.map(item => item.id)).toEqual(["session-200", "session-201"]);
-    expect(prismaMock.conversationSession.findMany).toHaveBeenCalledTimes(3);
+    expect(prismaMock.conversationSession.findMany).toHaveBeenCalledTimes(51);
     expect(prismaMock.conversationTurn.findMany).toHaveBeenCalledTimes(2);
     for (const [query] of prismaMock.conversationSession.findMany.mock.calls) {
       expect(query.take).toBe(100);
@@ -287,13 +297,28 @@ describe("conversations domain", () => {
     }
   });
 
+  it("uses frozen sort values when a boundary session receives activity between pages", async () => {
+    const date=new Date("2026-06-02");
+    const sessions=Array.from({length:101},(_,i)=>({id:String(1000-i),updatedAt:date,topic:"Known",roleOnboarding:null}));
+    let calls=0;
+    prismaMock.conversationSession.findMany.mockImplementation(async ({where,take})=>{
+      if(++calls===2) sessions[99].updatedAt=new Date("2026-06-03");
+      return sessions.filter(row=>!where.OR || row.updatedAt<where.OR[0].updatedAt.lt || row.updatedAt.getTime()===where.OR[1].updatedAt.getTime() && row.id<where.OR[1].id.lt).slice(0,take).map(row=>({...row}));
+    });
+    const {listConversations}=await import("./conversations");
+    expect(await listConversations(actor,"workspace-1",{take:0})).toMatchObject({total:101,items:[]});
+    expect(calls).toBe(2);
+    expect(prismaMock.conversationSession.findMany.mock.calls[1][0]).not.toHaveProperty("cursor");
+    expect(prismaMock.conversationSession.findMany.mock.calls[1][0].where.OR[1]).toEqual({updatedAt:date,id:{lt:"901"}});
+  });
+
   it("replenishes hidden sessions and searches older turns in bounded pages", async () => {
     const sessions = Array.from({ length: 102 }, (_, index) => ({ id: `session-${index}`, topic: "Hidden topic", roleOnboarding: null }));
     const turns = Array.from({ length: 102 }, (_, index) => ({ id: `turn-${index}`, sequenceNumber: 102 - index,
       promptInputId: null, userMessage: "Hidden input", assistantMessage: "Hidden reply", contextJson: null }));
     turns[101] = { ...turns[101], userMessage: "Safe question", assistantMessage: "Safe reply" };
-    prismaMock.conversationSession.findMany.mockImplementation(async ({ cursor, take }) => {
-      const start = cursor ? Number(cursor.id.slice(8)) + 1 : 0;
+    prismaMock.conversationSession.findMany.mockImplementation(async ({ where, take }) => {
+      const start = where.OR ? Number(where.OR[1].id.lt.slice(8)) + 1 : 0;
       return sessions.slice(start, start + take);
     });
     prismaMock.conversationTurn.findMany.mockImplementation(async ({ where, cursor, take }) => {
@@ -313,10 +338,10 @@ describe("conversations domain", () => {
     expect(turnQueries.filter(query => query.where.conversationId === "session-101")).toHaveLength(2);
   });
 
-  it("rejects oversized session or turn inventories before returning partial totals", async () => {
+  it("rejects malformed database pages and per-conversation oversized turn histories", async () => {
     const { listConversations } = await import("./conversations");
     prismaMock.conversationSession.findMany.mockResolvedValue(Array.from({ length: 5001 }, (_, index) => ({ id: `session-${index}`, turns: [] })));
-    await expect(listConversations(actor, "workspace-1")).rejects.toMatchObject({ code: "INPUT_SCAN_LIMIT" });
+    await expect(listConversations(actor, "workspace-1")).rejects.toMatchObject({ code: "SOURCE_READ_SCAN_CHANGED" });
     prismaMock.conversationSession.findMany.mockResolvedValue([{ id: "session-1", roleOnboarding: null }]);
     prismaMock.conversationTurn.findMany.mockResolvedValue(Array.from({ length: 5001 }, (_, index) => ({ id: `turn-${index}` })));
     await expect(listConversations(actor, "workspace-1")).rejects.toMatchObject({ code: "INPUT_SCAN_LIMIT" });

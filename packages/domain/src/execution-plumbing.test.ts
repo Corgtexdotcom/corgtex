@@ -126,6 +126,9 @@ vi.mock("./source-lineage", () => ({
   captureArtifactInputProof: vi.fn(), captureArtifactInputSnapshotProof: vi.fn(),
   captureImmutableArtifactInputProof: vi.fn(), readableArtifactIds: vi.fn(),
   isArtifactInputProofReadable: vi.fn(), isArtifactInputProofPubliclyShareable: vi.fn(),
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({ value: await read(), heads: new Map() }),
+  mergeLineageInputRoot: (_previous: unknown, root: unknown) => root,
+  withArtifactCountReleaseSnapshot: async (_actor: unknown, _ws: unknown, _roots: unknown, remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => { await remote(); return finish(prismaMock); },
 }));
 vi.mock("./producer-lineage", () => ({ prepareProducerLineage: vi.fn(), finishProducerLineage: vi.fn() }));
 
@@ -842,6 +845,42 @@ describe("execution plumbing domain", () => {
     expect(context.recent.proposals[0]).not.toHaveProperty("ownerMember");
   });
 
+  it("replenishes a filtered recent execution page beyond five thousand hidden candidates", async () => {
+    const hidden = Array.from({length:5001},(_,i)=>requestFixture({id:`request-${String(i).padStart(5,"0")}`}));
+    const known = requestFixture({id:"request-99999"});
+    const rows = [...hidden, known];
+    prismaMock.executionRequest.findMany.mockImplementation(async ({where,take}) => rows.filter(row => !where.OR || row.id > where.OR[1].id.gt).slice(0,take));
+    prismaMock.executionRequest.findFirst.mockImplementation(async ({where}) => where.id===known.id ? known : null);
+    const {listExecutionRequests}=await import("./execution-plumbing");
+    expect((await listExecutionRequests(actor,{workspaceId:"workspace-1",status:"pending",take:1})).map(row=>row.id)).toEqual([known.id]);
+    expect(prismaMock.executionRequest.findMany).toHaveBeenCalledTimes(51);
+    expect(prismaMock.executionRequest.findMany.mock.calls.every(([q])=>q.take===100 && q.where.status==="PENDING"
+      && JSON.stringify(q.orderBy)===JSON.stringify([{createdAt:"desc"},{id:"asc"}]))).toBe(true);
+  });
+
+  it("replenishes recent company inputs without a corpus cap and preserves coalesced meeting dates", async () => {
+    const rows=Array.from({length:5021},(_,i)=>({id:`action-${String(i).padStart(5,"0")}`,title:`Action ${i}`,updatedAt:new Date("2026-06-02"),assigneeMemberId:null}));
+    prismaMock.action.findMany.mockImplementation(async ({where,take})=>rows.filter(row=>!where.OR || row.id>where.OR[1].id.gt).slice(0,take));
+    const capture=vi.mocked(captureArtifactInputProof).getMockImplementation()!;
+    vi.mocked(captureArtifactInputProof).mockImplementation(async (...args)=>{
+      if(args[2].some(input=>input.kind==="Action" && input.id < "action-05001")) throw new AppError(409,"UNKNOWN_LINEAGE","Hidden candidate");
+      return capture(...args);
+    });
+    prismaMock.tension.findMany.mockResolvedValue([]);
+    prismaMock.proposal.findMany.mockResolvedValue([]);
+    prismaMock.brainArticle.findMany.mockResolvedValue([]);
+    prismaMock.meeting.findMany.mockResolvedValue([
+      {id:"meeting-a",title:"Recorded earlier",recordedAt:new Date("2024-01-01"),updatedAt:new Date("2026-06-01")},
+      {id:"meeting-b",title:"Updated fallback",recordedAt:null,updatedAt:new Date("2026-05-01")},
+    ]);
+    const {getCompanyContext}=await import("./execution-plumbing");
+    const context=await getCompanyContext(actor,"workspace-1") as any;
+    expect(context.recent.actions.map((row:any)=>row.id)).toEqual(rows.slice(5001).map(row=>row.id));
+    expect(context.recent.meetings.map((row:any)=>row.id)).toEqual(["meeting-b","meeting-a"]);
+    expect(prismaMock.action.findMany).toHaveBeenCalledTimes(51);
+    expect(prismaMock.action.findMany.mock.calls.every(([q])=>q.take===100)).toBe(true);
+  });
+
   it("applies Brain draft visibility when listing article write-back targets", async () => {
     requireWorkspaceMembership.mockResolvedValueOnce({ id: "member-1", workspaceId: "workspace-1", userId: "user-1", role: "MEMBER", isActive: true });
     prismaMock.brainArticle.findMany.mockResolvedValueOnce([]);
@@ -1354,13 +1393,13 @@ describe("execution plumbing domain", () => {
     expect(prismaMock.executionRequest.create).not.toHaveBeenCalled();
   });
 
-  it("filters unknown CRM requests and target titles before sampling and enforces an explicit read budget", async () => {
+  it("filters unknown CRM requests and target titles before sampling and rejects malformed pages", async () => {
     const { listExecutionRequests, listWritebackTargets } = await import("./execution-plumbing");
     prismaMock.executionRequest.findMany.mockResolvedValue([
       requestFixture({ id: "unknown", writebackTargetType: "CRM_COMMUNICATION", contextJson: null }),
       requestFixture({ id: "known", writebackTargetType: "CRM_COMMUNICATION" }),
     ]);
-    prismaMock.executionRequest.findFirst.mockResolvedValueOnce(requestFixture({ id: "known", writebackTargetType: "CRM_COMMUNICATION" }));
+    prismaMock.executionRequest.findFirst.mockImplementation(async ({where}) => where.id === "known" ? requestFixture({ id: "known", writebackTargetType: "CRM_COMMUNICATION" }) : null);
     expect((await listExecutionRequests(actor, { workspaceId: "workspace-1", take: 1 })).map((row) => row.id)).toEqual(["known"]);
     prismaMock.crmCommunicationSuggestion.findMany.mockResolvedValue([
       communicationSuggestionFixture({ id: "unproven", title: "Hidden raw title" }), communicationSuggestionFixture({ id: "known", title: "Public draft", subject: null }),
@@ -1371,6 +1410,6 @@ describe("execution plumbing domain", () => {
     });
     expect((await listWritebackTargets(actor, { workspaceId: "workspace-1", targetTypes: ["CRM_COMMUNICATION"], take: 1 })).items.map((row) => row.title)).toEqual(["Public draft"]);
     prismaMock.executionRequest.findMany.mockResolvedValue(Array.from({ length: 5001 }, () => requestFixture()));
-    await expect(listExecutionRequests(actor, { workspaceId: "workspace-1" })).rejects.toMatchObject({ code: "SOURCE_READ_SCAN_LIMIT" });
+    await expect(listExecutionRequests(actor, { workspaceId: "workspace-1" })).rejects.toMatchObject({ code: "SOURCE_READ_SCAN_CHANGED" });
   });
 });
