@@ -2500,7 +2500,7 @@ it("replenishes a bounded ordered page for visible skip/take in a 5001-goal corp
     const after = args?.where?.AND?.[1]?.OR?.[2]?.id?.gt;
     const start = after ? rows.findIndex(row => row.id === after) + 1 : 0;
     return rows.slice(start, args?.take === undefined ? undefined : start + args.take);
-  }) as typeof prisma.goal.findMany);
+  }) as unknown as typeof prisma.goal.findMany);
   vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspace, _kind, records) =>
     new Set(records.filter(row => Number(row.id.slice(-5)) >= 100).map(row => row.id)));
   const actor = { kind: "user", user: { id: "user-1" } } as Parameters<typeof listGoals>[0];

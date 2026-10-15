@@ -2378,12 +2378,12 @@ export async function captureHumanArtifactInputAdvance(params: {
   else await tx.$queryRaw(Prisma.sql`SELECT id FROM ${Prisma.raw(`"${physical.table}"`)} WHERE id = ${physical.id} FOR UPDATE`);
   const actual = await loadArtifact(tx, workspaceId, artifact);
   const fingerprint = lineageContentFingerprint(artifact.kind, before);
-  invariant(actual && lineageContentFingerprint(artifact.kind, actual) === fingerprint,
+  invariant(actual && actual.id === artifact.id && lineageContentFingerprint(artifact.kind, actual) === fingerprint,
     409, "SOURCE_CHANGED", "Artifact changed before the governed edit.");
   const previous = await latestManifest(tx, workspaceId, artifact);
   invariant(previous && manifestAdvanceStamp(previous) === manifestAdvanceStamp(initial)
     && previous.contentHash === fingerprint, 409, "SOURCE_CHANGED", "Artifact lineage changed before the governed edit.");
-  if (!(await readableArtifactIds(actor, workspaceId, artifact.kind, [actual], tx)).has(artifact.id)) return undefined;
+  if (!(await readableArtifactIds(actor, workspaceId, artifact.kind, [actual as { id: string; [key: string]: unknown }], tx)).has(artifact.id)) return undefined;
   invariant(await isArtifactPermissionEpochProofCurrent(workspaceId, saved, tx),
     409, "SOURCE_CHANGED", "Artifact permissions changed before the governed edit.");
   const own = saved.entries.find(entry => entry.kind === artifactOwnEpochKind(artifact.kind) && entry.id === artifact.id);
