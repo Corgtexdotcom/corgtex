@@ -584,17 +584,21 @@ async function loadSlackRequest(params: SlackInputPayload): Promise<SlackProofCo
   return { actor, prompt, roots, publicReply, sourceMessageId, threadTs };
 }
 
-/** Bound raw scans, then apply source and public-audience gates before sampling. */
-async function loadSlackReadableRows<T extends { id: string }>(params: {
+/** Stream bounded canonical pages, admitting source and audience proofs before sampling. */
+export async function loadSlackReadableRows<T extends { id: string }>(params: {
   proof: SlackProofContext; workspaceId: string; kind: LineageKind; limit: number;
-  load: (take: number, skip: number) => Promise<T[]>;
+  load: (page: { take: number; cursor?: { id: string }; skip?: number }) => Promise<T[]>;
 }) {
   const records: T[] = [];
   const roots: LineageRoot[][] = [];
   const seen = new Set<string>();
   const take = 50;
-  for (let skip = 0; skip < 5_000 && records.length < params.limit; skip += take) {
-    const batch = await params.load(take, skip);
+  let cursor: { id: string } | undefined;
+  while (records.length < params.limit) {
+    const batch = await params.load({ take, ...(cursor ? { cursor, skip: 1 } : {}) });
+    invariant(batch.length <= take, 409, "SOURCE_CHANGED", "Slack query returned an invalid page.");
+    const next = batch.at(-1);
+    invariant(!next || next.id !== cursor?.id, 409, "SOURCE_CHANGED", "Slack inputs changed while reading.");
     const captured = await captureReadableDigestInputs({ actor: params.proof.actor, workspaceId: params.workspaceId, kind: params.kind, records: batch });
     for (const row of captured.records) {
       if (seen.has(row.id)) continue;
@@ -605,8 +609,8 @@ async function loadSlackReadableRows<T extends { id: string }>(params: {
       if (records.length === params.limit) break;
     }
     if (batch.length < take || records.length === params.limit) return { records, roots: mergeArtifactInputProofs(...roots) };
+    cursor = { id: next!.id };
   }
-  invariant(records.length === params.limit, 503, "INPUT_SCAN_LIMIT", "Slack context needs a lineage rebuild before collection can complete.");
   return { records, roots: mergeArtifactInputProofs(...roots) };
 }
 
@@ -674,13 +678,16 @@ export async function runSlackAgent(input: SlackInputPayload & {
       const [memberRows, externalRows, actions, tensions, proposals, messages, channel, summaries, selected] = await Promise.all([
         listMembers(params.workspaceId),
         prisma.communicationExternalUser.findMany({ where: { installationId: params.installationId, workspaceId: params.workspaceId, provider: "SLACK", isDeleted: false, isBot: false } }),
-        loadSlackReadableRows<Action>({ ...rowParams, kind: "Action", limit: 5, load: (take, skip) => prisma.action.findMany({ where: { workspaceId: params.workspaceId, status: { in: ["OPEN", "IN_PROGRESS"] }, archivedAt: null }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take, skip }) }),
-        loadSlackReadableRows<Tension>({ ...rowParams, kind: "Tension", limit: 5, load: (take, skip) => prisma.tension.findMany({ where: { workspaceId: params.workspaceId, status: "OPEN", archivedAt: null }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take, skip }) }),
-        loadSlackReadableRows<Proposal>({ ...rowParams, kind: "Proposal", limit: 5, load: (take, skip) => prisma.proposal.findMany({ where: { workspaceId: params.workspaceId, status: "OPEN", archivedAt: null }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take, skip }) }),
+        loadSlackReadableRows<Action>({ ...rowParams, kind: "Action", limit: 5, load: (page) => prisma.action.findMany({ where: { workspaceId: params.workspaceId, status: { in: ["OPEN", "IN_PROGRESS"] }, archivedAt: null }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], ...page }) }),
+        loadSlackReadableRows<Tension>({ ...rowParams, kind: "Tension", limit: 5, load: (page) => prisma.tension.findMany({ where: { workspaceId: params.workspaceId, status: "OPEN", archivedAt: null }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], ...page }) }),
+        loadSlackReadableRows<Proposal>({ ...rowParams, kind: "Proposal", limit: 5, load: (page) => prisma.proposal.findMany({ where: { workspaceId: params.workspaceId, status: "OPEN", archivedAt: null }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], ...page }) }),
         loadSlackReadableRows<CommunicationMessage>({ ...rowParams, kind: "CommunicationMessage", limit: 80,
-          load: async (take, skip) => freshThread.slice(skip, skip + take) }),
-        loadSlackReadableRows<CommunicationMessage>({ ...rowParams, kind: "CommunicationMessage", limit: 40, load: (take, skip) => prisma.communicationMessage.findMany({ where: { ...commonMessageWhere, ...(currentMessageDate && Number.isFinite(currentMessageDate.getTime()) ? { messageTs: { lte: currentMessageDate } } : {}) }, orderBy: [{ messageTs: "desc" }, { id: "asc" }], take, skip }) }),
-        loadSlackReadableRows<CommunicationContextSummary>({ ...rowParams, kind: "CommunicationContextSummary", limit: 6, load: (take, skip) => prisma.communicationContextSummary.findMany({ where: { workspaceId: params.workspaceId, installationId: params.installationId, provider: "SLACK", externalChannelId: params.channelId!, ...(params.threadTs ? { OR: [{ threadExternalId: params.threadTs }, { threadExternalId: null }] } : {}) }, orderBy: [{ summaryDate: "desc" }, { id: "asc" }], take, skip }) }),
+          load: async ({ take, cursor }) => {
+            const start = cursor ? freshThread.findIndex(row => row.id === cursor.id) + 1 : 0;
+            return freshThread.slice(start, start + take);
+          } }),
+        loadSlackReadableRows<CommunicationMessage>({ ...rowParams, kind: "CommunicationMessage", limit: 40, load: (page) => prisma.communicationMessage.findMany({ where: { ...commonMessageWhere, ...(currentMessageDate && Number.isFinite(currentMessageDate.getTime()) ? { messageTs: { lte: currentMessageDate } } : {}) }, orderBy: [{ messageTs: "desc" }, { id: "asc" }], ...page }) }),
+        loadSlackReadableRows<CommunicationContextSummary>({ ...rowParams, kind: "CommunicationContextSummary", limit: 6, load: (page) => prisma.communicationContextSummary.findMany({ where: { workspaceId: params.workspaceId, installationId: params.installationId, provider: "SLACK", externalChannelId: params.channelId!, ...(params.threadTs ? { OR: [{ threadExternalId: params.threadTs }, { threadExternalId: null }] } : {}) }, orderBy: [{ summaryDate: "desc" }, { id: "asc" }], ...page }) }),
         params.sourceMessageId ? prisma.communicationMessage.findFirst({ where: { ...commonMessageWhere, id: params.sourceMessageId! } }) : Promise.resolve(null),
       ]);
       const members = await captureReadableDigestInputs({ actor, workspaceId: params.workspaceId, kind: "Member", records: memberRows.map(member => ({ ...member, user: { id: member.user.id, email: member.user.email, displayName: member.user.displayName } })) });

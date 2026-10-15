@@ -156,6 +156,17 @@ describe("meetings domain", () => {
     });
   });
 
+  it("listMeetings returns all 5000 readable matches without an implicit global cap", async () => {
+    const rows = Array.from({ length: 5_000 }, (_, i) => ({ id: `meeting-${i}` }));
+    prismaMock.meeting.findMany.mockImplementation(async ({ take, cursor }) => {
+      const start = cursor ? rows.findIndex(row => row.id === cursor.id) + 1 : 0;
+      return rows.slice(start, start + take);
+    });
+    const { listMeetings } = await import("./meetings");
+    await expect(listMeetings(actor, "workspace-1")).resolves.toEqual(rows);
+    expect(prismaMock.meeting.findMany).toHaveBeenCalledTimes(51);
+  });
+
   it("listMeetings matches multiple members through participant ids and emails", async () => {
     prismaMock.member.findMany.mockResolvedValue([
       { id: "member-1", userId: "user-1", user: { id: "user-1", email: "one@example.test" } },

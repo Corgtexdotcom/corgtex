@@ -581,13 +581,21 @@ describe("meeting-intelligence-context", () => {
     expect(read).toHaveBeenNthCalledWith(2, { take: 100, cursor: { id: "row-99" }, skip: 1 });
   });
 
-  it("fails closed at the explicit scan budget instead of returning a silently truncated list", async () => {
-    let offset = 0;
-    const read = vi.fn(async ({ take }: { take: number }) => Array.from({ length: take }, () => ({ id: `row-${offset++}` })));
-    await expect(readMeetingInputBatches(read, async () => []))
-      .rejects.toMatchObject({ code: "MEETING_READ_BUDGET", status: 413 });
-    expect(read).toHaveBeenCalledTimes(50);
-    expect(offset).toBe(5_000);
+  it("streams past 5000 denied inputs to fill the visible window", async () => {
+    const rows = Array.from({ length: 5_003 }, (_, i) => ({ id: `row-${i}`, visible: i >= 5_001 }));
+    const read = vi.fn(async ({ take, cursor }: { take: number; cursor?: { id: string } }) => {
+      const start = cursor ? rows.findIndex(row => row.id === cursor.id) + 1 : 0;
+      return rows.slice(start, start + take);
+    });
+    await expect(readMeetingInputBatches(read, async page => page.filter(row => row.visible), 2))
+      .resolves.toEqual(rows.slice(5_001));
+    expect(read).toHaveBeenCalledTimes(51);
+  });
+
+  it("rejects a stalled page instead of looping on changing inputs", async () => {
+    const page = Array.from({ length: 100 }, (_, i) => ({ id: `row-${i}` }));
+    await expect(readMeetingInputBatches(async () => page, async () => []))
+      .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
   });
 
 });

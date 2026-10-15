@@ -47,7 +47,6 @@ export function meetingAgendaInputProjection(meeting: Record<string, unknown>) {
 type CapturedContextInput = LineageInput & { snapshot: Record<string, unknown> };
 
 const MEETING_READ_BATCH_SIZE = 100;
-const MEETING_READ_SCAN_BUDGET = 5_000;
 
 type MeetingInputPage = { take: number; cursor?: { id: string }; skip?: number };
 
@@ -57,18 +56,16 @@ export async function readMeetingInputBatches<T extends { id: string }>(
   admit: (rows: T[]) => Promise<T[]>,
   take?: number,
 ): Promise<T[]> {
-  invariant(take === undefined || (Number.isInteger(take) && take >= 0 && take <= MEETING_READ_SCAN_BUDGET),
+  invariant(take === undefined || (Number.isSafeInteger(take) && take >= 0),
     400, "INVALID_INPUT", "Meeting result limit is invalid.");
   if (take === 0) return [];
   const results: T[] = [];
   const seen = new Set<string>();
   let cursor: { id: string } | undefined;
-  let scanned = 0;
-  while (scanned < MEETING_READ_SCAN_BUDGET) {
-    const batchSize = Math.min(MEETING_READ_BATCH_SIZE, MEETING_READ_SCAN_BUDGET - scanned);
+  while (true) {
+    const batchSize = MEETING_READ_BATCH_SIZE;
     const rows = await readPage({ take: batchSize, ...(cursor ? { cursor, skip: 1 } : {}) });
     invariant(rows.length <= batchSize, 409, "SOURCE_CHANGED", "Meeting query returned an invalid page.");
-    scanned += rows.length;
     const fresh = rows.filter((row) => !seen.has(row.id));
     fresh.forEach((row) => seen.add(row.id));
     results.push(...await admit(fresh));
@@ -78,7 +75,6 @@ export async function readMeetingInputBatches<T extends { id: string }>(
     invariant(next.id !== cursor?.id && fresh.length > 0, 409, "SOURCE_CHANGED", "Meeting inputs changed while reading.");
     cursor = { id: next.id };
   }
-  invariant(false, 413, "MEETING_READ_BUDGET", "This meeting query is too broad. Narrow the date range and try again.");
 }
 
 async function queryVisibleContextRows<T extends { id: string }>(actor: AppActor, workspaceId: string,

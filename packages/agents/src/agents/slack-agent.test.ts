@@ -813,11 +813,15 @@ describe("runSlackAgent", () => {
     for (const row of hidden.slice(0, 70)) lineage.unknown.add(row.id);
     for (const row of hidden.slice(70)) lineage.privateIds.add(row.id);
     const publicRows = Array.from({ length: 7 }, (_, index) => ({ id: `public-${index}`, title: `Public action ${index}`, bodyMd: "Public body", status: "OPEN", createdAt: new Date() }));
-    prismaMock.action.findMany.mockImplementation(async ({ take, skip }) => [...hidden, ...publicRows].slice(skip, skip + take));
+    prismaMock.action.findMany.mockImplementation(async ({ take, cursor }) => {
+      const rows = [...hidden, ...publicRows];
+      const start = cursor ? rows.findIndex(row => row.id === cursor.id) + 1 : 0;
+      return rows.slice(start, start + take);
+    });
     extractMock.mockResolvedValueOnce({ output: { intent: "brief", confidence: 0.9 } });
     const { runSlackAgent } = await import("./slack-agent");
     await runTrustedSlackAgent(runSlackAgent, { ...basePayload(), source: "app_mention", prompt: "brief" });
-    expect(prismaMock.action.findMany.mock.calls.map(([query]) => query.skip)).toEqual([0, 50, 100]);
+    expect(prismaMock.action.findMany.mock.calls.map(([query]) => query.cursor?.id)).toEqual([undefined, "hidden-49", "hidden-99"]);
     const prompt = JSON.parse(extractMock.mock.calls[0][0].input);
     expect(prompt.openActions.map((row: any) => row.id)).toEqual(publicRows.slice(0, 5).map(row => row.id));
     expect(JSON.stringify(prompt)).not.toContain("PRIVATE");
@@ -939,15 +943,21 @@ describe("runSlackAgent", () => {
   });
 
 
-  it("fails the bounded candidate scan before any model when it cannot establish a permitted sample", async () => {
-    const hidden = Array.from({ length: 5_000 }, (_, index) => ({ id: `unknown-${index}`, title: "UNKNOWN body", status: "OPEN" }));
+  it("finds readable Slack context after 5001 denied candidates", async () => {
+    const hidden = Array.from({ length: 5_001 }, (_, index) => ({ id: `unknown-${index}`, title: "UNKNOWN body", status: "OPEN" }));
     for (const row of hidden) lineage.unknown.add(row.id);
-    prismaMock.action.findMany.mockImplementation(async ({ take, skip }) => hidden.slice(skip, skip + take));
+    const rows = [...hidden, { id: "readable-tail", title: "Readable tail", status: "OPEN" }];
+    extractMock.mockResolvedValueOnce({ output: { intent: "brief", confidence: 0.9 } });
+    prismaMock.action.findMany.mockImplementation(async ({ take, skip = 0, cursor }) => {
+      const start = cursor ? rows.findIndex(row => row.id === cursor.id) + skip : skip;
+      return rows.slice(start, start + take);
+    });
     const { runSlackAgent } = await import("./slack-agent");
-    await expect(runTrustedSlackAgent(runSlackAgent, { ...basePayload(), source: "app_mention" })).rejects.toMatchObject({ code: "INPUT_SCAN_LIMIT" });
-    expect(prismaMock.action.findMany).toHaveBeenCalledTimes(100);
-    expect(extractMock).not.toHaveBeenCalled();
-    expect(deliverSlackAgentResponseMock).not.toHaveBeenCalled();
+    await runTrustedSlackAgent(runSlackAgent, { ...basePayload(), source: "app_mention" });
+    expect(prismaMock.action.findMany).toHaveBeenCalledTimes(101);
+    expect(extractMock).toHaveBeenCalled();
+    expect(JSON.stringify(extractMock.mock.calls)).toContain("Readable tail");
+    expect(JSON.stringify(extractMock.mock.calls)).not.toContain("UNKNOWN body");
   });
 
   it("keeps an unknown newly created result out of both the reply and the whole-run receipt", async () => {
