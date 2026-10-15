@@ -111,7 +111,9 @@ const f = vi.hoisted(() => {
       chat: vi.fn(async () => ({ content: "SYNTHETIC derived answer" })) } };
 });
 
-vi.mock("../../domain/src/source-lineage", () => ({withArtifactCountReleaseSnapshot: f.countRelease}));
+vi.mock("../../domain/src/source-lineage", () => ({withArtifactCountReleaseSnapshot: f.countRelease,
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map<string, string>()}),
+  isArtifactInputProofReadableAtObservedHeads: f.currentProof}));
 vi.mock("@corgtex/domain", () => ({ readableArtifactIds: f.readable, resolveKnowledgeAccessDomains: f.resolveDomains, lineageContentFingerprint: f.hash, captureArtifactInputProof: f.capture, isArtifactInputProofReadable: f.currentProof,
   mergeLineageInputRoot: (prior: unknown, root: unknown) => {
     if (prior && JSON.stringify(prior) !== JSON.stringify(root)) throw Object.assign(new Error("Changed original proof"), {code: "SOURCE_CHANGED"});
@@ -128,7 +130,7 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
 vi.mock("@corgtex/models", async () => ({ ...await import("../../models/src/provider-errors"), defaultModelGateway: f.gateway, resolveModel: () => "test" }));
 
 import { resetLocalCacheStore } from "@corgtex/shared";
-import { answerKnowledgeQuestion, fetchReadableKnowledgeChunk, getKnowledgeSearchInputRoots, searchIndexedKnowledge } from "./retrieval";
+import { answerKnowledgeQuestion, fetchReadableKnowledgeChunk, getKnowledgeSearchInputRoots, scanReadableKnowledgeChunks, searchIndexedKnowledge } from "./retrieval";
 
 const alice: AppActor = { kind: "user", user: { id: "alice", email: "alice@example.test", displayName: "Alice" } };
 const bob: AppActor = { kind: "user", user: { id: "bob", email: "bob@example.test", displayName: "Bob" } };
@@ -559,10 +561,42 @@ describe("child lineage admission before retrieval windows", () => {
     expect(f.gateway.rerank.mock.calls[0][0].documents).toHaveLength(1);
   });
 
-  it("fails explicitly at the raw scan bound before models, counts, or caches release partial results", async () => {
+  it("replenishes search beyond 5000 denied children without expanding the readable candidate window", async () => {
+    f.domains.set("bob:ws-1", ["WORKSPACE"]);
+    const chunks = crowdedChildren("ws-1", 5001);
+    const results = await searchIndexedKnowledge({actor: bob, workspaceId: "ws-1", query: "policy"});
+    expect(results.map(row => row.chunkId)).toEqual(chunks.slice(5001).map(row => row.id));
+    const pages = f.prisma.knowledgeChunk.findMany.mock.calls.filter(([query]) => query.take === 500);
+    expect(pages).toHaveLength(11);
+    expect(f.gateway.rerank.mock.calls[0][0].documents).toHaveLength(2);
+    expect(JSON.stringify(f.gateway.rerank.mock.calls)).not.toContain("PRIVATE");
+    const roots = await getKnowledgeSearchInputRoots(bob, "ws-1", results);
+    expect(roots.filter(root => root.kind === "KnowledgeChunk").map(root => root.id)).toEqual(chunks.slice(5001).map(row => row.id));
+  });
+
+  it.each([false, true])("preserves readable candidate ceilings and source-type windows (explicit types: %s)", async explicitTypes => {
+    for (let index = 0; index < 501; index++) {
+      article(`article-${index}`, [publicInput]);
+      const document = article(`document-${index}`, [publicInput]);
+      Object.assign(document, {type: "DOCUMENT", accessDomain: "WORKSPACE"});
+      const chunk = f.receipts[f.receipts.length - 1];
+      chunk.sourceType = "DOCUMENT";
+      chunk.metadata.sourceContentHash = f.hash("Document", document);
+    }
+    const result = await scanReadableKnowledgeChunks({actor: bob, workspaceId: "ws-1", accessDomains: ["WORKSPACE"],
+      ...(explicitTypes ? {sourceTypes: ["BRAIN_ARTICLE" as const, "DOCUMENT" as const, "BRAIN_ARTICLE" as const]} : {})}, 500);
+    expect(result.chunks).toHaveLength(explicitTypes ? 1000 : 500);
+    for (const type of ["BRAIN_ARTICLE", "DOCUMENT"]) {
+      expect(result.chunks.filter(chunk => chunk.sourceType === type)).toHaveLength(explicitTypes ? 500 : 250);
+    }
+    expect(result.roots.filter(root => root.kind === "KnowledgeChunk")).toHaveLength(result.chunks.length);
+    expect(result.chunks.map(chunk => chunk.id)).not.toContain("chunk-article-500");
+    expect(result.chunks.map(chunk => chunk.id)).not.toContain("chunk-document-500");
+  });
+
+  it("keeps the complete count's existing raw bound without releasing a partial total", async () => {
     f.domains.set("bob:ws-1", ["WORKSPACE"]);
     crowdedChildren("ws-1", 5001);
-    await expect(searchIndexedKnowledge({actor: bob, workspaceId: "ws-1", query: "policy"})).rejects.toMatchObject({code: "KNOWLEDGE_SCAN_LIMIT"});
     const {countReadableKnowledgeChunks} = await import("./counts");
     await expect(countReadableKnowledgeChunks(bob, "ws-1")).rejects.toMatchObject({code: "KNOWLEDGE_SCAN_LIMIT"});
     expect(f.gateway.embed).not.toHaveBeenCalled();
