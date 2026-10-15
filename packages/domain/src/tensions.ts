@@ -154,12 +154,13 @@ async function redactTensionJoins<T extends {
   raisedByMember?: { id: string } | null;
   circleId?: string | null;
   circle?: { id: string } | null;
-}>(actor: AppActor, workspaceId: string, rows: T[]) {
+}>(actor: AppActor, workspaceId: string, rows: T[], release?: WorkItemReadRelease) {
   const [authors, members, circles] = await Promise.all([
     captureReadableDigestInputs({ actor, workspaceId, kind: "User", records: rows.flatMap((row) => row.author ? [row.author] : []) }),
     captureReadableDigestInputs({ actor, workspaceId, kind: "Member", records: rows.flatMap((row) => [row.assigneeMember, row.raisedByMember].filter((member): member is { id: string } => Boolean(member))) }),
     captureReadableDigestInputs({ actor, workspaceId, kind: "Circle", records: rows.flatMap((row) => row.circle ? [row.circle] : []) }),
   ]);
+  release?.add([...authors.roots, ...members.roots, ...circles.roots]);
   const authorIds = new Set(authors.records.map((row) => row.id));
   const memberIds = new Set(members.records.map((row) => row.id));
   const circleIds = new Set(circles.records.map((row) => row.id));
@@ -215,7 +216,7 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
 
   const release = new WorkItemReadRelease(actor,workspaceId);
   const page= !opts?.sort || opts.sort==="priority"
-    ? await rankedReadableTensionPage({actor,workspaceId,release,take,skip,
+    ? await rankedReadableTensionPage<import("@prisma/client").Tension>({actor,workspaceId,release,take,skip,
       load:afterId=>prisma.tension.findMany({where:afterId?{AND:[where,{id:{gt:afterId}}]}:where,orderBy:{id:"asc"},take:100}),
       votes:async row=>{
         let count=0,afterId:string|undefined;
@@ -227,7 +228,7 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
           afterId=votes.at(-1)!.id;
         }
       }})
-    : await readableWorkItemPage({actor,workspaceId,release,kind:"Tension",take,skip,
+    : await readableWorkItemPage<import("@prisma/client").Tension>({actor,workspaceId,release,kind:"Tension",take,skip,
       load:after=>prisma.tension.findMany({where:after?{AND:[where,workItemAfter(after,opts.sort)]}:where,orderBy:workItemOrderBy(opts.sort),take:100})});
   const hydrated=page.items.length?await prisma.tension.findMany({where:{AND:[where,{id:{in:page.items.map(row=>row.id)}}]},
       include: {
@@ -267,11 +268,11 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
   }):[];
   const byId=new Map(hydrated.map(row=>[row.id,row]));
   const selected=page.items.flatMap(row=>{const loaded=byId.get(row.id);return loaded?[{...loaded,...row}]:[];});
-  const votes=await readableTensionVotes(actor,workspaceId,selected.flatMap(row=>row.upvotes??[]));
+  const votes=await readableTensionVotes(actor,workspaceId,selected.flatMap(row=>row.upvotes??[]),release);
   const voteIds=new Set(votes.map(vote=>vote.id));
   const items=selected.map(row=>({...row,upvotes:(row.upvotes??[]).filter(vote=>voteIds.has(vote.id))}));
   const total=page.total-(page.items.length-items.length);
-  const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "TENSION", items.map((item) => item.id));
+  const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "TENSION", items.map((item) => item.id), rows => release.observe("AdviceRequest", rows));
   const redactedItems = await redactTensionJoins(actor, workspaceId, items, release);
   const linkedProposals = items.flatMap((item) => item.proposal ? [item.proposal] : []);
   const visibleProposalIds = linkedProposals.length

@@ -1,6 +1,7 @@
 import { readableArtifactIds } from "./source-lineage";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import type {
+  AdviceRequest,
   AdviceRequestAudienceType,
   AdviceRequestPreferredChannel,
   AdviceRequestStatus,
@@ -67,6 +68,7 @@ export async function loadAdviceRequestCountSummaries(
   workspaceId: string,
   subjectType: AdviceSubjectType,
   subjectIds: string[],
+  observe?: (requests: AdviceRequest[]) => Promise<void>,
 ) {
   const uniqueSubjectIds = uniqueStrings(subjectIds);
   const summaries = new Map<string, AdviceRequestCountSummary>(
@@ -87,6 +89,7 @@ export async function loadAdviceRequestCountSummaries(
   });
 
   const visible = await readableArtifactIds(actor, workspaceId, "AdviceRequest", processes.flatMap((process) => process.requests));
+  await observe?.(processes.flatMap(process => process.requests).filter(request => visible.has(request.id)));
   for (const process of processes) {
     const requests = process.requests.filter((request) => visible.has(request.id));
     const summary = summaries.get(process.subjectId) ?? emptyAdviceRequestCountSummary();

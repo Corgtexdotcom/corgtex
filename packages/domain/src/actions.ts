@@ -181,7 +181,7 @@ async function resolveAssigneeMemberId(tx: Prisma.TransactionClient, workspaceId
   return member.id;
 }
 
-async function loadActionChecklistSummaries(actor: AppActor, workspaceId: string, actionIds: string[]) {
+async function loadActionChecklistSummaries(actor: AppActor, workspaceId: string, actionIds: string[], release?: WorkItemReadRelease) {
   const summaries = new Map<string, ActionChecklistSummary>();
   if (actionIds.length === 0) return summaries;
 
@@ -194,6 +194,7 @@ async function loadActionChecklistSummaries(actor: AppActor, workspaceId: string
   });
 
   const visible = await readableArtifactIds(actor, workspaceId, "ActionChecklistItem", items);
+  await release?.observe("ActionChecklistItem", items.filter(item => visible.has(item.id)));
   for (const item of items.filter((item) => visible.has(item.id))) {
     const current = summaries.get(item.actionId) ?? { checklistItemCount: 0, checklistCompletedCount: 0 };
     current.checklistItemCount += 1;
@@ -337,12 +338,13 @@ async function redactActionJoins<T extends {
   assigneeMember?: { id: string } | null;
   circleId?: string | null;
   circle?: { id: string } | null;
-}>(actor: AppActor, workspaceId: string, rows: T[]) {
+}>(actor: AppActor, workspaceId: string, rows: T[], release?: WorkItemReadRelease) {
   const [authors, members, circles] = await Promise.all([
     captureReadableDigestInputs({ actor, workspaceId, kind: "User", records: rows.flatMap((row) => row.author ? [row.author] : []) }),
     captureReadableDigestInputs({ actor, workspaceId, kind: "Member", records: rows.flatMap((row) => row.assigneeMember ? [row.assigneeMember] : []) }),
     captureReadableDigestInputs({ actor, workspaceId, kind: "Circle", records: rows.flatMap((row) => row.circle ? [row.circle] : []) }),
   ]);
+  release?.add([...authors.roots, ...members.roots, ...circles.roots]);
   const authorIds = new Set(authors.records.map((row) => row.id));
   const memberIds = new Set(members.records.map((row) => row.id));
   const circleIds = new Set(circles.records.map((row) => row.id));
@@ -370,7 +372,7 @@ export async function listActions(actor: AppActor, workspaceId: string, opts?: L
   const where = actionListWhere(actor, membership, workspaceId, opts);
 
   const release = new WorkItemReadRelease(actor,workspaceId);
-  const page=await readableWorkItemPage({actor,workspaceId,release,kind:"Action",take,skip,
+  const page=await readableWorkItemPage<import("@prisma/client").Action>({actor,workspaceId,release,kind:"Action",take,skip,
     load: after => prisma.action.findMany({where:after?{AND:[where,actionPageAfter(after,opts?.sort)]}:where,
       orderBy:workItemOrderBy(opts?.sort),take:100})});
   const selected = page.items;
@@ -403,8 +405,8 @@ export async function listActions(actor: AppActor, workspaceId: string, opts?: L
   const total=page.total-(selected.length-items.length);
   const itemIds = items.map((item) => item.id);
   const [requestCountSummaries, checklistSummaries] = await Promise.all([
-    loadAdviceRequestCountSummaries(actor, workspaceId, "ACTION", itemIds),
-    loadActionChecklistSummaries(actor, workspaceId, itemIds),
+    loadAdviceRequestCountSummaries(actor, workspaceId, "ACTION", itemIds, rows => release.observe("AdviceRequest", rows)),
+    loadActionChecklistSummaries(actor, workspaceId, itemIds, release),
   ]);
   const redactedItems = await redactActionJoins(actor, workspaceId, items, release);
   const linkedProposals = items.flatMap((item) => item.proposal ? [item.proposal] : []);
