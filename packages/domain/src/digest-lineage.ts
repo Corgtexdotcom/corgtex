@@ -143,19 +143,12 @@ export async function loadReadableDigestQuery<T extends { id: string }>(params: 
   const records: T[] = [];
   const release = params.release ?? (params.completeScan ? new DigestReadRelease(params.actor, params.workspaceId) : undefined);
   const take = Math.min(100, Math.max(50, params.limit));
-  const scanLimit = 5_000;
   let skip = 0;
   let after: T | undefined;
   const seen = new Set<string>();
   const candidates = new Set<string>();
   while (params.completeScan || records.length < params.limit) {
     const page = params.keyset ? { skip: 0, after } : { skip };
-    if (!params.completeScan && skip >= scanLimit) {
-      // An exact-budget history still needs an empty terminator query.
-      const more = await params.loadBatch({ take: 1, ...page });
-      invariant(more.length === 0, 503, "INPUT_SCAN_LIMIT", "Input collection needs a lineage rebuild before it can complete.");
-      break;
-    }
     const batch = await params.loadBatch({ take, ...page });
     for (const row of batch) {
       invariant(!candidates.has(row.id), 409, "SOURCE_CHANGED", "Input collection changed during pagination.");

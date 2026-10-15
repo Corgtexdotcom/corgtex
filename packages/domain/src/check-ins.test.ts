@@ -219,7 +219,8 @@ describe("getOverwhelmSignals", () => {
         questionType: "COMPANY_UNDERSTANDING",
         status: "OPEN",
       }),
-      orderBy: [{ priority: "desc" }, { createdAt: "desc" }],
+      orderBy: [{ priority: "desc" }, { createdAt: "desc" }, { id: "desc" }],
+      take: 100,
     }));
   });
 

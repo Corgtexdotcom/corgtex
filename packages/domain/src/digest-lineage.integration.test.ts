@@ -178,7 +178,7 @@ describe("digest input receipts", () => {
     expect((await prisma.brainArticle.findUniqueOrThrow({ where: { id: article.id } })).bodyMd).toBe("Independent human revision");
   });
 
-  it("filters unknown and private contributors before the editorial limit and rejects another workspace", async () => {
+  it("filters over 5000 unknown and private contributors before the editorial limit and rejects another workspace", async () => {
     const { workspace, other, ownerActor, readerActor } = await fixture();
     const safe = await createArticle(ownerActor, { workspaceId: workspace.id, slug: "safe", title: "Safe synthetic input", type: "PROJECT",
       authority: "REFERENCE", isPrivate: false, bodyMd: "Permitted text" });
@@ -186,7 +186,7 @@ describe("digest input receipts", () => {
     const privateRoots = await captureArtifactInputProof(ownerActor, workspace.id, [{ kind: "BrainArticle", id: privateOriginal.id }]);
     const mixed = await createArticle(ownerActor, { workspaceId: workspace.id, title: "Copied private canary", type: "PROJECT",
       authority: "REFERENCE", isPrivate: false, bodyMd: "Private body copied", completeInputRoots: privateRoots });
-    await prisma.brainArticle.createMany({ data: Array.from({ length: 55 }, (_, index) => ({ workspaceId: workspace.id,
+    await prisma.brainArticle.createMany({ data: Array.from({ length: 5001 }, (_, index) => ({ workspaceId: workspace.id,
       slug: `unknown-${index}`, title: `Unknown ${index}`, type: "PROJECT" as const, authority: "REFERENCE" as const,
       bodyMd: "Unknown synthetic input", updatedAt: new Date(Date.now() + index),
     })) });
@@ -199,7 +199,7 @@ describe("digest input receipts", () => {
     expect(common.records.map((record) => record.id)).toEqual([safe.id]);
     await expect(captureArtifactInputProof(readerActor, other.id, [{ kind: "BrainArticle", id: safe.id }]))
       .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
-  });
+  }, 180_000);
 
   it("gates personalized redirects and delivery counts separately from a readable shared edition", async () => {
     const { workspace, ownerActor, readerActor } = await fixture();

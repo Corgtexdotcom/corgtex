@@ -1,7 +1,7 @@
 import { WorkItemReadRelease } from "./work-item-readable-page";
 import { getReadableBrainArticleVariant, requestBrainArticleVariant } from "./brain-article-variants";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
-import { captureReadableDigestInputs } from "./digest-lineage";
+import { captureReadableDigestInputs, DigestReadRelease } from "./digest-lineage";
 import { visitSourceReadableRecords } from "./source-scoped-read";
 import type { BrainArticle, BrainArticleAuthority, BrainArticleType, BrainDiscussionTargetType, BrainSource, BrainSourceType } from "@prisma/client";
 import { Prisma } from "@prisma/client";
@@ -36,19 +36,27 @@ import {
 // ---------------------------------------------------------------------------
 
 async function readableDiscussionAuthor<T extends { id: string; userId: string; user: { displayName: string | null; email: string } }>(
-  actor: AppActor, workspaceId: string, member: T | null,
+  actor: AppActor, workspaceId: string, member: T | null, release?: DigestReadRelease,
 ) {
   if (!member) return null;
   const input = { ...member, user: { ...member.user, id: member.userId } };
-  const admitted = await captureReadableDigestInputs({ actor, workspaceId, kind: "Member", records: [input],
+  const capture = () => captureReadableDigestInputs({ actor, workspaceId, kind: "Member", records: [input],
     additionalInputs: (row) => [{ kind: "User", id: row.userId, snapshot: row.user }] });
+  const admitted = release ? await release.observeRead(capture) : await capture();
+  release?.add(admitted.roots);
   return admitted.records.length ? member : null;
 }
 
-async function readableDiscussionRows<T extends { id: string; comments: Array<{ id: string }> }>(actor: AppActor, workspaceId: string, rows: T[]) {
-  const threadIds = await readableArtifactIds(actor, workspaceId, "BrainDiscussionThread", rows);
+async function readableDiscussionRows<T extends { id: string; comments: Array<{ id: string }> }>(actor: AppActor, workspaceId: string,
+  rows: T[], release?: DigestReadRelease) {
+  const threadIds = release
+    ? new Set((await release.capture("BrainDiscussionThread", rows)).records.map(row => row.id))
+    : await readableArtifactIds(actor, workspaceId, "BrainDiscussionThread", rows);
   const threads = rows.filter((thread) => threadIds.has(thread.id));
-  const commentIds = await readableArtifactIds(actor, workspaceId, "BrainDiscussionComment", threads.flatMap((thread) => thread.comments));
+  const comments = threads.flatMap(thread => thread.comments);
+  const commentIds = release
+    ? new Set((await release.capture("BrainDiscussionComment", comments)).records.map(row => row.id))
+    : await readableArtifactIds(actor, workspaceId, "BrainDiscussionComment", comments);
   return threads.map((thread) => ({ ...thread, comments: thread.comments.filter((comment) => commentIds.has(comment.id)) as T["comments"] }));
 }
 
@@ -545,13 +553,17 @@ export async function getArticle(actor: AppActor, params: {
     invariant(canReadPrivateDraft, 404, "NOT_FOUND", "Article not found.");
   }
 
-  const readable = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", [article]);
+  // Preserve the original admitted article before backlinks and author reads.
+  // Every returned contributor is released together after those later awaits.
+  const release = new DigestReadRelease(actor, params.workspaceId);
+  const readable = new Set((await release.capture("BrainArticle", [article])).records.map(row => row.id));
   if (!readable.has(article.id) && !article.variantOfArticleId && !article.archivedAt && actor.kind === "user") {
     const variant = await getReadableBrainArticleVariant(actor, { workspaceId: params.workspaceId, articleId: article.id });
     if (variant) return getArticle(actor, { workspaceId: params.workspaceId, slug: variant.slug });
     await requestBrainArticleVariant(actor, { workspaceId: params.workspaceId, articleId: article.id });
   }
   invariant(readable.has(article.id), 404, "NOT_FOUND", "Article not found.");
+  const ownerMember = await readableDiscussionAuthor(actor, params.workspaceId, article.ownerMember, release);
   const linkedIds = [...new Set([
     ...article.backlinksTo.map((link) => link.fromArticleId),
     ...article.backlinksFrom.map((link) => link.toArticleId),
@@ -559,25 +571,32 @@ export async function getArticle(actor: AppActor, params: {
   const linked = linkedIds.length ? await prisma.brainArticle.findMany({
     where: { workspaceId: params.workspaceId, id: { in: linkedIds }, archivedAt: null },
   }) : [];
-  const readableLinked = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", linked);
-  const discussions = await Promise.all((await readableDiscussionRows(actor, params.workspaceId, article.discussions)).map(async (thread) => {
-    const authorMember = await readableDiscussionAuthor(actor, params.workspaceId, thread.authorMember);
+  const readableLinked = new Map((await release.capture("BrainArticle", linked)).records.map(row => [row.id, row]));
+  const linkedLabel = (id: string) => {
+    const row = readableLinked.get(id)!;
+    return {slug: row.slug, title: row.title, type: row.type};
+  };
+  const discussions = await Promise.all((await readableDiscussionRows(actor, params.workspaceId, article.discussions, release)).map(async (thread) => {
+    const authorMember = await readableDiscussionAuthor(actor, params.workspaceId, thread.authorMember, release);
     return { ...thread, authorMember, authorMemberId: authorMember?.id ?? null,
       comments: await Promise.all(thread.comments.map(async (comment) => {
-        const authorMember = await readableDiscussionAuthor(actor, params.workspaceId, comment.authorMember);
+        const authorMember = await readableDiscussionAuthor(actor, params.workspaceId, comment.authorMember, release);
         return { ...comment, authorMember, authorMemberId: authorMember?.id ?? null, agentRunId: null };
       })) };
   }));
 
-  return {
+  return release.finish({
     ...article,
+    ownerMember,
     isPermissionVariant: Boolean(article.variantOfArticleId),
     variantOfArticleId: null, variantTargetFingerprint: null, variantInputSetHash: null,
     variantSourceStateJson: null, variantGenerationJobId: null,
-    backlinksTo: article.backlinksTo.filter((link) => readableLinked.has(link.fromArticleId)),
-    backlinksFrom: article.backlinksFrom.filter((link) => readableLinked.has(link.toArticleId)),
+    backlinksTo: article.backlinksTo.filter((link) => readableLinked.has(link.fromArticleId))
+      .map(link => ({...link, fromArticle: linkedLabel(link.fromArticleId)})),
+    backlinksFrom: article.backlinksFrom.filter((link) => readableLinked.has(link.toArticleId))
+      .map(link => ({...link, toArticle: linkedLabel(link.toArticleId)})),
     discussions,
-  };
+  });
 }
 
 export async function listArticles(actor: AppActor, params: {

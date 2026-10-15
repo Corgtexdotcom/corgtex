@@ -1,13 +1,13 @@
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
-import type { Prisma } from "@prisma/client";
+import type { CheckIn, Prisma } from "@prisma/client";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 import { appendEvents } from "./events";
 import { currentArtifactInputRoots, recordArtifactInputLineage, readableArtifactIds, type LineageInput, type LineageRoot,
   assertArtifactInputWriteFence, captureArtifactInputProof, captureImmutableArtifactInputProof, isArtifactInputProofReadable } from "./source-lineage";
 import { AppError } from "./errors";
-import { captureReadableDigestInputs, DigestReadRelease, mergeArtifactInputProofs } from "./digest-lineage";
+import { loadReadableArtifactSample, DigestReadRelease, mergeArtifactInputProofs } from "./digest-lineage";
 import { prepareProducerLineage, finishProducerLineage } from "./producer-lineage";
 
 const COMPANY_UNDERSTANDING_TYPE = "COMPANY_UNDERSTANDING";
@@ -128,17 +128,27 @@ export async function createCompanyUnderstandingQuestion(actor: AppActor, params
   });
 }
 
-async function releaseCompanyUnderstandingQuestions<T extends { id: string }>(actor: AppActor,
-  workspaceId: string, questions: T[], take: number) {
+async function releaseCompanyUnderstandingQuestions(actor: AppActor,
+  workspaceId: string, memberId: string, status: string, take: number) {
   const release = new DigestReadRelease(actor, workspaceId);
-  const captured = await release.observeRead(() => captureReadableDigestInputs({
-    actor, workspaceId, kind: "CheckIn", records: questions,
-  }));
-  const selected = captured.records.slice(0, take);
-  // Preserve the selected rows' original bodies, caller epochs and observed
-  // heads across the complete admission scan, then replay before releasing.
-  for (const question of selected) release.add(captured.proofs.get(question.id)!);
-  return release.finish(selected);
+  const selected = await loadReadableArtifactSample<CheckIn>({
+    actor, workspaceId, kind: "CheckIn", limit: take, release,
+    loadBatch: (after, pageSize) => prisma.checkIn.findMany({
+      where: {
+        workspaceId, memberId, questionType: COMPANY_UNDERSTANDING_TYPE, status,
+        ...(after ? { OR: [
+          { priority: { lt: after.priority } },
+          { priority: after.priority, createdAt: { lt: after.createdAt } },
+          { priority: after.priority, createdAt: after.createdAt, id: { lt: after.id } },
+        ] } : {}),
+      },
+      orderBy: [{ priority: "desc" }, { createdAt: "desc" }, { id: "desc" }],
+      take: pageSize,
+    }),
+  });
+  // Selected original bodies, caller epochs and observed heads share the same
+  // final release even when denied candidates require several bounded pages.
+  return release.finish(selected.records);
 }
 
 export async function listCompanyUnderstandingQuestions(actor: AppActor, params: {
@@ -151,17 +161,8 @@ export async function listCompanyUnderstandingQuestions(actor: AppActor, params:
   const memberId = params.memberId?.trim() || membership?.id;
   invariant(memberId, 400, "INVALID_INPUT", "Member id is required for company understanding questions.");
 
-  const questions = await prisma.checkIn.findMany({
-    where: {
-      workspaceId: params.workspaceId,
-      memberId,
-      questionType: COMPANY_UNDERSTANDING_TYPE,
-      status: params.status?.trim() || "OPEN",
-    },
-    orderBy: [{ priority: "desc" }, { createdAt: "desc" }],
-  });
-  return releaseCompanyUnderstandingQuestions(actor, params.workspaceId, questions,
-    Math.min(Math.max(params.take ?? 20, 1), 50));
+  return releaseCompanyUnderstandingQuestions(actor, params.workspaceId, memberId,
+    params.status?.trim() || "OPEN", Math.min(Math.max(params.take ?? 20, 1), 50));
 }
 
 export async function listDailyCompanyUnderstandingQuestions(actor: AppActor, params: {
@@ -171,16 +172,7 @@ export async function listDailyCompanyUnderstandingQuestions(actor: AppActor, pa
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   invariant(membership, 401, "AUTH_REQUIRED", "Company understanding questions require a member.");
 
-  const questions = await prisma.checkIn.findMany({
-    where: {
-      workspaceId: params.workspaceId,
-      memberId: membership.id,
-      questionType: COMPANY_UNDERSTANDING_TYPE,
-      status: "OPEN",
-    },
-    orderBy: [{ priority: "desc" }, { createdAt: "desc" }],
-  });
-  return releaseCompanyUnderstandingQuestions(actor, params.workspaceId, questions,
+  return releaseCompanyUnderstandingQuestions(actor, params.workspaceId, membership.id, "OPEN",
     Math.min(Math.max(params.take ?? DAILY_COMPANY_QUESTION_CAP, 1), DAILY_COMPANY_QUESTION_CAP));
 }
 

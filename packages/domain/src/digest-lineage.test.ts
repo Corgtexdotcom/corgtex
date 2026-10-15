@@ -37,7 +37,7 @@ describe("digest permission selection", () => {
     expect(loadBatch.mock.calls.map(([page]) => page)).toEqual([{ take: 50, skip: 0 }, { take: 50, skip: 50 }]);
   });
 
-  it("completes full lists beyond 5000 candidates while sampled input budgets remain", async () => {
+  it("fills samples beyond 5000 denied candidates while complete scans retain every permitted row", async () => {
     capture.mockImplementation(async (_actor, _workspaceId, inputs) => {
       if (Number(inputs[0].id) < 5001) throw new AppError(409, "UNKNOWN_LINEAGE", "Unknown history");
       return [{kind: "NewspaperDelivery", id: inputs[0].id, fingerprint: "a".repeat(64)}];
@@ -46,10 +46,14 @@ describe("digest permission selection", () => {
     const loadBatch = vi.fn(async ({take,skip}) => rows.slice(skip,skip+take));
     expect(await loadReadableDigestQuery({actor: {} as any,workspaceId: "ws",kind: "NewspaperDelivery",limit: 1,completeScan: true,loadBatch})).toEqual([{id:"5001"},{id:"5002"}]);
     expect(loadBatch.mock.calls.every(([page]) => page.take <= 100)).toBe(true);
-    await expect(loadReadableDigestQuery({actor: {} as any,workspaceId: "ws",kind: "NewspaperDelivery",limit: 1,loadBatch})).rejects.toMatchObject({code:"INPUT_SCAN_LIMIT"});
+    expect(await loadReadableDigestQuery({actor: {} as any,workspaceId: "ws",kind: "NewspaperDelivery",limit: 1,loadBatch})).toEqual([{id:"5001"}]);
+    const keyset = vi.fn(async ({take, after}) => rows.slice(after ? Number(after.id) + 1 : 0, (after ? Number(after.id) + 1 : 0) + take));
+    expect(await loadReadableDigestQuery({actor: {} as any,workspaceId: "ws",kind: "NewspaperDelivery",limit: 1, keyset: true, loadBatch: keyset})).toEqual([{id:"5001"}]);
+    expect(keyset).toHaveBeenCalledTimes(101);
+    expect(keyset.mock.calls.every(([page]) => page.take === 50)).toBe(true);
   });
 
-  it("accepts an exact-budget history after an empty terminator query", async () => {
+  it("completes an exact-page history after an empty terminator query", async () => {
     capture.mockImplementation(async (_actor, _workspaceId, inputs) => [
       { kind: "NewspaperDelivery", id: inputs[0].id, fingerprint: "a".repeat(64) },
     ]);
@@ -72,6 +76,18 @@ describe("digest permission selection", () => {
       limit: 1, completeScan: true, keyset: true, loadBatch });
     expect(result).toHaveLength(55);
     expect(new Set(result.map((row) => row.id)).size).toBe(55);
+  });
+
+  it("exhausts denied pages and rejects duplicate candidates instead of looping", async () => {
+    capture.mockRejectedValue(new AppError(409, "UNKNOWN_LINEAGE", "Unknown history"));
+    const rows = Array.from({length: 5001}, (_, index) => ({id: String(index)}));
+    const loadBatch = vi.fn(async ({take, skip}) => rows.slice(skip, skip + take));
+    expect(await loadReadableDigestQuery({actor: {} as any, workspaceId: "ws", kind: "NewspaperEdition", limit: 1, loadBatch})).toEqual([]);
+    expect(loadBatch).toHaveBeenCalledTimes(101);
+    const repeating = vi.fn(async () => rows.slice(0, 50));
+    await expect(loadReadableDigestQuery({actor: {} as any, workspaceId: "ws", kind: "NewspaperEdition", limit: 1, loadBatch: repeating}))
+      .rejects.toMatchObject({code: "SOURCE_CHANGED"});
+    expect(repeating).toHaveBeenCalledTimes(2);
   });
 
   it("removes a departed recipient from the shared audience while still enforcing active readers", async () => {
