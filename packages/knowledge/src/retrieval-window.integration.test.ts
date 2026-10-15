@@ -26,7 +26,7 @@ async function fixture(deniedCount = 5001) {
   const user = await prisma.user.create({data: {email: `${randomUUID()}@example.test`, passwordHash: "synthetic"}});
   const member = await prisma.member.create({data: {workspaceId: workspace.id, userId: user.id, role: "ADMIN"}});
   const actor: AppActor = {kind: "user", user};
-  const articles = [];
+  const articles: Awaited<ReturnType<typeof createArticle>>[] = [];
   for (const slug of ["first", "tail"]) {
     const article = await createArticle(actor, {workspaceId: workspace.id, title: `Readable policy ${slug}`, slug,
       bodyMd: `Synthetic policy ${slug}`, type: "PROJECT", authority: "REFERENCE"});
