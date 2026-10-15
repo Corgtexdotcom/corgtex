@@ -10,6 +10,7 @@ vi.mock("./source-lineage", () => ({ captureArtifactInputProof: vi.fn(async () =
   captureArtifactReadHeadObservation: vi.fn(async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()})),
   mergeLineageInputRoot: vi.fn((prior, root) => { if (prior && JSON.stringify(prior) !== JSON.stringify(root)) throw new Error("Changed fixture root"); return root; }),
   withArtifactCountReleaseSnapshot: vi.fn(async (_actor, _workspace, _roots, remote, finish) => {await remote(); return finish(mocks.prisma);}),
+  currentArtifactInputRootsBatch: vi.fn(async (_db, _workspace, _kind, rows: Array<{id: string}>) => new Map(rows.map(row => [row.id, []]))),
   recordArtifactInputLineage: vi.fn(), readableArtifactIds: vi.fn(async (_actor, _ws, _kind, rows) => new Set(rows.map((row: { id: string }) => row.id))) }));
 vi.mock("./auth", () => ({requireWorkspaceMembership: vi.fn(async () => ({id: "fixture-member"}))}));
 vi.mock("./finance", () => ({ requireFinanceReportImportReadAccess: mocks.read, requireFinanceReportImportHumanWriteAccess: mocks.write }));

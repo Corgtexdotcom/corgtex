@@ -91,6 +91,11 @@ vi.mock("@corgtex/domain", async (importOriginal) => {
     scanSourceReadableRecords: vi.fn(async (params) => await params.load(undefined, 100) ?? []),
   };
 });
+vi.mock("../../domain/src/source-lineage", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../domain/src/source-lineage")>();
+  return {...actual, currentArtifactInputRootsBatch: vi.fn(async (_db, _workspace, _kind, rows: Array<{id: string}>) =>
+    new Map(rows.map(row => [row.id, []])))};
+});
 // These chunking/routing fixtures already supply synthetic proof boundaries.
 // Forward the collection release through those same gates; real PG and lineage
 // suites exercise the actual original-head/epoch snapshot implementation.

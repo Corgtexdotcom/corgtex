@@ -1,3 +1,5 @@
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { Prisma } from "@prisma/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -5,7 +7,7 @@ import { prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { createFinanceReportImportUpload } from "./finance-import-upload";
 import { listFinanceReportImports, getFinanceReportImportSummary, getFinanceReportImport } from "./finance-import-review";
-import { captureArtifactInputProof, recordArtifactInputLineage } from "./source-lineage";
+import { captureArtifactInputProof, recordArtifactInputLineage, lineageContentFingerprint } from "./source-lineage";
 
 beforeEach(async () => { await truncateAllTables(); });
 afterEach(() => vi.restoreAllMocks());
@@ -52,6 +54,7 @@ async function unknownCandidates(f: Awaited<ReturnType<typeof fixture>>, count: 
     candidateData(f.workspace.id, f.batch.id, `unknown-${String(n+i).padStart(6,"0")}`))});
 }
 it("streams summary counts and complete detail past 5001 unproved candidates, admitting applications independently", async () => {
+  const started = performance.now();
   const f = await fixture();
   await unknownCandidates(f, 5001);
   const first = await provedCandidate(f, "visible-1"), second = await provedCandidate(f, "visible-2");
@@ -64,9 +67,17 @@ it("streams summary counts and complete detail past 5001 unproved candidates, ad
   });
   await prisma.financeImportApplication.create({data: {workspaceId: f.workspace.id, batchId: f.batch.id, candidateId: second.id,
     idempotencyKey: hash(second.id), targetType: "REPORT_FACT", outcome: "SKIPPED", appliedByUserId: f.user.id}});
+  const seedMilliseconds = performance.now()-started;
   const reads = vi.spyOn(prisma.financeImportCandidate, "findMany");
+  const canonicalReads = vi.spyOn(prisma.financeImportCandidate, "findFirst");
+  const headReads = vi.spyOn(prisma.artifactInputLineage, "findFirst");
+  const summaryStarted = performance.now();
   expect(await getFinanceReportImportSummary(f.actor, {workspaceId: f.workspace.id, batchId: f.batch.id})).toMatchObject({addCount: 2});
+  const summaryMilliseconds = performance.now()-summaryStarted;
+  const detailStarted = performance.now();
   const detail = await getFinanceReportImport(f.actor, {workspaceId: f.workspace.id, batchId: f.batch.id});
+  recordProofMetrics("finance-full", {seedMilliseconds, summaryMilliseconds, detailMilliseconds: performance.now()-detailStarted,
+    candidatePages: reads.mock.calls.length, canonicalReads: canonicalReads.mock.calls.length, headReads: headReads.mock.calls.length});
   expect(detail.addCount).toBe(2);
   expect(detail.candidates.map(row=>row.id)).toEqual([first.id, second.id]);
   expect(detail.candidates[0].application?.id).toBe(application.id);
@@ -103,4 +114,29 @@ it.each(["head", "membership", "finance"] as const)("retains original proof when
   }) as typeof prisma.financeImportCandidate.findMany);
   await expect(getFinanceReportImportSummary(f.actor, {workspaceId: f.workspace.id, batchId: f.batch.id})).rejects.toMatchObject({code: "SOURCE_CHANGED"});
   expect(changed).toBe(true);
+});
+
+function recordProofMetrics(name: string, metrics: Record<string, number>) {
+  if (process.env.COLLECTION_PROOF_METRICS_DIR) writeFileSync(join(process.env.COLLECTION_PROOF_METRICS_DIR, `${name}.json`), JSON.stringify(metrics));
+}
+
+it("rejects missing candidate heads in one page lookup before per-row authorization", async () => {
+  const f = await fixture(); await unknownCandidates(f, 100);
+  const rows = vi.spyOn(prisma.financeImportCandidate, "findFirst");
+  const heads = vi.spyOn(prisma.artifactInputLineage, "findFirst");
+  const members = vi.spyOn(prisma.member, "findUnique");
+  const start = performance.now();
+  expect(await getFinanceReportImportSummary(f.actor, {workspaceId: f.workspace.id, batchId: f.batch.id})).toMatchObject({addCount: 0});
+  recordProofMetrics("finance-100", {milliseconds: performance.now()-start, candidateReads: rows.mock.calls.length, headReads: heads.mock.calls.length, memberReads: members.mock.calls.length});
+  expect(rows.mock.calls.length).toBe(0);
+});
+
+it("does not authorize a candidate merely because matching empty roots metadata exists", async () => {
+  const f = await fixture();
+  const row = await prisma.financeImportCandidate.create({data: candidateData(f.workspace.id, f.batch.id, "matching-unknown")});
+  await prisma.artifactInputLineage.create({data: {workspaceId: f.workspace.id, artifactType: "FinanceImportCandidate", artifactId: row.id,
+    revision: 1, origin: "UNKNOWN", contentHash: lineageContentFingerprint("FinanceImportCandidate", row), inputsJson: [], rootsJson: []}});
+  const reads = vi.spyOn(prisma.financeImportCandidate, "findFirst");
+  expect(await getFinanceReportImportSummary(f.actor, {workspaceId: f.workspace.id, batchId: f.batch.id})).toMatchObject({addCount: 0});
+  expect(reads.mock.calls.some(([query]) => query?.where?.id === row.id)).toBe(true);
 });

@@ -1,7 +1,7 @@
 import type { AppActor } from "@corgtex/shared";
 import { prisma } from "@corgtex/shared";
 import { Prisma, type FinanceImportBatch, type FinanceImportCandidate, type FinanceImportCandidateReviewState } from "@prisma/client";
-import { captureArtifactInputProof, captureImmutableArtifactInputProof, recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
+import { captureArtifactInputProof, captureImmutableArtifactInputProof, recordArtifactInputLineage, currentArtifactInputRootsBatch, type LineageRoot } from "./source-lineage";
 import { DigestReadRelease, loadReadableArtifactSample } from "./digest-lineage";
 import { AppError, invariant } from "./errors";
 import { requireFinanceReportImportHumanWriteAccess, requireFinanceReportImportReadAccess } from "./finance";
@@ -45,7 +45,10 @@ async function visitReadableCandidates(release: DigestReadRelease, batchIds: str
       ...(after ? {OR: [{sourceKey: {gt: after.sourceKey}}, {sourceKey: after.sourceKey, id: {gt: after.id}}]} : {})},
       orderBy: [{sourceKey: "asc"}, {id: "asc"}], take: 100});
     const next = rows.at(-1);
-    visit((await release.capture("FinanceImportCandidate", rows)).records);
+    // Missing/stale heads can only reject. Survivors still traverse the full
+    // caller/native/ancestor evaluator and retain their original release proof.
+    const heads = await currentArtifactInputRootsBatch(prisma, release.workspaceId, "FinanceImportCandidate", rows);
+    visit((await release.capture("FinanceImportCandidate", rows.filter(row => heads.get(row.id) != null))).records);
     if (rows.length < 100) return;
     invariant(next && next.id !== after?.id, 409, "SOURCE_CHANGED", "Finance candidates changed during pagination.");
     after = {sourceKey: next.sourceKey, id: next.id};

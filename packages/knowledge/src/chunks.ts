@@ -1,3 +1,4 @@
+import { currentArtifactInputRootsBatch } from "../../domain/src/source-lineage";
 import { DigestReadRelease } from "../../domain/src/digest-lineage";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -555,7 +556,10 @@ export async function reindexWorkspace(workspaceId: string, lineageActor?: AppAc
         orderBy: {id: "asc"}, take: 100,
       });
       const matching = page.filter(chunk => (chunk.metadata as Record<string, unknown> | null)?.sourceContentHash === hashes.get(chunk.sourceId));
-      const admitted = await release.capture("KnowledgeChunk", matching);
+      // These ordinary chunk kinds require a current manifest. This is only
+      // negative discovery; a matching head never replaces full authorization.
+      const heads = await currentArtifactInputRootsBatch(prisma, workspaceId, "KnowledgeChunk", matching);
+      const admitted = await release.capture("KnowledgeChunk", matching.filter(chunk => heads.get(chunk.id) != null));
       for (const chunk of admitted.records) found.add(chunk.sourceId);
       if (page.length < 100) return found;
       cursor = page[page.length - 1].id;

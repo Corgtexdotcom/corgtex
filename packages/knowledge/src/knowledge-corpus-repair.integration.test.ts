@@ -1,3 +1,5 @@
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { KnowledgeSourceType, Prisma } from "@prisma/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -51,6 +53,7 @@ it("search admits its indexed candidate without loading 5001 unrelated canonical
 });
 
 it("reindexes past 5000 old chunks per type with bounded canonical pages and no adoption of legacy bytes", async () => {
+  const started = performance.now();
   const {workspace, actor, article} = await fixture();
   const document = await createDocument(actor, {workspaceId: workspace.id, title: "Current document", textContent: "Synthetic current document",
     source: "manual", mimeType: "text/plain", storageKey: `workspaces/${workspace.id}/uploads/${randomUUID()}/synthetic.txt`});
@@ -60,8 +63,15 @@ it("reindexes past 5000 old chunks per type with bounded canonical pages and no 
   await createDocument(actor, {workspaceId: workspace.id, title: "New document", textContent: "New independently readable document", source: "manual", mimeType: "text/plain", storageKey: `workspaces/${workspace.id}/uploads/${randomUUID()}/new.txt`});
   await oldChunks(workspace.id, "BRAIN_ARTICLE", article.id, lineageContentFingerprint("BrainArticle", article), 5001);
   await oldChunks(workspace.id, "DOCUMENT", document.id, lineageContentFingerprint("Document", document), 5001);
+  const seedMilliseconds = performance.now()-started;
   const queries = vi.spyOn(prisma.knowledgeChunk, "findMany");
-  expect(await reindexWorkspace(workspace.id, actor)).toEqual({reindexedArticles: 1, reindexedDocuments: 1, errors: []});
+  const canonicalReads = vi.spyOn(prisma.knowledgeChunk, "findFirst");
+  const headReads = vi.spyOn(prisma.artifactInputLineage, "findFirst");
+  const operationStarted = performance.now();
+  const result = await reindexWorkspace(workspace.id, actor);
+  recordProofMetrics("knowledge-full", {seedMilliseconds, operationMilliseconds: performance.now()-operationStarted,
+    chunkPages: queries.mock.calls.length, canonicalReads: canonicalReads.mock.calls.length, headReads: headReads.mock.calls.length});
+  expect(result).toEqual({reindexedArticles: 1, reindexedDocuments: 1, errors: []});
   const pages = queries.mock.calls.map(([query]) => query).filter(query => query?.where?.sourceId && typeof query.where.sourceId === "object" && "in" in query.where.sourceId);
   expect(pages.length).toBeGreaterThanOrEqual(102);
   for (const query of pages) expect(query).toMatchObject({take: 100, orderBy: {id: "asc"}});
@@ -93,4 +103,34 @@ it("a membership revoke and restore during later reindex pages rejects the origi
   await expect(reindexWorkspace(workspace.id, actor)).rejects.toMatchObject({code: "SOURCE_CHANGED"});
   expect(changed).toBe(true);
   expect(await findMany({where: {workspaceId: workspace.id}, orderBy: {id: "asc"}})).toEqual(original);
+});
+
+function recordProofMetrics(name: string, metrics: Record<string, number>) {
+  if (process.env.COLLECTION_PROOF_METRICS_DIR) writeFileSync(join(process.env.COLLECTION_PROOF_METRICS_DIR, `${name}.json`), JSON.stringify(metrics));
+}
+
+it("rejects missing chunk heads before per-row authorization while retaining the genuine receipt", async () => {
+  const {workspace, actor, article} = await fixture();
+  await syncBrainArticleKnowledge({workspaceId: workspace.id, articleId: article.id, lineageActor: actor});
+  await oldChunks(workspace.id, "BRAIN_ARTICLE", article.id, lineageContentFingerprint("BrainArticle", article), 100);
+  const rows = vi.spyOn(prisma.knowledgeChunk, "findFirst");
+  const heads = vi.spyOn(prisma.artifactInputLineage, "findFirst");
+  const members = vi.spyOn(prisma.member, "findUnique");
+  const start = performance.now();
+  expect(await reindexWorkspace(workspace.id, actor)).toEqual({reindexedArticles: 0, reindexedDocuments: 0, errors: []});
+  recordProofMetrics("knowledge-100", {milliseconds: performance.now()-start, chunkReads: rows.mock.calls.length, headReads: heads.mock.calls.length, memberReads: members.mock.calls.length});
+  expect(rows.mock.calls.length).toBeLessThan(20);
+});
+
+it("rebuilds rather than adopting a chunk with a matching UNKNOWN head and empty roots", async () => {
+  const {workspace, actor, article} = await fixture();
+  await oldChunks(workspace.id, "BRAIN_ARTICLE", article.id, lineageContentFingerprint("BrainArticle", article), 1);
+  const old = await prisma.knowledgeChunk.findFirstOrThrow({where: {workspaceId: workspace.id}});
+  await prisma.artifactInputLineage.create({data: {workspaceId: workspace.id, artifactType: "KnowledgeChunk", artifactId: old.id,
+    revision: 1, origin: "UNKNOWN", contentHash: lineageContentFingerprint("KnowledgeChunk", old), inputsJson: [], rootsJson: []}});
+  const reads = vi.spyOn(prisma.knowledgeChunk, "findFirst");
+  expect(await reindexWorkspace(workspace.id, actor)).toEqual({reindexedArticles: 1, reindexedDocuments: 0, errors: []});
+  expect(reads.mock.calls.some(([query]) => query?.where?.id === old.id)).toBe(true);
+  expect(await prisma.knowledgeChunk.findUnique({where: {id: old.id}})).toBeNull();
+  expect(await prisma.knowledgeChunk.findFirst({where: {workspaceId: workspace.id, content: {contains: "Synthetic policy"}}})).not.toBeNull();
 });
