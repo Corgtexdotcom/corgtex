@@ -56,6 +56,8 @@ vi.mock("./source-lineage", () => ({
   captureArtifactInputProof: vi.fn(async (_actor, _ws, inputs) => inputs.map((input: { kind: string; id: string }) => ({ kind: input.kind, id: input.id, fingerprint: "a".repeat(64) }))),
   captureArtifactInputSnapshotProof: vi.fn(async (_actor, _ws, input) => [{ kind: "ArtifactInputSnapshot", id: `snapshot-${input.id}`, fingerprint: "a".repeat(64) }]),
   captureImmutableArtifactInputProof: vi.fn(async (_actor, _ws, roots) => roots),
+  // Legacy/human-original fixtures do not mint a governed derived-edit receipt.
+  captureHumanArtifactInputAdvance: vi.fn().mockResolvedValue(undefined),
   advanceHumanArtifactInputLineage: vi.fn(),
   invalidateArtifactInputLineage: vi.fn(),
   isArtifactInputProofReadable: vi.fn(async () => true),
