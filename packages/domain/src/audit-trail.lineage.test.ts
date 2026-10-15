@@ -44,7 +44,9 @@ beforeEach(() => {
     if (workspaceId !== "ws-1") throw new Error("workspace denied");
     return actor.kind === "user" ? {id: "member-admin", role: "ADMIN"} : null;
   });
-  db.modelUsage.findMany.mockImplementation(async () => costs);
+  db.modelUsage.findMany.mockImplementation(async ({where, take}) => costs.filter(row => row.workspaceId === where.workspaceId
+    && (!where.id?.gt || row.id > where.id.gt) && (!where.createdAt?.gte || row.createdAt >= where.createdAt.gte))
+    .sort((left, right) => left.id.localeCompare(right.id)).slice(0, take));
   db.modelUsage.findFirst.mockImplementation(async ({where}) => costs.find(row => row.id === where.id && row.workspaceId === where.workspaceId) ?? null);
   db.agentRun.findFirst.mockImplementation(async ({where}) => runs.find(row => row.id === where.id && row.workspaceId === where.workspaceId) ?? null);
   db.workspace.findFirst.mockImplementation(async ({where}) => where.id === workspace.id ? workspace : null);
@@ -77,10 +79,22 @@ describe("model usage summary source boundaries", () => {
     expect(result.byAgent.map(row => row.agentKey)).toEqual(["unknown", "known-agent"]);
   });
 
-  it("rejects incomplete financial scans instead of returning partial totals", async () => {
-    costs = Array.from({length: 5001}, (_, i) => usage(String(i), 1));
-    await expect(getModelUsageSummary(admin, "ws-1")).rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
-    expect(db.modelUsage.findMany).toHaveBeenCalledWith(expect.objectContaining({take: 5001}));
+  it("rejects an earlier admitted cost changed during a later canonical page", async () => {
+    costs = Array.from({length: 101}, (_, i) => usage(String(i).padStart(5, "0"), 1));
+    const query = db.modelUsage.findMany.getMockImplementation()!;
+    db.modelUsage.findMany.mockImplementation(async args => {
+      if (args.where.id?.gt) costs[0].estimatedCostUsd = 999;
+      return query(args);
+    });
+    await expect(getModelUsageSummary(admin, "ws-1")).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+  });
+
+  it("completes the usual reporting period beyond five thousand usage rows with bounded hydration", async () => {
+    costs = Array.from({length: 5001}, (_, i) => usage(String(i).padStart(5, "0"), 1));
+    const result = await getModelUsageSummary(admin, "ws-1");
+    expect(result).toMatchObject({totalCalls: 5001, totalCostUsd: 5001, totalTokens: 150030, periodDays: 30});
+    expect(db.modelUsage.findMany).toHaveBeenCalledTimes(51);
+    expect(db.modelUsage.findMany.mock.calls.every(([query]) => query.take === 100 && query.where.workspaceId === "ws-1")).toBe(true);
   });
 });
 

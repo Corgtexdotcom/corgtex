@@ -4,7 +4,7 @@ import { Prisma, EventStatus, WorkflowJobStatus } from "@prisma/client";
 import { redactAgentRunContent } from "./agent-runs";
 import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
-import { captureArtifactInputProof, isArtifactInputProofReadable, isLineageKind, readableArtifactIds, sealArtifactInputActor, type LineageKind, type LineageRoot } from "./source-lineage";
+import { mergeLineageInputRoot, withArtifactCountReleaseSnapshot, captureArtifactInputProof, isArtifactInputProofReadable, isLineageKind, readableArtifactIds, sealArtifactInputActor, type LineageKind, type LineageRoot } from "./source-lineage";
 
 export async function recordAudit(
   tx: Prisma.TransactionClient,
@@ -244,38 +244,6 @@ export async function getModelUsageSummary(actor: AppActor, workspaceId: string,
   const periodDays = opts?.periodDays ?? 30;
   const since = new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000);
 
-  const candidates = await prisma.modelUsage.findMany({
-    where: {
-      workspaceId,
-      createdAt: { gte: since },
-    },
-    select: {
-      id: true,
-      workspaceId: true,
-      agentRunId: true,
-      provider: true,
-      model: true,
-      taskType: true,
-      inputTokens: true,
-      outputTokens: true,
-      latencyMs: true,
-      estimatedCostUsd: true,
-      billableCostUsd: true,
-      createdAt: true,
-      agentRun: true,
-    },
-    orderBy: { createdAt: "desc" },
-    take: 5001,
-  });
-  invariant(candidates.length <= 5000, 409, "SOURCE_READ_SCAN_LIMIT", "Model usage period exceeds the safe scan limit; choose a shorter period.");
-  const costRows = candidates.map(({ id, workspaceId: rowWorkspaceId, estimatedCostUsd, billableCostUsd, createdAt }) =>
-    ({ id, workspaceId: rowWorkspaceId, estimatedCostUsd, billableCostUsd, createdAt }));
-  const readableCosts = await readableArtifactIds(actor, workspaceId, "ModelUsageCost", costRows);
-  const runs = [...new Map(candidates.flatMap(row => row.agentRun ? [[row.agentRun.id, row.agentRun] as const] : [])).values()];
-  const readableRuns = await readableArtifactIds(actor, workspaceId, "AgentRun", runs);
-  const usages = candidates.filter(row => readableCosts.has(row.id)
-    && (!row.agentRunId || (row.agentRun?.id === row.agentRunId && readableRuns.has(row.agentRunId))));
-
   // Aggregate by model
   const byModel = new Map<string, {
     provider: string;
@@ -305,70 +273,124 @@ export async function getModelUsageSummary(actor: AppActor, workspaceId: string,
     callCount: number;
   }>();
 
-  for (const usage of usages) {
-    const costUsd = parseCost(usage.billableCostUsd ?? usage.estimatedCostUsd);
+  const roots = new Map<string, LineageRoot>();
+  let afterId: string | undefined;
+  let totalCalls = 0;
+  for (;;) {
+    const candidates = await prisma.modelUsage.findMany({
+      where: {
+        workspaceId,
+        createdAt: { gte: since },
+        ...(afterId ? {id: {gt: afterId}} : {}),
+      },
+      select: {
+        id: true,
+        workspaceId: true,
+        agentRunId: true,
+        provider: true,
+        model: true,
+        taskType: true,
+        inputTokens: true,
+        outputTokens: true,
+        latencyMs: true,
+        estimatedCostUsd: true,
+        billableCostUsd: true,
+        createdAt: true,
+        agentRun: true,
+      },
+      orderBy: {id: "asc"},
+      take: 100,
+    });
+    const costRows = candidates.map(({ id, workspaceId: rowWorkspaceId, estimatedCostUsd, billableCostUsd, createdAt }) =>
+      ({ id, workspaceId: rowWorkspaceId, estimatedCostUsd, billableCostUsd, createdAt }));
+    const readableCosts = await readableArtifactIds(actor, workspaceId, "ModelUsageCost", costRows);
+    const runs = [...new Map(candidates.flatMap(row => row.agentRun ? [[row.agentRun.id, row.agentRun] as const] : [])).values()];
+    const readableRuns = await readableArtifactIds(actor, workspaceId, "AgentRun", runs);
+    const usages = candidates.filter(row => readableCosts.has(row.id)
+      && (!row.agentRunId || (row.agentRun?.id === row.agentRunId && readableRuns.has(row.agentRunId))));
 
-    // By model
-    const modelKey = `${usage.provider}:${usage.model}`;
-    const modelEntry = byModel.get(modelKey) ?? {
-      provider: usage.provider,
-      model: usage.model,
-      totalInputTokens: 0,
-      totalOutputTokens: 0,
-      totalLatencyMs: 0,
-      totalCostUsd: 0,
-      callCount: 0,
-    };
-    modelEntry.totalInputTokens += usage.inputTokens;
-    modelEntry.totalOutputTokens += usage.outputTokens;
-    modelEntry.totalLatencyMs += usage.latencyMs;
-    modelEntry.totalCostUsd += costUsd;
-    modelEntry.callCount += 1;
-    byModel.set(modelKey, modelEntry);
+    if (usages.length) {
+      const proof = await captureArtifactInputProof(actor, workspaceId, usages.flatMap(usage => [
+        {kind: "ModelUsageCost" as const, id: usage.id, snapshot: usage},
+        ...(usage.agentRun ? [{kind: "AgentRun" as const, id: usage.agentRun.id, snapshot: usage.agentRun}] : []),
+      ]));
+      for (const root of proof) {
+        const key = `${root.kind}:${root.id}`;
+        roots.set(key, mergeLineageInputRoot(roots.get(key), root));
+      }
+    }
+    totalCalls += usages.length;
+    for (const usage of usages) {
+      const costUsd = parseCost(usage.billableCostUsd ?? usage.estimatedCostUsd);
 
-    // By agent
-    const agentKey = usage.agentRun?.agentKey ?? "unknown";
-    const agentEntry = byAgent.get(agentKey) ?? {
-      agentKey,
-      totalInputTokens: 0,
-      totalOutputTokens: 0,
-      totalCostUsd: 0,
-      callCount: 0,
-    };
-    agentEntry.totalInputTokens += usage.inputTokens;
-    agentEntry.totalOutputTokens += usage.outputTokens;
-    agentEntry.totalCostUsd += costUsd;
-    agentEntry.callCount += 1;
-    byAgent.set(agentKey, agentEntry);
+      // By model
+      const modelKey = `${usage.provider}:${usage.model}`;
+      const modelEntry = byModel.get(modelKey) ?? {
+        provider: usage.provider,
+        model: usage.model,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        totalLatencyMs: 0,
+        totalCostUsd: 0,
+        callCount: 0,
+      };
+      modelEntry.totalInputTokens += usage.inputTokens;
+      modelEntry.totalOutputTokens += usage.outputTokens;
+      modelEntry.totalLatencyMs += usage.latencyMs;
+      modelEntry.totalCostUsd += costUsd;
+      modelEntry.callCount += 1;
+      byModel.set(modelKey, modelEntry);
 
-    // By day
-    const dateKey = usage.createdAt.toISOString().slice(0, 10);
-    const dayEntry = byDay.get(dateKey) ?? {
-      date: dateKey,
-      totalInputTokens: 0,
-      totalOutputTokens: 0,
-      totalCostUsd: 0,
-      callCount: 0,
-    };
-    dayEntry.totalInputTokens += usage.inputTokens;
-    dayEntry.totalOutputTokens += usage.outputTokens;
-    dayEntry.totalCostUsd += costUsd;
-    dayEntry.callCount += 1;
-    byDay.set(dateKey, dayEntry);
+      // By agent
+      const agentKey = usage.agentRun?.agentKey ?? "unknown";
+      const agentEntry = byAgent.get(agentKey) ?? {
+        agentKey,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        totalCostUsd: 0,
+        callCount: 0,
+      };
+      agentEntry.totalInputTokens += usage.inputTokens;
+      agentEntry.totalOutputTokens += usage.outputTokens;
+      agentEntry.totalCostUsd += costUsd;
+      agentEntry.callCount += 1;
+      byAgent.set(agentKey, agentEntry);
+
+      // By day
+      const dateKey = usage.createdAt.toISOString().slice(0, 10);
+      const dayEntry = byDay.get(dateKey) ?? {
+        date: dateKey,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        totalCostUsd: 0,
+        callCount: 0,
+      };
+      dayEntry.totalInputTokens += usage.inputTokens;
+      dayEntry.totalOutputTokens += usage.outputTokens;
+      dayEntry.totalCostUsd += costUsd;
+      dayEntry.callCount += 1;
+      byDay.set(dateKey, dayEntry);
+    }
+    if (candidates.length < 100) break;
+    afterId = candidates[candidates.length - 1].id;
   }
 
   const totalCostUsd = [...byModel.values()].reduce((sum, m) => sum + m.totalCostUsd, 0);
   const totalTokens = [...byModel.values()].reduce((sum, m) => sum + m.totalInputTokens + m.totalOutputTokens, 0);
 
-  return {
-    periodDays,
-    totalCostUsd,
-    totalTokens,
-    totalCalls: usages.length,
-    byModel: [...byModel.values()].sort((a, b) => b.totalCostUsd - a.totalCostUsd),
-    byAgent: [...byAgent.values()].sort((a, b) => b.totalCostUsd - a.totalCostUsd),
-    byDay: [...byDay.values()].sort((a, b) => a.date.localeCompare(b.date)),
-  };
+  return withArtifactCountReleaseSnapshot(actor, workspaceId, [...roots.values()], async () => undefined, async tx => {
+    const current = await requireWorkspaceMembership({actor, workspaceId, tx});
+    invariant(actor.kind === "user" && current?.role === "ADMIN", 403, "FORBIDDEN", "Model usage costs require a current workspace administrator.");
+    return {
+      periodDays,
+      totalCostUsd,
+      totalTokens,
+      totalCalls,
+      byModel: [...byModel.values()].sort((a, b) => b.totalCostUsd - a.totalCostUsd),
+      byAgent: [...byAgent.values()].sort((a, b) => b.totalCostUsd - a.totalCostUsd),
+      byDay: [...byDay.values()].sort((a, b) => a.date.localeCompare(b.date)),
+    };
+  });
 }
 
 function parseCost(value: unknown): number {

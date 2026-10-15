@@ -184,6 +184,16 @@ vi.mock("./source-permission-epochs", async (original) => ({ ...await original<t
   capturePermissionEpochs:vi.fn(async()=>({version:1})),isArtifactPermissionEpochProofCurrent:vi.fn(async()=>true) }));
 vi.mock("./source-lineage", () => ({ recordArtifactInputLineage:vi.fn(), preserveUnknownArtifactInputSnapshot:vi.fn(),
   captureArtifactInputProof: captureDigestProofMock,
+  mergeLineageInputRoot: (prior: {fingerprint: string} | undefined, root: {fingerprint: string}) => {
+    if (prior && prior.fingerprint !== root.fingerprint) throw new AppError(409, "SOURCE_CHANGED", "Changed original");
+    return root;
+  },
+  withArtifactCountReleaseSnapshot: async (actor: unknown, workspaceId: string, roots: unknown[], remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => {
+    if (roots.length && !await digestProofReadableMock(actor, workspaceId, roots)) throw new AppError(409, "SOURCE_CHANGED", "Changed original");
+    await remote();
+    if (roots.length && !await digestProofReadableMock(actor, workspaceId, roots)) throw new AppError(409, "SOURCE_CHANGED", "Changed original");
+    return finish(txMock);
+  },
   captureArtifactInputSnapshotProof: vi.fn(async () => []),
   lineageContentFingerprint: (_kind: string, row: unknown) => JSON.stringify(row),
   isArtifactInputProofReadable: digestProofReadableMock,
@@ -446,16 +456,29 @@ describe("communication Slack integration", () => {
   it("counts only current complete Message inputs across unknown crowding before returning installation totals", async () => {
     const {listCommunicationInstallations} = await import("./communication");
     prismaMock.communicationInstallation.findMany.mockResolvedValue([{id:"install-1",_count:{channels:1,externalUsers:1}}]);
-    const rows=Array.from({length:205},(_,index)=>({id:`row-${String(index).padStart(4,"0")}`,workspaceId:"workspace-1",installationId:"install-1"}));
+    const rows=Array.from({length:5005},(_,index)=>({id:`row-${String(index).padStart(4,"0")}`,workspaceId:"workspace-1",installationId:"install-1"}));
     prismaMock.communicationMessage.findMany.mockImplementation(async({where,take}:any)=>rows.filter(row=>!where.id?.gt||row.id>where.id.gt).slice(0,take));
     captureDigestProofMock.mockImplementation(async(_actor,_ws,inputs:any[])=>{
-      if(inputs.some(input=>Number(input.id.slice(4))<202))throw new AppError(409,"UNKNOWN_LINEAGE","Synthetic unknown message");
+      if(inputs.some(input=>Number(input.id.slice(4))<5002))throw new AppError(409,"UNKNOWN_LINEAGE","Synthetic unknown message");
       return inputs.map(input=>({kind:input.kind,id:input.id,fingerprint:"a".repeat(64)}));
     });
     const result=await listCommunicationInstallations({kind:"user",user:{id:"admin",email:"admin@example.test",displayName:"Admin"}},"workspace-1");
     expect(result[0]._count.messages).toBe(3);
-    expect(prismaMock.communicationMessage.findMany).toHaveBeenCalledTimes(3);
+    expect(prismaMock.communicationMessage.findMany).toHaveBeenCalledTimes(51);
+    expect(prismaMock.communicationMessage.findMany.mock.calls.every(([query]: any[]) => query.take === 100)).toBe(true);
     expect(prismaMock.communicationInstallation.findMany.mock.calls[0][0].select._count.select).toEqual({channels:true,externalUsers:true});
+  });
+
+  it("does not release an installation total after an earlier source is revoked during a later page", async () => {
+    const {listCommunicationInstallations} = await import("./communication");
+    prismaMock.communicationInstallation.findMany.mockResolvedValue([{id: "install-1", _count: {channels: 1, externalUsers: 0}}]);
+    const rows = Array.from({length: 101}, (_, i) => ({id: `row-${String(i).padStart(3, "0")}`, workspaceId: "workspace-1", installationId: "install-1"}));
+    prismaMock.communicationMessage.findMany.mockImplementation(async ({where, take}: any) => {
+      if (where.id?.gt) digestProofReadableMock.mockResolvedValue(false);
+      return rows.filter(row => !where.id?.gt || row.id > where.id.gt).slice(0, take);
+    });
+    await expect(listCommunicationInstallations({kind: "user", user: {id: "admin", email: "admin@example.test", displayName: "Admin"}}, "workspace-1"))
+      .rejects.toMatchObject({code: "SOURCE_CHANGED"});
   });
 
   it("bounds Slack digest messages by an optional upper cutoff", async () => {

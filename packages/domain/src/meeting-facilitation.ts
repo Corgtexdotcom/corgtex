@@ -942,12 +942,14 @@ export async function postMeetingSummaryToAgendaThread(params: {
       workspaceId: reviewPreparation.workspaceId,
       meetingId: reviewPreparation.meetingId,
       reviewId: reviewPreparation.reviewId,
+      reviewFingerprint: reviewPreparation.reviewFingerprint,
       installationId: reviewPreparation.installationId,
       channelId: reviewPreparation.channelId,
       messageTs,
       threadTs,
       text: reviewPreparation.message.text,
       raw: response,
+      lineageRoots: reviewPreparation.lineageRoots,
     });
 
     for (const blocks of reviewPreparation.message.overflowBlocks) {
