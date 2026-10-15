@@ -1,5 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+const transactionProbe = vi.hoisted(() => ({afterCommit: undefined as undefined | ((result: unknown) => Promise<void>)}));
+vi.mock("@corgtex/shared", async importOriginal => {
+  const actual = await importOriginal<typeof import("@corgtex/shared")>();
+  return {...actual, prisma: new Proxy(actual.prisma, {get(target, key) {
+    if (key !== "$transaction") return Reflect.get(target, key, target);
+    const transaction = target.$transaction.bind(target) as (...args: unknown[]) => Promise<unknown>;
+    return async (...args: unknown[]) => {
+      const result = await transaction(...args);
+      await transactionProbe.afterCommit?.(result);
+      return result;
+    };
+  }})};
+});
 import { prisma, type AppActor } from "@corgtex/shared";
 import { readableArtifactIds, recordArtifactInputLineage } from "@corgtex/domain";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
@@ -7,7 +20,7 @@ import { runPendingJobs } from "./outbox";
 import { prepareMaintenanceClaim } from "./brain-maintenance-jobs";
 
 beforeEach(truncateAllTables);
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
+afterEach(() => { transactionProbe.afterCommit = undefined; vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 async function fixture() {
   const workspace = await prisma.workspace.create({data: {slug: randomUUID(), name: "Synthetic maintenance", plan: "PAYG_AI"}});
   const user = await prisma.user.create({data: {email: `${randomUUID()}@example.test`, passwordHash: "synthetic"}});
@@ -275,4 +288,50 @@ it("publishes a full25-source page with original heads through the final dispatc
   expect(await readableArtifactIds(f.actor, f.workspace.id, "AgentRun", [run])).toEqual(new Set([run.id]));
   expect(await prisma.workflowJob.count({where: {workspaceId: f.workspace.id, status: "COMPLETED"}})).toBe(3);
   expect(await prisma.brainSource.count({where: {workspaceId: f.workspace.id}})).toBe(25);
+  // Exactly one frozen runtime input per source; read-only apply must not
+  // allocate a second discarded copy in the final publication transaction.
+  expect(await prisma.artifactInputSnapshot.count({where: {workspaceId: f.workspace.id, sourceKind: "BrainSource"}})).toBe(25);
+  const step = await prisma.agentStep.findFirstOrThrow({where: {agentRunId: run.id, name: "maintenance-batch"}});
+  expect(step.inputJson).toEqual({scope: "BATCH", phase: "SOURCES"});
+  expect(step.outputJson).toEqual({scope: "BATCH", phase: "SOURCES"});
+  const source = await prisma.brainSource.findFirstOrThrow({where: {workspaceId: f.workspace.id}});
+  await prisma.brainSource.update({where: {id: source.id}, data: {archivedAt: new Date()}});
+  expect(await readableArtifactIds(f.actor, f.workspace.id, "AgentRun", [run])).toEqual(new Set());
+});
+
+
+it.each(["head", "epoch", "claim"])("rejects late %s replacement after the source receipt is frozen and before final claimed publication", async change => {
+  const f = await fixture();
+  const source = await prisma.brainSource.create({data: {workspaceId: f.workspace.id, sourceType: "DOC", tier: 3,
+    content: "Original observed source", createdAt: new Date(Date.now() - 181 * 86400000)}});
+  const prove = () => prisma.$transaction(tx => recordArtifactInputLineage({tx, actor: f.actor, workspaceId: f.workspace.id,
+    artifact: {kind: "BrainSource", id: source.id}, content: source, origin: "HUMAN_ORIGINAL", inputs: []}));
+  await prove(); await f.job();
+  for (let index = 0; index < 2; index++) expect(await runPendingJobs("late-change-worker", 1, 1)).toBe(1);
+  const job = await prisma.workflowJob.findFirstOrThrow({where: {workspaceId: f.workspace.id, status: "PENDING"}});
+  let changed = false;
+  transactionProbe.afterCommit = async result => {
+    // Real runtime captureInputs returns its committed immutable snapshot roots.
+    // Intervene only after that real transaction releases its locks.
+    if (!changed && Array.isArray(result)) {
+      const root = result.find(item => item?.kind === "ArtifactInputSnapshot");
+      const frozen = root && await prisma.artifactInputSnapshot.findFirst({where: {id: root.id, sourceKind: "BrainSource", sourceId: source.id}});
+      if (frozen) {
+        changed = true;
+        if (change === "head") await prove();
+        else if (change === "epoch") {
+          await prisma.brainSource.update({where: {id: source.id}, data: {archivedAt: new Date()}});
+          await prisma.brainSource.update({where: {id: source.id}, data: {archivedAt: null}});
+        } else await prisma.workflowJob.update({where: {id: job.id}, data: {lockedBy: "replacement", attempts: 2, lockedAt: new Date()}});
+      }
+    }
+  };
+  expect(await runPendingJobs("late-change-worker", 1, 1)).toBe(1);
+  expect(changed).toBe(true);
+  expect(await prisma.agentRun.count({where: {triggerRef: job.id, status: "COMPLETED"}})).toBe(0);
+  expect(await prisma.workflowJob.count({where: {dependsOnJobId: job.id}})).toBe(0);
+  const current = await prisma.workflowJob.findUniqueOrThrow({where: {id: job.id}});
+  if (change === "claim") expect(current).toMatchObject({status: "RUNNING", lockedBy: "replacement", attempts: 2});
+  else expect(current.status).toBe("PENDING");
+  expect(await prisma.brainSource.findUniqueOrThrow({where: {id: source.id}})).toMatchObject({content: source.content, archivedAt: null});
 });

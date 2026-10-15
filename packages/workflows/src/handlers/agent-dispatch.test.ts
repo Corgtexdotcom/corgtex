@@ -46,17 +46,24 @@ describe("runAgentWorkflowJob", () => {
     const roots = [{kind: "Workspace", id: "ws-1", fingerprint: "a".repeat(64)}];
     const consumed = [{kind: "ArtifactInputSnapshot", id: "snapshot", fingerprint: "b".repeat(64)}];
     const token = Object.freeze({kind: "agent-input-receipt"});
+    const plannedToken = Object.freeze({kind: "agent-input-receipt"});
     captureProof.mockResolvedValue(roots);
     const apply = vi.fn(), finish = vi.fn(), assertCurrent = vi.fn(), acknowledgeCommit = vi.fn();
     const state = {phase: "DISCUSSIONS"};
     maintenanceClaim.mockResolvedValue({state, assertCurrent, finish, acknowledgeCommit, recoverOrVerifyExisting: async () => false});
     maintenance.mockResolvedValue({report: {scope: "BATCH", staleThreadCount: 1}, lineageRoots: consumed, next: state, apply, assertCurrent: async () => {}});
     const captureInputs = vi.fn(async () => token);
-    const step = vi.fn(async (_name, _input, work, proof) => {expect(proof.receipt).toBe(token); return work();});
+    const step = vi.fn(async (_name, input, work, proof) => {
+      expect(proof.receipt).toBe(plannedToken);
+      expect(input).toEqual({scope: "BATCH", phase: "DISCUSSIONS"});
+      const output = await work();
+      expect(output).toEqual(input);
+      return output;
+    });
     execute.mockImplementation(async params => {
       expect(params.lineageRoots).toBe(roots);
       expect(params.contextLineageRoots({})).toBe(roots);
-      const output = await params.execute({}, {captureInputs, step}, "run", "model");
+      const output = await params.execute({}, {captureInputs, step, plannedInputReceipt: plannedToken}, "run", "model");
       expect(output).toEqual({resultJson: {scope: "BATCH", staleThreadCount: 1}, lineageReceipt: token});
       await params.beforeComplete({transaction: "same-final-tx"});
       return {status: "COMPLETED"};

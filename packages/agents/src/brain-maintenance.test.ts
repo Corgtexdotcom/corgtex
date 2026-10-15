@@ -116,13 +116,16 @@ describe("maintenance actual input lineage", () => {
       {tier3CleanupCandidates: 1}, {staleThreadCount: 1, absorbedThreadCount: 1}, {status: "RETAINED_UNSUPPORTED_CUSTODY"},
     ]);
     expect(results[4].report).not.toHaveProperty("prunedEventsCount");
+    // Only mutation preparation needs its own snapshots. The observation-only
+    // source phase is frozen once by its enclosing agent runtime, not by apply.
+    expect(snapshots.some(row => row.sourceKind === "BrainSource")).toBe(false);
     expect(absorb).toHaveBeenCalledOnce();
     expect(absorb.mock.calls[0][1].threadId).toBe("resolved");
     expect(db.knowledgeChunk.deleteMany).not.toHaveBeenCalled();
     expect(snapshots.some(row => row.sourceId === "private-thread" || row.sourceId === "unknown-thread" || row.sourceId === "recent" || row.sourceId === "finance")).toBe(false);
     expect(await isArtifactInputProofReadable(actor, "ws-1", results[0].lineageRoots, db as any)).toBe(true);
     expect(db.artifactInputLineage.findMany).toHaveBeenCalledWith({
-      where: { workspaceId: "ws-1", artifactType: "BrainArticle", artifactId: "public", origin: "HUMAN_ORIGINAL",
+      where: { workspaceId: "ws-1", artifactType: "BrainDiscussionThread", artifactId: "resolved", origin: "HUMAN_ORIGINAL",
         id: expect.any(String), contentHash: expect.any(String) },
       orderBy: { revision: "desc" }, take: 1,
     });
