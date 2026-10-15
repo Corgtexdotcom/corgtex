@@ -1,4 +1,5 @@
-import { readableArtifactIds } from "./source-lineage";
+import { readableArtifactIds, captureArtifactReadHeadObservation, mergeLineageInputRoot, withArtifactCountReleaseSnapshot, type LineageInput, type LineageRoot } from "./source-lineage";
+import { captureReadableDigestInputs } from "./digest-lineage";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import type {
   AdviceRequest,
@@ -463,9 +464,6 @@ export async function createAdviceRequest(actor: AppActor, params: ProducerLinea
       },
     });
 
-    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
-      artifact: { kind: "AdviceRequest", id: request.id }, content: request, receipt });
-
     if (params.audienceType === "MEMBERS") {
       await tx.adviceRequestRecipient.createMany({
         data: memberIds.map((memberId) => ({
@@ -475,6 +473,9 @@ export async function createAdviceRequest(actor: AppActor, params: ProducerLinea
         skipDuplicates: true,
       });
     }
+
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "AdviceRequest", id: request.id }, content: request, receipt });
 
     if (params.reminderAt) {
       await tx.workflowJob.upsert({
@@ -546,43 +547,89 @@ export async function listAdviceRequests(actor: AppActor, params: {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const subjectType = params.subjectType ? normalizeSubjectType(params.subjectType) : undefined;
 
-  return prisma.adviceRequest.findMany({
-    where: {
-      workspaceId: params.workspaceId,
-      ...(params.processId ? { processId: params.processId } : {}),
-      ...(params.status ? { status: params.status } : {}),
-      ...(subjectType || params.subjectId
-        ? {
-          process: {
-            ...(subjectType ? { subjectType } : {}),
-            ...(params.subjectId ? { subjectId: params.subjectId } : {}),
-          },
-        }
-        : {}),
-    },
-    include: {
-      requestedBy: {
-        select: { id: true, displayName: true, email: true },
+  const take = params.take ?? 50;
+  invariant(Number.isSafeInteger(take) && take >= 0, 400, "INVALID_INPUT", "Invalid advice request sample size.");
+  const userProjection = { id: true, email: true, displayName: true, bio: true, avatarUrl: true,
+    linkedinUrl: true, websiteUrl: true, createdAt: true, updatedAt: true } as const;
+  const include = {
+    requestedBy: { select: userProjection }, targetCircle: true,
+    recipients: { orderBy: { id: "asc" }, include: { member: { include: { user: { select: userProjection } } } } },
+    process: true,
+  } satisfies Prisma.AdviceRequestInclude;
+  type Row = Prisma.AdviceRequestGetPayload<{ include: typeof include }>;
+  const selected: Row[] = [];
+  const roots = new Map<string, LineageRoot>();
+  const heads = new Map<string, string>();
+  let after: { id: string; createdAt: Date } | undefined;
+  while (selected.length < take) {
+    const rows: Row[] = await prisma.adviceRequest.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        ...(params.processId ? { processId: params.processId } : {}),
+        ...(params.status ? { status: params.status } : {}),
+        ...(subjectType || params.subjectId ? { process: {
+          ...(subjectType ? { subjectType } : {}), ...(params.subjectId ? { subjectId: params.subjectId } : {}),
+        } } : {}),
+        ...(after ? { OR: [{ createdAt: { lt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] } : {}),
       },
-      targetCircle: {
-        select: { id: true, name: true },
+      include, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: 100,
+    });
+    const last = rows.at(-1);
+    const next = last ? { id: last.id, createdAt: new Date(last.createdAt) } : undefined;
+    // Process is not a source kind: prove its actual subject and compare its returned
+    // projection again in the final snapshot. Never synthesize process authority.
+    const candidates = rows.filter(row => row.process.workspaceId === params.workspaceId
+      && VALID_SUBJECT_TYPES.has(row.process.subjectType as AdviceSubjectType)
+      && row.recipients.every(recipient => recipient.member.workspaceId === params.workspaceId));
+    const observed = await captureArtifactReadHeadObservation(() => captureReadableDigestInputs({
+      actor, workspaceId: params.workspaceId, kind: "AdviceRequest", records: candidates,
+      additionalInputs: row => {
+        const inputs: Array<LineageInput & { snapshot?: Record<string, unknown> }> = [
+          { kind: row.process.subjectType === "ACTION" ? "Action" : row.process.subjectType === "TENSION" ? "Tension" : "Proposal", id: row.process.subjectId },
+          { kind: "User", id: row.requestedBy.id, snapshot: row.requestedBy },
+        ];
+        if (row.targetCircle) inputs.push({ kind: "Circle", id: row.targetCircle.id, snapshot: row.targetCircle });
+        for (const recipient of row.recipients) inputs.push(
+          { kind: "Member", id: recipient.member.id, snapshot: { ...recipient.member, user: { id: recipient.member.user.id, email: recipient.member.user.email, displayName: recipient.member.user.displayName } } },
+          { kind: "User", id: recipient.member.user.id, snapshot: recipient.member.user },
+        );
+        if (row.process.ownerMemberId) inputs.push({ kind: "Member", id: row.process.ownerMemberId });
+        inputs.push({ kind: "Member", id: row.process.authorMemberId });
+        if (row.process.proposalId) inputs.push({ kind: "Proposal", id: row.process.proposalId });
+        return inputs;
       },
-      recipients: {
-        include: {
-          member: {
-            include: {
-              user: {
-                select: { id: true, displayName: true, email: true },
-              },
-            },
-          },
-        },
-      },
-      process: true,
-    },
-    orderBy: { createdAt: "desc" },
-    take: params.take ?? 50,
-  });
+    }));
+    for (const [key, stamp] of observed.heads) {
+      invariant(!heads.has(key) || heads.get(key) === stamp, 409, "SOURCE_CHANGED", "Advice sources changed during collection.");
+      heads.set(key, stamp);
+    }
+    for (const row of observed.value.records.slice(0, take - selected.length)) {
+      selected.push(row);
+      for (const root of observed.value.proofs.get(row.id)!) {
+        const key = `${root.kind}:${root.id}`;
+        roots.set(key, mergeLineageInputRoot(roots.get(key), root));
+      }
+    }
+    if (rows.length < 100) break;
+    after = next;
+  }
+  return withArtifactCountReleaseSnapshot(actor, params.workspaceId, [...roots.values()], async () => {}, async tx => {
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
+    // These joins have no standalone manifest. Compare their exact original values,
+    // alongside the original native proofs, within the same release snapshot.
+    for (let offset = 0; offset < selected.length; offset += 100) {
+      const batch = selected.slice(offset, offset + 100);
+      const current = await tx.adviceRequest.findMany({ where: { workspaceId: params.workspaceId, id: { in: batch.map(row => row.id) } }, include });
+      const byId = new Map(current.map(row => [row.id, row]));
+      for (const row of batch) invariant(JSON.stringify(byId.get(row.id)) === JSON.stringify(row),
+        409, "SOURCE_CHANGED", "Advice request details changed before release.");
+    }
+    const identity = (user: Row["requestedBy"]) => ({ id: user.id, displayName: user.displayName, email: user.email });
+    return selected.map(row => ({ ...row, requestedBy: identity(row.requestedBy),
+      targetCircle: row.targetCircle ? { id: row.targetCircle.id, name: row.targetCircle.name } : null,
+      recipients: row.recipients.map(recipient => ({ ...recipient, member: { ...recipient.member, user: identity(recipient.member.user) } })),
+    }));
+  }, heads);
 }
 
 async function assertCanManageRequest(tx: Prisma.TransactionClient, actor: AppActor, params: {
