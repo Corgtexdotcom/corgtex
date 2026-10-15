@@ -106,6 +106,24 @@ export async function redactAgentRunContent<TUsage>(actor: AppActor, workspaceId
   };
 }
 
+/** Counts expose the same workspace-scoped operational metadata as redacted runs.
+ * Aggregate in PostgreSQL without loading run content, children or usage rows. */
+export async function getAgentRunOperationalCounts(actor: AppActor, workspaceId: string) {
+  const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  return prisma.$transaction(async tx => {
+    await requireWorkspaceMembership({ actor, workspaceId, tx });
+    const [pending, recent] = await Promise.all([
+      tx.agentRun.groupBy({ by: ["agentKey"], where: { workspaceId, status: "WAITING_APPROVAL" }, _count: { _all: true } }),
+      tx.agentRun.groupBy({ by: ["agentKey"], where: { workspaceId, createdAt: { gte: since } }, _count: { _all: true } }),
+    ]);
+    await requireWorkspaceMembership({ actor, workspaceId, tx });
+    return {
+      pendingApprovalCountsByAgent: pending.map(row => ({ agentKey: row.agentKey, count: row._count._all })),
+      runCountsByAgent: recent.map(row => ({ agentKey: row.agentKey, count: row._count._all })),
+    };
+  });
+}
+
 export async function listAgentRuns(actor: AppActor, workspaceId: string, opts?: {
   take?: number | null;
   agentKey?: string;

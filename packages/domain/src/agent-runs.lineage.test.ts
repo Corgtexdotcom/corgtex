@@ -63,7 +63,17 @@ beforeEach(() => {
     return 1;
   });
   db.$queryRaw.mockImplementation(async (query: any) => {
-    if (!query.sql?.includes('FROM "SourcePermissionEpoch"')) return [];
+    const sql = query.sql ?? query.strings?.join("") ?? "";
+    if (sql.includes('DISTINCT ON ("artifactId")') && sql.includes('FROM "ArtifactInputLineage"')) {
+      const [workspaceId, artifactType, ...ids] = query.values;
+      const heads = new Map<string, typeof manifests[number]>();
+      for (const row of [...manifests].sort((a, b) => b.revision - a.revision)) {
+        if (row.workspaceId === workspaceId && row.artifactType === artifactType && ids.includes(row.artifactId)
+          && !heads.has(row.artifactId)) heads.set(row.artifactId, row);
+      }
+      return [...heads.values()].map(row => structuredClone(row));
+    }
+    if (!sql.includes('FROM "SourcePermissionEpoch"')) return [];
     const [ws, ...pairs] = query.values; const rows = [];
     for (let i = 0; i < pairs.length; i += 2) {
       const [sourceKind, sourceId] = pairs.slice(i, i + 2); const epoch = epochs.get(JSON.stringify([ws, sourceKind, sourceId]));

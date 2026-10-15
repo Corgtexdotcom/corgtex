@@ -7,9 +7,9 @@ import {
   listAgentCredentials,
   listAgentIdentities,
   listAgentRuns,
+  getAgentRunOperationalCounts,
   type AgentAuthoritySummary,
 } from "@corgtex/domain";
-import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { AgentRegistryToggle } from "./AgentRegistryToggle";
 import { updateAgentGovernancePolicyAction } from "./actions";
@@ -194,7 +194,6 @@ export async function AgentRegistryTab({
 }) {
   const membership = await requireWorkspaceMembership({actor, workspaceId});
   const canReadFinancials = actor.kind === "user" && membership?.role === "ADMIN";
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
   const [
     identities,
     usageSummary,
@@ -202,7 +201,6 @@ export async function AgentRegistryTab({
     credentials,
     budget,
     recentRuns,
-    pendingApprovalRuns,
     runCounts,
     t,
     format,
@@ -213,12 +211,7 @@ export async function AgentRegistryTab({
     listAgentCredentials(actor, workspaceId),
     canReadFinancials ? getModelUsageBudget(actor, workspaceId) : null,
     listAgentRuns(actor, workspaceId, { take: 100 }),
-    listAgentRuns(actor, workspaceId, { status: "WAITING_APPROVAL", take: null }),
-    prisma.agentRun.groupBy({
-      by: ["agentKey"],
-      where: { workspaceId, createdAt: { gte: thirtyDaysAgo } },
-      _count: { _all: true },
-    }),
+    getAgentRunOperationalCounts(actor, workspaceId),
     getTranslations("agents"),
     getFormatter(),
   ]);
@@ -228,10 +221,9 @@ export async function AgentRegistryTab({
     configs,
     credentials,
     recentRuns,
-    pendingApprovalRuns,
+    pendingApprovalCountsByAgent: runCounts.pendingApprovalCountsByAgent,
     usageByAgent: usageSummary?.byAgent ?? [],
-    runCountsByAgent: (runCounts as Array<{ agentKey: string; _count: { _all: number } }>)
-      .map((row) => ({ agentKey: row.agentKey, count: row._count._all })),
+    runCountsByAgent: runCounts.runCountsByAgent,
     workspaceBudget: budget
       ? {
         monthlyCostCapUsd: String(budget.monthlyCostCapUsd),
