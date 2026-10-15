@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { runCompanyUnderstandingAgentMock, runActionExtractionAgentMock, runBrainSourceRegenerationJobMock, runProposalDraftingAgentMock, runConstitutionUpdateTriggerAgentMock, recoveryGuard, execute, absorb, captureProof, maintenance, meetingWorker, meetingActor } = vi.hoisted(() => ({
+const { runCompanyUnderstandingAgentMock, runActionExtractionAgentMock, runBrainSourceRegenerationJobMock, runProposalDraftingAgentMock, runConstitutionUpdateTriggerAgentMock, recoveryGuard, execute, absorb, captureProof, maintenance, maintenanceClaim, meetingWorker, meetingActor } = vi.hoisted(() => ({
+  maintenanceClaim: vi.fn(),
   meetingWorker: vi.fn(),
   meetingActor: Object.freeze({kind: "agent", authProvider: "bootstrap", label: "claimed-meeting"}),
   runCompanyUnderstandingAgentMock: vi.fn(),
@@ -11,7 +12,8 @@ const { runCompanyUnderstandingAgentMock, runActionExtractionAgentMock, runBrain
   recoveryGuard: vi.fn(), execute: vi.fn(), absorb: vi.fn(), captureProof: vi.fn(), maintenance: vi.fn(),
 }));
 
-vi.mock("@corgtex/domain", () => ({ assertBrainSourceRecoveryJob: recoveryGuard, captureArtifactInputProof: captureProof, withMeetingTranscriptWorker: meetingWorker }));
+vi.mock("../brain-maintenance-jobs", () => ({prepareMaintenanceClaim: maintenanceClaim, MaintenanceDeferred: class extends Error {}}));
+vi.mock("@corgtex/domain", async () => ({...await import("../../../domain/src/errors"), assertBrainSourceRecoveryJob: recoveryGuard, captureArtifactInputProof: captureProof, withMeetingTranscriptWorker: meetingWorker }));
 
 vi.mock("@corgtex/agents", () => ({
   executeAgentRun: execute,
@@ -45,18 +47,28 @@ describe("runAgentWorkflowJob", () => {
     const consumed = [{kind: "ArtifactInputSnapshot", id: "snapshot", fingerprint: "b".repeat(64)}];
     const token = Object.freeze({kind: "agent-input-receipt"});
     captureProof.mockResolvedValue(roots);
-    maintenance.mockResolvedValue({staleThreadCount: 1, lineageRoots: consumed});
+    const apply = vi.fn(), finish = vi.fn(), assertCurrent = vi.fn(), acknowledgeCommit = vi.fn();
+    const state = {phase: "DISCUSSIONS"};
+    maintenanceClaim.mockResolvedValue({state, assertCurrent, finish, acknowledgeCommit, recoverOrVerifyExisting: async () => false});
+    maintenance.mockResolvedValue({report: {scope: "BATCH", staleThreadCount: 1}, lineageRoots: consumed, next: state, apply, assertCurrent: async () => {}});
     const captureInputs = vi.fn(async () => token);
     const step = vi.fn(async (_name, _input, work, proof) => {expect(proof.receipt).toBe(token); return work();});
     execute.mockImplementation(async params => {
       expect(params.lineageRoots).toBe(roots);
       expect(params.contextLineageRoots({})).toBe(roots);
-      return params.execute({}, {captureInputs, step}, "run", "model");
+      const output = await params.execute({}, {captureInputs, step}, "run", "model");
+      expect(output).toEqual({resultJson: {scope: "BATCH", staleThreadCount: 1}, lineageReceipt: token});
+      await params.beforeComplete({transaction: "same-final-tx"});
+      return {status: "COMPLETED"};
     });
-    expect(await runAgentWorkflowJob({id: "job", workspaceId: "ws-1", type: "agent.brain-maintenance", payload: {}}))
-      .toEqual({resultJson: {staleThreadCount: 1}, lineageReceipt: token});
+    expect(await runAgentWorkflowJob({id: "job", workspaceId: "ws-1", type: "agent.brain-maintenance", payload: {}}, "worker"))
+      .toEqual({status: "COMPLETED"});
     expect(captureInputs).toHaveBeenCalledExactlyOnceWith(consumed);
     expect(maintenance.mock.calls[0][0].actor).toBe(execute.mock.calls[0][0].lineageActor);
+    expect(assertCurrent.mock.invocationCallOrder[0]).toBeLessThan(apply.mock.invocationCallOrder[0]);
+    expect(apply.mock.invocationCallOrder[0]).toBeLessThan(finish.mock.invocationCallOrder[0]);
+    expect(finish).toHaveBeenCalledWith({transaction: "same-final-tx"}, state);
+    expect(acknowledgeCommit).toHaveBeenCalledOnce();
   });
 
   it("dispatches advisory review feedback to a new drafting run without protected actions", async () => {

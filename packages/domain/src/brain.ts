@@ -1219,13 +1219,15 @@ export async function markThreadAbsorbed(actor: AppActor, params: {
   workspaceId: string;
   threadId: string;
   expectedInputRoots?: LineageRoot[];
+  tx?: Prisma.TransactionClient;
 }) {
   await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
+    tx: params.tx,
   });
 
-  return prisma.$transaction(async (tx) => {
+  const run = async (tx: Prisma.TransactionClient) => {
     await tx.$queryRaw`SELECT id FROM "BrainDiscussionThread" WHERE id = ${params.threadId} FOR UPDATE`;
     const thread = await tx.brainDiscussionThread.findUnique({
       where: { id: params.threadId },
@@ -1248,7 +1250,8 @@ export async function markThreadAbsorbed(actor: AppActor, params: {
       artifact: { kind: "BrainDiscussionThread", id: updated.id }, content: updated, receipt });
     return (await readableArtifactIds(actor, params.workspaceId, "BrainDiscussionThread", [updated], tx)).has(updated.id)
       ? updated : { id: updated.id, contentWithheld: true };
-  });
+  };
+  return params.tx ? run(params.tx) : prisma.$transaction(run);
 }
 
 // ---------------------------------------------------------------------------

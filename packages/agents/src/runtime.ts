@@ -46,6 +46,8 @@ export type AgentRunParams<TPayload extends Record<string, unknown>, TContext ex
   /** Explicit trusted producer callback; never parse receipts from model output. */
   contextLineageRoots?: (context: TContext) => readonly LineageRoot[];
   contextIsAuditedRead?: boolean;
+  /** Trusted code hook: claimed workflow mutations and handoff share the final commit. */
+  beforeComplete?: (tx: Prisma.TransactionClient, runId: string) => Promise<void>;
   buildContext: (helpers: AgentHelpers, runId: string) => Promise<TContext>;
   execute: (context: TContext, helpers: AgentHelpers, runId: string, model: string) => Promise<AgentOutcome>;
 };
@@ -329,6 +331,7 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
     }
 
     const finalRun = await prisma.$transaction(async (tx) => {
+      if (nextStatus === "COMPLETED" && params.beforeComplete) await params.beforeComplete(tx, run.id);
       await persistOperations(tx);
 
       const updated = await tx.agentRun.update({

@@ -780,6 +780,14 @@ export async function captureArtifactReadHeadObservation<T>(read: () => Promise<
   return { value, heads: new Map(binding.heads) };
 }
 
+/** Validate original observations inside the caller's actual transaction. This
+ * binds only input reads; it neither starts a transaction nor grants authority. */
+export async function isArtifactInputProofReadableAtObservedHeads(actor: AppActor, workspaceId: string,
+  roots: readonly LineageRoot[], heads: ReadonlyMap<string, string>, db: LineageClient = prisma): Promise<boolean> {
+  return expectedReadHeads.run({heads: new Map(heads), sealed: true},
+    () => isArtifactInputProofReadable(actor, workspaceId, roots, db));
+}
+
 function readHeadBinding(memo: Map<string, boolean>) {
   let binding = readHeadMemos.get(memo);
   if (!binding) { binding = expectedReadHeads.getStore() ?? { heads: new Map(), sealed: false }; readHeadMemos.set(memo, binding); }
