@@ -10,6 +10,35 @@ import { listTensions, upvoteTension } from "./tensions";
 import { getBrainStatus } from "./brain";
 import { captureArtifactInputProof, withArtifactCountReleaseSnapshot, recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
 
+function isQueryRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Fresh lineage comparisons load complete rows by a bounded original ID set.
+ * Unlike a corpus page, an IN query needs no take; projections and joins are
+ * forbidden here, and IDs must belong to the actual original fixture cohort. */
+function isBoundedProofRead(query: unknown, workspaceId: string, originalIds: ReadonlySet<string>) {
+  if (!isQueryRecord(query) || Object.keys(query).some(key => key !== "where")) return false;
+  const where = query.where;
+  if (!isQueryRecord(where) || where.workspaceId !== workspaceId
+    || Object.keys(where).some(key => key !== "workspaceId" && key !== "id")) return false;
+  const id = where.id;
+  if (!isQueryRecord(id) || Object.keys(id).some(key => key !== "in")) return false;
+  const ids = id.in;
+  return Array.isArray(ids) && ids.length > 0 && ids.length <= 100 && new Set(ids).size === ids.length
+    && ids.every(value => typeof value === "string" && originalIds.has(value));
+}
+
+function isSelectedHydration(query: unknown, workspaceId: string, selectedIds: readonly string[]) {
+  if (!selectedIds.length || !isQueryRecord(query) || !query.include || query.select !== undefined
+    || !isQueryRecord(query.where) || !Array.isArray(query.where.AND)) return false;
+  const clauses = query.where.AND;
+  if (!clauses.some(clause => isQueryRecord(clause) && clause.workspaceId === workspaceId)) return false;
+  return clauses.some(clause => isQueryRecord(clause) && isQueryRecord(clause.id)
+    && Array.isArray(clause.id.in) && clause.id.in.length === selectedIds.length
+    && new Set(clause.id.in).size === selectedIds.length && clause.id.in.every(id => selectedIds.includes(id)));
+}
+
 beforeEach(truncateAllTables);
 afterEach(()=>vi.restoreAllMocks());
 async function fixture() {
@@ -43,13 +72,18 @@ it.each(["Action","Proposal","Tension"] as const)("keeps %s lists and zero-take 
   if(kind==="Proposal") await prisma.proposal.create({data:args});
   if(kind==="Tension") await prisma.tension.create({data:args});
   const queries=kind==="Action"?vi.spyOn(prisma.action,"findMany"):kind==="Proposal"?vi.spyOn(prisma.proposal,"findMany"):vi.spyOn(prisma.tension,"findMany");
+  const originals = new Set(["v1", "v2", "v3"]);
   const page=await list(1,1);
   expect(page.total).toBe(3);expect(page.items.map(row=>row.id)).toEqual(["v2"]);
   expect(queries.mock.calls.filter(([query])=>query?.take===100).length).toBeGreaterThan(50);
-  expect(queries.mock.calls.every(([query])=>query?.take===100 || query?.include && JSON.stringify(query.where).includes('"v2"'))).toBe(true);
+  expect(queries.mock.calls.every(([query])=>query?.take===100 && !query.select && !query.include
+    || isSelectedHydration(query,f.workspaceId,["v2"]) || isBoundedProofRead(query,f.workspaceId,originals))).toBe(true);
   queries.mockClear();
   expect(await list(0)).toMatchObject({items:[],total:3});
-  expect(queries.mock.calls.every(([query])=>query?.take===100 && !query.include)).toBe(true);
+  const countQueries = queries.mock.calls.map(([query])=>query);
+  expect(countQueries.some(query=>isBoundedProofRead(query,f.workspaceId,originals))).toBe(true);
+  expect(countQueries.every(query=>query?.include===undefined && query?.select===undefined
+    && (query?.take===100 || isBoundedProofRead(query,f.workspaceId,originals))),JSON.stringify(countQueries)).toBe(true);
   if(kind==="Action") expect(await countActionsByStatus(f.actor,f.workspaceId)).toMatchObject({OPEN:3,ALL:3});
   if(kind==="Action") await prisma.action.update({where:{id:"v2"},data:{archivedAt:new Date()}});
   if(kind==="Proposal") await prisma.proposal.update({where:{id:"v2"},data:{archivedAt:new Date()}});
@@ -125,7 +159,12 @@ it("ranks readable votes across multiple canonical and rank windows before selec
   expect(page.total).toBe(105);
   expect(page.items.map(row=>row.id)).toEqual(["t005","t004","t003"]);
   expect(queries.mock.calls.filter(([query])=>query?.take===100).length).toBeGreaterThan(3);
-  expect(queries.mock.calls.every(([query])=>query?.take===100 || query?.include && JSON.stringify(query.where).includes('"t005"'))).toBe(true);
+  const originals = new Set(Array.from({length:105},(_,i)=>`t${String(i).padStart(3,"0")}`));
+  const rankQueries = queries.mock.calls.map(([query])=>query);
+  expect(rankQueries.some(query=>isBoundedProofRead(query,f.workspaceId,originals))).toBe(true);
+  expect(rankQueries.every(query=>query?.take===100 && !query.select && !query.include
+    || isSelectedHydration(query,f.workspaceId,["t005","t004","t003"])
+    || isBoundedProofRead(query,f.workspaceId,originals)),JSON.stringify(rankQueries)).toBe(true);
 },180_000);
 
 it("refuses an early admitted count when a later canonical page withdraws it",async()=>{
@@ -143,3 +182,15 @@ it("refuses an early admitted count when a later canonical page withdraws it",as
   await expect(listActions(f.actor,f.workspaceId,{take:0,sort:"date"})).rejects.toMatchObject({code:"SOURCE_CHANGED"});
   expect(pages).toBe(2);
 },60_000);
+
+it("keeps the proof-read query exception canonical, tenant-bound and bounded",()=>{
+  const originals = new Set(Array.from({length:101},(_,i)=>`original-${i}`));
+  const where = {workspaceId:"workspace",id:{in:["original-0"]}};
+  expect(isBoundedProofRead({where},"workspace",originals)).toBe(true);
+  for (const query of [
+    {}, {where:{workspaceId:"workspace"}}, {where:{...where,workspaceId:"foreign"}},
+    {where:{...where,id:{in:[]}}}, {where:{...where,id:{in:[...originals]}}},
+    {where:{...where,id:{in:["original-0","original-0"]}}}, {where:{...where,id:{in:["unknown"]}}},
+    {where,select:{id:true}}, {where,include:{author:true}},
+  ]) expect(isBoundedProofRead(query,"workspace",originals)).toBe(false);
+});
