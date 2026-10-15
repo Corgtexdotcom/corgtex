@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { Prisma } from "@prisma/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const transactionProbe = vi.hoisted(() => ({afterCommit: undefined as undefined | ((result: unknown) => Promise<void>)}));
 vi.mock("@corgtex/shared", async importOriginal => {
@@ -35,6 +36,79 @@ async function fixture() {
   const job = () => prisma.workflowJob.create({data: {workspaceId: workspace.id, type: "agent.brain-maintenance", payload: {}, dedupeKey: randomUUID()}});
   return {workspace, actor, member, article, job};
 }
+
+type SeedRecovery = { remaining: number; recovered: number; attempts: number; maxTransactionMs: number };
+async function seedOriginal(f: Awaited<ReturnType<typeof fixture>>, index: number, age: Date, recovery: SeedRecovery,
+  beforeCommit?: (attempt: number) => Promise<void>) {
+  const id = randomUUID();
+  let attempt = 0;
+  const write = async () => {
+    const started = Date.now();
+    recovery.attempts++;
+    try {
+      return await prisma.$transaction(async tx => {
+        const row = await tx.brainSource.create({data: {id, workspaceId: f.workspace.id, sourceType: "DOC", tier: 3,
+          content: `Genuine authored synthetic source ${index}`, createdAt: age}});
+        await recordArtifactInputLineage({tx, actor: f.actor, workspaceId: f.workspace.id, artifact: {kind: "BrainSource", id},
+          content: row, origin: "HUMAN_ORIGINAL", inputs: []});
+        await beforeCommit?.(++attempt);
+        return row;
+      });
+    } finally {
+      recovery.maxTransactionMs = Math.max(recovery.maxTransactionMs, Date.now() - started);
+    }
+  };
+  const started = Date.now();
+  try { return await write(); }
+  catch (error) {
+    // This recovers one independently verified fixture rollback per cohort.
+    // It neither retries product work nor changes Prisma's default 5s timeout.
+    if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2028"
+      || !error.message.includes("expired transaction") || recovery.remaining !== 1) throw error;
+    const [source, manifest] = await Promise.all([
+      prisma.brainSource.findUnique({where: {id}, select: {id: true}}),
+      prisma.artifactInputLineage.findFirst({where: {workspaceId: f.workspace.id, artifactType: "BrainSource", artifactId: id}, select: {id: true}}),
+    ]);
+    if (source || manifest) throw error; // Never guess whether an ambiguous commit succeeded.
+    recovery.remaining = 0;
+    process.stdout.write(`${JSON.stringify({event: "maintenance.fixture.expired.rollback-verified", index, elapsedMs: Date.now() - started,
+      sourceAbsent: true, manifestAbsent: true, remainingRecovery: 0})}\n`);
+    const row = await write(); // Same ID, unchanged genuine writer, one default-timeout attempt.
+    recovery.recovered++;
+    process.stdout.write(`${JSON.stringify({event: "maintenance.fixture.admission-recovered", index, elapsedMs: Date.now() - started})}\n`);
+    return row;
+  }
+}
+
+it("recovers only one verified expired fixture transaction with a genuine original and unchanged timeout", async () => {
+  const f = await fixture();
+  const recovery: SeedRecovery = {remaining: 1, recovered: 0, attempts: 0, maxTransactionMs: 0};
+  const expire = async (attempt: number) => { if (attempt === 1) await new Promise(resolve => setTimeout(resolve, 6_000)); };
+  const row = await seedOriginal(f, 0, new Date(), recovery, expire);
+  expect(recovery).toMatchObject({remaining: 0, recovered: 1, attempts: 2});
+  expect(await prisma.brainSource.count({where: {workspaceId: f.workspace.id}})).toBe(1);
+  expect(await prisma.artifactInputLineage.count({where: {workspaceId: f.workspace.id, artifactType: "BrainSource", artifactId: row.id}})).toBe(1);
+  expect(await readableArtifactIds(f.actor, f.workspace.id, "BrainSource", [row])).toEqual(new Set([row.id]));
+  await expect(seedOriginal(f, 1, new Date(), recovery, async () => { throw new Error("synthetic non-expiry failure"); }))
+    .rejects.toThrow("synthetic non-expiry failure");
+  await expect(seedOriginal(f, 2, new Date(), recovery, expire)).rejects.toMatchObject({code: "P2028"});
+  expect(recovery).toMatchObject({remaining: 0, recovered: 1, attempts: 4});
+  expect(await prisma.brainSource.count({where: {workspaceId: f.workspace.id}})).toBe(1);
+  expect(await prisma.artifactInputLineage.count({where: {workspaceId: f.workspace.id, artifactType: "BrainSource"}})).toBe(1);
+});
+
+it("does not retry an ambiguous post-commit fixture error when the genuine original already exists", async () => {
+  const f = await fixture();
+  const recovery: SeedRecovery = {remaining: 1, recovered: 0, attempts: 0, maxTransactionMs: 0};
+  const error = new Prisma.PrismaClientKnownRequestError("Synthetic ambiguous acknowledgement: expired transaction", {
+    code: "P2028", clientVersion: Prisma.prismaVersion.client,
+  });
+  transactionProbe.afterCommit = async () => { throw error; };
+  await expect(seedOriginal(f, 0, new Date(), recovery)).rejects.toBe(error);
+  expect(recovery).toMatchObject({remaining: 1, recovered: 0, attempts: 1});
+  expect(await prisma.brainSource.count({where: {workspaceId: f.workspace.id}})).toBe(1);
+  expect(await prisma.artifactInputLineage.count({where: {workspaceId: f.workspace.id, artifactType: "BrainSource"}})).toBe(1);
+});
 
 it("atomically publishes a proved batch and its exact continuation through the real dispatcher", async () => {
   const f = await fixture();
@@ -106,19 +180,16 @@ it("processes more than 5000 genuine originals as independently proved bounded r
   const f = await fixture();
   const age = new Date(Date.now() - 181 * 86400000);
   const started = Date.now();
+  const recovery: SeedRecovery = {remaining: 1, recovered: 0, attempts: 0, maxTransactionMs: 0};
   // One synthetic cohort, genuine human originals. No inherited-root shortcut,
   // model call, elevated budget, or transaction timeout override.
   for (let page = 0; page < 5001; page += 25) {
     for (let index = page; index < Math.min(page + 25, 5001); index++) {
-      await prisma.$transaction(async tx => {
-        const row = await tx.brainSource.create({data: {workspaceId: f.workspace.id, sourceType: "DOC", tier: 3,
-          content: `Genuine authored synthetic source ${index}`, createdAt: age}});
-        await recordArtifactInputLineage({tx, actor: f.actor, workspaceId: f.workspace.id, artifact: {kind: "BrainSource", id: row.id},
-          content: row, origin: "HUMAN_ORIGINAL", inputs: []});
-      });
+      await seedOriginal(f, index, age, recovery);
     }
   }
-  console.info("Maintenance genuine originals admitted", {count: 5001, elapsedMs: Date.now() - started});
+  expect(await prisma.brainSource.count({where: {workspaceId: f.workspace.id}})).toBe(5001);
+  process.stdout.write(`${JSON.stringify({event: "maintenance.fixture.originals-admitted", count: 5001, elapsedMs: Date.now() - started, ...recovery})}\n`);
   await f.job();
   let jobs = 0;
   while (await runPendingJobs("cohort-worker", 1, 1)) {
