@@ -4,7 +4,7 @@ import { Prisma, type MeetingTranscriptSourceConnection, type NativeTranscriptIn
 import { decryptSecret, encryptSecret, prisma, type AppActor } from "@corgtex/shared";
 import { invariant } from "./errors";
 import { requireWorkspaceMembership } from "./auth";
-import { nativeTranscriptPayloadHash } from "./native-transcript-input";
+import { nativeTranscriptPayloadHash } from "./native-transcript-payload";
 import { capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, mergePermissionEpochProofs,
   parsePermissionEpochProof, type PermissionEpochProof } from "./source-permission-epochs";
 import { getTranscriptSourceImportPurpose, registerTranscriptSourceImport, revokeTranscriptSourceImport } from "./native-transcript-principal";

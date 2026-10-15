@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { isArtifactPermissionEpochProofCurrent, SOURCE_PERMISSION_POLICY_VERSION,
+  withExternalProviderPermissionReadPass } from "./source-permission-epochs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma, encryptSecret, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 
 const provider = vi.hoisted(() => ({ transport: vi.fn(), body: { text: "The product team owns onboarding.", etag: "same-version" },
-  transactionDepth: 0, callsInTransaction: 0, measureApply: false, applyOperations: 0, applySnapshotReads: 0 }));
+  transactionDepth: 0, callsInTransaction: 0, measureApply: false, applyOperations: 0, applySnapshotReads: 0, operations: {} as Record<string, number>, transactions: [] as Array<{ milliseconds: number; operations: number }> }));
 vi.mock("./external-mcp", async importOriginal => ({ ...await importOriginal<typeof import("./external-mcp")>(),
   readBoxExternalMcpNativeResponse: provider.transport }));
 vi.mock("@corgtex/shared", async importOriginal => {
@@ -19,11 +21,15 @@ vi.mock("@corgtex/shared", async importOriginal => {
       const callback = args[0];
       return original(async (tx: any) => {
         provider.transactionDepth++;
+        const measured = provider.measureApply, started = performance.now(), initialOperations = provider.applyOperations;
         const delegates = new Map<PropertyKey, unknown>();
         const observed = !provider.measureApply ? tx : new Proxy(tx, { get(client, name) {
           const value = Reflect.get(client, name, client);
           const count = (receiver: any, method: any, operation: PropertyKey) => (...params: any[]) => {
             provider.applyOperations++;
+            const sqlParts = params[0]?.strings ?? (Array.isArray(params[0]) ? params[0] : []);
+            const label = name === "$queryRaw" ? `$queryRaw:${sqlParts.join(" ").includes("SourcePermissionEpoch") ? "SourcePermissionEpoch" : "other"}` : `${String(name)}.${String(operation)}`;
+            provider.operations[label] = (provider.operations[label] ?? 0) + 1;
             if (name === "artifactInputSnapshot" && operation === "findFirst") provider.applySnapshotReads++;
             return Reflect.apply(method, receiver, params);
           };
@@ -36,6 +42,7 @@ vi.mock("@corgtex/shared", async importOriginal => {
           return delegates.get(name);
         } });
         try { return await callback(observed); } finally {
+          if (measured) provider.transactions.push({ milliseconds: performance.now() - started, operations: provider.applyOperations - initialOperations });
           provider.transactionDepth--;
         }
       }, ...args.slice(1));
@@ -127,7 +134,7 @@ describe("Box phase authority in real disposable database transactions", () => {
   beforeEach(async () => {
     await truncateAllTables();
     provider.transactionDepth = 0; provider.callsInTransaction = 0;
-    provider.measureApply = false; provider.applyOperations = 0; provider.applySnapshotReads = 0;
+    provider.measureApply = false; provider.applyOperations = 0; provider.applySnapshotReads = 0; provider.operations = {}; provider.transactions = [];
     provider.body = { text: "The product team owns onboarding.", etag: "same-version" };
     provider.transport.mockClear().mockImplementation(async () => {
       if (provider.transactionDepth) { provider.callsInTransaction++; throw new Error("Provider inside interactive transaction"); }
@@ -163,11 +170,17 @@ describe("Box phase authority in real disposable database transactions", () => {
     provider.measureApply = true;
     try {
       expect(await applyContextGraphProposedDiff(f.actor, { workspaceId: f.workspace.id, proposedDiffId: id })).toMatchObject({ status: "applied" });
-    } finally { provider.measureApply = false; }
+    } finally {
+      provider.measureApply = false;
+      process.stderr.write(`BOX_TRANSACTION_METRICS ${JSON.stringify({ transactions: provider.transactions, operations: provider.operations })}\n`);
+    }
     // This two-object native proposal previously issued 6,573 transaction
     // operations / 2,516 snapshot reads and repeatedly exceeded the default 5s.
     // Count work rather than relaxing the timeout or asserting host timing.
-    expect(provider.applyOperations).toBeLessThan(6_000);
+    // The later native commit still issued 1,254 epoch queries / 5,575 total
+    // after snapshot deduplication. Locked pass observations remove that repeat.
+    expect(provider.operations["$queryRaw:SourcePermissionEpoch"]).toBeLessThan(900);
+    expect(provider.applyOperations).toBeLessThan(5_500);
     expect(provider.applySnapshotReads).toBeLessThan(1_500);
     expect(provider.callsInTransaction).toBe(0);
     const objects = await prisma.contextGraphObject.findMany({ where: { workspaceId: f.workspace.id, id: { notIn: f.targets.map(row => row.id) } } });
@@ -176,6 +189,79 @@ describe("Box phase authority in real disposable database transactions", () => {
     provider.body.text = "Changed after publication";
     expect((await readableArtifactIds(f.actor, f.workspace.id, "ContextGraphObject", objects)).size).toBe(0);
   });
+  it.each(["update", "delete"])("rejects a same-TX epoch %s after a real locked observation and reuse", async mutation => {
+    const f = await fixture();
+    const roots = await captureArtifactInputProof(f.actor, f.workspace.id, [{ kind: "ExternalProviderFetchInput", id: f.receipt.input.id }]);
+    const cap = await prepareExternalProviderRootCommitPreflight(f.actor, f.workspace.id, roots);
+    const control = randomUUID();
+    await prisma.$executeRaw`INSERT INTO "SourcePermissionEpoch" ("id", "workspaceId", "sourceKind", "sourceId", "epoch")
+      VALUES (${randomUUID()}, ${f.workspace.id}, 'Action', ${control}, 0)`;
+    const proof = { version: 1 as const, policyVersion: SOURCE_PERMISSION_POLICY_VERSION,
+      entries: [{ kind: "Action", id: control, epoch: "0" }] };
+    provider.measureApply = true;
+    try {
+      await prisma.$transaction(tx => withExternalProviderCommitPreflight(f.actor, f.workspace.id, tx, cap, async () => {
+        const result = await withExternalProviderPermissionReadPass(f.actor, tx, f.workspace.id, "local", async () => {
+          const before = provider.operations["$queryRaw:SourcePermissionEpoch"] ?? 0;
+          expect(await isArtifactPermissionEpochProofCurrent(f.workspace.id, proof, tx)).toBe(true);
+          expect(provider.operations["$queryRaw:SourcePermissionEpoch"]).toBe(before + 1);
+          if (mutation === "update") await tx.$executeRaw`UPDATE "SourcePermissionEpoch" SET "epoch" = 1
+            WHERE "workspaceId" = ${f.workspace.id} AND "sourceKind" = 'Action' AND "sourceId" = ${control}`;
+          else await tx.$executeRaw`DELETE FROM "SourcePermissionEpoch"
+            WHERE "workspaceId" = ${f.workspace.id} AND "sourceKind" = 'Action' AND "sourceId" = ${control}`;
+          expect(await isArtifactPermissionEpochProofCurrent(f.workspace.id, proof, tx)).toBe(true);
+          expect(provider.operations["$queryRaw:SourcePermissionEpoch"]).toBe(before + 1); // Actual hit, no SQL.
+          return true;
+        });
+        expect(result).toBe(false); // Fresh final comparison observes own writes.
+      }));
+    } finally { provider.measureApply = false; }
+    expect(provider.callsInTransaction).toBe(0);
+  });
+
+  it("holds the first epoch observation against a concurrent writer until the real commit ends", async () => {
+    const f = await fixture();
+    const roots = await captureArtifactInputProof(f.actor, f.workspace.id, [{ kind: "ExternalProviderFetchInput", id: f.receipt.input.id }]);
+    const cap = await prepareExternalProviderRootCommitPreflight(f.actor, f.workspace.id, roots);
+    const control = randomUUID();
+    await prisma.$executeRaw`INSERT INTO "SourcePermissionEpoch" ("id", "workspaceId", "sourceKind", "sourceId", "epoch")
+      VALUES (${randomUUID()}, ${f.workspace.id}, 'Action', ${control}, 0)`;
+    const proof = { version: 1 as const, policyVersion: SOURCE_PERMISSION_POLICY_VERSION,
+      entries: [{ kind: "Action", id: control, epoch: "0" }] };
+    let writer: Promise<unknown> | undefined;
+    let writerFinished = false;
+    try {
+      await prisma.$transaction(tx => withExternalProviderCommitPreflight(f.actor, f.workspace.id, tx, cap, async () => {
+        expect(await withExternalProviderPermissionReadPass(f.actor, tx, f.workspace.id, "local", async () => {
+          expect(await isArtifactPermissionEpochProofCurrent(f.workspace.id, proof, tx)).toBe(true);
+          const [{ pid: readerPid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+          let started!: (pid: number) => void;
+          const ready = new Promise<number>(resolve => { started = resolve; });
+          writer = prisma.$transaction(async other => {
+            const [{ pid }] = await other.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+            started(pid);
+            await other.$executeRaw`UPDATE "SourcePermissionEpoch" SET "epoch" = 1
+              WHERE "workspaceId" = ${f.workspace.id} AND "sourceKind" = 'Action' AND "sourceId" = ${control}`;
+            writerFinished = true;
+          });
+          const writerPid = await ready;
+          let blocked = false;
+          for (let i = 0; i < 100 && !blocked; i++) {
+            const [row] = await prisma.$queryRaw<Array<{ blocked: boolean }>>`SELECT ${readerPid} = ANY(pg_blocking_pids(${writerPid}::integer)) AS blocked`;
+            blocked = row.blocked;
+            if (!blocked) await new Promise(resolve => setTimeout(resolve, 10));
+          }
+          expect(blocked).toBe(true);
+          expect(writerFinished).toBe(false);
+          return isArtifactPermissionEpochProofCurrent(f.workspace.id, proof, tx);
+        })).toBe(true);
+        expect(writerFinished).toBe(false);
+      }));
+    } finally { await writer; }
+    expect(writerFinished).toBe(true);
+    expect(await isArtifactPermissionEpochProofCurrent(f.workspace.id, proof)).toBe(false);
+  });
+
   it("rejects changed real provider bytes after model with no partial bundle despite an unchanged provider version label", async () => {
     const f = await fixture(); const lease = await claim(f);
     const result = await generateGraphSourceVariant({ ...lease, generate: async sources => {

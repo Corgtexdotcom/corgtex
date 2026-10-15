@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
-import { AppError, createMeetingAudioAsset, isPlausibleMeetingRecordedAt, readableArtifactIds, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, MAX_AUDIO_FILE_BYTES, createMeetingAudioAsset, isPlausibleMeetingRecordedAt, readableArtifactIds, requireWorkspaceMembership } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
@@ -112,6 +112,7 @@ function requireAudioFile(file: FormDataEntryValue | null) {
   if (!(file instanceof File) || file.size === 0) {
     throw new AppError(400, "INVALID_INPUT", "file is required.");
   }
+  if (file.size > MAX_AUDIO_FILE_BYTES) throw new AppError(413, "AUDIO_TOO_LARGE", "Audio file is too large.");
   const mimeType = file.type.trim().toLowerCase();
   if (mimeType && !mimeType.startsWith("audio/")) {
     throw new AppError(400, "INVALID_AUDIO_FILE", "Audio file must use an audio MIME type.");
@@ -215,7 +216,7 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
     const file = requireAudioFile(formData.get("file"));
     const meetingId = formString(formData, "meetingId");
     // Capture form values before the asynchronous file read; the domain layer
-    // copies the bytes again before storage or native input capture.
+    // keeps one isolated storage copy; native capture hashes without another copy.
     const upload = {
       workspaceId,
       fileName: file.name,

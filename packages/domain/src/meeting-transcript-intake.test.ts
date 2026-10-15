@@ -30,7 +30,10 @@ vi.mock("./meetings", () => ({
   uploadMeetingTranscript: uploadMeetingTranscriptMock,
 }));
 
-vi.mock("./native-transcript-input", () => ({ directMemberTranscriptRoots: directRootsMock }));
+vi.mock("./native-transcript-input", async importOriginal => ({
+  ...await importOriginal<typeof import("./native-transcript-input")>(),
+  directMemberTranscriptRoots: directRootsMock,
+}));
 
 const USER_ACTOR = { kind: "user" as const, user: { id: "user-1", email: "owner@example.test", displayName: "Owner" } };
 const RECEIPT = { inputId: "native-1" };

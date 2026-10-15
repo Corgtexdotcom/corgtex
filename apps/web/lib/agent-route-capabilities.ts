@@ -238,6 +238,10 @@ export const AGENT_REST_ROUTE_CAPABILITIES = {
     GET: { operation: "list_archived_artifacts" },
     POST: { operation: "archive_artifact" },
   },
+  "/api/workspaces/[workspaceId]/history-recovery": {
+    GET: { operation: null },
+    POST: { operation: null },
+  },
   "/api/workspaces/[workspaceId]/brain/articles/[slug]/discussions/[threadId]/comments": {
     POST: { operation: "add_discussion_comment" },
   },

@@ -15,6 +15,67 @@ async function fixture() {
 const events = () => prisma.event.findMany({ where: { type: "source-permission.changed" }, orderBy: { createdAt: "asc" } });
 
 describe("durable permission change events", () => {
+  it("invalidates category authority and schedules rebuilding on restriction and restoration", async () => {
+    const f = await fixture();
+    const policy = await prisma.informationCategoryPolicy.create({ data: {
+      workspaceId: f.workspace.id, category: "SALARY", isRestricted: false,
+    } });
+    const epoch = async () => (await prisma.sourcePermissionEpoch.findFirstOrThrow({ where: {
+      workspaceId: f.workspace.id, sourceKind: "InformationCategoryPolicy", sourceId: "SALARY",
+    } })).epoch;
+    const initialEpoch = await epoch();
+    await prisma.event.deleteMany();
+    await prisma.informationCategoryPolicy.update({ where: { id: policy.id }, data: { updatedAt: new Date(Date.now() + 60_000) } });
+    expect(await events()).toEqual([]);
+    expect(await epoch()).toBe(initialEpoch);
+    for (const isRestricted of [true, false]) {
+      const before = await epoch();
+      await prisma.informationCategoryPolicy.update({ where: { id: policy.id }, data: { isRestricted } });
+      expect(await epoch()).toBe(before + 1n);
+      const rows = await events();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].payload).toEqual({ version: 1, governors: [{ kind: "InformationCategoryPolicy", id: "SALARY" }] });
+      expect(planSourceLineageRebuild(rows[0])).toHaveLength(4);
+      await prisma.event.deleteMany();
+    }
+  });
+
+  it("schedules category role/circle changes and both identities on a policy move", async () => {
+    const f = await fixture();
+    const other = await prisma.workspace.create({ data: { name: "Synthetic category destination", slug: `category-move-${randomUUID()}` } });
+    const policy = await prisma.informationCategoryPolicy.create({ data: { workspaceId: f.workspace.id, category: "HR" } });
+    await prisma.event.deleteMany();
+    for (const data of [{ allowedRoleIds: ["synthetic-role"] }, { allowedCircleIds: ["synthetic-circle"] }]) {
+      await prisma.informationCategoryPolicy.update({ where: { id: policy.id }, data });
+      expect((await events())[0].payload).toEqual({ version: 1, governors: [{ kind: "InformationCategoryPolicy", id: "HR" }] });
+      await prisma.event.deleteMany();
+    }
+    await prisma.informationCategoryPolicy.update({ where: { id: policy.id }, data: { workspaceId: other.id, category: "PEOPLE" } });
+    expect((await events()).map(row => ({ workspaceId: row.workspaceId, payload: row.payload }))).toEqual(expect.arrayContaining([
+      { workspaceId: f.workspace.id, payload: { version: 1, governors: [{ kind: "InformationCategoryPolicy", id: "HR" }] } },
+      { workspaceId: other.id, payload: { version: 1, governors: [{ kind: "InformationCategoryPolicy", id: "PEOPLE" }] } },
+    ]));
+    expect(await events()).toHaveLength(2);
+    await prisma.event.deleteMany();
+    await prisma.informationCategoryPolicy.delete({ where: { id: policy.id } });
+    expect((await events())[0].payload).toEqual({ version: 1, governors: [{ kind: "InformationCategoryPolicy", id: "PEOPLE" }] });
+  });
+
+  it("rolls category epoch and rebuild scheduling back with the policy transaction", async () => {
+    const f = await fixture();
+    const policy = await prisma.informationCategoryPolicy.create({ data: { workspaceId: f.workspace.id, category: "HR" } });
+    await prisma.event.deleteMany();
+    const before = await prisma.sourcePermissionEpoch.findMany({ where: { workspaceId: f.workspace.id } });
+    await expect(prisma.$transaction(async tx => {
+      await tx.informationCategoryPolicy.update({ where: { id: policy.id }, data: { isRestricted: true } });
+      expect(await tx.event.count({ where: { workspaceId: f.workspace.id } })).toBe(1);
+      throw new Error("Synthetic category rollback");
+    })).rejects.toThrow("Synthetic category rollback");
+    expect(await events()).toEqual([]);
+    expect(await prisma.informationCategoryPolicy.findUniqueOrThrow({ where: { id: policy.id } })).toEqual(policy);
+    expect(await prisma.sourcePermissionEpoch.findMany({ where: { workspaceId: f.workspace.id } })).toEqual(before);
+  });
+
   it("coalesces every permission transition into one metadata-only event per workspace transaction", async () => {
     const f = await fixture();
     const second = await prisma.brainSource.create({ data: { workspaceId: f.workspace.id, sourceType: "ARTICLE", tier: 1,

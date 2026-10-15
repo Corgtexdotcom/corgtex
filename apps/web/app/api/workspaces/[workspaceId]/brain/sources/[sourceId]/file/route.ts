@@ -43,7 +43,13 @@ export async function GET(
     } else {
       // Finance uploads have a separate immutable raw-byte input; normalized
       // extracted text hashes or arbitrary metadata.fileHash are not byte proof.
-      if (metadata.fileContentHash !== undefined || source.accessDomain !== "FINANCE") throw new AppError(404, "SOURCE_FILE_UNPROVEN", "The file has no verified byte identity.");
+      if (source.accessDomain !== "FINANCE") {
+        const { legacyRecoveryFileBinding } = await import("@corgtex/domain");
+        const recovered = metadata.fileContentHash === undefined ? await legacyRecoveryFileBinding(actor, workspaceId, source.id) : null;
+        if (!recovered) throw new AppError(404, "SOURCE_FILE_UNPROVEN", "The file has no verified byte identity.");
+        binding = recovered;
+      } else {
+      if (metadata.fileContentHash !== undefined) throw new AppError(404, "SOURCE_FILE_UNPROVEN", "The file has no verified byte identity.");
       const upload = await prisma.financeReportUploadInput.findFirst({ where: { workspaceId, brainSourceId: source.id } });
       if (!upload || !validHash(upload.fileHash) || upload.storageKey !== source.fileStorageKey
         || upload.mimeType !== source.fileMimeType || upload.fileSizeBytes !== source.fileSizeBytes
@@ -59,6 +65,7 @@ export async function GET(
         { kind: "Document", id: document.id, snapshot: document },
       ])];
       binding = { sha256: upload.fileHash, sizeBytes: upload.fileSizeBytes };
+      }
     }
     if (binding.sizeBytes > MAX_BOUND_DOWNLOAD_BYTES) throw new AppError(413, "DOWNLOAD_TOO_LARGE", "The file exceeds the download byte limit.");
     const authorize = async () => {
