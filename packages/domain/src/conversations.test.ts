@@ -299,7 +299,7 @@ describe("conversations domain", () => {
 
   it("uses frozen sort values when a boundary session receives activity between pages", async () => {
     const date=new Date("2026-06-02");
-    const sessions=Array.from({length:101},(_,i)=>({id:String(1000-i),updatedAt:date,topic:"Known",roleOnboarding:null}));
+    const sessions=Array.from({length:101},(_,i)=>({id:String(1000-i).padStart(4,"0"),updatedAt:date,topic:"Known",roleOnboarding:null}));
     let calls=0;
     prismaMock.conversationSession.findMany.mockImplementation(async ({where,take})=>{
       if(++calls===2) sessions[99].updatedAt=new Date("2026-06-03");
@@ -309,7 +309,7 @@ describe("conversations domain", () => {
     expect(await listConversations(actor,"workspace-1",{take:0})).toMatchObject({total:101,items:[]});
     expect(calls).toBe(2);
     expect(prismaMock.conversationSession.findMany.mock.calls[1][0]).not.toHaveProperty("cursor");
-    expect(prismaMock.conversationSession.findMany.mock.calls[1][0].where.OR[1]).toEqual({updatedAt:date,id:{lt:"901"}});
+    expect(prismaMock.conversationSession.findMany.mock.calls[1][0].where.OR[1]).toEqual({updatedAt:date,id:{lt:"0901"}});
   });
 
   it("replenishes hidden sessions and searches older turns in bounded pages", async () => {
