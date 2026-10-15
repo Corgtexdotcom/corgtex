@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
+import { AppError } from "./errors";
 
 const {
   prismaMock,
@@ -184,6 +185,44 @@ describe("notifications domain", () => {
       where: { id: { in: ["notification-1"] }, workspaceId: "workspace-1", userId: "user-1", readAt: null },
       data: { readAt: new Date("2026-04-24T12:00:00.000Z") },
     });
+  });
+
+  it("withholds the single read mutation when the final original-proof release fails", async () => {
+    const failure = new AppError(409, "SOURCE_CHANGED", "Synthetic original authority changed");
+    lineageMocks.release.mockRejectedValue(failure);
+    const { markNotificationRead } = await import("./notifications");
+    await expect(markNotificationRead(actor, "workspace-1", "notification-1")).rejects.toBe(failure);
+    expect(prismaMock.notification.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("updates only the targeted admitted notification inside the final release transaction", async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const tx = { ...prismaMock, notification: { ...prismaMock.notification, updateMany } };
+    lineageMocks.release.mockImplementation(async (_actor, _workspace, roots, remote, finish) => {
+      expect(roots).toEqual([{ kind: "Notification", id: "notification-1", fingerprint: "notification-1" }]);
+      expect(prismaMock.notification.updateMany).not.toHaveBeenCalled();
+      await remote();
+      return finish(tx);
+    });
+    const { markNotificationRead } = await import("./notifications");
+    await markNotificationRead(actor, "workspace-1", "notification-1");
+    expect(prismaMock.notification.findMany).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      where: { id: "notification-1", workspaceId: "workspace-1", userId: "user-1" }, take: 100,
+    }));
+    expect(updateMany).toHaveBeenCalledExactlyOnceWith({
+      where: { id: { in: ["notification-1"] }, workspaceId: "workspace-1", userId: "user-1" },
+      data: { readAt: new Date("2026-04-24T12:00:00.000Z") },
+    });
+    expect(prismaMock.notification.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("keeps missing or denied single notifications as an empty scoped update", async () => {
+    lineageMocks.readable.mockResolvedValue(new Set());
+    const { markNotificationRead } = await import("./notifications");
+    await markNotificationRead(actor, "workspace-1", "notification-1");
+    expect(prismaMock.notification.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: { in: [] }, workspaceId: "workspace-1", userId: "user-1" },
+    }));
   });
 
   it("withholds retained rows, counts and mark-all writes when final release rejects original proofs", async () => {
@@ -496,6 +535,44 @@ describe("notifications domain", () => {
     lineageMocks.readable.mockResolvedValueOnce(new Set(["notification-1"])).mockResolvedValue(new Set());
     const { deliverNotificationDelivery } = await import("./notifications");
     await expect(deliverNotificationDelivery("delivery-1")).resolves.toEqual({ status: "SKIPPED" });
+    expect(sendEmailMock).not.toHaveBeenCalled();
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["EMAIL", 1], ["EMAIL", 2], ["SLACK", 1], ["SLACK", 2],
+  ] as const)("retries %s after a transient proof failure at admission %s", async (channel, admission) => {
+    const delivery = {
+      id: "delivery-1", notificationId: "notification-1", workspaceId: "workspace-1", userId: "user-1",
+      channel, status: "PENDING", attempts: 0, user: { email: "user-1@example.com" },
+      notification: { id: "notification-1", type: "deliberation.mention", title: "Synthetic notification", bodyMd: null },
+    };
+    prismaMock.notificationDelivery.findUnique.mockResolvedValue(delivery);
+    const failure = new Error("Synthetic temporary lineage database failure");
+    if (admission === 2) lineageMocks.readable.mockResolvedValueOnce(new Set(["notification-1"]));
+    lineageMocks.readable.mockRejectedValueOnce(failure);
+    const { deliverNotificationDelivery } = await import("./notifications");
+    await expect(deliverNotificationDelivery("delivery-1")).rejects.toBe(failure);
+    expect(prismaMock.notificationDelivery.update).not.toHaveBeenCalled();
+    expect(prismaMock.notificationDelivery.upsert).not.toHaveBeenCalled();
+    expect(sendEmailMock).not.toHaveBeenCalled();
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+    await expect(deliverNotificationDelivery("delivery-1")).resolves.toEqual({ status: "SENT" });
+    expect(channel === "EMAIL" ? sendEmailMock : sendSlackMessageMock).toHaveBeenCalledOnce();
+  });
+
+  it.each(["NOT_A_MEMBER", "SOURCE_RESTRICTED"])("keeps definitive %s admission denial terminal and unsent", async code => {
+    prismaMock.notificationDelivery.findUnique.mockResolvedValue({
+      id: "delivery-1", notificationId: "notification-1", workspaceId: "workspace-1", userId: "user-1",
+      channel: "SLACK", status: "PENDING", attempts: 0, user: { email: "user-1@example.com" },
+      notification: { id: "notification-1", title: "Denied", bodyMd: null },
+    });
+    lineageMocks.readable.mockRejectedValueOnce(new AppError(403, code, "Synthetic denied source"));
+    const { deliverNotificationDelivery } = await import("./notifications");
+    await expect(deliverNotificationDelivery("delivery-1")).resolves.toEqual({ status: "SKIPPED" });
+    expect(prismaMock.notificationDelivery.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "SKIPPED" }),
+    }));
     expect(sendEmailMock).not.toHaveBeenCalled();
     expect(sendSlackMessageMock).not.toHaveBeenCalled();
   });

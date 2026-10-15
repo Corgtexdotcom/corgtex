@@ -1,7 +1,7 @@
 import { WorkItemReadRelease } from "./work-item-readable-page";
 import { getReadableBrainArticleVariant, requestBrainArticleVariant } from "./brain-article-variants";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
-import { captureReadableDigestInputs, DigestReadRelease } from "./digest-lineage";
+import { captureReadableDigestInputs, DigestReadRelease, mergeArtifactInputProofs } from "./digest-lineage";
 import { visitSourceReadableRecords } from "./source-scoped-read";
 import type { BrainArticle, BrainArticleAuthority, BrainArticleType, BrainDiscussionTargetType, BrainSource, BrainSourceType } from "@prisma/client";
 import { Prisma } from "@prisma/client";
@@ -10,16 +10,17 @@ import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
-import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
+import { archiveFilterWhere, archiveWorkspaceArtifact, getWorkspaceArchiveRecord, type ArchiveFilter } from "./archive";
 import { resolveKnowledgeAccessDomains } from "./brain-access";
 import { lockActiveArticleSources, lockBrainSourceLink } from "./brain-source-links";
 import { requestBrainSourceRemoval } from "./brain-source-removal";
 import { brainSourceContentFingerprint, type BrainArticleDerivationV1 } from "./brain-derivation";
 import { readBrainArticleDerivation, sourceIdsInDerivation } from "./brain-source-impact";
 import { createBrainArticleHistoryVersion, currentArtifactInputRoots, lineageContentFingerprint, readableArtifactIds, readableBrainSourceIds,
-  assertArtifactInputWriteFence, isArtifactInputProofReadable,
+  assertArtifactInputWriteFence, isArtifactInputProofReadable, captureArtifactInputProof, captureArtifactReadHeadObservation,
+  isArtifactInputProofReadableAtObservedHeads, withArtifactCountReleaseSnapshot,
   recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
-import { invariant } from "./errors";
+import { AppError, invariant } from "./errors";
 import { persistedMemberId } from "./membership";
 import { requireDraftManager, requireCreationInputRoots } from "./draft-permissions";
 import { prepareArtifactCommitPreflight, withArtifactCommitPreflight } from "./artifact-commit-preflight";
@@ -493,6 +494,13 @@ export async function getArticle(actor: AppActor, params: {
   slug: string;
   includeArchived?: boolean;
 }) {
+  const release = new DigestReadRelease(actor, params.workspaceId);
+  return release.finish(await readArticle(actor, params, release));
+}
+
+async function readArticle(actor: AppActor, params: {
+  workspaceId: string; slug: string; includeArchived?: boolean;
+}, release: DigestReadRelease) {
   const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
@@ -555,11 +563,10 @@ export async function getArticle(actor: AppActor, params: {
 
   // Preserve the original admitted article before backlinks and author reads.
   // Every returned contributor is released together after those later awaits.
-  const release = new DigestReadRelease(actor, params.workspaceId);
   const readable = new Set((await release.capture("BrainArticle", [article])).records.map(row => row.id));
   if (!readable.has(article.id) && !article.variantOfArticleId && !article.archivedAt && actor.kind === "user") {
     const variant = await getReadableBrainArticleVariant(actor, { workspaceId: params.workspaceId, articleId: article.id });
-    if (variant) return getArticle(actor, { workspaceId: params.workspaceId, slug: variant.slug });
+    if (variant) return readArticle(actor, { workspaceId: params.workspaceId, slug: variant.slug }, release);
     await requestBrainArticleVariant(actor, { workspaceId: params.workspaceId, articleId: article.id });
   }
   invariant(readable.has(article.id), 404, "NOT_FOUND", "Article not found.");
@@ -585,7 +592,7 @@ export async function getArticle(actor: AppActor, params: {
       })) };
   }));
 
-  return release.finish({
+  return {
     ...article,
     ownerMember,
     isPermissionVariant: Boolean(article.variantOfArticleId),
@@ -596,7 +603,31 @@ export async function getArticle(actor: AppActor, params: {
     backlinksFrom: article.backlinksFrom.filter((link) => readableLinked.has(link.toArticleId))
       .map(link => ({...link, toArticle: linkedLabel(link.toArticleId)})),
     discussions,
-  });
+  };
+}
+
+/** Retain the main article's original proof through every later page read. */
+export async function getArticlePageData(actor: AppActor, params: {workspaceId: string; slug: string}) {
+  const release = new DigestReadRelease(actor, params.workspaceId);
+  const membership = await requireWorkspaceMembership({actor, workspaceId: params.workspaceId});
+  if (membership) invariant((await release.capture("Member", [membership])).records.length === 1,
+    409, "SOURCE_CHANGED", "Article page membership changed during collection.");
+  const article = await readArticle(actor, {...params, includeArchived: true}, release);
+  const isArchived = Boolean(article.archivedAt);
+  const isAdmin = actor.kind === "agent" || membership?.role === "ADMIN";
+  const archiveRecord = isArchived
+    ? await getWorkspaceArchiveRecord(actor, {workspaceId: params.workspaceId, entityType: "BrainArticle", entityId: article.id})
+    : null;
+  const canManage = !isArchived && !article.isPermissionVariant && (isAdmin
+    || (Boolean(article.ownerMemberId) && article.ownerMemberId === membership?.id));
+  const {items} = await listArticles(actor, {workspaceId: params.workspaceId, take: 50}, release);
+  const otherArticles = items.filter(row => row.id !== article.id).slice(0, 5)
+    .map(({id, slug, title, type}) => ({id, slug, title, type}));
+  const candidates = article.sourceIds.length ? await prisma.brainSource.findMany({where: {
+    workspaceId: params.workspaceId, id: {in: article.sourceIds},
+  }}) : [];
+  const sources = (await release.capture("BrainSource", candidates)).records;
+  return release.finish({article, otherArticles, sources, isArchived, isAdmin, canManage, archiveRecord});
 }
 
 export async function listArticles(actor: AppActor, params: {
@@ -607,7 +638,7 @@ export async function listArticles(actor: AppActor, params: {
   take?: number;
   skip?: number;
   archiveFilter?: ArchiveFilter;
-}) {
+}, release?: DigestReadRelease) {
   const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
@@ -670,7 +701,9 @@ export async function listArticles(actor: AppActor, params: {
     });
     const last = candidates.at(-1);
     const next = last ? { id: last.id, updatedAt: last.updatedAt } : undefined;
-    const initial = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", candidates);
+    const initial = release
+      ? new Set((await release.capture("BrainArticle", candidates)).records.map(row => row.id))
+      : await readableArtifactIds(actor, params.workspaceId, "BrainArticle", candidates);
     if (actor.kind === "user" && variantRequests < take) for (const candidate of candidates) {
       if (variantRequests >= take) break;
       if (!initial.has(candidate.id) && !candidate.variantOfArticleId && !candidate.archivedAt) {
@@ -982,6 +1015,7 @@ export async function listSources(actor: AppActor, params: {
     where.absorbedAt = null;
   }
 
+  const release = new DigestReadRelease(actor, params.workspaceId);
   const batchSize = 100;
   let cursor: string | undefined;
   let total = 0;
@@ -1003,16 +1037,20 @@ export async function listSources(actor: AppActor, params: {
       ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     });
     if (candidates.length === 0) break;
-    const visibleIds = await readableBrainSourceIds(actor, params.workspaceId, candidates);
-    for (const source of candidates) {
-      if (!visibleIds.has(source.id)) continue;
-      if (total >= skip && items.length < take) items.push(source);
+    const admitted = (await release.capture("BrainSource", candidates)).records;
+    for (const source of admitted) {
+      if (total >= skip && items.length < take) {
+        const authorMember = await readableDiscussionAuthor(actor, params.workspaceId, source.authorMember, release);
+        items.push({...source, authorMember: authorMember ? {...authorMember,
+          user: {displayName: authorMember.user.displayName, email: authorMember.user.email}} : null,
+          authorMemberId: authorMember?.id ?? null});
+      }
       total++;
     }
     if (candidates.length < batchSize) break;
     cursor = candidates[candidates.length - 1].id;
   }
-  return { items, total, take, skip };
+  return release.finish({ items, total, take, skip });
 }
 
 export async function markSourceAbsorbed(_actor: AppActor, params: {
@@ -1048,8 +1086,22 @@ export async function rebuildBacklinks(actor: AppActor, params: {
 
   const db = params.tx ?? prisma;
   const candidates = await db.brainArticle.findMany({ where: { workspaceId: params.workspaceId, archivedAt: null } });
-  const readableIds = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", candidates, db);
-  const articles = candidates.filter((article) => readableIds.has(article.id));
+  const observed = await captureArtifactReadHeadObservation(async () => {
+    const articles: BrainArticle[] = [];
+    const proofs: LineageRoot[][] = [];
+    for (const article of candidates) {
+      try {
+        const proof = await captureArtifactInputProof(actor, params.workspaceId,
+          [{kind: "BrainArticle", id: article.id, snapshot: article}], db);
+        articles.push(article);
+        proofs.push(proof);
+      } catch (error) {
+        if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
+      }
+    }
+    return {articles, roots: mergeArtifactInputProofs(...proofs)};
+  });
+  const {articles, roots} = observed.value;
 
   const slugToId = new Map<string, string>();
   const titleToId = new Map<string, string>();
@@ -1085,9 +1137,18 @@ export async function rebuildBacklinks(actor: AppActor, params: {
   }
 
   const run = async (tx: Prisma.TransactionClient) => {
+    const assertCurrent = async () => {
+      await requireWorkspaceMembership({actor, workspaceId: params.workspaceId, tx});
+      await assertArtifactInputWriteFence(tx);
+      for (let offset = 0; offset < roots.length; offset += 100) invariant(
+        await isArtifactInputProofReadableAtObservedHeads(actor, params.workspaceId, roots.slice(offset, offset + 100), observed.heads, tx),
+        409, "SOURCE_CHANGED", "Backlink inputs changed before replacement.");
+    };
+    await assertCurrent();
     if (articles.length > 0) {
       await tx.brainBacklink.deleteMany({
-        where: { workspaceId: params.workspaceId, fromArticleId: { in: articles.map((article) => article.id) } },
+        where: { workspaceId: params.workspaceId, fromArticleId: { in: articles.map((article) => article.id) },
+          toArticleId: { in: articles.map(article => article.id) } },
       });
     }
 
@@ -1100,10 +1161,11 @@ export async function rebuildBacklinks(actor: AppActor, params: {
         skipDuplicates: true,
       });
     }
+    await assertCurrent();
   };
 
   if (params.tx) await run(params.tx);
-  else await prisma.$transaction(run);
+  else await withArtifactCountReleaseSnapshot(actor, params.workspaceId, roots, async () => {}, run, observed.heads);
 
   return { linkCount: links.length };
 }

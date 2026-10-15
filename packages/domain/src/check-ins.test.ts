@@ -12,9 +12,12 @@ import {
 } from "./check-ins";
 import { prisma } from "@corgtex/shared";
 import { appendEvents } from "./events";
-import { captureArtifactInputProof, withArtifactCountReleaseSnapshot } from "./source-lineage";
+import { captureArtifactInputProof, isArtifactInputProofReadable, withArtifactCountReleaseSnapshot } from "./source-lineage";
 import { requireWorkspaceMembership } from "./auth";
 import { AppError } from "./errors";
+
+type LineageGroupByMock = ReturnType<typeof vi.mocked<typeof prisma.artifactInputLineage.groupBy>>;
+type LineageGroupByImplementation = Parameters<LineageGroupByMock["mockImplementation"]>[0];
 
 vi.mock("@corgtex/shared", () => ({
   prisma: {
@@ -29,6 +32,7 @@ vi.mock("@corgtex/shared", () => ({
       findUnique: vi.fn(),
     },
     $executeRaw: vi.fn(),
+    artifactInputLineage: { groupBy: vi.fn() },
     brainSource: {
       create: vi.fn(),
     },
@@ -83,6 +87,11 @@ describe("getOverwhelmSignals", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(prisma.checkIn.findMany).mockReset();
+    vi.mocked(captureArtifactInputProof).mockReset().mockImplementation(async (_actor, _ws, inputs) => inputs.map(input => ({ kind: input.kind, id: input.id, fingerprint: "a".repeat(64) })));
+    vi.mocked(isArtifactInputProofReadable).mockReset().mockResolvedValue(true);
+    vi.mocked(prisma.artifactInputLineage.groupBy).mockReset().mockImplementation((async (args) =>
+      ((args.where?.artifactId as { in: string[] }).in).map(artifactId => ({ artifactId }))) as LineageGroupByImplementation);
     vi.mocked((prisma as any).$transaction).mockImplementation(async (fn: any) => fn(prisma));
     vi.mocked((prisma as any).member.findUnique).mockResolvedValue({ id: memberId, workspaceId, userId: "user-1", role: "CONTRIBUTOR", isActive: true, joinedAt: new Date(), user: { id: "user-1", email: "user@example.com", displayName: "User" } });
   });
@@ -203,6 +212,85 @@ describe("getOverwhelmSignals", () => {
     });
 
     expect(result).toMatchObject({ created: 0, cap: 3 });
+    expect(prisma.checkIn.create).not.toHaveBeenCalled();
+  });
+
+  it("pages past 5001 unreadable quota candidates and dedupes only readable old prompts", async () => {
+    const old = new Date("2026-06-08");
+    const template = "What document, customer note, or working file would give CORGTEX the most useful company context today?";
+    const rows = Array.from({ length: 5001 }, (_, index) => ({ id: `denied-${String(index).padStart(5, "0")}`, createdAt: old, questionText: template }));
+    rows.push({ id: "tail-template", createdAt: old, questionText: `  ${template.toUpperCase()}  ` });
+    vi.mocked(prisma.checkIn.findMany).mockImplementation((async (args) => {
+      const after = (args?.where?.id as { gt?: string } | undefined)?.gt;
+      return rows.filter(row => !after || row.id > after).slice(0, args?.take ?? rows.length) as any;
+    }) as typeof prisma.checkIn.findMany);
+    vi.mocked(prisma.artifactInputLineage.groupBy).mockImplementation((async (args) =>
+      ((args.where?.artifactId as { in: string[] }).in).filter(id => id === "tail-template").map(artifactId => ({ artifactId }))) as LineageGroupByImplementation);
+    vi.mocked(prisma.checkIn.create).mockResolvedValue({ id: "new" } as any);
+    const result = await createDailyCompanyUnderstandingQuestions(actor, { workspaceId, memberId, now: new Date("2026-06-09") });
+    expect(result.created).toBe(2);
+    expect(prisma.checkIn.findMany).toHaveBeenCalledTimes(51);
+    expect(prisma.artifactInputLineage.groupBy).toHaveBeenCalledTimes(51);
+    expect(captureArtifactInputProof).toHaveBeenCalledTimes(3);
+    expect(prisma.checkIn.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      where: expect.objectContaining({ workspaceId, memberId, id: { gt: "denied-00099" }, OR: expect.any(Array) }),
+      orderBy: { id: "asc" }, take: 100,
+    }));
+    expect(result.lineageRoots.filter(root => root.kind === "CheckIn").map(root => root.id)).toEqual(["tail-template", "new"]);
+    expect(prisma.checkIn.create).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ questionText: template }) }));
+  });
+
+  it("does not stop at three old unrelated readable questions and ignores recipient-denied quota rows", async () => {
+    const old = Array.from({ length: 100 }, (_, index) => ({ id: `old-${index}`, questionText: `Unrelated ${index}`, createdAt: new Date("2026-06-08") }));
+    vi.mocked(prisma.checkIn.findMany).mockResolvedValueOnce(old as any).mockResolvedValueOnce([
+      { id: "denied-today", questionText: "Denied", createdAt: new Date("2026-06-09") },
+      { id: "today", questionText: "Actual quota", createdAt: new Date("2026-06-09") },
+    ] as any);
+    // Base actor/recipient and 100 historical admissions precede the denied recipient.
+    for (let index = 0; index < 102; index++) vi.mocked(isArtifactInputProofReadable).mockResolvedValueOnce(true);
+    vi.mocked(isArtifactInputProofReadable).mockResolvedValueOnce(false);
+    vi.mocked(prisma.checkIn.create).mockResolvedValue({ id: "new" } as any);
+    const result = await createDailyCompanyUnderstandingQuestions(actor, { workspaceId, memberId, now: new Date("2026-06-09") });
+    expect(result.created).toBe(2);
+    expect(prisma.checkIn.findMany).toHaveBeenCalledTimes(2);
+    expect(result.lineageRoots.filter(root => root.kind === "CheckIn").map(root => root.id)).toEqual(["today", "new"]);
+  });
+
+  it("stops quota discovery at three readable questions today without hydrating later pages", async () => {
+    vi.mocked(prisma.checkIn.findMany).mockResolvedValueOnce(Array.from({ length: 100 }, (_, index) => ({
+      id: `today-${index}`, questionText: `Today ${index}`, createdAt: new Date("2026-06-09"),
+    })) as any);
+    const result = await createDailyCompanyUnderstandingQuestions(actor, { workspaceId, memberId, now: new Date("2026-06-09") });
+    expect(result.created).toBe(0);
+    expect(prisma.checkIn.findMany).toHaveBeenCalledTimes(1);
+    expect(captureArtifactInputProof).toHaveBeenCalledTimes(4);
+    expect(prisma.checkIn.create).not.toHaveBeenCalled();
+  });
+
+  it("stops once all old template prompts are present without consuming today's quota", async () => {
+    const texts = [
+      "What decision or blocker should CORGTEX understand before it updates company direction?",
+      "What document, customer note, or working file would give CORGTEX the most useful company context today?",
+      "Which goal, project, or owner relationship is unclear enough that CORGTEX should ask before treating it as company truth?",
+    ];
+    vi.mocked(prisma.checkIn.findMany).mockResolvedValueOnce(Array.from({ length: 100 }, (_, index) => ({
+      id: `old-${index}`, questionText: texts[index] ?? "Unrelated", createdAt: new Date("2026-06-08"),
+    })) as any);
+    const result = await createDailyCompanyUnderstandingQuestions(actor, { workspaceId, memberId, now: new Date("2026-06-09") });
+    expect(result.created).toBe(0);
+    expect(prisma.checkIn.findMany).toHaveBeenCalledTimes(1);
+    expect(captureArtifactInputProof).toHaveBeenCalledTimes(4);
+    expect(result.lineageRoots.filter(root => root.kind === "CheckIn").map(root => root.id)).toEqual(["old-0", "old-1", "old-2"]);
+    expect(prisma.checkIn.create).not.toHaveBeenCalled();
+  });
+
+  it("retains the original quota contributor proof through the final write fence", async () => {
+    vi.mocked(prisma.checkIn.findMany).mockResolvedValueOnce([{ id: "quota-original", questionText: "Quota", createdAt: new Date("2026-06-09") }] as any);
+    vi.mocked(isArtifactInputProofReadable).mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    await expect(createDailyCompanyUnderstandingQuestions(actor, { workspaceId, memberId, now: new Date("2026-06-09") })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(isArtifactInputProofReadable).toHaveBeenLastCalledWith(actor, workspaceId, expect.arrayContaining([
+      { kind: "CheckIn", id: "quota-original", fingerprint: "a".repeat(64) },
+    ]), prisma);
     expect(prisma.checkIn.create).not.toHaveBeenCalled();
   });
 

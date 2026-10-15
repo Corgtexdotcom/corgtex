@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Prisma } from "@prisma/client";
+import type { Constitution, Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
@@ -181,10 +181,29 @@ export async function listConstitutionVersions(actor: AppActor, workspaceId: str
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
 
-  const rows = await prisma.constitution.findMany({ where: { workspaceId } });
-  const readable = await readableArtifactIds(actor, workspaceId, "Constitution", rows);
-  const visible = rows.filter((row) => readable.has(row.id)).sort((left, right) => right.version - left.version);
-  return { items: visible.slice(skip, skip + take), total: visible.length, take, skip };
+  const release = new DigestReadRelease(actor, workspaceId);
+  const items: Constitution[] = [];
+  let total = 0;
+  let after: { version: number; id: string } | undefined;
+  // Exact totals require full discovery, not retention of every version body.
+  // The release keeps original compact proofs for off-page count contributors.
+  while (true) {
+    const rows = await prisma.constitution.findMany({
+      where: { workspaceId, ...(after ? { OR: [
+        { version: { lt: after.version } }, { version: after.version, id: { lt: after.id } },
+      ] } : {}) },
+      orderBy: [{ version: "desc" }, { id: "desc" }], take: 100,
+    });
+    const captured = await release.capture("Constitution", rows);
+    for (const row of captured.records) {
+      if (total >= skip && total < skip + take) items.push(row);
+      total++;
+    }
+    if (rows.length < 100) break;
+    const last = rows[rows.length - 1]!;
+    after = { version: last.version, id: last.id };
+  }
+  return release.finish({ items, total, take, skip });
 }
 
 export async function getCurrentConstitution(actor: AppActor, workspaceId: string) {

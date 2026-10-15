@@ -5,7 +5,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { captureArtifactInputProof, captureArtifactReadHeadObservation, mergeLineageInputRoot,
   readableArtifactIds, sealArtifactInputActor, withArtifactCountReleaseSnapshot, type LineageRoot } from "./source-lineage";
-import { invariant } from "./errors";
+import { AppError, invariant } from "./errors";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 
 export const DEFAULT_NOTIFICATION_CHANNEL = "IN_APP";
@@ -370,7 +370,12 @@ async function refreshReadableDelivery(delivery: NotificationDeliveryWithRecipie
   let readable = false;
   if (actor && notification) {
     try { readable = (await readableArtifactIds(actor, delivery.workspaceId, "Notification", [notification])).has(notification.id); }
-    catch { /* Revocation prevents delivery. */ }
+    catch (error) {
+      // Unavailable proof infrastructure must leave the queued intent retryable.
+      // A current denial still permanently withholds this outbound content.
+      if (!(error instanceof AppError)
+        || !["AUTH_REQUIRED", "NOT_A_MEMBER", "SOURCE_RESTRICTED", "UNKNOWN_LINEAGE"].includes(error.code)) throw error;
+    }
   }
   if (!readable || !notification || actor?.kind !== "user") {
     await prisma.notificationDelivery.update({ where: { id: delivery.id }, data: {
@@ -478,6 +483,7 @@ async function deliverEmailNotificationDelivery(delivery: NotificationDeliveryWi
 
 async function deliverSlackNotificationDelivery(delivery: NotificationDeliveryWithRecipient) {
   const attempt = delivery.attempts + 1;
+  let checkingAuthority = false;
 
   try {
     const { resolveSlackNotificationRecipient, sendSlackMessage } = await import("./communication");
@@ -501,7 +507,10 @@ async function deliverSlackNotificationDelivery(delivery: NotificationDeliveryWi
       return { status: "SKIPPED" as const };
     }
 
-    if (!await refreshReadableDelivery(delivery)) return { status: "SKIPPED" as const };
+    checkingAuthority = true;
+    const readable = await refreshReadableDelivery(delivery);
+    checkingAuthority = false;
+    if (!readable) return { status: "SKIPPED" as const };
     if (delivery.user.email !== resolvedEmail) {
       await prisma.notificationDelivery.update({ where: { id: delivery.id }, data: {
         status: "SKIPPED", failedAt: new Date(), error: "Recipient identity changed during Slack resolution.",
@@ -531,6 +540,9 @@ async function deliverSlackNotificationDelivery(delivery: NotificationDeliveryWi
     });
     return { status: "SENT" as const };
   } catch (error) {
+    // Proof failure is not a Slack transport failure and must not terminalize
+    // the intent or create fallback mail before a later retry can revalidate it.
+    if (checkingAuthority) throw error;
     const message = error instanceof Error ? error.message : "Unknown notification Slack delivery error.";
     await prisma.notificationDelivery.update({
       where: { id: delivery.id },
@@ -607,7 +619,7 @@ export async function listNotifications(actor: AppActor, workspaceId: string, op
 
 async function visitReadableNotifications<T>(actor: AppActor & { kind: "user" }, workspaceId: string,
   unreadOnly: boolean, visit: (rows: Awaited<ReturnType<typeof prisma.notification.findMany>>) => false | void,
-  finish: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+  finish: (tx: Prisma.TransactionClient) => Promise<T>, notificationId?: string): Promise<T> {
   sealArtifactInputActor(actor);
   const roots = new Map<string, LineageRoot>();
   const heads = new Map<string, string>();
@@ -615,6 +627,7 @@ async function visitReadableNotifications<T>(actor: AppActor & { kind: "user" },
   while (true) {
     const rows = await prisma.notification.findMany({ where: {
       workspaceId, userId: actor.user.id, ...(unreadOnly ? { readAt: null } : {}),
+      ...(notificationId === undefined ? {} : { id: notificationId }),
       ...(after ? { OR: [{ createdAt: { lt: after.createdAt } },
         { createdAt: after.createdAt, id: { lt: after.id } }] } : {}),
     }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 100 });
@@ -654,17 +667,20 @@ export async function countUnreadNotifications(actor: AppActor, workspaceId: str
 }
 
 export async function markNotificationRead(actor: AppActor, workspaceId: string, notificationId: string) {
-  const userId = actor.kind === "user" ? actor.user.id : null;
-  if (!userId) return;
+  if (actor.kind !== "user" || !actor.user.id) return;
+  const userId = actor.user.id;
 
   await requireWorkspaceMembership({ actor, workspaceId });
 
-  const rows = await prisma.notification.findMany({ where: { id: notificationId, workspaceId, userId } });
-  const readable = await readableArtifactIds(actor, workspaceId, "Notification", rows);
-  await prisma.notification.updateMany({
-    where: { id: { in: [...readable] }, workspaceId, userId },
-    data: { readAt: new Date() },
-  });
+  const ids: string[] = [];
+  await visitReadableNotifications(actor, workspaceId, false, rows => {
+    ids.push(...rows.map(row => row.id));
+  }, async tx => {
+    await tx.notification.updateMany({
+      where: { id: { in: ids }, workspaceId, userId },
+      data: { readAt: new Date() },
+    });
+  }, notificationId);
 }
 
 export async function markAllNotificationsRead(actor: AppActor, workspaceId: string) {

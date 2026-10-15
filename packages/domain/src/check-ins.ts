@@ -200,27 +200,47 @@ export async function createDailyCompanyUnderstandingQuestions(actor: AppActor, 
       && await isArtifactInputProofReadable(recipient, params.workspaceId, baseRoots, tx),
     409, "SOURCE_CHANGED", "Daily question inputs are not currently available to the recipient.");
     const todayStart = startOfUtcDay(params.now);
-    const existingQuestions = await tx.checkIn.findMany({ where: {
-      workspaceId: params.workspaceId, memberId: params.memberId, questionType: COMPANY_UNDERSTANDING_TYPE,
-      OR: [{ status: "OPEN" }, { createdAt: { gte: todayStart } }],
-    }, orderBy: { id: "asc" }, take: 5001 });
-    invariant(existingQuestions.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Daily question permission scan exceeds its supported size.");
-    const safeQuestions = [];
+    const templateText = new Set(DAILY_COMPANY_QUESTION_TEMPLATES.map(template => template.questionText.toLowerCase()));
+    const existingText = new Set<string>();
     const quotaProofs: LineageRoot[][] = [];
-    for (const question of existingQuestions) {
-      try {
-        const proof = await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "CheckIn", id: question.id, snapshot: question }], tx);
-        if (!await isArtifactInputProofReadable(recipient, params.workspaceId, proof, tx)) continue;
-        safeQuestions.push(question); quotaProofs.push(proof);
-      } catch (error) {
-        if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
+    let createdToday = 0;
+    let after: string | undefined;
+    // Only readable quota/template contributors affect the decision. Keep their
+    // original proofs, but discard each bounded page of unrelated history.
+    while (createdToday < DAILY_COMPANY_QUESTION_CAP && existingText.size < templateText.size) {
+      const questions = await tx.checkIn.findMany({ where: {
+        workspaceId: params.workspaceId, memberId: params.memberId, questionType: COMPANY_UNDERSTANDING_TYPE,
+        OR: [{ status: "OPEN" }, { createdAt: { gte: todayStart } }],
+        ...(after ? { id: { gt: after } } : {}),
+      }, orderBy: { id: "asc" }, take: 100 });
+      // CheckIn always requires a manifest. Missing-manifest legacy rows are
+      // definitively denied; presence alone never grants quota or dedup authority.
+      const manifestIds = new Set((await tx.artifactInputLineage.groupBy({
+        by: ["artifactId"], where: { workspaceId: params.workspaceId, artifactType: "CheckIn",
+          artifactId: { in: questions.map(question => question.id) } },
+      })).map(manifest => manifest.artifactId));
+      for (const question of questions) {
+        if (!manifestIds.has(question.id)) continue;
+        try {
+          const proof = await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "CheckIn", id: question.id, snapshot: question }], tx);
+          if (!await isArtifactInputProofReadable(recipient, params.workspaceId, proof, tx)) continue;
+          const text = question.questionText.trim().toLowerCase();
+          const addsTemplate = templateText.has(text) && !existingText.has(text);
+          const addsQuota = question.createdAt >= todayStart;
+          if (addsTemplate) existingText.add(text);
+          if (addsQuota) createdToday++;
+          if (addsTemplate || addsQuota) quotaProofs.push(proof);
+          if (createdToday >= DAILY_COMPANY_QUESTION_CAP || existingText.size === templateText.size) break;
+        } catch (error) {
+          if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
+        }
       }
+      if (questions.length < 100) break;
+      after = questions[questions.length - 1]!.id;
     }
     const liveRoots = mergeArtifactInputProofs(baseRoots, ...quotaProofs);
     const recipeRoots = await captureImmutableArtifactInputProof(actor, params.workspaceId, liveRoots, tx);
-    const createdToday = safeQuestions.filter((question) => question.createdAt >= todayStart).length;
     const remaining = Math.max(DAILY_COMPANY_QUESTION_CAP - createdToday, 0);
-    const existingText = new Set(safeQuestions.map((question) => question.questionText.trim().toLowerCase()));
     const candidates = DAILY_COMPANY_QUESTION_TEMPLATES.filter((template) => !existingText.has(template.questionText.toLowerCase()));
     const created = [];
     for (const template of candidates.slice(0, remaining)) {
@@ -243,7 +263,7 @@ export async function createDailyCompanyUnderstandingQuestions(actor: AppActor, 
       409, "SOURCE_CHANGED", "Daily question outputs are no longer available to the recipient.");
     return { created: created.length, cap: DAILY_COMPANY_QUESTION_CAP,
       lineageRoots: mergeArtifactInputProofs(liveRoots, outcomeRoots) };
-  });
+  }, { maxWait: 5_000, timeout: 120_000 });
 }
 
 export async function startCompanyUnderstandingQuestionConversation(actor: AppActor, params: {

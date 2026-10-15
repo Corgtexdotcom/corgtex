@@ -359,7 +359,7 @@ describe("Constitution input proof and readers", () => {
   it("filters unknown and restricted version bodies before current selection, pagination, and totals", async () => {
     txMock.constitution.findMany.mockResolvedValue([
       { id: "private", version: 5, bodyMd: "Hidden" }, { id: "legacy", version: 4, bodyMd: "Unknown" },
-      { id: "public-old", version: 1, bodyMd: "Old known" }, { id: "public-current", version: 3, bodyMd: "Current known" },
+      { id: "public-current", version: 3, bodyMd: "Current known" }, { id: "public-old", version: 1, bodyMd: "Old known" },
     ]);
     vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, _kind, rows) => new Set(rows
       .filter((row) => row.id.startsWith("public")).map((row) => row.id)));
@@ -370,7 +370,7 @@ describe("Constitution input proof and readers", () => {
       { id: "public-current", version: 3, bodyMd: "Current known" }, { id: "public-old", version: 1, bodyMd: "Old known" },
     ]);
     expect(await getCurrentConstitution(actor, "ws-1")).toMatchObject({ id: "public-current", bodyMd: "Current known" });
-    expect(txMock.constitution.findMany).toHaveBeenCalledWith({ where: { workspaceId: "ws-1" } });
+    expect(txMock.constitution.findMany).toHaveBeenCalledWith({ where: { workspaceId: "ws-1" }, orderBy: [{ version: "desc" }, { id: "desc" }], take: 100 });
   });
 
   it("replenishes denied pages with a stable keyset and stops checking at the first readable version", async () => {
