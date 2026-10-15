@@ -1,3 +1,4 @@
+import { hasCompanyLegacyRecoveryCapture, assertCompanyLegacyRecoveryCaptureCurrent } from "./legacy-recovery-context";
 import { hasCompanyTranscriptPublicationScope } from "./native-transcript-publication-context";
 import { getMeetingTranscriptWorkerPurpose, isMeetingTranscriptWorkerCurrent } from "./native-meeting-workflow-principal";
 import type { BoundedSnapshotReads } from "./source-snapshot-read-pass";
@@ -464,7 +465,7 @@ const IMPLICIT_HUMAN_ORIGINAL_SNAPSHOT_KINDS = new Set<LineageKind>([
 ]);
 
 function isNativeControlOutcome(row: Record<string, unknown>) {
-  return ["BRAIN_SOURCE_REMOVAL_COMPLETED", "ACTION_COMPLETED", "ACTION_COMPLETION_PUBLIC_NOTE", "BRAIN_EXPORT_CONSENT"].includes(String(row.operation))
+  return ["BRAIN_SOURCE_REMOVAL_COMPLETED", "ACTION_COMPLETED", "ACTION_COMPLETION_PUBLIC_NOTE", "BRAIN_EXPORT_CONSENT", "LEGACY_RECOVERY_PUBLICATION"].includes(String(row.operation))
     && isRecord(row.controlJson) && row.controlJson.version === 1;
 }
 
@@ -473,6 +474,7 @@ function isArchived(row: unknown) {
 }
 
 function actorCanReadRecord(actor: AppActor, workspaceId: string, membership: { id: string; role: string } | null, kind: LineageKind, row: Record<string, unknown>, nativeSnapshotFingerprint?: string) {
+  if (kind === "ConversationOperationOutcome" && row.operation === "LEGACY_RECOVERY_PUBLICATION") return actor.kind === "user" && Boolean(membership) || actor.kind === "agent" && actor.authProvider === "credential";
   if (kind === "ConversationOperationOutcome" && row.operation === "BRAIN_EXPORT_CONSENT") return Boolean(membership && actor.kind === "user" || getBrainExportWorkerPurpose(actor, workspaceId)?.receiptId === row.id);
   if (kind === "ConversationOperationOutcome" && row.operation === "ACTION_COMPLETION_PUBLIC_NOTE")
     return row.actorKind === "public" && row.userId == null && row.credentialId == null
@@ -864,7 +866,12 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
   if (root.kind === "McpToolInput" && (!isMcpToolInputEncryptedPayload(row.argumentsJson) || !Array.isArray(row.requiredScopes) || !row.requiredScopes.length
     || row.requiredScopes.some(scope => typeof scope !== "string" || !scope))) return false;
   if (root.kind === "ConversationOperationOutcome") {
-    if (row.operation === "BRAIN_EXPORT_CONSENT") {
+    if (row.operation === "LEGACY_RECOVERY_PUBLICATION") {
+      const { currentLegacyRecoveryPublication } = await import("./legacy-recovery");
+      const recovery = await currentLegacyRecoveryPublication(actor, workspaceId, row, db);
+      if (!recovery) return false;
+      for (const input of recovery.roots) if (!await rootIsReadable(db, actor, workspaceId, membership, domains, input, visited, memo, purpose)) return false;
+    } else if (row.operation === "BRAIN_EXPORT_CONSENT") {
       const { currentBrainExportConsent } = await import("./conversation-brain-consent");
       const consent = await currentBrainExportConsent(actor, row, workspaceId, db);
       if (!consent || !(actor.kind === "user" && membership
@@ -1700,8 +1707,14 @@ export async function isBrainExportProofWorkspaceShareable(actor: AppActor, work
   return Boolean(purpose && await isBrainExportWorkerCurrent(actor, workspaceId, purpose.receiptId, db)
     && await artifactInputProofAudience(actor, workspaceId, roots, db, purpose.receiptId));
 }
+/** Company recovery can regenerate company projections, never public internet output.
+ * Every original contributor remains in the audience traversal. */
+export async function isLegacyRecoveryProofWorkspaceShareable(actor: AppActor, workspaceId: string,
+  roots: readonly LineageRoot[], db: LineageClient = prisma) {
+  return artifactInputProofAudience(actor, workspaceId, roots, db, undefined, true);
+}
 async function artifactInputProofAudience(actor: AppActor, workspaceId: string,
-  roots: readonly LineageRoot[], db: LineageClient, consentReceiptId?: string) {
+  roots: readonly LineageRoot[], db: LineageClient, consentReceiptId?: string, recoveryCompany = false) {
   if (!await isArtifactInputProofReadable(actor, workspaceId, roots, db)) return false;
   const seen = new Set<string>();
   const publicAuthorities = new Set<string>();
@@ -1732,6 +1745,20 @@ async function artifactInputProofAudience(actor: AppActor, workspaceId: string,
     seen.add(key);
     const loaded = await loadArtifact(db, workspaceId, root);
     if (!isRecord(loaded)) return false;
+    if (recoveryCompany && (root.kind === "ConversationOperationOutcome" && loaded.operation === "LEGACY_RECOVERY_PUBLICATION"
+      || root.kind === "ArtifactInputSnapshot" && loaded.sourceKind === "ConversationOperationOutcome")) {
+      const original = root.kind === "ConversationOperationOutcome" ? loaded
+        : await loadArtifact(db,workspaceId,{kind:"ConversationOperationOutcome",id:String(loaded.sourceId)});
+      if (original?.operation === "LEGACY_RECOVERY_PUBLICATION") {
+        const {currentLegacyRecoveryPublication} = await import("./legacy-recovery");
+        const recovery = await currentLegacyRecoveryPublication(actor,workspaceId,original,db);
+        if (!recovery || !["Action","Document","BrainSource"].includes(recovery.targetKind)
+          || privateEnvelope(recovery.targetKind,recovery.content)
+          || !await authorityIsPublic({kind:recovery.targetKind,id:recovery.targetId})) return false;
+        for (const contributor of recovery.roots) if (!await visit(contributor)) return false;
+        return true;
+      }
+    }
     // The complete read above validates every inner input under the exact private
     // consent purpose. Only this authenticated boundary may stop audience descent.
     if (consentReceiptId && (root.kind === "ConversationOperationOutcome" && root.id === consentReceiptId
@@ -1816,6 +1843,13 @@ export async function inspectStoredArtifactInputDependencies(db: LineageClient, 
         if (!consent) return false;
         upstream.push(...consent.roots);
       }
+      if (row.sourceKind === "ConversationOperationOutcome" && isRecord(row.contentJson) && row.contentJson.operation === "LEGACY_RECOVERY_PUBLICATION") {
+        const { decodeLegacyRecovery } = await import("./legacy-recovery");
+        const original = await loadArtifact(db, workspaceId, {kind: "ConversationOperationOutcome", id: String(row.sourceId)});
+        const recovery = original && decodeLegacyRecovery(original);
+        if (!recovery) return false;
+        upstream.push(...recovery.roots);
+      }
       if (row.sourceKind === "ConversationOperationOutcome") {
         const dependency = publicNoteDependency(row.contentJson);
         if (dependency === null) return false;
@@ -1836,6 +1870,12 @@ export async function inspectStoredArtifactInputDependencies(db: LineageClient, 
           || (manifest.origin === "DERIVED" && (!upstream.length || manifest.epochProofVersion !== 1
             || !parsePermissionEpochProof(manifest.permissionEpochsJson)))) return false;
       } else if (needsManifest(root.kind, row)) return false;
+      if (root.kind === "ConversationOperationOutcome" && row.operation === "LEGACY_RECOVERY_PUBLICATION") {
+        const { decodeLegacyRecovery } = await import("./legacy-recovery");
+        const recovery = decodeLegacyRecovery(row);
+        if (!recovery) return false;
+        upstream = [...(upstream ?? []), ...recovery.roots];
+      }
       if (root.kind === "ConversationOperationOutcome" && row.operation === "BRAIN_EXPORT_CONSENT") {
         const { decodeBrainExportConsent } = await import("./conversation-brain-consent");
         const consent = decodeBrainExportConsent(row);
@@ -1878,7 +1918,8 @@ export async function inspectStoredArtifactInputDependencies(db: LineageClient, 
 export async function captureArtifactPermissionEpochs(actor: AppActor, workspaceId: string,
   fullAncestorRoots: readonly LineageRoot[], tx: Prisma.TransactionClient): Promise<PermissionEpochProof> {
   const identities = [{kind: "Workspace", id: workspaceId}];
-  const companyPublication = hasCompanyTranscriptPublicationScope(actor, workspaceId);
+  await assertCompanyLegacyRecoveryCaptureCurrent(actor,workspaceId,tx);
+  const companyPublication = hasCompanyTranscriptPublicationScope(actor, workspaceId) || hasCompanyLegacyRecoveryCapture(actor,workspaceId,tx);
   if (actor.kind === "user" && !companyPublication) {
     identities.push({ kind: "MemberUserPolicy", id: actor.user.id }, { kind: "WorkspaceSupportPolicy", id: actor.user.id });
   } else if (actor.kind === "agent") {
@@ -1906,6 +1947,13 @@ export async function captureArtifactPermissionEpochs(actor: AppActor, workspace
       if (member) identities.push({kind: "MemberRolePolicy", id: member.id});
     }
     pending.push(...artifactPermissionParents(root.kind, { ...loaded, id: root.id }));
+    if (root.kind === "ConversationOperationOutcome" && loaded.operation === "LEGACY_RECOVERY_PUBLICATION") {
+      const { decodeLegacyRecovery } = await import("./legacy-recovery");
+      const original = await loadArtifact(tx, workspaceId, root);
+      const recovery = original && decodeLegacyRecovery(original);
+      invariant(recovery && await isArtifactPermissionEpochProofCurrent(workspaceId, recovery.epochs, tx), 409, "PERMISSION_CHANGED", "Recovery authority changed.");
+      identities.push(...recovery.epochs.entries.map(({kind, id}) => ({kind, id})));
+    }
     if (root.kind === "ConversationOperationOutcome" && loaded.operation === "BRAIN_EXPORT_CONSENT") {
       const { decodeBrainExportConsent } = await import("./conversation-brain-consent");
       const native = await loadArtifact(tx, workspaceId, root);

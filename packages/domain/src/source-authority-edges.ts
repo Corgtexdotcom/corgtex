@@ -1,3 +1,4 @@
+import { isCompanyLegacyRecoveryOutcome } from "./legacy-recovery-context";
 import { hasPendingCompanyTranscript } from "./native-transcript-publication-context";
 import { getMeetingTranscriptWorkerPurpose } from "./native-meeting-workflow-principal";
 import { categoryGovernorIdentities } from "./information-category-policy";
@@ -418,7 +419,21 @@ export async function discoverSourceAuthorityEdges(context: AuthorityDiscoveryCo
   if (kind === "ConversationOperationOutcome") {
     const control = authorityRecord(content.controlJson);
     if(content.operation!=="TOOL_LINK_ARCHIVED") invariant(control?.version === 1, 409, "SOURCE_LOCK_INCOMPLETE", "Native outcome authority is incomplete.");
-    if (content.operation === "ACTION_COMPLETED") { add("Action", control!.actionId, true); add("McpToolInput", control!.inputId, true); add("Member", control!.assigneeMemberId, true); }
+    if (content.operation === "LEGACY_RECOVERY_PUBLICATION") {
+      const { decodeLegacyRecovery } = await import("./legacy-recovery");
+      const recovery = decodeLegacyRecovery(content);
+      invariant(recovery, 409, "SOURCE_LOCK_INCOMPLETE", "Recovery authority is malformed.");
+      const where = recovery.targetKind === "ConversationTurn" ? {id: recovery.targetId, conversation: {workspaceId}} : {id: recovery.targetId, workspaceId};
+      const targets = await rows(recovery.targetKind, where, `recovery-target:${input.id}`, undefined, true);
+      await rows("ArtifactInputLineage",{id:recovery.targetManifestId,workspaceId,artifactType:recovery.targetKind,artifactId:recovery.targetId,
+        contentHash:recovery.targetFingerprint,origin:"DERIVED"},`recovery-original:${input.id}`,undefined,true);
+      const targetEdges = await discoverSourceAuthorityEdges(context, {kind: recovery.targetKind, id: recovery.targetId}, targets[0]);
+      result.rows.push(...targetEdges.rows); result.predicates.push(...targetEdges.predicates); result.policies.push(...targetEdges.policies);
+      result.artifacts.push(...targetEdges.artifacts);
+      result.policies.push(...recovery.epochs.entries.map(({kind, id}) => ({kind, id})));
+      for (const root of recovery.roots) add(root.kind, root.id, true);
+    }
+    else if (content.operation === "ACTION_COMPLETED") { add("Action", control!.actionId, true); add("McpToolInput", control!.inputId, true); add("Member", control!.assigneeMemberId, true); }
     else if(content.operation==="ACTION_COMPLETION_PUBLIC_NOTE") {
       invariant(content.actorKind==="public"&&content.userId===null&&content.credentialId===null&&content.credentialVersion===null&&content.scopeHash===null
         &&Array.isArray(content.requiredScopes)&&content.requiredScopes.length===0&&control!.publicationPolicyVersion===1
@@ -463,7 +478,7 @@ export async function discoverSourceAuthorityEdges(context: AuthorityDiscoveryCo
   // Ownership and author membership are live governors even when they are not consumed semantic inputs.
   for (const name of ["ownerMemberId", "memberId", "authorMemberId", "recipientMemberId"]) add("Member", content[name]);
   const users = new Set(["userId", "authorUserId", "createdByUserId", "submittedByUserId", "requesterUserId", "requestedByUserId", "localUserId", "selectedByUserId", "uploadedByUserId"]
-    .flatMap(name => typeof content[name] === "string" ? [content[name] as string] : []));
+    .flatMap(name => name === "userId" && isCompanyLegacyRecoveryOutcome(kind,content) ? [] : typeof content[name] === "string" ? [content[name] as string] : []));
   for (const userId of users) {
     await rows("Member", { workspaceId, userId }, `governing-member:${userId}`);
     await rows("WorkspaceSupportGrant", { workspaceId, userId }, `governing-support:${userId}`);
