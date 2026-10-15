@@ -73,7 +73,7 @@ export default async function RoleDetailPage({ params }: PageProps) {
 
   const [currentWorkspace, roleDirectoryData] = await Promise.all([
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
-    loadRoleDirectoryData(workspaceId, { roleIds: [role.id] }),
+    loadRoleDirectoryData(actor, workspaceId, { roleIds: [role.id] }),
   ]);
   const currentUserId = actor.kind === "user" ? actor.user.id : null;
   const currentMemberId = membership?.id && membership.id !== "global-operator" ? membership.id : null;

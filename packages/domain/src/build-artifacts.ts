@@ -845,7 +845,7 @@ export async function getBuildArtifactAssetSignedUrl(actor: AppActor, params: {
       404, "NOT_FOUND", "Build artifact asset not found.");
   };
   await authorize();
-  return { signedUrl: null, file, authorize };
+  return { signedUrl: null, file, mimeType: asset.mimeType, authorize };
 }
 
 export async function revokeBuildArtifactPublicAccess(actor: AppActor, params: {
@@ -944,7 +944,7 @@ export async function resolvePublicBuildArtifactAsset(params: {
   invariant(typeof asset.sha256 === "string" && createHash("sha256").update(file.data).digest("hex") === asset.sha256,
     409, "SOURCE_CHANGED", "Public proof asset changed.");
   await authorize();
-  return { signedUrl: null, file, authorize };
+  return { signedUrl: null, file, mimeType: asset.mimeType, authorize };
 }
 
 export async function markBuildArtifactClosedFromGitHub(params: {

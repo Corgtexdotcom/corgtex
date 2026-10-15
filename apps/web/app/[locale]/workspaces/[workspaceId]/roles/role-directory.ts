@@ -1,10 +1,12 @@
 import type { RoleOnboardingStatus } from "@prisma/client";
 import {
+  DigestReadRelease,
+  requireWorkspaceMembership,
   humanMemberIdentityWhere,
   isHumanMemberIdentity,
   isRoleAssignmentActive,
 } from "@corgtex/domain";
-import { prisma } from "@corgtex/shared";
+import { prisma, type AppActor } from "@corgtex/shared";
 import type { WorkItemSort, WorkItemSortable } from "@/lib/work-item-view";
 import { compareWorkItemSortValues, firstSearchParam } from "@/lib/work-item-view";
 
@@ -70,7 +72,7 @@ export type RoleDirectoryRole = {
   coreRoleType?: string | null;
   createdAt: DateLike;
   updatedAt: DateLike;
-  circle: RoleDirectoryCircle;
+  circle: RoleDirectoryCircle | null;
   assignments: RoleDirectoryAssignment[];
 };
 
@@ -99,9 +101,12 @@ const KANBAN_SORT_PRIORITY: Record<RoleKanbanColumnId, number> = {
 };
 
 export async function loadRoleDirectoryData(
+  actor: AppActor,
   workspaceId: string,
   opts: { roleIds?: string[] } = {},
 ): Promise<RoleDirectoryData> {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const release = new DigestReadRelease(actor, workspaceId);
   const roleIdFilter = opts.roleIds ? { id: { in: opts.roleIds } } : {};
   const onboardingRoleFilter = opts.roleIds ? { roleId: { in: opts.roleIds } } : {};
 
@@ -116,12 +121,7 @@ export async function loadRoleDirectoryData(
         },
       },
       include: {
-        circle: {
-          select: {
-            id: true,
-            name: true,
-          },
-        },
+        circle: true,
         assignments: {
           include: {
             member: {
@@ -145,10 +145,6 @@ export async function loadRoleDirectoryData(
     }),
     prisma.circle.findMany({
       where: { workspaceId, archivedAt: null },
-      select: {
-        id: true,
-        name: true,
-      },
       orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
     }),
     prisma.member.findMany({
@@ -160,6 +156,7 @@ export async function loadRoleDirectoryData(
       include: {
         user: {
           select: {
+            id: true,
             email: true,
             displayName: true,
           },
@@ -173,27 +170,66 @@ export async function loadRoleDirectoryData(
         ...onboardingRoleFilter,
         status: { in: ["PENDING", "ACTIVE"] },
       },
-      select: {
-        roleId: true,
-        memberId: true,
-        conversationId: true,
-        status: true,
-        updatedAt: true,
-      },
       orderBy: { updatedAt: "desc" },
     }),
   ]);
 
-  return {
-    roles,
-    circles,
-    members: members.map((member) => ({
-      id: member.id,
-      name: member.user.displayName ?? member.user.email,
-      email: member.user.email,
+  const admittedRoles = (await release.capture("Role", roles)).records;
+  const admittedCircles = (await release.capture("Circle", circles)).records;
+  const circleById = new Map(admittedCircles.map((circle) => [circle.id, circle]));
+  const admittedMembers = (await release.capture("Member", members)).records;
+  const admittedUsers = (await release.capture("User", admittedMembers.map((member) => member.user))).records;
+  const userIds = new Set(admittedUsers.map((user) => user.id));
+  const memberOptions = admittedMembers.filter((member) => userIds.has(member.user.id));
+  const directoryRoles: RoleDirectoryRole[] = [];
+  for (const role of admittedRoles) {
+    const assignments = (await release.capture("RoleAssignment", role.assignments)).records;
+    const assignmentMembers = (await release.capture("Member", assignments.map(({ member }) => ({
+      ...member, user: { id: member.user.id, email: member.user.email, displayName: member.user.displayName },
+    })))).records;
+    const memberIds = new Set(assignmentMembers.map((member) => member.id));
+    const profiles = (await release.capture("User", assignments
+      .filter(({ member }) => memberIds.has(member.id)).map(({ member }) => member.user))).records;
+    const profileIds = new Set(profiles.map((profile) => profile.id));
+    const circle = circleById.get(role.circle.id);
+    directoryRoles.push({
+      id: role.id, name: role.name, purposeMd: role.purposeMd,
+      accountabilities: role.accountabilities, artifacts: role.artifacts, coreRoleType: role.coreRoleType,
+      createdAt: role.createdAt, updatedAt: role.updatedAt,
+      circle: circle ? { id: circle.id, name: circle.name } : null,
+      assignments: assignments.filter(({ member }) => memberIds.has(member.id) && profileIds.has(member.user.id))
+        .map((assignment) => ({
+          id: assignment.id, memberId: assignment.memberId, assignedAt: assignment.assignedAt,
+          expiresAt: assignment.expiresAt, transferReason: assignment.transferReason,
+          member: { id: assignment.member.id, kind: assignment.member.kind, isActive: assignment.member.isActive,
+            user: assignment.member.user },
+        })),
+    });
+  }
+  const sourceRoleById = new Map(admittedRoles.map((role) => [role.id, role]));
+  directoryRoles.sort((left, right) => {
+    const leftSource = sourceRoleById.get(left.id)!;
+    const rightSource = sourceRoleById.get(right.id)!;
+    const leftOrder = left.circle ? circleById.get(left.circle.id)!.sortOrder : 0;
+    const rightOrder = right.circle ? circleById.get(right.circle.id)!.sortOrder : 0;
+    return leftOrder - rightOrder || leftSource.sortOrder - rightSource.sortOrder
+      || new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime();
+  });
+  const roleIds = new Set(directoryRoles.map((role) => role.id));
+  const assignments = new Set(directoryRoles.flatMap((role) => role.assignments.map((assignment) => roleOnboardingKey(role.id, assignment.memberId))));
+  const sessions = (await release.capture("RoleOnboardingSession", onboardingSessions.filter((session) =>
+    roleIds.has(session.roleId) && assignments.has(roleOnboardingKey(session.roleId, session.memberId))))).records;
+  return release.finish({
+    roles: directoryRoles,
+    circles: admittedCircles.map((circle) => ({ id: circle.id, name: circle.name })),
+    members: memberOptions.map((member) => ({
+      id: member.id, name: member.user.displayName ?? member.user.email, email: member.user.email,
     })),
-    onboardingByRoleMember: latestOnboardingByRoleMember(onboardingSessions),
-  };
+    onboardingByRoleMember: latestOnboardingByRoleMember(sessions.map((session) => ({
+      roleId: session.roleId, memberId: session.memberId, conversationId: session.conversationId,
+      status: session.status, updatedAt: session.updatedAt,
+    }))),
+  });
 }
 
 export function roleOnboardingKey(roleId: string, memberId: string) {
@@ -273,7 +309,7 @@ export function roleMatchesStaffingFilter(params: {
 }
 
 export function roleMatchesCircleFilter(role: RoleDirectoryRole, circleIds: readonly string[]) {
-  return circleIds.length === 0 || circleIds.includes(role.circle.id);
+  return circleIds.length === 0 || Boolean(role.circle && circleIds.includes(role.circle.id));
 }
 
 export function roleMatchesMemberFilter(role: RoleDirectoryRole, memberIds: readonly string[], now = new Date()) {
@@ -291,7 +327,7 @@ export function roleDirectorySort(
   return {
     priority: (KANBAN_SORT_PRIORITY[columnId] * 1000) + (role.accountabilities.length * 10) + activeAssignments.length,
     date: role.updatedAt ?? role.createdAt ?? null,
-    alpha: `${role.circle.name} ${role.name}`,
+    alpha: `${role.circle?.name ?? ""} ${role.name}`,
   };
 }
 

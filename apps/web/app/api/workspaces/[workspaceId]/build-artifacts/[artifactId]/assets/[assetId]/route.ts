@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { buildAssetResponseHeaders } from "@/lib/build-asset-response-headers";
 import { getBuildArtifactAssetSignedUrl } from "@corgtex/domain";
 import { withWorkspaceRoute } from "@/lib/route-handler";
 import { disabledWorkspaceFeatureResponse } from "@/lib/workspace-feature-route";
@@ -11,7 +12,7 @@ export const GET = withWorkspaceRoute(async (request, { actor, workspaceId, para
   const disabled = await disabledWorkspaceFeatureResponse(workspaceId, "BUILD_ARTIFACTS");
   if (disabled) return disabled;
 
-  const { file, authorize } = await getBuildArtifactAssetSignedUrl(actor, {
+  const { file, mimeType, authorize } = await getBuildArtifactAssetSignedUrl(actor, {
     workspaceId,
     artifactId: params.artifactId,
     assetId: params.assetId,
@@ -20,8 +21,5 @@ export const GET = withWorkspaceRoute(async (request, { actor, workspaceId, para
   const source = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array(file.data)); controller.close(); } });
   const body = await authorizedDownloadStream(source, () => origin ? runWithSupportOrigin(origin, authorize) : authorize(),
     request.signal, { authorizeEveryDelivery: true });
-  return new NextResponse(body, { headers: {
-    "Content-Type": "application/octet-stream", "Content-Disposition": "attachment",
-    "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
-  } });
+  return new NextResponse(body, { headers: buildAssetResponseHeaders(mimeType) });
 });

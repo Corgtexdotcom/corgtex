@@ -58,4 +58,28 @@ describe("public build artifact asset route", () => {
     await expect(reader.read()).rejects.toMatchObject({ code: "NOT_FOUND" });
     expect(authorize).toHaveBeenCalledTimes(admittedChecks + 1);
   });
+  it.each(["image/png", "image/jpeg", "image/webp"])("renders %s inline without bypassing delivery authorization", async (mimeType) => {
+    const provider = resolvePublicBuildArtifactAsset;
+    provider.mockResolvedValue({ file: { data: Buffer.from("synthetic image") }, mimeType, authorize });
+    const { GET } = await import("./route");
+    const response = await GET(new NextRequest("https://synthetic.example.test/assets"), {
+      params: Promise.resolve({ publicToken: "token", assetId: "asset-1" }),
+    } as never);
+    expect(response.headers.get("content-type")).toBe(mimeType);
+    expect(response.headers.get("content-disposition")).toBe("inline");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(await response.text()).toBe("synthetic image");
+    expect(authorize).toHaveBeenCalledTimes(2);
+  });
+  it.each(["text/html", "image/svg+xml", "application/pdf"])("keeps executable or non-preview %s downloadable", async (mimeType) => {
+    resolvePublicBuildArtifactAsset.mockResolvedValue({ file: { data: Buffer.from("synthetic upload") }, mimeType, authorize });
+    const { GET } = await import("./route");
+    const response = await GET(new NextRequest("https://synthetic.example.test/assets"), {
+      params: Promise.resolve({ publicToken: "token", assetId: "asset-1" }),
+    } as never);
+    expect(response.headers.get("content-type")).toBe(mimeType);
+    expect(response.headers.get("content-disposition")).toBe("attachment");
+    expect(await response.text()).toBe("synthetic upload");
+  });
+
 });
