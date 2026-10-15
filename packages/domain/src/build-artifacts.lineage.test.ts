@@ -194,6 +194,8 @@ describe("Build artifact producer/read closure with actual input receipts", () =
     const normal = await getBuildArtifactAssetSignedUrl(alpha, { workspaceId, artifactId: created.id, assetId: uploaded.asset.id });
     expect(normal.signedUrl).toBeNull(); expect(normal.file.data.toString()).toBe("synthetic bytes");
     expect(normal.mimeType).toBe(uploaded.asset.mimeType);
+    expect(normal.byteBinding).toEqual({ sha256: createHash("sha256").update("synthetic bytes").digest("hex"), sizeBytes: uploaded.asset.sizeBytes });
+    expect(storage.get).toHaveBeenLastCalledWith(fixture.rows.buildArtifactAsset[0].storageKey, { maxBytes: 64 * 1024 * 1024 });
     const publicFile = await resolvePublicBuildArtifactAsset({ publicToken: "synthetic-bearer", assetId: uploaded.asset.id });
     expect(publicFile.signedUrl).toBeNull(); expect(publicFile.mimeType).toBe(uploaded.asset.mimeType);
     expect(publicFile.byteBinding).toEqual({ sha256: createHash("sha256").update("synthetic bytes").digest("hex"), sizeBytes: uploaded.asset.sizeBytes });
@@ -206,6 +208,23 @@ describe("Build artifact producer/read closure with actual input receipts", () =
     fixture.rows.buildArtifact[0].publicTokenHash = "sha:synthetic-bearer";
     files.set(fixture.rows.buildArtifactAsset[0].storageKey, Buffer.from("changed bytes"));
     await expect(getBuildArtifactAssetSignedUrl(alpha, { workspaceId, artifactId: created.id, assetId: uploaded.asset.id })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+  });
+
+  it("keeps private byte binding behind current actor, membership and source custody", async () => {
+    const created = await upsertBuildArtifact(beta, fresh({ visibility: "PRIVATE", classification: "INTERNAL" }));
+    const uploaded = await upload(created.id);
+    const params = { workspaceId, artifactId: created.id, assetId: uploaded.asset.id };
+    await expect(getBuildArtifactAssetSignedUrl(alpha, params)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    const file = await getBuildArtifactAssetSignedUrl(beta, params);
+    expect(file.byteBinding).toEqual({ sha256: digest(Buffer.from("synthetic bytes")), sizeBytes: 15 });
+    expect(file.signedUrl).toBeNull();
+    await expect(file.authorize()).resolves.toBeUndefined();
+    fixture.rows.member.find((m) => m.userId === "beta").isActive = false;
+    await expect(file.authorize()).rejects.toMatchObject({ code: "NOT_A_MEMBER" });
+    fixture.rows.member.find((m) => m.userId === "beta").isActive = true;
+    fixture.rows.buildArtifactAsset[0].captionMd = "Changed after byte verification";
+    await expect(file.authorize()).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(storage.getSignedUrl).not.toHaveBeenCalled();
   });
 
   it("withholds copied credential/HTTP and unreceipted GitHub inputs rather than inventing human authorship", async () => {

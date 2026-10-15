@@ -845,7 +845,8 @@ export async function getBuildArtifactAssetSignedUrl(actor: AppActor, params: {
       404, "NOT_FOUND", "Build artifact asset not found.");
   };
   await authorize();
-  return { signedUrl: null, file, mimeType: asset.mimeType, authorize };
+  return { signedUrl: null, file, mimeType: asset.mimeType, authorize,
+    byteBinding: { sha256: asset.sha256, sizeBytes: asset.sizeBytes } };
 }
 
 export async function revokeBuildArtifactPublicAccess(actor: AppActor, params: {

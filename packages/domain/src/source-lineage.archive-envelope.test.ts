@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fixture, workspaceId, alpha, beta, resetFixture, known } from "../../agents/src/agents/model-consumer.test-fixture";
 import { installSourcePermissionEpochFixture } from "./source-permission-epochs.test-fixture";
 import { advanceArchivedArtifactEnvelopeLineage, captureArtifactInputProof, captureArtifactInputSnapshotProof, inspectStoredArtifactInputDependencies,
-  invalidateArtifactInputLineage, isArtifactInputProofReadable, isArtifactArchiveMetadataReadable, readableArtifactIds, lineageContentFingerprint, withArtifactInputWriteFence } from "./source-lineage";
+  invalidateArtifactInputLineage, isArtifactInputProofReadable, isArtifactArchiveMetadataReadable, captureArtifactArchiveMetadataProof, isArtifactArchiveMetadataProofReadable, readableArtifactIds, lineageContentFingerprint, withArtifactInputWriteFence } from "./source-lineage";
 import { isArtifactPermissionEpochProofCurrent } from "./source-permission-epochs";
 
 vi.mock("@corgtex/shared", () => ({ prisma: fixture.prisma }));
@@ -127,6 +127,29 @@ describe("archive metadata uses current source permissions", () => {
     expect(await isArtifactArchiveMetadataReadable(alpha, workspaceId, { kind: "BrainArticle", id: row.id }, fixture.prisma)).toBe(true);
     expect(await readableArtifactIds(alpha, workspaceId, "BrainArticle", [row], fixture.prisma)).toEqual(new Set());
     await expect(captureArtifactInputProof(alpha, workspaceId, [{ kind: "BrainArticle", id: row.id }], fixture.prisma)).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+  });
+
+  it("retains the admitted metadata fingerprint, heads and consuming caller epochs", async () => {
+    const row = await archiveOriginal();
+    const proof = await captureArtifactArchiveMetadataProof(beta, workspaceId, { kind: "BrainArticle", id: row.id });
+    expect(proof).not.toBeNull();
+    expect(proof!.heads.size).toBeGreaterThan(0);
+    expect(proof!.root.permissionEpochs?.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "MemberUserPolicy", id: "beta" }),
+      expect.objectContaining({ kind: "MemberRolePolicy", id: "member-beta" }),
+    ]));
+    expect(await isArtifactArchiveMetadataProofReadable(beta, workspaceId, proof!)).toBe(true);
+    epochs.bump(workspaceId, "MemberUserPolicy", "beta");
+    expect(await isArtifactArchiveMetadataProofReadable(beta, workspaceId, proof!)).toBe(false);
+  });
+
+  it("does not use archive metadata receipts as content authority or recapture a new head", async () => {
+    const row = await archiveOriginal();
+    const proof = await captureArtifactArchiveMetadataProof(alpha, workspaceId, { kind: "BrainArticle", id: row.id });
+    expect(proof).not.toBeNull();
+    expect(await isArtifactInputProofReadable(alpha, workspaceId, [proof!.root], fixture.prisma)).toBe(false);
+    fixture.manifest("BrainArticle", row.id).revision++;
+    expect(await isArtifactArchiveMetadataProofReadable(alpha, workspaceId, proof!)).toBe(false);
   });
 
   it("requires the current private owner, membership and workspace even for metadata", async () => {

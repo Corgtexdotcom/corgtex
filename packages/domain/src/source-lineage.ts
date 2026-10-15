@@ -2803,12 +2803,18 @@ export async function currentArtifactInputRootsBatch(db: LineageClient, workspac
  * returns no body and never admits an archived input to a model or copy writer. */
 export async function isArtifactArchiveMetadataReadable(actor: AppActor, workspaceId: string,
   artifact: LineageInput, db: LineageClient = prisma) {
+  return evaluateArchiveMetadataRoot(actor, workspaceId, artifact, db);
+}
+
+async function evaluateArchiveMetadataRoot(actor: AppActor, workspaceId: string,
+  artifact: LineageInput, db: LineageClient, expected?: LineageRoot) {
   assertSourceCommitTransactionCompatible(db);
   const membership = await requireWorkspaceMembership({ actor, workspaceId, tx: db });
   const domains = await resolveKnowledgeAccessDomains(actor, workspaceId, db);
   const row = await loadArtifact(db, workspaceId, artifact);
   if (!isRecord(row)) return false;
   const fingerprint = lineageContentFingerprint(artifact.kind, row);
+  if (expected && fingerprint !== expected.fingerprint) return false;
   if (isArchived(row)) {
     const manifest = await latestManifest(db, workspaceId, artifact);
     if (!manifest || manifest.origin !== "HUMAN_ORIGINAL" || manifest.contentHash !== fingerprint
@@ -2818,6 +2824,57 @@ export async function isArtifactArchiveMetadataReadable(actor: AppActor, workspa
   }
   return evaluateRoot(db, actor, workspaceId, membership, domains,
     { ...artifact, fingerprint }, new Set(), new Map(), false, true);
+}
+
+/** A metadata-only receipt. It must never be passed to a content/model reader. */
+export type ArchiveMetadataProof = { root: LineageRoot; heads: ReadonlyMap<string, string> };
+
+export async function captureArtifactArchiveMetadataProof(actor: AppActor, workspaceId: string,
+  artifact: LineageInput): Promise<ArchiveMetadataProof | null> {
+  // Cheap rejection before opening a proof transaction. This observation can
+  // only withhold a candidate; admission still rereads everything below.
+  const candidate = await loadArtifact(prisma, workspaceId, artifact);
+  if (!isRecord(candidate)) return null;
+  if (isArchived(candidate)) {
+    const manifest = await latestManifest(prisma, workspaceId, artifact);
+    if (!manifest || manifest.origin !== "HUMAN_ORIGINAL") return null;
+  }
+  const binding: ReadHeadBinding = { heads: new Map(), sealed: false };
+  const root = await expectedReadHeads.run(binding, () => prisma.$transaction(async tx => {
+    const membership = await requireWorkspaceMembership({ actor, workspaceId, tx });
+    const row = await loadArtifact(tx, workspaceId, artifact);
+    if (!isRecord(row)) return null;
+    const original: LineageRoot = { ...artifact, fingerprint: lineageContentFingerprint(artifact.kind, row) };
+    if (!await localCommitAdmission.run(true, () => isArtifactArchiveMetadataReadable(actor, workspaceId, artifact, tx))) return null;
+    // Capture the admitted closure and caller before provider replay. Archive
+    // transitions intentionally preserve older manifests; use the current epoch
+    // vector here solely to fence this metadata read's own lifetime.
+    const closure = [...binding.heads.keys()].map(key => {
+      const [kind, id] = JSON.parse(key) as [LineageKind, string];
+      return { kind, id, fingerprint: "metadata-permission-parent" };
+    });
+    const epochs = await captureArtifactPermissionEpochs(actor, workspaceId, closure, tx);
+    const role = membership?.id ? await capturePermissionEpochs(tx, workspaceId,
+      [{ kind: "MemberRolePolicy", id: membership.id }]) : undefined;
+    original.permissionEpochs = mergePermissionEpochProofs(epochs, role)!;
+    return original;
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 30_000 }));
+  if (!root) return null;
+  const proof = { root, heads: new Map(binding.heads) };
+  return await isArtifactArchiveMetadataProofReadable(actor, workspaceId, proof) ? proof : null;
+}
+
+/** Replay the ORIGINAL fingerprint, permission vector and heads, retaining the
+ * archive-only exception. A caller transaction is the final local release fence. */
+export async function isArtifactArchiveMetadataProofReadable(actor: AppActor, workspaceId: string,
+  proof: ArchiveMetadataProof, db: LineageClient = prisma): Promise<boolean> {
+  const read = async () => {
+    if (!proof.root.permissionEpochs
+      || !await isArtifactPermissionEpochProofCurrent(workspaceId, proof.root.permissionEpochs, db)) return false;
+    return evaluateArchiveMetadataRoot(actor, workspaceId, proof.root, db, proof.root);
+  };
+  return expectedReadHeads.run({ heads: new Map(proof.heads), sealed: true },
+    () => db === prisma ? read() : localCommitAdmission.run(true, read));
 }
 
 /** Returns only ids whose current content and every permission-bearing input are provably safe. */

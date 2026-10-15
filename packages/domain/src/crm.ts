@@ -1150,6 +1150,47 @@ export async function listCrmAccounts(actor: AppActor, workspaceId: string, opts
   });
 }
 
+async function readAccountDetailDeals(actor: AppActor, workspaceId: string, accountId: string) {
+  // Detail relations are complete arrays. Fetch card metadata in bounded joins;
+  // only a denied first candidate needs the ordinary replenishing sample reader.
+  const deals = await readCrmRows(actor, workspaceId, "CrmDeal", page => prisma.crmDeal.findMany({
+    where: { workspaceId, accountId, archivedAt: null,
+      ...activeCrmParentWhere(["account", "contact"], "active", ["contact"]) },
+    orderBy: [{ updatedAt: "desc" }, { id: "asc" }], ...page,
+    include: { contact: true,
+      activities: { where: { workspaceId, type: CrmActivityType.TASK, completedAt: null, archivedAt: null,
+        ...activeCrmParentWhere(["account", "contact", "deal"]) },
+      orderBy: [{ dueAt: { sort: "asc", nulls: "last" } }, { createdAt: "desc" }, { id: "asc" }], take: 1 },
+      stageTransitions: { where: { workspaceId }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: 1 },
+    },
+  }));
+  const result: typeof deals = [];
+  for (let offset = 0; offset < deals.length; offset += 100) {
+    const page = deals.slice(offset, offset + 100);
+    const contacts = await observeCrmReadRows(actor, workspaceId, "CrmContact", page.map(row => row.contact));
+    const contactIds = new Set(contacts.map(row => row.id));
+    const admitted = page.filter(row => contactIds.has(row.contact.id));
+    const [tasks, transitions] = await Promise.all([
+      observeCrmReadRows(actor, workspaceId, "CrmActivity", admitted.flatMap(row => row.activities)),
+      observeCrmReadRows(actor, workspaceId, "CrmDealStageTransition", admitted.flatMap(row => row.stageTransitions)),
+    ]);
+    const taskIds = new Set(tasks.map(row => row.id)), transitionIds = new Set(transitions.map(row => row.id));
+    result.push(...await Promise.all(admitted.map(async row => ({ ...row,
+      activities: row.activities.every(task => taskIds.has(task.id)) ? row.activities
+        : await readCrmSample(actor, workspaceId, "CrmActivity", page => prisma.crmActivity.findMany({
+          where: { workspaceId, dealId: row.id, type: CrmActivityType.TASK, completedAt: null, archivedAt: null,
+            ...activeCrmParentWhere(["account", "contact", "deal"]) },
+          orderBy: [{ dueAt: { sort: "asc", nulls: "last" } }, { createdAt: "desc" }, { id: "asc" }], ...page,
+        }), 1),
+      stageTransitions: row.stageTransitions.every(transition => transitionIds.has(transition.id)) ? row.stageTransitions
+        : await readCrmSample(actor, workspaceId, "CrmDealStageTransition", page => prisma.crmDealStageTransition.findMany({
+          where: { workspaceId, dealId: row.id }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], ...page,
+        }), 1),
+    }))));
+  }
+  return result;
+}
+
 export async function getCrmAccount(actor: AppActor, params: { workspaceId: string; accountId: string }) {
   return withCrmReadSnapshot(actor,params.workspaceId,async()=>{
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
@@ -1158,13 +1199,16 @@ export async function getCrmAccount(actor: AppActor, params: { workspaceId: stri
     && (await observeCrmReadRows(actor, params.workspaceId, "CrmAccount", [account])).length,
     404, "NOT_FOUND", "Account not found.");
   const [contacts, deals, activities, conversations, prospects] = await Promise.all([
-    listContacts(actor, params.workspaceId, { accountId: account.id, take: 5_000 }),
-    listDeals(actor, params.workspaceId, { accountId: account.id, take: 5_000 }),
+    readCrmRows(actor, params.workspaceId, "CrmContact", page => prisma.crmContact.findMany({
+      where: { workspaceId: params.workspaceId, accountId: account.id, archivedAt: null, ...activeCrmParentWhere(["account"]) },
+      orderBy: [{ lastSeenAt: "desc" }, { id: "asc" }], ...page,
+    })),
+    readAccountDetailDeals(actor, params.workspaceId, account.id),
     listCrmActivities(actor, params.workspaceId, { accountId: account.id, take: 50 }),
     listCrmConversations(actor, params.workspaceId, { accountId: account.id, take: 25 }),
     listCrmProspectWorkspaces(actor, params.workspaceId, { accountId: account.id, take: 25 }),
   ]);
-  return { ...account, contacts: contacts.items, deals: deals.items, activities: activities.items,
+  return { ...account, contacts, deals, activities: activities.items,
     crmConversations: conversations.items, prospectWorkspaces: prospects.items };
 
   });
@@ -1515,10 +1559,16 @@ export async function getContact(actor: AppActor, params: { workspaceId: string;
     404, "NOT_FOUND", "Contact not found.");
   const [account, deals, activities] = await Promise.all([
     visibleCrmRelated(actor, params.workspaceId, "CrmAccount", contact.account),
-    listDeals(actor, params.workspaceId, { contactId: contact.id, take: 5_000 }),
+    readCrmRows(actor, params.workspaceId, "CrmDeal", page => prisma.crmDeal.findMany({
+      where: { workspaceId: params.workspaceId, contactId: contact.id, archivedAt: null,
+        ...activeCrmParentWhere(["account", "contact"], "active", ["contact"]) },
+      orderBy: [{ updatedAt: "desc" }, { id: "asc" }], ...page,
+    })),
     listCrmActivities(actor, params.workspaceId, { contactId: contact.id, take: 50 }),
   ]);
-  return { ...contact, account, deals: deals.items, activities: activities.items };
+  // The detail contact was admitted above, and every deal's proof includes its
+  // mandatory current contact and account closure in the shared release ledger.
+  return { ...contact, account, deals, activities: activities.items };
 
   });
 }
