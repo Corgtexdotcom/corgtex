@@ -49,7 +49,11 @@ vi.mock("@corgtex/domain", async () => ({
   requireWorkspaceMembership: membershipMock,
 }));
 
-vi.mock("../../../domain/src/source-lineage", () => ({
+vi.mock("../../../domain/src/auth", () => ({requireWorkspaceMembership: membershipMock}));
+vi.mock("../../../domain/src/source-lineage", async importOriginal => ({
+  mergeLineageInputRoot: (await importOriginal<typeof import("../../../domain/src/source-lineage")>()).mergeLineageInputRoot,
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
+  withArtifactCountReleaseSnapshot: async (_actor: unknown, _ws: string, _roots: unknown, remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => {await remote();return finish({});},
   captureArtifactInputProof: captureProofMock,
   readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) => new Set(records.filter((row: { lineageReadable?: boolean }) => row.lineageReadable !== false).map((row: { id: string }) => row.id))),
 }));

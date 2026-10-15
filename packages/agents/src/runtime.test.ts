@@ -99,6 +99,11 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
 // Audited context helpers share the same primitive receipt boundary as the runtime.
 // Keep the scanner real; context collection below consumes these same captured primitive proofs.
 vi.mock("../../domain/src/source-lineage", async importOriginal => ({ ...await importOriginal<any>(),
+  withArtifactCountReleaseSnapshot: async (actor: unknown, ws: string, roots: unknown, remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => {
+    await remote();
+    if (!await lineage.readable(actor, ws, roots)) throw new (await import("../../domain/src/errors")).AppError(409, "SOURCE_CHANGED", "Fixture inputs changed.");
+    return finish(prismaMock);
+  },
   captureArtifactInputProof: lineage.capture, readableArtifactIds: lineage.readableIds,
   isArtifactInputProofReadable: lineage.readable,
 }));

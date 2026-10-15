@@ -129,8 +129,11 @@ export async function runAgentWorkflowJob(job: {
         const receipt = prepared.lineageRoots.length ? await helpers.captureInputs(prepared.lineageRoots) : helpers.plannedInputReceipt;
         const report = prepared.lineageRoots.length || claim.state.phase === "RETENTION" ? prepared.report : {scope: "BATCH", phase: claim.state.phase,
           observation: "Operational phase completion only; no source-derived counts", status: "OPERATION_COMPLETED"};
-        return helpers.step("maintenance-batch", {scope: "BATCH", phase: claim.state.phase},
-          async () => ({resultJson: report, lineageReceipt: receipt}), {receipt});
+        // The step is an operational phase marker. Publish the source-derived
+        // report once on AgentRun, under its original captured input receipt.
+        await helpers.step("maintenance-batch", {scope: "BATCH", phase: claim.state.phase},
+          async () => ({scope: "BATCH", phase: claim.state.phase}), {receipt: helpers.plannedInputReceipt});
+        return {resultJson: report, lineageReceipt: receipt};
       },
       beforeComplete: async tx => {
         await claim.assertCurrent(tx);

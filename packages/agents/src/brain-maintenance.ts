@@ -256,10 +256,12 @@ export async function runBrainMaintenance(params: {
   };
   return {report, lineageRoots: roots, next, assertCurrent: () => assertProof(mergeArtifactInputProofs(roots, retentionRoots)), apply: async tx => {
     const all = mergeArtifactInputProofs(roots, retentionRoots);
-    if (all.length) {
-      await assertProof(all, tx);
-      await captureImmutableArtifactInputProof(actor, workspaceId, all, tx);
-    }
+    if (all.length) await assertProof(all, tx);
+    // Observation-only batches already have the runtime's frozen input receipt.
+    // Keep the original head/epoch fence above in this claimed final transaction,
+    // but do not recapture and discard a second snapshot when nothing is mutated.
+    if (!upserts.length && !deletes.length && !absorptions.length && !retention.length) return;
+    if (all.length) await captureImmutableArtifactInputProof(actor, workspaceId, all, tx);
     if (upserts.length) await tx.brainBacklink.createMany({data: upserts.map(edge => ({workspaceId, ...edge})), skipDuplicates: true});
     if (deletes.length) await tx.brainBacklink.deleteMany({where: {workspaceId, id: {in: deletes}}});
     for (const thread of absorptions) await markThreadAbsorbed(actor, {workspaceId, threadId: thread.id, expectedInputRoots: thread.roots, tx});

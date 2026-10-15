@@ -77,8 +77,19 @@ vi.mock("./source-lineage", () => ({
   isArtifactInputProofReadable: receiptMocks.readable,
   isArtifactInputProofPubliclyShareable: receiptMocks.public,
   lineageContentFingerprint: vi.fn((_kind, row) => row?.stateHash ?? "fingerprint"),
+  recordArtifactInputLineage: vi.fn(),
   readableArtifactIds: vi.fn(async (_actor: unknown, _workspaceId: string, _kind: string,
     rows: Array<{ id: string }>) => new Set(rows.map((row) => row.id))),
+}));
+
+// Provider/transaction fencing has its own real PostgreSQL integration coverage.
+// Keep this orchestration fixture on the same explicit readable-proof boundary.
+vi.mock("./artifact-commit-preflight", () => ({
+  prepareArtifactCommitPreflight: vi.fn(async () => ({})),
+  withArtifactCommitPreflight: async (_actor: unknown, _ws: string, _tx: unknown, _roots: unknown, _token: unknown, work: () => Promise<unknown>) => {
+    if (!await receiptMocks.readable()) throw new Error("Fixture inputs changed.");
+    return work();
+  },
 }));
 
 vi.mock("./communication", () => ({
@@ -118,7 +129,7 @@ describe("meeting facilitation", () => {
     prismaMock.meetingInsight.findMany.mockReset().mockResolvedValue([]);
     prismaMock.knowledgeChunk.findMany.mockReset().mockResolvedValue([]);
     prismaMock.deliberationEntry.findMany.mockReset().mockResolvedValue([]);
-    prismaMock.meetingFollowUpReview.findFirst.mockReset().mockResolvedValue({ id: "review-1", workspaceId: "workspace-1" });
+    prismaMock.meetingFollowUpReview.findFirst.mockReset().mockResolvedValue({ id: "review-1", workspaceId: "workspace-1", meetingId: "meeting-1", installationId: "slack-1", channelId: "C999" });
     prismaMock.meetingFollowUpReview.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.meetingFollowUpReview.upsert.mockReset().mockResolvedValue({ id: "review-1" });
     prismaMock.meetingFollowUpReview.update.mockReset().mockResolvedValue({ id: "review-1" });
