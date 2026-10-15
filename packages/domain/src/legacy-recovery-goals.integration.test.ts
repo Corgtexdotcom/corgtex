@@ -6,6 +6,9 @@ import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { inspectLegacyRecovery, recoverLegacyArtifact, type LegacyRecoveryKind } from "./legacy-recovery";
 import { captureArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, recordArtifactInputLineage } from "./source-lineage";
 import * as lineage from "./source-lineage";
+import { prepareArtifactSourceCommit, withArtifactSourceCommit } from "./artifact-source-commit";
+import { assertSourceCommitRowCovered, assertSourceCommitSemanticRootCovered } from "./source-commit-lock-plan";
+import { discoverSourceAuthorityEdges } from "./source-authority-edges";
 import { getGoal, listGoals, updateGoal, updateKeyResult } from "./goals";
 const auth = vi.hoisted(() => ({ actor: vi.fn() }));
 vi.mock("@/lib/auth", () => ({ resolveRequestActor: auth.actor }));
@@ -152,4 +155,79 @@ describe("selected legacy Goal recovery", () => {
     await db.member.update({ where: { id: f.members[0].id }, data: { role: "CONTRIBUTOR" } });
     await expect(recoverLegacyArtifact(f.admin, request)).rejects.toMatchObject({ code: "RECOVERY_ADMIN_REQUIRED" });
   });
+  it.each(["KeyResult", "GoalUpdate"] as const)("locks a recovered %s and parent in a downstream governed commit", async kind => {
+    const f = await fixture();
+    await f.restore("Goal", f.goal.id);
+    const child = kind === "KeyResult" ? f.keyResult : f.update;
+    await f.restore(kind, child.id);
+    const roots = await captureArtifactInputProof(f.admin, f.workspace.id, [{ kind, id: child.id }]);
+    const options = { writeTargets: [], ownerBinding: { kind: "HUMAN_REQUEST" as const, id: randomUUID(), generation: 1 } };
+    const prepared = await prepareArtifactSourceCommit(f.admin, f.workspace.id, roots, options);
+    const result = await db.$transaction(tx => withArtifactSourceCommit(f.admin, f.workspace.id, tx,
+      roots, options, prepared, async connection => {
+        expect(await connection.member.findFirst({ where: { id: f.members[0].id, workspaceId: f.workspace.id,
+          userId: f.users[0].id, isActive: true, role: "ADMIN" } })).not.toBeNull();
+      }, async () => {
+        assertSourceCommitRowCovered(tx, kind, child.id);
+        assertSourceCommitRowCovered(tx, "Goal", f.goal.id);
+        return isArtifactInputProofReadable(f.admin, f.workspace.id, roots, tx);
+      }), { timeout: 30_000 });
+    expect(result).toBe(true);
+    expect(await db.goal.findUniqueOrThrow({ where: { id: f.goal.id } })).toEqual(f.goal);
+  });
+
+  it.each(["KeyResult", "GoalUpdate"] as const)("rejects a recovered %s authority target through a foreign parent scope", async kind => {
+    const f = await fixture();
+    await f.restore("Goal", f.goal.id);
+    const child = kind === "KeyResult" ? f.keyResult : f.update;
+    await f.restore(kind, child.id);
+    const outcome = await db.conversationOperationOutcome.findFirstOrThrow({ where: {
+      workspaceId: f.workspace.id, operation: "LEGACY_RECOVERY_PUBLICATION" }, orderBy: { createdAt: "desc" } });
+    const foreign = await db.workspace.create({ data: { name: "Foreign authority", slug: randomUUID() } });
+    await expect(discoverSourceAuthorityEdges({ actor: f.admin, workspaceId: foreign.id, db,
+      budget: { consume() {}, remaining: () => 1_000 } },
+    { kind: "ConversationOperationOutcome", id: outcome.id }, outcome)).rejects.toMatchObject({ code: "SOURCE_LOCK_INCOMPLETE" });
+  });
+
+  it.each(["parent-epoch", "caller"] as const)("withholds a recovered child commit after %s changes following preparation", async change => {
+    const f = await fixture();
+    await f.restore("Goal", f.goal.id);
+    await f.restore("KeyResult", f.keyResult.id);
+    const roots = await captureArtifactInputProof(f.admin, f.workspace.id, [{ kind: "KeyResult", id: f.keyResult.id }]);
+    const options = { writeTargets: [], ownerBinding: { kind: "HUMAN_REQUEST" as const, id: randomUUID(), generation: 1 } };
+    const prepared = await prepareArtifactSourceCommit(f.admin, f.workspace.id, roots, options);
+    if (change === "parent-epoch") {
+      await db.goal.update({ where: { id: f.goal.id }, data: { archivedAt: new Date() } });
+      await db.goal.update({ where: { id: f.goal.id }, data: { archivedAt: null } });
+    } else await db.member.update({ where: { id: f.members[0].id }, data: { isActive: false } });
+    const work = vi.fn(async () => true);
+    await expect(db.$transaction(tx => withArtifactSourceCommit(f.admin, f.workspace.id, tx,
+      roots, options, prepared, async connection => {
+        if (!await connection.member.findFirst({ where: { id: f.members[0].id, workspaceId: f.workspace.id,
+          userId: f.users[0].id, isActive: true, role: "ADMIN" } })) throw new Error("Owner is not current");
+      }, work), { timeout: 30_000 })).rejects.toThrow();
+    expect(work).not.toHaveBeenCalled();
+  });
+
+  it("does not promote a recovery output's governing ancestry into consumed semantic inputs", async () => {
+    const f = await fixture();
+    await f.restore("Goal", f.goal.id);
+    await f.restore("GoalUpdate", f.update.id);
+    const outcome = await db.conversationOperationOutcome.findFirstOrThrow({ where: {
+      workspaceId: f.workspace.id, operation: "LEGACY_RECOVERY_PUBLICATION" }, orderBy: { createdAt: "desc" } });
+    const roots = await captureArtifactInputProof(f.admin, f.workspace.id, [{ kind: "User", id: f.users[0].id }]);
+    const goalRoot = (await captureArtifactInputProof(f.admin, f.workspace.id, [{ kind: "Goal", id: f.goal.id }]))[0]!;
+    const options = { writeTargets: [{ kind: "ConversationOperationOutcome" as const, id: outcome.id }],
+      ownerBinding: { kind: "HUMAN_REQUEST" as const, id: randomUUID(), generation: 1 } };
+    const prepared = await prepareArtifactSourceCommit(f.admin, f.workspace.id, roots, options);
+    await db.$transaction(tx => withArtifactSourceCommit(f.admin, f.workspace.id, tx,
+      roots, options, prepared, async connection => {
+        expect(await connection.member.findFirst({ where: { id: f.members[0].id, workspaceId: f.workspace.id,
+          userId: f.users[0].id, isActive: true, role: "ADMIN" } })).not.toBeNull();
+      }, async () => {
+        assertSourceCommitRowCovered(tx, "Goal", f.goal.id);
+        expect(() => assertSourceCommitSemanticRootCovered(tx, f.workspace.id, goalRoot)).toThrowError(/not consumed or verified/);
+      }), { timeout: 30_000 });
+  });
+
 });
