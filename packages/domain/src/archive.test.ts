@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { Prisma } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
 
 const { prismaMock, storageDeleteMock, appendEventsMock } = vi.hoisted(() => {
@@ -746,6 +747,16 @@ describe("workspace archive domain", () => {
     prismaMock.brainArticle.findMany.mockResolvedValue([{ id: "article-1", slug: "notes", title: "Notes", isPrivate: false,
       ownerMemberId: null, sourceIds: ["source-1"], derivationJson: { version: 1, origin: "brain-absorb",
         agentRunId: "run-1", sources: [{ sourceId: "source-1", fingerprint: "a".repeat(64) }] } }]);
+    prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql | TemplateStringsArray) => {
+      if ("sql" in query && query.sql.includes('SELECT a.id,') && query.sql.includes('AS candidate')) {
+        expect(query.sql).toContain('a."workspaceId" =');
+        expect(query.sql).toContain('ORDER BY a.id LIMIT 100');
+        expect(query.values).toContain("workspace-1");
+        expect(query.values).toContain("source-1");
+        return [{id: "article-1", candidate: true}];
+      }
+      return [];
+    });
     const { archiveWorkspaceArtifact } = await import("./archive");
 
     await expect(archiveWorkspaceArtifact(actor, { workspaceId: "workspace-1", entityType: "BrainSource", entityId: source.id }))
@@ -763,6 +774,16 @@ describe("workspace archive domain", () => {
     prismaMock.brainSource.findMany.mockResolvedValue([{ id: "source-1" }]);
     prismaMock.brainArticle.findMany.mockResolvedValue([{ id: "article-1", slug: "notes", title: "Notes", isPrivate: false,
       ownerMemberId: null, sourceIds: ["source-1"], derivationJson: null }]);
+    prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql | TemplateStringsArray) => {
+      if ("sql" in query && query.sql.includes('SELECT a.id,') && query.sql.includes('AS candidate')) {
+        expect(query.sql).toContain('a."workspaceId" =');
+        expect(query.sql).toContain('ORDER BY a.id LIMIT 100');
+        expect(query.values).toContain("workspace-1");
+        expect(query.values).toContain("source-1");
+        return [{id: "article-1", candidate: true}];
+      }
+      return [];
+    });
     const { archiveWorkspaceArtifact } = await import("./archive");
 
     await expect(archiveWorkspaceArtifact(actor, { workspaceId: "workspace-1", entityType: "Document", entityId: document.id }))

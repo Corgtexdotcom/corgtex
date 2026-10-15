@@ -112,7 +112,11 @@ const f = vi.hoisted(() => {
 });
 
 vi.mock("../../domain/src/source-lineage", () => ({withArtifactCountReleaseSnapshot: f.countRelease}));
-vi.mock("@corgtex/domain", () => ({ readableArtifactIds: f.readable, resolveKnowledgeAccessDomains: f.resolveDomains, lineageContentFingerprint: f.hash, captureArtifactInputProof: f.capture, isArtifactInputProofReadable: f.currentProof }));
+vi.mock("@corgtex/domain", () => ({ readableArtifactIds: f.readable, resolveKnowledgeAccessDomains: f.resolveDomains, lineageContentFingerprint: f.hash, captureArtifactInputProof: f.capture, isArtifactInputProofReadable: f.currentProof,
+  mergeLineageInputRoot: (prior: unknown, root: unknown) => {
+    if (prior && JSON.stringify(prior) !== JSON.stringify(root)) throw Object.assign(new Error("Changed original proof"), {code: "SOURCE_CHANGED"});
+    return root;
+  } }));
 vi.mock("@corgtex/shared", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@corgtex/shared")>();
   return { ...actual, prisma: f.prisma, setCacheJson: async (...args: Parameters<typeof actual.setCacheJson>) => {
@@ -170,8 +174,9 @@ describe("actor-aware knowledge lineage", () => {
     const results = await searchIndexedKnowledge({ actor: bob, workspaceId: "ws-1", query: "policy", limit: 1, accessDomains: ["FINANCE", "WORKSPACE"] });
     expect(results.map((result) => result.sourceId)).toEqual(["public"]);
     expect(f.prisma.knowledgeChunk.findMany.mock.calls.filter(([query]) => query.take === 500)[0][0]).toMatchObject({ where: {
-      accessDomain: { in: ["WORKSPACE"] }, OR: [expect.objectContaining({ sourceType: "BRAIN_ARTICLE", sourceId: "public", metadata: { path: ["sourceContentHash"], equals: f.hash("BrainArticle", f.sources[2]) } })],
+      accessDomain: { in: ["WORKSPACE"] },
     }, take: 500 });
+    expect(f.prisma.brainArticle.findMany.mock.calls[0][0].where.id.in).toEqual(expect.arrayContaining(["finance", "unknown", "public"]));
     expect(f.gateway.rerank.mock.calls[0][0].documents.join(" ")).not.toMatch(/finance|unknown|other-tenant/);
     expect(f.readable).toHaveBeenCalledWith(bob, "ws-1", "BrainArticle", expect.arrayContaining([expect.objectContaining({ bodyMd: "Synthetic policy finance" })]));
   });
@@ -540,12 +545,18 @@ describe("child lineage admission before retrieval windows", () => {
     else expect(await searchIndexedKnowledge({actor: bob, workspaceId: "ws-1", query: "policy", limit: 1})).toEqual([]);
   });
 
-  it("fails explicitly on parent scan overflow before querying or scoring child bodies", async () => {
+  it("hydrates only candidate parents when more than 5000 unrelated sources have no chunks", async () => {
     for (let index = 0; index < 5001; index++) article(`parent-${index}`, [publicInput]);
-    await expect(searchIndexedKnowledge({actor: bob, workspaceId: "ws-1", query: "policy"})).rejects.toMatchObject({code: "KNOWLEDGE_SCAN_LIMIT"});
-    expect(f.prisma.knowledgeChunk.findMany).not.toHaveBeenCalled();
-    expect(f.gateway.embed).not.toHaveBeenCalled();
-    expect(f.afterCacheWrite).not.toHaveBeenCalled();
+    f.receipts.splice(0);
+    article("candidate", [publicInput]);
+    const results = await searchIndexedKnowledge({actor: bob, workspaceId: "ws-1", query: "policy"});
+    expect(results.map(result => result.sourceId)).toEqual(["candidate"]);
+    expect(f.prisma.brainArticle.findMany.mock.calls).not.toHaveLength(0);
+    for (const [query] of f.prisma.brainArticle.findMany.mock.calls) {
+      expect(query.where.id.in).toEqual(["candidate"]);
+      expect(query.take).toBeLessThanOrEqual(500);
+    }
+    expect(f.gateway.rerank.mock.calls[0][0].documents).toHaveLength(1);
   });
 
   it("fails explicitly at the raw scan bound before models, counts, or caches release partial results", async () => {

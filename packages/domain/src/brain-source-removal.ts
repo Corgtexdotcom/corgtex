@@ -9,7 +9,7 @@ import { sourceIdsInDerivation } from "./brain-source-impact";
 import { lockActiveArticleSources, lockBrainSourceLink } from "./brain-source-links";
 import { AppError, invariant } from "./errors";
 import { appendEvents } from "./events";
-import { advanceHumanArtifactInputLineage, assertArtifactInputWriteFence, captureArtifactInputProof, createBrainArticleHistoryVersion, currentArtifactInputRoots,
+import { advanceHumanArtifactInputLineage, assertArtifactInputWriteFence, captureArtifactInputProof, createBrainArticleHistoryVersion, currentArtifactInputRoots, currentArtifactInputRootsBatch,
   inspectStoredArtifactInputDependencies, isArtifactInputProofReadable, readableArtifactIds,
   readableBrainSourceIds, recordArtifactInputLineage, sealArtifactInputActor, type LineageRoot } from "./source-lineage";
 import { commitBrainSourceRemovalCompletion, consumeArchivedBrainSourceRetirement, findBrainSourceRemovalCompletion,
@@ -120,17 +120,39 @@ async function archiveStateHash(tx: Prisma.TransactionClient, workspaceId: strin
 }
 
 async function discoverRemovalArticles(tx: Prisma.TransactionClient, workspaceId: string, sourceId: string) {
-  const articles = await tx.brainArticle.findMany({ where: { workspaceId, archivedAt: null } });
   const discovered = [];
-  for (const article of articles) {
-    const roots = await currentArtifactInputRoots(tx, workspaceId, { kind: "BrainArticle", id: article.id }, article);
-    const dependencies = roots ? await inspectStoredArtifactInputDependencies(tx, workspaceId, roots) : null;
-    // An attested original is independent even when it has citation-only links.
-    const linked = article.sourceIds.includes(sourceId) || sourceIdsInDerivation(article.derivationJson).includes(sourceId)
-      || dependencies?.roots.some((root) => root.kind === "BrainSource" && root.id === sourceId);
-    if (linked) discovered.push({ article, roots, dependencies });
+  let cursor: string | undefined;
+  for (;;) {
+    // This metadata-only pass excludes independent/unproved unlinked rows
+    // without hydrating every article body or issuing one head query per row.
+    // Nonempty ancestry still uses the complete existing dependency inspector,
+    // including historical snapshots and encrypted consent/recovery capsules.
+    const page = await tx.$queryRaw<Array<{id: string; candidate: boolean}>>(Prisma.sql`
+      SELECT a.id, (${sourceId} = ANY(a."sourceIds")
+        OR coalesce(a."derivationJson" @> ${JSON.stringify({sources: [{sourceId}]})}::jsonb, false)
+        OR CASE WHEN jsonb_typeof(h."rootsJson") = 'array' THEN jsonb_array_length(h."rootsJson") > 0 ELSE false END) AS candidate
+      FROM "BrainArticle" a
+      LEFT JOIN LATERAL (SELECT "rootsJson" FROM "ArtifactInputLineage"
+        WHERE "workspaceId" = ${workspaceId} AND "artifactType" = 'BrainArticle' AND "artifactId" = a.id
+        ORDER BY revision DESC LIMIT 1) h ON true
+      WHERE a."workspaceId" = ${workspaceId} AND a."archivedAt" IS NULL
+        ${cursor ? Prisma.sql`AND a.id > ${cursor}` : Prisma.empty}
+      ORDER BY a.id LIMIT 100
+    `);
+    const ids = page.filter(row => row.candidate).map(row => row.id);
+    const articles = ids.length ? await tx.brainArticle.findMany({where: {workspaceId, archivedAt: null, id: {in: ids}}, orderBy: {id: "asc"}}) : [];
+    const currentRoots = await currentArtifactInputRootsBatch(tx, workspaceId, "BrainArticle", articles);
+    for (const article of articles) {
+      const roots = currentRoots.get(article.id) ?? null;
+      const dependencies = roots ? await inspectStoredArtifactInputDependencies(tx, workspaceId, roots) : null;
+      // An attested original is independent even when it has citation-only links.
+      const linked = article.sourceIds.includes(sourceId) || sourceIdsInDerivation(article.derivationJson).includes(sourceId)
+        || dependencies?.roots.some(root => root.kind === "BrainSource" && root.id === sourceId);
+      if (linked) discovered.push({article, roots, dependencies});
+    }
+    if (page.length < 100) return discovered;
+    cursor = page[page.length - 1].id;
   }
-  return discovered.sort((left, right) => left.article.id.localeCompare(right.article.id));
 }
 
 async function currentPlan(tx: Prisma.TransactionClient, workspaceId: string, sourceId: string, expected?: RemovalRequest) {

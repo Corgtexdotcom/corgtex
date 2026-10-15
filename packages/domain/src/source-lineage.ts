@@ -2479,6 +2479,26 @@ export async function currentArtifactInputRoots(db: LineageClient, workspaceId: 
   return parseRoots(manifest.rootsJson);
 }
 
+/** Discovery-only batch equivalent of currentArtifactInputRoots. Canonical rows
+ * still have to match the actual latest manifest; this does not grant reads. */
+export async function currentArtifactInputRootsBatch(db: LineageClient, workspaceId: string,
+  kind: LineageKind, records: readonly {id: string}[]) {
+  assertSourceCommitTransactionCompatible(db);
+  invariant(records.length <= 100, 409, "LINEAGE_DISCOVERY_PAGE_LIMIT", "Lineage discovery requires canonical pages.");
+  if (!records.length) return new Map<string, LineageRoot[] | null>();
+  const heads = await db.$queryRaw<Array<{artifactId: string; contentHash: string; rootsJson: Prisma.JsonValue}>>(Prisma.sql`
+    SELECT DISTINCT ON ("artifactId") "artifactId", "contentHash", "rootsJson"
+    FROM "ArtifactInputLineage"
+    WHERE "workspaceId" = ${workspaceId} AND "artifactType" = ${kind} AND "artifactId" IN (${Prisma.join(records.map(row => row.id))})
+    ORDER BY "artifactId", revision DESC
+  `);
+  const byId = new Map(heads.map(head => [head.artifactId, head]));
+  return new Map(records.map(row => {
+    const head = byId.get(row.id);
+    return [row.id, head?.contentHash === lineageContentFingerprint(kind, row) ? parseRoots(head.rootsJson) : null] as const;
+  }));
+}
+
 /** Archive existence and paths are source-derived metadata too. This exception
  * returns no body and never admits an archived input to a model or copy writer. */
 export async function isArtifactArchiveMetadataReadable(actor: AppActor, workspaceId: string,

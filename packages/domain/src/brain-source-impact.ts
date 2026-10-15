@@ -4,9 +4,9 @@ import { requireWorkspaceMembership } from "./auth";
 import { resolveKnowledgeAccessDomains } from "./brain-access";
 import { invariant } from "./errors";
 import type { BrainArticleDerivationV1 } from "./brain-derivation";
-import { currentArtifactInputRoots, readableArtifactIds } from "./source-lineage";
+import { currentArtifactInputRootsBatch, readableArtifactIds } from "./source-lineage";
 
-type ImpactClient = Pick<Prisma.TransactionClient, "brainArticle" | "artifactInputLineage">;
+type ImpactClient = Pick<Prisma.TransactionClient, "brainArticle" | "artifactInputLineage" | "$queryRaw">;
 
 type ArticleLink = {
   id: string;
@@ -49,29 +49,45 @@ export async function findSourceArticleImpacts(
   const impacts = new Map(uniqueIds.map((sourceId) => [sourceId, { sourceId, articles: [] as ArticleLink[] }]));
   if (uniqueIds.length === 0) return impacts;
 
-  const articles = await tx.brainArticle.findMany({
-    where: { workspaceId, archivedAt: null },
-  });
-  for (const article of articles) {
-    const roots = await currentArtifactInputRoots(tx as Prisma.TransactionClient, workspaceId,
-      { kind: "BrainArticle", id: article.id }, article);
-    const provenSources = new Set(roots?.filter((root) => root.kind === "BrainSource").map((root) => root.id) ?? []);
-    const explicit = new Set(readBrainArticleDerivation(article.derivationJson)?.sources.map((source) => source.sourceId) ?? []);
-    const linked = new Set([...article.sourceIds, ...sourceIdsInDerivation(article.derivationJson), ...provenSources]);
-    for (const sourceId of linked) {
-      const impact = impacts.get(sourceId);
-      if (!impact) continue;
-      impact.articles.push({
-        id: article.id,
-        slug: article.slug,
-        title: article.title,
-        isPrivate: article.isPrivate,
-        ownerMemberId: article.ownerMemberId,
-        kind: provenSources.has(sourceId) || explicit.has(sourceId) ? "derived" : "unclassified",
-      });
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await tx.$queryRaw<Array<{id: string; candidate: boolean}>>(Prisma.sql`
+      SELECT a.id, (a."sourceIds" && ARRAY[${Prisma.join(uniqueIds)}]::text[]
+        OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(a."derivationJson"->'sources') = 'array'
+          THEN a."derivationJson"->'sources' ELSE '[]'::jsonb END) s WHERE s->>'sourceId' IN (${Prisma.join(uniqueIds)}))
+        OR CASE WHEN jsonb_typeof(h."rootsJson") = 'array' THEN jsonb_array_length(h."rootsJson") > 0 ELSE false END) AS candidate
+      FROM "BrainArticle" a
+      LEFT JOIN LATERAL (SELECT "rootsJson" FROM "ArtifactInputLineage"
+        WHERE "workspaceId" = ${workspaceId} AND "artifactType" = 'BrainArticle' AND "artifactId" = a.id
+        ORDER BY revision DESC LIMIT 1) h ON true
+      WHERE a."workspaceId" = ${workspaceId} AND a."archivedAt" IS NULL
+        ${cursor ? Prisma.sql`AND a.id > ${cursor}` : Prisma.empty}
+      ORDER BY a.id LIMIT 100
+    `);
+    const ids = page.filter(row => row.candidate).map(row => row.id);
+    const articles = ids.length ? await tx.brainArticle.findMany({where: {workspaceId, archivedAt: null, id: {in: ids}}, orderBy: {id: "asc"}}) : [];
+    const heads = await currentArtifactInputRootsBatch(tx as Prisma.TransactionClient, workspaceId, "BrainArticle", articles);
+    for (const article of articles) {
+      const roots = heads.get(article.id) ?? null;
+      const provenSources = new Set(roots?.filter((root) => root.kind === "BrainSource").map((root) => root.id) ?? []);
+      const explicit = new Set(readBrainArticleDerivation(article.derivationJson)?.sources.map((source) => source.sourceId) ?? []);
+      const linked = new Set([...article.sourceIds, ...sourceIdsInDerivation(article.derivationJson), ...provenSources]);
+      for (const sourceId of linked) {
+        const impact = impacts.get(sourceId);
+        if (!impact) continue;
+        impact.articles.push({
+          id: article.id,
+          slug: article.slug,
+          title: article.title,
+          isPrivate: article.isPrivate,
+          ownerMemberId: article.ownerMemberId,
+          kind: provenSources.has(sourceId) || explicit.has(sourceId) ? "derived" : "unclassified",
+        });
+      }
     }
+    if (page.length < 100) return impacts;
+    cursor = page[page.length - 1].id;
   }
-  return impacts;
 }
 
 export async function listBrainSourceArchiveImpacts(actor: AppActor, params: {

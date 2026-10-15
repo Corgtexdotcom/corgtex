@@ -1,3 +1,4 @@
+import { DigestReadRelease } from "../../domain/src/digest-lineage";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { KnowledgeAccessDomain, KnowledgeSourceType, Prisma } from "@prisma/client";
@@ -532,39 +533,37 @@ export async function getWorkspaceIndexingHealth(workspaceId: string, lineageAct
 export async function reindexWorkspace(workspaceId: string, lineageActor?: AppActor) {
   const actor: AppActor = lineageActor ?? { kind: "agent", authProvider: "bootstrap", label: "document-reindex", workspaceIds: [workspaceId] };
   await requireWorkspaceMembership({ actor, workspaceId });
+  const release = new DigestReadRelease(actor, workspaceId);
   const [articles, documents] = await Promise.all([
-    scanSourceReadableRecords({ actor, workspaceId, kind: "BrainArticle", load: (afterId, take) => prisma.brainArticle.findMany({
+    scanSourceReadableRecords({ actor, workspaceId, release, kind: "BrainArticle", load: (afterId, take) => prisma.brainArticle.findMany({
       where: { workspaceId, isPrivate: false, archivedAt: null, ...(afterId ? { id: { gt: afterId } } : {}) }, orderBy: { id: "asc" }, take,
     }) }),
-    scanSourceReadableRecords({ actor, workspaceId, kind: "Document", load: (afterId, take) => prisma.document.findMany({
+    scanSourceReadableRecords({ actor, workspaceId, release, kind: "Document", load: (afterId, take) => prisma.document.findMany({
       where: { workspaceId, textContent: { not: null }, archivedAt: null, ...(afterId ? { id: { gt: afterId } } : {}) }, orderBy: { id: "asc" }, take,
     }) }),
   ]);
 
-  const existingArticleChunks = await prisma.knowledgeChunk.findMany({
-    where: { workspaceId, sourceType: "BRAIN_ARTICLE", sourceId: { in: articles.map((a) => a.id) } },
-    orderBy: { id: "asc" }, take: 5001,
-  });
-
-  const existingDocumentChunks = await prisma.knowledgeChunk.findMany({
-    where: { workspaceId, sourceType: "DOCUMENT", sourceId: { in: documents.map((d) => d.id) } },
-    orderBy: { id: "asc" }, take: 5001,
-  });
-
-  if (existingArticleChunks.length > 5000 || existingDocumentChunks.length > 5000) {
-    throw Object.assign(new Error("Knowledge reindex receipt scan exceeds its supported size."), { code: "SOURCE_READ_SCAN_LIMIT" });
-  }
-  const [readableArticleChunks, readableDocumentChunks] = await Promise.all([
-    readableArtifactIds(actor, workspaceId, "KnowledgeChunk", existingArticleChunks),
-    readableArtifactIds(actor, workspaceId, "KnowledgeChunk", existingDocumentChunks),
-  ]);
-  const articleHashes = new Map(articles.map((article) => [article.id, lineageContentFingerprint("BrainArticle", article)]));
-  const documentHashes = new Map(documents.map((document) => [document.id, lineageContentFingerprint("Document", document)]));
-  // A legacy or superseded receipt needs rebuilding even when SQL still has a chunk.
-  const chunkedArticleIds = new Set(existingArticleChunks.filter((chunk) =>
-    readableArticleChunks.has(chunk.id) && (chunk.metadata as Record<string, unknown> | null)?.sourceContentHash === articleHashes.get(chunk.sourceId)).map((chunk) => chunk.sourceId));
-  const chunkedDocumentIds = new Set(existingDocumentChunks.filter((chunk) =>
-    readableDocumentChunks.has(chunk.id) && (chunk.metadata as Record<string, unknown> | null)?.sourceContentHash === documentHashes.get(chunk.sourceId)).map((chunk) => chunk.sourceId));
+  // Only compact admitted identities survive each canonical chunk page. The
+  // original source and chunk observations share one final release snapshot.
+  const chunkedIds = async (sourceType: "BRAIN_ARTICLE" | "DOCUMENT", hashes: Map<string, string>) => {
+    const found = new Set<string>();
+    if (!hashes.size) return found;
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await prisma.knowledgeChunk.findMany({
+        where: {workspaceId, sourceType, sourceId: {in: [...hashes.keys()]}, ...(cursor ? {id: {gt: cursor}} : {})},
+        orderBy: {id: "asc"}, take: 100,
+      });
+      const matching = page.filter(chunk => (chunk.metadata as Record<string, unknown> | null)?.sourceContentHash === hashes.get(chunk.sourceId));
+      const admitted = await release.capture("KnowledgeChunk", matching);
+      for (const chunk of admitted.records) found.add(chunk.sourceId);
+      if (page.length < 100) return found;
+      cursor = page[page.length - 1].id;
+    }
+  };
+  const chunkedArticleIds = await chunkedIds("BRAIN_ARTICLE", new Map(articles.map(article => [article.id, lineageContentFingerprint("BrainArticle", article)])));
+  const chunkedDocumentIds = await chunkedIds("DOCUMENT", new Map(documents.map(document => [document.id, lineageContentFingerprint("Document", document)])));
+  await release.finish(undefined);
 
   const articlesToReindex = articles.filter((a) => !chunkedArticleIds.has(a.id));
   const documentsToReindex = documents.filter((d) => !chunkedDocumentIds.has(d.id));

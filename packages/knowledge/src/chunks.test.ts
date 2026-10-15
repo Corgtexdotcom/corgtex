@@ -91,6 +91,23 @@ vi.mock("@corgtex/domain", async (importOriginal) => {
     scanSourceReadableRecords: vi.fn(async (params) => await params.load(undefined, 100) ?? []),
   };
 });
+// These chunking/routing fixtures already supply synthetic proof boundaries.
+// Forward the collection release through those same gates; real PG and lineage
+// suites exercise the actual original-head/epoch snapshot implementation.
+vi.mock("../../domain/src/digest-lineage", () => ({DigestReadRelease: class {
+  constructor(readonly actor: import("@corgtex/shared").AppActor, readonly workspaceId: string) {}
+  async capture(kind: import("@corgtex/domain").LineageKind, rows: Array<{id: string}>) {
+    const domain = await import("@corgtex/domain");
+    const ids = await domain.readableArtifactIds(this.actor, this.workspaceId, kind, rows);
+    const records = rows.filter(row => ids.has(row.id));
+    const roots = await domain.captureArtifactInputProof(this.actor, this.workspaceId, records.map(row => ({kind, id: row.id, snapshot: row})));
+    return {records, roots};
+  }
+  async finish<T>(value: T) {
+    await (await import("@corgtex/domain")).requireWorkspaceMembership({actor: this.actor, workspaceId: this.workspaceId});
+    return value;
+  }
+}}));
 vi.mock("./counts", () => ({ countReadableKnowledgeChunks: vi.fn(async () => (prisma as any).knowledgeChunk.count()) }));
 
 beforeEach(() => {

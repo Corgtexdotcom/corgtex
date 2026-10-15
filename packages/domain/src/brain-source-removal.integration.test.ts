@@ -9,12 +9,13 @@ import { syncBrainArticleKnowledge } from "../../knowledge/src/chunks";
 import { createArticle, deleteSource, updateArticle } from "./brain";
 import { brainSourceContentFingerprint } from "./brain-derivation";
 import { archiveWorkspaceArtifact, restoreWorkspaceArtifact } from "./archive";
-import { advanceHumanArtifactInputLineage, captureArtifactInputProof, captureArtifactInputSnapshotProof, readableArtifactIds, recordArtifactInputLineage } from "./source-lineage";
+import { advanceHumanArtifactInputLineage, captureArtifactInputProof, captureArtifactInputSnapshotProof, currentArtifactInputRoots, currentArtifactInputRootsBatch, readableArtifactIds, recordArtifactInputLineage } from "./source-lineage";
 import {
   generateBrainSourceRemovalCandidate,
   listBrainSourceRemovalReviews,
   resolveBrainSourceRemoval,
   retryBrainSourceRemoval,
+  requestBrainSourceRemoval,
 } from "./brain-source-removal";
 
 async function fixture(sourceRemovalEnabled = true) {
@@ -72,6 +73,76 @@ describe("Brain source removal review", () => {
   afterEach(() => {
     if (previousRuntimeOptIn === undefined) delete process.env[runtimeOptIn];
     else process.env[runtimeOptIn] = previousRuntimeOptIn;
+  });
+
+  it("batch discovery preserves canonical mismatch, latest same-body heads and snapshot tamper rejection", async () => {
+    const {workspace, actor, removed, remaining} = await fixture();
+    const article = await prisma.brainArticle.create({data: {workspaceId: workspace.id, slug: "batch-heads",
+      title: "Head changes", type: "PROJECT", bodyMd: "Exact original body", sourceIds: [removed.id]}});
+    await attestArticle(actor, workspace.id, article.id, [removed.id]);
+    const read = async () => (await currentArtifactInputRootsBatch(prisma, workspace.id, "BrainArticle", [article])).get(article.id);
+    expect(await read()).toEqual(await currentArtifactInputRoots(prisma, workspace.id, {kind: "BrainArticle", id: article.id}, article));
+    await attestArticle(actor, workspace.id, article.id, [remaining.id]);
+    expect((await read())?.some(root => root.kind === "BrainSource" && root.id === remaining.id)).toBe(true);
+    const edited = await prisma.brainArticle.update({where: {id: article.id}, data: {bodyMd: "Unattested body"}});
+    expect((await currentArtifactInputRootsBatch(prisma, workspace.id, "BrainArticle", [edited])).get(article.id)).toBeNull();
+    await prisma.brainArticle.update({where: {id: article.id}, data: {bodyMd: article.bodyMd}});
+    const snapshot = await prisma.$transaction(async tx => {
+      const roots = await captureArtifactInputSnapshotProof(actor, workspace.id, {kind: "BrainSource", id: removed.id}, tx);
+      await recordArtifactInputLineage({tx, actor, workspaceId: workspace.id, artifact: {kind: "BrainArticle", id: article.id},
+        content: article, origin: "DERIVED", inputs: [], inheritedRoots: roots});
+      return roots.find(root => root.kind === "ArtifactInputSnapshot")!;
+    });
+    await prisma.artifactInputSnapshot.update({where: {id: snapshot.id}, data: {rootsJson: []}});
+    await expect(deleteSource(actor, {workspaceId: workspace.id, sourceId: removed.id})).rejects.toMatchObject({code: "UNCLASSIFIED_SOURCE_LINK"});
+    expect((await prisma.brainSource.findUniqueOrThrow({where: {id: removed.id}})).archivedAt).toBeNull();
+    expect((await prisma.brainArticle.findUniqueOrThrow({where: {id: article.id}})).archivedAt).toBeNull();
+  });
+
+  it("discovers one affected article among unrelated legacy and derived rows with bounded body/head queries", async () => {
+    const {workspace, actor, removed, remaining} = await fixture();
+    for (let offset = 0; offset < 5001; offset += 100) await prisma.brainArticle.createMany({data:
+      Array.from({length: Math.min(100, 5001 - offset)}, (_, i) => ({workspaceId: workspace.id, slug: `unrelated-${offset+i}`,
+        title: "Unrelated old original", bodyMd: "Unproved preserved historical bytes", type: "PROJECT"}))});
+    for (let index = 0; index < 100; index++) {
+      const article = await prisma.brainArticle.create({data: {workspaceId: workspace.id, slug: `derived-${index}`,
+        title: "Independent derived article", bodyMd: "Remaining source facts", type: "PROJECT"}});
+      await attestArticle(actor, workspace.id, article.id, [remaining.id]);
+    }
+    const affected = await prisma.brainArticle.create({data: {workspaceId: workspace.id, slug: "affected",
+      title: "Affected article", bodyMd: "Removed facts", type: "PROJECT"}});
+    await attestArticle(actor, workspace.id, affected.id, [removed.id]);
+    let canonicalBodies = 0, articleHeads = 0;
+    const start = performance.now();
+    const result = await prisma.$transaction(async tx => {
+      const instrumented = new Proxy(tx, {get(target, property) {
+        if (property === "brainArticle") return new Proxy(target.brainArticle, {get(delegate, operation) {
+          if (operation === "findMany") return async (query: Prisma.BrainArticleFindManyArgs) => {
+            expect(query.where?.id).toHaveProperty("in");
+            const filter = query.where?.id;
+            if (!filter || typeof filter !== "object" || !Array.isArray(filter.in)) throw new Error("Expected bounded canonical article IDs");
+            expect(filter.in.length).toBeLessThanOrEqual(100);
+            const rows = await delegate.findMany(query); canonicalBodies += rows.length; return rows;
+          };
+          const value = Reflect.get(delegate, operation); return typeof value === "function" ? value.bind(delegate) : value;
+        }});
+        if (property === "artifactInputLineage") return new Proxy(target.artifactInputLineage, {get(delegate, operation) {
+          if (operation === "findFirst") return async (query: Prisma.ArtifactInputLineageFindFirstArgs) => {
+            if (query.where?.artifactType === "BrainArticle") articleHeads++;
+            return delegate.findFirst(query);
+          };
+          const value = Reflect.get(delegate, operation); return typeof value === "function" ? value.bind(delegate) : value;
+        }});
+        const value = Reflect.get(target, property); return typeof value === "function" ? value.bind(target) : value;
+      }});
+      return requestBrainSourceRemoval(actor, {workspaceId: workspace.id, sourceId: removed.id, _tx: instrumented});
+    }, {timeout: 120_000});
+    expect(result.status).toBe("archived");
+    expect(canonicalBodies).toBeLessThanOrEqual(302);
+    expect(articleHeads).toBeLessThan(20);
+    expect(await prisma.brainArticle.count({where: {workspaceId: workspace.id, archivedAt: null}})).toBe(5101);
+    expect((await prisma.brainArticle.findUniqueOrThrow({where: {id: affected.id}})).archivedAt).not.toBeNull();
+    console.info("removal-discovery", JSON.stringify({milliseconds: performance.now()-start, canonicalBodies, articleHeads, unrelatedLegacy: 5001, unrelatedDerived: 100}));
   });
 
   it("archives the derived composite while preserving its independently authored original version", async () => {

@@ -380,7 +380,7 @@ export async function countReadableNonSqlKnowledgeChunks(params: RetrievalAccess
 
 /** Shared count/search admission. Raw rows never set a candidate cap or visible count. */
 export async function scanReadableKnowledgeChunks(params: RetrievalAccess, perTypeLimit?: number) {
-  const sources = await readableKnowledgeSources(params);
+  const retainedRoots = new Map<string, LineageRoot>();
   const sourceTypeWindows = params.sourceTypes?.length ? [...new Set(params.sourceTypes)] : [undefined];
   const chunks: PermissionChunk[] = [];
   let scanned = 0;
@@ -392,14 +392,6 @@ export async function scanReadableKnowledgeChunks(params: RetrievalAccess, perTy
       const page: PermissionChunk[] = await prisma.knowledgeChunk.findMany({
         where: {
           workspaceId: params.workspaceId, accessDomain: { in: params.accessDomains }, sourceType,
-          OR: [...sources].filter(([key]) => !sourceType || key.startsWith(`${sourceType}:`)).map(([key, source]) => {
-            const separator = key.indexOf(":");
-            const type = key.slice(0, separator) as KnowledgeSourceType;
-            return type === "EXTERNAL_DATABASE" ? {sourceType: type, AND: [
-              {metadata: {path: ["nativeInputId"], equals: source.record.id}},
-              {metadata: {path: ["sourceContentHash"], equals: source.contentHash}}]} :
-              {sourceType: type, sourceId: key.slice(separator + 1), metadata: { path: ["sourceContentHash"], equals: source.contentHash }};
-          }),
           sensitivity: params.maxSensitivity ? { in: levelsUpTo(params.maxSensitivity) } : undefined,
           ...(cursor ? { AND: [{ OR: [
             { createdAt: { lt: cursor.createdAt } },
@@ -411,8 +403,23 @@ export async function scanReadableKnowledgeChunks(params: RetrievalAccess, perTy
       });
       scanned += page.length;
       if (scanned > KNOWLEDGE_SCAN_LIMIT) scanLimitExceeded();
+      const sourceIds = new Map<KnowledgeSourceType, string[]>();
+      for (const chunk of page) {
+        const ids = sourceIds.get(chunk.sourceType) ?? [];
+        if (!ids.includes(chunk.sourceId)) ids.push(chunk.sourceId);
+        sourceIds.set(chunk.sourceType, ids);
+      }
+      // Parent hydration follows this bounded candidate page. Unindexed source
+      // records cannot exhaust a search before any chunk is considered.
+      const sources = await readableKnowledgeSources(params, sourceIds);
       const permitted = await admitKnowledgeChunks(params, page, sources);
       const selected = perTypeLimit === undefined ? permitted : permitted.slice(0, perTypeLimit - admitted);
+      const proof = await captureKnowledgeInputs(params, selected, sources);
+      if (!proof) throw Object.assign(new Error("Knowledge inputs changed during admission."), {code: "SOURCE_CHANGED", status: 409});
+      for (const root of proof) {
+        const key = `${root.kind}:${root.id}`;
+        retainedRoots.set(key, mergeLineageInputRoot(retainedRoots.get(key), root));
+      }
       chunks.push(...selected);
       admitted += selected.length;
       if (page.length < take) break;
@@ -422,9 +429,7 @@ export async function scanReadableKnowledgeChunks(params: RetrievalAccess, perTy
   chunks.sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime()
     || left.chunkIndex - right.chunkIndex || left.id.localeCompare(right.id));
   // Every admitted candidate contributes to ranking, including uncited candidates.
-  const roots = await captureKnowledgeInputs(params, chunks, sources);
-  if (!roots) throw Object.assign(new Error("Knowledge inputs changed during admission."), { code: "SOURCE_CHANGED", status: 409 });
-  return { chunks, roots };
+  return { chunks, roots: [...retainedRoots.values()] };
 }
 
 /** Complete bounded SQL count, independent of search's candidate window. Keep
