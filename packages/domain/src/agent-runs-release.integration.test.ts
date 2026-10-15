@@ -53,11 +53,11 @@ async function read(surface: Surface, f: Awaited<ReturnType<typeof fixture>>, ru
 function duringCosts(mutate: () => Promise<void>) {
   const original = db.modelUsage.findMany.bind(db.modelUsage);
   let fired = false;
-  vi.spyOn(db.modelUsage, "findMany").mockImplementation(async args => {
+  vi.spyOn(db.modelUsage, "findMany").mockImplementation((async args => {
     const rows = await original(args);
     if (!fired) { fired = true; await mutate(); }
     return rows;
-  });
+  }) as typeof db.modelUsage.findMany);
 }
 
 describe("agent run final content release", () => {
@@ -82,7 +82,7 @@ describe("agent run final content release", () => {
     const row = kind === "AgentRun" ? r.run : kind === "AgentStep" ? r.step : r.tool;
     duringCosts(async () => {
       const head = await db.artifactInputLineage.findFirstOrThrow({ where: { workspaceId: f.workspaceId, artifactType: kind, artifactId: row.id }, orderBy: { revision: "desc" } });
-      const { id: _id, createdAt: _createdAt, ...data } = head;
+      const { id: _id, ...data } = head;
       await db.artifactInputLineage.create({ data: { ...data, revision: head.revision + 1,
         rootsJson: data.rootsJson ?? Prisma.JsonNull, inputsJson: data.inputsJson ?? Prisma.JsonNull,
         permissionEpochsJson: data.permissionEpochsJson ?? Prisma.JsonNull } });
@@ -118,7 +118,7 @@ describe("agent run final content release", () => {
     const original = db.modelUsage.findMany.bind(db.modelUsage);
     let firstDone!: () => void;
     const first = new Promise<void>(resolve => { firstDone = resolve; });
-    vi.spyOn(db.modelUsage, "findMany").mockImplementation(async args => {
+    vi.spyOn(db.modelUsage, "findMany").mockImplementation((async args => {
       const rows = await original(args);
       if (rows.some(row => row.id === early.usage.id)) firstDone();
       if (rows.some(row => row.id === slow.usage.id)) {
@@ -127,7 +127,7 @@ describe("agent run final content release", () => {
         await db.action.update({ where: { id: early.source.id }, data: { archivedAt: new Date() } });
       }
       return rows;
-    });
+    }) as typeof db.modelUsage.findMany);
     await expect(listAgentRuns(f.actor, f.workspaceId)).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
   });
 
