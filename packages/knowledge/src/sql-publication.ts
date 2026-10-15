@@ -5,7 +5,7 @@ import { getSharedStateBackend, prisma } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
 import { assertArtifactInputWriteFence } from "../../domain/src/artifact-input-write-fence";
 import { AppError } from "../../domain/src/errors";
-import { assertSqlIngestionAttemptCurrent, completeSqlIngestionAttempt, lockSqlIngestionAttempt,
+import { assertSqlIngestionAttemptCurrent, completeSqlIngestionAttempt, failSqlIngestionAttempt, lockSqlIngestionAttempt,
   renewSqlIngestionAttempt } from "../../domain/src/sql-ingestion-attempt";
 import { assertSqlNativeCaptureCurrent, disposeSqlIngestionCapture, finalizeSqlNativeCapture,
   sqlNativeCaptureForPreparation } from "../../domain/src/sql-native-input";
@@ -38,6 +38,7 @@ const json = (value: unknown): Prisma.InputJsonValue => JSON.parse(JSON.stringif
 export async function prepareSqlKnowledgeAttempt(input: {attempt: SqlIngestionAttempt;
   receipt: AuthenticatedSqlRunReceipt}): Promise<PreparedSqlKnowledgeAttempt> {
   const {attempt, receipt} = input;
+  let publicationCreated = false;
   try {
     const capture = await sqlNativeCaptureForPreparation(attempt, receipt);
     const source = await prisma.externalDataSource.findFirstOrThrow({where: {id: attempt.sourceId, workspaceId: attempt.workspaceId}});
@@ -66,6 +67,7 @@ export async function prepareSqlKnowledgeAttempt(input: {attempt: SqlIngestionAt
         generation: BigInt(attempt.generation), configurationFingerprint: attempt.configurationFingerprint,
         outputSetHash: "", chunksCreated: outputs.length, rowsProcessed: capture.payload.rowsProcessed, nextCursor: capture.payload.nextCursor}});
     }, {timeout: 10_000});
+    publicationCreated = true;
     for (let offset = 0; offset < outputs.length; offset += VECTOR_BATCH_SIZE) {
       const batch = outputs.slice(offset, offset + VECTOR_BATCH_SIZE);
       await assertSqlIngestionAttemptCurrent(attempt);
@@ -107,7 +109,12 @@ export async function prepareSqlKnowledgeAttempt(input: {attempt: SqlIngestionAt
     const prepared = Object.freeze({preparationId: publicationId}) as PreparedSqlKnowledgeAttempt;
     preparations.set(prepared, {attempt, receipt, publication, outputs: identities, root, rowIds});
     return prepared;
-  } catch (error) {await disposeSqlIngestionCapture(receipt).catch(() => undefined); throw error;}
+  } catch (error) {
+    if (publicationCreated) await failSqlIngestionAttempt({attempt, logId: attempt.logId,
+      error: error instanceof Error ? error.message : "SQL preparation failed"}).catch(() => undefined);
+    await disposeSqlIngestionCapture(receipt).catch(() => undefined);
+    throw error;
+  }
 }
 
 function invariant(condition: unknown, code: string, message: string): asserts condition {
@@ -125,8 +132,10 @@ export async function publishPreparedSqlKnowledgeAttempt(input: Parameters<SqlKn
   preparations.delete(input.prepared);
   const {attempt, receipt, outputs, root, publication} = state;
   try {
-    await input.beforePublication?.();
+    // Native revalidation can outlast a lease. Keep both caller heartbeats alive
+    // until every provider await has completed, then drain them before SQL locks.
     await finalizeSqlNativeCapture(attempt, receipt);
+    await input.beforePublication?.();
     await renewSqlIngestionAttempt(attempt);
     const identity: SqlPublicationIdentity = Object.freeze({publicationId: publication.id, workspaceId: attempt.workspaceId,
       sourceId: attempt.sourceId, attemptId: attempt.attemptId, generation: attempt.generation,
@@ -205,6 +214,10 @@ export async function publishPreparedSqlKnowledgeAttempt(input: Parameters<SqlKn
     }, {timeout: 120_000});
     if (getSharedStateBackend() !== "postgres") await invalidateKnowledgeCache(attempt.workspaceId);
     return Object.freeze({...identity, committed: true});
+  } catch (error) {
+    await failSqlIngestionAttempt({attempt, logId: attempt.logId,
+      error: error instanceof Error ? error.message : "SQL publication failed"}).catch(() => undefined);
+    throw error;
   } finally {await disposeSqlIngestionCapture(receipt).catch(() => undefined);}
 }
 

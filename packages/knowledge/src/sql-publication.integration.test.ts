@@ -144,6 +144,27 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
     const f = await fixture(), p = await f.prepare();
     expect(await publishPreparedSqlKnowledgeAttempt({...p, commit: f.commit})).toMatchObject({committed: true, chunksCreated: 1});
   });
+  it("accepts an empty text primary key through native custody, publication and ordinary serving", async () => {
+    const textKey = {name: "id", type: "text" as const, typeOid: 25, typeModifier: -1, collationOid: 100};
+    const native = {...row(1).row, id: ""};
+    transport.rows = [{...row(1), row: native, primaryKey: "", values: [String(native.updated_at), ""],
+      definition: {...definition, key: [textKey], columns: [{...definition.columns[0], ...textKey}, ...definition.columns.slice(1)]},
+      content: Object.entries(native).map(([key, value]) => `${key}: ${value}`).join("\n")}];
+    const f = await fixture(), prepared = await f.prepare();
+    await publishPreparedSqlKnowledgeAttempt({...prepared, commit: f.commit});
+    const chunk = await prisma.knowledgeChunk.findFirstOrThrow();
+    expect(chunk.sourceId).toBe(`byodb:${f.source.id}:public.rows:`);
+    expect(await fetchReadableKnowledgeChunk(f.bobActor, f.workspace.id, chunk.id)).toMatchObject({id: chunk.id});
+  });
+  it("keeps caller leases running through final native validation and closes them before publication", async () => {
+    const f = await fixture(), prepared = await f.prepare();
+    let stopped = false;
+    transport.afterAccess = async () => {expect(stopped).toBe(false);};
+    await publishPreparedSqlKnowledgeAttempt({...prepared,
+      beforePublication: async () => {stopped = true;},
+      commit: async (tx, identity) => {expect(stopped).toBe(true); await f.commit(tx, identity);}});
+    expect(stopped).toBe(true);
+  });
   it("incomplete captured payload columns cannot mint a receipt", async () => {
     transport.rows = [{...row(1), definition: {...definition, columns: definition.columns.slice(0, 2)}}];
     const f = await fixture(), attempt = await f.claim();
@@ -175,9 +196,9 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
     }})).rejects.toThrow("Synthetic completion log failure");
     expect(await prisma.knowledgeChunk.count()).toBe(0); expect(await prisma.artifactInputLineage.count()).toBe(0);
     expect((await prisma.externalDataSource.findUniqueOrThrow({where: {id: f.source.id}})).lastCursorValue).toBeNull();
-    expect((await prisma.externalDataSyncLog.findUniqueOrThrow({where: {id: p.attempt.logId}})).completedAt).toBeNull();
-    expect((await prisma.sqlIngestionAttempt.findUniqueOrThrow({where: {id: p.attempt.attemptId}})).status).toBe("RUNNING");
-    expect((await prisma.sqlKnowledgePublication.findUniqueOrThrow({where: {id: p.prepared.preparationId}})).status).toBe("PREPARED");
+    expect((await prisma.externalDataSyncLog.findUniqueOrThrow({where: {id: p.attempt.logId}})).error).not.toBeNull();
+    expect((await prisma.sqlIngestionAttempt.findUniqueOrThrow({where: {id: p.attempt.attemptId}})).status).toBe("FAILED");
+    expect(await prisma.sqlKnowledgePublication.findUnique({where: {id: p.prepared.preparationId}})).toBeNull();
     expect(await prisma.sharedCacheVersion.findMany()).toEqual(beforeCache);
     expect(await prisma.sqlNativeRunInput.count()).toBe(1); // Preserve the original native receipt.
     await failSqlIngestionAttempt({attempt: p.attempt, logId: p.attempt.logId, error: "Synthetic completion log failure"});
@@ -192,13 +213,13 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
       FOR EACH ROW EXECUTE FUNCTION pun85_stage_transport_failure()`);
     try {
       await expect(prepareSqlKnowledgeAttempt({attempt, receipt})).rejects.toThrow("synthetic staged row failure");
-      const publication = await prisma.sqlKnowledgePublication.findFirstOrThrow({where: {attemptId: attempt.attemptId}});
-      expect(publication).toMatchObject({status: "PREPARING", chunksCreated: 2, outputSetHash: ""});
-      expect(await prisma.sqlKnowledgeStagedChunk.count({where: {publicationId: publication.id}})).toBe(0);
+      expect(await prisma.sqlKnowledgePublication.findFirst({where: {attemptId: attempt.attemptId}})).toBeNull();
+      expect(await prisma.sqlKnowledgeStagedChunk.count()).toBe(0);
+      expect(await prisma.sqlNativeRunInput.count()).toBe(1);
       expect(await prisma.knowledgeChunk.count()).toBe(0);
       expect(await prisma.artifactInputLineage.count()).toBe(0);
       expect((await prisma.externalDataSource.findUniqueOrThrow({where: {id: f.source.id}})).lastCursorValue).toBeNull();
-      expect((await prisma.externalDataSyncLog.findUniqueOrThrow({where: {id: attempt.logId}})).completedAt).toBeNull();
+      expect((await prisma.externalDataSyncLog.findUniqueOrThrow({where: {id: attempt.logId}})).error).not.toBeNull();
       expect(await prisma.sharedCacheVersion.findMany()).toEqual(beforeCache);
       expect(await prisma.sqlNativeRunInput.count()).toBe(1);
     } finally {
@@ -206,7 +227,7 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
       await prisma.$executeRawUnsafe(`DROP FUNCTION pun85_stage_transport_failure()`);
     }
   });
-  it("a later model batch failure preserves non-serving staging and a fresh independent retry publishes the complete run", async () => {
+  it("a later model batch failure reclaims non-serving vectors and a fresh retry publishes the complete run", async () => {
     transport.rows = Array.from({length: 600}, (_, index) => row(index + 1));
     const f = await fixture(), attempt = await f.claim(), receipt = await captureSqlIngestionAttempt(attempt);
     const embed = async ({input}: {input: string[]}) => ({embeddings: input
@@ -215,26 +236,75 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
       .mockRejectedValueOnce(new Error("Synthetic second model batch failed"));
     const beforeCache = await prisma.sharedCacheVersion.findMany();
     await expect(prepareSqlKnowledgeAttempt({attempt, receipt})).rejects.toThrow("Synthetic second model batch failed");
-    const incomplete = await prisma.sqlKnowledgePublication.findFirstOrThrow({where: {attemptId: attempt.attemptId}});
-    expect(incomplete).toMatchObject({status: "PREPARING", chunksCreated: 600, outputSetHash: ""});
-    const stagedCount = await prisma.sqlKnowledgeStagedChunk.count({where: {publicationId: incomplete.id}});
-    expect(stagedCount).toBe(models.embed.mock.calls[0][0].input.length);
-    expect(stagedCount).toBeGreaterThan(0); expect(stagedCount).toBeLessThan(600);
+    expect(await prisma.sqlKnowledgePublication.findFirst({where: {attemptId: attempt.attemptId}})).toBeNull();
+    expect(await prisma.sqlKnowledgeStagedChunk.count()).toBe(0);
+    expect(models.embed.mock.calls[0][0].input.length).toBeGreaterThan(0);
+    expect(await prisma.sqlNativeRunInput.count()).toBe(1);
     expect(await prisma.knowledgeChunk.count()).toBe(0);
     expect((await prisma.externalDataSource.findUniqueOrThrow({where: {id: f.source.id}})).lastCursorValue).toBeNull();
-    expect((await prisma.externalDataSyncLog.findUniqueOrThrow({where: {id: attempt.logId}})).completedAt).toBeNull();
-    expect((await prisma.sqlIngestionAttempt.findUniqueOrThrow({where: {id: attempt.attemptId}})).status).toBe("RUNNING");
+    expect((await prisma.externalDataSyncLog.findUniqueOrThrow({where: {id: attempt.logId}})).error).not.toBeNull();
+    expect((await prisma.sqlIngestionAttempt.findUniqueOrThrow({where: {id: attempt.attemptId}})).status).toBe("FAILED");
     expect(await prisma.artifactInputLineage.count()).toBe(0);
     expect(await prisma.sharedCacheVersion.findMany()).toEqual(beforeCache);
     await failSqlIngestionAttempt({attempt, error: "Synthetic second model batch failed", logId: attempt.logId});
     const retry = await f.prepare();
     expect(await publishPreparedSqlKnowledgeAttempt({...retry, commit: f.commit})).toMatchObject({committed: true, chunksCreated: 600});
     expect(await countReadableKnowledgeChunks(f.bobActor, f.workspace.id, ["EXTERNAL_DATABASE"])).toBe(600);
-    expect(await prisma.sqlKnowledgeStagedChunk.count({where: {publicationId: incomplete.id}})).toBe(stagedCount);
+    expect(await prisma.sqlKnowledgePublication.count({where: {attemptId: attempt.attemptId}})).toBe(0);
     expect(await prisma.sqlKnowledgeStagedChunk.count({where: {publicationId: retry.prepared.preparationId}})).toBe(600);
     expect((await prisma.knowledgeChunk.findFirstOrThrow()).embedding).toHaveLength(1536);
     expect(Math.max(...models.embed.mock.calls.map(([request]) => request.input.length))).toBeLessThanOrEqual(128);
     await expect(prisma.sqlKnowledgePublication.update({where: {id: retry.prepared.preparationId}, data: {outputSetHash: ""}})).rejects.toThrow();
+  });
+  it("cleans prepared staging on final native failure while retaining its native audit", async () => {
+    const f = await fixture(), p = await f.prepare();
+    transport.failFinal = true;
+    await expect(publishPreparedSqlKnowledgeAttempt({...p, commit: f.commit})).rejects.toThrow("Synthetic native DDL changed");
+    expect(await prisma.sqlKnowledgePublication.findUnique({where: {id: p.prepared.preparationId}})).toBeNull();
+    expect(await prisma.sqlKnowledgeStagedChunk.count()).toBe(0);
+    expect(await prisma.sqlNativeRunInput.findUnique({where: {id: p.receipt.receiptId}})).not.toBeNull();
+    expect(await prisma.knowledgeChunk.count()).toBe(0);
+  });
+  it("an obsolete terminal attempt cleans only its own staging and repeated failure preserves a committed successor", async () => {
+    const f = await fixture(), old = await f.prepare();
+    const expired = new Date(Date.now() - 1000);
+    await prisma.$transaction([
+      prisma.sqlIngestionAttempt.update({where: {id: old.attempt.attemptId}, data: {leaseExpiresAt: expired}}),
+      prisma.sqlIngestionSourceClaim.updateMany({where: {sourceId: f.source.id}, data: {leaseExpiresAt: expired}}),
+    ]);
+    const next = await f.prepare();
+    const before = await prisma.sqlIngestionSourceClaim.findFirstOrThrow({where: {sourceId: f.source.id}});
+    await failSqlIngestionAttempt({attempt: old.attempt, logId: old.attempt.logId, error: "obsolete"});
+    expect(await prisma.sqlKnowledgePublication.findUnique({where: {id: old.prepared.preparationId}})).toBeNull();
+    expect(await prisma.sqlKnowledgeStagedChunk.count({where: {publicationId: next.prepared.preparationId}})).toBeGreaterThan(0);
+    expect(await prisma.sqlIngestionSourceClaim.findFirst({where: {sourceId: f.source.id}})).toEqual(before);
+    await publishPreparedSqlKnowledgeAttempt({...next, commit: f.commit});
+    const committed = await prisma.sqlKnowledgePublication.findUniqueOrThrow({where: {id: next.prepared.preparationId}});
+    await failSqlIngestionAttempt({attempt: old.attempt, logId: old.attempt.logId, error: "duplicate obsolete"});
+    await failSqlIngestionAttempt({attempt: next.attempt, logId: next.attempt.logId, error: "late acknowledgement"});
+    expect(await prisma.sqlKnowledgePublication.findUnique({where: {id: committed.id}})).toEqual(committed);
+    expect(await prisma.sqlNativeRunInput.count()).toBe(2);
+    expect(await countReadableKnowledgeChunks(f.bobActor, f.workspace.id, ["EXTERNAL_DATABASE"])).toBe(1);
+  });
+  it("cleanup failure rolls back its own terminal change and idempotent failure retries cleanup", async () => {
+    const f = await fixture(), p = await f.prepare();
+    await prisma.$executeRawUnsafe(`CREATE FUNCTION sql_review_cleanup_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'synthetic cleanup failure'; END $$`);
+    await prisma.$executeRawUnsafe(`CREATE TRIGGER sql_review_cleanup_failure BEFORE DELETE ON "SqlKnowledgePublication"
+      FOR EACH ROW EXECUTE FUNCTION sql_review_cleanup_failure()`);
+    try {
+      await expect(failSqlIngestionAttempt({attempt: p.attempt, logId: p.attempt.logId, error: "prepare rejected"})).rejects.toThrow("synthetic cleanup failure");
+      expect((await prisma.sqlIngestionAttempt.findUniqueOrThrow({where: {id: p.attempt.attemptId}})).status).toBe("RUNNING");
+      expect(await prisma.sqlKnowledgeStagedChunk.count({where: {publicationId: p.prepared.preparationId}})).toBeGreaterThan(0);
+    } finally {
+      await prisma.$executeRawUnsafe(`DROP TRIGGER sql_review_cleanup_failure ON "SqlKnowledgePublication"`);
+      await prisma.$executeRawUnsafe(`DROP FUNCTION sql_review_cleanup_failure()`);
+    }
+    await failSqlIngestionAttempt({attempt: p.attempt, logId: p.attempt.logId, error: "prepare rejected"});
+    await failSqlIngestionAttempt({attempt: p.attempt, logId: p.attempt.logId, error: "duplicate"});
+    expect(await prisma.sqlKnowledgeStagedChunk.count()).toBe(0);
+    expect(await prisma.sqlNativeRunInput.count()).toBe(1);
+    expect((await prisma.sqlIngestionAttempt.findUniqueOrThrow({where: {id: p.attempt.attemptId}})).status).toBe("FAILED");
   });
   it("immutable ciphertext cannot update and same-id native replacement cannot reuse the original publisher epoch", async () => {
     const f = await fixture(), p = await f.prepare();
@@ -248,13 +318,13 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
     await expect(publishPreparedSqlKnowledgeAttempt({...p, commit})).rejects.toMatchObject({code: "SQL_INGESTION_FENCE_LOST"});
     expect(commit).not.toHaveBeenCalled(); expect(await prisma.knowledgeChunk.count()).toBe(0);
     expect((await prisma.externalDataSource.findUniqueOrThrow({where: {id: f.source.id}})).lastCursorValue).toBeNull();
-    expect((await prisma.externalDataSyncLog.findUniqueOrThrow({where: {id: p.attempt.logId}})).completedAt).toBeNull();
+    expect((await prisma.externalDataSyncLog.findUniqueOrThrow({where: {id: p.attempt.logId}})).error).not.toBeNull();
   });
   it("mandatory post-model native DDL check cannot be replaced by a caller hook", async () => {
     const f = await fixture(), p = await f.prepare(); transport.failFinal = true;
     const hook = vi.fn(async () => undefined), commit = vi.fn(f.commit);
     await expect(publishPreparedSqlKnowledgeAttempt({...p, beforePublication: hook, commit})).rejects.toMatchObject({code: "CURSOR_SCAN_CHANGED"});
-    expect(hook).toHaveBeenCalledOnce(); expect(commit).not.toHaveBeenCalled();
+    expect(hook).not.toHaveBeenCalled(); expect(commit).not.toHaveBeenCalled();
     expect(models.embed).toHaveBeenCalledOnce(); expect(transport.closes).toBe(1);
     expect(await prisma.knowledgeChunk.count()).toBe(0);
   });
@@ -555,9 +625,9 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
     }})).rejects.toMatchObject({code: "SQL_PUBLICATION_SET_CHANGED"});
     expect(await prisma.knowledgeChunk.count()).toBe(0); expect(await prisma.artifactInputLineage.count()).toBe(0);
     expect((await prisma.externalDataSource.findUniqueOrThrow({where: {id: f.source.id}})).lastCursorValue).toBeNull();
-    expect((await prisma.externalDataSyncLog.findUniqueOrThrow({where: {id: p.attempt.logId}})).completedAt).toBeNull();
-    expect((await prisma.sqlKnowledgePublication.findUniqueOrThrow({where: {id: p.prepared.preparationId}})).status).toBe("PREPARED");
-    expect((await prisma.sqlIngestionAttempt.findUniqueOrThrow({where: {id: p.attempt.attemptId}})).status).toBe("RUNNING");
+    expect((await prisma.externalDataSyncLog.findUniqueOrThrow({where: {id: p.attempt.logId}})).error).not.toBeNull();
+    expect(await prisma.sqlKnowledgePublication.findUnique({where: {id: p.prepared.preparationId}})).toBeNull();
+    expect((await prisma.sqlIngestionAttempt.findUniqueOrThrow({where: {id: p.attempt.attemptId}})).status).toBe("FAILED");
     expect(await prisma.sharedCacheVersion.findMany()).toEqual(beforeCache);
     expect(await prisma.sqlNativeRunInput.count()).toBe(1);
   });

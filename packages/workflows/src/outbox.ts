@@ -851,8 +851,12 @@ async function handleJob(job: ClaimedJob, workerId: string, sqlLease?: ReturnTyp
   if (job.type === "data-source.sync") {
     const { syncExternalDataSource } = await import("@corgtex/connectors-sql");
     if (!sqlLease) throw new Error("SQL workflow has no exclusive admission lease.");
-    await syncExternalDataSource((payload as { sourceId: string }).sourceId, sqlLease);
-    return;
+    const sourceId = (payload as { sourceId: string }).sourceId;
+    const result = await syncExternalDataSource(sourceId, sqlLease);
+    if (result && "skipped" in result && result.skipped) {
+      logger.info("sql_ingestion_skipped", {jobId: job.id, sourceId, reason: result.reason});
+    }
+    return result;
   }
 
   if (job.type === "knowledge.sync.tension") {
@@ -1469,7 +1473,7 @@ export async function schedulePeriodicJobs() {
   const aiUsageLedgerEntryDelegate = (prisma as typeof prisma & { aiUsageLedgerEntry?: typeof prisma.aiUsageLedgerEntry }).aiUsageLedgerEntry;
   const [sources, slackInstallations, customerDeployments, appRuntimes, pendingAiUsage] = await Promise.all([
     prisma.externalDataSource.findMany({
-      where: { isActive: true },
+      where: { isActive: true, archivedAt: null, selectedTables: { isEmpty: false } },
       select: { id: true, workspaceId: true, pullCadenceMinutes: true, lastSyncAt: true }
     }),
     prisma.communicationInstallation.findMany({

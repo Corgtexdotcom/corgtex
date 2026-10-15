@@ -62,7 +62,7 @@ function validateNativeSet(payload: Payload, selectedTables: readonly string[]) 
     for (const row of rows) {
       const key = JSON.stringify([row.table, row.primaryKey]);
       invariant(row.table === page.table && isDeepStrictEqual(row.definition, page.definition)
-        && row.definition.key.length === 1 && typeof row.primaryKey === "string" && row.primaryKey.length > 0
+        && row.definition.key.length === 1 && typeof row.primaryKey === "string"
         && Array.isArray(row.values) && row.values.length > 0 && row.values.every((value: unknown) => typeof value === "string")
         && row.row && typeof row.row === "object" && !Array.isArray(row.row)
         && !containsDecodedDate(row.row)
