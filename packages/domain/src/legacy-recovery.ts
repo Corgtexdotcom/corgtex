@@ -14,7 +14,7 @@ import { withCompanyLegacyRecoveryCapture } from "./legacy-recovery-context";
 import { inspectSourceLineageBackfill } from "./source-lineage-backfill";
 
 export const LEGACY_RECOVERY_OPERATION = "LEGACY_RECOVERY_PUBLICATION";
-export const LEGACY_RECOVERY_KINDS = ["Action", "ConversationSession", "ConversationTurn", "Document", "BrainSource", "Role", "Circle"] as const;
+export const LEGACY_RECOVERY_KINDS = ["Action", "Goal", "GoalUpdate", "KeyResult", "ConversationSession", "ConversationTurn", "Document", "BrainSource", "Role", "Circle"] as const;
 export type LegacyRecoveryKind = typeof LEGACY_RECOVERY_KINDS[number];
 type Row = Record<string, unknown> & { id: string };
 type Db = Prisma.TransactionClient;
@@ -32,6 +32,9 @@ async function load(db: Db, selection: Selection): Promise<Row | null> {
   const where = { id: selection.id, workspaceId: selection.workspaceId };
   switch (selection.kind) {
     case "Action": return db.action.findFirst({ where });
+    case "Goal": return db.goal.findFirst({ where });
+    case "GoalUpdate": return db.goalUpdate.findFirst({ where: { id: selection.id, goal: { workspaceId: selection.workspaceId } } });
+    case "KeyResult": return db.keyResult.findFirst({ where: { id: selection.id, goal: { workspaceId: selection.workspaceId } } });
     case "Role": return db.role.findFirst({ where: { id: selection.id, circle: { workspaceId: selection.workspaceId } } });
     case "Circle": return db.circle.findFirst({ where });
     case "Document": return db.document.findFirst({ where });
@@ -45,16 +48,21 @@ async function load(db: Db, selection: Selection): Promise<Row | null> {
  * artifact read bypass. Normal lineage is required everywhere outside recovery. */
 async function targetAudience(actor: AppActor, selection: Selection, row: Row, db: Db): Promise<boolean> {
   if (row.archivedAt != null || row.accessDomain === "FINANCE") return false;
+  if (selection.kind === "GoalUpdate" || selection.kind === "KeyResult") {
+    const parent = await db.goal.findFirst({ where: { id: String(row.goalId), workspaceId: selection.workspaceId } });
+    return Boolean(parent && await targetAudience(actor, { ...selection, kind: "Goal", id: parent.id }, parent, db));
+  }
   if (actor.kind === "agent") {
     if (actor.authProvider !== "credential" || !actor.credentialId || !actor.credentialVersion
       || !actor.workspaceIds?.includes(selection.workspaceId) || selection.kind.startsWith("Conversation") || row.isPrivate === true) return false;
     const credential = await db.agentCredential.findFirst({where:{id:actor.credentialId,workspaceId:selection.workspaceId,isActive:true}});
     const scopes = selection.kind === "Role" || selection.kind === "Circle" ? ["circles:read"]
-      : selection.kind === "Action" ? ["actions:read", "brain:read"] : ["brain:read"];
+      : selection.kind === "Action" ? ["actions:read", "brain:read"]
+        : selection.kind === "Goal" ? ["goals:read", "brain:read"] : ["brain:read"];
     if (!credential || mcpCredentialVersion(credential.tokenHash) !== actor.credentialVersion
       || mcpScopesHash(credential.scopes) !== mcpScopesHash(actor.scopes ?? []) || !scopes.some(scope=>credential.scopes.includes(scope))) return false;
     if (selection.kind === "Role") return Boolean(await db.circle.findFirst({ where: { id: String(row.circleId), workspaceId: selection.workspaceId, archivedAt: null } }));
-    return selection.kind === "Circle" || selection.kind === "Action" || row.accessDomain === "WORKSPACE" && typeof row.informationCategory === "string"
+    return selection.kind === "Circle" || selection.kind === "Action" || selection.kind === "Goal" || row.accessDomain === "WORKSPACE" && typeof row.informationCategory === "string"
       && await canReadInformationCategory(actor,selection.workspaceId,row.informationCategory,db);
   }
   const member = await db.member.findFirst({ where: { workspaceId: selection.workspaceId, userId: actor.user.id, isActive: true } });
@@ -64,7 +72,7 @@ async function targetAudience(actor: AppActor, selection: Selection, row: Row, d
   if (selection.kind === "ConversationSession") return row.userId === actor.user.id;
   if (selection.kind === "ConversationTurn") return Boolean(await db.conversationSession.findFirst({ where: {
     id: String(row.conversationId), workspaceId: selection.workspaceId, userId: actor.user.id } }));
-  if (selection.kind === "Action") return row.isPrivate !== true || row.authorUserId === actor.user.id && row.status === "DRAFT";
+  if (selection.kind === "Action" || selection.kind === "Goal") return row.isPrivate !== true || row.authorUserId === actor.user.id && row.status === "DRAFT";
   return row.accessDomain === "WORKSPACE" && typeof row.informationCategory === "string"
     && await canReadInformationCategory(actor, selection.workspaceId, row.informationCategory, db);
 }
@@ -79,7 +87,7 @@ export function decodeLegacyRecovery(row: Record<string, unknown>): Capsule | nu
       || typeof value.targetFingerprint !== "string" || typeof value.requestHash !== "string" || !["EXISTING_EVIDENCE", "CURRENT_ATTESTATION"].includes(String(value.basis)) || !record(value.content)
       || value.content.id !== value.targetId || !Array.isArray(value.roots) || value.roots.length > 1000
       || !parsePermissionEpochProof(value.operationEpochs) || !["COMPANY","OWNER"].includes(String(value.audience))
-      || (value.audience === "COMPANY") !== (["Action","Document","BrainSource","Role","Circle"].includes(value.targetKind) && value.content.isPrivate !== true)
+      || (value.audience === "COMPANY") !== (["Action","Goal","GoalUpdate","KeyResult","Document","BrainSource","Role","Circle"].includes(value.targetKind) && value.content.isPrivate !== true)
       || row.controlJson.audience !== value.audience || !parsePermissionEpochProof(value.epochs) || row.workspaceId !== value.workspaceId || row.userId !== value.userId
       || row.actorKind !== "user" || row.credentialId != null || row.credentialVersion != null || row.scopeHash != null
       || row.controlJson.targetKind !== value.targetKind || row.controlJson.targetId !== value.targetId
@@ -176,8 +184,10 @@ async function selectionForRecovery(actor: AppActor, selection: Selection, db: D
 export async function inspectLegacyRecovery(actor: AppActor, selection: Selection) {
   const row = await selectionForRecovery(actor, selection, prisma);
   const roots = await knownRoots(actor, selection, row, prisma);
+  const parent = selection.kind === "GoalUpdate" || selection.kind === "KeyResult"
+    ? await prisma.goal.findFirst({ where: { id: String(row.goalId), workspaceId: selection.workspaceId } }) : null;
   return { ...selection, fingerprint: lineageContentFingerprint(selection.kind, row), knownContributors: roots.length,
-    requiresConfirmation: true, private: selection.kind.startsWith("Conversation") || row.isPrivate === true,
+    requiresConfirmation: true, private: selection.kind.startsWith("Conversation") || row.isPrivate === true || parent?.isPrivate === true,
     hasFile: selection.kind === "BrainSource" && typeof row.fileStorageKey === "string" };
 }
 
@@ -230,7 +240,9 @@ export async function recoverLegacyArtifact(actor: AppActor, submission: Selecti
   const row = await selectionForRecovery(actor, request, prisma);
   invariant(actor.kind === "user", 403, "RECOVERY_HUMAN_REQUIRED", "A human recovery session is required.");
   invariant(lineageContentFingerprint(request.kind, row) === request.expectedFingerprint, 409, "RECOVERY_STALE", "The selected record changed.");
-  const company = ["Action","Document","BrainSource","Role","Circle"].includes(request.kind) && row.isPrivate !== true;
+  // Goal children retain the parent as a known root, including its private audience.
+  // Company capture removes only the recovering operator, never parent restrictions.
+  const company = ["Action","Goal","GoalUpdate","KeyResult","Document","BrainSource","Role","Circle"].includes(request.kind) && row.isPrivate !== true;
   const perform = async () => {
   const userId = actor.user.id, requestKey = hash([LEGACY_RECOVERY_OPERATION, request.workspaceId, userId, request.requestId]);
   const requestHash = hash(request);
@@ -280,8 +292,13 @@ export async function recoverLegacyArtifact(actor: AppActor, submission: Selecti
       && (!inheritedRoots.length || await isArtifactInputProofReadable(actor,request.workspaceId,inheritedRoots,tx)),409,"RECOVERY_STALE","Recovery sources or permissions changed.");
     const freshRoots = await knownRoots(actor,request,current,tx);
     invariant(hash(freshRoots) === hash(roots),409,"RECOVERY_STALE","Historical evidence changed during recovery.");
-    const publicationRoots = basis === "EXISTING_EVIDENCE"
+    let publicationRoots = basis === "EXISTING_EVIDENCE"
       ? [...roots,...await captureImmutableArtifactInputProof(actor,request.workspaceId,evidenceRoots,tx)] : inheritedRoots;
+    // Goal progress updates consume their children and then change the parent.
+    // Freeze the approved parent content, retaining its live permission envelope.
+    if (request.kind === "GoalUpdate" || request.kind === "KeyResult") {
+      publicationRoots = await captureImmutableArtifactInputProof(actor, request.workspaceId, publicationRoots, tx);
+    }
     const id = randomUUID(), targetManifestId = randomUUID();
     const capsule: Capsule = {version:1,workspaceId:request.workspaceId,userId,targetKind:request.kind,targetId:request.id,
       targetFingerprint:request.expectedFingerprint,targetManifestId,requestHash,basis,content,audience:company?"COMPANY":"OWNER",operationEpochs,epochs,roots:publicationRoots,file};
