@@ -51,7 +51,7 @@ describe("CRM producers capture actual inputs before effects", () => {
     f.record.mockImplementation(async (_ws: string, _id: string, _body: string, opts: any) => ({ operationId: opts.operationId, delivery: await opts.send(f.lead.email, opts.operationId) }));
     f.runtime.mockImplementation(async (options: any) => {
       const receipt = Object.freeze({ kind: "agent-input-receipt" });
-      const op = async (name: string, _input: any, fn: any, proof: any) => { f.operations.push({ name, proof }); return fn(); };
+      const op = async (name: string, _input: any, fn: any, proof: any) => { f.operations.push({ name, proof }); return fn({modelRequest: (request: any) => request}); };
       const helpers = { plannedInputReceipt: receipt, behaviorContext: "Known behavior", behaviorLineageRoots: [{ kind: "AgentIdentity", id: "identity", fingerprint: "known" }], captureInputs: vi.fn(async (roots: LineageRoot[]) => { expect(roots.length).toBeGreaterThan(0); return receipt; }), step: op, tool: op };
       const context = await options.buildContext(helpers);
       expect(options.contextLineageRoots(context).length).toBeGreaterThan(0);

@@ -244,7 +244,7 @@ describe("runSlackAgent", () => {
           expect(proof?.receipt?.roots.length).toBeGreaterThan(0);
           if (!await lineage.readable(params.lineageActor, params.workspaceId, proof.receipt.roots)) throw Object.assign(new Error("Revoked operation input"), { code: "SOURCE_CHANGED" });
           lineage.operations.push({ name, input, roots: proof.receipt.roots });
-          return work();
+          return work({modelRequest: (request: any) => request});
         },
       };
       const context = await params.buildContext(helpers, "run-1");

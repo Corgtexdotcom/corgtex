@@ -481,9 +481,15 @@ export async function getBuildArtifact(actor: AppActor, params: {
     select: buildArtifactSelect,
   });
   invariant(artifact, 404, "NOT_FOUND", "Build artifact not found.");
-  const readable = await readableArtifact(actor, artifact);
+  const release = new DigestReadRelease(actor, params.workspaceId);
+  const captured = await release.capture("BuildArtifact", [artifact]);
+  const readable = captured.records[0];
   invariant(readable, 404, "NOT_FOUND", "Build artifact not found.");
-  return serializeArtifact(actor, membership, readable);
+  const assets = await release.capture("BuildArtifactAsset", readable.assets);
+  const creators = await release.capture("User", readable.createdBy ? [readable.createdBy] : []);
+  return release.finish(serializeArtifact(actor, membership, {
+    ...readable, assets: assets.records, createdBy: creators.records[0] ?? null,
+  }));
 }
 
 export async function upsertBuildArtifact(actor: AppActor, params: ArtifactInput) {

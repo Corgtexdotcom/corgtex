@@ -454,13 +454,13 @@ async function answerSlackConversation(params: {
     return answerMemberList(params.members, params.prompt);
   }
 
-  const knowledge = await searchIndexedKnowledge({
+  const knowledge = await params.tool("knowledge.search", {}, operation => searchIndexedKnowledge(operation.modelRequest({
     actor: params.actor, workspaceId: params.workspaceId, query: params.prompt,
     workflowJobId: params.workflowJobId, agentRunId: params.agentRunId,
-  });
+  })));
   await params.collectInputs(await getKnowledgeSearchInputRoots(params.actor, params.workspaceId, knowledge));
 
-  const chat = await params.tool("model.conversation", { purpose: "workspace_question" }, () => defaultModelGateway.chat({
+  const chat = await params.tool("model.conversation", { purpose: "workspace_question" }, (operation) => defaultModelGateway.chat(operation.modelRequest({
     model: params.model,
     workspaceId: params.workspaceId,
     workflowJobId: params.workflowJobId,
@@ -504,7 +504,7 @@ async function answerSlackConversation(params: {
         }),
       },
     ],
-  }));
+  })));
 
   return chat.content.trim() || "I do not have enough information to answer that yet.";
 }
@@ -720,9 +720,9 @@ export async function runSlackAgent(input: SlackInputPayload & {
         invariant(!proof.publicReply || await isArtifactInputProofPubliclyShareable(proof.actor, params.workspaceId, roots), 409, "SOURCE_RESTRICTED", "Knowledge context cannot be shared in Slack.");
         receipt = await helpers.captureInputs(roots);
       };
-      const tool: AgentHelpers["tool"] = (name, input, work) => helpers.tool(name, input, async () => {
+      const tool: AgentHelpers["tool"] = (name, input, work) => helpers.tool(name, input, async operation => {
         invariant(await isArtifactInputProofReadable(proof.actor, params.workspaceId, roots), 409, "SOURCE_CHANGED", "Slack inputs changed before execution.");
-        const result = await work();
+        const result = await work(operation);
         invariant(await isArtifactInputProofReadable(proof.actor, params.workspaceId, roots), 409, "SOURCE_CHANGED", "Slack inputs changed during execution.");
         return result;
       }, { receipt });
@@ -773,7 +773,7 @@ export async function runSlackAgent(input: SlackInputPayload & {
           couldNot: undo.couldNot, next: undo.next, delivery } };
       }
 
-      const extraction = await tool("model.extract", { prompt: params.prompt }, async () => defaultModelGateway.extract({
+      const extraction = await tool("model.extract", { prompt: params.prompt }, async (operation) => defaultModelGateway.extract(operation.modelRequest({
         model,
         workspaceId: params.workspaceId,
         workflowJobId: params.workflowJobId,
@@ -808,7 +808,7 @@ export async function runSlackAgent(input: SlackInputPayload & {
           openTensions: context.openTensions,
           openProposals: context.openProposals,
         }),
-      }));
+      })));
 
       const parsed = normalizeExtraction(extraction.output, params.prompt);
       const done: string[] = [];
@@ -903,7 +903,7 @@ export async function runSlackAgent(input: SlackInputPayload & {
         if (threadMessages.length === 0) {
           couldNot.push("I could not load thread context to summarize.");
         } else {
-          const summary = await tool("model.chat", { purpose: "summarize_slack_thread" }, () => defaultModelGateway.chat({
+          const summary = await tool("model.chat", { purpose: "summarize_slack_thread" }, (operation) => defaultModelGateway.chat(operation.modelRequest({
             model,
             workspaceId: params.workspaceId,
             workflowJobId: params.workflowJobId,
@@ -913,7 +913,7 @@ export async function runSlackAgent(input: SlackInputPayload & {
               { role: "system", content: [helpers.behaviorContext, "Summarize this Slack thread concisely for a Corgtex workspace operator. Include decisions, open questions, and action candidates when present."].filter(Boolean).join("\n\n") },
               { role: "user", content: JSON.stringify(threadMessages) },
             ],
-          }));
+          })));
           done.push(summary.content);
         }
       } else {

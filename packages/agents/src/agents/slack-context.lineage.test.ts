@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ModelRequestControls } from "@corgtex/models";
 
 const fixture = vi.hoisted(() => {
   const state = {
@@ -43,7 +44,7 @@ const fixture = vi.hoisted(() => {
       }),
     },
   };
-  const chat = vi.fn(async (_request: { messages: Array<{ content: string }> }) => {
+  const chat = vi.fn(async (_request: ModelRequestControls & { messages: Array<{ content: string }> }) => {
     state.beforeResponse?.();
     return { content: "Synthetic model output from both messages." };
   });
@@ -171,4 +172,72 @@ describe("Slack summary complete input receipts", () => {
     expect(fixture.state.summary).toEqual(oldSummary());
     expect(fixture.state.receipt).toBeNull();
   });
+});
+
+
+describe("Slack summary provider attempt boundary", () => {
+  it.each(["credentials", "retry"] as const)("withholds original transcript after revocation during %s", async (phase) => {
+    let sends = 0;
+    fixture.chat.mockImplementationOnce(async (request) => {
+      const guarded = request;
+      const signal = new AbortController().signal;
+      if (phase === "retry") { await guarded.authorizeAttempt?.({ signal }); sends += 1; }
+      fixture.state.messages[0].isHidden = true;
+      await guarded.authorizeAttempt?.({ signal });
+      sends += 1;
+      return { content: "Should not send revoked transcript" };
+    });
+    await expect(runSlackContextSummary(params)).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(sends).toBe(phase === "retry" ? 1 : 0);
+    expect(fixture.capture).toHaveBeenCalledTimes(1);
+    expect(fixture.record).not.toHaveBeenCalled();
+  });
+  it.each(["redacted", "disconnected", "muted", "disabled"])("denies %s inputs before the summary provider send", async (change) => {
+    let sends = 0;
+    fixture.chat.mockImplementationOnce(async (request) => {
+      if (change === "redacted") fixture.state.messages[0].textRedactedAt = new Date();
+      if (change === "disconnected") fixture.state.installation.disconnectedAt = new Date();
+      if (change === "muted") fixture.state.config.mutedChannelIds = ["C1"];
+      if (change === "disabled") fixture.state.config.publicIngestionEnabled = false;
+      await request.authorizeAttempt!({ signal: new AbortController().signal });
+      sends += 1;
+      return { content: "Denied" };
+    });
+    await expect(runSlackContextSummary(params)).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(sends).toBe(0);
+    expect(fixture.capture).toHaveBeenCalledTimes(1);
+  });
+
+  it("permits a retry with the same original receipt and propagates cancellation", async () => {
+    const controller = new AbortController();
+    fixture.chat.mockImplementationOnce(async (request) => {
+      expect(request.signal).toBe(controller.signal);
+      const original = await fixture.capture.mock.results[0].value;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await request.authorizeAttempt!({ signal: controller.signal });
+        expect(fixture.proofReadable.mock.calls.at(-1)![2]).toBe(original);
+      }
+      return { content: "Permitted summary" };
+    });
+    await expect(runSlackContextSummary({ ...params, signal: controller.signal })).resolves.toMatchObject({ summarized: true });
+    expect(fixture.capture).toHaveBeenCalledTimes(1);
+    expect(fixture.state.summary.summaryMd).toBe("Permitted summary");
+  });
+
+  it.each(["before", "during proof"])("stops a cancelled summary attempt %s authorization", async (phase) => {
+    const controller = new AbortController();
+    let sends = 0;
+    const check = fixture.proofReadable.getMockImplementation()!;
+    fixture.chat.mockImplementationOnce(async (request) => {
+      if (phase === "before") controller.abort(new Error("Synthetic cancellation"));
+      else fixture.proofReadable.mockImplementationOnce(async (...args) => { const allowed = await check(...args); controller.abort(new Error("Synthetic cancellation")); return allowed; });
+      await request.authorizeAttempt!({ signal: controller.signal });
+      sends += 1;
+      return { content: "Cancelled" };
+    });
+    await expect(runSlackContextSummary({ ...params, signal: controller.signal })).rejects.toThrow("Synthetic cancellation");
+    expect(sends).toBe(0);
+    expect(fixture.record).not.toHaveBeenCalled();
+  });
+
 });

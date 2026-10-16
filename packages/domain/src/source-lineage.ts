@@ -862,7 +862,8 @@ function actorCanReadRecord(actor: AppActor, workspaceId: string, membership: { 
     : row.actorKind === "agent" && row.userId == null && actor.kind === "agent" && actor.authProvider === "credential" && row.credentialId === actor.credentialId
       && row.credentialVersion === actor.credentialVersion && row.scopeHash === mcpScopesHash(actor.scopes ?? []);
   if (kind === "Member") return row.isActive === true;
-  if (kind === "AgentIdentity") return row.isActive === true || (row.agentKey === "__workspace__" && row.archivedAt == null);
+  if (kind === "AgentIdentity") return row.isActive === true || (row.agentKey === "__workspace__" && row.archivedAt == null)
+    || (actor.kind === "user" && membership?.role === "ADMIN" && row.archivedAt == null);
   if (kind === "NewspaperDelivery") return membership?.role === "ADMIN"
     || (row.kind === "MEMBER_NEWSPAPER" && row.memberId === membership?.id);
   if (kind === "Notification") return actor.kind === "user" && row.userId === actor.user.id;

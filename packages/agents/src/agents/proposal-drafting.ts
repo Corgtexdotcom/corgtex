@@ -44,13 +44,13 @@ export async function runProposalDraftingAgent(params: {
     },
     plan: ["load-context", "search-knowledge", "draft-proposal", "structure-draft", "approval-checkpoint"],
     buildContext: async (helpers, runId) => {
-      const citations = await helpers.tool("knowledge.search", { prompt: prompt }, () => searchIndexedKnowledge({
+      const citations = await helpers.tool("knowledge.search", { prompt: prompt }, operation => searchIndexedKnowledge(operation.modelRequest({
         actor,
         workspaceId: params.workspaceId,
         agentRunId: runId,
         query: prompt,
         limit: 4,
-      }), { receipt: helpers.plannedInputReceipt, auditedRead: true });
+      })), { receipt: helpers.plannedInputReceipt, auditedRead: true });
       const lineageRoots: LineageRoot[] = mergeArtifactInputProofs(input.lineageRoots, await getKnowledgeSearchInputRoots(actor, params.workspaceId, citations));
 
       let meeting: {
@@ -89,7 +89,7 @@ export async function runProposalDraftingAgent(params: {
     execute: async (context, helpers, runId, model) => {
       const receipt = await helpers.captureInputs(mergeArtifactInputProofs(input.lineageRoots, context.lineageRoots as LineageRoot[], [...helpers.behaviorLineageRoots]));
       const citations = Array.isArray(context.citations) ? context.citations : [];
-      const draft = await helpers.tool("model.chat", { prompt: prompt }, async () => defaultModelGateway.chat({ model,
+      const draft = await helpers.tool("model.chat", { prompt: prompt }, async (operation) => defaultModelGateway.chat(operation.modelRequest({ model,
         workspaceId: params.workspaceId,
         agentRunId: runId,
         taskType: "AGENT",
@@ -109,15 +109,15 @@ export async function runProposalDraftingAgent(params: {
             }),
           },
         ],
-      }), { receipt });
+      })), { receipt });
 
-      const structured = await helpers.tool("model.extract", { prompt: prompt }, async () => defaultModelGateway.extract({ model,
+      const structured = await helpers.tool("model.extract", { prompt: prompt }, async (operation) => defaultModelGateway.extract(operation.modelRequest({ model,
         workspaceId: params.workspaceId,
         agentRunId: runId,
         instruction: "Convert this proposal draft into a structured proposal payload.",
         schemaHint: "{ title: string, summary: string, bodyMd: string }",
         input: draft.content,
-      }), { receipt });
+      })), { receipt });
 
       const proposalDraft = normalizeProposalDraft(structured.output, prompt);
 

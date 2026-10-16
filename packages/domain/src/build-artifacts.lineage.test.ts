@@ -17,9 +17,11 @@ import { addBuildArtifactAsset, getBuildArtifact, getBuildArtifactAssetSignedUrl
   resolvePublicBuildArtifactAsset, upsertBuildArtifact, updateBuildArtifact, upsertBuildArtifactsFromGitHubPullRequest } from "./build-artifacts";
 import { revokeBuildArtifactPublicAccess } from "./build-artifacts";
 import { captureArtifactInputProof, isArtifactInputProofReadable, readableArtifactIds } from "./source-lineage";
+import * as lineage from "./source-lineage";
 import { createExecutionRequest, getExecutionPacket, submitExecutionResult, listWritebackTargets } from "./execution-plumbing";
 
 let revision = 0;
+let permissionEpochs: ReturnType<typeof installSourcePermissionEpochFixture>;
 const files = new Map<string, Buffer>();
 const digest = (v: Buffer) => createHash("sha256").update(v).digest("hex");
 function matches(row: any, where: any): boolean {
@@ -88,7 +90,7 @@ beforeEach(async () => {
   });
   storage.put.mockImplementation(async (key, data) => { files.set(key, data); });
   storage.get.mockImplementation(async (key) => files.has(key) ? { data: files.get(key)!, contentType: "image/png" } : null);
-  installSourcePermissionEpochFixture(fixture.prisma);
+  permissionEpochs = installSourcePermissionEpochFixture(fixture.prisma);
 });
 const fresh = (overrides: any = {}) => ({ workspaceId, repositoryOwner: "synthetic", repositoryName: "product", title: "Fresh authored artifact",
   summaryMd: "Fresh authored details", classification: "OPEN_CORE" as const, visibility: "PUBLIC_REVIEW" as const,
@@ -276,5 +278,59 @@ describe("Build artifact producer/read closure with actual input receipts", () =
     await expect(submitExecutionResult(beta, { workspaceId, requestId: request.id, idempotencyKey: "forged", output: { title: "Forged", repositoryOwner: "synthetic", repositoryName: "product" },
       lineageRoots: [{ kind: "Workspace", id: workspaceId, fingerprint: "f".repeat(64) }] })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
     expect(fixture.rows.executionResult).toEqual([]);
+  });
+});
+
+
+describe("Build artifact detail final release", () => {
+  it.each(["caller", "source", "artifact", "asset", "creator", "head", "caller restore"] as const)(
+    "rejects original response after late %s change during creator admission", async (change) => {
+      const source = fixture.add("brainArticle", { id: "detail-source", workspaceId, title: "Private detail source", bodyMd: "Private facts",
+        isPrivate: true, ownerMemberId: "member-beta", archivedAt: null });
+      await known("BrainArticle", source, [], beta);
+      const roots = await captureArtifactInputProof(beta, workspaceId, [{ kind: "BrainArticle", id: source.id }]);
+      const created = await upsertBuildArtifact(beta, fresh({ visibility: "PRIVATE", classification: "INTERNAL", copied: true, lineageRoots: roots }));
+      await upload(created.id);
+      const original = lineage.captureArtifactInputProof;
+      let changed = false;
+      const capture = vi.spyOn(lineage, "captureArtifactInputProof").mockImplementation(async (...args) => {
+        const proof = await original(...args);
+        if (!changed && args[2].some((input) => input.kind === "User")) {
+          changed = true;
+          if (change === "caller") fixture.rows.member.find((row) => row.id === "member-beta").isActive = false;
+          if (change === "source") source.archivedAt = fixture.timestamp;
+          if (change === "artifact") fixture.rows.buildArtifact[0].title = "Changed artifact";
+          if (change === "asset") fixture.rows.buildArtifactAsset[0].captionMd = "Changed caption";
+          if (change === "creator") fixture.rows.user = fixture.rows.user.map((row) => row.id === "beta" ? { ...row, displayName: "Changed creator" } : row);
+          if (change === "head") {
+            const head = fixture.manifest("BuildArtifact", created.id);
+            fixture.add("artifactInputLineage", { ...head, id: `${head.id}-replacement`, revision: head.revision + 1 });
+          }
+          if (change === "caller restore") {
+            const member = fixture.rows.member.find((row) => row.id === "member-beta");
+            member.isActive = false;
+            permissionEpochs.bump(workspaceId, "MemberUserPolicy", "beta");
+            member.isActive = true;
+            permissionEpochs.bump(workspaceId, "MemberUserPolicy", "beta");
+          }
+        }
+        return proof;
+      });
+      try {
+        await expect(getBuildArtifact(beta, { workspaceId, artifactId: created.id })).rejects.toThrow();
+        expect(changed).toBe(true);
+      } finally { capture.mockRestore(); }
+    },
+  );
+
+  it("releases complete private detail with its readable assets and creator", async () => {
+    const created = await upsertBuildArtifact(beta, fresh({ visibility: "PRIVATE", classification: "INTERNAL" }));
+    const uploaded = await upload(created.id);
+    expect(await getBuildArtifact(beta, { workspaceId, artifactId: created.id })).toMatchObject({
+      id: created.id, title: "Fresh authored artifact", summaryMd: "Fresh authored details",
+      repositoryOwner: "synthetic", repositoryName: "product", canManage: true,
+      createdBy: { id: "beta", displayName: "Beta", email: "beta@example.test" },
+      assets: [{ id: uploaded.asset.id, label: "Fresh asset label", captionMd: "Fresh caption" }],
+    });
   });
 });
