@@ -97,7 +97,8 @@ vi.mock("@corgtex/shared", () => ({
   },
 }));
 
-vi.mock("./digest-lineage", () => ({
+vi.mock("./digest-lineage", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./digest-lineage")>(),
   captureReadableDigestInputs: vi.fn(async ({actor, workspaceId, kind, records}) => {
     const ids = await lineageReadMocks.readable(actor, workspaceId, kind, records);
     const admitted = records.filter((row: {id: string}) => ids.has(row.id));
@@ -217,6 +218,22 @@ describe("proposal AI summaries", () => {
         summary: "Generated summary for the proposal.",
       }),
     }));
+  });
+
+  it("summarizes a human original without treating an empty inherited proof as an artifact", async () => {
+    const { isArtifactInputProofReadable } = await import("./source-lineage");
+    const { defaultModelGateway } = await import("@corgtex/models");
+    const { createProposal } = await import("./proposals");
+    vi.mocked(isArtifactInputProofReadable).mockImplementation(async (_actor, _workspaceId, roots) => roots.length > 0);
+    vi.mocked(defaultModelGateway.extract).mockImplementationOnce(async request => {
+      await request.authorizeAttempt?.({ signal: request.signal! });
+      return { output: { summary: "Human original summary" } } as never;
+    });
+    vi.mocked(prisma.proposal.create).mockResolvedValueOnce(makeProposal("p-human", { authorUserId: "u-1", bodyMd: words(130), summary: "Human original summary" }) as never);
+    try {
+      await expect(createProposal({ kind: "user", user: { id: "u-1" } } as never,
+        { workspaceId: "ws-1", title: "Human original", bodyMd: words(130), includeAiSummary: true })).resolves.toMatchObject({ summary: "Human original summary" });
+    } finally { vi.mocked(isArtifactInputProofReadable).mockResolvedValue(true); }
   });
 
   it("does not generate AI summaries for short proposals", async () => {
@@ -1060,6 +1077,8 @@ describe("updateProposal AI-summary transaction scope", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    const { defaultModelGateway } = await import("@corgtex/models");
+    vi.mocked(defaultModelGateway.extract).mockReset();
     const { requireWorkspaceMembership } = await import("./auth");
     vi.mocked(requireWorkspaceMembership).mockReset().mockResolvedValue({
       id: "mem-1", workspaceId: "ws-1", userId: "u-1", role: "MEMBER", isActive: true,
@@ -1173,6 +1192,7 @@ describe("updateProposal AI-summary transaction scope", () => {
       drifted: Record<string, unknown>,
       admissionOverrides: Record<string, unknown> = {},
       expected: Record<string, unknown> = { status: 409, code: "VERSION_CONFLICT" },
+      afterStarted?: () => void,
     ) => {
       const { defaultModelGateway } = await import("@corgtex/models");
       const { updateProposal } = await import("./proposals");
@@ -1199,8 +1219,9 @@ describe("updateProposal AI-summary transaction scope", () => {
         ...params,
       } as any);
       const rejection = expect(promise).rejects.toMatchObject(expected);
-      await extractStarted;
+      await Promise.race([extractStarted, promise.then(() => { throw new Error("Update completed before model admission"); })]);
       expect(defaultModelGateway.extract).toHaveBeenCalledTimes(1);
+      afterStarted?.();
       releaseExtract({ output: { summary: "Drifted summary." } });
 
       await rejection;
@@ -1274,13 +1295,14 @@ describe("updateProposal AI-summary transaction scope", () => {
       ["demoted", { id: "mem-1", userId: "u-1", role: "MEMBER", isActive: true }, { status: 403, code: "FORBIDDEN" }],
     ])("rejects a %s member after inference before any write", async (_label, finalMembership, expected) => {
       const { requireWorkspaceMembership } = await import("./auth");
-      vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce({
+      vi.mocked(requireWorkspaceMembership).mockResolvedValue({
         id: "mem-1", workspaceId: "ws-1", userId: "u-1", role: "ADMIN", isActive: true,
       } as any);
-      if (finalMembership) vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce(finalMembership as any);
-      else vi.mocked(requireWorkspaceMembership).mockRejectedValueOnce(expected);
-      await runDriftScenario({ bodyMd: words(140) }, {}, { authorUserId: "u-other" }, expected);
-      expect(requireWorkspaceMembership).toHaveBeenCalledTimes(2);
+      await runDriftScenario({ bodyMd: words(140) }, {}, { authorUserId: "u-other" }, expected, () => {
+        if (finalMembership) vi.mocked(requireWorkspaceMembership).mockResolvedValue(finalMembership as any);
+        else vi.mocked(requireWorkspaceMembership).mockRejectedValue(expected);
+      });
+      expect(requireWorkspaceMembership).toHaveBeenCalledTimes(3);
     });
   });
 

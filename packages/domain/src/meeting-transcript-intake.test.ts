@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { createMeetingMock, getMeetingMock, directRootsMock, modelGatewayMock, uploadMeetingTranscriptMock,
-  prismaMock, captureArtifactInputProofMock, captureArtifactInputSnapshotProofMock } = vi.hoisted(() => ({
+  prismaMock, captureArtifactInputProofMock, captureArtifactInputSnapshotProofMock, readableMock, authorizeMock } = vi.hoisted(() => ({
+  readableMock: vi.fn(), authorizeMock: vi.fn(),
   createMeetingMock: vi.fn(),
   modelGatewayMock: {
     extract: vi.fn(),
@@ -18,7 +19,8 @@ vi.mock("@corgtex/shared", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@corgtex/shared")>()), prisma: prismaMock,
 }));
 vi.mock("./source-lineage", () => ({ captureArtifactInputProof: captureArtifactInputProofMock,
-  captureArtifactInputSnapshotProof: captureArtifactInputSnapshotProofMock }));
+  captureArtifactInputSnapshotProof: captureArtifactInputSnapshotProofMock, isArtifactInputProofReadable: readableMock }));
+vi.mock("./auth", () => ({ requireWorkspaceMembership: authorizeMock }));
 
 vi.mock("@corgtex/models", () => ({
   defaultModelGateway: modelGatewayMock,
@@ -42,11 +44,65 @@ const TEST_NOW = new Date("2026-07-16T12:00:00.000Z");
 describe("meeting transcript intake", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    readableMock.mockReset().mockResolvedValue(true);
+    authorizeMock.mockReset().mockResolvedValue({ id: "member-owner", role: "ADMIN" });
     getMeetingMock.mockResolvedValue(null);
     directRootsMock.mockResolvedValue([{ kind: "NativeTranscriptInput", id: "native-1", fingerprint: "a".repeat(64) }]);
     prismaMock.$transaction.mockImplementation(callback => callback(prismaMock));
     captureArtifactInputProofMock.mockResolvedValue([{ kind: "Meeting", id: "meeting-1", fingerprint: "b".repeat(64) }]);
     captureArtifactInputSnapshotProofMock.mockResolvedValue([{ kind: "ArtifactInputSnapshot", id: "snapshot-1", fingerprint: "c".repeat(64) }]);
+  });
+
+  it.each(["source", "source-revoke-restore", "caller", "caller-revoke-restore"])("fences %s across metadata credentials and retry waits", async mode => {
+    const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
+    for (const retry of [false, true]) {
+      let sends = 0, currentGrant = true, epoch = 0;
+      readableMock.mockImplementation(async () => currentGrant && epoch === 0);
+      authorizeMock.mockImplementation(async () => {
+        if (!currentGrant || epoch !== 0) throw new Error("caller epoch changed");
+        return { id: "member-owner", role: "ADMIN" };
+      });
+      modelGatewayMock.extract.mockImplementationOnce(async request => {
+        const context = { signal: request.signal };
+        if (retry) { await request.authorizeAttempt(context); sends++; }
+        currentGrant = false; epoch++;
+        if (mode.endsWith("revoke-restore")) { currentGrant = true; epoch++; }
+        if (mode.startsWith("source")) authorizeMock.mockResolvedValue({ id: "member-owner", role: "ADMIN" });
+        else readableMock.mockResolvedValue(true);
+        // A restored current grant cannot restore the original captured epoch.
+        try { await request.authorizeAttempt(context); } catch { /* adversarial adapter swallows denial */ }
+        return { output: { title: "Unauthorized metadata", participantEmails: [] } };
+      });
+      await expect(intakeMeetingTranscript(USER_ACTOR, { workspaceId: "workspace-1", nativeReceipt: RECEIPT,
+        transcript: "Jan: Private original transcript.", now: TEST_NOW })).rejects.toBeDefined();
+      expect(sends).toBe(retry ? 1 : 0);
+      expect(createMeetingMock).not.toHaveBeenCalled(); expect(uploadMeetingTranscriptMock).not.toHaveBeenCalled();
+    }
+  });
+
+  it("retains original native and selected Meeting proof on permitted metadata retries", async () => {
+    const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
+    getMeetingMock.mockResolvedValueOnce({ id: "meeting-1", title: null, recordedAt: TEST_NOW, participantEmails: [] });
+    uploadMeetingTranscriptMock.mockResolvedValueOnce({ meeting: { id: "meeting-1", title: "Permitted" } });
+    let sends = 0;
+    modelGatewayMock.extract.mockImplementationOnce(async request => {
+      for (let i = 0; i < 2; i++) { await request.authorizeAttempt({ signal: request.signal }); sends++; }
+      return { output: { title: "Permitted", participantEmails: [] } };
+    });
+    await intakeMeetingTranscript(USER_ACTOR, { workspaceId: "workspace-1", nativeReceipt: RECEIPT,
+      meetingId: "meeting-1", transcript: "Jan: Original transcript.", now: TEST_NOW });
+    expect(sends).toBe(2); expect(captureArtifactInputSnapshotProofMock).toHaveBeenCalledTimes(1);
+    expect(readableMock.mock.calls.every(call => JSON.stringify(call[2]) === JSON.stringify([
+      { kind: "NativeTranscriptInput", id: "native-1", fingerprint: "a".repeat(64) },
+      { kind: "ArtifactInputSnapshot", id: "snapshot-1", fingerprint: "c".repeat(64) },
+    ]))).toBe(true);
+  });
+
+  it("keeps ordinary metadata provider errors as a safe fallback", async () => {
+    const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
+    modelGatewayMock.extract.mockRejectedValueOnce(new Error("ordinary provider unavailable"));
+    await expect(intakeMeetingTranscript(USER_ACTOR, { workspaceId: "workspace-1", nativeReceipt: RECEIPT,
+      transcript: "Jan: Original transcript.", now: TEST_NOW })).resolves.toMatchObject({ status: "needs_clarification" });
   });
 
   it("skips model metadata extraction when title and recordedAt are explicit", async () => {

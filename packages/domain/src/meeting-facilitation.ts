@@ -1,4 +1,4 @@
-import { defaultModelGateway } from "@corgtex/models";
+import { defaultModelGateway, type ModelAttemptGuard } from "@corgtex/models";
 import { prisma, toInputJson, type AppActor } from "@corgtex/shared";
 import type { MeetingInsightType } from "@prisma/client";
 import { requireWorkspaceMembership } from "./auth";
@@ -37,6 +37,31 @@ function agendaActor(workspaceId: string): AppActor {
 async function requireAgendaProof(actor: AppActor, workspaceId: string, roots: LineageRoot[]) {
   invariant(roots.length > 0 && await isArtifactInputProofReadable(actor, workspaceId, roots),
     409, "UNKNOWN_LINEAGE", "The complete agenda input receipt is unavailable or changed.");
+}
+
+function agendaModelAttempt(actor: AppActor, workspaceId: string, roots: LineageRoot[], policy?: () => Promise<void>) {
+  const originalRoots = structuredClone(roots);
+  const controller = new AbortController();
+  const authorizeAttempt: ModelAttemptGuard = async ({ signal }) => {
+    try {
+      controller.signal.throwIfAborted();
+      signal.throwIfAborted();
+      await requireWorkspaceMembership({ actor, workspaceId });
+      await requireAgendaProof(actor, workspaceId, originalRoots);
+      if (policy) {
+        await policy();
+        // Slack policy validation may await remote authority. Replay the original
+        // prompt receipt afterward rather than capturing replacement inputs.
+        await requireAgendaProof(actor, workspaceId, originalRoots);
+      }
+      signal.throwIfAborted();
+      controller.signal.throwIfAborted();
+    } catch (error) {
+      controller.abort(error);
+      throw error;
+    }
+  };
+  return { authorizeAttempt, signal: controller.signal, assertActive: () => controller.signal.throwIfAborted() };
 }
 
 async function saveAgendaWithProof(actor: AppActor, workspaceId: string, meetingId: string,
@@ -317,8 +342,11 @@ export async function prepareAgendaForMeeting(params: {
   const fallbackAgenda = buildLegacyAgendaFallback(context);
   let agenda: LegacyMeetingAgenda = fallbackAgenda;
   let fallbackReason: string | null = "model_not_used";
+  const attempt = agendaModelAttempt(actor, params.workspaceId, lineageRoots);
   try {
     const extraction = await defaultModelGateway.extract({
+      authorizeAttempt: attempt.authorizeAttempt,
+      signal: attempt.signal,
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId,
       instruction: [
@@ -341,12 +369,15 @@ export async function prepareAgendaForMeeting(params: {
         ]
       }`,
     });
+    attempt.assertActive();
     agenda = normalizeLegacyAgenda(extraction.output, context.meeting.title || "Meeting agenda", fallbackAgenda.sections);
     fallbackReason = null;
   } catch {
     agenda = fallbackAgenda;
     fallbackReason = "model_generation_failed";
   }
+  // Ordinary model errors can use the proven fallback; failed authority cannot.
+  attempt.assertActive();
   await saveAgendaWithProof(actor, params.workspaceId, context.meeting.id, agenda, lineageRoots, sourceStateHash);
 
   return { meeting: context.meeting, agenda, context, fallbackReason };
@@ -787,7 +818,14 @@ export async function runMeetingAgendaThreadEdit(params: {
 
   await requirePublicSlackPublication(params.workspaceId, params.installationId, params.channelId, promptRoots);
 
+  const attempt = agendaModelAttempt(actor, params.workspaceId, promptRoots, async () => {
+    const currentInstallation = await activeSlackInstallation(params.workspaceId);
+    invariant(currentInstallation?.id === params.installationId, 403, "SOURCE_RESTRICTED", "The Slack installation is no longer active.");
+    await requirePublicSlackPublication(params.workspaceId, params.installationId, params.channelId, promptRoots);
+  });
   const extraction = await defaultModelGateway.extract({
+    authorizeAttempt: attempt.authorizeAttempt,
+    signal: attempt.signal,
     workspaceId: params.workspaceId,
     workflowJobId: params.workflowJobId,
     instruction: [
@@ -828,6 +866,7 @@ export async function runMeetingAgendaThreadEdit(params: {
     }`,
   });
 
+  attempt.assertActive();
   await requireAgendaProof(actor, params.workspaceId, promptRoots);
   await requirePublicSlackPublication(params.workspaceId, params.installationId, params.channelId, promptRoots);
   const edit = parseAgendaEditOutput(extraction.output, meeting.title || currentAgenda.title);

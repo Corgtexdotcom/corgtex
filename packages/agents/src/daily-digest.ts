@@ -1,6 +1,6 @@
 import { env, logger, prisma, sendEmail } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
-import { defaultModelGateway, resolveModel } from "@corgtex/models";
+import { defaultModelGateway, resolveModel, type ModelAttemptGuard, type ModelRequestControls } from "@corgtex/models";
 import {
   AGENT_REGISTRY,
   getAgentModelOverride,
@@ -1304,7 +1304,7 @@ export async function runDailyDigest(params: {
   /** Rebuild shared artifacts without ingestion, person-profile writes, or delivery. */
   regenerationOnly?: boolean;
   rebuildRef?: string;
-}) {
+} & ModelRequestControls) {
   const agentActor: AppActor = {
     kind: "agent",
     authProvider: "bootstrap",
@@ -1412,6 +1412,38 @@ export async function runDailyDigest(params: {
     }
   });
   const audience: AppActor[] = recipientMembers.map((member) => ({ kind: "user", user: member.user }));
+  // Every model stage shares a fatal latch while retaining its own original
+  // input receipts. Credential waits and retries cannot refresh those receipts.
+  const modelController = new AbortController();
+  const modelSignal = params.signal ? AbortSignal.any([params.signal, modelController.signal]) : modelController.signal;
+  async function withModelProof<T>(roots: readonly LineageRoot[], work: (controls: ModelRequestControls) => Promise<T>, shared = false): Promise<T> {
+    const originalRoots = structuredClone(roots);
+    const assertCurrent = async () => {
+      await requireWorkspaceMembership({actor: agentActor, workspaceId: params.workspaceId});
+      if (!await isArtifactInputProofReadable(agentActor, params.workspaceId, originalRoots)
+        || (shared && !await isDigestInputProofShared(audience, params.workspaceId, originalRoots))) {
+        throw new AppError(409, "SOURCE_CHANGED", "Newspaper model inputs changed before use.");
+      }
+    };
+    const authorizeAttempt: ModelAttemptGuard = async context => {
+      try {
+        modelSignal.throwIfAborted(); context.signal.throwIfAborted();
+        await params.authorizeAttempt?.(context);
+        modelSignal.throwIfAborted(); context.signal.throwIfAborted();
+        await assertCurrent();
+        modelSignal.throwIfAborted(); context.signal.throwIfAborted();
+      } catch (error) {
+        modelController.abort(error);
+        throw error;
+      }
+    };
+    modelSignal.throwIfAborted();
+    const result = await work({signal: modelSignal, authorizeAttempt});
+    modelSignal.throwIfAborted();
+    await assertCurrent();
+    modelSignal.throwIfAborted();
+    return result;
+  }
   const sessionReceipts = await Promise.all(loadedSessions.map(async (session) => {
     const turns = await captureReadableDigestInputs({ actor: agentActor, workspaceId: params.workspaceId,
       kind: "ConversationTurn", records: session.turns, additionalInputs: () => [
@@ -1609,7 +1641,8 @@ export async function runDailyDigest(params: {
   for (const [userId, data] of members.entries()) {
     const fullTranscript = data.transcripts.join("\n\n---\n\n").slice(0, 8000); // Take up to 8K chars
 
-    const extraction = await defaultModelGateway.extract({
+    const extraction = await withModelProof(data.lineageRoots, controls => defaultModelGateway.extract({
+      ...controls,
       model,
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId,
@@ -1626,7 +1659,7 @@ export async function runDailyDigest(params: {
         peopleSignals: string[]
       }`,
       input: fullTranscript
-    });
+    }));
 
     const insights = extraction.output as any;
 
@@ -1664,7 +1697,11 @@ export async function runDailyDigest(params: {
     const insightRoots = await captureArtifactInputProof(agentActor, params.workspaceId,
       [{ kind: "BrainSource", id: source.id, snapshot: source }]);
 
-    const profileMergeResult = await defaultModelGateway.chat({
+    const profileRoots = existingArticle ? await captureArtifactInputProof(agentActor, params.workspaceId,
+      [{kind: "BrainArticle", id: existingArticle.id, snapshot: existingArticle}]) : [];
+    const profileInputRoots = mergeArtifactInputProofs(data.lineageRoots, insightRoots, profileRoots);
+    const profileMergeResult = await withModelProof(profileInputRoots, controls => defaultModelGateway.chat({
+      ...controls,
       model,
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId,
@@ -1688,7 +1725,7 @@ Rules:
 - Maintain structured section headers exactly (e.g. Identity, Communication Preferences, Current Sentiment, Key Concerns & Tensions, Working Style, Relationship Dynamics, Recent Context)`
         }
       ]
-    });
+    }));
 
     const newBodyMd = profileMergeResult.content;
 
@@ -1749,7 +1786,8 @@ Rules:
     ...briefingCandidates.map((candidate) => candidate.lineageRoots ?? []));
 
   const digest = hasSourceInputs
-    ? normalizeNewspaperDigestPayload((await defaultModelGateway.extract({
+    ? normalizeNewspaperDigestPayload((await withModelProof(sharedInputRoots, controls => defaultModelGateway.extract({
+        ...controls,
         model,
         workspaceId: params.workspaceId,
         workflowJobId: params.workflowJobId,
@@ -1771,7 +1809,7 @@ Rules:
           otherUpdates: string[]
         }`,
         input: allTranscripts,
-      })).output)
+      }), true)).output)
     : normalizeNewspaperDigestPayload({});
 
   const workspaceBriefing = digest.sections.length > 0

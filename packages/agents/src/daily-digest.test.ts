@@ -1,3 +1,4 @@
+import type { ModelRequestControls } from "@corgtex/models";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
@@ -1921,4 +1922,120 @@ describe("runDailyDigest", () => {
     expect(recordDemoWelcomeCrmActivityMock).toHaveBeenCalledWith({ workspaceId: "workspace-1",
       demoLeadId: "lead-1", expectedContactId: null });
   });
+  describe("provider attempt guards", () => {
+    beforeEach(async () => {
+      const domain = await import("@corgtex/domain");
+      vi.mocked(domain.isArtifactInputProofReadable).mockReset().mockResolvedValue(true);
+      vi.mocked(domain.isDigestInputProofShared).mockReset().mockResolvedValue(true);
+      vi.mocked(domain.requireWorkspaceMembership).mockReset().mockResolvedValue({id: "member-1", isActive: true} as any);
+      chatMock.mockReset().mockResolvedValue({content: "Merged profile body"});
+      getWorkspaceNewspaperCadenceMock.mockResolvedValue("DAILY");
+      prismaMock.conversationSession.findMany.mockResolvedValue([{id: "session-a", userId: "user-a",
+        user: {id: "user-a", email: "a@example.test", displayName: "A"},
+        turns: [{id: "turn-a", userMessage: "Original conversation", assistantMessage: "Original reply"}]}]);
+      prismaMock.brainArticle.findMany.mockResolvedValue([{id: "profile-a", slug: "person-user-a", bodyMd: "Original profile",
+        authority: "DRAFT", ownerMemberId: null, humanEditedAt: null, frontmatterJson: {generatedBy: "daily-digest"}}]);
+    });
+    const run = async (controls: ModelRequestControls = {}) => {
+      const {runDailyDigest} = await import("./daily-digest");
+      return runDailyDigest({workspaceId: "workspace-1", dateISO: "2026-04-30T12:00:00.000Z", cadence: "DAILY", ...controls});
+    };
+    type Request = ModelRequestControls & {instruction?: string};
+    function targetStage(request: Request) {
+      return request.instruction?.startsWith("Generate a structured") ? "digest" : "insight";
+    }
+
+    it.each(["insight", "profile", "digest"].flatMap(stage => ["credentials", "retry"].flatMap(boundary =>
+      ["source", "caller"].flatMap(authority => [false, true].map(restore => ({stage, boundary, authority, restore}))))))
+      ("denies $stage $authority at $boundary (restored=$restore)", async ({stage,boundary,authority,restore}) => {
+        const domain = await import("@corgtex/domain");
+        let originalEpoch = 1, allowed = true, sends = 0;
+        const revoked = new domain.AppError(403, "NOT_A_MEMBER", "Synthetic departed caller");
+        vi.mocked(domain.isArtifactInputProofReadable).mockImplementation(async (_actor,_workspace,roots) => {
+          expect(roots.length).toBeGreaterThan(0);
+          return originalEpoch === 1;
+        });
+        vi.mocked(domain.requireWorkspaceMembership).mockImplementation(async () => {
+          if (!allowed && authority === "caller") throw revoked;
+          return {id: "member-1", isActive: true} as any;
+        });
+        const attempt = async (request: Request) => {
+          const captured = vi.mocked(domain.captureArtifactInputProof).mock.calls.length;
+          const context = {signal: new AbortController().signal};
+          if (boundary === "retry") {await request.authorizeAttempt?.(context); sends++;}
+          allowed = false;
+          if (authority === "source" || restore) originalEpoch++;
+          if (restore) {allowed = true; originalEpoch++;}
+          try {await request.authorizeAttempt?.(context); sends++;}
+          finally {expect(vi.mocked(domain.captureArtifactInputProof).mock.calls).toHaveLength(captured);}
+        };
+        extractMock.mockImplementation(async (request: Request) => {
+          if (targetStage(request) === stage) await attempt(request);
+          return {output: {conversationHighlights: ["Original evidence summary"]}};
+        });
+        chatMock.mockImplementation(async (request: Request) => {if (stage === "profile") await attempt(request); return {content: "Merged profile"};});
+        const result = await run().catch(error => error);
+        expect(sends).toBe(boundary === "retry" ? 1 : 0);
+        expect(result).toMatchObject({code: authority === "caller" && !restore ? "NOT_A_MEMBER" : "SOURCE_CHANGED"});
+        if (stage === "insight") expect(txMock.brainSource.create).not.toHaveBeenCalled();
+        if (stage !== "digest") expect(updateArticleMock).not.toHaveBeenCalled();
+        expect(upsertWorkspaceBriefingMock).not.toHaveBeenCalled();
+        expect(sendEmailMock).not.toHaveBeenCalled();
+      });
+
+    it.each(["insight", "profile", "digest"])("latches swallowed %s denial before any output publication", async stage => {
+      const domain = await import("@corgtex/domain");
+      const attempt = async (request: Request) => {
+        vi.mocked(domain.isArtifactInputProofReadable).mockResolvedValueOnce(false);
+        await expect(request.authorizeAttempt!({signal: new AbortController().signal})).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+        expect(request.signal?.aborted).toBe(true);
+        await expect(request.authorizeAttempt!({signal: new AbortController().signal})).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+      };
+      extractMock.mockImplementation(async (request: Request) => {if (targetStage(request) === stage) await attempt(request); return {output: {conversationHighlights: ["summary"]}};});
+      chatMock.mockImplementation(async (request: Request) => {if (stage === "profile") await attempt(request); return {content: "profile"};});
+      await expect(run()).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+      expect(upsertWorkspaceBriefingMock).not.toHaveBeenCalled();
+      expect(sendEmailMock).not.toHaveBeenCalled();
+    });
+
+    it("replays the exact original profile, composes caller controls and permits two attempts at all three sends", async () => {
+      const domain = await import("@corgtex/domain");
+      const caller = vi.fn().mockResolvedValue(undefined);
+      const external = new AbortController();
+      const sent: string[] = [];
+      const attempt = async (request: Request, stage: string) => {
+        expect(request.signal).toBeInstanceOf(AbortSignal);
+        const context = {signal: new AbortController().signal};
+        for (let index=0;index<2;index++) {await request.authorizeAttempt!(context);sent.push(stage);}
+        expect(caller).toHaveBeenLastCalledWith(context);
+      };
+      extractMock.mockImplementation(async (request: Request) => {await attempt(request,targetStage(request));return {output: {conversationHighlights: ["summary"]}};});
+      chatMock.mockImplementation(async (request: Request) => {
+        await attempt(request,"profile");
+        expect(vi.mocked(domain.captureArtifactInputProof).mock.calls.some(([, ,inputs]) => inputs.some(input =>
+          input.kind === "BrainArticle" && input.id === "profile-a" && input.snapshot?.bodyMd === "Original profile"))).toBe(true);
+        expect(vi.mocked(domain.isArtifactInputProofReadable).mock.calls.at(-1)?.[2]).toEqual(expect.arrayContaining([
+          expect.objectContaining({kind:"BrainArticle",id:"profile-a"}), expect.objectContaining({kind:"BrainSource",id:"source-1"}),
+          expect.objectContaining({kind:"ConversationTurn",id:"turn-a"}),
+        ]));
+        return {content: "Merged profile"};
+      });
+      await expect(run({signal: external.signal, authorizeAttempt: caller})).resolves.toMatchObject({success: true, updatedProfiles: 1});
+      expect(sent).toEqual(["insight","insight","profile","profile","digest","digest"]);
+      expect(caller).toHaveBeenCalledTimes(6);
+      expect(updateArticleMock).toHaveBeenCalledTimes(1);
+      expect(upsertWorkspaceBriefingMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("stops an external cancellation during the upstream attempt callback", async () => {
+      const controller = new AbortController(); const cancelled = new Error("Synthetic caller cancellation");
+      extractMock.mockImplementation(async (request: Request) => {
+        await expect(request.authorizeAttempt!({signal: new AbortController().signal})).rejects.toBe(cancelled);
+        return {output: {}};
+      });
+      await expect(run({signal: controller.signal, authorizeAttempt: async () => {controller.abort(cancelled);}})).rejects.toBe(cancelled);
+      expect(txMock.brainSource.create).not.toHaveBeenCalled();
+    });
+  });
+
 });

@@ -1,4 +1,5 @@
-import { captureReadableDigestInputs } from "./digest-lineage";
+import { createVariantModelControls } from "./variant-model-attempt";
+import { captureReadableDigestInputs, DigestReadRelease } from "./digest-lineage";
 import { WorkItemReadRelease, readableWorkItemPage, workItemAfter } from "./work-item-readable-page";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { prisma } from "@corgtex/shared";
@@ -237,6 +238,7 @@ function normalizeGeneratedSummary(value: unknown) {
 }
 
 async function generateProposalSummary(params: {
+  assertInputsCurrent: () => Promise<void>;
   workspaceId: string;
   title: string;
   bodyMd: string;
@@ -245,8 +247,11 @@ async function generateProposalSummary(params: {
     return null;
   }
 
+  const attempt = createVariantModelControls(params.assertInputsCurrent);
   try {
+    await attempt.controls.authorizeAttempt({ signal: attempt.controls.signal });
     const extraction = await defaultModelGateway.extract({
+      ...attempt.controls,
       workspaceId: params.workspaceId,
       instruction: [
         "Write a concise plain-text summary for this governance proposal.",
@@ -260,8 +265,10 @@ async function generateProposalSummary(params: {
       schemaHint: "{ summary: string }",
     });
 
+    attempt.assertActive();
     return normalizeGeneratedSummary(extraction.output.summary);
   } catch {
+    attempt.assertActive();
     return null;
   }
 }
@@ -826,8 +833,13 @@ export async function createProposal(actor: AppActor, params: CreateProposalPara
   if (duplicateDecision?.resolution === "update_existing") {
     return applyProposalDuplicateUpdate(actor, params, duplicateDecision.match.entityId);
   }
+  const modelRoots = structuredClone(params.lineageRoots ?? []);
   const summary = params.includeAiSummary === true
-    ? await generateProposalSummary({ workspaceId: params.workspaceId, title, bodyMd })
+    ? await generateProposalSummary({ workspaceId: params.workspaceId, title, bodyMd, assertInputsCurrent: async () => {
+      await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+      invariant(!modelRoots.length || await isArtifactInputProofReadable(actor, params.workspaceId, modelRoots),
+        409, "SOURCE_CHANGED", "Proposal summary inputs changed.");
+    } })
     : params.summary?.trim() || null;
   const isPrivate = params.isPrivate ?? true;
   const openedAt = isPrivate ? null : new Date();
@@ -1325,6 +1337,9 @@ export async function updateProposal(actor: AppActor, params: UpdateProposalPara
     invariant(admissionProposal && admissionProposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
     invariant((await readableArtifactIds(actor, params.workspaceId, "Proposal", [admissionProposal])).has(admissionProposal.id),
       404, "NOT_FOUND", "Proposal not found.");
+    const modelRelease = new DigestReadRelease(actor, params.workspaceId);
+    const admitted = await modelRelease.capture("Proposal", [admissionProposal]);
+    invariant(admitted.records.length === 1, 409, "SOURCE_CHANGED", "Proposal summary source changed.");
     requireUpdateProposalEditable(actor, membership, admissionProposal);
     requireExpectedVersionForProposalContent(params, admissionProposal.version);
 
@@ -1355,6 +1370,7 @@ export async function updateProposal(actor: AppActor, params: UpdateProposalPara
     const effectiveTitle = String(data.title ?? admissionProposal.title);
     const effectiveBodyMd = String(data.bodyMd ?? admissionProposal.bodyMd);
     data.summary = await generateProposalSummary({
+      assertInputsCurrent: () => modelRelease.finish(undefined),
       workspaceId: params.workspaceId,
       title: effectiveTitle,
       bodyMd: effectiveBodyMd,
