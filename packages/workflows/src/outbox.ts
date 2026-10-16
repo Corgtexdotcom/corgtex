@@ -578,6 +578,10 @@ async function claimPendingJobs(workerId: string, batchSize: number) {
   });
 }
 
+function isSourceRegenerationJob(type: string) {
+  return type === "agent.brain-source-regenerate" || type === "agent.brain-article-variant" || type === "agent.graph-source-variant";
+}
+
 function executionAuthorizationRevoked(error: unknown) {
   const revokedCodes = ["SUPPORT_AUTHORIZATION_REVOKED", "MCP_AUTHORIZATION_REVOKED"];
   return error instanceof Error && (revokedCodes.includes((error as Error & { code?: string }).code ?? "") || revokedCodes.includes(error.message));
@@ -1168,7 +1172,7 @@ async function handleJob(job: ClaimedJob, workerId: string, meetingActor?: AppAc
     return;
   }
 
-  if (job.type === "agent.brain-source-regenerate" || job.type === "agent.brain-article-variant" || job.type === "agent.graph-source-variant") {
+  if (isSourceRegenerationJob(job.type)) {
     return runAgentWorkflowJob(job, workerId);
   }
 
@@ -1262,7 +1266,7 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
         try {
           await recordMeetingProgressForJob(job, "ACTIVE", {actor});
           const result = await (diagnostic ? handleReleaseDiagnostic(job, workerId) : handleJob(job, workerId, actor));
-          superseded = job.type === "agent.brain-source-regenerate"
+          superseded = isSourceRegenerationJob(job.type)
             && !!result && typeof result === "object" && "phase" in result && result.phase === "SUPERSEDED";
           await recordMeetingProgressForJob(job, resultWasSkipped(result) ? "SKIPPED" : "COMPLETED", {actor});
         } catch (error) {
@@ -1279,7 +1283,7 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
       } else await execute();
     }));
     if (!diagnostic) {
-      if ((job.type === "agent.brain-source-regenerate" || job.type === "agent.brain-absorb" || job.type === BRAIN_MAINTENANCE_JOB || isMeetingTranscriptWorkerJob(job.type) || job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE) && !superseded) {
+      if ((isSourceRegenerationJob(job.type) || job.type === "agent.brain-absorb" || job.type === BRAIN_MAINTENANCE_JOB || isMeetingTranscriptWorkerJob(job.type) || job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE) && !superseded) {
         // A reclaimed job may still have an older model call in flight.
         await prisma.workflowJob.updateMany({
           where: { id: job.id, workspaceId: job.workspaceId, type: job.type,
@@ -1315,7 +1319,7 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
         where: { id: job.id, workspaceId: job.workspaceId, type: RELEASE_DIAGNOSTIC_JOB_TYPE, status: "RUNNING", lockedBy: workerId },
         data: { status: "FAILED", lockedAt: null, lockedBy: null, error: "Release diagnostic failed; reconcile the exact operation." },
       });
-    } else if (job.type === "agent.brain-source-regenerate" || job.type === "agent.brain-absorb" || job.type === BRAIN_MAINTENANCE_JOB || isMeetingTranscriptWorkerJob(job.type) || job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE) {
+    } else if (isSourceRegenerationJob(job.type) || job.type === "agent.brain-absorb" || job.type === BRAIN_MAINTENANCE_JOB || isMeetingTranscriptWorkerJob(job.type) || job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE) {
       const status: WorkflowJobStatus = job.attempts >= MAX_ATTEMPTS || executionAuthorizationRevoked(error) ? "FAILED" : "PENDING";
       await prisma.workflowJob.updateMany({
         where: { id: job.id, workspaceId: job.workspaceId, type: job.type,

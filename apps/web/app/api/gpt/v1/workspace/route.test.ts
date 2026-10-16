@@ -53,3 +53,17 @@ it("withholds the response when the final original-proof release rejects", async
   state.proposals.mockResolvedValue([]); state.actions.mockResolvedValue([]); state.tensions.mockResolvedValue([]);
   await expect(GET(new Request("http://localhost/api/gpt/v1/workspace") as never)).rejects.toThrow("Synthetic final release denied");
 });
+
+
+it("excludes readable archived records from active workspace totals", async () => {
+  const activeAndArchived = [{ id: "active", archivedAt: null }, { id: "archived", archivedAt: new Date() }];
+  for (const query of [state.proposals, state.actions, state.tensions]) {
+    query.mockImplementation(async ({ where }) => activeAndArchived.filter(row => where.archivedAt !== null || row.archivedAt === null));
+  }
+  const response = await GET(new Request("http://localhost/api/gpt/v1/workspace") as never);
+  expect((await response.json()).counts).toEqual({ proposals: 1, actions: 1, tensions: 1, members: 4 });
+  for (const query of [state.proposals, state.actions, state.tensions]) {
+    expect(query.mock.calls[0][0].where).toEqual({ workspaceId: "ws", archivedAt: null });
+  }
+  expect(state.release.mock.calls[0][2].every((root: { id: string }) => root.id === "active")).toBe(true);
+});
