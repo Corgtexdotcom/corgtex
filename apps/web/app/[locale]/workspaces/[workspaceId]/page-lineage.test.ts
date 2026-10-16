@@ -7,6 +7,7 @@ const state = vi.hoisted(() => ({
   readable: vi.fn(),
   unread: vi.fn(async () => 0),
   edition: vi.fn(),
+  release: vi.fn(),
 }));
 type Row = { id: string; workspaceId: string; title: string; allowed: boolean; [key: string]: unknown };
 type Query = { take?: number; cursor?: { id: string }; where?: { id?: { in: string[] }; OR?: Array<{generatedAt?: Date | {lt: Date}; id?: {lt: string}}> }; orderBy?: unknown };
@@ -26,13 +27,25 @@ vi.mock("@corgtex/shared", () => ({
 }));
 vi.mock("../../../../../../packages/domain/src/auth", () => ({ requireWorkspaceMembership: vi.fn() }));
 vi.mock("../../../../../../packages/domain/src/source-lineage", () => ({
-  readableArtifactIds: state.readable, captureArtifactInputProof: vi.fn(),
+  readableArtifactIds: state.readable,
+  captureArtifactInputProof: async (actor: unknown, workspaceId: string, inputs: Array<{kind: string; id: string; snapshot: {id: string}}>) => {
+    for (const input of inputs) if (!(await state.readable(actor, workspaceId, input.kind, [input.snapshot])).has(input.id)) {
+      const {AppError} = await import("../../../../../../packages/domain/src/errors");
+      throw new AppError(409, "SOURCE_RESTRICTED", "Synthetic denied input");
+    }
+    return inputs.map(input => ({kind: input.kind, id: input.id, fingerprint: JSON.stringify(input.snapshot)}));
+  },
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
+  mergeLineageInputRoot: (_prior: unknown, root: unknown) => root,
+  withArtifactCountReleaseSnapshot: (...args: unknown[]) => state.release(...args),
   invalidateArtifactInputLineage: vi.fn(), recordArtifactInputLineage: vi.fn(),
 }));
 vi.mock("@corgtex/domain", async () => {
   const briefing = await import("../../../../../../packages/domain/src/workspace-briefing");
   const priority = await import("../../../../../../packages/domain/src/newspaper-priority");
   return { ...briefing, ...priority,
+    ...await import("../../../../../../packages/domain/src/digest-lineage"),
+    ...await import("../../../../../../packages/domain/src/errors"),
     normalizeNewspaperEditionDigest: state.edition,
     countUnreadNotifications: state.unread,
     privacyFilter: () => ({}), readableArtifactIds: state.readable,
@@ -71,6 +84,7 @@ function installRows(tables: Record<string, Row[]>) {
   }
 }
 beforeEach(() => {
+  state.release.mockImplementation(async (_actor, _workspaceId, _roots, remote, finish) => {await remote(); return finish({});});
   vi.clearAllMocks(); state.unread.mockResolvedValue(0); state.edition.mockReturnValue(null);
   installRows({});
   state.readable.mockImplementation(async (_actor, workspaceId, _kind, rows: Row[]) => {
@@ -179,4 +193,9 @@ it("uses only readable advice to create personal signals and deadlines, replenis
   expect(state.queries.get("adviceRequest")).toHaveBeenCalledTimes(2);
   expect(state.queries.get("adviceRequest")!.mock.calls[0][0]).toMatchObject({take: 100, where: {workspaceId: "ws", status: "ACTIVE"}, include: {process: {select: {subjectType: true, subjectId: true}}}});
   expect(state.queries.get("adviceRequest")!.mock.calls[0][0]).not.toHaveProperty("select");
+});
+
+it("withholds the response when the final original-proof release rejects", async () => {
+  state.release.mockRejectedValueOnce(new Error("Synthetic final release denied"));
+  await expect(renderDashboard()).rejects.toThrow("Synthetic final release denied");
 });

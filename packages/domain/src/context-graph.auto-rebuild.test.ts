@@ -47,6 +47,12 @@ beforeEach(async () => {
     return 1;
   });
   fixture.prisma.$queryRaw = vi.fn(async (sql: any) => {
+    if (sql.sql?.includes('FROM "ArtifactInputLineage"') && sql.sql.includes("DISTINCT ON")) {
+      const [ws, kind, ...ids] = sql.values;
+      const rows = fixture.rows.artifactInputLineage.filter(row => row.workspaceId === ws
+        && row.artifactType === kind && ids.includes(row.artifactId)).sort((a, b) => b.revision - a.revision);
+      return [...new Set(rows.map(row => row.artifactId))].map(id => ({ ...rows.find(row => row.artifactId === id) }));
+    }
     if (!sql.strings?.join("").includes('FROM "SourcePermissionEpoch"')) return [];
     const [ws, ...pairs] = sql.values; const result = [];
     for (let i = 0; i < pairs.length; i += 2) {

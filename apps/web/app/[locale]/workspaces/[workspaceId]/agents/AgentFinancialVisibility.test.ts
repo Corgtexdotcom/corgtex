@@ -1,11 +1,12 @@
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-const { membership, usage, budget } = vi.hoisted(() => ({membership: vi.fn(), usage: vi.fn(), budget: vi.fn()}));
+const { membership, usage, budget, counts } = vi.hoisted(() => ({membership: vi.fn(), usage: vi.fn(), budget: vi.fn(), counts: vi.fn()}));
 vi.mock("@corgtex/domain", async () => ({
   ...await import("../../../../../../../packages/domain/src/agent-authority-summary"),
   requireWorkspaceMembership: membership, getModelUsageSummary: usage, getModelUsageBudget: budget,
   listAgentIdentities: async () => [{agentKey: "maintenance", displayName: "Maintenance", maxSpendPerRunCents: 12345, maxRunsPerDay: 10}],
+  getAgentRunOperationalCounts: counts,
   listAgentConfigs: async () => [], listAgentCredentials: async () => [], listAgentRuns: async () => [],
 }));
 vi.mock("@corgtex/shared", () => ({prisma: {agentRun: {groupBy: async () => []}}}));
@@ -21,6 +22,7 @@ const props = {actor, workspaceId: "ws-1"};
 beforeEach(() => {
   vi.stubGlobal("React", React); vi.resetAllMocks(); membership.mockResolvedValue({id: "member", role: "CONTRIBUTOR"});
   usage.mockResolvedValue({totalCostUsd: 1, totalTokens: 30, totalCalls: 1, byAgent: [{agentKey: "maintenance", totalCostUsd: 1}], byModel: [], byDay: []});
+  counts.mockResolvedValue({runCountsByAgent: [], pendingApprovalCountsByAgent: []});
   budget.mockResolvedValue({monthlyCostCapUsd: 6789, alertThresholdPct: 80, periodStartDay: 1});
 });
 describe("agent finance visibility", () => {
@@ -29,6 +31,7 @@ describe("agent finance visibility", () => {
     expect(html).toContain("Maintenance"); expect(html).toContain("10 runs/day");
     expect(html).not.toMatch(/\$\d/); expect(html).not.toContain("12345"); expect(html).not.toContain("6789");
     expect(usage).not.toHaveBeenCalled(); expect(budget).not.toHaveBeenCalled();
+    expect(counts).toHaveBeenCalledExactlyOnceWith(actor, "ws-1");
   });
   it("omits the financial panel without financial calls for a non-admin", async () => {
     expect(await SpendControlTab(props)).toBeNull();

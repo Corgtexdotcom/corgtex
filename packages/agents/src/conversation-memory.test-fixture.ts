@@ -47,10 +47,14 @@ export const memoryFixture = (() => {
       const rows = () => [...(tables.get(name)?.values() ?? [])];
       const find = ({ where, select, orderBy, take }: any) => {
         let result = rows().filter((row) => matches(row, where));
-        for (const [field, direction] of Object.entries(Array.isArray(orderBy) ? Object.assign({}, ...orderBy) : orderBy ?? {})) result.sort((a, b) => {
-          const left = a[field] instanceof Date ? a[field].getTime() : a[field];
-          const right = b[field] instanceof Date ? b[field].getTime() : b[field];
-          return (left === right ? 0 : left > right ? 1 : -1) * (direction === "desc" ? -1 : 1);
+        const order = Array.isArray(orderBy) ? orderBy : [orderBy ?? {}];
+        result.sort((a, b) => {
+          for (const part of order) for (const [field, direction] of Object.entries(part)) {
+            const left = a[field] instanceof Date ? a[field].getTime() : a[field];
+            const right = b[field] instanceof Date ? b[field].getTime() : b[field];
+            if (left !== right) return (left > right ? 1 : -1) * (direction === "desc" ? -1 : 1);
+          }
+          return 0;
         });
         return result.slice(0, take ?? result.length).map((row) => project(row, select));
       };

@@ -10,6 +10,18 @@ vi.mock("./brain-access", () => ({ resolveKnowledgeAccessDomains: async (actor: 
 
 beforeEach(async () => {
   await resetFixture();
+  const baseQuery = vi.mocked(fixture.prisma.$queryRaw).getMockImplementation()!;
+  vi.mocked(fixture.prisma.$queryRaw).mockImplementation(async (query: any, ...values: any[]) => {
+    if (query.sql?.includes('FROM "ArtifactInputLineage"') && query.sql.includes("DISTINCT ON")) {
+      const [ws, kind, ...ids] = query.values;
+      const rows = fixture.rows.artifactInputLineage.filter(row => row.workspaceId === ws
+        && row.artifactType === kind && ids.includes(row.artifactId)).sort((a, b) => b.revision - a.revision);
+      return [...new Set(rows.map(row => row.artifactId))].map(id => ({ ...rows.find(row => row.artifactId === id) }));
+    }
+    return baseQuery(query, ...values);
+  });
+  fixture.rows.adviceRequest = [];
+  fixture.prisma.adviceRequest = { findMany: vi.fn(async () => []) };
   fixture.rows.circle = [];
   fixture.prisma.circle = { findFirst: vi.fn(async ({ where }: any) => fixture.rows.circle.find((row: any) =>
     row.id === where.id && row.workspaceId === where.workspaceId) ?? null) };
