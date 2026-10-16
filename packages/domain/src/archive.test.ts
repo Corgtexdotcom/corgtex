@@ -1128,10 +1128,13 @@ describe("workspace archive domain", () => {
     expect(detail).toBeNull();
     expect(JSON.stringify({ list, detail })).not.toContain("-canary");
     expect(prismaMock.workspacePermalink.findMany).not.toHaveBeenCalled();
-    for (const query of [prismaMock.workspaceArchiveRecord.findMany.mock.calls.at(-1)?.[0], prismaMock.workspaceArchiveRecord.findFirst.mock.calls.at(-1)?.[0]]) {
+    for (const query of [prismaMock.workspaceArchiveRecord.findMany.mock.calls.at(-1)?.[0], prismaMock.workspaceArchiveRecord.findFirst.mock.calls.find(([query]) => !query.where.previousState)?.[0]]) {
       expect(query.select).toMatchObject({ id: true, entityId: true, purgedAt: true });
       for (const field of ["previousState", "entityLabel", "archivedByLabel", "archiveReason", "purgeReason"]) expect(query.select).not.toHaveProperty(field);
     }
+    expect(prismaMock.workspaceArchiveRecord.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ previousState: { path: ["purgedMetadata", "version"], equals: 1 } }),
+    }));
     expect(prismaMock.brainArticle.findFirst).not.toHaveBeenCalled();
   });
 

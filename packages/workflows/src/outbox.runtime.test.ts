@@ -535,7 +535,7 @@ describe("runPendingJobs", () => {
         workspaceId: "ws-1",
         type: "meeting-audio.transcribe",
         payload: { audioAssetId: "audio-1" },
-        attempts: 1, lockedBy: "worker-1", lockedAt,
+        attempts: 1, lockedBy: "worker-1", lockedAt, startedAt: lockedAt,
       },
     ]);
 
@@ -547,8 +547,10 @@ describe("runPendingJobs", () => {
       workflowJobId: "job-1",
       expectedLease: { attempts: 1, lockedBy: "worker-1", lockedAt },
     });
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1", workspaceId: "ws-1", type: "meeting-audio.transcribe",
+        status: "RUNNING", attempts: 1, lockedBy: "worker-1", startedAt: lockedAt,
+        payload: { equals: { audioAssetId: "audio-1" } }, lockedAt: { gt: expect.any(Date) } }),
       data: expect.objectContaining({
         status: "COMPLETED",
       }),

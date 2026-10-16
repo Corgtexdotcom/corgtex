@@ -345,11 +345,12 @@ async function redactActionJoins<T extends {
   circleId?: string | null;
   circle?: { id: string } | null;
 }>(actor: AppActor, workspaceId: string, rows: T[], release?: WorkItemReadRelease) {
-  const [authors, members, circles] = await Promise.all([
+  const captureJoins = () => Promise.all([
     captureReadableDigestInputs({ actor, workspaceId, kind: "User", records: rows.flatMap((row) => row.author ? [row.author] : []) }),
     captureReadableDigestInputs({ actor, workspaceId, kind: "Member", records: rows.flatMap((row) => row.assigneeMember ? [row.assigneeMember] : []) }),
     captureReadableDigestInputs({ actor, workspaceId, kind: "Circle", records: rows.flatMap((row) => row.circle ? [row.circle] : []) }),
   ]);
+  const [authors, members, circles] = await (release ? release.observeRead(captureJoins) : captureJoins());
   release?.add([...authors.roots, ...members.roots, ...circles.roots]);
   const authorIds = new Set(authors.records.map((row) => row.id));
   const memberIds = new Set(members.records.map((row) => row.id));
@@ -483,16 +484,19 @@ async function readAction(actor: AppActor, params: {
     },
   });
   invariant(action, 404, "NOT_FOUND", "Action not found.");
-  invariant((await readableArtifactIds(actor, params.workspaceId, "Action", [action])).has(action.id),
-    404, "NOT_FOUND", "Action not found.");
-  const visibleProposalIds = action.proposal
-    ? await readableArtifactIds(actor, params.workspaceId, "Proposal", [action.proposal]) : new Set<string>();
-  return {
-    ...(await redactActionJoins(actor, params.workspaceId, [action]))[0],
+  const release = new WorkItemReadRelease(actor, params.workspaceId);
+  invariant((await release.admit("Action", [action])).length, 404, "NOT_FOUND", "Action not found.");
+  const proposals = await release.observeRead(() => captureReadableDigestInputs({
+    actor, workspaceId: params.workspaceId, kind: "Proposal", records: action.proposal ? [action.proposal] : [],
+  }));
+  release.add(proposals.roots);
+  const visibleProposalIds = new Set(proposals.records.map(row => row.id));
+  return release.finish({
+    ...(await redactActionJoins(actor, params.workspaceId, [action], release))[0],
     proposalId: action.proposal && visibleProposalIds.has(action.proposal.id) ? action.proposalId : null,
     proposal: action.proposal && visibleProposalIds.has(action.proposal.id)
       ? { id: action.proposal.id, title: action.proposal.title } : null,
-  };
+  });
 }
 
 export async function listActionChecklistItems(actor: AppActor, params: {

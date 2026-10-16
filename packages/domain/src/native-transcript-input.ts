@@ -65,10 +65,13 @@ function audioAssetBindingHash(input: { workspaceId: string; meetingAudioAssetId
   return nativeTranscriptPayloadHash(input);
 }
 
+const AUDIO_LEASE_TIMEOUT_MS = 5 * 60_000;
+
+// A heartbeat changes freshness, never the immutable identity of this attempt.
 function audioJobLeaseHash(job: WorkflowJob) {
   return nativeTranscriptPayloadHash({ id: job.id, workspaceId: job.workspaceId, type: job.type,
     payload: job.payload, status: job.status, attempts: job.attempts,
-    lockedBy: job.lockedBy, lockedAt: job.lockedAt?.toISOString() ?? null,
+    lockedBy: job.lockedBy,
     startedAt: job.startedAt?.toISOString() ?? null });
 }
 
@@ -226,7 +229,8 @@ export async function createAudioTranscriptWorkerActor(params: {
     prisma.workflowJob.findFirst({ where: { id: params.workflowJobId, workspaceId: params.workspaceId } }),
   ]);
   invariant(asset && input && job && job.type === "meeting-audio.transcribe" && job.status === "RUNNING"
-    && job.lockedAt && job.lockedBy && job.attempts === params.expectedLease.attempts
+    && job.startedAt && job.lockedAt && job.lockedAt.getTime() > Date.now() - AUDIO_LEASE_TIMEOUT_MS
+    && job.lockedBy && job.attempts === params.expectedLease.attempts
     && job.lockedBy === params.expectedLease.lockedBy
     && job.lockedAt.getTime() === params.expectedLease.lockedAt.getTime()
     && (job.payload as { audioAssetId?: string })?.audioAssetId === asset.id,
@@ -240,7 +244,36 @@ export async function createAudioTranscriptWorkerActor(params: {
   try {
     const roots = await captureArtifactInputProof(actor, params.workspaceId,
       [{ kind: "NativeTranscriptInput", id: input.id, snapshot: input }]);
-    return { actor, asset, input, roots };
+    const attemptHash = audioJobLeaseHash(job);
+    let lastLockedAt = job.lockedAt;
+    let pending: Promise<void> | undefined;
+    // Both the timer and the provider callback share this serialized CAS. A
+    // stale/expired attempt cannot renew itself or adopt another owner's lease.
+    const renewLease = () => {
+      if (pending) return pending;
+      pending = prisma.$transaction(async tx => {
+        await tx.$queryRaw`SELECT "id" FROM "WorkflowJob" WHERE "id" = ${job.id}
+          AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+        const current = await tx.workflowJob.findFirst({ where: { id: job.id, workspaceId: params.workspaceId } });
+        invariant(current && current.startedAt && current.lockedAt
+          && current.lockedAt.getTime() === lastLockedAt.getTime()
+          && current.lockedAt.getTime() > Date.now() - AUDIO_LEASE_TIMEOUT_MS
+          && audioJobLeaseHash(current) === attemptHash
+          && await isArtifactInputProofReadable(actor, params.workspaceId, roots, tx),
+        409, "SOURCE_CHANGED", "Audio transcription attempt or source authority changed.");
+        const nextLockedAt = new Date();
+        const renewed = await tx.workflowJob.updateMany({ where: {
+          id: job.id, workspaceId: params.workspaceId, type: job.type, status: "RUNNING",
+          attempts: job.attempts, lockedBy: job.lockedBy, startedAt: job.startedAt,
+          payload: { equals: job.payload as Prisma.InputJsonValue },
+          lockedAt: { equals: lastLockedAt, gt: new Date(nextLockedAt.getTime() - AUDIO_LEASE_TIMEOUT_MS) },
+        }, data: { lockedAt: nextLockedAt } });
+        invariant(renewed.count === 1, 409, "SOURCE_CHANGED", "Audio transcription lease changed.");
+        return nextLockedAt;
+      }).then(nextLockedAt => { lastLockedAt = nextLockedAt; }).finally(() => { pending = undefined; });
+      return pending;
+    };
+    return { actor, asset, input, roots, renewLease };
   } catch (error) { revokeAudioTranscriptWorker(actor); throw error; }
 }
 
@@ -317,7 +350,8 @@ export async function isNativeTranscriptInputCurrent(actor: AppActor, workspaceI
       const supportGrant = await db.workspaceSupportGrant.findUnique({ where: {
         workspaceId_userId: { workspaceId, userId: input.submittedByUserId } }, select: { role: true, isActive: true } });
       return Boolean(job && job.type === "meeting-audio.transcribe" && job.status === "RUNNING"
-        && job.lockedAt && job.lockedBy && (job.payload as { audioAssetId?: string })?.audioAssetId === asset.id
+        && job.startedAt && job.lockedAt && job.lockedAt.getTime() > Date.now() - AUDIO_LEASE_TIMEOUT_MS
+        && job.lockedBy && (job.payload as { audioAssetId?: string })?.audioAssetId === asset.id
         && audioJobLeaseHash(job) === purpose.jobLeaseHash
         && (!supportGrant || (supportGrant.isActive && supportGrant.role === "FULL")));
     }

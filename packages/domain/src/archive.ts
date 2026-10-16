@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { MemberRole } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { incrementCacheVersion, prisma } from "@corgtex/shared";
@@ -23,7 +24,12 @@ import {
 import { appendEvents } from "./events";
 import { findSourceArticleImpacts, sourceIdsInDerivation } from "./brain-source-impact";
 import { lockActiveArticleSources, lockBrainSourceLink } from "./brain-source-links";
-import { advanceArchivedArtifactEnvelopeLineage, assertArtifactInputWriteFence, isArtifactArchiveMetadataReadable, captureArtifactArchiveMetadataProof, isArtifactArchiveMetadataProofReadable, type ArchiveMetadataProof, isLineageKind, sealArtifactInputActor } from "./source-lineage";
+import { advanceArchivedArtifactEnvelopeLineage, assertArtifactInputWriteFence, isArtifactArchiveMetadataReadable, captureArtifactArchiveMetadataProof, isArtifactArchiveMetadataProofReadable, type ArchiveMetadataProof, isLineageKind, sealArtifactInputActor, isPurgedArchiveMetadataPolicyReadable, captureArtifactPermissionEpochs } from "./source-lineage";
+
+import { artifactPermissionEpochIdentities, capturePermissionEpochs, isArtifactPermissionEpochProofCurrent,
+  mergePermissionEpochProofs, parsePermissionEpochProof, type PermissionEpochProof } from "./source-permission-epochs";
+import { artifactPermissionParents } from "./source-permission-parents";
+import { categoryGovernorIdentities } from "./information-category-policy";
 
 export type ArchiveFilter = "active" | "archived" | "all";
 
@@ -601,6 +607,81 @@ function archiveMetadata(record: Prisma.WorkspaceArchiveRecordGetPayload<{ selec
     archiveReason: null, archivedByLabel: null, purgeReason: null };
 }
 
+// Deliberately not a LineageKind: these heads authenticate purge status only,
+// never artifact content, model inputs or generic source provenance.
+const PURGED_AUDIT_KIND = "WorkspaceArchiveRecord";
+const PURGED_POLICY_FIELDS = ["id", "workspaceId", "isPrivate", "status", "ownerMemberId", "authorUserId",
+  "variantOfArticleId", "informationCategory", "accessDomain"] as const;
+function auditHash(value: unknown): string {
+  const canonical = (item: unknown): unknown => item instanceof Date ? item.toISOString()
+    : Array.isArray(item) ? item.map(canonical)
+      : item && typeof item === "object" ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, entry]) => [key, canonical(entry)])) : item;
+  return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
+}
+function auditHeadStamp(head: { id: string; revision: number; origin: string; contentHash: string;
+  inputsJson: unknown; rootsJson: unknown; epochProofVersion: number | null; permissionEpochsJson: unknown }) {
+  return auditHash([head.id, head.revision, head.origin, head.contentHash, head.inputsJson,
+    head.rootsJson, head.epochProofVersion, head.permissionEpochsJson]);
+}
+type PurgedAuditReceipt = { version: 1; archiveRecordId: string; workspaceId: string; entityType: string; entityId: string;
+  sourceHead: string; envelope: Record<string, unknown>; epochs: PermissionEpochProof };
+type PurgedAuditProof = { record: ReturnType<typeof archiveMetadata>; receiptHash: string; head: string; epochs: PermissionEpochProof };
+
+async function purgeAuditEnvelope(actor: AppActor, workspaceId: string, entityType: string,
+  record: Record<string, unknown>, tx: Prisma.TransactionClient) {
+  if (!isLineageKind(entityType) || artifactPermissionParents(entityType, record).length) return null;
+  const head = await tx.artifactInputLineage.findFirst({ where: { workspaceId, artifactType: entityType,
+    artifactId: String(record.id) }, orderBy: { revision: "desc" } });
+  if (!head || head.origin !== "HUMAN_ORIGINAL" || !await isArtifactArchiveMetadataReadable(actor, workspaceId,
+    { kind: entityType, id: String(record.id) }, tx)) return null;
+  const envelope = Object.fromEntries(PURGED_POLICY_FIELDS.filter(key => record[key] !== undefined).map(key => [key, record[key]]));
+  if (!await isPurgedArchiveMetadataPolicyReadable(actor, workspaceId, entityType, envelope, tx)) return null;
+  return { envelope, sourceHead: auditHeadStamp(head) };
+}
+
+async function readPurgedAudit(actor: AppActor, workspaceId: string, record: ReturnType<typeof archiveMetadata>,
+  tx: Prisma.TransactionClient, expected?: PurgedAuditProof) {
+  if (!record.purgedAt || record.workspaceId !== workspaceId) return null;
+  // The JSON predicate excludes legacy body snapshots before hydration.
+  const stored = await tx.workspaceArchiveRecord.findFirst({ where: { id: record.id, workspaceId,
+    entityType: record.entityType, entityId: record.entityId, purgedAt: record.purgedAt, restoredAt: null,
+    previousState: { path: ["purgedMetadata", "version"], equals: 1 } },
+    select: { ...archiveMetadataSelect, previousState: true } });
+  if (!stored || auditHash(archiveMetadata(stored)) !== auditHash(record)) return null;
+  const wrapper = stored.previousState as { purgedMetadata?: PurgedAuditReceipt } | null;
+  const receipt = wrapper?.purgedMetadata;
+  if (!receipt || receipt.version !== 1 || receipt.archiveRecordId !== record.id || receipt.workspaceId !== workspaceId
+    || receipt.entityType !== record.entityType || receipt.entityId !== record.entityId
+    || !receipt.envelope || receipt.envelope.id !== record.entityId || receipt.envelope.workspaceId !== workspaceId
+    || !parsePermissionEpochProof(receipt.epochs)) return null;
+  const head = await tx.artifactInputLineage.findFirst({ where: { workspaceId, artifactType: PURGED_AUDIT_KIND,
+    artifactId: record.id }, orderBy: { revision: "desc" } });
+  const source = await tx.artifactInputLineage.findFirst({ where: { workspaceId, artifactType: record.entityType,
+    artifactId: record.entityId }, orderBy: { revision: "desc" } });
+  const receiptHash = auditHash(receipt);
+  if (!head || head.revision !== 1 || head.origin !== "NATIVE_ORIGINAL" || head.contentHash !== receiptHash || head.epochProofVersion !== 1
+    || auditHash(head.permissionEpochsJson) !== auditHash(receipt.epochs)
+    || auditHash(head.inputsJson) !== auditHash([]) || auditHash(head.rootsJson) !== auditHash([])
+    || !source || source.origin !== "HUMAN_ORIGINAL" || auditHeadStamp(source) !== receipt.sourceHead
+    || expected && (expected.receiptHash !== receiptHash || expected.head !== auditHeadStamp(head))) return null;
+  if (!await isArtifactPermissionEpochProofCurrent(workspaceId, receipt.epochs, tx)
+    || expected && !await isArtifactPermissionEpochProofCurrent(workspaceId, expected.epochs, tx)
+    || !await isPurgedArchiveMetadataPolicyReadable(actor, workspaceId, record.entityType, receipt.envelope, tx)) return null;
+  return { receiptHash, head: auditHeadStamp(head) };
+}
+
+async function capturePurgedAudit(actor: AppActor, workspaceId: string, record: ReturnType<typeof archiveMetadata>) {
+  return prisma.$transaction(async tx => {
+    const membership = await requireWorkspaceMembership({ actor, workspaceId, tx });
+    const captured = await readPurgedAudit(actor, workspaceId, record, tx);
+    if (!captured) return null;
+    const epochs = mergePermissionEpochProofs(await captureArtifactPermissionEpochs(actor, workspaceId, [], tx),
+      membership?.id ? await capturePermissionEpochs(tx, workspaceId, [{ kind: "MemberRolePolicy", id: membership.id }]) : undefined)!;
+    return { record, ...captured, epochs };
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 30_000 });
+}
+
 export async function getWorkspaceArchiveRecord(actor: AppActor, params: {
   workspaceId: string;
   entityType: string;
@@ -620,6 +701,16 @@ export async function getWorkspaceArchiveRecord(actor: AppActor, params: {
     orderBy: { archivedAt: "desc" },
     select: archiveMetadataSelect,
   });
+  if (record?.purgedAt) {
+    const proof = await capturePurgedAudit(actor, params.workspaceId, archiveMetadata(record));
+    if (!proof) return null;
+    return prisma.$transaction(async tx => {
+      await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
+      invariant(await readPurgedAudit(actor, params.workspaceId, proof.record, tx, proof),
+        409, "SOURCE_CHANGED", "Purge metadata permissions changed before release.");
+      return proof.record;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 30_000 });
+  }
   return record && !record.purgedAt && isLineageKind(record.entityType)
     && await isArtifactArchiveMetadataReadable(actor, params.workspaceId, { kind: record.entityType, id: record.entityId })
     ? archiveMetadata(record) : null;
@@ -964,6 +1055,7 @@ export async function purgeWorkspaceArtifact(actor: AppActor, params: {
     if (config.canPurge) {
       await config.canPurge(tx, record);
     }
+    const auditEnvelope = await purgeAuditEnvelope(actor, params.workspaceId, config.entityType, record, tx);
     if (config.beforePurge) {
       await config.beforePurge(tx, record);
     }
@@ -986,11 +1078,29 @@ export async function purgeWorkspaceArtifact(actor: AppActor, params: {
     await tx.workspaceArchiveRecord.update({
       where: { id: archiveRecord.id },
       data: {
+        previousState: Prisma.DbNull,
         purgedAt: new Date(),
         purgedByUserId: actorUserId(actor),
         purgeReason: reason,
       },
     });
+    let receipt: PurgedAuditReceipt | null = null;
+    if (auditEnvelope) {
+      // Capture after DELETE: the tombstone binds the new absence epoch, never
+      // a pre-deletion content proof or the publisher's current authority.
+      const epochs = await capturePermissionEpochs(tx, params.workspaceId, [
+        { kind: PURGED_AUDIT_KIND, id: archiveRecord.id },
+        ...artifactPermissionEpochIdentities(config.entityType, auditEnvelope.envelope),
+        ...await categoryGovernorIdentities(config.entityType, auditEnvelope.envelope, params.workspaceId, tx),
+      ]);
+      receipt = { version: 1, archiveRecordId: archiveRecord.id, workspaceId: params.workspaceId,
+        entityType: config.entityType, entityId: record.id, ...auditEnvelope, epochs };
+      await tx.artifactInputLineage.create({ data: { workspaceId: params.workspaceId, artifactType: PURGED_AUDIT_KIND,
+        artifactId: archiveRecord.id, revision: 1, origin: "NATIVE_ORIGINAL", contentHash: auditHash(receipt),
+        inputsJson: [], rootsJson: [], epochProofVersion: 1, permissionEpochsJson: epochs as unknown as Prisma.InputJsonValue } });
+    }
+    if (receipt) await tx.workspaceArchiveRecord.update({ where: { id: archiveRecord.id },
+      data: { previousState: { purgedMetadata: receipt } as unknown as Prisma.InputJsonValue } });
 
     await tx.auditLog.create({
       data: {
@@ -1027,7 +1137,7 @@ export async function listArchivedWorkspaceArtifacts(actor: AppActor, params: {
     400, "INVALID_INPUT", "Archive pagination is invalid.");
 
   if (take === 0) return [];
-  const page: Array<{ record: ReturnType<typeof archiveMetadata>; proof: ArchiveMetadataProof }> = [];
+  const page: Array<{ record: ReturnType<typeof archiveMetadata>; proof?: ArchiveMetadataProof; purged?: PurgedAuditProof }> = [];
   let readablePosition = 0;
   let cursor: { archivedAt: Date; id: string } | undefined;
   while (page.length < take) {
@@ -1050,7 +1160,14 @@ export async function listArchivedWorkspaceArtifacts(actor: AppActor, params: {
     });
     if (!records.length) break;
     for (const record of records) {
-      if (record.purgedAt || !isLineageKind(record.entityType)) continue;
+      if (record.purgedAt) {
+        const purged = await capturePurgedAudit(actor, params.workspaceId, archiveMetadata(record));
+        if (!purged || readablePosition++ < skip) continue;
+        page.push({ record: purged.record, purged });
+        if (page.length === take) break;
+        continue;
+      }
+      if (!isLineageKind(record.entityType)) continue;
       const proof = await captureArtifactArchiveMetadataProof(actor, params.workspaceId,
         { kind: record.entityType, id: record.entityId });
       if (!proof) continue;
@@ -1075,6 +1192,7 @@ export async function listArchivedWorkspaceArtifacts(actor: AppActor, params: {
   // original admitted receipts after discovery, outside the local release tx.
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"] });
   for (const { proof } of page) {
+    if (!proof) continue;
     invariant(await isArtifactArchiveMetadataProofReadable(actor, params.workspaceId, proof),
       409, "SOURCE_CHANGED", "Archive metadata source access changed before release.");
   }
@@ -1082,9 +1200,10 @@ export async function listArchivedWorkspaceArtifacts(actor: AppActor, params: {
   // shared snapshot. Never replace an admitted proof with today's receipt.
   return prisma.$transaction(async tx => {
     await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"], tx });
-    for (const { proof } of page) {
-      invariant(await isArtifactArchiveMetadataProofReadable(actor, params.workspaceId, proof, tx),
-        409, "SOURCE_CHANGED", "Archive metadata permissions changed before release.");
+    for (const { proof, purged } of page) {
+      invariant(proof ? await isArtifactArchiveMetadataProofReadable(actor, params.workspaceId, proof, tx)
+        : purged && await readPurgedAudit(actor, params.workspaceId, purged.record, tx, purged),
+      409, "SOURCE_CHANGED", "Archive metadata permissions changed before release.");
     }
     return page.map(({ record }) => {
       const permalink = permalinkByEntity.get(`${record.entityType}:${record.entityId}`);

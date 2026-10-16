@@ -2851,6 +2851,30 @@ async function evaluateArchiveMetadataRoot(actor: AppActor, workspaceId: string,
     { ...artifact, fingerprint }, new Set(), new Map(), false, true);
 }
 
+/** Current policy only for archive-owned purge audit receipts. This does not
+ * authenticate a receipt or admit content: archive.ts binds the stored receipt,
+ * original human head, post-delete epochs and final current-reader snapshot. */
+export async function isPurgedArchiveMetadataPolicyReadable(actor: AppActor, workspaceId: string,
+  kind: string, envelope: Record<string, unknown>, db: LineageClient = prisma): Promise<boolean> {
+  // These kinds have no live permission parents or native/provider validators.
+  // Never broaden this list merely because another kind has a similar DTO.
+  if (!["Action", "Goal", "Proposal", "Tension", "BrainArticle", "Meeting", "Document"].includes(kind)
+    || envelope.workspaceId !== workspaceId || typeof envelope.id !== "string"
+    || envelope.variantOfArticleId != null) return false;
+  const sourceKind = kind as LineageKind;
+  if (artifactPermissionParents(sourceKind, envelope).length) return false;
+  if (["Action", "Goal", "Proposal", "Tension", "BrainArticle"].includes(kind)
+    && typeof envelope.isPrivate !== "boolean") return false;
+  if (["Action", "Goal", "Proposal", "Tension"].includes(kind) && typeof envelope.status !== "string") return false;
+  const membership = await requireWorkspaceMembership({ actor, workspaceId, tx: db });
+  if (!await currentCredentialCanRead(db, actor, workspaceId, sourceKind, new Map())
+    || !actorCanReadRecord(actor, workspaceId, membership, sourceKind, envelope)) return false;
+  if (["Meeting", "Document"].includes(kind) && (typeof envelope.informationCategory !== "string"
+    || !await canReadInformationCategory(actor, workspaceId, envelope.informationCategory, db))) return false;
+  if (kind === "Document" && !(await resolveKnowledgeAccessDomains(actor, workspaceId, db)).some(domain => domain === String(envelope.accessDomain))) return false;
+  return true;
+}
+
 /** A metadata-only receipt. It must never be passed to a content/model reader. */
 export type ArchiveMetadataProof = { root: LineageRoot; heads: ReadonlyMap<string, string> };
 

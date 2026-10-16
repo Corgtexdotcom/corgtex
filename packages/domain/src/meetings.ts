@@ -9,7 +9,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import { invariant } from "./errors";
-import { captureArtifactInputSnapshotProof, captureImmutableArtifactInputProof, currentArtifactInputRoots, invalidateArtifactInputLineage, lineageContentFingerprint, preserveUnknownArtifactInputSnapshot, readableArtifactIds, recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
+import { captureArtifactInputProof, captureArtifactInputSnapshotProof, captureImmutableArtifactInputProof, currentArtifactInputRoots, invalidateArtifactInputLineage, lineageContentFingerprint, preserveUnknownArtifactInputSnapshot, readableArtifactIds, recordArtifactInputLineage, type LineageKind, type LineageRoot } from "./source-lineage";
 import { finishProducerLineage, prepareProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { meetingAgendaInputProjection, meetingTranscriptInputProjection, readMeetingInputBatches } from "./meeting-intelligence-context";
 import { requireMeetingProcessedContentEditor } from "./collaborative-permissions";
@@ -754,12 +754,27 @@ function meetingDateRangeWhere(from?: Date, to?: Date): Prisma.DateTimeFilter | 
   return Object.keys(filter).length > 0 ? filter : undefined;
 }
 
-async function projectMeetingsForReader<T extends { id: string }>(actor: AppActor, workspaceId: string, meetings: T[], db?: Prisma.TransactionClient) {
-  const rawIds = await readableArtifactIds(actor, workspaceId, "MeetingTranscript",
-    meetings.map((meeting) => meetingTranscriptInputProjection(meeting) as { id: string }), db);
-  const derivedIds = await readableArtifactIds(actor, workspaceId, "Meeting", meetings, db);
-  const agendaIds = await readableArtifactIds(actor, workspaceId, "MeetingAgenda",
-    meetings.map((meeting) => meetingAgendaInputProjection(meeting) as { id: string }), db);
+async function captureMeetingReaderRows<T extends { id: string }>(actor: AppActor, workspaceId: string,
+  kind: LineageKind, records: T[], release: DigestReadRelease) {
+  return release.observeRead(async () => {
+    const ids = await readableArtifactIds(actor, workspaceId, kind, records);
+    const selected = records.filter(row => ids.has(row.id));
+    release.add(await captureArtifactInputProof(actor, workspaceId,
+      selected.map(row => ({ kind, id: row.id, snapshot: row }))));
+    return selected;
+  });
+}
+
+async function projectMeetingsForReader<T extends { id: string }>(actor: AppActor, workspaceId: string, meetings: T[], db?: Prisma.TransactionClient, release?: DigestReadRelease) {
+  const admit = async <R extends { id: string }>(kind: "MeetingTranscript" | "Meeting" | "MeetingAgenda", records: R[]) => {
+    if (!release) return readableArtifactIds(actor, workspaceId, kind, records, db);
+    return new Set((await captureMeetingReaderRows(actor, workspaceId, kind, records, release)).map(row => row.id));
+  };
+  const rawIds = await admit("MeetingTranscript",
+    meetings.map((meeting) => meetingTranscriptInputProjection(meeting) as { id: string }));
+  const derivedIds = await admit("Meeting", meetings);
+  const agendaIds = await admit("MeetingAgenda",
+    meetings.map((meeting) => meetingAgendaInputProjection(meeting) as { id: string }));
   return meetings.filter((meeting) => (meeting as { transcript?: unknown }).transcript
     ? rawIds.has(meeting.id) : derivedIds.has(meeting.id)).map((meeting) => {
     const projected = { ...meeting } as T & { summaryMd?: string | null; blocksJson?: unknown; decisionsJson?: unknown; agendaJson?: unknown };
@@ -801,7 +816,8 @@ export async function listMeetings(actor: AppActor, workspaceId: string, opts?: 
   ])];
   const participantEmails = [...new Set(members.map((member) => member.user.email))];
   const recordedAt = meetingDateRangeWhere(opts?.recordedFrom, opts?.recordedTo);
-  return readMeetingInputBatches((page) => prisma.meeting.findMany({
+  const release = new DigestReadRelease(actor, workspaceId);
+  const meetings = await readMeetingInputBatches((page) => prisma.meeting.findMany({
     where: {
       workspaceId,
       ...(opts?.status ? { status: opts.status } : {}),
@@ -817,14 +833,16 @@ export async function listMeetings(actor: AppActor, workspaceId: string, opts?: 
       ...archiveFilterWhere(opts?.archiveFilter),
     },
     orderBy: [{ recordedAt: opts?.status === "SCHEDULED" ? "asc" : "desc" }, { id: "asc" }], ...page,
-  }), (rows) => projectMeetingsForReader(actor, workspaceId, rows), opts?.take);
+  }), (rows) => projectMeetingsForReader(actor, workspaceId, rows, undefined, release), opts?.take);
+  return release.finish(meetings);
 }
 
 export async function listUpcomingMeetings(actor: AppActor, workspaceId: string, opts?: { from?: Date; to?: Date; take?: number }) {
   await requireWorkspaceMembership({ actor, workspaceId });
   const from = opts?.from ?? new Date();
   const to = opts?.to ?? addDays(from, DEFAULT_OCCURRENCE_LOOKAHEAD_DAYS);
-  return readMeetingInputBatches((page) => prisma.meeting.findMany({
+  const release = new DigestReadRelease(actor, workspaceId);
+  const meetings = await readMeetingInputBatches((page) => prisma.meeting.findMany({
     where: {
       workspaceId,
       status: "SCHEDULED",
@@ -832,7 +850,8 @@ export async function listUpcomingMeetings(actor: AppActor, workspaceId: string,
       recordedAt: { gte: from, lte: to },
     },
     orderBy: [{ recordedAt: "asc" }, { id: "asc" }], ...page,
-  }), (rows) => projectMeetingsForReader(actor, workspaceId, rows), opts?.take);
+  }), (rows) => projectMeetingsForReader(actor, workspaceId, rows, undefined, release), opts?.take);
+  return release.finish(meetings);
 }
 
 export async function getMeeting(actor: AppActor, workspaceId: string, meetingId: string, opts?: { includeArchived?: boolean }) {
@@ -840,13 +859,13 @@ export async function getMeeting(actor: AppActor, workspaceId: string, meetingId
   const meeting = await prisma.meeting.findFirst({ where: { id: meetingId, workspaceId,
     ...(opts?.includeArchived ? {} : { archivedAt: null }) }, include: { series: true } });
   if (!meeting) return null;
-  const projectedMeeting = (await projectMeetingsForReader(actor, workspaceId, [meeting]))[0];
+  const release = new DigestReadRelease(actor, workspaceId);
+  const projectedMeeting = (await projectMeetingsForReader(actor, workspaceId, [meeting], undefined, release))[0];
   if (!projectedMeeting) return null;
   const admit = <T extends { id: string }>(kind: "MeetingInsight" | "Proposal" | "Tension" | "Action") => async (rows: T[]) => {
-    const ids = await readableArtifactIds(actor, workspaceId, kind, rows);
-    return rows.filter((row) => ids.has(row.id));
+    return captureMeetingReaderRows(actor, workspaceId, kind, rows, release);
   };
-  const hasDerivedReceipt = (await readableArtifactIds(actor, workspaceId, "Meeting", [meeting])).has(meeting.id);
+  const hasDerivedReceipt = (await captureMeetingReaderRows(actor, workspaceId, "Meeting", [meeting], release)).length > 0;
   const [insights, proposalRows, tensions, visibleSeries] = await Promise.all([
     hasDerivedReceipt ? readMeetingInputBatches((page) => prisma.meetingInsight.findMany({ where: { workspaceId, meetingId },
       orderBy: [{ sourceRecordedAt: { sort: "desc", nulls: "last" } }, { createdAt: "desc" }, { id: "asc" }], ...page }),
@@ -857,9 +876,9 @@ export async function getMeeting(actor: AppActor, workspaceId: string, meetingId
     readMeetingInputBatches((page) => prisma.tension.findMany({ where: { workspaceId, meetingId, archivedAt: null },
       include: { author: { select: MEETING_PROFILE_INPUT_SELECT } },
       orderBy: [{ createdAt: "desc" }, { id: "asc" }], ...page }), admit("Tension")),
-    meeting.series ? readableArtifactIds(actor, workspaceId, "MeetingSeries", [meeting.series]) : Promise.resolve(new Set<string>()),
+    captureMeetingReaderRows(actor, workspaceId, "MeetingSeries", meeting.series ? [meeting.series] : [], release),
   ]);
-  if (meeting.series && !visibleSeries.has(meeting.series.id)) projectedMeeting.series = null;
+  if (meeting.series && !visibleSeries.some(row => row.id === meeting.series!.id)) projectedMeeting.series = null;
   const proposals = await Promise.all(proposalRows.map(async (proposal) => {
     const [relatedTensions, relatedActions] = await Promise.all([
       readMeetingInputBatches((page) => prisma.tension.findMany({ where: { workspaceId, proposalId: proposal.id, archivedAt: null },
@@ -881,13 +900,14 @@ export async function getMeeting(actor: AppActor, workspaceId: string, meetingId
   // The labels are native profile inputs, whose current workspace membership is checked independently.
   const users = [...proposals.map((row) => row.author), ...tensions.map((row) => row.author),
     ...raisedActions.flatMap((row) => [row.author, row.assigneeMember?.user])].filter((row): row is NonNullable<typeof row> => Boolean(row));
-  const userIds = await readableArtifactIds(actor, workspaceId, "User", users);
+  const userIds = new Set((await captureMeetingReaderRows(actor, workspaceId, "User", users, release)).map(row => row.id));
+  const memberIds = new Set((await captureMeetingReaderRows(actor, workspaceId, "Member", raisedActions.flatMap(row => row.assigneeMember ? [row.assigneeMember] : []), release)).map(row => row.id));
   const redactAuthor = <T extends { author: { id: string; email: string; displayName: string | null } | null }>(row: T) => ({ ...row,
     author: row.author && userIds.has(row.author.id) ? meetingProfileLabel(row.author) : null });
-  for (const row of raisedActions) if (row.assigneeMember && !userIds.has(row.assigneeMember.user.id)) row.assigneeMember = null;
-  return { ...projectedMeeting, insights, proposals: proposals.map(redactAuthor), tensions: tensions.map(redactAuthor),
+  for (const row of raisedActions) if (row.assigneeMember && (!memberIds.has(row.assigneeMember.id) || !userIds.has(row.assigneeMember.user.id))) row.assigneeMember = null;
+  return release.finish({ ...projectedMeeting, insights, proposals: proposals.map(redactAuthor), tensions: tensions.map(redactAuthor),
     raisedActions: raisedActions.map((row) => ({ ...redactAuthor(row), assigneeMember: row.assigneeMember
-      ? { ...row.assigneeMember, user: meetingProfileLabel(row.assigneeMember.user) } : null })) };
+      ? { ...row.assigneeMember, user: meetingProfileLabel(row.assigneeMember.user) } : null })) });
 }
 
 export async function getMeetingParticipants(actor: AppActor, workspaceId: string, participantIds: string[]) {

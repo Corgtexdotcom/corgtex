@@ -85,6 +85,7 @@ type ClaimedEvent = {
 
 type ClaimedJob = {
   meetingClaim?: MeetingTranscriptWorkflowClaim;
+  startedAt: Date;
   lockedBy: string;
   lockedAt: Date;
   mcpOrigin?: unknown;
@@ -528,12 +529,12 @@ async function claimPendingJobs(workerId: string, batchSize: number) {
         LEFT JOIN "WorkflowJob" AS dep ON dep.id = job."dependsOnJobId"
         WHERE (
           (job.status = 'PENDING' AND (
-            (job.type IN ('agent.brain-maintenance', 'agent.brain-absorb', 'agent.meeting-summary', 'meeting.insights.extract', 'agent.action-extraction') AND job."runAfter" <= (NOW() AT TIME ZONE 'UTC'))
-            OR (job.type NOT IN ('agent.brain-maintenance', 'agent.brain-absorb', 'agent.meeting-summary', 'meeting.insights.extract', 'agent.action-extraction') AND job."runAfter" <= NOW())
+            (job.type IN ('agent.brain-maintenance', 'agent.brain-absorb', 'agent.meeting-summary', 'meeting.insights.extract', 'agent.action-extraction', 'meeting-audio.transcribe') AND job."runAfter" <= (NOW() AT TIME ZONE 'UTC'))
+            OR (job.type NOT IN ('agent.brain-maintenance', 'agent.brain-absorb', 'agent.meeting-summary', 'meeting.insights.extract', 'agent.action-extraction', 'meeting-audio.transcribe') AND job."runAfter" <= NOW())
           ))
           OR (job.status = 'RUNNING' AND job."lockedAt" IS NOT NULL AND (
-            (job.type IN ('agent.brain-maintenance', 'agent.brain-absorb', 'agent.meeting-summary', 'meeting.insights.extract', 'agent.action-extraction') AND job."lockedAt" < (clock_timestamp() AT TIME ZONE 'UTC') - interval '5 minutes')
-            OR (job.type NOT IN ('agent.brain-maintenance', 'agent.brain-absorb', 'agent.meeting-summary', 'meeting.insights.extract', 'agent.action-extraction') AND job."lockedAt" < ${staleBefore})
+            (job.type IN ('agent.brain-maintenance', 'agent.brain-absorb', 'agent.meeting-summary', 'meeting.insights.extract', 'agent.action-extraction', 'meeting-audio.transcribe') AND job."lockedAt" < (clock_timestamp() AT TIME ZONE 'UTC') - interval '5 minutes')
+            OR (job.type NOT IN ('agent.brain-maintenance', 'agent.brain-absorb', 'agent.meeting-summary', 'meeting.insights.extract', 'agent.action-extraction', 'meeting-audio.transcribe') AND job."lockedAt" < ${staleBefore})
           ))
         )
         AND (job."dependsOnJobId" IS NULL OR dep.status = 'COMPLETED')
@@ -550,7 +551,7 @@ async function claimPendingJobs(workerId: string, batchSize: number) {
       SET
         status = 'RUNNING',
         "startedAt" = NOW(),
-        "lockedAt" = CASE WHEN job.type IN ('agent.brain-maintenance', 'agent.brain-absorb', 'agent.meeting-summary', 'meeting.insights.extract', 'agent.action-extraction')
+        "lockedAt" = CASE WHEN job.type IN ('agent.brain-maintenance', 'agent.brain-absorb', 'agent.meeting-summary', 'meeting.insights.extract', 'agent.action-extraction', 'meeting-audio.transcribe')
           THEN (clock_timestamp() AT TIME ZONE 'UTC') ELSE NOW()::timestamp END,
         "lockedBy" = ${workerId},
         "attempts" = job."attempts" + 1,
@@ -567,7 +568,8 @@ async function claimPendingJobs(workerId: string, batchSize: number) {
         job.payload,
         job.attempts,
         job."lockedBy",
-        job."lockedAt"
+        job."lockedAt",
+        job."startedAt"
     `;
     for (const job of claimed) {
       if (isMeetingTranscriptWorkerJob(job.type)) job.meetingClaim = registerClaimedMeetingTranscriptWorkflow(job);
@@ -1277,12 +1279,13 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
       } else await execute();
     }));
     if (!diagnostic) {
-      if ((job.type === "agent.brain-source-regenerate" || job.type === "agent.brain-absorb" || job.type === BRAIN_MAINTENANCE_JOB || isMeetingTranscriptWorkerJob(job.type)) && !superseded) {
+      if ((job.type === "agent.brain-source-regenerate" || job.type === "agent.brain-absorb" || job.type === BRAIN_MAINTENANCE_JOB || isMeetingTranscriptWorkerJob(job.type) || job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE) && !superseded) {
         // A reclaimed job may still have an older model call in flight.
         await prisma.workflowJob.updateMany({
           where: { id: job.id, workspaceId: job.workspaceId, type: job.type,
             status: "RUNNING", lockedBy: workerId, attempts: job.attempts,
-            ...((isMeetingTranscriptWorkerJob(job.type) || job.type === BRAIN_MAINTENANCE_JOB) ? {payload: {equals: job.payload as Prisma.InputJsonValue}, lockedAt: {gt: new Date(Date.now() - LOCK_TIMEOUT_MS)}} : {}) },
+            ...((isMeetingTranscriptWorkerJob(job.type) || job.type === BRAIN_MAINTENANCE_JOB || job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE) ? {payload: {equals: job.payload as Prisma.InputJsonValue}, lockedAt: {gt: new Date(Date.now() - LOCK_TIMEOUT_MS)}} : {}),
+            ...(job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE ? { startedAt: job.startedAt } : {}) },
           data: { status: "COMPLETED", completedAt: new Date(), error: null, lockedAt: null, lockedBy: null },
         });
       } else if (!superseded) {
@@ -1312,12 +1315,13 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
         where: { id: job.id, workspaceId: job.workspaceId, type: RELEASE_DIAGNOSTIC_JOB_TYPE, status: "RUNNING", lockedBy: workerId },
         data: { status: "FAILED", lockedAt: null, lockedBy: null, error: "Release diagnostic failed; reconcile the exact operation." },
       });
-    } else if (job.type === "agent.brain-source-regenerate" || job.type === "agent.brain-absorb" || job.type === BRAIN_MAINTENANCE_JOB || isMeetingTranscriptWorkerJob(job.type)) {
+    } else if (job.type === "agent.brain-source-regenerate" || job.type === "agent.brain-absorb" || job.type === BRAIN_MAINTENANCE_JOB || isMeetingTranscriptWorkerJob(job.type) || job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE) {
       const status: WorkflowJobStatus = job.attempts >= MAX_ATTEMPTS || executionAuthorizationRevoked(error) ? "FAILED" : "PENDING";
       await prisma.workflowJob.updateMany({
         where: { id: job.id, workspaceId: job.workspaceId, type: job.type,
           status: "RUNNING", lockedBy: workerId, attempts: job.attempts,
-            ...((isMeetingTranscriptWorkerJob(job.type) || job.type === BRAIN_MAINTENANCE_JOB) ? {payload: {equals: job.payload as Prisma.InputJsonValue}, lockedAt: {gt: new Date(Date.now() - LOCK_TIMEOUT_MS)}} : {}) },
+            ...((isMeetingTranscriptWorkerJob(job.type) || job.type === BRAIN_MAINTENANCE_JOB || job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE) ? {payload: {equals: job.payload as Prisma.InputJsonValue}, lockedAt: {gt: new Date(Date.now() - LOCK_TIMEOUT_MS)}} : {}),
+            ...(job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE ? { startedAt: job.startedAt } : {}) },
         data: { status, error: error instanceof Error ? error.message : "Unknown worker error.",
           completedAt: status === "FAILED" ? new Date() : null,
           runAfter: status === "PENDING" ? nextRetryTime(job.attempts) : undefined,
