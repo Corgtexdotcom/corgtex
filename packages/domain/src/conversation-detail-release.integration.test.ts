@@ -4,6 +4,7 @@ import { prisma, getPrismaClient, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { addConversationTurn, createConversation, createConversationPromptInput, getConversation, listConversations } from "./conversations";
 import { captureArtifactInputProof, recordArtifactInputLineage } from "./source-lineage";
+import * as lineage from "./source-lineage";
 
 beforeEach(truncateAllTables);
 afterEach(() => vi.restoreAllMocks());
@@ -60,10 +61,17 @@ it.each(["source", "source-restore", "caller", "caller-restore", "session", "ses
   "withholds admitted detail after %s changes during later prompt loading", async change => {
     const f = await fixture();
     const find = prisma.conversationPromptInput.findMany.bind(prisma.conversationPromptInput);
+    const capture = lineage.captureReadableConversationInputs;
+    let admittedTurns = false;
+    vi.spyOn(lineage, "captureReadableConversationInputs").mockImplementation(async (...args) => {
+      const result = await capture(...args);
+      if (args[2] === "ConversationTurn" && result?.records.length) admittedTurns = true;
+      return result;
+    });
     let changed = false;
     vi.spyOn(prisma.conversationPromptInput, "findMany").mockImplementation((async (args: Parameters<typeof find>[0]) => {
       const rows = await find(args);
-      if (!changed) {
+      if (!changed && admittedTurns) {
         changed = true;
         if (change.startsWith("source")) {
           await prisma.brainSource.update({ where: { id: f.source.id }, data: { archivedAt: new Date() } });

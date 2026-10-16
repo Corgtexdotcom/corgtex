@@ -35,6 +35,7 @@ const { prismaMock } = vi.hoisted(() => {
 const lineage = vi.hoisted(() => ({ assertArtifactInputWriteFence: vi.fn(), readableArtifactIds: vi.fn(), recordArtifactInputLineage: vi.fn(),
   advanceHumanArtifactInputLineage: vi.fn(), currentArtifactInputRoots: vi.fn(), captureArtifactInputProof: vi.fn() }));
 vi.mock("./source-lineage", async () => ({ ...lineage,
+  captureReadableConversationInputs: async () => null,
   sealArtifactInputActor: (await import("./artifact-input-actor")).sealArtifactInputActor,
   captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({ value: await read(), heads: new Map() }),
   mergeLineageInputRoot: (_previous: unknown, root: unknown) => root,

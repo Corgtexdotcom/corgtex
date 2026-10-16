@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AppError, captureManualTranscriptSourceArtifact, requireWorkspaceMembership, importMeetingTranscriptSourceArtifacts, normalizeMeetingTranscriptSourceProvider } from "@corgtex/domain";
+import { AppError, captureManualTranscriptSourceArtifact, requireWorkspaceMembership, requireMeetingTranscriptSourcesFeature, importMeetingTranscriptSourceArtifacts, normalizeMeetingTranscriptSourceProvider } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { checkApiDemoGuard } from "@/lib/demo-guard";
 import { handleRouteError } from "@/lib/http";
@@ -22,6 +22,7 @@ export async function POST(
     await requireWorkspaceMembership({ actor, workspaceId });
     await checkApiDemoGuard(workspaceId);
     const provider = normalizeMeetingTranscriptSourceProvider(providerParam);
+    await requireMeetingTranscriptSourcesFeature(workspaceId);
     const contentType = request.headers.get("content-type") ?? "";
     const formData = contentType.includes("multipart/form-data") ? await request.formData() : null;
     const redirectValue = formData?.get("redirectTo");

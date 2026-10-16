@@ -1,3 +1,5 @@
+import { assertVariantGenerationClaim, createVariantModelControls, variantGenerationClaimStamp,
+  type VariantGenerationControls } from "./variant-model-attempt";
 import { createHash, randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { incrementCacheVersion, prisma, type AppActor } from "@corgtex/shared";
@@ -448,7 +450,7 @@ export async function generateBrainSourceRemovalCandidate(params: {
   jobId: string;
   expectedAttempt: number;
   expectedOwner: string | null;
-  generate: (article: { id: string; title: string }, sources: Array<{ id: string; title: string | null; content: string }>) => Promise<string>;
+  generate: (article: { id: string; title: string }, sources: Array<{ id: string; title: string | null; content: string }>, controls: VariantGenerationControls) => Promise<string>;
 }) {
   const claim = await prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM "WorkflowJob" WHERE id = ${params.jobId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
@@ -475,7 +477,8 @@ export async function generateBrainSourceRemovalCandidate(params: {
     await tx.workflowJob.update({ where: { id: job.id }, data: {
       payload: { ...payload, phase: "GENERATING", generationToken: token } as Prisma.InputJsonObject,
     } });
-    return { payload, token, attempts: job.attempts } as const;
+    return { payload, token, attempts: job.attempts, claimStamp: variantGenerationClaimStamp({ ...job,
+      payload: { ...payload, phase: "GENERATING", generationToken: token } as Prisma.InputJsonObject }) } as const;
   });
   if ("done" in claim) return { phase: claim.done };
   const { payload, token, attempts } = claim;
@@ -553,7 +556,17 @@ export async function generateBrainSourceRemovalCandidate(params: {
     // The removed article's old title may itself contain withdrawn information.
     // Give the model only a title from the independently retained sources.
     const safeTitle = sources[0]?.title?.trim() || "Remaining-source article";
-    const bodyMd = (await params.generate({ id: article.id, title: safeTitle }, sources)).trim();
+    const attempt = createVariantModelControls(async () => {
+      await prisma.$transaction((tx) => currentPlan(tx, params.workspaceId, payload.sourceId, payload));
+      invariant(await isArtifactInputProofReadable(generationActor, params.workspaceId, candidateRoots[article.id]),
+        409, "SOURCE_CHANGED", "The original remaining sources are no longer readable.");
+      const job = await prisma.workflowJob.findFirst({ where: { id: params.jobId, workspaceId: params.workspaceId,
+        type: "agent.brain-source-regenerate" } });
+      assertVariantGenerationClaim(claim.claimStamp, job);
+    });
+    const generated = await params.generate({ id: article.id, title: safeTitle }, sources, attempt.controls);
+    attempt.assertActive();
+    const bodyMd = generated.trim();
     invariant(bodyMd.length > 0 && bodyMd.length <= 100_000, 422, "INVALID_CANDIDATE", "Regeneration produced an invalid candidate.");
     candidates[article.id] = bodyMd;
     candidateTitles[article.id] = safeTitle;

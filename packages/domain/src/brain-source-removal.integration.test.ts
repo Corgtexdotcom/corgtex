@@ -75,6 +75,41 @@ describe("Brain source removal review", () => {
     else process.env[runtimeOptIn] = previousRuntimeOptIn;
   });
 
+  it.each(["source", "claim", "none"].flatMap(change => [0, 1].map(priorSends => ({ change, priorSends }))))(
+    "provider attempt guards removal $change after $priorSends sends", async ({ change, priorSends }) => {
+      const { workspace, actor, removed, remaining } = await fixture();
+      const article = await prisma.brainArticle.create({ data: { workspaceId: workspace.id, slug: "attempt-guard",
+        title: "Two sources", type: "PROJECT", bodyMd: "Original facts", sourceIds: [removed.id, remaining.id],
+        derivationJson: { version: 1, origin: "brain-absorb", agentRunId: "synthetic-run", sources: [
+          { sourceId: removed.id, fingerprint: brainSourceContentFingerprint(removed) },
+          { sourceId: remaining.id, fingerprint: brainSourceContentFingerprint(remaining) }] } } });
+      await attestArticle(actor, workspace.id, article.id, [removed.id, remaining.id]);
+      const request = await deleteSource(actor, { workspaceId: workspace.id, sourceId: removed.id });
+      if (request.status !== "pending") throw new Error("Expected pending regeneration");
+      await prisma.workflowJob.update({ where: { id: request.jobId }, data: {
+        status: "RUNNING", attempts: 1, lockedBy: "worker", lockedAt: new Date(), startedAt: new Date() } });
+      let sends = 0;
+      const result = await generateBrainSourceRemovalCandidate({ workspaceId: workspace.id, jobId: request.jobId,
+        expectedAttempt: 1, expectedOwner: "worker", generate: async (_article, _sources, controls) => {
+          if (priorSends) { await controls?.authorizeAttempt({ signal: controls.signal }); sends++; }
+          if (change === "source") {
+            await prisma.brainSource.update({ where: { id: remaining.id }, data: { archivedAt: new Date() } });
+            await prisma.brainSource.update({ where: { id: remaining.id }, data: { archivedAt: null } });
+          }
+          if (change === "claim") await prisma.workflowJob.update({ where: { id: request.jobId }, data: { attempts: 2, lockedBy: "replacement" } });
+          await controls?.authorizeAttempt({ signal: controls.signal }); sends++;
+          return "Remaining source facts";
+        } }).catch(error => error);
+      expect(sends).toBe(priorSends + (change === "none" ? 1 : 0));
+      if (change === "none") expect(result).toEqual({ phase: "READY", candidateCount: 1 });
+      else {
+        expect(result).toBeInstanceOf(Error);
+        expect(await prisma.agentRun.count({ where: { workspaceId: workspace.id, agentKey: "brain-source-regenerate" } })).toBe(0);
+      }
+      if (change === "claim") expect(await prisma.workflowJob.findUniqueOrThrow({ where: { id: request.jobId } }))
+        .toMatchObject({ status: "RUNNING", attempts: 2, lockedBy: "replacement" });
+    });
+
   it("batch discovery preserves canonical mismatch, latest same-body heads and snapshot tamper rejection", async () => {
     const {workspace, actor, removed, remaining} = await fixture();
     const article = await prisma.brainArticle.create({data: {workspaceId: workspace.id, slug: "batch-heads",

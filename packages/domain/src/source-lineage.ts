@@ -444,6 +444,8 @@ const localDeliveryReadBatch = new AsyncLocalStorage<LocalDeliveryBatch>();
 const deliveryInputKey = (input: LineageInput) => JSON.stringify([input.kind, input.id]);
 const LOCAL_CRM_KINDS = new Set<LineageKind>(["CrmAccount", "CrmContact", "CrmActivity", "CrmDeal"]);
 const LOCAL_APPROVAL_KINDS = new Set<LineageKind>(["ApprovalFlow", "ApprovalDecision", "Objection", "Proposal", "Member"]);
+const CONVERSATION_READ_KINDS = new Set<LineageKind>(["ConversationTurn", "ConversationPromptInput", "ConversationSession"]);
+const LOCAL_CONVERSATION_KINDS = new Set<LineageKind>([...CONVERSATION_READ_KINDS, "BrainSource", "BrainArticle", "Document", "Action", "Proposal", "Tension"]);
 const APPROVAL_READ_KINDS = new Set<LineageKind>(["ApprovalFlow", "ApprovalDecision", "Objection"]);
 const LOCAL_DELIVERY_KINDS = new Set<LineageKind>(["NewspaperDelivery", "Workspace", "Member", "Action", "Proposal", "Tension"]);
 function localDeliveryBatch(db: LineageClient, workspaceId: string, input: LineageInput) {
@@ -461,6 +463,12 @@ async function loadLocalDeliveryRows(db: LineageClient, workspaceId: string, inp
     const found = kind === "NewspaperDelivery" ? await db.newspaperDelivery.findMany({where})
       : kind === "Workspace" ? await db.workspace.findMany({where: {id: {in: ids.filter(id => id === workspaceId)}}})
       : kind === "Member" ? await db.member.findMany({where, include: {user: {select: {id: true, email: true, displayName: true}}}})
+      : kind === "ConversationTurn" ? await db.conversationTurn.findMany({where: {id: {in: ids}, conversation: {workspaceId}}})
+      : kind === "ConversationPromptInput" ? await db.conversationPromptInput.findMany({where})
+      : kind === "ConversationSession" ? await db.conversationSession.findMany({where})
+      : kind === "BrainSource" ? await db.brainSource.findMany({where})
+      : kind === "BrainArticle" ? await db.brainArticle.findMany({where})
+      : kind === "Document" ? await db.document.findMany({where})
       : kind === "ApprovalFlow" ? await db.approvalFlow.findMany({where})
       : kind === "ApprovalDecision" ? await db.approvalDecision.findMany({where: {id: {in: ids}, flow: {workspaceId}}})
       : kind === "Objection" ? await db.objection.findMany({where: {id: {in: ids}, flow: {workspaceId}}})
@@ -484,7 +492,8 @@ async function loadLocalDeliveryRows(db: LineageClient, workspaceId: string, inp
 async function prepareLocalDeliveryBatch(db: LineageClient, workspaceId: string, inputs: readonly LineageInput[]) {
   const crm = inputs.every(input => LOCAL_CRM_KINDS.has(input.kind));
   const approvals = inputs.some(input => APPROVAL_READ_KINDS.has(input.kind));
-  if (!inputs.length || inputs.length > 100 || !crm && !approvals && !inputs.some(input => input.kind === "NewspaperDelivery")
+  const conversations = inputs.some(input => CONVERSATION_READ_KINDS.has(input.kind));
+  if (!inputs.length || inputs.length > 100 || !crm && !approvals && !conversations && !inputs.some(input => input.kind === "NewspaperDelivery")
     || hasActiveSourceCommitLockPlan(db) || localDeliveryReadBatch.getStore() || workItemReadBatch.getStore()) return null;
   const loaded: LocalDeliveryRows = {rows:new Map(),heads:new Map()};
   let pending = [...inputs];
@@ -498,7 +507,7 @@ async function prepareLocalDeliveryBatch(db: LineageClient, workspaceId: string,
     pending = [...new Map(pending.filter(input => !loaded.rows.has(deliveryInputKey(input)))
       .map(input => [deliveryInputKey(input),input])).values()];
     if (!pending.length) break;
-    if (loaded.rows.size + pending.length > 256 || pending.some(input => !(crm ? LOCAL_CRM_KINDS : approvals ? LOCAL_APPROVAL_KINDS : LOCAL_DELIVERY_KINDS).has(input.kind))) return null;
+    if (loaded.rows.size + pending.length > 256 || pending.some(input => !(crm ? LOCAL_CRM_KINDS : approvals ? LOCAL_APPROVAL_KINDS : conversations ? LOCAL_CONVERSATION_KINDS : LOCAL_DELIVERY_KINDS).has(input.kind))) return null;
     const page = await loadLocalDeliveryRows(db,workspaceId,pending);
     if (page.rows.size !== pending.length) return null;
     const next: LineageInput[] = [];
@@ -506,7 +515,7 @@ async function prepareLocalDeliveryBatch(db: LineageClient, workspaceId: string,
       const key = deliveryInputKey(input), row = page.rows.get(key)!, head = page.heads.get(key);
       const fingerprint = lineageContentFingerprint(input.kind,row);
       const parents = artifactPermissionParents(input.kind,row);
-      if (!crm && !approvals && parents.length || revisions.has(key) && revisions.get(key) !== fingerprint
+      if (!crm && !approvals && !conversations && parents.length || revisions.has(key) && revisions.get(key) !== fingerprint
         || head && head.contentHash !== fingerprint) return null;
       if (crm) {
         if (!head || head.origin !== "HUMAN_ORIGINAL" || !Array.isArray(head.inputsJson) || head.inputsJson.length
@@ -515,11 +524,11 @@ async function prepareLocalDeliveryBatch(db: LineageClient, workspaceId: string,
       } else if (needsManifest(input.kind,row) || head) {
         const roots = head && parseRoots(head.rootsJson);
         if (!head || !roots || !["HUMAN_ORIGINAL","DERIVED"].includes(head.origin)
-          || roots.some(root => !root.permissionEpochs) && (!approvals || head.epochProofVersion !== 1
+          || roots.some(root => !root.permissionEpochs) && (!(approvals || conversations) || head.epochProofVersion !== 1
             || !parsePermissionEpochProof(head.permissionEpochsJson))) return null;
         next.push(...roots);
       }
-      if (approvals) next.push(...parents);
+      if (approvals || conversations) next.push(...parents);
       loaded.rows.set(key,row);
       if (head) loaded.heads.set(key,head);
     }
@@ -537,14 +546,15 @@ async function readLocalDeliveryBatch(db: LineageClient, workspaceId: string, lo
   const stamp = localDeliveryStamp(loaded);
   const crm = [...loaded.rows.keys()].every(key => LOCAL_CRM_KINDS.has(JSON.parse(key)[0]));
   const approvals = [...loaded.rows.keys()].some(key => APPROVAL_READ_KINDS.has(JSON.parse(key)[0]));
+  const conversations = [...loaded.rows.keys()].some(key => CONVERSATION_READ_KINDS.has(JSON.parse(key)[0]));
   const proofs = [...roots.flatMap(root => root.permissionEpochs ? [root.permissionEpochs] : []),
-    ...(crm ? [] : [...loaded.heads.values()].flatMap(head => [approvals && head.origin === "HUMAN_ORIGINAL"
+    ...(crm ? [] : [...loaded.heads.values()].flatMap(head => [(approvals || conversations) && head.origin === "HUMAN_ORIGINAL"
       ? undefined : parsePermissionEpochProof(head.permissionEpochsJson),
       ...(parseRoots(head.rootsJson) ?? []).map(root => root.permissionEpochs)].filter((proof): proof is PermissionEpochProof => Boolean(proof))))];
   // Original human content does not inherit its publisher's historical epochs.
   // A page containing conflicting derived receipts needs ordinary per-row
   // admission; a batch cache must not turn one denied sibling into a page error.
-  if (approvals) try { mergePermissionEpochProofs(...proofs); } catch (error) {
+  if (approvals || conversations) try { mergePermissionEpochProofs(...proofs); } catch (error) {
     if (error instanceof AppError && ["SOURCE_CHANGED", "UNKNOWN_LINEAGE", "PERMISSION_PROOF_LIMIT"].includes(error.code)) return false;
     throw error;
   }
@@ -636,6 +646,61 @@ export async function captureReadableNewspaperDeliveryInputs<T extends {id: stri
   if (!valid) return null;
   observeArtifactRead(actor,workspaceId,all);
   return {records,proofs,roots:all};
+}
+
+/** Small conversation pages cache only supported current local rows/heads.
+ * Original ancestor epochs remain unchanged; unsupported or denied pages ask
+ * the caller to subdivide and eventually use ordinary individual admission. */
+export async function captureReadableConversationInputs<T extends {id: string}>(actor: AppActor,
+  workspaceId: string, kind: "ConversationTurn" | "ConversationPromptInput", records: T[]) {
+  const loaded = await prepareLocalDeliveryBatch(prisma,workspaceId,records.map(record => ({kind,id:record.id})));
+  if (!loaded) return null;
+  const ownIdentities = new Map<string, Array<{kind: string; id: string}>>();
+  for (const record of records) {
+    const key = deliveryInputKey({kind,id:record.id}), row = loaded.rows.get(key)!;
+    if (snapshotContentFields(kind,row).some(field => field in record
+      && !snapshotMatches((record as Record<string,unknown>)[field],row[field]))) return null;
+    const upstream = loaded.heads.has(key) ? parseRoots(loaded.heads.get(key)!.rootsJson) : [];
+    if (!upstream || upstream.some(root => !root.permissionEpochs)) return null;
+    const pending: LineageInput[] = [{kind,id:record.id}], visited = new Set<string>();
+    const identities: Array<{kind: string; id: string}> = [];
+    for (const input of pending) {
+      const parentKey = deliveryInputKey(input);
+      if (visited.has(parentKey)) continue;
+      visited.add(parentKey);
+      // This newly bound root has only native conversation ownership parents.
+      // Source/category/native ancestors keep their original saved proofs.
+      if (!CONVERSATION_READ_KINDS.has(input.kind)) return null;
+      const parent = loaded.rows.get(parentKey)!;
+      identities.push(...artifactPermissionEpochIdentities(input.kind,{...parent,id:input.id,workspaceId}));
+      pending.push(...artifactPermissionParents(input.kind,parent));
+    }
+    ownIdentities.set(record.id,identities);
+  }
+  const epochs = await prisma.$transaction(async tx => {
+    await requireWorkspaceMembership({actor,workspaceId,tx});
+    return {ambient:await captureArtifactPermissionEpochs(actor,workspaceId,[],tx),
+      own:await capturePermissionEpochs(tx,workspaceId,[...ownIdentities.values()].flat())};
+  });
+  const proofs = new Map<string,LineageRoot[]>(), all = new Map<string,LineageRoot>();
+  for (const record of records) {
+    const key = deliveryInputKey({kind,id:record.id}), row = loaded.rows.get(key)!;
+    const identities = new Set(ownIdentities.get(record.id)!.map(identity => JSON.stringify([identity.kind,identity.id])));
+    const own = {...epochs.own,entries:epochs.own.entries.filter(entry => identities.has(JSON.stringify([entry.kind,entry.id])))};
+    const roots: LineageRoot[] = [{kind,id:record.id,fingerprint:lineageContentFingerprint(kind,row),
+      permissionEpochs:mergePermissionEpochProofs(epochs.ambient,own)!},
+      ...parseRoots(loaded.heads.get(key)?.rootsJson ?? [])!];
+    proofs.set(record.id,roots);
+    try { for (const root of roots) all.set(deliveryInputKey(root),mergeLineageInputRoot(all.get(deliveryInputKey(root)),root)); }
+    catch (error) {
+      if (error instanceof AppError && ["SOURCE_CHANGED","UNKNOWN_LINEAGE","PERMISSION_PROOF_LIMIT"].includes(error.code)) return null;
+      throw error;
+    }
+  }
+  const roots = [...all.values()];
+  if (!await readLocalDeliveryBatch(prisma,workspaceId,loaded,roots,() => isArtifactInputProofReadable(actor,workspaceId,roots))) return null;
+  observeArtifactRead(actor,workspaceId,roots);
+  return {records,proofs,roots};
 }
 
 async function loadArtifact(db: LineageClient, workspaceId: string, input: LineageInput): Promise<Record<string, unknown> | null> {
@@ -1503,12 +1568,12 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
     if (!session || session.userId !== row.userId || (actor.kind === "user" && session.userId !== actor.user.id)) return false;
   }
   if (root.kind === "ConversationPromptInput") {
-    const session = await db.conversationSession.findFirst({ where: { id: String(row.sessionId), workspaceId } });
+    const session = await loadArtifact(db, workspaceId, { kind: "ConversationSession", id: String(row.sessionId) });
     if (!session || session.userId !== row.userId || (actor.kind === "user" && session.userId !== actor.user.id
       && !consentAllows(purpose, root.kind, root.id, root.fingerprint))) return false;
   }
   if (root.kind === "ConversationTurn") {
-    const session = await db.conversationSession.findFirst({ where: { id: String(row.conversationId), workspaceId } });
+    const session = await loadArtifact(db, workspaceId, { kind: "ConversationSession", id: String(row.conversationId) });
     if (!session || (!consentAllows(purpose, root.kind, root.id, root.fingerprint)
       && (actor.kind !== "user" || session.userId !== actor.user.id))) return false;
   }

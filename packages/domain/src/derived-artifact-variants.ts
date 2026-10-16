@@ -1,3 +1,5 @@
+import { assertVariantGenerationClaim, createVariantModelControls, variantGenerationClaimStamp,
+  type VariantGenerationControls } from "./variant-model-attempt";
 import { createHash, randomUUID } from "node:crypto";
 import { Prisma, type GenericDerivedArtifactVariant } from "@prisma/client";
 import { prisma, type AppActor } from "@corgtex/shared";
@@ -104,7 +106,7 @@ type Discovery = { params: PreparationParams; memberId: string; requestRoots: Li
 type PhasePreflight = { discovery: Discovery; admitted: DerivationIdentity[]; roots: LineageRoot[];
   targetEpochs: PermissionEpochProof; provider: ExternalProviderCommitPreflight };
 export type GraphSourceVariantGenerationResult = { phase: "APPLIED"; variantId: string } | { phase: "STALE" | "SUPERSEDED" };
-type GenerationClaim = GraphSourceVariantGenerationResult | { actor: UserActor; prepared: Prepared; token: string; leaseStamp: string };
+type GenerationClaim = GraphSourceVariantGenerationResult | { actor: UserActor; prepared: Prepared; token: string; leaseStamp: string; claimStamp: string };
 const TARGET_KINDS: GraphTargetKind[] = ["ContextGraphObject", "ContextGraphRelationship", "ContextGraphEvidenceRef", "ContextGraphProposedDiff"];
 const LIMIT = 5000;
 const TX_OPTIONS = { maxWait: 5_000, timeout: 120_000 };
@@ -538,7 +540,7 @@ export async function revalidateGraphSourceVariants(actor: AppActor, params: { w
 }
 
 export async function generateGraphSourceVariant(params: { workspaceId: string; jobId: string; expectedAttempt: number; expectedOwner: string;
-  generate: (sources: PermittedDerivationSource[], anchors: readonly never[], scope: GraphVariantScope) => Promise<GraphVariantCandidate> }): Promise<GraphSourceVariantGenerationResult> {
+  generate: (sources: PermittedDerivationSource[], anchors: readonly never[], scope: GraphVariantScope, controls: VariantGenerationControls) => Promise<GraphVariantCandidate> }): Promise<GraphSourceVariantGenerationResult> {
   invariant(Number.isInteger(params.expectedAttempt) && params.expectedAttempt > 0 && params.expectedOwner?.trim(), 400, "INVALID_INPUT", "An actual worker lease is required.");
   params = { ...params };
   const initialJob = await prisma.workflowJob.findFirst({ where: { id: params.jobId, workspaceId: params.workspaceId, type: GRAPH_SOURCE_VARIANT_JOB_TYPE } });
@@ -589,7 +591,8 @@ export async function generateGraphSourceVariant(params: { workspaceId: string; 
       if (recipe.phase === "APPLIED") return invalidate();
       const token = randomUUID();
       await tx.workflowJob.update({ where: { id: job.id }, data: { payload: json({ ...recipe, phase: "GENERATING", generationToken: token }) } });
-      return { actor, prepared, token, leaseStamp: leaseHash(job) };
+      return { actor, prepared, token, leaseStamp: leaseHash(job),
+        claimStamp: variantGenerationClaimStamp({ ...job, payload: json({ ...recipe, phase: "GENERATING", generationToken: token }) }) };
     } catch (error) { if (stale(error)) return invalidate(); throw error; }
   }), TX_OPTIONS); } catch (error) { if (stale(error)) return invalidateJob(); throw error; }
   if ("phase" in claim) {
@@ -604,7 +607,17 @@ export async function generateGraphSourceVariant(params: { workspaceId: string; 
   for (const source of modelSources) Object.freeze(source);
   Object.freeze(modelSources);
   const modelScope = Object.freeze(structuredClone(claim.prepared.recipe.scope));
-  const candidate = current ? await params.generate(modelSources, [], modelScope) : null;
+  const attempt = createVariantModelControls(async () => {
+    invariant(await isArtifactInputProofReadable(claim.actor, params.workspaceId, claim.prepared.inputs.roots)
+      && await isArtifactPermissionEpochProofCurrent(params.workspaceId, claim.prepared.recipe.sourceState.permissionEpochs)
+      && await isArtifactPermissionEpochProofCurrent(params.workspaceId, claim.prepared.recipe.sourceState.targetEpochs),
+    409, "SOURCE_CHANGED", "The original graph variant inputs are no longer readable.");
+    const job = await prisma.workflowJob.findFirst({ where: { id: params.jobId, workspaceId: params.workspaceId,
+      type: GRAPH_SOURCE_VARIANT_JOB_TYPE } });
+    assertVariantGenerationClaim(claim.claimStamp, job);
+  });
+  const candidate = current ? await params.generate(modelSources, [], modelScope, attempt.controls) : null;
+  attempt.assertActive();
   const bundle = candidate ? createGraphVariantBundle(candidate, modelSources) : null;
   const publicationJob = await prisma.workflowJob.findFirst({ where: { id: params.jobId, workspaceId: params.workspaceId, type: GRAPH_SOURCE_VARIANT_JOB_TYPE } });
   if (!publicationJob || leaseHash(publicationJob) !== claim.leaseStamp) return { phase: "SUPERSEDED" };

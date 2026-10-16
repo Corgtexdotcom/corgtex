@@ -1,6 +1,6 @@
 import { captureReadableDigestInputs } from "./digest-lineage";
 import { WorkItemReadRelease } from "./work-item-readable-page";
-import { assertArtifactInputWriteFence, readableArtifactIds, recordArtifactInputLineage, advanceHumanArtifactInputLineage, currentArtifactInputRoots, captureArtifactInputProof, sealArtifactInputActor, type LineageRoot } from "./source-lineage";
+import { assertArtifactInputWriteFence, captureReadableConversationInputs, readableArtifactIds, recordArtifactInputLineage, advanceHumanArtifactInputLineage, currentArtifactInputRoots, captureArtifactInputProof, sealArtifactInputActor, type LineageRoot } from "./source-lineage";
 import { prisma, toInputJson } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
@@ -33,17 +33,33 @@ export async function createConversationPromptInput(actor: AppActor, params: { w
   return suppliedTx ? persist(suppliedTx) : prisma.$transaction(persist);
 }
 
+async function captureConversationPage<T extends {id: string}>(actor: AppActor, workspaceId: string,
+  kind: "ConversationTurn" | "ConversationPromptInput", records: T[]): Promise<{records: T[]; proofs: Map<string,LineageRoot[]>}> {
+  if (!records.length) return {records: [], proofs: new Map()};
+  if (records.length <= 75) {
+    const captured = await captureReadableConversationInputs(actor,workspaceId,kind,records);
+    if (captured) return captured;
+    if (records.length === 1) return captureReadableDigestInputs({actor,workspaceId,kind,records});
+  }
+  // Subdivide unsupported/denied closures so one legacy row cannot force the
+  // whole history back into serial proof traversal. No content is truncated.
+  const split = records.length > 75 ? 75 : Math.ceil(records.length / 2);
+  const first = await captureConversationPage(actor,workspaceId,kind,records.slice(0,split));
+  const rest = await captureConversationPage(actor,workspaceId,kind,records.slice(split));
+  return {records: [...first.records,...rest.records], proofs: new Map([...first.proofs,...rest.proofs])};
+}
+
 async function redactConversationTurns(actor: AppActor, workspaceId: string, turns: Array<import("@prisma/client").ConversationTurn>, release?: WorkItemReadRelease, firstOnly = false) {
   // Discovery can omit unknown candidates cheaply; selected content still needs
   // its original full proof and the final shared release.
   const candidateIds = release && firstOnly
     ? await readableArtifactIds(actor, workspaceId, "ConversationTurn", turns) : null;
   const candidates = candidateIds ? turns.filter(turn => candidateIds.has(turn.id)) : turns;
-  const admittedTurns = release ? await captureReadableDigestInputs({ actor, workspaceId, kind: "ConversationTurn", records: candidates }) : null;
+  const admittedTurns = release ? await captureConversationPage(actor, workspaceId, "ConversationTurn", candidates) : null;
   const readable = admittedTurns ? new Set(admittedTurns.records.map(row => row.id)) : await readableArtifactIds(actor, workspaceId, "ConversationTurn", turns);
   const originalIds = turns.flatMap((turn) => turn.promptInputId ? [turn.promptInputId] : []);
   const originals = originalIds.length ? await prisma.conversationPromptInput.findMany({ where: { workspaceId, id: { in: originalIds } } }) : [];
-  const admittedPrompts = release ? await captureReadableDigestInputs({ actor, workspaceId, kind: "ConversationPromptInput", records: originals }) : null;
+  const admittedPrompts = release ? await captureConversationPage(actor, workspaceId, "ConversationPromptInput", originals) : null;
   const originalProof = admittedPrompts ? new Set(admittedPrompts.records.map(row => row.id)) : await readableArtifactIds(actor, workspaceId, "ConversationPromptInput", originals);
   const byId = new Map(originals.map((row) => [row.id, row]));
   const safe = [];

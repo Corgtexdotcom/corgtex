@@ -422,3 +422,53 @@ describe("graph bundle generation with actual lineage and worker lease", () => {
   });
 
 });
+
+
+describe("graph variant provider attempt authority", () => {
+  it.each(["source epoch", "caller epoch", "target epoch", "owner", "payload", "lease expiry"].flatMap(change => [0, 1].map(sendsBeforeChange => ({ change, sendsBeforeChange }))))(
+    "denies $change after $sendsBeforeChange sends without recapturing authority", async ({ change, sendsBeforeChange }) => {
+        const f = await setup(); const lease = await claimRequest(f.request);
+        const job = fixture.rows.workflowJob.find(row => row.id === lease.jobId)!;
+        Object.assign(job, { lockedAt: new Date(), startedAt: new Date() });
+        let sends = 0;
+        const result = generateGraphSourceVariant({ ...lease, generate: async (sources, _anchors, _scope, controls) => {
+          if (sendsBeforeChange) { await controls?.authorizeAttempt({ signal: controls.signal }); sends++; }
+          if (change === "source epoch") epochFixture.bump(workspaceId, "Document", f.doc.id);
+          if (change === "caller epoch") epochFixture.bump(workspaceId, "MemberUserPolicy", "alpha");
+          if (change === "target epoch") epochFixture.bump(workspaceId, "ContextGraphObject", f.targets[0].id);
+          if (change === "owner") job.lockedBy = "replacement-worker";
+          if (change === "payload") job.payload = { ...job.payload, unreviewed: true };
+          if (change === "lease expiry") { vi.spyOn(Date, "now").mockReturnValue(job.lockedAt.getTime() + 300_001); }
+          try { await controls?.authorizeAttempt({ signal: controls.signal }); sends++; }
+          finally { vi.spyOn(Date, "now").mockRestore(); }
+          return generated(sources);
+        } });
+        const outcome = await result.catch(error => error);
+        expect(sends).toBe(sendsBeforeChange);
+        expect(outcome).toBeInstanceOf(Error);
+        expect(fixture.rows.genericDerivedArtifactVariant).toHaveLength(0);
+    });
+
+  it.each([1, 2])("allows %i provider sends with the unchanged original proof and claim", async attempts => {
+    const f = await setup(); const lease = await claimRequest(f.request);
+    Object.assign(fixture.rows.workflowJob.find(row => row.id === lease.jobId)!, { lockedAt: new Date(), startedAt: new Date() });
+    let sends = 0;
+    const result = await generateGraphSourceVariant({ ...lease, generate: async (sources, _anchors, _scope, controls) => {
+      for (let index = 0; index < attempts; index++) { await controls.authorizeAttempt({ signal: controls.signal }); sends++; }
+      return generated(sources);
+    } });
+    expect(result.phase).toBe("APPLIED"); expect(sends).toBe(attempts);
+  });
+
+  it("latches a swallowed guard failure and rejects publication", async () => {
+    const f = await setup(); const lease = await claimRequest(f.request);
+    Object.assign(fixture.rows.workflowJob.find(row => row.id === lease.jobId)!, { lockedAt: new Date(), startedAt: new Date() });
+    await expect(generateGraphSourceVariant({ ...lease, generate: async (sources, _anchors, _scope, controls) => {
+      epochFixture.bump(workspaceId, "Document", f.doc.id);
+      await controls.authorizeAttempt({ signal: controls.signal }).catch(() => {});
+      expect(controls.signal.aborted).toBe(true);
+      return generated(sources);
+    } })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(fixture.rows.genericDerivedArtifactVariant).toHaveLength(0);
+  });
+});

@@ -4,6 +4,7 @@ import { transcriptArtifactByteBudget } from "@/lib/meeting-transcript-source-ar
 const {
   captureManualTranscriptSourceArtifact,
   requireWorkspaceMembership,
+  requireMeetingTranscriptSourcesFeature,
   importMeetingTranscriptSourceArtifacts,
   normalizeMeetingTranscriptSourceProvider,
   resolveRequestActor,
@@ -12,6 +13,7 @@ const {
 } = vi.hoisted(() => ({
   captureManualTranscriptSourceArtifact: vi.fn(),
   requireWorkspaceMembership: vi.fn(),
+  requireMeetingTranscriptSourcesFeature: vi.fn(),
   importMeetingTranscriptSourceArtifacts: vi.fn(),
   normalizeMeetingTranscriptSourceProvider: vi.fn(),
   resolveRequestActor: vi.fn(),
@@ -34,6 +36,7 @@ vi.mock("@corgtex/domain", () => ({
   AppError: MockAppError,
   captureManualTranscriptSourceArtifact,
   requireWorkspaceMembership,
+  requireMeetingTranscriptSourcesFeature,
   importMeetingTranscriptSourceArtifacts,
   normalizeMeetingTranscriptSourceProvider,
 }));
@@ -90,6 +93,8 @@ describe("POST /api/workspaces/[workspaceId]/meeting-transcript-sources/[provide
     expect(captureManualTranscriptSourceArtifact).toHaveBeenCalledWith(actor, expect.objectContaining({ workspaceId: "ws-1", provider: "FIREFLIES", artifact: expect.objectContaining({ rawRequestText: expect.stringContaining("Import this transcript") }) }));
     expect(requireWorkspaceMembership.mock.invocationCallOrder[0]).toBeLessThan(captureManualTranscriptSourceArtifact.mock.invocationCallOrder[0]);
     expect(checkApiDemoGuard).toHaveBeenCalledWith("ws-1");
+    expect(requireMeetingTranscriptSourcesFeature).toHaveBeenCalledWith("ws-1");
+    expect(requireMeetingTranscriptSourcesFeature.mock.invocationCallOrder[0]).toBeLessThan(captureManualTranscriptSourceArtifact.mock.invocationCallOrder[0]);
     expect(importMeetingTranscriptSourceArtifacts).toHaveBeenCalledWith(actor, expect.objectContaining({
       workspaceId: "ws-1",
       provider: "FIREFLIES",
@@ -138,4 +143,26 @@ describe("POST /api/workspaces/[workspaceId]/meeting-transcript-sources/[provide
     expect(importMeetingTranscriptSourceArtifacts).not.toHaveBeenCalled();
   });
 
+});
+
+
+it.each(["json", "multipart"])("rejects disabled transcript %s upload before parsing or custody", async mode => {
+  resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
+  normalizeMeetingTranscriptSourceProvider.mockReturnValue("FIREFLIES");
+  requireMeetingTranscriptSourcesFeature.mockRejectedValueOnce(new MockAppError(403, "FEATURE_DISABLED", "Disabled"));
+  importMeetingTranscriptSourceArtifacts.mockResolvedValue({ batch: { status: "COMPLETED" }, results: [] });
+  handleRouteError.mockImplementation((error: MockAppError) => Response.json({ code: error.code }, { status: error.status }));
+  const artifacts = [{ externalId: "private", text: "Private transcript" }];
+  const { meetingTranscriptArtifactsFromFormData } = await import("@/lib/meeting-transcript-source-artifacts");
+  vi.mocked(meetingTranscriptArtifactsFromFormData).mockResolvedValue(artifacts);
+  const form = new FormData(); form.set("transcript", "Private transcript");
+  const request = mode === "json" ? new Request("http://localhost/import", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ artifacts }) })
+    : new Request("http://localhost/import", { method: "POST", body: form });
+  const parse = vi.spyOn(request, mode === "json" ? "text" : "formData");
+  const { POST } = await import("./route");
+  const response = await POST(request as never, { params: Promise.resolve({ workspaceId: "ws-1", provider: "fireflies" }) });
+  expect(response.status).toBe(403); expect(await response.json()).toEqual({ code: "FEATURE_DISABLED" });
+  expect(parse).not.toHaveBeenCalled();
+  expect(captureManualTranscriptSourceArtifact).not.toHaveBeenCalled();
+  expect(importMeetingTranscriptSourceArtifacts).not.toHaveBeenCalled();
 });

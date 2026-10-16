@@ -6,8 +6,9 @@ import { defaultModelGateway, resolveModel } from "@corgtex/models";
 export async function runGraphSourceVariantJob(params: {
   workspaceId: string; jobId: string; expectedAttempt: number; expectedOwner: string;
 }) {
-  return generateGraphSourceVariant({ ...params, generate: async (sources, _anchors, scope) => {
-    const response = await defaultModelGateway.extract({ model: resolveModel("fast"), workspaceId: params.workspaceId,
+  return generateGraphSourceVariant({ ...params, generate: async (sources, _anchors, scope, controls) => {
+    const response = await defaultModelGateway.extract({
+        ...controls, model: resolveModel("fast"), workspaceId: params.workspaceId,
       workflowJobId: params.jobId, instruction: GRAPH_SOURCE_VARIANT_INSTRUCTION,
       schemaHint: JSON.stringify({ objects: [{ ref: "local ref", objectType: GRAPH_VARIANT_OBJECT_TYPES,
         title: "string", summary: "optional string", properties: "optional object", confidence: "optional 0..1" }],
