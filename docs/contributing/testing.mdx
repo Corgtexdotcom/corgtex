@@ -3,10 +3,18 @@ title: "Testing"
 description: "How to run and write tests in Corgtex."
 ---
 
-We use Vitest for unit and integration tests and the Agent API for
-broader end-to-end coverage. The canonical list of commands lives in
-[`AGENTS.md`](https://github.com/Corgtexdotcom/corgtex/blob/main/AGENTS.md)
-— this page documents the "why" and the E2E setup.
+We use Vitest for application unit and integration tests, Node's native
+`node:test` runner for migration and tooling suites, and the Agent API for
+broader end-to-end coverage. Run commands from the repository root. The executable
+commands and selections live in
+[`package.json`](https://github.com/Corgtexdotcom/corgtex/blob/main/package.json),
+[`vitest.config.mts`](https://github.com/Corgtexdotcom/corgtex/blob/main/vitest.config.mts),
+and [CI](https://github.com/Corgtexdotcom/corgtex/blob/main/.github/workflows/ci.yml).
+
+Follow [Development setup](/contributing/development-setup): use Node.js
+`>=22.22.0 <23`, npm `>=10` (pinned to `10.9.4`), install root workspace
+dependencies, and run `npm run prisma:generate` before application tests.
+Database-backed suites need Docker and the suite-specific fixtures described below.
 
 ## Running Tests
 
@@ -26,7 +34,7 @@ npm run test:unit
 # Vitest project `integration`, then tear down the test database
 npm run test:integration
 
-# Unit + integration (same test-db up/down wrapper)
+# Vitest unit + integration only (same test-db up/down wrapper)
 npm run test:all
 
 # Database-independent production web build
@@ -36,11 +44,15 @@ env -u DATABASE_URL npm run build
 npx vitest run packages/domain/src/runtime.test.ts
 ```
 
-`npm test` is an alias of `npm run test:unit`.
+`npm test` is an alias of `npm run test:unit`. Despite its name, `test:all`
+does not run the native suites or manual infrastructure checks listed below.
 
-Unit tests live next to source (`packages/**/*.test.ts`,
-`apps/**/*.test.ts`, plus `scripts/**/*.test.mjs`). Integration tests
-are `*.integration.test.ts` under the Vitest `integration` project.
+The Vitest `unit` project selects `packages/**/*.test.ts`, `apps/**/*.test.ts`,
+and `scripts/**/*.test.mjs`, excluding `*.integration.test.ts` and
+`*.integration.test.mjs`. The `integration` project selects
+`packages/**/*.integration.test.ts` and `apps/**/*.integration.test.ts`.
+Files under `scripts/` named `*.integration.test.ts`, `*.integration.test.mjs`,
+or `*.node-test.mjs` use the native commands below.
 `npm run test:integration` starts `docker-compose.test.yml` (service
 `postgres`, image `pgvector/pgvector:pg16`, host port **5433**, database
 `corgtex_test`) and tears it down afterward. Do not point integration
@@ -49,9 +61,157 @@ tests at the local-dev `db` service on port `5432`.
 An exported `DATABASE_URL` overrides the integration-test default. Unset it before
 using the local test commands, or explicitly point it to the disposable test
 database on port `5433`. Never run these tests against a shared or production database.
+Vitest's integration global setup applies committed migrations to the selected
+database; the npm wrappers remove the Compose test volumes on teardown.
 
 Do not use `prisma db push` / `npm run prisma:push` to prepare a test or
 dev database; apply migrations with `npm run prisma:migrate:deploy`.
+
+## Native test commands and prerequisites
+
+These suites are separate from Vitest. Use installed workspace dependencies;
+TypeScript native tests run through the installed `tsx` runner. The ordinary
+`Lint, Typecheck & Test` CI job invokes each command in the inventory below.
+
+```bash
+# Ops/Core native suites, then managed PITR and the PostgreSQL restore smoke
+npm run test:migration:ops-core
+
+# Standalone subsets of that command
+node --test scripts/migration/promote-opscore-images.node-test.mjs
+npm run test:migration:opscore-pitr
+npm run test:migration:postgres-smoke
+
+# Typecheck and run the three native tenant-transfer TS suites
+npm run test:tenant-transfer
+# Source-copy subset only
+npm run test:source-copy
+
+# Isolated PG18/PG16 NOT NULL fixtures and the native TS suite
+npm run test:migration:pg18-pg16-notnull
+
+# Native suites invoked directly by CI
+node --test scripts/azure-site-image-release.node-test.mjs scripts/release/ops-readiness-receipt.node-test.mjs
+node --test scripts/adopt-validation-support-owner.integration.test.mjs
+node --test scripts/selfserve-validation-schema.integration.test.mjs scripts/selfserve-schema-catalog.integration.test.mjs
+```
+
+- **Ops/Core:** needs local Docker with a Unix socket, OpenSSL, PostgreSQL
+  fixture images, and `mcr.microsoft.com/azure-storage/azurite:3.35.0`.
+  Preload the pinned official PostgreSQL client image named in
+  [CI](https://github.com/Corgtexdotcom/corgtex/blob/main/.github/workflows/ci.yml)
+  and Azurite: some fixtures use `--pull=never`. The restore smoke creates
+  synthetic local databases and TLS material. The managed-PITR npm command sets
+  the required `TARGET_PROFILE=opscore`. Conditional cases are detailed below.
+- **Tenant transfer:** needs Docker, Prisma tooling, `python3` on `PATH` for the
+  source-copy test's `pg_dump` wrapper, and PostgreSQL 16 client tools
+  (`pg_dump` on `PATH`; CI installs `postgresql-client-16`). The suites
+  create their own loopback containers, apply fixture migrations, and clean them
+  up. Source-copy conversion exercises pgvector PostgreSQL 16, 17, and 18 images.
+- **NOT NULL:** the
+  [fixture runner](https://github.com/Corgtexdotcom/corgtex/blob/main/scripts/migration/run-pg18-pg16-notnull-tests.mjs)
+  needs Docker and installed `pg`, Prisma, and `tsx`. It provisions fresh PG18
+  and PG16 containers, generates fixture DDL locally, and supplies
+  `PG18_NOTNULL_TEST_SOURCE_URL` and `PG18_NOTNULL_TEST_TARGET_URL` to the 14-case
+  suite. It ignores ambient `DATABASE_URL` and externally supplied NOT NULL URLs
+  as targets, and removes its containers and temporary schema in `finally`.
+  Use this npm wrapper instead of invoking the TS suite against an existing database.
+  Local runs use pinned public images; leave `CI_PGVECTOR_PG18_CONFIG_ID` unset
+  unless using CI's verified preloaded image setup.
+- **Owner adoption and schema checks:** explicitly set
+  `QA_OWNER_TEST_DATABASE_URL` for the owner suite and
+  `QA_SCHEMA_TEST_DATABASE_URL` for both schema suites. They require disposable
+  local PostgreSQL fixtures; CI supplies its migrated `corgtex_test` database.
+  The owner suite also accepts `corgtex_owner_adoption_test` with committed
+  migrations applied. Schema checks require `corgtex_test` and privileges to
+  create roles and, for catalog checks, databases. Missing or invalid URLs fail
+  these suites rather than skip them. The two release/receipt suites need no
+  database fixture.
+
+### Reviewed test-registration inventory
+
+Static inventory at
+[`b13afd77`](https://github.com/Corgtexdotcom/corgtex/tree/b13afd77fe8090bdcb33cf8f7aba8246d6ff658e)
+(2026-10-16): **703 tracked test-named TS/JS files = 622 Vitest unit + 31 Vitest
+integration + 50 outside Vitest**. The count includes `*.test.*` and
+`*.node-test.*` source files, not test cases or passing results.
+
+| Selection outside Vitest | Files | Registration |
+| --- | ---: | --- |
+| Ops/Core native group | 40 | `test:migration:ops-core`: 32 `scripts/migration/ops-core-*.node-test.mjs` files plus the eight explicit files below |
+| Tenant transfer | 3 | `test:tenant-transfer`: `shared-tenant-source-copy.integration.test.ts`, `shared-tenant-export.integration.test.ts`, `shared-tenant-import.integration.test.ts` under `scripts/migration/` |
+| PG18/PG16 NOT NULL | 1 | `test:migration:pg18-pg16-notnull`: `scripts/migration/pg18-pg16-notnull.integration.test.ts` through the fixture runner |
+| Owner adoption | 1 | CI directly runs `scripts/adopt-validation-support-owner.integration.test.mjs` |
+| Schema privileges/catalog | 2 | CI directly runs `scripts/selfserve-validation-schema.integration.test.mjs` and `scripts/selfserve-schema-catalog.integration.test.mjs` |
+| Release/receipt | 2 | CI directly runs `scripts/azure-site-image-release.node-test.mjs` and `scripts/release/ops-readiness-receipt.node-test.mjs` |
+| Manual infrastructure | 1 | `infra/azure/ops-core/infra.node-test.mjs`; command and prerequisites below |
+
+The eight explicit files in the Ops/Core group are:
+
+- `scripts/migration/promote-opscore-images.node-test.mjs` (five cases)
+- `scripts/migration/railway-source-fence.node-test.mjs`
+- `scripts/migration/railway-postgres-custody.node-test.mjs`
+- `scripts/migration/run-ops-core-update.node-test.mjs`
+- `scripts/release/worker-demand.node-test.mjs`
+- `scripts/release/managed-azure-worker-demand.node-test.mjs`
+- `scripts/release/managed-azure-container-app-transport.node-test.mjs`
+- `scripts/migration/opscore-managed-pitr.node-test.mjs` (via the chained PITR command)
+
+Thus **49 files are selected by ordinary CI native commands and one is manual**.
+The chained PostgreSQL restore smoke adds executable coverage but is not a
+test-named file in this count. Selection means a command includes a file; it does
+not prove every case executed. Check that run's output for failures and skips.
+This is a reviewed documentation inventory, not an automated registration guard.
+When adding or renaming tests, reconcile the Vitest globs, native package/CI
+commands, and this manual/conditional list so every file has an intentional runner.
+
+### Conditional native cases
+
+The Ops/Core glob selects
+[`ops-core-postgres-runtime-access.integration.node-test.mjs`](https://github.com/Corgtexdotcom/corgtex/blob/main/scripts/migration/ops-core-postgres-runtime-access.integration.node-test.mjs),
+but its real local fixture skips unless `CORGTEX_RUNTIME_ACCESS_LOCAL_TEST=1`.
+It needs a preloaded local image containing PG18 and vector 0.8.2, identified by
+`CORGTEX_RUNTIME_ACCESS_PG_IMAGE=sha256:<cached-image-id>` if overriding the
+source default, plus local Unix-socket Docker, OpenSSL, and installed Prisma tooling.
+It uses `--pull=never` and creates its own synthetic databases and TLS material.
+After preparing that image, opt in with:
+
+```bash
+CORGTEX_RUNTIME_ACCESS_LOCAL_TEST=1 node --test scripts/migration/ops-core-postgres-runtime-access.integration.node-test.mjs
+```
+
+[`worker-demand.node-test.mjs`](https://github.com/Corgtexdotcom/corgtex/blob/main/scripts/release/worker-demand.node-test.mjs)
+runs its mock cases by default, but its real PostgreSQL case skips without
+`WORKER_DEMAND_TEST_DATABASE_URL`. That case separately requires
+`WORKER_DEMAND_TEST_CA_FILE`, a readable CA file for verified TLS, and a fresh,
+empty local database named `worker_demand_synthetic`. The URL must use
+`localhost` or `127.0.0.1`, an explicit port, user `postgres` with a password,
+and no query parameters. It creates fixture tables and the
+`worker_scale_fixture` role; discard the disposable database and role afterward.
+`WORKER_DEMAND_TEST_SCALER_PASSWORD` is optional (otherwise generated).
+After exporting the required inputs, run:
+
+```bash
+node --test scripts/release/worker-demand.node-test.mjs
+```
+
+Ordinary CI does not set either opt-in. Green CI with these files selected does
+not establish that their real database cases ran.
+
+### Intentional manual exclusion
+
+[`infra/azure/ops-core/infra.node-test.mjs`](https://github.com/Corgtexdotcom/corgtex/blob/main/infra/azure/ops-core/infra.node-test.mjs)
+is outside Vitest and ordinary native CI selection at the inventory revision.
+Install Azure CLI with Bicep already available, then run the
+[documented local template check](https://github.com/Corgtexdotcom/corgtex/blob/main/infra/azure/ops-core/README.md):
+
+```bash
+node --test infra/azure/ops-core/infra.node-test.mjs
+```
+
+The test calls `az bicep build --stdout` locally for its templates. It does not
+require an Azure account, provider request, deployment, or database. Keep this
+explicit manual entry reviewed when infrastructure test registration changes.
 
 ## What QA expects
 
