@@ -3,6 +3,7 @@ const { db, authorize } = vi.hoisted(() => ({ db: {
   auditLog: { findMany: vi.fn(), create: vi.fn() }, event: { findMany: vi.fn() }, workflowJob: { findFirst: vi.fn(), findMany: vi.fn() },
   contextGraphProposedDiff: { findFirst: vi.fn() },
   action: { findFirst: vi.fn(), findMany: vi.fn() }, brainArticle: { findFirst: vi.fn() },
+  member: { findFirst: vi.fn(), findMany: vi.fn() }, user: { findFirst: vi.fn() },
   modelUsage: { findMany: vi.fn(), findFirst: vi.fn() }, agentRun: { findFirst: vi.fn() }, workspace: { findFirst: vi.fn() },
   artifactInputLineage: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn() }, $executeRaw: vi.fn(), $queryRaw: vi.fn(), $transaction: vi.fn(),
 }, authorize: vi.fn() }));
@@ -129,6 +130,29 @@ describe("audit and timeline source admission", () => {
     db.workflowJob.findMany.mockImplementation(async () => event.jobs.map(job => ({ ...job, eventId: event.id })));
     return { source, audit, event };
   }
+
+  it.each(["member.updated", "member.deactivated", "member.reactivated"] as const)(
+    "retains %s lifecycle facts only while the current Member is readable", async action => {
+      // Historical deactivation remains visible after a member is reactivated.
+      const user = { id: "subject-user", email: "subject@example.test", displayName: "Subject" };
+      const member = { id: "member-subject", workspaceId: "ws-1", userId: user.id, role: "CONTRIBUTOR", isActive: true, user };
+      db.member.findFirst.mockImplementation(async ({ where }) => where.id === member.id && where.workspaceId === member.workspaceId ? member : null);
+      db.user.findFirst.mockImplementation(async ({ where }) => where.id === user.id ? user : null);
+      const audit = { id: `audit-${action}`, workspaceId: "ws-1", actorUserId: "admin", action,
+        entityType: "Member", entityId: member.id, createdAt: date, meta: { private: "historical fields" } };
+      const event = { id: `event-${action}`, type: action, status: "DISPATCHED", createdAt: date,
+        payload: { private: "historical fields" }, jobs: [] };
+      db.auditLog.findMany.mockResolvedValue([audit, { ...audit, id: "unknown", action: "member.unknown" }]);
+      db.event.findMany.mockResolvedValue([event, { ...event, id: "unknown", type: "member.unknown" }]);
+      db.workflowJob.findMany.mockResolvedValue([]);
+      expect(await listAuditLogs(admin, "ws-1")).toEqual([{ ...audit, meta: null }]);
+      expect(await getEntityTimeline(admin, "ws-1", "Member", member.id)).toEqual({
+        auditLogs: [{ ...audit, meta: null }], relatedEvents: [{ ...event, payload: null }],
+      });
+      member.isActive = false;
+      expect(await listAuditLogs(admin, "ws-1")).toEqual([]);
+      expect(await getEntityTimeline(admin, "ws-1", "Member", member.id)).toEqual({ auditLogs: [], relatedEvents: [] });
+    });
 
   it.each(["Action", "BrainArticle"] as const)("withholds %s audit identity and existence from another member", async kind => {
     const { source, audit } = await privateSource(kind);

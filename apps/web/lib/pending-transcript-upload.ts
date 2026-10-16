@@ -1,7 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
-import { decryptSecret, encryptSecret, getRedisClient, getSharedStateBackend, prisma, redisKey } from "@corgtex/shared";
+import { decryptSecret, encryptSecret, getRedisClient, getSharedStateBackend, isRedisConfigured, isSecretEncryptionConfigured, prisma, redisKey } from "@corgtex/shared";
 
 const PENDING_TRANSCRIPT_TTL_SECONDS = 20 * 60;
+
+/** Redis can serve ordinary shared state without encryption, but private pending
+ * transcripts require durable encryption configuration before accepting work. */
+export function assertPendingTranscriptStorageConfiguration() {
+  if (getSharedStateBackend() === "redis" && isRedisConfigured() && !isSecretEncryptionConfigured()) {
+    throw Object.assign(new Error("Pending transcript Redis storage requires ENCRYPTION_KEY to be a 32-byte hex string."),
+      { code: "PENDING_TRANSCRIPT_ENCRYPTION_REQUIRED" });
+  }
+}
 
 export type PendingTranscriptPayload = {
   workspaceId: string;
@@ -65,6 +74,7 @@ async function cleanupExpired() {
 }
 
 export async function storePendingTranscriptPayload(payload: PendingTranscriptPayload) {
+  assertPendingTranscriptStorageConfiguration();
   try {
     if (!isPendingTranscriptPayload(payload)) return null;
     const token = randomUUID();
@@ -92,6 +102,7 @@ export async function storePendingTranscriptPayload(payload: PendingTranscriptPa
 }
 
 export async function readPendingTranscriptPayload(workspaceId: string, token: string) {
+  assertPendingTranscriptStorageConfiguration();
   try {
     let raw: string | null;
     if (getSharedStateBackend() === "postgres") {

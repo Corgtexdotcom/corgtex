@@ -68,6 +68,7 @@ vi.mock("@corgtex/shared", () => ({
     return value.slice("encrypted:".length);
   },
   getSharedStateBackend: () => "redis",
+  isRedisConfigured: () => true, isSecretEncryptionConfigured: () => true,
   redisKey: (key: string) => `test:${key}`,
 }));
 

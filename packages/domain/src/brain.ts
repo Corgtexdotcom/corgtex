@@ -653,6 +653,14 @@ export async function listArticles(actor: AppActor, params: {
       ? [{ isPrivate: false }, { isPrivate: true, ownerMemberId: membership.id }]
       : [{ isPrivate: false }];
 
+  // List filters select target articles; incoming sources retain the same
+  // workspace/archive/privacy scope without inheriting type, authority or age.
+  const backlinkSourceWhere: Prisma.BrainArticleWhereInput = {
+    workspaceId: params.workspaceId,
+    ...archiveFilterWhere(params.archiveFilter),
+    OR: privacyFilter,
+  };
+
   const baseWhere = {
     workspaceId: params.workspaceId,
     ...(params.type ? { type: params.type } : {}),
@@ -715,7 +723,7 @@ export async function listArticles(actor: AppActor, params: {
     for (const article of candidates) {
       if (!initial.has(article.id) || !current.has(article.id)) continue;
       if (total >= skip && items.length < take) {
-        const related = await articleListRelations(actor, params.workspaceId, article, where);
+        const related = await articleListRelations(actor, params.workspaceId, article, backlinkSourceWhere);
         // Related reads may have awaited a policy/content change. Never return
         // a new row using an old receipt or count a now-withheld selected row.
         if (!(await readableArtifactIds(actor, params.workspaceId, "BrainArticle", [article])).has(article.id)) continue;
