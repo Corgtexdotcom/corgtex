@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
@@ -9,6 +9,16 @@ import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
 const SOURCE_TYPES = ["MEETING","TICKET","PR","RFC","INCIDENT","SLACK","CUSTOMER_FEEDBACK","COMPETITOR","RESEARCH","ARTICLE","DOC","RUNBOOK","EMAIL","FILE_UPLOAD","EXTERNAL_CONTENT"];
 
 type DuplicatePasteResolution = "use_existing" | "update_existing" | "create_new";
+
+type SubmittedPaste = Readonly<{
+  title: string;
+  sourceType: string;
+  channel: string;
+  content: string;
+  ingestionGuidanceMd: string;
+  recordedAt: string | undefined;
+  timeZone: string | undefined;
+}>;
 
 type DuplicatePasteConfirmation = {
   status: "duplicate_confirmation_required";
@@ -63,12 +73,40 @@ export function TextPasteUploader({
   const [timeZone, setTimeZone] = useState("UTC");
   const [error, setError] = useState("");
   const [clarification, setClarification] = useState("");
-  const [duplicate, setDuplicate] = useState<DuplicatePasteConfirmation | null>(null);
+  const [duplicate, setDuplicate] = useState<(DuplicatePasteConfirmation & { submitted: SubmittedPaste; revision: number }) | null>(null);
   const t = useTranslations("settings");
+
+  const revision = useRef(0);
+  const activeRequest = useRef<object | null>(null);
+
+  useEffect(() => {
+    // A workspace change or unmount ends the request session. An old finally
+    // must not unlock a request started in the next session.
+    activeRequest.current = null;
+    revision.current++;
+    setIsSubmitting(false);
+    setDuplicate(null);
+    setError("");
+    setClarification("");
+    return () => { activeRequest.current = null; };
+  }, [workspaceId]);
+
+  const editDraft = useCallback(() => {
+    revision.current++;
+    setDuplicate(null);
+    setError("");
+    setClarification("");
+  }, []);
+
+  const changeTimeZone = useCallback((value: string) => {
+    editDraft();
+    setTimeZone(value);
+  }, [editDraft]);
 
   const isMeeting = sourceType === "MEETING";
 
   const handleSourceTypeChange = (value: string) => {
+    editDraft();
     setSourceType(value);
     setClarification("");
     setDuplicate(null);
@@ -80,38 +118,46 @@ export function TextPasteUploader({
   };
 
   const submitText = async (resolution?: DuplicatePasteResolution) => {
-    if (!content.trim()) return;
-    
+    // React state does not lock same-tick submit events synchronously.
+    if (activeRequest.current || !content.trim()) return;
+    if (resolution && (!duplicate || duplicate.revision !== revision.current ||
+      !duplicate.allowedResolutions.includes(resolution))) return;
+
+    const submittedRevision = revision.current;
+    const submitted: SubmittedPaste = resolution && duplicate ? duplicate.submitted : Object.freeze({
+      title, sourceType, channel, content, ingestionGuidanceMd,
+      recordedAt: isMeeting && recordedAt ? recordedAt : undefined,
+      timeZone: isMeeting && recordedAt ? timeZone : undefined,
+    });
+    const request = {};
+    activeRequest.current = request;
+    const isCurrentDraft = () => activeRequest.current === request && revision.current === submittedRevision;
     setIsSubmitting(true);
     setError("");
     setClarification("");
-    
+    setDuplicate(null);
+
     try {
       const res = await fetch(`/api/workspaces/${workspaceId}/data-sources/text-ingest`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          title,
-          sourceType,
-          channel,
-          content,
-          ingestionGuidanceMd,
-          recordedAt: isMeeting && recordedAt ? recordedAt : undefined,
-          timeZone: isMeeting && recordedAt ? timeZone : undefined,
+          ...submitted,
           duplicateGuardEnabled: true,
           duplicateResolution: resolution,
           duplicateTargetEntityId: resolution ? duplicate?.candidate.entityId : undefined,
         }),
       });
-
+      const data = await res.json().catch(() => ({}));
+      // Fence both fetch and body parsing: neither may act on a newer draft.
+      if (!isCurrentDraft()) return;
       if (res.ok) {
-        const data = await res.json().catch(() => ({}));
         setTitle("");
         setChannel("");
         setContent("");
         setIngestionGuidanceMd("");
         setRecordedAt("");
-        setDuplicate(null);
+        revision.current++;
 
         if (data.meeting?.id) {
           router.push(`/workspaces/${workspaceId}/meetings/${data.meeting.id}`);
@@ -119,21 +165,22 @@ export function TextPasteUploader({
           router.refresh();
         }
       } else if (res.status === 409) {
-        const data = await res.json().catch(() => ({}));
         const duplicatePayload = duplicateConfirmation(data);
         if (duplicatePayload) {
-          setDuplicate(duplicatePayload);
+          setDuplicate({ ...duplicatePayload, submitted, revision: submittedRevision });
           return;
         }
         setClarification(data.message || t("errorMeetingClarificationFallback"));
       } else {
-        const data = await res.json().catch(() => ({}));
         setError(data.error?.message || t("errorFailedIngestText"));
       }
     } catch {
-      setError(t("errorNetwork"));
+      if (isCurrentDraft()) setError(t("errorNetwork"));
     } finally {
-      setIsSubmitting(false);
+      if (activeRequest.current === request) {
+        activeRequest.current = null;
+        setIsSubmitting(false);
+      }
     }
   };
 
@@ -187,7 +234,7 @@ export function TextPasteUploader({
       
       <label>
         {t("labelTitleOptional")}
-        <input value={title} onChange={e => { setTitle(e.target.value); setDuplicate(null); }} placeholder={t("placeholderTitle")} />
+        <input value={title} onChange={e => { editDraft(); setTitle(e.target.value); }} placeholder={t("placeholderTitle")} />
       </label>
       
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
@@ -204,23 +251,23 @@ export function TextPasteUploader({
               <input
                 type="datetime-local"
                 value={recordedAt}
-                onChange={e => { setRecordedAt(e.target.value); setDuplicate(null); }}
+                onChange={e => { editDraft(); setRecordedAt(e.target.value); }}
                 required
               />
             </label>
-            <TimeZoneSelect onValueChange={setTimeZone} />
+            <TimeZoneSelect onValueChange={changeTimeZone} />
           </>
         ) : (
           <label>
             {t("labelChannel")}
-            <input value={channel} onChange={e => { setChannel(e.target.value); setDuplicate(null); }} placeholder={t("placeholderChannel")} />
+            <input value={channel} onChange={e => { editDraft(); setChannel(e.target.value); }} placeholder={t("placeholderChannel")} />
           </label>
         )}
       </div>
       
       <label>
         {t("labelContent")}
-        <textarea required value={content} onChange={e => { setContent(e.target.value); setDuplicate(null); }} rows={6} placeholder={isMeeting ? t("placeholderMeetingTranscript") : t("placeholderContent")} />
+        <textarea required value={content} onChange={e => { editDraft(); setContent(e.target.value); }} rows={6} placeholder={isMeeting ? t("placeholderMeetingTranscript") : t("placeholderContent")} />
       </label>
 
       <label>
@@ -228,7 +275,7 @@ export function TextPasteUploader({
         <MarkdownEditor
           name="ingestionGuidanceMd"
           value={ingestionGuidanceMd}
-          onValueChange={setIngestionGuidanceMd}
+          onValueChange={value => { editDraft(); setIngestionGuidanceMd(value); }}
           rows={3}
           placeholder={t("placeholderIngestionGuidance")}
         />
