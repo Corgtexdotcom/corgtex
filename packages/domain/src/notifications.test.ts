@@ -10,6 +10,9 @@ const {
 } = vi.hoisted(() => ({
   prismaMock: {
     $executeRaw: vi.fn(),
+    $transaction: vi.fn(),
+    communicationInstallation: { findFirst: vi.fn() },
+    communicationExternalUser: { findFirst: vi.fn() },
     user: { findFirst: vi.fn() },
     workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },
     notification: {
@@ -84,6 +87,13 @@ vi.mock("./source-lineage", () => ({
   withArtifactCountReleaseSnapshot: lineageMocks.release,
 }));
 
+const epochMocks = vi.hoisted(() => ({ capture: vi.fn(), current: vi.fn() }));
+vi.mock("./source-permission-epochs", async importOriginal => ({
+  ...await importOriginal<typeof import("./source-permission-epochs")>(),
+  capturePermissionEpochs: epochMocks.capture,
+  isArtifactPermissionEpochProofCurrent: epochMocks.current,
+}));
+
 const actor: AppActor = {
   kind: "user" as const,
   user: {
@@ -97,19 +107,26 @@ const actor: AppActor = {
 describe("notifications domain", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    prismaMock.$transaction.mockReset().mockImplementation(async work => work(prismaMock));
+    prismaMock.communicationInstallation.findFirst.mockReset().mockResolvedValue({ id: "slack-install-1", workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE", botTokenEnc: "synthetic", disconnectedAt: null });
+    prismaMock.communicationExternalUser.findFirst.mockReset().mockResolvedValue({ id: "mapping-1", installationId: "slack-install-1", workspaceId: "workspace-1", provider: "SLACK", externalUserId: "U1", userId: "user-1", isBot: false, isDeleted: false, updatedAt: new Date("2026-01-01") });
+    epochMocks.capture.mockReset().mockResolvedValue({ version: 1, policyVersion: "pun68-permissions-v3", entries: [] });
+    epochMocks.current.mockReset().mockResolvedValue(true);
     lineageMocks.prepare.mockReset().mockImplementation(async ({ capture }) => capture?.lineageRoots?.length
       ? { mode: "DERIVED", inputs: [], roots: capture.lineageRoots } : { mode: "UNKNOWN" });
     lineageMocks.finish.mockReset().mockResolvedValue(undefined);
     lineageMocks.readable.mockReset().mockImplementation(async (_actor, _workspace, _kind, rows) => new Set(rows.map((row: { id: string }) => row.id)));
-    lineageMocks.capture.mockReset().mockImplementation(async (_actor, _workspace, inputs) => inputs.map((input: { kind: string; id: string }) => ({
-      kind: input.kind, id: input.id, fingerprint: input.id,
-    })));
+    lineageMocks.capture.mockReset().mockImplementation(async (_actor, _workspace, inputs) => {
+      const admitted = await lineageMocks.readable(_actor, _workspace, inputs[0]?.kind, inputs);
+      if (inputs.some((input: { id: string }) => !admitted.has(input.id))) throw new AppError(403, "SOURCE_RESTRICTED", "Fixture source restricted");
+      return inputs.map((input: { kind: string; id: string }) => ({ kind: input.kind, id: input.id, fingerprint: input.id }));
+    });
     lineageMocks.release.mockReset().mockImplementation(async (_actor, _workspace, _roots, remote, finish) => {
       await remote();
       return finish(prismaMock);
     });
     prismaMock.notification.findUnique.mockReset().mockResolvedValue(null);
-    prismaMock.notification.findMany.mockReset().mockResolvedValue([{ id: "notification-1" }]);
+    prismaMock.notification.findMany.mockReset().mockResolvedValue([{ id: "notification-1", createdAt: new Date("2026-04-24") }]);
     prismaMock.member.findUnique.mockReset().mockResolvedValue({ id: "member-1", workspaceId: "workspace-1", userId: "user-1", role: "CONTRIBUTOR", isActive: true });
     prismaMock.user.findFirst.mockReset().mockResolvedValue({ id: "user-1", email: "user-1@example.com", displayName: "User", globalRole: "USER" });
     prismaMock.notification.findFirst.mockReset().mockImplementation(async () => {
@@ -149,10 +166,10 @@ describe("notifications domain", () => {
   });
 
   it("listNotifications returns user notifications for a workspace", async () => {
-    prismaMock.notification.findMany.mockResolvedValue([{ id: "notification-1" }]);
+    prismaMock.notification.findMany.mockResolvedValue([{ id: "notification-1", createdAt: new Date("2026-04-24") }]);
 
     const { listNotifications } = await import("./notifications");
-    await expect(listNotifications(actor, "workspace-1", { unreadOnly: true, take: 10, skip: 0 })).resolves.toEqual([{ id: "notification-1" }]);
+    await expect(listNotifications(actor, "workspace-1", { unreadOnly: true, take: 10, skip: 0 })).resolves.toEqual([{ id: "notification-1", createdAt: new Date("2026-04-24") }]);
     expect(prismaMock.notification.findMany).toHaveBeenCalledWith({
       where: {
         workspaceId: "workspace-1",
@@ -165,10 +182,37 @@ describe("notifications domain", () => {
   });
 
   it("countUnreadNotifications counts unread rows", async () => {
-    prismaMock.notification.findMany.mockResolvedValue([{ id: "n1" }, { id: "n2" }, { id: "n3" }]);
+    prismaMock.notification.findMany.mockResolvedValue(["n1", "n2", "n3"].map(id => ({ id, createdAt: new Date("2026-04-24") })));
 
     const { countUnreadNotifications } = await import("./notifications");
     await expect(countUnreadNotifications(actor, "workspace-1")).resolves.toBe(3);
+  });
+
+  it("preserves an exact zero only for a complete empty notification result", async () => {
+    prismaMock.notification.findMany.mockResolvedValue([]);
+    const { countUnreadNotifications, getUnreadNotificationSummary } = await import("./notifications");
+    await expect(getUnreadNotificationSummary(actor, "workspace-1")).resolves.toEqual({ count: 0, complete: true, available: true });
+    await expect(countUnreadNotifications(actor, "workspace-1")).resolves.toBe(0);
+  });
+
+  it("returns bounded summaries but rejects a legacy exact count when more rows remain", async () => {
+    prismaMock.notification.findMany.mockResolvedValue(Array.from({ length: 100 }, (_, index) => ({
+      id: `n-${index}`, createdAt: new Date("2026-04-24"),
+    })));
+    const { countUnreadNotifications, getUnreadNotificationSummary } = await import("./notifications");
+    await expect(getUnreadNotificationSummary(actor, "workspace-1")).resolves.toEqual({ count: 100, complete: false, available: true });
+    await expect(countUnreadNotifications(actor, "workspace-1")).rejects.toMatchObject({ code: "SOURCE_READ_SCAN_LIMIT" });
+  });
+
+  it("exposes continuation for a hidden window instead of returning an incomplete legacy array", async () => {
+    const rows = Array.from({ length: 200 }, (_, index) => ({ id: `n-${index}`, createdAt: new Date("2026-04-24") }));
+    lineageMocks.readable.mockResolvedValue(new Set());
+    prismaMock.notification.findMany.mockResolvedValueOnce(rows.slice(0, 100)).mockResolvedValueOnce(rows.slice(100))
+      .mockResolvedValueOnce(rows.slice(0, 100)).mockResolvedValueOnce(rows.slice(100));
+    const { listNotifications, listNotificationPage } = await import("./notifications");
+    await expect(listNotificationPage(actor, "workspace-1")).resolves.toMatchObject({ items: [], hasMore: true, complete: false, nextCursor: expect.any(String) });
+    await expect(listNotifications(actor, "workspace-1")).rejects.toMatchObject({ code: "SOURCE_READ_SCAN_LIMIT" });
+    expect(prismaMock.notification.findMany).toHaveBeenCalledTimes(4);
   });
 
   it("markNotificationRead marks one notification for the actor", async () => {
@@ -229,9 +273,10 @@ describe("notifications domain", () => {
 
   it("withholds retained rows, counts and mark-all writes when final release rejects original proofs", async () => {
     lineageMocks.release.mockRejectedValue(new Error("Synthetic authority changed"));
-    const { listNotifications, countUnreadNotifications, markAllNotificationsRead } = await import("./notifications");
+    const { listNotifications, countUnreadNotifications, getUnreadNotificationSummary, markAllNotificationsRead } = await import("./notifications");
     await expect(listNotifications(actor, "workspace-1")).rejects.toThrow("Synthetic authority changed");
-    expect(await countUnreadNotifications(actor, "workspace-1")).toBe(0);
+    await expect(countUnreadNotifications(actor, "workspace-1")).rejects.toMatchObject({ code: "SOURCE_READ_SCAN_LIMIT" });
+    await expect(getUnreadNotificationSummary(actor, "workspace-1")).resolves.toEqual({ count: 0, complete: false, available: false });
     await expect(markAllNotificationsRead(actor, "workspace-1")).rejects.toThrow("Synthetic authority changed");
     expect(prismaMock.notification.updateMany).not.toHaveBeenCalled();
     expect(lineageMocks.release).toHaveBeenCalledWith(actor, "workspace-1", [{
@@ -545,10 +590,10 @@ describe("notifications domain", () => {
   });
 
   it("filters unavailable sources before list pagination and unread counts", async () => {
-    prismaMock.notification.findMany.mockResolvedValue([{ id: "hidden" }, { id: "shown-1" }, { id: "shown-2" }]);
+    prismaMock.notification.findMany.mockResolvedValue(["hidden", "shown-1", "shown-2"].map(id => ({ id, createdAt: new Date("2026-04-24") })));
     lineageMocks.readable.mockResolvedValue(new Set(["shown-1", "shown-2"]));
     const { listNotifications, countUnreadNotifications } = await import("./notifications");
-    await expect(listNotifications(actor, "workspace-1", { skip: 1, take: 1 })).resolves.toEqual([{ id: "shown-2" }]);
+    await expect(listNotifications(actor, "workspace-1", { skip: 1, take: 1 })).resolves.toEqual([{ id: "shown-2", createdAt: new Date("2026-04-24") }]);
     await expect(countUnreadNotifications(actor, "workspace-1")).resolves.toBe(2);
   });
 
@@ -645,7 +690,7 @@ describe("notifications domain", () => {
         userId: "user-1",
         workspaceId: "workspace-1",
       }),
-    }));
+    }), expect.objectContaining({ authorizeAttempt: expect.any(Function), signal: expect.any(AbortSignal) }));
     expect(prismaMock.notificationDelivery.update).toHaveBeenCalledWith({
       where: { id: "delivery-1" },
       data: expect.objectContaining({
@@ -751,6 +796,71 @@ describe("notifications domain", () => {
       expect(prismaMock.notificationDelivery.upsert).not.toHaveBeenCalled();
       expect(prismaMock.notificationDelivery.update).not.toHaveBeenCalled();
     }
+  });
+
+  it.each((["credentials", "retry"] as const).flatMap(boundary =>
+    (["source", "recipient", "email", "none"] as const).map(change => ({ boundary, change }))))("retains original email authority at $boundary/$change", async ({ boundary, change }) => {
+    prismaMock.notificationDelivery.findUnique.mockResolvedValue({ id: "delivery-1", notificationId: "notification-1", workspaceId: "workspace-1", userId: "user-1",
+      channel: "EMAIL", status: "PENDING", attempts: 4, user: { email: "user-1@example.com" }, notification: { id: "notification-1", type: "deliberation.mention", title: "Notice" } });
+    let changed = false; let sends = 0;
+    lineageMocks.release.mockImplementation(async (_actor, _ws, roots, remote, finish) => {
+      expect(roots).toEqual([expect.objectContaining({ kind: "Notification", id: "notification-1" })]);
+      if (changed && change === "source") throw new AppError(409, "SOURCE_CHANGED", "Original receipt changed");
+      await remote(); return finish(prismaMock);
+    });
+    sendEmailMock.mockImplementation(async (_params, controls) => {
+      if (boundary === "retry") { await controls?.authorizeAttempt({ signal: controls.signal }); sends++; }
+      changed = true;
+      if (change === "recipient") prismaMock.user.findFirst.mockResolvedValue(null);
+      if (change === "email") prismaMock.user.findFirst.mockResolvedValue({ id: "user-1", email: "replacement@example.test", globalRole: "USER" });
+      await controls?.authorizeAttempt({ signal: controls.signal }); sends++;
+      return { status: "SENT", providerMessageId: "synthetic" };
+    });
+    const { deliverNotificationDelivery } = await import("./notifications");
+    const result = await deliverNotificationDelivery("delivery-1").catch(error => error);
+    expect(sends).toBe(change === "none" ? (boundary === "retry" ? 2 : 1) : boundary === "retry" ? 1 : 0);
+    if (change === "none") expect(result).toEqual({ status: "SENT" });
+    else { expect(result).toBeInstanceOf(Error); expect(prismaMock.notificationDelivery.update).not.toHaveBeenCalled(); }
+  });
+
+  it("keeps a swallowed email guard failure fatal even on the final delivery attempt", async () => {
+    prismaMock.notificationDelivery.findUnique.mockResolvedValue({ id: "delivery-1", notificationId: "notification-1", workspaceId: "workspace-1", userId: "user-1",
+      channel: "EMAIL", status: "PENDING", attempts: 4, user: { email: "user-1@example.com" }, notification: { id: "notification-1", type: "deliberation.mention", title: "Notice" } });
+    const failure = new Error("Proof infrastructure unavailable"); let rejected = false;
+    sendEmailMock.mockImplementation(async (_params, controls) => {
+      lineageMocks.release.mockRejectedValueOnce(failure);
+      try { await controls?.authorizeAttempt({ signal: controls.signal }); } catch { rejected = true; }
+      return { status: "SENT", providerMessageId: "ignored-guard" };
+    });
+    const { deliverNotificationDelivery } = await import("./notifications");
+    const result = await deliverNotificationDelivery("delivery-1").catch(error => error);
+    expect(rejected).toBe(true); expect(result).toBe(failure);
+    expect(prismaMock.notificationDelivery.update).not.toHaveBeenCalled();
+  });
+
+  it.each((["credentials", "retry"] as const).flatMap(boundary =>
+    (["installation", "replacement", "mapping", "mapping-restore", "epochs", "none"] as const).map(change => ({ boundary, change }))))("retains selected Slack binding at $boundary/$change", async ({ boundary, change }) => {
+    prismaMock.notificationDelivery.findUnique.mockResolvedValue({ id: "delivery-1", notificationId: "notification-1", workspaceId: "workspace-1", userId: "user-1",
+      channel: "SLACK", status: "PENDING", attempts: 0, user: { email: "user-1@example.com" }, notification: { id: "notification-1", type: "deliberation.mention", title: "Notice" } });
+    let sends = 0;
+    sendSlackMessageMock.mockImplementation(async (_id, _target, _blocks, _token, controls) => {
+      if (boundary === "retry") { await controls?.authorizeAttempt({ signal: controls.signal }); sends++; }
+      if (change === "installation") prismaMock.communicationInstallation.findFirst.mockResolvedValue(null);
+      if (change === "replacement") prismaMock.communicationInstallation.findFirst.mockResolvedValue({ id: "replacement-installation" });
+      if (change === "mapping") prismaMock.communicationExternalUser.findFirst.mockResolvedValue({ id: "mapping-1", externalUserId: "OTHER" });
+      if (change === "mapping-restore") {
+        const previous = await prismaMock.communicationExternalUser.findFirst();
+        prismaMock.communicationExternalUser.findFirst.mockResolvedValue({ ...previous, updatedAt: new Date("2026-01-02") });
+      }
+      if (change === "epochs") epochMocks.current.mockResolvedValue(false);
+      await controls?.authorizeAttempt({ signal: controls.signal }); sends++;
+      return { ts: "synthetic" };
+    });
+    const { deliverNotificationDelivery } = await import("./notifications");
+    const result = await deliverNotificationDelivery("delivery-1").catch(error => error);
+    expect(sends).toBe(change === "none" ? (boundary === "retry" ? 2 : 1) : boundary === "retry" ? 1 : 0);
+    if (change === "none") expect(result).toEqual({ status: "SENT" });
+    else { expect(result).toBeInstanceOf(Error); expect(prismaMock.notificationDelivery.update).not.toHaveBeenCalled(); expect(prismaMock.notificationDelivery.upsert).not.toHaveBeenCalled(); }
   });
 
   it("withholds a delivery when original proof capture definitively denies after admission", async () => {

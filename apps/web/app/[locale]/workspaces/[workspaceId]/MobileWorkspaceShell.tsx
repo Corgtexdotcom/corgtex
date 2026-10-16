@@ -34,6 +34,7 @@ type MobileWorkspaceShellProps = {
   workspaces: SwitchableWorkspace[];
   navGroups: NavGroup[];
   unreadCount: number;
+  unreadCountLabel?: string;
   conversations: ConversationSummary[];
   aiWorkspaceState: AiWorkspaceLaunchState;
   captureActions: MobileCaptureAction[];
@@ -52,6 +53,7 @@ export function MobileWorkspaceShell({
   workspaces,
   navGroups,
   unreadCount,
+  unreadCountLabel,
   conversations,
   aiWorkspaceState,
   captureActions,
@@ -202,8 +204,8 @@ export function MobileWorkspaceShell({
                 >
                   <WorkspaceNavIcon name={item.icon} className="mobile-bottom-icon" />
                   <span>{tNav(item.labelKey as any)}</span>
-                  {item.href === "/notifications" && unreadCount > 0 && (
-                    <span className="mobile-bottom-badge">{unreadCount}</span>
+                  {item.href === "/notifications" && (unreadCount > 0 || unreadCountLabel === "…") && (
+                    <span className="mobile-bottom-badge">{unreadCountLabel ?? unreadCount}</span>
                   )}
                 </a>
               );
@@ -257,8 +259,8 @@ export function MobileWorkspaceShell({
                       >
                         <WorkspaceNavIcon name={item.icon} className="mobile-more-icon" />
                         <span>{tNav(item.labelKey as any)}</span>
-                        {item.href === "/notifications" && unreadCount > 0 && (
-                          <span className="mobile-more-badge">{unreadCount}</span>
+                        {item.href === "/notifications" && (unreadCount > 0 || unreadCountLabel === "…") && (
+                          <span className="mobile-more-badge">{unreadCountLabel ?? unreadCount}</span>
                         )}
                       </a>
                     );

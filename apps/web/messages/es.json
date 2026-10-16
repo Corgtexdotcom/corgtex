@@ -1125,7 +1125,11 @@
     "tabUnread": "Sin leer ({count})",
     "title": "Notificaciones",
     "unread": "Sin leer",
-    "unreadSummary": "{count, plural, =0 {No hay notificaciones sin leer} =1 {# notificación sin leer} other {# notificaciones sin leer}}"
+    "unreadSummary": "{count, plural, =0 {No hay notificaciones sin leer} =1 {# notificación sin leer} other {# notificaciones sin leer}}",
+    "latest": "Volver a las más recientes",
+    "continueHistory": "No hay notificaciones visibles aquí. Continúa a las notificaciones anteriores.",
+    "unreadSummaryMore": "Al menos {count} notificaciones sin leer",
+    "unreadSummaryUnknown": "El recuento de notificaciones sin leer aún no está disponible."
   },
   "error": {
     "defaultMessage": "Ocurrió un error inesperado.",

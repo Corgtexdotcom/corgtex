@@ -1125,7 +1125,11 @@
     "tabUnread": "Unread ({count})",
     "title": "Notifications",
     "unread": "Unread",
-    "unreadSummary": "{count, plural, =0 {No unread notifications} =1 {# unread notification} other {# unread notifications}}"
+    "unreadSummary": "{count, plural, =0 {No unread notifications} =1 {# unread notification} other {# unread notifications}}",
+    "latest": "Back to latest",
+    "continueHistory": "No visible notifications here. Continue to older notifications.",
+    "unreadSummaryMore": "At least {count} unread notifications",
+    "unreadSummaryUnknown": "Unread count is not available yet."
   },
   "error": {
     "defaultMessage": "An unexpected error occurred.",

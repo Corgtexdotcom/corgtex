@@ -10,7 +10,7 @@ vi.mock("next-intl/server", () => ({
   getFormatter: async () => ({ dateTime: () => "synthetic" }),
 }));
 vi.mock("@corgtex/knowledge", () => ({ countReadableKnowledgeChunkAggregate: async () => { await hooks.afterFamilies(); return 0; } }));
-vi.mock("@corgtex/domain", async importOriginal => ({ ...await importOriginal<typeof import("@corgtex/domain")>(), countUnreadNotifications: async () => 0 }));
+vi.mock("@corgtex/domain", async importOriginal => ({ ...await importOriginal<typeof import("@corgtex/domain")>(), getUnreadNotificationSummary: async () => ({ count: 0, complete: true, available: true }) }));
 import WorkspaceDashboard from "./page";
 vi.stubGlobal("React", React);
 const workspaces: string[] = [];

@@ -1,6 +1,6 @@
 import type { BrainArticle, Meeting, Prisma } from "@prisma/client";
 import {
-  countUnreadNotifications,
+  getUnreadNotificationSummary,
   DigestReadRelease,
   filterWorkspaceBriefingSources,
   normalizeNewspaperEditionDigest,
@@ -312,8 +312,8 @@ export default async function WorkspaceDashboard({
     orderBy: [{ generatedAt: "desc" as const }, { id: "desc" as const }], take,
     ...(cursor ? { OR: [{ generatedAt: { lt: cursor.generatedAt } }, { generatedAt: cursor.generatedAt, id: { lt: cursor.id } }] } : {}),
   });
-  const [unreadNotificationsCount, latestWorkspaceBriefing, latestNewspaperEdition, workspaceData, membersCount] = await Promise.all([
-    countUnreadNotifications(actor, workspaceId),
+  const [unreadNotificationsSummary, latestWorkspaceBriefing, latestNewspaperEdition, workspaceData, membersCount] = await Promise.all([
+    getUnreadNotificationSummary(actor, workspaceId),
     findLatestReadableArtifact({ actor, workspaceId, release, kind: "WorkspaceBriefing",
       loadPage: (cursor, take) => {
         const { OR, ...paging } = latestPageArgs(cursor, take);
@@ -485,8 +485,9 @@ export default async function WorkspaceDashboard({
     : displayedEditionPeriod === "DAILY"
       ? t("dailyEdition")
       : t("workspaceEdition");
+  const unreadNotificationsCount = unreadNotificationsSummary.count;
   const unreadNotificationsDisplayCount = capDashboardUnreadNotificationCount(unreadNotificationsCount);
-  const isUnreadNotificationsCountCapped = isDashboardUnreadNotificationCountCapped(unreadNotificationsCount);
+  const isUnreadNotificationsCountCapped = !unreadNotificationsSummary.complete || isDashboardUnreadNotificationCountCapped(unreadNotificationsCount);
   const notificationLabel = unreadNotificationsCount > 0
     ? t(isUnreadNotificationsCountCapped ? "unreadNotificationsSummaryCapped" : "unreadNotificationsSummary", {
       count: unreadNotificationsDisplayCount,

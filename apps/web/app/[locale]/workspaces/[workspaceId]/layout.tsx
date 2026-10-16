@@ -1,4 +1,5 @@
-import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations, listDailyCompanyUnderstandingQuestions, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig, getUserWorkspaceOnboardingState, getAiWorkspaceSelectionState, resolveWorkspaceModuleAccess, hasWorkspaceInitialKnowledgeSource, SELF_SERVE_WORKSPACE_TOUR_KEY, SELF_SERVE_WORKSPACE_TOUR_VERSION } from "@corgtex/domain";
+import { notificationUnreadCountLabel } from "@/lib/notification-count";
+import { isGlobalOperator, listActorWorkspaces, getUnreadNotificationSummary, listConversations, listDailyCompanyUnderstandingQuestions, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig, getUserWorkspaceOnboardingState, getAiWorkspaceSelectionState, resolveWorkspaceModuleAccess, hasWorkspaceInitialKnowledgeSource, SELF_SERVE_WORKSPACE_TOUR_KEY, SELF_SERVE_WORKSPACE_TOUR_VERSION } from "@corgtex/domain";
 import { workspaceBranding, prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { countReadableKnowledgeChunkAggregate } from "@corgtex/knowledge";
@@ -82,8 +83,8 @@ export default async function WorkspaceLayout({
     redirect(localizedPath(workspaces[0] ? `/workspaces/${workspaces[0].id}` : "/find-account", locale));
   }
 
-  const [unreadCount, conversationsResult, dailyQuestions, featureFlags, membership, invitePolicy, workspaceRuntime, onboardingState, hasInitialKnowledge, googleConnection, productFeedbackTarget, hasSupportAccess] = await Promise.all([
-    userId ? countUnreadNotifications(actor, workspaceId) : Promise.resolve(0),
+  const [unreadSummary, conversationsResult, dailyQuestions, featureFlags, membership, invitePolicy, workspaceRuntime, onboardingState, hasInitialKnowledge, googleConnection, productFeedbackTarget, hasSupportAccess] = await Promise.all([
+    userId ? getUnreadNotificationSummary(actor, workspaceId) : Promise.resolve({ count: 0, complete: true, available: true }),
     listConversations(actor, workspaceId, { take: 30 }).catch(() => ({ items: [], total: 0, take: 30, skip: 0 })),
     userId ? listDailyCompanyUnderstandingQuestions(actor, { workspaceId, take: 3 }).catch(() => []) : Promise.resolve([]),
     getWorkspaceFeatureFlags(workspaceId),
@@ -230,7 +231,8 @@ export default async function WorkspaceLayout({
         workspaces={switchableWorkspaces}
         workspaceId={workspaceId}
         navGroups={visibleNavGroups}
-        unreadCount={unreadCount}
+        unreadCount={unreadSummary.count}
+          unreadCountLabel={notificationUnreadCountLabel(unreadSummary)}
         conversations={conversationSummaries}
         aiWorkspaceState={aiWorkspaceState}
         captureActions={captureActions}
@@ -245,7 +247,8 @@ export default async function WorkspaceLayout({
         <DesktopWorkspaceNav
           workspaceId={workspaceId}
           navGroups={visibleNavGroups}
-          unreadCount={unreadCount}
+          unreadCount={unreadSummary.count}
+          unreadCountLabel={notificationUnreadCountLabel(unreadSummary)}
           showPlatformAdmin={showPlatformAdmin}
           controlPlaneHref={controlPlaneHref}
         />

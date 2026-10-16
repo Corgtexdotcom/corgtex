@@ -84,7 +84,7 @@ it("rejects the original selected lineage head even if a later replacement keeps
 it("does not release stale unread totals after a later page revokes and restores membership", async () => {
   const f = await fixture();
   f.onLaterPage(f.revokeRestore);
-  expect(await countUnreadNotifications(f.actor, f.workspaceId)).toBe(0);
+  await expect(countUnreadNotifications(f.actor, f.workspaceId)).rejects.toMatchObject({ code: "SOURCE_READ_SCAN_LIMIT" });
 });
 
 it("revalidates the selected notification's source closure after a later page archives its source", async () => {

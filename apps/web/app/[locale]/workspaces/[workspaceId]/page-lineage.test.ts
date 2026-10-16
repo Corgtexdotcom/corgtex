@@ -5,7 +5,7 @@ import { beforeEach, expect, it, vi, type Mock } from "vitest";
 const state = vi.hoisted(() => ({
   queries: new Map<string, Mock<(query: Query) => Promise<Row[]>>>(),
   readable: vi.fn(),
-  unread: vi.fn(async () => 0),
+  unread: vi.fn<(actor: unknown, workspaceId: string) => Promise<number>>(async () => 0),
   edition: vi.fn(),
   release: vi.fn(),
 }));
@@ -47,7 +47,7 @@ vi.mock("@corgtex/domain", async () => {
     ...await import("../../../../../../packages/domain/src/digest-lineage"),
     ...await import("../../../../../../packages/domain/src/errors"),
     normalizeNewspaperEditionDigest: state.edition,
-    countUnreadNotifications: state.unread,
+    getUnreadNotificationSummary: async (actor: unknown, workspaceId: string) => ({ count: await state.unread(actor, workspaceId), complete: true, available: true }),
     privacyFilter: () => ({}), readableArtifactIds: state.readable,
     requireWorkspaceMembership: async () => ({ id: "member", workspaceId: "ws", userId: "viewer", role: "MEMBER", isActive: true }),
   };

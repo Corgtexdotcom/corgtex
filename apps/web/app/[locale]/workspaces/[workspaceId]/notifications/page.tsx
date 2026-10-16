@@ -1,4 +1,5 @@
-import { countUnreadNotifications, listNotifications } from "@corgtex/domain";
+import { notificationUnreadCountLabel } from "@/lib/notification-count";
+import { getUnreadNotificationSummary, listNotificationPage } from "@corgtex/domain";
 import Link from "next/link";
 import { getFormatter, getTranslations } from "next-intl/server";
 import { requirePageActor } from "@/lib/auth";
@@ -12,10 +13,10 @@ const PAGE_SIZE = 30;
 
 type NotificationFilter = "all" | "unread";
 
-function notificationHref(workspaceId: string, filter: NotificationFilter, page = 1) {
+function notificationHref(workspaceId: string, filter: NotificationFilter, cursor?: string) {
   const params = new URLSearchParams();
   if (filter === "unread") params.set("filter", filter);
-  if (page > 1) params.set("page", String(page));
+  if (cursor) params.set("cursor", cursor);
 
   const query = params.toString();
   return `/workspaces/${workspaceId}/notifications${query ? `?${query}` : ""}`;
@@ -23,11 +24,6 @@ function notificationHref(workspaceId: string, filter: NotificationFilter, page 
 
 function parseFilter(value: string | undefined): NotificationFilter {
   return value === "unread" ? "unread" : "all";
-}
-
-function parsePage(value: string | undefined) {
-  const page = Number.parseInt(value ?? "1", 10);
-  return Number.isFinite(page) && page > 0 ? page : 1;
 }
 
 function formatNotificationKind(type: string, entityType: string | null) {
@@ -45,29 +41,29 @@ export default async function NotificationsPage({
   searchParams,
 }: {
   params: Promise<{ workspaceId: string }>;
-  searchParams: Promise<{ filter?: string; page?: string }>;
+  searchParams: Promise<{ filter?: string; cursor?: string; page?: string }>;
 }) {
   const { workspaceId } = await params;
-  const { filter: filterParam, page: pageParam } = await searchParams;
+  const { filter: filterParam, cursor } = await searchParams;
   const actor = await requirePageActor();
   const t = await getTranslations("notificationsPage");
   const format = await getFormatter();
   const filter = parseFilter(filterParam);
-  const page = parsePage(pageParam);
-  const skip = (page - 1) * PAGE_SIZE;
   const userId = actor.kind === "user" ? actor.user.id : null;
 
-  const [notificationsResult, unreadCount] = await Promise.all([
-    listNotifications(actor, workspaceId, {
+  const [notificationsResult, unreadSummary] = await Promise.all([
+    listNotificationPage(actor, workspaceId, {
       unreadOnly: filter === "unread",
-      take: PAGE_SIZE + 1,
-      skip,
+      take: PAGE_SIZE,
+      cursor,
     }),
-    userId ? countUnreadNotifications(actor, workspaceId) : Promise.resolve(0),
+    userId ? getUnreadNotificationSummary(actor, workspaceId) : Promise.resolve({ count: 0, complete: true, available: true }),
   ]);
 
-  const hasNextPage = notificationsResult.length > PAGE_SIZE;
-  const notifications = notificationsResult.slice(0, PAGE_SIZE);
+  const hasNextPage = notificationsResult.hasMore;
+  const notifications = notificationsResult.items;
+  const unreadCount = unreadSummary.count;
+  const unreadLabel = notificationUnreadCountLabel(unreadSummary);
 
   return (
     <div className="notifications-page">
@@ -75,7 +71,7 @@ export default async function NotificationsPage({
         <div>
           <p className="eyebrow">{t("eyebrow")}</p>
           <h1>{t("title")}</h1>
-          <p className="muted">{t("unreadSummary", { count: unreadCount })}</p>
+          <p className="muted">{unreadSummary.complete ? t("unreadSummary", { count: unreadCount }) : unreadCount > 0 ? t("unreadSummaryMore", { count: unreadCount }) : t("unreadSummaryUnknown")}</p>
         </div>
         {unreadCount > 0 && (
           <form action={markAllNotificationsReadAction}>
@@ -101,14 +97,14 @@ export default async function NotificationsPage({
             role="tab"
             aria-selected={filter === "unread"}
           >
-            {t("tabUnread", { count: unreadCount })}
+            {t("tabUnread", { count: unreadLabel })}
           </Link>
         </div>
       </div>
 
       {notifications.length === 0 ? (
         <section className="notifications-empty">
-          <h2>{filter === "unread" ? t("emptyUnread") : t("emptyAll")}</h2>
+          <h2>{hasNextPage ? t("continueHistory") : filter === "unread" ? t("emptyUnread") : t("emptyAll")}</h2>
         </section>
       ) : (
         <ul className="notifications-list">
@@ -172,17 +168,17 @@ export default async function NotificationsPage({
         </ul>
       )}
 
-      {(page > 1 || hasNextPage) && (
+      {(cursor || hasNextPage) && (
         <nav className="notifications-pagination" aria-label={t("paginationLabel")}>
-          {page > 1 ? (
-            <Link href={notificationHref(workspaceId, filter, page - 1)} className="secondary small">
-              {t("previous")}
+          {cursor ? (
+            <Link href={notificationHref(workspaceId, filter)} className="secondary small">
+              {t("latest")}
             </Link>
           ) : (
             <span />
           )}
           {hasNextPage && (
-            <Link href={notificationHref(workspaceId, filter, page + 1)} className="secondary small">
+            <Link href={notificationHref(workspaceId, filter, notificationsResult.nextCursor ?? undefined)} className="secondary small">
               {t("next")}
             </Link>
           )}
