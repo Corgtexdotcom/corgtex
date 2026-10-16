@@ -174,6 +174,24 @@ jobs:
       - name: Test Azure site image release and read-only Ops receipt
         run: node --test scripts/azure-site-image-release.node-test.mjs scripts/release/ops-readiness-receipt.node-test.mjs
 
+      - name: Test Azure monitor bootstrap defaults
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          bicep_dir="$RUNNER_TEMP/bicep-v0.38.5"
+          mkdir -p "$bicep_dir"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --connect-timeout 10 --max-time 60 --max-filesize 104857600 \
+            https://github.com/Azure/bicep/releases/download/v0.38.5/bicep-linux-x64 \
+            --output "$bicep_dir/bicep"
+          # SHA-256 published for bicep-linux-x64 in the official v0.38.5 release.
+          printf '%s  %s\n' 7853e83d533d93afc67d8ccec87b982edbd334137616ade14b994c6b774bde24 "$bicep_dir/bicep" \
+            | sha256sum --check --strict
+          chmod +x "$bicep_dir/bicep"
+          BICEP_CLI_PATH="$bicep_dir/bicep" DOTNET_BUNDLE_EXTRACT_BASE_DIR="$bicep_dir/.net" \
+            node --test infra/azure/hosting/monitor.node-test.mjs
+
       - name: Test Ops and Core migration custody, fences and retained restore
         timeout-minutes: 15
         run: npm run test:migration:ops-core
