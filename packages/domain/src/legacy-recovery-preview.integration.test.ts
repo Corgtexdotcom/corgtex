@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { Prisma, type ArtifactInputLineage } from "@prisma/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma as db, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
@@ -32,12 +33,18 @@ async function fixture() {
     });
     return () => changed;
   };
-  return { workspace, actor, member, input, goal, update, head, selection, afterPreviewCapture };
+  return { workspace, user, actor, member, input, goal, update, head, selection, afterPreviewCapture };
+}
+
+function cloneHead(head: ArtifactInputLineage): Prisma.ArtifactInputLineageUncheckedCreateInput {
+  return { ...head, inputsJson: head.inputsJson ?? Prisma.JsonNull, rootsJson: head.rootsJson ?? Prisma.JsonNull,
+    permissionEpochsJson: head.permissionEpochsJson ?? Prisma.DbNull };
 }
 
 describe("original legacy recovery preview release", () => {
   it.each(["caller", "source", "caller-restore", "source-restore", "role-restore", "target-body", "target-head", "source-head", "parent-private"] as const)("rejects %s change after original preview capture", async change => {
     const f = await fixture();
+    let completedChanges = 0;
     const changed = f.afterPreviewCapture(async () => {
       if (change === "caller" || change === "caller-restore") {
         await db.member.update({ where: { id: f.member.id }, data: { isActive: false } });
@@ -49,14 +56,21 @@ describe("original legacy recovery preview release", () => {
         await db.member.update({ where: { id: f.member.id }, data: { role: "CONTRIBUTOR" } });
         await db.member.update({ where: { id: f.member.id }, data: { role: "ADMIN" } });
       } else if (change === "target-body") await db.goalUpdate.update({ where: { id: f.update.id }, data: { bodyMd: "Changed preview" } });
-      else if (change === "target-head") await db.artifactInputLineage.create({ data: { ...f.head, id: randomUUID(), revision: 2 } });
+      else if (change === "target-head") await db.artifactInputLineage.create({ data: { ...cloneHead(f.head), id: randomUUID(), revision: 2 } });
       else if (change === "source-head") {
         const head = await db.artifactInputLineage.findFirstOrThrow({ where: { artifactType: "BrainArticle", artifactId: f.input.id }, orderBy: { revision: "desc" } });
-        await db.artifactInputLineage.create({ data: { ...head, id: randomUUID(), revision: head.revision + 1 } });
+        await db.artifactInputLineage.create({ data: { ...cloneHead(head), id: randomUUID(), revision: head.revision + 1 } });
       } else await db.goal.update({ where: { id: f.goal.id }, data: { isPrivate: true, status: "DRAFT" } });
+      completedChanges++;
     });
     await expect(inspectLegacyRecovery(f.actor, f.selection)).rejects.toThrow();
     expect(changed()).toBe(true);
+    expect(completedChanges).toBe(1);
+    if (change === "target-head" || change === "source-head") {
+      const target = change === "target-head" ? { artifactType: "GoalUpdate", artifactId: f.update.id }
+        : { artifactType: "BrainArticle", artifactId: f.input.id };
+      expect(await db.artifactInputLineage.count({ where: { workspaceId: f.workspace.id, ...target, revision: 2 } })).toBe(1);
+    }
   });
 
   it("preserves eligible UNKNOWN target metadata without admitting its content", async () => {
@@ -73,7 +87,7 @@ describe("original legacy recovery preview release", () => {
     const f = await fixture();
     const source = await db.brainSource.create({ data: { workspaceId: f.workspace.id, sourceType: "ARTICLE", tier: 1, content: "Unknown extract", fileStorageKey: `workspaces/${f.workspace.id}/uploads/file.txt` } });
     expect(await inspectLegacyRecovery(f.actor, { workspaceId: f.workspace.id, kind: "BrainSource", id: source.id })).toMatchObject({ knownContributors: 0, private: false, hasFile: true });
-    const conversation = await db.conversationSession.create({ data: { workspaceId: f.workspace.id, userId: f.actor.kind === "user" ? f.actor.user.id : null, topic: "Original private conversation" } });
+    const conversation = await db.conversationSession.create({ data: { workspaceId: f.workspace.id, userId: f.user.id, topic: "Original private conversation" } });
     expect(await inspectLegacyRecovery(f.actor, { workspaceId: f.workspace.id, kind: "ConversationSession", id: conversation.id })).toMatchObject({ knownContributors: 0, private: true, hasFile: false });
   });
 
