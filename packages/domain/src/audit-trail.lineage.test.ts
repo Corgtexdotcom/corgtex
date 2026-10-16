@@ -11,7 +11,7 @@ vi.mock("@corgtex/shared", async original => ({ ...await original<any>(), prisma
 vi.mock("./auth", () => ({ requireWorkspaceMembership: authorize }));
 vi.mock("./finance", () => ({ getFinanceAccessPolicy: vi.fn(async () => ({canRead: true})) }));
 vi.mock("./agent-runs", () => ({ redactAgentRunContent: vi.fn() }));
-import { getModelUsageSummary, listAuditLogs, getEntityTimeline } from "./audit-trail";
+import { getModelUsageSummary, listAuditLogs, listAuditLogsPage, getEntityTimeline } from "./audit-trail";
 import { recordArtifactInputLineage, readableArtifactIds } from "./source-lineage";
 const admin = {kind: "user", user: {id: "admin"}} as any;
 const date = new Date();
@@ -224,7 +224,7 @@ describe("audit and timeline source admission", () => {
     expect(await listAuditLogs(other, "ws-1", { take: 1 })).toEqual([{ ...publicAudit, meta: null }]);
   });
 
-  it("replenishes the recent sample after over five thousand denied audit rows", async () => {
+  it("bounds denied audit windows and continues to a later permitted row", async () => {
     const { source, audit } = await privateSource("Action");
     const publicSource = { ...source, id: "permitted-late", isPrivate: false };
     db.action.findFirst.mockImplementation(async ({ where }) => [source, publicSource].find(row => row.id === where.id && row.workspaceId === where.workspaceId) ?? null);
@@ -233,9 +233,53 @@ describe("audit and timeline source admission", () => {
     const rows = Array.from({length: 5001}, (_, i) => ({...audit, id: String(6000-i).padStart(5,"0"), createdAt: date}));
     rows.push({...audit, id: "00001", entityId: publicSource.id, createdAt: date});
     db.auditLog.findMany.mockImplementation(async ({where,take}) => rows.filter(row => !where.OR || row.id < where.OR[1].id.lt).slice(0,take));
-    expect(await listAuditLogs(other,"ws-1",{take:1})).toEqual([{...rows.at(-1),meta:null}]);
+    const first = await listAuditLogsPage(other, "ws-1", { take: 1 });
+    expect(first).toMatchObject({ items: [], scanLimited: true, nextCursor: expect.any(String) });
+    expect(db.auditLog.findMany).toHaveBeenCalledTimes(50);
+    const second = await listAuditLogsPage(other, "ws-1", { take: 1, cursor: first.nextCursor! });
+    expect(second).toEqual({ items: [{ ...rows.at(-1), meta: null }], nextCursor: null, scanLimited: false });
     expect(db.auditLog.findMany).toHaveBeenCalledTimes(51);
     expect(db.auditLog.findMany.mock.calls.every(([query]) => query.take===100)).toBe(true);
+  });
+
+  it.each(["unknown-operation", "unsupported-type"])("bounds all %s candidates and rejects malformed continuation", async mode => {
+    const rows = Array.from({ length: 5100 }, (_, i) => ({ id: String(6000-i).padStart(5, "0"), workspaceId: "ws-1",
+      action: mode === "unknown-operation" ? "unknown.free.text" : "action.created",
+      entityType: mode === "unsupported-type" ? "Unsupported" : "Action", entityId: "hidden", actorUserId: null, createdAt: date }));
+    db.auditLog.findMany.mockImplementation(async ({ where, take }) => {
+      expect(where.workspaceId).toBe("ws-1");
+      return rows.filter(row => !where.OR || row.id < where.OR[1].id.lt).slice(0, take);
+    });
+    const page = await listAuditLogsPage(owner, "ws-1", { take: 50 });
+    expect(page.items).toEqual([]); expect(page.scanLimited).toBe(true); expect(page.nextCursor).toBeTruthy();
+    expect(db.auditLog.findMany).toHaveBeenCalledTimes(50); expect(db.action.findFirst).not.toHaveBeenCalled();
+    await expect(listAuditLogs(owner, "ws-1")).rejects.toMatchObject({ code: "SOURCE_READ_SCAN_LIMIT" });
+    await expect(listAuditLogsPage(owner, "ws-1", { cursor: "malformed" })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+  });
+
+  it("limits the legacy list wrapper instead of exhausting an unbounded denied suffix", async () => {
+    const rows = Array.from({ length: 5100 }, (_, i) => ({ id: String(6000-i).padStart(5, "0"), workspaceId: "ws-1",
+      action: "unknown.free.text", entityType: "Action", entityId: "hidden", actorUserId: null, createdAt: date }));
+    db.auditLog.findMany.mockImplementation(async ({ where, take }) => rows.filter(row => !where.OR || row.id < where.OR[1].id.lt).slice(0, take));
+    await expect(listAuditLogs(owner, "ws-1")).rejects.toMatchObject({ code: "SOURCE_READ_SCAN_LIMIT" });
+    expect(db.auditLog.findMany).toHaveBeenCalledTimes(50);
+  });
+
+  it("continues after the last examined permitted row without skipping the fetched tail", async () => {
+    const { audit } = await privateSource("Action");
+    const rows = Array.from({ length: 3 }, (_, i) => ({ ...audit, id: String(3-i), createdAt: date }));
+    db.auditLog.findMany.mockImplementation(async ({ where, take }) => {
+      expect(where).toMatchObject({ workspaceId: "ws-1", entityType: "Action", entityId: audit.entityId, action: { contains: "created" }, actorUserId: "owner" });
+      return rows.filter(row => !where.OR || row.id < where.OR[1].id.lt).slice(0, take);
+    });
+    const opts = { take: 1, entityType: "Action", entityId: audit.entityId, action: "created", actorUserId: "owner" };
+    const first = await listAuditLogsPage(owner, "ws-1", opts);
+    const second = await listAuditLogsPage(owner, "ws-1", { ...opts, cursor: first.nextCursor! });
+    const third = await listAuditLogsPage(owner, "ws-1", { ...opts, cursor: second.nextCursor! });
+    expect([first, second, third].flatMap(page => page.items.map(row => row.id))).toEqual(["3", "2", "1"]);
+    expect(third.nextCursor).toBeNull();
+    authorize.mockRejectedValueOnce(new Error("membership revoked"));
+    await expect(listAuditLogsPage(owner, "ws-1", { ...opts, cursor: first.nextCursor! })).rejects.toThrow("membership revoked");
   });
 
   it("withholds unknown, deleted and unsupported audit targets and rejects malformed pages", async () => {

@@ -1,5 +1,5 @@
 import {
-  listAuditLogs,
+  listAuditLogsPage,
   listArchivedWorkspaceArtifacts,
   listNewspaperDeliveryDetails,
   listNewspaperDeliverySummaries,
@@ -42,6 +42,7 @@ export default async function AuditPage({
 }: {
   params: Promise<{ workspaceId: string }>;
   searchParams: Promise<{
+    auditCursor?: string;
     entityType?: string;
     entityId?: string;
     agentRunId?: string;
@@ -65,11 +66,16 @@ export default async function AuditPage({
     notFound();
   }
 
-  const auditLogs = await listAuditLogs(actor, workspaceId, {
+  const auditPage = await listAuditLogsPage(actor, workspaceId, {
+    cursor: search.auditCursor,
     take: 50,
     entityType: search.entityType,
     entityId: search.entityId,
   });
+
+  const auditLogs = auditPage.items;
+  const nextAuditQuery = new URLSearchParams({ tab: "audit", ...(search.entityType ? { entityType: search.entityType } : {}),
+    ...(search.entityId ? { entityId: search.entityId } : {}), ...(auditPage.nextCursor ? { auditCursor: auditPage.nextCursor } : {}) });
 
   const archivedArtifacts = tab === "archive" && canViewArchive ? await listArchivedWorkspaceArtifacts(actor, {
     workspaceId,
@@ -143,7 +149,8 @@ export default async function AuditPage({
             )}
           </p>
           <div>
-            {auditLogs.length === 0 && <p className="nr-item-meta">{t("noAuditEntries")}</p>}
+            {auditPage.scanLimited && <p className="nr-item-meta">{t("scanLimited")}</p>}
+            {auditLogs.length === 0 && !auditPage.nextCursor && <p className="nr-item-meta">{t("noAuditEntries")}</p>}
             {auditLogs.map((log) => (
               <div className="nr-item" key={log.id} style={{ padding: "12px 0" }}>
                 <div className="row">
@@ -179,6 +186,7 @@ export default async function AuditPage({
                 )}
               </div>
             ))}
+            {auditPage.nextCursor && <a href={`?${nextAuditQuery.toString()}`} className="nr-btn">{t("nextWindow")}</a>}
           </div>
         </section>
       )}

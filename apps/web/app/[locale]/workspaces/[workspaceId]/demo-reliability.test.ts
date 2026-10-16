@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   workspace: vi.fn(),
   archive: vi.fn(),
   audit: vi.fn(),
+  auditPage: vi.fn(),
   summaries: vi.fn(),
   details: vi.fn(),
   feature: vi.fn(),
@@ -71,7 +72,7 @@ vi.mock("@corgtex/domain", () => {
   return {
     requireWorkspaceMembership: mocks.membership,
     listArchivedWorkspaceArtifacts: mocks.archive,
-    listAuditLogs: mocks.audit,
+    listAuditLogsPage: mocks.auditPage,
     listNewspaperDeliverySummaries: mocks.summaries,
     listNewspaperDeliveryDetails: mocks.details,
     listCrmAccounts: result([account]), listContacts: result([contact]),
@@ -120,6 +121,7 @@ beforeEach(() => {
     id: "synthetic-audit", action: "action.created", entityType: "Action",
     entityId: "synthetic-action", createdAt: new Date("2026-01-01T12:00:00Z"), meta: null,
   }]);
+  mocks.auditPage.mockImplementation(async (...args: unknown[]) => ({ items: await mocks.audit(...args), nextCursor: null, scanLimited: false }));
   mocks.summaries.mockResolvedValue([]);
   mocks.details.mockResolvedValue([]);
   mocks.feature.mockResolvedValue(undefined);
@@ -133,6 +135,15 @@ const renderAccountDetail = async (view = "overview") =>
     params: Promise.resolve({ ...(await params()), accountId: "synthetic-account" }),
     searchParams: Promise.resolve({ view }),
   }));
+
+it("offers continuation for an empty limited audit window and preserves filters", async () => {
+  mocks.auditPage.mockResolvedValue({ items: [], nextCursor: "older-cursor", scanLimited: true });
+  const html = await renderAudit({ auditCursor: "start", entityType: "Action", entityId: "selected" });
+  expect(html).toContain(messages.audit.scanLimited);
+  expect(html).not.toContain(messages.audit.noAuditEntries);
+  expect(html).toContain('href="?tab=audit&amp;entityType=Action&amp;entityId=selected&amp;auditCursor=older-cursor"');
+  expect(mocks.auditPage).toHaveBeenCalledWith(expect.anything(), "synthetic-demo", expect.objectContaining({ cursor: "start", entityType: "Action", entityId: "selected" }));
+});
 
 describe("Account detail read-only demo", () => {
   it.each(accountDetailViews)("keeps %s readable without mutations", async (view) => {
@@ -295,6 +306,10 @@ it.runIf(process.env.DEMO_UI_PROOF === "1")("captures bounded synthetic browser 
     pages.set("account:" + view, await renderAccountDetail(view));
   }
   pages.set("audit", await renderAudit());
+  mocks.auditPage.mockResolvedValue({ items: [], nextCursor: "older-cursor", scanLimited: true });
+  pages.set("audit:limited", await renderAudit({ auditCursor: "start", entityType: "Action", entityId: "synthetic-action" }));
+  mocks.auditPage.mockResolvedValue({ items: await mocks.audit(), nextCursor: null, scanLimited: false });
+  pages.set("audit:continued", await renderAudit({ auditCursor: "older-cursor", entityType: "Action", entityId: "synthetic-action" }));
   const { default: postcss } = await import("postcss");
   const { default: tailwindcss } = await import("tailwindcss");
   const { default: tailwindConfig } = await import("../../../../tailwind.config");
@@ -307,7 +322,7 @@ it.runIf(process.env.DEMO_UI_PROOF === "1")("captures bounded synthetic browser 
     const section = url.pathname.split("/leads/")[1];
     const key = section === "accounts/synthetic-account"
       ? "account:" + (url.searchParams.get("view") ?? "overview")
-      : url.pathname.endsWith("/audit") ? "audit" : section ?? url.searchParams.get("view") ?? "dashboard";
+      : url.pathname.endsWith("/audit") ? (url.searchParams.get("auditCursor") === "start" ? "audit:limited" : url.searchParams.get("auditCursor") === "older-cursor" ? "audit:continued" : "audit") : section ?? url.searchParams.get("view") ?? "dashboard";
     if (request.method !== "GET" || !pages.has(key)) {
       response.writeHead(404).end();
       return;
@@ -348,6 +363,16 @@ it.runIf(process.env.DEMO_UI_PROOF === "1")("captures bounded synthetic browser 
       expect(await page.getByRole("heading", { name: messages.audit.pageTitle, exact: true }).count()).toBe(1);
       expect(await page.locator('a[href*="tab=archive"], form').count()).toBe(0);
       await page.screenshot({ path: new URL("audit-" + viewport.width + ".png", output).pathname, fullPage: true });
+      await page.goto(base + "/workspaces/synthetic-demo/audit?auditCursor=start&entityType=Action&entityId=synthetic-action");
+      expect(await page.getByText(messages.audit.scanLimited, { exact: true }).count()).toBe(1);
+      expect(await page.getByText(messages.audit.noAuditEntries, { exact: true }).count()).toBe(0);
+      await page.screenshot({ path: new URL("audit-limited-" + viewport.width + ".png", output).pathname, fullPage: true });
+      await page.getByRole("link", { name: messages.audit.nextWindow, exact: true }).click();
+      expect(new URL(page.url()).searchParams.get("auditCursor")).toBe("older-cursor");
+      expect(new URL(page.url()).searchParams.get("entityId")).toBe("synthetic-action");
+      expect(await page.locator(".nr-item").count()).toBeGreaterThan(0);
+      expect(await page.getByRole("link", { name: messages.audit.nextWindow, exact: true }).count()).toBe(0);
+      await page.screenshot({ path: new URL("audit-continued-" + viewport.width + ".png", output).pathname, fullPage: true });
       await page.getByRole("link", { name: "Relationships", exact: true }).click();
       await page.getByRole("link", { name: messages.leads.openDetail, exact: true }).first().click();
       expect(new URL(page.url()).pathname).toBe("/workspaces/synthetic-demo/leads/accounts/synthetic-account");

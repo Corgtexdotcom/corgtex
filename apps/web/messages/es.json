@@ -358,6 +358,8 @@
     "movedTitle": "Trasladado a Gobernanza de agentes",
     "noArchivedRecords": "No se encontraron registros archivados.",
     "noAuditEntries": "No se encontraron entradas de auditoría.",
+    "scanLimited": "Esta ventana alcanzó el límite de búsqueda. Continúa para ver entradas anteriores.",
+    "nextWindow": "Entradas de auditoría anteriores",
     "noNewspaperDeliveries": "Aún no hay entregas de periódicos registradas.",
     "newspaperClickCounts": "{clicks} clics totales en {clickedLinks} de {links} enlaces rastreados.",
     "newspaperFirstSent": "Primer envío: {date}",

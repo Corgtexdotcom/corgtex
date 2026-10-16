@@ -123,23 +123,46 @@ async function captureAuditTarget(actor: AppActor, workspaceId: string, kind: st
   }
 }
 
-export async function listAuditLogs(actor: AppActor, workspaceId: string, opts?: {
+type AuditLogOptions = {
   take?: number;
   entityType?: string;
   entityId?: string;
   action?: string;
   actorUserId?: string;
-}) {
+  cursor?: string;
+};
+
+export async function listAuditLogs(actor: AppActor, workspaceId: string, opts?: AuditLogOptions) {
+  const page = await listAuditLogsPage(actor, workspaceId, opts);
+  invariant(!page.scanLimited, 409, "SOURCE_READ_SCAN_LIMIT", "Audit scan reached its safe limit; use bounded audit pagination or narrow the filters.");
+  return page.items;
+}
+
+export async function listAuditLogsPage(actor: AppActor, workspaceId: string, opts?: AuditLogOptions) {
   sealArtifactInputActor(actor);
   opts = opts ? { ...opts } : undefined;
   await requireWorkspaceMembership({ actor, workspaceId });
-  if (opts?.entityType && !isLineageKind(opts.entityType)) return [];
-  if (opts?.entityType && opts.entityId && !await captureAuditTarget(actor, workspaceId, opts.entityType, opts.entityId)) return [];
+  const empty = { items: [] as ReturnType<typeof auditOperationalFields>[], nextCursor: null as string | null, scanLimited: false };
+  if (opts?.entityType && !isLineageKind(opts.entityType)) return empty;
+  if (opts?.entityType && opts.entityId && !await captureAuditTarget(actor, workspaceId, opts.entityType, opts.entityId)) return empty;
   const take = Math.max(0, Math.min(opts?.take ?? 50, AUDIT_SCAN_LIMIT));
   const release = new WorkItemReadRelease(actor, workspaceId);
   const visible = [];
-  let after: AuditOperationalRow | undefined;
-  while (visible.length < take) {
+  let after: { id: string; createdAt: Date } | undefined;
+  if (opts?.cursor) {
+    try {
+      invariant(opts.cursor.length <= 2048, 400, "VALIDATION_ERROR", "Invalid audit cursor.");
+      const value = JSON.parse(Buffer.from(opts.cursor, "base64url").toString("utf8"));
+      invariant(value && typeof value.id === "string" && value.id.length > 0 && value.id.length <= 256
+        && typeof value.createdAt === "string" && new Date(value.createdAt).toISOString() === value.createdAt,
+      400, "VALIDATION_ERROR", "Invalid audit cursor.");
+      after = { id: value.id, createdAt: new Date(value.createdAt) };
+    } catch { throw new AppError(400, "VALIDATION_ERROR", "Invalid audit cursor."); }
+  }
+  let examined = 0;
+  let mayHaveMore = false;
+  const proofs = new Map<string, LineageRoot[] | null>();
+  while (visible.length < take && examined < AUDIT_SCAN_LIMIT) {
     const rows = await prisma.auditLog.findMany({
       where: { workspaceId,
         ...(opts?.entityType ? { entityType: opts.entityType } : {}),
@@ -153,9 +176,12 @@ export async function listAuditLogs(actor: AppActor, workspaceId: string, opts?:
     });
     invariant(rows.length <= 100 && (!rows.length || rows.at(-1)!.id !== after?.id),
       503, "SOURCE_READ_SCAN_CHANGED", "Audit page changed; retry.");
-    // Denied candidates do not consume the visible sample or accumulate bodies.
-    const proofs = new Map<string, LineageRoot[] | null>();
-    for (const row of rows) {
+    // Every examined row consumes the bounded window, including denied facts.
+    mayHaveMore = rows.length === 100;
+    for (const [index, row] of rows.entries()) {
+      after = row;
+      examined += 1;
+      mayHaveMore = index < rows.length - 1 || rows.length === 100;
       if (!isLineageKind(row.entityType) || !(AUDIT_OPERATIONS[row.entityType]?.includes(row.action) || ARCHIVE_OPERATIONS.has(row.action))) continue;
       const key = JSON.stringify([row.entityType, row.entityId]);
       if (!proofs.has(key)) proofs.set(key, await release.observeRead(() => captureAuditTarget(actor, workspaceId, row.entityType, row.entityId)));
@@ -166,10 +192,12 @@ export async function listAuditLogs(actor: AppActor, workspaceId: string, opts?:
       if (visible.length === take) break;
     }
     if (rows.length < 100) break;
-    after = rows.at(-1);
   }
   await requireWorkspaceMembership({ actor, workspaceId });
-  return release.finish(visible);
+  return release.finish({ items: visible,
+    nextCursor: mayHaveMore && after ? Buffer.from(JSON.stringify({ id: after.id, createdAt: after.createdAt.toISOString() })).toString("base64url") : null,
+    scanLimited: examined === AUDIT_SCAN_LIMIT && mayHaveMore,
+  });
 }
 
 export async function getEntityTimeline(actor: AppActor, workspaceId: string, entityType: string, entityId: string) {

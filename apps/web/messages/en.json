@@ -358,6 +358,8 @@
     "movedTitle": "Moved to Agent Governance",
     "noArchivedRecords": "No archived records found.",
     "noAuditEntries": "No audit entries found.",
+    "scanLimited": "This window reached the audit scan limit. Continue to older entries.",
+    "nextWindow": "Older audit entries",
     "noNewspaperDeliveries": "No newspaper deliveries recorded yet.",
     "newspaperClickCounts": "{clicks} total clicks across {clickedLinks} of {links} tracked links.",
     "newspaperFirstSent": "First sent: {date}",

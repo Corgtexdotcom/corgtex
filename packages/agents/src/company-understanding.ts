@@ -1,6 +1,6 @@
 import type { AgentTriggerType, BrainArticle, BrainSource, Goal, GoalCadence, GoalStatus, Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
-import { defaultModelGateway } from "@corgtex/models";
+import { defaultModelGateway, type ModelAttemptGuard } from "@corgtex/models";
 import type { AppActor } from "@corgtex/shared";
 import {
   CONTEXT_GRAPH_OBJECT_TYPES,
@@ -739,7 +739,24 @@ export async function runCompanyUnderstandingSynthesis(params: {
       || !["SOURCE_CHANGED", "UNKNOWN_LINEAGE", "SOURCE_RESTRICTED"].includes(String(error.code))) throw error;
     return { skipped: true, reason: "input_changed" };
   }
+  // Reuse the original input/head observations through credential acquisition
+  // and every retry; a failed attempt remains cancelled even if the gateway catches it.
+  const controller = new AbortController();
+  const authorizeAttempt: ModelAttemptGuard = async context => {
+    try {
+      controller.signal.throwIfAborted();
+      context.signal.throwIfAborted();
+      await release.finish(undefined);
+      controller.signal.throwIfAborted();
+      context.signal.throwIfAborted();
+    } catch (error) {
+      controller.abort(error);
+      throw error;
+    }
+  };
   const extraction = await defaultModelGateway.extract({
+    signal: controller.signal,
+    authorizeAttempt,
     model: params.model,
     workspaceId: params.workspaceId,
     agentRunId: params.agentRunId,
@@ -802,6 +819,8 @@ Expected JSON shape:
       goalApplyMode,
     }),
   });
+
+  controller.signal.throwIfAborted();
 
   try { await release.finish(undefined); }
   catch (error) {
