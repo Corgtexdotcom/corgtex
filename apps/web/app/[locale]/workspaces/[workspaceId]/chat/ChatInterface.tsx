@@ -38,6 +38,13 @@ type Turn = {
   createdAt: string;
 };
 
+type ChatRequest = {
+  controller: AbortController;
+  reader: ReadableStreamDefaultReader<Uint8Array> | null;
+};
+
+type ChatDraft = { input: string; attachedFile: File | null; uploadedMessage?: string };
+
 function renderAssistantMarkdown(markdown: string) {
   const escaped = markdown
     .replaceAll("&", "&amp;")
@@ -89,6 +96,69 @@ export function ChatInterface({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const requestRef = useRef<ChatRequest | null>(null);
+  const draftsRef = useRef(new Map<string | null, ChatDraft>());
+  const draftSessionRef = useRef(activeSessionId);
+  const draftRef = useRef<ChatDraft>({ input: "", attachedFile: null });
+  const workspaceRef = useRef(workspaceId);
+
+  const cancelRequest = useCallback(() => {
+    const request = requestRef.current;
+    requestRef.current = null;
+    request?.controller.abort();
+    void request?.reader?.cancel().catch(() => {});
+  }, []);
+
+  const beginRequest = useCallback(() => {
+    cancelRequest();
+    const request: ChatRequest = { controller: new AbortController(), reader: null };
+    requestRef.current = request;
+    return request;
+  }, [cancelRequest]);
+
+  const isCurrentRequest = useCallback((request: ChatRequest) =>
+    requestRef.current === request && !request.controller.signal.aborted, []);
+
+  function updateInput(value: string) {
+    draftRef.current = { ...draftRef.current, input: value };
+    draftsRef.current.set(draftSessionRef.current, draftRef.current);
+    setInput(value);
+  }
+
+  function updateAttachment(file: File | null) {
+    draftRef.current = { ...draftRef.current, attachedFile: file, uploadedMessage: undefined };
+    draftsRef.current.set(draftSessionRef.current, draftRef.current);
+    setAttachedFile(file);
+  }
+
+  const selectDraft = useCallback((id: string | null) => {
+    draftSessionRef.current = id;
+    const draft = draftsRef.current.get(id) ?? { input: "", attachedFile: null };
+    draftRef.current = draft;
+    setInput(draft.input);
+    setAttachedFile(draft.attachedFile);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }, []);
+
+  useEffect(() => () => cancelRequest(), [workspaceId, cancelRequest]);
+
+  useEffect(() => {
+    if (workspaceRef.current === workspaceId) return;
+    workspaceRef.current = workspaceId;
+    draftsRef.current.clear();
+    selectDraft(activeSessionId);
+    setConversations(initialConversations);
+    setCompanyQuestions(initialCompanyQuestions);
+    setActiveQuestionId(null);
+    setSessionId(activeSessionId);
+    setTurns([]);
+    setLoading(false);
+    setError(null);
+    setErrorAction(null);
+    setEditingTopic(false);
+    setShowNewChat(mobileMode);
+    setShowMobileHistory(false);
+  }, [workspaceId, activeSessionId, initialConversations, initialCompanyQuestions, mobileMode, selectDraft]);
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -110,10 +180,19 @@ export function ChatInterface({
   }, [isFullScreen]);
 
   const loadConversation = useCallback(async (id: string) => {
+    const request = beginRequest();
+    selectDraft(id);
+    setSessionId(id);
+    setTurns([]);
+    setLoading(true);
+    setError(null);
+    setErrorAction(null);
     try {
-      const res = await fetch(`/api/workspaces/${workspaceId}/conversations/${id}`);
+      const res = await fetch(`/api/workspaces/${workspaceId}/conversations/${id}`, { signal: request.controller.signal });
+      if (!isCurrentRequest(request)) return;
       if (!res.ok) throw new Error(t("errorFailedToLoad"));
       const data = await res.json();
+      if (!isCurrentRequest(request)) return;
       const loadedTurns = data.conversation.turns as Turn[];
       const lastTurn = loadedTurns.at(-1);
       const loadedConversation: ConversationSummary = {
@@ -144,31 +223,43 @@ export function ChatInterface({
       setSessionId(id);
       setError(null);
     } catch {
+      if (!isCurrentRequest(request)) return;
       setError(t("errorFailedToLoad"));
+    } finally {
+      if (isCurrentRequest(request)) {
+        requestRef.current = null;
+        setLoading(false);
+      }
     }
-  }, [t, workspaceId]);
+  }, [t, workspaceId, beginRequest, isCurrentRequest, selectDraft]);
 
   useEffect(() => {
     if (activeSessionId) {
       void loadConversation(activeSessionId);
     } else {
+      cancelRequest();
+      selectDraft(null);
       setSessionId(null);
       setTurns([]);
+      setLoading(false);
     }
-  }, [activeSessionId, loadConversation]);
+  }, [activeSessionId, loadConversation, cancelRequest, selectDraft]);
 
   useEffect(() => {
     setCompanyQuestions(initialCompanyQuestions);
   }, [initialCompanyQuestions]);
 
   function openNewConversation() {
+    cancelRequest();
+    selectDraft(null);
+    setLoading(false);
     setSessionId(null);
     setActiveQuestionId(null);
     setTurns([]);
     setError(null);
-    setInput("");
+    setErrorAction(null);
     setEditingTopic(false);
-    removeAttachment();
+    setShowMobileHistory(false);
     setShowNewChat(true);
     if (!compact) {
       window.history.pushState({}, "", `/workspaces/${workspaceId}/chat`);
@@ -199,8 +290,11 @@ export function ChatInterface({
   }
 
   async function openCompanyQuestion(question: CompanyQuestionSummary) {
+    const request = beginRequest();
     setLoading(true);
     setError(null);
+    setErrorAction(null);
+    setTurns([]);
     setShowMobileHistory(false);
     setEditingTopic(false);
     try {
@@ -211,11 +305,15 @@ export function ChatInterface({
           action: "start_company_understanding_conversation",
           checkInId: question.id,
         }),
+        signal: request.controller.signal,
       });
+      if (!isCurrentRequest(request)) return;
       if (!response.ok) throw new Error(t("errorFailedToLoad"));
       const data = await response.json();
+      if (!isCurrentRequest(request)) return;
       const conversation = data.conversation as ConversationSummary & { turns?: Turn[] };
       const loadedTurns = conversation.turns ?? [];
+      selectDraft(conversation.id);
       setTurns(loadedTurns);
       setSessionId(conversation.id);
       setActiveQuestionId(question.id);
@@ -240,9 +338,13 @@ export function ChatInterface({
       }
       setTimeout(() => inputRef.current?.focus(), 50);
     } catch (err) {
+      if (!isCurrentRequest(request)) return;
       setError(err instanceof Error ? err.message : t("errorFailedToLoad"));
     } finally {
-      setLoading(false);
+      if (isCurrentRequest(request)) {
+        requestRef.current = null;
+        setLoading(false);
+      }
     }
   }
 
@@ -314,235 +416,275 @@ export function ChatInterface({
   }
 
   async function handleFileUpload(file: File) {
-    setAttachedFile(file);
+    updateAttachment(file);
   }
 
   function removeAttachment() {
-    setAttachedFile(null);
+    updateAttachment(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
   async function sendMessage() {
-    if ((!input.trim() && !attachedFile) || loading) return;
+    if ((!input.trim() && !attachedFile) || loading || requestRef.current) return;
 
+    const request = beginRequest();
+    const submittedDraft = draftRef.current;
     setLoading(true);
     setError(null);
+    setErrorAction(null);
 
-    let userMessage = input.trim();
+    try {
+      let userMessage = input.trim();
 
-    if (userMessage.length > MAX_MESSAGE_LENGTH) {
-      setError(`This message is too long (${userMessage.length.toLocaleString()} characters). Please use the + button to upload it as a file instead.`);
-      setLoading(false);
-      return;
-    }
+      if (userMessage.length > MAX_MESSAGE_LENGTH) {
+        setError(`This message is too long (${userMessage.length.toLocaleString()} characters). Please use the + button to upload it as a file instead.`);
+        setLoading(false);
+        return;
+      }
 
-    if (attachedFile) {
-      try {
-        const formData = new FormData();
-        formData.append("file", attachedFile);
-        formData.append("title", attachedFile.name);
-        formData.append("source", "chat-upload");
-        if (userMessage) formData.append("message", userMessage);
-        const uploadRes = await fetch(`/api/workspaces/${workspaceId}/chat/attachments`, {
-          method: "POST",
-          body: formData,
-        });
-        const uploadData = await uploadRes.json().catch(() => ({})) as {
-          status?: string;
-          message?: string;
-          webUrl?: string | null;
-        };
-        if (!uploadRes.ok) {
-          throw new Error(uploadData.message || t("errorFailedToSend"));
-        }
-        if (uploadData.status === "needs_clarification" || uploadData.status === "needs_meeting_details") {
-          const uploadMessage = uploadData.message || "Please add the missing meeting details and send again.";
-          setError(uploadMessage);
-          setErrorAction(uploadData.webUrl
-            ? { message: uploadMessage, href: uploadData.webUrl, label: "Open meeting upload" }
-            : null);
-          setLoading(false);
-          inputRef.current?.focus();
+      if (attachedFile && draftRef.current.uploadedMessage === undefined) {
+        try {
+          const formData = new FormData();
+          formData.append("file", attachedFile);
+          formData.append("title", attachedFile.name);
+          formData.append("source", "chat-upload");
+          if (userMessage) formData.append("message", userMessage);
+          const uploadRes = await fetch(`/api/workspaces/${workspaceId}/chat/attachments`, {
+            method: "POST",
+            body: formData,
+            signal: request.controller.signal,
+          });
+          if (!isCurrentRequest(request)) return;
+          const uploadData = await uploadRes.json().catch(() => ({})) as {
+            status?: string;
+            message?: string;
+            webUrl?: string | null;
+          };
+          if (!isCurrentRequest(request)) return;
+          if (!uploadRes.ok) {
+            throw new Error(uploadData.message || t("errorFailedToSend"));
+          }
+          if (uploadData.status === "needs_clarification" || uploadData.status === "needs_meeting_details") {
+            const uploadMessage = uploadData.message || "Please add the missing meeting details and send again.";
+            setError(uploadMessage);
+            setErrorAction(uploadData.webUrl
+              ? { message: uploadMessage, href: uploadData.webUrl, label: "Open meeting upload" }
+              : null);
+            setLoading(false);
+            inputRef.current?.focus();
+            return;
+          }
+          const attachmentMessage = uploadData.webUrl
+            ? `${uploadData.message}\n${uploadData.webUrl}`
+            : uploadData.message;
+          // Retain the uploaded reference for retries without uploading again.
+          draftRef.current = { ...draftRef.current, uploadedMessage: attachmentMessage ?? "" };
+          draftsRef.current.set(draftSessionRef.current, draftRef.current);
+        } catch (err) {
+          if (!isCurrentRequest(request)) return;
+          setError(err instanceof Error ? err.message : t("errorFailedToSend"));
           return;
         }
-        const attachmentMessage = uploadData.webUrl
-          ? `${uploadData.message}\n${uploadData.webUrl}`
-          : uploadData.message;
-        userMessage = [attachmentMessage, userMessage].filter(Boolean).join("\n\n");
-        removeAttachment();
-      } catch (err) {
-        if (!userMessage) {
+      }
+      if (attachedFile) {
+        userMessage = [draftRef.current.uploadedMessage, userMessage].filter(Boolean).join("\n\n");
+      }
+
+      let currentSessionId = sessionId;
+      if (!currentSessionId) {
+        try {
+          const res = await fetch(`/api/workspaces/${workspaceId}/conversations`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ agentKey: "assistant" }),
+            signal: request.controller.signal,
+          });
+          if (!isCurrentRequest(request)) return;
+          if (!res.ok) throw new Error(t("errorFailedToCreate"));
+          const data = await res.json();
+          if (!isCurrentRequest(request)) return;
+          currentSessionId = data.session.id as string;
+          const newSession: ConversationSummary = {
+            id: currentSessionId,
+            topic: null,
+            agentKey: "assistant",
+            status: "ACTIVE",
+            updatedAt: new Date().toISOString(),
+            lastMessage: null,
+          };
+          draftsRef.current.set(currentSessionId, draftRef.current);
+          draftsRef.current.delete(null);
+          selectDraft(currentSessionId);
+          setConversations((prev) => [newSession, ...prev]);
+          setSessionId(currentSessionId);
+          setShowNewChat(false);
+          if (!compact) {
+            window.history.pushState({}, "", `/workspaces/${workspaceId}/chat?session=${currentSessionId}`);
+          }
+        } catch {
+          if (!isCurrentRequest(request)) return;
+          setError(t("errorFailedToCreate"));
+          return;
+        }
+      }
+
+      const answeredQuestionId = activeQuestionId;
+      if (answeredQuestionId) {
+        try {
+          const response = await fetch(`/api/workspaces/${workspaceId}/check-ins`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              checkInId: answeredQuestionId,
+              responseMd: userMessage,
+              relatedConversationId: currentSessionId,
+            }),
+            signal: request.controller.signal,
+          });
+          if (!isCurrentRequest(request)) return;
+          if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            if (!isCurrentRequest(request)) return;
+            throw new Error(errorData.error || t("errorFailedToSend"));
+          }
+          setCompanyQuestions((prev) => prev.filter((question) => question.id !== answeredQuestionId));
+          setActiveQuestionId(null);
+        } catch (err) {
+          if (!isCurrentRequest(request)) return;
           setError(err instanceof Error ? err.message : t("errorFailedToSend"));
           setLoading(false);
           return;
         }
       }
-    }
 
-    let currentSessionId = sessionId;
-    if (!currentSessionId) {
+      // Keep the submitted draft in memory until success, so navigating away or
+      // a failed stream can restore it without carrying it into another chat.
+      setInput("");
+      const optimisticTurn: Turn = {
+        id: `pending-${Date.now()}`,
+        sequenceNumber: turns.length + 1,
+        userMessage,
+        assistantMessage: "",
+        createdAt: new Date().toISOString(),
+      };
+      setTurns((prev) => [...prev, optimisticTurn]);
+
       try {
-        const res = await fetch(`/api/workspaces/${workspaceId}/conversations`, {
+        const res = await fetch(`/api/workspaces/${workspaceId}/conversations/${currentSessionId}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ agentKey: "assistant" }),
+          body: JSON.stringify({ message: userMessage, pageContext }),
+          signal: request.controller.signal,
         });
-        if (!res.ok) throw new Error(t("errorFailedToCreate"));
-        const data = await res.json();
-        currentSessionId = data.session.id as string;
-        const newSession: ConversationSummary = {
-          id: currentSessionId,
-          topic: null,
-          agentKey: "assistant",
-          status: "ACTIVE",
-          updatedAt: new Date().toISOString(),
-          lastMessage: null,
+
+        if (!isCurrentRequest(request)) {
+          void res.body?.cancel().catch(() => {});
+          return;
+        }
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          if (!isCurrentRequest(request)) return;
+          throw new Error(errData.error || t("errorFailedToSend"));
+        }
+        if (!res.body) {
+          throw new Error(t("errorStreamUnavailable"));
+        }
+
+        const reader = res.body.getReader();
+        request.reader = reader;
+        const decoder = new TextDecoder();
+        let assistantMessage = "";
+        let buffer = "";
+        let shouldRefreshCurrentRoute = false;
+
+        const updatePendingTurn = (nextMessage: string) => {
+          if (!isCurrentRequest(request)) return;
+          setTurns((prev) =>
+            prev.map((turn) =>
+              turn.id === optimisticTurn.id
+                ? { ...turn, assistantMessage: nextMessage }
+                : turn
+            )
+          );
         };
-        setConversations((prev) => [newSession, ...prev]);
-        setSessionId(currentSessionId);
-        setShowNewChat(false);
-        if (!compact) {
-          window.history.pushState({}, "", `/workspaces/${workspaceId}/chat?session=${currentSessionId}`);
+
+        const consumeBuffer = () => {
+          if (!isCurrentRequest(request)) return;
+          let newlineIndex = buffer.indexOf("\n");
+          while (newlineIndex >= 0) {
+            const line = buffer.slice(0, newlineIndex).trim();
+            buffer = buffer.slice(newlineIndex + 1);
+
+            if (line.startsWith("data: ") && line !== "data: [DONE]") {
+              try {
+                const payload = JSON.parse(line.slice(6)) as { text?: string; topic?: string; refreshCurrentRoute?: boolean };
+                if (payload.topic) {
+                  setConversations((prev) =>
+                    prev.map((c) =>
+                      c.id === currentSessionId ? { ...c, topic: payload.topic! } : c
+                    )
+                  );
+                }
+                if (payload.refreshCurrentRoute) {
+                  shouldRefreshCurrentRoute = true;
+                }
+                if (payload.text) {
+                  assistantMessage += payload.text;
+                  updatePendingTurn(assistantMessage);
+                }
+              } catch {
+                // Ignore malformed partial payloads and continue streaming.
+              }
+            }
+
+            newlineIndex = buffer.indexOf("\n");
+          }
+        };
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (!isCurrentRequest(request)) return;
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          consumeBuffer();
         }
-      } catch {
-        setError(t("errorFailedToCreate"));
-        return;
-      }
-    }
 
-    const answeredQuestionId = activeQuestionId;
-    if (answeredQuestionId) {
-      try {
-        const response = await fetch(`/api/workspaces/${workspaceId}/check-ins`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            checkInId: answeredQuestionId,
-            responseMd: userMessage,
-            relatedConversationId: currentSessionId,
-          }),
-        });
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => ({}));
-          throw new Error(errorData.error || t("errorFailedToSend"));
-        }
-        setCompanyQuestions((prev) => prev.filter((question) => question.id !== answeredQuestionId));
-        setActiveQuestionId(null);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : t("errorFailedToSend"));
-        setLoading(false);
-        return;
-      }
-    }
+        buffer += decoder.decode();
+        consumeBuffer();
 
-    setInput("");
-
-    const optimisticTurn: Turn = {
-      id: `pending-${Date.now()}`,
-      sequenceNumber: turns.length + 1,
-      userMessage,
-      assistantMessage: "",
-      createdAt: new Date().toISOString(),
-    };
-    setTurns((prev) => [...prev, optimisticTurn]);
-
-    try {
-      const res = await fetch(`/api/workspaces/${workspaceId}/conversations/${currentSessionId}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: userMessage, pageContext }),
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || t("errorFailedToSend"));
-      }
-      if (!res.body) {
-        throw new Error(t("errorStreamUnavailable"));
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let assistantMessage = "";
-      let buffer = "";
-      let shouldRefreshCurrentRoute = false;
-
-      const updatePendingTurn = (nextMessage: string) => {
-        setTurns((prev) =>
-          prev.map((turn) =>
-            turn.id === optimisticTurn.id
-              ? { ...turn, assistantMessage: nextMessage }
-              : turn
+        updateInput("");
+        removeAttachment();
+        setConversations((prev) =>
+          prev.map((conversation) =>
+            conversation.id === currentSessionId
+              ? {
+                  ...conversation,
+                  lastMessage: assistantMessage.slice(0, 100) || null,
+                  topic: conversation.topic || userMessage.slice(0, 60),
+                  updatedAt: new Date().toISOString(),
+                }
+              : conversation
           )
         );
-      };
-
-      const consumeBuffer = () => {
-        let newlineIndex = buffer.indexOf("\n");
-        while (newlineIndex >= 0) {
-          const line = buffer.slice(0, newlineIndex).trim();
-          buffer = buffer.slice(newlineIndex + 1);
-
-          if (line.startsWith("data: ") && line !== "data: [DONE]") {
-            try {
-              const payload = JSON.parse(line.slice(6)) as { text?: string; topic?: string; refreshCurrentRoute?: boolean };
-              if (payload.topic) {
-                setConversations((prev) =>
-                  prev.map((c) =>
-                    c.id === currentSessionId ? { ...c, topic: payload.topic! } : c
-                  )
-                );
-              }
-              if (payload.refreshCurrentRoute) {
-                shouldRefreshCurrentRoute = true;
-              }
-              if (payload.text) {
-                assistantMessage += payload.text;
-                updatePendingTurn(assistantMessage);
-              }
-            } catch {
-              // Ignore malformed partial payloads and continue streaming.
-            }
-          }
-
-          newlineIndex = buffer.indexOf("\n");
+        if (shouldRefreshCurrentRoute) {
+          router.refresh();
+        } else if (answeredQuestionId) {
+          router.refresh();
         }
-      };
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        consumeBuffer();
+      } catch (err) {
+        if (!isCurrentRequest(request)) return;
+        setError(err instanceof Error ? err.message : t("errorFailedToSend"));
+        updateInput(submittedDraft.input);
+        setTurns((prev) => prev.filter((turn) => turn.id !== optimisticTurn.id));
       }
-
-      buffer += decoder.decode();
-      consumeBuffer();
-
-      setConversations((prev) =>
-        prev.map((conversation) =>
-          conversation.id === currentSessionId
-            ? {
-                ...conversation,
-                lastMessage: assistantMessage.slice(0, 100) || null,
-                topic: conversation.topic || userMessage.slice(0, 60),
-                updatedAt: new Date().toISOString(),
-              }
-            : conversation
-        )
-      );
-      if (shouldRefreshCurrentRoute) {
-        router.refresh();
-      } else if (answeredQuestionId) {
-        router.refresh();
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("errorFailedToSend"));
-      setTurns((prev) => prev.filter((turn) => turn.id !== optimisticTurn.id));
     } finally {
-      setLoading(false);
-      if (!mobileMode && !window.matchMedia("(pointer: coarse)").matches) {
-        inputRef.current?.focus();
+      request.reader?.releaseLock();
+      if (isCurrentRequest(request)) {
+        requestRef.current = null;
+        setLoading(false);
+        if (!mobileMode && !window.matchMedia("(pointer: coarse)").matches) {
+          inputRef.current?.focus();
+        }
       }
     }
   }
@@ -672,7 +814,17 @@ export function ChatInterface({
               <div style={{ display: "flex", alignItems: "center", gap: "8px", flex: 1, minWidth: 0 }}>
                 {compact && !mobileMode && (
                   <button
-                    onClick={() => { setSessionId(null); setShowNewChat(false); setEditingTopic(false); }}
+                    onClick={() => {
+                      cancelRequest();
+                      selectDraft(null);
+                      setLoading(false);
+                      setSessionId(null);
+                      setTurns([]);
+                      setActiveQuestionId(null);
+                      setError(null);
+                      setShowNewChat(false);
+                      setEditingTopic(false);
+                    }}
                     style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: "0 4px" }}
                     title={t("titleBackToConversations")}
                     type="button"
@@ -793,7 +945,7 @@ export function ChatInterface({
                     <button
                       key={starter}
                       onClick={() => {
-                        setInput(starter);
+                        updateInput(starter);
                         inputRef.current?.focus();
                       }}
                       type="button"
@@ -879,7 +1031,7 @@ export function ChatInterface({
               <textarea
                 ref={inputRef}
                 value={input}
-                onChange={(event) => setInput(event.target.value)}
+                onChange={(event) => updateInput(event.target.value)}
                 onKeyDown={handleKeyDown}
                 placeholder={t("placeholderTypeMessage")}
                 rows={1}
