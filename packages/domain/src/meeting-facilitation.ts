@@ -109,6 +109,7 @@ async function requirePublicSlackPublication(workspaceId: string, installationId
   invariant(validation.ok, 403, "SOURCE_RESTRICTED", "The Slack destination is unavailable.");
   invariant(await isArtifactInputProofPubliclyShareable(actor, workspaceId, [...roots, ...destinationRoots]),
     403, "SOURCE_RESTRICTED", "The content is not available to this public channel.");
+  return [...roots, ...destinationRoots];
 }
 
 type AgendaEditOutput = {
@@ -981,11 +982,14 @@ export async function postMeetingSummaryToAgendaThread(params: {
       return { skipped: true, reason: validation.code };
     }
 
-    await assertMeetingReviewPublicPublication(agendaActor(params.workspaceId), reviewPreparation);
+    const publicationRoots = await assertMeetingReviewPublicPublication(agendaActor(params.workspaceId), reviewPreparation);
+    const publication = agendaSlackAttempt(agendaActor(params.workspaceId), params.workspaceId,
+      reviewPreparation.installationId, reviewPreparation.channelId, publicationRoots);
     const response = await sendSlackMessage(reviewPreparation.installationId, {
       channel: reviewPreparation.channelId,
       threadTs: reviewPreparation.threadTs ?? undefined,
-    }, reviewPreparation.message.mainBlocks);
+    }, reviewPreparation.message.mainBlocks, undefined, publication);
+    publication.assertActive();
     const messageTs = typeof response.ts === "string" ? response.ts : "";
     invariant(messageTs, 502, "SLACK_POST_FAILED", "Slack did not return a message timestamp for the meeting follow-up review.");
     const threadTs = reviewPreparation.threadTs ?? messageTs;
@@ -1009,7 +1013,8 @@ export async function postMeetingSummaryToAgendaThread(params: {
       await sendSlackMessage(reviewPreparation.installationId, {
         channel: reviewPreparation.channelId,
         threadTs,
-      }, blocks);
+      }, blocks, undefined, publication);
+      publication.assertActive();
     }
 
     await prisma.meeting.update({
@@ -1046,7 +1051,7 @@ export async function postMeetingSummaryToAgendaThread(params: {
       { kind: "Meeting", id: meeting.id, snapshot: meeting },
       ...insights.map((insight) => ({ kind: "MeetingInsight" as const, id: insight.id, snapshot: insight })),
     ]);
-    await requirePublicSlackPublication(params.workspaceId, installation.id, meeting.agendaChannelId, roots);
+    roots = await requirePublicSlackPublication(params.workspaceId, installation.id, meeting.agendaChannelId, roots);
   } catch (error) {
     if (!(error instanceof Error) || !("code" in error)
       || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED", "NOT_FOUND"].includes(String(error.code))) throw error;
@@ -1059,10 +1064,12 @@ export async function postMeetingSummaryToAgendaThread(params: {
     groupedInsights.set(insight.type, items);
   }
 
+  const publication = agendaSlackAttempt(actor, params.workspaceId, installation.id, meeting.agendaChannelId, roots);
   await sendSlackMessage(installation.id, {
     channel: meeting.agendaChannelId,
     threadTs: meeting.agendaMessageTs,
-  }, renderSummaryBlocks({ meeting, groupedInsights }));
+  }, renderSummaryBlocks({ meeting, groupedInsights }), undefined, publication);
+  publication.assertActive();
 
   await prisma.meeting.update({
     where: { id: meeting.id },

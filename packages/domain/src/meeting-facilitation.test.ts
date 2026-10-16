@@ -624,7 +624,7 @@ describe("meeting facilitation", () => {
     expect(sendSlackMessageMock).toHaveBeenCalledWith("slack-1", {
       channel: "C123",
       threadTs: "1710000000.000100",
-    }, expect.any(Array));
+    }, expect.any(Array), undefined, expect.objectContaining({ authorizeAttempt: expect.any(Function), signal: expect.any(AbortSignal) }));
     expect(prismaMock.meeting.update).toHaveBeenCalledWith({
       where: { id: "meeting-1" },
       data: { summaryPostedAt: expect.any(Date) },
@@ -848,6 +848,50 @@ describe("meeting facilitation", () => {
     });
   });
 
+  it.each((["initial", "overflow", "retry", "fallback"] as const).flatMap(site =>
+    (["source", "installation", "policy", "none"] as const).map(change => ({ site, change }))))("guards review $site Slack attempts after $change changes", async ({ site, change }) => {
+    if (site !== "fallback") prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({ enabled: true,
+      config: { meetingSeriesExternalId: "series", channelId: "C999" } });
+    prismaMock.meeting.findFirst.mockResolvedValue({ id: "meeting-1", workspaceId: "workspace-1", title: "Review", summaryMd: "content ".repeat(site === "overflow" ? 25000 : 5),
+      recordedAt: new Date(), summaryPostedAt: null, seriesId: null, series: { externalId: "series" }, agendaChannelId: "C123", agendaMessageTs: "1.1" });
+    let sends = 0; let calls = 0;
+    const mutate = () => {
+      if (change === "source") receiptMocks.readable.mockResolvedValue(false);
+      if (change === "installation") prismaMock.communicationInstallation.findFirst.mockResolvedValue(null);
+      if (change === "policy") validateSlackPostTargetMock.mockResolvedValue({ ok: false });
+    };
+    sendSlackMessageMock.mockImplementation(async (_id, _target, _blocks, _token, controls) => {
+      calls++;
+      if (site === "retry") { await controls?.authorizeAttempt({ signal: controls.signal }); sends++; }
+      if (site !== "overflow" || calls > 1) mutate();
+      await controls?.authorizeAttempt({ signal: controls.signal }); sends++;
+      return { ts: "123.456" };
+    });
+    const { postMeetingSummaryToAgendaThread } = await import("./meeting-facilitation");
+    const result = await postMeetingSummaryToAgendaThread({ workspaceId: "workspace-1", meetingId: "meeting-1" }).catch(error => error);
+    if (change === "none") { expect(result).toMatchObject({ posted: true }); expect(sends).toBeGreaterThan(0); }
+    else {
+      expect(result).toBeInstanceOf(Error); expect(sends).toBe(site === "overflow" || site === "retry" ? 1 : 0);
+      expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    }
+  });
+
+  it("keeps a swallowed summary attempt denial fatal after authority is restored", async () => {
+    prismaMock.meeting.findFirst.mockResolvedValue({ id: "meeting-1", workspaceId: "workspace-1", title: "Review", summaryMd: "Synthetic summary",
+      recordedAt: new Date(), summaryPostedAt: null, agendaChannelId: "C123", agendaMessageTs: "1.1" });
+    let rejected = false;
+    sendSlackMessageMock.mockImplementation(async (_id, _target, _blocks, _token, controls) => {
+      receiptMocks.readable.mockResolvedValue(false);
+      try { await controls?.authorizeAttempt({ signal: controls.signal }); } catch { rejected = true; }
+      receiptMocks.readable.mockResolvedValue(true);
+      return { ts: "ignored-guard" };
+    });
+    const { postMeetingSummaryToAgendaThread } = await import("./meeting-facilitation");
+    const result = await postMeetingSummaryToAgendaThread({ workspaceId: "workspace-1", meetingId: "meeting-1" }).catch(error => error);
+    expect(rejected).toBe(true); expect(result).toBeInstanceOf(Error);
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+  });
+
   it("rechecks complete public proof before configured review overflow messages", async () => {
     prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({ enabled: true,
       config: { meetingSeriesExternalId: "series", channelId: "C999" } });
@@ -920,7 +964,7 @@ describe("meeting facilitation", () => {
     expect(sendSlackMessageMock).toHaveBeenCalledWith("slack-1", {
       channel: "C999",
       threadTs: undefined,
-    }, expect.any(Array));
+    }, expect.any(Array), undefined, expect.objectContaining({ authorizeAttempt: expect.any(Function), signal: expect.any(AbortSignal) }));
     const postedBlocks = JSON.stringify(sendSlackMessageMock.mock.calls[0]?.[2]);
     expect(postedBlocks).toContain("Full generated summary for the customer meeting.");
     expect(postedBlocks).toContain("Milan to confirm rollout channel");

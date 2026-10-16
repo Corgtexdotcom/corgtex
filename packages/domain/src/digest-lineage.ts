@@ -2,7 +2,7 @@ import type { Prisma } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
-import { captureReadableNewspaperDeliveryInputs, captureArtifactInputProof, captureArtifactReadHeadObservation, mergeLineageInputRoot, withArtifactCountReleaseSnapshot, isArtifactInputProofReadable, type LineageInput, type LineageKind, type LineageRoot } from "./source-lineage";
+import { captureReadableWorkItemInputs, captureReadableNewspaperDeliveryInputs, captureArtifactInputProof, captureArtifactReadHeadObservation, mergeLineageInputRoot, withArtifactCountReleaseSnapshot, isArtifactInputProofReadable, type LineageInput, type LineageKind, type LineageRoot } from "./source-lineage";
 import { mergePermissionEpochProofs } from "./source-permission-epochs";
 
 /** One request's original compact observations, released together in a fresh snapshot. */
@@ -28,6 +28,17 @@ export class DigestReadRelease {
     const captured = await this.observeRead(() => captureReadableDigestInputs({actor: this.actor, workspaceId: this.workspaceId, kind, records}));
     this.add(captured.roots);
     return captured;
+  }
+  /** Bounded canonical admission for full-corpus Brain counts. Complex and derived
+   * articles retain the ordinary evaluator; original rows share page reads. */
+  async captureBrainArticlePage<T extends {id: string; [key: string]: unknown}>(records: T[]) {
+    const captured = await captureReadableWorkItemInputs(this.actor, this.workspaceId, "BrainArticle", records);
+    this.add(captured.roots);
+    for (const [key, stamp] of captured.heads) {
+      invariant(!this.heads.has(key) || this.heads.get(key) === stamp, 409, "SOURCE_CHANGED", "Brain article lineage changed during collection.");
+      this.heads.set(key, stamp);
+    }
+    return records.filter(record => captured.ids.has(record.id));
   }
   finish<T>(value: T, validate?: (tx: Prisma.TransactionClient) => Promise<void>) {
     return withArtifactCountReleaseSnapshot(this.actor, this.workspaceId, [...this.roots.values()], async () => {}, async tx => {

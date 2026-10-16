@@ -21,8 +21,8 @@ export async function listBrainArticleTypeCounts(params: CountParams) {
       orderBy: { id: "asc" }, take: 100,
     });
     const nextId = candidates.at(-1)?.id;
-    const captured = await release.capture("BrainArticle", candidates);
-    for (const article of captured.records) counts.set(article.type, (counts.get(article.type) ?? 0) + 1);
+    const captured = await release.captureBrainArticlePage(candidates);
+    for (const article of captured) counts.set(article.type, (counts.get(article.type) ?? 0) + 1);
     if (candidates.length < 100) break;
     if (nextId === afterId) throw new Error("Brain article count cursor did not advance");
     afterId = nextId;

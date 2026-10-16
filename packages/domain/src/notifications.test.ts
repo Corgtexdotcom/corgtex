@@ -31,6 +31,7 @@ const {
       findMany: vi.fn(),
     },
     member: {
+      findUnique: vi.fn(),
       findMany: vi.fn(),
     },
     workflowJob: {
@@ -109,6 +110,7 @@ describe("notifications domain", () => {
     });
     prismaMock.notification.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.notification.findMany.mockReset().mockResolvedValue([{ id: "notification-1" }]);
+    prismaMock.member.findUnique.mockReset().mockResolvedValue({ id: "member-1", workspaceId: "workspace-1", userId: "user-1", role: "CONTRIBUTOR", isActive: true });
     prismaMock.user.findFirst.mockReset().mockResolvedValue({ id: "user-1", email: "user-1@example.com", displayName: "User", globalRole: "USER" });
     prismaMock.notification.findFirst.mockReset().mockImplementation(async () => {
       const delivery = await prismaMock.notificationDelivery.findUnique();
@@ -721,6 +723,62 @@ describe("notifications domain", () => {
     });
   });
 
+  it.each((["credentials", "retry"] as const).flatMap(boundary =>
+    (["source", "recipient", "none"] as const).map(change => ({ boundary, change }))))("retains original Slack notification authority across $boundary/$change", async ({ boundary, change }) => {
+    const delivery = { id: "delivery-1", notificationId: "notification-1", workspaceId: "workspace-1", userId: "user-1",
+      channel: "SLACK", status: "PENDING", attempts: 0, user: { email: "user-1@example.com" },
+      notification: { id: "notification-1", type: "deliberation.mention", title: "Private notice", bodyMd: "Private original body" } };
+    prismaMock.notificationDelivery.findUnique.mockResolvedValue(delivery);
+    let changed = false; let sends = 0; const denied = new AppError(409, "SOURCE_CHANGED", "Original proof revoked and restored.");
+    lineageMocks.release.mockImplementation(async (_actor, _ws, roots, remote, finish) => {
+      expect(roots).toEqual([expect.objectContaining({ kind: "Notification", id: "notification-1", fingerprint: "notification-1" })]);
+      if (changed && change === "source") throw denied;
+      await remote(); return finish(prismaMock);
+    });
+    const mutate = () => { changed = true; if (change === "recipient") prismaMock.user.findFirst.mockResolvedValue(null); };
+    sendSlackMessageMock.mockImplementation(async (_installation, _target, _blocks, _token, controls) => {
+      if (boundary === "retry") { await controls?.authorizeAttempt({ signal: controls.signal }); sends++; }
+      mutate();
+      await controls?.authorizeAttempt({ signal: controls.signal }); sends++;
+      return { ts: "sent" };
+    });
+    const { deliverNotificationDelivery } = await import("./notifications");
+    const result = await deliverNotificationDelivery("delivery-1").catch(error => error);
+    expect(sends).toBe(change === "none" ? (boundary === "retry" ? 2 : 1) : (boundary === "retry" ? 1 : 0));
+    if (change === "none") expect(result).toEqual({ status: "SENT" });
+    else {
+      expect(result).toBeInstanceOf(Error);
+      expect(prismaMock.notificationDelivery.upsert).not.toHaveBeenCalled();
+      expect(prismaMock.notificationDelivery.update).not.toHaveBeenCalled();
+    }
+  });
+
+  it("withholds a delivery when original proof capture definitively denies after admission", async () => {
+    prismaMock.notificationDelivery.findUnique.mockResolvedValue({ id: "delivery-1", notificationId: "notification-1", workspaceId: "workspace-1", userId: "user-1",
+      channel: "SLACK", status: "PENDING", attempts: 0, user: { email: "user-1@example.com" }, notification: { id: "notification-1", type: "deliberation.mention", title: "Notice" } });
+    lineageMocks.capture.mockRejectedValueOnce(new AppError(409, "UNKNOWN_LINEAGE", "Original proof unavailable."));
+    const { deliverNotificationDelivery } = await import("./notifications");
+    expect(await deliverNotificationDelivery("delivery-1")).toEqual({ status: "SKIPPED" });
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+    expect(prismaMock.notificationDelivery.upsert).not.toHaveBeenCalled();
+  });
+
+  it("does not swallow a notification attempt proof failure or queue fallback after an adapter restores authority", async () => {
+    prismaMock.notificationDelivery.findUnique.mockResolvedValue({ id: "delivery-1", notificationId: "notification-1", workspaceId: "workspace-1", userId: "user-1",
+      channel: "SLACK", status: "PENDING", attempts: 0, user: { email: "user-1@example.com" }, notification: { id: "notification-1", title: "Private", bodyMd: null } });
+    const failure = new Error("Temporary proof backend unavailable"); let rejected = false;
+    sendSlackMessageMock.mockImplementation(async (_installation, _target, _blocks, _token, controls) => {
+      lineageMocks.release.mockRejectedValueOnce(failure);
+      await controls?.authorizeAttempt({ signal: controls.signal }).catch(() => { rejected = true; });
+      return { ts: "not-actually-sent" };
+    });
+    const { deliverNotificationDelivery } = await import("./notifications");
+    const result = await deliverNotificationDelivery("delivery-1").catch(error => error);
+    expect(rejected).toBe(true); expect(result).toBe(failure);
+    expect(prismaMock.notificationDelivery.update).not.toHaveBeenCalled();
+    expect(prismaMock.notificationDelivery.upsert).not.toHaveBeenCalled();
+  });
+
   it("deliverNotificationDelivery sends Slack and records provider success", async () => {
     prismaMock.notificationDelivery.findUnique.mockResolvedValue({
       id: "delivery-1",
@@ -756,6 +814,7 @@ describe("notifications domain", () => {
       expect.arrayContaining([
         expect.objectContaining({ type: "section" }),
       ]),
+      undefined, expect.objectContaining({ authorizeAttempt: expect.any(Function), signal: expect.any(AbortSignal) }),
     );
     expect(prismaMock.notificationDelivery.update).toHaveBeenCalledWith({
       where: { id: "delivery-1" },

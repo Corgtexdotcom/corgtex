@@ -5,6 +5,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { captureArtifactInputProof, captureArtifactReadHeadObservation, mergeLineageInputRoot,
   readableArtifactIds, sealArtifactInputActor, withArtifactCountReleaseSnapshot, type LineageRoot } from "./source-lineage";
+import type { SlackAttemptControls } from "./communication";
 import { AppError, invariant } from "./errors";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 
@@ -371,18 +372,28 @@ type NotificationDeliveryWithRecipient = Prisma.NotificationDeliveryGetPayload<{
   };
 }>;
 
-async function refreshReadableDelivery(delivery: NotificationDeliveryWithRecipient) {
+async function refreshReadableDelivery(delivery: NotificationDeliveryWithRecipient, retainProof = false) {
   const actor = await currentRecipientActor(delivery.userId, delivery.workspaceId);
   const notification = actor ? await prisma.notification.findFirst({ where: {
     id: delivery.notificationId, workspaceId: delivery.workspaceId, userId: delivery.userId,
   } }) : null;
   let readable = false;
+  let roots: LineageRoot[] = [];
+  let heads = new Map<string, string>();
   if (actor && notification) {
-    try { readable = (await readableArtifactIds(actor, delivery.workspaceId, "Notification", [notification])).has(notification.id); }
-    catch (error) {
+    try {
+      if (retainProof) sealArtifactInputActor(actor);
+      const observed = await captureArtifactReadHeadObservation(async () => {
+        readable = (await readableArtifactIds(actor, delivery.workspaceId, "Notification", [notification])).has(notification.id);
+        if (readable && retainProof) roots = await captureArtifactInputProof(actor, delivery.workspaceId,
+          [{ kind: "Notification", id: notification.id, snapshot: notification }]);
+      });
+      heads = observed.heads;
+    } catch (error) {
       // Unavailable proof infrastructure must leave the queued intent retryable.
       // A current denial still permanently withholds this outbound content.
       if (!isDefinitiveNotificationDenial(error)) throw error;
+      readable = false;
     }
   }
   if (!readable || !notification || actor?.kind !== "user") {
@@ -393,8 +404,10 @@ async function refreshReadableDelivery(delivery: NotificationDeliveryWithRecipie
   }
   delivery.notification = notification;
   delivery.user = { email: actor.user.email };
-  return true;
+  return { actor, roots, heads };
 }
+
+type DeliveryProof = Exclude<Awaited<ReturnType<typeof refreshReadableDelivery>>, false>;
 
 async function createEmailFallbackDelivery(delivery: NotificationDeliveryWithRecipient) {
   if (!delivery.user.email) return;
@@ -489,9 +502,31 @@ async function deliverEmailNotificationDelivery(delivery: NotificationDeliveryWi
   }
 }
 
-async function deliverSlackNotificationDelivery(delivery: NotificationDeliveryWithRecipient) {
+async function deliverSlackNotificationDelivery(delivery: NotificationDeliveryWithRecipient, original: DeliveryProof) {
   const attempt = delivery.attempts + 1;
   let checkingAuthority = false;
+  const controller = new AbortController();
+  const originalEmail = original.actor.user.email;
+  const controls: SlackAttemptControls = {
+    signal: controller.signal,
+    authorizeAttempt: async ({ signal }) => {
+      try {
+        controller.signal.throwIfAborted();
+        signal.throwIfAborted();
+        await withArtifactCountReleaseSnapshot(original.actor, delivery.workspaceId, original.roots, async () => {}, async tx => {
+          await requireWorkspaceMembership({ actor: original.actor, workspaceId: delivery.workspaceId, tx });
+          const user = await tx.user.findFirst({ where: { id: delivery.userId,
+            memberships: { some: { workspaceId: delivery.workspaceId, isActive: true } } }, select: { email: true } });
+          invariant(user?.email === originalEmail, 403, "SOURCE_RESTRICTED", "Notification recipient identity is unavailable.");
+        }, original.heads);
+        signal.throwIfAborted();
+        controller.signal.throwIfAborted();
+      } catch (error) {
+        controller.abort(error);
+        throw error;
+      }
+    },
+  };
 
   try {
     const { resolveSlackNotificationRecipient, sendSlackMessage } = await import("./communication");
@@ -533,7 +568,8 @@ async function deliverSlackNotificationDelivery(delivery: NotificationDeliveryWi
     const result = await sendSlackMessage(recipient.installationId, {
       channel: recipient.externalUserId,
       text: slack.text,
-    }, slack.blocks);
+    }, slack.blocks, undefined, controls);
+    controller.signal.throwIfAborted();
 
     await prisma.notificationDelivery.update({
       where: { id: delivery.id },
@@ -550,6 +586,7 @@ async function deliverSlackNotificationDelivery(delivery: NotificationDeliveryWi
   } catch (error) {
     // Proof failure is not a Slack transport failure and must not terminalize
     // the intent or create fallback mail before a later retry can revalidate it.
+    controller.signal.throwIfAborted();
     if (checkingAuthority) throw error;
     const message = error instanceof Error ? error.message : "Unknown notification Slack delivery error.";
     await prisma.notificationDelivery.update({
@@ -577,12 +614,13 @@ export async function deliverNotificationDelivery(deliveryId: string) {
   if (!delivery || delivery.status === "SENT" || delivery.status === "SKIPPED" || delivery.status === "FAILED") {
     return { status: "SKIPPED" as const };
   }
-  if (!await refreshReadableDelivery(delivery)) return { status: "SKIPPED" as const };
+  const original = await refreshReadableDelivery(delivery, delivery.channel === NOTIFICATION_DELIVERY_SLACK_CHANNEL);
+  if (!original) return { status: "SKIPPED" as const };
   if (delivery.channel === NOTIFICATION_DELIVERY_EMAIL_CHANNEL) {
     return deliverEmailNotificationDelivery(delivery);
   }
   if (delivery.channel === NOTIFICATION_DELIVERY_SLACK_CHANNEL) {
-    return deliverSlackNotificationDelivery(delivery);
+    return deliverSlackNotificationDelivery(delivery, original);
   }
   {
     await prisma.notificationDelivery.update({

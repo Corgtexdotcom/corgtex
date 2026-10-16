@@ -307,7 +307,7 @@ function parseRoots(value: Prisma.JsonValue): LineageRoot[] | null {
   return roots;
 }
 
-type BatchedWorkItemKind = "Action" | "Proposal" | "Tension" | "CrmAccount" | "CrmContact" | "CrmActivity" | "CrmDeal";
+type BatchedWorkItemKind = "BrainArticle" | "Action" | "Proposal" | "Tension" | "CrmAccount" | "CrmContact" | "CrmActivity" | "CrmDeal";
 type WorkItemRows = {rows: Map<string, Record<string, unknown>>; heads: Map<string, import("@prisma/client").ArtifactInputLineage>};
 type WorkItemReadBatch = WorkItemRows & {db: LineageClient; workspaceId: string; kind: BatchedWorkItemKind; active: boolean};
 const workItemReadBatch = new AsyncLocalStorage<WorkItemReadBatch>();
@@ -319,11 +319,12 @@ function workItemBatch(db: LineageClient, workspaceId: string, input: LineageInp
   return batch;
 }
 function isBatchedWorkItemKind(kind: LineageKind | undefined): kind is BatchedWorkItemKind {
-  return kind === "Action" || kind === "Proposal" || kind === "Tension" || kind === "CrmAccount" || kind === "CrmContact" || kind === "CrmActivity" || kind === "CrmDeal";
+  return kind === "BrainArticle" || kind === "Action" || kind === "Proposal" || kind === "Tension" || kind === "CrmAccount" || kind === "CrmContact" || kind === "CrmActivity" || kind === "CrmDeal";
 }
 async function loadWorkItemBatch(db: LineageClient, workspaceId: string, kind: BatchedWorkItemKind, ids: string[]): Promise<WorkItemRows> {
   const where = {workspaceId, id: {in: ids}};
-  const rows = kind === "Action" ? await db.action.findMany({where})
+  const rows = kind === "BrainArticle" ? await db.brainArticle.findMany({where})
+    : kind === "Action" ? await db.action.findMany({where})
     : kind === "Proposal" ? await db.proposal.findMany({where})
       : kind === "CrmAccount" ? await db.crmAccount.findMany({where})
       : kind === "CrmContact" ? await db.crmContact.findMany({where})
