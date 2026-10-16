@@ -240,7 +240,7 @@ describe("runSlackAgent", () => {
           if (!await lineage.readable(params.lineageActor, params.workspaceId, roots)) throw Object.assign(new Error("Revoked captured input"), { code: "SOURCE_CHANGED" });
           return { kind: "agent-input-receipt", roots };
         },
-        tool: async (name: string, input: unknown, work: () => Promise<any>, proof: any) => {
+        tool: async (name: string, input: unknown, work: (operation: import("../runtime").AgentOperationContext) => Promise<any>, proof: any) => {
           expect(proof?.receipt?.roots.length).toBeGreaterThan(0);
           if (!await lineage.readable(params.lineageActor, params.workspaceId, proof.receipt.roots)) throw Object.assign(new Error("Revoked operation input"), { code: "SOURCE_CHANGED" });
           lineage.operations.push({ name, input, roots: proof.receipt.roots });
