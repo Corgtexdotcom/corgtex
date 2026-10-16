@@ -17,7 +17,7 @@ describe("variant model attempt cancellation", () => {
     expect(() => attempt.assertActive()).toThrow(error);
   });
   it("latches a transient authority failure even when an adapter tries again", async () => {
-    const error = new Error("proof storage unavailable"); const check = vi.fn(async () => { throw error; });
+    const error = new Error("proof storage unavailable"); const check = vi.fn(async (): Promise<void> => { throw error; });
     const attempt = createVariantModelControls(check);
     await expect(attempt.controls.authorizeAttempt({ signal: new AbortController().signal })).rejects.toBe(error);
     check.mockResolvedValue(undefined);
