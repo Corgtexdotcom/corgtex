@@ -3296,6 +3296,7 @@
     "readOnlyBanner": "This demo is read-only. You can inspect the workspace freely, but modifications are disabled.",
     "restartTour": "Restart Tour",
     "tour": {
+      "skip": "Skip",
       "welcomeTitle": "Welcome to Corgtex",
       "welcomeDescription": "Explore an illustrative Johnson & Johnson workspace to see how self-management could work. Sample meetings, people, and workflows are fictional examples inspired by public information; they do not represent the company's actual operations.",
       "newspaperTitle": "Your Daily Newspaper",
