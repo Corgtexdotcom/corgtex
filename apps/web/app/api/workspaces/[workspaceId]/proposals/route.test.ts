@@ -28,6 +28,7 @@ const formatWorkItemPriority = vi.fn((priority: number | null | undefined) => {
   return "Low";
 });
 const getWorkspacePermanentPathForEntity = vi.fn(async () => null);
+const getProposal = vi.fn();
 const loadAdviceRequestCountSummaries = vi.fn();
 const listProposals = vi.fn();
 const prisma = {
@@ -70,6 +71,7 @@ vi.mock("@corgtex/domain", async () => {
     deleteProposal,
     formatWorkItemPriority,
     getWorkspacePermanentPathForEntity,
+    getProposal,
     loadAdviceRequestCountSummaries,
     listProposals,
     normalizeActionWorkItem,
@@ -146,7 +148,7 @@ describe("POST /api/workspaces/[workspaceId]/proposals", () => {
       priority: 2,
       ownerMemberId: "member-owner",
     });
-    prisma.proposal.findFirst.mockResolvedValue({
+    getProposal.mockResolvedValue({
       id: "proposal-1",
       title: "Resolve tension",
       status: "DRAFT",
@@ -199,7 +201,7 @@ describe("POST /api/workspaces/[workspaceId]/proposals", () => {
       priority: 3,
       ownerMemberId: "member-owner",
     });
-    prisma.proposal.findFirst.mockResolvedValue({
+    getProposal.mockResolvedValue({
       id: "proposal-2",
       title: "Improve follow-through",
       status: "DRAFT",
@@ -231,17 +233,7 @@ describe("POST /api/workspaces/[workspaceId]/proposals", () => {
       ownerMemberId: "member-owner",
       priority: 3,
     }));
-    expect(prisma.proposal.findFirst).toHaveBeenCalledWith(expect.objectContaining({
-      include: expect.objectContaining({
-        adviceProcess: {
-          include: {
-            requests: {
-              select: { status: true },
-            },
-          },
-        },
-      }),
-    }));
+    expect(getProposal).toHaveBeenCalledWith(actor, { workspaceId: "workspace-1", proposalId: "proposal-2" });
     await expect(response.json()).resolves.toMatchObject({
       proposal: {
         id: "proposal-2",
@@ -261,7 +253,7 @@ describe("POST /api/workspaces/[workspaceId]/proposals", () => {
       priority: 0,
       ownerMemberId: "member-default",
     });
-    prisma.proposal.findFirst.mockResolvedValue({
+    getProposal.mockResolvedValue({
       id: "proposal-3",
       title: "Default to author",
       status: "DRAFT",
@@ -302,7 +294,7 @@ describe("POST /api/workspaces/[workspaceId]/proposals", () => {
       priority: 0,
       ownerMemberId: null,
     });
-    prisma.proposal.findFirst.mockResolvedValue({
+    getProposal.mockResolvedValue({
       id: "proposal-4",
       title: "No owner",
       status: "DRAFT",
@@ -342,7 +334,7 @@ describe("PATCH /api/workspaces/[workspaceId]/proposals/[proposalId]", () => {
       ownerMemberId: "member-owner",
       version: 3,
     });
-    prisma.proposal.findFirst.mockResolvedValue({
+    getProposal.mockResolvedValue({
       id: "proposal-1",
       status: "DRAFT",
       priority: 1,
@@ -368,17 +360,7 @@ describe("PATCH /api/workspaces/[workspaceId]/proposals/[proposalId]", () => {
       priority: 1,
       expectedVersion: 2,
     }));
-    expect(prisma.proposal.findFirst).toHaveBeenCalledWith(expect.objectContaining({
-      include: expect.objectContaining({
-        adviceProcess: {
-          include: {
-            requests: {
-              select: { status: true },
-            },
-          },
-        },
-      }),
-    }));
+    expect(getProposal).toHaveBeenCalledWith(actor, { workspaceId: "workspace-1", proposalId: "proposal-1" });
     await expect(response.json()).resolves.toMatchObject({
       proposal: {
         id: "proposal-1",

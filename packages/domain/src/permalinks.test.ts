@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
+import { readableArtifactIds } from "./source-lineage";
 
 const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => ({
   prismaMock: {
@@ -25,6 +26,11 @@ vi.mock("@corgtex/shared", () => ({
 
 vi.mock("./auth", () => ({
   requireWorkspaceMembership: requireWorkspaceMembershipMock,
+}));
+
+vi.mock("./source-lineage", () => ({
+  readableArtifactIds: vi.fn(async (_actor: unknown, _workspaceId: string, _kind: string, records: Array<{ id: string }>) =>
+    new Set(records.map((record) => record.id))),
 }));
 
 const actor: AppActor = {
@@ -64,9 +70,7 @@ describe("workspace permalinks", () => {
     await expect(resolveWorkspacePermalink(actor, {
       workspaceId: "ws-1",
       permalinkId: "permalink-1",
-    })).resolves.toMatchObject({
-      status: "MISSING",
-    });
+    })).rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
 
     expect(prismaMock.goal.findFirst).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
@@ -78,5 +82,18 @@ describe("workspace permalinks", () => {
         ]),
       }),
     }));
+  });
+
+  it("does not return a saved canonical path for an article with unknown lineage", async () => {
+    prismaMock.workspacePermalink.findFirst.mockResolvedValueOnce({
+      id: "permalink-2", workspaceId: "ws-1", entityType: "BrainArticle", entityId: "article-1",
+      canonicalPath: "/workspaces/ws-1/brain/secret-title",
+    });
+    prismaMock.brainArticle.findFirst.mockResolvedValueOnce({ id: "article-1", workspaceId: "ws-1",
+      slug: "secret-title", isPrivate: false, archivedAt: null });
+    vi.mocked(readableArtifactIds).mockResolvedValueOnce(new Set());
+    const { resolveWorkspacePermalink } = await import("./permalinks");
+    await expect(resolveWorkspacePermalink(actor, { workspaceId: "ws-1", permalinkId: "permalink-2" }))
+      .rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
   });
 });

@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { marked } from "marked";
+import { BrainAnswerExport } from "./BrainAnswerExport";
 import { formatConversationDate } from "./date-format";
 import type { WorkspaceChatPageContext } from "./page-context";
 
@@ -485,7 +486,11 @@ export function ChatInterface({
 
           if (line.startsWith("data: ") && line !== "data: [DONE]") {
             try {
-              const payload = JSON.parse(line.slice(6)) as { text?: string; topic?: string; refreshCurrentRoute?: boolean };
+              const payload = JSON.parse(line.slice(6)) as { text?: string; topic?: string; refreshCurrentRoute?: boolean; committedTurn?: { id: string; sequenceNumber: number; createdAt: string } };
+              if (payload.committedTurn) {
+                const committed = payload.committedTurn;
+                setTurns(previous => previous.map(turn => turn.id === optimisticTurn.id ? { ...turn, ...committed } : turn));
+              }
               if (payload.topic) {
                 setConversations((prev) =>
                   prev.map((c) =>
@@ -816,6 +821,7 @@ export function ChatInterface({
                         className="markdown-body"
                         dangerouslySetInnerHTML={{ __html: renderAssistantMarkdown(turn.assistantMessage) }}
                       />
+                      {sessionId && !loading && <BrainAnswerExport workspaceId={workspaceId} conversationId={sessionId} output={turn} turns={turns} />}
                     </div>
                   ) : (
                     <div className="chat-message assistant">

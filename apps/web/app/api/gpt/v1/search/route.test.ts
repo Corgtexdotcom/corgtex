@@ -69,6 +69,7 @@ describe("GET /api/gpt/v1/search", () => {
     expect(requireGptAuth).toHaveBeenCalledWith(expect.anything(), "read");
     expect(resolveKnowledgeAccessDomains).toHaveBeenCalledWith(actor, "workspace-1");
     expect(searchIndexedKnowledge).toHaveBeenCalledWith({
+      actor,
       workspaceId: "workspace-1",
       query: "forecast",
       limit: 7,

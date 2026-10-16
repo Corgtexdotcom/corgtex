@@ -25,8 +25,7 @@ export function canEditPrivateDraft(
   membership: MembershipSummary | null | undefined,
   record: WorkItemRecord & AuthoredRecord,
 ) {
-  if (actor.kind === "agent") return true;
-  if (!membership?.isActive) return false;
+  if (actor.kind !== "user" || !membership?.isActive || membership.userId !== actor.user.id) return false;
   if (membership.role === "ADMIN") return true;
   return Boolean(record.authorUserId && record.authorUserId === actor.user.id);
 }
@@ -37,7 +36,7 @@ export function requirePrivateDraftEditor(
   record: WorkItemRecord & AuthoredRecord,
 ) {
   if (canEditPrivateDraft(actor, membership, record)) return;
-  throw new AppError(403, "FORBIDDEN", "Only the draft creator, workspace admins, or agents can manage this draft.");
+  throw new AppError(403, "FORBIDDEN", "Only the draft creator or a current workspace administrator can manage this draft.");
 }
 
 export function canEditCollaborativeWorkItem(

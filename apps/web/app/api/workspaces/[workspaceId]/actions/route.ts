@@ -61,7 +61,7 @@ export const POST = withWorkspaceRoute(async (req, { actor, workspaceId, members
   });
   const origin = env.APP_URL.replace(/\/$/, "");
   const permanentPath = await getWorkspacePermanentPathForEntity({ workspaceId, entityType: "Action", entityId: action.id });
-  const actionForResponse = await loadActionWorkItemResponse(workspaceId, action.id) ?? action;
+  const actionForResponse = await loadActionWorkItemResponse(actor, workspaceId, action.id) ?? action;
   return NextResponse.json({
     action: serializeActionWorkItem(actionForResponse),
     webUrl: `${origin}/workspaces/${workspaceId}/actions/${action.id}`,

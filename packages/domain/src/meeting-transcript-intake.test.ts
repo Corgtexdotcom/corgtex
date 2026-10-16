@@ -1,37 +1,52 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { createMeetingMock, modelGatewayMock, prismaMock, uploadMeetingTranscriptMock } = vi.hoisted(() => ({
+const { createMeetingMock, getMeetingMock, directRootsMock, modelGatewayMock, uploadMeetingTranscriptMock,
+  prismaMock, captureArtifactInputProofMock, captureArtifactInputSnapshotProofMock } = vi.hoisted(() => ({
   createMeetingMock: vi.fn(),
   modelGatewayMock: {
     extract: vi.fn(),
   },
-  prismaMock: {
-    meeting: {
-      findFirst: vi.fn(),
-    },
-  },
+  getMeetingMock: vi.fn(),
+  directRootsMock: vi.fn(),
   uploadMeetingTranscriptMock: vi.fn(),
+  prismaMock: { $transaction: vi.fn() },
+  captureArtifactInputProofMock: vi.fn(),
+  captureArtifactInputSnapshotProofMock: vi.fn(),
 }));
+
+vi.mock("@corgtex/shared", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@corgtex/shared")>()), prisma: prismaMock,
+}));
+vi.mock("./source-lineage", () => ({ captureArtifactInputProof: captureArtifactInputProofMock,
+  captureArtifactInputSnapshotProof: captureArtifactInputSnapshotProofMock }));
 
 vi.mock("@corgtex/models", () => ({
   defaultModelGateway: modelGatewayMock,
 }));
 
-vi.mock("@corgtex/shared", () => ({
-  prisma: prismaMock,
-}));
-
 vi.mock("./meetings", () => ({
   createMeeting: createMeetingMock,
+  getMeeting: getMeetingMock,
   uploadMeetingTranscript: uploadMeetingTranscriptMock,
 }));
 
+vi.mock("./native-transcript-input", async importOriginal => ({
+  ...await importOriginal<typeof import("./native-transcript-input")>(),
+  directMemberTranscriptRoots: directRootsMock,
+}));
+
+const USER_ACTOR = { kind: "user" as const, user: { id: "user-1", email: "owner@example.test", displayName: "Owner" } };
+const RECEIPT = { inputId: "native-1" };
 const TEST_NOW = new Date("2026-07-16T12:00:00.000Z");
 
 describe("meeting transcript intake", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    prismaMock.meeting.findFirst.mockResolvedValue(null);
+    getMeetingMock.mockResolvedValue(null);
+    directRootsMock.mockResolvedValue([{ kind: "NativeTranscriptInput", id: "native-1", fingerprint: "a".repeat(64) }]);
+    prismaMock.$transaction.mockImplementation(callback => callback(prismaMock));
+    captureArtifactInputProofMock.mockResolvedValue([{ kind: "Meeting", id: "meeting-1", fingerprint: "b".repeat(64) }]);
+    captureArtifactInputSnapshotProofMock.mockResolvedValue([{ kind: "ArtifactInputSnapshot", id: "snapshot-1", fingerprint: "c".repeat(64) }]);
   });
 
   it("skips model metadata extraction when title and recordedAt are explicit", async () => {
@@ -95,14 +110,10 @@ describe("meeting transcript intake", () => {
     });
     const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
 
-    await expect(intakeMeetingTranscript({
-      kind: "agent",
-      authProvider: "bootstrap",
-      label: "test-agent",
-      workspaceIds: ["workspace-1"],
-    }, {
+    await expect(intakeMeetingTranscript(USER_ACTOR, {
       workspaceId: "workspace-1",
-      source: "meeting-transcript:fireflies", provider: "FIREFLIES",
+      nativeReceipt: RECEIPT,
+      source: "transcript-upload",
       transcript: "Date: 2001-07-15\nJan: We need a follow-up.",
       now: TEST_NOW,
     })).resolves.toMatchObject({
@@ -120,13 +131,9 @@ describe("meeting transcript intake", () => {
   it("rejects implausible explicit manual upload dates", async () => {
     const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
 
-    await expect(intakeMeetingTranscript({
-      kind: "agent",
-      authProvider: "bootstrap",
-      label: "test-agent",
-      workspaceIds: ["workspace-1"],
-    }, {
+    await expect(intakeMeetingTranscript(USER_ACTOR, {
       workspaceId: "workspace-1",
+      nativeReceipt: RECEIPT,
       title: "Weekly Tactical",
       recordedAt: new Date("2001-07-15T11:00:00.000Z"),
       source: "transcript-upload",
@@ -144,68 +151,90 @@ describe("meeting transcript intake", () => {
     expect(uploadMeetingTranscriptMock).not.toHaveBeenCalled();
   });
 
-  it("allows trusted provider imports to keep historical recordedAt values", async () => {
-    uploadMeetingTranscriptMock.mockResolvedValueOnce({
-      status: "created",
-      meeting: { id: "meeting-provider" },
-      candidates: [],
-    });
+  it("rejects a provider label and source record id before any model or meeting read", async () => {
     const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
 
-    await expect(intakeMeetingTranscript({
-      kind: "agent",
-      authProvider: "bootstrap",
-      label: "test-agent",
-      workspaceIds: ["workspace-1"],
-    }, {
+    await expect(intakeMeetingTranscript(USER_ACTOR, {
       workspaceId: "workspace-1",
+      nativeReceipt: RECEIPT,
       title: "Historical provider transcript",
       recordedAt: new Date("2001-07-15T11:00:00.000Z"),
       source: "meeting-transcript:fireflies",
       provider: "FIREFLIES", sourceRecordId: "source-record-1",
       transcript: "Jan: Provider imported this historical meeting.",
       now: TEST_NOW,
-    })).resolves.toMatchObject({
-      status: "meeting_created",
-      meeting: { id: "meeting-provider" },
-    });
-    expect(uploadMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      recordedAt: new Date("2001-07-15T11:00:00.000Z"),
+    })).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    expect(directRootsMock).not.toHaveBeenCalled();
+    expect(getMeetingMock).not.toHaveBeenCalled();
+    expect(modelGatewayMock.extract).not.toHaveBeenCalled();
+    expect(uploadMeetingTranscriptMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unproved model tool submission even when its actor is a human", async () => {
+    directRootsMock.mockRejectedValueOnce(Object.assign(new Error("unproved"), { code: "UNKNOWN_LINEAGE" }));
+    const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
+
+    await expect(intakeMeetingTranscript(USER_ACTOR, {
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      source: "agent-upload",
+      transcript: "Jan: Model tool invented this transcript.",
+      now: TEST_NOW,
+    })).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    expect(getMeetingMock).not.toHaveBeenCalled();
+    expect(modelGatewayMock.extract).not.toHaveBeenCalled();
+    expect(uploadMeetingTranscriptMock).not.toHaveBeenCalled();
+  });
+
+  it("does not use an unreadable selected Meeting as metadata input", async () => {
+    getMeetingMock.mockResolvedValueOnce(null);
+    const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
+    await expect(intakeMeetingTranscript(USER_ACTOR, {
+      workspaceId: "workspace-1", nativeReceipt: RECEIPT, meetingId: "hidden-meeting",
+      transcript: "Jan: Synthetic content.",
+    })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(getMeetingMock).toHaveBeenCalledWith(USER_ACTOR, "workspace-1", "hidden-meeting");
+    expect(modelGatewayMock.extract).not.toHaveBeenCalled();
+    expect(uploadMeetingTranscriptMock).not.toHaveBeenCalled();
+  });
+
+  it("captures selected Meeting metadata and freezes its revision before model inference", async () => {
+    const recordedAt = new Date("2026-05-17T10:00:00.000Z");
+    getMeetingMock.mockResolvedValueOnce({ id: "meeting-1", title: null, recordedAt,
+      participantEmails: ["owner@example.test"] });
+    modelGatewayMock.extract.mockResolvedValueOnce({ output: { title: "Inferred title", recordedAt: null,
+      participantEmails: [] } });
+    uploadMeetingTranscriptMock.mockResolvedValueOnce({ status: "matched",
+      meeting: { id: "meeting-1", title: "Inferred title" } });
+    const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
+    await intakeMeetingTranscript(USER_ACTOR, { workspaceId: "workspace-1", nativeReceipt: RECEIPT,
+      meetingId: "meeting-1", transcript: "Jan: A synthetic update.", now: TEST_NOW });
+    expect(captureArtifactInputProofMock).toHaveBeenCalledWith(USER_ACTOR, "workspace-1", [{
+      kind: "Meeting", id: "meeting-1", snapshot: { title: null, recordedAt,
+        participantEmails: ["owner@example.test"] },
+    }], prismaMock);
+    expect(captureArtifactInputSnapshotProofMock).toHaveBeenCalledWith(USER_ACTOR, "workspace-1",
+      { kind: "Meeting", id: "meeting-1", fingerprint: "b".repeat(64) }, prismaMock);
+    expect(captureArtifactInputSnapshotProofMock.mock.invocationCallOrder[0])
+      .toBeLessThan(modelGatewayMock.extract.mock.invocationCallOrder[0]!);
+    expect(uploadMeetingTranscriptMock).toHaveBeenCalledWith(USER_ACTOR, expect.objectContaining({
+      lineageRoots: [
+        { kind: "NativeTranscriptInput", id: "native-1", fingerprint: "a".repeat(64) },
+        { kind: "ArtifactInputSnapshot", id: "snapshot-1", fingerprint: "c".repeat(64) },
+      ],
     }));
   });
 
-  it("lets trusted provider revisions update an existing meeting date", async () => {
-    prismaMock.meeting.findFirst.mockResolvedValueOnce({
-      recordedAt: new Date("2026-07-15T16:00:00.000Z"),
-      title: "Existing meeting",
-      participantEmails: [],
-    });
-    uploadMeetingTranscriptMock.mockResolvedValueOnce({
-      status: "matched",
-      meeting: { id: "meeting-1", title: "Existing meeting" },
-      candidates: [],
-    });
+  it("rejects an unproved selected Meeting before metadata inference", async () => {
+    getMeetingMock.mockResolvedValueOnce({ id: "meeting-1", title: "Unknown", recordedAt: TEST_NOW,
+      participantEmails: [] });
+    captureArtifactInputProofMock.mockRejectedValueOnce(Object.assign(new Error("unknown"), { code: "UNKNOWN_LINEAGE" }));
     const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
-
-    await intakeMeetingTranscript({
-      kind: "agent",
-      authProvider: "bootstrap",
-      label: "test-agent",
-      workspaceIds: ["workspace-1"],
-    }, {
-      workspaceId: "workspace-1",
-      meetingId: "meeting-1",
-      recordedAt: new Date("2001-07-15T11:00:00.000Z"),
-      source: "meeting-transcript:fireflies",
-      provider: "FIREFLIES",
-      sourceRecordId: "source-record-1",
-      transcript: "Jan: Provider corrected this historical meeting.",
-      now: TEST_NOW,
-    });
-    expect(uploadMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      meetingId: "meeting-1",
-      recordedAt: new Date("2001-07-15T11:00:00.000Z"),
-    }));
+    await expect(intakeMeetingTranscript(USER_ACTOR, { workspaceId: "workspace-1", nativeReceipt: RECEIPT,
+      meetingId: "meeting-1", transcript: "Jan: A synthetic update." }))
+      .rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    expect(modelGatewayMock.extract).not.toHaveBeenCalled();
+    expect(uploadMeetingTranscriptMock).not.toHaveBeenCalled();
   });
 
   it("reports duplicate use-existing transcript uploads as existing meeting matches", async () => {
@@ -216,13 +245,9 @@ describe("meeting transcript intake", () => {
     });
     const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
 
-    await expect(intakeMeetingTranscript({
-      kind: "agent",
-      authProvider: "bootstrap",
-      label: "test-agent",
-      workspaceIds: ["workspace-1"],
-    }, {
+    await expect(intakeMeetingTranscript(USER_ACTOR, {
       workspaceId: "workspace-1",
+      nativeReceipt: RECEIPT,
       title: "Existing meeting",
       recordedAt: new Date("2026-05-17T10:00:00.000Z"),
       source: "transcript-upload",
@@ -247,13 +272,9 @@ describe("meeting transcript intake", () => {
     });
     const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
 
-    await intakeMeetingTranscript({
-      kind: "agent",
-      authProvider: "bootstrap",
-      label: "test-agent",
-      workspaceIds: ["workspace-1"],
-    }, {
+    await intakeMeetingTranscript(USER_ACTOR, {
       workspaceId: "workspace-1",
+      nativeReceipt: RECEIPT,
       title: "Weekly Tactical",
       recordedAt: new Date("2026-05-17T10:00:00.000Z"),
       source: "meeting-transcript:fireflies",
@@ -281,13 +302,9 @@ describe("meeting transcript intake", () => {
     });
     const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
 
-    await expect(intakeMeetingTranscript({
-      kind: "agent",
-      authProvider: "bootstrap",
-      label: "test-agent",
-      workspaceIds: ["workspace-1"],
-    }, {
+    await expect(intakeMeetingTranscript(USER_ACTOR, {
       workspaceId: "workspace-1",
+      nativeReceipt: RECEIPT,
       title: "Weekly Tactical",
       recordedAt: new Date("2026-05-17T10:00:00.000Z"),
       source: "transcript-upload",
@@ -311,13 +328,9 @@ describe("meeting transcript intake", () => {
     });
     const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
 
-    await expect(intakeMeetingTranscript({
-      kind: "agent",
-      authProvider: "bootstrap",
-      label: "test-agent",
-      workspaceIds: ["workspace-1"],
-    }, {
+    await expect(intakeMeetingTranscript(USER_ACTOR, {
       workspaceId: "workspace-1",
+      nativeReceipt: RECEIPT,
       title: "Weekly Tactical",
       recordedAt: new Date("2026-05-17T10:00:00.000Z"),
       source: "transcript-upload",

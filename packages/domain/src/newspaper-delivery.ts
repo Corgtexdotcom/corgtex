@@ -1,9 +1,11 @@
 import { env, prisma, sha256, toInputJson } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
-import type { NewspaperCadence, NewspaperDeliveryKind, NewspaperDeliveryStatus } from "@prisma/client";
+import type { NewspaperCadence, NewspaperDelivery, NewspaperDeliveryKind, NewspaperDeliveryStatus, NewspaperEdition, NewspaperTrackedLink, Prisma } from "@prisma/client";
 import { createHmac } from "node:crypto";
-import { AppError } from "./errors";
+import { AppError, invariant } from "./errors";
 import { requireWorkspaceMembership } from "./auth";
+import { invalidateArtifactInputLineage, readableArtifactIds, recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
+import { loadReadableDigestQuery } from "./digest-lineage";
 import {
   getNextNewspaperRunISO,
   isHumanNewspaperRecipientIdentity,
@@ -74,6 +76,8 @@ export async function upsertNewspaperEdition(params: {
   digestJson: unknown;
   bodyMd: string;
   sourceCounts: unknown;
+  actor?: AppActor;
+  lineageRoots?: LineageRoot[];
 }) {
   if (params.cadence === "OFF") {
     throw new AppError(400, "INVALID_INPUT", "Newspaper editions require a delivery cadence.");
@@ -81,62 +85,57 @@ export async function upsertNewspaperEdition(params: {
 
   const cadence = params.cadence as NewspaperEditionCadence;
   const generatedAt = new Date();
-  return prisma.newspaperEdition.upsert({
-    where: {
-      workspaceId_cadence_dateKey: {
+  const actor = params.actor ?? { kind: "agent", authProvider: "bootstrap", label: "newspaper-edition",
+    workspaceIds: [params.workspaceId] } as AppActor;
+  return prisma.$transaction(async (tx) => {
+    const edition = await tx.newspaperEdition.upsert({
+      where: {
+        workspaceId_cadence_dateKey: {
+          workspaceId: params.workspaceId,
+          cadence,
+          dateKey: params.dateKey,
+        },
+      },
+      create: {
         workspaceId: params.workspaceId,
+        workflowJobId: params.workflowJobId ?? null,
         cadence,
         dateKey: params.dateKey,
+        runKey: params.runKey,
+        title: params.title,
+        slug: params.slug,
+        digestJson: toInputJson(params.digestJson),
+        bodyMd: params.bodyMd,
+        sourceCounts: toInputJson(params.sourceCounts),
+        generatedAt,
       },
-    },
-    create: {
-      workspaceId: params.workspaceId,
-      workflowJobId: params.workflowJobId ?? null,
-      cadence,
-      dateKey: params.dateKey,
-      runKey: params.runKey,
-      title: params.title,
-      slug: params.slug,
-      digestJson: toInputJson(params.digestJson),
-      bodyMd: params.bodyMd,
-      sourceCounts: toInputJson(params.sourceCounts),
-      generatedAt,
-    },
-    update: {
-      workflowJobId: params.workflowJobId ?? null,
-      runKey: params.runKey,
-      title: params.title,
-      slug: params.slug,
-      digestJson: toInputJson(params.digestJson),
-      bodyMd: params.bodyMd,
-      sourceCounts: toInputJson(params.sourceCounts),
-      generatedAt,
-    },
+      update: {
+        workflowJobId: params.workflowJobId ?? null,
+        runKey: params.runKey,
+        title: params.title,
+        slug: params.slug,
+        digestJson: toInputJson(params.digestJson),
+        bodyMd: params.bodyMd,
+        sourceCounts: toInputJson(params.sourceCounts),
+        generatedAt,
+      },
+    });
+    if (params.lineageRoots?.length) await recordArtifactInputLineage({
+      tx, actor, workspaceId: params.workspaceId, artifact: { kind: "NewspaperEdition", id: edition.id },
+      content: edition, origin: "DERIVED", inputs: [], inheritedRoots: params.lineageRoots,
+    });
+    else await invalidateArtifactInputLineage({ tx, workspaceId: params.workspaceId,
+      artifact: { kind: "NewspaperEdition", id: edition.id }, content: edition });
+    return edition;
   });
 }
 
 export async function listNewspaperEditions(actor: AppActor, workspaceId: string, opts?: { take?: number }) {
   await requireWorkspaceMembership({ actor, workspaceId });
 
-  return prisma.newspaperEdition.findMany({
-    where: { workspaceId },
-    orderBy: { generatedAt: "desc" },
-    take: opts?.take ?? 20,
-    select: {
-      id: true,
-      workflowJobId: true,
-      cadence: true,
-      dateKey: true,
-      runKey: true,
-      title: true,
-      slug: true,
-      digestJson: true,
-      bodyMd: true,
-      sourceCounts: true,
-      generatedAt: true,
-      createdAt: true,
-      updatedAt: true,
-    },
+  return loadReadableDigestQuery<NewspaperEdition>({ actor, workspaceId, kind: "NewspaperEdition", limit: opts?.take ?? 20,
+    loadBatch: ({ take, skip }) => prisma.newspaperEdition.findMany({ where: { workspaceId },
+      orderBy: [{ generatedAt: "desc" }, { id: "desc" }], take, skip }),
   });
 }
 
@@ -145,26 +144,39 @@ async function getTrackingUrl(params: {
   workflowJobId?: string | null;
   runKey: string;
   targetUrl: string;
+  actor?: AppActor;
+  lineageRoots?: LineageRoot[];
 }) {
-  const targetUrlHash = sha256(params.targetUrl);
+  // Distinct input permissions must never share one reusable redirect token.
+  const scope = (params.lineageRoots ?? []).map((root) => `${root.kind}:${root.id}:${root.fingerprint}`).sort();
+  const targetUrlHash = sha256(JSON.stringify([params.targetUrl, scope]));
   const token = trackingToken(params.runKey, targetUrlHash);
 
-  await prisma.newspaperTrackedLink.upsert({
-    where: {
-      runKey_targetUrlHash: {
-        runKey: params.runKey,
-        targetUrlHash,
+  await prisma.$transaction(async (tx) => {
+    const link = await tx.newspaperTrackedLink.upsert({
+      where: {
+        runKey_targetUrlHash: {
+          runKey: params.runKey,
+          targetUrlHash,
+        },
       },
-    },
-    create: {
-      workspaceId: params.workspaceId,
-      workflowJobId: params.workflowJobId ?? null,
-      runKey: params.runKey,
-      targetUrl: params.targetUrl,
-      targetUrlHash,
-      tokenHash: sha256(token),
-    },
-    update: {},
+      create: {
+        workspaceId: params.workspaceId,
+        workflowJobId: params.workflowJobId ?? null,
+        runKey: params.runKey,
+        targetUrl: params.targetUrl,
+        targetUrlHash,
+        tokenHash: sha256(token),
+      },
+      update: {},
+    });
+    invariant(link.workspaceId === params.workspaceId, 409, "SOURCE_CHANGED", "Newspaper link scope changed.");
+    if (params.lineageRoots?.length) await recordArtifactInputLineage({ tx,
+      actor: params.actor ?? { kind: "agent", authProvider: "bootstrap", label: "newspaper-link", workspaceIds: [params.workspaceId] },
+      workspaceId: params.workspaceId, artifact: { kind: "NewspaperTrackedLink", id: link.id }, content: link,
+      origin: "DERIVED", inputs: [], inheritedRoots: params.lineageRoots });
+    else await invalidateArtifactInputLineage({ tx, workspaceId: params.workspaceId,
+      artifact: { kind: "NewspaperTrackedLink", id: link.id }, content: link });
   });
 
   return `${appUrl()}/api/newspaper/click/${token}`;
@@ -175,6 +187,8 @@ export async function instrumentNewspaperHtmlLinks(params: {
   workflowJobId?: string | null;
   runKey: string;
   html: string;
+  actor?: AppActor;
+  lineageRoots?: LineageRoot[];
 }) {
   const targets = new Set<string>();
   for (const match of params.html.matchAll(HREF_ATTR_PATTERN)) {
@@ -195,6 +209,8 @@ export async function instrumentNewspaperHtmlLinks(params: {
       workflowJobId: params.workflowJobId ?? null,
       runKey: params.runKey,
       targetUrl,
+      actor: params.actor,
+      lineageRoots: params.lineageRoots,
     }));
   }
 
@@ -218,41 +234,65 @@ export async function recordNewspaperDelivery(params: {
   status: NewspaperDeliveryStatus;
   providerMessageId?: string | null;
   error?: string | null;
+  actor?: AppActor;
+  lineageRoots?: LineageRoot[];
 }) {
   const now = new Date();
-  return prisma.newspaperDelivery.create({
-    data: {
-      workspaceId: params.workspaceId,
-      workflowJobId: params.workflowJobId ?? null,
-      memberId: params.memberId ?? null,
-      demoLeadId: params.demoLeadId ?? null,
-      kind: params.kind,
-      cadence: params.cadence ?? null,
-      runKey: params.runKey,
-      recipientEmail: params.recipientEmail,
-      subject: params.subject,
-      status: params.status,
-      providerMessageId: params.providerMessageId ?? null,
-      error: params.error ?? null,
-      sentAt: params.status === "SENT" ? now : null,
-      skippedAt: params.status === "SKIPPED" ? now : null,
-      failedAt: params.status === "FAILED" ? now : null,
-    },
+  return prisma.$transaction(async (tx) => {
+    const delivery = await tx.newspaperDelivery.create({
+      data: {
+        workspaceId: params.workspaceId,
+        workflowJobId: params.workflowJobId ?? null,
+        memberId: params.memberId ?? null,
+        demoLeadId: params.demoLeadId ?? null,
+        kind: params.kind,
+        cadence: params.cadence ?? null,
+        runKey: params.runKey,
+        recipientEmail: params.recipientEmail,
+        subject: params.subject,
+        status: params.status,
+        providerMessageId: params.providerMessageId ?? null,
+        error: params.error ?? null,
+        sentAt: params.status === "SENT" ? now : null,
+        skippedAt: params.status === "SKIPPED" ? now : null,
+        failedAt: params.status === "FAILED" ? now : null,
+      },
+    });
+    if (params.lineageRoots?.length) {
+      try {
+        await recordArtifactInputLineage({ tx,
+          actor: params.actor ?? { kind: "agent", authProvider: "bootstrap", label: "newspaper-delivery", workspaceIds: [params.workspaceId] },
+          workspaceId: params.workspaceId, artifact: { kind: "NewspaperDelivery", id: delivery.id }, content: delivery,
+          origin: "DERIVED", inputs: [], inheritedRoots: params.lineageRoots });
+        return delivery;
+      } catch (error) {
+        if (!(error instanceof AppError) || !["SOURCE_CHANGED", "SOURCE_RESTRICTED", "UNKNOWN_LINEAGE"].includes(error.code)) throw error;
+      }
+    }
+    // Keep the historical delivery outcome if authorization changed after send;
+    // it remains unreadable until an independently safe receipt can be established.
+    await invalidateArtifactInputLineage({ tx, workspaceId: params.workspaceId,
+      artifact: { kind: "NewspaperDelivery", id: delivery.id }, content: delivery });
+    return delivery;
   });
 }
 
-export async function recordNewspaperLinkClick(token: string) {
+export async function recordNewspaperLinkClick(actor: AppActor, token: string) {
   const tokenHash = sha256(token.trim());
   const link = await prisma.newspaperTrackedLink.findUnique({
     where: { tokenHash },
-    select: {
-      id: true,
-      targetUrl: true,
-      firstClickedAt: true,
-    },
   });
 
   if (!link) {
+    throw new AppError(404, "NOT_FOUND", "Newspaper link not found.");
+  }
+
+  try {
+    await requireWorkspaceMembership({ actor, workspaceId: link.workspaceId });
+    const readableRuns = await readableNewspaperRunKeys(actor, link.workspaceId, [link.runKey]);
+    if (!readableRuns.has(link.runKey)) throw new Error("Unreadable edition");
+    if (!(await readableArtifactIds(actor, link.workspaceId, "NewspaperTrackedLink", [link])).has(link.id)) throw new Error("Unreadable link");
+  } catch {
     throw new AppError(404, "NOT_FOUND", "Newspaper link not found.");
   }
 
@@ -274,27 +314,58 @@ export async function recordNewspaperLinkClick(token: string) {
   return { targetUrl: target };
 }
 
+async function readableNewspaperRunKeys(actor: AppActor, workspaceId: string, runKeys: string[]) {
+  if (runKeys.length === 0) return new Set<string>();
+  const editions = await prisma.newspaperEdition.findMany({
+    where: { workspaceId, runKey: { in: [...new Set(runKeys)] } },
+  });
+  const readable = await readableArtifactIds(actor, workspaceId, "NewspaperEdition", editions);
+  return new Set(editions.filter((edition) => readable.has(edition.id)).map((edition) => edition.runKey));
+}
+
 export async function listNewspaperDeliverySummaries(actor: AppActor, workspaceId: string, opts?: { take?: number }) {
   await requireWorkspaceMembership({ actor, workspaceId });
 
-  const deliveries = await prisma.newspaperDelivery.findMany({
-    where: { workspaceId },
-    orderBy: { createdAt: "desc" },
-    take: Math.max((opts?.take ?? 20) * 20, 100),
-    select: {
-      id: true,
-      kind: true,
-      cadence: true,
-      runKey: true,
-      subject: true,
-      status: true,
-      sentAt: true,
-      skippedAt: true,
-      failedAt: true,
-      createdAt: true,
-      workflowJobId: true,
-    },
-  });
+  const limit = opts?.take ?? 20;
+  invariant(Number.isInteger(limit) && limit >= 0 && limit <= 5_000, 400, "INVALID_INPUT", "Delivery summary limit is invalid.");
+  if (limit === 0) return [];
+  // Group identities are discovery only. Every count below still comes from
+  // complete, permission-admitted rows, never from raw database aggregates.
+  const deliveries: NewspaperDelivery[] = [];
+  const latestReadable = new Map<string, number>();
+  let scannedGroups = 0, scannedDeliveries = 0, complete = false;
+  while (!complete) {
+    const candidates = await prisma.newspaperDelivery.groupBy({by: ["runKey"], where: {workspaceId},
+      _max: {createdAt: true}, orderBy: [{_max: {createdAt: "desc"}}, {runKey: "desc"}],
+      take: Math.min(50, 5_001 - scannedGroups), skip: scannedGroups});
+    for (const candidate of candidates) {
+      const threshold = [...latestReadable.values()].sort((a, b) => b - a)[limit - 1];
+      // A group's raw latest timestamp is an upper bound on any permitted row.
+      // Once it falls below the requested visible groups, older runs cannot win.
+      if (threshold !== undefined && candidate._max.createdAt && candidate._max.createdAt.getTime() < threshold) {
+        complete = true; break;
+      }
+      invariant(++scannedGroups <= 5_000, 503, "INPUT_SCAN_LIMIT", "Narrow the requested delivery history to complete its permission scan.");
+      const rows = await loadReadableDigestQuery<NewspaperDelivery>({actor, workspaceId, kind: "NewspaperDelivery",
+        limit: 100, completeScan: true, keyset: true,
+        loadBatch: async ({take, after}) => {
+          const batch = await prisma.newspaperDelivery.findMany({where: {workspaceId, runKey: candidate.runKey,
+            ...(after ? {OR: [{createdAt: {lt: after.createdAt}}, {createdAt: after.createdAt, id: {lt: after.id}}]} : {})},
+            orderBy: [{createdAt: "desc"}, {id: "desc"}], take: Math.min(take, 5_001 - scannedDeliveries)});
+          scannedDeliveries += batch.length;
+          invariant(scannedDeliveries <= 5_000, 503, "INPUT_SCAN_LIMIT", "The requested delivery groups exceed the complete permission scan limit.");
+          return batch;
+        },
+      });
+      if (rows.length) {
+        deliveries.push(...rows);
+        latestReadable.set(candidate.runKey, Math.max(...rows.map(row => row.createdAt.getTime())));
+      }
+    }
+    if (candidates.length < 50) complete = true;
+  }
+  const selectedKeys = new Set([...latestReadable].sort(([a, left], [b, right]) => right - left || b.localeCompare(a))
+    .slice(0, limit).map(([key]) => key));
 
   const groups = new Map<string, {
     runKey: string;
@@ -315,6 +386,7 @@ export async function listNewspaperDeliverySummaries(actor: AppActor, workspaceI
   }>();
 
   for (const delivery of deliveries) {
+    if (!selectedKeys.has(delivery.runKey)) continue;
     const group = groups.get(delivery.runKey) ?? {
       runKey: delivery.runKey,
       kind: delivery.kind,
@@ -352,9 +424,10 @@ export async function listNewspaperDeliverySummaries(actor: AppActor, workspaceI
 
   const runKeys = Array.from(groups.keys());
   if (runKeys.length > 0) {
-    const links = await prisma.newspaperTrackedLink.findMany({
-      where: { workspaceId, runKey: { in: runKeys } },
-      select: { runKey: true, clickCount: true },
+    const links = await loadReadableDigestQuery<NewspaperTrackedLink>({ actor, workspaceId, kind: "NewspaperTrackedLink",
+      limit: 100, completeScan: true, keyset: true,
+      loadBatch: ({ take, after }) => prisma.newspaperTrackedLink.findMany({
+        where: { workspaceId, runKey: { in: runKeys }, ...(after ? { id: { gt: after.id } } : {}) }, orderBy: { id: "asc" }, take }),
     });
     for (const link of links) {
       const group = groups.get(link.runKey);
@@ -368,31 +441,19 @@ export async function listNewspaperDeliverySummaries(actor: AppActor, workspaceI
   }
 
   return Array.from(groups.values())
-    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
-    .slice(0, opts?.take ?? 20);
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || b.runKey.localeCompare(a.runKey))
+    .slice(0, limit);
 }
 
 export async function listNewspaperDeliveryDetails(actor: AppActor, workspaceId: string, opts?: { take?: number }) {
   await requireWorkspaceMembership({ actor, workspaceId });
 
-  return prisma.newspaperDelivery.findMany({
+  return loadReadableDigestQuery<Prisma.NewspaperDeliveryGetPayload<{ include: { member: { select: { user: { select: { displayName: true; email: true } } } } } }>>({ actor, workspaceId, kind: "NewspaperDelivery", limit: opts?.take ?? 100,
+    loadBatch: ({ take, skip }) => prisma.newspaperDelivery.findMany({
     where: { workspaceId },
-    orderBy: { createdAt: "desc" },
-    take: opts?.take ?? 100,
-    select: {
-      id: true,
-      kind: true,
-      cadence: true,
-      runKey: true,
-      recipientEmail: true,
-      subject: true,
-      status: true,
-      providerMessageId: true,
-      sentAt: true,
-      skippedAt: true,
-      failedAt: true,
-      error: true,
-      createdAt: true,
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take, skip,
+    include: {
       member: {
         select: {
           user: {
@@ -404,186 +465,8 @@ export async function listNewspaperDeliveryDetails(actor: AppActor, workspaceId:
         },
       },
     },
+    }),
   });
-}
-
-async function countNewspaperSources(workspaceId: string, since: Date) {
-  const [
-    meetings,
-    proposals,
-    resolvedTensions,
-    openActions,
-    goals,
-    goalUpdates,
-    roleChanges,
-    roleHolderChanges,
-    newMembers,
-    brainArticles,
-    documents,
-    activeAdviceRequests,
-    conversations,
-    slackMessages,
-    buildArtifacts,
-  ] = await Promise.all([
-    prisma.meeting.count({
-      where: {
-        workspaceId,
-        archivedAt: null,
-        OR: [
-          { recordedAt: { gte: since } },
-          { updatedAt: { gte: since } },
-          { summaryPostedAt: { gte: since } },
-          { aiProcessedAt: { gte: since } },
-        ],
-      },
-    }),
-    prisma.proposal.count({
-      where: {
-        workspaceId,
-        archivedAt: null,
-        isPrivate: false,
-        OR: [
-          { createdAt: { gte: since } },
-          { updatedAt: { gte: since } },
-          { publishedAt: { gte: since } },
-          { decidedAt: { gte: since } },
-        ],
-      },
-    }),
-    prisma.tension.count({
-      where: {
-        workspaceId,
-        archivedAt: null,
-        isPrivate: false,
-        status: "RESOLVED",
-        OR: [
-          { resolvedAt: { gte: since } },
-          { updatedAt: { gte: since } },
-        ],
-      },
-    }),
-    prisma.action.count({
-      where: {
-        workspaceId,
-        archivedAt: null,
-        isPrivate: false,
-        status: { in: ["OPEN", "IN_PROGRESS"] },
-      },
-    }),
-    prisma.goal.count({
-      where: {
-        workspaceId,
-        archivedAt: null,
-        OR: [
-          { updatedAt: { gte: since } },
-          { status: { in: ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"] } },
-        ],
-      },
-    }),
-    prisma.goalUpdate.count({
-      where: {
-        createdAt: { gte: since },
-        goal: {
-          workspaceId,
-          archivedAt: null,
-        },
-      },
-    }),
-    prisma.roleVersion.count({
-      where: {
-        workspaceId,
-        createdAt: { gte: since },
-      },
-    }),
-    prisma.roleHolderHistory.count({
-      where: {
-        workspaceId,
-        OR: [
-          { startedAt: { gte: since } },
-          { endedAt: { gte: since } },
-        ],
-      },
-    }),
-    prisma.member.count({
-      where: {
-        workspaceId,
-        isActive: true,
-        joinedAt: { gte: since },
-      },
-    }),
-    prisma.brainArticle.count({
-      where: {
-        workspaceId,
-        archivedAt: null,
-        isPrivate: false,
-        type: { not: "DIGEST" },
-        OR: [
-          { createdAt: { gte: since } },
-          { updatedAt: { gte: since } },
-          { publishedAt: { gte: since } },
-        ],
-      },
-    }),
-    prisma.document.count({
-      where: {
-        workspaceId,
-        archivedAt: null,
-        OR: [
-          { createdAt: { gte: since } },
-          { updatedAt: { gte: since } },
-        ],
-      },
-    }),
-    prisma.adviceRequest.count({
-      where: {
-        workspaceId,
-        status: "ACTIVE",
-      },
-    }),
-    prisma.conversationSession.count({
-      where: {
-        workspaceId,
-        turns: { some: { createdAt: { gte: since } } },
-      },
-    }),
-    prisma.communicationMessage.count({
-      where: {
-        workspaceId,
-        provider: "SLACK",
-        isHidden: false,
-        isDeleted: false,
-        receivedAt: { gte: since },
-      },
-    }),
-    prisma.buildArtifact.count({
-      where: {
-        workspaceId,
-        OR: [
-          { updatedAt: { gte: since } },
-          { mergedAt: { gte: since } },
-          { closedAt: { gte: since } },
-        ],
-      },
-    }),
-  ]);
-
-  return {
-    meetings,
-    proposals,
-    resolvedTensions,
-    openActions,
-    goals,
-    goalUpdates,
-    roleChanges,
-    roleHolderChanges,
-    newMembers,
-    brainArticles,
-    documents,
-    activeAdviceRequests,
-    conversations,
-    slackMessages,
-    buildArtifacts,
-  };
 }
 
 function nextRunsForRecipients(params: {
@@ -743,67 +626,24 @@ export async function getNewspaperDiagnostics(actor: AppActor, workspaceId: stri
   const recipientCadences = new Set<NewspaperCadence>(
     recipients.filter((recipient) => recipient.receivesNewspaper).map((recipient) => recipient.effectiveCadence),
   );
-  const [oneDayCounts, sevenDayCounts, jobs, deliveries, editions] = await Promise.all([
-    countNewspaperSources(workspaceId, new Date(now.getTime() - 24 * 60 * 60 * 1000)),
-    countNewspaperSources(workspaceId, new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)),
-    prisma.workflowJob.findMany({
-      where: {
-        workspaceId,
-        type: "brain.daily-digest",
-      },
-      orderBy: { createdAt: "desc" },
-      take,
-      select: {
-        id: true,
-        status: true,
-        dedupeKey: true,
-        payload: true,
-        error: true,
-        runAfter: true,
-        createdAt: true,
-        startedAt: true,
-        completedAt: true,
-      },
-    }),
-    prisma.newspaperDelivery.findMany({
-      where: { workspaceId },
-      orderBy: { createdAt: "desc" },
-      take: take * 5,
-      select: {
-        id: true,
-        workflowJobId: true,
-        memberId: true,
-        cadence: true,
-        runKey: true,
-        recipientEmail: true,
-        subject: true,
-        status: true,
-        providerMessageId: true,
-        error: true,
-        sentAt: true,
-        skippedAt: true,
-        failedAt: true,
-        createdAt: true,
-      },
-    }),
-    prisma.newspaperEdition.findMany({
-      where: { workspaceId },
-      orderBy: { generatedAt: "desc" },
-      take,
-      select: {
-        id: true,
-        workflowJobId: true,
-        cadence: true,
-        dateKey: true,
-        runKey: true,
-        title: true,
-        slug: true,
-        generatedAt: true,
-        updatedAt: true,
-      },
+  const [visibleEditions, visibleDeliveries] = await Promise.all([
+    listNewspaperEditions(actor, workspaceId, { take }),
+    loadReadableDigestQuery<NewspaperDelivery>({ actor, workspaceId, kind: "NewspaperDelivery", limit: take * 5,
+      loadBatch: ({ take, skip }) => prisma.newspaperDelivery.findMany({ where: { workspaceId },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }], take, skip }),
     }),
   ]);
-  const providerMessageIds = Array.from(new Set(deliveries
+  const visibleJobIds = [...new Set([
+    ...visibleEditions.map((edition) => edition.workflowJobId),
+    ...visibleDeliveries.map((delivery) => delivery.workflowJobId),
+  ].filter((id): id is string => Boolean(id)))];
+  const jobs = visibleJobIds.length ? await prisma.workflowJob.findMany({
+    where: { workspaceId, type: "brain.daily-digest", id: { in: visibleJobIds } },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }], take,
+    select: { id: true, status: true, dedupeKey: true, runAfter: true,
+      createdAt: true, startedAt: true, completedAt: true },
+  }) : [];
+  const providerMessageIds = Array.from(new Set(visibleDeliveries
     .map((delivery) => delivery.providerMessageId)
     .filter((id): id is string => Boolean(id))));
   const emailDeliveryRows = providerMessageIds.length > 0
@@ -819,6 +659,7 @@ export async function getNewspaperDiagnostics(actor: AppActor, workspaceId: stri
       })
     : [];
   const emailDeliveryByMessageId = new Map(emailDeliveryRows.map((delivery) => [delivery.providerMessageId, delivery]));
+  const deliveryAlert = buildNewspaperDeliveryAlert(visibleDeliveries, emailDeliveryByMessageId);
 
   return {
     workspaceId,
@@ -826,13 +667,17 @@ export async function getNewspaperDiagnostics(actor: AppActor, workspaceId: stri
     defaultSchedule: schedule,
     nextRuns: nextRunsForRecipients({ now, schedule, recipientCadences }),
     recipients,
-    sourceCounts: {
-      oneDay: oneDayCounts,
-      sevenDays: sevenDayCounts,
-    },
+    sourceCounts: visibleEditions[0]?.sourceCounts ?? null,
     recentJobs: jobs,
-    recentDeliveries: deliveries,
-    recentEditions: editions,
-    deliveryAlert: buildNewspaperDeliveryAlert(deliveries, emailDeliveryByMessageId),
+    recentDeliveries: visibleDeliveries.map((delivery) => ({ ...delivery, subject: null, error: null })),
+    recentEditions: visibleEditions.map((edition) => ({
+      id: edition.id, workflowJobId: edition.workflowJobId, cadence: edition.cadence,
+      dateKey: edition.dateKey, runKey: edition.runKey, title: edition.title, slug: edition.slug,
+      generatedAt: edition.generatedAt, updatedAt: edition.updatedAt,
+    })),
+    deliveryAlert: {
+      ...deliveryAlert,
+      affectedRecipients: deliveryAlert.affectedRecipients.map((recipient) => ({ ...recipient, error: null })),
+    },
   };
 }

@@ -1,7 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
-import { deleteCircle, listCircleTree, suggestMaturityUpgrade, updateCircle } from "./circles";
+import { deleteCircle, listCircles, listCircleTree, suggestMaturityUpgrade, updateCircle } from "./circles";
 import { prisma } from "@corgtex/shared";
+import { readableArtifactIds } from "./source-lineage";
+
+vi.mock("./source-lineage", async () => ({
+  sealArtifactInputActor: (await import("./artifact-input-actor")).sealArtifactInputActor,
+  isLineageKind: (value: unknown) => ["Circle", "Role"].includes(String(value)),
+  assertArtifactInputWriteFence: vi.fn().mockResolvedValue(undefined),
+  // This lifecycle fixture has no known content receipt to advance.
+  advanceArchivedArtifactEnvelopeLineage: vi.fn().mockResolvedValue(false),
+  captureArtifactInputProof: vi.fn().mockResolvedValue([]),
+  readableArtifactIds: vi.fn(),
+}));
 
 vi.mock("./auth", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./auth")>();
@@ -33,9 +44,11 @@ vi.mock("@corgtex/shared", () => ({
       findMany: vi.fn(),
     },
     roleHolderHistory: {
+      findMany: vi.fn().mockResolvedValue([]),
       updateMany: vi.fn(),
     },
     roleOnboardingSession: {
+      findMany: vi.fn().mockResolvedValue([]),
       updateMany: vi.fn(),
     },
     roleAssignment: {
@@ -60,6 +73,11 @@ vi.mock("@corgtex/shared", () => ({
   },
 }));
 
+vi.mock("./producer-lineage", () => ({
+  prepareProducerLineage: vi.fn().mockResolvedValue({ mode: "HUMAN_ORIGINAL", inputs: [], roots: [] }),
+  finishProducerLineage: vi.fn().mockResolvedValue(undefined),
+}));
+
 const actor: AppActor = {
   kind: "user",
   user: {
@@ -72,6 +90,7 @@ const actor: AppActor = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map((row) => row.id)));
   vi.mocked(prisma.$transaction).mockImplementation(async (callback: (tx: typeof prisma) => Promise<unknown>) => callback(prisma));
   vi.mocked(prisma.auditLog.create).mockResolvedValue({} as any);
   vi.mocked(prisma.event.createMany).mockResolvedValue({ count: 1 } as any);
@@ -91,10 +110,10 @@ describe("suggestMaturityUpgrade", () => {
       id: circleId,
       workspaceId,
       maturityStage: "GETTING_STARTED",
-      tensions: Array(5).fill({}),
+      tensions: Array.from({ length: 5 }, (_, index) => ({ id: `tension-${index}` })),
     } as any);
 
-    const result = await suggestMaturityUpgrade(workspaceId, circleId);
+    const result = await suggestMaturityUpgrade(actor, workspaceId, circleId);
 
     expect(result.ready).toBe(true);
     expect(result.reason).toContain("Ready to practice proposals");
@@ -105,10 +124,10 @@ describe("suggestMaturityUpgrade", () => {
       id: circleId,
       workspaceId,
       maturityStage: "GETTING_STARTED",
-      tensions: Array(2).fill({}),
+      tensions: Array.from({ length: 2 }, (_, index) => ({ id: `tension-${index}` })),
     } as any);
 
-    const result = await suggestMaturityUpgrade(workspaceId, circleId);
+    const result = await suggestMaturityUpgrade(actor, workspaceId, circleId);
 
     expect(result.ready).toBe(false);
   });
@@ -118,10 +137,10 @@ describe("suggestMaturityUpgrade", () => {
       id: circleId,
       workspaceId,
       maturityStage: "BUILDING_MUSCLE",
-      tensions: Array(20).fill({}),
+      tensions: Array.from({ length: 20 }, (_, index) => ({ id: `tension-${index}` })),
     } as any);
 
-    const result = await suggestMaturityUpgrade(workspaceId, circleId);
+    const result = await suggestMaturityUpgrade(actor, workspaceId, circleId);
 
     expect(result.ready).toBe(true);
     expect(result.reason).toContain("Ready for full O2");
@@ -135,7 +154,7 @@ describe("suggestMaturityUpgrade", () => {
       tensions: Array(50).fill({}),
     } as any);
 
-    const result = await suggestMaturityUpgrade(workspaceId, circleId);
+    const result = await suggestMaturityUpgrade(actor, workspaceId, circleId);
 
     expect(result.ready).toBe(false);
   });
@@ -234,7 +253,8 @@ describe("updateCircle", () => {
         workspaceId,
         parentCircleId: null,
         archivedAt: null,
-      } as any);
+      } as any)
+      .mockResolvedValueOnce({ id: "parent-1", workspaceId, parentCircleId: null, archivedAt: null } as any);
     vi.mocked(prisma.circle.update).mockResolvedValueOnce({
       id: circleId,
       workspaceId,
@@ -288,7 +308,7 @@ describe("listCircleTree", () => {
       },
     ] as any);
 
-    const result = await listCircleTree("ws-1");
+    const result = await listCircleTree(actor, "ws-1");
 
     expect(prisma.circle.findMany).toHaveBeenCalledWith(expect.objectContaining({
       include: expect.objectContaining({
@@ -376,5 +396,108 @@ describe("deleteCircle", () => {
       where: { roleId: { in: ["role-1"] } },
       data: { roleId: null },
     });
+  });
+});
+
+
+describe("circle source permission readers", () => {
+  function circle(id: string, sortOrder = 0) {
+    return { id, workspaceId: "ws-1", name: id, purposeMd: `Purpose ${id}`, domainMd: null,
+      maturityStage: "GETTING_STARTED", parentCircleId: null, parentCircle: null,
+      sortOrder, createdAt: new Date("2026-10-01T12:00:00Z"), updatedAt: new Date("2026-10-01T12:00:00Z"), roles: [] };
+  }
+
+  it("filters unknown/restricted circles and roles before list order and role counts", async () => {
+    vi.mocked(prisma.circle.findMany).mockResolvedValue([
+      { ...circle("public-child", 2), parentCircleId: "finance", parentCircle: circle("finance"), roles: [
+        { id: "role-private", name: "Private", sortOrder: 0, createdAt: new Date() },
+        { id: "role-public", name: "Public", sortOrder: 1, createdAt: new Date() },
+      ] }, circle("legacy"), circle("finance"), circle("public-first", 1),
+    ] as any);
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, kind, rows) => new Set(rows
+      .filter((row) => kind === "Circle" ? !["legacy", "finance"].includes(row.id) : row.id !== "role-private")
+      .map((row) => row.id)));
+    const result = await listCircles(actor, "ws-1");
+    expect(result.map((row) => row.id)).toEqual(["public-first", "public-child"]);
+    expect(result[1]?.parentCircleId).toBeNull();
+    expect(result[1]?.roles.map((role) => role.id)).toEqual(["role-public"]);
+    expect(JSON.stringify(result)).not.toContain("finance");
+    expect(vi.mocked(prisma.circle.findMany).mock.calls[0]?.[0]).not.toHaveProperty("orderBy");
+  });
+
+  it("builds trees from permitted circles and redacts hidden parent affiliation", async () => {
+    const publicRoot = circle("public-root");
+    const child = { ...circle("public-child"), parentCircleId: publicRoot.id, parentCircle: publicRoot };
+    const detached = { ...circle("original-child", 1), parentCircleId: "finance", parentCircle: circle("finance") };
+    vi.mocked(prisma.circle.findMany).mockResolvedValue([circle("finance"), child, detached, publicRoot] as any);
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, _kind, rows) => new Set(rows
+      .filter((row) => row.id !== "finance").map((row) => row.id)));
+    const result = await listCircleTree(actor, "ws-1");
+    expect(result.map((row) => row.id)).toEqual(["public-root", "original-child"]);
+    expect(result[0]?.childCircles.map((row) => row.id)).toEqual(["public-child"]);
+    expect(result[1]).toMatchObject({ parentCircleId: null, parentCircle: null, childCircles: [] });
+    expect(JSON.stringify(result)).not.toContain("finance");
+  });
+
+  it("filters tree roles and member profiles before exposing assignment counts", async () => {
+    const assignment = (id: string) => ({ id, assignedAt: new Date(),
+      member: { id: `member-${id}`, user: { id: `user-${id}`, email: `${id}@example.test`, displayName: id, bio: null } },
+    });
+    vi.mocked(prisma.circle.findMany).mockResolvedValue([{ ...circle("public"), roles: [
+      { id: "role-private", name: "Private", assignments: [assignment("private")], sortOrder: 0, createdAt: new Date() },
+      { id: "role-public", name: "Public", assignments: [assignment("revoked"), assignment("public")], sortOrder: 1, createdAt: new Date() },
+    ] }] as any);
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, kind, rows) => new Set(rows
+      .filter((row) => kind === "Role" ? row.id !== "role-private" : kind === "Member" ? row.id !== "member-revoked" : true)
+      .map((row) => row.id)));
+    const result = await listCircleTree(actor, "ws-1");
+    expect(result[0]?.roles.map((role) => role.id)).toEqual(["role-public"]);
+    expect(result[0]?.roles[0]?.assignments.map((row: { id: string }) => row.id)).toEqual(["public"]);
+    expect(JSON.stringify(result)).not.toContain("revoked");
+    expect(JSON.stringify(result)).not.toContain("Private");
+  });
+
+  it("does not count restricted or unknown resolved tensions toward a maturity upgrade", async () => {
+    vi.mocked(prisma.circle.findUnique).mockResolvedValue({ ...circle("public"), tensions: [
+      { id: "public-1" }, { id: "public-2" }, { id: "public-3" }, { id: "finance" }, { id: "legacy" },
+    ] } as any);
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, kind, rows) => new Set(rows
+      .filter((row) => kind !== "Tension" || !["finance", "legacy"].includes(row.id)).map((row) => row.id)));
+    await expect(suggestMaturityUpgrade(actor, "ws-1", "public")).resolves.toEqual({
+      ready: false, reason: "Not enough recent activity to suggest upgrade.",
+    });
+  });
+
+  it("withholds a maturity suggestion if the circle lineage is unknown", async () => {
+    vi.mocked(prisma.circle.findUnique).mockResolvedValue({ ...circle("legacy"), tensions: [] } as any);
+    vi.mocked(readableArtifactIds).mockResolvedValue(new Set());
+    await expect(suggestMaturityUpgrade(actor, "ws-1", "legacy")).rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+  });
+
+  it("preserves the stored parent when a partial circle edit omits it", async () => {
+    vi.mocked(prisma.circle.findUnique).mockResolvedValue({ ...circle("public"), parentCircleId: "finance", archivedAt: null } as any);
+    vi.mocked(prisma.circle.update).mockResolvedValue({ ...circle("public"), name: "Edited", parentCircleId: "finance" } as any);
+    await updateCircle(actor, { workspaceId: "ws-1", circleId: "public", name: "Edited" });
+    expect(prisma.circle.update).toHaveBeenCalledWith(expect.objectContaining({ data: { name: "Edited" } }));
+    expect(vi.mocked(prisma.circle.findUnique).mock.calls[0]?.[0]).toEqual({ where: { id: "public" } });
+  });
+
+  it("redacts an unreadable parent from mutation responses while preserving the persisted relationship", async () => {
+    vi.mocked(prisma.circle.findUnique).mockResolvedValue({ ...circle("public"), parentCircleId: "finance", archivedAt: null } as any);
+    vi.mocked(prisma.circle.update).mockResolvedValue({ ...circle("public"), name: "Edited", parentCircleId: "finance" } as any);
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, _kind, rows) => new Set(rows
+      .filter((row) => row.id === "public").map((row) => row.id)));
+    const result = await updateCircle(actor, { workspaceId: "ws-1", circleId: "public", name: "Edited" });
+    expect(result).toMatchObject({ id: "public", name: "Edited", parentCircleId: null });
+    expect(prisma.circle.update).toHaveBeenCalledWith(expect.objectContaining({ data: { name: "Edited" } }));
+  });
+
+  it("withholds stale or unknown content in mutation responses after writing safe fields", async () => {
+    vi.mocked(prisma.circle.findUnique).mockResolvedValue({ ...circle("legacy"), archivedAt: null } as any);
+    vi.mocked(prisma.circle.update).mockResolvedValue({ ...circle("legacy"), name: "Edited" } as any);
+    vi.mocked(readableArtifactIds).mockResolvedValue(new Set());
+    await expect(updateCircle(actor, { workspaceId: "ws-1", circleId: "legacy", name: "Edited" }))
+      .resolves.toEqual({ id: "legacy", contentWithheld: true });
+    expect(prisma.circle.update).toHaveBeenCalled();
   });
 });

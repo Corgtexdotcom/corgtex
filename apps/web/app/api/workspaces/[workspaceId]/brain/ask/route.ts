@@ -17,6 +17,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
     const accessDomains = await resolveKnowledgeAccessDomains(actor, workspaceId);
     const result = await answerKnowledgeQuestion({
+      actor,
       workspaceId,
       question,
       limit,

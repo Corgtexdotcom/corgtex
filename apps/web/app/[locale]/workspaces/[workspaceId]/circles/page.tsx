@@ -37,7 +37,7 @@ export default async function CirclesPage({
   try {
     const [currentWorkspace, loadedTreeData] = await Promise.all([
       prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
-      listCircleTree(workspaceId).catch((error) => {
+      listCircleTree(actor, workspaceId).catch((error) => {
         console.error("[CirclesPage] listCircleTree failed:", error);
         throw error;
       }),

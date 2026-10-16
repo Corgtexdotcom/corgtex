@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
-import { AppError, createMeetingAudioAsset, isPlausibleMeetingRecordedAt, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, MAX_AUDIO_FILE_BYTES, createMeetingAudioAsset, isPlausibleMeetingRecordedAt, readableArtifactIds, requireWorkspaceMembership } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
@@ -11,6 +11,8 @@ type RouteContext = {
 
 const DEFAULT_LIST_TAKE = 25;
 const MAX_LIST_TAKE = 50;
+const LIST_SCAN_PAGE = 100;
+const LIST_SCAN_LIMIT = 5_000;
 
 const audioAssetSelect = {
   id: true,
@@ -44,6 +46,11 @@ const audioAssetSelect = {
     },
   },
 } satisfies Prisma.MeetingAudioAssetSelect;
+
+// The complete scalar row is required to validate the exact saved manifest.
+// Extra fields remain server-side and are never passed to the serializer.
+const audioAssetProofSelect = { ...audioAssetSelect, uploadedByUserId: true,
+  storageKey: true, transcriptText: true, transcriptMetadata: true } as const;
 
 type MeetingAudioAssetSummary = Prisma.MeetingAudioAssetGetPayload<{ select: typeof audioAssetSelect }>;
 
@@ -105,6 +112,7 @@ function requireAudioFile(file: FormDataEntryValue | null) {
   if (!(file instanceof File) || file.size === 0) {
     throw new AppError(400, "INVALID_INPUT", "file is required.");
   }
+  if (file.size > MAX_AUDIO_FILE_BYTES) throw new AppError(413, "AUDIO_TOO_LARGE", "Audio file is too large.");
   const mimeType = file.type.trim().toLowerCase();
   if (mimeType && !mimeType.startsWith("audio/")) {
     throw new AppError(400, "INVALID_AUDIO_FILE", "Audio file must use an audio MIME type.");
@@ -139,7 +147,7 @@ function serializeAudioAsset(audioAsset: MeetingAudioAssetSummary) {
           id: audioAsset.workflowJob.id,
           status: audioAsset.workflowJob.status,
           attempts: audioAsset.workflowJob.attempts,
-          error: audioAsset.workflowJob.error,
+          error: audioAsset.workflowJob.error ? "Audio processing failed." : null,
           runAfter: audioAsset.workflowJob.runAfter.toISOString(),
           updatedAt: audioAsset.workflowJob.updatedAt.toISOString(),
         }
@@ -152,13 +160,42 @@ export async function GET(request: NextRequest, { params }: RouteContext) {
   try {
     const actor = await resolveRequestActor(request);
     ({ workspaceId } = await params);
-    await requireWorkspaceMembership({ actor, workspaceId });
-
-    const audioAssets = await prisma.meetingAudioAsset.findMany({
-      where: { workspaceId },
-      orderBy: [{ createdAt: "desc" }],
-      take: clampTake(request.nextUrl.searchParams.get("take")),
-      select: audioAssetSelect,
+    const authorizedWorkspaceId = workspaceId;
+    if (!authorizedWorkspaceId) throw new AppError(400, "INVALID_INPUT", "Workspace is required.");
+    if (actor.kind !== "user") throw new AppError(403, "SOURCE_RESTRICTED", "Audio uploads require their human owner.");
+    const ownerUserId = actor.user.id;
+    await requireWorkspaceMembership({ actor, workspaceId: authorizedWorkspaceId });
+    const requestedTake = clampTake(request.nextUrl.searchParams.get("take"));
+    const audioAssets = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Workspace" WHERE "id" = ${authorizedWorkspaceId} FOR SHARE`;
+      await tx.$queryRaw`SELECT "id" FROM "Member" WHERE "workspaceId" = ${authorizedWorkspaceId}
+        AND "userId" = ${ownerUserId} FOR SHARE`;
+      const currentMembership = await requireWorkspaceMembership({ actor, workspaceId: authorizedWorkspaceId, tx });
+      if (!currentMembership || currentMembership.id === "global-operator"
+        || currentMembership.userId !== ownerUserId) {
+        throw new AppError(403, "SOURCE_RESTRICTED", "Audio uploads require their active human owner.");
+      }
+      const admitted: MeetingAudioAssetSummary[] = [];
+      let cursor: string | undefined;
+      let scanned = 0;
+      while (admitted.length < requestedTake) {
+        const pageTake = Math.min(LIST_SCAN_PAGE, LIST_SCAN_LIMIT + 1 - scanned);
+        const page = await tx.meetingAudioAsset.findMany({
+          where: { workspaceId: authorizedWorkspaceId, uploadedByUserId: ownerUserId },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          take: pageTake,
+          ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+          select: audioAssetProofSelect,
+        });
+        if (!page.length) break;
+        scanned += page.length;
+        if (scanned > LIST_SCAN_LIMIT) throw new AppError(409, "SOURCE_PROOF_SCAN_LIMIT", "Audio history exceeds the safe source scan limit.");
+        const readable = await readableArtifactIds(actor, authorizedWorkspaceId, "MeetingAudioAsset", page, tx);
+        admitted.push(...page.filter(asset => readable.has(asset.id)).slice(0, requestedTake - admitted.length));
+        cursor = page[page.length - 1]?.id;
+        if (page.length < pageTake) break;
+      }
+      return admitted;
     });
 
     return NextResponse.json({ audioAssets: audioAssets.map(serializeAudioAsset) });
@@ -173,20 +210,28 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
     requireMultipart(request);
     const actor = await resolveRequestActor(request);
     ({ workspaceId } = await params);
+    if (actor.kind !== "user") throw new AppError(403, "SOURCE_RESTRICTED", "Audio uploads require their human owner.");
+    await requireWorkspaceMembership({ actor, workspaceId });
     const formData = await request.formData();
     const file = requireAudioFile(formData.get("file"));
     const meetingId = formString(formData, "meetingId");
-
-    const result = await createMeetingAudioAsset(actor, {
+    // Capture form values before the asynchronous file read; the domain layer
+    // keeps one isolated storage copy; native capture hashes without another copy.
+    const upload = {
       workspaceId,
       fileName: file.name,
       mimeType: file.type || null,
-      fileBuffer: Buffer.from(await file.arrayBuffer()),
       meetingId,
       title: formString(formData, "title"),
       recordedAt: meetingId ? null : parseRecordedAt(formString(formData, "recordedAt"), true),
       durationSeconds: parseDurationSeconds(formString(formData, "durationSeconds")),
       participantEmails: formStringList(formData, "participantEmails"),
+    };
+    const fileBuffer = Buffer.from(await file.arrayBuffer());
+
+    const result = await createMeetingAudioAsset(actor, {
+      ...upload,
+      fileBuffer,
     });
 
     return NextResponse.json(

@@ -1,12 +1,15 @@
+import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
-import type { Prisma } from "@prisma/client";
+import type { Circle, Prisma } from "@prisma/client";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 import { closeRoleLifecycleForCircleTree } from "./role-onboarding";
+import { readableArtifactIds } from "./source-lineage";
+import { filterReadableRoleAssignments } from "./roles";
 
 async function validateParentCircle(tx: Prisma.TransactionClient, params: {
   workspaceId: string;
@@ -57,20 +60,42 @@ async function validateParentCircle(tx: Prisma.TransactionClient, params: {
   return parentCircleId;
 }
 
-export async function listCircles(workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
-  return prisma.circle.findMany({
-    where: { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) },
-    include: {
-      roles: {
-        where: { archivedAt: null },
-        orderBy: { sortOrder: "asc" },
-      },
-    },
-    orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
-  });
+async function circleMutationResult(tx: Prisma.TransactionClient, actor: AppActor, workspaceId: string,
+  circle: Circle) {
+  const visible = await readableArtifactIds(actor, workspaceId, "Circle", [circle], tx);
+  if (!visible.has(circle.id)) return { id: circle.id, contentWithheld: true as const };
+  if (!circle.parentCircleId) return circle;
+  const parent = await tx.circle.findUnique({ where: { id: circle.parentCircleId } });
+  const visibleParents = await readableArtifactIds(actor, workspaceId, "Circle", parent ? [parent] : [], tx);
+  return { ...circle, parentCircleId: visibleParents.has(circle.parentCircleId) ? circle.parentCircleId : null };
 }
 
-export async function createCircle(actor: AppActor, params: {
+export async function listCircles(actor: AppActor, workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const circles = await prisma.circle.findMany({
+    where: { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) },
+    include: {
+      parentCircle: true,
+      roles: {
+        where: { archivedAt: null },
+      },
+    },
+  });
+  const visibleCircles = await readableArtifactIds(actor, workspaceId, "Circle", circles);
+  const admitted = circles.filter((circle) => visibleCircles.has(circle.id));
+  const visibleParents = await readableArtifactIds(actor, workspaceId, "Circle", admitted.flatMap((circle) => circle.parentCircle ? [circle.parentCircle] : []));
+  const visibleRoles = await readableArtifactIds(actor, workspaceId, "Role", admitted.flatMap((circle) => circle.roles));
+  return admitted.sort(compareCircleOrder).map(({ parentCircle: _parentCircle, ...circle }) => ({ ...circle,
+    parentCircleId: circle.parentCircleId && visibleParents.has(circle.parentCircleId) ? circle.parentCircleId : null,
+    roles: circle.roles.filter((role) => visibleRoles.has(role.id)).sort(compareCircleOrder),
+  }));
+}
+
+function compareCircleOrder(left: { sortOrder: number; createdAt: Date }, right: { sortOrder: number; createdAt: Date }) {
+  return left.sortOrder - right.sortOrder || left.createdAt.getTime() - right.createdAt.getTime();
+}
+
+export async function createCircle(actor: AppActor, params: ProducerLineageParams & {
   workspaceId: string;
   name: string;
   purposeMd?: string | null;
@@ -95,6 +120,7 @@ export async function createCircle(actor: AppActor, params: {
       parentCircleId: params.parentCircleId,
     });
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId, capture: params });
     const circle = await tx.circle.create({
       data: {
         workspaceId: params.workspaceId,
@@ -105,6 +131,9 @@ export async function createCircle(actor: AppActor, params: {
         maturityStage: params.maturityStage || "GETTING_STARTED",
       },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Circle", id: circle.id }, content: circle, receipt });
+
 
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
@@ -127,11 +156,11 @@ export async function createCircle(actor: AppActor, params: {
       },
     ]);
 
-    return circle;
+    return circleMutationResult(tx, actor, params.workspaceId, circle);
   });
 }
 
-export async function updateCircle(actor: AppActor, params: {
+export async function updateCircle(actor: AppActor, params: ProducerLineageParams & {
   workspaceId: string;
   circleId: string;
   name?: string;
@@ -172,10 +201,15 @@ export async function updateCircle(actor: AppActor, params: {
     }
     if (params.maturityStage !== undefined) data.maturityStage = params.maturityStage;
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Circle", id: circle.id }, before: circle, capture: params });
     const updated = await tx.circle.update({
       where: { id: params.circleId },
       data,
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Circle", id: updated.id }, content: updated, receipt });
+
 
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
@@ -185,7 +219,7 @@ export async function updateCircle(actor: AppActor, params: {
       meta: { fields: Object.keys(data) },
     });
 
-    return updated;
+    return circleMutationResult(tx, actor, params.workspaceId, updated);
   });
 }
 
@@ -219,7 +253,8 @@ export async function deleteCircle(actor: AppActor, params: {
   return { id: params.circleId };
 }
 
-export async function suggestMaturityUpgrade(workspaceId: string, circleId: string) {
+export async function suggestMaturityUpgrade(actor: AppActor, workspaceId: string, circleId: string) {
+  await requireWorkspaceMembership({ actor, workspaceId });
   const circle = await prisma.circle.findUnique({
     where: { id: circleId },
     include: {
@@ -235,15 +270,16 @@ export async function suggestMaturityUpgrade(workspaceId: string, circleId: stri
     },
   });
 
-  if (!circle || circle.workspaceId !== workspaceId) {
-    throw new Error("Circle not found.");
-  }
+  invariant(circle && circle.workspaceId === workspaceId, 404, "NOT_FOUND", "Circle not found.");
+  const visible = await readableArtifactIds(actor, workspaceId, "Circle", [circle]);
+  invariant(visible.has(circle.id), 404, "NOT_FOUND", "Circle not found.");
 
   if (circle.maturityStage === "FULL_O2") {
     return { ready: false, reason: "Already at highest maturity stage." };
   }
 
-  const recentResolvedTensions = circle.tensions.length;
+  const visibleTensions = await readableArtifactIds(actor, workspaceId, "Tension", circle.tensions);
+  const recentResolvedTensions = circle.tensions.filter((tension) => visibleTensions.has(tension.id)).length;
 
   if (circle.maturityStage === "GETTING_STARTED") {
     if (recentResolvedTensions >= 5) {
@@ -276,11 +312,12 @@ export type CircleTreeItem = {
   childCircles: CircleTreeItem[];
 };
 
-export async function listCircleTree(workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
+export async function listCircleTree(actor: AppActor, workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
+  await requireWorkspaceMembership({ actor, workspaceId });
   const circles = await prisma.circle.findMany({
     where: { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) },
     include: {
-      parentCircle: { select: { id: true, name: true } },
+      parentCircle: true,
       roles: {
         where: { archivedAt: null },
         include: {
@@ -302,13 +339,26 @@ export async function listCircleTree(workspaceId: string, opts?: { archiveFilter
             },
           },
         },
-        orderBy: { sortOrder: "asc" },
       },
     },
-    orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
   });
-
-  return buildCircleTree(circles);
+  const visibleCircles = await readableArtifactIds(actor, workspaceId, "Circle", circles);
+  const admitted = circles.filter((circle) => visibleCircles.has(circle.id));
+  const visibleParents = await readableArtifactIds(actor, workspaceId, "Circle", admitted.flatMap((circle) => circle.parentCircle ? [circle.parentCircle] : []));
+  const visibleRoles = await readableArtifactIds(actor, workspaceId, "Role", admitted.flatMap((circle) => circle.roles));
+  const assignments = await filterReadableRoleAssignments(actor, workspaceId,
+    admitted.flatMap((circle) => circle.roles.filter((role) => visibleRoles.has(role.id)).flatMap((role) => role.assignments)));
+  const visibleAssignments = new Set(assignments.map((assignment) => assignment.id));
+  const safeCircles = admitted.sort(compareCircleOrder).map((circle) => ({ ...circle,
+    parentCircleId: circle.parentCircleId && visibleParents.has(circle.parentCircleId) ? circle.parentCircleId : null,
+    parentCircle: circle.parentCircle && visibleParents.has(circle.parentCircle.id)
+      ? { id: circle.parentCircle.id, name: circle.parentCircle.name } : null,
+    roles: circle.roles.filter((role) => visibleRoles.has(role.id)).sort(compareCircleOrder).map((role) => ({ ...role,
+      assignments: role.assignments.filter((assignment) => visibleAssignments.has(assignment.id))
+        .sort((left, right) => right.assignedAt.getTime() - left.assignedAt.getTime()),
+    })),
+  }));
+  return buildCircleTree(safeCircles);
 }
 
 function buildCircleTree(flatList: any[]): CircleTreeItem[] {

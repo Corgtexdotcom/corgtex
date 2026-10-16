@@ -4,8 +4,9 @@ import { requireWorkspaceMembership } from "./auth";
 import { resolveKnowledgeAccessDomains } from "./brain-access";
 import { invariant } from "./errors";
 import type { BrainArticleDerivationV1 } from "./brain-derivation";
+import { currentArtifactInputRoots, readableArtifactIds } from "./source-lineage";
 
-type ImpactClient = Pick<Prisma.TransactionClient, "brainArticle">;
+type ImpactClient = Pick<Prisma.TransactionClient, "brainArticle" | "artifactInputLineage">;
 
 type ArticleLink = {
   id: string;
@@ -49,22 +50,14 @@ export async function findSourceArticleImpacts(
   if (uniqueIds.length === 0) return impacts;
 
   const articles = await tx.brainArticle.findMany({
-    where: {
-      workspaceId,
-      archivedAt: null,
-      OR: [
-        { sourceIds: { hasSome: uniqueIds } },
-        { derivationJson: { not: Prisma.DbNull } },
-      ],
-    },
-    select: {
-      id: true, slug: true, title: true, isPrivate: true, ownerMemberId: true,
-      sourceIds: true, derivationJson: true,
-    },
+    where: { workspaceId, archivedAt: null },
   });
   for (const article of articles) {
+    const roots = await currentArtifactInputRoots(tx as Prisma.TransactionClient, workspaceId,
+      { kind: "BrainArticle", id: article.id }, article);
+    const provenSources = new Set(roots?.filter((root) => root.kind === "BrainSource").map((root) => root.id) ?? []);
     const explicit = new Set(readBrainArticleDerivation(article.derivationJson)?.sources.map((source) => source.sourceId) ?? []);
-    const linked = new Set([...article.sourceIds, ...sourceIdsInDerivation(article.derivationJson)]);
+    const linked = new Set([...article.sourceIds, ...sourceIdsInDerivation(article.derivationJson), ...provenSources]);
     for (const sourceId of linked) {
       const impact = impacts.get(sourceId);
       if (!impact) continue;
@@ -74,7 +67,7 @@ export async function findSourceArticleImpacts(
         title: article.title,
         isPrivate: article.isPrivate,
         ownerMemberId: article.ownerMemberId,
-        kind: explicit.has(sourceId) ? "derived" : "unclassified",
+        kind: provenSources.has(sourceId) || explicit.has(sourceId) ? "derived" : "unclassified",
       });
     }
   }
@@ -95,10 +88,16 @@ export async function listBrainSourceArchiveImpacts(actor: AppActor, params: {
   });
   invariant(sources.length === sourceIds.length, 404, "NOT_FOUND", "Source not found.");
   const impacts = await findSourceArticleImpacts(prisma, params.workspaceId, sourceIds);
+  const impactedIds = [...new Set([...impacts.values()].flatMap((impact) => impact.articles.map((article) => article.id)))];
+  const impactedArticles = await prisma.brainArticle.findMany({ where: {
+    workspaceId: params.workspaceId, id: { in: impactedIds }, archivedAt: null,
+  } });
+  const readableIds = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", impactedArticles);
   return sourceIds.map((sourceId) => {
     const articles = impacts.get(sourceId)?.articles ?? [];
-    const canView = (article: ArticleLink) => actor.kind === "agent" || membership?.role === "ADMIN"
-      || !article.isPrivate || article.ownerMemberId === membership?.id;
+    const canView = (article: ArticleLink) => readableIds.has(article.id)
+      && (actor.kind === "agent" || membership?.role === "ADMIN"
+        || !article.isPrivate || article.ownerMemberId === membership?.id);
     return {
       sourceId,
       blocked: articles.length > 0,

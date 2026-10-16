@@ -77,6 +77,17 @@ describe("resolveKnowledgeAccessDomains", () => {
       .resolves.toEqual(["WORKSPACE", "FINANCE"]);
   });
 
+  it("uses the supplied proof transaction for membership and Finance policy", async () => {
+    const db = {} as Parameters<typeof import("./brain-access")["resolveKnowledgeAccessDomains"]>[2];
+    getFinanceAccessPolicy.mockResolvedValue({ canRead: true });
+
+    const { resolveKnowledgeAccessDomains } = await import("./brain-access");
+    await expect(resolveKnowledgeAccessDomains(userActor, "workspace-1", db))
+      .resolves.toEqual(["WORKSPACE", "FINANCE"]);
+    expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor: userActor, workspaceId: "workspace-1", tx: db });
+    expect(getFinanceAccessPolicy).toHaveBeenCalledWith(userActor, "workspace-1", db);
+  });
+
   it.each(insufficientAgentScopeCases)("keeps an agent with $label out of Finance knowledge", async ({ scopes }) => {
     const actor = agentActor(scopes);
 
@@ -87,7 +98,7 @@ describe("resolveKnowledgeAccessDomains", () => {
     expect(getFinanceAccessPolicy).not.toHaveBeenCalled();
   });
 
-  it("adds Finance for an agent only when both knowledge scopes and Finance read policy allow it", async () => {
+  it("does not treat finance scopes as a current human Finance grant", async () => {
     const actor = agentActor(["brain:read", "finance:read"]);
     getFinanceAccessPolicy.mockResolvedValue({
       canRead: true,
@@ -96,9 +107,9 @@ describe("resolveKnowledgeAccessDomains", () => {
 
     const { resolveKnowledgeAccessDomains } = await import("./brain-access");
     await expect(resolveKnowledgeAccessDomains(actor, "workspace-1"))
-      .resolves.toEqual(["WORKSPACE", "FINANCE"]);
+      .resolves.toEqual(["WORKSPACE"]);
 
-    expect(getFinanceAccessPolicy).toHaveBeenCalledWith(actor, "workspace-1");
+    expect(getFinanceAccessPolicy).not.toHaveBeenCalled();
   });
 
   it("keeps a fully scoped agent out of Finance when the native policy denies read access", async () => {
@@ -111,6 +122,14 @@ describe("resolveKnowledgeAccessDomains", () => {
     const { resolveKnowledgeAccessDomains } = await import("./brain-access");
     await expect(resolveKnowledgeAccessDomains(actor, "workspace-1"))
       .resolves.toEqual(["WORKSPACE"]);
+  });
+
+  it("does not treat an internal-looking bootstrap label as Finance authority", async () => {
+    const { resolveKnowledgeAccessDomains } = await import("./brain-access");
+    await expect(resolveKnowledgeAccessDomains({ kind: "agent", authProvider: "bootstrap", label: "budget-alerts",
+      workspaceIds: ["workspace-1"], scopes: ["brain:read", "finance:read", "support:write"] }, "workspace-1"))
+      .resolves.toEqual(["WORKSPACE"]);
+    expect(getFinanceAccessPolicy).not.toHaveBeenCalled();
   });
 
   it("propagates workspace authorization failures before deriving domains", async () => {

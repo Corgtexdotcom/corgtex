@@ -1,7 +1,8 @@
+import { prisma, type AppActor } from "@corgtex/shared";
 import { runInboxTriageAgent, runDailyCheckInAgent, runMeetingSummaryAgent, runActionExtractionAgent, runProposalDraftingAgent, runConstitutionUpdateTriggerAgent, runConstitutionSynthesisAgent, runCrmDripFollowupAgent, runCrmEmailExtractionAgent, runCrmLeadEnrichmentAgent, runCompanyUnderstandingAgent } from "@corgtex/agents";
 import { executeAgentRun } from "@corgtex/agents";
-import { runBrainMaintenance, absorbSource, runBrainSourceRegenerationJob } from "@corgtex/agents";
-import { assertBrainSourceRecoveryJob } from "@corgtex/domain";
+import { runBrainMaintenance, absorbSource, runBrainSourceRegenerationJob, runBrainArticleVariantJob, runGraphSourceVariantJob } from "@corgtex/agents";
+import { assertBrainSourceRecoveryJob, captureArtifactInputProof, withBrainExportWorker, withMeetingTranscriptWorker, getMeetingTranscriptWorkerPurpose, assertMeetingTranscriptWorkerCurrent, invariant } from "@corgtex/domain";
 
 function asString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -13,12 +14,25 @@ export async function runAgentWorkflowJob(job: {
   type: string;
   payload: unknown;
   attempts?: number;
-}, claimOwner?: string) {
+}, claimOwner?: string, meetingActor?: AppActor) {
   if (!job.workspaceId) {
     return null;
   }
 
   const payload = (job.payload ?? {}) as Record<string, unknown>;
+  const runMeeting = async <T>(work: (actor: AppActor) => Promise<T>) => {
+    if (meetingActor) {
+      const purpose = getMeetingTranscriptWorkerPurpose(meetingActor, job.workspaceId!);
+      invariant(purpose && purpose.jobId === job.id && purpose.jobType === job.type
+        && purpose.owner === claimOwner && purpose.attempt === job.attempts
+        && purpose.payload === JSON.stringify(job.payload),
+      409, "MEETING_WORKFLOW_JOB_LOST", "Meeting dispatch requires the original claimed execution actor.");
+      await assertMeetingTranscriptWorkerCurrent(meetingActor, job.workspaceId!);
+      return work(meetingActor);
+    }
+    return withMeetingTranscriptWorker({workspaceId: job.workspaceId!, meetingId: asString(payload.meetingId),
+      jobId: job.id, owner: claimOwner ?? "", attempt: job.attempts ?? 0, claim: undefined}, work);
+  };
 
   if (job.type === "agent.inbox-triage") {
     return runInboxTriageAgent({
@@ -40,21 +54,23 @@ export async function runAgentWorkflowJob(job: {
   }
 
   if (job.type === "agent.meeting-summary") {
-    return runMeetingSummaryAgent({
-      workspaceId: job.workspaceId,
+    return runMeeting(lineageActor => runMeetingSummaryAgent({
+      lineageActor,
+      workspaceId: job.workspaceId!,
       triggerRef: job.id,
       meetingId: asString(payload.meetingId),
       triggerType: job.type === "agent.meeting-summary" && payload.triggerType === "MANUAL" ? "MANUAL" : "EVENT",
-    });
+    }));
   }
 
   if (job.type === "agent.action-extraction") {
-    return runActionExtractionAgent({
-      workspaceId: job.workspaceId,
+    return runMeeting(lineageActor => runActionExtractionAgent({
+      lineageActor,
+      workspaceId: job.workspaceId!,
       triggerRef: job.id,
       meetingId: asString(payload.meetingId),
       triggerType: payload.triggerType === "MANUAL" ? "MANUAL" : "EVENT",
-    });
+    }));
   }
 
   if (job.type === "agent.proposal-drafting") {
@@ -64,8 +80,9 @@ export async function runAgentWorkflowJob(job: {
       prompt: asString(payload.prompt),
       meetingId: asString(payload.meetingId) || null,
       triggerType: payload.triggerType === "API" ? "API" : "MANUAL",
-      reviewFeedback: asString(payload.reviewFeedback) || undefined,
-      previousAdvice: asString(payload.previousAdvice) || undefined,
+      requestInputId: asString(payload.requestInputId) || undefined,
+      feedbackInputId: asString(payload.feedbackInputId) || undefined,
+      priorRunSnapshotId: asString(payload.priorRunSnapshotId) || undefined,
     });
   }
 
@@ -75,8 +92,9 @@ export async function runAgentWorkflowJob(job: {
       triggerRef: job.id,
       proposalId: asString(payload.proposalId),
       triggerType: payload.triggerType === "MANUAL" ? "MANUAL" : "EVENT",
-      reviewFeedback: asString(payload.reviewFeedback) || undefined,
-      previousAdvice: asString(payload.previousAdvice) || undefined,
+      requestInputId: asString(payload.requestInputId) || undefined,
+      feedbackInputId: asString(payload.feedbackInputId) || undefined,
+      priorRunSnapshotId: asString(payload.priorRunSnapshotId) || undefined,
     });
   }
 
@@ -89,7 +107,11 @@ export async function runAgentWorkflowJob(job: {
   }
 
   if (job.type === "agent.brain-maintenance") {
+    const lineageActor: AppActor = {kind: "agent", authProvider: "bootstrap", label: "brain-maintenance", workspaceIds: [job.workspaceId]};
+    const lineageRoots = await captureArtifactInputProof(lineageActor, job.workspaceId, [{kind: "Workspace", id: job.workspaceId}]);
     return executeAgentRun({
+      lineageActor, lineageRoots,
+      contextLineageRoots: () => lineageRoots,
       agentKey: "brain-maintenance",
       workspaceId: job.workspaceId,
       triggerType: payload.triggerType === "MANUAL" ? "MANUAL" : "SCHEDULE",
@@ -98,15 +120,12 @@ export async function runAgentWorkflowJob(job: {
       payload: {},
       plan: ["freshness-scan", "dead-link-scan", "orphan-detection", "tier3-cleanup", "backlink-rebuild", "discussion-maintenance"],
       buildContext: async (helpers) =>
-        helpers.tool("brain.workspace-info", {}, async () => ({ workspaceId: job.workspaceId })),
-      execute: async (_context, helpers, runId, _model) =>
-        helpers.step("maintenance", {}, async () => {
-          const result = await runBrainMaintenance({
-            workspaceId: job.workspaceId!,
-            agentRunId: runId,
-          });
-          return { resultJson: result };
-        }),
+        helpers.tool("brain.workspace-info", {}, async () => ({ workspaceId: job.workspaceId }), {receipt: helpers.plannedInputReceipt}),
+      execute: async (_context, helpers, runId, _model) => {
+        const {lineageRoots: consumedRoots, ...result} = await runBrainMaintenance({workspaceId: job.workspaceId!, agentRunId: runId, actor: lineageActor});
+        const receipt = await helpers.captureInputs(consumedRoots);
+        return helpers.step("maintenance", {}, async () => ({resultJson: result, lineageReceipt: receipt}), {receipt});
+      },
     });
   }
 
@@ -121,35 +140,50 @@ export async function runAgentWorkflowJob(job: {
       const admission = await assertBrainSourceRecoveryJob({ workspaceId: job.workspaceId, sourceId, workflowJobId: job.id, expectedSourceIdentity });
       if (admission?.alreadyCompleted) return admission;
     }
-    const result = await executeAgentRun({
-      agentKey: "brain-absorb",
-      workspaceId: job.workspaceId,
-      triggerType: "EVENT",
-      triggerRef: job.id,
-      goal: "Absorb a new source into the brain — update or create articles.",
-      payload: { sourceId },
-      plan: ["load-source", "classify", "match-articles", "absorb", "sync-knowledge", "rebuild-backlinks"],
-      buildContext: async (helpers) =>
-        helpers.tool("brain.load-source", { sourceId }, async () => ({ sourceId })),
-      execute: async (_context, helpers, runId, model) =>
-        helpers.step("absorb", { sourceId }, async () => {
-          const result = await absorbSource({
-            workspaceId: job.workspaceId!,
-            sourceId,
-            agentRunId: runId,
-            model,
-            ...(expectedSourceIdentity ? { expectedSourceIdentity } : {}),
-          });
+    const workspaceId = job.workspaceId;
+    const executeAbsorption = async (lineageActor?: AppActor) => {
+      const lineageRoots = lineageActor ? await captureArtifactInputProof(lineageActor, workspaceId, [{kind: "BrainSource", id: sourceId}]) : undefined;
+      return executeAgentRun({
+        ...(lineageActor && lineageRoots ? {lineageActor, lineageRoots, contextLineageRoots: () => lineageRoots} : {}),
+        agentKey: "brain-absorb", workspaceId, triggerType: "EVENT", triggerRef: job.id,
+        goal: "Absorb a new source into the brain — update or create articles.", payload: {sourceId},
+        plan: ["load-source", "classify", "match-articles", "absorb", "sync-knowledge", "rebuild-backlinks"],
+        buildContext: async helpers => helpers.tool("brain.load-source", {sourceId}, async () => ({sourceId}),
+          {receipt: helpers.plannedInputReceipt}),
+        execute: async (_context, helpers, runId, model) => helpers.step("absorb", {sourceId}, async () => {
+          const result = await absorbSource({workspaceId, sourceId, agentRunId: runId, model,
+            ...(lineageActor ? {actor: lineageActor} : {}), ...(expectedSourceIdentity ? {expectedSourceIdentity} : {})});
           if (payload.supportRecovery === true && "skipped" in result && result.skipped === true) {
             throw new Error("Brain source recovery did not complete absorption.");
           }
-          return { resultJson: result };
-        }),
-    });
+          const lineageReceipt = lineageActor && "lineageRoots" in result && result.lineageRoots?.length
+            ? await helpers.captureInputs(result.lineageRoots) : undefined;
+          return {resultJson: result, ...(lineageReceipt ? {lineageReceipt} : {})};
+        }, {receipt: helpers.plannedInputReceipt}),
+      });
+    };
+    const source = await prisma.brainSource.findFirst({where: {id: sourceId, workspaceId}, select: {channel: true}});
+    const result = source?.channel === "chat-consent"
+      ? await withBrainExportWorker({workspaceId, sourceId, jobId: job.id, owner: claimOwner ?? "", attempt: job.attempts ?? 0}, executeAbsorption)
+      : await executeAbsorption();
     if (payload.supportRecovery === true && result && "skipped" in result && result.skipped === true) {
       throw new Error("Brain source recovery was skipped by agent runtime before processing.");
     }
     return result;
+  }
+
+  if (job.type === "agent.graph-source-variant") {
+    if (!Number.isSafeInteger(job.attempts) || (job.attempts ?? 0) < 1 || !claimOwner) {
+      throw new Error("Graph variant generation requires a claimed worker attempt.");
+    }
+    return runGraphSourceVariantJob({workspaceId: job.workspaceId, jobId: job.id, expectedAttempt: job.attempts!, expectedOwner: claimOwner});
+  }
+
+  if (job.type === "agent.brain-article-variant") {
+    if (!Number.isSafeInteger(job.attempts) || (job.attempts ?? 0) < 1 || !claimOwner) {
+      throw new Error("Article variant generation requires a claimed worker attempt.");
+    }
+    return runBrainArticleVariantJob({ workspaceId: job.workspaceId, jobId: job.id, expectedAttempt: job.attempts!, expectedOwner: claimOwner });
   }
 
   if (job.type === "agent.brain-source-regenerate") {

@@ -3,6 +3,8 @@ import { env, prisma, sendEmail } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { humanMemberIdentityWhere } from "./member-identity";
+import { readableArtifactIds } from "./source-lineage";
+import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 
 export const DEFAULT_NOTIFICATION_CHANNEL = "IN_APP";
 export const NOTIFICATION_DELIVERY_JOB_TYPE = "notification.delivery";
@@ -45,7 +47,8 @@ export type StoredNotificationChannel = typeof STORED_NOTIFICATION_CHANNELS[numb
 export type NotificationPreferenceChannel = typeof NOTIFICATION_PREFERENCE_CHANNELS[number];
 export type NotificationPriority = "LOW" | "NORMAL" | "HIGH";
 
-export type NotificationIntentParams = {
+export type NotificationIntentParams = ProducerLineageParams & {
+  lineageActor?: AppActor;
   workspaceId: string;
   type: string;
   recipientUserIds: string[];
@@ -274,7 +277,7 @@ export async function createNotificationIntent(
     },
     select: {
       userId: true,
-      user: { select: { email: true } },
+      user: { select: { id: true, email: true, displayName: true, globalRole: true } },
     },
   });
   if (activeRecipients.length === 0) {
@@ -316,63 +319,35 @@ export async function createNotificationIntent(
     const channel = channelByUserId.get(recipient.userId) ?? DEFAULT_NOTIFICATION_CHANNEL;
     return shouldAllowOutbound && channelEnablesSlack(channel);
   };
-  const bulkRecipients = recipients.filter((recipient) => (
-    !notificationDedupeKey(params.dedupeKey, recipient.userId)
-      && !shouldCreateEmailDelivery(recipient)
-      && !shouldCreateSlackDelivery(recipient)
-  ));
-  const individualRecipients = recipients.filter((recipient) => !bulkRecipients.includes(recipient));
+  const lineageActor = params.lineageActor ?? { kind: "agent" as const, authProvider: "bootstrap" as const,
+    label: "notification-without-receipt", workspaceIds: [params.workspaceId] };
+  const receipt = await prepareProducerLineage({ tx, actor: lineageActor, workspaceId: params.workspaceId,
+    copied: true, capture: params.lineageActor ? params : {} });
   let count = 0;
-
-  if (bulkRecipients.length > 0) {
-    const result = await tx.notification.createMany({
-      data: bulkRecipients.map((recipient) => ({
-        workspaceId: params.workspaceId,
-        userId: recipient.userId,
-        type: params.type,
-        priority,
-        entityType: params.entityType ?? null,
-        entityId: params.entityId ?? null,
-        title: params.title,
-        bodyMd: params.bodyMd ?? null,
-      })),
-    });
-    count += result.count;
-  }
-
-  for (const recipient of individualRecipients) {
+  for (const recipient of recipients) {
     const dedupeKey = notificationDedupeKey(params.dedupeKey, recipient.userId);
-    const data = {
-      workspaceId: params.workspaceId,
-      userId: recipient.userId,
-      type: params.type,
-      dedupeKey,
-      priority,
-      entityType: params.entityType ?? null,
-      entityId: params.entityId ?? null,
-      title: params.title,
-      bodyMd: params.bodyMd ?? null,
-    };
-    const notification = dedupeKey
-      ? await tx.notification.upsert({
-        where: { dedupeKey },
-        update: {},
-        create: data,
-        select: { id: true, workspaceId: true, userId: true },
-      })
-      : await tx.notification.create({
-        data,
-        select: { id: true, workspaceId: true, userId: true },
-      });
-
+    // Existing content keeps its own receipt. A retry cannot certify an older
+    // payload with a new caller's input set.
+    if (dedupeKey) await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`notification:${dedupeKey}`}, 0))`;
+    const existing = dedupeKey ? await tx.notification.findUnique({ where: { dedupeKey } }) : null;
+    const notification = existing ?? await tx.notification.create({ data: {
+      workspaceId: params.workspaceId, userId: recipient.userId, type: params.type, dedupeKey, priority,
+      entityType: params.entityType ?? null, entityId: params.entityId ?? null,
+      title: params.title, bodyMd: params.bodyMd ?? null,
+    } });
+    if (!existing) await finishProducerLineage({ tx, actor: lineageActor, workspaceId: params.workspaceId,
+      artifact: { kind: "Notification", id: notification.id }, content: notification, receipt });
     count += 1;
-
-    if (shouldCreateEmailDelivery(recipient)) {
-      await createEmailDeliveryIntent(tx, notification);
-    }
-    if (shouldCreateSlackDelivery(recipient)) {
-      await createSlackDeliveryIntent(tx, notification);
-    }
+    if (!existing && receipt.mode === "UNKNOWN") continue;
+    if (!recipient.user || notification.workspaceId !== params.workspaceId || notification.userId !== recipient.userId) continue;
+    const recipientActor: AppActor = { kind: "user", user: recipient.user };
+    let readable = false;
+    try {
+      readable = (await readableArtifactIds(recipientActor, params.workspaceId, "Notification", [notification], tx)).has(notification.id);
+    } catch { /* A concurrently revoked recipient must not block other recipients. */ }
+    if (!readable) continue;
+    if (shouldCreateEmailDelivery(recipient)) await createEmailDeliveryIntent(tx, notification);
+    if (shouldCreateSlackDelivery(recipient)) await createSlackDeliveryIntent(tx, notification);
   }
 
   return { count };
@@ -385,6 +360,27 @@ type NotificationDeliveryWithRecipient = Prisma.NotificationDeliveryGetPayload<{
   };
 }>;
 
+async function refreshReadableDelivery(delivery: NotificationDeliveryWithRecipient) {
+  const actor = await currentRecipientActor(delivery.userId, delivery.workspaceId);
+  const notification = actor ? await prisma.notification.findFirst({ where: {
+    id: delivery.notificationId, workspaceId: delivery.workspaceId, userId: delivery.userId,
+  } }) : null;
+  let readable = false;
+  if (actor && notification) {
+    try { readable = (await readableArtifactIds(actor, delivery.workspaceId, "Notification", [notification])).has(notification.id); }
+    catch { /* Revocation prevents delivery. */ }
+  }
+  if (!readable || !notification || actor?.kind !== "user") {
+    await prisma.notificationDelivery.update({ where: { id: delivery.id }, data: {
+      status: "SKIPPED", failedAt: new Date(), error: "Notification inputs or recipient access are unavailable.",
+    } });
+    return false;
+  }
+  delivery.notification = notification;
+  delivery.user = { email: actor.user.email };
+  return true;
+}
+
 async function createEmailFallbackDelivery(delivery: NotificationDeliveryWithRecipient) {
   if (!delivery.user.email) return;
   await createEmailDeliveryIntent(prisma, {
@@ -395,6 +391,7 @@ async function createEmailFallbackDelivery(delivery: NotificationDeliveryWithRec
 }
 
 async function deliverEmailNotificationDelivery(delivery: NotificationDeliveryWithRecipient) {
+  if (!await refreshReadableDelivery(delivery)) return { status: "SKIPPED" as const };
   if (!delivery.user.email) {
     await prisma.notificationDelivery.update({
       where: { id: delivery.id },
@@ -482,6 +479,7 @@ async function deliverSlackNotificationDelivery(delivery: NotificationDeliveryWi
 
   try {
     const { resolveSlackNotificationRecipient, sendSlackMessage } = await import("./communication");
+    const resolvedEmail = delivery.user.email;
     const recipient = await resolveSlackNotificationRecipient({
       workspaceId: delivery.workspaceId,
       userId: delivery.userId,
@@ -501,6 +499,13 @@ async function deliverSlackNotificationDelivery(delivery: NotificationDeliveryWi
       return { status: "SKIPPED" as const };
     }
 
+    if (!await refreshReadableDelivery(delivery)) return { status: "SKIPPED" as const };
+    if (delivery.user.email !== resolvedEmail) {
+      await prisma.notificationDelivery.update({ where: { id: delivery.id }, data: {
+        status: "SKIPPED", failedAt: new Date(), error: "Recipient identity changed during Slack resolution.",
+      } });
+      return { status: "SKIPPED" as const };
+    }
     const slack = renderNotificationSlackMessage({
       workspaceId: delivery.workspaceId,
       title: delivery.notification.title,
@@ -550,6 +555,7 @@ export async function deliverNotificationDelivery(deliveryId: string) {
   if (!delivery || delivery.status === "SENT" || delivery.status === "SKIPPED" || delivery.status === "FAILED") {
     return { status: "SKIPPED" as const };
   }
+  if (!await refreshReadableDelivery(delivery)) return { status: "SKIPPED" as const };
   if (delivery.channel === NOTIFICATION_DELIVERY_EMAIL_CHANNEL) {
     return deliverEmailNotificationDelivery(delivery);
   }
@@ -569,32 +575,59 @@ export async function deliverNotificationDelivery(deliveryId: string) {
   }
 }
 
+async function currentRecipientActor(userId: string, workspaceId: string): Promise<AppActor | null> {
+  const user = await prisma.user.findFirst({ where: { id: userId,
+    memberships: { some: { workspaceId, isActive: true } } },
+    select: { id: true, email: true, displayName: true, globalRole: true },
+  });
+  return user ? { kind: "user", user } : null;
+}
+
 export async function listNotifications(actor: AppActor, workspaceId: string, opts?: {
   unreadOnly?: boolean;
   take?: number;
   skip?: number;
 }) {
-  const userId = actor.kind === "user" ? actor.user.id : null;
-  if (!userId) return [];
-
+  if (actor.kind !== "user") return [];
   await requireWorkspaceMembership({ actor, workspaceId });
-
-  return prisma.notification.findMany({
-    where: {
-      workspaceId,
-      userId,
-      ...(opts?.unreadOnly ? { readAt: null } : {}),
-    },
-    orderBy: { createdAt: "desc" },
-    take: opts?.take ?? 30,
-    skip: opts?.skip,
+  const skip = Math.max(0, opts?.skip ?? 0);
+  const take = Math.max(0, opts?.take ?? 30);
+  const result: Awaited<ReturnType<typeof prisma.notification.findMany>> = [];
+  if (!take) return result;
+  let visible = 0;
+  await visitReadableNotifications(actor, workspaceId, Boolean(opts?.unreadOnly), rows => {
+    for (const row of rows) {
+      if (visible++ >= skip) result.push(row);
+      if (result.length >= take) return false;
+    }
   });
+  return result;
 }
 
-export async function countUnreadNotifications(userId: string, workspaceId: string) {
-  return prisma.notification.count({
-    where: { workspaceId, userId, readAt: null },
-  });
+async function visitReadableNotifications(actor: AppActor & { kind: "user" }, workspaceId: string,
+  unreadOnly: boolean, visit: (rows: Awaited<ReturnType<typeof prisma.notification.findMany>>) => false | void | Promise<false | void>) {
+  let after: { id: string; createdAt: Date } | undefined;
+  while (true) {
+    const rows = await prisma.notification.findMany({ where: {
+      workspaceId, userId: actor.user.id, ...(unreadOnly ? { readAt: null } : {}),
+      ...(after ? { OR: [{ createdAt: { lt: after.createdAt } },
+        { createdAt: after.createdAt, id: { lt: after.id } }] } : {}),
+    }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 100 });
+    const last = rows.at(-1);
+    const next = last ? { id: last.id, createdAt: last.createdAt } : undefined;
+    const readable = await readableArtifactIds(actor, workspaceId, "Notification", rows);
+    if (await visit(rows.filter(row => readable.has(row.id))) === false || rows.length < 100) return;
+    after = next;
+  }
+}
+
+export async function countUnreadNotifications(actor: AppActor, workspaceId: string) {
+  if (actor.kind !== "user") return 0;
+  try {
+    let count = 0;
+    await visitReadableNotifications(actor, workspaceId, true, rows => { count += rows.length; });
+    return count;
+  } catch { return 0; }
 }
 
 export async function markNotificationRead(actor: AppActor, workspaceId: string, notificationId: string) {
@@ -603,18 +636,23 @@ export async function markNotificationRead(actor: AppActor, workspaceId: string,
 
   await requireWorkspaceMembership({ actor, workspaceId });
 
+  const rows = await prisma.notification.findMany({ where: { id: notificationId, workspaceId, userId } });
+  const readable = await readableArtifactIds(actor, workspaceId, "Notification", rows);
   await prisma.notification.updateMany({
-    where: { id: notificationId, workspaceId, userId },
+    where: { id: { in: [...readable] }, workspaceId, userId },
     data: { readAt: new Date() },
   });
 }
 
 export async function markAllNotificationsRead(actor: AppActor, workspaceId: string) {
-  const userId = actor.kind === "user" ? actor.user.id : null;
-  if (!userId) return;
-
-  await prisma.notification.updateMany({
-    where: { workspaceId, userId, readAt: null },
-    data: { readAt: new Date() },
+  if (actor.kind !== "user") return;
+  const userId = actor.user.id;
+  await requireWorkspaceMembership({ actor, workspaceId });
+  await visitReadableNotifications(actor, workspaceId, true, async rows => {
+    if (!rows.length) return;
+    await prisma.notification.updateMany({
+      where: { id: { in: rows.map(row => row.id) }, workspaceId, userId, readAt: null },
+      data: { readAt: new Date() },
+    });
   });
 }

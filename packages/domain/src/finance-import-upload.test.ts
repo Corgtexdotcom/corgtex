@@ -14,7 +14,8 @@ const { prismaMock, storageMock, accessMock, capacityMock, createBatchMock } = v
     $transaction: vi.fn(),
     document: { create: vi.fn() },
     brainSource: { create: vi.fn() },
-    financeImportBatch: { findUnique: vi.fn(), updateMany: vi.fn() },
+    financeReportUploadInput: { create: vi.fn(async ({ data }) => ({ id: "native-upload", ...data })) },
+    financeImportBatch: { findUniqueOrThrow: vi.fn(), findUnique: vi.fn(), updateMany: vi.fn() },
     workflowJob: { findUnique: vi.fn(), updateMany: vi.fn() },
     event: { createMany: vi.fn() },
     auditLog: { create: vi.fn() },
@@ -26,6 +27,10 @@ vi.mock("@corgtex/storage", () => ({ defaultStorage: storageMock }));
 vi.mock("./finance", () => ({ requireFinanceReportImportHumanWriteAccess: accessMock }));
 vi.mock("./finance-import-artifact-ownership", () => ({ createFinanceImportBatchWithArtifactOwnership: createBatchMock }));
 vi.mock("./trial-entitlements", () => ({ lockAndAssertTrialStorageCapacity: capacityMock }));
+
+vi.mock("./finance-import-lineage", () => ({ captureFinanceUploadInputs: vi.fn(async () => ({ roots: [] })) }));
+vi.mock("./source-lineage", () => ({ advanceHumanArtifactInputLineage: vi.fn(), captureArtifactInputProof: vi.fn(async () => []),
+  isArtifactInputProofReadable: vi.fn(async () => true), recordArtifactInputLineage: vi.fn() }));
 
 const fileBuffer = Buffer.from("Account,Amount");
 const fileHash = createHash("sha256").update(fileBuffer).digest("hex");
@@ -59,6 +64,11 @@ describe("Finance report import upload persistence", () => {
     prismaMock.$transaction.mockImplementation((callback) => callback(prismaMock));
     prismaMock.financeImportBatch.findUnique.mockResolvedValue(null);
     prismaMock.financeImportBatch.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.financeImportBatch.findUniqueOrThrow.mockImplementation(async () => {
+      const prior = await prismaMock.financeImportBatch.findUnique.mock.results.at(-1)?.value ?? reserved;
+      const data = prismaMock.financeImportBatch.updateMany.mock.calls.at(-1)?.[0].data ?? {};
+      return { ...prior, ...data, version: typeof data.version === "object" ? prior.version + data.version.increment : prior.version };
+    });
     prismaMock.workflowJob.findUnique.mockResolvedValue(null);
     prismaMock.workflowJob.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.event.createMany.mockResolvedValue({ count: 1 });

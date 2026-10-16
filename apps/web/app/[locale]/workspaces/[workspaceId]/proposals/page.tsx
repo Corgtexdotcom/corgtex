@@ -72,7 +72,7 @@ export default async function ProposalsPage({
   const [{ items: proposals }, currentWorkspace, circles, members, activeAdviceRequests] = await Promise.all([
     listProposals(actor, workspaceId, { take: 200, circleIds, memberIds, sort }),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
-    listCircles(workspaceId),
+    listCircles(actor, workspaceId),
     listHumanMembers(workspaceId),
     listAdviceRequests(actor, { workspaceId, subjectType: "PROPOSAL", status: "ACTIVE", take: 500 }),
   ]);

@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
+import { createHash } from "node:crypto";
 
 const { prismaMock, defaultStorageMock, encryptSecretMock, decryptSecretMock, sha256Mock } = vi.hoisted(() => ({
   defaultStorageMock: {
     put: vi.fn(),
+    get: vi.fn(),
     getSignedUrl: vi.fn(),
   },
   encryptSecretMock: vi.fn((value: string) => `enc:${value}`),
@@ -11,6 +13,7 @@ const { prismaMock, defaultStorageMock, encryptSecretMock, decryptSecretMock, sh
   sha256Mock: vi.fn((value: string) => `sha:${value}`),
   prismaMock: {
     $transaction: vi.fn(),
+    $queryRaw: vi.fn(),
     buildArtifact: {
       create: vi.fn(),
       findMany: vi.fn(),
@@ -38,6 +41,36 @@ const { prismaMock, defaultStorageMock, encryptSecretMock, decryptSecretMock, sh
 const requireWorkspaceMembership = vi.fn();
 const actorUserIdForWorkspace = vi.fn();
 const recordAudit = vi.fn();
+const receipts = new Map<string, unknown>();
+const receiptKey = (kind: string, id: string) => `${kind}:${id}`;
+// API-shape fixtures carry explicit original receipts; actual permission and
+// inheritance behavior is exercised by build-artifacts.lineage.test.ts.
+vi.mock("./source-lineage", () => ({
+  readableArtifactIds: async (_actor: AppActor, workspaceId: string, kind: string, rows: any[]) => new Set(rows
+    .filter((row) => workspaceId === "workspace-1" && receipts.has(receiptKey(kind, row.id))).map((row) => row.id)),
+  captureArtifactInputProof: async (_actor: AppActor, workspaceId: string, inputs: any[]) => {
+    if (workspaceId !== "workspace-1" || inputs.some((i) => !receipts.has(receiptKey(i.kind, i.id)))) {
+      throw Object.assign(new Error("Unknown fixture receipt"), { code: "UNKNOWN_LINEAGE" });
+    }
+    return inputs.map((i) => ({ kind: i.kind, id: i.id, fingerprint: "a".repeat(64) }));
+  },
+  isArtifactInputProofReadable: async (_actor: AppActor, workspaceId: string, roots: any[]) => workspaceId === "workspace-1"
+    && roots.every((root) => receipts.has(receiptKey(root.kind, root.id))),
+  isArtifactInputProofPubliclyShareable: async (_actor: AppActor, workspaceId: string, roots: any[]) => workspaceId === "workspace-1"
+    && roots.every((root) => {
+      const row = receipts.get(receiptKey(root.kind, root.id)) as any;
+      return row && (root.kind !== "BuildArtifact" || row.visibility === "PUBLIC_REVIEW" && row.classification === "OPEN_CORE");
+    }),
+  lineageContentFingerprint: (_kind: string, row: any) => JSON.stringify(row),
+  recordArtifactInputLineage: async ({ artifact, content }: any) => receipts.set(receiptKey(artifact.kind, artifact.id), content),
+  invalidateArtifactInputLineage: async ({ artifact }: any) => receipts.delete(receiptKey(artifact.kind, artifact.id)),
+}));
+vi.mock("./producer-lineage", () => ({
+  prepareProducerLineage: async ({ before, capture, copied, actor: principal }: any) => ({ mode: copied || principal.kind === "agent"
+    ? capture?.lineageRoots?.length ? "DERIVED" : "UNKNOWN" : before ? "ADVANCE" : "HUMAN_ORIGINAL" }),
+  finishProducerLineage: async ({ artifact, content, receipt }: any) => receipt.mode === "UNKNOWN"
+    ? receipts.delete(receiptKey(artifact.kind, artifact.id)) : receipts.set(receiptKey(artifact.kind, artifact.id), content),
+}));
 
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
@@ -121,7 +154,7 @@ function assetFixture(overrides: Record<string, unknown> = {}) {
     sizeBytes: 12,
     width: null,
     height: null,
-    sha256: "asset-sha",
+    sha256: createHash("sha256").update(Buffer.from("proof")).digest("hex"),
     sortOrder: 0,
     createdAt: new Date("2026-04-29T10:12:00.000Z"),
     ...overrides,
@@ -131,6 +164,9 @@ function assetFixture(overrides: Record<string, unknown> = {}) {
 describe("build artifacts", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    receipts.clear();
+    for (const [kind, row] of [["BuildArtifact", artifactFixture()], ["BuildArtifactAsset", assetFixture()], ["Member", { id: "member-1" }], ["User", { id: "user-1" }], ["User", { id: "operator-1" }]] as const) receipts.set(receiptKey(kind, row.id), row);
+    prismaMock.$queryRaw.mockResolvedValue([]);
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
     requireWorkspaceMembership.mockResolvedValue({
       id: "member-1",
@@ -284,7 +320,8 @@ describe("build artifacts", () => {
     const refreshed = artifactFixture({ brainSourceId: "brain-1", assets: [asset] });
     prismaMock.buildArtifact.findFirst
       .mockResolvedValueOnce({ id: "artifact-1", workspaceId: "workspace-1", createdByUserId: "user-1" })
-      .mockResolvedValueOnce(refreshed);
+      .mockResolvedValueOnce(refreshed)
+      .mockResolvedValue(refreshed);
     prismaMock.buildArtifactAsset.create.mockResolvedValue(asset);
     prismaMock.buildArtifact.findUnique.mockResolvedValue(refreshed);
     prismaMock.brainSource.update.mockResolvedValue({ id: "brain-1" });
@@ -305,7 +342,7 @@ describe("build artifacts", () => {
       Buffer.from("proof"),
       { contentType: "image/png" },
     );
-    expect(prismaMock.brainSource.update).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prismaMock.brainSource.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         sourceType: "PR",
         channel: "build-artifacts",
@@ -320,19 +357,14 @@ describe("build artifacts", () => {
   });
 
   it("resolves, rejects, and revokes public proof asset links correctly", async () => {
-    prismaMock.buildArtifact.findFirst.mockResolvedValueOnce({
-      id: "artifact-1",
-      visibility: "PUBLIC_REVIEW",
-      classification: "OPEN_CORE",
-      publicRevokedAt: null,
-      assets: [{ id: "asset-1", storageKey: "stored/key.png" }],
-    });
+    prismaMock.buildArtifact.findFirst.mockResolvedValue(artifactFixture({ assets: [assetFixture()] }));
+    defaultStorageMock.get = vi.fn().mockResolvedValue({ data: Buffer.from("proof") });
 
     const { resolvePublicBuildArtifactAsset } = await import("./build-artifacts");
     await expect(resolvePublicBuildArtifactAsset({
       publicToken: "public-token",
       assetId: "asset-1",
-    })).resolves.toEqual({ signedUrl: "https://signed.example/proof" });
+    })).resolves.toMatchObject({ signedUrl: null, file: { data: Buffer.from("proof") }, authorize: expect.any(Function) });
 
     prismaMock.buildArtifact.findFirst.mockResolvedValueOnce(null);
     await expect(resolvePublicBuildArtifactAsset({

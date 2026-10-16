@@ -4,7 +4,7 @@ const { prismaMock } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
     $executeRaw: vi.fn(),
-    financeImportBatch: { findUnique: vi.fn(), updateMany: vi.fn() },
+    financeImportBatch: { findUniqueOrThrow: vi.fn(), findUnique: vi.fn(), updateMany: vi.fn() },
     document: { findUnique: vi.fn(), update: vi.fn() },
     brainSource: { findUnique: vi.fn(), update: vi.fn() },
     event: { create: vi.fn() },
@@ -13,6 +13,15 @@ const { prismaMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("@corgtex/shared", () => ({ prisma: prismaMock }));
+
+vi.mock("./finance-import-lineage", () => ({
+  assertFinanceExtractionLease: vi.fn(),
+  resolveFinanceUploadInputs: vi.fn(async () => ({ actor: { kind: "user", user: { id: "user-1" } }, roots: [] })),
+  createFinanceExtractionReceipt: vi.fn(() => ({ kind: "FINANCE_REPORT_EXTRACTION" })),
+  validateFinanceExtractionReceipt: vi.fn(async () => ({ actor: { kind: "user", user: { id: "user-1" } }, roots: [] })),
+}));
+vi.mock("./source-lineage", () => ({ advanceHumanArtifactInputLineage: vi.fn(), captureArtifactInputProof: vi.fn(async () => []),
+  captureImmutableArtifactInputProof: vi.fn(async () => []), recordArtifactInputLineage: vi.fn() }));
 
 const uploaded = {
   id: "batch-1",
@@ -64,6 +73,11 @@ describe("Finance report import extraction lifecycle", () => {
     prismaMock.document.findUnique.mockResolvedValue({ accessDomain: "FINANCE", archivedAt: null });
     prismaMock.brainSource.findUnique.mockResolvedValue({ accessDomain: "FINANCE", archivedAt: null });
     prismaMock.financeImportBatch.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.financeImportBatch.findUniqueOrThrow.mockImplementation(async () => {
+      const prior = await prismaMock.financeImportBatch.findUnique.mock.results.at(-1)?.value ?? uploaded;
+      const data = prismaMock.financeImportBatch.updateMany.mock.calls.at(-1)?.[0].data ?? {};
+      return { ...prior, ...data, version: typeof data.version === "object" ? prior.version + data.version.increment : prior.version };
+    });
     prismaMock.document.update.mockResolvedValue({});
     prismaMock.brainSource.update.mockResolvedValue({});
     prismaMock.auditLog.create.mockResolvedValue({});

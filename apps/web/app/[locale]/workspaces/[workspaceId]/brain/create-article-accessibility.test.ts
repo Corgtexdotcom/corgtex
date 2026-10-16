@@ -28,6 +28,7 @@ vi.mock("@corgtex/domain", () => ({
   listDocuments: async () => [],
   getBrainStatus: async () => ({ totalArticles: 0, unabsorbedSources: 0 }),
   resolveKnowledgeAccessDomains: async () => [],
+  readableArtifactIds: async () => new Set(),
 }));
 
 vi.mock("@corgtex/knowledge", () => ({
@@ -36,7 +37,7 @@ vi.mock("@corgtex/knowledge", () => ({
 }));
 
 vi.mock("@corgtex/shared", () => ({
-  prisma: { brainArticle: { groupBy: async () => [] } },
+  prisma: { brainArticle: { findMany: async () => [] } },
 }));
 
 vi.mock("../KnowledgeFileUploader", () => ({ KnowledgeFileUploader: () => null }));

@@ -669,7 +669,23 @@
     "titleBackToConversations": "Back to conversations",
     "titleClickToRename": "Click to rename",
     "titleExpandChat": "Expand chat",
-    "titleRemoveAttachment": "Remove attachment"
+    "titleRemoveAttachment": "Remove attachment",
+    "brainExport": {
+      "open": "Save to Brain",
+      "explanation": "Share this answer with your company, subject to its original source permissions. Your private conversation stays private.",
+      "title": "Brain title",
+      "transcript": "Transcript metadata to include",
+      "none": "None — answer only",
+      "partial": "Selected turns",
+      "full": "Full conversation",
+      "chooseTurns": "Choose turns to include",
+      "includesPrompts": "The selected transcript includes both your prompts and the assistant’s answers.",
+      "confirm": "Confirm and save",
+      "saving": "Saving…",
+      "saved": "Saved",
+      "success": "Saved to Brain and queued for absorption.",
+      "failed": "The answer could not be saved. Reload the conversation and try again."
+    }
   },
   "circles": {
     "addMemberWithPlusHint": "Use the + button to add members to roles in this circle.",

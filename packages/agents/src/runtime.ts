@@ -1,12 +1,22 @@
+import { randomUUID } from "node:crypto";
 import type { AgentRunStatus, AgentTriggerType } from "@prisma/client";
 import { Prisma } from "@prisma/client";
-import { env, prisma, toInputJson } from "@corgtex/shared";
+import { env, prisma, toInputJson, type AppActor } from "@corgtex/shared";
 import { resolveModel } from "@corgtex/models";
 import { isAgentEnabled, getAgentModelOverride, AGENT_REGISTRY, type RegisteredAgentKey } from "@corgtex/domain";
-import { resolveAgentIdentityLimits, resolveAgentBehaviorContext } from "@corgtex/domain";
+import {
+  resolveAgentIdentityLimits, captureArtifactInputProof, captureImmutableArtifactInputProof,
+  isArtifactInputProofReadable, readableArtifactIds, recordArtifactInputLineage, invalidateArtifactInputLineage,
+  withArtifactInputReadCapture, mergeArtifactInputProofs, invariant, type LineageRoot,
+} from "@corgtex/domain";
+
+// The roots are intentionally held outside serialized/model-visible data.
+export type AgentInputReceipt = { readonly kind: "agent-input-receipt" };
+export type AgentOperationReceipt = { receipt?: AgentInputReceipt; auditedRead?: boolean };
 
 export type AgentOutcome = {
   resultJson: Prisma.InputJsonValue;
+  lineageReceipt?: AgentInputReceipt;
   approvalCheckpoint?: {
     summary: string;
     detail: Prisma.InputJsonValue;
@@ -14,8 +24,12 @@ export type AgentOutcome = {
 };
 
 export type AgentHelpers = {
-  step<T>(name: string, input: unknown, work: () => Promise<T>): Promise<T>;
-  tool<T>(name: string, input: unknown, work: () => Promise<T>): Promise<T>;
+  captureInputs(roots: readonly LineageRoot[]): Promise<AgentInputReceipt>;
+  readonly plannedInputReceipt: AgentInputReceipt | undefined;
+  readonly behaviorContext: string | null;
+  readonly behaviorLineageRoots: readonly LineageRoot[];
+  step<T>(name: string, input: unknown, work: () => Promise<T>, proof?: AgentOperationReceipt): Promise<T>;
+  tool<T>(name: string, input: unknown, work: () => Promise<T>, proof?: AgentOperationReceipt): Promise<T>;
 };
 
 export type AgentRunParams<TPayload extends Record<string, unknown>, TContext extends Record<string, unknown>> = {
@@ -26,6 +40,12 @@ export type AgentRunParams<TPayload extends Record<string, unknown>, TContext ex
   goal: string;
   payload: TPayload;
   plan: string[];
+  /** Complete proof of caller-provided goal, plan, payload and trigger reference, captured before execution. */
+  lineageActor?: AppActor;
+  lineageRoots?: LineageRoot[];
+  /** Explicit trusted producer callback; never parse receipts from model output. */
+  contextLineageRoots?: (context: TContext) => readonly LineageRoot[];
+  contextIsAuditedRead?: boolean;
   buildContext: (helpers: AgentHelpers, runId: string) => Promise<TContext>;
   execute: (context: TContext, helpers: AgentHelpers, runId: string, model: string) => Promise<AgentOutcome>;
 };
@@ -107,9 +127,15 @@ async function findExistingRun(agentKey: RegisteredAgentKey, workspaceId: string
 export async function executeAgentRun<TPayload extends Record<string, unknown>, TContext extends Record<string, unknown>>(
   params: AgentRunParams<TPayload, TContext>,
 ) {
+  invariant(!["sourceAgentRunId", "previousAdvice", "reviewFeedback"].some(key => typeof params.payload[key] === "string" && String(params.payload[key]).trim())
+    || (params.lineageActor && params.lineageRoots?.length), 409, "UNKNOWN_LINEAGE",
+  "Feedback continuation needs the immutable prior run and authored feedback receipt.");
+  const actor: AppActor = params.lineageActor ?? { kind: "agent", authProvider: "bootstrap", label: "agent-runtime", workspaceIds: [params.workspaceId] };
   const existing = await findExistingRun(params.agentKey, params.workspaceId, params.triggerType, params.triggerRef);
   if (existing && existing.status !== "FAILED" && existing.status !== "CANCELLED") {
-    return existing;
+    const readable = (await readableArtifactIds(actor, params.workspaceId, "AgentRun", [existing])).has(existing.id);
+    return readable ? existing : { ...existing, goal: "Content unavailable", triggerRef: null, planJson: null,
+      contextJson: null, resultJson: null, skipped: true, reason: "existing_run_inputs_unavailable" };
   }
 
   const isEnabled = await isAgentEnabled(params.workspaceId, params.agentKey);
@@ -169,86 +195,98 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
     }
   }
 
-  const run = await prisma.agentRun.create({
-    data: {
-      workspaceId: params.workspaceId,
-      agentKey: params.agentKey,
-      triggerType: params.triggerType,
-      triggerRef: params.triggerRef,
-      status: "RUNNING",
-      goal: params.goal,
-      planJson: toJson({
-        steps: params.plan,
-        payload: params.payload,
-      }),
-      startedAt: new Date(),
-      contextJson: {},
-    },
+  const receipts = new WeakMap<AgentInputReceipt, LineageRoot[]>();
+  const freezeRoots = async (roots: readonly LineageRoot[]): Promise<LineageRoot[]> => {
+    invariant(roots.length > 0, 409, "UNKNOWN_LINEAGE", "Agent inputs need a complete current receipt.");
+    invariant(await isArtifactInputProofReadable(actor, params.workspaceId, roots),
+      409, "SOURCE_CHANGED", "Agent inputs changed before their receipt was captured.");
+    return prisma.$transaction(tx => captureImmutableArtifactInputProof(actor, params.workspaceId, roots, tx));
+  };
+  const initialRoots = params.lineageActor && params.lineageRoots?.length ? await freezeRoots(params.lineageRoots) : null;
+  const plannedInputReceipt: AgentInputReceipt | undefined = initialRoots ? Object.freeze({ kind: "agent-input-receipt" }) : undefined;
+  if (plannedInputReceipt && initialRoots) receipts.set(plannedInputReceipt, initialRoots);
+  const writeReceipt = async (tx: Prisma.TransactionClient, kind: "AgentRun" | "AgentStep" | "AgentToolCall",
+    row: { id: string }, roots: LineageRoot[] | null) => {
+    // A source may be revoked after model completion. Keep operational history,
+    // but never stamp stale/missing inputs onto persisted copied text.
+    if (roots?.length && await isArtifactInputProofReadable(actor, params.workspaceId, roots, tx)) {
+      await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId, artifact: { kind, id: row.id },
+        content: row, origin: "DERIVED", inputs: [], inheritedRoots: roots });
+    } else await invalidateArtifactInputLineage({ tx, workspaceId: params.workspaceId,
+      artifact: { kind, id: row.id }, content: row });
+  };
+  const run = await prisma.$transaction(async tx => {
+    const created = await tx.agentRun.create({ data: {
+      workspaceId: params.workspaceId, agentKey: params.agentKey, triggerType: params.triggerType,
+      triggerRef: params.triggerRef, status: "RUNNING", goal: params.goal,
+      planJson: toJson({ steps: params.plan, payload: params.payload }), startedAt: new Date(), contextJson: {},
+    } });
+    await writeReceipt(tx, "AgentRun", created, initialRoots);
+    return created;
   });
 
-  const accumulatedSteps: Prisma.AgentStepCreateManyInput[] = [];
-  const accumulatedToolCalls: Prisma.AgentToolCallCreateManyInput[] = [];
-
+  type LoggedOperation = { data: Prisma.AgentStepCreateManyInput; roots: LineageRoot[] | null };
+  const accumulatedSteps: LoggedOperation[] = [];
+  const accumulatedToolCalls: LoggedOperation[] = [];
+  let behaviorContext: string | null = null;
+  let behaviorLineageRoots: LineageRoot[] = [];
+  let contextRoots: LineageRoot[] | null = null;
+  const operation = async <T>(kind: "AgentStep" | "AgentToolCall", name: string, input: unknown,
+    work: () => Promise<T>, proof?: AgentOperationReceipt): Promise<T> => {
+    const list = kind === "AgentStep" ? accumulatedSteps : accumulatedToolCalls;
+    const startedAt = new Date();
+    const id = randomUUID();
+    let roots = proof?.receipt ? receipts.get(proof.receipt) ?? null : null;
+    // A forged token or revoked input must be rejected before executing a model/tool.
+    if (proof?.receipt) invariant(roots && await isArtifactInputProofReadable(actor, params.workspaceId, roots),
+      409, "UNKNOWN_LINEAGE", "Agent operation has no valid captured input receipt.");
+    try {
+      let output: T;
+      if (proof?.auditedRead && roots) {
+        const observed = await withArtifactInputReadCapture(actor, params.workspaceId, work);
+        output = observed.value;
+        roots = mergeArtifactInputProofs(roots, (observed.roots.length ? await freezeRoots(observed.roots) : []));
+      } else output = await work();
+      list.push({ data: { id, agentRunId: run.id, name, status: "COMPLETED", inputJson: toJson(input),
+        outputJson: toJson(output), startedAt, completedAt: new Date(), createdAt: startedAt, error: null }, roots });
+      return output;
+    } catch (error) {
+      // Arbitrary exception text can mention unobserved state; keep it withheld.
+      list.push({ data: { id, agentRunId: run.id, name, status: "FAILED", inputJson: toJson(input),
+        outputJson: Prisma.DbNull, startedAt, completedAt: new Date(), createdAt: startedAt, error: serializeError(error) }, roots: null });
+      throw error;
+    }
+  };
   const helpers: AgentHelpers = {
-    async step<T>(name: string, input: unknown, work: () => Promise<T>) {
-      const startedAt = new Date();
-      try {
-        const output = await work();
-        accumulatedSteps.push({
-          agentRunId: run.id,
-          name,
-          status: "COMPLETED",
-          inputJson: toJson(input) as any,
-          outputJson: toJson(output) as any,
-          startedAt,
-          completedAt: new Date(),
-          error: null,
-        });
-        return output;
-      } catch (error) {
-        accumulatedSteps.push({
-          agentRunId: run.id,
-          name,
-          status: "FAILED",
-          inputJson: toJson(input) as any,
-          outputJson: Prisma.DbNull,
-          startedAt,
-          completedAt: new Date(),
-          error: serializeError(error),
-        });
-        throw error;
-      }
+    async captureInputs(roots) {
+      const frozen = await freezeRoots(roots);
+      const receipt: AgentInputReceipt = Object.freeze({ kind: "agent-input-receipt" });
+      receipts.set(receipt, frozen);
+      return receipt;
     },
-
-    async tool<T>(name: string, input: unknown, work: () => Promise<T>) {
-      const startedAt = new Date();
-      try {
-        const output = await work();
-        accumulatedToolCalls.push({
-          agentRunId: run.id,
-          name,
-          status: "COMPLETED",
-          inputJson: toJson(input) as any,
-          outputJson: toJson(output) as any,
-          startedAt,
-          completedAt: new Date(),
-          error: null,
-        });
-        return output;
-      } catch (error) {
-        accumulatedToolCalls.push({
-          agentRunId: run.id,
-          name,
-          status: "FAILED",
-          inputJson: toJson(input) as any,
-          outputJson: Prisma.DbNull,
-          startedAt,
-          completedAt: new Date(),
-          error: serializeError(error),
-        });
-        throw error;
+    get plannedInputReceipt() { return plannedInputReceipt; },
+    get behaviorContext() { return behaviorContext; },
+    get behaviorLineageRoots() { return behaviorLineageRoots; },
+    step: (name, input, work, proof) => operation("AgentStep", name, input, work, proof),
+    tool: (name, input, work, proof) => operation("AgentToolCall", name, input, work, proof),
+  };
+  const persistOperations = async (tx: Prisma.TransactionClient) => {
+    // Stable ids and explicit createdAt make the content hash identical to the stored row.
+    for (const [kind, logs] of [["AgentStep", accumulatedSteps], ["AgentToolCall", accumulatedToolCalls]] as const) {
+      if (!logs.length) continue;
+      if (kind === "AgentStep") await tx.agentStep.createMany({ data: logs.map(log => log.data) });
+      else await tx.agentToolCall.createMany({ data: logs.map(log => log.data) });
+      // PostgreSQL jsonb canonicalizes object key order. Hash its persisted shape,
+      // not the pre-insert JavaScript object, while keeping the same transaction.
+      const where = { agentRunId: run.id, id: { in: logs.map(log => log.data.id!) } };
+      const stored = kind === "AgentStep" ? await tx.agentStep.findMany({ where }) : await tx.agentToolCall.findMany({ where });
+      const rows = new Map(stored.map(row => [row.id, row]));
+      for (const log of logs) {
+        const row = rows.get(log.data.id!);
+        invariant(row, 409, "SOURCE_CHANGED", "An agent operation disappeared before its receipt was saved.");
+        await writeReceipt(tx, kind, row, log.roots);
       }
-    },
+    }
   };
 
   try {
@@ -256,39 +294,42 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
     const tier = AGENT_REGISTRY[params.agentKey as RegisteredAgentKey]?.defaultModelTier ?? "none";
     const model = resolveModel(tier, override);
 
-    // Resolve behavioral directives (workspace-level + per-agent)
-    const behaviorContext = await resolveAgentBehaviorContext(params.workspaceId, params.agentKey);
+    // Only proven current identity behavior may enter execution or copied logs.
+    const behaviorParts: string[] = [];
+    for (const agentKey of ["__workspace__", params.agentKey]) {
+      const identity = await prisma.agentIdentity.findUnique({ where: { workspaceId_agentKey: { workspaceId: params.workspaceId, agentKey } } });
+      if (!identity || identity.archivedAt || (agentKey !== "__workspace__" && !identity.isActive) || !identity.behaviorMd) continue;
+      const captured = await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "AgentIdentity", id: identity.id, snapshot: identity }]);
+      behaviorLineageRoots = mergeArtifactInputProofs(behaviorLineageRoots, await freezeRoots(captured));
+      behaviorParts.push(`${agentKey === "__workspace__" ? "## Workspace Agent Policy" : "## Agent-Specific Behavior"}\n\n${identity.behaviorMd}`);
+    }
+    behaviorContext = behaviorParts.length ? behaviorParts.join("\n\n---\n\n") : null;
 
-    const context = await helpers.step("load-context", params.payload, () => params.buildContext(helpers, run.id));
+    const context = await helpers.step("load-context", params.payload, () => params.buildContext(helpers, run.id),
+      { receipt: plannedInputReceipt, auditedRead: params.contextIsAuditedRead });
+    if (params.contextLineageRoots) {
+      const declared = params.contextLineageRoots(context);
+      if (declared.length) contextRoots = await freezeRoots(declared);
+    }
 
     // Inject behavioral context into payload so agents can reference it in system prompts
     if (behaviorContext) {
       (context as Record<string, unknown>).__behaviorMd = behaviorContext;
     }
-    if (identityLimits?.maxSpendPerRunCents != null) {
-      (context as Record<string, unknown>).__maxSpendPerRunCents = identityLimits.maxSpendPerRunCents;
-    }
 
     const outcome = await params.execute(context, helpers, run.id, model);
     const nextStatus: AgentRunStatus = outcome.approvalCheckpoint ? "WAITING_APPROVAL" : "COMPLETED";
     if (outcome.approvalCheckpoint) {
-      accumulatedSteps.push({
-        agentRunId: run.id,
-        name: "approval-checkpoint",
-        status: "PENDING",
+      const createdAt = new Date();
+      accumulatedSteps.push({ data: {
+        id: randomUUID(), agentRunId: run.id, name: "approval-checkpoint", status: "PENDING",
         inputJson: toJson(outcome.approvalCheckpoint.detail),
-        outputJson: toJson({ question: outcome.approvalCheckpoint.summary }),
-        startedAt: new Date(),
-      });
+        outputJson: toJson({ question: outcome.approvalCheckpoint.summary }), startedAt: createdAt, createdAt,
+      }, roots: outcome.lineageReceipt ? receipts.get(outcome.lineageReceipt) ?? null : null });
     }
 
     const finalRun = await prisma.$transaction(async (tx) => {
-      if (accumulatedSteps.length > 0) {
-        await tx.agentStep.createMany({ data: accumulatedSteps });
-      }
-      if (accumulatedToolCalls.length > 0) {
-        await tx.agentToolCall.createMany({ data: accumulatedToolCalls });
-      }
+      await persistOperations(tx);
 
       const updated = await tx.agentRun.update({
         where: { id: run.id },
@@ -304,6 +345,10 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
           failedAt: null,
         },
       });
+
+      const outcomeRoots = outcome.lineageReceipt ? receipts.get(outcome.lineageReceipt) : null;
+      await writeReceipt(tx, "AgentRun", updated, initialRoots && contextRoots && outcomeRoots
+        ? mergeArtifactInputProofs(initialRoots, contextRoots, behaviorLineageRoots, outcomeRoots) : null);
 
       await tx.event.create({
         data: {
@@ -326,12 +371,7 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
     return finalRun;
   } catch (error) {
     await prisma.$transaction(async (tx) => {
-      if (accumulatedSteps.length > 0) {
-        await tx.agentStep.createMany({ data: accumulatedSteps });
-      }
-      if (accumulatedToolCalls.length > 0) {
-        await tx.agentToolCall.createMany({ data: accumulatedToolCalls });
-      }
+      await persistOperations(tx);
 
       const updated = await tx.agentRun.update({
         where: { id: run.id },
@@ -345,6 +385,7 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
         },
       });
 
+      await writeReceipt(tx, "AgentRun", updated, null);
       await tx.event.create({
         data: {
           workspaceId: params.workspaceId,
@@ -366,16 +407,3 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
     throw error;
   }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-

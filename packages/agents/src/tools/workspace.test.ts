@@ -5,8 +5,9 @@ import { AppError } from "../../../domain/src/errors";
 const {
   listGoalsMock, membershipMock, findManyTensionsMock, findManyActionsMock,
   findManyProposalsMock, tensionCountMock, actionCountMock, proposalCountMock,
-  goalCountMock, memberCountMock, circleCountMock,
+  goalCountMock, memberCountMock, findManyMembersMock, circleCountMock, findManyGoalsMock, findManyCirclesMock, captureProofMock,
 } = vi.hoisted(() => ({
+  captureProofMock: vi.fn(),
   listGoalsMock: vi.fn(),
   membershipMock: vi.fn(),
   findManyTensionsMock: vi.fn(),
@@ -15,8 +16,10 @@ const {
   tensionCountMock: vi.fn(),
   actionCountMock: vi.fn(),
   proposalCountMock: vi.fn(),
+  findManyGoalsMock: vi.fn(), findManyCirclesMock: vi.fn(),
   goalCountMock: vi.fn(),
   memberCountMock: vi.fn(),
+  findManyMembersMock: vi.fn(),
   circleCountMock: vi.fn(),
 }));
 
@@ -25,9 +28,9 @@ vi.mock("@corgtex/shared", () => ({
     tension: { findMany: findManyTensionsMock, count: tensionCountMock },
     action: { findMany: findManyActionsMock, count: actionCountMock },
     proposal: { findMany: findManyProposalsMock, count: proposalCountMock },
-    goal: { count: goalCountMock },
-    member: { count: memberCountMock },
-    circle: { count: circleCountMock },
+    goal: { count: goalCountMock, findMany: findManyGoalsMock },
+    member: { count: memberCountMock, findMany: findManyMembersMock },
+    circle: { count: circleCountMock, findMany: findManyCirclesMock },
   },
 }));
 
@@ -40,8 +43,15 @@ vi.mock("@corgtex/domain", async () => ({
   }),
   ...await import("../../../domain/src/errors"),
   ...await import("../../../domain/src/privacy"),
+  ...await import("../../../domain/src/source-scoped-read"),
+  ...await import("../../../domain/src/digest-lineage"),
   listGoals: listGoalsMock,
   requireWorkspaceMembership: membershipMock,
+}));
+
+vi.mock("../../../domain/src/source-lineage", () => ({
+  captureArtifactInputProof: captureProofMock,
+  readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) => new Set(records.filter((row: { lineageReadable?: boolean }) => row.lineageReadable !== false).map((row: { id: string }) => row.id))),
 }));
 
 const actor: AppActor = {
@@ -66,6 +76,7 @@ function matches(row: Record<string, any>, where: Record<string, any>): boolean 
     if (key === "OR") return value.some((clause: Record<string, any>) => matches(row, clause));
     if (key === "AND") return value.every((clause: Record<string, any>) => matches(row, clause));
     if (value && typeof value === "object") {
+      if (value.gt !== undefined) return row[key] > value.gt;
       if (value.in) return value.in.includes(row[key]);
       if (value.notIn) return !value.notIn.includes(row[key]);
       throw new Error(`Unsupported synthetic predicate: ${key}`);
@@ -79,9 +90,9 @@ function fixture(id: string, overrides: Record<string, any> = {}) {
     id, workspaceId: "ws-1", authorUserId: "user-1", isPrivate: false,
     status: "OPEN", archivedAt: null, version: 3, title: id, bodyMd: "Synthetic body",
     priority: "HIGH", dueAt: null, createdAt: new Date("2026-01-01"),
-    assigneeMemberId: "member-2", author: { displayName: "Author", email: "hidden@example.com" },
-    assigneeMember: { user: { displayName: "Assignee", email: "hidden@example.com" } },
-    raisedByMember: { user: { displayName: "Raised by", email: "hidden@example.com" } },
+    assigneeMemberId: "member-2", author: { id: "user-1", displayName: "Author", email: "hidden@example.com" },
+    assigneeMember: { id: "member-2", workspaceId: "ws-1", userId: "user-2", isActive: true, user: { id: "user-2", displayName: "Assignee", email: "hidden@example.com" } },
+    raisedByMember: { id: "member-3", workspaceId: "ws-1", userId: "user-3", isActive: true, user: { id: "user-3", displayName: "Raised by", email: "hidden@example.com" } },
     proposal: { id: "hidden-proposal", title: "Private related proposal" },
     actions: [{ id: "hidden-action", title: "Private related action" }],
     tensions: [{ id: "hidden-tension", title: "Private related tension" }],
@@ -100,13 +111,17 @@ const rows = [
   fixture("archived-draft", { isPrivate: true, status: "DRAFT", archivedAt: new Date("2026-01-02") }),
   fixture("foreign-open", { workspaceId: "ws-2" }),
   fixture("foreign-draft", { workspaceId: "ws-2", isPrivate: true, status: "DRAFT" }),
-];
+].map((row, index) => ({ ...row, createdAt: new Date(Date.UTC(2026, 0, 20 - index)) }));
 
 const readMocks = [findManyTensionsMock, findManyActionsMock, findManyProposalsMock];
 const countMocks = [tensionCountMock, actionCountMock, proposalCountMock, goalCountMock, memberCountMock, circleCountMock];
 
 beforeEach(() => {
   vi.resetAllMocks();
+  captureProofMock.mockImplementation(async (_actor, _workspaceId, inputs) => inputs.map((input: { kind: string; id: string; snapshot: { isActive?: boolean; lineageReadable?: boolean } }) => {
+    if (!input.id || input.snapshot.isActive === false || input.snapshot.lineageReadable === false) throw new AppError(409, "SOURCE_RESTRICTED", "Profile unavailable.");
+    return { kind: input.kind, id: input.id, fingerprint: "a".repeat(64) };
+  }));
   membershipMock.mockImplementation(async ({ actor: caller, workspaceId }) => {
     if (caller.kind === "agent") {
       if (!caller.workspaceIds?.includes(workspaceId)) throw new AppError(403, "FORBIDDEN", "Agent workspace denied.");
@@ -118,19 +133,22 @@ beforeEach(() => {
     return { id: "member-1", workspaceId, userId: caller.user.id, role: "MEMBER", isActive: true };
   });
   for (const mock of readMocks) {
-    mock.mockImplementation(async ({ where, take }) => rows.filter(row => matches(row, where)).slice(0, take));
+    mock.mockImplementation(async ({ where, take }) => rows.filter(row => matches(row, where)).sort((a, b) => a.id.localeCompare(b.id)).slice(0, take));
   }
   for (const mock of [tensionCountMock, actionCountMock, proposalCountMock, goalCountMock]) {
     mock.mockImplementation(async ({ where }) => rows.filter(row => matches(row, where)).length);
   }
+  findManyGoalsMock.mockImplementation(async ({ where, take }) => rows.filter(row => matches(row, where)).sort((a, b) => a.id.localeCompare(b.id)).slice(0, take));
+  findManyCirclesMock.mockResolvedValue([{ id: "circle-1", workspaceId: "ws-1", archivedAt: null }]);
   memberCountMock.mockResolvedValue(2);
+  findManyMembersMock.mockResolvedValue([{ id: "member-1", isActive: true }, { id: "member-2", isActive: true }]);
   circleCountMock.mockResolvedValue(1);
   listGoalsMock.mockResolvedValue([{
     id: "goal-1", title: "Launch goal", descriptionMd: "Launch safely.",
     cadence: "QUARTERLY", level: "COMPANY", status: "ACTIVE", progressPercent: 25,
-    targetDate: null, startDate: null, circle: { name: "General" },
-    ownerMember: { user: { displayName: "Owner" } },
-    keyResults: [{ title: "Ship the rollout", currentValue: 1, targetValue: 4, unit: "milestones", progressPercent: 25 }],
+    targetDate: null, startDate: null, circle: { id: "circle-1", name: "General" },
+    ownerMember: { id: "owner-1", userId: "owner-user", user: { displayName: "Owner" } },
+    keyResults: [{ id: "kr-1", title: "Ship the rollout", currentValue: 1, targetValue: 4, unit: "milestones", progressPercent: 25 }],
   }]);
 });
 
@@ -211,19 +229,19 @@ describe("authenticated workspace readers", () => {
     }
   });
 
-  it.each(["admin", "agent"] as const)("preserves authorized %s private-draft access without exposing private non-drafts", async (kind) => {
+  it.each(["admin", "agent"] as const)("applies the current %s draft authority without exposing private non-drafts", async (kind) => {
     const { queryActions, queryTensions, queryProposals, getWorkspaceOverview } = await import("./workspace");
     const caller = kind === "agent" ? agent : actor;
     if (kind === "admin") membershipMock.mockResolvedValue({ id: "member-1", role: "ADMIN", isActive: true });
     for (const query of [queryActions, queryTensions]) {
       expect((await query("ws-1", undefined, undefined, undefined, caller)).map(item => item.id))
-        .toEqual(["public-open", "own-draft", "other-draft", "public-draft"]);
-      expect((await query("ws-1", "DRAFT", "member-2", "other-draft", caller))[0]?.id).toBe("other-draft");
+        .toEqual(kind === "admin" ? ["public-open", "own-draft", "other-draft", "public-draft"] : ["public-open", "public-draft"]);
+      expect((await query("ws-1", "DRAFT", "member-2", "other-draft", caller))[0]?.id).toBe(kind === "admin" ? "other-draft" : undefined);
       expect(await query("ws-1", undefined, undefined, "other-private-open", caller)).toEqual([]);
       expect(await query("ws-1", undefined, undefined, "foreign-draft", caller)).toEqual([]);
     }
     const proposals = await queryProposals("ws-1", undefined, caller);
-    expect(proposals).toHaveLength(4);
+    expect(proposals).toHaveLength(kind === "admin" ? 4 : 2);
     expect(await getWorkspaceOverview("ws-1", caller)).toMatchObject({ activeProposals: proposals.length, openActions: 1 });
   });
 
@@ -237,9 +255,9 @@ describe("authenticated workspace readers", () => {
       fixture("abandoned", { status: "ABANDONED" }),
       fixture("foreign-active", { status: "ACTIVE", workspaceId: "ws-2" }),
     ];
-    goalCountMock.mockImplementation(async ({ where }) => goals.filter(row => matches(row, where)).length);
+    findManyGoalsMock.mockImplementation(async ({ where, take }) => goals.filter(row => matches(row, where)).slice(0, take));
     expect(await getWorkspaceOverview("ws-1", actor)).toMatchObject({ activeGoals: 1 });
-    expect(goalCountMock).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ workspaceId: "ws-1", archivedAt: null }) }));
+    expect(findManyGoalsMock).toHaveBeenCalledWith(expect.objectContaining({ where: { AND: [expect.objectContaining({ workspaceId: "ws-1", archivedAt: null })] } }));
   });
 
   it.each(["absent actor", "missing membership", "revoked membership", "foreign workspace", "out-of-scope agent"])("denies every reader before content access for %s", async (scenario) => {
@@ -271,25 +289,30 @@ describe("authenticated workspace readers", () => {
     for (const mock of [...readMocks, ...countMocks]) expect(mock).not.toHaveBeenCalled();
   });
 
-  it("selects only necessary fields and never includes related private work items or member internals", async () => {
+  it("omits unproved author and inactive member labels without losing the permitted action", async () => {
+    const { queryActions } = await import("./workspace");
+    const row = fixture("visible-action");
+    findManyActionsMock.mockResolvedValue([{ ...row, author: { ...row.author, lineageReadable: false }, assigneeMember: { ...row.assigneeMember, isActive: false } }]);
+    expect(await queryActions("ws-1", undefined, undefined, undefined, actor)).toEqual([
+      expect.objectContaining({ id: row.id, title: row.title, author: null, assignee: null }),
+    ]);
+    expect(captureProofMock).toHaveBeenCalledWith(actor, "ws-1", [expect.objectContaining({ kind: "User", id: "user-1" })]);
+    expect(captureProofMock).toHaveBeenCalledWith(actor, "ws-1", [expect.objectContaining({ kind: "Member", id: "member-2" })]);
+  });
+
+  it("returns only public fields after proving full rows and excludes related private records", async () => {
     const { queryActions, queryTensions, queryProposals } = await import("./workspace");
     const actions = await queryActions("ws-1", undefined, undefined, undefined, actor);
     const tensions = await queryTensions("ws-1", undefined, undefined, undefined, actor);
     const proposals = await queryProposals("ws-1", undefined, actor);
-    const displayName = { select: { displayName: true } };
-    expect(findManyActionsMock).toHaveBeenCalledWith(expect.objectContaining({
-      select: { id: true, version: true, title: true, status: true, bodyMd: true, dueAt: true, createdAt: true, author: displayName, assigneeMember: { select: { user: displayName } } },
-    }));
-    expect(findManyTensionsMock).toHaveBeenCalledWith(expect.objectContaining({
-      select: { id: true, version: true, title: true, status: true, priority: true, bodyMd: true, createdAt: true, author: displayName, assigneeMember: { select: { user: displayName } }, raisedByMember: { select: { user: displayName } } },
-    }));
-    expect(findManyProposalsMock).toHaveBeenCalledWith(expect.objectContaining({
-      select: { id: true, title: true, status: true, createdAt: true, author: displayName },
-    }));
     for (const mock of readMocks) {
       const args = mock.mock.calls[0][0];
-      expect(args).not.toHaveProperty("include");
-      expect(args).toMatchObject({ take: 20, orderBy: { createdAt: "desc" } });
+      // Full current rows prove visibility before the public result projection.
+      expect(args).not.toHaveProperty("select");
+      expect(args).toMatchObject({ take: 100, orderBy: { id: "asc" }, include: { author: expect.any(Object) } });
+      expect(args.include).not.toHaveProperty("proposal");
+      expect(args.include).not.toHaveProperty("actions");
+      expect(args.include).not.toHaveProperty("tensions");
     }
     expect(Object.keys(actions[0]).sort()).toEqual(["id", "version", "title", "status", "author", "assignee", "dueAt", "createdAt", "bodySnippet"].sort());
     expect(Object.keys(tensions[0]).sort()).toEqual(["id", "version", "title", "status", "priority", "author", "assignee", "raisedBy", "createdAt", "bodySnippet"].sort());

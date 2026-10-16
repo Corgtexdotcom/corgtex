@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getConversation, addConversationTurn, renameConversation, deleteConversation, completeRoleOnboardingConversation } from "@corgtex/domain";
+import { getConversation, isArtifactInputProofReadable, type LineageRoot, addConversationTurn, renameConversation, deleteConversation, completeRoleOnboardingConversation } from "@corgtex/domain";
 import { processConversationTurnStream, sanitizeConversationPageContext } from "@corgtex/agents";
 import { defaultModelGateway } from "@corgtex/models";
 import { resolveRequestActor } from "@/lib/auth";
@@ -10,6 +10,8 @@ const STREAM_KEEPALIVE_INTERVAL_MS = 10_000;
 const EMPTY_ASSISTANT_STREAM_MESSAGE = "The assistant did not return a response. Please retry or ask a more specific question.";
 
 type ConversationStreamResult = {
+  promptInputId?: string;
+  lineageRoots: LineageRoot[];
   assistantMessage: string;
   contextUsed: {
     knowledgeResults?: unknown[];
@@ -219,39 +221,50 @@ export async function POST(
               controller.enqueue(encodeStreamPayload(encoder, { text: missingText }));
             }
 
-            await addConversationTurn(actor, {
+            const committedTurn = await addConversationTurn(actor, {
               workspaceId,
               conversationId,
               userMessage,
               assistantMessage,
               contextJson: finalResult?.contextUsed ?? {},
+              promptInputId: finalResult?.promptInputId,
+              lineageRoots: finalResult?.lineageRoots,
             });
+
+            if (!cancellation.cancelled) controller.enqueue(encodeStreamPayload(encoder, { committedTurn: {
+              id: committedTurn.id, sequenceNumber: committedTurn.sequenceNumber, createdAt: committedTurn.createdAt,
+            } }));
 
             // Auto-name: generate a title from the first message if none exists
             if (!conversation.topic) {
               try {
-                const titleResponse = await defaultModelGateway.chat({
-                  workspaceId,
-                  ...catalogUsageContext(actor),
-                  taskType: "CLASSIFICATION",
-                  messages: [
-                    {
-                      role: "system",
-                      content: "Generate a very short title (max 6 words) for this conversation based on the user's message. Return ONLY the title text, nothing else. No quotes, no punctuation at the end.",
-                    },
-                    { role: "user", content: userMessage },
-                  ],
-                  signal: modelAbortController.signal,
-                });
-                const generatedTopic = titleResponse.content.trim().slice(0, 80);
-                if (generatedTopic) {
-                  await renameConversation(actor, {
+                if (finalResult?.lineageRoots.length && await isArtifactInputProofReadable(actor, workspaceId, finalResult.lineageRoots)) {
+                  const titleResponse = await defaultModelGateway.chat({
                     workspaceId,
-                    conversationId,
-                    topic: generatedTopic,
+                    ...catalogUsageContext(actor),
+                    taskType: "CLASSIFICATION",
+                    messages: [
+                      {
+                        role: "system",
+                        content: "Generate a very short title (max 6 words) for this conversation based on the user's message. Return ONLY the title text, nothing else. No quotes, no punctuation at the end.",
+                      },
+                      { role: "user", content: userMessage },
+                    ],
+                    signal: modelAbortController.signal,
                   });
-                  if (cancellation.cancelled) return;
-                  controller.enqueue(encodeStreamPayload(encoder, { topic: generatedTopic }));
+                  if (await isArtifactInputProofReadable(actor, workspaceId, finalResult.lineageRoots)) {
+                    const generatedTopic = titleResponse.content.trim().slice(0, 80);
+                    if (generatedTopic) {
+                      await renameConversation(actor, {
+                        workspaceId,
+                        conversationId,
+                        topic: generatedTopic,
+                        lineageRoots: finalResult.lineageRoots,
+                      });
+                      if (cancellation.cancelled) return;
+                      controller.enqueue(encodeStreamPayload(encoder, { topic: generatedTopic }));
+                    }
+                  }
                 }
               } catch {
                 // Auto-naming is best-effort; don't break the stream
@@ -279,7 +292,7 @@ export async function POST(
         try {
           await iterator.return?.({
             assistantMessage: "",
-            contextUsed: {},
+            contextUsed: {}, promptInputId: "", lineageRoots: [],
           });
         } catch {
           // Client disconnect cleanup is best-effort.

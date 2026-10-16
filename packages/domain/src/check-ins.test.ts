@@ -11,6 +11,7 @@ import {
 } from "./check-ins";
 import { prisma } from "@corgtex/shared";
 import { appendEvents } from "./events";
+import { readableArtifactIds } from "./source-lineage";
 
 vi.mock("@corgtex/shared", () => ({
   prisma: {
@@ -24,6 +25,7 @@ vi.mock("@corgtex/shared", () => ({
     member: {
       findUnique: vi.fn(),
     },
+    $executeRaw: vi.fn(),
     brainSource: {
       create: vi.fn(),
     },
@@ -35,17 +37,32 @@ vi.mock("@corgtex/shared", () => ({
     conversationTurn: {
       create: vi.fn(),
     },
+    conversationPromptInput: { create: vi.fn() },
     $transaction: vi.fn((fn) => fn(prisma)),
   },
   AppActor: {},
 }));
 
 vi.mock("./auth", () => ({
-  requireWorkspaceMembership: vi.fn().mockResolvedValue({ id: "member-1" }),
+  requireWorkspaceMembership: vi.fn().mockResolvedValue({ id: "member-1", userId: "user-1" }),
 }));
 
 vi.mock("./events", () => ({
   appendEvents: vi.fn().mockResolvedValue(true),
+}));
+
+vi.mock("./source-lineage", () => ({
+  assertArtifactInputWriteFence: vi.fn(),
+  captureArtifactInputProof: vi.fn(async (_actor, _ws, inputs) => inputs.map((input: { kind: string; id: string }) => ({ kind: input.kind, id: input.id, fingerprint: "a".repeat(64) }))),
+  captureArtifactInputSnapshotProof: vi.fn(async (_actor, _ws, input) => [{ kind: "ArtifactInputSnapshot", id: `snapshot-${input.id}`, fingerprint: "a".repeat(64) }]),
+  captureImmutableArtifactInputProof: vi.fn(async (_actor, _ws, roots) => roots),
+  advanceHumanArtifactInputLineage: vi.fn(),
+  invalidateArtifactInputLineage: vi.fn(),
+  isArtifactInputProofReadable: vi.fn(async () => true),
+  recordArtifactInputLineage: vi.fn(),
+  currentArtifactInputRoots: vi.fn(async () => []),
+  readableArtifactIds: vi.fn(async (_actor: unknown, _workspaceId: string, _kind: string, records: Array<{ id: string }>) =>
+    new Set(records.map((record) => record.id))),
 }));
 
 describe("getOverwhelmSignals", () => {
@@ -59,7 +76,7 @@ describe("getOverwhelmSignals", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked((prisma as any).$transaction).mockImplementation(async (fn: any) => fn(prisma));
-    vi.mocked((prisma as any).member.findUnique).mockResolvedValue({ id: memberId, workspaceId, isActive: true });
+    vi.mocked((prisma as any).member.findUnique).mockResolvedValue({ id: memberId, workspaceId, userId: "user-1", role: "CONTRIBUTOR", isActive: true, joinedAt: new Date(), user: { id: "user-1", email: "user@example.com", displayName: "User" } });
   });
 
   it("getOverwhelmSignals flags member with 3+ negative responses in 7 days", async () => {
@@ -145,7 +162,7 @@ describe("getOverwhelmSignals", () => {
   it("creates at most three daily company understanding questions and dedupes existing prompts", async () => {
     vi.mocked((prisma as any).checkIn.count).mockResolvedValueOnce(1);
     vi.mocked(prisma.checkIn.findMany).mockResolvedValueOnce([
-      { questionText: "What document, customer note, or working file would give CORGTEX the most useful company context today?" },
+      { id: "existing-question", createdAt: new Date("2026-06-08"), questionText: "What document, customer note, or working file would give CORGTEX the most useful company context today?" },
     ] as any);
     vi.mocked(prisma.checkIn.create).mockResolvedValue({ id: "checkin-new" } as any);
 
@@ -155,7 +172,7 @@ describe("getOverwhelmSignals", () => {
       now: new Date("2026-06-09T12:00:00.000Z"),
     });
 
-    expect(result).toEqual({ created: 2, cap: 3 });
+    expect(result).toMatchObject({ created: 2, cap: 3 });
     expect(prisma.checkIn.create).toHaveBeenCalledTimes(2);
     expect(prisma.checkIn.create).not.toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
@@ -165,8 +182,11 @@ describe("getOverwhelmSignals", () => {
   });
 
   it("does not create daily questions after the same-day cap is reached", async () => {
-    vi.mocked((prisma as any).checkIn.count).mockResolvedValueOnce(3);
-    vi.mocked(prisma.checkIn.findMany).mockResolvedValueOnce([]);
+    vi.mocked(prisma.checkIn.findMany).mockResolvedValueOnce([1, 2, 3].map((number) => ({
+      id: `question-${number}`,
+      questionText: `Existing ${number}`,
+      createdAt: new Date("2026-06-09T09:00:00.000Z"),
+    })) as any);
 
     const result = await createDailyCompanyUnderstandingQuestions(actor, {
       workspaceId,
@@ -174,7 +194,7 @@ describe("getOverwhelmSignals", () => {
       now: new Date("2026-06-09T12:00:00.000Z"),
     });
 
-    expect(result).toEqual({ created: 0, cap: 3 });
+    expect(result).toMatchObject({ created: 0, cap: 3 });
     expect(prisma.checkIn.create).not.toHaveBeenCalled();
   });
 
@@ -193,6 +213,17 @@ describe("getOverwhelmSignals", () => {
       }),
       orderBy: [{ priority: "desc" }, { createdAt: "desc" }],
     }));
+  });
+
+  it("filters restricted questions before applying the daily limit", async () => {
+    vi.mocked(prisma.checkIn.findMany).mockResolvedValueOnce([
+      { id: "restricted", questionText: "Restricted" },
+      { id: "safe", questionText: "Safe" },
+    ] as any);
+    vi.mocked(readableArtifactIds).mockResolvedValueOnce(new Set(["safe"]));
+    const questions = await listCompanyUnderstandingQuestions(actor, { workspaceId, take: 1 });
+    expect(questions.map((question) => question.id)).toEqual(["safe"]);
+    expect(prisma.checkIn.findMany).toHaveBeenCalledWith(expect.not.objectContaining({ take: 1 }));
   });
 
   it("marks regular check-ins answered when a member responds", async () => {
@@ -284,8 +315,11 @@ describe("getOverwhelmSignals", () => {
       relatedConversationId: null,
     } as any);
     vi.mocked((prisma as any).conversationSession.create).mockResolvedValueOnce({ id: "conversation-1" });
-    vi.mocked((prisma as any).conversationSession.findUniqueOrThrow).mockResolvedValueOnce({
-      id: "conversation-1",
+    vi.mocked((prisma as any).conversationPromptInput.create).mockResolvedValueOnce({ id: "prompt-1", content: "Open company understanding question" });
+    vi.mocked((prisma as any).conversationTurn.create).mockResolvedValueOnce({ id: "turn-1" });
+    vi.mocked(prisma.checkIn.update).mockResolvedValueOnce({ id: "checkin-1" } as any);
+    vi.mocked((prisma as any).conversationSession.findUnique).mockResolvedValueOnce({
+      id: "conversation-1", workspaceId, userId: "user-1",
       turns: [{ id: "turn-1" }],
     });
 
