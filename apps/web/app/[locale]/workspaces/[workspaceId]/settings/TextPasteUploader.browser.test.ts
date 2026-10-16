@@ -24,20 +24,31 @@ describe.runIf(process.env.TEXT_PASTE_BROWSER_QA === "1")("Text paste pending dr
     const { chromium } = await import("playwright");
     const bundle = await build({
       stdin: { resolveDir: fileURLToPath(webRoot), loader: "tsx", contents: `
-        import React from "react";
+        import React, { useLayoutEffect, useEffect } from "react";
         import { createRoot } from "react-dom/client";
         import { NextIntlClientProvider } from "next-intl";
         import en from "./messages/en.json";
         import { TextPasteUploader } from "./app/[locale]/workspaces/[workspaceId]/settings/TextPasteUploader";
-        window.fixture = { requests: [], refreshes: 0, pushes: [] };
+        window.fixture = { requests: [], refreshes: 0, pushes: [], lifecycle: [] };
+        function CommitProbe({children}) {
+          useLayoutEffect(() => () => {
+            window.fixture.lifecycle.push("unmount-commit");
+            window.fixture.onUnmountCommit?.();
+          }, []);
+          useEffect(() => () => window.fixture.lifecycle.push("passive-cleanup"), []);
+          return children;
+        }
         window.fetch = (url, options) => new Promise((resolve, reject) => {
           window.fixture.requests.push({url, body: JSON.parse(options.body), resolve: (status, body) =>
-            resolve(new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } })), resolveHeaders: (status) => resolve({ ok: status < 300, status, json: () => new Promise(resolveBody => { window.fixture.resolveBody = resolveBody; }) }), reject});
+            resolve(new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } })), resolveImmediate: (status, body) => resolve({ ok: status < 300, status, json: async () => { window.fixture.lifecycle.push("body-read"); return body; } }), resolveHeaders: (status) => resolve({ ok: status < 300, status, json: () => new Promise(resolveBody => { window.fixture.resolveBody = resolveBody; }) }), reject});
         });
         const root = createRoot(document.getElementById("root"));
+        // Mirror the workspace layout key; the real switcher also performs a full navigation.
         window.mount = (workspaceId = "synthetic-workspace") => root.render(
           <NextIntlClientProvider locale="en" timeZone="UTC" messages={en}>
-            <TextPasteUploader workspaceId={workspaceId} />
+            <div key={workspaceId}>
+              <CommitProbe><TextPasteUploader workspaceId={workspaceId} /></CommitProbe>
+            </div>
           </NextIntlClientProvider>);
         window.unmount = () => root.render(null);
         window.mount();
@@ -46,7 +57,7 @@ describe.runIf(process.env.TEXT_PASTE_BROWSER_QA === "1")("Text paste pending dr
       plugins: [{ name: "synthetic-router", setup(build) {
         build.onResolve({ filter: /^next\/navigation$/ }, () => ({ path: "router", namespace: "synthetic" }));
         build.onLoad({ filter: /.*/, namespace: "synthetic" }, () => ({ contents:
-          "export const useRouter = () => ({refresh: () => window.fixture.refreshes++, push: path => window.fixture.pushes.push(path)});" }));
+          "export const useRouter = () => ({refresh: () => window.fixture.refreshes++, push: path => { window.fixture.lifecycle.push('router-push'); window.fixture.pushes.push(path); }});" }));
       } }],
     });
     server = createServer((request, response) => {
@@ -205,16 +216,46 @@ describe.runIf(process.env.TEXT_PASTE_BROWSER_QA === "1")("Text paste pending dr
     expect(await page.getByText("Possible duplicate", { exact: true }).count()).toBe(0);
   });
 
-  it("fences old workspace responses and their finally block from a new request", async () => {
-    await fresh(); await submit();
+  it("starts keyed workspace B empty and submits only newly entered B", async () => {
+    await fresh(true); await submit();
     await page.evaluate(() => (window as any).mount("synthetic-other"));
-    await expect.poll(() => page.locator('button[type="submit"]').textContent()).not.toMatch(/Ingesting/);
+    await expect.poll(() => page.locator('textarea[required]').inputValue()).toBe("");
+    expect(await page.locator('input').first().inputValue()).toBe("");
+    expect(await page.locator('[name="ingestionGuidanceMd"]').inputValue()).toBe("");
+    expect(await page.locator('select').first().inputValue()).toBe("ARTICLE");
+    expect(await page.locator('button[type="submit"]').isDisabled()).toBe(true);
+    expect((await requests()).length).toBe(1);
+    await page.locator('input').first().fill("Only B title");
+    await page.locator('textarea[required]').fill("Only B content");
+    await page.locator('input').nth(1).fill("Only B channel");
+    await page.locator('[name="ingestionGuidanceMd"]').fill("Only B guidance");
     await page.locator('button[type="submit"]').click();
     await expect.poll(async () => (await requests()).length).toBe(2);
+    expect((await requests())[1]).toEqual({ url: "/api/workspaces/synthetic-other/data-sources/text-ingest",
+      body: { title: "Only B title", content: "Only B content", channel: "Only B channel",
+        ingestionGuidanceMd: "Only B guidance", sourceType: "ARTICLE", duplicateGuardEnabled: true } });
     await page.evaluate(() => (window as any).fixture.requests[0].resolve(200, { meeting: { id: "old" } }));
     expect(await page.locator('button[type="submit"]').isDisabled()).toBe(true);
     expect(await page.evaluate(() => (window as any).fixture.pushes)).toEqual([]);
     await release(500, {}, 1);
+    expect(await page.locator('textarea[required]').inputValue()).toBe("Only B content");
+  });
+
+  it("ignores an accepted response released during the unmount commit", async () => {
+    await fresh(true); await submit();
+    await page.evaluate(() => {
+      const fixture = (window as any).fixture;
+      fixture.onUnmountCommit = () => fixture.requests[0].resolveImmediate(200, { meeting: { id: "old-commit" } });
+      (window as any).unmount();
+    });
+    await expect.poll(() => page.evaluate(() => (window as any).fixture.lifecycle.includes("body-read"))).toBe(true);
+    await expect.poll(() => page.evaluate(() => (window as any).fixture.lifecycle.includes("passive-cleanup"))).toBe(true);
+    await expect.poll(() => page.locator("form").count()).toBe(0);
+    await writeFile(new URL("unmount-commit.json", output), JSON.stringify(await page.evaluate(() => ({
+      lifecycle: (window as any).fixture.lifecycle, pushes: (window as any).fixture.pushes,
+    })), null, 2));
+    expect(await page.evaluate(() => (window as any).fixture.pushes)).toEqual([]);
+    expect((await requests()).length).toBe(1);
   });
 
   it("ignores success after unmount and remount", async () => {

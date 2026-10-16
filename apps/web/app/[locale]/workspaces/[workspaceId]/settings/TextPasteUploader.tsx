@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
@@ -79,8 +79,9 @@ export function TextPasteUploader({
   const revision = useRef(0);
   const activeRequest = useRef<object | null>(null);
 
-  useEffect(() => {
-    // A workspace change or unmount ends the request session. An old finally
+  useLayoutEffect(() => {
+    // End the request session during commit, before promise continuations can
+    // navigate after unmount while passive cleanup is still pending. An old finally
     // must not unlock a request started in the next session.
     activeRequest.current = null;
     revision.current++;
