@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { existsSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
@@ -54,19 +55,25 @@ it.runIf(process.env.MAP_BROWSER_QA === "1")("navigates, refreshes and reloads a
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Missing test port");
   const origin = "http://127.0.0.1:" + address.port;
-  const browser = await chromium.launch({ executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", headless: true });
+  const browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? (existsSync("/usr/bin/chromium") ? "/usr/bin/chromium" : undefined), headless: true });
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
     for (let run = 0; run < 3; run++) {
-      await page.goto(origin + "/en/workspaces/demo/maps");
-      await page.waitForResponse((response) => response.url().includes("/context?"));
-      await page.locator('.react-flow__node[data-id="node-b"]').click();
-      await page.waitForResponse((response) => response.url().includes("object=node-b"));
-      await page.getByRole("button", { name: "Context", exact: true }).click();
-      await page.waitForResponse((response) => response.url().includes("/context?"));
+      await Promise.all([
+        page.waitForResponse((response) => response.url().includes("/context?")),
+        page.goto(origin + "/en/workspaces/demo/maps"),
+      ]);
+      await Promise.all([
+        page.waitForResponse((response) => response.url().includes("object=node-b")),
+        page.locator('.react-flow__node[data-id="node-b"]').click(),
+      ]);
+      await Promise.all([
+        page.waitForResponse((response) => response.url().includes("/context?")),
+        page.getByRole("button", { name: "Context", exact: true }).click(),
+      ]);
       await page.getByRole("button", { name: "Fit", exact: true }).click();
       await page.getByRole("button", { name: "Reset", exact: true }).click();
       expect(await page.getByRole("button", { name: /Save copy|Update master|Add/ }).count()).toBe(0);
@@ -78,13 +85,19 @@ it.runIf(process.env.MAP_BROWSER_QA === "1")("navigates, refreshes and reloads a
     expect(errors).toEqual([]);
     // Recoverable read failure stays in the inspector and can be retried.
     failNext = true;
-    await page.getByRole("button", { name: "Context", exact: true }).click();
-    await page.waitForResponse((response) => response.status() === 403);
-    await page.getByRole("button", { name: "Context", exact: true }).click();
-    await page.waitForResponse((response) => response.url().includes("/context?") && response.ok());
+    await Promise.all([
+      page.waitForResponse((response) => response.status() === 403),
+      page.getByRole("button", { name: "Context", exact: true }).click(),
+    ]);
+    await Promise.all([
+      page.waitForResponse((response) => response.url().includes("/context?") && response.ok()),
+      page.getByRole("button", { name: "Context", exact: true }).click(),
+    ]);
     await page.goto(origin + "/en/workspaces/demo/maps?member=1");
-    await page.getByRole("button", { name: "Update master", exact: true }).click();
-    await page.waitForResponse((response) => response.request().method() === "POST");
+    await Promise.all([
+      page.waitForResponse((response) => response.request().method() === "POST"),
+      page.getByRole("button", { name: "Update master", exact: true }).click(),
+    ]);
     expect(await page.getByRole("button", { name: "Save copy", exact: true }).count()).toBe(1);
   } finally {
     await browser.close();
