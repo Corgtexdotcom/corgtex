@@ -39,7 +39,7 @@ const AUDIT_OPERATIONS: Partial<Record<LineageKind, readonly string[]>> = {
   ApprovalFlow: ["approval.decision_recorded", "approval.finalized", "approval.objection_created", "approval.objection_resolved", "approval.withdrawn"],
   BrainArticle: ["brain-article.created", "brain-article.published", "brain-article.regenerated", "brain-article.returned_to_draft", "brain-article.updated", "brain-article.variant.created"],
   BrainSource: ["brain-source.created", "brain-source.reconciled", "brain-source.updated"],
-  BuildArtifact: ["build_artifact.public_revoked"],
+  BuildArtifact: ["build_artifact.created", "build_artifact.updated", "build_artifact.public_revoked"],
   BuildArtifactAsset: ["build_artifact_asset.created", "managed_release.inventory_frozen"],
   Circle: ["circle.created", "circle.updated"],
   ContextGraphObject: ["context-graph.object.upserted"],

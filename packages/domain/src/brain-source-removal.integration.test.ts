@@ -1,3 +1,4 @@
+import * as lineage from "./source-lineage";
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
@@ -62,6 +63,32 @@ async function attestArticle(actor: AppActor, workspaceId: string, articleId: st
   });
 }
 
+async function removalAttemptFixture(count = 1) {
+  const f = await fixture();
+  const articles = [];
+  for (let index = 0; index < count; index++) {
+    const article = await prisma.brainArticle.create({ data: { workspaceId: f.workspace.id, slug: `attempt-${index}`,
+      title: `Original title ${index}`, type: "PROJECT", bodyMd: `Original private body ${index}`,
+      sourceIds: [f.removed.id, f.remaining.id], derivationJson: { version: 1, origin: "brain-absorb", agentRunId: "fixture-run",
+        sources: [{ sourceId: f.removed.id, fingerprint: brainSourceContentFingerprint(f.removed) },
+          { sourceId: f.remaining.id, fingerprint: brainSourceContentFingerprint(f.remaining) }] } } });
+    await attestArticle(f.actor, f.workspace.id, article.id, [f.removed.id, f.remaining.id]); articles.push(article);
+  }
+  const request = await deleteSource(f.actor, { workspaceId: f.workspace.id, sourceId: f.removed.id });
+  if (request.status !== "pending") throw new Error("Expected regeneration");
+  const job = await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "RUNNING", attempts: 1,
+    lockedBy: "renewal-worker", lockedAt: new Date(), startedAt: new Date() } });
+  return { ...f, articles, job, lease: { workspaceId: f.workspace.id, jobId: job.id, expectedAttempt: 1, expectedOwner: "renewal-worker" } };
+}
+async function waitForRenewal(jobId: string, expected: number) {
+  for (let index = 0; index < 200; index++) {
+    const row = await prisma.workflowJob.findUniqueOrThrow({ where: { id: jobId } });
+    if (row.lockedAt && row.lockedAt.getTime() >= expected) return row;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  throw new Error("Removal heartbeat did not renew its exact lease");
+}
+
 const runtimeOptIn = "BRAIN_SOURCE_REMOVAL_RUNTIME_ENABLED";
 const previousRuntimeOptIn = process.env[runtimeOptIn];
 
@@ -71,6 +98,8 @@ describe("Brain source removal review", () => {
     await truncateAllTables();
   });
   afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
     if (previousRuntimeOptIn === undefined) delete process.env[runtimeOptIn];
     else process.env[runtimeOptIn] = previousRuntimeOptIn;
   });
@@ -87,7 +116,7 @@ describe("Brain source removal review", () => {
       const request = await deleteSource(actor, { workspaceId: workspace.id, sourceId: removed.id });
       if (request.status !== "pending") throw new Error("Expected pending regeneration");
       await prisma.workflowJob.update({ where: { id: request.jobId }, data: {
-        status: "RUNNING", attempts: 1, lockedBy: "worker", lockedAt: new Date(), startedAt: new Date() } });
+        status: "RUNNING", lockedAt: new Date(), startedAt: new Date(), attempts: 1, lockedBy: "worker" } });
       let sends = 0;
       const result = await generateBrainSourceRemovalCandidate({ workspaceId: workspace.id, jobId: request.jobId,
         expectedAttempt: 1, expectedOwner: "worker", generate: async (_article, _sources, controls) => {
@@ -109,6 +138,92 @@ describe("Brain source removal review", () => {
       if (change === "claim") expect(await prisma.workflowJob.findUniqueOrThrow({ where: { id: request.jobId } }))
         .toMatchObject({ status: "RUNNING", attempts: 2, lockedBy: "replacement" });
     });
+
+  it("removal renewal keeps the first provider wait and multiple articles live beyond five minutes", async () => {
+    const f = await removalAttemptFixture(2);
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    let sends = 0;
+    const result = await generateBrainSourceRemovalCandidate({ ...f.lease, generate: async (_article, _sources, controls) => {
+      // No provider attempt runs during this wait: the periodic heartbeat alone
+      // must keep the first credential/provider wait alive beyond its old lease.
+      for (let minute = 0; minute < 6; minute++) {
+        vi.advanceTimersByTime(60_000);
+        await waitForRenewal(f.job.id, Date.now());
+      }
+      await controls.authorizeAttempt({ signal: controls.signal }); sends++;
+      return "Remaining source only";
+    } });
+    expect(result).toEqual({ phase: "READY", candidateCount: 2 }); expect(sends).toBe(2);
+    const finished = await prisma.workflowJob.findUniqueOrThrow({ where: { id: f.job.id } });
+    vi.advanceTimersByTime(180_000);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(await prisma.workflowJob.findUniqueOrThrow({ where: { id: f.job.id } })).toEqual(finished);
+  });
+
+  it("removal renewal never mutates an already expired initial claim", async () => {
+    const f = await removalAttemptFixture();
+    const expired = await prisma.workflowJob.update({ where: { id: f.job.id }, data: { lockedAt: new Date(Date.now() - 300_001) } });
+    const generate = vi.fn(async () => "Never sent");
+    await expect(generateBrainSourceRemovalCandidate({ ...f.lease, generate })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(generate).not.toHaveBeenCalled();
+    expect(await prisma.workflowJob.findUniqueOrThrow({ where: { id: f.job.id } })).toEqual(expired);
+  });
+
+  it.each(["owner", "attempt", "token", "payload", "lockedAt"] as const)("removal renewal rejects replacement %s and latches swallowed failure", async field => {
+    const f = await removalAttemptFixture(); let replacement: unknown;
+    await expect(generateBrainSourceRemovalCandidate({ ...f.lease, generate: async (_article, _sources, controls) => {
+      const claimed = await prisma.workflowJob.findUniqueOrThrow({ where: { id: f.job.id } });
+      const payload = claimed.payload as Prisma.JsonObject;
+      const data = field === "owner" ? { lockedBy: "replacement" } : field === "attempt" ? { attempts: 2 }
+        : field === "lockedAt" ? { lockedAt: new Date(claimed.lockedAt!.getTime() + 1) }
+          : { payload: { ...payload, ...(field === "token" ? { generationToken: "replacement" } : { changed: true }) } as Prisma.InputJsonObject };
+      replacement = await prisma.workflowJob.update({ where: { id: f.job.id }, data });
+      await controls.authorizeAttempt({ signal: controls.signal }).catch(() => {});
+      expect(controls.signal.aborted).toBe(true);
+      return "Adapter swallowed the error";
+    } })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(await prisma.workflowJob.findUniqueOrThrow({ where: { id: f.job.id } })).toEqual(replacement);
+    expect(await prisma.agentRun.count({ where: { workspaceId: f.workspace.id, agentKey: "brain-source-regenerate" } })).toBe(0);
+  });
+
+  it.each(["caller", "article", "source", "candidate", "job status", "none"] as const)("removal review final fence catches late %s changes", async change => {
+    const f = await removalAttemptFixture();
+    await generateBrainSourceRemovalCandidate({ ...f.lease, generate: async () => "Safe candidate body" });
+    await prisma.workflowJob.update({ where: { id: f.job.id }, data: { status: "COMPLETED" } });
+    const original = lineage.isArtifactInputProofReadable;
+    let changed = false;
+    const spy = vi.spyOn(lineage, "isArtifactInputProofReadable").mockImplementation(async (...args) => {
+      const result = await original(...args);
+      if (!changed && args[0] === f.actor && !args[3]) {
+        changed = true;
+        if (change === "caller") {
+          const member = await prisma.member.findUniqueOrThrow({ where: { workspaceId_userId: { workspaceId: f.workspace.id, userId: f.actor.kind === "user" ? f.actor.user.id : "" } } });
+          await prisma.member.update({ where: { id: member.id }, data: { isActive: false } });
+          await prisma.member.update({ where: { id: member.id }, data: { isActive: true } });
+        }
+        if (change === "article") {
+          await prisma.brainArticle.update({ where: { id: f.articles[0].id }, data: { isPrivate: true } });
+          await prisma.brainArticle.update({ where: { id: f.articles[0].id }, data: { isPrivate: false } });
+        }
+        if (change === "source") {
+          await prisma.brainSource.update({ where: { id: f.remaining.id }, data: { archivedAt: new Date() } });
+          await prisma.brainSource.update({ where: { id: f.remaining.id }, data: { archivedAt: null } });
+        }
+        if (change === "candidate") {
+          const job = await prisma.workflowJob.findUniqueOrThrow({ where: { id: f.job.id } });
+          await prisma.workflowJob.update({ where: { id: job.id }, data: { payload: { ...job.payload as Prisma.JsonObject,
+            candidates: { [f.articles[0].id]: "Unreviewed replacement" } } as Prisma.InputJsonObject } });
+        }
+        if (change === "job status") await prisma.workflowJob.update({ where: { id: f.job.id }, data: { status: "FAILED" } });
+      }
+      return result;
+    });
+    const result = await listBrainSourceRemovalReviews(f.actor, { workspaceId: f.workspace.id, sourceIds: [f.removed.id] }).catch(error => error);
+    spy.mockRestore(); expect(changed).toBe(true);
+    if (change === "none") expect(result[0].articles[0]).toMatchObject({ title: f.articles[0].title,
+      currentBodyMd: f.articles[0].bodyMd, candidateBodyMd: "Safe candidate body" });
+    else expect(result).toBeInstanceOf(Error);
+  });
 
   it("batch discovery preserves canonical mismatch, latest same-body heads and snapshot tamper rejection", async () => {
     const {workspace, actor, removed, remaining} = await fixture();
@@ -301,9 +416,9 @@ describe("Brain source removal review", () => {
     expect(await deleteSource(actor, { workspaceId: workspace.id, sourceId: removed.id })).toEqual(requested);
     expect((await prisma.brainArticle.findUniqueOrThrow({ where: { id: article.id } })).bodyMd).toBe("Human revised facts");
     expect((await prisma.brainSource.findUniqueOrThrow({ where: { id: removed.id } })).archivedAt).toBeNull();
-    await prisma.workflowJob.update({ where: { id: requested.jobId }, data: { status: "RUNNING" } });
+    await prisma.workflowJob.update({ where: { id: requested.jobId }, data: { status: "RUNNING", lockedAt: new Date(), startedAt: new Date(), attempts: 1, lockedBy: "fixture-worker" } });
     let inputs: string[] = [];
-    const staged = await generateBrainSourceRemovalCandidate({ workspaceId: workspace.id, jobId: requested.jobId, expectedAttempt: 0, expectedOwner: null,
+    const staged = await generateBrainSourceRemovalCandidate({ workspaceId: workspace.id, jobId: requested.jobId, expectedAttempt: 1, expectedOwner: "fixture-worker",
       generate: async (_target, sources) => { inputs = sources.map((source) => source.content); return "Facts from remaining source only"; },
     });
     expect(staged).toEqual({ phase: "READY", candidateCount: 1 });
@@ -394,8 +509,8 @@ describe("Brain source removal review", () => {
     await attestArticle(actor, workspace.id, article.id, [removed.id, remaining.id]);
     const requested = await deleteSource(actor, { workspaceId: workspace.id, sourceId: removed.id });
     if (requested.status !== "pending") throw new Error("Expected a regeneration job.");
-    await prisma.workflowJob.update({ where: { id: requested.jobId }, data: { status: "RUNNING" } });
-    const stale = await generateBrainSourceRemovalCandidate({ workspaceId: workspace.id, jobId: requested.jobId, expectedAttempt: 0, expectedOwner: null,
+    await prisma.workflowJob.update({ where: { id: requested.jobId }, data: { status: "RUNNING", lockedAt: new Date(), startedAt: new Date(), attempts: 1, lockedBy: "fixture-worker" } });
+    const stale = await generateBrainSourceRemovalCandidate({ workspaceId: workspace.id, jobId: requested.jobId, expectedAttempt: 1, expectedOwner: "fixture-worker",
       generate: async () => {
         await updateAuthoredSource(actor, remaining.id, { content: "Revised remaining facts" });
         return "Old candidate";
@@ -444,9 +559,9 @@ describe("Brain source removal review", () => {
     await attestArticle(actor, workspace.id, article.id, [removed.id, remaining.id]);
     const request = await deleteSource(actor, { workspaceId: workspace.id, sourceId: removed.id });
     if (request.status !== "pending") throw new Error("Expected a regeneration job.");
-    await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "RUNNING" } });
+    await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "RUNNING", lockedAt: new Date(), startedAt: new Date(), attempts: 1, lockedBy: "fixture-worker" } });
     await generateBrainSourceRemovalCandidate({ workspaceId: workspace.id, jobId: request.jobId,
-      expectedAttempt: 0, expectedOwner: null, generate: async () => "Reviewed candidate",
+      expectedAttempt: 1, expectedOwner: "fixture-worker", generate: async () => "Reviewed candidate",
     });
     await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "COMPLETED" } });
 
@@ -485,8 +600,8 @@ describe("Brain source removal review", () => {
     await attestArticle(actor, workspace.id, article.id, [removed.id, remaining.id]);
     const request = await deleteSource(actor, { workspaceId: workspace.id, sourceId: removed.id });
     if (request.status !== "pending") throw new Error("Expected a regeneration job.");
-    await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "RUNNING" } });
-    await generateBrainSourceRemovalCandidate({ workspaceId: workspace.id, jobId: request.jobId, expectedAttempt: 0, expectedOwner: null,
+    await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "RUNNING", lockedAt: new Date(), startedAt: new Date(), attempts: 1, lockedBy: "fixture-worker" } });
+    await generateBrainSourceRemovalCandidate({ workspaceId: workspace.id, jobId: request.jobId, expectedAttempt: 1, expectedOwner: "fixture-worker",
       generate: async () => "Proposed replacement",
     });
     await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "COMPLETED" } });
@@ -513,7 +628,7 @@ describe("Brain source removal review", () => {
     await attestArticle(actor, workspace.id, article.id, [removed.id, remaining.id]);
     const request = await deleteSource(actor, { workspaceId: workspace.id, sourceId: removed.id });
     if (request.status !== "pending") throw new Error("Expected a regeneration job.");
-    await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "RUNNING", attempts: 1, lockedBy: "worker-old" } });
+    await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "RUNNING", lockedAt: new Date(), startedAt: new Date(), attempts: 1, lockedBy: "worker-old" } });
     let releaseFirst!: () => void;
     let firstEntered!: () => void;
     const holdFirst = new Promise<void>((resolve) => { releaseFirst = resolve; });
@@ -571,10 +686,10 @@ describe("Brain source removal review", () => {
     await archiveWorkspaceArtifact(actor, { workspaceId: workspace.id, entityType: "BrainArticle", entityId: article.id });
     await archiveWorkspaceArtifact(actor, { workspaceId: workspace.id, entityType: "BrainSource", entityId: removed.id });
     await restoreWorkspaceArtifact(actor, { workspaceId: workspace.id, entityType: "BrainArticle", entityId: article.id });
-    await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "RUNNING" } });
+    await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "RUNNING", lockedAt: new Date(), startedAt: new Date(), attempts: 1, lockedBy: "fixture-worker" } });
     const generate = vi.fn(async () => "Independent replacement");
     await expect(generateBrainSourceRemovalCandidate({ workspaceId: workspace.id, jobId: request.jobId,
-      expectedAttempt: 0, expectedOwner: null, generate })).resolves.toEqual({ phase: "STALE" });
+      expectedAttempt: 1, expectedOwner: "fixture-worker", generate })).resolves.toEqual({ phase: "STALE" });
     expect(generate).not.toHaveBeenCalled();
     const oldJob = await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "COMPLETED" } });
     const restoredArticle = await prisma.brainArticle.findUniqueOrThrow({ where: { id: article.id } });
@@ -582,10 +697,11 @@ describe("Brain source removal review", () => {
     const fresh = await retryBrainSourceRemoval(actor, { workspaceId: workspace.id, jobId: request.jobId });
     if (fresh.status !== "pending") throw new Error("Expected a fresh canonical archived-exclusion recipe");
     expect(fresh.jobId).not.toBe(request.jobId);
-    await prisma.workflowJob.update({ where: { id: fresh.jobId }, data: { status: "RUNNING" } });
+    await prisma.workflowJob.update({ where: { id: fresh.jobId }, data: { status: "RUNNING", lockedAt: new Date(), startedAt: new Date(), attempts: 1, lockedBy: "fixture-worker" } });
     await expect(generateBrainSourceRemovalCandidate({ workspaceId: workspace.id, jobId: fresh.jobId,
-      expectedAttempt: 0, expectedOwner: null, generate })).resolves.toEqual({ phase: "READY", candidateCount: 1 });
-    expect(generate).toHaveBeenCalledWith({ id: article.id, title: remaining.title }, [expect.objectContaining({ id: remaining.id })]);
+      expectedAttempt: 1, expectedOwner: "fixture-worker", generate })).resolves.toEqual({ phase: "READY", candidateCount: 1 });
+    expect(generate).toHaveBeenCalledWith({ id: article.id, title: remaining.title }, [expect.objectContaining({ id: remaining.id })],
+      expect.objectContaining({ authorizeAttempt: expect.any(Function), signal: expect.any(AbortSignal) }));
     await prisma.workflowJob.update({ where: { id: fresh.jobId }, data: { status: "COMPLETED" } });
     expect((await prisma.workflowJob.findUniqueOrThrow({ where: { id: request.jobId } })).payload).toEqual(oldJob.payload);
     const [review] = await listBrainSourceRemovalReviews(actor, { workspaceId: workspace.id, sourceIds: [removed.id] });
@@ -614,9 +730,9 @@ describe("Brain source removal review", () => {
       artifact: { kind: "BrainSource", id: copied.id }, content: fresh, origin: "DERIVED", inputs: [{ kind: "BrainSource", id: remaining.id }] }));
     const request = await deleteSource(actor, { workspaceId: workspace.id, sourceId: removed.id });
     if (request.status !== "pending") throw new Error("Expected candidate review");
-    await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "RUNNING" } });
+    await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "RUNNING", lockedAt: new Date(), startedAt: new Date(), attempts: 1, lockedBy: "fixture-worker" } });
     const generate = vi.fn(async (_article: { id: string; title: string }, _sources: Array<{ id: string; title: string | null; content: string }>) => "Clean output");
-    await generateBrainSourceRemovalCandidate({ workspaceId: workspace.id, jobId: request.jobId, expectedAttempt: 0, expectedOwner: null, generate });
+    await generateBrainSourceRemovalCandidate({ workspaceId: workspace.id, jobId: request.jobId, expectedAttempt: 1, expectedOwner: "fixture-worker", generate });
     expect(generate.mock.calls[0]?.[1]).toEqual(expect.arrayContaining([expect.objectContaining({ id: copied.id, content: "Clean retained facts" })]));
     expect(JSON.stringify(generate.mock.calls)).not.toContain("Old removed copy");
   });
@@ -629,9 +745,9 @@ describe("Brain source removal review", () => {
     const request = await deleteSource(actor, { workspaceId: workspace.id, sourceId: removed.id });
     if (request.status !== "pending") throw new Error("Expected candidate review");
     await prisma.brainSource.update({ where: { id: removed.id }, data: { archivedAt: new Date() } });
-    await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "RUNNING" } });
+    await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "RUNNING", lockedAt: new Date(), startedAt: new Date(), attempts: 1, lockedBy: "fixture-worker" } });
     await expect(generateBrainSourceRemovalCandidate({ workspaceId: workspace.id, jobId: request.jobId,
-      expectedAttempt: 0, expectedOwner: null, generate: async () => {
+      expectedAttempt: 1, expectedOwner: "fixture-worker", generate: async () => {
         await prisma.brainSource.update({ where: { id: removed.id }, data: { archivedAt: null } });
         return "Never commit";
       } })).resolves.toEqual({ phase: "STALE" });

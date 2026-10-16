@@ -127,6 +127,18 @@ it("lists an exact original prompt beyond 5100 newer denied legacy turns", async
   expect(result.total).toBe(1);
   expect(result.items[0].turns).toEqual([expect.objectContaining({ id: f.withheld.id,
     userMessage: f.withheld.userMessage, assistantMessage: "", assistantContentWithheld: true })]);
-  expect(find).toHaveBeenCalledTimes(52);
-  expect(find.mock.calls.every(([args]) => args?.take === 100 && !args.cursor)).toBe(true);
+  const discovery = find.mock.calls.filter(([args]) => args?.where?.conversationId === f.session.id);
+  const proofLoads = find.mock.calls.filter(([args]) => args?.where?.conversationId !== f.session.id);
+  expect(discovery).toHaveLength(52);
+  expect(discovery.every(([args]) => args?.take === 100 && !args.cursor
+    && JSON.stringify(args.orderBy) === JSON.stringify([{ sequenceNumber: "desc" }, { id: "desc" }]))).toBe(true);
+  // Batching observes the two readable candidates before/after admission; these
+  // scoped ID loads are not additional discovery pages or admitted legacy rows.
+  expect(proofLoads).toHaveLength(2);
+  for (const [args] of proofLoads) {
+    expect(args).toEqual({ where: { id: { in: expect.arrayContaining([f.second.id, f.first.id]) },
+      conversation: { workspaceId: f.workspace.id } } });
+    const ids = args?.where?.id;
+    expect(ids && typeof ids === "object" ? ids.in : []).toHaveLength(2);
+  }
 }, 120_000);

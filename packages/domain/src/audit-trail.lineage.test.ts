@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const { db, authorize } = vi.hoisted(() => ({ db: {
   auditLog: { findMany: vi.fn(), create: vi.fn() }, event: { findMany: vi.fn() }, workflowJob: { findFirst: vi.fn(), findMany: vi.fn() },
   contextGraphProposedDiff: { findFirst: vi.fn() },
-  action: { findFirst: vi.fn(), findMany: vi.fn() }, brainArticle: { findFirst: vi.fn() },
+  action: { findFirst: vi.fn(), findMany: vi.fn() }, brainArticle: { findFirst: vi.fn() }, buildArtifact: { findFirst: vi.fn() },
   member: { findFirst: vi.fn(), findMany: vi.fn() }, user: { findFirst: vi.fn() },
   modelUsage: { findMany: vi.fn(), findFirst: vi.fn() }, agentRun: { findFirst: vi.fn() }, workspace: { findFirst: vi.fn() },
   artifactInputLineage: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn() }, $executeRaw: vi.fn(), $queryRaw: vi.fn(), $transaction: vi.fn(),
@@ -273,5 +273,29 @@ describe("audit and timeline source admission", () => {
     await expect(getEntityTimeline(other, "ws-1", "Action", "private-target")).rejects.toThrow("membership revoked");
     expect(db.auditLog.findMany).not.toHaveBeenCalled();
     expect(db.event.findMany).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("build artifact audit lifecycle", () => {
+  it.each(["build_artifact.created", "build_artifact.updated"] as const)("retains %s only for readable original targets", async action => {
+    const owner = { kind: "user", user: { id: "build-owner" } } as any;
+    const other = { kind: "user", user: { id: "other-member" } } as any;
+    authorize.mockImplementation(async ({ actor, workspaceId }) => { if (workspaceId !== "ws-1") throw new Error("workspace denied"); return { id: `member-${actor.user.id}`, role: "CONTRIBUTOR" }; });
+    const artifact = { id: "private-build", workspaceId: "ws-1", createdByUserId: owner.user.id, brainSourceId: null, repositoryOwner: "synthetic", repositoryName: "private-repository", title: "Private build", summaryMd: "Private details", status: "OPEN", classification: "INTERNAL", visibility: "PRIVATE", createdAt: date, updatedAt: date };
+    db.buildArtifact.findFirst.mockImplementation(async ({ where }) => where.id === artifact.id && where.workspaceId === artifact.workspaceId ? artifact : null);
+    await recordArtifactInputLineage({ tx: db as any, actor: owner, workspaceId: "ws-1", artifact: { kind: "BuildArtifact", id: artifact.id }, content: artifact, origin: "HUMAN_ORIGINAL", inputs: [] });
+    expect(await readableArtifactIds(owner, "ws-1", "BuildArtifact", [artifact])).toEqual(new Set([artifact.id]));
+    expect(await readableArtifactIds(other, "ws-1", "BuildArtifact", [artifact])).toEqual(new Set());
+    const audit = { id: `audit-${action}`, workspaceId: "ws-1", actorUserId: owner.user.id, action, entityType: "BuildArtifact", entityId: artifact.id, createdAt: date, meta: { private: artifact.summaryMd } };
+    db.auditLog.findMany.mockResolvedValue([audit, { ...audit, id: "unknown-operation", action: "build_artifact.private_free_text" }]);
+    db.event.findMany.mockResolvedValue([]);
+    expect(await listAuditLogs(owner, "ws-1")).toEqual([{ ...audit, meta: null }]);
+    expect(await getEntityTimeline(owner, "ws-1", "BuildArtifact", artifact.id)).toEqual({ auditLogs: [{ ...audit, meta: null }], relatedEvents: [] });
+    expect(await listAuditLogs(other, "ws-1")).toEqual([]);
+    expect(await getEntityTimeline(other, "ws-1", "BuildArtifact", artifact.id)).toEqual({ auditLogs: [], relatedEvents: [] });
+    artifact.summaryMd = "Changed unproven content";
+    expect(await listAuditLogs(owner, "ws-1")).toEqual([]);
+    expect(await getEntityTimeline(owner, "ws-1", "BuildArtifact", artifact.id)).toEqual({ auditLogs: [], relatedEvents: [] });
   });
 });

@@ -223,7 +223,7 @@ describe("confirmed Brain article removal", () => {
     await expect(previewBrainArticleRemoval(owner, { workspaceId: workspace.id, slug: article.slug })).rejects.toMatchObject({ code: "NOT_FOUND" });
     const request = await requestBrainArticleVariant(owner, { workspaceId: workspace.id, articleId: article.id });
     if (request.status !== "pending") throw new Error("Expected a fresh permitted-source variant recipe");
-    await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "RUNNING", attempts: 1, lockedBy: "variant-fixture-worker" } });
+    await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "RUNNING", lockedAt: new Date(), startedAt: new Date(), attempts: 1, lockedBy: "variant-fixture-worker" } });
     await expect(generateBrainArticleVariant({ workspaceId: workspace.id, jobId: request.jobId,
       expectedAttempt: 1, expectedOwner: "variant-fixture-worker", generate: async inputs => {
         expect(JSON.stringify(inputs)).not.toContain("DENIED old composite body");
@@ -303,7 +303,7 @@ describe("confirmed Brain article removal", () => {
     expect(retried.status).toBe("pending");
     if (retried.status !== "pending") throw new Error("Expected a retried source job.");
     expect(retried.jobId).not.toBe(requested.pendingJobId);
-    await prisma.workflowJob.update({ where: { id: retried.jobId }, data: { status: "RUNNING", attempts: 1, lockedBy: "fixture-worker" } });
+    await prisma.workflowJob.update({ where: { id: retried.jobId }, data: { status: "RUNNING", lockedAt: new Date(), startedAt: new Date(), attempts: 1, lockedBy: "fixture-worker" } });
     let input: string[] = [];
     await expect(generateBrainSourceRemovalCandidate({ workspaceId: workspace.id, jobId: retried.jobId,
       expectedAttempt: 1, expectedOwner: "fixture-worker",
@@ -327,7 +327,7 @@ describe("confirmed Brain article removal", () => {
     const fresh = await requestBrainSourceRemoval(admin, { workspaceId: workspace.id, sourceId: removed.id, archiveLinkedDocument: true });
     if (fresh.status !== "pending") throw new Error("Expected a fresh source recipe after restoration");
     expect(fresh.jobId).not.toBe(retried.jobId);
-    await prisma.workflowJob.update({ where: { id: fresh.jobId }, data: { status: "RUNNING", attempts: 1, lockedBy: "fresh-fixture-worker" } });
+    await prisma.workflowJob.update({ where: { id: fresh.jobId }, data: { status: "RUNNING", lockedAt: new Date(), startedAt: new Date(), attempts: 1, lockedBy: "fresh-fixture-worker" } });
     await expect(generateBrainSourceRemovalCandidate({ workspaceId: workspace.id, jobId: fresh.jobId,
       expectedAttempt: 1, expectedOwner: "fresh-fixture-worker", generate: async (_article, sources) => {
         expect(sources.map(source => source.content)).toEqual(["Remaining verified facts"]);
@@ -451,7 +451,7 @@ describe("confirmed Brain article removal", () => {
     expect(preview.sources.flatMap((item) => item.sharedArticles).map((item) => item.action)).toEqual(["archive", "archive"]);
     const result = await confirmBrainArticleRemoval(admin, confirmParams(workspace.id, target.slug, preview.token, "remove_sources"));
     expect(result.pendingJobId).toBeTruthy();
-    await prisma.workflowJob.update({ where: { id: result.pendingJobId! }, data: { status: "RUNNING", attempts: 1, lockedBy: "fixture-worker" } });
+    await prisma.workflowJob.update({ where: { id: result.pendingJobId! }, data: { status: "RUNNING", lockedAt: new Date(), startedAt: new Date(), attempts: 1, lockedBy: "fixture-worker" } });
     await generateBrainSourceRemovalCandidate({ workspaceId: workspace.id, jobId: result.pendingJobId!,
       expectedAttempt: 1, expectedOwner: "fixture-worker", generate: async () => "Intermediate verified body",
     });
@@ -463,7 +463,7 @@ describe("confirmed Brain article removal", () => {
     const retried = await retryBrainSourceRemoval(admin, { workspaceId: workspace.id, jobId: result.pendingJobId! });
     expect(retried.status).toBe("pending");
     if (retried.status !== "pending") throw new Error("Expected a retried source job.");
-    await prisma.workflowJob.update({ where: { id: retried.jobId }, data: { status: "RUNNING", attempts: 1, lockedBy: "fixture-worker" } });
+    await prisma.workflowJob.update({ where: { id: retried.jobId }, data: { status: "RUNNING", lockedAt: new Date(), startedAt: new Date(), attempts: 1, lockedBy: "fixture-worker" } });
     await generateBrainSourceRemovalCandidate({ workspaceId: workspace.id, jobId: retried.jobId,
       expectedAttempt: 1, expectedOwner: "fixture-worker", generate: async () => "Reviewed intermediate body",
     });

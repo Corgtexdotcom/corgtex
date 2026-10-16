@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
@@ -28,9 +29,10 @@ export class DigestReadRelease {
     this.add(captured.roots);
     return captured;
   }
-  finish<T>(value: T) {
+  finish<T>(value: T, validate?: (tx: Prisma.TransactionClient) => Promise<void>) {
     return withArtifactCountReleaseSnapshot(this.actor, this.workspaceId, [...this.roots.values()], async () => {}, async tx => {
       await requireWorkspaceMembership({actor: this.actor, workspaceId: this.workspaceId, tx});
+      await validate?.(tx);
       return value;
     }, this.heads);
   }
