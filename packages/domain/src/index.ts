@@ -140,8 +140,6 @@ export * from "./admin";
 export * from "./railway-client";
 export * from "./member-briefing";
 export * from "./goals";
-export * from "./admin";
-export * from "./meeting-intelligence";
 export * from "./agent-identity";
 export * from "./deliberation";
 export * from "./user-profile";
