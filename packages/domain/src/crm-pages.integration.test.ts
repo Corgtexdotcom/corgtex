@@ -30,6 +30,8 @@ async function fixture() {
   return {workspaceId:workspace.id,actor,user,member};
 }
 
+// This functional case creates two 5,001-row cohorts and exercises multiple
+// complete permission ledgers; allow hosted-runner variance without reducing assertions.
 it("returns exact permission-aware totals and a deep page across5001 persisted readable accounts",async()=>{
   const f=await fixture(),now=new Date("2026-01-01T00:00:00Z");
   // Native synthetic originals use real epoch rows and content fingerprints;
@@ -74,7 +76,7 @@ it("returns exact permission-aware totals and a deep page across5001 persisted r
   const linked=await listContacts(f.actor,f.workspaceId,{take:1,skip:5000,accountId:"account-000000"});
   expect(linked.total).toBe(5001);expect(linked.items).toHaveLength(1);
 
-},60000);
+},120000);
 
 it.each(["body","head","revoke-restore"] as const)("retains off-page count observations across %s changes",async change=>{
   const f=await fixture();

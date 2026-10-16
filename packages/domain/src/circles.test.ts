@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { AppError } from "./errors";
 import type { AppActor } from "@corgtex/shared";
 import { deleteCircle, listCircles, listCircleTree, suggestMaturityUpgrade, updateCircle } from "./circles";
 import { prisma } from "@corgtex/shared";
-import { readableArtifactIds } from "./source-lineage";
+import { captureArtifactInputProof, readableArtifactIds } from "./source-lineage";
 
 vi.mock("./source-lineage", async () => ({
   sealArtifactInputActor: (await import("./artifact-input-actor")).sealArtifactInputActor,
@@ -12,6 +13,9 @@ vi.mock("./source-lineage", async () => ({
   advanceArchivedArtifactEnvelopeLineage: vi.fn().mockResolvedValue(false),
   captureArtifactInputProof: vi.fn().mockResolvedValue([]),
   readableArtifactIds: vi.fn(),
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({ value: await read(), heads: new Map() }),
+  withArtifactCountReleaseSnapshot: async (_actor: unknown, _workspaceId: string, _roots: unknown,
+    before: () => Promise<void>, release: (tx: typeof prisma) => Promise<unknown>) => { await before(); return release(prisma); },
 }));
 
 vi.mock("./auth", async (importOriginal) => {
@@ -90,6 +94,15 @@ const actor: AppActor = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Preserve the existing fixture denials through the real assignment release.
+  vi.mocked(captureArtifactInputProof).mockImplementation(async (actor, workspaceId, inputs) => {
+    for (const input of inputs) {
+      if (input.kind === "User") continue;
+      const visible = await readableArtifactIds(actor, workspaceId, input.kind, [input.snapshot as { id: string }]);
+      if (!visible.has(input.id)) throw new AppError(409, "SOURCE_RESTRICTED", "Fixture source denied.");
+    }
+    return [];
+  });
   vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map((row) => row.id)));
   vi.mocked(prisma.$transaction).mockImplementation(async (callback: (tx: typeof prisma) => Promise<unknown>) => callback(prisma));
   vi.mocked(prisma.auditLog.create).mockResolvedValue({} as any);

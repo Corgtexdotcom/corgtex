@@ -510,15 +510,26 @@ const TOOL_HANDLERS = guardConversationToolHandlers<ConversationContext>(Object.
   }
 ])) as typeof RAW_TOOL_HANDLERS);
 
+export function conversationAttemptRequest(ctx: ConversationContext, request: Parameters<typeof defaultModelGateway.chat>[0]) {
+  const collector = conversationCollector(ctx);
+  const authorizeAttempt = request.authorizeAttempt;
+  return { ...request, authorizeAttempt: async (context: Parameters<NonNullable<typeof request.authorizeAttempt>>[0]) => {
+    // Credential resolution and retry waits occur inside the gateway. Recheck
+    // the original collector after any existing asynchronous attempt guard.
+    await authorizeAttempt?.(context);
+    await collector.assertReadable();
+  } };
+}
+
 async function conversationChat(ctx: ConversationContext, request: Parameters<typeof defaultModelGateway.chat>[0]) {
   await conversationCollector(ctx).assertReadable();
-  const response = await defaultModelGateway.chat(request);
+  const response = await defaultModelGateway.chat(conversationAttemptRequest(ctx, request));
   await conversationCollector(ctx).assertReadable();
   return response;
 }
 async function* conversationChatStream(ctx: ConversationContext, request: Parameters<typeof defaultModelGateway.chatStream>[0]) {
   await conversationCollector(ctx).assertReadable();
-  const iterator = defaultModelGateway.chatStream(request);
+  const iterator = defaultModelGateway.chatStream(conversationAttemptRequest(ctx, request));
   try {
     while (true) {
       const result = await iterator.next();
@@ -530,7 +541,7 @@ async function* conversationChatStream(ctx: ConversationContext, request: Parame
 }
 async function* conversationChatEventStream(ctx: ConversationContext, request: Parameters<typeof defaultModelGateway.chatEventStream>[0]) {
   await conversationCollector(ctx).assertReadable();
-  const iterator = defaultModelGateway.chatEventStream(request);
+  const iterator = defaultModelGateway.chatEventStream(conversationAttemptRequest(ctx, request));
   try {
     while (true) {
       const result = await iterator.next();

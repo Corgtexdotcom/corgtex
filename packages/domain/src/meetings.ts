@@ -901,7 +901,8 @@ export async function getMeeting(actor: AppActor, workspaceId: string, meetingId
   const users = [...proposals.map((row) => row.author), ...tensions.map((row) => row.author),
     ...raisedActions.flatMap((row) => [row.author, row.assigneeMember?.user])].filter((row): row is NonNullable<typeof row> => Boolean(row));
   const userIds = new Set((await captureMeetingReaderRows(actor, workspaceId, "User", users, release)).map(row => row.id));
-  const memberIds = new Set((await captureMeetingReaderRows(actor, workspaceId, "Member", raisedActions.flatMap(row => row.assigneeMember ? [row.assigneeMember] : []), release)).map(row => row.id));
+  const memberIds = new Set((await captureMeetingReaderRows(actor, workspaceId, "Member", raisedActions.flatMap(row => row.assigneeMember
+    ? [{ ...row.assigneeMember, user: meetingProfileLabel(row.assigneeMember.user) }] : []), release)).map(row => row.id));
   const redactAuthor = <T extends { author: { id: string; email: string; displayName: string | null } | null }>(row: T) => ({ ...row,
     author: row.author && userIds.has(row.author.id) ? meetingProfileLabel(row.author) : null });
   for (const row of raisedActions) if (row.assigneeMember && (!memberIds.has(row.assigneeMember.id) || !userIds.has(row.assigneeMember.user.id))) row.assigneeMember = null;

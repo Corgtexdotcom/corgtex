@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { installSourcePermissionEpochFixture } from "../../domain/src/source-permission-epochs.test-fixture";
-import type { AppActor } from "@corgtex/shared";
+import { env, type AppActor } from "@corgtex/shared";
+import type { ModelAttemptGuard } from "@corgtex/models";
 import type { LineageKind, LineageRoot } from "../../domain/src/source-lineage";
 
 const fixture = vi.hoisted(() => {
@@ -129,7 +130,8 @@ vi.mock("@corgtex/domain", async () => ({
 import { AppError } from "../../domain/src/errors";
 import { mcpCredentialVersion, mcpScopesHash, runWithMcpOrigin, assertMcpOriginActive, getMcpOrigin, captureMcpOAuthGrantEpoch } from "../../shared/src/mcp-context";
 import { captureArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, recordArtifactInputLineage } from "../../domain/src/source-lineage";
-import { processConversationTurn, processConversationTurnStream } from "./conversation";
+import { conversationAttemptRequest, processConversationTurn, processConversationTurnStream } from "./conversation";
+import { createConversationLineageCollector } from "./conversation-lineage";
 
 const workspaceId = "synthetic-ws-a";
 const alice: AppActor = { kind: "user", user: { id: "synthetic-alice", email: "alice@example.test", displayName: null } };
@@ -186,6 +188,7 @@ async function pendingCompletion() {
 }
 
 beforeEach(async () => {
+  env.MODEL_PROVIDER = "fake";
   vi.clearAllMocks(); fixture.tables.clear(); fixture.memberships.clear(); fixture.cache.clear(); fixture.updateHook.current = null; fixture.commitHook.current = null; fixture.transactionErrors.length = 0;
   fixture.memberships.set(`${workspaceId}:synthetic-alice`, { id: "member-alice", role: "CONTRIBUTOR" });
   fixture.memberships.set(`${workspaceId}:synthetic-bob`, { id: "member-bob", role: "CONTRIBUTOR" });
@@ -222,6 +225,74 @@ beforeEach(async () => {
 });
 
 describe("conversation orchestration using actual provenance and permissions", () => {
+  it("forwards the exact gateway attempt context before checking the original collector", async () => {
+    const source = await mixedKnowledge();
+    const collector = createConversationLineageCollector(alice, workspaceId);
+    await collector.capture("Synthetic private contributor", [{ kind: "BrainArticle", id: source.id, snapshot: source }]);
+    const attemptContext = Object.freeze({ signal: new AbortController().signal });
+    let revoke = false;
+    const originalGuard = vi.fn<ModelAttemptGuard>(async context => {
+      expect(context).toBe(attemptContext);
+      await Promise.resolve();
+      if (revoke) source.ownerMemberId = "member-bob";
+    });
+    const request = conversationAttemptRequest({ ...base, collector }, {
+      workspaceId, model: "synthetic", taskType: "AGENT", messages: [], authorizeAttempt: originalGuard,
+    });
+    await expect(request.authorizeAttempt(attemptContext)).resolves.toBeUndefined();
+    revoke = true;
+    await expect(request.authorizeAttempt(attemptContext)).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(originalGuard).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["chat", "credentials"], ["chat", "retry"],
+    ["eventStream", "credentials"], ["eventStream", "retry"],
+    ["chatStream", "credentials"], ["chatStream", "retry"],
+    ["chat", "permitted"], ["eventStream", "permitted"], ["chatStream", "permitted"],
+  ] as const)("fences private provider sends after %s %s wait", async (method, phase) => {
+    const source = await mixedKnowledge();
+    let sends = 0;
+    const send = async (request: { authorizeAttempt?: ModelAttemptGuard }) => {
+      const attemptContext = { signal: new AbortController().signal };
+      // The adapter has already received the private prompt. Credential lookup
+      // and provider backoff happen inside it, after the outer preflight.
+      if (phase === "credentials") source.ownerMemberId = "member-bob";
+      await request.authorizeAttempt?.(attemptContext);
+      sends++;
+      if (phase !== "credentials") {
+        if (phase === "retry") source.ownerMemberId = "member-bob";
+        await request.authorizeAttempt?.(attemptContext);
+        sends++;
+      }
+    };
+    if (method === "chat") {
+      fixture.chat.mockImplementation(async request => { await send(request); return reply(); });
+    } else if (method === "eventStream") {
+      fixture.eventStream.mockImplementation(async function* (request) {
+        await send(request); yield { type: "content_delta", content: "Synthetic streamed answer" };
+        return reply("Synthetic streamed answer");
+      });
+    } else {
+      env.MODEL_PROVIDER = "openai";
+      const route = { id: "attempt-route", type: "function", function: { name: "route_conversation_tools",
+        arguments: JSON.stringify({ calls: [{ name: "query_tensions", arguments: {} }] }) } };
+      fixture.eventStream.mockImplementation(async function* () {
+        yield { type: "tool_call_delta", index: 0, idDelta: route.id, nameDelta: route.function.name,
+          argumentsDelta: route.function.arguments };
+        return reply("", [route]);
+      });
+      fixture.chatStream.mockImplementation(async function* (request) {
+        await send(request); yield "Synthetic follow-up"; return reply("Synthetic follow-up");
+      });
+    }
+    const result = method === "chat" ? processConversationTurn(base) : collect(processConversationTurnStream(base));
+    if (phase === "permitted") await expect(result).resolves.toBeDefined();
+    else await expect(result).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(sends).toBe(phase === "credentials" ? 0 : phase === "retry" ? 1 : 2);
+    expect(fixture[method]).toHaveBeenCalledTimes(1);
+  });
+
   it("captures uncited private ranking/context inputs, filters other users and isolates workspaces", async () => {
     await mixedKnowledge();
     fixture.rerank.mockImplementation(async ({ documents }: any) => ({ results: [{ index: documents.findIndex((value: string) => value.includes("Synthetic public policy fact")), score: 1 }], usage: {} }));
