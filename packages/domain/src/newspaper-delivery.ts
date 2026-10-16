@@ -4,7 +4,7 @@ import type { NewspaperCadence, NewspaperDelivery, NewspaperDeliveryKind, Newspa
 import { createHmac } from "node:crypto";
 import { AppError, invariant } from "./errors";
 import { requireWorkspaceMembership } from "./auth";
-import { invalidateArtifactInputLineage, readableArtifactIds, recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
+import { invalidateArtifactInputLineage, sealArtifactInputActor, recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
 import { DigestReadRelease, loadReadableDigestQuery } from "./digest-lineage";
 import {
   getNextNewspaperRunISO,
@@ -278,49 +278,40 @@ export async function recordNewspaperDelivery(params: {
 }
 
 export async function recordNewspaperLinkClick(actor: AppActor, token: string) {
+  sealArtifactInputActor(actor);
   const tokenHash = sha256(token.trim());
-  const link = await prisma.newspaperTrackedLink.findUnique({
-    where: { tokenHash },
-  });
-
-  if (!link) {
-    throw new AppError(404, "NOT_FOUND", "Newspaper link not found.");
-  }
-
+  const loadedLink = await prisma.newspaperTrackedLink.findUnique({ where: { tokenHash } });
+  const link = loadedLink ? structuredClone(loadedLink) : null;
+  const missing = () => new AppError(404, "NOT_FOUND", "Newspaper link not found.");
+  if (!link) throw missing();
   try {
     await requireWorkspaceMembership({ actor, workspaceId: link.workspaceId });
-    const readableRuns = await readableNewspaperRunKeys(actor, link.workspaceId, [link.runKey]);
-    if (!readableRuns.has(link.runKey)) throw new Error("Unreadable edition");
-    if (!(await readableArtifactIds(actor, link.workspaceId, "NewspaperTrackedLink", [link])).has(link.id)) throw new Error("Unreadable link");
-  } catch {
-    throw new AppError(404, "NOT_FOUND", "Newspaper link not found.");
-  }
-
-  const target = normalizeTrackableTarget(link.targetUrl);
-  if (!target) {
-    throw new AppError(404, "NOT_FOUND", "Newspaper link not found.");
-  }
-
-  const now = new Date();
-  await prisma.newspaperTrackedLink.update({
-    where: { id: link.id },
-    data: {
-      clickCount: { increment: 1 },
-      firstClickedAt: link.firstClickedAt ?? now,
-      lastClickedAt: now,
-    },
-  });
-
-  return { targetUrl: target };
-}
-
-async function readableNewspaperRunKeys(actor: AppActor, workspaceId: string, runKeys: string[]) {
-  if (runKeys.length === 0) return new Set<string>();
-  const editions = await prisma.newspaperEdition.findMany({
-    where: { workspaceId, runKey: { in: [...new Set(runKeys)] } },
-  });
-  const readable = await readableArtifactIds(actor, workspaceId, "NewspaperEdition", editions);
-  return new Set(editions.filter((edition) => readable.has(edition.id)).map((edition) => edition.runKey));
+    const release = new DigestReadRelease(actor, link.workspaceId);
+    const editions = await prisma.newspaperEdition.findMany({ where: { workspaceId: link.workspaceId, runKey: link.runKey } });
+    const admittedEditions = await release.capture("NewspaperEdition", editions);
+    const editionId = admittedEditions.records[0]?.id;
+    if (!editionId) throw missing();
+    const admittedLink = await release.capture("NewspaperTrackedLink", [link]);
+    if (admittedLink.records.length !== 1) throw missing();
+    const target = normalizeTrackableTarget(link.targetUrl);
+    if (!target) throw missing();
+    const validateBinding = async (tx: Prisma.TransactionClient) => {
+      const currentLink = await tx.newspaperTrackedLink.findUnique({ where: { id: link.id },
+        select: { id: true, workspaceId: true, runKey: true } });
+      const currentEdition = await tx.newspaperEdition.findFirst({ where: { id: editionId, workspaceId: link.workspaceId, runKey: link.runKey }, select: { id: true } });
+      if (!currentLink || currentLink.workspaceId !== link.workspaceId || currentLink.runKey !== link.runKey || !currentEdition) throw missing();
+    };
+    await release.finish(undefined, async tx => {
+      await validateBinding(tx);
+      const now = new Date();
+      await tx.newspaperTrackedLink.update({ where: { id: link.id }, data: {
+        clickCount: { increment: 1 }, firstClickedAt: link.firstClickedAt ?? now, lastClickedAt: now,
+      } });
+    });
+    // The mutation can yield after its write. Reuse the original proof in a fresh
+    // release snapshot; a denied redirect may still have aggregate click telemetry.
+    return await release.finish({ targetUrl: target }, validateBinding);
+  } catch { throw missing(); }
 }
 
 export async function listNewspaperDeliverySummaries(actor: AppActor, workspaceId: string, opts?: { take?: number }) {

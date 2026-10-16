@@ -4,8 +4,9 @@ const {
   prismaMock,
   requireWorkspaceMembershipMock,
   readableArtifactIdsMock,
-  trackedLinks,
+  trackedLinks, authorityVersion,
 } = vi.hoisted(() => ({
+  authorityVersion: { value: 0 },
   trackedLinks: [] as any[],
   prismaMock: {
     $transaction: vi.fn(),
@@ -76,6 +77,7 @@ const {
       findMany: vi.fn(),
     },
     newspaperEdition: {
+      findFirst: vi.fn(),
       upsert: vi.fn(),
       findMany: vi.fn(),
     },
@@ -108,18 +110,22 @@ vi.mock("./source-lineage", async () => {
   return {
     // These orchestration fixtures have no epoch vectors; avoid loading the real
     // source module through its newspaper dependency cycle.
+    sealArtifactInputActor: (await import("./artifact-input-actor")).sealArtifactInputActor,
     mergeLineageInputRoot: (previous: {fingerprint: string} | undefined, root: {fingerprint: string}) => {
       if (previous && previous.fingerprint !== root.fingerprint) throw new AppError(409, "SOURCE_CHANGED", "Fixture revision changed.");
       return root;
     },
     captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
-    withArtifactCountReleaseSnapshot: async (_actor: unknown, _ws: string, _roots: unknown, remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => {await remote();return finish(prismaMock);}, readableArtifactIds: readableArtifactIdsMock,
+    withArtifactCountReleaseSnapshot: async (_actor: unknown, _ws: string, roots: Array<{fingerprint:string}>, remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => {
+      if (roots.some(root => root.fingerprint !== `synthetic-proof-${authorityVersion.value}`)) throw new AppError(409, "SOURCE_CHANGED", "Original epoch changed");
+      await remote(); return finish(prismaMock);
+    }, readableArtifactIds: readableArtifactIdsMock,
     captureReadableNewspaperDeliveryInputs: async () => null,
     captureArtifactInputProof: vi.fn(async (actor, workspaceId, inputs) => {
       const input = inputs[0];
       const readable = await readableArtifactIdsMock(actor, workspaceId, input.kind, [input.snapshot]);
       if (!readable.has(input.id)) throw new AppError(409, "UNKNOWN_LINEAGE", "Unknown input");
-      return [{ kind: input.kind, id: input.id, fingerprint: "synthetic-proof" }];
+      return [{ kind: input.kind, id: input.id, fingerprint: `synthetic-proof-${authorityVersion.value}` }];
     }),
     recordArtifactInputLineage: vi.fn(), invalidateArtifactInputLineage: vi.fn(),
   };
@@ -127,7 +133,7 @@ vi.mock("./source-lineage", async () => {
 
 describe("newspaper delivery", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.clearAllMocks(); authorityVersion.value = 0;
     prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock));
     readableArtifactIdsMock.mockImplementation(async (_actor: unknown, _workspaceId: string, _kind: string,
       rows: Array<{ id: string }>) => new Set(rows.map((row) => row.id)));
@@ -153,7 +159,7 @@ describe("newspaper delivery", () => {
       return link;
     });
     prismaMock.newspaperTrackedLink.findUnique.mockImplementation(async ({ where }: any) => (
-      trackedLinks.find((link) => link.tokenHash === where.tokenHash) ?? null
+      trackedLinks.find((link) => where.id ? link.id === where.id : link.tokenHash === where.tokenHash) ?? null
     ));
     prismaMock.newspaperTrackedLink.update.mockImplementation(async ({ where, data }: any) => {
       const link = trackedLinks.find((candidate) => candidate.id === where.id);
@@ -177,6 +183,10 @@ describe("newspaper delivery", () => {
       { id: "edition-2", runKey: "run-2", workflowJobId: "job-2" },
       { id: "edition-3", runKey: "run-3", workflowJobId: "job-3" },
     ]);
+    prismaMock.newspaperEdition.findFirst.mockImplementation(async ({where}) => {
+      const rows = await prismaMock.newspaperEdition.findMany({where});
+      return rows.find((row: any) => row.id === where.id && row.runKey === where.runKey) ?? null;
+    });
     prismaMock.workspaceAgentConfig.findUnique.mockResolvedValue(null);
     prismaMock.workflowJob.findMany.mockResolvedValue([]);
     prismaMock.member.findMany.mockResolvedValue([]);
@@ -239,6 +249,23 @@ describe("newspaper delivery", () => {
     expect(trackedLinks[0].clickCount).toBe(1);
     expect(trackedLinks[0].firstClickedAt).toBeInstanceOf(Date);
     expect(trackedLinks[0].lastClickedAt).toBeInstanceOf(Date);
+  });
+
+  it.each(["source", "source-revoke-restore", "caller", "edition-run"])("withholds tracked URL after %s changes during click update", async mode => {
+    const { instrumentNewspaperHtmlLinks, recordNewspaperLinkClick } = await import("./newspaper-delivery");
+    const html = await instrumentNewspaperHtmlLinks({ workspaceId: "ws-1", runKey: "run-1", html: '<a href="https://example.com/private">Private</a>' });
+    const token = html.match(/\/api\/newspaper\/click\/([^"]+)/)?.[1] ?? "";
+    const update = prismaMock.newspaperTrackedLink.update.getMockImplementation()!;
+    prismaMock.newspaperTrackedLink.update.mockImplementationOnce(async args => {
+      const result = await update(args);
+      if (mode.startsWith("source")) authorityVersion.value += mode.endsWith("restore") ? 2 : 1;
+      if (mode === "caller") requireWorkspaceMembershipMock.mockRejectedValue(new Error("member revoked"));
+      if (mode === "edition-run") prismaMock.newspaperEdition.findFirst.mockResolvedValue(null);
+      return result;
+    });
+    await expect(recordNewspaperLinkClick({ kind: "user", user: { id: "u-1" } } as any, token))
+      .rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+    expect(trackedLinks[0].clickCount).toBe(1); // aggregate telemetry may survive a denied redirect
   });
 
   it("stops tracked redirects after the edition becomes unreadable", async () => {

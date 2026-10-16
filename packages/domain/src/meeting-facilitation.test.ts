@@ -1089,11 +1089,11 @@ describe("meeting facilitation", () => {
     expect(updateSlackMessageMock).toHaveBeenCalledWith("slack-1", {
       channel: "C123",
       ts: "1710000000.000100",
-    }, expect.any(Array));
+    }, expect.any(Array), undefined, expect.objectContaining({ authorizeAttempt: expect.any(Function), signal: expect.any(AbortSignal) }));
     expect(sendSlackMessageMock).toHaveBeenCalledWith("slack-1", {
       channel: "C123",
       threadTs: "1710000000.000100",
-    }, expect.any(Array));
+    }, expect.any(Array), undefined, expect.objectContaining({ authorizeAttempt: expect.any(Function), signal: expect.any(AbortSignal) }));
     expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         action: "meeting.agenda.edited",
@@ -1164,7 +1164,7 @@ describe("meeting facilitation", () => {
     expect(sendSlackMessageMock).toHaveBeenCalledWith("slack-1", {
       channel: "C123",
       threadTs: "1710000000.000100",
-    }, expect.any(Array));
+    }, expect.any(Array), undefined, expect.objectContaining({ authorizeAttempt: expect.any(Function), signal: expect.any(AbortSignal) }));
   });
   function provenAgendaMeeting() {
     return { id: "meeting-1", workspaceId: "workspace-1", status: "SCHEDULED", title: "Planning",
@@ -1190,6 +1190,45 @@ describe("meeting facilitation", () => {
       : api.runMeetingAgendaThreadEdit({ workspaceId: "workspace-1", meetingId: "meeting-1", actorUserId: "user-1",
         installationId: "slack-1", channelId: "C123", threadTs: "1710000000.000100", messageTs: "1710000001.000100", messageText: "make it better" });
   }
+  const slackCases = (["update", "second", "clarify"] as const).flatMap(site =>
+    (["source", "installation", "policy", "none"] as const).map(change => ({ site, change })));
+  it.each(slackCases)("guards Slack $site send after credential/previous-send $change change", async ({ site, change }) => {
+    setupAttemptSite("edit"); let sends = 0;
+    defaultModelGatewayMock.extract.mockResolvedValue({ output: site === "clarify"
+      ? { action: "clarify", clarification: "Which item?" }
+      : { action: "update", changeSummary: "Changed plan", agenda: { title: "Planning", sections: [{ title: "Discussion", items: [{ text: "New plan" }] }] } } });
+    const mutate = () => {
+      if (change === "source") receiptMocks.readable.mockResolvedValue(false);
+      if (change === "installation") prismaMock.communicationInstallation.findFirst.mockResolvedValue(null);
+      if (change === "policy") validateSlackPostTargetMock.mockResolvedValue({ ok: false });
+    };
+    updateSlackMessageMock.mockImplementation(async (_id, _target, _blocks, _text, controls) => {
+      if (site === "update") mutate();
+      await controls?.authorizeAttempt({ signal: controls.signal }); sends++;
+      if (site === "second") mutate();
+      return { ok: true };
+    });
+    sendSlackMessageMock.mockImplementation(async (_id, _target, _blocks, _token, controls) => {
+      if (site === "clarify") mutate();
+      await controls?.authorizeAttempt({ signal: controls.signal }); sends++;
+      return { ok: true, ts: "2" };
+    });
+    const result = await runAttemptSite("edit").catch(error => error);
+    expect(sends).toBe(change === "none" ? (site === "clarify" ? 1 : 2) : (site === "second" ? 1 : 0));
+    if (change === "none") expect(result).not.toBeInstanceOf(Error);
+    else expect(result).toBeInstanceOf(Error);
+  });
+  it("keeps a swallowed Slack guard failure fatal after the source restores", async () => {
+    setupAttemptSite("edit"); defaultModelGatewayMock.extract.mockResolvedValue({ output: { action: "clarify", clarification: "Which?" } });
+    let denied = false;
+    sendSlackMessageMock.mockImplementation(async (_id, _target, _blocks, _token, controls) => {
+      receiptMocks.readable.mockResolvedValue(false);
+      await controls?.authorizeAttempt({ signal: controls.signal }).catch(() => { denied = true; });
+      receiptMocks.readable.mockResolvedValue(true); return { ok: true, ts: "2" };
+    });
+    await expect(runAttemptSite("edit")).rejects.toBeInstanceOf(Error);
+    expect(denied).toBe(true);
+  });
   const attemptCases = (["prepare", "edit"] as const).flatMap(site => (["credentials", "retry"] as const).flatMap(boundary =>
     (site === "edit" ? ["source", "caller", "installation", "policy", "none"] as const : ["source", "caller", "none"] as const)
       .map(change => ({ site, boundary, change }))));

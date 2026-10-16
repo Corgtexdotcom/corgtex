@@ -4,7 +4,8 @@ import { requireWorkspaceMembership } from "./auth";
 import { resolveKnowledgeAccessDomains } from "./brain-access";
 import { invariant } from "./errors";
 import type { BrainArticleDerivationV1 } from "./brain-derivation";
-import { currentArtifactInputRootsBatch, readableArtifactIds } from "./source-lineage";
+import { DigestReadRelease } from "./digest-lineage";
+import { currentArtifactInputRootsBatch, sealArtifactInputActor } from "./source-lineage";
 
 type ImpactClient = Pick<Prisma.TransactionClient, "brainArticle" | "artifactInputLineage" | "$queryRaw">;
 
@@ -94,31 +95,39 @@ export async function listBrainSourceArchiveImpacts(actor: AppActor, params: {
   workspaceId: string;
   sourceIds: string[];
 }) {
+  sealArtifactInputActor(actor);
+  params = structuredClone(params);
+  const release = new DigestReadRelease(actor, params.workspaceId);
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const domains = await resolveKnowledgeAccessDomains(actor, params.workspaceId);
   const sourceIds = [...new Set(params.sourceIds.filter(Boolean))];
   if (sourceIds.length === 0) return [];
   const sources = await prisma.brainSource.findMany({
     where: { id: { in: sourceIds }, workspaceId: params.workspaceId, accessDomain: { in: domains }, archivedAt: null },
-    select: { id: true },
   });
   invariant(sources.length === sourceIds.length, 404, "NOT_FOUND", "Source not found.");
-  const impacts = await findSourceArticleImpacts(prisma, params.workspaceId, sourceIds);
+  const admittedSources = await release.capture("BrainSource", sources);
+  invariant(admittedSources.records.length === sourceIds.length, 404, "NOT_FOUND", "Source not found.");
+  const impacts = await release.observeRead(() => findSourceArticleImpacts(prisma, params.workspaceId, sourceIds));
   const impactedIds = [...new Set([...impacts.values()].flatMap((impact) => impact.articles.map((article) => article.id)))];
   const impactedArticles = await prisma.brainArticle.findMany({ where: {
     workspaceId: params.workspaceId, id: { in: impactedIds }, archivedAt: null,
   } });
-  const readableIds = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", impactedArticles);
-  return sourceIds.map((sourceId) => {
+  const admittedArticles = await release.capture("BrainArticle", impactedArticles);
+  const readableById = new Map(admittedArticles.records.map(row => [row.id, row]));
+  return release.finish(sourceIds.map((sourceId) => {
     const articles = impacts.get(sourceId)?.articles ?? [];
-    const canView = (article: ArticleLink) => readableIds.has(article.id)
+    const canView = (article: ArticleLink) => readableById.has(article.id)
       && (actor.kind === "agent" || membership?.role === "ADMIN"
         || !article.isPrivate || article.ownerMemberId === membership?.id);
     return {
       sourceId,
       blocked: articles.length > 0,
-      visibleArticles: articles.filter(canView).map(({ id, slug, title, kind }) => ({ id, slug, title, kind })),
+      visibleArticles: articles.filter(canView).map(({ id, kind }) => {
+        const row = readableById.get(id)!;
+        return { id, slug: row.slug, title: row.title, kind };
+      }),
       hasHiddenArticles: articles.some((article) => !canView(article)),
     };
-  });
+  }));
 }

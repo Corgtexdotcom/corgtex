@@ -1953,7 +1953,7 @@ export async function getGoalTree(actor: AppActor, workspaceId: string, opts?: {
   const allGoals = await prisma.goal.findMany({
     where: query,
     include: {
-      ownerMember: { include: { user: { select: { displayName: true, email: true } } } },
+      ownerMember: { include: goalReaderMemberInclude },
       keyResults: true,
       circle: true,
     },
@@ -1961,13 +1961,19 @@ export async function getGoalTree(actor: AppActor, workspaceId: string, opts?: {
   });
 
   const goalsById = new Map<string, any>();
-  const visibleIds = await readableArtifactIds(actor, workspaceId, "Goal", allGoals);
-  for (const g of allGoals.filter((goal) => visibleIds.has(goal.id))) {
-    goalsById.set(g.id, { ...g, childGoals: [] });
+  const release = new DigestReadRelease(actor, workspaceId);
+  const admitted = (await release.capture("Goal", allGoals)).records;
+  for (const goal of admitted) {
+    goalsById.set(goal.id, { ...goal,
+      ownerMember: await readableGoalMember(release, goal.ownerMember),
+      keyResults: (await release.capture("KeyResult", goal.keyResults ?? [])).records,
+      circle: goal.circle && (await release.capture("Circle", [goal.circle])).records[0] || null,
+      childGoals: [],
+    });
   }
 
   const rootGoals: any[] = [];
-  for (const g of allGoals.filter((goal) => visibleIds.has(goal.id))) {
+  for (const g of admitted) {
     const mapped = goalsById.get(g.id);
     if (g.parentGoalId && goalsById.has(g.parentGoalId)) {
       goalsById.get(g.parentGoalId).childGoals.push(mapped);
@@ -1976,7 +1982,7 @@ export async function getGoalTree(actor: AppActor, workspaceId: string, opts?: {
     }
   }
 
-  return rootGoals;
+  return release.finish(rootGoals);
 }
 
 export async function getMyGoalSlice(actor: AppActor, memberId: string, workspaceId: string) {

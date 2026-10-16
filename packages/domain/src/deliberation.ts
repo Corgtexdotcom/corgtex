@@ -1,10 +1,11 @@
+import { DigestReadRelease } from "./digest-lineage";
 import type { DeliberationEntry, Prisma } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
 import { prisma } from "@corgtex/shared";
 import { requireWorkspaceMembership, actorUserIdForWorkspace } from "./auth";
 import { invariant } from "./errors";
 import { appendEvents } from "./events";
-import { captureArtifactInputProof, readableArtifactIds, type LineageInput } from "./source-lineage";
+import { captureArtifactInputProof, type LineageInput } from "./source-lineage";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { createNotificationIntent } from "./notifications";
@@ -27,33 +28,44 @@ type LinkedAdviceRequest = {
   process: { subjectType: string; subjectId: string };
   recipients: Array<{ memberId: string }>;
 };
+const userProofSelect = { id: true, email: true, displayName: true, bio: true, avatarUrl: true,
+  linkedinUrl: true, websiteUrl: true } as const;
 const deliberationEntryListInclude = {
-  author: {
-    select: {
-      id: true,
-      displayName: true,
-      email: true,
-    }
-  },
-  targetCircle: {
-    select: {
-      id: true,
-      name: true,
-    }
-  },
-  targetMember: {
-    include: {
-      user: {
-        select: {
-          id: true,
-          displayName: true,
-          email: true,
-        }
-      }
-    }
-  }
+  author: { select: userProofSelect },
+  targetCircle: true,
+  targetMember: { include: { user: { select: userProofSelect } } },
 } as const;
-type ListedDeliberationEntry = Prisma.DeliberationEntryGetPayload<{ include: typeof deliberationEntryListInclude }>;
+type JoinedDeliberationEntry = Prisma.DeliberationEntryGetPayload<{ include: typeof deliberationEntryListInclude }>;
+type UserLabel = Pick<JoinedDeliberationEntry["author"], "id" | "displayName" | "email">;
+type ListedDeliberationEntry = DeliberationEntry & {
+  author: UserLabel | null;
+  targetCircle: { id: string; name: string } | null;
+  targetMember: (Omit<NonNullable<JoinedDeliberationEntry["targetMember"]>, "user"> & { user: UserLabel }) | null;
+};
+const userLabel = (user: UserLabel): UserLabel => ({ id: user.id, displayName: user.displayName, email: user.email });
+
+async function releaseDeliberationEntries(actor: AppActor, workspaceId: string, entries: JoinedDeliberationEntry[]) {
+  const release = new DigestReadRelease(actor, workspaceId);
+  const admitted = (await release.capture("DeliberationEntry", entries)).records;
+  const users = [...new Map(admitted.flatMap(entry => [entry.author, entry.targetMember?.user])
+    .filter((user): user is NonNullable<typeof user> => !!user).map(user => [user.id, user])).values()];
+  const readableUsers = new Set((await release.capture("User", users)).records.map(user => user.id));
+  const members = [...new Map(admitted.flatMap(entry => entry.targetMember?.isActive
+    && readableUsers.has(entry.targetMember.userId) ? [{ ...entry.targetMember, user: userLabel(entry.targetMember.user) }] : [])
+    .map(member => [member.id, member])).values()];
+  const readableMembers = new Set((await release.capture("Member", members)).records.map(member => member.id));
+  const circles = [...new Map(admitted.flatMap(entry => entry.targetCircle && !entry.targetCircle.archivedAt
+    ? [entry.targetCircle] : []).map(circle => [circle.id, circle])).values()];
+  const readableCircles = new Set((await release.capture("Circle", circles)).records.map(circle => circle.id));
+  const result: ListedDeliberationEntry[] = admitted.map(entry => ({ ...entry,
+    author: entry.author && readableUsers.has(entry.author.id) ? userLabel(entry.author) : null,
+    targetMember: entry.targetMember && readableMembers.has(entry.targetMember.id)
+      ? { ...entry.targetMember, user: userLabel(entry.targetMember.user) } : null,
+    targetCircle: entry.targetCircle && readableCircles.has(entry.targetCircle.id)
+      ? { id: entry.targetCircle.id, name: entry.targetCircle.name } : null,
+  }));
+  return release.finish(result);
+}
 type DeliberationEntryRecord = DeliberationEntry;
 
 function validateEntryType(entryType: string) {
@@ -882,8 +894,7 @@ export async function listDeliberationEntries(actor: AppActor, params: {
     include: deliberationEntryListInclude,
     orderBy: { createdAt: "asc" }
   });
-  const readable = await readableArtifactIds(actor, params.workspaceId, "DeliberationEntry", entries);
-  return entries.filter((entry) => readable.has(entry.id));
+  return releaseDeliberationEntries(actor, params.workspaceId, entries);
 }
 
 export async function listDeliberationEntriesForParents(actor: AppActor, params: {
@@ -911,9 +922,8 @@ export async function listDeliberationEntriesForParents(actor: AppActor, params:
     orderBy: { createdAt: "asc" }
   });
 
-  const readable = await readableArtifactIds(actor, params.workspaceId, "DeliberationEntry", entries);
-  for (const entry of entries) {
-    if (!readable.has(entry.id)) continue;
+  const released = await releaseDeliberationEntries(actor, params.workspaceId, entries);
+  for (const entry of released) {
     entriesByParentId.get(entry.parentId)?.push(entry);
   }
 

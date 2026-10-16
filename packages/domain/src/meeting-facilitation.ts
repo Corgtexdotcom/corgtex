@@ -64,6 +64,14 @@ function agendaModelAttempt(actor: AppActor, workspaceId: string, roots: Lineage
   return { authorizeAttempt, signal: controller.signal, assertActive: () => controller.signal.throwIfAborted() };
 }
 
+function agendaSlackAttempt(actor: AppActor, workspaceId: string, installationId: string, channelId: string, roots: LineageRoot[]) {
+  return agendaModelAttempt(actor, workspaceId, roots, async () => {
+    const installation = await activeSlackInstallation(workspaceId);
+    invariant(installation?.id === installationId, 403, "SOURCE_RESTRICTED", "The Slack installation is no longer active.");
+    await requirePublicSlackPublication(workspaceId, installationId, channelId, roots);
+  });
+}
+
 async function saveAgendaWithProof(actor: AppActor, workspaceId: string, meetingId: string,
   agenda: MeetingAgenda, roots: LineageRoot[], expectedMeetingHash?: string) {
   return prisma.$transaction(async (tx) => {
@@ -543,16 +551,17 @@ async function postAgendaForMeeting(params: {
   await requireAgendaProof(actor, params.workspaceId, lineageRoots.filter((root) => root.id !== params.meeting.id
     || (root.kind !== "Meeting" && root.kind !== "MeetingAgenda")));
   const attendeeMentions = await attendeeMentionsForContext(params.installationId, params.workspaceId, context.attendees);
-  await requirePublicSlackPublication(params.workspaceId, params.installationId, params.channelId, [
-    ...agendaRoots, ...lineageRoots.filter((root) => root.id !== params.meeting.id
-      || (root.kind !== "Meeting" && root.kind !== "MeetingAgenda")),
-  ]);
+  const publicationRoots = [...agendaRoots, ...lineageRoots.filter((root) => root.id !== params.meeting.id
+    || (root.kind !== "Meeting" && root.kind !== "MeetingAgenda"))];
+  await requirePublicSlackPublication(params.workspaceId, params.installationId, params.channelId, publicationRoots);
+  const publication = agendaSlackAttempt(actor, params.workspaceId, params.installationId, params.channelId, publicationRoots);
   const response = await sendSlackMessage(params.installationId, { channel: params.channelId }, renderAgendaSlackBlocks({
     meeting: params.meeting,
     agenda,
     attendeeMentions,
     timezone: params.settings.agendaTimezone || "UTC",
-  }));
+  }), undefined, publication);
+  publication.assertActive();
   const messageTs = typeof response.ts === "string" ? response.ts.trim() : "";
   if (!messageTs) {
     throw new AppError(502, "SLACK_AGENDA_POST_MISSING_TS", "Slack accepted the agenda post without returning a message timestamp.");
@@ -872,10 +881,12 @@ export async function runMeetingAgendaThreadEdit(params: {
   const edit = parseAgendaEditOutput(extraction.output, meeting.title || currentAgenda.title);
   if (edit.action !== "update" || !edit.agenda) {
     const clarification = edit.clarification || "I could not identify a concrete agenda edit. Please tell me what to add, remove, reword, or reorder.";
+    const publication = agendaSlackAttempt(actor, params.workspaceId, params.installationId, params.channelId, promptRoots);
     await sendSlackMessage(params.installationId, {
       channel: params.channelId,
       threadTs: params.threadTs,
-    }, [slackSection("Agenda edit", [clarification])]);
+    }, [slackSection("Agenda edit", [clarification])], undefined, publication);
+    publication.assertActive();
     return { edited: false, reason: "clarification_requested" };
   }
 
@@ -900,12 +911,12 @@ export async function runMeetingAgendaThreadEdit(params: {
     } });
   });
 
-  await requireReadableAgenda(actor, params.workspaceId, meeting.id);
+  const publishedAgendaRoots = await requireReadableAgenda(actor, params.workspaceId, meeting.id);
   await requireAgendaProof(actor, params.workspaceId, promptRoots);
-  await requirePublicSlackPublication(params.workspaceId, params.installationId, params.channelId, [
-    ...promptRoots, ...(context.lineageRoots ?? []).filter((root) => root.id !== meeting.id
-      || (root.kind !== "Meeting" && root.kind !== "MeetingAgenda")),
-  ]);
+  const publicationRoots = [...publishedAgendaRoots, ...promptRoots, ...(context.lineageRoots ?? []).filter((root) => root.id !== meeting.id
+    || (root.kind !== "Meeting" && root.kind !== "MeetingAgenda"))];
+  await requirePublicSlackPublication(params.workspaceId, params.installationId, params.channelId, publicationRoots);
+  const publication = agendaSlackAttempt(actor, params.workspaceId, params.installationId, params.channelId, publicationRoots);
   await updateSlackMessage(params.installationId, {
     channel: params.channelId,
     ts: params.threadTs,
@@ -914,11 +925,13 @@ export async function runMeetingAgendaThreadEdit(params: {
     agenda: edit.agenda,
     attendeeMentions,
     timezone: settings.agendaTimezone || "UTC",
-  }));
+  }), undefined, publication);
+  publication.assertActive();
   await sendSlackMessage(params.installationId, {
     channel: params.channelId,
     threadTs: params.threadTs,
-  }, [slackSection("Agenda updated", [changeSummary])]);
+  }, [slackSection("Agenda updated", [changeSummary])], undefined, publication);
+  publication.assertActive();
 
 
   return { edited: true, changeSummary };

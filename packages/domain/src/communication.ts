@@ -1,3 +1,4 @@
+import { AbortError as SlackAttemptAbortError } from "p-retry";
 import { createHmac } from "node:crypto";
 import { WebClient } from "@slack/web-api";
 import { Prisma, type CommunicationInstallation, type CommunicationMessage, type CommunicationProvider } from "@prisma/client";
@@ -2143,18 +2144,40 @@ export async function handleSlackInteraction(payload: Record<string, unknown>, s
   return {};
 }
 
+export type SlackAttemptControls = Readonly<{
+  signal: AbortSignal;
+  authorizeAttempt: (context: Readonly<{ signal: AbortSignal }>) => Promise<void>;
+}>;
+
+function guardedSlackClient(token: string, controls?: SlackAttemptControls) {
+  if (!controls) return slackClient(token);
+  // The SDK interceptor runs after credential acquisition and for every actual
+  // HTTP retry. A denied authority aborts its retry engine, not just one request.
+  return new WebClient(token, { requestInterceptor: async config => {
+    try {
+      controls.signal.throwIfAborted();
+      await controls.authorizeAttempt({ signal: controls.signal });
+      controls.signal.throwIfAborted();
+      config.signal = controls.signal;
+      return config;
+    } catch (error) {
+      throw new SlackAttemptAbortError(error instanceof Error ? error : new Error("Slack attempt denied."));
+    }
+  } });
+}
+
 export async function sendSlackMessage(installationId: string, target: {
   channel: string;
   threadTs?: string;
   text?: string;
-}, blocks: unknown[], tokenOverride?: string) {
+}, blocks: unknown[], tokenOverride?: string, controls?: SlackAttemptControls) {
   const installation = await prisma.communicationInstallation.findUnique({
     where: { id: installationId },
   });
   invariant(installation, 404, "NOT_FOUND", "Slack installation not found.");
   const token = tokenOverride ?? encryptedBotToken(installation);
 
-  return slackClient(token).chat.postMessage({
+  return guardedSlackClient(token, controls).chat.postMessage({
     channel: target.channel,
     thread_ts: target.threadTs,
     text: target.text ?? "Corgtex update",
@@ -2185,13 +2208,13 @@ export async function slackSourceLink(installationId: string, channelId: string,
 export async function updateSlackMessage(installationId: string, target: {
   channel: string;
   ts: string;
-}, blocks: unknown[], text = "Corgtex update") {
+}, blocks: unknown[], text = "Corgtex update", controls?: SlackAttemptControls) {
   const installation = await prisma.communicationInstallation.findUnique({
     where: { id: installationId },
   });
   invariant(installation, 404, "NOT_FOUND", "Slack installation not found.");
 
-  return slackClient(encryptedBotToken(installation)).chat.update({
+  return guardedSlackClient(encryptedBotToken(installation), controls).chat.update({
     channel: target.channel,
     ts: target.ts,
     text,
