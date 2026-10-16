@@ -330,7 +330,9 @@ describe("knowledge retrieval cache", () => {
       await expect(searchIndexedKnowledge({ ...searchScope, query: "travel policy" })).rejects.toBe(error);
       expect(modelGatewayMock.embed).toHaveBeenCalledOnce();
       expect(modelGatewayMock.rerank).not.toHaveBeenCalled();
-      expect(prismaMock.knowledgeChunk.findMany).not.toHaveBeenCalled();
+      // One canonical source cohort must be admitted before embedding. Budget
+      // refusal must not restart retrieval with a second fallback scan.
+      expect(prismaMock.knowledgeChunk.findMany).toHaveBeenCalledTimes(1);
       expectUsage([]);
       expect(azureRequests).toBe(0);
     });
@@ -661,7 +663,11 @@ describe("knowledge retrieval cache", () => {
     prismaMock.knowledgeChunk.findMany.mockResolvedValue(certifyRows([]));
 
     expect(await searchIndexedKnowledge({ actor, workspaceId: "ws-1", query: "Superseded file text" })).toEqual([]);
-    expect(fetch).toHaveBeenCalledOnce();
+    // With no canonical receipt, neither the query nor stale Azure content is
+    // sent to an external service; no provider score can revive the old copy.
+    expect(fetch).not.toHaveBeenCalled();
+    expect(modelGatewayMock.embed).not.toHaveBeenCalled();
+    expect(modelGatewayMock.rerank).not.toHaveBeenCalled();
   });
 
   it.each(["obsolete hit", "empty index"])("uses current Postgres chunks when Azure has an %s", async (caseName) => {

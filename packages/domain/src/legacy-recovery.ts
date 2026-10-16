@@ -8,6 +8,7 @@ import { invariant } from "./errors";
 import { canReadInformationCategory } from "./information-category-policy";
 import { artifactPermissionParents } from "./source-permission-parents";
 import { captureArtifactInputProof, captureImmutableArtifactInputProof, captureArtifactPermissionEpochs, isArtifactInputProofReadable,
+  captureArtifactReadHeadObservation, withArtifactCountReleaseSnapshot,
   lineageContentFingerprint, recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
 import { capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, parsePermissionEpochProof, type PermissionEpochProof } from "./source-permission-epochs";
 import { withCompanyLegacyRecoveryCapture } from "./legacy-recovery-context";
@@ -182,13 +183,37 @@ async function selectionForRecovery(actor: AppActor, selection: Selection, db: D
 }
 
 export async function inspectLegacyRecovery(actor: AppActor, selection: Selection) {
-  const row = await selectionForRecovery(actor, selection, prisma);
-  const roots = await knownRoots(actor, selection, row, prisma);
-  const parent = selection.kind === "GoalUpdate" || selection.kind === "KeyResult"
-    ? await prisma.goal.findFirst({ where: { id: String(row.goalId), workspaceId: selection.workspaceId } }) : null;
-  return { ...selection, fingerprint: lineageContentFingerprint(selection.kind, row), knownContributors: roots.length,
-    requiresConfirmation: true, private: selection.kind.startsWith("Conversation") || row.isPrivate === true || parent?.isPrivate === true,
-    hasFile: selection.kind === "BrainSource" && typeof row.fileStorageKey === "string" };
+  // UNKNOWN targets are eligible only under recovery's existing audience rule.
+  // Bind its original row, head and caller epochs before contributor reads. Content
+  // admission applies to the contributors, never as a bypass for the target.
+  const observed = await captureArtifactReadHeadObservation(async () => {
+    const target = await prisma.$transaction(async tx => {
+      const row = await selectionForRecovery(actor, selection, tx);
+      const head = await tx.artifactInputLineage.findFirst({ where: { workspaceId: selection.workspaceId,
+        artifactType: selection.kind, artifactId: selection.id }, orderBy: { revision: "desc" } });
+      const epochs = await captureArtifactPermissionEpochs(actor, selection.workspaceId,
+        [{ kind: selection.kind, id: selection.id, fingerprint: lineageContentFingerprint(selection.kind, row) }], tx);
+      return { row, rowStamp: hash(row), headStamp: hash(head), epochs };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 30_000 });
+    // Native contributors retain their normal outside-transaction replay.
+    const roots = await knownRoots(actor, selection, target.row, prisma);
+    const parent = selection.kind === "GoalUpdate" || selection.kind === "KeyResult"
+      ? await prisma.goal.findFirst({ where: { id: String(target.row.goalId), workspaceId: selection.workspaceId } }) : null;
+    return { ...target, roots,
+      preview: { ...selection, fingerprint: lineageContentFingerprint(selection.kind, target.row), knownContributors: roots.length,
+        requiresConfirmation: true, private: selection.kind.startsWith("Conversation") || target.row.isPrivate === true || parent?.isPrivate === true,
+        hasFile: selection.kind === "BrainSource" && typeof target.row.fileStorageKey === "string" } };
+  });
+  const original = observed.value;
+  return withArtifactCountReleaseSnapshot(actor, selection.workspaceId, original.roots, async () => {}, async tx => {
+    const current = await selectionForRecovery(actor, selection, tx);
+    const head = await tx.artifactInputLineage.findFirst({ where: { workspaceId: selection.workspaceId,
+      artifactType: selection.kind, artifactId: selection.id }, orderBy: { revision: "desc" } });
+    invariant(hash(current) === original.rowStamp && hash(head) === original.headStamp
+      && await isArtifactPermissionEpochProofCurrent(selection.workspaceId, original.epochs, tx),
+    409, "RECOVERY_STALE", "The original recovery preview or its authority changed.");
+    return original.preview;
+  }, observed.heads);
 }
 
 /** Strict namespace evidence is deliberately stronger than an arbitrary stored

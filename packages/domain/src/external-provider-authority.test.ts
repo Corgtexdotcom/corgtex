@@ -81,7 +81,8 @@ const fixture = vi.hoisted(() => {
   return { prisma, tables, time, state, revoked: new Set<string>(), departed: new Set<string>() };
 });
 vi.mock("../../shared/src/env", () => ({ env: { ENCRYPTION_KEY: "a".repeat(64) } }));
-vi.mock("@corgtex/shared", async () => ({ ...await import("../../shared/src/crypto"), prisma: fixture.prisma, env: { APP_URL: "https://synthetic.test" }, toInputJson: (value: unknown) => value }));
+vi.mock("@corgtex/shared", async () => ({ ...await import("../../shared/src/crypto"),
+  ...await import("../../shared/src/mcp-context"), ...await import("../../shared/src/support-context"), prisma: fixture.prisma, env: { APP_URL: "https://synthetic.test" }, toInputJson: (value: unknown) => value }));
 vi.mock("./auth", () => ({ requireWorkspaceMembership: vi.fn(async ({ actor, workspaceId }) => {
   if (!["ws-crm", "ws-other"].includes(workspaceId) || fixture.departed.has(actor.user?.id ?? "agent")) throw Object.assign(new Error("Membership revoked"), { status: 403 });
   return { id: `member-${actor.user?.id ?? "agent"}`, role: actor.user?.globalRole === "OPERATOR" ? "ADMIN" : "MEMBER" };
@@ -101,6 +102,8 @@ vi.mock("./external-mcp", async importOriginal => ({ ...await importOriginal<typ
   readBoxExternalMcpNativeResponse: remote.transport }));
 
 import { listArchivedWorkspaceArtifacts } from "./archive";
+import { inspectLegacyRecovery } from "./legacy-recovery";
+import * as lineage from "./source-lineage";
 import { selectExternalContentSource, syncExternalContentSource, listExternalContentSources, enqueueExternalContentSourceSync } from "./external-content-sources";
 import { captureExternalProviderFetchInput, createExternalProviderSyncActor, externalProviderResponseHash,
   getExternalProviderPrincipalUserId, isExternalProviderCapturedResponse, isExternalProviderFetchInputCurrent, assertExternalProviderCapturedResponseCurrent } from "./external-provider-authority";
@@ -139,6 +142,38 @@ describe("External provider live authority and copied lineage with real helpers"
       if (remote.fail) throw new Error("Restricted provider payload");
       return structuredClone(toolName === "get_file_details" ? remote.details : remote.content); });
   });
+  it.each(["fresh", "late-revocation"] as const)("retains native provider authority for an UNKNOWN recovery preview: %s", async phase => {
+    const source = await setup();
+    const receipt = await capture(source.id);
+    const roots = await captureArtifactInputProof(owner, ws, [{ kind: "ExternalProviderFetchInput", id: receipt.input.id }]);
+    const document = await fixture.prisma.document.create({ data: { id: "unknown-provider-document", workspaceId: ws,
+      title: "Historical provider copy", source: "legacy", content: "Original Box bytes" } });
+    await fixture.prisma.artifactInputLineage.create({ data: { workspaceId: ws, artifactType: "Document", artifactId: document.id,
+      revision: 1, origin: "UNKNOWN", contentHash: lineage.lineageContentFingerprint("Document", document), inputsJson: [], rootsJson: roots } });
+    const admin = { ...owner, user: { ...(owner as Extract<AppActor, { kind: "user" }>).user, globalRole: "OPERATOR" as const } } as AppActor;
+    const before = structuredClone(fixture.tables);
+    const original = lineage.captureArtifactReadHeadObservation;
+    let capturedCalls = 0;
+    remote.transport.mockClear();
+    const observation = vi.spyOn(lineage, "captureArtifactReadHeadObservation").mockImplementation(async read => {
+      const result = await original(read);
+      capturedCalls = remote.transport.mock.calls.length;
+      if (phase === "late-revocation") remote.fail = true;
+      return result;
+    });
+    try {
+      const preview = inspectLegacyRecovery(admin, { workspaceId: ws, kind: "Document", id: document.id });
+      if (phase === "fresh") await expect(preview).resolves.toMatchObject({ id: document.id,
+        fingerprint: lineage.lineageContentFingerprint("Document", document), knownContributors: roots.length, private: false, hasFile: false });
+      else await expect(preview).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+      expect(capturedCalls).toBeGreaterThan(0);
+      expect(remote.transport.mock.calls.length).toBeGreaterThan(capturedCalls);
+      expect(fixture.tables).toEqual(before);
+      // The transport throws if any provider request occurs inside either RR.
+      expect(fixture.state.transactionDepth).toBe(0);
+    } finally { observation.mockRestore(); }
+  });
+
   it.each(["fresh", "permalink-revocation", "later-candidates-revocation"] as const)(
     "replays original restored archive provider authority after discovery: %s", async phase => {
       const source = await setup(); const receipt = await capture(source.id);
