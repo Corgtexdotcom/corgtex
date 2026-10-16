@@ -42,7 +42,7 @@ describe.runIf(process.env.SHARED_INTERACTIONS_BROWSER_QA === "1")("ActionMenu b
  <form onSubmit={e => { e.preventDefault(); fixture.submissions++; }}><input required aria-label="Required" /><button>Save</button></form>
  </>}</ActionMenu>}
  <Dialog open={dialog} onClose={() => setDialog(false)} title="Container"><ActionMenu label="Modal menu"><button id="modal-action">Modal action</button></ActionMenu></Dialog>
- <ActionMenu label="Form popover" panelRole="dialog"><input id="popover-first" aria-label="First field" /><input id="popover-second" aria-label="Second field" /></ActionMenu>
+ <ActionMenu label="Form popover" panelRole="dialog"><details><summary id="popover-summary">Edit fields</summary><input id="popover-first" aria-label="First field" /><input id="popover-second" aria-label="Second field" /></details></ActionMenu>
  </>;
 }
         createRoot(document.getElementById("root")).render(
@@ -177,6 +177,8 @@ describe.runIf(process.env.SHARED_INTERACTIONS_BROWSER_QA === "1")("ActionMenu b
   });
   it("preserves sequential navigation within a dialog-role popover", async () => {
     await page.getByRole("button", { name: "Form popover", exact: true }).click(); await settled();
+    expect(await focused("#popover-summary")).toBe(true);
+    await page.keyboard.press("Space"); await page.keyboard.press("Tab");
     expect(await focused("#popover-first")).toBe(true);
     await page.keyboard.press("Tab"); await settled();
     expect(await focused("#popover-second")).toBe(true);

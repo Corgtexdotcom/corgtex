@@ -82,7 +82,7 @@ export function ActionMenu({
       if (!panel) return;
       const controls = visibleFocusableControls(
         panel,
-        "input:not([type='hidden']), textarea, select, button, a[href], [tabindex]",
+        "input:not([type='hidden']), textarea, select, button, a[href], summary, [tabindex]",
       );
       if (focusLastOnOpen.current) controls.reverse();
       for (const control of controls) {

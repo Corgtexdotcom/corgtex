@@ -572,6 +572,7 @@ function GoalNodeInner({
         <div className="mt-4 pt-3 border-t border-line-subtle space-y-3">
           <ItemActions
             moreLabel={tCommon("moreActions")}
+            moreRole="dialog"
             primary={
               goal.status === "DRAFT" ? (
                 <form action={updateGoalFormAction}>
