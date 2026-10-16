@@ -22,6 +22,7 @@ import {
   type LineageKind,
   type LineageRoot,
   type SlackAgentDelivery,
+  type SlackAttemptControls,
   type SlackAgentJobPayload,
 } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
@@ -615,24 +616,60 @@ export async function loadSlackReadableRows<T extends { id: string }>(params: {
 }
 
 async function deliverSafely(payload: SlackInputPayload, response: SlackAgentDelivery, proof: SlackProofContext, roots: LineageRoot[]) {
-  invariant(await isArtifactInputProofReadable(proof.actor, payload.workspaceId, roots), 409, "SOURCE_CHANGED", "Slack inputs changed before delivery.");
-  const mapping = await prisma.communicationExternalUser.findUnique({ where: {
-    installationId_externalUserId: { installationId: payload.installationId, externalUserId: payload.externalUserId },
-  } });
-  invariant(mapping && !mapping.isDeleted && mapping.userId === proof.actor.user.id, 409, "SOURCE_RESTRICTED", "The Slack requester mapping changed.");
-  if (proof.publicReply) {
-    invariant(!payload.responseUrlEnc && await isArtifactInputProofPubliclyShareable(proof.actor, payload.workspaceId, roots),
-      409, "SOURCE_RESTRICTED", "These inputs cannot be published to Slack.");
-  }
-  const target = await validateSlackPostTarget(payload.installationId, payload.channelId ?? "", { requirePublic: true });
-  invariant(target.ok && target.channelId === payload.channelId, 409, "SOURCE_RESTRICTED", "The original Slack destination changed.");
-  invariant(await isArtifactInputProofReadable(proof.actor, payload.workspaceId, roots)
-    && (!proof.publicReply || await isArtifactInputProofPubliclyShareable(proof.actor, payload.workspaceId, roots)),
-  409, "SOURCE_CHANGED", "Slack inputs changed during destination validation.");
+  const originalRoots = structuredClone(roots);
+  const controller = new AbortController();
+  const assertActive = (signal = controller.signal) => {
+    controller.signal.throwIfAborted();
+    signal.throwIfAborted();
+  };
+  const assertInputs = async (signal: AbortSignal) => {
+    assertActive(signal);
+    invariant(await isArtifactInputProofReadable(proof.actor, payload.workspaceId, originalRoots),
+      409, "SOURCE_CHANGED", "Slack inputs changed before delivery.");
+    if (proof.publicReply) {
+      invariant(!payload.responseUrlEnc && await isArtifactInputProofPubliclyShareable(proof.actor, payload.workspaceId, originalRoots),
+        409, "SOURCE_RESTRICTED", "These inputs cannot be published to Slack.");
+    }
+    const mapping = await prisma.communicationExternalUser.findUnique({ where: {
+      installationId_externalUserId: { installationId: payload.installationId, externalUserId: payload.externalUserId },
+    } });
+    const member = await prisma.member.findUnique({ where: { workspaceId_userId: {
+      workspaceId: payload.workspaceId, userId: proof.actor.user.id,
+    } }, include: { user: { select: { id: true, email: true, displayName: true } } } });
+    invariant(mapping && mapping.workspaceId === payload.workspaceId && mapping.installationId === payload.installationId
+      && mapping.provider === "SLACK" && mapping.externalUserId === payload.externalUserId && !mapping.isDeleted && !mapping.isBot
+      && mapping.userId === proof.actor.user.id && member?.isActive && isHumanMemberIdentity(member)
+      && (!mapping.memberId || mapping.memberId === member.id),
+      409, "SOURCE_RESTRICTED", "The Slack requester mapping or membership changed.");
+    // Mapping and policy reads are awaits too: retain the original source vector
+    // through them rather than capturing a fresh proof of restored authority.
+    invariant(await isArtifactInputProofReadable(proof.actor, payload.workspaceId, originalRoots),
+      409, "SOURCE_CHANGED", "Slack inputs changed during recipient validation.");
+    assertActive(signal);
+  };
+  const controls: SlackAttemptControls = {
+    signal: controller.signal,
+    authorizeAttempt: async ({ signal }) => {
+      try {
+        await assertInputs(signal);
+        const target = await validateSlackPostTarget(payload.installationId, payload.channelId ?? "", { requirePublic: true });
+        invariant(target.ok && target.channelId === payload.channelId, 409, "SOURCE_RESTRICTED", "The original Slack destination changed.");
+        await assertInputs(signal);
+      } catch (error) {
+        controller.abort(error);
+        throw error;
+      }
+    },
+  };
+  await controls.authorizeAttempt({ signal: controls.signal });
   try {
-    await deliverSlackAgentResponse(payload, response);
+    await deliverSlackAgentResponse(payload, response, controls);
+    assertActive();
     return { delivered: true };
   } catch {
+    // Ordinary transport failures keep the existing result. A denied attempt
+    // stays fatal even if an SDK retry or response transport swallowed its error.
+    assertActive();
     return { delivered: false, error: "Slack delivery failed." };
   }
 }

@@ -384,3 +384,59 @@ describe("Guarded Slack HTTP attempts", () => {
     } finally { f.guardedSdk = false; }
   });
 });
+
+describe("Slack agent response attempt controls", () => {
+  it.each((["public", "ephemeral"] as const).flatMap(destination =>
+    (["credentials", "retry", "none"] as const).map(boundary => ({ destination, boundary }))))("guards $destination replies at $boundary", async ({ destination, boundary }) => {
+    f.guardedSdk = true;
+    let allowed = true;
+    const original = f.db.communicationInstallation.findUnique.getMockImplementation()!;
+    f.db.communicationInstallation.findUnique.mockImplementationOnce(async (...args: Parameters<typeof original>) => {
+      const row = await original(...args);
+      if (boundary === "credentials") allowed = false;
+      return row;
+    });
+    const controller = new AbortController();
+    const authorizeAttempt = vi.fn(async ({ signal }: Readonly<{ signal: AbortSignal }>) => {
+      expect(signal).toBe(controller.signal);
+      if (!allowed) { const failure = new Error("Original response receipt revoked"); controller.abort(failure); throw failure; }
+    });
+    let sends = 0;
+    f.http.mockReset().mockImplementation(async config => {
+      sends++;
+      if (boundary === "retry" && sends === 1) { allowed = false; return { status: 500, data: {}, headers: {}, config }; }
+      return { status: 200, data: { ok: true, ts: "2" }, headers: {}, request: { path: "/api/chat.postMessage" }, config };
+    });
+    const { deliverSlackAgentResponse } = await import("./communication");
+    try {
+      const result = await deliverSlackAgentResponse({ source: destination === "public" ? "app_mention" : "slash_command",
+        installationId: "install-1", workspaceId: "workspace-1", actorUserId: "user-1", externalUserId: "U1", prompt: "Synthetic",
+        channelId: "C1", threadTs: "1" }, { text: "Synthetic response" }, { signal: controller.signal, authorizeAttempt }).catch(error => error);
+      expect(sends).toBe(boundary === "credentials" ? 0 : 1);
+      expect(authorizeAttempt).toHaveBeenCalledTimes(boundary === "retry" ? 2 : 1);
+      if (boundary === "none") { expect(result).toBeUndefined(); expect(f.http.mock.calls[0][0].signal).toBe(controller.signal); }
+      else expect(result).toBeInstanceOf(Error);
+    } finally { f.guardedSdk = false; }
+  });
+
+  it.each(["allow", "deny", "abort-during-response"] as const)("guards the decrypted response URL before fetch: %s", async mode => {
+    const order: string[] = []; const controller = new AbortController();
+    const failure = new Error("Original response authority revoked");
+    const authorizeAttempt = vi.fn(async ({ signal }: Readonly<{ signal: AbortSignal }>) => {
+      order.push("guard"); expect(signal).toBe(controller.signal);
+      if (mode === "deny") { controller.abort(failure); throw failure; }
+    });
+    const fetchMock = vi.fn(async () => { order.push("fetch"); if (mode === "abort-during-response") controller.abort(failure); return { ok: true }; });
+    vi.stubGlobal("fetch", fetchMock);
+    const { deliverSlackAgentResponse } = await import("./communication");
+    try {
+      const result = await deliverSlackAgentResponse({ source: "slash_command", installationId: "install-1", workspaceId: "workspace-1",
+        actorUserId: "user-1", externalUserId: "U1", prompt: "Synthetic", responseUrlEnc: "enc:https://synthetic.invalid/response" },
+      { text: "Synthetic response" }, { signal: controller.signal, authorizeAttempt }).catch(error => error);
+      expect(order).toEqual(mode === "deny" ? ["guard"] : ["guard", "fetch"]);
+      if (mode === "allow") expect(result).toBeUndefined(); else expect(result).toBe(failure);
+      if (mode !== "deny") expect(fetchMock).toHaveBeenCalledWith("https://synthetic.invalid/response",
+        expect.objectContaining({ signal: controller.signal, method: "POST" }));
+    } finally { vi.unstubAllGlobals(); }
+  });
+});

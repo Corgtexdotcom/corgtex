@@ -7,6 +7,7 @@ const {
   txMock,
   createActionMock,
   slackWebClientMock,
+  attemptFixture,
   meetingReviewConfirmMock,
   meetingReviewDismissMock,
   meetingReviewEditViewMock,
@@ -131,6 +132,7 @@ const {
     },
     createActionMock: vi.fn(),
     slackWebClientMock: webClient,
+    attemptFixture: { enabled: false, http: vi.fn() },
     meetingReviewConfirmMock: vi.fn(),
     meetingReviewDismissMock: vi.fn(),
     meetingReviewEditViewMock: vi.fn(),
@@ -219,11 +221,15 @@ vi.mock("./meeting-action-review", () => ({
   updateSlackMeetingActionReviewProposalFromModal: meetingReviewModalUpdateMock,
 }));
 
-vi.mock("@slack/web-api", () => ({
-  WebClient: vi.fn(function WebClient() {
-    return slackWebClientMock;
-  }),
-}));
+vi.mock("@slack/web-api", async importOriginal => {
+  const actual = await importOriginal<typeof import("@slack/web-api")>();
+  return { ...actual, WebClient: vi.fn(function WebClient(token?: string, options?: import("@slack/web-api").WebClientOptions) {
+    return attemptFixture.enabled ? { ...slackWebClientMock, chat: new actual.WebClient(token, { ...options,
+      adapter: attemptFixture.http, retryConfig: { retries: 1, minTimeout: 0, maxTimeout: 0 },
+      logger: { debug() {}, info() {}, warn() {}, error() {}, setLevel() {}, getLevel: () => "error" } as never,
+    }).chat } : slackWebClientMock;
+  }) };
+});
 
 function signedHeaders(body: string, timestamp = Math.floor(Date.now() / 1000)) {
   const signature = `v0=${createHmac("sha256", "slack-secret").update(`v0:${timestamp}:${body}`).digest("hex")}`;
@@ -335,6 +341,7 @@ function stubAuthoredSlackScope() {
 describe("communication Slack integration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    attemptFixture.enabled = false; attemptFixture.http.mockReset();
     prismaMock.communicationInboundEvent.findUnique.mockReset();
     prismaMock.communicationInstallation.findUnique.mockReset();
     prismaMock.communicationIngressInput.findFirst.mockReset();
@@ -350,6 +357,7 @@ describe("communication Slack integration", () => {
     reviewPublicationMock.mockReset().mockImplementation(async (actor, params) => {
       await requireMembershipMock({ actor, workspaceId: params.workspaceId });
       if (!params.lineageRoots?.length) throw new AppError(403, "UNKNOWN_LINEAGE", "Synthetic review input proof is unavailable.");
+      return params.lineageRoots;
     });
     reviewRefreshMock.mockReset().mockResolvedValue(null);
     captureDigestProofMock.mockReset().mockImplementation(async (_actor, _workspaceId, inputs) =>
@@ -1983,6 +1991,54 @@ describe("communication Slack integration", () => {
     expect(reviewPublicationMock).toHaveBeenCalledWith(actor, { workspaceId: "workspace-1", installationId: "install-1", channelId: "C1", lineageRoots: update.lineageRoots });
     expect(reviewPublicationMock.mock.invocationCallOrder[0]).toBeLessThan(slackWebClientMock.chat.update.mock.invocationCallOrder[0]);
     expect(slackWebClientMock.chat.update).toHaveBeenCalledWith(expect.objectContaining({ text: "Synthetic complete review" }));
+  });
+
+  it.each((["interaction", "modal", "web"] as const).flatMap(path => (["credentials", "retry"] as const).flatMap(boundary =>
+    (["source", "member", "installation", "policy", "during-policy", "none"] as const).map(change => ({ path, boundary, change })))))("guards rendered review $path at $boundary after $change change", async ({ path, boundary, change }) => {
+    const { handleSlackInteraction, syncSlackMeetingActionReviewAfterWebApply } = await authenticatedCommunicationFixture();
+    const user = { id: "user-1", email: "user@example.test", displayName: "User", globalRole: "USER" as const };
+    const actor = { kind: "user" as const, user };
+    const installation = { id: "install-1", workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE", disconnectedAt: null, botTokenEnc: "enc:bot-token", externalWorkspaceId: "T1" };
+    prismaMock.communicationInstallation.findFirst.mockResolvedValue(installation);
+    prismaMock.communicationExternalUser.findUnique.mockResolvedValue({ userId: user.id });
+    prismaMock.user.findUnique.mockResolvedValue(user);
+    const update = { channelId: "C1", messageTs: "1.1", blocks: [], text: "Synthetic rendered review", responseText: "Updated",
+      lineageRoots: [{ kind: "Meeting", id: "meeting-1", fingerprint: "original" }] };
+    const original = [...update.lineageRoots, { kind: "CommunicationChannel", id: "channel-1", fingerprint: "original-destination" }];
+    meetingReviewConfirmMock.mockResolvedValue(update); meetingReviewModalUpdateMock.mockResolvedValue(update);
+    reviewRefreshMock.mockResolvedValue({ installationId: "install-1", update });
+    let armed = false; let changed = false; let sends = 0;
+    const mutate = () => {
+      changed = true;
+      if (change === "source") digestProofReadableMock.mockResolvedValue(false);
+      if (change === "member") requireMembershipMock.mockRejectedValue(new AppError(403, "NOT_A_MEMBER", "Revoked member"));
+      if (change === "installation") prismaMock.communicationInstallation.findFirst.mockResolvedValue(null);
+    };
+    reviewPublicationMock.mockImplementation(async (_actor, params) => {
+      if (!armed) { armed = true; return original; }
+      expect(params.lineageRoots).toEqual(original);
+      if (changed && change === "policy") throw new AppError(403, "SOURCE_RESTRICTED", "Revoked destination policy");
+      if (changed && change === "during-policy") digestProofReadableMock.mockResolvedValue(false);
+      return [...original, { kind: "CommunicationChannel", id: "channel-1", fingerprint: "replacement-must-not-replace-original" }];
+    });
+    prismaMock.communicationInstallation.findUnique.mockImplementation(async () => {
+      if (armed && boundary === "credentials") mutate();
+      return installation;
+    });
+    attemptFixture.enabled = true;
+    attemptFixture.http.mockImplementation(async config => {
+      sends++;
+      if (boundary === "retry" && sends === 1) { mutate(); return { status: 500, data: {}, headers: {}, config }; }
+      return { status: 200, data: { ok: true, ts: "1.1" }, headers: {}, request: { path: "/api/chat.update" }, config };
+    });
+    const request = path === "web" ? syncSlackMeetingActionReviewAfterWebApply(actor, { workspaceId: "workspace-1", insightId: "insight-1" })
+      : handleSlackInteraction({ team: { id: "T1" }, user: { id: "U1" }, ...(path === "modal" ? {
+        type: "view_submission", view: { callback_id: "corgtex_meeting_review_edit_modal", private_metadata: "{}", state: { values: {} } },
+      } : { type: "block_actions", actions: [{ action_id: "corgtex_meeting_review_confirm", value: JSON.stringify({ reviewId: "review-1", insightId: "insight-1" }) }] }) });
+    const result = await request.catch(error => error);
+    expect(sends).toBe(change === "none" ? (boundary === "retry" ? 2 : 1) : boundary === "retry" ? 1 : 0);
+    if (change !== "none") expect(result instanceof Error || (typeof result === "object" && result !== null && "response_type" in result)).toBe(true);
+    if (change === "none") expect(result).not.toBeInstanceOf(Error);
   });
 
   it.each(["interaction", "modal", "web"] as const)("blocks the %s Slack review update when its publication proof is revoked", async (path) => {

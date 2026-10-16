@@ -98,6 +98,7 @@ const {
 }));
 
 const lineage = vi.hoisted(() => {
+  const epochs = new Map<string, number>();
   const revoked = new Set<string>();
   const unknown = new Set<string>();
   const privateIds = new Set<string>();
@@ -106,13 +107,13 @@ const lineage = vi.hoisted(() => {
   const recorded: any[] = [];
   const invalidated: any[] = [];
   const behaviorRoots: any[] = [];
-  const root = (input: any) => ({ kind: input.kind, id: input.id, fingerprint: JSON.stringify(input.snapshot ?? input) });
+  const root = (input: any) => ({ kind: input.kind, id: input.id, fingerprint: JSON.stringify(input.snapshot ?? input), epoch: epochs.get(input.id) ?? 0 });
   const capture = vi.fn(async (_actor: any, _ws: string, inputs: any[]) => {
     if (inputs.some(input => unknown.has(input.id) || revoked.has(input.id))) throw Object.assign(new Error("Unavailable source"), { code: "UNKNOWN_LINEAGE" });
     for (const input of inputs) if (input.snapshot) rows.set(input.id, input.snapshot);
     return inputs.map(root);
   });
-  const readable = vi.fn(async (_actor: any, _ws: string, roots: any[]) => roots.every(root => !revoked.has(root.id) && !unknown.has(root.id)
+  const readable = vi.fn(async (_actor: any, _ws: string, roots: any[]) => roots.every(root => !revoked.has(root.id) && !unknown.has(root.id) && (root.epoch ?? 0) === (epochs.get(root.id) ?? 0)
     && (!rows.has(root.id) || JSON.stringify(rows.get(root.id)) === root.fingerprint)));
   const publicProof = vi.fn(async (_actor: any, _ws: string, roots: any[]) => roots.every(root => !revoked.has(root.id) && !unknown.has(root.id) && !privateIds.has(root.id) && root.kind !== "AgentRequestInput"));
   const merge = (...proofs: any[][]) => [...new Map(proofs.flat().map(root => [`${root.kind}:${root.id}`, root])).values()];
@@ -125,7 +126,7 @@ const lineage = vi.hoisted(() => {
   const target = vi.fn(async (_install: string, channelId: string) => ({ ok: true, channelId }));
   const knowledgeRoots = vi.fn(async (_actor: any, _ws: string, rows: any[]) => rows.map(row => ({ kind: "KnowledgeChunk", id: row.chunkId, fingerprint: row.snippet })));
   const run = vi.fn();
-  return { revoked, unknown, privateIds, rows, operations, recorded, invalidated, behaviorRoots, capture, readable, publicProof, merge, captureRows, target, knowledgeRoots, run };
+  return { epochs, revoked, unknown, privateIds, rows, operations, recorded, invalidated, behaviorRoots, capture, readable, publicProof, merge, captureRows, target, knowledgeRoots, run };
 });
 
 vi.mock("../runtime", () => ({
@@ -230,7 +231,7 @@ async function runTrustedSlackAgent(run: (payload: any) => Promise<any>, payload
 describe("runSlackAgent", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    lineage.revoked.clear(); lineage.unknown.clear(); lineage.privateIds.clear(); lineage.rows.clear();
+    lineage.epochs.clear(); lineage.revoked.clear(); lineage.unknown.clear(); lineage.privateIds.clear(); lineage.rows.clear();
     lineage.operations.length = 0; lineage.recorded.length = 0; lineage.invalidated.length = 0; lineage.behaviorRoots.length = 0;
     lineage.target.mockResolvedValue({ ok: true, channelId: "C1" });
     lineage.run.mockImplementation(async params => {
@@ -350,7 +351,7 @@ describe("runSlackAgent", () => {
     }));
     expect(deliverSlackAgentResponseMock).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
       text: expect.stringContaining("Done:"),
-    }));
+    }), expect.objectContaining({ authorizeAttempt: expect.any(Function), signal: expect.any(AbortSignal) }));
   });
 
   it("keeps an Action private and asks for a human owner when Slack names none", async () => {
@@ -368,7 +369,7 @@ describe("runSlackAgent", () => {
     }));
     expect(deliverSlackAgentResponseMock).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
       text: expect.stringContaining("Assign an active Corgtex member"),
-    }));
+    }), expect.objectContaining({ authorizeAttempt: expect.any(Function), signal: expect.any(AbortSignal) }));
   });
 
   it("does not assign an Action to a system member matched in Slack", async () => {
@@ -968,6 +969,115 @@ describe("runSlackAgent", () => {
     expect(outcome.lineageReceipt).toBeUndefined();
     expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toBe("I completed the request. Review the result in Corgtex.");
     expect(JSON.stringify(deliverSlackAgentResponseMock.mock.calls)).not.toMatch(/Derived title|action-1/);
+  });
+
+  describe("reply transport attempt authority", () => {
+    beforeEach(() => {
+      lineage.target.mockReset().mockResolvedValue({ ok: true, channelId: "C1" });
+      deliverSlackAgentResponseMock.mockReset().mockResolvedValue(undefined);
+    });
+    it.each([
+      ["credentials", "incoming-message"], ["retry", "incoming-message"],
+      ["credentials", "actor-member-1"], ["retry", "actor-member-1"],
+      ["credentials", "behavior-1"], ["retry", "behavior-1"],
+    ] as const)("blocks original %s/%s revoke-restore even if transport swallows denial", async (boundary, revokedId) => {
+      lineage.behaviorRoots.push({ kind: "AgentIdentity", id: "behavior-1", fingerprint: "original-behavior", epoch: 0 });
+      let sent = 0;
+      let denied: unknown;
+      let aborted = false;
+      let capturesAtTransport = 0;
+      deliverSlackAgentResponseMock.mockImplementationOnce(async (_payload, _response, controls) => {
+        capturesAtTransport = lineage.capture.mock.calls.length;
+        if (boundary === "retry") {
+          await controls?.authorizeAttempt({ signal: controls.signal });
+          sent++;
+        }
+        lineage.epochs.set(revokedId, 1); // revoked and restored: current bytes look unchanged
+        try { await controls?.authorizeAttempt({ signal: controls.signal }); sent++; } catch (error) { denied = error; }
+        aborted = Boolean(controls?.signal.aborted);
+        // A transport may translate failure or resolve after its retry engine.
+        return { delivered: false };
+      });
+      const { runSlackAgent } = await import("./slack-agent");
+      await expect(runTrustedSlackAgent(runSlackAgent, { ...basePayload(), source: "app_mention", prompt: "help" })).rejects.toThrow();
+      expect(denied).toMatchObject({ code: "SOURCE_CHANGED" });
+      expect(aborted).toBe(true);
+      expect(sent).toBe(boundary === "retry" ? 1 : 0);
+      expect(lineage.capture).toHaveBeenCalledTimes(capturesAtTransport);
+    });
+
+    it.each(["mapping", "membership", "public audience", "destination"] as const)("blocks late %s loss at a transport attempt", async mutation => {
+      let sent = 0;
+      let denied: unknown;
+      deliverSlackAgentResponseMock.mockImplementationOnce(async (_payload, _response, controls) => {
+        if (mutation === "mapping") prismaMock.communicationExternalUser.findUnique.mockResolvedValue({ id: "external-user-1", userId: "another-user", isDeleted: false });
+        else if (mutation === "membership") prismaMock.member.findUnique.mockResolvedValue({ id: "actor-member-1", userId: "user-1", isActive: false });
+        else if (mutation === "public audience") lineage.privateIds.add("incoming-message");
+        else lineage.target.mockResolvedValue({ ok: true, channelId: "C2" });
+        try { await controls?.authorizeAttempt({ signal: controls.signal }); sent++; } catch (error) { denied = error; }
+      });
+      const { runSlackAgent } = await import("./slack-agent");
+      await expect(runTrustedSlackAgent(runSlackAgent, { ...basePayload(), source: "app_mention", prompt: "help" })).rejects.toThrow();
+      expect(denied).toBeDefined();
+      expect(sent).toBe(0);
+    });
+
+    it.each(["mapping", "source"] as const)("rechecks %s after the destination await within the transport attempt", async mutation => {
+      let sent = 0;
+      let denied: unknown;
+      deliverSlackAgentResponseMock.mockImplementationOnce(async (_payload, _response, controls) => {
+        lineage.target.mockImplementationOnce(async () => {
+          if (mutation === "mapping") prismaMock.communicationExternalUser.findUnique.mockResolvedValue({ id: "external-user-1", userId: "another-user", isDeleted: false });
+          else lineage.epochs.set("incoming-message", 1);
+          return { ok: true, channelId: "C1" };
+        });
+        try { await controls?.authorizeAttempt({ signal: controls.signal }); sent++; } catch (error) { denied = error; }
+      });
+      const { runSlackAgent } = await import("./slack-agent");
+      await expect(runTrustedSlackAgent(runSlackAgent, { ...basePayload(), source: "app_mention", prompt: "help" })).rejects.toThrow();
+      expect(denied).toBeDefined();
+      expect(sent).toBe(0);
+    });
+
+    it("latches cancellation through a caught attempt and a later retry", async () => {
+      let sent = 0;
+      const failures: unknown[] = [];
+      let aborted = false;
+      deliverSlackAgentResponseMock.mockImplementationOnce(async (_payload, _response, controls) => {
+        const cancelled = new AbortController(); cancelled.abort(new Error("Synthetic cancellation"));
+        for (const signal of [cancelled.signal, controls?.signal]) {
+          try { await controls?.authorizeAttempt({ signal }); sent++; } catch (error) { failures.push(error); }
+        }
+        aborted = Boolean(controls?.signal.aborted);
+      });
+      const { runSlackAgent } = await import("./slack-agent");
+      await expect(runTrustedSlackAgent(runSlackAgent, { ...basePayload(), source: "app_mention", prompt: "help" })).rejects.toThrow();
+      expect(failures).toHaveLength(2);
+      expect(aborted).toBe(true);
+      expect(sent).toBe(0);
+    });
+
+    it.each(["public", "private"] as const)("permits current %s reply attempts over the same original proof", async audience => {
+      let sent = 0;
+      let capturesAtTransport = 0;
+      deliverSlackAgentResponseMock.mockImplementationOnce(async (_payload, _response, controls) => {
+        capturesAtTransport = lineage.capture.mock.calls.length;
+        for (let attempt = 0; attempt < 2; attempt++) { await controls?.authorizeAttempt({ signal: controls.signal }); sent++; }
+      });
+      const { runSlackAgent } = await import("./slack-agent");
+      const outcome = await runTrustedSlackAgent(runSlackAgent, { ...basePayload(), source: audience === "public" ? "app_mention" : "slash_command", prompt: "help" });
+      expect(outcome.resultJson.delivery).toEqual({ delivered: true });
+      expect(sent).toBe(2);
+      expect(deliverSlackAgentResponseMock.mock.calls[0][2]).toMatchObject({ authorizeAttempt: expect.any(Function), signal: expect.any(AbortSignal) });
+      expect(lineage.capture).toHaveBeenCalledTimes(capturesAtTransport);
+    });
+
+    it("preserves ordinary delivery failure without an authorization latch", async () => {
+      deliverSlackAgentResponseMock.mockRejectedValueOnce(new Error("Synthetic transport unavailable"));
+      const { runSlackAgent } = await import("./slack-agent");
+      const outcome = await runTrustedSlackAgent(runSlackAgent, { ...basePayload(), source: "app_mention", prompt: "help" });
+      expect(outcome.resultJson.delivery).toEqual({ delivered: false, error: "Slack delivery failed." });
+    });
   });
 
 });
