@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { installSourcePermissionEpochFixture } from "../../domain/src/source-permission-epochs.test-fixture";
-import { env, type AppActor } from "@corgtex/shared";
+import type { AppActor } from "@corgtex/shared";
 import type { ModelAttemptGuard } from "@corgtex/models";
 import type { LineageKind, LineageRoot } from "../../domain/src/source-lineage";
 
 const fixture = vi.hoisted(() => {
+  const modelEnv = { MODEL_PROVIDER: "fake", MODEL_CHAT_CONVERSATION: "synthetic-chat", KNOWLEDGE_SEARCH_PROVIDER: "postgres" };
   const tables = new Map<string, Map<string, any>>();
   const memberships = new Map<string, { id: string; role: string }>();
   const delegates = new Map<string, any>();
@@ -82,7 +83,7 @@ const fixture = vi.hoisted(() => {
     }
     return delegates.get(name);
   } });
-  return { tables, memberships, delegates, membership, prisma, base, chat, eventStream, chatStream, embedding, rerank, cache, updateHook, commitHook, transactionErrors };
+  return { modelEnv, tables, memberships, delegates, membership, prisma, base, chat, eventStream, chatStream, embedding, rerank, cache, updateHook, commitHook, transactionErrors };
 });
 
 vi.mock("@corgtex/shared", async () => ({
@@ -93,7 +94,7 @@ vi.mock("@corgtex/shared", async () => ({
   setCacheJson: async (key: string, value: unknown) => { fixture.cache.set(key, structuredClone(value)); },
   getCacheVersion: async () => 0, incrementCacheVersion: async () => 0,
   logger: { warn: vi.fn(), error: vi.fn(), info: vi.fn() },
-  env: { MODEL_PROVIDER: "fake", MODEL_CHAT_CONVERSATION: "synthetic-chat", KNOWLEDGE_SEARCH_PROVIDER: "postgres" },
+  env: fixture.modelEnv,
 }));
 vi.mock("../../domain/src/auth", () => ({ requireWorkspaceMembership: fixture.membership, requireGlobalOperator: vi.fn() }));
 vi.mock("../../domain/src/brain-access", () => ({ resolveKnowledgeAccessDomains: vi.fn(async (actor, workspaceId) => {
@@ -188,7 +189,7 @@ async function pendingCompletion() {
 }
 
 beforeEach(async () => {
-  env.MODEL_PROVIDER = "fake";
+  fixture.modelEnv.MODEL_PROVIDER = "fake";
   vi.clearAllMocks(); fixture.tables.clear(); fixture.memberships.clear(); fixture.cache.clear(); fixture.updateHook.current = null; fixture.commitHook.current = null; fixture.transactionErrors.length = 0;
   fixture.memberships.set(`${workspaceId}:synthetic-alice`, { id: "member-alice", role: "CONTRIBUTOR" });
   fixture.memberships.set(`${workspaceId}:synthetic-bob`, { id: "member-bob", role: "CONTRIBUTOR" });
@@ -274,7 +275,7 @@ describe("conversation orchestration using actual provenance and permissions", (
         return reply("Synthetic streamed answer");
       });
     } else {
-      env.MODEL_PROVIDER = "openai";
+      fixture.modelEnv.MODEL_PROVIDER = "openai";
       const route = { id: "attempt-route", type: "function", function: { name: "route_conversation_tools",
         arguments: JSON.stringify({ calls: [{ name: "query_tensions", arguments: {} }] }) } };
       fixture.eventStream.mockImplementation(async function* () {
