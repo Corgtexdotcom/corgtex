@@ -7,7 +7,7 @@ import { assertArtifactInputWriteFence } from "../../domain/src/artifact-input-w
 import { AppError } from "../../domain/src/errors";
 import { assertSqlIngestionAttemptCurrent, completeSqlIngestionAttempt, lockSqlIngestionAttempt,
   renewSqlIngestionAttempt } from "../../domain/src/sql-ingestion-attempt";
-import { assertSqlNativeCaptureCurrent, disposeSqlIngestionCapture, finalizeSqlNativeCapture,
+import { assertSqlNativeCaptureCurrent, assertSqlNativeModelInputCurrent, disposeSqlIngestionCapture, finalizeSqlNativeCapture,
   sqlNativeCaptureForPreparation } from "../../domain/src/sql-native-input";
 import { artifactPermissionEpochIdentities, capturePermissionEpochs, mergePermissionEpochProofs,
   parsePermissionEpochProof } from "../../domain/src/source-permission-epochs";
@@ -70,7 +70,20 @@ export async function prepareSqlKnowledgeAttempt(input: {attempt: SqlIngestionAt
     for (let offset = 0; offset < outputs.length; offset += VECTOR_BATCH_SIZE) {
       const batch = outputs.slice(offset, offset + VECTOR_BATCH_SIZE);
       await assertSqlIngestionAttemptCurrent(attempt);
-      const embedded = await defaultModelGateway.embed({workspaceId: attempt.workspaceId, input: batch.map(output => output.row.content)});
+      const controller = new AbortController();
+      const embedded = await defaultModelGateway.embed({workspaceId: attempt.workspaceId, input: batch.map(output => output.row.content),
+        signal: controller.signal,
+        authorizeAttempt: async ({ signal }) => {
+          try {
+            signal.throwIfAborted();
+            await assertSqlNativeModelInputCurrent(attempt, receipt);
+            signal.throwIfAborted();
+          } catch (error) { controller.abort(error); throw error; }
+        },
+      });
+      // An adapter may ignore cancellation or swallow an attempt-guard error.
+      // Such a response cannot become staged SQL output.
+      controller.signal.throwIfAborted();
       await assertSqlIngestionAttemptCurrent(attempt);
       invariant(embedded.embeddings.length === batch.length && embedded.embeddings.every(vector =>
         Array.isArray(vector) && vector.length > 0 && vector.every(value => Number.isFinite(value))),

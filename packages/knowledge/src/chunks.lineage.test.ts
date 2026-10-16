@@ -1,3 +1,4 @@
+import type { ModelAttemptGuard } from "@corgtex/models";
 import { installSourcePermissionEpochFixture } from "../../domain/src/source-permission-epochs.test-fixture";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fixture, resetFixture, known, alpha, beta, workspaceId } from "../../agents/src/agents/model-consumer.test-fixture";
@@ -142,12 +143,79 @@ describe("generated KnowledgeChunk receipts with actual source helper", () => {
     expect(await currentReadable()).toEqual(new Set([fixture.rows.knowledgeChunk[0].id]));
   });
 
+  it.each(["credentials", "retry"])("blocks indexing provider sends after %s revoke/restore with the original proof", async boundary => {
+    const source = await original(); const old = legacy(source); let sends = 0;
+    remote.embed.mockImplementationOnce(async ({ authorizeAttempt, signal }: { authorizeAttempt?: ModelAttemptGuard; signal?: AbortSignal }) => {
+      const context = { signal: signal ?? new AbortController().signal };
+      if (boundary === "retry") { await authorizeAttempt?.(context); sends++; }
+      epochs.bump(workspaceId, "Document", source.id);
+      epochs.bump(workspaceId, "Document", source.id);
+      await authorizeAttempt?.(context); sends++;
+      return { embeddings: [[1, 0]], usage: { model: "synthetic-current" } };
+    });
+    const result = await syncDocumentKnowledge({ workspaceId, documentId: source.id, lineageActor: alpha }).catch(error => error);
+    expect(sends).toBe(boundary === "retry" ? 1 : 0);
+    expect(result).toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(fixture.rows.knowledgeChunk).toEqual([old]); expect(remote.azure).not.toHaveBeenCalled();
+  });
+
+  it.each([1, 2])("allows %s authorized indexing attempt(s) and persists readable output", async attempts => {
+    const source = await original(); let sends = 0;
+    remote.embed.mockImplementationOnce(async ({ authorizeAttempt, signal }: { authorizeAttempt?: ModelAttemptGuard; signal?: AbortSignal }) => {
+      expect(authorizeAttempt).toBeTypeOf("function"); expect(signal).toBeInstanceOf(AbortSignal);
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        await authorizeAttempt!({ signal: signal! }); sends++;
+      }
+      return { embeddings: [[1, 0]], usage: { model: "synthetic-current" } };
+    });
+    expect(await syncDocumentKnowledge({ workspaceId, documentId: source.id, lineageActor: alpha })).toBe(1);
+    expect(sends).toBe(attempts);
+    expect(await currentReadable()).toEqual(new Set([fixture.rows.knowledgeChunk[0].id]));
+  });
+
+  it("latches a denied indexing attempt when an adapter swallows the guard failure", async () => {
+    const source = await original(); const old = legacy(source);
+    remote.embed.mockImplementationOnce(async ({ authorizeAttempt, signal }: { authorizeAttempt?: ModelAttemptGuard; signal?: AbortSignal }) => {
+      epochs.bump(workspaceId, "Document", source.id);
+      epochs.bump(workspaceId, "Document", source.id);
+      try { await authorizeAttempt?.({ signal: signal ?? new AbortController().signal }); } catch { /* Deliberately broken adapter. */ }
+      expect(signal?.aborted).toBe(true);
+      return { embeddings: [[1, 0]], usage: { model: "synthetic-current" } };
+    });
+    await expect(syncDocumentKnowledge({ workspaceId, documentId: source.id, lineageActor: alpha })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(fixture.rows.knowledgeChunk).toEqual([old]); expect(remote.azure).not.toHaveBeenCalled();
+    expect(fixture.prisma.knowledgeChunk.deleteMany).not.toHaveBeenCalled();
+    expect(fixture.prisma.knowledgeChunk.createMany).not.toHaveBeenCalled();
+  });
+
+  it("honors the gateway attempt cancellation context and latches it before persistence", async () => {
+    const source = await original(); const old = legacy(source);
+    const deadline = new AbortController(); const reason = new Error("Synthetic attempt deadline");
+    remote.embed.mockImplementationOnce(async ({ authorizeAttempt, signal }: { authorizeAttempt: ModelAttemptGuard; signal: AbortSignal }) => {
+      deadline.abort(reason);
+      await expect(authorizeAttempt({ signal: deadline.signal })).rejects.toBe(reason);
+      expect(signal.aborted).toBe(true); expect(signal.reason).toBe(reason);
+      return { embeddings: [[1, 0]], usage: { model: "synthetic-current" } };
+    });
+    await expect(syncDocumentKnowledge({ workspaceId, documentId: source.id, lineageActor: alpha })).rejects.toBe(reason);
+    expect(fixture.rows.knowledgeChunk).toEqual([old]);
+    expect(fixture.prisma.knowledgeChunk.createMany).not.toHaveBeenCalled();
+  });
+
   it("rolls back chunk replacement when complete receipt persistence fails", async () => {
     const source = await original(); const old = legacy(source);
     fixture.prisma.artifactInputLineage.create.mockImplementationOnce(async () => { throw new Error("Synthetic receipt failure"); });
     await expect(syncDocumentKnowledge({ workspaceId, documentId: source.id, lineageActor: alpha })).rejects.toThrow("Synthetic receipt failure");
     expect(fixture.rows.knowledgeChunk).toEqual([old]); expect(remote.azure).not.toHaveBeenCalled();
     expect(fixture.rows.document[0]).toEqual(source);
+  });
+
+  it.each(["", "Synthetic private SQL row"])("rejects legacy SQL publication explicitly before source/model work: %s", async content => {
+    await expect(syncKnowledgeForSource({ workspaceId, sourceType: "EXTERNAL_DATABASE", accessDomain: "WORKSPACE",
+      sourceId: "legacy-sql-row", content })).rejects.toMatchObject({ status: 409, code: "SQL_NATIVE_PUBLICATION_REQUIRED" });
+    expect(remote.embed).not.toHaveBeenCalled();
+    expect(remote.azure).not.toHaveBeenCalled();
+    expect(fixture.rows.knowledgeChunk).toEqual([]);
   });
 
   it("does not pass unsupported, unknown, private or arbitrary annotations to embedding", async () => {

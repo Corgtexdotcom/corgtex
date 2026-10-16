@@ -110,6 +110,9 @@ const { evidenceCapture, evidenceRelease } = vi.hoisted(() => ({evidenceCapture:
 vi.mock("../../domain/src/auth", () => ({requireWorkspaceMembership: async () => ({id:"member"})}));
 vi.mock("../../domain/src/source-lineage", () => ({
   captureArtifactInputProof: evidenceCapture,
+  captureReadableWorkItemInputs: async (actor: unknown, workspaceId: string, kind: string, rows: Array<{id: string}>) => ({
+    ids: new Set(rows.map(row => row.id)), roots: await evidenceCapture(actor, workspaceId, rows.map(row => ({kind, id: row.id, snapshot: row}))), heads: new Map(),
+  }),
   captureArtifactReadHeadObservation: async (read:()=>Promise<unknown>)=>({value:await read(),heads:new Map()}),
   mergeLineageInputRoot: (_previous:unknown,root:unknown)=>root,
   withArtifactCountReleaseSnapshot: async (_a:unknown,_w:string,roots:unknown,_r:unknown,finish:(tx:unknown)=>Promise<unknown>)=>{await evidenceRelease(roots);return finish({});},
@@ -128,6 +131,7 @@ vi.mock("@corgtex/domain", async () => {
 
   return {
   ...await import("../../domain/src/digest-lineage"),
+  ...await import("../../domain/src/work-item-readable-page"),
   // This routing fixture verifies handler wiring; native permission/encryption behavior is exercised by mcp-tool-input.test.ts.
   withMcpToolInput: vi.fn(async (_actor, params, work) => work(structuredClone(params.args))),
   readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map((row: {id: string}) => row.id))),
@@ -401,6 +405,8 @@ describe("createCorgtexMcpServer", () => {
   });
 
   beforeEach(async () => {
+    evidenceCapture.mockReset().mockImplementation(async (_actor, _workspaceId, inputs) => inputs.map((input: {kind: string; id: string}) => ({kind: input.kind, id: input.id, fingerprint: "fixture"})));
+    evidenceRelease.mockReset().mockResolvedValue(undefined);
     vi.unstubAllEnvs();
     vi.stubEnv("MICROSOFT_CLIENT_ID", "microsoft-client-id");
     vi.stubEnv("MICROSOFT_CLIENT_SECRET", "microsoft-client-secret");
@@ -2492,7 +2498,7 @@ describe("createCorgtexMcpServer", () => {
         version: 1,
         priority: 2,
         assigneeMemberId: "member-assignee",
-        assigneeMember: { id: "member-assignee", user: { displayName: "Assignee", email: "assignee@example.test" } },
+        assigneeMember: { id: "member-assignee", userId: "user-assignee", isActive: true, user: { displayName: "Assignee", email: "assignee@example.test" } },
       } as never)
       .mockResolvedValueOnce({
         id: "action-1",
@@ -2500,7 +2506,7 @@ describe("createCorgtexMcpServer", () => {
         version: 2,
         priority: 3,
         assigneeMemberId: "member-assignee",
-        assigneeMember: { id: "member-assignee", user: { displayName: "Assignee", email: "assignee@example.test" } },
+        assigneeMember: { id: "member-assignee", userId: "user-assignee", isActive: true, user: { displayName: "Assignee", email: "assignee@example.test" } },
       } as never);
     vi.mocked(prisma.tension.findFirst)
       .mockResolvedValueOnce({
@@ -2510,8 +2516,9 @@ describe("createCorgtexMcpServer", () => {
         priority: 1,
         assigneeMemberId: "member-responsible",
         raisedByMemberId: "member-raiser",
-        assigneeMember: { id: "member-responsible", user: { displayName: "Responsible", email: "responsible@example.test" } },
-        raisedByMember: { id: "member-raiser", user: { displayName: "Raiser", email: "raiser@example.test" } },
+        upvotes: [],
+        assigneeMember: { id: "member-responsible", userId: "user-responsible", isActive: true, user: { displayName: "Responsible", email: "responsible@example.test" } },
+        raisedByMember: { id: "member-raiser", userId: "user-raiser", isActive: true, user: { displayName: "Raiser", email: "raiser@example.test" } },
       } as never)
       .mockResolvedValueOnce({
         id: "tension-1",
@@ -2520,8 +2527,9 @@ describe("createCorgtexMcpServer", () => {
         priority: 2,
         assigneeMemberId: "member-responsible",
         raisedByMemberId: "member-raiser",
-        assigneeMember: { id: "member-responsible", user: { displayName: "Responsible", email: "responsible@example.test" } },
-        raisedByMember: { id: "member-raiser", user: { displayName: "Raiser", email: "raiser@example.test" } },
+        upvotes: [],
+        assigneeMember: { id: "member-responsible", userId: "user-responsible", isActive: true, user: { displayName: "Responsible", email: "responsible@example.test" } },
+        raisedByMember: { id: "member-raiser", userId: "user-raiser", isActive: true, user: { displayName: "Raiser", email: "raiser@example.test" } },
       } as never);
     getProposalMock
       .mockResolvedValueOnce({
@@ -3607,6 +3615,9 @@ describe("createCorgtexMcpServer", () => {
       }
       testCase.domainFn.mockClear().mockResolvedValueOnce({ id: "id-1", version: 3 });
       if (testCase.name === "update_proposal") getProposalMock.mockResolvedValueOnce({ id: "id-1", version: 3 });
+      const { prisma } = await import("@corgtex/shared");
+      if (testCase.name === "update_action") vi.mocked(prisma.action.findFirst).mockResolvedValueOnce({ id: "id-1", version: 3, assigneeMember: null } as any);
+      if (testCase.name === "update_tension") vi.mocked(prisma.tension.findFirst).mockResolvedValueOnce({ id: "id-1", version: 3, assigneeMember: null, raisedByMember: null, upvotes: [] } as any);
       recordAuditMock.mockClear();
       const success = await tool.handler(testCase.args);
       expect(testCase.domainFn).toHaveBeenCalledWith(expect.anything(), expect.objectContaining(testCase.args));

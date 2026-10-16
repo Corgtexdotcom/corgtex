@@ -1,3 +1,4 @@
+import type { ModelGateway } from "@corgtex/models";
 import { createHash, randomUUID } from "node:crypto";
 import type { Prisma } from "@prisma/client";
 import { serialize, deserialize } from "node:v8";
@@ -6,7 +7,7 @@ import { decryptSecret, getPrismaClient, prisma, type AppActor } from "@corgtex/
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { registerSqlNativeDriver } from "../../domain/src/sql-native-driver";
 import { claimSqlIngestionAttempt, failSqlIngestionAttempt, sqlIngestionConfigurationFingerprint } from "../../domain/src/sql-ingestion-attempt";
-import { captureSqlIngestionAttempt, loadSqlNativeRunInput } from "../../domain/src/sql-native-input";
+import { captureSqlIngestionAttempt, disposeSqlIngestionCapture, finalizeSqlNativeCapture, loadSqlNativeRunInput } from "../../domain/src/sql-native-input";
 import type { AuthenticatedSqlRunReceipt, SqlNativeDefinition, SqlNativePage, SqlNativeRow, SqlPublicationIdentity } from "../../domain/src/sql-ingestion-contract";
 import { prepareSqlKnowledgeAttempt, publishPreparedSqlKnowledgeAttempt } from "./sql-publication";
 import { countReadableKnowledgeChunks } from "./counts";
@@ -109,6 +110,96 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
     models.embed.mockReset().mockImplementation(async ({input}) => ({embeddings: (typeof input === "string" ? [input] : input)
       .map(() => [1, 0]), usage: {model: "synthetic-sql-embedding"}}));
   });
+  it.each(["credentials", "retry"] as const)("model attempt rejects native access revoked during %s wait", async phase => {
+    const f = await fixture(), attempt = await f.claim(), receipt = await captureSqlIngestionAttempt(attempt);
+    let sends = 0;
+    models.embed.mockImplementation(async (request: Parameters<ModelGateway["embed"]>[0]) => {
+      const context = { signal: request.signal ?? new AbortController().signal };
+      if (phase === "retry") { await request.authorizeAttempt?.(context); sends++; }
+      transport.access = false;
+      await request.authorizeAttempt?.(context);
+      sends++;
+      return { embeddings: [[1, 0]], usage: { model: "synthetic-sql-embedding" } };
+    });
+    await expect(prepareSqlKnowledgeAttempt({ attempt, receipt })).rejects.toMatchObject({ code: "SQL_NATIVE_CAPTURE_ACCESS_REVOKED" });
+    expect(sends).toBe(phase === "retry" ? 1 : 0);
+    expect(await prisma.sqlKnowledgeStagedChunk.count()).toBe(0);
+    expect((await prisma.externalDataSource.findUniqueOrThrow({ where: { id: f.source.id } })).lastCursorValue).toBeNull();
+    expect(transport.closes).toBe(1);
+    expect(transport.accessInsideCommit).toBe(0);
+  });
+
+  it.each(["source", "capture", "attempt"] as const)("model attempt rejects original %s authority changes before send", async kind => {
+    const f = await fixture(), attempt = await f.claim(), receipt = await captureSqlIngestionAttempt(attempt);
+    let sends = 0;
+    models.embed.mockImplementation(async (request: Parameters<ModelGateway["embed"]>[0]) => {
+      if (kind === "source") await prisma.externalDataSource.update({ where: { id: f.source.id }, data: { isActive: false } });
+      if (kind === "capture") await prisma.sourcePermissionEpoch.updateMany({ where: { workspaceId: f.workspace.id,
+        sourceKind: "SqlNativeRunInput", sourceId: receipt.receiptId }, data: { epoch: { increment: 1n } } });
+      if (kind === "attempt") await prisma.sqlIngestionAttempt.update({ where: { id: attempt.attemptId }, data: { leaseExpiresAt: new Date(0) } });
+      await request.authorizeAttempt?.({ signal: request.signal ?? new AbortController().signal });
+      sends++;
+      return { embeddings: [[1, 0]], usage: { model: "synthetic-sql-embedding" } };
+    });
+    await expect(prepareSqlKnowledgeAttempt({ attempt, receipt })).rejects.toBeDefined();
+    expect(sends).toBe(0);
+    expect(await prisma.sqlKnowledgeStagedChunk.count()).toBe(0);
+    expect(transport.closes).toBe(1);
+  });
+
+  it.each(["disposed", "finalized"] as const)("model attempt rejects a receipt %s during native validation", async state => {
+    const f = await fixture(), attempt = await f.claim(), receipt = await captureSqlIngestionAttempt(attempt);
+    let sends = 0;
+    transport.afterAccess = async () => {
+      transport.afterAccess = undefined;
+      if (state === "disposed") await disposeSqlIngestionCapture(receipt);
+      else await finalizeSqlNativeCapture(attempt, receipt);
+    };
+    models.embed.mockImplementation(async (request: Parameters<ModelGateway["embed"]>[0]) => {
+      await request.authorizeAttempt?.({ signal: request.signal ?? new AbortController().signal });
+      sends++;
+      return { embeddings: [[1, 0]], usage: { model: "synthetic-sql-embedding" } };
+    });
+    await expect(prepareSqlKnowledgeAttempt({ attempt, receipt })).rejects.toMatchObject({ code: "SQL_NATIVE_RECEIPT_INVALID" });
+    expect(sends).toBe(0);
+    expect(await prisma.sqlKnowledgeStagedChunk.count()).toBe(0);
+    expect(transport.closes).toBe(1);
+  });
+
+  it("model attempt denial stays fatal when an adapter ignores it and the native grant restores", async () => {
+    const f = await fixture(), attempt = await f.claim(), receipt = await captureSqlIngestionAttempt(attempt);
+    let requestSignal: AbortSignal | undefined;
+    models.embed.mockImplementation(async (request: Parameters<ModelGateway["embed"]>[0]) => {
+      requestSignal = request.signal;
+      transport.access = false;
+      try { await request.authorizeAttempt?.({ signal: request.signal ?? new AbortController().signal }); } catch { /* synthetic ignoring adapter */ }
+      transport.access = true;
+      return { embeddings: [[1, 0]], usage: { model: "synthetic-sql-embedding" } };
+    });
+    await expect(prepareSqlKnowledgeAttempt({ attempt, receipt })).rejects.toMatchObject({ code: "SQL_NATIVE_CAPTURE_ACCESS_REVOKED" });
+    expect(requestSignal?.aborted).toBe(true);
+    expect(await prisma.sqlKnowledgeStagedChunk.count()).toBe(0);
+    expect(transport.closes).toBe(1);
+  });
+
+  it("model attempt permits retries with the original capture and leaves finalization to publication", async () => {
+    const f = await fixture(), attempt = await f.claim(), receipt = await captureSqlIngestionAttempt(attempt);
+    const original = await prisma.sqlNativeRunInput.findUniqueOrThrow({ where: { id: receipt.receiptId } });
+    models.embed.mockImplementation(async (request: Parameters<ModelGateway["embed"]>[0]) => {
+      const context = { signal: request.signal ?? new AbortController().signal };
+      await request.authorizeAttempt?.(context); await request.authorizeAttempt?.(context);
+      expect(transport.closes).toBe(0); expect(transport.checks).toBe(0);
+      return { embeddings: [[1, 0]], usage: { model: "synthetic-sql-embedding" } };
+    });
+    const prepared = await prepareSqlKnowledgeAttempt({ attempt, receipt });
+    expect(transport.accessChecks).toBe(2);
+    expect(await prisma.sqlNativeRunInput.findUniqueOrThrow({ where: { id: receipt.receiptId } })).toEqual(original);
+    await publishPreparedSqlKnowledgeAttempt({ attempt, prepared, commit: f.commit });
+    expect(transport.checks).toBe(1); expect(transport.closes).toBe(1);
+    expect(transport.accessInsideCommit).toBe(0);
+    expect(await prisma.knowledgeChunk.count()).toBe(1);
+  });
+
   it("accepts only an exact native receipt and withholds staged output until the real commit", async () => {
     const f = await fixture(), attempt = await f.claim(), receipt = await captureSqlIngestionAttempt(attempt);
     await expect(prepareSqlKnowledgeAttempt({attempt, receipt: {...receipt} as AuthenticatedSqlRunReceipt})).rejects.toMatchObject({code: "SQL_NATIVE_RECEIPT_INVALID"});

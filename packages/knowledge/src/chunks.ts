@@ -1,3 +1,4 @@
+import { AppError } from "../../domain/src/errors";
 import { currentArtifactInputRootsBatch } from "../../domain/src/source-lineage";
 import { DigestReadRelease } from "../../domain/src/digest-lineage";
 import { randomUUID } from "node:crypto";
@@ -5,7 +6,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { KnowledgeAccessDomain, KnowledgeSourceType, Prisma } from "@prisma/client";
 import { getSharedStateBackend, prisma, type AppActor } from "@corgtex/shared";
 import { assertArtifactInputWriteFence, captureArtifactInputProof, captureImmutableArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, prepareArtifactCommitPreflight, readableArtifactIds, recordArtifactInputLineage, requireWorkspaceMembership, scanSourceReadableRecords, withArtifactCommitPreflight, type LineageKind, type LineageRoot } from "@corgtex/domain";
-import { defaultModelGateway } from "@corgtex/models";
+import { defaultModelGateway, type ModelAttemptGuard } from "@corgtex/models";
 import { invalidateKnowledgeCache } from "./retrieval";
 import { getKnowledgeSearchProvider, isAzureKnowledgeSearchConfigured, logAzureKnowledgeIndexingWarning, syncAzureKnowledgeSource } from "./azure-search";
 import { classifyChunkSensitivity } from "./sensitivity";
@@ -120,6 +121,11 @@ export async function syncKnowledgeForSource(params: {
   sourceUpdatedAt?: Date;
   lineageActor?: AppActor;
 }) {
+  // SQL rows require the authenticated claim/capture/publication pipeline. A
+  // zero count would let legacy connector callers acknowledge a skipped row.
+  if (params.sourceType === "EXTERNAL_DATABASE") {
+    throw new AppError(409, "SQL_NATIVE_PUBLICATION_REQUIRED", "Database rows require the native SQL publisher before advancing their checkpoint.");
+  }
   // Only these canonical renderers have complete, current source proof.
   if (!["BRAIN_ARTICLE", "DOCUMENT", "MEETING", "PROPOSAL", "EXTERNAL_CONTENT"].includes(params.sourceType)) return 0;
   params = { ...params, metadata: params.metadata ? structuredClone(params.metadata) : undefined,
@@ -214,12 +220,34 @@ export async function syncKnowledgeForSource(params: {
     !Object.hasOwn(sourceMetadata, key) || JSON.stringify(value) !== JSON.stringify(sourceMetadata[key]))) return 0;
   params = { ...params, metadata: snapshot.kind === "ExternalContentSource" ? storedMetadata : sourceMetadata };
 
+  // The worker lease remains a live commit authority, while the output keeps
+  // the frozen job receipt so completion does not invalidate indexed content.
+  const commitRoots = [...sourceRoots, ...sourceProof.filter(root => root.kind === "WorkflowJobInput")];
+  const attemptController = new AbortController();
+  const authorizeAttempt: ModelAttemptGuard = async ({ signal }) => {
+    try {
+      attemptController.signal.throwIfAborted();
+      signal.throwIfAborted();
+      if (!await isArtifactInputProofReadable(sourceActor, params.workspaceId, commitRoots)) {
+        throw new AppError(409, "SOURCE_CHANGED", "Indexing source authority changed before the model attempt.");
+      }
+      attemptController.signal.throwIfAborted();
+      signal.throwIfAborted();
+    } catch (error) {
+      // Keep denial terminal even if an adapter catches the guard rejection.
+      attemptController.abort(error);
+      throw error;
+    }
+  };
   const embeddingResponse = await defaultModelGateway.embed({
     workspaceId: params.workspaceId,
     workflowJobId: params.workflowJobId,
     agentRunId: params.agentRunId,
     input: chunks,
+    signal: attemptController.signal,
+    authorizeAttempt,
   });
+  attemptController.signal.throwIfAborted();
 
   const createdAt = new Date();
   const chunkRows = chunks.map((content, index) => {
@@ -248,9 +276,6 @@ export async function syncKnowledgeForSource(params: {
     };
   });
 
-  // The worker lease remains a live commit authority, while the output keeps
-  // the frozen job receipt so completion does not invalidate indexed content.
-  const commitRoots = [...sourceRoots, ...sourceProof.filter(root => root.kind === "WorkflowJobInput")];
   let commitPreflight: Awaited<ReturnType<typeof prepareArtifactCommitPreflight>>;
   try {
     commitPreflight = await prepareArtifactCommitPreflight(sourceActor, params.workspaceId, commitRoots);

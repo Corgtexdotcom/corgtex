@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { Prisma, type KnowledgeAccessDomain, type KnowledgeSourceType } from "@prisma/client";
 import { getCacheJson, getCacheVersion, incrementCacheVersion, prisma, cosineSimilarity, logger, setCacheJson } from "@corgtex/shared";
+import type { ModelRequestControls } from "@corgtex/models";
 import { CatalogBudgetError, defaultModelGateway, ModelProviderHttpError, WorkspaceModelBudgetError } from "@corgtex/models";
 import type { AppActor } from "@corgtex/shared";
 import { mergeLineageInputRoot, captureArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, readableArtifactIds, resolveKnowledgeAccessDomains, type LineageKind, type LineageRoot } from "@corgtex/domain";
@@ -157,7 +158,7 @@ const knowledgeLineageKinds: Partial<Record<KnowledgeSourceType, LineageKind>> =
   EXTERNAL_DATABASE: "SqlNativeRunInput",
 };
 
-type RetrievalAccess = {
+type RetrievalAccess = ModelRequestControls & {
   actor: AppActor;
   workspaceId: string;
   accessDomains: KnowledgeAccessDomain[];
@@ -198,6 +199,7 @@ function unavailableInput(error: unknown) {
 }
 
 async function currentInputProof(params: RetrievalAccess, roots: LineageRoot[]) {
+  params.signal?.throwIfAborted();
   if (roots.length === 0) return false;
   try {
     const heads = searchInputHeads.get(roots);
@@ -210,6 +212,22 @@ async function currentInputProof(params: RetrievalAccess, roots: LineageRoot[]) 
     if (unavailableInput(error)) return false;
     throw error;
   }
+}
+
+function knowledgeAttemptControls(params: RetrievalAccess, roots: LineageRoot[]): ModelRequestControls {
+  const authorizeAttempt = params.authorizeAttempt;
+  return { signal: params.signal, authorizeAttempt: async context => {
+    params.signal?.throwIfAborted();
+    context.signal.throwIfAborted();
+    await authorizeAttempt?.(context);
+    params.signal?.throwIfAborted();
+    context.signal.throwIfAborted();
+    if (!await currentInputProof(params, roots)) {
+      throw Object.assign(new Error("Knowledge source authority changed before provider send."), { code: "SOURCE_CHANGED", status: 409 });
+    }
+    params.signal?.throwIfAborted();
+    context.signal.throwIfAborted();
+  } };
 }
 
 function rememberSearchProof(params: RetrievalAccess, run: SearchRun) {
@@ -626,7 +644,8 @@ export async function searchIndexedKnowledge(params: {
   agentRunId?: string;
   catalogItemId?: string;
   agentCredentialId?: string;
-}) {
+} & ModelRequestControls) {
+  params.signal?.throwIfAborted();
   const query = params.query.trim();
   if (!query) {
     return rememberSearchProof({ ...params, accessDomains: [] }, { results: [], roots: [] });
@@ -692,11 +711,14 @@ async function executeKnowledgeSearch(params: {
   agentCredentialId?: string;
   provider: "postgres" | "azure" | "dual_compare";
   configuredProvider: "postgres" | "azure" | "dual_compare";
-}) {
+} & ModelRequestControls) {
   if (params.provider === "postgres") {
     return searchIndexedKnowledgePostgres(params);
   }
 
+  const cohort = await scanReadableKnowledgeChunks(params, POSTGRES_SEARCH_WINDOW);
+  if (!cohort.chunks.length || !await currentInputProof(params, cohort.roots)) return { results: [], roots: cohort.roots };
+  const controls = knowledgeAttemptControls(params, cohort.roots);
   let queryVector: number[];
   try {
     const queryEmbedding = await defaultModelGateway.embed({
@@ -706,8 +728,10 @@ async function executeKnowledgeSearch(params: {
       catalogItemId: params.catalogItemId,
       agentCredentialId: params.agentCredentialId,
       input: params.query,
+      ...controls,
     });
     queryVector = queryEmbedding.embeddings[0] ?? [];
+    await controls.authorizeAttempt!({ signal: params.signal ?? new AbortController().signal });
     await searchAzureKnowledge({
       workspaceId: params.workspaceId,
       query: params.query,
@@ -718,7 +742,9 @@ async function executeKnowledgeSearch(params: {
       accessDomains: params.accessDomains,
     });
   } catch (error) {
-    if (error instanceof CatalogBudgetError || error instanceof WorkspaceModelBudgetError) throw error;
+    params.signal?.throwIfAborted();
+    if (unavailableInput(error) || (error instanceof Error && "code" in error && error.code === "MODEL_ATTEMPT_DENIED")
+      || error instanceof CatalogBudgetError || error instanceof WorkspaceModelBudgetError) throw error;
     logger.warn("Azure Search retrieval failed; falling back to Postgres knowledge retrieval", {
       workspaceId: params.workspaceId,
       configuredProvider: params.configuredProvider,
@@ -726,14 +752,15 @@ async function executeKnowledgeSearch(params: {
       accessDomains: params.accessDomains,
       error: error instanceof Error ? error.message : String(error),
     });
-    return searchIndexedKnowledgePostgres(params);
+    return searchIndexedKnowledgePostgres(params, undefined, cohort);
   }
 
   // Azure hit membership, order and scores can depend on unseen private inputs.
   // Its suggestions cannot determine the candidate cap or any displayed rank.
   // Recompute from the canonical permitted SQL pool, reusing the charged query
   // embedding; all local candidates are captured before scoring and reranking.
-  return searchIndexedKnowledgePostgres(params, queryVector);
+  params.signal?.throwIfAborted();
+  return searchIndexedKnowledgePostgres(params, queryVector, cohort);
 }
 
 async function searchIndexedKnowledgePostgres(params: {
@@ -748,10 +775,12 @@ async function searchIndexedKnowledgePostgres(params: {
   agentRunId?: string;
   catalogItemId?: string;
   agentCredentialId?: string;
-}, queryEmbeddingOverride?: number[]): Promise<SearchRun> {
+} & ModelRequestControls, queryEmbeddingOverride?: number[],
+  captured?: Awaited<ReturnType<typeof scanReadableKnowledgeChunks>>): Promise<SearchRun> {
   const query = params.query;
 
-  const { chunks, roots } = await scanReadableKnowledgeChunks(params, POSTGRES_SEARCH_WINDOW);
+  const { chunks, roots } = captured ?? await scanReadableKnowledgeChunks(params, POSTGRES_SEARCH_WINDOW);
+  params.signal?.throwIfAborted();
   if (chunks.length === 0) return { results: [], roots: [] };
   if (!await currentInputProof(params, roots)) return { results: [], roots };
 
@@ -792,6 +821,7 @@ async function searchIndexedKnowledgePostgres(params: {
         catalogItemId: params.catalogItemId,
         agentCredentialId: params.agentCredentialId,
         input: query,
+        ...knowledgeAttemptControls(params, roots),
         failFastOnRateLimit: true,
       });
   } catch (error) {
@@ -834,6 +864,7 @@ async function searchIndexedKnowledgePostgres(params: {
       catalogItemId: params.catalogItemId,
       agentCredentialId: params.agentCredentialId,
       query,
+      ...knowledgeAttemptControls(params, roots),
       documents: scored.map((entry) => `${entry.chunk.sourceTitle ?? ""}\n${entry.chunk.content}`.trim()),
       topK: resultLimit,
       failFastOnRateLimit: true,
@@ -859,7 +890,8 @@ export async function answerKnowledgeQuestion(params: {
   accessDomains?: KnowledgeAccessDomain[];
   workflowJobId?: string;
   agentRunId?: string;
-}) {
+} & ModelRequestControls) {
+  params.signal?.throwIfAborted();
   const accessDomains = await currentAccessDomains(params.actor, params.workspaceId, params.accessDomains);
   if (accessDomains.length === 0) {
     return {
@@ -897,6 +929,8 @@ export async function answerKnowledgeQuestion(params: {
     actor: params.actor,
     workspaceId: params.workspaceId,
     query: params.question,
+    signal: params.signal,
+    authorizeAttempt: params.authorizeAttempt,
     limit: params.limit ?? DEFAULT_ANSWER_LIMIT,
     sourceTypes: params.sourceTypes,
     accessDomains,
@@ -927,6 +961,7 @@ export async function answerKnowledgeQuestion(params: {
   }
   const response = await defaultModelGateway.chat({
     model: resolveModel("quality"),
+    ...knowledgeAttemptControls({ ...params, accessDomains }, inputRoots),
     workspaceId: params.workspaceId,
     workflowJobId: params.workflowJobId,
     agentRunId: params.agentRunId,

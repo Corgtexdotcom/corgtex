@@ -17,6 +17,8 @@ import { z } from "zod";
 import {
   withMcpToolInput,
   DigestReadRelease,
+  WorkItemReadRelease,
+  captureReadableDigestInputs,
   loadReadableArtifactSample,
   createConversation,
   listProposals,
@@ -179,7 +181,7 @@ import {
 import type { AgentScope } from "@corgtex/domain";
 import { fetchReadableKnowledgeChunk, searchIndexedKnowledge } from "@corgtex/knowledge";
 import { processConversationTurn } from "@corgtex/agents";
-import { prisma, env, toInputJson, withMcpRequiredScopes } from "@corgtex/shared";
+import { prisma, env, toInputJson, withMcpRequiredScopes, getMcpOrigin, runWithMcpOrigin } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import type { McpSessionContext } from "./auth";
 import { requireScope } from "./auth";
@@ -412,31 +414,38 @@ function memberDisplayName(member: any) {
 }
 
 const memberUserInclude = {
-  user: {
-    select: {
-      displayName: true,
-      email: true,
-    },
-  },
-};
+  user: { select: { displayName: true, email: true } },
+} as const;
 
-async function loadActionWorkItemResponse(actor: AppActor, workspaceId: string, actionId: string, fallback: any) {
+async function readableWorkItemResponseMembers<T extends { id: string; userId: string;
+  user: { displayName: string | null; email: string } }>(actor: AppActor, workspaceId: string,
+  release: WorkItemReadRelease, members: T[]) {
+  const captured = await release.observeRead(() => captureReadableDigestInputs({
+    actor, workspaceId, kind: "Member", records: members,
+    additionalInputs: member => [{ kind: "User", id: member.userId, snapshot: { ...member.user, id: member.userId } }],
+  }));
+  release.add(captured.roots);
+  return new Set(captured.records.map(member => member.id));
+}
+
+async function loadActionWorkItemResponse(actor: AppActor, workspaceId: string, actionId: string, release: WorkItemReadRelease) {
   const action = await prisma.action.findFirst({
     where: { id: actionId, workspaceId },
-    include: {
-      assigneeMember: { include: memberUserInclude },
-    },
-  }) ?? fallback;
-  if (!action?.id) return action;
-  if (!(await readableArtifactIds(actor, workspaceId, "Action", [action])).has(action.id)) return { id: action.id, contentWithheld: true };
-  const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "ACTION", [action.id]);
+    include: { assigneeMember: { include: memberUserInclude } },
+  });
+  if (!action || !(await release.admit("Action", [action])).length) return { id: actionId, contentWithheld: true as const };
+  const members = await readableWorkItemResponseMembers(actor, workspaceId, release, action.assigneeMember ? [action.assigneeMember] : []);
+  const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "ACTION", [action.id],
+    requests => release.observe("AdviceRequest", requests));
   return {
     ...action,
+    assigneeMemberId: action.assigneeMember && members.has(action.assigneeMember.id) ? action.assigneeMemberId : null,
+    assigneeMember: action.assigneeMember && members.has(action.assigneeMember.id) ? action.assigneeMember : null,
     ...requestCountSummaries.get(action.id),
   };
 }
 
-async function loadTensionWorkItemResponse(actor: AppActor, workspaceId: string, tensionId: string, fallback: any) {
+async function loadTensionWorkItemResponse(actor: AppActor, workspaceId: string, tensionId: string, release: WorkItemReadRelease) {
   const tension = await prisma.tension.findFirst({
     where: { id: tensionId, workspaceId },
     include: {
@@ -444,12 +453,24 @@ async function loadTensionWorkItemResponse(actor: AppActor, workspaceId: string,
       raisedByMember: { include: memberUserInclude },
       upvotes: true,
     },
-  }) ?? fallback;
-  if (!tension?.id) return tension;
-  if (!(await readableArtifactIds(actor, workspaceId, "Tension", [tension])).has(tension.id)) return { id: tension.id, contentWithheld: true };
-  const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "TENSION", [tension.id]);
+  });
+  if (!tension || !(await release.admit("Tension", [tension])).length) return { id: tensionId, contentWithheld: true as const };
+  const members = await readableWorkItemResponseMembers(actor, workspaceId, release,
+    [tension.assigneeMember, tension.raisedByMember].filter(member => member !== null));
+  const votes = await release.observeRead(() => captureReadableDigestInputs({
+    actor, workspaceId, kind: "TensionUpvote", records: tension.upvotes,
+    additionalInputs: vote => [{ kind: "User", id: vote.userId }],
+  }));
+  release.add(votes.roots);
+  const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "TENSION", [tension.id],
+    requests => release.observe("AdviceRequest", requests));
   return {
     ...tension,
+    assigneeMemberId: tension.assigneeMember && members.has(tension.assigneeMember.id) ? tension.assigneeMemberId : null,
+    assigneeMember: tension.assigneeMember && members.has(tension.assigneeMember.id) ? tension.assigneeMember : null,
+    raisedByMemberId: tension.raisedByMember && members.has(tension.raisedByMember.id) ? tension.raisedByMemberId : null,
+    raisedByMember: tension.raisedByMember && members.has(tension.raisedByMember.id) ? tension.raisedByMember : null,
+    upvotes: votes.records,
     ...requestCountSummaries.get(tension.id),
   };
 }
@@ -747,28 +768,48 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     }
     return withMcpRequiredScopes(prisma, sessionCtx.mcpOrigin, scopes, work);
   };
+  // These four write responses retain their original source proofs through
+  // permalink and audit awaits. The receipt is private, never serialized.
+  const workItemReleases = new WeakMap<object, WorkItemReadRelease>();
+  const workItemResponse = (release: WorkItemReadRelease, value: unknown) => {
+    const result = jsonResult(value);
+    workItemReleases.set(result, release);
+    return result;
+  };
   const tool = (name: string, description: string, inputSchema: Record<string, unknown>, handler: unknown) => {
     if (!hasToolCapability(name)) throw new AppError(403, "AGENT_OPERATION_UNDECLARED", "This operation is unavailable to agent credentials.");
     const guardedHandler = typeof handler === "function"
       ? async (...args: unknown[]) => {
-        return withLiveMcpScopes(TOOL_CAPABILITIES[name].scopes, async () => {
-          requireToolCapability(name);
-          try {
-            const capability = TOOL_CAPABILITIES[name];
-            const writesContent = name !== "chat" && (capability.destructive || capability.scopes.some(scope => /:(write|propose|approve)$/.test(scope)));
-            const result = writesContent ? await withMcpToolInput(actor, { workspaceId, toolName: name,
-              args: args[0] ?? {}, requiredScopes: capability.scopes }, submitted => handler(submitted, ...args.slice(1))) : await handler(...args);
-            if (isVersionConflictResult(result)) {
-              await auditToolExecution(name, args[0], null, new Error("VERSION_CONFLICT"));
-            } else {
-              await auditToolExecution(name, args[0], result);
+        let preparedWorkItem: object | undefined;
+        let responseOrigin: ReturnType<typeof getMcpOrigin>;
+        try {
+          const result = await withLiveMcpScopes(TOOL_CAPABILITIES[name].scopes, async () => {
+            requireToolCapability(name);
+            try {
+              const capability = TOOL_CAPABILITIES[name];
+              const writesContent = name !== "chat" && (capability.destructive || capability.scopes.some(scope => /:(write|propose|approve)$/.test(scope)));
+              const result = writesContent ? await withMcpToolInput(actor, { workspaceId, toolName: name,
+                args: args[0] ?? {}, requiredScopes: capability.scopes }, submitted => handler(submitted, ...args.slice(1))) : await handler(...args);
+              if (result && typeof result === "object" && workItemReleases.has(result)) preparedWorkItem = result;
+              if (isVersionConflictResult(result)) {
+                await auditToolExecution(name, args[0], null, new Error("VERSION_CONFLICT"));
+              } else {
+                await auditToolExecution(name, args[0], result);
+              }
+              responseOrigin = getMcpOrigin();
+              return name === "archive_tool_link" || name === "complete_action" ? jsonResult(result) : result;
+            } catch (error) {
+              await auditToolExecution(name, args[0], null, error);
+              throw error;
             }
-            return name === "archive_tool_link" || name === "complete_action" ? jsonResult(result) : result;
-          } catch (error) {
-            await auditToolExecution(name, args[0], null, error);
-            throw error;
-          }
-        });
+          });
+          const release = result && typeof result === "object" ? workItemReleases.get(result) : undefined;
+          // The live-scope wrapper itself awaits its post-call origin check.
+          // Replay the original proofs after that read, in the same origin context.
+          return release ? await runWithMcpOrigin(responseOrigin, () => release.finish(result)) : result;
+        } finally {
+          if (preparedWorkItem) workItemReleases.delete(preparedWorkItem);
+        }
       }
       : handler;
     return server.tool(name, description, inputSchema, annotationsForTool(name), guardedHandler);
@@ -2885,10 +2926,12 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           duplicateGuard: duplicateGuardOptionsFromParams(params),
           source: params.idempotencyKey === undefined ? undefined : actionRequestSource("MCP_REQUEST", sessionActorId, params.idempotencyKey),
         });
-        const actionForResponse = await loadActionWorkItemResponse(actor, workspaceId, action.id, action);
+        const release = new WorkItemReadRelease(actor, workspaceId);
+        const actionForResponse = await loadActionWorkItemResponse(actor, workspaceId, action.id, release);
+        if ("contentWithheld" in actionForResponse) return workItemResponse(release, actionForResponse);
         const permanent = await permanentUrl(workspaceId, "Action", action.id);
         const item = normalizeActionWorkItem(actionForResponse);
-        return jsonResult({
+        return workItemResponse(release, {
           id: item.id,
           status: item.status,
           priority: item.priority,
@@ -2965,9 +3008,11 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         }
         throw error;
       }
-      const actionForResponse = await loadActionWorkItemResponse(actor, workspaceId, updated.id, updated);
+      const release = new WorkItemReadRelease(actor, workspaceId);
+      const actionForResponse = await loadActionWorkItemResponse(actor, workspaceId, updated.id, release);
+      if ("contentWithheld" in actionForResponse) return workItemResponse(release, actionForResponse);
       const item = normalizeActionWorkItem(actionForResponse);
-      return jsonResult({
+      return workItemResponse(release, {
         id: item.id,
         status: item.status,
         priority: item.priority,
@@ -3108,10 +3153,12 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           authorMemberId: params.authorMemberId,
           duplicateGuard: duplicateGuardOptionsFromParams(params),
         });
-        const tensionForResponse = await loadTensionWorkItemResponse(actor, workspaceId, tension.id, tension);
+        const release = new WorkItemReadRelease(actor, workspaceId);
+        const tensionForResponse = await loadTensionWorkItemResponse(actor, workspaceId, tension.id, release);
+        if ("contentWithheld" in tensionForResponse) return workItemResponse(release, tensionForResponse);
         const permanent = await permanentUrl(workspaceId, "Tension", tension.id);
         const item = normalizeTensionWorkItem(tensionForResponse);
-        return jsonResult({
+        return workItemResponse(release, {
           id: item.id,
           status: item.status,
           priority: item.priority,
@@ -3192,9 +3239,11 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         }
         throw error;
       }
-      const tensionForResponse = await loadTensionWorkItemResponse(actor, workspaceId, updated.id, updated);
+      const release = new WorkItemReadRelease(actor, workspaceId);
+      const tensionForResponse = await loadTensionWorkItemResponse(actor, workspaceId, updated.id, release);
+      if ("contentWithheld" in tensionForResponse) return workItemResponse(release, tensionForResponse);
       const item = normalizeTensionWorkItem(tensionForResponse);
-      return jsonResult({
+      return workItemResponse(release, {
         id: item.id,
         status: item.status,
         priority: item.priority,
