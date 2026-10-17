@@ -36,7 +36,7 @@ async function fixture(kind: "documents" | "email" = "documents", nullableWorksp
     usage: {provider: "fixture", model: "fixture-embed", inputTokens: 1, outputTokens: 0, latencyMs: 0, estimatedCostUsd: "0", rawProviderCostUsd: "0", billableCostUsd: "0"}}));
   vi.spyOn(defaultModelGateway, "rerank").mockImplementation(async ({documents, topK}) => ({results: documents.slice(0, topK).map((document, index) => ({index, score: 1, document})),
     usage: {provider: "fixture", model: "fixture-rerank", inputTokens: 1, outputTokens: 0, latencyMs: 0, estimatedCostUsd: "0", rawProviderCostUsd: "0", billableCostUsd: "0"}}));
-  const run = () => (kind === "documents" ? handleOAuthDocumentsSync : handleOAuthEmailSync)(job.id, {connectionId: connection.id}, workspace.id);
+  const run = () => (kind === "documents" ? handleOAuthDocumentsSync : handleOAuthEmailSync)(job.id, {connectionId: connection.id}, workspace.id, structuredClone(job));
   const actor: AppActor = {kind: "user", user};
   const search = () => searchIndexedKnowledge({actor, workspaceId: workspace.id, query: "cobalt policy", sourceTypes: ["DOCUMENT"]});
   return {workspace, user, member, connection, job, actor, run, search, remote, fetchMock, embed};
@@ -94,7 +94,7 @@ it.each(["selection", "account", "owner"] as const)("withholds publication after
   expect(f.embed).toHaveBeenCalledTimes(1);
   expect(sent).toBe(0);
   expect(await prisma.knowledgeChunk.count({where: {workspaceId: f.workspace.id}})).toBe(0);
-  expect(await prisma.oAuthConnection.findUniqueOrThrow({where: {id: f.connection.id}})).toMatchObject({lastSyncAt: null, status: "ERROR"});
+  expect(await prisma.oAuthConnection.findUniqueOrThrow({where: {id: f.connection.id}})).toMatchObject({lastSyncAt: null, status: "ACTIVE"});
 });
 
 it("checks the original account after credential refresh and does not publish an alien provider response", async () => {
@@ -167,4 +167,58 @@ it.each([false, true])("fences the actual token refresh response before publicat
     expect(await prisma.oAuthConnection.findUniqueOrThrow({where: {id: f.connection.id}})).toMatchObject({status: "ACTIVE", lastSyncError: null});
   }
   expect(refreshed).toBe(1);
+});
+
+
+it.each(["expired", "takeover-before-begin", "replacement-during-replay"] as const)("rejects the original OAuth worker claim: %s", async mode => {
+  const f = await fixture();
+  let replaced = false, sent = 0;
+  const replace = async () => {
+    await prisma.workflowJob.update({where: {id: f.job.id}, data: mode === "expired"
+      ? {lockedAt: new Date(Date.now() - 6 * 60_000)}
+      : {attempts: {increment: 1}, lockedBy: "replacement-worker", lockedAt: new Date()}});
+    replaced = true;
+  };
+  if (mode === "expired") {
+    await replace();
+    // Even an exact originally claimed recipe cannot outlive the normal five-minute lease.
+    f.job.lockedAt = new Date(Date.now() - 6 * 60_000);
+    await prisma.workflowJob.update({where: {id: f.job.id}, data: {lockedAt: f.job.lockedAt}});
+  } else if (mode === "takeover-before-begin") {
+    const find = prisma.oAuthConnection.findUnique.bind(prisma.oAuthConnection);
+    vi.spyOn(prisma.oAuthConnection, "findUnique").mockImplementationOnce((async args => {
+      const row = await find(args);
+      await replace();
+      return row;
+    }) as typeof prisma.oAuthConnection.findUnique);
+  } else {
+    f.embed.mockImplementationOnce(async request => {
+      const respond = f.fetchMock.getMockImplementation()!;
+      f.fetchMock.mockImplementation(async input => {
+        const result = await respond(input);
+        if (!replaced && String(input).includes("alt=media")) await replace();
+        return result;
+      });
+      await request.authorizeAttempt!({signal: request.signal!});
+      sent++;
+      return {embeddings: [Array(1536).fill(0.01)], usage: {provider: "fixture", model: "fixture", inputTokens: 1, outputTokens: 0, latencyMs: 0,
+        estimatedCostUsd: "0", rawProviderCostUsd: "0", billableCostUsd: "0"}};
+    });
+  }
+  await expect(f.run()).rejects.toThrow();
+  expect(replaced).toBe(true);
+  expect(sent).toBe(0);
+  if (mode !== "replacement-during-replay") expect(f.fetchMock).not.toHaveBeenCalled();
+  expect(await prisma.knowledgeChunk.count({where: {workspaceId: f.workspace.id}})).toBe(0);
+  expect(await prisma.oAuthConnection.findUniqueOrThrow({where: {id: f.connection.id}})).toMatchObject({lastSyncAt: null, status: "ACTIVE"});
+  if (mode !== "expired") expect(await prisma.workflowJob.findUniqueOrThrow({where: {id: f.job.id}})).toMatchObject({attempts: 2, lockedBy: "replacement-worker", status: "RUNNING"});
+});
+
+it("shares provider-derived workspace documents with another current member after the job completes", async () => {
+  const f = await fixture(); await f.run();
+  await prisma.workflowJob.update({where: {id: f.job.id}, data: {status: "COMPLETED", lockedAt: null, lockedBy: null}});
+  const user = await prisma.user.create({data: {email: `${randomUUID()}@oauth.test`, passwordHash: "synthetic"}});
+  await prisma.member.create({data: {workspaceId: f.workspace.id, userId: user.id, role: "CONTRIBUTOR"}});
+  const rows = await searchIndexedKnowledge({actor: {kind: "user", user}, workspaceId: f.workspace.id, query: "cobalt policy", sourceTypes: ["DOCUMENT"]});
+  expect(rows.some(row => row.snippet.includes("Synthetic searchable cobalt policy."))).toBe(true);
 });

@@ -1,4 +1,4 @@
-import { beginOAuthKnowledgeSync } from "../../../domain/src/oauth-provider-native";
+import { beginOAuthKnowledgeSync, type OAuthKnowledgeSyncClaim } from "../../../domain/src/oauth-provider-native";
 import { invariant } from "../../../domain/src/errors";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { syncDocumentKnowledge, syncKnowledgeForSource } from "@corgtex/knowledge";
@@ -451,7 +451,7 @@ function stringArray(value: unknown) {
     : [];
 }
 
-export async function handleOAuthDocumentsSync(jobId: string, payload: { connectionId?: string }, workspaceId: string) {
+export async function handleOAuthDocumentsSync(jobId: string, payload: { connectionId?: string }, workspaceId: string, expectedClaim: OAuthKnowledgeSyncClaim) {
   if (!payload.connectionId) return;
   const connection = await prisma.oAuthConnection.findUnique({ where: { id: payload.connectionId } });
   if (!connection || connection.status !== "ACTIVE") return;
@@ -462,10 +462,10 @@ export async function handleOAuthDocumentsSync(jobId: string, payload: { connect
   const selectedDocumentIds = stringArray(documentSettings.selectedDriveIds ?? documentSettings.selectedDocumentIds);
   if (selectedDocumentIds.length === 0) return;
 
-  return syncOAuthCanonicalKnowledge(jobId, connection.id, workspaceId, "documents");
+  return syncOAuthCanonicalKnowledge(jobId, connection.id, workspaceId, "documents", structuredClone(expectedClaim));
 }
 
-export async function handleOAuthEmailSync(jobId: string, payload: { connectionId?: string }, workspaceId: string) {
+export async function handleOAuthEmailSync(jobId: string, payload: { connectionId?: string }, workspaceId: string, expectedClaim: OAuthKnowledgeSyncClaim) {
   if (!payload.connectionId) return;
   const connection = await prisma.oAuthConnection.findUnique({ where: { id: payload.connectionId } });
   if (!connection || connection.status !== "ACTIVE") return;
@@ -476,12 +476,12 @@ export async function handleOAuthEmailSync(jobId: string, payload: { connectionI
   const filters = stringArray(emailSettings.filters ?? emailSettings.queries);
   if (filters.length === 0) return;
 
-  return syncOAuthCanonicalKnowledge(jobId, connection.id, workspaceId, "email");
+  return syncOAuthCanonicalKnowledge(jobId, connection.id, workspaceId, "email", structuredClone(expectedClaim));
 }
 
-async function syncOAuthCanonicalKnowledge(jobId: string, connectionId: string, workspaceId: string, kind: "documents" | "email") {
+async function syncOAuthCanonicalKnowledge(jobId: string, connectionId: string, workspaceId: string, kind: "documents" | "email", expectedClaim: OAuthKnowledgeSyncClaim) {
+  const capture = await beginOAuthKnowledgeSync({workspaceId, connectionId, workflowJobId: jobId, kind, expectedClaim});
   try {
-    const capture = await beginOAuthKnowledgeSync({workspaceId, connectionId, workflowJobId: jobId, kind});
     for (const document of capture.documents) {
       const count = await syncKnowledgeForSource({workspaceId, sourceType: "DOCUMENT", accessDomain: document.accessDomain,
         sourceId: document.id, sourceTitle: document.title, content: [document.title, document.textContent].filter(Boolean).join("\n\n"),
@@ -494,9 +494,7 @@ async function syncOAuthCanonicalKnowledge(jobId: string, connectionId: string, 
     }
     await capture.checkpoint();
   } catch (error) {
-    // Never revive a disconnected/paused connection from an old worker catch.
-    await prisma.oAuthConnection.updateMany({where: {id: connectionId, status: "ACTIVE"},
-      data: {lastSyncError: "OAuth content could not be safely indexed; retry after checking source access.", status: "ERROR"}});
+    await capture.recordFailure();
     throw error;
   }
 }

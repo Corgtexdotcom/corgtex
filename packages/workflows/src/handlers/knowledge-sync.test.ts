@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   beginOAuthKnowledgeSyncMock,
   checkpointMock,
+  recordFailureMock,
   sourceGuardMock,
   fetchCalendarEventsMock,
   fetchFilteredEmailMessagesMock,
@@ -17,6 +18,7 @@ const {
 } = vi.hoisted(() => ({
   beginOAuthKnowledgeSyncMock: vi.fn(),
   checkpointMock: vi.fn(),
+  recordFailureMock: vi.fn(),
   sourceGuardMock: vi.fn(),
   fetchCalendarEventsMock: vi.fn(),
   fetchFilteredEmailMessagesMock: vi.fn(),
@@ -339,6 +341,7 @@ describe("handleCalendarSync", () => {
 });
 
 describe("OAuth document and email knowledge sync", () => {
+  const claim = (kind: string) => ({id: "job-1", workspaceId: "workspace-1", type: `oauth.${kind}.sync`, payload: {connectionId: "conn-1"}, attempts: 1, lockedBy: "worker", lockedAt: new Date("2026-10-17Z"), startedAt: new Date("2026-10-17Z")});
   const actor = {kind: "user", user: {id: "owner", email: "owner@example.test", displayName: null}};
   beforeEach(() => {
     vi.clearAllMocks();
@@ -347,8 +350,9 @@ describe("OAuth document and email knowledge sync", () => {
     prismaMock.oAuthConnection.updateMany.mockResolvedValue({count: 1});
     sourceGuardMock.mockResolvedValue(undefined);
     checkpointMock.mockResolvedValue(undefined);
+    recordFailureMock.mockResolvedValue(undefined);
     syncKnowledgeForSourceMock.mockResolvedValue(1);
-    beginOAuthKnowledgeSyncMock.mockResolvedValue({actor, sourceGuard: sourceGuardMock, assertCurrent: sourceGuardMock, checkpoint: checkpointMock,
+    beginOAuthKnowledgeSyncMock.mockResolvedValue({actor, sourceGuard: sourceGuardMock, assertCurrent: sourceGuardMock, checkpoint: checkpointMock, recordFailure: recordFailureMock,
       documents: [{id: "canonical-document", title: "Selected content", textContent: "Only the captured body", accessDomain: "WORKSPACE", updatedAt: new Date("2026-05-24Z")}],
       messages: [{id: "msg-1", filter: "from:customer@example.test"}]});
   });
@@ -356,15 +360,15 @@ describe("OAuth document and email knowledge sync", () => {
     prismaMock.oAuthConnection.findUnique.mockResolvedValueOnce({id: "conn-1", workspaceId: "workspace-1", status: "ACTIVE",
       syncSettings: {[kind]: {enabled: true, selectedDriveIds: [], filters: []}}});
     const handlers = await import("./knowledge-sync");
-    await (kind === "documents" ? handlers.handleOAuthDocumentsSync : handlers.handleOAuthEmailSync)("job-1", {connectionId: "conn-1"}, "workspace-1");
+    await (kind === "documents" ? handlers.handleOAuthDocumentsSync : handlers.handleOAuthEmailSync)("job-1", {connectionId: "conn-1"}, "workspace-1", claim(kind));
     expect(beginOAuthKnowledgeSyncMock).not.toHaveBeenCalled();
     expect(syncKnowledgeForSourceMock).not.toHaveBeenCalled();
     expect(checkpointMock).not.toHaveBeenCalled();
   });
   it.each(["documents", "email"] as const)("indexes canonical %s with original owner/job guard before checkpoint", async kind => {
     const handlers = await import("./knowledge-sync");
-    await (kind === "documents" ? handlers.handleOAuthDocumentsSync : handlers.handleOAuthEmailSync)("job-1", {connectionId: "conn-1"}, "workspace-1");
-    expect(beginOAuthKnowledgeSyncMock).toHaveBeenCalledWith({workspaceId: "workspace-1", connectionId: "conn-1", workflowJobId: "job-1", kind});
+    await (kind === "documents" ? handlers.handleOAuthDocumentsSync : handlers.handleOAuthEmailSync)("job-1", {connectionId: "conn-1"}, "workspace-1", claim(kind));
+    expect(beginOAuthKnowledgeSyncMock).toHaveBeenCalledWith({workspaceId: "workspace-1", connectionId: "conn-1", workflowJobId: "job-1", kind, expectedClaim: claim(kind)});
     expect(syncKnowledgeForSourceMock).toHaveBeenCalledWith(expect.objectContaining({workspaceId: "workspace-1", sourceType: "DOCUMENT", sourceId: "canonical-document",
       content: "Selected content\n\nOnly the captured body", lineageActor: actor, sourceGuard: sourceGuardMock}));
     expect(checkpointMock).toHaveBeenCalledOnce();
@@ -374,9 +378,10 @@ describe("OAuth document and email knowledge sync", () => {
   it.each(["documents", "email"] as const)("does not report %s success when nonempty canonical content is withheld", async kind => {
     syncKnowledgeForSourceMock.mockResolvedValueOnce(0);
     const handlers = await import("./knowledge-sync");
-    await expect((kind === "documents" ? handlers.handleOAuthDocumentsSync : handlers.handleOAuthEmailSync)("job-1", {connectionId: "conn-1"}, "workspace-1")).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+    await expect((kind === "documents" ? handlers.handleOAuthDocumentsSync : handlers.handleOAuthEmailSync)("job-1", {connectionId: "conn-1"}, "workspace-1", claim(kind))).rejects.toMatchObject({code: "SOURCE_CHANGED"});
     expect(checkpointMock).not.toHaveBeenCalled();
     expect(materializeCrmEmailTouchpointsMock).not.toHaveBeenCalled();
-    expect(prismaMock.oAuthConnection.updateMany).toHaveBeenCalledWith({where: {id: "conn-1", status: "ACTIVE"}, data: expect.objectContaining({status: "ERROR"})});
+    expect(recordFailureMock).toHaveBeenCalledTimes(1);
+    expect(prismaMock.oAuthConnection.updateMany).not.toHaveBeenCalled();
   });
 });

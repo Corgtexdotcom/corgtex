@@ -578,6 +578,10 @@ async function claimPendingJobs(workerId: string, batchSize: number) {
   });
 }
 
+function isOAuthKnowledgeSyncJob(type: string) {
+  return type === "oauth.documents.sync" || type === "oauth.email.sync";
+}
+
 function isSourceRegenerationJob(type: string) {
   return type === "agent.brain-source-regenerate" || type === "agent.brain-article-variant" || type === "agent.graph-source-variant";
 }
@@ -903,12 +907,12 @@ async function handleJob(job: ClaimedJob, workerId: string, meetingActor?: AppAc
   }
 
   if (job.type === "oauth.documents.sync") {
-    await handleOAuthDocumentsSync(job.id, payload as { connectionId?: string }, job.workspaceId);
+    await handleOAuthDocumentsSync(job.id, payload as { connectionId?: string }, job.workspaceId, structuredClone(job));
     return;
   }
 
   if (job.type === "oauth.email.sync") {
-    await handleOAuthEmailSync(job.id, payload as { connectionId?: string }, job.workspaceId);
+    await handleOAuthEmailSync(job.id, payload as { connectionId?: string }, job.workspaceId, structuredClone(job));
     return;
   }
 
@@ -1283,12 +1287,13 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
       } else await execute();
     }));
     if (!diagnostic) {
-      if ((isSourceRegenerationJob(job.type) || job.type === "agent.brain-absorb" || job.type === BRAIN_MAINTENANCE_JOB || isMeetingTranscriptWorkerJob(job.type) || job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE) && !superseded) {
+      if ((isOAuthKnowledgeSyncJob(job.type) || isSourceRegenerationJob(job.type) || job.type === "agent.brain-absorb" || job.type === BRAIN_MAINTENANCE_JOB || isMeetingTranscriptWorkerJob(job.type) || job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE) && !superseded) {
         // A reclaimed job may still have an older model call in flight.
         await prisma.workflowJob.updateMany({
           where: { id: job.id, workspaceId: job.workspaceId, type: job.type,
             status: "RUNNING", lockedBy: workerId, attempts: job.attempts,
-            ...((isMeetingTranscriptWorkerJob(job.type) || job.type === BRAIN_MAINTENANCE_JOB || job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE) ? {payload: {equals: job.payload as Prisma.InputJsonValue}, lockedAt: {gt: new Date(Date.now() - LOCK_TIMEOUT_MS)}} : {}),
+            ...((isOAuthKnowledgeSyncJob(job.type) || isMeetingTranscriptWorkerJob(job.type) || job.type === BRAIN_MAINTENANCE_JOB || job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE) ? {payload: {equals: job.payload as Prisma.InputJsonValue}, lockedAt: {gt: new Date(Date.now() - LOCK_TIMEOUT_MS)}} : {}),
+            ...(isOAuthKnowledgeSyncJob(job.type) ? {lockedAt: {equals: job.lockedAt, gt: new Date(Date.now() - LOCK_TIMEOUT_MS)}, startedAt: job.startedAt} : {}),
             ...(job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE ? { startedAt: job.startedAt } : {}) },
           data: { status: "COMPLETED", completedAt: new Date(), error: null, lockedAt: null, lockedBy: null },
         });
@@ -1319,12 +1324,13 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
         where: { id: job.id, workspaceId: job.workspaceId, type: RELEASE_DIAGNOSTIC_JOB_TYPE, status: "RUNNING", lockedBy: workerId },
         data: { status: "FAILED", lockedAt: null, lockedBy: null, error: "Release diagnostic failed; reconcile the exact operation." },
       });
-    } else if (isSourceRegenerationJob(job.type) || job.type === "agent.brain-absorb" || job.type === BRAIN_MAINTENANCE_JOB || isMeetingTranscriptWorkerJob(job.type) || job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE) {
+    } else if (isOAuthKnowledgeSyncJob(job.type) || isSourceRegenerationJob(job.type) || job.type === "agent.brain-absorb" || job.type === BRAIN_MAINTENANCE_JOB || isMeetingTranscriptWorkerJob(job.type) || job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE) {
       const status: WorkflowJobStatus = job.attempts >= MAX_ATTEMPTS || executionAuthorizationRevoked(error) ? "FAILED" : "PENDING";
       await prisma.workflowJob.updateMany({
         where: { id: job.id, workspaceId: job.workspaceId, type: job.type,
           status: "RUNNING", lockedBy: workerId, attempts: job.attempts,
-            ...((isMeetingTranscriptWorkerJob(job.type) || job.type === BRAIN_MAINTENANCE_JOB || job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE) ? {payload: {equals: job.payload as Prisma.InputJsonValue}, lockedAt: {gt: new Date(Date.now() - LOCK_TIMEOUT_MS)}} : {}),
+            ...((isOAuthKnowledgeSyncJob(job.type) || isMeetingTranscriptWorkerJob(job.type) || job.type === BRAIN_MAINTENANCE_JOB || job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE) ? {payload: {equals: job.payload as Prisma.InputJsonValue}, lockedAt: {gt: new Date(Date.now() - LOCK_TIMEOUT_MS)}} : {}),
+            ...(isOAuthKnowledgeSyncJob(job.type) ? {lockedAt: {equals: job.lockedAt, gt: new Date(Date.now() - LOCK_TIMEOUT_MS)}, startedAt: job.startedAt} : {}),
             ...(job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE ? { startedAt: job.startedAt } : {}) },
         data: { status, error: error instanceof Error ? error.message : "Unknown worker error.",
           completedAt: status === "FAILED" ? new Date() : null,

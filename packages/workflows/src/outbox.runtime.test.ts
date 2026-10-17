@@ -3,6 +3,7 @@ import { mcpScopesHash } from "../../shared/src/mcp-context";
 import { getNextPollIntervalMs, getWorkerPollOutcome } from "../../../apps/worker/src/polling";
 
 const {
+  oauthSyncMock,
   prismaMock,
   txMock,
   loggerMock,
@@ -37,6 +38,7 @@ const {
   runFinanceReportImportExtractionJobMock,
   runFinanceReportImportProposalJobMock,
 } = vi.hoisted(() => ({
+  oauthSyncMock: vi.fn(),
   prismaMock: {
     mcpOAuthAccessToken: { findUnique: vi.fn() },
     workspaceSupportGrant: { findUnique: vi.fn() },
@@ -122,6 +124,12 @@ vi.mock("@corgtex/shared", async () => ({
   logger: loggerMock,
   prisma: prismaMock,
   toInputJson: (value: unknown) => value,
+}));
+
+vi.mock("./handlers/knowledge-sync", async importOriginal => ({
+  ...await importOriginal<typeof import("./handlers/knowledge-sync")>(),
+  handleOAuthDocumentsSync: oauthSyncMock,
+  handleOAuthEmailSync: oauthSyncMock,
 }));
 
 vi.mock("./handlers/agent-dispatch", () => ({
@@ -240,6 +248,41 @@ afterEach(() => {
 });
 
 describe("runPendingJobs", () => {
+  describe.each(["oauth.documents.sync", "oauth.email.sync"])("%s original claim settlement", type => {
+    it.each(["current", "takeover-success", "takeover-error"])("retains the original recipe and fences %s", async mode => {
+      const row = {id: "oauth-job", workspaceId: "ws-1", type, payload: {connectionId: "conn-1"}, attempts: 1,
+        status: "RUNNING", lockedBy: "worker-1", lockedAt: new Date(), startedAt: new Date()};
+      const original = structuredClone(row);
+      txMock.$queryRaw.mockResolvedValueOnce([structuredClone(row)]);
+      const apply = ({where, data}: any) => {
+        const matches = Object.entries(where).every(([key, value]: [string, any]) => {
+          const actual = row[key as keyof typeof row];
+          if (value && typeof value === "object" && !(value instanceof Date)) {
+            return (!Object.hasOwn(value, "equals") || JSON.stringify(actual) === JSON.stringify(value.equals))
+              && (!Object.hasOwn(value, "gt") || Number(actual) > Number(value.gt));
+          }
+          return JSON.stringify(actual) === JSON.stringify(value);
+        });
+        if (matches) Object.assign(row, data);
+        return {count: Number(matches)};
+      };
+      prismaMock.workflowJob.update.mockImplementation(async args => {apply(args); return row;});
+      prismaMock.workflowJob.updateMany.mockImplementation(async args => apply(args));
+      oauthSyncMock.mockImplementationOnce(async () => {
+        if (mode !== "current") {row.attempts = 2; row.lockedAt = new Date(Date.now()+1);}
+        if (mode === "takeover-error") throw new Error("Old worker failed");
+      });
+      await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+      expect(oauthSyncMock).toHaveBeenCalledWith("oauth-job", original.payload, "ws-1", expect.objectContaining(original));
+      expect(prismaMock.workflowJob.update).not.toHaveBeenCalled();
+      expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({where: expect.objectContaining({
+        id: original.id, workspaceId: original.workspaceId, type, attempts: 1, lockedBy: "worker-1", startedAt: original.startedAt,
+        payload: {equals: original.payload}, lockedAt: {equals: original.lockedAt, gt: expect.any(Date)},
+      }), data: expect.any(Object)});
+      expect(row).toMatchObject(mode === "current" ? {status: "COMPLETED", lockedBy: null} : {status: "RUNNING", attempts: 2, lockedBy: "worker-1"});
+    });
+  });
+
   it("does not complete feedback jobs that never reach a new review checkpoint", async () => {
     txMock.$queryRaw.mockResolvedValueOnce([{
       id: "feedback-job", workspaceId: "ws-1", type: "agent.proposal-drafting",

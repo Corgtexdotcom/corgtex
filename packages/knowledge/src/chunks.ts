@@ -235,6 +235,8 @@ export async function syncKnowledgeForSource(params: {
       if (!await isArtifactInputProofReadable(sourceActor, params.workspaceId, commitRoots)) {
         throw new AppError(409, "SOURCE_CHANGED", "Indexing source authority changed before the model attempt.");
       }
+      // Provider proof replay can await remote credentials and HTTP; recheck the original worker claim after it.
+      await params.sourceGuard?.();
       attemptController.signal.throwIfAborted();
       signal.throwIfAborted();
     } catch (error) {
