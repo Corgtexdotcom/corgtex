@@ -1,6 +1,6 @@
 import { AdviceRequestWindowNotice } from "@/lib/components/AdviceRequestWindowNotice";
 import Link from "next/link";
-import { AppError, getTension, getWorkspaceArchiveRecord, listAdviceRequestWindow, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listTensions, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, getTension, ArchiveMetadataReadRelease, getWorkspaceArchiveRecord, listAdviceRequestWindow, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listTensions, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
@@ -47,6 +47,7 @@ export default async function TensionDetailPage({
   const { workspaceId, tensionId } = await params;
   const resolvedSearch = searchParams ? await searchParams : {};
   const actor = await requirePageActor();
+  const archiveRelease = new ArchiveMetadataReadRelease(actor, workspaceId);
   const t = await getTranslations("tensions");
   const tCommon = await getTranslations("common");
   const tWork = await getTranslations("workItems");
@@ -107,7 +108,7 @@ export default async function TensionDetailPage({
     archivedSafeRead(isArchived, listExternalResourceAttachments(actor, { workspaceId, entityType: "Tension", entityId: tensionId }), []),
     isArchived ? Promise.resolve({ items: [], complete: true, nextCursor: null }) : listAdviceRequestWindow(actor, { workspaceId, subjectType: "TENSION", subjectId: tensionId, cursor: typeof resolvedSearch.adviceCursor === "string" ? resolvedSearch.adviceCursor : undefined }),
     isArchived
-      ? archivedSafeRead(true, getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Tension", entityId: tension.id }), null)
+      ? archivedSafeRead(true, getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Tension", entityId: tension.id }, archiveRelease), null)
       : Promise.resolve(null),
     isArchived ? Promise.resolve([]) : listHumanMembers(workspaceId),
   ]);
@@ -272,6 +273,8 @@ export default async function TensionDetailPage({
       ) : null,
     };
   });
+
+  await archiveRelease.finish(undefined);
 
   return (
     <>

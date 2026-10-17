@@ -139,14 +139,21 @@ describe("Proposal reader source admission", () => {
 
   it("rejects a parent whose content changes after its list row was read", async () => {
     const { visible } = await seed();
+    // Complete first-use epoch initialization before injecting drift into the
+    // serving snapshot; a discarded initialization attempt is not admission.
+    await listProposals(alpha, workspaceId, { take: 10 });
     const read = vi.mocked(fixture.prisma.proposal.findMany).getMockImplementation()!;
+    let changed = 0;
     vi.mocked(fixture.prisma.proposal.findMany).mockImplementationOnce(async (args: any) => {
       const rows = await read(args);
-      visible.bodyMd = "Changed after the candidate read";
+      expect(args.take).toBe(100);
+      fixture.rows.proposal.find((row: any) => row.id === visible.id)!.bodyMd = "Changed after the candidate read";
+      changed++;
       return rows;
     });
     const result = await listProposals(alpha, workspaceId, { take: 10 });
     expect(result.items.every((row) => row.id !== visible.id)).toBe(true);
     expect(result.total).toBe(1);
+    expect(changed).toBe(1);
   });
 });

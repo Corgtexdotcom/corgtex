@@ -1157,6 +1157,16 @@
     "tryAgain": "Try again"
   },
   "goals": {
+    "myWindowLimited": "These are the readable owned goals in this window. More goals may be outside it.",
+    "recognitionWindowLimited": "These are the readable recognitions in this window. More recognition history may be outside it.",
+    "recognitionWindowNext": "Next recognition window",
+    "recognitionWindowStart": "First recognition window",
+    "recognitionWindowEmpty": "No readable recognitions in this window.",
+
+    "windowLimited": "This goal window also supplies parent choices. Other goals may be outside it; goals with a parent outside this window appear at the top level.",
+    "windowNext": "Next goal window",
+    "windowStart": "First goal window",
+    "windowEmpty": "No readable goals in this window.",
     "contributesTo": "contributes to:",
     "addKeyResultTitle": "Add key result",
     "editKeyResultTitle": "Edit key result",

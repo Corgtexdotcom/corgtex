@@ -1,8 +1,9 @@
+import { AsyncResource } from "node:async_hooks";
 import type { Action } from "@prisma/client";
 import { writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
-import { prisma, type AppActor } from "@corgtex/shared";
+import { prisma, getPrismaClient, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { listActions, countActionsByStatus } from "./actions";
 import { listProposals } from "./proposals";
@@ -39,6 +40,32 @@ function isSelectedHydration(query: unknown, workspaceId: string, selectedIds: r
     && new Set(clause.id.in).size === selectedIds.length && clause.id.in.every(id => selectedIds.includes(id)));
 }
 
+/** Observe the actual RR delegate as well as the outside-TX final proof pass. */
+function observeReads(delegate: "action" | "proposal" | "tension", afterRead?: (args: any) => Promise<void>) {
+  const queries = vi.fn<(args: any) => void>();
+  const candidateIds = new Set<string>();
+  const globalRead = (prisma[delegate].findMany as any).bind(prisma[delegate]);
+  const transaction = prisma.$transaction.bind(prisma);
+  const read = async (args: any, load: () => Promise<unknown>) => {
+    const rows = await load();
+    if (args?.take === 100 && args.orderBy && !args.select && !args.include) {
+      for (const row of rows as Array<{id: string}>) candidateIds.add(row.id);
+    }
+    queries(args); await afterRead?.(args); return rows;
+  };
+  vi.spyOn(prisma[delegate], "findMany").mockImplementation(((args: any) => read(args, () => globalRead(args))) as any);
+  vi.spyOn(getPrismaClient(), "$transaction").mockImplementation(((operation: any, options: any) => transaction(async tx => operation(new Proxy(tx, {
+    get(target, property) {
+      if (property === delegate) return new Proxy(target[delegate], {get(model, method) {
+        if (method === "findMany") return (args: any) => read(args, () => (model.findMany as any)(args));
+        const value = Reflect.get(model, method); return typeof value === "function" ? value.bind(model) : value;
+      }});
+      const value = Reflect.get(target, property); return typeof value === "function" ? value.bind(target) : value;
+    },
+  })), options)) as typeof prisma.$transaction);
+  return Object.assign(queries, {candidateIds});
+}
+
 beforeEach(truncateAllTables);
 afterEach(()=>vi.restoreAllMocks());
 async function fixture() {
@@ -71,19 +98,23 @@ it.each(["Action","Proposal","Tension"] as const)("keeps %s lists and zero-take 
   if(kind==="Action") await prisma.action.create({data:args});
   if(kind==="Proposal") await prisma.proposal.create({data:args});
   if(kind==="Tension") await prisma.tension.create({data:args});
-  const queries=kind==="Action"?vi.spyOn(prisma.action,"findMany"):kind==="Proposal"?vi.spyOn(prisma.proposal,"findMany"):vi.spyOn(prisma.tension,"findMany");
+  const queries=observeReads(kind === "Action" ? "action" : kind === "Proposal" ? "proposal" : "tension");
   const originals = new Set(["v1", "v2", "v3"]);
   const page=await list(1,1);
   expect(page.total).toBe(3);expect(page.items.map(row=>row.id)).toEqual(["v2"]);
   expect(queries.mock.calls.filter(([query])=>query?.take===100).length).toBeGreaterThan(50);
   expect(queries.mock.calls.every(([query])=>query?.take===100 && !query.select && !query.include
-    || isSelectedHydration(query,f.workspaceId,["v2"]) || isBoundedProofRead(query,f.workspaceId,originals))).toBe(true);
-  queries.mockClear();
+    || isSelectedHydration(query,f.workspaceId,["v2"]) || isBoundedProofRead(query,f.workspaceId,originals)
+    // The RR admission cache also hydrates denied candidates, but only IDs
+    // already discovered in bounded canonical pages, never arbitrary bodies.
+    || isBoundedProofRead(query,f.workspaceId,queries.candidateIds))).toBe(true);
+  queries.mockClear(); queries.candidateIds.clear();
   expect(await list(0)).toMatchObject({items:[],total:3});
   const countQueries = queries.mock.calls.map(([query])=>query);
   expect(countQueries.some(query=>isBoundedProofRead(query,f.workspaceId,originals))).toBe(true);
   expect(countQueries.every(query=>query?.include===undefined && query?.select===undefined
-    && (query?.take===100 || isBoundedProofRead(query,f.workspaceId,originals))),JSON.stringify(countQueries)).toBe(true);
+    && (query?.take===100 || isBoundedProofRead(query,f.workspaceId,originals)
+      || isBoundedProofRead(query,f.workspaceId,queries.candidateIds))),JSON.stringify(countQueries)).toBe(true);
   if(kind==="Action") expect(await countActionsByStatus(f.actor,f.workspaceId)).toMatchObject({OPEN:3,ALL:3});
   if(kind==="Action") await prisma.action.update({where:{id:"v2"},data:{archivedAt:new Date()}});
   if(kind==="Proposal") await prisma.proposal.update({where:{id:"v2"},data:{archivedAt:new Date()}});
@@ -154,7 +185,7 @@ it("ranks readable votes across multiple canonical and rank windows before selec
   }
   await upvoteTension(f.actor,{workspaceId:f.workspaceId,tensionId:"t000"});
   expect((await listTensions(f.actor,f.workspaceId,{take:1})).items.map(row=>row.id)).toEqual(["t000"]);
-  const queries=vi.spyOn(prisma.tension,"findMany");
+  const queries=observeReads("tension");
   const page=await listTensions(f.actor,f.workspaceId,{take:3,skip:100});
   expect(page.total).toBe(105);
   expect(page.items.map(row=>row.id)).toEqual(["t005","t004","t003"]);
@@ -164,7 +195,8 @@ it("ranks readable votes across multiple canonical and rank windows before selec
   expect(rankQueries.some(query=>isBoundedProofRead(query,f.workspaceId,originals))).toBe(true);
   expect(rankQueries.every(query=>query?.take===100 && !query.select && !query.include
     || isSelectedHydration(query,f.workspaceId,["t005","t004","t003"])
-    || isBoundedProofRead(query,f.workspaceId,originals)),JSON.stringify(rankQueries)).toBe(true);
+    || isBoundedProofRead(query,f.workspaceId,originals)
+    || isBoundedProofRead(query,f.workspaceId,queries.candidateIds)),JSON.stringify(rankQueries)).toBe(true);
 },180_000);
 
 it("refuses an early admitted count when a later canonical page withdraws it",async()=>{
@@ -174,13 +206,20 @@ it("refuses an early admitted count when a later canonical page withdraws it",as
     await prisma.$transaction(tx=>recordArtifactInputLineage({tx,actor:f.actor,workspaceId:f.workspaceId,artifact:{kind:"Action",id},content:row,origin:"HUMAN_ORIGINAL",inputs:[]}));
   }
   await prisma.action.createMany({data:Array.from({length:100},(_,i)=>({id:`m-${i}`,workspaceId:f.workspaceId,authorUserId:f.user.id,title:"Unknown",bodyMd:"Unproved",status:"OPEN",isPrivate:false,createdAt:new Date("2026-01-01")}))});
-  const read=prisma.action.findMany.bind(prisma.action);let pages=0;
-  vi.spyOn(prisma.action,"findMany").mockImplementation(args=>(async()=>{
-    if(args?.take===100 && ++pages===2) await prisma.action.update({where:{id:"z-original"},data:{archivedAt:new Date()}});
-    return read(args);
-  })() as ReturnType<typeof read>);
+  // Initialization retries may legitimately replace an unadmitted snapshot.
+  await listActions(f.actor,f.workspaceId,{take:0,sort:"date"});
+  const writer = new AsyncResource("independent-status-withdrawal");
+  let pages=0, mutations=0;
+  observeReads("action", async args => {
+    if (args?.take===100 && ++pages===2) {
+      await writer.runInAsyncScope(() => prisma.action.update({where:{id:"z-original"},data:{archivedAt:new Date()}}));
+      mutations++;
+    }
+  });
   await expect(listActions(f.actor,f.workspaceId,{take:0,sort:"date"})).rejects.toMatchObject({code:"SOURCE_CHANGED"});
   expect(pages).toBe(2);
+  expect(mutations).toBe(1);
+  expect((await prisma.action.findUniqueOrThrow({where:{id:"z-original"}})).archivedAt).not.toBeNull();
 },60_000);
 
 it("keeps the proof-read query exception canonical, tenant-bound and bounded",()=>{

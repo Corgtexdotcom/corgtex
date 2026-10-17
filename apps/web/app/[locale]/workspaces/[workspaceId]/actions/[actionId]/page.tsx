@@ -1,6 +1,6 @@
 import { AdviceRequestWindowNotice } from "@/lib/components/AdviceRequestWindowNotice";
 import Link from "next/link";
-import { AppError, getAction, getWorkspaceArchiveRecord, listActionChecklistItems, listAdviceRequestWindow, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, getAction, ArchiveMetadataReadRelease, getWorkspaceArchiveRecord, listActionChecklistItems, listAdviceRequestWindow, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { ConfirmSubmitButton } from "@/lib/components/ConfirmSubmitButton";
@@ -47,6 +47,7 @@ export default async function ActionDetailPage({
   const backHref = returnTo ?? `/workspaces/${workspaceId}/actions`;
   const editHref = (id: string) => appendActionReturnTo(`/workspaces/${workspaceId}/actions/${id}/edit`, returnTo);
   const actor = await requirePageActor();
+  const archiveRelease = new ArchiveMetadataReadRelease(actor, workspaceId);
   const t = await getTranslations("actions");
   const tCommon = await getTranslations("common");
   const tWork = await getTranslations("workItems");
@@ -92,7 +93,7 @@ export default async function ActionDetailPage({
     archivedSafeRead(isArchived, listDeliberationEntries(actor, { workspaceId, parentType: "ACTION", parentId: actionId }), []),
     isArchived ? Promise.resolve({ items: [], complete: true, nextCursor: null }) : listAdviceRequestWindow(actor, { workspaceId, subjectType: "ACTION", subjectId: actionId, cursor: typeof resolvedSearch.adviceCursor === "string" ? resolvedSearch.adviceCursor : undefined }),
     isArchived
-      ? archivedSafeRead(true, getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Action", entityId: action.id }), null)
+      ? archivedSafeRead(true, getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Action", entityId: action.id }, archiveRelease), null)
       : Promise.resolve(null),
     isArchived ? Promise.resolve([]) : listHumanMembers(workspaceId),
   ]);
@@ -252,6 +253,8 @@ export default async function ActionDetailPage({
       ) : null,
     };
   });
+
+  await archiveRelease.finish(undefined);
 
   return (
     <>

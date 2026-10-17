@@ -329,7 +329,7 @@ describe("getOverwhelmSignals", () => {
     expect(await listDailyCompanyUnderstandingQuestions(actor, { workspaceId, take: 100 })).toEqual(rows.slice(0, 3));
     expect(captureArtifactInputProof).toHaveBeenCalledWith(actor, workspaceId, [
       { kind: "CheckIn", id: rows[0].id, snapshot: rows[0] },
-    ]);
+    ], undefined);
     const call = vi.mocked(withArtifactCountReleaseSnapshot).mock.calls.at(-1)!;
     expect(call[2].map(root => root.id)).toEqual(rows.slice(0, 3).map(row => row.id));
     expect(call[5]).toBeInstanceOf(Map);

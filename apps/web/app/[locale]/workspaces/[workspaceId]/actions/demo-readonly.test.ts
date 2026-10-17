@@ -36,6 +36,8 @@ vi.mock("@corgtex/domain", () => ({
   listExternalResourceAttachments: async () => [],
   listDeliberationEntries: async () => [],
   getWorkspaceArchiveRecord: async () => null,
+  // This rendering fixture has no archived metadata; authority is exercised by the domain PG suite.
+  ArchiveMetadataReadRelease: class { async finish<T>(value: T) { return value; } },
 }));
 vi.mock("@/lib/deliberation-targets", () => ({
   getDeliberationTargets: async () => ({ options: [], defaultValue: "", actorMemberId: "synthetic-member", actorCircleIds: [] }),

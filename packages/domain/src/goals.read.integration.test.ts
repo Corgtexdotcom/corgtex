@@ -1,4 +1,3 @@
-import { Prisma } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
@@ -48,8 +47,8 @@ it("pages visible skip and take without hydrating the complete goal corpus", asy
   const query = vi.spyOn(prisma.goal, "findMany");
   const result = await listGoals(f.actors[1], { workspaceId: f.workspace.id, take: 1 });
   expect(result.map(row => row.id)).toEqual([f.goal.id]);
-  expect(query.mock.calls.filter(([args]) => args?.take === 100)).toHaveLength(2);
-  expect(query.mock.calls.every(([args]) => args?.take === 100)).toBe(true);
+  expect(query).toHaveBeenCalledOnce();
+  expect(query.mock.calls[0][0]?.take).toBe(200);
   expect(await listGoals(f.actors[1], { workspaceId: f.workspace.id, skip: 1, take: 1 })).toEqual([]);
   expect((await listGoals(f.actors[1], { workspaceId: f.workspace.id })).map(row => row.id)).toEqual([f.goal.id]);
 });
@@ -71,18 +70,20 @@ it.each(["update-head", "child-source", "owner-identity", "author-member", "call
     await expect(getGoal(f.actors[1], { workspaceId: f.workspace.id, goalId: f.goal.id })).rejects.toMatchObject({ code: mode === "caller" ? "NOT_A_MEMBER" : "SOURCE_CHANGED" });
   },
 );
-it("rejects an earlier selected goal's original head after later paging", async () => {
+it("rejects an earlier selected goal's original head after the next admission batch", async () => {
   const f = await fixture();
   await prisma.goal.createMany({ data: Array.from({ length: 101 }, () => ({ workspaceId: f.workspace.id, title: "Unproved tail", status: "ACTIVE" as const, sortOrder: 1 })) });
-  const query = prisma.goal.findMany.bind(prisma.goal);
+  const observe = DigestReadRelease.prototype.observeRead;
+  let calls = 0;
   let changed = false;
-  vi.spyOn(prisma.goal, "findMany").mockImplementation((async (args?: Prisma.GoalFindManyArgs) => {
-    if (!changed && Array.isArray(args?.where?.AND) && args.where.AND.length > 1) {
+  vi.spyOn(DigestReadRelease.prototype, "observeRead").mockImplementation(async function<T>(this: DigestReadRelease, read: () => Promise<T>) {
+    calls += 1;
+    if (calls === 2) {
       changed = true;
       await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: f.actors[0], workspaceId: f.workspace.id, artifact: { kind: "Goal", id: f.goal.id }, content: f.goal, origin: "HUMAN_ORIGINAL", inputs: [] }));
     }
-    return query(args);
-  }) as typeof prisma.goal.findMany);
+    return observe.call(this, read) as Promise<T>;
+  });
   await expect(listGoals(f.actors[1], { workspaceId: f.workspace.id, take: 2 })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
   expect(changed).toBe(true);
 });

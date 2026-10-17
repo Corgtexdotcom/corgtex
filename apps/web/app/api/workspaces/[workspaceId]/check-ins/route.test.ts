@@ -1,108 +1,39 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { prismaMock } = vi.hoisted(() => ({
-  prismaMock: {
-    checkIn: {
-      findMany: vi.fn(),
-    },
-  },
+const mocks = vi.hoisted(() => ({
+  listCheckInsPage: vi.fn(),
+  respondToCheckIn: vi.fn(),
+  skipCompanyUnderstandingQuestion: vi.fn(),
+  startCompanyUnderstandingQuestionConversation: vi.fn(),
+  actor: { kind: "user" as const, user: { id: "user-1", email: "user@example.test", displayName: "User", globalRole: "USER" } },
 }));
-
-const actor = {
-  kind: "user" as const,
-  user: {
-    id: "user-1",
-    email: "user@example.com",
-    displayName: "User",
-    globalRole: "USER",
-  },
-};
-
-const requireWorkspaceMembership = vi.fn();
-const respondToCheckIn = vi.fn();
-const skipCompanyUnderstandingQuestion = vi.fn();
-const startCompanyUnderstandingQuestionConversation = vi.fn();
-const resolveRequestActor = vi.fn(async () => actor);
-
-vi.mock("@corgtex/shared", () => ({
-  prisma: prismaMock,
-}));
-
-vi.mock("@/lib/auth", () => ({
-  resolveRequestActor,
-}));
-
-vi.mock("@corgtex/domain", () => ({
-  requireWorkspaceMembership,
-  respondToCheckIn,
-  skipCompanyUnderstandingQuestion,
-  startCompanyUnderstandingQuestionConversation,
-}));
-
-function context(workspaceId = "workspace-1") {
-  return { params: Promise.resolve({ workspaceId }) };
-}
-
-function request(url: string) {
-  return new NextRequest(url);
-}
+vi.mock("@/lib/auth", () => ({ resolveRequestActor: async () => mocks.actor }));
+vi.mock("@corgtex/domain", () => mocks);
+function context() { return { params: Promise.resolve({ workspaceId: "workspace-1" }) }; }
 
 describe("GET /api/workspaces/[workspaceId]/check-ins", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    requireWorkspaceMembership.mockResolvedValue({ id: "member-1" });
-    prismaMock.checkIn.findMany.mockResolvedValue([]);
+  beforeEach(() => { vi.clearAllMocks(); mocks.listCheckInsPage.mockResolvedValue({ checkIns: [], nextCursor: null }); });
+
+  it("serializes the domain's admitted page and last-examined continuation", async () => {
+    const page = { checkIns: [{ id: "visible" }], nextCursor: "last-examined" };
+    mocks.listCheckInsPage.mockResolvedValueOnce(page);
+    const { GET } = await import("./route");
+    const response = await GET(new NextRequest("http://localhost/api/workspaces/workspace-1/check-ins"), context());
+    expect(await response.json()).toEqual(page);
+    expect(mocks.listCheckInsPage).toHaveBeenCalledWith(mocks.actor, { workspaceId: "workspace-1", take: 50, cursor: null });
   });
 
-  it("returns a bounded first page with a next cursor", async () => {
-    prismaMock.checkIn.findMany.mockResolvedValueOnce(
-      Array.from({ length: 51 }, (_, index) => ({ id: `checkin-${index + 1}` })),
-    );
-
+  it("clamps requested take and forwards the cursor to the scoped domain boundary", async () => {
     const { GET } = await import("./route");
-    const response = await GET(request("http://localhost/api/workspaces/workspace-1/check-ins"), context());
-
-    await expect(response.json()).resolves.toEqual({
-      checkIns: Array.from({ length: 50 }, (_, index) => ({ id: `checkin-${index + 1}` })),
-      nextCursor: "checkin-50",
-    });
-    expect(prismaMock.checkIn.findMany).toHaveBeenCalledWith({
-      where: {
-        workspaceId: "workspace-1",
-        memberId: "member-1",
-      },
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      take: 51,
-    });
+    await GET(new NextRequest("http://localhost/api/workspaces/workspace-1/check-ins?take=500&cursor=checkin-10"), context());
+    expect(mocks.listCheckInsPage).toHaveBeenCalledWith(mocks.actor, { workspaceId: "workspace-1", take: 100, cursor: "checkin-10" });
   });
 
-  it("clamps take and applies the requested cursor", async () => {
+  it("preserves a hidden-only page's continuation instead of claiming exhausted history", async () => {
+    mocks.listCheckInsPage.mockResolvedValueOnce({ checkIns: [], nextCursor: "hidden-last" });
     const { GET } = await import("./route");
-    await GET(
-      request("http://localhost/api/workspaces/workspace-1/check-ins?take=500&cursor=checkin-10"),
-      context(),
-    );
-
-    expect(prismaMock.checkIn.findMany).toHaveBeenCalledWith({
-      where: {
-        workspaceId: "workspace-1",
-        memberId: "member-1",
-      },
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      take: 101,
-      cursor: { id: "checkin-10" },
-      skip: 1,
-    });
-  });
-
-  it("does not query check-ins for agent actors without a member record", async () => {
-    requireWorkspaceMembership.mockResolvedValueOnce(null);
-
-    const { GET } = await import("./route");
-    const response = await GET(request("http://localhost/api/workspaces/workspace-1/check-ins"), context());
-
-    await expect(response.json()).resolves.toEqual({ checkIns: [], nextCursor: null });
-    expect(prismaMock.checkIn.findMany).not.toHaveBeenCalled();
+    const response = await GET(new NextRequest("http://localhost/api/workspaces/workspace-1/check-ins"), context());
+    expect(await response.json()).toEqual({ checkIns: [], nextCursor: "hidden-last" });
   });
 });

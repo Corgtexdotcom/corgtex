@@ -302,8 +302,8 @@ describe("authenticated workspace readers", () => {
     expect(await queryActions("ws-1", undefined, undefined, undefined, actor)).toEqual([
       expect.objectContaining({ id: row.id, title: row.title, author: null, assignee: null }),
     ]);
-    expect(captureProofMock).toHaveBeenCalledWith(actor, "ws-1", [expect.objectContaining({ kind: "User", id: "user-1" })]);
-    expect(captureProofMock).toHaveBeenCalledWith(actor, "ws-1", [expect.objectContaining({ kind: "Member", id: "member-2" })]);
+    expect(captureProofMock).toHaveBeenCalledWith(actor, "ws-1", [expect.objectContaining({ kind: "User", id: "user-1" })], undefined);
+    expect(captureProofMock).toHaveBeenCalledWith(actor, "ws-1", [expect.objectContaining({ kind: "Member", id: "member-2" })], undefined);
   });
 
   it("returns only public fields after proving full rows and excludes related private records", async () => {

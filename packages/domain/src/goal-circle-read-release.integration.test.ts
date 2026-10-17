@@ -33,7 +33,7 @@ it("preserves readable goal hierarchy, owner DTO, cadence and circle role orderi
   expect(tree[0]).toMatchObject({id:f.goal.id,circle:{id:f.circle.id,name:"Original circle"},ownerMember:{id:f.members[0].id,user:{displayName:"author",email:f.users[0].email}}});
   expect(tree[0].keyResults.map((row:{id:string})=>row.id)).toEqual([f.keyResult.id]);
   expect(tree[0].childGoals.map((row:{id:string})=>row.id)).toEqual([f.child.id]);
-  expect(Object.keys(tree[0].ownerMember.user).sort()).toEqual(["displayName","email"]);
+  expect(Object.keys(tree[0].ownerMember!.user).sort()).toEqual(["displayName","email"]);
   expect((await getGoalTree(f.actors[1],f.workspace.id,{cadence:"QUARTERLY"})).map(row=>row.id)).toEqual([f.child.id]);
   const circles=await listCircles(f.actors[1],f.workspace.id);
   expect(circles.map(row=>row.id)).toEqual([f.parent.id,f.circle.id]);

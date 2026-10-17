@@ -1,7 +1,7 @@
 import {randomUUID} from "node:crypto";
 import {afterEach, beforeEach, expect, it, vi} from "vitest";
 import {Prisma} from "@prisma/client";
-import {prisma, type AppActor} from "@corgtex/shared";
+import {prisma, getPrismaClient, type AppActor} from "@corgtex/shared";
 import {truncateAllTables} from "../../shared/src/db-test-utils";
 import {getProposal, listProposals} from "./proposals";
 import {recordArtifactInputLineage, readableArtifactIds, invalidateArtifactInputLineage} from "./source-lineage";
@@ -74,7 +74,20 @@ it("replenishes all three relation collections beyond 5000 and releases full lis
     await prisma.$transaction(tx => recordArtifactInputLineage({tx, actor: f.actor, workspaceId: f.workspaceId,
       artifact: {kind, id: row.id}, content: row, origin: "HUMAN_ORIGINAL", inputs: []}));
   }
+  // Measure a successful serving snapshot separately from first-use epoch initialization.
+  await listProposals(f.actor, f.workspaceId, {take: 1});
   const queries = [vi.spyOn(prisma.action, "findMany"), vi.spyOn(prisma.tension, "findMany"), vi.spyOn(prisma.adviceRequest, "findMany")];
+  const transactionPages = {action: [] as any[], tension: [] as any[], adviceRequest: [] as any[]};
+  const transaction = prisma.$transaction.bind(prisma);
+  vi.spyOn(getPrismaClient(), "$transaction").mockImplementation(((operation: any, options: any) => transaction(async tx => operation(new Proxy(tx, {
+    get(target, property) {
+      if (property === "action" || property === "tension" || property === "adviceRequest") return new Proxy(target[property], {get(model, method) {
+        if (method === "findMany") return (args: any) => {transactionPages[property].push(args); return (model.findMany as any)(args);};
+        const value = Reflect.get(model, method); return typeof value === "function" ? value.bind(model) : value;
+      }});
+      const value = Reflect.get(target, property); return typeof value === "function" ? value.bind(target) : value;
+    },
+  })), options)) as typeof prisma.$transaction);
   const list = await listProposals(f.actor, f.workspaceId, {take: 1});
   const detail = await getProposal(f.actor, {workspaceId: f.workspaceId, proposalId: f.proposal.id});
   for (const result of [list.items[0], detail]) {
@@ -82,10 +95,14 @@ it("replenishes all three relation collections beyond 5000 and releases full lis
     expect(result.tensions).toEqual([{id: tension.id, title: tension.title, status: tension.status}]);
     expect(result.adviceProcess.requests).toEqual([{status: request.status}]);
   }
-  for (const query of queries) {
-    const pages = query.mock.calls.map(([args]) => args).filter(args => args?.take !== undefined);
-    expect(pages.length).toBeGreaterThan(100);
-    expect(pages.every(args => args?.take === 100 && !args.select && !args.include && args.where?.workspaceId === f.workspaceId)).toBe(true);
+  for (const [index, kind] of (["action", "tension", "adviceRequest"] as const).entries()) {
+    const globalPages = queries[index].mock.calls.map(([args]) => args).filter(args => args?.take !== undefined);
+    const snapshotPages = transactionPages[kind].filter(args => args?.take !== undefined);
+    // Detail uses the global client; list discovery uses the RR client. Each
+    // must traverse all 5,002 candidates in 51 canonical pages.
+    expect(globalPages).toHaveLength(51);
+    expect(snapshotPages).toHaveLength(51);
+    expect([...globalPages, ...snapshotPages].every(args => args?.take === 100 && !args.select && !args.include && args.where?.workspaceId === f.workspaceId)).toBe(true);
   }
   // Change a previously admitted relation during a later collection read. A
   // fresh valid-looking body cannot replace the original permission history.

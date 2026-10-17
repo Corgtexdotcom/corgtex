@@ -8,6 +8,9 @@ import {
   getGoal,
   getMyGoalSlice,
   listGoals,
+  listGoalsPage,
+  listRecognitions,
+  buildGoalTree,
   listCompanyDirectionFromBrain,
   postGoalUpdate,
   recomputeGoalProgress,
@@ -47,7 +50,7 @@ vi.mock("@corgtex/shared", () => ({
       update: vi.fn(),
       delete: vi.fn(),
     },
-    recognition: { create: vi.fn() },
+    recognition: { create: vi.fn(), findMany: vi.fn() },
     goalUpdate: {
       create: vi.fn(),
     },
@@ -1491,6 +1494,7 @@ describe("Goals Domain", () => {
         ownerMemberId: "member-1",
         status: "ACTIVE",
         archivedAt: null,
+        circle: null,
       };
       vi.mocked(prisma.goal.findMany).mockResolvedValueOnce([activeGoal] as any);
 
@@ -1506,6 +1510,7 @@ describe("Goals Domain", () => {
         orderBy: [
           { targetDate: "asc" },
           { updatedAt: "desc" },
+          { id: "asc" },
         ],
       }));
     });
@@ -2506,7 +2511,45 @@ it("replenishes a bounded ordered page for visible skip/take in a 5001-goal corp
   const actor = { kind: "user", user: { id: "user-1" } } as Parameters<typeof listGoals>[0];
   const selected = await listGoals(actor, { workspaceId: "ws-1", skip: 5, take: 20 });
   expect(selected.map(row => row.id)).toEqual(rows.slice(105, 125).map(row => row.id));
-  expect(query).toHaveBeenCalledTimes(2);
-  expect(query.mock.calls.every(([args]) => args?.take === 100)).toBe(true);
+  expect(query).toHaveBeenCalledOnce();
+  expect(query.mock.calls.every(([args]) => args?.take === 200)).toBe(true);
   expect(query).toHaveBeenLastCalledWith(expect.objectContaining({ orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }, { id: "asc" }] }));
+});
+
+
+it("refuses an incomplete default goal array rather than scanning 5001 hidden rows",async()=>{
+  vi.clearAllMocks();
+  const rows=Array.from({length:5001},(_,i)=>({id:`goal-${String(i).padStart(5,"0")}`,sortOrder:0,createdAt:new Date("2026-01-01"),title:"Unknown",ownerMember:null,circle:null,keyResults:[]}));
+  const query=vi.mocked(prisma.goal.findMany);
+  query.mockImplementation((async(args:any)=>{const after=args.where?.AND?.[1]?.OR?.[2]?.id?.gt;return rows.filter(row=>!after||row.id>after).slice(0,args.take);}) as unknown as typeof prisma.goal.findMany);
+  vi.mocked(readableArtifactIds).mockResolvedValue(new Set());
+  const error=await listGoals({kind:"user",user:{id:"user-1"}} as any,{workspaceId:"ws-1"}).then(()=>null,error=>error);
+  expect(query).toHaveBeenCalledOnce();expect(query.mock.calls[0][0]?.take).toBe(200);
+  expect(error).toMatchObject({code:"SOURCE_READ_SCAN_LIMIT"});
+});
+
+it("continues after the last selected goal rather than the prefetched end",async()=>{
+  vi.clearAllMocks();
+  const rows=Array.from({length:150},(_,i)=>({id:`goal-${String(i).padStart(5,"0")}`,parentGoalId:i===1?"outside":null,sortOrder:0,createdAt:new Date("2026-01-01"),title:"Visible",ownerMember:null,circle:null,keyResults:[]}));
+  const query=vi.mocked(prisma.goal.findMany);
+  query.mockImplementation((async(args:any)=>{const after=args.where?.AND?.[1]?.OR?.[2]?.id?.gt;return rows.filter(row=>!after||row.id>after).slice(0,args.take);}) as unknown as typeof prisma.goal.findMany);
+  vi.mocked(readableArtifactIds).mockImplementation(async(_a,_w,_k,records)=>new Set(records.map(row=>row.id)));
+  const actor={kind:"user",user:{id:"user-1"}} as any;
+  const first=await listGoalsPage(actor,{workspaceId:"ws-1",take:1});
+  const second=await listGoalsPage(actor,{workspaceId:"ws-1",take:1,cursor:first.nextCursor!});
+  expect(first.items[0].id).toBe(rows[0].id);expect(second.items[0].id).toBe(rows[1].id);
+  expect(buildGoalTree(second.items).map(row=>row.id)).toEqual([rows[1].id]);
+  await expect(listGoalsPage(actor,{workspaceId:"other",cursor:first.nextCursor!})).rejects.toMatchObject({code:"INVALID_INPUT"});
+});
+
+it.each(["owned", "recognition"] as const)("refuses an incomplete 5001-row %s array after one bounded enumeration",async kind=>{
+  vi.clearAllMocks();
+  const rows=Array.from({length:5001},(_,i)=>({id:`item-${i.toString().padStart(5,"0")}`,updatedAt:new Date("2026-01-01"),createdAt:new Date("2026-01-01"),targetDate:null}));
+  const query=kind==="owned"?vi.mocked(prisma.goal.findMany):vi.mocked(prisma.recognition.findMany);
+  query.mockImplementation((async(args:any)=>rows.slice(0,args.take)) as any);
+  vi.mocked(readableArtifactIds).mockResolvedValue(new Set());
+  const actor={kind:"user",user:{id:"user-1"}} as any;
+  const error=await (kind==="owned"?getMyGoalSlice(actor,"member-1","ws-1"):listRecognitions(actor,{workspaceId:"ws-1"})).then(()=>null,error=>error);
+  expect(query).toHaveBeenCalledOnce();expect(query.mock.calls[0][0]?.take).toBe(200);
+  expect(error).toMatchObject({code:"SOURCE_READ_SCAN_LIMIT"});
 });

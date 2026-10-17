@@ -1157,6 +1157,16 @@
     "tryAgain": "Intentar de nuevo"
   },
   "goals": {
+    "myWindowLimited": "Estos son los objetivos propios legibles en esta ventana. Puede haber más objetivos fuera de ella.",
+    "recognitionWindowLimited": "Estos son los reconocimientos legibles en esta ventana. Puede haber más historial fuera de ella.",
+    "recognitionWindowNext": "Siguiente ventana de reconocimientos",
+    "recognitionWindowStart": "Primera ventana de reconocimientos",
+    "recognitionWindowEmpty": "No hay reconocimientos legibles en esta ventana.",
+
+    "windowLimited": "Esta ventana de objetivos también proporciona las opciones de objetivo padre. Puede haber otros objetivos fuera de ella; los objetivos con un padre fuera de esta ventana aparecen en el nivel superior.",
+    "windowNext": "Siguiente ventana de objetivos",
+    "windowStart": "Primera ventana de objetivos",
+    "windowEmpty": "No hay objetivos legibles en esta ventana.",
     "contributesTo": "contribuye a:",
     "addKeyResultTitle": "Agregar resultado clave",
     "editKeyResultTitle": "Editar resultado clave",

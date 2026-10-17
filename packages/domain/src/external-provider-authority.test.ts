@@ -101,7 +101,7 @@ const remote = vi.hoisted(() => ({ details: { id: "file", name: "Original Box ti
 vi.mock("./external-mcp", async importOriginal => ({ ...await importOriginal<typeof import("./external-mcp")>(),
   readBoxExternalMcpNativeResponse: remote.transport }));
 
-import { listArchivedWorkspaceArtifacts } from "./archive";
+import { ArchiveMetadataReadRelease, getWorkspaceArchiveRecord, listArchivedWorkspaceArtifacts } from "./archive";
 import { inspectLegacyRecovery } from "./legacy-recovery";
 import * as lineage from "./source-lineage";
 import { selectExternalContentSource, syncExternalContentSource, listExternalContentSources, enqueueExternalContentSourceSync } from "./external-content-sources";
@@ -174,7 +174,7 @@ describe("External provider live authority and copied lineage with real helpers"
     } finally { observation.mockRestore(); }
   });
 
-  it.each(["fresh", "permalink-revocation", "later-candidates-revocation"] as const)(
+  it.each(["fresh", "permalink-revocation", "later-candidates-revocation", "detail-fresh", "detail-revocation"] as const)(
     "replays original restored archive provider authority after discovery: %s", async phase => {
       const source = await setup(); const receipt = await capture(source.id);
       const roots = await captureArtifactInputProof(owner, ws, [{ kind: "ExternalProviderFetchInput", id: receipt.input.id }]);
@@ -198,6 +198,20 @@ describe("External provider live authority and copied lineage with real helpers"
       }
       const admin = { ...owner, user: { ...(owner as Extract<AppActor, { kind: "user" }>).user, globalRole: "OPERATOR" as const } } as AppActor;
       const localBefore = structuredClone(fixture.tables);
+      if (phase === "detail-fresh" || phase === "detail-revocation") {
+        const release = new ArchiveMetadataReadRelease(admin, ws);
+        const record = await getWorkspaceArchiveRecord(admin, {workspaceId: ws, entityType: "BrainArticle", entityId: article.id,
+          includeRestored: true}, release);
+        expect(record).toMatchObject({id: "archive-restored"});
+        const capturedCalls = remote.transport.mock.calls.length;
+        if (phase === "detail-revocation") remote.fail = true;
+        if (phase === "detail-fresh") await expect(release.finish(record)).resolves.toMatchObject({id: "archive-restored"});
+        else await expect(release.finish(record)).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+        expect(remote.transport.mock.calls.length).toBeGreaterThan(capturedCalls);
+        expect(fixture.tables).toEqual(localBefore);
+        expect(fixture.state.transactionDepth).toBe(0);
+        return;
+      }
       const callsBeforeLateQuery: number[] = [];
       remote.transport.mockClear();
       const delegate = phase === "later-candidates-revocation" ? fixture.prisma.workspaceArchiveRecord : fixture.prisma.workspacePermalink;

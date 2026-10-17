@@ -155,7 +155,7 @@ describe("listWorkspaceAgreements", () => {
     });
     try {
       const result = await listWorkspaceAgreements(actor, { workspaceId: "ws-1" });
-      expect(lineage.capture).toHaveBeenCalledWith(actor, "ws-1", [{ kind: "ConstitutionSourceReference", id: denied.id, snapshot: denied }]);
+      expect(lineage.capture).toHaveBeenCalledWith(actor, "ws-1", [{ kind: "ConstitutionSourceReference", id: denied.id, snapshot: denied }], undefined);
       expect(prismaMock.tension.findMany).not.toHaveBeenCalled();
       expect(result.currentConstitution?.sourceReferences).toEqual([{ pointOrder: 1, sourceOrder: 1, sourceKind: "PROPOSAL", targetId: "public-proposal", title: "Current proposal title" }]);
       expect(JSON.stringify(result)).not.toContain("secret-tension");

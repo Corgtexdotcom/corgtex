@@ -10,7 +10,7 @@ import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
-import { archiveFilterWhere, archiveWorkspaceArtifact, getWorkspaceArchiveRecord, type ArchiveFilter } from "./archive";
+import { archiveFilterWhere, archiveWorkspaceArtifact, getWorkspaceArchiveRecord, ArchiveMetadataReadRelease, type ArchiveFilter } from "./archive";
 import { resolveKnowledgeAccessDomains } from "./brain-access";
 import { lockActiveArticleSources, lockBrainSourceLink } from "./brain-source-links";
 import { requestBrainSourceRemoval } from "./brain-source-removal";
@@ -608,6 +608,7 @@ async function readArticle(actor: AppActor, params: {
 
 /** Retain the main article's original proof through every later page read. */
 export async function getArticlePageData(actor: AppActor, params: {workspaceId: string; slug: string}) {
+  const archiveRelease = new ArchiveMetadataReadRelease(actor, params.workspaceId);
   const release = new DigestReadRelease(actor, params.workspaceId);
   const membership = await requireWorkspaceMembership({actor, workspaceId: params.workspaceId});
   if (membership) invariant((await release.capture("Member", [membership])).records.length === 1,
@@ -616,7 +617,7 @@ export async function getArticlePageData(actor: AppActor, params: {workspaceId: 
   const isArchived = Boolean(article.archivedAt);
   const isAdmin = actor.kind === "agent" || membership?.role === "ADMIN";
   const archiveRecord = isArchived
-    ? await getWorkspaceArchiveRecord(actor, {workspaceId: params.workspaceId, entityType: "BrainArticle", entityId: article.id})
+    ? await getWorkspaceArchiveRecord(actor, {workspaceId: params.workspaceId, entityType: "BrainArticle", entityId: article.id}, archiveRelease)
     : null;
   const canManage = !isArchived && !article.isPermissionVariant && (isAdmin
     || (Boolean(article.ownerMemberId) && article.ownerMemberId === membership?.id));
@@ -627,7 +628,7 @@ export async function getArticlePageData(actor: AppActor, params: {workspaceId: 
     workspaceId: params.workspaceId, id: {in: article.sourceIds},
   }}) : [];
   const sources = (await release.capture("BrainSource", candidates)).records;
-  return release.finish({article, otherArticles, sources, isArchived, isAdmin, canManage, archiveRecord});
+  return archiveRelease.finish({article, otherArticles, sources, isArchived, isAdmin, canManage, archiveRecord}, release);
 }
 
 export async function listArticles(actor: AppActor, params: {

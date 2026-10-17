@@ -1,14 +1,17 @@
+import { GoalWindowNotice } from "./GoalWindowNotice";
 import { useTranslations } from "next-intl";
 import { getTranslations } from "next-intl/server";
 import {
   getGoal,
+  DigestReadRelease,
+  ArchiveMetadataReadRelease,
   getWorkspaceArchiveRecord,
-  getGoalTree,
-  getMyGoalSlice,
+  buildGoalTree,
+  getMyGoalSlicePage,
   listCircles,
-  listGoals,
+  listGoalsPage,
   listHumanMembers,
-  listRecognitions,
+  listRecognitionsPage,
   requireWorkspaceMembership,
 } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
@@ -53,11 +56,11 @@ export default async function GoalsPage({
   searchParams,
 }: {
   params: Promise<{ workspaceId: string }>;
-  searchParams: Promise<{ view?: string; cadence?: string; goalId?: string; versionConflict?: string }>;
+  searchParams: Promise<{ view?: string; cadence?: string; goalId?: string; goalCursor?: string; myCursor?: string; recognitionCursor?: string; versionConflict?: string }>;
 }) {
   const { workspaceId } = await params;
   await requireWorkspaceFeature(workspaceId, "GOALS");
-  const { view = "tree", cadence = "QUARTERLY", goalId, versionConflict } = await searchParams;
+  const { view = "tree", cadence = "QUARTERLY", goalId, goalCursor, myCursor, recognitionCursor, versionConflict } = await searchParams;
   const actor = await requirePageActor();
   const t = await getTranslations("goals");
   const tWork = await getTranslations("workItems");
@@ -65,19 +68,23 @@ export default async function GoalsPage({
   const canManageAnyGoal = actor.kind === "agent" || membership?.role === "ADMIN";
   const currentUserId = actor.kind === "user" ? actor.user.id : null;
 
-  const [allGoals, circles, members] = await Promise.all([
-    listGoals(actor, { workspaceId }),
+  const goalReadRelease = new DigestReadRelease(actor, workspaceId);
+  const archiveReadRelease = new ArchiveMetadataReadRelease(actor, workspaceId);
+  const [goalWindow, circles, members] = await Promise.all([
+    view === "tree" || goalId ? listGoalsPage(actor, { workspaceId, cursor:goalCursor }, goalReadRelease) : Promise.resolve({items: [], complete: true, nextCursor: null}),
     listCircles(actor, workspaceId),
     listHumanMembers(workspaceId),
   ]);
+  const allGoals = goalWindow.items;
   const focusedGoal = goalId
-    ? await getGoal(actor, { workspaceId, goalId, includeArchived: true, _membership: membership })
+    ? await getGoal(actor, { workspaceId, goalId, includeArchived: true, _membership: membership }, goalReadRelease)
     : null;
   const focusedArchiveRecord = focusedGoal?.archivedAt
-    ? await getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Goal", entityId: focusedGoal.id })
+    ? await getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Goal", entityId: focusedGoal.id }, archiveReadRelease)
     : null;
 
   if (focusedGoal?.archivedAt) {
+    await archiveReadRelease.finish(undefined, goalReadRelease);
     return (
       <div className="max-w-5xl mx-auto p-6 space-y-8">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-line pb-4">
@@ -116,16 +123,28 @@ export default async function GoalsPage({
   let tree: any[] = [];
   let mySlice: any[] = [];
   let recognitions: any[] = [];
+  let myWindow: {complete: boolean; nextCursor: string | null} = {complete: true, nextCursor: null};
+  let recognitionWindow: {complete: boolean; nextCursor: string | null} = {complete: true, nextCursor: null};
+  function sectionHref(kind: "myCursor" | "recognitionCursor", cursor?: string) {
+    const search = new URLSearchParams({view: "slice", cadence});
+    if (myCursor) search.set("myCursor", myCursor);
+    if (recognitionCursor) search.set("recognitionCursor", recognitionCursor);
+    if (cursor) search.set(kind, cursor); else search.delete(kind);
+    return `/workspaces/${workspaceId}/goals?${search}`;
+  }
 
   if (view === "tree") {
-    tree = await getGoalTree(actor, workspaceId, { cadence: cadence as GoalCadence });
+    tree = buildGoalTree(allGoals.filter(goal => goal.cadence === cadence));
   } else if (actor.kind === "user") {
     if (membership) {
-      mySlice = await getMyGoalSlice(actor, membership.id, workspaceId);
-      recognitions = await listRecognitions(actor, { workspaceId, recipientMemberId: membership.id });
+      const own = await getMyGoalSlicePage(actor, membership.id, workspaceId, {cursor: myCursor}, goalReadRelease);
+      mySlice = own.items; myWindow = own;
+      const recognized = await listRecognitionsPage(actor, { workspaceId, recipientMemberId: membership.id, cursor: recognitionCursor }, goalReadRelease);
+      recognitions = recognized.items; recognitionWindow = recognized;
     }
   }
 
+  await goalReadRelease.finish(undefined);
   return (
     <div className="max-w-5xl mx-auto p-6 space-y-8">
       <WorkspacePageHeader
@@ -152,6 +171,11 @@ export default async function GoalsPage({
           />
         }
       />
+
+      {view === "tree" && <GoalWindowNotice complete={goalWindow.complete}
+        nextHref={goalWindow.nextCursor ? `/workspaces/${workspaceId}/goals?view=${encodeURIComponent(view)}&cadence=${encodeURIComponent(cadence)}&goalCursor=${encodeURIComponent(goalWindow.nextCursor)}` : null}
+        startHref={goalCursor ? `/workspaces/${workspaceId}/goals?view=${encodeURIComponent(view)}&cadence=${encodeURIComponent(cadence)}` : undefined}
+        labels={{limited:t("windowLimited"),next:t("windowNext"),start:t("windowStart")}} />}
 
       {versionConflict && (
         <div className="form-message form-message-error" role="alert">
@@ -291,7 +315,7 @@ export default async function GoalsPage({
           <div className="space-y-4">
             {tree.length === 0 ? (
               <WorkspaceEmptyState
-                title={t("noGoalsFound", { cadence: cadence.toLowerCase().replace("_", "") })}
+                title={goalWindow.complete && !goalCursor ? t("noGoalsFound", { cadence: cadence.toLowerCase().replace("_", "") }) : t("windowEmpty")}
                 className="bg-surface-strong rounded-xl border border-dashed border-line"
               />
             ) : (
@@ -318,10 +342,14 @@ export default async function GoalsPage({
         <div className="space-y-8">
           <div>
             <h3 className="text-xl font-semibold mb-4 text-text">{t("myActiveGoals")}</h3>
+            <GoalWindowNotice complete={myWindow.complete}
+              nextHref={myWindow.nextCursor ? sectionHref("myCursor", myWindow.nextCursor) : null}
+              startHref={myCursor ? sectionHref("myCursor") : undefined}
+              labels={{limited:t("myWindowLimited"),next:t("windowNext"),start:t("windowStart")}} />
             <div className="space-y-4">
               {mySlice.length === 0 ? (
                 <WorkspaceEmptyState
-                  title={t("noOwnedGoals")}
+                  title={myWindow.complete && !myCursor ? t("noOwnedGoals") : t("windowEmpty")}
                   className="bg-surface-strong rounded-xl border border-dashed border-line"
                 />
               ) : (
@@ -366,10 +394,14 @@ export default async function GoalsPage({
 
           <div>
             <h3 className="text-xl font-semibold mb-4 text-text">{t("recentRecognitions")}</h3>
+            <GoalWindowNotice complete={recognitionWindow.complete}
+              nextHref={recognitionWindow.nextCursor ? sectionHref("recognitionCursor", recognitionWindow.nextCursor) : null}
+              startHref={recognitionCursor ? sectionHref("recognitionCursor") : undefined}
+              labels={{limited:t("recognitionWindowLimited"),next:t("recognitionWindowNext"),start:t("recognitionWindowStart")}} />
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {recognitions.length === 0 ? (
                 <WorkspaceEmptyState
-                  title={t("noRecognitions")}
+                  title={recognitionWindow.complete && !recognitionCursor ? t("noRecognitions") : t("recognitionWindowEmpty")}
                   className="col-span-full bg-surface-strong rounded-xl border border-dashed border-line"
                 />
               ) : (

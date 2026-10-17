@@ -1,3 +1,4 @@
+import { DigestReadRelease } from "./digest-lineage";
 import { createHash } from "node:crypto";
 import type { MemberRole } from "@prisma/client";
 import { Prisma } from "@prisma/client";
@@ -682,13 +683,48 @@ async function capturePurgedAudit(actor: AppActor, workspaceId: string, record: 
   }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 30_000 });
 }
 
+/** Metadata authority stays separate from content proofs. A caller with later
+ * awaits retains this collector and finishes it at its response boundary. */
+export class ArchiveMetadataReadRelease {
+  private readonly entries: Array<{record: ReturnType<typeof archiveMetadata>; proof?: ArchiveMetadataProof; purged?: PurgedAuditProof}> = [];
+  constructor(readonly actor: AppActor, readonly workspaceId: string) {}
+  async capture(record: ReturnType<typeof archiveMetadata>) {
+    const purged = record.purgedAt ? await capturePurgedAudit(this.actor, this.workspaceId, record) : null;
+    const proof = !record.purgedAt && isLineageKind(record.entityType)
+      ? await captureArtifactArchiveMetadataProof(this.actor, this.workspaceId, {kind: record.entityType, id: record.entityId}) : null;
+    if (!proof && !purged) return null;
+    this.entries.push({record: structuredClone(record), proof: proof ?? undefined, purged: purged ?? undefined});
+    return record;
+  }
+  async finish<T>(value: T, release = new DigestReadRelease(this.actor, this.workspaceId)): Promise<T> {
+    invariant(release.actor === this.actor && release.workspaceId === this.workspaceId,
+      409, "SOURCE_CHANGED", "Archive metadata release scope changed.");
+    // Native replay must follow caller reads and remain outside the final RR.
+    for (const {proof} of this.entries) if (proof) invariant(
+      await isArtifactArchiveMetadataProofReadable(this.actor, this.workspaceId, proof),
+      409, "SOURCE_CHANGED", "Archive metadata source access changed before release.");
+    return release.finish(value, async tx => {
+      for (const {record, proof, purged} of this.entries) {
+        const current = await tx.workspaceArchiveRecord.findFirst({where: {id: record.id, workspaceId: this.workspaceId}, select: archiveMetadataSelect});
+        invariant(current && auditHash(archiveMetadata(current)) === auditHash(record),
+          409, "SOURCE_CHANGED", "Archive record changed before release.");
+        invariant(proof ? await isArtifactArchiveMetadataProofReadable(this.actor, this.workspaceId, proof, tx)
+          : purged && await readPurgedAudit(this.actor, this.workspaceId, record, tx, purged),
+        409, "SOURCE_CHANGED", "Archive metadata permissions changed before release.");
+      }
+    });
+  }
+}
+
 export async function getWorkspaceArchiveRecord(actor: AppActor, params: {
   workspaceId: string;
   entityType: string;
   entityId: string;
   includePurged?: boolean;
   includeRestored?: boolean;
-}) {
+}, release?: ArchiveMetadataReadRelease) {
+  invariant(!release || release.actor === actor && release.workspaceId === params.workspaceId,
+    409, "SOURCE_CHANGED", "Archive metadata collection scope changed.");
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const record = await prisma.workspaceArchiveRecord.findFirst({
     where: {
@@ -701,19 +737,10 @@ export async function getWorkspaceArchiveRecord(actor: AppActor, params: {
     orderBy: { archivedAt: "desc" },
     select: archiveMetadataSelect,
   });
-  if (record?.purgedAt) {
-    const proof = await capturePurgedAudit(actor, params.workspaceId, archiveMetadata(record));
-    if (!proof) return null;
-    return prisma.$transaction(async tx => {
-      await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
-      invariant(await readPurgedAudit(actor, params.workspaceId, proof.record, tx, proof),
-        409, "SOURCE_CHANGED", "Purge metadata permissions changed before release.");
-      return proof.record;
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 30_000 });
-  }
-  return record && !record.purgedAt && isLineageKind(record.entityType)
-    && await isArtifactArchiveMetadataReadable(actor, params.workspaceId, { kind: record.entityType, id: record.entityId })
-    ? archiveMetadata(record) : null;
+  if (!record) return null;
+  const collector = release ?? new ArchiveMetadataReadRelease(actor, params.workspaceId);
+  const admitted = await collector.capture(archiveMetadata(record));
+  return release ? admitted : collector.finish(admitted);
 }
 
 export async function archiveWorkspaceArtifact(actor: AppActor, params: {

@@ -25,7 +25,7 @@ import {
   normalizeDuplicateGuardText,
   type DuplicateGuardOptions,
 } from "./duplicate-guard";
-import type { Goal, GoalLevel, GoalCadence, GoalStatus, Prisma } from "@prisma/client";
+import type { Circle, Goal, GoalLevel, GoalCadence, GoalStatus, Prisma } from "@prisma/client";
 import {
   acquireWorkItemAdvisoryLock,
   changedDataFields,
@@ -383,26 +383,21 @@ function canReadGoalRecord(
   return actor.kind === "user" && goal.authorUserId === actor.user.id;
 }
 
-type GoalParentVisibilityRecord = {
+type GoalParentVisibilityRecord = Pick<Goal, "id" | "isPrivate" | "status" | "authorUserId"> & {
+  circle?: Circle | null;
   parentGoal?: GoalParentVisibilityRecord | null;
-  isPrivate?: boolean | null;
-  status?: GoalStatus | null;
-  authorUserId?: string | null;
 };
 
-function stripInvisibleGoalParents<T extends { parentGoal?: GoalParentVisibilityRecord | null }>(
-  actor: AppActor,
-  membership: MembershipSummary | null | undefined,
-  goal: T,
-): T {
-  if (!goal.parentGoal) return goal;
-  if (!canReadGoalRecord(actor, membership, goal.parentGoal)) {
-    return { ...goal, parentGoal: null };
+async function readableGoalParents<T extends GoalParentVisibilityRecord>(
+  release: DigestReadRelease, actor: AppActor, membership: MembershipSummary | null | undefined, goal: T,
+): Promise<T> {
+  const circle = goal.circle ? (await release.capture("Circle", [goal.circle])).records[0] ?? null : null;
+  let parentGoal: GoalParentVisibilityRecord | null = null;
+  if (goal.parentGoal && canReadGoalRecord(actor, membership, goal.parentGoal)
+    && (await release.capture("Goal", [goal.parentGoal])).records.length) {
+    parentGoal = await readableGoalParents(release, actor, membership, goal.parentGoal);
   }
-  return {
-    ...goal,
-    parentGoal: stripInvisibleGoalParents(actor, membership, goal.parentGoal),
-  };
+  return {...goal, circle, ...(goal.parentGoal !== undefined ? {parentGoal} : {})};
 }
 
 
@@ -1005,6 +1000,12 @@ async function readableGoalMember(release: DigestReadRelease, member: GoalReader
   return { ...member, user: { displayName: user.displayName, email: user.email } };
 }
 
+function goalReadRelease(actor: AppActor, workspaceId: string, release?: DigestReadRelease) {
+  invariant(!release || release.actor === actor && release.workspaceId === workspaceId,
+    409, "SOURCE_CHANGED", "Goal read collection scope changed.");
+  return release ?? new DigestReadRelease(actor, workspaceId);
+}
+
 export async function getGoal(
   actor: AppActor,
   params: {
@@ -1012,7 +1013,8 @@ export async function getGoal(
     goalId: string;
     includeArchived?: boolean;
     _membership?: MembershipSummary | null;
-  }
+  },
+  readRelease?: DigestReadRelease,
 ) {
   const membership = await requireWorkspaceMembership({
     actor,
@@ -1036,7 +1038,7 @@ export async function getGoal(
   });
 
   invariant(goal, 404, "NOT_FOUND", "Goal not found.");
-  const release = new DigestReadRelease(actor, params.workspaceId);
+  const release = goalReadRelease(actor, params.workspaceId, readRelease);
   invariant((await release.capture("Goal", [goal])).records.length, 404, "NOT_FOUND", "Goal not found.");
   const childGoals = (await release.capture("Goal", goal.childGoals ?? [])).records;
   const keyResults = (await release.capture("KeyResult", goal.keyResults ?? [])).records;
@@ -1047,74 +1049,102 @@ export async function getGoal(
   return release.finish({ ...goal, ownerMember, childGoals, keyResults, updates });
 }
 
-export async function listGoals(
-  actor: AppActor,
-  params: {
-    workspaceId: string;
-    level?: GoalLevel;
-    cadence?: GoalCadence;
-    circleId?: string | null;
-    ownerMemberId?: string | null;
-    status?: GoalStatus;
-    parentGoalId?: string | null;
-    take?: number;
-    skip?: number;
-    archiveFilter?: ArchiveFilter;
-    _membership?: MembershipSummary | null;
+type ListGoalsParams = {
+  workspaceId: string;
+  level?: GoalLevel;
+  cadence?: GoalCadence;
+  circleId?: string | null;
+  ownerMemberId?: string | null;
+  status?: GoalStatus;
+  parentGoalId?: string | null;
+  take?: number;
+  skip?: number;
+  archiveFilter?: ArchiveFilter;
+  _membership?: MembershipSummary | null;
+};
+
+/** A fixed bounded candidate window; the cursor follows the last consumed row. */
+export async function listGoalsPage(actor: AppActor, params: ListGoalsParams & {cursor?: string}, readRelease?: DigestReadRelease) {
+  const membership = await requireWorkspaceMembership({actor, workspaceId:params.workspaceId, resolvedMembership:params._membership});
+  const take = params.take ?? 100, skip = params.skip ?? 0;
+  invariant(Number.isSafeInteger(take) && take > 0 && take <= 200 && Number.isSafeInteger(skip) && skip >= 0 && skip <= 200,
+    400, "INVALID_INPUT", "Invalid goal window.");
+  const query: Prisma.GoalWhereInput = {workspaceId:params.workspaceId,...privacyFilter(actor,membership),...archiveFilterWhere(params.archiveFilter)};
+  if(params.level!==undefined)query.level=params.level;
+  if(params.cadence!==undefined)query.cadence=params.cadence;
+  if(params.circleId!==undefined)query.circleId=params.circleId;
+  if(params.ownerMemberId!==undefined)query.ownerMemberId=params.ownerMemberId;
+  if(params.status!==undefined)query.status=params.status;
+  if(params.parentGoalId!==undefined)query.parentGoalId=params.parentGoalId;
+  const scope=JSON.stringify([params.workspaceId,params.level,params.cadence,
+    params.circleId===undefined?"*":params.circleId,params.ownerMemberId===undefined?"*":params.ownerMemberId,
+    params.status,params.parentGoalId===undefined?"*":params.parentGoalId,params.archiveFilter??"active"]);
+  let after:Pick<Goal,"id"|"sortOrder"|"createdAt">|undefined;
+  if(params.cursor!==undefined) {
+    try {
+      invariant(params.cursor.length<=4096&&/^[A-Za-z0-9_-]+$/.test(params.cursor),400,"INVALID_INPUT","Invalid goal cursor.");
+      const value=JSON.parse(Buffer.from(params.cursor,"base64url").toString("utf8"));
+      invariant(value?.purpose==="goals-window-v1"&&value.scope===scope&&typeof value.id==="string"&&value.id.length>0&&value.id.length<=256
+        &&Number.isSafeInteger(value.sortOrder)&&typeof value.createdAt==="string"&&Number.isFinite(Date.parse(value.createdAt)),400,"INVALID_INPUT","Invalid goal cursor.");
+      after={id:value.id,sortOrder:value.sortOrder,createdAt:new Date(value.createdAt)};
+    }catch{invariant(false,400,"INVALID_INPUT","Invalid goal cursor.");}
   }
-) {
-  const membership = await requireWorkspaceMembership({
-    actor,
-    workspaceId: params.workspaceId,
-    resolvedMembership: params._membership,
-  });
-
-  const query: Prisma.GoalWhereInput = { workspaceId: params.workspaceId, ...privacyFilter(actor, membership), ...archiveFilterWhere(params.archiveFilter) };
-  if (params.level !== undefined) query.level = params.level;
-  if (params.cadence !== undefined) query.cadence = params.cadence;
-  if (params.circleId !== undefined) query.circleId = params.circleId;
-  if (params.ownerMemberId !== undefined) query.ownerMemberId = params.ownerMemberId;
-  if (params.status !== undefined) query.status = params.status;
-  if (params.parentGoalId !== undefined) query.parentGoalId = params.parentGoalId;
-
-  const skip = params.skip ?? 0;
-  invariant(Number.isSafeInteger(skip) && skip >= 0 && (params.take === undefined || Number.isSafeInteger(params.take) && params.take >= 0),
-    400, "INVALID_INPUT", "Invalid goal pagination.");
-  const release = new DigestReadRelease(actor, params.workspaceId);
-  const include = { ownerMember: { include: goalReaderMemberInclude }, keyResults: true, circle: true } satisfies Prisma.GoalInclude;
-  type Row = Prisma.GoalGetPayload<{ include: typeof include }>;
-  const selected: Row[] = [];
-  let after: Pick<Row, "sortOrder" | "createdAt" | "id"> | undefined;
-  let visible = 0;
-  while (params.take === undefined || selected.length < params.take) {
-    const page: Row[] = await prisma.goal.findMany({
-      where: { AND: [query, ...(after ? [{ OR: [
-        { sortOrder: { gt: after.sortOrder } },
-        { sortOrder: after.sortOrder, createdAt: { lt: after.createdAt } },
-        { sortOrder: after.sortOrder, createdAt: after.createdAt, id: { gt: after.id } },
-      ] }] : [])] },
-      orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }, { id: "asc" }], take: 100, include,
-    });
-    const last = page.at(-1);
-    const next = last ? { sortOrder: last.sortOrder, createdAt: new Date(last.createdAt), id: last.id } : undefined;
-    invariant(!next || next.id !== after?.id, 409, "SOURCE_CHANGED", "Goals changed during pagination.");
-    const captured = await release.observeRead(() => captureReadableDigestInputs({ actor, workspaceId: params.workspaceId, kind: "Goal", records: page }));
-    for (const goal of captured.records) {
-      if (visible++ < skip) continue;
-      selected.push(goal);
-      release.add(captured.proofs.get(goal.id)!);
-      if (params.take !== undefined && selected.length === params.take) break;
+  const release=goalReadRelease(actor,params.workspaceId,readRelease);
+  const include={ownerMember:{include:goalReaderMemberInclude},keyResults:true,circle:true} satisfies Prisma.GoalInclude;
+  const candidates=await prisma.goal.findMany({where:{AND:[query,...(after?[{OR:[
+    {sortOrder:{gt:after.sortOrder}},
+    {sortOrder:after.sortOrder,createdAt:{lt:after.createdAt}},
+    {sortOrder:after.sortOrder,createdAt:after.createdAt,id:{gt:after.id}},
+  ]}]:[])]},orderBy:[{sortOrder:"asc"},{createdAt:"desc"},{id:"asc"}],take:200,include});
+  const selected:typeof candidates=[];
+  let visible=0,lastIndex=-1;
+  for(let offset=0;offset<candidates.length&&selected.length<take;offset+=100){
+    const batch=candidates.slice(offset,offset+100);
+    const captured=await release.observeRead(()=>captureReadableDigestInputs({actor,workspaceId:params.workspaceId,kind:"Goal",records:batch}));
+    for(let i=0;i<batch.length;i++){
+      lastIndex=offset+i;
+      const goal=batch[i];const proof=captured.proofs.get(goal.id);
+      if(!proof)continue;
+      if(visible++<skip)continue;
+      selected.push(goal);release.add(proof);
+      if(selected.length===take)break;
     }
-    if (page.length < 100) break;
-    after = next;
   }
-  const result = [];
-  for (const goal of selected) result.push({ ...goal,
-    ownerMember: await readableGoalMember(release, goal.ownerMember),
-    circle: goal.circle && (await release.capture("Circle", [goal.circle])).records[0] || null,
-    keyResults: (await release.capture("KeyResult", goal.keyResults ?? [])).records,
+  const complete=candidates.length<200&&lastIndex===candidates.length-1;
+  const last=candidates[lastIndex];
+  const nextCursor=complete||!last?null:Buffer.from(JSON.stringify({purpose:"goals-window-v1",scope,id:last.id,
+    sortOrder:last.sortOrder,createdAt:last.createdAt.toISOString()})).toString("base64url");
+  const items=[];
+  for(const goal of selected)items.push({...goal,
+    ownerMember:await readableGoalMember(release,goal.ownerMember),
+    circle:goal.circle&&(await release.capture("Circle",[goal.circle])).records[0]||null,
+    keyResults:(await release.capture("KeyResult",goal.keyResults??[])).records,
   });
-  return release.finish(result);
+  return release.finish({items,complete,nextCursor});
+}
+
+/** Compatibility callers requesting an exact array must not receive a truncated result. */
+export async function listGoals(actor:AppActor,params:ListGoalsParams){
+  if(params.take===0){
+    await requireWorkspaceMembership({actor,workspaceId:params.workspaceId,resolvedMembership:params._membership});
+    return new DigestReadRelease(actor,params.workspaceId).finish([]);
+  }
+  const page=await listGoalsPage(actor,{...params,take:params.take??200});
+  invariant(page.complete||(params.take!==undefined&&page.items.length===params.take),409,"SOURCE_READ_SCAN_LIMIT","Goal list is incomplete; use the bounded goal window.");
+  return page.items;
+}
+
+/** Build only the admitted window; a parent outside it is deliberately not fetched. */
+export function buildGoalTree<T extends {id:string;parentGoalId:string|null}>(goals:T[]){
+  type Node=T&{childGoals:Node[]};
+  const byId=new Map<string,Node>(goals.map(goal=>[goal.id,{...goal,childGoals:[]}]));
+  const roots:Node[]=[];
+  for(const goal of goals){
+    const row=byId.get(goal.id)!;
+    if(goal.parentGoalId&&byId.has(goal.parentGoalId))byId.get(goal.parentGoalId)!.childGoals.push(row);
+    else roots.push(row);
+  }
+  return roots;
 }
 
 export async function listCompanyDirectionFromBrain(
@@ -1944,78 +1974,58 @@ export async function recomputeGoalProgress(
   }
 }
 
-export async function getGoalTree(actor: AppActor, workspaceId: string, opts?: { cadence?: GoalCadence }) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId });
-  
-  const query: any = { workspaceId, ...privacyFilter(actor, membership), archivedAt: null };
-  if (opts?.cadence) query.cadence = opts.cadence;
-  
-  const allGoals = await prisma.goal.findMany({
-    where: query,
-    include: {
-      ownerMember: { include: goalReaderMemberInclude },
-      keyResults: true,
-      circle: true,
-    },
-    orderBy: { sortOrder: "asc" }
-  });
-
-  const goalsById = new Map<string, any>();
-  const release = new DigestReadRelease(actor, workspaceId);
-  const admitted = (await release.capture("Goal", allGoals)).records;
-  for (const goal of admitted) {
-    goalsById.set(goal.id, { ...goal,
-      ownerMember: await readableGoalMember(release, goal.ownerMember),
-      keyResults: (await release.capture("KeyResult", goal.keyResults ?? [])).records,
-      circle: goal.circle && (await release.capture("Circle", [goal.circle])).records[0] || null,
-      childGoals: [],
-    });
-  }
-
-  const rootGoals: any[] = [];
-  for (const g of admitted) {
-    const mapped = goalsById.get(g.id);
-    if (g.parentGoalId && goalsById.has(g.parentGoalId)) {
-      goalsById.get(g.parentGoalId).childGoals.push(mapped);
-    } else {
-      rootGoals.push(mapped);
-    }
-  }
-
-  return release.finish(rootGoals);
+export async function getGoalTree(actor:AppActor,workspaceId:string,opts?:{cadence?:GoalCadence}){
+  return buildGoalTree(await listGoals(actor,{workspaceId,cadence:opts?.cadence}));
 }
 
-export async function getMyGoalSlice(actor: AppActor, memberId: string, workspaceId: string) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+function goalSectionCursor(cursor: string | undefined, purpose: string, scope: string) {
+  if (cursor === undefined) return null;
+  try {
+    invariant(cursor.length <= 4096 && /^[A-Za-z0-9_-]+$/.test(cursor), 400, "INVALID_INPUT", "Invalid goal section cursor.");
+    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    invariant(value?.purpose === purpose && value.scope === scope && typeof value.id === "string" && value.id.length > 0 && value.id.length <= 256
+      && typeof value.date === "string" && Number.isFinite(Date.parse(value.date))
+      && (value.targetDate === null || typeof value.targetDate === "string" && Number.isFinite(Date.parse(value.targetDate))),
+    400, "INVALID_INPUT", "Invalid goal section cursor.");
+    return {id: value.id as string, date: new Date(value.date), targetDate: value.targetDate === null ? null : new Date(value.targetDate)};
+  } catch { invariant(false, 400, "INVALID_INPUT", "Invalid goal section cursor."); }
+}
 
+export async function getMyGoalSlicePage(actor: AppActor, memberId: string, workspaceId: string,
+  opts: {cursor?: string} = {}, readRelease?: DigestReadRelease) {
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const scope = JSON.stringify([workspaceId, memberId]);
+  const after = goalSectionCursor(opts.cursor, "my-goals-v1", scope);
+  const laterWithinDate: Prisma.GoalWhereInput[] = after ? [
+    {targetDate: after.targetDate, updatedAt: {lt: after.date}},
+    {targetDate: after.targetDate, updatedAt: after.date, id: {gt: after.id}},
+  ] : [];
   const myGoals = await prisma.goal.findMany({
     where: {
-      workspaceId,
-      ...privacyFilter(actor, membership),
-      ownerMemberId: memberId,
-      archivedAt: null,
-      status: { in: ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"] },
+      workspaceId, ...privacyFilter(actor, membership), ownerMemberId: memberId, archivedAt: null,
+      status: {in: ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"]},
+      ...(after ? {AND: [{OR: [...(after.targetDate ? [{targetDate: {gt: after.targetDate}}, {targetDate: null}] : []), ...laterWithinDate]}]} : {}),
     },
-    include: {
-      circle: true,
-      parentGoal: {
-        include: {
-          circle: true,
-          parentGoal: {
-            include: { circle: true },
-          },
-        },
-      },
-    },
-    orderBy: [
-      { targetDate: "asc" },
-      { updatedAt: "desc" },
-    ],
+    include: {circle: true, parentGoal: {include: {circle: true, parentGoal: {include: {circle: true}}}}},
+    orderBy: [{targetDate: "asc"}, {updatedAt: "desc"}, {id: "asc"}], take: 200,
   });
+  const release = goalReadRelease(actor, workspaceId, readRelease);
+  const items = [];
+  for (let offset = 0; offset < myGoals.length; offset += 100) {
+    const admitted = (await release.capture("Goal", myGoals.slice(offset, offset + 100))).records;
+    for (const goal of admitted) items.push(await readableGoalParents(release, actor, membership, goal));
+  }
+  const complete = myGoals.length < 200;
+  const last = myGoals.at(-1);
+  const nextCursor = complete || !last ? null : Buffer.from(JSON.stringify({purpose: "my-goals-v1", scope,
+    id: last.id, date: last.updatedAt.toISOString(), targetDate: last.targetDate?.toISOString() ?? null})).toString("base64url");
+  return release.finish({items, complete, nextCursor});
+}
 
-  const visibleIds = await readableArtifactIds(actor, workspaceId, "Goal", myGoals);
-  return myGoals.filter((goal) => visibleIds.has(goal.id))
-    .map((goal) => stripInvisibleGoalParents(actor, membership, goal));
+export async function getMyGoalSlice(actor: AppActor, memberId: string, workspaceId: string, readRelease?: DigestReadRelease) {
+  const page = await getMyGoalSlicePage(actor, memberId, workspaceId, {}, readRelease);
+  invariant(page.complete, 409, "SOURCE_READ_SCAN_LIMIT", "My goals are incomplete; use the bounded goal window.");
+  return page.items;
 }
 
 export async function createRecognition(
@@ -2058,13 +2068,15 @@ export async function createRecognition(
   });
 }
 
-export async function listRecognitions(
+export async function listRecognitionsPage(
   actor: AppActor,
   params: {
     workspaceId: string;
     recipientMemberId?: string;
+    cursor?: string;
     _membership?: MembershipSummary | null;
-  }
+  },
+  readRelease?: DigestReadRelease,
 ) {
   await requireWorkspaceMembership({
     actor,
@@ -2075,12 +2087,38 @@ export async function listRecognitions(
   const query: any = { workspaceId: params.workspaceId };
   if (params.recipientMemberId) query.recipientMemberId = params.recipientMemberId;
 
-  return prisma.recognition.findMany({
+  const scope = JSON.stringify([params.workspaceId, params.recipientMemberId ?? null]);
+  const after = goalSectionCursor(params.cursor, "recognitions-v1", scope);
+  if (after) query.AND = [{OR: [{createdAt: {lt: after.date}}, {createdAt: after.date, id: {gt: after.id}}]}];
+  const rows = await prisma.recognition.findMany({
     where: query,
     include: {
-      author: { include: { user: { select: { displayName: true } } } },
-      recipient: { include: { user: { select: { displayName: true } } } },
+      author: { include: goalReaderMemberInclude },
+      recipient: { include: goalReaderMemberInclude },
     },
-    orderBy: { createdAt: "desc" },
+    orderBy: [{createdAt: "desc"}, {id: "asc"}], take: 200,
   });
+  const release=goalReadRelease(actor,params.workspaceId,readRelease);
+  const admitted: typeof rows = [];
+  for (let offset=0; offset<rows.length; offset+=100) admitted.push(...(await release.capture("Recognition",rows.slice(offset,offset+100))).records);
+  const result=[];
+  for(const row of admitted){
+    const author=await readableGoalMember(release,row.author),recipient=await readableGoalMember(release,row.recipient);
+    result.push({...row,
+      author:author?{...author,user:{displayName:author.user.displayName}}:null,
+      recipient:recipient?{...recipient,user:{displayName:recipient.user.displayName}}:null});
+  }
+  const complete = rows.length < 200;
+  const last = rows.at(-1);
+  const nextCursor = complete || !last ? null : Buffer.from(JSON.stringify({purpose: "recognitions-v1", scope,
+    id: last.id, date: last.createdAt.toISOString(), targetDate: null})).toString("base64url");
+  return release.finish({items: result, complete, nextCursor});
+}
+
+export async function listRecognitions(actor: AppActor, params: {
+  workspaceId: string; recipientMemberId?: string; _membership?: MembershipSummary | null;
+}, readRelease?: DigestReadRelease) {
+  const page = await listRecognitionsPage(actor, params, readRelease);
+  invariant(page.complete, 409, "SOURCE_READ_SCAN_LIMIT", "Recognitions are incomplete; use the bounded recognition window.");
+  return page.items;
 }

@@ -15,6 +15,42 @@ const COMPANY_KNOWLEDGE_POLICY = "COMPANY_KNOWLEDGE";
 const MEMBER_CHECKIN_POLICY = "MEMBER_CHECKIN";
 const DAILY_COMPANY_QUESTION_CAP = 3;
 
+/** A member's bounded history window. Continuation follows the last examined
+ * canonical row, including windows whose bodies are all unavailable. */
+export async function listCheckInsPage(actor: AppActor, params: {
+  workspaceId: string;
+  take?: number;
+  cursor?: string | null;
+}) {
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const release = new DigestReadRelease(actor, params.workspaceId);
+  if (!membership) return release.finish({ checkIns: [] as CheckIn[], nextCursor: null as string | null });
+  const take = Math.min(Math.max(Number.isFinite(params.take) ? Math.trunc(params.take!) : 50, 1), 100);
+  const cursor = params.cursor?.trim();
+  const boundary = cursor ? await prisma.checkIn.findFirst({
+    where: { id: cursor, workspaceId: params.workspaceId, memberId: membership.id },
+    select: { id: true, createdAt: true },
+  }) : null;
+  invariant(!cursor || boundary, 400, "INVALID_CURSOR", "Check-in cursor is unavailable for this member.");
+  const candidates = await prisma.checkIn.findMany({
+    where: { workspaceId: params.workspaceId, memberId: membership.id,
+      ...(boundary ? { OR: [
+        { createdAt: { lt: boundary.createdAt } },
+        { createdAt: boundary.createdAt, id: { lt: boundary.id } },
+      ] } : {}),
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: take + 1,
+  });
+  const examined = candidates.slice(0, take);
+  const checkIns = (await release.capture("CheckIn", examined)).records;
+  const nextCursor = candidates.length > take ? examined.at(-1)?.id ?? null : null;
+  return release.finish({ checkIns, nextCursor }, async tx => {
+    const current = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
+    invariant(current?.id === membership.id, 409, "SOURCE_CHANGED", "Check-in recipient changed before release.");
+  });
+}
+
 const DAILY_COMPANY_QUESTION_TEMPLATES = [
   {
     questionText: "What decision or blocker should CORGTEX understand before it updates company direction?",

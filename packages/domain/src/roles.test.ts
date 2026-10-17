@@ -1130,7 +1130,7 @@ describe("roles domain", () => {
     expect(await filterReadableRoleAssignments(actor, "workspace-1", [row])).toEqual([row]);
     expect(captureArtifactInputProof).toHaveBeenCalledWith(actor, "workspace-1", [
       { kind: "User", id: partialUser.id, snapshot: partialUser },
-    ]);
+    ], undefined);
     expect(vi.mocked(captureArtifactInputProof).mock.calls.at(-1)?.[2][0]?.snapshot).not.toHaveProperty("bio");
     expect(vi.mocked(readableArtifactIds).mock.calls.some((call) => call[2] === "User")).toBe(false);
   });
