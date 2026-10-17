@@ -7,9 +7,35 @@ import { getMeeting, listMeetings, listUpcomingMeetings } from "./meetings";
 import { meetingAgendaInputProjection, meetingTranscriptInputProjection } from "./meeting-intelligence-context";
 import * as lineage from "./source-lineage";
 import * as digest from "./digest-lineage";
+import * as meetingContext from "./meeting-intelligence-context";
 
-beforeEach(truncateAllTables);
-afterEach(() => vi.restoreAllMocks());
+// Promise.all rejects before its sibling reads settle. Keep the whole query /
+// admission chains alive until teardown drains them, before the next TRUNCATE.
+const pendingReads: Promise<void>[] = [];
+function trackRead<T>(read: Promise<T>): Promise<T> {
+  pendingReads.push(read.then(() => undefined, () => undefined));
+  return read;
+}
+async function drainReads() {
+  while (pendingReads.length) await Promise.all(pendingReads.splice(0));
+}
+beforeEach(async () => {
+  await truncateAllTables();
+  const batches = meetingContext.readMeetingInputBatches;
+  vi.spyOn(meetingContext, "readMeetingInputBatches").mockImplementation(<T extends { id: string }>(
+    ...args: Parameters<typeof meetingContext.readMeetingInputBatches<T>>
+  ) => trackRead(batches(...args)));
+  const observe = digest.DigestReadRelease.prototype.observeRead;
+  vi.spyOn(digest.DigestReadRelease.prototype, "observeRead").mockImplementation(function<T>(
+    this: digest.DigestReadRelease, read: () => Promise<T>,
+  ): Promise<T> {
+    return trackRead(observe.call(this, read) as Promise<T>);
+  });
+});
+afterEach(async () => {
+  await drainReads();
+  vi.restoreAllMocks();
+});
 async function setup() {
   const workspace = await prisma.workspace.create({ data: { name: "Synthetic final release", slug: randomUUID() } });
   const users = await Promise.all(["reader", "author"].map(name => prisma.user.create({ data: {
@@ -110,4 +136,42 @@ it.each(["input", "head", "caller", "profile", "proposal"] as const)("withholds 
     return result;
   });
   await expect(getAction(f.actor, { workspaceId: f.workspaceId, actionId: f.action.id })).rejects.toMatchObject({ code: "SOURCE_CHANGED" }); expect(changed).toBe(true);
+});
+
+
+it("drains a pending sibling meeting query after another parallel branch rejects", async () => {
+  const f = await setup();
+  let unblock!: () => void;
+  let started!: () => void;
+  const held = new Promise<void>(resolve => { unblock = resolve; });
+  const queryStarted = new Promise<void>(resolve => { started = resolve; });
+  const delegate = getPrismaClient().tension;
+  const query = delegate.findMany.bind(delegate);
+  let siblingSettled = false;
+  vi.spyOn(delegate, "findMany").mockImplementation((async (args: Parameters<typeof query>[0]) => {
+    started();
+    await held;
+    const rows = await query(args);
+    siblingSettled = true;
+    return rows;
+  }) as typeof delegate.findMany);
+  vi.spyOn(getPrismaClient().meetingInsight as { findMany: () => Promise<unknown[]> }, "findMany").mockImplementation(async () => {
+    await queryStarted;
+    throw new Error("synthetic joined-read rejection");
+  });
+  let drained = false;
+  try {
+    await expect(getMeeting(f.actor, f.workspaceId, f.meeting.id)).rejects.toThrow("synthetic joined-read rejection");
+    expect(siblingSettled).toBe(false);
+    const draining = drainReads().then(() => { drained = true; });
+    await Promise.resolve();
+    expect(drained).toBe(false);
+    unblock();
+    await draining;
+    expect(siblingSettled).toBe(true);
+    expect(drained).toBe(true);
+    expect(pendingReads).toHaveLength(0);
+  } finally {
+    unblock();
+  }
 });
