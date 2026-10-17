@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { WorkItemMemberSelect, type WorkItemMemberOption } from "@/lib/components/WorkItemMemberSelect";
@@ -60,10 +60,31 @@ export function DuplicateGuardActionEditorForm({
   footer?: ReactNode;
   children?: ReactNode;
 }) {
+  const formRef = useRef<HTMLFormElement>(null);
   const [state, formAction, isPending] = useActionState(action, null);
 
+  useEffect(() => {
+    const form = formRef.current;
+    if (!form) return;
+    const preserveDraft = (event: Event) => {
+      // React resets during commit, before effects and with synthetic events disabled.
+      // The DOM already reflects the response, so read its confirmation marker here.
+      if (form.dataset.duplicateConfirmation !== "true") return;
+      event.preventDefault();
+      // MarkdownEditor also listens for resets on this form.
+      event.stopImmediatePropagation();
+    };
+    form.addEventListener("reset", preserveDraft, true);
+    return () => form.removeEventListener("reset", preserveDraft, true);
+  }, []);
+
   return (
-    <form action={formAction} className="stack nr-form-section nr-action-editor-form">
+    <form
+      ref={formRef}
+      action={formAction}
+      className="stack nr-form-section nr-action-editor-form"
+      data-duplicate-confirmation={state?.status === "duplicate_confirmation_required" ? "true" : undefined}
+    >
       <input type="hidden" name="duplicateGuardEnabled" value="true" />
       <DuplicateGuardConfirmationPanel state={state} isPending={isPending} />
       <input type="hidden" name="workspaceId" value={workspaceId} />
