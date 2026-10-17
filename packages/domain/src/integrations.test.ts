@@ -743,7 +743,7 @@ describe("saved OAuth email selection replay", () => {
         return Response.json({messages: [{id: "older-message"}]});
       }
       if (!parsed.searchParams.has("$skiptoken")) {
-        expect(parsed.searchParams.get("$search")).toBe('"(from:sender@synthetic.test) AND received:6/18/2026"');
+        expect(parsed.searchParams.get("$search")).toBe('"(from:sender@synthetic.test) AND received>=2026-06-18T09:00:00Z AND received<2026-06-18T09:00:01Z"');
         return Response.json({value: [{id: "newer-message"}], "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/messages?$skiptoken=opaque"});
       }
       return Response.json({value: [{id: "older-message"}]});
@@ -780,8 +780,8 @@ describe("saved OAuth email selection replay", () => {
       : new URL(url).pathname.endsWith("/older-message") ? Response.json({id: "older-message", receivedDateTime: "2026-06-18T09:00:00Z"})
       : Response.json({value: [], "@odata.nextLink": "https://untrusted.example/messages"}));
     vi.stubGlobal("fetch", fetchMock);
-    expect(await fetchSelectedEmailMessage("connection", "older-message", "from:sender@synthetic.test",
-      {authorizeAttempt: async () => {}, expectedAccountId: "account"})).toBeNull();
+    await expect(fetchSelectedEmailMessage("connection", "older-message", "from:sender@synthetic.test",
+      {authorizeAttempt: async () => {}, expectedAccountId: "account"})).rejects.toMatchObject({status: 503, code: "OAUTH_SELECTION_INCOMPLETE"});
     expect(fetchMock.mock.calls.every(([url]) => new URL(url).hostname === "graph.microsoft.com")).toBe(true);
   });
 });
@@ -863,4 +863,62 @@ it.each(["discovery", "replay"] as const)("rejects a different Graph mailbox bef
     : fetchSelectedEmailMessage("connection", "StableCaseSensitiveId", "from:sender@synthetic.test", controls)).rejects.toMatchObject({code: "SOURCE_CHANGED"});
   expect(fetchMock).toHaveBeenCalledOnce();
   expect(fetchMock).toHaveBeenCalledWith("https://graph.microsoft.com/v1.0/me", expect.any(Object));
+});
+
+
+it("replays a selected Outlook message beyond a saturated UTC-day search", async () => {
+  const {fetchSelectedEmailMessage} = await import("./integrations");
+  prismaMock.oAuthConnection.findUnique.mockResolvedValue({id: "connection", provider: "MICROSOFT", status: "ACTIVE", providerAccountId: "account",
+    accessToken: "enc:synthetic", expiresAt: new Date(Date.now() + 3600_000)});
+  const requested: string[] = [];
+  const fetchMock = vi.fn(async (url: string) => {
+    const parsed = new URL(url);
+    if (parsed.pathname === "/v1.0/me") return Response.json({id: "account"});
+    if (parsed.pathname.endsWith("/older-message")) return Response.json({id: "older-message", bodyPreview: "Original body", receivedDateTime: "2026-06-18T09:00:00.999Z"});
+    const search = parsed.searchParams.get("$search") ?? ""; requested.push(search);
+    return Response.json({value: search.includes("received>=2026-06-18T09:00:00Z AND received<2026-06-18T09:00:01Z")
+      ? [{id: "older-message"}] : Array.from({length: 1000}, (_, index) => ({id: `other-${index}`}))});
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  expect(await fetchSelectedEmailMessage("connection", "older-message", "from:sender@synthetic.test OR subject:invoice",
+    {expectedAccountId: "account", authorizeAttempt: async () => {}})).toMatchObject({id: "older-message", snippet: "Original body"});
+  expect(requested).toEqual(['"(from:sender@synthetic.test OR subject:invoice) AND received>=2026-06-18T09:00:00Z AND received<2026-06-18T09:00:01Z"']);
+});
+
+
+it.each(["saturated", "split-cap", "cycle", "budget", "shape", "row-shape", "bad-token"] as const)("does not treat an incomplete Outlook selection as revocation (%s)", async mode => {
+  const {fetchSelectedEmailMessage} = await import("./integrations");
+  prismaMock.oAuthConnection.findUnique.mockResolvedValue({id: "connection", provider: "MICROSOFT", status: "ACTIVE", providerAccountId: "account",
+    accessToken: "enc:synthetic", expiresAt: new Date(Date.now() + 3600_000)});
+  let pages = 0;
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    const parsed = new URL(url);
+    if (parsed.pathname === "/v1.0/me") return Response.json({id: "account"});
+    if (parsed.pathname.endsWith("/older-message")) return Response.json({id: "older-message", bodyPreview: "Original body", receivedDateTime: "2026-06-18T09:00:00Z"});
+    pages++;
+    if (mode === "shape") return Response.json({value: null});
+    if (mode === "row-shape") return Response.json({value: [null]});
+    if (mode === "bad-token") return Response.json({value: [], "@odata.nextLink": 123});
+    const size = mode === "saturated" ? 1000 : mode === "split-cap" ? 500 : 1;
+    return Response.json({value: Array.from({length: size}, (_, index) => ({id: `other-${pages}-${index}`})),
+      ...(mode === "saturated" ? {} : {"@odata.nextLink": `https://graph.microsoft.com/v1.0/me/messages?$skiptoken=${mode === "cycle" ? "repeated" : pages}`})});
+  }));
+  await expect(fetchSelectedEmailMessage("connection", "older-message", "subject:invoice",
+    {expectedAccountId: "account", authorizeAttempt: async () => {}})).rejects.toMatchObject({status: 503, code: "OAUTH_SELECTION_INCOMPLETE"});
+  expect(pages).toBe(mode === "budget" ? 100 : mode === "cycle" || mode === "split-cap" ? 2 : 1);
+});
+
+it("keeps Outlook exact membership positive at the ceiling and preserves the UTC rollover", async () => {
+  const {fetchSelectedEmailMessage} = await import("./integrations");
+  prismaMock.oAuthConnection.findUnique.mockResolvedValue({id: "connection", provider: "MICROSOFT", status: "ACTIVE", providerAccountId: "account",
+    accessToken: "enc:synthetic", expiresAt: new Date(Date.now() + 3600_000)});
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    const parsed = new URL(url);
+    if (parsed.pathname === "/v1.0/me") return Response.json({id: "account"});
+    if (parsed.pathname.endsWith("/older-message")) return Response.json({id: "older-message", bodyPreview: "Original body", receivedDateTime: "2026-12-31T23:59:59.999Z"});
+    expect(parsed.searchParams.get("$search")).toBe('"(subject:invoice) AND received>=2026-12-31T23:59:59Z AND received<2027-01-01T00:00:00Z"');
+    return Response.json({value: [...Array.from({length: 999}, (_, index) => ({id: `other-${index}`})), {id: "older-message"}]});
+  }));
+  expect(await fetchSelectedEmailMessage("connection", "older-message", "subject:invoice",
+    {expectedAccountId: "account", authorizeAttempt: async () => {}})).toMatchObject({id: "older-message"});
 });

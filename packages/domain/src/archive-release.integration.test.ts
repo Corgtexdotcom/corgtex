@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { createArticle } from "./brain";
+import * as lineage from "./source-lineage";
 import { lineageContentFingerprint } from "./source-lineage";
 import { archiveWorkspaceArtifact, listArchivedWorkspaceArtifacts } from "./archive";
 
@@ -34,7 +35,7 @@ describe("archive page release", () => {
     expect(JSON.stringify(page)).not.toContain("Synthetic archive body");
   });
 
-  it("replenishes past 5001 denied candidates with stable tied ordering and readable skip/take", async () => {
+  it("rejects an exact array beyond the raw window without scanning 5001 denied candidates", async () => {
     const f = await setup();
     const privateArticle = await createArticle(f.ownerActor, { workspaceId: f.workspaceId, slug: "private", title: "Private",
       bodyMd: "Private synthetic", type: "PROJECT", authority: "DRAFT", isPrivate: true });
@@ -49,13 +50,13 @@ describe("archive page release", () => {
       entityId: i < 5001 ? privateArticle.id : f.article.id, entityLabel: "Synthetic", archivedAt: at,
     })) });
     const query = vi.spyOn(prisma.workspaceArchiveRecord, "findMany");
-    const page = await listArchivedWorkspaceArtifacts(f.actor, { workspaceId: f.workspaceId, take: 2, skip: 1 });
-    expect(page.map(row => row.id)).toEqual(["archive-05002", "archive-05003"]);
-    expect(query.mock.calls.length).toBe(51);
-    for (const [args] of query.mock.calls) expect(args).toMatchObject({ take: 100, orderBy: [{ archivedAt: "desc" }, { id: "asc" }] });
+    await expect(listArchivedWorkspaceArtifacts(f.actor, { workspaceId: f.workspaceId, take: 2, skip: 1 }))
+      .rejects.toMatchObject({code:"SOURCE_READ_SCAN_LIMIT"});
+    expect(query.mock.calls.length).toBe(1);
+    expect(query.mock.calls[0][0]).toMatchObject({ take: 200, orderBy: [{ archivedAt: "desc" }, { id: "asc" }] });
   }, 120_000);
 
-  for (const phase of ["permalink", "later-candidates"] as const) {
+  for (const phase of ["permalink", "later-admission"] as const) {
     it.each(["membership-loss", "membership-restore", "source-restore", "head-replacement"] as const)(
       `withholds admitted metadata after %s during ${phase}`, async change => {
         const f = await setup();
@@ -83,17 +84,15 @@ describe("archive page release", () => {
             const result = await original(args); await mutate(); return result;
           }) as typeof prisma.workspacePermalink.findMany);
         } else {
-          await prisma.workspaceArchiveRecord.createMany({ data: Array.from({ length: 100 }, (_, i) => ({
-            workspaceId: f.workspaceId, entityType: "UnknownArtifact", entityId: `denied-${i}`,
-            entityLabel: "Synthetic", archivedAt: new Date(0),
-          })) });
-          const original = prisma.workspaceArchiveRecord.findMany.bind(prisma.workspaceArchiveRecord);
+          await prisma.workspaceArchiveRecord.create({ data: { workspaceId: f.workspaceId, entityType: "BrainArticle",
+            entityId: f.article.id, entityLabel: "Synthetic", archivedAt: new Date(0) } });
+          const original = lineage.captureArtifactArchiveMetadataProof;
           let calls = 0;
-          vi.spyOn(prisma.workspaceArchiveRecord, "findMany").mockImplementation((async args => {
-            const result = await original(args);
+          vi.spyOn(lineage, "captureArtifactArchiveMetadataProof").mockImplementation(async (...args) => {
+            const result = await original(...args);
             if (++calls === 2) await mutate();
             return result;
-          }) as typeof prisma.workspaceArchiveRecord.findMany);
+          });
         }
         await expect(listArchivedWorkspaceArtifacts(f.actor, { workspaceId: f.workspaceId, take: 2 }))
           .rejects.toMatchObject({ code: change === "membership-loss" ? "NOT_A_MEMBER" : "SOURCE_CHANGED" });

@@ -687,7 +687,7 @@ async function capturePurgedAudit(actor: AppActor, workspaceId: string, record: 
  * awaits retains this collector and finishes it at its response boundary. */
 export class ArchiveMetadataReadRelease {
   private readonly entries: Array<{record: ReturnType<typeof archiveMetadata>; proof?: ArchiveMetadataProof; purged?: PurgedAuditProof}> = [];
-  constructor(readonly actor: AppActor, readonly workspaceId: string) {}
+  constructor(readonly actor: AppActor, readonly workspaceId: string, private readonly adminOnly = false) {}
   async capture(record: ReturnType<typeof archiveMetadata>) {
     const purged = record.purgedAt ? await capturePurgedAudit(this.actor, this.workspaceId, record) : null;
     const proof = !record.purgedAt && isLineageKind(record.entityType)
@@ -699,11 +699,13 @@ export class ArchiveMetadataReadRelease {
   async finish<T>(value: T, release = new DigestReadRelease(this.actor, this.workspaceId)): Promise<T> {
     invariant(release.actor === this.actor && release.workspaceId === this.workspaceId,
       409, "SOURCE_CHANGED", "Archive metadata release scope changed.");
+    if (this.adminOnly) await requireWorkspaceMembership({ actor: this.actor, workspaceId: this.workspaceId, allowedRoles: ["ADMIN"] });
     // Native replay must follow caller reads and remain outside the final RR.
     for (const {proof} of this.entries) if (proof) invariant(
       await isArtifactArchiveMetadataProofReadable(this.actor, this.workspaceId, proof),
       409, "SOURCE_CHANGED", "Archive metadata source access changed before release.");
     return release.finish(value, async tx => {
+      if (this.adminOnly) await requireWorkspaceMembership({ actor: this.actor, workspaceId: this.workspaceId, allowedRoles: ["ADMIN"], tx });
       for (const {record, proof, purged} of this.entries) {
         const current = await tx.workspaceArchiveRecord.findFirst({where: {id: record.id, workspaceId: this.workspaceId}, select: archiveMetadataSelect});
         invariant(current && auditHash(archiveMetadata(current)) === auditHash(record),
@@ -1149,92 +1151,79 @@ export async function purgeWorkspaceArtifact(actor: AppActor, params: {
   return purged.result;
 }
 
+/** Exact array compatibility: never disguise a bounded incomplete window as exhaustion. */
 export async function listArchivedWorkspaceArtifacts(actor: AppActor, params: {
-  workspaceId: string;
-  entityType?: string | null;
-  take?: number;
-  skip?: number;
-  includeRestored?: boolean;
-  includePurged?: boolean;
+  workspaceId: string; entityType?: string | null; take?: number; skip?: number;
+  includeRestored?: boolean; includePurged?: boolean;
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"] });
-  const take = params.take ?? 100;
-  const skip = params.skip ?? 0;
-  invariant(Number.isInteger(take) && take >= 0 && take <= 5_000 && Number.isInteger(skip) && skip >= 0,
+  const take = params.take ?? 100, skip = params.skip ?? 0;
+  invariant(Number.isSafeInteger(take) && take >= 0 && take <= 5_000 && Number.isSafeInteger(skip) && skip >= 0,
     400, "INVALID_INPUT", "Archive pagination is invalid.");
+  if (!take) return [];
+  invariant(skip <= ARCHIVE_WINDOW_LIMIT, 409, "SOURCE_READ_SCAN_LIMIT", "Use archive continuation to read older records.");
+  const page = await listArchivedWorkspaceArtifactsPage(actor, { ...params, take: Math.min(take, 100), skip });
+  invariant(page.complete || page.items.length === take, 409, "SOURCE_READ_SCAN_LIMIT", "Use archive continuation to read older records.");
+  return page.items;
+}
 
-  if (take === 0) return [];
-  const page: Array<{ record: ReturnType<typeof archiveMetadata>; proof?: ArchiveMetadataProof; purged?: PurgedAuditProof }> = [];
-  let readablePosition = 0;
-  let cursor: { archivedAt: Date; id: string } | undefined;
-  while (page.length < take) {
-    const records = await prisma.workspaceArchiveRecord.findMany({
-      where: {
-        workspaceId: params.workspaceId,
-        ...(params.entityType ? { entityType: params.entityType } : {}),
-        ...(params.includeRestored ? {} : { restoredAt: null }),
-        ...(params.includePurged ? {} : { purgedAt: null }),
-        ...(cursor ? { OR: [
-          { archivedAt: { lt: cursor.archivedAt } },
-          { archivedAt: cursor.archivedAt, id: { gt: cursor.id } },
-        ] } : {}),
-      },
-      orderBy: [{ archivedAt: "desc" }, { id: "asc" }],
-      // Bound hydration, not the size of the workspace. Denied candidates do
-      // not consume readable skip/take; the deterministic cursor replenishes.
-      select: archiveMetadataSelect,
-      take: 100,
-    });
-    if (!records.length) break;
-    for (const record of records) {
-      if (record.purgedAt) {
-        const purged = await capturePurgedAudit(actor, params.workspaceId, archiveMetadata(record));
-        if (!purged || readablePosition++ < skip) continue;
-        page.push({ record: purged.record, purged });
-        if (page.length === take) break;
-        continue;
-      }
-      if (!isLineageKind(record.entityType)) continue;
-      const proof = await captureArtifactArchiveMetadataProof(actor, params.workspaceId,
-        { kind: record.entityType, id: record.entityId });
-      if (!proof) continue;
-      if (readablePosition++ < skip) continue;
-      page.push({ record: archiveMetadata(record), proof });
-      if (page.length === take) break;
-    }
-    const last = records[records.length - 1];
-    cursor = { archivedAt: last.archivedAt, id: last.id };
-    if (records.length < 100) break;
-  }
-  const permalinkEligibleRecords = page.map(({ record }) => record)
-    .filter(record => isWorkspacePermalinkEntityType(record.entityType));
-  const permalinks = permalinkEligibleRecords.length ? await prisma.workspacePermalink.findMany({
-    where: {
-      workspaceId: params.workspaceId,
-      OR: permalinkEligibleRecords.map(record => ({ entityType: record.entityType, entityId: record.entityId })),
-    },
-  }) : [];
-  const permalinkByEntity = new Map(permalinks.map(permalink => [`${permalink.entityType}:${permalink.entityId}`, permalink]));
-  // Restored active copies can depend on live provider authority. Replay the
-  // original admitted receipts after discovery, outside the local release tx.
+
+type ArchiveWindowParams = {
+  workspaceId: string; entityType?: string | null; includeRestored?: boolean; includePurged?: boolean;
+  take?: number; skip?: number; cursor?: string | null;
+};
+const ARCHIVE_WINDOW_LIMIT = 200;
+function archiveWindowPosition(params: ArchiveWindowParams, scope: string) {
+  if (!params.cursor) return undefined;
+  invariant(params.cursor.length <= 2048, 400, "INVALID_INPUT", "Invalid archive continuation.");
+  let value;
+  try { value = JSON.parse(Buffer.from(params.cursor, "base64url").toString("utf8")); } catch { /* validated below */ }
+  invariant(value?.v === 1 && value.scope === scope && typeof value.id === "string" && value.id.length > 0 && value.id.length <= 256
+    && typeof value.archivedAt === "string" && Number.isFinite(Date.parse(value.archivedAt))
+    && new Date(value.archivedAt).toISOString() === value.archivedAt,
+  400, "INVALID_INPUT", "Invalid archive continuation.");
+  return { id: value.id as string, archivedAt: new Date(value.archivedAt) };
+}
+
+/** A raw bounded metadata window; continuation advances past denied candidates.
+ * complete concerns this suffix, not an exact count or a snapshot of all history. */
+export async function listArchivedWorkspaceArtifactsPage(actor: AppActor, params: ArchiveWindowParams) {
+  sealArtifactInputActor(actor);
+  params = Object.freeze({ ...params });
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"] });
-  for (const { proof } of page) {
-    if (!proof) continue;
-    invariant(await isArtifactArchiveMetadataProofReadable(actor, params.workspaceId, proof),
-      409, "SOURCE_CHANGED", "Archive metadata source access changed before release.");
+  const take = params.take ?? 100, skip = params.skip ?? 0;
+  invariant(Number.isSafeInteger(take) && take > 0 && take <= 100 && Number.isSafeInteger(skip) && skip >= 0 && skip <= ARCHIVE_WINDOW_LIMIT,
+    400, "INVALID_INPUT", "Archive window is out of range.");
+  const scope = auditHash([params.workspaceId, params.entityType || null, Boolean(params.includeRestored), Boolean(params.includePurged)]);
+  const after = archiveWindowPosition(params, scope);
+  const records = await prisma.workspaceArchiveRecord.findMany({ where: {
+    workspaceId: params.workspaceId,
+    ...(params.entityType ? { entityType: params.entityType } : {}),
+    ...(params.includeRestored ? {} : { restoredAt: null }),
+    ...(params.includePurged ? {} : { purgedAt: null }),
+    ...(after ? { OR: [{ archivedAt: { lt: after.archivedAt } }, { archivedAt: after.archivedAt, id: { gt: after.id } }] } : {}),
+  }, orderBy: [{ archivedAt: "desc" }, { id: "asc" }], select: archiveMetadataSelect, take: ARCHIVE_WINDOW_LIMIT });
+  const release = new ArchiveMetadataReadRelease(actor, params.workspaceId, true);
+  const items: ReturnType<typeof archiveMetadata>[] = [];
+  let examined = 0, skipped = 0;
+  for (const record of records) {
+    examined++;
+    const admitted = await release.capture(archiveMetadata(record));
+    if (!admitted) continue;
+    if (skipped < skip) { skipped++; continue; }
+    items.push(admitted);
+    if (items.length === take) break;
   }
-  // All later archive discovery and permalink reads finish before this fresh
-  // shared snapshot. Never replace an admitted proof with today's receipt.
-  return prisma.$transaction(async tx => {
-    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"], tx });
-    for (const { proof, purged } of page) {
-      invariant(proof ? await isArtifactArchiveMetadataProofReadable(actor, params.workspaceId, proof, tx)
-        : purged && await readPurgedAudit(actor, params.workspaceId, purged.record, tx, purged),
-      409, "SOURCE_CHANGED", "Archive metadata permissions changed before release.");
-    }
-    return page.map(({ record }) => {
-      const permalink = permalinkByEntity.get(`${record.entityType}:${record.entityId}`);
-      return { ...record, permanentPath: permalink ? workspacePermanentPath(params.workspaceId, permalink.id) : null };
-    });
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 30_000 });
+  const eligible = items.filter(record => isWorkspacePermalinkEntityType(record.entityType));
+  const permalinks = eligible.length ? await prisma.workspacePermalink.findMany({ where: { workspaceId: params.workspaceId,
+    OR: eligible.map(record => ({ entityType: record.entityType, entityId: record.entityId })) } }) : [];
+  const byEntity = new Map(permalinks.map(link => [`${link.entityType}:${link.entityId}`, link]));
+  const complete = examined === records.length && records.length < ARCHIVE_WINDOW_LIMIT;
+  const last = records[examined - 1];
+  const nextCursor = !complete && last ? Buffer.from(JSON.stringify({ v: 1, scope, id: last.id,
+    archivedAt: last.archivedAt.toISOString() })).toString("base64url") : null;
+  return release.finish({ items: items.map(record => {
+    const link = byEntity.get(`${record.entityType}:${record.entityId}`);
+    return { ...record, permanentPath: link ? workspacePermanentPath(params.workspaceId, link.id) : null };
+  }), complete, nextCursor });
 }

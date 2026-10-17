@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { Prisma, type OAuthConnection, type OAuthProviderFetchInput } from "@prisma/client";
 import { decryptSecret, encryptSecret, prisma, type AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
-import { invariant } from "./errors";
+import { AppError, invariant } from "./errors";
 import { fetchSelectedDocuments, fetchFilteredEmailMessages, fetchSelectedEmailMessage, type OAuthEmailMessage } from "./integrations";
 import { capturePermissionEpochs, isArtifactPermissionEpochProofCurrent } from "./source-permission-epochs";
 
@@ -108,7 +108,12 @@ export async function isOAuthProviderFetchInputCurrent(actor: AppActor, workspac
     const exact = entries.find(entry => entry.payload.id === input.externalId && entry.payload.sourceKey === input.sourceKey
       && entry.selection === input.selection && hash(entry.payload) === input.payloadHash);
     return !!exact && await isOAuthProviderFetchInputLocallyCurrent(actor, workspaceId, input);
-  } catch { return false; }
+  } catch (error) {
+    // A truncated provider selection is a retryable verification failure. It
+    // cannot authorize reads or masquerade as evidence for source withdrawal.
+    if (error instanceof AppError && error.code === "OAUTH_SELECTION_INCOMPLETE") throw error;
+    return false;
+  }
 }
 
 /** Only this trusted server path mints native captures; callers never supply a body or receipt id. */

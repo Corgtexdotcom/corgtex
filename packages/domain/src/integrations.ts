@@ -3,7 +3,7 @@ import type { AppActor } from "@corgtex/shared";
 import type { OAuthConnection, OAuthProvider, Prisma } from "@prisma/client";
 import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
-import { invariant } from "./errors";
+import { AppError, invariant } from "./errors";
 import { extractSupportedMeetingUrlFromText } from "./meeting-urls";
 
 const ENCRYPTED_TOKEN_STORAGE_VERSION = "aes-256-gcm";
@@ -1234,20 +1234,40 @@ export async function fetchSelectedEmailMessage(connectionId: string, messageId:
     if (item.id !== messageId || typeof item.receivedDateTime !== "string") return null;
     const received = new Date(item.receivedDateTime);
     if (!Number.isFinite(received.getTime())) return null;
-    const day = `${received.getUTCMonth() + 1}/${received.getUTCDate()}/${received.getUTCFullYear()}`;
+    // Keep Microsoft's original KQL predicate, but restrict membership to the
+    // exact provider-returned UTC second rather than a potentially saturated day.
+    const second = Math.floor(received.getTime() / 1000) * 1000;
+    const start = new Date(second).toISOString().replace(".000Z", "Z");
+    const end = new Date(second + 1000).toISOString().replace(".000Z", "Z");
     const query = new URLSearchParams({$top: "1000", $select: "id",
-      $search: `"(${filter.replace(/"/g, '\\"')}) AND received:${day}"`});
+      $search: `"(${filter.replace(/"/g, '\\"')}) AND received>=${start} AND received<${end}"`});
     let next: string | null = `https://graph.microsoft.com/v1.0/me/messages?${query}`;
     const seen = new Set<string>();
+    let examined = 0;
     let matched = false;
     while (next && !matched) {
-      const url = new URL(next);
-      if (url.origin !== "https://graph.microsoft.com" || url.pathname !== "/v1.0/me/messages" || seen.has(next) || seen.size >= 100) return null;
+      let url: URL;
+      try { url = new URL(next); }
+      catch { throw new AppError(503, "OAUTH_SELECTION_INCOMPLETE", "Outlook selection continuation was invalid."); }
+      invariant(url.origin === "https://graph.microsoft.com" && url.pathname === "/v1.0/me/messages"
+        && !seen.has(next) && seen.size < 100,
+      503, "OAUTH_SELECTION_INCOMPLETE", "Outlook selection could not be completely verified. Retry later.");
       seen.add(next);
       const listing = await readProviderJsonResponse(await oauthSourceFetch(next,
         {headers: {...messageHeaders, ConsistencyLevel: "eventual"}}, controls), "Microsoft Graph");
-      matched = Array.isArray(listing.value) && listing.value.some((row: {id?: unknown}) => row.id === messageId);
-      next = typeof listing["@odata.nextLink"] === "string" ? listing["@odata.nextLink"] : null;
+      invariant(Array.isArray(listing.value) && listing.value.every((row: unknown) => row !== null
+        && typeof row === "object" && "id" in row && typeof row.id === "string" && row.id.length > 0),
+        503, "OAUTH_SELECTION_INCOMPLETE", "Outlook selection response was incomplete.");
+      matched = listing.value.some((row: {id?: unknown}) => row.id === messageId);
+      examined += listing.value.length;
+      // Graph search has a 1,000-result ceiling, even without a nextLink.
+      // Its truncated absence is neither membership nor source revocation.
+      invariant(matched || examined < 1000, 503, "OAUTH_SELECTION_INCOMPLETE",
+        "Outlook selection reached the provider search limit. Retry later.");
+      const continuation = listing["@odata.nextLink"];
+      invariant(continuation == null || typeof continuation === "string" && continuation.length > 0,
+        503, "OAUTH_SELECTION_INCOMPLETE", "Outlook selection continuation was incomplete.");
+      next = typeof continuation === "string" ? continuation : null;
     }
     if (!matched) return null;
     return {id: messageId, provider: connection.provider,

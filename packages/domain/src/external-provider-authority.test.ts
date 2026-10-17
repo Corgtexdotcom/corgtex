@@ -174,7 +174,7 @@ describe("External provider live authority and copied lineage with real helpers"
     } finally { observation.mockRestore(); }
   });
 
-  it.each(["fresh", "permalink-revocation", "later-candidates-revocation", "detail-fresh", "detail-revocation"] as const)(
+  it.each(["fresh", "permalink-revocation", "later-admission-revocation", "detail-fresh", "detail-revocation"] as const)(
     "replays original restored archive provider authority after discovery: %s", async phase => {
       const source = await setup(); const receipt = await capture(source.id);
       const roots = await captureArtifactInputProof(owner, ws, [{ kind: "ExternalProviderFetchInput", id: receipt.input.id }]);
@@ -190,12 +190,10 @@ describe("External provider live authority and copied lineage with real helpers"
         entityType: "BrainArticle", entityId: article.id, archivedAt: fixture.time, restoredAt: fixture.time, purgedAt: null } });
       await fixture.prisma.workspacePermalink.create({ data: { id: "restored-permalink", workspaceId: ws,
         entityType: "BrainArticle", entityId: article.id } });
-      if (phase === "later-candidates-revocation") {
-        for (let i = 0; i < 100; i++) await fixture.prisma.workspaceArchiveRecord.create({ data: {
-          id: `denied-${i}`, workspaceId: ws, entityType: "UnknownArtifact", entityId: `denied-${i}`,
-          archivedAt: new Date(0), restoredAt: null, purgedAt: null,
-        } });
-      }
+      if (phase === "later-admission-revocation") await fixture.prisma.workspaceArchiveRecord.create({ data: {
+        id: "archive-later", workspaceId: ws, entityType: "BrainArticle", entityId: article.id,
+        archivedAt: new Date(0), restoredAt: fixture.time, purgedAt: null,
+      } });
       const admin = { ...owner, user: { ...(owner as Extract<AppActor, { kind: "user" }>).user, globalRole: "OPERATOR" as const } } as AppActor;
       const localBefore = structuredClone(fixture.tables);
       if (phase === "detail-fresh" || phase === "detail-revocation") {
@@ -214,12 +212,18 @@ describe("External provider live authority and copied lineage with real helpers"
       }
       const callsBeforeLateQuery: number[] = [];
       remote.transport.mockClear();
-      const delegate = phase === "later-candidates-revocation" ? fixture.prisma.workspaceArchiveRecord : fixture.prisma.workspacePermalink;
+      const delegate = fixture.prisma.workspacePermalink;
       const original = delegate.findMany.getMockImplementation();
-      let queries = 0;
+      const captureOriginal = lineage.captureArtifactArchiveMetadataProof;
+      let captures = 0;
+      const captureSpy = phase === "later-admission-revocation" ? vi.spyOn(lineage, "captureArtifactArchiveMetadataProof").mockImplementation(async (...args) => {
+        const proof = await captureOriginal(...args);
+        if (++captures === 2) { callsBeforeLateQuery.push(remote.transport.mock.calls.length); remote.fail = true; }
+        return proof;
+      }) : undefined;
       delegate.findMany.mockImplementation(async (args: any) => {
         const rows = await original(args);
-        if (++queries === (phase === "later-candidates-revocation" ? 2 : 1)) {
+        if (phase !== "later-admission-revocation") {
           callsBeforeLateQuery.push(remote.transport.mock.calls.length);
           if (phase !== "fresh") remote.fail = true;
         }
@@ -237,7 +241,7 @@ describe("External provider live authority and copied lineage with real helpers"
         // The shared provider harness throws on any network call in a tx;
         // successful fresh release therefore also exercises the local RR fence.
         expect(fixture.state.transactionDepth).toBe(0);
-      } finally { delegate.findMany.mockImplementation(original); }
+      } finally { delegate.findMany.mockImplementation(original); captureSpy?.mockRestore(); }
     });
   it("captures encrypted exact responses with opaque runtime identity and checks every live read", async () => {
     const source = await setup(); const receipt = await capture(source.id);

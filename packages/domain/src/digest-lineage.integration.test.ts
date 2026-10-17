@@ -26,7 +26,7 @@ async function fixture() {
 describe("digest input receipts", () => {
   beforeEach(async () => { await truncateAllTables(); });
 
-  it("completely counts 20 delivery runs of 251 recipients in PostgreSQL", async () => {
+  it("bounds 5020 proven deliveries to a qualified count window in PostgreSQL", async () => {
     const { workspace, ownerActor, ownerMember } = await fixture();
     const roots = await captureArtifactInputProof(ownerActor, workspace.id,
       [{kind: "Workspace", id: workspace.id}, {kind: "Member", id: ownerMember.id}]);
@@ -39,8 +39,9 @@ describe("digest input receipts", () => {
     }
     expect(await prisma.newspaperDelivery.count({where: {workspaceId: workspace.id}})).toBe(5020);
     const result = await listNewspaperDeliverySummaries(ownerActor, workspace.id);
-    expect(result).toHaveLength(20);
-    expect(result.every(run => run.recipientCount === 251 && run.sentCount === 251)).toBe(true);
+    expect(result).toMatchObject({complete: false, deliveriesComplete: false, scope: "WINDOW"});
+    expect(result.items.reduce((sum, run) => sum + run.recipientCount, 0)).toBe(200);
+    expect(result.items.every(run => run.sentCount === run.recipientCount)).toBe(true);
   }, 300_000);
 
   it("keeps the former owner's private article body out of the new owner's history", async () => {
@@ -106,14 +107,14 @@ describe("digest input receipts", () => {
       memberId: readerMember.id, recipientEmail: "reader@example.test", subject: "Workspace briefing", status: "FAILED",
       error: "Synthetic provider failure", actor: ownerActor, lineageRoots: roots });
     expect(await listNewspaperDeliveryDetails(readerActor, workspace.id)).toHaveLength(1);
-    expect(await listNewspaperDeliverySummaries(readerActor, workspace.id)).toMatchObject([{ failedCount: 1, recipientCount: 1 }]);
+    expect(await listNewspaperDeliverySummaries(readerActor, workspace.id)).toMatchObject({complete: true, items: [{ failedCount: 1, recipientCount: 1 }]});
     const otherRoots = await captureArtifactInputProof(ownerActor, workspace.id,
       [{ kind: "Workspace", id: workspace.id }, { kind: "Member", id: (await prisma.member.findFirstOrThrow({ where: { userId: ownerActor.kind === "user" ? ownerActor.user.id : "", workspaceId: workspace.id } })).id }]);
     await recordNewspaperDelivery({ workspaceId: workspace.id, runKey: "other-recipient", kind: "MEMBER_NEWSPAPER",
       memberId: (otherRoots.find((root) => root.kind === "Member"))!.id, recipientEmail: "other@example.test",
       subject: "Other recipient", status: "FAILED", error: "Other synthetic outcome", actor: ownerActor, lineageRoots: otherRoots });
     expect(await listNewspaperDeliveryDetails(readerActor, workspace.id)).toHaveLength(1);
-    expect(await listNewspaperDeliverySummaries(readerActor, workspace.id)).toHaveLength(1);
+    expect((await listNewspaperDeliverySummaries(readerActor, workspace.id)).items).toHaveLength(1);
     expect(await listNewspaperDeliveryDetails(ownerActor, workspace.id)).toHaveLength(2);
     const edition = await upsertNewspaperEdition({ workspaceId: workspace.id, cadence: "DAILY", dateKey: "2026-10-12",
       runKey: "synthetic-safe", title: "Safe edition", slug: "safe", digestJson: {}, bodyMd: "Safe original name",
@@ -218,8 +219,8 @@ describe("digest input receipts", () => {
     await recordNewspaperDelivery({ workspaceId: workspace.id, runKey: "synthetic-personal", kind: "MEMBER_NEWSPAPER",
       recipientEmail: "owner@example.test", subject: "Private supplement", status: "SENT", actor: ownerActor, lineageRoots: privateRoots });
     expect(await listNewspaperDeliveryDetails(readerActor, workspace.id)).toEqual([]);
-    expect(await listNewspaperDeliverySummaries(readerActor, workspace.id)).toEqual([]);
-    expect((await listNewspaperDeliverySummaries(ownerActor, workspace.id))[0]).toMatchObject({ recipientCount: 1, totalClickCount: 2 });
+    expect(await listNewspaperDeliverySummaries(readerActor, workspace.id)).toMatchObject({items: [], complete: true});
+    expect((await listNewspaperDeliverySummaries(ownerActor, workspace.id)).items[0]).toMatchObject({ recipientCount: 1, totalClickCount: 2 });
   });
 
   it("retains requester ownership through conversation copies and refuses unknown turn provenance", async () => {

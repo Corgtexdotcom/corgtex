@@ -455,3 +455,46 @@ it("a takeover during provider wait cannot be renewed or checkpointed by the old
   expect(f.embed).not.toHaveBeenCalled();
   expect(vi.getTimerCount()).toBe(0);
 });
+
+
+it("keeps saturated Outlook membership indeterminate through native proof and commit preflight", async () => {
+  const f = await fixture("email");
+  await prisma.oAuthConnection.update({where: {id: f.connection.id}, data: {provider: "MICROSOFT", scopes: ["Mail.Read"]}});
+  let state: "matched" | "saturated" | "malformed" | "absent" = "matched";
+  const message = {id: "email-1", subject: "Synthetic policy", from: {emailAddress: {address: f.remote.from}},
+    bodyPreview: f.remote.text, receivedDateTime: "2026-06-18T09:00:00.999Z"};
+  f.fetchMock.mockImplementation(async input => {
+    const url = new URL(String(input));
+    if (url.pathname === "/v1.0/me") return Response.json({id: f.remote.accountId});
+    if (url.pathname === "/v1.0/me/messages/email-1") return Response.json(message);
+    if (url.pathname === "/v1.0/me/messages") {
+      if (url.searchParams.get("$top") === "10") return Response.json({value: [message]});
+      if (state === "saturated") return Response.json({value: Array.from({length: 1000}, (_, i) => ({id: `other-${i}`}))});
+      if (state === "malformed") return Response.json({value: [], "@odata.nextLink": "not-a-url"});
+      return Response.json({value: state === "absent" ? [] : [message]});
+    }
+    throw new Error("Unexpected synthetic Outlook endpoint");
+  });
+  await f.run();
+  const {isOAuthProviderFetchInputCurrent} = await import("../../domain/src/oauth-provider-native");
+  const {prepareOAuthProviderReadCommitPreflight} = await import("../../domain/src/oauth-provider-read-preflight");
+  const input = await prisma.oAuthProviderFetchInput.findFirstOrThrow({where: {workspaceId: f.workspace.id}});
+  const roots = await captureArtifactInputProof(f.actor, f.workspace.id, [{kind: "OAuthProviderFetchInput", id: input.id, snapshot: input}]);
+  const before = {document: await prisma.document.findMany({where: {workspaceId: f.workspace.id}}),
+    chunks: await prisma.knowledgeChunk.findMany({where: {workspaceId: f.workspace.id}})};
+  expect(before.document).toHaveLength(1); expect(before.chunks.length).toBeGreaterThan(0);
+  expect(await isOAuthProviderFetchInputCurrent(f.actor, f.workspace.id, input)).toBe(true);
+  for (const next of ["saturated", "malformed"] as const) {
+    state = next;
+    await expect(isOAuthProviderFetchInputCurrent(f.actor, f.workspace.id, input)).rejects.toMatchObject({status: 503, code: "OAUTH_SELECTION_INCOMPLETE"});
+    await expect(isArtifactInputProofReadable(f.actor, f.workspace.id, roots)).rejects.toMatchObject({code: "OAUTH_SELECTION_INCOMPLETE"});
+    await expect(prepareOAuthProviderReadCommitPreflight(f.actor, f.workspace.id, roots, roots)).rejects.toMatchObject({code: "OAUTH_SELECTION_INCOMPLETE"});
+    expect({document: await prisma.document.findMany({where: {workspaceId: f.workspace.id}}),
+      chunks: await prisma.knowledgeChunk.findMany({where: {workspaceId: f.workspace.id}})}).toEqual(before);
+  }
+  state = "matched";
+  expect(await isOAuthProviderFetchInputCurrent(f.actor, f.workspace.id, input)).toBe(true);
+  expect((await f.search()).map(row => row.sourceId)).toContain(before.document[0]!.id);
+  state = "absent";
+  expect(await isOAuthProviderFetchInputCurrent(f.actor, f.workspace.id, input)).toBe(false);
+});
