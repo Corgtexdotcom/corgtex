@@ -23,6 +23,40 @@ Redis public access is disabled; Redis persistence is disabled, so HA is replica
 not an archive. No `flexibleServers/databases` resource is created: full restore owns
 database names and promotion. Extension allowlisting is also a restore preflight step.
 
+## Opt-in offline runtime configuration check
+
+Set `plan.azureOnly` to `{ "enabled": true, "legacyOrigins": ["https://old.example.test"] }`
+when preparing a runtime that must no longer reference Railway. The projection checks
+the resulting runtime values before retaining any secrets. Omitting this policy or
+setting `enabled: false` preserves staged migration behavior. The policy participates
+in the existing plan hash; it does not enable a deployment or change provider state.
+
+The same validator can check explicitly supplied values offline:
+
+```sh
+node scripts/migration/azure-only-config.mjs <<'JSON'
+{"values":{"MCP_PUBLIC_URL":"https://new.example.test/mcp"},"policy":{"enabled":true,"legacyOrigins":["https://old.example.test"]}}
+JSON
+```
+
+Keep real configuration input private. The command reads JSON from stdin and emits
+only setting names and reason codes, with exit status 1 for invalid input or findings.
+It never discovers environment variables, resolves secrets, or contacts providers.
+Use `policy.urlNames` to designate additional URL-valued setting names. Standard
+`URL`, `URI`, `ORIGIN`, `ENDPOINT`, `HOST` and `HOSTNAME` suffixes and absolute network
+URLs under other setting names are checked. Optional absent/null/empty settings are
+ignored; other malformed relevant values fail. HOST/HOSTNAME settings also accept a
+bare hostname with an optional port.
+
+Matching uses parsed, case-normalized ASCII hostnames with a trailing DNS dot removed.
+Railway roots `railway.app`, `railway.internal`, `railway.com` and `rlwy.net` and their
+subdomains are rejected on every port. Custom legacy origins must be absolute HTTP(S)
+origins without credentials, paths, queries or fragments; their exact hostnames are
+rejected on every port and protocol. List legacy subdomains separately. Other providers
+remain allowed. URLs embedded in opaque JSON, lists or arbitrary text need separate
+extraction into named values; the check cannot identify unlisted custom domains or
+prove an endpoint's hosting provider, fleet inventory, DNS ownership or live cutover.
+
 ## Reuse one existing PostgreSQL server
 
 For a new shared target, deploy `shared-postgres-target.bicep` once to the intended
