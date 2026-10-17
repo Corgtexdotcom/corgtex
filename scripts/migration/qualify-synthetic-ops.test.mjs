@@ -16,6 +16,16 @@ import { work } from "./synthetic-ops-worker.mjs";
 const dirs = [];
 const temporary = () => { const dir = mkdtempSync(resolve(tmpdir(), "syn-ops-test-")); dirs.push(dir); return dir; };
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+const processIsRunning = pid => {
+  try { process.kill(pid, 0); } catch (e) { if (e.code === "ESRCH") return false; throw e; }
+  if (process.platform !== "linux") return true;
+  try {
+    // Minimal container init processes may not reap orphaned grandchildren.
+    // A zombie has terminated, although signal 0 succeeds until its parent reaps it.
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0] !== "Z";
+  } catch (e) { if (e.code === "ENOENT" || e.code === "ESRCH") return false; throw e; }
+};
 const lifecycle = () => {
   const createdAt = Date.now();
   return { schemaVersion: "1.0.0", kind: "ops-target-qualification", resource: RESOURCE, host: HOST, database: "postgres",
@@ -29,14 +39,11 @@ describe("synthetic child supervision", () => {
     expect(await s.run(process.execPath, ["-e", "process.stdout.write('ok')"], { deadline: Date.now() + 2000, env: localToolEnvironment() })).toBe("ok");
     expect(s.active.size).toBe(0);
   });
-  it("terminates a SIGTERM-ignoring child AND its grandchild at the deadline", async () => {
-    const s = new SyntheticSubprocesses(), path = resolve(temporary(), "pid");
-    const code = `const {spawn}=require('node:child_process');const fs=require('node:fs');process.on('SIGTERM',()=>{});const child=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});setInterval(()=>{},100)"],{stdio:'inherit'});fs.writeFileSync(${JSON.stringify(path)},String(child.pid));setInterval(()=>{},100);`;
-    await expect(s.run(process.execPath, ["-e", code], { deadline: Date.now() + 500, env: localToolEnvironment() })).rejects.toThrow("CHILD_DEADLINE");
-    expect(existsSync(path)).toBe(true);
-    const pid = Number(readFileSync(path, "utf8"));
-    await expect.poll(() => { try { process.kill(pid, 0); return false; } catch (e) { return e.code === "ESRCH"; } }).toBe(true);
-    expect(s.active.size).toBe(0);
+  it.each(["inherit", "ignore"])("terminates a SIGTERM-ignoring child AND its grandchild at the deadline (%s stdio)", async stdio => {
+    await assertProcessTreeCleanup("deadline", stdio);
+  });
+  it("terminates a SIGTERM-ignoring child AND its grandchild on interruption", async () => {
+    await assertProcessTreeCleanup("interruption", "inherit");
   });
   it("rejects oversized output and stops the process, not just the waiter", async () => {
     const s = new SyntheticSubprocesses();
@@ -57,6 +64,37 @@ describe("synthetic child supervision", () => {
     expect(localToolEnvironment({ PATH: "/bin", HOME: "/tmp", GH_TOKEN: "secret", SOURCE_DATABASE_URL: "secret", TARGET_POSTGRES_ADMIN_PASSWORD: "secret" })).toEqual({ PATH: "/bin", HOME: "/tmp" });
   });
 });
+
+async function assertProcessTreeCleanup(reason, stdio) {
+  const s = new SyntheticSubprocesses(), directory = temporary(), ready = resolve(directory, "ready.json");
+  const parentTerm = resolve(directory, "parent-term"), grandchildTerm = resolve(directory, "grandchild-term");
+  const grandchild = `
+    const fs = require("node:fs");
+    process.on("SIGTERM", () => fs.writeFileSync(${JSON.stringify(grandchildTerm)}, "received"));
+    fs.writeFileSync(${JSON.stringify(ready + ".tmp")}, JSON.stringify([process.ppid, process.pid]));
+    fs.renameSync(${JSON.stringify(ready + ".tmp")}, ${JSON.stringify(ready)});
+    setInterval(() => {}, 100);
+  `;
+  const code = `
+    const { spawn } = require("node:child_process"), fs = require("node:fs");
+    process.on("SIGTERM", () => fs.writeFileSync(${JSON.stringify(parentTerm)}, "received"));
+    spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { stdio: ${JSON.stringify(stdio)} });
+    setInterval(() => {}, 100);
+  `;
+  const result = s.run(process.execPath, ["-e", code], { deadline: Date.now() + 2000, env: localToolEnvironment() }).catch(e => e);
+  try {
+    // The grandchild publishes readiness only after both SIGTERM handlers exist.
+    await expect.poll(() => existsSync(ready), { timeout: 1500 }).toBe(true);
+    const pids = JSON.parse(readFileSync(ready, "utf8"));
+    expect(pids.map(processIsRunning)).toEqual([true, true]);
+    if (reason === "interruption") s.stop();
+    expect(await result).toMatchObject({ code: reason === "deadline" ? "CHILD_DEADLINE" : "CHILD_INTERRUPTED" });
+    expect(existsSync(parentTerm)).toBe(true);
+    expect(existsSync(grandchildTerm)).toBe(true);
+    await expect.poll(() => pids.map(processIsRunning)).toEqual([false, false]);
+    expect(s.active.size).toBe(0);
+  } finally { s.stop(true); await result; }
+}
 
 describe("fixed synthetic input and runtime guards", () => {
   it("rejects changed bytes and symlinks before loading a source image", () => {

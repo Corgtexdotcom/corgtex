@@ -12,19 +12,44 @@ interface Props {
 
 export function AdminWorkspaceMemberPanel({ workspaceId, targetWorkspaceId }: Props) {
   const t = useTranslations("admin");
-  const [data, setData] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
+  const [result, setResult] = useState<{
+    workspaceId: string;
+    targetWorkspaceId: string;
+    data: Awaited<ReturnType<typeof adminGetWorkspaceDetailAction>> | null;
+  } | null>(null);
+  const [attempt, setAttempt] = useState(0);
   const [copiedLink, setCopiedLink] = useState<string | null>(null);
 
   useEffect(() => {
-    adminGetWorkspaceDetailAction(workspaceId, targetWorkspaceId).then(res => {
-      setData(res);
-      setLoading(false);
-    });
-  }, [workspaceId, targetWorkspaceId]);
+    let active = true;
+    setResult(null);
+    setCopiedLink(null);
+    async function load() {
+      try {
+        const data = await adminGetWorkspaceDetailAction(workspaceId, targetWorkspaceId);
+        if (active) setResult({ workspaceId, targetWorkspaceId, data });
+      } catch {
+        if (active) setResult({ workspaceId, targetWorkspaceId, data: null });
+      }
+    }
+    void load();
+    return () => { active = false; };
+  }, [workspaceId, targetWorkspaceId, attempt]);
 
-  if (loading) return <div className="muted p-4">Loading details...</div>;
-  if (!data) return <div className="muted p-4">Failed to load</div>;
+  // Hide the previous result during the render before the new effect runs too.
+  if (!result || result.workspaceId !== workspaceId || result.targetWorkspaceId !== targetWorkspaceId) {
+    return <div className="muted p-4" role="status">Loading details...</div>;
+  }
+  const data = result.data;
+  if (!data) return (
+    <div className="stack p-4" role="alert">
+      <div>Failed to load</div>
+      <button type="button" className="btn-secondary" onClick={() => {
+        setResult(null);
+        setAttempt(value => value + 1);
+      }}>Retry</button>
+    </div>
+  );
 
   return (
     <div className="stack" style={{ gap: 24 }}>
