@@ -1,6 +1,6 @@
 import { createVariantModelControls } from "./variant-model-attempt";
-import { captureReadableDigestInputs, DigestReadRelease } from "./digest-lineage";
-import { WorkItemReadRelease, readableWorkItemPage, workItemAfter } from "./work-item-readable-page";
+import { DigestReadRelease } from "./digest-lineage";
+import { WorkItemReadRelease, readWorkItemListSnapshot, readableWorkItemPage, workItemAfter } from "./work-item-readable-page";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { prisma } from "@corgtex/shared";
 import { Prisma, type ProposalResolutionOutcome, type ProposalStatus } from "@prisma/client";
@@ -428,7 +428,7 @@ async function readableProposalRelations<T extends {
   author: ({ id: string; email: string; displayName: string | null } & Record<string, unknown>) | null;
 }>(actor: AppActor, workspaceId: string, proposal: T, membership: MembershipSummary | null, release: WorkItemReadRelease) {
   async function capture<R extends {id: string}>(kind: import("./source-lineage").LineageKind, rows: R[]) {
-    const captured = await release.observeRead(() => captureReadableDigestInputs({actor, workspaceId, kind, records: rows}));
+    const captured = await release.capture(kind,rows);
     release.add(captured.roots);
     return captured.records;
   }
@@ -443,7 +443,7 @@ async function readableProposalRelations<T extends {
       const next = rows.at(-1)?.id;
       // Negative discovery only: every surviving canonical row still passes the
       // full evaluator and retains its original proof through the final release.
-      const heads = await currentArtifactInputRootsBatch(prisma, workspaceId, kind, rows);
+      const heads = await currentArtifactInputRootsBatch(release.db, workspaceId, kind, rows);
       const candidates = rows.filter(row => heads.get(row.id) != null);
       const admitted = kind === "AdviceRequest" ? await capture(kind, candidates) : await release.admit(kind, candidates);
       result.push(...admitted.map(project));
@@ -452,16 +452,16 @@ async function readableProposalRelations<T extends {
     }
     return result;
   }
-  const tensions = await relations("Tension", after => prisma.tension.findMany({where: {
+  const tensions = await relations("Tension", after => release.db.tension.findMany({where: {
     workspaceId, proposalId: proposal.id, ...privacyFilter(actor, membership), ...(after ? {id: {gt: after}} : {}),
   }, orderBy: {id: "asc"}, take: 100}), row => ({id: row.id, title: row.title, status: row.status}));
-  const actions = await relations("Action", after => prisma.action.findMany({where: {
+  const actions = await relations("Action", after => release.db.action.findMany({where: {
     workspaceId, proposalId: proposal.id, ...privacyFilter(actor, membership), ...(after ? {id: {gt: after}} : {}),
   }, orderBy: {id: "asc"}, take: 100}), row => ({id: row.id, title: row.title, status: row.status}));
-  const requests = await relations("AdviceRequest", after => prisma.adviceRequest.findMany({where: {
+  const requests = await relations("AdviceRequest", after => release.db.adviceRequest.findMany({where: {
     workspaceId, process: {workspaceId, proposalId: proposal.id}, ...(after ? {id: {gt: after}} : {}),
   }, orderBy: {id: "asc"}, take: 100}), row => ({status: row.status}));
-  const meeting = proposal.meetingId ? await prisma.meeting.findFirst({where: {id: proposal.meetingId, workspaceId}}) : null;
+  const meeting = proposal.meetingId ? await release.db.meeting.findFirst({where: {id: proposal.meetingId, workspaceId}}) : null;
   const [circles, owners, authors, ownerUsers, meetings] = await Promise.all([
     capture("Circle", proposal.circle?.workspaceId === workspaceId ? [proposal.circle] : []),
     capture("Member", proposal.ownerMember?.workspaceId === workspaceId && proposal.ownerMember.isActive
@@ -481,95 +481,96 @@ async function readableProposalRelations<T extends {
 }
 
 export async function listProposals(actor: AppActor, workspaceId: string, opts?: ListProposalsOptions) {
-  const take = opts?.take ?? 20;
-  const skip = opts?.skip ?? 0;
-  invariant(Number.isInteger(take) && take >= 0 && take <= 5000 && Number.isInteger(skip) && skip >= 0,
-    400, "INVALID_INPUT", "Proposal pagination is invalid.");
-  const membership = await requireWorkspaceMembership({ actor, workspaceId });
-  const where: Prisma.ProposalWhereInput = {
-    workspaceId,
-    ...privacyFilter(actor, membership),
-    ...archiveFilterWhere(opts?.archiveFilter),
-  };
-  const circleIds = listFilterValues(opts?.circleIds);
-  if (circleIds.length > 0) {
-    where.circleId = { in: circleIds };
-  } else if (opts?.circleId !== undefined) {
-    where.circleId = opts.circleId;
-  }
-  if (opts?.status) where.status = opts.status;
-  const memberIds = listFilterValues([...(opts?.memberIds ?? []), opts?.memberId]);
-  invariant(memberIds.length <= 5000, 400, "INVALID_INPUT", "Too many proposal member filters.");
-  const release = new WorkItemReadRelease(actor,workspaceId);
-  const members = memberIds.length ? await prisma.member.findMany({where:{id:{in:memberIds},workspaceId,isActive:true},
-    include:{user:{select:{id:true,email:true,displayName:true,bio:true,avatarUrl:true,linkedinUrl:true,websiteUrl:true,createdAt:true,updatedAt:true}}}}) : [];
-  const [visibleMembers,visibleUsers]=await Promise.all([
-    readableArtifactIds(actor,workspaceId,"Member",members),readableArtifactIds(actor,workspaceId,"User",members.map(member=>member.user))]);
-  const permittedMembers=members.filter(member=>visibleMembers.has(member.id)&&visibleUsers.has(member.userId));
-  await release.observe("Member",permittedMembers.map(member=>({...member,user:{id:member.user.id,email:member.user.email,displayName:member.user.displayName}})));
-  await release.observe("User",permittedMembers.map(member=>member.user));
-  const memberSet=new Set(permittedMembers.map(member=>member.id)),authorUsers=new Set(permittedMembers.map(member=>member.userId));
-  const actionMemberFilter:Prisma.ActionWhereInput={OR:[{assigneeMemberId:{in:[...memberSet]}},{authorUserId:{in:[...authorUsers]}}]};
-  const tensionMemberFilter:Prisma.TensionWhereInput={OR:[{assigneeMemberId:{in:[...memberSet]}},{raisedByMemberId:{in:[...memberSet]}},{authorUserId:{in:[...authorUsers]}}]};
-  const page=await readableWorkItemPage<import("@prisma/client").Proposal>({actor,workspaceId,release,kind:"Proposal",take,skip,
-    load:after=>prisma.proposal.findMany({where:after?{AND:[where,workItemAfter(after,opts?.sort)]}:where,
-      orderBy:workItemOrderBy(opts?.sort),take:100}),
-    admit:async candidate=>{
-      if(circleIds.length || opts?.circleId) {
-        const circle=candidate.circleId?await prisma.circle.findFirst({where:{id:candidate.circleId,workspaceId}}):null;
-        if(!circle || !(await readableArtifactIds(actor,workspaceId,"Circle",[circle])).has(circle.id)) return false;
-        await release.observe("Circle",[circle]);
-      }
-      if(!memberIds.length || memberSet.has(candidate.ownerMemberId??"") || authorUsers.has(candidate.authorUserId)) return true;
-      if(!memberSet.size) return false;
-      if(await release.has("Action",(afterId,take)=>prisma.action.findMany({
-        where:{AND:[{workspaceId,proposalId:candidate.id,...privacyFilter(actor,membership)},actionMemberFilter,
-          ...(afterId?[{id:{gt:afterId}}]:[])]},orderBy:{id:"asc"},take}))) return true;
-      return release.has("Tension",(afterId,take)=>prisma.tension.findMany({
-        where:{AND:[{workspaceId,proposalId:candidate.id,...privacyFilter(actor,membership)},tensionMemberFilter,
-          ...(afterId?[{id:{gt:afterId}}]:[])]},orderBy:{id:"asc"},take}));
-    }});
-  const hydrated=page.items.length?await prisma.proposal.findMany({where:{AND:[where,{id:{in:page.items.map(row=>row.id)}}]},
-      include: {
-        author: {
-          select: {
-            id: true,
-            displayName: true,
-            email: true,
-            bio: true,
-            avatarUrl: true,
-            linkedinUrl: true,
-            websiteUrl: true,
-            createdAt: true,
-            updatedAt: true,
+  return readWorkItemListSnapshot(actor, workspaceId, async release => {
+    const db = release.db;
+    const take = opts?.take ?? 20;
+    const skip = opts?.skip ?? 0;
+    invariant(Number.isInteger(take) && take >= 0 && take <= 5000 && Number.isInteger(skip) && skip >= 0,
+      400, "INVALID_INPUT", "Proposal pagination is invalid.");
+    const membership = await requireWorkspaceMembership({ actor, workspaceId, tx: db });
+    const where: Prisma.ProposalWhereInput = {
+      workspaceId,
+      ...privacyFilter(actor, membership),
+      ...archiveFilterWhere(opts?.archiveFilter),
+    };
+    const circleIds = listFilterValues(opts?.circleIds);
+    if (circleIds.length > 0) {
+      where.circleId = { in: circleIds };
+    } else if (opts?.circleId !== undefined) {
+      where.circleId = opts.circleId;
+    }
+    if (opts?.status) where.status = opts.status;
+    const memberIds = listFilterValues([...(opts?.memberIds ?? []), opts?.memberId]);
+    invariant(memberIds.length <= 5000, 400, "INVALID_INPUT", "Too many proposal member filters.");
+    const members = memberIds.length ? await db.member.findMany({where:{id:{in:memberIds},workspaceId,isActive:true},
+      include:{user:{select:{id:true,email:true,displayName:true,bio:true,avatarUrl:true,linkedinUrl:true,websiteUrl:true,createdAt:true,updatedAt:true}}}}) : [];
+    const [visibleMembers,visibleUsers]=await Promise.all([
+      release.readable("Member",members),release.readable("User",members.map(member=>member.user))]);
+    const permittedMembers=members.filter(member=>visibleMembers.has(member.id)&&visibleUsers.has(member.userId));
+    await release.observe("Member",permittedMembers.map(member=>({...member,user:{id:member.user.id,email:member.user.email,displayName:member.user.displayName}})));
+    await release.observe("User",permittedMembers.map(member=>member.user));
+    const memberSet=new Set(permittedMembers.map(member=>member.id)),authorUsers=new Set(permittedMembers.map(member=>member.userId));
+    const actionMemberFilter:Prisma.ActionWhereInput={OR:[{assigneeMemberId:{in:[...memberSet]}},{authorUserId:{in:[...authorUsers]}}]};
+    const tensionMemberFilter:Prisma.TensionWhereInput={OR:[{assigneeMemberId:{in:[...memberSet]}},{raisedByMemberId:{in:[...memberSet]}},{authorUserId:{in:[...authorUsers]}}]};
+    const page=await readableWorkItemPage<import("@prisma/client").Proposal>({actor,workspaceId,release,kind:"Proposal",take,skip,
+      load:after=>db.proposal.findMany({where:after?{AND:[where,workItemAfter(after,opts?.sort)]}:where,
+        orderBy:workItemOrderBy(opts?.sort),take:100}),
+      admit:async candidate=>{
+        if(circleIds.length || opts?.circleId) {
+          const circle=candidate.circleId?await db.circle.findFirst({where:{id:candidate.circleId,workspaceId}}):null;
+          if(!circle || !(await release.readable("Circle",[circle])).has(circle.id)) return false;
+          await release.observe("Circle",[circle]);
+        }
+        if(!memberIds.length || memberSet.has(candidate.ownerMemberId??"") || authorUsers.has(candidate.authorUserId)) return true;
+        if(!memberSet.size) return false;
+        if(await release.has("Action",(afterId,take)=>db.action.findMany({
+          where:{AND:[{workspaceId,proposalId:candidate.id,...privacyFilter(actor,membership)},actionMemberFilter,
+            ...(afterId?[{id:{gt:afterId}}]:[])]},orderBy:{id:"asc"},take}))) return true;
+        return release.has("Tension",(afterId,take)=>db.tension.findMany({
+          where:{AND:[{workspaceId,proposalId:candidate.id,...privacyFilter(actor,membership)},tensionMemberFilter,
+            ...(afterId?[{id:{gt:afterId}}]:[])]},orderBy:{id:"asc"},take}));
+      }});
+    const hydrated=page.items.length?await db.proposal.findMany({where:{AND:[where,{id:{in:page.items.map(row=>row.id)}}]},
+        include: {
+          author: {
+            select: {
+              id: true,
+              displayName: true,
+              email: true,
+              bio: true,
+              avatarUrl: true,
+              linkedinUrl: true,
+              websiteUrl: true,
+              createdAt: true,
+              updatedAt: true,
+            },
           },
-        },
-        ownerMember: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                displayName: true,
-                email: true,
-                bio: true,
-                avatarUrl: true,
-                linkedinUrl: true,
-                websiteUrl: true,
-                createdAt: true,
-                updatedAt: true,
+          ownerMember: {
+            include: {
+              user: {
+                select: {
+                  id: true,
+                  displayName: true,
+                  email: true,
+                  bio: true,
+                  avatarUrl: true,
+                  linkedinUrl: true,
+                  websiteUrl: true,
+                  createdAt: true,
+                  updatedAt: true,
+                },
               },
             },
           },
+          circle: true,
         },
-        circle: true,
-      },
-  }):[];
-  const byId=new Map(hydrated.map(row=>[row.id,row]));
-  const selected=page.items.flatMap(row=>{const loaded=byId.get(row.id);return loaded?[{...loaded,...row}]:[];});
-  const items=await Promise.all(selected.map(proposal=>readableProposalRelations(actor,workspaceId,proposal,membership,release)));
-  const finalIds=await readableArtifactIds(actor,workspaceId,"Proposal",selected);
-  const admitted=items.filter(row=>finalIds.has(row.id));
-  return release.finish({items:admitted,total:page.total-(page.items.length-admitted.length),take,skip});
+    }):[];
+    const byId=new Map(hydrated.map(row=>[row.id,row]));
+    const selected=page.items.flatMap(row=>{const loaded=byId.get(row.id);return loaded?[{...loaded,...row}]:[];});
+    const items=await Promise.all(selected.map(proposal=>readableProposalRelations(actor,workspaceId,proposal,membership,release)));
+    invariant(items.length === page.items.length,409,"SOURCE_CHANGED","Selected proposals changed within collection.");
+    return {items,total:page.total,take,skip};
+  });
 }
 
 export async function getProposal(actor: AppActor, params: {

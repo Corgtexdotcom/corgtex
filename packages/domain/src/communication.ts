@@ -17,10 +17,10 @@ import { captureSlackNativeMessageFetch, communicationInstallationGrantHash, isC
   withSlackNativeCommitReceipt, slackNativeMessageProjection, type SlackNativeFetchReceipt } from "./communication-native-authority";
 import { artifactPermissionEpochIdentities, capturePermissionEpochs } from "./source-permission-epochs";
 import { requireWorkspaceMembership } from "./auth";
-import { loadReadableDigestQuery, captureReadableDigestInputs, isDigestInputProofShared } from "./digest-lineage";
+import { loadReadableDigestQuery, DigestReadRelease, isDigestInputProofShared } from "./digest-lineage";
 import { createAction, publishAction } from "./actions";
 import { ingestSource } from "./brain";
-import { mergeLineageInputRoot, withArtifactCountReleaseSnapshot, captureArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, recordArtifactInputLineage, preserveUnknownArtifactInputSnapshot, type LineageRoot } from "./source-lineage";
+import { captureArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, recordArtifactInputLineage, preserveUnknownArtifactInputSnapshot, type LineageRoot } from "./source-lineage";
 import { AppError, invariant } from "./errors";
 import {
   assertMeetingReviewPublicPublication,
@@ -314,26 +314,37 @@ export async function listCommunicationInstallations(actor: AppActor, workspaceI
       _count: { select: { channels: true, externalUsers: true } },
     },
   });
-  const counts = new Map<string, number>();
-  const roots = new Map<string, LineageRoot>();
-  let afterId: string | undefined;
-  for (;;) {
-    const batch = await prisma.communicationMessage.findMany({
-      where: { workspaceId, ...(afterId ? {id: {gt: afterId}} : {}) }, orderBy: {id: "asc"}, take: 100,
+  const unavailable = () => installations.map(installation => ({...installation,
+    _count: {...installation._count, messages: null as number | null},
+    messageCount: {count: null as number | null, complete: false, available: false},
+  }));
+  try {
+    const counts = new Map<string, number>();
+    const release = new DigestReadRelease(actor, workspaceId);
+    // Enumerate the bounded corpus once: live keyset pages can mix insert snapshots.
+    const candidates = await prisma.communicationMessage.findMany({
+      where: { workspaceId }, orderBy: {id: "asc"}, take: 200,
     });
-    const admitted = await captureReadableDigestInputs({ actor, workspaceId, kind: "CommunicationMessage", records: batch });
-    for (const root of admitted.roots) {
-      const key = `${root.kind}:${root.id}`;
-      roots.set(key, mergeLineageInputRoot(roots.get(key), root));
+    const complete = candidates.length < 200;
+    for (let offset = 0; offset < candidates.length; offset += 100) {
+      for (const message of (await release.capture("CommunicationMessage", candidates.slice(offset, offset + 100))).records) {
+        counts.set(message.installationId, (counts.get(message.installationId) ?? 0) + 1);
+      }
     }
-    for (const message of admitted.records) counts.set(message.installationId, (counts.get(message.installationId) ?? 0) + 1);
-    if (batch.length < 100) break;
-    afterId = batch[batch.length - 1].id;
+    return await release.finish(installations.map(installation => ({...installation,
+      _count: {...installation._count, messages: complete ? counts.get(installation.id) ?? 0 : null},
+      messageCount: {count: counts.get(installation.id) ?? 0, complete, available: true},
+    })), async tx => {
+      await requireWorkspaceMembership({actor, workspaceId, allowedRoles: ["ADMIN"], tx});
+    });
+  } catch (error) {
+    if (!(error instanceof AppError) || !["SOURCE_CHANGED", "SOURCE_RESTRICTED", "UNKNOWN_LINEAGE"].includes(error.code)) throw error;
+    // A withdrawn count is not evidence that the installation disappeared.
+    // Release no stale count, and independently recheck current administrator authority.
+    return new DigestReadRelease(actor, workspaceId).finish(unavailable(), async tx => {
+      await requireWorkspaceMembership({actor, workspaceId, allowedRoles: ["ADMIN"], tx});
+    });
   }
-  return withArtifactCountReleaseSnapshot(actor, workspaceId, [...roots.values()], async () => undefined, async tx => {
-    await requireWorkspaceMembership({actor, workspaceId, allowedRoles: ["ADMIN"], tx});
-    return installations.map(installation => ({...installation, _count: {...installation._count, messages: counts.get(installation.id) ?? 0}}));
-  });
 
 }
 

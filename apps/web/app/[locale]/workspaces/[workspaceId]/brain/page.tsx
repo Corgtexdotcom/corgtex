@@ -1,6 +1,8 @@
 import React from "react";
-import { brainArticleVisibility, listBrainArticleTypeCounts } from "./article-type-counts";
-import { getBrainStatus, listArticles, readableArtifactIds, requireWorkspaceMembership, listMeetings, listDocuments, resolveKnowledgeAccessDomains } from "@corgtex/domain";
+import { boundedCountLabel } from "@/lib/bounded-count-label";
+import { BrainTypeCountFilters } from "./BrainTypeCountFilters";
+import { brainArticleVisibility, listBrainArticleTypeCounts, listBrainPendingSourceCount } from "./article-type-counts";
+import { listArticles, readableArtifactIds, requireWorkspaceMembership, listMeetings, listDocuments, resolveKnowledgeAccessDomains } from "@corgtex/domain";
 import { answerKnowledgeQuestion, searchIndexedKnowledge } from "@corgtex/knowledge";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
@@ -47,14 +49,14 @@ export default async function BrainPage({
     ? await resolveKnowledgeAccessDomains(actor, workspaceId)
     : [];
 
-  const [{ items: articles }, articleTypeCounts, status, searchResults, answer, allMeetings, allDocuments] = await Promise.all([
+  const [{ items: articles }, articleTypeCounts, pendingSources, searchResults, answer, allMeetings, allDocuments] = await Promise.all([
     listArticles(actor, {
       workspaceId,
       take: 500,
       ...(normalizedSearch.selectedType ? { type: normalizedSearch.selectedType } : {}),
     }),
     listBrainArticleTypeCounts({ workspaceId, actor, membership }),
-    getBrainStatus(actor, { workspaceId }),
+    listBrainPendingSourceCount({ workspaceId, actor, membership }),
     provisionalQuery.trim()
       ? searchIndexedKnowledge({ actor, workspaceId, query: provisionalQuery, limit: 12, accessDomains, sourceTypes: ["BRAIN_ARTICLE", "DOCUMENT", "MEETING"] })
       : Promise.resolve([]),
@@ -80,7 +82,7 @@ export default async function BrainPage({
     meetings: allMeetings,
     documents: allDocuments,
     searchParams: resolvedSearch,
-    typeCounts: articleTypeCounts,
+    typeCounts: articleTypeCounts.counts,
   });
   const [resolvedSearchArticleRefs, resolvedSearchMeetingRefs] = await Promise.all([
     listSearchResultArticleRefs({
@@ -102,6 +104,7 @@ export default async function BrainPage({
     new Set(allDocuments.map((document) => document.id)),
   );
 
+  const totalArticleLabel = boundedCountLabel({count:articleTypeCounts.counts.reduce((sum,row)=>sum+row.count,0),complete:articleTypeCounts.complete});
   const filterHref = (type: string | null) => buildBrainIndexHref({ query, question, range, type });
   const rangeHref = (nextRange: "30d" | "90d" | "all") => buildBrainIndexHref({ query, question, range: nextRange, type: selectedType });
 
@@ -111,7 +114,7 @@ export default async function BrainPage({
         <div className="brain-masthead-row">
           <h1>{t("title")}</h1>
           <span className="brain-masthead-meta">
-            {t("stats", { articles: status.totalArticles, meetings: allMeetings.length })}
+            {t("stats", { articles: totalArticleLabel, meetings: allMeetings.length })}
           </span>
         </div>
       </div>
@@ -125,18 +128,20 @@ export default async function BrainPage({
 
       <section className="brain-stat-strip" aria-label={t("statusTitle")}>
         <div className="brain-stat-card">
-          <strong>{status.totalArticles}</strong>
+          <strong>{totalArticleLabel}</strong>
           <span>{t("totalArticles")}</span>
         </div>
         <div className="brain-stat-card">
-          <strong>{typeCounts.length}</strong>
+          <strong>{boundedCountLabel({count:typeCounts.length,complete:articleTypeCounts.complete})}</strong>
           <span>{t("articleTypes")}</span>
         </div>
         <div className="brain-stat-card">
-          <strong>{status.unabsorbedSources}</strong>
+          <strong>{boundedCountLabel(pendingSources)}</strong>
           <span>{t("pendingSources")}</span>
         </div>
       </section>
+
+      {(!articleTypeCounts.complete || !pendingSources.complete) && <p className="nr-item-meta" role="status">{t("countWindowLimited")}</p>}
 
       <section className="brain-top-grid">
         <div className="brain-top-panel">
@@ -220,17 +225,9 @@ export default async function BrainPage({
             </div>
           </div>
 
-          <nav className="brain-filter-bar" aria-label={t("typeFilter")}>
-            <a className={`brain-filter-chip${selectedType ? "" : " active"}`} href={filterHref(null)}>
-              <span>{t("all")}</span>
-            </a>
-            {typeCounts.map(({ type, count }) => (
-              <a key={type} className={`brain-filter-chip${selectedType === type ? " active" : ""}`} href={filterHref(type)}>
-                <span>{type}</span>
-                <strong>{count}</strong>
-              </a>
-            ))}
-          </nav>
+          <BrainTypeCountFilters counts={typeCounts} complete={articleTypeCounts.complete} types={BRAIN_ARTICLE_TYPES}
+            selectedType={selectedType} href={filterHref}
+            labels={{all:t("all"),filter:t("typeFilter"),limited:t("typeCountWindowLimited")}} />
 
           {visibleArticles.length > 0 ? (
             <div className="brain-article-list">

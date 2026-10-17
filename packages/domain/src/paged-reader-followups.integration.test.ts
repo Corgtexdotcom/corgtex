@@ -4,6 +4,7 @@ import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { recordArtifactInputLineage } from "./source-lineage";
+import { DigestReadRelease } from "./digest-lineage";
 import { listWritebackTargets } from "./execution-plumbing";
 import { listBrainArticleTypeCounts } from "../../../apps/web/app/[locale]/workspaces/[workspaceId]/brain/article-type-counts";
 
@@ -25,7 +26,13 @@ async function articles(f:Awaited<ReturnType<typeof fixture>>) {
 }
 function pageProbe(f:Awaited<ReturnType<typeof fixture>>,work:()=>Promise<void>) {
   const delegate=prisma.brainArticle as unknown as {findMany:(args?:Prisma.BrainArticleFindManyArgs)=>Promise<BrainArticle[]>};
-  const query=delegate.findMany.bind(delegate);let changed=false;
+  const query=delegate.findMany.bind(delegate);
+  const capture=DigestReadRelease.prototype.captureBrainArticlePage;
+  let admissionBatches=0;
+  vi.spyOn(DigestReadRelease.prototype,"captureBrainArticlePage").mockImplementation(async function(this:DigestReadRelease,rows){
+    if(admissionBatches++===1)await work();
+    return capture.call(this,rows);
+  });
   const canonical:Prisma.BrainArticleFindManyArgs[]=[];
   const proofReads:Prisma.BrainArticleFindManyArgs[]=[];
   const spy=vi.spyOn(delegate,"findMany").mockImplementation(async args=>{
@@ -36,27 +43,26 @@ function pageProbe(f:Awaited<ReturnType<typeof fixture>>,work:()=>Promise<void>)
       proofReads.push(args!);
       return query(args);
     }
-    expect(args.take).toBe(100);expect(args.orderBy).toEqual({id:"asc"});
+    expect(args.take).toBe(200);expect(args.orderBy).toEqual({id:"asc"});
     const clauses=args.where?.AND as Prisma.BrainArticleWhereInput[];
     expect(clauses[0]?.workspaceId).toBe(f.workspaceId);
     canonical.push(args);
-    if(!changed&&clauses[0]?.id){changed=true;await work();}
     return query(args);
   });
   return {spy,canonical,proofReads};
 }
-it("Brain page type counts replenish genuine permitted rows across denied pages without foreign/private bodies",async()=>{
+it("Brain page type counts replenish genuine permitted rows across denied admission batches without foreign/private bodies",async()=>{
   const f=await fixture();await articles(f);
   const privateArticle=await prisma.brainArticle.create({data:{workspaceId:f.workspaceId,slug:"private",title:"Private",type:"STRATEGY",authority:"DRAFT",bodyMd:"Private original",sourceIds:[],isPrivate:true,ownerMemberId:f.ownerMember.id}});
   await prisma.$transaction(tx=>recordArtifactInputLineage({tx,actor:f.ownerActor,workspaceId:f.workspaceId,artifact:{kind:"BrainArticle",id:privateArticle.id},content:privateArticle,origin:"HUMAN_ORIGINAL",inputs:[]}));
   const foreign=await prisma.workspace.create({data:{name:"Other workspace",slug:randomUUID()}});
   await prisma.brainArticle.create({data:{workspaceId:foreign.id,slug:"foreign",title:"Foreign",type:"STRATEGY",bodyMd:"Foreign body",sourceIds:[]}});
   const calls=pageProbe(f,async()=>{});
-  expect(await listBrainArticleTypeCounts(f)).toEqual([{type:"PROJECT",count:2}]);
-  expect(calls.canonical).toHaveLength(2);
+  expect(await listBrainArticleTypeCounts(f)).toEqual({counts:[{type:"PROJECT",count:2}],complete:true});
+  expect(calls.canonical).toHaveLength(1);
   expect(calls.proofReads.length).toBeGreaterThan(0);
 });
-it.each(["head","epoch"] as const)("rejects a counted first-page original whose %s changes during the second page",async mode=>{
+it.each(["head","epoch"] as const)("rejects a counted first-page original whose %s changes during the second admission batch",async mode=>{
   const f=await fixture();const originals=await articles(f);
   const calls=pageProbe(f,async()=>{
     if(mode==="head") await prisma.$transaction(tx=>recordArtifactInputLineage({tx,actor:f.ownerActor,workspaceId:f.workspaceId,artifact:{kind:"BrainArticle",id:originals[0].id},content:originals[0],origin:"HUMAN_ORIGINAL",inputs:[]}));
@@ -66,7 +72,7 @@ it.each(["head","epoch"] as const)("rejects a counted first-page original whose 
     }
   });
   await expect(listBrainArticleTypeCounts(f)).rejects.toMatchObject({code:"SOURCE_CHANGED"});
-  expect(calls.canonical).toHaveLength(2);
+  expect(calls.canonical).toHaveLength(1);
   expect(calls.proofReads.length).toBeGreaterThan(0);
 });
 it("rechecks current membership before releasing even an empty type count",async()=>{

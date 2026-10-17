@@ -107,6 +107,7 @@ vi.mock("./digest-lineage", async (importOriginal) => ({
   }),
 }));
 vi.mock("./source-lineage", async () => ({
+  collectWorkItemReadSnapshot: vi.fn(async (_workspaceId: string, read: (tx: typeof prisma) => Promise<unknown>) => read(prisma)),
   currentArtifactInputRootsBatch: vi.fn(async (_db, _workspace, _kind, rows: Array<{id: string}>) => new Map(rows.map(row => [row.id, []]))),
   captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
   captureReadableWorkItemInputs: vi.fn(async (actor, workspaceId, kind, records) => {

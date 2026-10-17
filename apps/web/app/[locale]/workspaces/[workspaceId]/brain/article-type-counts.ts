@@ -1,4 +1,4 @@
-import { DigestReadRelease, requireWorkspaceMembership } from "@corgtex/domain";
+import { DigestReadRelease, requireWorkspaceMembership, resolveKnowledgeAccessDomains } from "@corgtex/domain";
 import { prisma, type AppActor } from "@corgtex/shared";
 
 type CountParams = {
@@ -11,23 +11,35 @@ export async function listBrainArticleTypeCounts(params: CountParams) {
   await requireWorkspaceMembership({ actor: params.actor, workspaceId: params.workspaceId });
   const release = new DigestReadRelease(params.actor, params.workspaceId);
   const counts = new Map<string, number>();
-  let afterId: string | undefined;
-  for (;;) {
-    const candidates = await prisma.brainArticle.findMany({
-      where: { AND: [
-        { workspaceId: params.workspaceId, archivedAt: null, ...(afterId ? { id: { gt: afterId } } : {}) },
-        { OR: brainArticleVisibility(params.actor, params.membership) },
-      ] },
-      orderBy: { id: "asc" }, take: 100,
-    });
-    const nextId = candidates.at(-1)?.id;
-    const captured = await release.captureBrainArticlePage(candidates);
+  // One enumeration snapshot; permission admission remains bounded to100 rows.
+  const candidates = await prisma.brainArticle.findMany({
+    where: { AND: [
+      { workspaceId: params.workspaceId, archivedAt: null },
+      { OR: brainArticleVisibility(params.actor, params.membership) },
+    ] },
+    orderBy: { id: "asc" }, take: 200,
+  });
+  const complete = candidates.length < 200;
+  for (let offset = 0; offset < candidates.length; offset += 100) {
+    const captured = await release.captureBrainArticlePage(candidates.slice(offset, offset + 100));
     for (const article of captured) counts.set(article.type, (counts.get(article.type) ?? 0) + 1);
-    if (candidates.length < 100) break;
-    if (nextId === afterId) throw new Error("Brain article count cursor did not advance");
-    afterId = nextId;
   }
-  return release.finish([...counts].map(([type, count]) => ({ type, count })));
+  return release.finish({counts:[...counts].map(([type, count]) => ({ type, count })),complete});
+}
+
+/** Page-only pending total; the explicit domain status API retains its exact contract. */
+export async function listBrainPendingSourceCount(params: CountParams) {
+  await requireWorkspaceMembership({actor:params.actor,workspaceId:params.workspaceId});
+  const accessDomains = await resolveKnowledgeAccessDomains(params.actor,params.workspaceId);
+  const release = new DigestReadRelease(params.actor,params.workspaceId);
+  const candidates = await prisma.brainSource.findMany({where:{workspaceId:params.workspaceId,accessDomain:{in:accessDomains},
+    archivedAt:null,absorbedAt:null},orderBy:{id:"asc"},take:200});
+  const complete = candidates.length < 200;
+  let count = 0;
+  for (let offset = 0; offset < candidates.length; offset += 100) {
+    count += (await release.capture("BrainSource", candidates.slice(offset, offset + 100))).records.length;
+  }
+  return release.finish({count,complete});
 }
 
 export function brainArticleVisibility(

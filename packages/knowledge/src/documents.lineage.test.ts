@@ -230,7 +230,7 @@ describe("Document parser and index boundaries with real source receipts", () =>
         accessDomain: "WORKSPACE", content: "New private body", metadata: { sourceContentHash: "unproven" } }];
       return { skipped: false };
     });
-    await expect(syncDocumentKnowledge({ workspaceId: ws, documentId: row.id })).rejects.toThrow("Document inputs changed during Azure indexing");
+    await expect(syncDocumentKnowledge({ workspaceId: ws, documentId: row.id })).rejects.toMatchObject({code: "SOURCE_CHANGED"});
     expect(remote.azure).toHaveBeenCalledTimes(1);
     expect(remote.azure.mock.calls[0][0].chunks[0].content).toBe("Synthetic document\n\nSynthetic current source");
   });

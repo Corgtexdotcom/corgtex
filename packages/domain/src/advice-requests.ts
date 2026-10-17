@@ -71,6 +71,7 @@ export async function loadAdviceRequestCountSummaries(
   subjectType: AdviceSubjectType,
   subjectIds: string[],
   observe?: (requests: AdviceRequest[]) => Promise<void>,
+  db: Prisma.TransactionClient = prisma,
 ) {
   const uniqueSubjectIds = uniqueStrings(subjectIds);
   const summaries = new Map<string, AdviceRequestCountSummary>(
@@ -78,7 +79,7 @@ export async function loadAdviceRequestCountSummaries(
   );
   if (uniqueSubjectIds.length === 0) return summaries;
 
-  const processes = await prisma.adviceProcess.findMany({
+  const processes = await db.adviceProcess.findMany({
     where: {
       workspaceId,
       subjectType,
@@ -90,7 +91,7 @@ export async function loadAdviceRequestCountSummaries(
     },
   });
 
-  const visible = await readableArtifactIds(actor, workspaceId, "AdviceRequest", processes.flatMap((process) => process.requests));
+  const visible = await readableArtifactIds(actor, workspaceId, "AdviceRequest", processes.flatMap((process) => process.requests), db);
   await observe?.(processes.flatMap(process => process.requests).filter(request => visible.has(request.id)));
   for (const process of processes) {
     const requests = process.requests.filter((request) => visible.has(request.id));

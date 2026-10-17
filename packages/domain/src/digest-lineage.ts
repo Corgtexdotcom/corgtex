@@ -77,13 +77,14 @@ export async function isDigestInputProofShared(audience: readonly AppActor[], wo
 /** Unknown legacy entries are omitted individually before formatting, ranking or counting. */
 export async function captureReadableDigestInputs<T extends { id: string }>(params: {
   actor: AppActor;
+  db?: Prisma.TransactionClient;
   workspaceId: string;
   kind: LineageKind;
   records: T[];
   audience?: AppActor[];
   additionalInputs?: (record: T) => Array<LineageInput & { snapshot?: Record<string, unknown> }>;
 }) {
-  if (params.kind === "NewspaperDelivery" && !params.audience && !params.additionalInputs && params.records.length <= 100) {
+  if (!params.db && params.kind === "NewspaperDelivery" && !params.audience && !params.additionalInputs && params.records.length <= 100) {
     try {
       const batched = await captureReadableNewspaperDeliveryInputs(params.actor,params.workspaceId,params.records);
       if (batched) return batched;
@@ -98,7 +99,7 @@ export async function captureReadableDigestInputs<T extends { id: string }>(para
       const roots = await captureArtifactInputProof(params.actor, params.workspaceId, [
         { kind: params.kind, id: record.id, snapshot: record },
         ...(params.additionalInputs?.(record) ?? []),
-      ]);
+      ], params.db);
       if (params.audience && !await isDigestInputProofShared(params.audience, params.workspaceId, roots)) continue;
       records.push(record);
       proofs.set(record.id, roots);

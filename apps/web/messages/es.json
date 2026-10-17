@@ -452,6 +452,8 @@
     "workEmailLabel": "Correo laboral"
   },
   "brain": {
+    "countWindowLimited": "Los recuentos cubren una ventana limitada. + indica al menos esa cantidad; … indica un total aún desconocido.",
+    "typeCountWindowLimited": "Los recuentos por tipo cubren una ventana limitada. Todos los filtros siguen disponibles.",
     "meetingUploadGuidance": "Sube las transcripciones de reuniones en Reuniones para obtener un resumen y seguimientos revisables. Usa Brain para artículos, búsquedas y otros documentos.",
     "openMeetings": "Abrir Reuniones",
     "agentSynthesis": "Síntesis del Agente",

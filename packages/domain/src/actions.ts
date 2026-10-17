@@ -1,4 +1,4 @@
-import { WorkItemReadRelease, readableWorkItemPage, workItemAfter } from "./work-item-readable-page";
+import { WorkItemReadRelease, readWorkItemListSnapshot, readableWorkItemPage, workItemAfter } from "./work-item-readable-page";
 import { completeActionWithNativeRequest } from "./action-completion";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { createHash } from "node:crypto";
@@ -184,7 +184,7 @@ async function loadActionChecklistSummaries(actor: AppActor, workspaceId: string
   const summaries = new Map<string, ActionChecklistSummary>();
   if (actionIds.length === 0) return summaries;
 
-  const items = await prisma.actionChecklistItem.findMany({
+  const items = await (release?.db ?? prisma).actionChecklistItem.findMany({
     where: {
       workspaceId,
       actionId: { in: actionIds },
@@ -192,7 +192,7 @@ async function loadActionChecklistSummaries(actor: AppActor, workspaceId: string
 
   });
 
-  const visible = await readableArtifactIds(actor, workspaceId, "ActionChecklistItem", items);
+  const visible = await readableArtifactIds(actor, workspaceId, "ActionChecklistItem", items, release?.db);
   await release?.observe("ActionChecklistItem", items.filter(item => visible.has(item.id)));
   for (const item of items.filter((item) => visible.has(item.id))) {
     const current = summaries.get(item.actionId) ?? { checklistItemCount: 0, checklistCompletedCount: 0 };
@@ -345,13 +345,13 @@ async function redactActionJoins<T extends {
   circleId?: string | null;
   circle?: { id: string } | null;
 }>(actor: AppActor, workspaceId: string, rows: T[], release?: WorkItemReadRelease) {
-  const captureJoins = () => Promise.all([
-    captureReadableDigestInputs({ actor, workspaceId, kind: "User", records: rows.flatMap((row) => row.author ? [row.author] : []) }),
-    captureReadableDigestInputs({ actor, workspaceId, kind: "Member", records: rows.flatMap((row) => row.assigneeMember ? [row.assigneeMember] : []) }),
-    captureReadableDigestInputs({ actor, workspaceId, kind: "Circle", records: rows.flatMap((row) => row.circle ? [row.circle] : []) }),
+  const capture = <R extends {id: string}>(kind: Parameters<WorkItemReadRelease["capture"]>[0], records: R[]) =>
+    release ? release.capture(kind,records) : captureReadableDigestInputs({actor,workspaceId,kind,records});
+  const [authors, members, circles] = await Promise.all([
+    capture("User", rows.flatMap(row => row.author ? [row.author] : [])),
+    capture("Member", rows.flatMap(row => row.assigneeMember ? [row.assigneeMember] : [])),
+    capture("Circle", rows.flatMap(row => row.circle ? [row.circle] : [])),
   ]);
-  const [authors, members, circles] = await (release ? release.observeRead(captureJoins) : captureJoins());
-  release?.add([...authors.roots, ...members.roots, ...circles.roots]);
   const authorIds = new Set(authors.records.map((row) => row.id));
   const memberIds = new Set(members.records.map((row) => row.id));
   const circleIds = new Set(circles.records.map((row) => row.id));
@@ -373,67 +373,69 @@ function actionPageAfter(row: import("@prisma/client").Action, sort: ListActions
 }
 
 export async function listActions(actor: AppActor, workspaceId: string, opts?: ListActionsOptions) {
-  const take = opts?.take ?? 20;
-  const skip = opts?.skip ?? 0;
-  const membership = await requireWorkspaceOperation({ operation: "list_actions", actor, workspaceId });
-  const where = actionListWhere(actor, membership, workspaceId, opts);
+  return readWorkItemListSnapshot(actor, workspaceId, async release => {
+    const db = release.db;
+    const take = opts?.take ?? 20;
+    const skip = opts?.skip ?? 0;
+    const membership = await requireWorkspaceOperation({ operation: "list_actions", actor, workspaceId, tx: db });
+    const where = actionListWhere(actor, membership, workspaceId, opts);
 
-  const release = new WorkItemReadRelease(actor,workspaceId);
-  const page=await readableWorkItemPage<import("@prisma/client").Action>({actor,workspaceId,release,kind:"Action",take,skip,
-    load: after => prisma.action.findMany({where:after?{AND:[where,actionPageAfter(after,opts?.sort)]}:where,
-      orderBy:workItemOrderBy(opts?.sort),take:100})});
-  const selected = page.items;
-  const hydrated = selected.length ? await prisma.action.findMany({where:{AND:[where,{id:{in:selected.map(row=>row.id)}}]},
-      include: {
-        author: {
-          select: {
-            id: true,
-            displayName: true,
-            email: true,
+    const page=await readableWorkItemPage<import("@prisma/client").Action>({actor,workspaceId,release,kind:"Action",take,skip,
+      load: after => db.action.findMany({where:after?{AND:[where,actionPageAfter(after,opts?.sort)]}:where,
+        orderBy:workItemOrderBy(opts?.sort),take:100})});
+    const selected = page.items;
+    const hydrated = selected.length ? await db.action.findMany({where:{AND:[where,{id:{in:selected.map(row=>row.id)}}]},
+        include: {
+          author: {
+            select: {
+              id: true,
+              displayName: true,
+              email: true,
+            },
           },
-        },
-        assigneeMember: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                displayName: true,
-                email: true,
+          assigneeMember: {
+            include: {
+              user: {
+                select: {
+                  id: true,
+                  displayName: true,
+                  email: true,
+                },
               },
             },
           },
+          circle: true,
+          proposal: true,
         },
-        circle: true,
-        proposal: true,
-      },
-  }) : [];
-  const byId=new Map(hydrated.map(row=>[row.id,row]));
-  const items=selected.flatMap(row=>{const loaded=byId.get(row.id);return loaded?[{...loaded,...row}]:[];});
-  const total=page.total-(selected.length-items.length);
-  const itemIds = items.map((item) => item.id);
-  const [requestCountSummaries, checklistSummaries] = await Promise.all([
-    loadAdviceRequestCountSummaries(actor, workspaceId, "ACTION", itemIds, rows => release.observe("AdviceRequest", rows)),
-    loadActionChecklistSummaries(actor, workspaceId, itemIds, release),
-  ]);
-  const redactedItems = await redactActionJoins(actor, workspaceId, items, release);
-  const linkedProposals = items.flatMap((item) => item.proposal ? [item.proposal] : []);
-  const visibleProposalIds = linkedProposals.length
-    ? await readableArtifactIds(actor, workspaceId, "Proposal", linkedProposals) : new Set<string>();
-  await release.observe("Proposal",linkedProposals.filter(row=>visibleProposalIds.has(row.id)));
-  const finalIds=await readableArtifactIds(actor,workspaceId,"Action",items);
-  return release.finish({
-    items: redactedItems.filter(item=>finalIds.has(item.id)).map((item) => ({
-      ...item,
-      proposalId: item.proposal && visibleProposalIds.has(item.proposal.id) ? item.proposalId : null,
-      proposal: item.proposal && visibleProposalIds.has(item.proposal.id)
-        ? { id: item.proposal.id, title: item.proposal.title } : null,
-      ...requestCountSummaries.get(item.id),
-      checklistItemCount: checklistSummaries.get(item.id)?.checklistItemCount ?? 0,
-      checklistCompletedCount: checklistSummaries.get(item.id)?.checklistCompletedCount ?? 0,
-    })),
-    total:total-items.filter(item=>!finalIds.has(item.id)).length,
-    take,
-    skip,
+    }) : [];
+    const byId=new Map(hydrated.map(row=>[row.id,row]));
+    const items=selected.flatMap(row=>{const loaded=byId.get(row.id);return loaded?[{...loaded,...row}]:[];});
+    invariant(items.length === selected.length,409,"SOURCE_CHANGED","Selected actions changed within collection.");
+    const total=page.total;
+    const itemIds = items.map((item) => item.id);
+    const [requestCountSummaries, checklistSummaries] = await Promise.all([
+      loadAdviceRequestCountSummaries(actor, workspaceId, "ACTION", itemIds, rows => release.observe("AdviceRequest", rows), db),
+      loadActionChecklistSummaries(actor, workspaceId, itemIds, release),
+    ]);
+    const redactedItems = await redactActionJoins(actor, workspaceId, items, release);
+    const linkedProposals = items.flatMap((item) => item.proposal ? [item.proposal] : []);
+    const visibleProposalIds = linkedProposals.length
+      ? await release.readable("Proposal", linkedProposals) : new Set<string>();
+    await release.observe("Proposal",linkedProposals.filter(row=>visibleProposalIds.has(row.id)));
+    return {
+      items: redactedItems.map((item) => ({
+        ...item,
+        proposalId: item.proposal && visibleProposalIds.has(item.proposal.id) ? item.proposalId : null,
+        proposal: item.proposal && visibleProposalIds.has(item.proposal.id)
+          ? { id: item.proposal.id, title: item.proposal.title } : null,
+        ...requestCountSummaries.get(item.id),
+        checklistItemCount: checklistSummaries.get(item.id)?.checklistItemCount ?? 0,
+        checklistCompletedCount: checklistSummaries.get(item.id)?.checklistCompletedCount ?? 0,
+      })),
+      total,
+      take,
+      skip,
+    };
   });
 }
 

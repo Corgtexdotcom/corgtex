@@ -6,7 +6,7 @@ import { getBrainExportWorkerPurpose, isBrainExportWorkerCurrent } from "./brain
 import { canReadInformationCategory, categoryGovernorIdentities, CATEGORY_BOUND_SOURCE_KINDS } from "./information-category-policy";
 import { financeFactValue, financeValueHash, isFinanceFactRevisionIntact } from "./finance-fact-value";
 import { getTranscriptSourceImportPurpose, getRecorderTranscriptWorkerPurpose, nativeTranscriptPrincipalUserId } from "./native-transcript-principal";
-import { artifactPermissionEpochIdentities, capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, mergePermissionEpochProofs, parsePermissionEpochProof, withSourceCommitPermissionReadPass, withExternalProviderPermissionReadPass, withArtifactPermissionBatchRead, type PermissionEpochProof } from "./source-permission-epochs";
+import { collectWorkItemPermissionSnapshot, artifactPermissionEpochIdentities, capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, mergePermissionEpochProofs, parsePermissionEpochProof, withSourceCommitPermissionReadPass, withExternalProviderPermissionReadPass, withArtifactPermissionBatchRead, type PermissionEpochProof } from "./source-permission-epochs";
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { assertArtifactInputWriteFence } from "./artifact-input-write-fence";
@@ -374,16 +374,16 @@ async function withWorkItemBatchRead(db: LineageClient, workspaceId: string, roo
  * The observed vector has the same current caller and per-target identities as
  * captureArtifactPermissionEpochs; saved ancestry is never refreshed. */
 export async function captureReadableWorkItemInputs(actor: AppActor, workspaceId: string, kind: BatchedWorkItemKind,
-  records: Array<{id: string; [key: string]: unknown}>) {
+  records: Array<{id: string; [key: string]: unknown}>, db: LineageClient = prisma) {
   invariant(records.length <= 100, 400, "INVALID_INPUT", "Capture one bounded work item page.");
   if (!records.length) return {ids: new Set<string>(), roots: [] as LineageRoot[], heads: new Map<string,string>()};
-  if (LOCAL_CRM_KINDS.has(kind)) {
+  if (db === prisma && LOCAL_CRM_KINDS.has(kind)) {
     const captured = await captureLocalCrmOriginalInputs(actor,workspaceId,kind,records);
     if (captured) return captured;
   }
   const ids = new Set<string>(), roots: LineageRoot[] = [], heads = new Map<string,string>();
   const fallback: typeof records = [];
-  await prisma.$transaction(async tx => {
+  const capturePage = async (tx: Prisma.TransactionClient) => {
     const membership = await requireWorkspaceMembership({actor,workspaceId,tx});
     const domains = await resolveKnowledgeAccessDomains(actor,workspaceId,tx);
     const loaded = await loadWorkItemBatch(tx,workspaceId,kind,records.map(row => row.id));
@@ -420,13 +420,14 @@ export async function captureReadableWorkItemInputs(actor: AppActor, workspaceId
       invariant(stamp,409,"SOURCE_CHANGED","Observed work item has no bound head.");
       heads.set(key,stamp);
     }
-  });
+  };
+  if (db === prisma) await prisma.$transaction(capturePage); else await capturePage(db);
   if (fallback.length) {
     const observed = await captureArtifactReadHeadObservation(async () => {
-      const readable = await readableArtifactIds(actor,workspaceId,kind,fallback);
+      const readable = await readableArtifactIds(actor,workspaceId,kind,fallback,db);
       const admitted = fallback.filter(row => readable.has(row.id));
       if (admitted.length) {
-        roots.push(...await captureArtifactInputProof(actor,workspaceId,admitted.map(row => ({kind,id:row.id,snapshot:row}))));
+        roots.push(...await captureArtifactInputProof(actor,workspaceId,admitted.map(row => ({kind,id:row.id,snapshot:row})),db));
         for (const row of admitted) ids.add(row.id);
       }
     });
@@ -2044,6 +2045,29 @@ export async function assertArtifactInputClosureLocallyAdmissible(actor: AppActo
     invariant(await isArtifactInputProofReadable(actor, workspaceId, roots), 409, "SOURCE_CHANGED",
       "Commit caller cannot access the complete input closure.");
   });
+}
+
+/** Internal work-item collection only: local admission in one repeatable-read
+ * inventory. It grants no provider/serving authority; the caller must release
+ * the original roots and heads through withArtifactCountReleaseSnapshot after
+ * this transaction closes. Never use it for model inputs or publication. */
+export async function collectWorkItemReadSnapshot<T>(workspaceId: string, read: (tx: Prisma.TransactionClient) => Promise<T>) {
+  const ambient = artifactReadCapture.getStore();
+  const ambientHeads = expectedReadHeads.getStore();
+  const captured = await collectWorkItemPermissionSnapshot(workspaceId, tx => {
+    const heads: ReadHeadBinding = {heads:new Map(),sealed:false};
+    const scope = ambient ? {...ambient,roots:new Map<string,LineageRoot>()} : undefined;
+    const collect = async () => ({value:await localCommitAdmission.run(true, () => read(tx)),heads:heads.heads,roots:scope?.roots});
+    return expectedReadHeads.run(heads, () => scope ? artifactReadCapture.run(scope,collect) : collect());
+  });
+  // Failed initialization attempts publish no ambient observations.
+  if (ambient && captured.roots) observeArtifactRead(ambient.actor,workspaceId,[...captured.roots.values()]);
+  if (ambientHeads) for (const [key,stamp] of captured.heads) {
+    invariant(!ambientHeads.heads.has(key) || ambientHeads.heads.get(key) === stamp,409,"SOURCE_CHANGED","Original read lineage changed during collection.");
+    invariant(!ambientHeads.sealed || ambientHeads.heads.has(key),409,"SOURCE_CHANGED","Collection escaped the original read lineage.");
+    ambientHeads.heads.set(key,stamp);
+  }
+  return captured.value;
 }
 
 /** Fixed count release boundary: ordinary authorization observes all generic

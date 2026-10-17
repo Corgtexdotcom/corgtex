@@ -73,6 +73,7 @@ vi.mock("./auth", () => ({
 }));
 
 vi.mock("./source-lineage", () => ({
+  collectWorkItemReadSnapshot: vi.fn(async (_workspaceId: string, read: (tx: typeof prismaMock) => Promise<unknown>) => read(prismaMock)),
   captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
   captureReadableWorkItemInputs: vi.fn(async (reader: import("@corgtex/shared").AppActor, workspaceId: string,
     kind: "Action" | "Proposal" | "Tension", records: Array<{id: string; [key: string]: unknown}>) => {
@@ -1656,7 +1657,7 @@ describe("tensions domain", () => {
     expect(page.items[0]).toMatchObject({ id: "safe-winner", upvotes: [visibleVote] });
     expect(captureArtifactInputProof).toHaveBeenCalledWith(actor, "ws-1", [
       { kind: "TensionUpvote", id: visibleVote.id, snapshot: visibleVote }, { kind: "User", id: visibleVote.userId },
-    ]);
+    ], prismaMock);
     prismaMock.tension.findFirst.mockResolvedValue(rawWinner);
     expect((await getTension(actor, { workspaceId: "ws-1", tensionId: rawWinner.id })).upvotes).toEqual([]);
     vi.mocked(captureArtifactInputProof).mockImplementation(async (_actor,_workspace,inputs)=>{

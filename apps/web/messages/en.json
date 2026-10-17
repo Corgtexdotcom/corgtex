@@ -452,6 +452,8 @@
     "workEmailLabel": "Work Email"
   },
   "brain": {
+    "countWindowLimited": "Counts cover a limited window. + means at least this many; … means the total is not yet known.",
+    "typeCountWindowLimited": "Article type counts cover a limited window. All type filters remain available.",
     "meetingUploadGuidance": "Upload meeting transcripts in Meetings to get a summary and reviewable follow-ups. Use Brain for articles, search, and other documents.",
     "openMeetings": "Open Meetings",
     "agentSynthesis": "Agent Synthesis",

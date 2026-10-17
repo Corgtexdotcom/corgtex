@@ -43,7 +43,7 @@ async function fixture(size = 201) {
 it("batches canonical counts and final proof replay instead of querying each article", async () => {
   const f = await fixture();
   probe.queries = 0;
-  expect(await listBrainArticleTypeCounts(f.params)).toEqual([{ type: "PROJECT", count: 101 }, { type: "STRATEGY", count: 100 }]);
+  expect(await listBrainArticleTypeCounts(f.params)).toEqual({ counts: [{ type: "PROJECT", count: 100 }, { type: "STRATEGY", count: 100 }], complete: false });
   const batchedQueries = probe.queries;
   expect(batchedQueries).toBeGreaterThan(10);
   expect(batchedQueries).toBeLessThan(350);
@@ -53,7 +53,7 @@ it("batches canonical counts and final proof replay instead of querying each art
     return (await this.capture("BrainArticle", rows)).records;
   });
   probe.queries = 0;
-  expect(await listBrainArticleTypeCounts(f.params)).toEqual([{ type: "PROJECT", count: 101 }, { type: "STRATEGY", count: 100 }]);
+  expect(await listBrainArticleTypeCounts(f.params)).toEqual({ counts: [{ type: "PROJECT", count: 100 }, { type: "STRATEGY", count: 100 }], complete: false });
   expect(probe.queries).toBeGreaterThan(batchedQueries * 3);
 });
 
@@ -69,7 +69,7 @@ it("retains derived ancestry authorization and omits unknown and private entries
   await prisma.brainArticle.create({ data: { workspaceId: f.params.workspaceId, slug: "unknown", title: "Unknown", bodyMd: "unknown", type: "PROJECT", authority: "REFERENCE" } });
   const reader = await prisma.user.create({ data: { email: `${randomUUID()}@example.test`, passwordHash: "synthetic" } });
   const membership = await prisma.member.create({ data: { workspaceId: f.params.workspaceId, userId: reader.id, role: "CONTRIBUTOR" } });
-  expect(await listBrainArticleTypeCounts({ ...f.params, actor: { kind: "user", user: reader }, membership })).toEqual([{ type: "PROJECT", count: 1 }, { type: "STRATEGY", count: 1 }]);
+  expect(await listBrainArticleTypeCounts({ ...f.params, actor: { kind: "user", user: reader }, membership })).toEqual({ counts: [{ type: "PROJECT", count: 1 }, { type: "STRATEGY", count: 1 }], complete: true });
 });
 
 it.each(["membership", "body", "head"])("withholds the full count after late %s change", async change => {
