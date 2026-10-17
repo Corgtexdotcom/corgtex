@@ -398,6 +398,7 @@ export default async function ProposalsPage({
         actions={!isDemo ? (
           <ItemActions
             moreLabel={tCommon("moreActions")}
+            moreRole="dialog"
             primary={primaryAction}
             more={moreItems.length > 0 ? moreItems : null}
           />
@@ -492,6 +493,7 @@ export default async function ProposalsPage({
           <>
             <ItemActions
               moreLabel={tCommon("moreActions")}
+              moreRole="dialog"
               primary={primaryAction}
               more={moreItems.length > 0 ? moreItems : null}
             />

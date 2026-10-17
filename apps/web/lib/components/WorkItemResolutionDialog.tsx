@@ -24,6 +24,7 @@ export function WorkItemResolutionDialog({
   cancelLabel,
   fileLabel,
   className = "secondary small",
+  menuItem,
 }: {
   action: (formData: FormData) => void | Promise<void>;
   buttonLabel: string;
@@ -39,12 +40,20 @@ export function WorkItemResolutionDialog({
   cancelLabel: string;
   fileLabel: string;
   className?: string;
+  menuItem?: boolean;
 }) {
   const [open, setOpen] = useState(false);
 
   return (
     <>
-      <button type="button" className={className} onClick={() => setOpen(true)}>
+      <button
+        type="button"
+        className={className}
+        role={menuItem ? "menuitem" : undefined}
+        tabIndex={menuItem ? -1 : undefined}
+        aria-haspopup={menuItem ? "dialog" : undefined}
+        onClick={() => setOpen(true)}
+      >
         {buttonLabel}
       </button>
       <Dialog open={open} onClose={() => setOpen(false)} title={title}>

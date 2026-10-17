@@ -25,12 +25,17 @@ interface ActionMenuProps {
 const PANEL_MARGIN = 8;
 const VIEWPORT_PADDING = 12;
 
+function isInsideChildDialog(panel: HTMLElement, target: EventTarget | null) {
+  const dialog = target instanceof Element ? target.closest("dialog") : null;
+  return dialog != null && panel.contains(dialog);
+}
+
 function visibleFocusableControls(panel: HTMLElement, selector: string) {
   return Array.from(panel.querySelectorAll<HTMLElement>(selector)).filter(
     (control) =>
-      control.tabIndex >= 0 &&
+      (control.tabIndex >= 0 || control.matches("[role='menuitem']")) &&
       !control.matches(":disabled, [aria-disabled='true']") &&
-      control.closest(".action-menu-panel") === panel &&
+      control.closest(".action-menu-panel, dialog") === panel &&
       !control.closest("[hidden], [inert]") &&
       control.getClientRects().length > 0 &&
       getComputedStyle(control).visibility === "visible",
@@ -77,7 +82,7 @@ export function ActionMenu({
       if (!panel) return;
       const controls = visibleFocusableControls(
         panel,
-        "input:not([type='hidden']), textarea, select, button, a[href], [tabindex]",
+        "input:not([type='hidden']), textarea, select, button, a[href], summary, [tabindex]",
       );
       if (focusLastOnOpen.current) controls.reverse();
       for (const control of controls) {
@@ -155,6 +160,8 @@ export function ActionMenu({
       setOpen(false);
     }
     function handleKey(event: KeyboardEvent) {
+      const panel = panelRef.current;
+      if (panel && isInsideChildDialog(panel, event.target)) return;
       if (event.key === "Escape" && !event.defaultPrevented &&
           (panelRef.current?.contains(event.target as Node) || event.target === triggerRef.current)) {
         event.preventDefault();
@@ -268,7 +275,15 @@ export function ActionMenu({
                 setOpen(false);
             }}
             onKeyDown={(event) => {
-              if (event.defaultPrevented) return;
+              if (event.defaultPrevented || isInsideChildDialog(event.currentTarget, event.target)) return;
+              if (event.key === "Tab" && panelRole === "menu") {
+                // Return to the trigger before native Tab navigation so a body
+                // portal does not send focus to the end of the document. Let
+                // this bubble to close parent menus, up to any dialog boundary.
+                close();
+                return;
+              }
+              if ((event.target as Element).closest(".action-menu-panel") !== event.currentTarget) return;
               if (event.key === "Escape") {
                 event.preventDefault();
                 event.stopPropagation();
