@@ -152,7 +152,7 @@ describe("/api/workspaces/[workspaceId]/meeting-audio-assets", () => {
     expect(findManyMeetingAudioAssets).toHaveBeenCalledTimes(2);
   });
 
-  it("replenishes a visible page beyond 5,000 denied rows using stable keysets", async () => {
+  it("bounds hidden-history requests and reaches later readable rows through explicit continuation", async () => {
     const hidden = Array.from({length: 5100}, (_, index) => audioAsset({
       id: `hidden-${index}`, createdAt: new Date(1800000000000 - index),
     }));
@@ -168,14 +168,46 @@ describe("/api/workspaces/[workspaceId]/meeting-audio-assets", () => {
     readableArtifactIds.mockImplementation(async (_actor, _workspace, _kind, records) =>
       new Set(records.filter((row: any) => row.id === visible.id).map((row: any) => row.id)));
     const {GET} = await import("./route");
-    const response = await GET(new NextRequest("http://localhost/api/workspaces/workspace-1/meeting-audio-assets?take=1"), context());
-    expect(response.status).toBe(200);
-    expect((await response.json()).audioAssets.map((row: any) => row.id)).toEqual([visible.id]);
+    let cursor: string | null = null;
+    let windows = 0;
+    let last: any;
+    do {
+      const calls = findManyMeetingAudioAssets.mock.calls.length;
+      const response = await GET(new NextRequest(`http://localhost/api/workspaces/workspace-1/meeting-audio-assets?take=1${cursor ? `&cursor=${cursor}` : ""}`), context());
+      expect(response.status).toBe(200);
+      last = await response.json();
+      expect(findManyMeetingAudioAssets.mock.calls.length - calls).toBeLessThanOrEqual(2);
+      if (windows === 0) expect(last).toMatchObject({audioAssets: [], complete: false, nextCursor: expect.any(String)});
+      cursor = last.nextCursor;
+      windows++;
+    } while (cursor);
+    expect(last.audioAssets.map((row: any) => row.id)).toEqual([visible.id]);
+    expect(windows).toBe(26);
     expect(findManyMeetingAudioAssets).toHaveBeenCalledTimes(52);
     expect(findManyMeetingAudioAssets.mock.calls.every(([query]) => query.take === 100 && !query.cursor && !query.skip)).toBe(true);
-    expect(releaseSnapshot).toHaveBeenCalledWith(expect.anything(), "workspace-1",
+    expect(releaseSnapshot).toHaveBeenLastCalledWith(expect.anything(), "workspace-1",
       [{kind: "MeetingAudioAsset", id: visible.id, fingerprint: `original-${visible.id}`}],
       expect.any(Function), expect.any(Function), new Map([["synthetic-head", "original-head"]]));
+  });
+
+  it("continues at the last displayed candidate without skipping prefetched readable rows", async () => {
+    const all = Array.from({length: 10}, (_, i) => audioAsset({id: `audio-${i}`, createdAt: new Date(1800000000000-i)}));
+    findManyMeetingAudioAssets.mockImplementation(async ({where, take}) => all.filter(row => !where.OR || row.createdAt < where.OR[0].createdAt.lt).slice(0, take));
+    readableArtifactIds.mockImplementation(async (_a, _w, _k, rows) => new Set(rows.map((row: any) => row.id)));
+    const {GET} = await import("./route");
+    const first = await (await GET(new NextRequest("http://localhost/api/workspaces/workspace-1/meeting-audio-assets?take=5"), context())).json();
+    const second = await (await GET(new NextRequest(`http://localhost/api/workspaces/workspace-1/meeting-audio-assets?take=5&cursor=${first.nextCursor}`), context())).json();
+    expect(first.audioAssets.map((row: any) => row.id)).toEqual(all.slice(0,5).map(row => row.id));
+    expect(second.audioAssets.map((row: any) => row.id)).toEqual(all.slice(5).map(row => row.id));
+    expect(second).toMatchObject({complete: true, nextCursor: null});
+    expect(findManyMeetingAudioAssets.mock.calls[1][0].where).toMatchObject({workspaceId: "workspace-1", uploadedByUserId: "user-1"});
+  });
+
+  it("rejects malformed continuation before history reads", async () => {
+    const {GET} = await import("./route");
+    await GET(new NextRequest("http://localhost/api/workspaces/workspace-1/meeting-audio-assets?cursor=garbage"), context());
+    expect(handleRouteError).toHaveBeenCalledWith(expect.objectContaining({code: "INVALID_INPUT"}), expect.anything());
+    expect(findManyMeetingAudioAssets).not.toHaveBeenCalled();
   });
 
   it("withholds a collected page when the final current caller is no longer its active human owner", async () => {

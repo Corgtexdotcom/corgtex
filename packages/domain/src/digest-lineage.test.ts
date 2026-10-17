@@ -37,7 +37,7 @@ describe("digest permission selection", () => {
     expect(loadBatch.mock.calls.map(([page]) => page)).toEqual([{ take: 50, skip: 0 }, { take: 50, skip: 50 }]);
   });
 
-  it("fills samples beyond 5000 denied candidates while complete scans retain every permitted row", async () => {
+  it("bounds small samples while explicit complete scans retain every permitted row", async () => {
     capture.mockImplementation(async (_actor, _workspaceId, inputs) => {
       if (Number(inputs[0].id) < 5001) throw new AppError(409, "UNKNOWN_LINEAGE", "Unknown history");
       return [{kind: "NewspaperDelivery", id: inputs[0].id, fingerprint: "a".repeat(64)}];
@@ -46,10 +46,12 @@ describe("digest permission selection", () => {
     const loadBatch = vi.fn(async ({take,skip}) => rows.slice(skip,skip+take));
     expect(await loadReadableDigestQuery({actor: {} as any,workspaceId: "ws",kind: "NewspaperDelivery",limit: 1,completeScan: true,loadBatch})).toEqual([{id:"5001"},{id:"5002"}]);
     expect(loadBatch.mock.calls.every(([page]) => page.take <= 100)).toBe(true);
-    expect(await loadReadableDigestQuery({actor: {} as any,workspaceId: "ws",kind: "NewspaperDelivery",limit: 1,loadBatch})).toEqual([{id:"5001"}]);
+    loadBatch.mockClear();
+    await expect(loadReadableDigestQuery({actor: {} as any,workspaceId: "ws",kind: "NewspaperDelivery",limit: 1,loadBatch})).rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
+    expect(loadBatch).toHaveBeenCalledTimes(4);
     const keyset = vi.fn(async ({take, after}) => rows.slice(after ? Number(after.id) + 1 : 0, (after ? Number(after.id) + 1 : 0) + take));
-    expect(await loadReadableDigestQuery({actor: {} as any,workspaceId: "ws",kind: "NewspaperDelivery",limit: 1, keyset: true, loadBatch: keyset})).toEqual([{id:"5001"}]);
-    expect(keyset).toHaveBeenCalledTimes(101);
+    await expect(loadReadableDigestQuery({actor: {} as any,workspaceId: "ws",kind: "NewspaperDelivery",limit: 1, keyset: true, loadBatch: keyset})).rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
+    expect(keyset).toHaveBeenCalledTimes(4);
     expect(keyset.mock.calls.every(([page]) => page.take === 50)).toBe(true);
   });
 
@@ -82,8 +84,8 @@ describe("digest permission selection", () => {
     capture.mockRejectedValue(new AppError(409, "UNKNOWN_LINEAGE", "Unknown history"));
     const rows = Array.from({length: 5001}, (_, index) => ({id: String(index)}));
     const loadBatch = vi.fn(async ({take, skip}) => rows.slice(skip, skip + take));
-    expect(await loadReadableDigestQuery({actor: {} as any, workspaceId: "ws", kind: "NewspaperEdition", limit: 1, loadBatch})).toEqual([]);
-    expect(loadBatch).toHaveBeenCalledTimes(101);
+    await expect(loadReadableDigestQuery({actor: {} as any, workspaceId: "ws", kind: "NewspaperEdition", limit: 1, loadBatch})).rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
+    expect(loadBatch).toHaveBeenCalledTimes(4);
     const repeating = vi.fn(async () => rows.slice(0, 50));
     await expect(loadReadableDigestQuery({actor: {} as any, workspaceId: "ws", kind: "NewspaperEdition", limit: 1, loadBatch: repeating}))
       .rejects.toMatchObject({code: "SOURCE_CHANGED"});
@@ -101,17 +103,45 @@ describe("digest permission selection", () => {
 });
 
 
-it("replenishes a bounded sample beyond 5000 denied candidates and keeps only its original roots", async () => {
+it("replenishes a bounded sample within 200 candidates and keeps only its original roots", async () => {
   capture.mockImplementation(async (_actor, _ws, inputs) => {
-    if (Number(inputs[0].id) < 5001) throw new AppError(409, "UNKNOWN_LINEAGE", "Unproved");
+    if (Number(inputs[0].id) < 101) throw new AppError(409, "UNKNOWN_LINEAGE", "Unproved");
     return [{kind: "BrainArticle", id: inputs[0].id, fingerprint: "a".repeat(64)}];
   });
-  const rows = Array.from({length: 5004}, (_, id) => ({id: String(id)}));
+  const rows = Array.from({length: 104}, (_, id) => ({id: String(id)}));
   const loadBatch = vi.fn(async (after, take) => rows.slice(after ? Number(after.id)+1 : 0, (after ? Number(after.id)+1 : 0)+take));
   const release = new DigestReadRelease({} as any, "ws");
   const sample = await loadReadableArtifactSample({actor: {} as any, workspaceId: "ws", kind: "BrainArticle", limit: 2, release, loadBatch});
-  expect(sample.records.map(row => row.id)).toEqual(["5001", "5002"]);
-  expect(sample.roots.map(root => root.id)).toEqual(["5001", "5002"]);
-  expect(loadBatch).toHaveBeenCalledTimes(51);
+  expect(sample.records.map(row => row.id)).toEqual(["101", "102"]);
+  expect(sample.roots.map(root => root.id)).toEqual(["101", "102"]);
+  expect(loadBatch).toHaveBeenCalledTimes(2);
   expect(loadBatch.mock.calls.every(([, take]) => take === 100)).toBe(true);
+});
+
+
+it.each(["sample", "digest"])("bounds %s discovery before a 5001-row denied tail", async mode => {
+  capture.mockRejectedValue(new AppError(409, "UNKNOWN_LINEAGE", "Unknown history"));
+  const rows = Array.from({length: 5001}, (_, i) => ({id: String(i)}));
+  const loads = vi.fn(async (after: {id: string} | undefined, take: number) => {
+    const offset = after ? Number(after.id) + 1 : 0;
+    return rows.slice(offset, offset + take);
+  });
+  const params = {actor: {} as any, workspaceId: "ws", kind: "BrainArticle" as const, limit: 2};
+  const result = mode === "sample" ? loadReadableArtifactSample({...params, release: new DigestReadRelease({} as any, "ws"), loadBatch: loads})
+    : loadReadableDigestQuery({...params, keyset: true, loadBatch: ({after, take}) => loads(after, take)});
+  await expect(result).rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
+  expect(loads.mock.calls.reduce((sum, [, take]) => sum + take, 0)).toBe(200);
+});
+
+
+it.each([0, -1, NaN, Infinity, 1.5])("rejects invalid sample size %s before loading", async limit => {
+  const loadBatch = vi.fn();
+  await expect(loadReadableDigestQuery({actor: {} as any, workspaceId: "ws", kind: "BrainArticle", limit, loadBatch})).rejects.toMatchObject({code: "INVALID_INPUT"});
+  expect(loadBatch).not.toHaveBeenCalled();
+});
+it("bounds an explicit larger sample to its requested candidates without rounding up", async () => {
+  capture.mockRejectedValue(new AppError(409, "UNKNOWN_LINEAGE", "Unknown history"));
+  const loadBatch = vi.fn(async (after: {id:string} | undefined, take: number) => Array.from({length:take},(_,i)=>({id:String((after ? Number(after.id)+1 : 0)+i)})));
+  await expect(loadReadableArtifactSample({actor:{} as any,workspaceId:"ws",kind:"BrainArticle",limit:250,release:new DigestReadRelease({} as any,"ws"),loadBatch})).rejects.toMatchObject({code:"SOURCE_READ_SCAN_LIMIT"});
+  expect(loadBatch.mock.calls.map(([,take])=>take)).toEqual([100,100,50]);
 });

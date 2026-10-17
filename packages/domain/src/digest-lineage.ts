@@ -109,6 +109,23 @@ export async function captureReadableDigestInputs<T extends { id: string }>(para
   return { records, proofs, roots: mergeArtifactInputProofs(...proofs.values()) };
 }
 
+/** Small samples never certify an incomplete candidate window as an empty/full result. */
+export function createArtifactSampleBudget(limit: number) {
+  invariant(Number.isSafeInteger(limit) && limit > 0, 400, "INVALID_INPUT", "Invalid source sample size.");
+  const maximum = Math.max(200, limit);
+  let examined = 0;
+  return {
+    nextTake(pageSize = 100) {
+      invariant(examined < maximum, 409, "SOURCE_READ_SCAN_LIMIT", "Source sample is not available within the candidate window.");
+      return Math.min(pageSize, maximum - examined);
+    },
+    consume(count: number, requested: number) {
+      invariant(count <= requested, 409, "SOURCE_CHANGED", "Source sample exceeded its candidate page.");
+      examined += count;
+    },
+  };
+}
+
 /** Ordered keyset pages replenish denied candidates without retaining a corpus.
  * The caller releases all selected original proofs together after its joins. */
 export async function loadReadableArtifactSample<T extends { id: string }>(params: {
@@ -119,12 +136,14 @@ export async function loadReadableArtifactSample<T extends { id: string }>(param
   release: DigestReadRelease;
   loadBatch: (after: NoInfer<T> | undefined, take: number) => Promise<T[]>;
 }) {
-  invariant(Number.isSafeInteger(params.limit) && params.limit > 0, 400, "INVALID_INPUT", "Invalid source sample size.");
+  const budget = createArtifactSampleBudget(params.limit);
   const records: T[] = [];
   const proofs = new Map<string, LineageRoot[]>();
   let after: T | undefined;
   while (records.length < params.limit) {
-    const batch = await params.loadBatch(after, 100);
+    const take = budget.nextTake();
+    const batch = await params.loadBatch(after, take);
+    budget.consume(batch.length, take);
     invariant(batch.length <= 100 && (!batch.length || batch.at(-1)!.id !== after?.id),
       409, "SOURCE_CHANGED", "Source sample changed during pagination.");
     const next = batch.length ? structuredClone(batch.at(-1)!) : undefined;
@@ -135,7 +154,7 @@ export async function loadReadableArtifactSample<T extends { id: string }>(param
       proofs.set(row.id, proof);
       params.release.add(proof);
     }
-    if (batch.length < 100) break;
+    if (batch.length < take) break;
     after = next;
   }
   return { records, proofs, roots: mergeArtifactInputProofs(...proofs.values()) };
@@ -153,6 +172,7 @@ export async function loadReadableDigestQuery<T extends { id: string }>(params: 
   keyset?: boolean;
   release?: DigestReadRelease;
 }) {
+  const budget = createArtifactSampleBudget(params.limit);
   const records: T[] = [];
   const release = params.release ?? (params.completeScan ? new DigestReadRelease(params.actor, params.workspaceId) : undefined);
   const take = Math.min(100, Math.max(50, params.limit));
@@ -162,7 +182,9 @@ export async function loadReadableDigestQuery<T extends { id: string }>(params: 
   const candidates = new Set<string>();
   while (params.completeScan || records.length < params.limit) {
     const page = params.keyset ? { skip: 0, after } : { skip };
-    const batch = await params.loadBatch({ take, ...page });
+    const pageTake = params.completeScan ? take : budget.nextTake(take);
+    const batch = await params.loadBatch({ take: pageTake, ...page });
+    if (!params.completeScan) budget.consume(batch.length, pageTake);
     for (const row of batch) {
       invariant(!candidates.has(row.id), 409, "SOURCE_CHANGED", "Input collection changed during pagination.");
       candidates.add(row.id);
@@ -178,7 +200,7 @@ export async function loadReadableDigestQuery<T extends { id: string }>(params: 
     const selected = params.completeScan ? fresh : fresh.slice(0, params.limit - records.length);
     for (const row of selected) release?.add(captured.proofs.get(row.id) ?? []);
     records.push(...selected);
-    if (batch.length < take) break;
+    if (batch.length < pageTake) break;
     skip += batch.length;
     after = batch.at(-1);
   }

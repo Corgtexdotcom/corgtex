@@ -5,7 +5,8 @@ import { getFormatter, getTranslations } from "next-intl/server";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import { resolveWorkspaceEntityUrl } from "@/lib/workspace-entity-url";
-import { markAllNotificationsReadAction, markNotificationReadAction } from "../actions";
+import { markNotificationReadAction } from "../actions";
+import { MarkAllNotificationsReadButton } from "./MarkAllNotificationsReadButton";
 
 export const dynamic = "force-dynamic";
 
@@ -73,12 +74,10 @@ export default async function NotificationsPage({
           <h1>{t("title")}</h1>
           <p className="muted">{unreadSummary.complete ? t("unreadSummary", { count: unreadCount }) : unreadCount > 0 ? t("unreadSummaryMore", { count: unreadCount }) : t("unreadSummaryUnknown")}</p>
         </div>
-        {unreadCount > 0 && (
-          <form action={markAllNotificationsReadAction}>
-            <input type="hidden" name="workspaceId" value={workspaceId} />
-            <button type="submit" className="secondary">{t("markAllRead")}</button>
-          </form>
-        )}
+        {userId && <MarkAllNotificationsReadButton workspaceId={workspaceId}
+          canStart={unreadCount > 0 || !unreadSummary.complete}
+          labels={{ start: t("markAllRead"), continue: t("markAllContinue"), pending: t("markAllPending"),
+            partial: t("markAllPartial"), complete: t("markAllComplete"), error: t("markAllError") }} />}
       </header>
 
       <div className="notifications-toolbar">

@@ -360,4 +360,16 @@ describe("role onboarding domain", () => {
     expect(captured.filter(input => input.id === "candidate-199")).toEqual([]);
   });
 
+  it("does not disguise a bounded incomplete onboarding sample as missing context", async () => {
+    const rows = Array.from({length:501}, (_, i) => ({id:`hidden-${i}`}));
+    prismaMock.action.findMany.mockImplementation(async ({take,cursor}) => {
+      const start = cursor ? rows.findIndex(row => row.id === cursor.id) + 1 : 0;
+      return rows.slice(start,start+take);
+    });
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor,_ws,kind,rows) => new Set(kind === "Action" ? [] : rows.map(row=>row.id)));
+    const {buildRoleOnboardingContextWithLineageForConversation} = await import("./role-onboarding");
+    await expect(buildRoleOnboardingContextWithLineageForConversation({workspaceId:"workspace-1",conversationId:"conversation-1",userId:"user-1"})).rejects.toMatchObject({code:"SOURCE_READ_SCAN_LIMIT"});
+    expect(prismaMock.action.findMany).toHaveBeenCalledTimes(2);
+  });
+
 });

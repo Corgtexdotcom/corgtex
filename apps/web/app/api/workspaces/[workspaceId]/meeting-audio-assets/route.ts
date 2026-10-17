@@ -12,6 +12,18 @@ type RouteContext = {
 const DEFAULT_LIST_TAKE = 25;
 const MAX_LIST_TAKE = 50;
 const LIST_SCAN_PAGE = 100;
+const LIST_SCAN_LIMIT = 200;
+
+function audioHistoryCursor(value: string | null) {
+  if (value === null) return undefined;
+  try {
+    if (value.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(value)) throw new Error("cursor");
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+    if (typeof parsed.id !== "string" || !parsed.id || parsed.id.length > 256
+      || typeof parsed.createdAt !== "string" || !Number.isFinite(Date.parse(parsed.createdAt))) throw new Error("cursor");
+    return { id: parsed.id, createdAt: new Date(parsed.createdAt) };
+  } catch { throw new AppError(400, "INVALID_INPUT", "Invalid audio history cursor."); }
+}
 
 const audioAssetSelect = {
   id: true,
@@ -168,8 +180,10 @@ export async function GET(request: NextRequest, { params }: RouteContext) {
     const admitted: MeetingAudioAssetSummary[] = [];
     let roots: LineageRoot[] = [];
     const heads = new Map<string, string>();
-    let after: { id: string; createdAt: Date } | undefined;
-    while (admitted.length < requestedTake) {
+    let after = audioHistoryCursor(request.nextUrl.searchParams.get("cursor"));
+    let examined = 0;
+    let complete = false;
+    while (admitted.length < requestedTake && examined < LIST_SCAN_LIMIT) {
       const page = await prisma.meetingAudioAsset.findMany({
         where: { workspaceId: authorizedWorkspaceId, uploadedByUserId: ownerUserId,
           ...(after ? { OR: [{createdAt: {lt: after.createdAt}}, {createdAt: after.createdAt, id: {lt: after.id}}] } : {}) },
@@ -177,7 +191,9 @@ export async function GET(request: NextRequest, { params }: RouteContext) {
         take: LIST_SCAN_PAGE,
         select: audioAssetProofSelect,
       });
-      if (!page.length) break;
+      if (page.length > LIST_SCAN_PAGE) throw new AppError(409, "SOURCE_CHANGED", "Audio history exceeded its bound.");
+      examined += page.length;
+      if (!page.length) { complete = true; break; }
       if (after && page.some(asset => asset.createdAt > after!.createdAt ||
         (asset.createdAt.getTime() === after!.createdAt.getTime() && asset.id >= after!.id))) {
         throw new AppError(409, "SOURCE_CHANGED", "Audio history changed during pagination.");
@@ -196,8 +212,12 @@ export async function GET(request: NextRequest, { params }: RouteContext) {
       const selected = observed.value.records.slice(0, requestedTake - admitted.length);
       admitted.push(...selected);
       roots = mergeArtifactInputProofs(roots, ...selected.map(asset => observed.value.proofs.get(asset.id)!));
-      after = {id: page[page.length - 1].id, createdAt: page[page.length - 1].createdAt};
-      if (page.length < LIST_SCAN_PAGE) break;
+      // Do not skip readable rows fetched beyond the requested display slots.
+      const lastIndex = admitted.length === requestedTake && selected.length
+        ? page.findIndex(asset => asset.id === selected[selected.length - 1].id) : page.length - 1;
+      after = {id: page[lastIndex].id, createdAt: page[lastIndex].createdAt};
+      complete = page.length < LIST_SCAN_PAGE && lastIndex === page.length - 1;
+      if (complete) break;
     }
     const audioAssets = await withArtifactCountReleaseSnapshot(actor, authorizedWorkspaceId, roots, async () => {}, async tx => {
       const currentMembership = await requireWorkspaceMembership({ actor, workspaceId: authorizedWorkspaceId, tx });
@@ -207,7 +227,9 @@ export async function GET(request: NextRequest, { params }: RouteContext) {
       return admitted;
     }, heads);
 
-    return NextResponse.json({ audioAssets: audioAssets.map(serializeAudioAsset) });
+    return NextResponse.json({ audioAssets: audioAssets.map(serializeAudioAsset), complete,
+      nextCursor: complete || !after ? null : Buffer.from(JSON.stringify({id: after.id, createdAt: after.createdAt.toISOString()})).toString("base64url"),
+    });
   } catch (error) {
     return handleRouteError(error, { request, surface: "meeting_audio_assets", workspaceId });
   }

@@ -415,6 +415,58 @@ export async function countReadableNonSqlKnowledgeChunks(params: RetrievalAccess
   }
 }
 
+/** A single bounded display window across every source type, including SQL.
+ * The caller owns final release; no successful admission escapes its originals. */
+export async function summarizeReadableKnowledgeChunks(params: RetrievalAccess,
+  release: import("../../domain/src/digest-lineage").DigestReadRelease) {
+  let cursor: string | undefined;
+  let examined = 0;
+  let count = 0;
+  while (examined < 200) {
+    const take = Math.min(100, 200 - examined);
+    const page = await release.observeRead(async () => {
+      const chunks = await prisma.knowledgeChunk.findMany({
+        where: { workspaceId: params.workspaceId, accessDomain: { in: params.accessDomains },
+          sourceType: { in: params.sourceTypes }, ...(cursor ? { id: { gt: cursor } } : {}) },
+        orderBy: { id: "asc" }, take, select: chunkProjection,
+      });
+      const sourceIds = new Map<KnowledgeSourceType, string[]>();
+      for (const chunk of chunks) {
+        if (chunk.sourceType === "EXTERNAL_DATABASE") continue;
+        const ids = sourceIds.get(chunk.sourceType) ?? [];
+        if (!ids.includes(chunk.sourceId)) ids.push(chunk.sourceId);
+        sourceIds.set(chunk.sourceType, ids);
+      }
+      const sources = await readableKnowledgeSources({ ...params,
+        sourceTypes: (params.sourceTypes ?? []).filter(type => type !== "EXTERNAL_DATABASE") }, sourceIds);
+      const sqlChunks = chunks.filter(chunk => chunk.sourceType === "EXTERNAL_DATABASE");
+      const nativeIds = [...new Set(sqlChunks.flatMap(chunk => {
+        const id = (chunk.metadata as Record<string, unknown> | null)?.nativeInputId;
+        return typeof id === "string" && id ? [id] : [];
+      }))];
+      if (nativeIds.length) {
+        const records = await loadSqlNativeRunInputs(params.workspaceId, nativeIds);
+        const readable = await readableArtifactIds(params.actor, params.workspaceId, "SqlNativeRunInput", records);
+        for (const record of records) if (readable.has(record.id)) sources.set(`EXTERNAL_DATABASE:${record.id}`, {
+          kind: "SqlNativeRunInput", record, contentHash: lineageContentFingerprint("SqlNativeRunInput", record),
+        });
+      }
+      // Keep native SQL's existing bounded proof path eligible for SQL children.
+      const otherChunks = chunks.filter(chunk => chunk.sourceType !== "EXTERNAL_DATABASE");
+      const proof: LineageRoot[] = [];
+      const other = await admitKnowledgeChunks(params, otherChunks, sources, roots => proof.push(...roots));
+      const sql = await admitKnowledgeChunks(params, sqlChunks, sources, roots => proof.push(...roots));
+      return { chunks, count: other.length + sql.length, proof };
+    });
+    release.add(page.proof);
+    examined += page.chunks.length;
+    count += page.count;
+    if (page.chunks.length < take) return { count, complete: true };
+    cursor = page.chunks[page.chunks.length - 1].id;
+  }
+  return { count, complete: false };
+}
+
 /** Shared count/search admission. Raw rows never set a candidate cap or visible count. */
 export async function scanReadableKnowledgeChunks(params: RetrievalAccess, perTypeLimit?: number) {
   const retainedHeads = new Map<string, string>();

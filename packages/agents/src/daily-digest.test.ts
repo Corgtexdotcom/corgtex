@@ -1,5 +1,5 @@
 import type { ModelRequestControls } from "@corgtex/models";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   prismaMock,
@@ -115,6 +115,13 @@ vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
   sendEmail: sendEmailMock,
 }));
+
+const emailBoundary = vi.hoisted(() => ({ beforeCredentials: () => {}, upsert: vi.fn() }));
+vi.mock("../../shared/src/env", () => ({ env: {
+  get RESEND_API_KEY() { emailBoundary.beforeCredentials(); return "synthetic-email-key"; },
+  EMAIL_FROM: "Synthetic <sender@example.test>",
+} }));
+vi.mock("../../shared/src/db", () => ({ prisma: { emailDelivery: { upsert: emailBoundary.upsert } } }));
 
 vi.mock("@corgtex/models", () => ({
   defaultModelGateway: {
@@ -593,7 +600,7 @@ describe("runDailyDigest", () => {
       const { runDailyDigest } = await import("./daily-digest");
       await runDailyDigest({ workspaceId: "workspace-1", dateISO: "2026-04-30T12:00:00.000Z", cadence: "DAILY" });
       expect(sendEmailMock).toHaveBeenCalledTimes(1);
-      expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({ to: "active@example.test" }));
+      expect(sendEmailMock.mock.calls.map(([request]) => request)).toContainEqual(expect.objectContaining({ to: "active@example.test" }));
       expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
         status: "SENT", lineageRoots: expect.arrayContaining([expect.objectContaining({ kind: "Member", id: "active-member" })]),
       }));
@@ -687,7 +694,7 @@ describe("runDailyDigest", () => {
         buildArtifacts: 2,
       }),
     }));
-    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(sendEmailMock.mock.calls.map(([request]) => request)).toContainEqual(expect.objectContaining({
       to: "member@example.com",
       subject: "Weekly Newspaper - 2026-04-30 - Your Personal Briefing",
       html: expect.stringContaining("The Workspace One Edition"),
@@ -975,12 +982,12 @@ describe("runDailyDigest", () => {
       dateISO: "2026-04-30T12:00:00.000Z",
     });
 
-    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(sendEmailMock.mock.calls.map(([request]) => request)).toContainEqual(expect.objectContaining({
       to: "member@example.com",
       subject: "Stored Workspace Briefing - 2026-04-30 - Your Personal Briefing",
       html: expect.stringContaining("Stored Workspace Briefing - 2026-04-30"),
     }));
-    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(sendEmailMock.mock.calls.map(([request]) => request)).toContainEqual(expect.objectContaining({
       html: expect.stringContaining("Stored briefing item."),
     }));
   });
@@ -1040,7 +1047,7 @@ describe("runDailyDigest", () => {
       bodyMd: expect.stringContaining("## Workspace Narrative"),
       title: "Weekly Newspaper - 2026-04-30",
     }));
-    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(sendEmailMock.mock.calls.map(([request]) => request)).toContainEqual(expect.objectContaining({
       to: "member@example.com",
       html: expect.stringContaining("Weekly tactical: onboarding progress and role handoff were reviewed."),
     }));
@@ -1196,7 +1203,7 @@ describe("runDailyDigest", () => {
     });
 
     expect(sendEmailMock).toHaveBeenCalledTimes(1);
-    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(sendEmailMock.mock.calls.map(([request]) => request)).toContainEqual(expect.objectContaining({
       to: "daily@example.com",
     }));
     expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
@@ -1239,7 +1246,7 @@ describe("runDailyDigest", () => {
     });
 
     expect(sendEmailMock).toHaveBeenCalledTimes(1);
-    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(sendEmailMock.mock.calls.map(([request]) => request)).toContainEqual(expect.objectContaining({
       to: "human@example.com",
     }));
     expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
@@ -1373,7 +1380,7 @@ describe("runDailyDigest", () => {
     const { runDailyDigest } = await import("./daily-digest");
     await runDailyDigest({ workspaceId: "workspace-1", dateISO: "2026-04-30T12:00:00.000Z", cadence: "DAILY" });
 
-    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(sendEmailMock.mock.calls.map(([request]) => request)).toContainEqual(expect.objectContaining({
       to: "a@example.com",
       html: expect.stringContaining("Resolve urgent blocker"),
     }));
@@ -1550,11 +1557,11 @@ describe("runDailyDigest", () => {
       sentEmails: 2,
       skippedEmails: 0,
     }));
-    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(sendEmailMock.mock.calls.map(([request]) => request)).toContainEqual(expect.objectContaining({
       to: "a@example.com",
       html: expect.stringContaining("Advice request: Proposal - Approve pricing"),
     }));
-    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(sendEmailMock.mock.calls.map(([request]) => request)).toContainEqual(expect.objectContaining({
       to: "b@example.com",
     }));
     const htmlByRecipient = new Map(sendEmailMock.mock.calls.map(([request]) => [request.to, request.html]));
@@ -1601,7 +1608,7 @@ describe("runDailyDigest", () => {
       title: "Weekly Newspaper - 2026-04-30",
     }));
     expect(upsertNewspaperEditionMock).toHaveBeenCalled();
-    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(sendEmailMock.mock.calls.map(([request]) => request)).toContainEqual(expect.objectContaining({
       to: "member@example.com",
       subject: "Weekly Newspaper - 2026-04-30 - Your Personal Briefing",
     }));
@@ -1656,7 +1663,7 @@ describe("runDailyDigest", () => {
         })],
       }),
     }));
-    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(sendEmailMock.mock.calls.map(([request]) => request)).toContainEqual(expect.objectContaining({
       html: expect.stringContaining("customer rollout goal is active"),
     }));
   });
@@ -1710,7 +1717,7 @@ describe("runDailyDigest", () => {
     }));
     expect(upsertWorkspaceBriefingMock).toHaveBeenCalled();
     expect(upsertNewspaperEditionMock).toHaveBeenCalled();
-    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(sendEmailMock.mock.calls.map(([request]) => request)).toContainEqual(expect.objectContaining({
       to: "member@example.com",
       subject: "Daily Newspaper - 2026-04-30 - Your Personal Briefing",
     }));
@@ -1843,7 +1850,7 @@ describe("runDailyDigest", () => {
       reason: "non_draft_article",
       slug: "daily-newspaper-2026-04-30",
     }));
-    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(sendEmailMock.mock.calls.map(([request]) => request)).toContainEqual(expect.objectContaining({
       to: "member@example.com",
     }));
   });
@@ -1864,7 +1871,7 @@ describe("runDailyDigest", () => {
       demoLeadId: "lead-1",
     })).resolves.toEqual({ success: true, skipped: false });
 
-    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(sendEmailMock.mock.calls.map(([request]) => request)).toContainEqual(expect.objectContaining({
       to: "lead@example.com",
       subject: "Welcome to Corgtex - your first newspaper",
       html: expect.stringContaining("Ownership and control"),
@@ -1922,6 +1929,90 @@ describe("runDailyDigest", () => {
     expect(recordDemoWelcomeCrmActivityMock).toHaveBeenCalledWith({ workspaceId: "workspace-1",
       demoLeadId: "lead-1", expectedContactId: null });
   });
+  describe("personal newspaper email attempt guards", () => {
+    beforeEach(async () => {
+      const domain = await import("@corgtex/domain");
+      vi.mocked(domain.isArtifactInputProofReadable).mockReset().mockResolvedValue(true);
+      vi.mocked(domain.requireWorkspaceMembership).mockReset().mockResolvedValue({ id: "member-1", isActive: true } as any);
+      emailBoundary.beforeCredentials = () => {};
+      emailBoundary.upsert.mockReset().mockResolvedValue({});
+      getWorkspaceNewspaperCadenceMock.mockResolvedValue("DAILY");
+      vi.stubGlobal("fetch", vi.fn(async () => Response.json({ id: "synthetic-email" })));
+      const actualEmail = await import("../../shared/src/email");
+      sendEmailMock.mockReset().mockImplementation(actualEmail.sendEmail);
+    });
+    afterEach(() => { vi.unstubAllGlobals(); emailBoundary.beforeCredentials = () => {}; });
+    const run = async (controls: ModelRequestControls = {}) => (await import("./daily-digest")).runDailyDigest({ workspaceId: "workspace-1",
+      dateISO: "2026-04-30T12:00:00.000Z", cadence: "DAILY", ...controls });
+
+    it.each(["source", "caller"].flatMap(authority => [false, true].map(restore => ({ authority, restore }))))
+      ("withholds $authority revoked at real email credentials (restored=$restore)", async ({ authority, restore }) => {
+        const domain = await import("@corgtex/domain");
+        let epoch = 1, active = true, captured = 0;
+        vi.mocked(domain.isArtifactInputProofReadable).mockImplementation(async () => epoch === 1);
+        vi.mocked(domain.requireWorkspaceMembership).mockImplementation(async () => {
+          if (!active) throw new domain.AppError(403, "NOT_A_MEMBER", "Synthetic recipient departed");
+          return { id: "member-1", isActive: true } as any;
+        });
+        emailBoundary.beforeCredentials = () => {
+          captured = vi.mocked(domain.captureArtifactInputProof).mock.calls.length;
+          if (authority === "source") epoch++;
+          else active = false;
+          if (restore) { active = true; epoch++; }
+        };
+        const result = await run().catch(error => error);
+        expect(fetch).not.toHaveBeenCalled();
+        expect(result).toMatchObject({ code: authority === "caller" && !restore ? "NOT_A_MEMBER" : "SOURCE_CHANGED" });
+        expect(vi.mocked(domain.captureArtifactInputProof).mock.calls).toHaveLength(captured);
+        expect(emailBoundary.upsert).not.toHaveBeenCalled();
+        expect(recordNewspaperDeliveryMock).not.toHaveBeenCalledWith(expect.objectContaining({ status: "SENT" }));
+      });
+
+    it("sends unchanged personalized content through the real guarded SDK", async () => {
+      const result = await run();
+      expect(result.sentEmails).toBe(1);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      const [url, options] = vi.mocked(fetch).mock.calls[0];
+      expect(url).toBe("https://api.resend.com/emails");
+      expect(options?.signal).toBeInstanceOf(AbortSignal);
+      expect(JSON.parse(String(options?.body))).toMatchObject({ to: "member@example.com", subject: expect.stringContaining("Personal Briefing") });
+      expect(emailBoundary.upsert).toHaveBeenCalledTimes(1);
+    });
+
+    it("propagates cancellation during real email credential preparation", async () => {
+      const controller = new AbortController();
+      const reason = new Error("Synthetic newspaper cancellation");
+      emailBoundary.beforeCredentials = () => controller.abort(reason);
+      await expect(run({ signal: controller.signal })).rejects.toBe(reason);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(emailBoundary.upsert).not.toHaveBeenCalled();
+    });
+
+    it("composes the caller attempt guard at the real email HTTP boundary", async () => {
+      const reason = new Error("Synthetic caller guard denied email");
+      const authorizeAttempt = vi.fn(async () => { if (sendEmailMock.mock.calls.length) throw reason; });
+      await expect(run({ authorizeAttempt })).rejects.toBe(reason);
+      expect(authorizeAttempt).toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it("latches a swallowed retry denial before marking a newspaper sent", async () => {
+      const domain = await import("@corgtex/domain");
+      let attempts = 0;
+      sendEmailMock.mockImplementation(async (_request, controls) => {
+        const context = { signal: new AbortController().signal };
+        await controls?.authorizeAttempt(context); attempts++;
+        vi.mocked(domain.isArtifactInputProofReadable).mockResolvedValue(false);
+        await controls?.authorizeAttempt(context).catch(() => {});
+        expect(controls?.signal.aborted).toBe(true);
+        return { status: "SENT", providerMessageId: "must-not-publish" };
+      });
+      await expect(run()).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+      expect(attempts).toBe(1);
+      expect(recordNewspaperDeliveryMock).not.toHaveBeenCalledWith(expect.objectContaining({ status: "SENT" }));
+    });
+  });
+
   describe("provider attempt guards", () => {
     beforeEach(async () => {
       const domain = await import("@corgtex/domain");

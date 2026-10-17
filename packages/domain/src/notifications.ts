@@ -707,22 +707,45 @@ export async function listNotifications(actor: AppActor, workspaceId: string, op
   return page.items;
 }
 
+type NotificationWriteWindow = { complete: boolean; nextCursor: string | null };
+function notificationWritePosition(actor: AppActor & { kind: "user" }, workspaceId: string, cursor?: string) {
+  if (cursor === undefined) return undefined;
+  invariant(cursor.length > 0 && cursor.length <= 2048, 400, "INVALID_INPUT", "Invalid notification write continuation.");
+  let value;
+  try { value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")); } catch { /* validated below */ }
+  invariant(value?.v === 1 && value.purpose === "mark-all-read" && value.workspaceId === workspaceId
+    && value.userId === actor.user.id && typeof value.id === "string" && value.id.length > 0 && value.id.length <= 256
+    && typeof value.createdAt === "string" && Number.isFinite(Date.parse(value.createdAt))
+    && new Date(value.createdAt).toISOString() === value.createdAt,
+  400, "INVALID_INPUT", "Invalid notification write continuation.");
+  return { id: value.id as string, createdAt: new Date(value.createdAt) };
+}
+
 async function visitReadableNotifications<T>(actor: AppActor & { kind: "user" }, workspaceId: string,
   unreadOnly: boolean, visit: (rows: Awaited<ReturnType<typeof prisma.notification.findMany>>) => false | void,
-  finish: (tx: Prisma.TransactionClient) => Promise<T>, notificationId?: string): Promise<T> {
+  finish: (tx: Prisma.TransactionClient, window: NotificationWriteWindow) => Promise<T>, notificationId?: string,
+  window?: { cursor?: string }): Promise<T> {
   sealArtifactInputActor(actor);
   const roots = new Map<string, LineageRoot>();
   const heads = new Map<string, string>();
-  let after: { id: string; createdAt: Date } | undefined;
-  while (true) {
+  let after: { id: string; createdAt: Date } | undefined = window
+    ? notificationWritePosition(actor, workspaceId, window.cursor) : undefined;
+  let examined = 0;
+  let complete = false;
+  while (!window || examined < 200) {
     const rows = await prisma.notification.findMany({ where: {
       workspaceId, userId: actor.user.id, ...(unreadOnly ? { readAt: null } : {}),
       ...(notificationId === undefined ? {} : { id: notificationId }),
       ...(after ? { OR: [{ createdAt: { lt: after.createdAt } },
         { createdAt: after.createdAt, id: { lt: after.id } }] } : {}),
     }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 100 });
+    invariant(rows.length <= 100, 409, "SOURCE_CHANGED", "Notification write page exceeded its bound.");
     const last = rows.at(-1);
-    const next = last ? { id: last.id, createdAt: last.createdAt } : undefined;
+    const next = last ? { id: last.id, createdAt: last.createdAt } : after;
+    invariant(!after || !last || last.createdAt < after.createdAt
+      || (last.createdAt.getTime() === after.createdAt.getTime() && last.id < after.id),
+    409, "SOURCE_CHANGED", "Notification write continuation did not advance.");
+    examined += rows.length;
     const observed = await captureArtifactReadHeadObservation(async () => {
       const readable = await readableArtifactIds(actor, workspaceId, "Notification", rows);
       const admitted = rows.filter(row => readable.has(row.id));
@@ -737,14 +760,20 @@ async function visitReadableNotifications<T>(actor: AppActor & { kind: "user" },
       invariant(!heads.has(key) || heads.get(key) === stamp, 409, "SOURCE_CHANGED", "Notification inputs changed during collection.");
       heads.set(key, stamp);
     }
-    if (visit(observed.value) === false || rows.length < 100) break;
     after = next;
+    const keepGoing = visit(observed.value);
+    if (rows.length < 100) { complete = true; break; }
+    if (keepGoing === false) break;
   }
+  const nextCursor = window && !complete && after ? Buffer.from(JSON.stringify({
+    v: 1, purpose: "mark-all-read", workspaceId, userId: actor.user.id,
+    id: after.id, createdAt: after.createdAt.toISOString(),
+  })).toString("base64url") : null;
   // Earlier pages retain their original bodies, epochs and manifest heads. Check
   // all of them and current membership together before releasing a result/write.
   return withArtifactCountReleaseSnapshot(actor, workspaceId, [...roots.values()], async () => {}, async tx => {
     await requireWorkspaceMembership({ actor, workspaceId, tx });
-    return finish(tx);
+    return finish(tx, { complete, nextCursor });
   }, heads);
 }
 
@@ -772,17 +801,22 @@ export async function markNotificationRead(actor: AppActor, workspaceId: string,
   }, notificationId);
 }
 
-export async function markAllNotificationsRead(actor: AppActor, workspaceId: string) {
-  if (actor.kind !== "user") return;
+export async function markAllNotificationsRead(actor: AppActor, workspaceId: string, opts?: { cursor?: string }) {
+  if (actor.kind !== "user") return { updatedCount: 0, complete: true, nextCursor: null };
   const userId = actor.user.id;
   await requireWorkspaceMembership({ actor, workspaceId });
   const pages: string[][] = [];
-  await visitReadableNotifications(actor, workspaceId, true, rows => {
+  return visitReadableNotifications(actor, workspaceId, true, rows => {
     if (rows.length) pages.push(rows.map(row => row.id));
-  }, async tx => {
-    for (const ids of pages) await tx.notification.updateMany({
-      where: { id: { in: ids }, workspaceId, userId, readAt: null },
-      data: { readAt: new Date() },
-    });
-  });
+  }, async (tx, window) => {
+    let updatedCount = 0;
+    for (const ids of pages) {
+      const updated = await tx.notification.updateMany({
+        where: { id: { in: ids }, workspaceId, userId, readAt: null },
+        data: { readAt: new Date() },
+      });
+      updatedCount += updated.count;
+    }
+    return { updatedCount, ...window };
+  }, undefined, opts ?? {});
 }

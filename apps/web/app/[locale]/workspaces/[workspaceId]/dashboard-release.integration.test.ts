@@ -9,7 +9,7 @@ vi.mock("next-intl/server", () => ({
   getTranslations: async () => (key: string) => key,
   getFormatter: async () => ({ dateTime: () => "synthetic" }),
 }));
-vi.mock("@corgtex/knowledge", () => ({ countReadableKnowledgeChunkAggregate: async () => { await hooks.afterFamilies(); return 0; } }));
+vi.mock("@corgtex/knowledge", () => ({ getReadableKnowledgeChunkSummary: async () => { await hooks.afterFamilies(); return {count: 0, complete: true}; } }));
 vi.mock("@corgtex/domain", async importOriginal => ({ ...await importOriginal<typeof import("@corgtex/domain")>(), getUnreadNotificationSummary: async () => ({ count: 0, complete: true, available: true }) }));
 import WorkspaceDashboard from "./page";
 vi.stubGlobal("React", React);
@@ -44,5 +44,8 @@ it.each(["withdrawal", "epoch ABA", "head", "unchanged"] as const)("dashboard re
   };
   const result = WorkspaceDashboard({ params: Promise.resolve({ workspaceId: workspace.id }) });
   if (change === "unchanged") expect(JSON.stringify(await result, (key, value) => key === "type" || key === "_owner" ? undefined : value)).toContain("Early article canary");
-  else await expect(result).rejects.toMatchObject({ code: change === "withdrawal" ? "NOT_A_MEMBER" : "SOURCE_CHANGED" });
+  // The original-proof prepass can reject a departed reader before the final
+  // explicit membership callback. Both authority paths must withhold the JSX.
+  else await expect(result).rejects.toMatchObject({ code: change === "withdrawal"
+    ? expect.stringMatching(/^(NOT_A_MEMBER|SOURCE_CHANGED)$/) : "SOURCE_CHANGED" });
 });

@@ -178,7 +178,7 @@ describe("digest input receipts", () => {
     expect((await prisma.brainArticle.findUniqueOrThrow({ where: { id: article.id } })).bodyMd).toBe("Independent human revision");
   });
 
-  it("filters over 5000 unknown and private contributors before the editorial limit and rejects another workspace", async () => {
+  it("bounds unknown candidate discovery while preserving private and foreign source denial", async () => {
     const { workspace, other, ownerActor, readerActor } = await fixture();
     const safe = await createArticle(ownerActor, { workspaceId: workspace.id, slug: "safe", title: "Safe synthetic input", type: "PROJECT",
       authority: "REFERENCE", isPrivate: false, bodyMd: "Permitted text" });
@@ -190,10 +190,9 @@ describe("digest input receipts", () => {
       slug: `unknown-${index}`, title: `Unknown ${index}`, type: "PROJECT" as const, authority: "REFERENCE" as const,
       bodyMd: "Unknown synthetic input", updatedAt: new Date(Date.now() + index),
     })) });
-    const candidates = await collectWorkspaceBriefingCandidates({ workspaceId: workspace.id, actor: ownerActor,
-      audience: [ownerActor, readerActor], since: new Date(Date.now() - 60_000), until: new Date(Date.now() + 60_000) });
-    expect(candidates.map((candidate) => candidate.sourceId)).toEqual([safe.id]);
-    expect(JSON.stringify(candidates)).not.toContain("Private body");
+    await expect(collectWorkspaceBriefingCandidates({ workspaceId: workspace.id, actor: ownerActor,
+      audience: [ownerActor, readerActor], since: new Date(Date.now() - 60_000), until: new Date(Date.now() + 60_000) }))
+      .rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
     const common = await captureReadableDigestInputs({ actor: ownerActor, audience: [ownerActor, readerActor],
       workspaceId: workspace.id, kind: "BrainArticle", records: [safe, mixed] });
     expect(common.records.map((record) => record.id)).toEqual([safe.id]);

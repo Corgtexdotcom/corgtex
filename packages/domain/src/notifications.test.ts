@@ -226,7 +226,7 @@ describe("notifications domain", () => {
 
   it("markAllNotificationsRead marks all unread notifications for the actor", async () => {
     const { markAllNotificationsRead } = await import("./notifications");
-    await markAllNotificationsRead(actor, "workspace-1");
+    await expect(markAllNotificationsRead(actor, "workspace-1")).resolves.toEqual({ updatedCount: 1, complete: true, nextCursor: null });
     expect(prismaMock.notification.updateMany).toHaveBeenCalledWith({
       where: { id: { in: ["notification-1"] }, workspaceId: "workspace-1", userId: "user-1", readAt: null },
       data: { readAt: new Date("2026-04-24T12:00:00.000Z") },

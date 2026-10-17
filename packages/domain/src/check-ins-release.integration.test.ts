@@ -38,7 +38,7 @@ for (const [name, list] of [["company", listCompanyUnderstandingQuestions], ["da
       const foreign = await prisma.workspace.create({ data: { name: "Other tenant", slug: randomUUID() } });
       await expect(list(f.actor, { workspaceId: foreign.id })).rejects.toMatchObject({ code: "NOT_A_MEMBER" });
     });
-    it("pages beyond 5000 denied questions and stops after the requested readable sample", async () => {
+    it("reports unavailable after 200 of more than 5000 denied questions", async () => {
       const f = await setup();
       const date = new Date("2026-01-01T00:00:00Z");
       await prisma.checkIn.createMany({ data: Array.from({ length: 5501 }, (_, index) => ({
@@ -56,11 +56,10 @@ for (const [name, list] of [["company", listCompanyUnderstandingQuestions], ["da
         expect(rows.length).toBeLessThanOrEqual(100);
         return rows;
       }) as typeof prisma.checkIn.findMany);
-      expect((await list(f.actor, { workspaceId: f.workspaceId, take: 3 })).map(row => row.id))
-        .toEqual(f.questions.slice(0, 3).map(row => row.id));
-      expect(pages).toHaveLength(51);
+      await expect(list(f.actor, { workspaceId: f.workspaceId, take: 3 })).rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
+      expect(pages).toHaveLength(2);
       expect(pages.every(page => page.size === 100)).toBe(true);
-      expect(new Set(pages.flatMap(page => page.ids)).size).toBe(5100);
+      expect(new Set(pages.flatMap(page => page.ids)).size).toBe(200);
       expect(query.mock.calls.every(([args]) => JSON.stringify(args?.orderBy) ===
         JSON.stringify([{ priority: "desc" }, { createdAt: "desc" }, { id: "desc" }]))).toBe(true);
       const deniedPrefix = pages.slice(0, 50).flatMap(page => page.ids);

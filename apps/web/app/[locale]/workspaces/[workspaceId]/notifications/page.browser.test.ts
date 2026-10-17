@@ -16,7 +16,8 @@ vi.mock("@corgtex/domain", () => ({
   },
 }));
 vi.mock("@/lib/auth", () => ({ requirePageActor: async () => ({ kind: "user", user: { id: "synthetic-user" } }) }));
-vi.mock("../actions", () => ({ markAllNotificationsReadAction: async () => {}, markNotificationReadAction: async () => {} }));
+vi.mock("../actions", () => ({ markNotificationReadAction: async () => {} }));
+vi.mock("../settings/actions", () => ({ markAllNotificationsReadAction: async () => ({ updatedCount: 0, complete: true, nextCursor: null }) }));
 vi.mock("next-intl/server", () => ({
   getTranslations: async () => createTranslator({ locale: "en", messages: JSON.parse(await readFile(new URL("../../../../../messages/en.json", import.meta.url), "utf8")).notificationsPage }),
   getFormatter: async () => ({ dateTime: (date: Date) => date.toISOString(), relativeTime: () => "today" }),
@@ -35,6 +36,7 @@ it("keeps an empty hidden-history continuation reachable without claiming exact 
   expect(markup).toContain("No visible notifications here.");
   expect(markup).toContain("Unread count is not available yet.");
   expect(markup).not.toContain("No unread notifications");
+  expect(markup).toContain("Mark all read");
   expect(markup).toContain("cursor=opaque-continuation");
   expect(markup).not.toContain("page=1000000");
 });

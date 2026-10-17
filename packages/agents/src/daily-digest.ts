@@ -1,5 +1,5 @@
 import { env, logger, prisma, sendEmail } from "@corgtex/shared";
-import type { AppActor } from "@corgtex/shared";
+import type { AppActor, EmailAttemptControls } from "@corgtex/shared";
 import { defaultModelGateway, resolveModel, type ModelAttemptGuard, type ModelRequestControls } from "@corgtex/models";
 import {
   AGENT_REGISTRY,
@@ -1950,6 +1950,8 @@ Rules:
 
   for (const member of recipientMembers) {
     const recipientActor: AppActor = { kind: "user", user: member.user };
+    const emailController = new AbortController();
+    const emailSignal = params.signal ? AbortSignal.any([params.signal, emailController.signal]) : emailController.signal;
     try {
       await requireWorkspaceMembership({ actor: recipientActor, workspaceId: params.workspaceId });
       const safeOutcomeRoots = mergeArtifactInputProofs(workspaceRoots, await captureArtifactInputProof(agentActor, params.workspaceId,
@@ -2000,6 +2002,25 @@ Rules:
         [{ kind: "Member", id: member.id, snapshot: { user: member.user } }]);
       const recipientRoots = mergeArtifactInputProofs(briefingRoots, memberRoots, safeRoles.roots,
         safeOwnedProposals.roots, safeAssignedTensions.roots, ...personalItems.map((item) => item.lineageRoots!));
+      const originalRecipientRoots = structuredClone(recipientRoots);
+      const emailControls: EmailAttemptControls = {
+        signal: emailSignal,
+        authorizeAttempt: async context => {
+          try {
+            emailSignal.throwIfAborted(); context.signal.throwIfAborted();
+            await params.authorizeAttempt?.(context);
+            emailSignal.throwIfAborted(); context.signal.throwIfAborted();
+            await requireWorkspaceMembership({ actor: recipientActor, workspaceId: params.workspaceId });
+            if (!await isArtifactInputProofReadable(recipientActor, params.workspaceId, originalRecipientRoots)) {
+              throw new AppError(409, "SOURCE_CHANGED", "Newspaper recipient inputs changed before delivery.");
+            }
+            emailSignal.throwIfAborted(); context.signal.throwIfAborted();
+          } catch (error) {
+            emailController.abort(error);
+            throw error;
+          }
+        },
+      };
       const recipientBriefing = personalizeWorkspaceBriefing(sharedBriefing, {
         roleNames: activeRoles.flatMap((assignment) => assignment.role?.name ? [assignment.role.name] : []),
         circleNames: activeRoles.flatMap((assignment) => assignment.role?.circle?.name ? [assignment.role.circle.name] : []),
@@ -2083,7 +2104,8 @@ Rules:
               kind: "MEMBER_NEWSPAPER",
             },
           },
-        });
+        }, emailControls);
+        emailSignal.throwIfAborted();
         if (emailResult.status === "SENT") {
           sentEmails++;
           await recordNewspaperDelivery({
@@ -2118,6 +2140,7 @@ Rules:
           });
         }
       } catch (error) {
+        emailSignal.throwIfAborted();
         if (error instanceof AppError && error.code === "NOT_A_MEMBER") { skippedEmails++; continue; }
         failedEmails++;
         const message = error instanceof Error ? error.message : "Unknown email error";
@@ -2144,6 +2167,7 @@ Rules:
         });
       }
     } catch (error) {
+      emailSignal.throwIfAborted();
       if (error instanceof AppError && error.code === "NOT_A_MEMBER") { skippedEmails++; continue; }
       // A recipient can disappear between the membership and identity receipt.
       try { await requireWorkspaceMembership({ actor: recipientActor, workspaceId: params.workspaceId }); }

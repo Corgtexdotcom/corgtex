@@ -156,6 +156,7 @@ describe("audit and timeline source admission", () => {
 
   it.each(["Action", "BrainArticle"] as const)("withholds %s audit identity and existence from another member", async kind => {
     const { source, audit } = await privateSource(kind);
+    if (kind === "Action") audit.action = "legacy-history.recovered";
     const result = await listAuditLogs(other, "ws-1", { entityType: kind, entityId: source.id });
     expect(result).toEqual([]);
     expect(audit.meta.title).toBe(source.title);
@@ -167,8 +168,9 @@ describe("audit and timeline source admission", () => {
     expect(result).toEqual({ auditLogs: [], relatedEvents: [] });
   });
 
-  it("retains a proven owner's native operation facts and filters unproved jobs and free text", async () => {
+  it.each(["action.created", "legacy-history.recovered"])("retains a proven owner's %s facts and filters unproved jobs and free text", async action => {
     const { source, audit, event } = await privateSource("Action");
+    audit.action = action;
     const job = { id: "proved-job", workspaceId: "ws-1", eventId: event.id, type: "knowledge.sync.action", payload: { actionId: source.id } };
     db.workflowJob.findFirst.mockImplementation(async ({ where }) => where.id === job.id && where.workspaceId === job.workspaceId ? job : null);
     await recordArtifactInputLineage({ tx: db as any, actor: owner, workspaceId: "ws-1",

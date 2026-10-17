@@ -1,5 +1,5 @@
 import { readableArtifactIds, captureArtifactInputProof, mergeLineageInputRoot, withArtifactCountReleaseSnapshot, captureArtifactPermissionEpochs, lineageContentFingerprint, type LineageKind, type LineageRoot } from "./source-lineage";
-import { DigestReadRelease } from "./digest-lineage";
+import { createArtifactSampleBudget, DigestReadRelease } from "./digest-lineage";
 import { requireUnreservedPublicDemoEmail } from "./public-demo-identity";
 import { Prisma, type AuditLog, type MemberInviteRequestStatus, type MemberKind, type MemberRole } from "@prisma/client";
 import { artifactPermissionEpochIdentities, capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, mergePermissionEpochProofs, parsePermissionEpochProof } from "./source-permission-epochs";
@@ -1021,15 +1021,18 @@ export async function getMemberProfile(actor: AppActor, workspaceId: string, mem
   const recent = async <T extends {id: string; createdAt: Date; recordedAt?: Date}>(kind: LineageKind,
     dateField: "createdAt" | "recordedAt", load: (after: RecentCursor | undefined, take: number) => Promise<T[]>) => {
     const selected: T[] = [];
+    const budget = createArtifactSampleBudget(5);
     let after: RecentCursor | undefined;
     for (;;) {
-      const batch = await load(after, 100);
+      const take = budget.nextTake();
+      const batch = await load(after, take);
+      budget.consume(batch.length, take);
       const readable = await readableArtifactIds(actor, workspaceId, kind, batch);
       const admitted = batch.filter(row => readable.has(row.id)).slice(0, 5 - selected.length);
       if (admitted.length) retain(await captureArtifactInputProof(actor, workspaceId,
         admitted.map(row => ({kind, id: row.id, snapshot: row}))));
       selected.push(...admitted);
-      if (selected.length === 5 || batch.length < 100) return selected;
+      if (selected.length === 5 || batch.length < take) return selected;
       const last = batch[batch.length - 1], at = last[dateField];
       invariant(at instanceof Date, 409, "SOURCE_CHANGED", "Recent source ordering is unavailable.");
       after = {id: last.id, at};
@@ -1055,8 +1058,11 @@ export async function getMemberProfile(actor: AppActor, workspaceId: string, mem
   const kinds: Record<string, LineageKind> = { Action: "Action", Tension: "Tension", Proposal: "Proposal", Goal: "Goal", BrainArticle: "BrainArticle", BrainSource: "BrainSource", Circle: "Circle", Role: "Role", Member: "Member", Meeting: "Meeting" };
   const recentActivity: Array<Omit<AuditLog, "meta"> & {meta: null}> = [];
   let afterActivity: RecentCursor | undefined;
+  const activityBudget = createArtifactSampleBudget(10);
   while (recentActivity.length < 10) {
-    const logs = await prisma.auditLog.findMany({where: {workspaceId, actorUserId: member.user.id, ...createdBefore(afterActivity)}, orderBy: createdOrder, take: 100});
+    const take = activityBudget.nextTake();
+    const logs = await prisma.auditLog.findMany({where: {workspaceId, actorUserId: member.user.id, ...createdBefore(afterActivity)}, orderBy: createdOrder, take});
+    activityBudget.consume(logs.length, take);
     for (const log of logs) {
       const kind = log.entityType ? kinds[log.entityType] : null;
       if (!kind || !log.entityId) continue;
@@ -1067,7 +1073,7 @@ export async function getMemberProfile(actor: AppActor, workspaceId: string, mem
       if (recentActivity.length === 10) break;
     }
 
-    if (recentActivity.length === 10 || logs.length < 100) break;
+    if (recentActivity.length === 10 || logs.length < take) break;
     const last = logs[logs.length - 1];
     afterActivity = {id: last.id, at: last.createdAt};
   }

@@ -1,8 +1,8 @@
 import { notificationUnreadCountLabel } from "@/lib/notification-count";
-import { isGlobalOperator, listActorWorkspaces, getUnreadNotificationSummary, listConversations, listDailyCompanyUnderstandingQuestions, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig, getUserWorkspaceOnboardingState, getAiWorkspaceSelectionState, resolveWorkspaceModuleAccess, hasWorkspaceInitialKnowledgeSource, SELF_SERVE_WORKSPACE_TOUR_KEY, SELF_SERVE_WORKSPACE_TOUR_VERSION } from "@corgtex/domain";
+import { isGlobalOperator, listActorWorkspaces, getUnreadNotificationSummary, listRecentConversations, listDailyCompanyUnderstandingQuestions, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig, getUserWorkspaceOnboardingState, getAiWorkspaceSelectionState, resolveWorkspaceModuleAccess, getWorkspaceInitialKnowledgeSummary, SELF_SERVE_WORKSPACE_TOUR_KEY, SELF_SERVE_WORKSPACE_TOUR_VERSION } from "@corgtex/domain";
 import { workspaceBranding, prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
-import { countReadableKnowledgeChunkAggregate } from "@corgtex/knowledge";
+import { getReadableKnowledgeChunkSummary } from "@corgtex/knowledge";
 import type { Metadata } from "next";
 import { logoutAction, requirePageActor } from "@/lib/auth";
 import { filterWorkspacesForDeploymentScope } from "@/lib/deployment-workspace-scope";
@@ -43,8 +43,11 @@ function localizedPath(path: string, locale: string) {
 }
 
 async function hasWorkspaceInitialKnowledge(actor: AppActor, workspaceId: string) {
-  return await hasWorkspaceInitialKnowledgeSource(actor, workspaceId)
-    || await countReadableKnowledgeChunkAggregate(actor, workspaceId, ["DOCUMENT", "MEETING"]) > 0;
+  const sourceSummary = await getWorkspaceInitialKnowledgeSummary(actor, workspaceId);
+  if (sourceSummary.found || !sourceSummary.complete) return true;
+  const summary = await getReadableKnowledgeChunkSummary(actor, workspaceId, { sourceTypes: ["DOCUMENT", "MEETING"] });
+  // Incomplete discovery must not send an established workspace back to onboarding.
+  return summary.count > 0 || !summary.complete;
 }
 
 function syncSettingsRecord(value: unknown) {
@@ -85,7 +88,7 @@ export default async function WorkspaceLayout({
 
   const [unreadSummary, conversationsResult, dailyQuestions, featureFlags, membership, invitePolicy, workspaceRuntime, onboardingState, hasInitialKnowledge, googleConnection, productFeedbackTarget, hasSupportAccess] = await Promise.all([
     userId ? getUnreadNotificationSummary(actor, workspaceId) : Promise.resolve({ count: 0, complete: true, available: true }),
-    listConversations(actor, workspaceId, { take: 30 }).catch(() => ({ items: [], total: 0, take: 30, skip: 0 })),
+    listRecentConversations(actor, workspaceId, { take: 30 }).catch(() => ({ items: [], complete: false })),
     userId ? listDailyCompanyUnderstandingQuestions(actor, { workspaceId, take: 3 }).catch(() => []) : Promise.resolve([]),
     getWorkspaceFeatureFlags(workspaceId),
     requireWorkspaceMembership({ actor, workspaceId }),
@@ -234,6 +237,7 @@ export default async function WorkspaceLayout({
         unreadCount={unreadSummary.count}
           unreadCountLabel={notificationUnreadCountLabel(unreadSummary)}
         conversations={conversationSummaries}
+        historyLimited={!conversationsResult.complete}
         aiWorkspaceState={aiWorkspaceState}
         captureActions={captureActions}
         utilityActions={mobileUtilityActions}
@@ -295,6 +299,7 @@ export default async function WorkspaceLayout({
         readOnly={isDemo}
         workspaceId={workspaceId}
         conversations={conversationSummaries}
+        historyLimited={!conversationsResult.complete}
         companyQuestions={dailyQuestions.map((question) => ({
           id: question.id,
           questionText: question.questionText,

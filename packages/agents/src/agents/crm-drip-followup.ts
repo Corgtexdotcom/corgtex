@@ -82,8 +82,8 @@ export async function runCrmDripFollowupAgent(params: {
         await revalidate();
         return recordDripFollowUp(params.workspaceId, payload.demoLeadId, emailContent, { actor, lineageRoots,
           expectedFollowUpNumber: payload.followUpNumber, operationId: job.id,
-          send: (recipient, operationId) => sendEmail({ to: recipient, subject: "A quick follow-up from Corgtex", html: emailBodyToHtml(emailContent),
-            idempotencyKey: `crm-drip/${operationId}` }),
+          send: (recipient, operationId, controls) => sendEmail({ to: recipient, subject: "A quick follow-up from Corgtex", html: emailBodyToHtml(emailContent),
+            idempotencyKey: `crm-drip/${operationId}` }, controls),
         });
       }, { receipt });
       return { lineageReceipt: receipt, resultJson: { emailContent, delivery: delivery as Prisma.InputJsonValue } };

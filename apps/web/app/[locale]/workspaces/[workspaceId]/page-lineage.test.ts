@@ -3,6 +3,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, expect, it, vi, type Mock } from "vitest";
 
 const state = vi.hoisted(() => ({
+  realTranslations: false,
+  chunkSummary: {count: 3, complete: true},
   queries: new Map<string, Mock<(query: Query) => Promise<Row[]>>>(),
   readable: vi.fn(),
   unread: vi.fn<(actor: unknown, workspaceId: string) => Promise<number>>(async () => 0),
@@ -52,11 +54,18 @@ vi.mock("@corgtex/domain", async () => {
     requireWorkspaceMembership: async () => ({ id: "member", workspaceId: "ws", userId: "viewer", role: "MEMBER", isActive: true }),
   };
 });
-vi.mock("@corgtex/knowledge", () => ({ countReadableKnowledgeChunkAggregate: async () => 3 }));
+vi.mock("@corgtex/knowledge", () => ({ getReadableKnowledgeChunkSummary: async () => state.chunkSummary }));
 vi.mock("@/lib/auth", () => ({ requirePageActor: async () => ({ kind: "user", user: { id: "viewer" } }) }));
 vi.mock("next/link", () => ({ default: ({ children, ...props }: React.ComponentProps<"a">) => React.createElement("a", props, children) }));
 vi.mock("next-intl/server", () => ({
-  getTranslations: async () => (key: string, args?: Record<string, unknown>) => [key, ...Object.entries(args ?? {}).map(([name, value]) => `${name}=${value}`)].join(" "),
+  getTranslations: async () => {
+    if (state.realTranslations) {
+      const { readFile } = await import("node:fs/promises");
+      const { createTranslator } = await import("next-intl");
+      return createTranslator({ locale: "en", messages: JSON.parse(await readFile("apps/web/messages/en.json", "utf8")).dashboard });
+    }
+    return (key: string, args?: Record<string, unknown>) => [key, ...Object.entries(args ?? {}).map(([name, value]) => `${name}=${value}`)].join(" ");
+  },
   getFormatter: async () => ({ dateTime: () => "Synthetic date" }),
 }));
 vi.mock("@/lib/components/MarkdownRenderer", () => ({ MarkdownRenderer: ({ markdown, className }: { markdown: string; className?: string }) => React.createElement("div", { className }, markdown) }));
@@ -85,6 +94,7 @@ function installRows(tables: Record<string, Row[]>) {
 }
 beforeEach(() => {
   state.release.mockImplementation(async (_actor, _workspaceId, _roots, remote, finish) => {await remote(); return finish({});});
+  state.chunkSummary = {count: 3, complete: true};
   vi.clearAllMocks(); state.unread.mockResolvedValue(0); state.edition.mockReturnValue(null);
   installRows({});
   state.readable.mockImplementation(async (_actor, workspaceId, _kind, rows: Row[]) => {
@@ -199,3 +209,73 @@ it("withholds the response when the final original-proof release rejects", async
   state.release.mockRejectedValueOnce(new Error("Synthetic final release denied"));
   await expect(renderDashboard()).rejects.toThrow("Synthetic final release denied");
 });
+
+it("bounds large hidden families and renders qualified counts and empty snapshots", async () => {
+  const hidden = (prefix: string) => Array.from({length: 201}, (_, i) => row(`${prefix}-${String(i).padStart(3, "0")}`, "Restricted payload", false));
+  installRows({ action: hidden("a"), adviceRequest: hidden("r"), brainArticle: hidden("b"), meeting: hidden("m"),
+    workspaceBriefing: hidden("z").reverse(), newspaperEdition: hidden("y").reverse() });
+  const html = await renderDashboard();
+  expect(html).toContain("limitedSnapshot");
+  expect(html).toContain("snapshotEmpty");
+  expect(html).not.toContain("personalNewspaperEmpty");
+  expect(html).not.toContain("newspaperEmptyBody");
+  expect(html).not.toContain("Restricted payload");
+  expect(html).toContain("personal=… total=…");
+  expect(html).toContain("articles=… meetings=…");
+  for (const family of ["action", "adviceRequest", "brainArticle", "meeting", "workspaceBriefing", "newspaperEdition"]) {
+    expect(state.queries.get(family)).toHaveBeenCalledTimes(2);
+  }
+});
+
+it("qualifies personal counts when only the advice window is incomplete", async () => {
+  installRows({ adviceRequest: Array.from({length: 200}, (_, i) => ({...row(`r-${String(i).padStart(3, "0")}`, "Restricted", false), process: {subjectType: "ACTION", subjectId: "a"}})),
+    action: [{...row("a", "Assigned", true), assigneeMemberId: "member"}] });
+  const html = await renderDashboard();
+  expect(html).toContain("personal=1+ total=1");
+  expect(html).toContain("limitedSnapshot");
+});
+
+it("qualifies an incomplete knowledge-only count without claiming an empty knowledge base", async () => {
+  state.chunkSummary = {count: 0, complete: false};
+  const html = await renderDashboard();
+  expect(html).toContain("limitedSnapshot");
+  expect(html).toContain("chunks=…");
+  expect(html).not.toContain("chunks=0");
+});
+
+it.runIf(process.env.DASHBOARD_WINDOW_BROWSER_QA === "1")("shows the limited snapshot and usable full-list link in a running browser", async () => {
+  const { createServer } = await import("node:http");
+  const { mkdir, readFile } = await import("node:fs/promises");
+  const { chromium } = await import("playwright");
+  installRows({ action: Array.from({length: 201}, (_, i) => ({...row(`a-${String(i).padStart(3, "0")}`, "Visible assigned action", true), assigneeMemberId: "member"})) });
+  state.realTranslations = true;
+  const css = (await Promise.all(["globals.css", "styles/tokens.css", "styles/components.css", "styles/animations.css", "styles/pages.css"].map(path => readFile(`apps/web/app/${path}`, "utf8")))).join("\n");
+  const server = createServer(async (request, response) => {
+    try {
+      if (request.url?.includes("/actions")) { response.end("<h1>Action section fixture</h1>"); return; }
+      response.setHeader("Content-Type", "text/html; charset=utf-8");
+      response.end(`<html><head><meta charset="utf-8"><style>${css}</style></head><body>${await renderDashboard()}</body></html>`);
+    } catch (error) { response.writeHead(500).end(String(error)); }
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address(); if (!address || typeof address === "string") throw new Error("No fixture port");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const browser = await chromium.launch({headless: true});
+  try {
+    const page = await browser.newPage();
+    await page.route("**/*", route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await page.goto(`${origin}/workspaces/ws`);
+    await page.getByRole("status").filter({hasText: "Limited snapshot."}).waitFor();
+    const actions = page.getByRole("link", {name: "Actions: 200+ for you, 200+ total open", exact: true});
+    await actions.waitFor();
+    await mkdir(".artifacts/source-160-bounded-aggregate", {recursive: true});
+    await page.screenshot({path: ".artifacts/source-160-bounded-aggregate/dashboard.png", fullPage: true});
+    await actions.click();
+    await page.getByRole("heading", {name: "Action section fixture"}).waitFor();
+    expect(new URL(page.url()).searchParams.getAll("status")).toEqual(["OPEN", "IN_PROGRESS"]);
+  } finally {
+    state.realTranslations = false;
+    await browser.close();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+}, 30000);

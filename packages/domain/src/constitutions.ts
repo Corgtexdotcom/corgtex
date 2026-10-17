@@ -4,7 +4,7 @@ import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
-import { DigestReadRelease } from "./digest-lineage";
+import { createArtifactSampleBudget, DigestReadRelease } from "./digest-lineage";
 import { captureArtifactInputProof, invalidateArtifactInputLineage, readableArtifactIds, recordArtifactInputLineage } from "./source-lineage";
 import { finishProducerLineage, prepareProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 
@@ -211,19 +211,22 @@ export async function getCurrentConstitution(actor: AppActor, workspaceId: strin
   const release = new DigestReadRelease(actor, workspaceId);
   let after: { version: number; id: string } | undefined;
   // Current reads do not need the history endpoint's exact readable total.
-  // Replenish denied pages without imposing a maximum history length.
+  // A bounded current sample must not report absence after an incomplete scan.
+  const budget = createArtifactSampleBudget(1);
   while (true) {
+    const take = budget.nextTake();
     const rows = await prisma.constitution.findMany({
       where: { workspaceId, ...(after ? { OR: [
         { version: { lt: after.version } }, { version: after.version, id: { lt: after.id } },
       ] } : {}) },
-      orderBy: [{ version: "desc" }, { id: "desc" }], take: 100,
+      orderBy: [{ version: "desc" }, { id: "desc" }], take,
     });
+    budget.consume(rows.length, take);
     for (const row of rows) {
       const captured = await release.capture("Constitution", [row]);
       if (captured.records.length) return release.finish(captured.records[0]);
     }
-    if (rows.length < 100) return release.finish(null);
+    if (rows.length < take) return release.finish(null);
     const last = rows[rows.length - 1]!;
     after = { version: last.version, id: last.id };
   }

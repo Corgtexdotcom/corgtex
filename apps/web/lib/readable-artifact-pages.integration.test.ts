@@ -52,7 +52,7 @@ it.each(["withdrawal", "epoch ABA", "head"] as const)("releases families togethe
   const titles: string[] = [];
   const first = await scanReadableArtifactPages({ actor: f.actor, workspaceId: f.workspaceId, kind: "Document", release,
     loadPage: async () => [f.row], visit: row => { titles.push(row.title); } });
-  expect(first).toBe(1);
+  expect(first).toEqual({ count: 1, complete: true, nextCursor: null });
   expect(titles).toEqual(["Original canary"]);
   const second = await scanReadableArtifactPages({ actor: f.actor, workspaceId: f.workspaceId, kind: "Meeting", release,
     loadPage: async () => { await f.change(kind); return []; }, visit: () => {} });

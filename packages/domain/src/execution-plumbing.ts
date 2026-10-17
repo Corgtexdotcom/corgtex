@@ -41,7 +41,7 @@ import { captureArtifactInputProof, captureArtifactInputSnapshotProof, isArtifac
   captureImmutableArtifactInputProof, isArtifactInputProofReadable, readableArtifactIds, assertArtifactInputWriteFence,
   sealArtifactInputActor, lineageContentFingerprint, inspectStoredArtifactInputDependencies, type LineageKind, type LineageRoot } from "./source-lineage";
 import { finishProducerLineage, prepareProducerLineage, type ProducerLineageParams } from "./producer-lineage";
-import { captureReadableDigestInputs } from "./digest-lineage";
+import { createArtifactSampleBudget, captureReadableDigestInputs } from "./digest-lineage";
 import { getMcpToolInputRoots } from "./mcp-tool-input-context";
 import { lockArtifactReadAuthorityRows, prepareArtifactCommitPreflight, withArtifactCommitPreflight } from "./artifact-commit-preflight";
 import { prepareArtifactSourceCommit, withArtifactSourceCommit } from "./artifact-source-commit";
@@ -889,19 +889,23 @@ export async function listExecutionRequests(actor: AppActor, params: {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const status = params.status ? String(params.status).trim().toUpperCase() : null;
   invariant(!status || status in ExecutionRequestStatus, 400, "INVALID_INPUT", "Unsupported execution request status.");
+  invariant(params.take == null || Number.isSafeInteger(params.take), 400, "INVALID_INPUT", "Invalid execution sample size.");
   const take = Math.min(Math.max(params.take ?? 20, 1), 100);
   const release = new WorkItemReadRelease(actor, params.workspaceId);
   const visible: ExecutionRequestRecord[] = [];
+  const budget = createArtifactSampleBudget(take);
   let after: { id: string; createdAt: Date } | undefined;
   while (visible.length < take) {
+    const pageTake = budget.nextTake();
     const requests = await prisma.executionRequest.findMany({
       where: { ...executionRequestAccessWhere(actor, params.workspaceId),
         ...(status ? { status: status as ExecutionRequestStatus } : {}),
         ...(after ? { OR: [{ createdAt: { lt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] } : {}),
-      }, include: executionRequestInclude, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: 100,
+      }, include: executionRequestInclude, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: pageTake,
     });
     invariant(requests.length <= 100 && (!requests.length || requests.at(-1)!.id !== after?.id),
       503, "SOURCE_READ_SCAN_CHANGED", "Execution page changed; retry.");
+    budget.consume(requests.length, pageTake);
     for (const candidate of requests) {
       let request: ExecutionRequestRecord;
       try { request = await release.observeRead(() => loadExecutionRequest(actor, params.workspaceId, candidate.id, release)); }
@@ -914,7 +918,7 @@ export async function listExecutionRequests(actor: AppActor, params: {
       visible.push(request);
       if (visible.length === take) break;
     }
-    if (requests.length < 100) break;
+    if (requests.length < pageTake) break;
     after = requests.at(-1);
   }
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
@@ -989,11 +993,14 @@ async function recentExecutionInputs<T extends { id: string; updatedAt: Date; re
 }) {
   let after: T | undefined;
   let selected: T[] = [];
+  const budget = createArtifactSampleBudget(params.take);
   const proofs = new Map<string, LineageRoot[]>();
   for (;;) {
+    budget.nextTake();
     const batch = await params.load(after);
     invariant(batch.length <= 100 && (!batch.length || batch.at(-1)!.id !== after?.id),
       503, "SOURCE_READ_SCAN_CHANGED", "Execution context page changed; retry.");
+    budget.consume(batch.length, 100);
     const next = batch.length ? structuredClone(batch.at(-1)!) : undefined;
     const read = await params.release.observeRead(() => captureReadableDigestInputs({ ...params, records: batch.filter(row => !params.matches || params.matches(row)) }));
     for (const row of read.records) {

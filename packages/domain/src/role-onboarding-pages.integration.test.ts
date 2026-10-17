@@ -79,12 +79,17 @@ it("pages all five persisted candidate kinds through denied prefixes with stable
   console.log(JSON.stringify({ scenario: "five-kind-denied-prefix", maximumHydratedPage: Math.max(...sizes), selected: result?.lineageInputs.length }));
 }, 60_000);
 
-it("finds eight readable actions beyond a 5001-row denied prefix without a global scan cap", async () => {
+it("rejects an incomplete onboarding sample after 200 of 5001 denied candidates", async () => {
   const f = await fixture();
   await candidates(f, 5001, 8, false);
-  const result = await buildRoleOnboardingContextWithLineageForConversation(f);
-  expect(result?.lineageInputs.filter((input) => input.kind === "Action").map((input) => input.id)).toEqual(
-    Array.from({ length: 8 }, (_, i) => `action-${String(5001 + i).padStart(6, "0")}`));
+  const delegate = getPrismaClient().action;
+  const find = delegate.findMany.bind(delegate);
+  const sizes: number[] = [];
+  vi.spyOn(delegate, "findMany").mockImplementation((async (args: Parameters<typeof find>[0]) => {
+    const rows = await find(args); sizes.push(rows.length); return rows;
+  }) as typeof delegate.findMany);
+  await expect(buildRoleOnboardingContextWithLineageForConversation(f)).rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
+  expect(sizes).toEqual([100,100]);
 }, 120_000);
 
 it.each(["head", "source-revoke-restore", "caller-revoke-restore"] as const)("withholds the selected original proof after a late %s change", async (change) => {

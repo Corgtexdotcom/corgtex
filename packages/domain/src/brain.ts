@@ -811,15 +811,15 @@ export async function listArticleVersions(actor: AppActor, params: {
 
   invariant(article, 404, "NOT_FOUND", "Article not found.");
 
-  const readableArticle = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", [article]);
-  invariant(readableArticle.has(article.id), 404, "NOT_FOUND", "Article not found.");
+  const release = new DigestReadRelease(actor, params.workspaceId);
+  invariant((await release.capture("BrainArticle", [article])).records.length, 404, "NOT_FOUND", "Article not found.");
 
   const versions = await prisma.brainArticleVersion.findMany({
     where: { articleId: article.id },
     orderBy: { version: "desc" },
   });
-  const readableVersions = await readableArtifactIds(actor, params.workspaceId, "BrainArticleVersion", versions);
-  return versions.filter((version) => readableVersions.has(version.id));
+  const readableVersions = await release.capture("BrainArticleVersion", versions);
+  return release.finish(readableVersions.records);
 }
 
 // ---------------------------------------------------------------------------

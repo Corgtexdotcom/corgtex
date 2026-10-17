@@ -37,7 +37,8 @@ vi.mock("./source-lineage", () => ({
 }));
 vi.mock("./producer-lineage", () => ({ prepareProducerLineage: vi.fn().mockResolvedValue({ mode: "DERIVED", inputs: [], roots: [] }),
   finishProducerLineage: vi.fn().mockResolvedValue({}) }));
-vi.mock("./digest-lineage", () => ({
+vi.mock("./digest-lineage", async importOriginal => ({
+  createArtifactSampleBudget: (await importOriginal<typeof import("./digest-lineage")>()).createArtifactSampleBudget,
   DigestReadRelease: class {
     constructor(readonly actor: AppActor, readonly workspaceId: string) {}
     async capture<T extends { id: string }>(kind: LineageKind, rows: T[]) {
@@ -386,6 +387,15 @@ describe("Constitution input proof and readers", () => {
     });
     expect(readableArtifactIds).toHaveBeenCalledTimes(101);
     expect(readableArtifactIds).not.toHaveBeenCalledWith(actor, "ws-1", "Constitution", [{ id: "unneeded", version: 99 }]);
+  });
+
+  it("does not report no current constitution after 200 denied candidates", async () => {
+    const rows = Array.from({length: 501}, (_, i) => ({id: `hidden-${i}`, version: 501-i}));
+    txMock.constitution.findMany.mockImplementation(async ({where, take}: any) => rows.filter(row => !where.OR || row.version < where.OR[0].version.lt).slice(0, take));
+    vi.mocked(readableArtifactIds).mockResolvedValue(new Set());
+    await expect(getCurrentConstitution(actor, "ws-1")).rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
+    expect(txMock.constitution.findMany).toHaveBeenCalledTimes(2);
+    expect(readableArtifactIds).toHaveBeenCalledTimes(200);
   });
 
   it("loads only provably readable policy rows before sort and fingerprint", async () => {

@@ -1,3 +1,4 @@
+import { createArtifactSampleBudget } from "./digest-lineage";
 import { captureArtifactInputProof, captureArtifactReadHeadObservation, mergeLineageInputRoot, readableArtifactIds, withArtifactCountReleaseSnapshot, type LineageInput, type LineageRoot } from "./source-lineage";
 import { prepareProducerLineage, finishProducerLineage } from "./producer-lineage";
 import { Prisma, type RoleOnboardingStatus } from "@prisma/client";
@@ -547,12 +548,15 @@ async function loadRoleOnboardingContext(params: {
   async function sample<T extends { id: string }>(kind: LineageInput["kind"], take: number,
     fetch: (page: { take: number; cursor?: { id: string }; skip?: number }) => Promise<T[]>) {
     const selected: T[] = [];
+    const budget = createArtifactSampleBudget(take);
     let cursor: { id: string } | undefined;
     for (;;) {
-      const page = await fetch({ take: 100, ...(cursor ? { cursor, skip: 1 } : {}) });
+      const pageTake = budget.nextTake();
+      const page = await fetch({ take: pageTake, ...(cursor ? { cursor, skip: 1 } : {}) });
+      budget.consume(page.length, pageTake);
       invariant(page.length <= 100, 409, "SOURCE_CHANGED", "Invalid onboarding candidate page.");
       selected.push(...await admitted(kind, page, take - selected.length));
-      if (selected.length === take || page.length < 100) return selected;
+      if (selected.length === take || page.length < pageTake) return selected;
       const last = page.at(-1)!;
       invariant(last.id !== cursor?.id, 409, "SOURCE_CHANGED", "Onboarding candidates changed during collection.");
       cursor = { id: last.id };

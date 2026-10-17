@@ -36,6 +36,7 @@ type MobileWorkspaceShellProps = {
   unreadCount: number;
   unreadCountLabel?: string;
   conversations: ConversationSummary[];
+  historyLimited?: boolean;
   aiWorkspaceState: AiWorkspaceLaunchState;
   captureActions: MobileCaptureAction[];
   utilityActions: ReactNode;
@@ -55,6 +56,7 @@ export function MobileWorkspaceShell({
   unreadCount,
   unreadCountLabel,
   conversations,
+  historyLimited = false,
   aiWorkspaceState,
   captureActions,
   utilityActions,
@@ -332,6 +334,7 @@ export function MobileWorkspaceShell({
                   <ChatInterface
                     workspaceId={workspaceId}
                     conversations={conversations}
+              historyLimited={historyLimited}
                     activeSessionId={null}
                     compact={true}
                     mobileMode={true}

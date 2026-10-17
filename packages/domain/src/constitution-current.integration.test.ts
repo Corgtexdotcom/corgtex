@@ -42,11 +42,11 @@ it("loads a bounded current page with constant work as older history grows", asy
   expect(calls).toHaveBeenCalledWith({ where: { workspaceId: f.workspaceId }, orderBy: [{ version: "desc" }, { id: "desc" }], take: 100 });
 });
 
-it("finds the newest readable version after more than 5000 denied versions", async () => {
+it("reports current constitution unavailable after 200 of more than 5000 denied versions", async () => {
   const f = await fixture(5002, 1);
   const calls = vi.spyOn(prisma.constitution, "findMany");
-  expect(await getCurrentConstitution(f.actor, f.workspaceId)).toMatchObject({ id: f.row.id, version: 1 });
-  expect(calls).toHaveBeenCalledTimes(51);
+  await expect(getCurrentConstitution(f.actor, f.workspaceId)).rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
+  expect(calls).toHaveBeenCalledTimes(2);
   expect(calls.mock.calls.every(([args]) => args?.take === 100)).toBe(true);
 }, 120_000);
 

@@ -18,7 +18,7 @@ import { requireDraftManager, requireCreationInputRoots } from "./draft-permissi
 import { requireCollaborativeWorkItemEditor } from "./collaborative-permissions";
 import { resolveWorkspaceProposalLink } from "./proposal-links";
 import { captureImmutableArtifactInputProof, readableArtifactIds } from "./source-lineage";
-import { captureReadableDigestInputs } from "./digest-lineage";
+import { captureReadableDigestInputs, DigestReadRelease } from "./digest-lineage";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import {
@@ -503,7 +503,14 @@ export async function listActionChecklistItems(actor: AppActor, params: {
   workspaceId: string;
   actionId: string;
 }) {
-  await getAction(actor, { workspaceId: params.workspaceId, actionId: params.actionId });
+  await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "list_actions" });
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const action = await prisma.action.findFirst({ where: {
+    id: params.actionId, workspaceId: params.workspaceId, ...privacyFilter(actor, membership), archivedAt: null,
+  } });
+  invariant(action, 404, "NOT_FOUND", "Action not found.");
+  const release = new DigestReadRelease(actor, params.workspaceId);
+  invariant((await release.capture("Action", [action])).records.length, 404, "NOT_FOUND", "Action not found.");
   const items = await prisma.actionChecklistItem.findMany({
     where: {
       workspaceId: params.workspaceId,
@@ -515,8 +522,8 @@ export async function listActionChecklistItems(actor: AppActor, params: {
       { id: "asc" },
     ],
   });
-  const visible = await readableArtifactIds(actor, params.workspaceId, "ActionChecklistItem", items);
-  return items.filter((item) => visible.has(item.id));
+  const visible = await release.capture("ActionChecklistItem", items);
+  return release.finish(visible.records);
 }
 
 export async function createActionChecklistItem(actor: AppActor, params: ProducerLineageParams & {

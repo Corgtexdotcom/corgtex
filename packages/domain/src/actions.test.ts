@@ -2111,6 +2111,12 @@ describe("action domain lifecycle", () => {
     ]);
     vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, kind, rows) =>
       new Set(rows.filter((row) => kind !== "ActionChecklistItem" || row.id === "item-safe").map((row) => row.id)));
+    vi.mocked(captureArtifactInputProof).mockImplementation(async (_actor, _workspaceId, inputs) => {
+      if (inputs.some(input => input.kind === "ActionChecklistItem" && input.id !== "item-safe")) {
+        throw new AppError(409, "UNKNOWN_LINEAGE", "Unproven checklist fixture");
+      }
+      return [];
+    });
     const { listActions, listActionChecklistItems } = await import("./actions");
     await expect(listActions(actor, "workspace-1")).resolves.toMatchObject({
       items: [{ id: "action-1", checklistItemCount: 1, checklistCompletedCount: 0 }],

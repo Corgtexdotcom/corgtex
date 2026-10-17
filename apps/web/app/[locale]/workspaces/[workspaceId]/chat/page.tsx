@@ -1,4 +1,4 @@
-import { listConversations } from "@corgtex/domain";
+import { listRecentConversations } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { getTranslations } from "next-intl/server";
 import { ChatInterface } from "./ChatInterface";
@@ -18,7 +18,7 @@ export default async function ChatPage({
   const actor = await requirePageActor();
   const t = await getTranslations("chat");
 
-  const { items: conversations } = await listConversations(actor, workspaceId, { take: 30 });
+  const { items: conversations, complete } = await listRecentConversations(actor, workspaceId, { take: 30 });
 
   return (
     <>
@@ -30,6 +30,7 @@ export default async function ChatPage({
       </header>
       <ChatInterface
         workspaceId={workspaceId}
+        historyLimited={!complete}
         conversations={conversations.map((c) => ({
           id: c.id,
           topic: c.topic,
