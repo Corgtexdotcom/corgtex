@@ -4,9 +4,9 @@ import type { ChatCompletionResponse } from "@corgtex/models";
 import { MCP_TOOL_CAPABILITIES } from "../../domain/src/mcp-tool-capabilities";
 
 const m = vi.hoisted(() => ({
-  membership: vi.fn(), credential: vi.fn(), grant: vi.fn(),
+  membership: vi.fn(), prepared: vi.fn(), credential: vi.fn(), grant: vi.fn(),
   chat: vi.fn(), events: vi.fn(), stream: vi.fn(), search: vi.fn(), memories: vi.fn(), profile: vi.fn(), onboarding: vi.fn(),
-  reveal: vi.fn(), pending: vi.fn(), pendingFind: vi.fn(), pendingFindUnique: vi.fn(), pendingUpdate: vi.fn(), pendingUpdateMany: vi.fn(),
+  reveal: vi.fn(), credentialAccess: vi.fn(), pending: vi.fn(), pendingFind: vi.fn(), pendingFindUnique: vi.fn(), pendingUpdate: vi.fn(), pendingUpdateMany: vi.fn(),
   activity: vi.fn(), actions: vi.fn(), storeMemory: vi.fn(), accessDomains: vi.fn(), externalSearch: vi.fn(),
 }));
 vi.mock("@corgtex/shared", () => ({
@@ -14,6 +14,9 @@ vi.mock("@corgtex/shared", () => ({
   mcpCredentialVersion: (hash: string) => `version:${hash}`,
   env: { MODEL_CHAT_CONVERSATION: "synthetic-model", MODEL_PROVIDER: "openai_compatible" },
   prisma: {
+    $transaction: vi.fn(async (work) => work((await import("@corgtex/shared")).prisma)),
+    $executeRaw: vi.fn().mockResolvedValue(1),
+    conversationSession: { findFirst: vi.fn(async ({ where }) => ({ id: where.id, workspaceId: where.workspaceId, userId: where.userId, agentKey: where.agentKey })) },
     agentCredential: { findUnique: m.credential, findFirst: vi.fn() },
     workspaceSupportGrant: { findUnique: m.grant },
     modelUsage: { count: vi.fn().mockResolvedValue(0), findMany: vi.fn().mockResolvedValue([]) },
@@ -33,13 +36,57 @@ vi.mock("@corgtex/shared", () => ({
   },
 }));
 vi.mock("../../domain/src/auth", () => ({ requireWorkspaceMembership: m.membership }));
-vi.mock("@corgtex/knowledge", () => ({ searchIndexedKnowledge: m.search }));
+vi.mock("@corgtex/knowledge", () => ({ searchIndexedKnowledge: m.search, getKnowledgeSearchInputRoots: async () => [{ kind: "Workspace", id: "synthetic-workspace", fingerprint: "a".repeat(64) }] }));
+vi.mock("./conversation-inputs", async () => {
+  const shared = await import("@corgtex/shared");
+  const domain = await import("@corgtex/domain");
+  const collector = { roots: async () => [{ kind: "Workspace", id: "synthetic-workspace", fingerprint: "a".repeat(64) }],
+    assertReadable: async () => {}, admitRecords: async (_kind: unknown, rows: unknown[]) => rows,
+    admitKnowledgeResults: async (rows: unknown[]) => rows,
+    capture: async () => {}, captureTrusted: async () => {}, addReceipt: async () => {}, preserveConsumedRevisions: async () => {} };
+  return {
+    prepareConversationInputs: async (ctx: any) => {
+      m.prepared(ctx);
+      await domain.requireWorkspaceMembership({ actor: ctx.actor, workspaceId: ctx.workspaceId });
+      return { collector: { ...collector, assertReadable: () => domain.requireWorkspaceMembership({ actor: ctx.actor, workspaceId: ctx.workspaceId }) },
+        promptInputId: "prompt-fixture", pageContext: ctx.pageContext ?? null, systemPrompt: ctx.systemPrompt ?? null };
+    },
+    loadConversationHistory: async (_actor: unknown, _ws: string, sessionId: string, limit: number) => (await shared.prisma.conversationTurn.findMany({
+      where: { conversationId: sessionId }, orderBy: { sequenceNumber: "desc" }, take: limit })).reverse(),
+    loadConversationOnboarding: async (workspaceId: string, conversationId: string, userId: string) => domain.buildRoleOnboardingContextForConversation({ workspaceId, conversationId, userId }),
+  };
+});
+
+
 vi.mock("@corgtex/models", async importOriginal => ({
   ...await importOriginal<typeof import("@corgtex/models")>(),
   assertCatalogModelBudget: vi.fn().mockResolvedValue(undefined),
   defaultModelGateway: { chat: m.chat, chatEventStream: m.events, chatStream: m.stream },
 }));
 vi.mock("@corgtex/domain", async () => ({
+  sealArtifactInputActor: (await import("../../domain/src/source-lineage")).sealArtifactInputActor,
+  mergeArtifactInputProofs: (await import("../../domain/src/digest-lineage")).mergeArtifactInputProofs,
+  // These operation-authority fixtures model already-admitted SQL inputs;
+  // operation capability and current credential checks remain real. Full permission,
+  // provenance and revocation behavior is exercised in conversation.provenance.
+  withArtifactInputWriteFence: (_fence: unknown, work: () => Promise<unknown>) => work(),
+  withArtifactInputReadCapture: async (_actor: unknown, _ws: string, read: () => Promise<unknown>) => ({ value: await read(), roots: [{ kind: "Workspace", id: "synthetic-workspace", fingerprint: "a".repeat(64) }] }),
+  captureConversationInputReceipt: vi.fn(async () => ({})),
+  captureArtifactInputProof: vi.fn().mockResolvedValue([{ kind: "Workspace", id: "synthetic-workspace", fingerprint: "a".repeat(64) }, { kind: "ArtifactInputSnapshot", id: "snapshot-fixture", fingerprint: "a".repeat(64) }]),
+  captureImmutableArtifactInputProof: vi.fn(async (_actor, _ws, roots) => [...roots, { kind: "ArtifactInputSnapshot", id: "snapshot-fixture", fingerprint: "a".repeat(64) }]),
+  captureArtifactInputSnapshotProof: vi.fn(async () => [{ kind: "ArtifactInputSnapshot", id: "snapshot-fixture", fingerprint: "a".repeat(64) }]),
+  currentArtifactInputRoots: vi.fn(async () => [{ kind: "Workspace", id: "synthetic-workspace", fingerprint: "a".repeat(64) }]),
+  isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
+  lineageContentFingerprint: vi.fn().mockReturnValue("a".repeat(64)),
+  recordArtifactInputLineage: vi.fn().mockResolvedValue(undefined),
+  assertArtifactInputWriteFence: vi.fn().mockResolvedValue(undefined),
+  scanSourceReadableRecords: vi.fn(async ({ load }) => load(undefined, 5001)),
+  captureReadableDigestInputs: vi.fn(async ({ records }) => ({ records: records.filter(Boolean), roots: [{ kind: "Workspace", id: "synthetic-workspace", fingerprint: "a".repeat(64) }] })),
+  getWorkspaceToolLinkInputRoots: vi.fn().mockResolvedValue([{ kind: "Workspace", id: "synthetic-workspace", fingerprint: "a".repeat(64) }]),
+  duplicateGuardErrorPayload: vi.fn(),
+  isDuplicateGuardMatchError: vi.fn().mockReturnValue(false),
+  readableArtifactIds: vi.fn(async (_actor, _ws, _kind, rows) => new Set(rows.map((row: any) => row.id))),
+
   ...await import("../../domain/src/errors"),
   ...await import("../../domain/src/agent-operation-capabilities"),
   ...await import("../../domain/src/agent-operation-authorization"),
@@ -50,7 +97,7 @@ vi.mock("@corgtex/domain", async () => ({
   resolveKnowledgeAccessDomains: m.accessDomains,
   loadRelevantMemories: m.memories, storeAgentMemory: m.storeMemory,
   buildRoleOnboardingContextForConversation: m.onboarding,
-  revealWorkspaceToolLinkCredential: m.reveal, createActivity: m.activity,
+  revealWorkspaceToolLinkCredential: m.reveal, getWorkspaceToolLinkCredentialAccess: m.credentialAccess, createActivity: m.activity,
   archiveWorkspaceToolLink: vi.fn(), upsertWorkspaceToolLink: vi.fn(), listWorkspaceToolLinks: vi.fn().mockResolvedValue([]),
   listExternalMcpConnections: vi.fn().mockResolvedValue([]), executeExternalMcpTool: vi.fn(),
   fetchConnectedExternalMcpContext: vi.fn(), searchConnectedExternalMcpContext: m.externalSearch,
@@ -124,6 +171,7 @@ beforeEach(() => {
   m.profile.mockResolvedValue({ bodyMd: "synthetic-private-profile" });
   m.onboarding.mockResolvedValue("synthetic-private-onboarding");
   m.reveal.mockResolvedValue({ credentialLabel: "synthetic-label", credentialSecret: "synthetic-secret" });
+  m.credentialAccess.mockResolvedValue({ id: "synthetic-link", credentialLabel: "synthetic-label", hasCredential: true });
   m.pending.mockImplementation(({ data }) => ({ ...data, id: "synthetic-pending", expiresAt: new Date(Date.now() + 60_000) }));
   m.actions.mockResolvedValue([]);
   m.externalSearch.mockResolvedValue({ results: [], errors: [] });
@@ -131,6 +179,46 @@ beforeEach(() => {
 });
 
 describe.each([false, true])("conversation scope enforcement (streaming=%s)", streaming => {
+  it("snapshots scope, page and receipt arrays before the first async authorization check", async () => {
+    let start!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { start = resolve; });
+    const paused = new Promise<void>(resolve => { release = resolve; });
+    m.membership.mockImplementationOnce(async () => {
+      start(); await paused;
+      return { id: "synthetic-member", workspaceId, userId: "synthetic-user", role: "ADMIN", isActive: true };
+    });
+    script(response([toolCall("reveal_tool_link_credential", { toolLinkId: "synthetic-link" })]));
+    const operationScopes = ["conversations:write", "context-graph:read"];
+    const pageContext = { surface: "context-map" as const, route: null,
+      mapView: { id: "original-view", name: "Original map", viewType: "CUSTOM" }, includeStale: false,
+      selectedObjectIds: ["original-object"], selectedObjects: [{ id: "original-object", title: "Original title", objectType: "Goal", status: "approved" }],
+      selectedRelationship: null };
+    const lineageRoots = [{ kind: "Workspace" as const, id: workspaceId, fingerprint: "a".repeat(64) }];
+    const requestLineageRoots = [{ kind: "ConversationPromptInput" as const, id: "original-prompt", fingerprint: "b".repeat(64) }];
+    const expected = structuredClone({ operationScopes, pageContext, lineageRoots, requestLineageRoots });
+    const submitted = { ...context(oauthHuman, operationScopes), pageContext, lineageRoots, requestLineageRoots };
+    const pending = run(streaming, submitted);
+    await started;
+    operationScopes.push("tools:credentials:read");
+    pageContext.mapView.id = "changed-view";
+    pageContext.selectedObjectIds.push("changed-object");
+    pageContext.selectedObjects[0].title = "Changed secret title";
+    lineageRoots[0].fingerprint = "c".repeat(64);
+    requestLineageRoots[0].id = "changed-prompt";
+    release();
+    await pending;
+    const prepared = m.prepared.mock.calls[0][0];
+    expect(prepared).toMatchObject(expected);
+    expect(prepared.operationScopes).not.toBe(operationScopes);
+    expect(Object.isFrozen(prepared.operationScopes)).toBe(true);
+    expect(prepared.pageContext).not.toBe(pageContext);
+    expect(prepared.lineageRoots).not.toBe(lineageRoots);
+    expect(prepared.requestLineageRoots).not.toBe(requestLineageRoots);
+    expect(m.credentialAccess).not.toHaveBeenCalled();
+    expect(m.reveal).not.toHaveBeenCalled();
+    expect(JSON.stringify((streaming ? m.events : m.chat).mock.calls)).not.toContain("Changed secret title");
+  });
+
   it.each(["credential", "oauth-human"] as const)("skips eager Brain, memory, profile, and onboarding for chat-only %s", async principal => {
     const actor = principal === "credential" ? agent(["conversations:write"]) : oauthHuman;
     const ctx = { ...context(actor, principal === "oauth-human" ? ["conversations:write"] : undefined), agentKey: "role-onboarding" };
@@ -155,6 +243,7 @@ describe.each([false, true])("conversation scope enforcement (streaming=%s)", st
     const actor = principal === "credential" ? agent(["conversations:write"]) : oauthHuman;
     await run(streaming, context(actor, principal === "oauth-human" ? ["conversations:write"] : undefined));
     expect(m.reveal).not.toHaveBeenCalled();
+    expect(m.credentialAccess).not.toHaveBeenCalled();
   });
 
   it.each(["credential", "oauth-human"] as const)("denies a pure requested Brain batch before knowledge access resolution for %s", async principal => {
@@ -166,13 +255,16 @@ describe.each([false, true])("conversation scope enforcement (streaming=%s)", st
     expect(m.search).not.toHaveBeenCalled();
   });
 
-  it.each(["credential", "oauth-human"] as const)("allows an explicitly granted sensitive native operation for %s", async principal => {
+  it.each(["credential", "oauth-human"] as const)("allows explicitly granted credential metadata while keeping secret reveal out of model context for %s", async principal => {
     script(response([toolCall("reveal_tool_link_credential", { toolLinkId: "synthetic-link" })]));
     const scopes = ["conversations:write", "tools:credentials:read"];
     const actor = principal === "credential" ? agent(scopes) : oauthHuman;
     await run(streaming, context(actor, principal === "oauth-human" ? scopes : undefined));
-    expect(m.reveal).toHaveBeenCalledOnce();
-    expect(m.reveal).toHaveBeenCalledWith(actor, { workspaceId, toolLinkId: "synthetic-link" });
+    expect(m.credentialAccess).toHaveBeenCalledOnce();
+    expect(m.credentialAccess).toHaveBeenCalledWith(actor, { workspaceId, toolLinkId: "synthetic-link" });
+    expect(m.reveal).not.toHaveBeenCalled();
+    expect(JSON.stringify(m.chat.mock.calls)).not.toContain("synthetic-secret");
+    expect(JSON.stringify(m.stream.mock.calls)).not.toContain("synthetic-secret");
   });
 
   it("does not create a CRM pending operation before its write scope check", async () => {
@@ -231,7 +323,7 @@ describe.each([false, true])("conversation scope enforcement (streaming=%s)", st
     script(response([toolCall("query_actions")]));
     await run(streaming, context(agent(["conversations:write", "actions:read"])));
     expect(m.actions).toHaveBeenCalledOnce();
-    expect(m.actions.mock.calls[0][0]).toMatchObject({ where: { workspaceId, isPrivate: false } });
+    expect(m.actions.mock.calls[0][0]).toMatchObject({ where: { AND: [{ workspaceId, isPrivate: false, archivedAt: null }] } });
   });
 
   it("rejects revoked chat credentials before model or eager storage reads", async () => {

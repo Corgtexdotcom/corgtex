@@ -58,7 +58,7 @@ export default async function CircleDetailPage({
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
 
   const [treeData, currentWorkspace, agentAssignments, allAgents, roleDirectoryData] = await Promise.all([
-    listCircleTree(workspaceId),
+    listCircleTree(actor, workspaceId),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
     prisma.circleAgentAssignment.findMany({
       where: { circleId, circle: { workspaceId, archivedAt: null } },

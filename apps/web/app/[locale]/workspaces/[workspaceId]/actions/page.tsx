@@ -181,7 +181,7 @@ export default async function ActionsPage({
   const page = Math.min(requestedPage, pageCount);
   const [actionResult, circles, members] = await Promise.all([
     listActions(actor, workspaceId, { ...actionListOptions, skip: (page - 1) * ACTION_PAGE_SIZE }),
-    listCircles(workspaceId),
+    listCircles(actor, workspaceId),
     listHumanMembers(workspaceId),
   ]);
   const actions = actionResult.items;

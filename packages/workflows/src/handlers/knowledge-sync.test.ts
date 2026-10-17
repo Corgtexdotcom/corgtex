@@ -233,6 +233,7 @@ describe("handleExternalContentKnowledgeSync", () => {
       sourceTitle: "Box source",
       content: "Box source content",
       metadata: { providerKey: "box" },
+      lineageActor: { kind: "agent", label: "opaque-worker" },
       workflowJobId: "job-1",
     });
     expect(syncKnowledgeForSourceMock).toHaveBeenCalledWith(expect.objectContaining({
@@ -241,6 +242,7 @@ describe("handleExternalContentKnowledgeSync", () => {
       sourceId: "source-1",
       sourceTitle: "Box source",
       workflowJobId: "job-1",
+      lineageActor: expect.objectContaining({ label: "opaque-worker" }),
     }));
   });
 });

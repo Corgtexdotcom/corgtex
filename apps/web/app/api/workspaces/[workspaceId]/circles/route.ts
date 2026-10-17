@@ -3,9 +3,9 @@ import { createCircle, listCircles } from "@corgtex/domain";
 import type { ArchiveFilter } from "@corgtex/domain";
 import { withWorkspaceRoute } from "@/lib/route-handler";
 
-export const GET = withWorkspaceRoute(async (req, { workspaceId }) => {
+export const GET = withWorkspaceRoute(async (req, { actor, workspaceId }) => {
   const archiveFilter = req.nextUrl.searchParams.get("archiveFilter") as ArchiveFilter | null;
-  const circles = await listCircles(workspaceId, { archiveFilter: archiveFilter ?? undefined });
+  const circles = await listCircles(actor, workspaceId, { archiveFilter: archiveFilter ?? undefined });
   return NextResponse.json({ circles });
 });
 

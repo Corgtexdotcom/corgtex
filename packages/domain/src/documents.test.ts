@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const prismaMock = vi.hoisted(() => {
   const mock: any = {
     $transaction: vi.fn(async (cb: any) => cb(mock)),
+    $queryRaw: vi.fn(),
+    $executeRaw: vi.fn(),
     document: {
       create: vi.fn(),
       findFirst: vi.fn(),
@@ -49,10 +51,25 @@ vi.mock("./brain-access", () => ({
   resolveKnowledgeAccessDomains: resolveKnowledgeAccessDomainsMock,
 }));
 
+vi.mock("./source-lineage", async importOriginal => ({
+  mergeLineageInputRoot: (await importOriginal<typeof import("./source-lineage")>()).mergeLineageInputRoot,
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
+  withArtifactCountReleaseSnapshot: async (_actor: unknown, _ws: string, _roots: unknown, remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => {await remote();return finish(prismaMock);},
+  captureArtifactInputProof: vi.fn(async (_actor, _ws, inputs) => inputs.map((input: any) => ({ kind: input.kind, id: input.id, fingerprint: "fixture" }))),
+  captureImmutableArtifactInputProof: vi.fn(async (_actor, _ws, roots) => roots),
+  currentArtifactInputRoots: vi.fn(async () => null), preserveUnknownArtifactInputSnapshot: vi.fn(),
+  readableArtifactIds: vi.fn(async (_actor, _ws, _kind, rows) => new Set(rows.map((row: any) => row.id))),
+}));
+vi.mock("./producer-lineage", () => ({
+  prepareProducerLineage: vi.fn(async () => ({ mode: "DERIVED", roots: [], inputs: [] })), finishProducerLineage: vi.fn(),
+}));
+
 describe("listDocuments", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     prismaMock.document.findMany.mockResolvedValue([]);
+    prismaMock.brainSource.findMany.mockResolvedValue([]);
+    prismaMock.brainSource.update.mockImplementation(async ({ where, data }: any) => ({ id: where.id, ...data }));
     resolveKnowledgeAccessDomainsMock.mockResolvedValue(["WORKSPACE"]);
   });
 
@@ -70,7 +87,7 @@ describe("listDocuments", () => {
         accessDomain: { in: ["WORKSPACE", "FINANCE"] },
         archivedAt: null,
       },
-      orderBy: { createdAt: "desc" },
+      orderBy: { id: "asc" }, take: 100,
     });
   });
 
@@ -100,7 +117,7 @@ describe("listDocuments", () => {
         accessDomain: { in: ["WORKSPACE"] },
         archivedAt: { not: null },
       },
-      orderBy: { createdAt: "desc" },
+      orderBy: { id: "asc" }, take: 100,
     });
   });
 });
@@ -127,6 +144,8 @@ describe("createDocument", () => {
     });
     prismaMock.document.findFirst.mockResolvedValue(null);
     prismaMock.document.findMany.mockResolvedValue([]);
+    prismaMock.brainSource.findMany.mockResolvedValue([]);
+    prismaMock.brainSource.update.mockImplementation(async ({ where, data }: any) => ({ id: where.id, ...data }));
     prismaMock.document.update.mockResolvedValue({
       id: "document-1",
       workspaceId: "workspace-1",
@@ -346,7 +365,7 @@ describe("createDocument", () => {
     };
     prismaMock.document.findMany.mockResolvedValueOnce([existingDocument]);
     prismaMock.document.findFirst.mockResolvedValueOnce(existingDocument);
-    prismaMock.brainSource.findMany.mockResolvedValueOnce([{ id: "source-doc" }, { id: "source-file" }]);
+    prismaMock.brainSource.findMany.mockResolvedValue([{ id: "source-doc" }, { id: "source-file" }]);
     prismaMock.document.update.mockResolvedValueOnce({
       ...existingDocument,
       textContent: "The critical path runs through finance approval.\n\n---\nAdditional duplicate upload context:\nFinance approval is still the blocker.",
@@ -373,7 +392,6 @@ describe("createDocument", () => {
         sourceType: { in: ["DOC", "FILE_UPLOAD"] },
         metadata: { path: ["documentId"], equals: "document-existing" },
       }),
-      select: { id: true },
     }));
     expect(prismaMock.brainSource.update).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: "source-doc" },

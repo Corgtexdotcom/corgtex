@@ -24,7 +24,7 @@ export const GET = withWorkspaceRoute(async (request, { actor, workspaceId, para
 const updateSchema = z.object({
   label: z.string().min(1).optional(),
   connectionString: z.string().min(1).optional(),
-  selectedTables: z.array(z.string()).optional(),
+  selectedTables: z.array(z.string().min(1)).min(1).optional(),
   pullCadenceMinutes: z.number().int().min(5).optional(),
   cursorColumn: z.string().min(1).optional(),
   isActive: z.boolean().optional(),

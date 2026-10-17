@@ -51,7 +51,7 @@ export default async function BrainArticlePage({
   const archiveRecord = isArchived
     ? await getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "BrainArticle", entityId: article.id })
     : null;
-  const canManage = !isArchived && (actor.kind === "agent"
+  const canManage = !isArchived && !article.isPermissionVariant && (actor.kind === "agent"
     || membership?.role === "ADMIN"
     || (Boolean(article.ownerMemberId) && article.ownerMemberId === membership?.id));
 

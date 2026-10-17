@@ -10,6 +10,7 @@ const {
   renameConversation,
   resolveRequestActor,
   titleChat,
+  isArtifactInputProofReadable,
 } = vi.hoisted(() => ({
   addConversationTurn: vi.fn(),
   completeRoleOnboardingConversation: vi.fn(),
@@ -20,6 +21,7 @@ const {
   renameConversation: vi.fn(),
   resolveRequestActor: vi.fn(),
   titleChat: vi.fn(),
+  isArtifactInputProofReadable: vi.fn(),
 }));
 
 vi.mock("@corgtex/domain", () => ({
@@ -27,6 +29,7 @@ vi.mock("@corgtex/domain", () => ({
   completeRoleOnboardingConversation,
   deleteConversation,
   getConversation,
+  isArtifactInputProofReadable,
   renameConversation,
 }));
 
@@ -93,6 +96,8 @@ describe("POST /api/workspaces/[workspaceId]/conversations/[conversationId]", ()
   beforeEach(() => {
     vi.clearAllMocks();
     resolveRequestActor.mockResolvedValue(actor);
+    isArtifactInputProofReadable.mockReset().mockResolvedValue(true);
+    addConversationTurn.mockResolvedValue({id: "persisted-turn-1", sequenceNumber: 1, createdAt: new Date("2026-10-14T00:00:00Z")});
     getConversation.mockResolvedValue({
       agentKey: "assistant",
       systemPrompt: null,
@@ -104,6 +109,25 @@ describe("POST /api/workspaces/[workspaceId]/conversations/[conversationId]", ()
   afterEach(() => {
     vi.useRealTimers();
   });
+
+  it.each(["before-title", "after-title"])("closes a committed response when title permission is denied %s", async (phase) => {
+    getConversation.mockResolvedValue({ agentKey: "assistant", systemPrompt: null, topic: null });
+    isArtifactInputProofReadable.mockResolvedValueOnce(phase === "after-title").mockResolvedValueOnce(false);
+    titleChat.mockResolvedValue({ content: "Generated title" });
+    async function* reply() {
+      yield "Saved reply";
+      return { assistantMessage: "Saved reply", contextUsed: {}, promptInputId: "prompt-1", lineageRoots: [{ kind: "PROMPT", id: "prompt-1" }] };
+    }
+    processConversationTurnStream.mockReturnValue(reply());
+    const { POST } = await import("./route");
+    const response = await POST(request() as never, routeParams());
+    const body = await response.text();
+    expect(body).toContain('"committedTurn":{"id":"persisted-turn-1"');
+    expect(body).toContain("data: [DONE]");
+    expect(addConversationTurn).toHaveBeenCalledOnce();
+    expect(renameConversation).not.toHaveBeenCalled();
+    expect(titleChat).toHaveBeenCalledTimes(phase === "after-title" ? 1 : 0);
+  }, 2_000);
 
   it("flushes keepalive frames while waiting for the first assistant chunk", async () => {
     vi.useFakeTimers();
@@ -145,6 +169,7 @@ describe("POST /api/workspaces/[workspaceId]/conversations/[conversationId]", ()
     const remaining = await readRemainingBody(reader);
     expect(remaining).toContain("Assistant reply");
     expect(remaining).toContain("data: [DONE]");
+    expect(remaining).toContain('"committedTurn":{"id":"persisted-turn-1","sequenceNumber":1');
     expect(addConversationTurn).toHaveBeenCalledWith(actor, expect.objectContaining({
       workspaceId: "ws-1",
       conversationId: "conversation-1",
@@ -209,6 +234,8 @@ describe("POST /api/workspaces/[workspaceId]/conversations/[conversationId]", ()
     expect(returnMock).toHaveBeenCalledWith({
       assistantMessage: "",
       contextUsed: {},
+      lineageRoots: [],
+      promptInputId: "",
     });
     const conversationContext = processConversationTurnStream.mock.calls[0]?.[0] as { signal?: AbortSignal } | undefined;
     expect(conversationContext?.signal).toBeInstanceOf(AbortSignal);

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getSupportAuthorizationContext, runWithSupportOrigin } from "../../../packages/shared/src/support-context";
 
@@ -5,7 +6,7 @@ vi.mock("@corgtex/domain", () => ({ AppError: class AppError extends Error {
   constructor(public status: number, public code: string, message: string) { super(message); }
 } }));
 import { AppError } from "@corgtex/domain";
-import { authorizedDownloadStream, DOWNLOAD_AUTH_BYTES, DOWNLOAD_AUTH_INTERVAL_MS } from "./authorized-download-stream";
+import { authorizedDownloadStream, DOWNLOAD_AUTH_BYTES, DOWNLOAD_AUTH_INTERVAL_MS, MAX_BOUND_DOWNLOAD_BYTES } from "./authorized-download-stream";
 
 afterEach(() => vi.restoreAllMocks());
 const signal = () => new AbortController().signal;
@@ -105,5 +106,91 @@ describe("authorized download stream", () => {
     const reader = (await authorizedDownloadStream(source, async () => {}, abort.signal)).getReader();
     expect((await reader.read()).value).toEqual(new Uint8Array([1, 2]));
     expect((await reader.read()).done).toBe(true); abort.abort(); expect(cancel).not.toHaveBeenCalled();
+  });
+});
+
+
+const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+const strictOptions = (bytes: Uint8Array) => ({ authorizeEveryDelivery: true, byteBinding: { sha256: digest(bytes), sizeBytes: bytes.byteLength } });
+describe("strict verified file delivery", () => {
+  it("returns no stream until complete bytes, size/hash and current proof are verified", async () => {
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    let provider!: ReadableStreamDefaultController<Uint8Array>;
+    const authorize = vi.fn().mockResolvedValue(undefined);
+    const source = new ReadableStream<Uint8Array>({ start(controller) { provider = controller; } }, { highWaterMark: 0 });
+    let resolved = false;
+    const pending = authorizedDownloadStream(source, authorize, signal(), strictOptions(bytes)).then(value => { resolved = true; return value; });
+    await vi.waitFor(() => expect(authorize).toHaveBeenCalledTimes(3));
+    provider.enqueue(bytes.slice(0, 2));
+    await vi.waitFor(() => expect(authorize.mock.calls.length).toBeGreaterThanOrEqual(5));
+    expect(resolved).toBe(false);
+    provider.enqueue(bytes.slice(2)); provider.close();
+    const body = await pending;
+    expect(resolved).toBe(true);
+    expect((await body.getReader().read()).value).toEqual(bytes);
+  });
+
+  it("rejects an exact-length changed file and cancels provider before any return value", async () => {
+    const expected = new Uint8Array([1, 2]); const cancel = vi.fn();
+    const source = new ReadableStream<Uint8Array>({ pull(controller) { controller.enqueue(new Uint8Array([3, 4])); }, cancel }, { highWaterMark: 0 });
+    await expect(authorizedDownloadStream(source, async () => {}, signal(), strictOptions(expected))).rejects.toMatchObject({ code: "SOURCE_FILE_CHANGED" });
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("rejects extra bytes even when the initial matching prefix has the right raw hash", async () => {
+    const expected = new Uint8Array([1, 2]); const cancel = vi.fn(); let pulls = 0;
+    const source = new ReadableStream<Uint8Array>({ pull(controller) { controller.enqueue(pulls++ === 0 ? expected : new Uint8Array([3])); }, cancel }, { highWaterMark: 0 });
+    await expect(authorizedDownloadStream(source, async () => {}, signal(), strictOptions(expected))).rejects.toMatchObject({ code: "SOURCE_FILE_CHANGED" });
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("cancels untouched source for missing identity or size beyond the fixed 100 MiB bound", async () => {
+    for (const byteBinding of [{ sha256: "unproved", sizeBytes: 1 }, { sha256: "a".repeat(64), sizeBytes: MAX_BOUND_DOWNLOAD_BYTES + 1 }]) {
+      const cancel = vi.fn(), pull = vi.fn();
+      const source = new ReadableStream<Uint8Array>({ pull, cancel }, { highWaterMark: 0 });
+      await expect(authorizedDownloadStream(source, async () => {}, signal(), { authorizeEveryDelivery: true, byteBinding })).rejects.toBeInstanceOf(AppError);
+      expect(pull).not.toHaveBeenCalled(); expect(cancel).toHaveBeenCalledOnce();
+    }
+    expect(MAX_BOUND_DOWNLOAD_BYTES).toBe(100 * 1024 * 1024);
+  });
+
+  it("cancels a pending verification read immediately on request abort", async () => {
+    const cancel = vi.fn(), abort = new AbortController(), authorize = vi.fn().mockResolvedValue(undefined);
+    const source = new ReadableStream<Uint8Array>({ cancel }, { highWaterMark: 0 });
+    const pending = authorizedDownloadStream(source, authorize, abort.signal, strictOptions(new Uint8Array([1])));
+    await vi.waitFor(() => expect(authorize).toHaveBeenCalledTimes(3)); abort.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" }); expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("withholds verified bytes if the post-read source proof changes before response creation", async () => {
+    const bytes = new Uint8Array([1]); let revoked = false; const cancel = vi.fn();
+    const source = new ReadableStream<Uint8Array>({ pull(controller) { controller.enqueue(bytes); revoked = true; }, cancel }, { highWaterMark: 0 });
+    await expect(authorizedDownloadStream(source, async () => { if (revoked) throw denied(); }, signal(), strictOptions(bytes))).rejects.toMatchObject({ code: "SUPPORT_AUTHORIZATION_REVOKED" });
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("rechecks a paused consumer once immediately before every small delivery", async () => {
+    const bytes = new Uint8Array(128 * 1024); let revoked = false;
+    const authorize = vi.fn(async () => { if (revoked) throw denied(); });
+    const source = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(bytes); controller.close(); } });
+    const reader = (await authorizedDownloadStream(source, authorize, signal(), strictOptions(bytes))).getReader();
+    const before = authorize.mock.calls.length;
+    expect((await reader.read()).value!.byteLength).toBe(64 * 1024);
+    expect(authorize.mock.calls.length - before).toBe(1);
+    revoked = true;
+    await expect(reader.read()).rejects.toMatchObject({ code: "SUPPORT_AUTHORIZATION_REVOKED" });
+  });
+
+  it("does not enqueue a copied chunk if its delivery permission check is revoked", async () => {
+    const bytes = new Uint8Array([1, 2]); const authorize = vi.fn().mockResolvedValue(undefined);
+    const source = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(bytes); controller.close(); } });
+    const reader = (await authorizedDownloadStream(source, authorize, signal(), strictOptions(bytes))).getReader();
+    authorize.mockRejectedValueOnce(denied());
+    await expect(reader.read()).rejects.toMatchObject({ code: "SUPPORT_AUTHORIZATION_REVOKED" });
+  });
+
+  it("sanitizes provider errors encountered while pre-verifying raw bytes", async () => {
+    const source = new ReadableStream<Uint8Array>({ pull(controller) { controller.error(new Error("https://storage.invalid/?credential=private")); } }, { highWaterMark: 0 });
+    await expect(authorizedDownloadStream(source, async () => {}, signal(), strictOptions(new Uint8Array([1])))).rejects.toMatchObject({ code: "DOWNLOAD_FAILED", message: "File download failed." });
   });
 });

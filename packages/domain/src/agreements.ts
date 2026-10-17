@@ -1,8 +1,10 @@
-import type { BrainArticleAuthority, BrainArticleType } from "@prisma/client";
+import type { BrainArticleAuthority, BrainArticleType, Constitution, ConstitutionSourceReference, PolicyCorpus, BrainArticle } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { privacyFilter } from "./privacy";
+import { DigestReadRelease, loadReadableDigestQuery } from "./digest-lineage";
+
 
 export const AGREEMENT_BRAIN_ARTICLE_TYPES = [
   "DECISION",
@@ -23,121 +25,127 @@ export async function listWorkspaceAgreements(actor: AppActor, params: {
 }) {
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
+  const release = new DigestReadRelease(actor, params.workspaceId);
   const brainArticleTake = params.brainArticleTake ?? 20;
   const constitutionVersionTake = params.constitutionVersionTake ?? 8;
 
-  const [
-    currentConstitution,
-    constitutionVersions,
-    policyCorpus,
-    brainArticles,
-  ] = await Promise.all([
-    prisma.constitution.findFirst({
-      where: { workspaceId: params.workspaceId },
-      orderBy: { version: "desc" },
-      include: { sourceReferences: { orderBy: [{ pointOrder: "asc" }, { sourceOrder: "asc" }] } },
+  const constitutionRows = await loadReadableDigestQuery<Constitution & {sourceReferences?: ConstitutionSourceReference[]}>({
+    actor, workspaceId: params.workspaceId, release, kind: "Constitution", keyset: true,
+    limit: Math.max(1, constitutionVersionTake),
+    loadBatch: ({ take, after }) => prisma.constitution.findMany({
+      where: { workspaceId: params.workspaceId, ...(after ? { OR: [
+        { version: { lt: after.version } }, { version: after.version, id: { lt: after.id } },
+      ] } : {}) },
+      orderBy: [{ version: "desc" }, { id: "desc" }], take,
     }),
-    prisma.constitution.findMany({
-      where: { workspaceId: params.workspaceId },
-      orderBy: { version: "desc" },
-      take: constitutionVersionTake,
+  });
+  const currentConstitution = constitutionRows[0] ?? null;
+  const constitutionVersions = constitutionRows.slice(0, Math.max(0, constitutionVersionTake)).map(({sourceReferences: _references, ...row}) => row);
+  const [policyCorpus, brainArticles] = await Promise.all([
+    loadReadableDigestQuery<PolicyCorpus & { circle: { id: string; name: string; [key: string]: unknown } | null }>({
+      actor, workspaceId: params.workspaceId, release, kind: "PolicyCorpus", keyset: true, limit: 100, completeScan: true,
+      loadBatch: ({ take, after }) => prisma.policyCorpus.findMany({
+        where: { workspaceId: params.workspaceId, ...(after ? { OR: [
+          { acceptedAt: { lt: after.acceptedAt } }, { acceptedAt: after.acceptedAt, id: { lt: after.id } },
+        ] } : {}) },
+        include: { circle: true },
+        orderBy: [{ acceptedAt: "desc" }, { id: "desc" }], take,
+      }),
     }),
-    prisma.policyCorpus.findMany({
-      where: { workspaceId: params.workspaceId },
-      select: {
-        id: true,
-        title: true,
-        bodyMd: true,
-        acceptedAt: true,
-        proposalId: true,
-        circle: {
-          select: { id: true, name: true },
+    loadReadableDigestQuery<BrainArticle & { ownerMember: { id: string; user: { id: string; displayName: string | null; email: string }; [key: string]: unknown } | null }>({
+      actor, workspaceId: params.workspaceId, release, kind: "BrainArticle", keyset: true, limit: Math.max(0, brainArticleTake),
+      loadBatch: ({ take, after }) => prisma.brainArticle.findMany({
+        where: { workspaceId: params.workspaceId, archivedAt: null, isPrivate: false,
+          authority: { in: [...AGREEMENT_BRAIN_ARTICLE_AUTHORITIES] }, type: { in: [...AGREEMENT_BRAIN_ARTICLE_TYPES] },
+          ...(after ? { OR: [
+            { authority: { in: [...AGREEMENT_BRAIN_ARTICLE_AUTHORITIES].slice(AGREEMENT_BRAIN_ARTICLE_AUTHORITIES.indexOf(after.authority as typeof AGREEMENT_BRAIN_ARTICLE_AUTHORITIES[number]) + 1) } },
+            { authority: after.authority, updatedAt: { lt: after.updatedAt } },
+            { authority: after.authority, updatedAt: after.updatedAt, id: { lt: after.id } },
+          ] } : {}),
         },
-      },
-      orderBy: { acceptedAt: "desc" },
-    }),
-    prisma.brainArticle.findMany({
-      where: {
-        workspaceId: params.workspaceId,
-        archivedAt: null,
-        isPrivate: false,
-        authority: { in: [...AGREEMENT_BRAIN_ARTICLE_AUTHORITIES] },
-        type: { in: [...AGREEMENT_BRAIN_ARTICLE_TYPES] },
-      },
-      select: {
-        id: true,
-        slug: true,
-        title: true,
-        type: true,
-        authority: true,
-        bodyMd: true,
-        frontmatterJson: true,
-        updatedAt: true,
-        lastVerifiedAt: true,
-        ownerMember: {
-          select: {
-            user: {
-              select: { displayName: true, email: true },
-            },
-          },
-        },
-      },
-      orderBy: [
-        { authority: "asc" },
-        { updatedAt: "desc" },
-      ],
-      take: brainArticleTake,
+        include: { ownerMember: { include: { user: true } } },
+        orderBy: [{ authority: "asc" }, { updatedAt: "desc" }, { id: "desc" }], take,
+      }),
     }),
   ]);
 
-  const references = currentConstitution?.sourceReferences ?? [];
+  const circles = await release.capture("Circle", policyCorpus.flatMap(row => row.circle ? [row.circle] : []));
+  const circleIdsReadable = new Set(circles.records.map(row => row.id));
+  const owners = await release.capture("Member", brainArticles.flatMap(row => row.ownerMember ? [{id: row.ownerMember.id, userId: row.ownerMember.user.id,
+    user: {id: row.ownerMember.user.id, email: row.ownerMember.user.email, displayName: row.ownerMember.user.displayName}}] : []));
+  const ownerIdsReadable = new Set(owners.records.map(row => row.id));
+  const references: ConstitutionSourceReference[] = [];
+  if (currentConstitution) {
+    let afterId: string | undefined;
+    while (true) {
+      const page = await prisma.constitutionSourceReference.findMany({where: {workspaceId: params.workspaceId, constitutionId: currentConstitution.id,
+        ...(afterId ? {id: {gt: afterId}} : {})}, orderBy: {id: "asc"}, take: 100});
+      references.push(...(await release.capture("ConstitutionSourceReference", page)).records);
+      if (page.length < 100) break;
+      afterId = page.at(-1)!.id;
+    }
+    references.sort((a,b) => a.pointOrder-b.pointOrder || a.sourceOrder-b.sourceOrder || a.id.localeCompare(b.id));
+  }
+  const ownerUsers = await release.capture("User", owners.records.map(row => row.user));
+  const ownerUserIdsReadable = new Set(ownerUsers.records.map(user => user.id));
   const proposalIds = [...new Set([
     ...policyCorpus.map((policy) => policy.proposalId),
     ...references.flatMap((reference) => reference.sourceKind === "PROPOSAL" && reference.proposalId ? [reference.proposalId] : []),
   ])];
   const tensionIds = [...new Set(references.flatMap((reference) => reference.sourceKind === "TENSION" && reference.tensionId ? [reference.tensionId] : []))];
-  const [visibleProposals, visibleTensions] = await Promise.all([
-    proposalIds.length ? prisma.proposal.findMany({
-      where: { id: { in: proposalIds }, workspaceId: params.workspaceId, archivedAt: null, publishedAt: { not: null }, isPrivate: false, ...privacyFilter(actor, membership) },
-      select: { id: true, title: true },
-    }) : [],
-    tensionIds.length ? prisma.tension.findMany({
-      where: { id: { in: tensionIds }, workspaceId: params.workspaceId, archivedAt: null, publishedAt: { not: null }, isPrivate: false, ...privacyFilter(actor, membership) },
-      select: { id: true, title: true },
-    }) : [],
-  ]);
-  const visibleProposalTitles = new Map(visibleProposals.map((proposal) => [proposal.id, proposal.title]));
-  const visibleTensionTitles = new Map(visibleTensions.map((tension) => [tension.id, tension.title]));
+  const visibleProposalTitles = new Map<string, string>();
+  const visibleTensionTitles = new Map<string, string>();
+  for (let offset = 0; offset < proposalIds.length; offset += 100) {
+    const rows = await prisma.proposal.findMany({where: {id: {in: proposalIds.slice(offset,offset+100)},
+      workspaceId: params.workspaceId, archivedAt: null, publishedAt: {not: null}, isPrivate: false, ...privacyFilter(actor, membership)}});
+    for (const row of (await release.capture("Proposal", rows)).records) visibleProposalTitles.set(row.id, row.title);
+  }
+  for (let offset = 0; offset < tensionIds.length; offset += 100) {
+    const rows = await prisma.tension.findMany({where: {id: {in: tensionIds.slice(offset,offset+100)},
+      workspaceId: params.workspaceId, archivedAt: null, publishedAt: {not: null}, isPrivate: false, ...privacyFilter(actor, membership)}});
+    for (const row of (await release.capture("Tension", rows)).records) visibleTensionTitles.set(row.id, row.title);
+  }
+  const visibleSourceOrders = new Map<number, number>();
   const visibleReferences = references.flatMap((reference) => {
     const targetId = reference.sourceKind === "PROPOSAL" ? reference.proposalId : reference.tensionId;
     const title = reference.sourceKind === "PROPOSAL"
       ? visibleProposalTitles.get(targetId ?? "")
       : visibleTensionTitles.get(targetId ?? "");
-    return targetId && title?.trim() ? [{
+    if (!targetId || !title?.trim()) return [];
+    const sourceOrder = (visibleSourceOrders.get(reference.pointOrder) ?? 0) + 1;
+    visibleSourceOrders.set(reference.pointOrder, sourceOrder);
+    return [{
       pointOrder: reference.pointOrder,
-      sourceOrder: reference.sourceOrder,
+      sourceOrder,
       sourceKind: reference.sourceKind,
       targetId,
       title,
-    }] : [];
+    }];
   });
-  const visiblePolicies = policyCorpus.map(({ proposalId, ...policy }) => {
-    const proposalTitle = visibleProposalTitles.get(proposalId);
+  const visiblePolicies = policyCorpus.map((policy) => {
+    const proposalTitle = visibleProposalTitles.get(policy.proposalId);
     return {
-      ...policy,
-      proposal: proposalTitle?.trim() ? { id: proposalId, title: proposalTitle } : null,
+      id: policy.id, title: policy.title, bodyMd: policy.bodyMd, acceptedAt: policy.acceptedAt,
+      circle: policy.circle && circleIdsReadable.has(policy.circle.id) ? { id: policy.circle.id, name: policy.circle.name } : null,
+      proposal: proposalTitle?.trim() ? { id: policy.proposalId, title: proposalTitle } : null,
     };
   });
+  const visibleBrainArticles = brainArticles.map((row) => ({
+    id: row.id, slug: row.slug, title: row.title, type: row.type, authority: row.authority,
+    bodyMd: row.bodyMd, frontmatterJson: row.frontmatterJson, updatedAt: row.updatedAt, lastVerifiedAt: row.lastVerifiedAt,
+    ownerMember: row.ownerMember && ownerIdsReadable.has(row.ownerMember.id) && ownerUserIdsReadable.has(row.ownerMember.user.id)
+      ? { user: { displayName: row.ownerMember.user.displayName, email: row.ownerMember.user.email } } : null,
+  }));
 
-  return {
+  return release.finish({
     currentConstitution: currentConstitution ? { ...currentConstitution, sourceReferences: visibleReferences } : null,
     constitutionVersions,
     policyCorpus: visiblePolicies,
-    brainArticles,
+    brainArticles: visibleBrainArticles,
     counts: {
       constitutionVersions: constitutionVersions.length,
       policies: visiblePolicies.length,
-      brainArticles: brainArticles.length,
+      brainArticles: visibleBrainArticles.length,
     },
-  };
+  });
 }

@@ -6,6 +6,7 @@ import { after, before, test } from "node:test";
 import pg from "pg";
 import { canonicalManifest, exportTenantSnapshot, hashCanonical, hashFrames } from "./shared-tenant-export";
 import { inventorySharedTenantSource, readSharedTenantSchema } from "./shared-tenant-inventory.mjs";
+import { historicalAuthorityTables, transferScalarFieldKinds } from "./shared-tenant-transfer-contract";
 import type { TenantTransferManifest, TransferSqlClient } from "./shared-tenant-transfer-contract";
 
 let containerId: string;
@@ -57,7 +58,7 @@ async function fixtureManifest(): Promise<TenantTransferManifest> {
     formatVersion: 1, transferId: "synthetic-transfer", workspaceId: tenantA, workspaceSlug: tenantA, schemaSha256: inventory.schemaSha256,
     tables: Object.fromEntries(inventory.tables.filter((table: { rows: string }) => BigInt(table.rows) > 0n).map((table: { name: string }) => [table.name, {
       disposition: table.name === "_prisma_migrations" ? "operator-control" : "copy", reason: "Explicit synthetic fixture classification",
-      fields: { ...(table.name === "User" ? { passwordHash: { kind: "secret", reason: "Source password is replaced for new target identities" } } : {}),
+      fields: { ...Object.fromEntries(Object.entries(transferScalarFieldKinds[table.name] ?? {}).map(([name, kind]) => [name, { kind, reason: "Explicit synthetic scalar classification; no inferred FK or grant" }])), ...(table.name === "User" ? { passwordHash: { kind: "secret", reason: "Source password is replaced for new target identities" } } : {}),
         ...(table.name === "KnowledgeChunk" ? { sourceId: { kind: "reference", reason: "Explicit polymorphic historical source identifier" } } : {}),
         ...(table.name === "EmailDelivery" ? { providerMessageId: { kind: "reference", reason: "Provider receipt identity" }, workspaceId: { kind: "reference", reason: "Scalar tenant ownership" }, userId: { kind: "reference", reason: "Explicit synthetic scalar actor", references: { table: "User", column: "id" } } } : {}), ...Object.fromEntries(inventory.schema.columns.filter((column: { table: string; type: string }) => column.table === table.name && (/^jsonb?$/.test(column.type) || column.type.endsWith("[]")))
         .map((column: { name: string }) => [column.name, { kind: "content", reason: "Synthetic content retained without number parsing" }])) },
@@ -187,9 +188,11 @@ test("real populated scalar secrets cannot be omitted or relabeled as ordinary c
     value.tables.CommunicationInstallation.fields!.externalWorkspaceId = { kind: "reference", reason: "Explicit external provider identity" };
     for (const kind of [undefined, "content"] as const) {
       if (kind) value.tables.CommunicationInstallation.fields!.botTokenEnc = { kind, reason: "Incorrect credential classification" };
+      else delete value.tables.CommunicationInstallation.fields!.botTokenEnc;
       await assert.rejects(exportTenantSnapshot(db, value), /TRANSFER_SCALAR_FIELD_POLICY_REQUIRED:CommunicationInstallation.botTokenEnc:secret/); await assertIdle();
     }
     value.tables.CommunicationInstallation.fields!.botTokenEnc = { kind: "secret", reason: "Credential must be staged, nulled or reencrypted on import" };
+    delete value.tables.ExternalDataSource.fields!.connectionStringEnc;
     await assert.rejects(exportTenantSnapshot(db, value), /TRANSFER_SCALAR_FIELD_POLICY_REQUIRED:ExternalDataSource.connectionStringEnc:secret/); await assertIdle();
     value.tables.ExternalDataSource.fields!.connectionStringEnc = { kind: "secret", reason: "Datasource credential requires separate disposition" };
     const exported = await exportTenantSnapshot(db, value);
@@ -209,3 +212,66 @@ test("private export retains an existing source marker for explicit publication 
     assert.equal(flags.rows[0][flags.columns.findIndex((column) => column.name === "flag")], "operator_import_inactive");
   } finally { await db.query('DELETE FROM "WorkspaceFeatureFlag" WHERE id=$1', [id]); }
 });
+
+
+test("authority originals cannot be discarded or rebuilt during export", async () => {
+  for (const disposition of ["discard", "rebuild", "operator-control"] as const) {
+    const value = await fixtureManifest(); value.tables.SourcePermissionEpoch.disposition = disposition;
+    await assert.rejects(exportTenantSnapshot(db, value), /TRANSFER_AUTHORITY_PRESERVATION_REQUIRED:SourcePermissionEpoch/);
+    await assertIdle();
+  }
+});
+
+
+test("pending permission events and executable jobs must be exported for exact private staging", async () => {
+  const job = randomUUID();
+  await db.query(`INSERT INTO "WorkflowJob" (id,"workspaceId",type,payload,"updatedAt") VALUES ($1,$2,'synthetic.pending','{}',now())`, [job, tenantA]);
+  try {
+    for (const name of ["Event", "WorkflowJob"]) for (const disposition of ["discard", "rebuild", "operator-control"] as const) {
+      const value = await fixtureManifest(); value.tables[name].disposition = disposition;
+      await assert.rejects(exportTenantSnapshot(db, value), new RegExp(`TRANSFER_SOURCE_WORK_PRESERVATION_REQUIRED:${name}`));
+      await assertIdle();
+    }
+  } finally { await db.query('DELETE FROM "WorkflowJob" WHERE id=$1', [job]); }
+});
+
+for (const name of ["Event", "WorkflowJob"] as const) {
+  test(`${name} preservation checks only the selected tenant, including terminal leased work`, async () => {
+    const selectedTenant = randomUUID(), unrelatedTenant = randomUUID();
+    await db.query('INSERT INTO "Workspace" (id,slug,name,"updatedAt") VALUES ($1,$1,\'Selected empty fixture\',now()),($2,$2,\'Unrelated work fixture\',now())', [selectedTenant, unrelatedTenant]);
+    // Establish an empty queue in these two newly created synthetic fixtures.
+    // All other workspaces and their automatically generated events stay intact.
+    await db.query('DELETE FROM "Event" WHERE "workspaceId"=ANY($1::text[])', [[selectedTenant, unrelatedTenant]]);
+    const table = `"${name}"`;
+    const terminal = name === "Event" ? "DISPATCHED" : "COMPLETED";
+    const insert = async (workspace: string, status: string, leased: boolean) => {
+      const id = randomUUID();
+      await db.query(`INSERT INTO ${table} (id,"workspaceId",type,payload,status,"lockedBy","lockedAt"${name === "WorkflowJob" ? ',"updatedAt"' : ''})
+        VALUES ($1,$2,'synthetic.tenant-guard','{}',$3,$4,$5${name === "WorkflowJob" ? ',now()' : ''})`,
+      [id, workspace, status, leased ? "synthetic-lease-owner" : null, leased ? new Date("2026-01-01") : null]);
+      return id;
+    };
+    try {
+      for (const [status, leased] of [["PENDING", false], [terminal, true]] as const) {
+        const unrelatedId = await insert(unrelatedTenant, status, leased);
+        const before = (await db.query(`SELECT row_to_json(r)::text AS row FROM ${table} r WHERE "workspaceId"=$1 ORDER BY id`, [unrelatedTenant])).rows;
+        const value = await fixtureManifest(); value.workspaceId = selectedTenant; value.workspaceSlug = selectedTenant;
+        for (const disposition of ["discard", "rebuild", "operator-control"] as const) {
+          value.tables[name].disposition = disposition;
+          const exported = await exportTenantSnapshot(db, value);
+          assert.equal(exported.tables.find((entry) => entry.name === name), undefined);
+          assert.equal(exported.dispositions.find((entry) => entry.table === name)?.selectedRows, "0");
+          await assertIdle();
+        }
+        assert.deepEqual((await db.query(`SELECT row_to_json(r)::text AS row FROM ${table} r WHERE "workspaceId"=$1 ORDER BY id`, [unrelatedTenant])).rows, before);
+        const selectedId = await insert(selectedTenant, status, leased);
+        try {
+          await assert.rejects(exportTenantSnapshot(db, value), new RegExp(`TRANSFER_SOURCE_WORK_PRESERVATION_REQUIRED:${name}`));
+          await assertIdle();
+          assert.deepEqual((await db.query(`SELECT row_to_json(r)::text AS row FROM ${table} r WHERE "workspaceId"=$1 ORDER BY id`, [unrelatedTenant])).rows, before);
+        } finally { await db.query(`DELETE FROM ${table} WHERE id=$1`, [selectedId]); }
+        await db.query(`DELETE FROM ${table} WHERE id=$1`, [unrelatedId]);
+      }
+    } finally { await db.query('DELETE FROM "Workspace" WHERE id=ANY($1::text[])', [[selectedTenant, unrelatedTenant]]); }
+  });
+}

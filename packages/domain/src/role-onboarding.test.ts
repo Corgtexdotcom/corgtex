@@ -1,4 +1,16 @@
+import { captureArtifactInputProof, readableArtifactIds } from "./source-lineage";
+import { finishProducerLineage } from "./producer-lineage";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("./source-lineage", () => ({
+  captureArtifactInputProof: vi.fn(async (_actor, _workspaceId, inputs) => inputs.map((input: { kind: string; id: string }) => ({ kind: input.kind, id: input.id, fingerprint: "a".repeat(64) }))),
+  readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map((row: { id: string }) => row.id))),
+}));
+
+vi.mock("./producer-lineage", () => ({
+  prepareProducerLineage: vi.fn().mockResolvedValue({ mode: "HUMAN_ORIGINAL", inputs: [], roots: [] }),
+  finishProducerLineage: vi.fn().mockResolvedValue(undefined),
+}));
 
 const { prismaMock } = vi.hoisted(() => {
   const prisma = {
@@ -6,6 +18,7 @@ const { prismaMock } = vi.hoisted(() => {
     $executeRaw: vi.fn(),
     $transaction: vi.fn(),
     roleOnboardingSession: {
+      findMany: vi.fn().mockResolvedValue([]),
       findFirst: vi.fn(),
       update: vi.fn(),
       updateMany: vi.fn(),
@@ -84,8 +97,10 @@ const onboardingRecord = {
     assignments: [
       {
         id: "assignment-active",
+        memberId: "holder-active",
         expiresAt: null,
         member: {
+          id: "holder-active",
           user: {
             displayName: "Active Holder",
             email: "active@example.com",
@@ -121,6 +136,7 @@ const onboardingRecord = {
 describe("role onboarding domain", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map((row) => row.id)));
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
     prismaMock.$executeRaw.mockResolvedValue(0);
     prismaMock.roleOnboardingSession.findFirst.mockResolvedValue(onboardingRecord);
@@ -128,11 +144,11 @@ describe("role onboarding domain", () => {
     prismaMock.roleOnboardingSession.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.conversationTurn.findFirst.mockResolvedValue(null);
     prismaMock.conversationTurn.create.mockResolvedValue({});
-    prismaMock.policyCorpus.findMany.mockResolvedValue([{ title: "Advice process", bodyMd: "Ask for advice before high-impact changes.", acceptedAt: new Date("2026-01-01") }]);
-    prismaMock.action.findMany.mockResolvedValue([{ title: "Publish weekly status", status: "OPEN", dueAt: null }]);
-    prismaMock.tension.findMany.mockResolvedValue([{ title: "Unclear delivery priority", priority: 3 }]);
-    prismaMock.proposal.findMany.mockResolvedValue([{ title: "Clarify escalation path", summary: "Define who handles blockers." }]);
-    prismaMock.meeting.findMany.mockResolvedValue([{ title: "Ops tactical", recordedAt: new Date("2026-02-01"), summaryMd: "Reviewed current delivery risks." }]);
+    prismaMock.policyCorpus.findMany.mockResolvedValue([{ id: "policy-1", title: "Advice process", bodyMd: "Ask for advice before high-impact changes.", acceptedAt: new Date("2026-01-01") }]);
+    prismaMock.action.findMany.mockResolvedValue([{ id: "action-1", title: "Publish weekly status", status: "OPEN", dueAt: null }]);
+    prismaMock.tension.findMany.mockResolvedValue([{ id: "tension-1", title: "Unclear delivery priority", priority: 3 }]);
+    prismaMock.proposal.findMany.mockResolvedValue([{ id: "proposal-1", title: "Clarify escalation path", summary: "Define who handles blockers." }]);
+    prismaMock.meeting.findMany.mockResolvedValue([{ id: "meeting-1", title: "Ops tactical", recordedAt: new Date("2026-02-01"), summaryMd: "Reviewed current delivery risks." }]);
   });
 
   it("creates the first assistant intro turn and activates the session", async () => {
@@ -266,4 +282,42 @@ describe("role onboarding domain", () => {
     });
     expect(prismaMock.roleOnboardingSession.update).not.toHaveBeenCalled();
   });
+
+  it("hands off every admitted onboarding context input with its captured receipt", async () => {
+    const { buildRoleOnboardingContextWithLineageForConversation } = await import("./role-onboarding");
+    const result = await buildRoleOnboardingContextWithLineageForConversation({
+      workspaceId: "workspace-1", conversationId: "conversation-1", userId: "user-1",
+    });
+    expect(result?.lineageInputs).toEqual(expect.arrayContaining([
+      { kind: "RoleOnboardingSession", id: "onboarding-1" }, { kind: "Role", id: "role-1" },
+      { kind: "Circle", id: "circle-1" }, { kind: "Member", id: "member-1" },
+      { kind: "RoleAssignment", id: "assignment-active" }, { kind: "Member", id: "holder-active" },
+      { kind: "PolicyCorpus", id: "policy-1" }, { kind: "Action", id: "action-1" },
+      { kind: "Tension", id: "tension-1" }, { kind: "Proposal", id: "proposal-1" }, { kind: "Meeting", id: "meeting-1" },
+    ]));
+    expect(captureArtifactInputProof).toHaveBeenCalledWith(expect.objectContaining({ kind: "user" }), "workspace-1",
+      expect.arrayContaining([expect.objectContaining({ kind: "Action", id: "action-1", snapshot: expect.objectContaining({ title: "Publish weekly status" }) })]));
+  });
+
+  it("omits unknown optional onboarding sources and withholds a session with unknown required lineage", async () => {
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, kind, rows) =>
+      new Set(kind === "PolicyCorpus" ? [] : rows.map((row) => row.id)));
+    const { buildRoleOnboardingContextWithLineageForConversation } = await import("./role-onboarding");
+    const params = { workspaceId: "workspace-1", conversationId: "conversation-1", userId: "user-1" };
+    const result = await buildRoleOnboardingContextWithLineageForConversation(params);
+    expect(result?.context).not.toContain("Advice process");
+    expect(result?.lineageInputs).not.toContainEqual({ kind: "PolicyCorpus", id: "policy-1" });
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, kind, rows) =>
+      new Set(kind === "RoleOnboardingSession" ? [] : rows.map((row) => row.id)));
+    await expect(buildRoleOnboardingContextWithLineageForConversation(params)).resolves.toBeNull();
+  });
+
+  it("atomically records copied intro content with its conversation turn", async () => {
+    const { createRoleOnboardingIntro } = await import("./role-onboarding");
+    prismaMock.conversationTurn.create.mockResolvedValue({ id: "intro-turn-1" });
+    await createRoleOnboardingIntro({ workspaceId: "workspace-1", onboardingSessionId: "onboarding-1" });
+    expect(finishProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ tx: prismaMock,
+      artifact: { kind: "ConversationTurn", id: "intro-turn-1" } }));
+  });
+
 });

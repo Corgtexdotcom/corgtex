@@ -669,7 +669,23 @@
     "titleBackToConversations": "Volver a conversaciones",
     "titleClickToRename": "Haz clic para cambiar el nombre",
     "titleExpandChat": "Expandir chat",
-    "titleRemoveAttachment": "Quitar adjunto"
+    "titleRemoveAttachment": "Quitar adjunto",
+    "brainExport": {
+      "open": "Guardar en Brain",
+      "explanation": "Comparte esta respuesta con tu empresa, respetando los permisos de sus fuentes originales. Tu conversación privada sigue siendo privada.",
+      "title": "Título en Brain",
+      "transcript": "Metadatos de transcripción incluidos",
+      "none": "Ninguno: solo la respuesta",
+      "partial": "Turnos seleccionados",
+      "full": "Conversación completa",
+      "chooseTurns": "Elige los turnos que quieres incluir",
+      "includesPrompts": "La transcripción seleccionada incluye tus mensajes y las respuestas del asistente.",
+      "confirm": "Confirmar y guardar",
+      "saving": "Guardando…",
+      "saved": "Guardado",
+      "success": "Guardado en Brain y en cola para su incorporación.",
+      "failed": "No se pudo guardar. Vuelve a cargar la conversación e inténtalo de nuevo."
+    }
   },
   "circles": {
     "addMemberWithPlusHint": "Usa el botón + para añadir miembros a roles en este círculo.",

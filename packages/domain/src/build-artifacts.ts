@@ -1,10 +1,10 @@
-import type {
-  BuildArtifactAssetKind,
-  BuildArtifactClassification,
-  BuildArtifactStatus,
-  BuildArtifactVisibility,
-  MemberRole,
+import {
   Prisma,
+  type BuildArtifactAssetKind,
+  type BuildArtifactClassification,
+  type BuildArtifactStatus,
+  type BuildArtifactVisibility,
+  type MemberRole,
 } from "@prisma/client";
 import { createHash, randomUUID } from "node:crypto";
 import { defaultStorage } from "@corgtex/storage";
@@ -18,13 +18,15 @@ import {
 } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
-import { getWorkspaceSupportGrant } from "./workspace-support-access";
 import { recordAudit } from "./audit-trail";
 import { AppError, invariant } from "./errors";
+import { DigestReadRelease } from "./digest-lineage";
 import { OPERATIONAL_ARTIFACT_FILTER } from "./operational-artifacts";
+import { captureArtifactInputProof, invalidateArtifactInputLineage, isArtifactInputProofReadable, isArtifactInputProofPubliclyShareable, lineageContentFingerprint, readableArtifactIds, recordArtifactInputLineage } from "./source-lineage";
+import { finishProducerLineage, prepareProducerLineage, type ProducerLineageParams } from "./producer-lineage";
+import { getMcpToolInputRoots } from "./mcp-tool-input-context";
 
 const ARTIFACT_MANAGER_ROLES = new Set<MemberRole>(["ADMIN", "FACILITATOR"]);
-const PUBLIC_PROOF_URL_TTL_SECONDS = 60 * 10;
 
 const buildArtifactAssetSelect = {
   id: true,
@@ -83,7 +85,7 @@ const buildArtifactSelect = {
 type BuildArtifactRecord = Prisma.BuildArtifactGetPayload<{ select: typeof buildArtifactSelect }>;
 type BuildArtifactAssetRecord = Prisma.BuildArtifactAssetGetPayload<{ select: typeof buildArtifactAssetSelect }>;
 
-type ArtifactInput = {
+type ArtifactInput = ProducerLineageParams & {
   workspaceId: string;
   artifactId?: string | null;
   repositoryOwner: string;
@@ -99,6 +101,10 @@ type ArtifactInput = {
   classification?: BuildArtifactClassification;
   visibility?: BuildArtifactVisibility;
   noPrivateDataConfirmed?: boolean;
+  /** The supplied text was copied or generated; a user owner is not original authorship. */
+  copied?: boolean;
+  expectedUpdatedAt?: Date;
+  tx?: Prisma.TransactionClient;
 };
 
 type ArtifactUpdateInput = Partial<Omit<ArtifactInput, "workspaceId" | "artifactId">> & {
@@ -256,6 +262,21 @@ function serializeArtifact(
   };
 }
 
+async function readableArtifact(actor: AppActor, artifact: BuildArtifactRecord, tx: Prisma.TransactionClient = prisma) {
+  if (!(await readableArtifactIds(actor, artifact.workspaceId, "BuildArtifact", [artifact], tx)).has(artifact.id)) return null;
+  const assetIds = await readableArtifactIds(actor, artifact.workspaceId, "BuildArtifactAsset", artifact.assets, tx);
+  let createdBy = artifact.createdBy;
+  if (createdBy) {
+    try {
+      await captureArtifactInputProof(actor, artifact.workspaceId, [{ kind: "User", id: createdBy.id, snapshot: createdBy }], tx);
+    } catch (error) {
+      if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
+      createdBy = null;
+    }
+  }
+  return { ...artifact, createdBy, assets: artifact.assets.filter((asset) => assetIds.has(asset.id)) };
+}
+
 function publicTokenData() {
   const token = randomOpaqueToken(24);
   return {
@@ -315,6 +336,7 @@ function artifactExternalId(artifact: Pick<BuildArtifactRecord, "repositoryOwner
 
 async function syncBrainSource(
   tx: Prisma.TransactionClient,
+  actor: AppActor,
   artifactId: string,
   authorMemberId?: string | null,
 ) {
@@ -323,6 +345,16 @@ async function syncBrainSource(
     select: buildArtifactSelect,
   });
   invariant(artifact, 404, "NOT_FOUND", "Build artifact not found.");
+
+  try {
+    await captureArtifactInputProof(actor, artifact.workspaceId, [
+      { kind: "BuildArtifact", id: artifact.id, snapshot: artifact },
+      ...artifact.assets.map((asset) => ({ kind: "BuildArtifactAsset" as const, id: asset.id, snapshot: asset })),
+    ], tx);
+  } catch (error) {
+    if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
+    return null;
+  }
 
   const data = {
     workspaceId: artifact.workspaceId,
@@ -344,24 +376,29 @@ async function syncBrainSource(
     } satisfies Prisma.InputJsonObject,
   };
 
-  if (artifact.brainSourceId) {
-    await tx.brainSource.update({
-      where: { id: artifact.brainSourceId },
-      data,
-    });
-    return artifact.brainSourceId;
-  }
-
+  // Preserve old source bodies and receipts; this is a separately proven current copy.
+  const linkReceipt = await prepareProducerLineage({ tx, actor, workspaceId: artifact.workspaceId,
+    artifact: { kind: "BuildArtifact", id: artifact.id }, before: artifact, allowSystemTransition: true });
   const source = await tx.brainSource.create({
     data: {
       ...data,
       authorMemberId: authorMemberId ?? null,
     },
   });
-  await tx.buildArtifact.update({
+  const linked = await tx.buildArtifact.update({
     where: { id: artifact.id },
     data: { brainSourceId: source.id },
+    select: buildArtifactSelect,
   });
+  await finishProducerLineage({ tx, actor, workspaceId: artifact.workspaceId,
+    artifact: { kind: "BuildArtifact", id: linked.id }, content: linked, receipt: linkReceipt });
+  const roots = await captureArtifactInputProof(actor, artifact.workspaceId, [
+    { kind: "BuildArtifact", id: linked.id, snapshot: linked },
+    ...linked.assets.map((asset) => ({ kind: "BuildArtifactAsset" as const, id: asset.id, snapshot: asset })),
+    ...(authorMemberId ? [{ kind: "Member" as const, id: authorMemberId }] : []),
+  ], tx);
+  await recordArtifactInputLineage({ tx, actor, workspaceId: artifact.workspaceId,
+    artifact: { kind: "BrainSource", id: source.id }, content: source, origin: "DERIVED", inputs: [], inheritedRoots: roots });
   return source.id;
 }
 
@@ -389,17 +426,26 @@ export async function listBuildArtifacts(actor: AppActor, params: {
   status?: BuildArtifactStatus;
 }) {
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  const artifacts = await prisma.buildArtifact.findMany({
-    where: {
-      workspaceId: params.workspaceId,
-      ...(params.status ? { status: params.status } : {}),
-      NOT: OPERATIONAL_ARTIFACT_FILTER,
-    },
-    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
-    select: buildArtifactSelect,
-  });
-
-  return artifacts.map((artifact) => serializeArtifact(actor, membership, artifact));
+  const release = new DigestReadRelease(actor, params.workspaceId);
+  const permitted: BuildArtifactRecord[] = [];
+  let afterId: string | undefined;
+  while (true) {
+    const artifacts = await prisma.buildArtifact.findMany({
+      where: {workspaceId: params.workspaceId, ...(params.status ? {status: params.status} : {}),
+        NOT: OPERATIONAL_ARTIFACT_FILTER, ...(afterId ? {id: {gt: afterId}} : {})},
+      orderBy: {id: "asc"}, select: buildArtifactSelect, take: 100,
+    });
+    const captured = await release.capture("BuildArtifact", artifacts);
+    for (const artifact of captured.records) {
+      const assets = await release.capture("BuildArtifactAsset", artifact.assets);
+      const creators = await release.capture("User", artifact.createdBy ? [artifact.createdBy] : []);
+      permitted.push({...artifact, assets: assets.records, createdBy: creators.records[0] ?? null});
+    }
+    if (artifacts.length < 100) break;
+    afterId = artifacts.at(-1)!.id;
+  }
+  permitted.sort((a,b) => b.updatedAt.getTime()-a.updatedAt.getTime() || b.createdAt.getTime()-a.createdAt.getTime() || a.id.localeCompare(b.id));
+  return release.finish(permitted.map(artifact => serializeArtifact(actor, membership, artifact)));
 }
 
 export async function listBuildArtifactWorkspaceIdsForGithubRepository(params: {
@@ -435,11 +481,13 @@ export async function getBuildArtifact(actor: AppActor, params: {
     select: buildArtifactSelect,
   });
   invariant(artifact, 404, "NOT_FOUND", "Build artifact not found.");
-  return serializeArtifact(actor, membership, artifact);
+  const readable = await readableArtifact(actor, artifact);
+  invariant(readable, 404, "NOT_FOUND", "Build artifact not found.");
+  return serializeArtifact(actor, membership, readable);
 }
 
 export async function upsertBuildArtifact(actor: AppActor, params: ArtifactInput) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx: params.tx });
   const createdByUserId = actor.kind === "user" ? actor.user.id : await actorUserIdForWorkspace(actor, params.workspaceId);
   const repositoryOwner = normalizeRepoPart(params.repositoryOwner, "Repository owner");
   const repositoryName = normalizeRepoPart(params.repositoryName, "Repository name");
@@ -449,11 +497,13 @@ export async function upsertBuildArtifact(actor: AppActor, params: ArtifactInput
   invariant(!isOperationalBuildArtifact({ repositoryOwner, repositoryName, pullRequestNumber }),
     404, "NOT_FOUND", "Build artifact not found.");
 
-  return prisma.$transaction(async (tx) => {
+  const run = async (tx: Prisma.TransactionClient) => {
+    if (params.artifactId) await tx.$queryRaw`SELECT id FROM "BuildArtifact" WHERE id = ${params.artifactId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    else if (pullRequestNumber) await tx.$queryRaw`SELECT id FROM "BuildArtifact" WHERE "workspaceId" = ${params.workspaceId} AND "repositoryOwner" = ${repositoryOwner} AND "repositoryName" = ${repositoryName} AND "pullRequestNumber" = ${pullRequestNumber} FOR UPDATE`;
     const existing = params.artifactId
       ? await tx.buildArtifact.findFirst({
         where: { id: params.artifactId, workspaceId: params.workspaceId, NOT: OPERATIONAL_ARTIFACT_FILTER },
-        select: { id: true, createdByUserId: true, publicTokenEnc: true },
+        select: buildArtifactSelect,
       })
       : pullRequestNumber
         ? await tx.buildArtifact.findFirst({
@@ -463,13 +513,20 @@ export async function upsertBuildArtifact(actor: AppActor, params: ArtifactInput
             repositoryName,
             pullRequestNumber,
           },
-          select: { id: true, createdByUserId: true, publicTokenEnc: true },
+          select: buildArtifactSelect,
         })
         : null;
 
     if (existing) {
       invariant(canManageArtifact(actor, membership, existing), 403, "FORBIDDEN", "Only the uploader, facilitators, or admins can manage this build artifact.");
+      invariant(!params.expectedUpdatedAt || existing.updatedAt.getTime() === params.expectedUpdatedAt.getTime(),
+        409, "SOURCE_CHANGED", "Build artifact changed during the partial edit.");
     }
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: existing ? { kind: "BuildArtifact", id: existing.id } : undefined, before: existing ?? undefined,
+      capture: params, copied: params.copied });
+    invariant(receipt.mode !== "UNKNOWN" || actor.kind === "user" && !params.copied,
+      409, "UNKNOWN_LINEAGE", "Copied build artifact content requires its complete input receipt.");
 
     enforcePublicReviewRules({
       visibility,
@@ -477,6 +534,8 @@ export async function upsertBuildArtifact(actor: AppActor, params: ArtifactInput
       requiresConfirmation: !existing?.publicTokenEnc,
       noPrivateDataConfirmed: params.noPrivateDataConfirmed,
     });
+    invariant(visibility !== "REVOKED" || Boolean(existing?.publicEnabledAt),
+      400, "INVALID_STATE", "Only a previously enabled public proof link can be revoked.");
 
     const token = visibility === "PUBLIC_REVIEW" && !existing?.publicTokenEnc ? publicTokenData() : null;
     const data = {
@@ -528,8 +587,12 @@ export async function upsertBuildArtifact(actor: AppActor, params: ArtifactInput
         select: buildArtifactSelect,
       });
 
-    await syncBrainSource(tx, artifact.id, brainSourceAuthorMemberId(membership));
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "BuildArtifact", id: artifact.id }, content: artifact, receipt });
+    await syncBrainSource(tx, actor, artifact.id, brainSourceAuthorMemberId(membership));
     const refreshed = await getArtifactOrThrow(tx, params.workspaceId, artifact.id);
+    const readable = await readableArtifact(actor, refreshed, tx);
+    invariant(readable, 409, "UNKNOWN_LINEAGE", "The build artifact's current inputs cannot be proven.");
 
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
@@ -546,8 +609,9 @@ export async function upsertBuildArtifact(actor: AppActor, params: ArtifactInput
       },
     });
 
-    return serializeArtifact(actor, membership, refreshed);
-  });
+    return serializeArtifact(actor, membership, readable);
+  };
+  return params.tx ? run(params.tx) : prisma.$transaction(run);
 }
 
 export async function updateBuildArtifact(actor: AppActor, params: ArtifactUpdateInput) {
@@ -571,6 +635,10 @@ export async function updateBuildArtifact(actor: AppActor, params: ArtifactUpdat
     classification: params.classification ?? current.classification,
     visibility: params.visibility ?? current.visibility,
     noPrivateDataConfirmed: params.noPrivateDataConfirmed,
+    lineageRoots: params.lineageRoots,
+    lineageInputs: params.lineageInputs,
+    copied: params.copied,
+    expectedUpdatedAt: current.updatedAt,
   });
 }
 
@@ -631,7 +699,8 @@ export async function upsertBuildArtifactsFromGitHubPullRequest(params: GitHubPu
           select: buildArtifactSelect,
         });
 
-      await syncBrainSource(tx, artifact.id);
+      // The provider body has no immutable authenticated content receipt yet.
+      await invalidateArtifactInputLineage({ tx, workspaceId, artifact: { kind: "BuildArtifact", id: artifact.id }, content: artifact });
       const refreshed = await getArtifactOrThrow(tx, workspaceId, artifact.id);
       await tx.auditLog.create({
         data: {
@@ -655,7 +724,7 @@ export async function upsertBuildArtifactsFromGitHubPullRequest(params: GitHubPu
   });
 }
 
-export async function addBuildArtifactAsset(actor: AppActor, params: {
+export async function addBuildArtifactAsset(actor: AppActor, params: ProducerLineageParams & {
   workspaceId: string;
   artifactId: string;
   fileBuffer: Buffer;
@@ -667,14 +736,19 @@ export async function addBuildArtifactAsset(actor: AppActor, params: {
   sortOrder?: number | null;
   width?: number | null;
   height?: number | null;
+  copied?: boolean;
 }) {
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const artifact = await prisma.buildArtifact.findFirst({
     where: { id: params.artifactId, workspaceId: params.workspaceId, NOT: OPERATIONAL_ARTIFACT_FILTER },
-    select: { id: true, workspaceId: true, createdByUserId: true },
+    select: buildArtifactSelect,
   });
   invariant(artifact, 404, "NOT_FOUND", "Build artifact not found.");
   invariant(canManageArtifact(actor, membership, artifact), 403, "FORBIDDEN", "Only the uploader, facilitators, or admins can upload build artifact assets.");
+  invariant((await readableArtifactIds(actor, params.workspaceId, "BuildArtifact", [artifact])).has(artifact.id),
+    404, "NOT_FOUND", "Build artifact not found.");
+  invariant(actor.kind === "user" && !params.copied || params.lineageRoots?.length || getMcpToolInputRoots(actor, params.workspaceId).length,
+    409, "UNKNOWN_LINEAGE", "Copied build asset content requires its complete input receipt.");
   invariant(params.fileBuffer.byteLength > 0, 400, "INVALID_INPUT", "Asset file is required.");
   invariant(params.fileBuffer.byteLength <= 50 * 1024 * 1024, 400, "INVALID_INPUT", "Artifact assets must be 50MB or smaller.");
 
@@ -687,6 +761,12 @@ export async function addBuildArtifactAsset(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "BuildArtifact" WHERE id = ${params.artifactId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    const current = await getArtifactOrThrow(tx, params.workspaceId, params.artifactId);
+    invariant((await readableArtifactIds(actor, params.workspaceId, "BuildArtifact", [current], tx)).has(current.id),
+      404, "NOT_FOUND", "Build artifact not found.");
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId, capture: params, copied: params.copied });
+    invariant(receipt.mode !== "UNKNOWN", 409, "UNKNOWN_LINEAGE", "Copied build asset content requires its complete input receipt.");
     const asset = await tx.buildArtifactAsset.create({
       data: {
         id: assetId,
@@ -705,7 +785,9 @@ export async function addBuildArtifactAsset(actor: AppActor, params: {
       select: buildArtifactAssetSelect,
     });
 
-    await syncBrainSource(tx, params.artifactId, brainSourceAuthorMemberId(membership));
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "BuildArtifactAsset", id: asset.id }, content: asset, receipt });
+    await syncBrainSource(tx, actor, params.artifactId, brainSourceAuthorMemberId(membership));
 
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
@@ -723,9 +805,11 @@ export async function addBuildArtifactAsset(actor: AppActor, params: {
     });
 
     const refreshed = await getArtifactOrThrow(tx, params.workspaceId, params.artifactId);
+    const readable = await readableArtifact(actor, refreshed, tx);
+    invariant(readable && readable.assets.some((item) => item.id === asset.id), 409, "UNKNOWN_LINEAGE", "The build asset's current inputs cannot be proven.");
     return {
-      asset: serializeAsset(asset, decryptPublicToken(refreshed)),
-      artifact: serializeArtifact(actor, membership, refreshed),
+      asset: serializeAsset(asset, decryptPublicToken(readable)),
+      artifact: serializeArtifact(actor, membership, readable),
     };
   });
 }
@@ -742,17 +826,26 @@ export async function getBuildArtifactAssetSignedUrl(actor: AppActor, params: {
       artifactId: params.artifactId,
       artifact: { workspaceId: params.workspaceId, NOT: OPERATIONAL_ARTIFACT_FILTER },
     },
-    select: { id: true, storageKey: true },
+    select: buildArtifactAssetSelect,
   });
   invariant(asset, 404, "NOT_FOUND", "Build artifact asset not found.");
-  if ((actor.kind === "user" && await getWorkspaceSupportGrant(actor, params.workspaceId)) || (actor.kind === "agent" && actor.supportOrigin)) {
-    const file = await defaultStorage.get(asset.storageKey, { maxBytes: 64 * 1024 * 1024 });
-    invariant(file, 404, "NOT_FOUND", "Build artifact asset not found.");
+  const artifact = await prisma.buildArtifact.findFirst({ where: { id: params.artifactId, workspaceId: params.workspaceId }, select: buildArtifactSelect });
+  invariant(artifact && (await readableArtifactIds(actor, params.workspaceId, "BuildArtifact", [artifact])).has(artifact.id)
+    && (await readableArtifactIds(actor, params.workspaceId, "BuildArtifactAsset", [asset])).has(asset.id),
+  404, "NOT_FOUND", "Build artifact asset not found.");
+  const proof = await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "BuildArtifact", id: artifact.id, snapshot: artifact },
+    { kind: "BuildArtifactAsset", id: asset.id, snapshot: asset }]);
+  const file = await defaultStorage.get(asset.storageKey, { maxBytes: 64 * 1024 * 1024 });
+  invariant(file, 404, "NOT_FOUND", "Build artifact asset not found.");
+  invariant(typeof asset.sha256 === "string" && createHash("sha256").update(file.data).digest("hex") === asset.sha256,
+    409, "SOURCE_CHANGED", "Build asset file changed.");
+  const authorize = async () => {
     await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-    return { signedUrl: null, file };
-  }
-  const signedUrl = await defaultStorage.getSignedUrl(asset.storageKey, PUBLIC_PROOF_URL_TTL_SECONDS);
-  return { signedUrl, file: null };
+    invariant(await isArtifactInputProofReadable(actor, params.workspaceId, proof),
+      404, "NOT_FOUND", "Build artifact asset not found.");
+  };
+  await authorize();
+  return { signedUrl: null, file, authorize };
 }
 
 export async function revokeBuildArtifactPublicAccess(actor: AppActor, params: {
@@ -762,12 +855,17 @@ export async function revokeBuildArtifactPublicAccess(actor: AppActor, params: {
 }) {
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "BuildArtifact" WHERE id = ${params.artifactId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const existing = await tx.buildArtifact.findFirst({
       where: { id: params.artifactId, workspaceId: params.workspaceId, NOT: OPERATIONAL_ARTIFACT_FILTER },
-      select: { id: true, createdByUserId: true },
+      select: buildArtifactSelect,
     });
     invariant(existing, 404, "NOT_FOUND", "Build artifact not found.");
     invariant(canManageArtifact(actor, membership, existing), 403, "FORBIDDEN", "Only the uploader, facilitators, or admins can revoke build artifact public links.");
+    invariant(existing.visibility === "PUBLIC_REVIEW" || existing.visibility === "REVOKED" && Boolean(existing.publicEnabledAt),
+      400, "INVALID_STATE", "Only a previously enabled public proof link can be revoked.");
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "BuildArtifact", id: existing.id }, before: existing });
 
     const artifact = await tx.buildArtifact.update({
       where: { id: existing.id },
@@ -778,7 +876,9 @@ export async function revokeBuildArtifactPublicAccess(actor: AppActor, params: {
       },
       select: buildArtifactSelect,
     });
-    await syncBrainSource(tx, artifact.id, brainSourceAuthorMemberId(membership));
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "BuildArtifact", id: artifact.id }, content: artifact, receipt });
+    await syncBrainSource(tx, actor, artifact.id, brainSourceAuthorMemberId(membership));
 
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
@@ -792,7 +892,9 @@ export async function revokeBuildArtifactPublicAccess(actor: AppActor, params: {
     });
 
     const refreshed = await getArtifactOrThrow(tx, params.workspaceId, artifact.id);
-    return serializeArtifact(actor, membership, refreshed);
+    const readable = await readableArtifact(actor, refreshed, tx);
+    invariant(readable, 409, "UNKNOWN_LINEAGE", "The build artifact's current inputs cannot be proven.");
+    return serializeArtifact(actor, membership, readable);
   });
 }
 
@@ -805,20 +907,7 @@ export async function resolvePublicBuildArtifactAsset(params: {
     where: {
       publicTokenHash: tokenHash,
     },
-    select: {
-      id: true,
-      visibility: true,
-      classification: true,
-      publicRevokedAt: true,
-      assets: {
-        where: { id: params.assetId },
-        select: {
-          id: true,
-          storageKey: true,
-        },
-        take: 1,
-      },
-    },
+    select: buildArtifactSelect,
   });
 
   if (!artifact) {
@@ -829,10 +918,33 @@ export async function resolvePublicBuildArtifactAsset(params: {
     throw new AppError(410, "PUBLIC_LINK_REVOKED", "This public proof link has been revoked.");
   }
   invariant(artifact.visibility === "PUBLIC_REVIEW" && artifact.classification === "OPEN_CORE", 404, "NOT_FOUND", "Public proof link not found.");
-  const asset = artifact.assets[0];
+  const asset = artifact.assets.find((item) => item.id === params.assetId);
   invariant(asset, 404, "NOT_FOUND", "Public proof asset not found.");
-  const signedUrl = await defaultStorage.getSignedUrl(asset.storageKey, PUBLIC_PROOF_URL_TTL_SECONDS);
-  return { signedUrl };
+  invariant(artifact.createdByUserId && artifact.createdBy, 404, "NOT_FOUND", "Public proof link not found.");
+  const actor: AppActor = { kind: "user", user: { ...artifact.createdBy, globalRole: "USER" } };
+  const authorize = async () => {
+    await requireWorkspaceMembership({ actor, workspaceId: artifact.workspaceId });
+    const current = await prisma.buildArtifact.findFirst({ where: { id: artifact.id, workspaceId: artifact.workspaceId, publicTokenHash: tokenHash }, select: buildArtifactSelect });
+    invariant(current?.visibility === "PUBLIC_REVIEW" && current.classification === "OPEN_CORE" && !current.publicRevokedAt,
+      404, "NOT_FOUND", "Public proof link not found.");
+    invariant(lineageContentFingerprint("BuildArtifact", current) === lineageContentFingerprint("BuildArtifact", artifact)
+      && current.assets.some((item) => item.id === asset.id && lineageContentFingerprint("BuildArtifactAsset", item) === lineageContentFingerprint("BuildArtifactAsset", asset)),
+    409, "SOURCE_CHANGED", "Public proof changed during delivery.");
+    const roots = await captureArtifactInputProof(actor, current.workspaceId, [
+      { kind: "BuildArtifact", id: current.id, snapshot: current },
+      ...current.assets.map((item) => ({ kind: "BuildArtifactAsset" as const, id: item.id, snapshot: item })),
+      { kind: "User", id: artifact.createdByUserId! },
+    ]);
+    invariant(await isArtifactInputProofPubliclyShareable(actor, current.workspaceId, roots),
+      404, "NOT_FOUND", "Public proof link not found.");
+  };
+  await authorize();
+  const file = await defaultStorage.get(asset.storageKey, { maxBytes: 64 * 1024 * 1024 });
+  invariant(file, 404, "NOT_FOUND", "Public proof asset not found.");
+  invariant(typeof asset.sha256 === "string" && createHash("sha256").update(file.data).digest("hex") === asset.sha256,
+    409, "SOURCE_CHANGED", "Public proof asset changed.");
+  await authorize();
+  return { signedUrl: null, file, authorize };
 }
 
 export async function markBuildArtifactClosedFromGitHub(params: {
@@ -873,7 +985,8 @@ export async function markBuildArtifactClosedFromGitHub(params: {
         },
         select: buildArtifactSelect,
       });
-      await syncBrainSource(tx, next.id);
+      await invalidateArtifactInputLineage({ tx, workspaceId: next.workspaceId,
+        artifact: { kind: "BuildArtifact", id: next.id }, content: next });
       await tx.auditLog.create({
         data: {
           workspaceId: next.workspaceId,

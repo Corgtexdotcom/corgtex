@@ -63,7 +63,7 @@ export default async function NotificationsPage({
       take: PAGE_SIZE + 1,
       skip,
     }),
-    userId ? countUnreadNotifications(userId, workspaceId) : Promise.resolve(0),
+    userId ? countUnreadNotifications(actor, workspaceId) : Promise.resolve(0),
   ]);
 
   const hasNextPage = notificationsResult.length > PAGE_SIZE;

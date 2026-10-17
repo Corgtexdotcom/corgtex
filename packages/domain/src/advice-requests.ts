@@ -1,4 +1,7 @@
+import { readableArtifactIds } from "./source-lineage";
+import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import type {
+  AdviceRequest,
   AdviceRequestAudienceType,
   AdviceRequestPreferredChannel,
   AdviceRequestStatus,
@@ -61,9 +64,11 @@ function emptyAdviceRequestCountSummary(): AdviceRequestCountSummary {
 }
 
 export async function loadAdviceRequestCountSummaries(
+  actor: AppActor,
   workspaceId: string,
   subjectType: AdviceSubjectType,
   subjectIds: string[],
+  observe?: (requests: AdviceRequest[]) => Promise<void>,
 ) {
   const uniqueSubjectIds = uniqueStrings(subjectIds);
   const summaries = new Map<string, AdviceRequestCountSummary>(
@@ -79,16 +84,17 @@ export async function loadAdviceRequestCountSummaries(
     },
     select: {
       subjectId: true,
-      requests: {
-        select: { status: true },
-      },
+      requests: true,
     },
   });
 
+  const visible = await readableArtifactIds(actor, workspaceId, "AdviceRequest", processes.flatMap((process) => process.requests));
+  await observe?.(processes.flatMap(process => process.requests).filter(request => visible.has(request.id)));
   for (const process of processes) {
+    const requests = process.requests.filter((request) => visible.has(request.id));
     const summary = summaries.get(process.subjectId) ?? emptyAdviceRequestCountSummary();
-    const total = process.requests.length;
-    const active = process.requests.filter((request) => request.status === "ACTIVE").length;
+    const total = requests.length;
+    const active = requests.filter((request) => request.status === "ACTIVE").length;
     summary.adviceRequestCount += total;
     summary.activeAdviceRequestCount += active;
     summary.inputRequestCount += total;
@@ -357,7 +363,7 @@ function buildAdviceRequestPayload(params: {
   };
 }
 
-export async function createAdviceRequest(actor: AppActor, params: {
+export async function createAdviceRequest(actor: AppActor, params: ProducerLineageParams & {
   workspaceId: string;
   subjectType: string;
   subjectId: string;
@@ -395,6 +401,8 @@ export async function createAdviceRequest(actor: AppActor, params: {
           && existing.preferredChannel === preferredChannel
           && JSON.stringify(existing.recipients.map((recipient) => recipient.memberId).sort()) === JSON.stringify((params.audienceType === "MEMBERS" ? memberIds : []).sort()),
         409, "IDEMPOTENCY_CONFLICT", "This advice request key was already used for different content.");
+        invariant((await readableArtifactIds(actor, params.workspaceId, "AdviceRequest", [existing], tx)).has(existing.id),
+          404, "NOT_FOUND", "The earlier input request is no longer readable.");
         return existing;
       }
     }
@@ -433,6 +441,13 @@ export async function createAdviceRequest(actor: AppActor, params: {
       deadlineAt: params.deadlineAt,
     });
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      capture: params, dependencies: [
+        { kind: subjectType === "ACTION" ? "Action" : subjectType === "TENSION" ? "Tension" : "Proposal", id: params.subjectId },
+        { kind: "Member", id: requesterMember.id },
+        ...(params.audienceType === "MEMBERS" ? memberIds.map((id) => ({ kind: "Member" as const, id })) : []),
+        ...(params.audienceType === "CIRCLE" && params.targetCircleId ? [{ kind: "Circle" as const, id: params.targetCircleId }] : []),
+      ] });
     const request = await tx.adviceRequest.create({
       data: {
         ...(params.idempotencyId ? { id: params.idempotencyId } : {}),
@@ -447,6 +462,9 @@ export async function createAdviceRequest(actor: AppActor, params: {
         preferredChannel,
       },
     });
+
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "AdviceRequest", id: request.id }, content: request, receipt });
 
     if (params.audienceType === "MEMBERS") {
       await tx.adviceRequestRecipient.createMany({
@@ -611,6 +629,8 @@ export async function closeAdviceRequest(actor: AppActor, params: {
       membershipRole: membership?.role,
     });
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "AdviceRequest", id: request.id }, before: request, allowSystemTransition: true });
     const updated = await tx.adviceRequest.update({
       where: { id: params.requestId },
       data: {
@@ -618,6 +638,9 @@ export async function closeAdviceRequest(actor: AppActor, params: {
         completedAt: new Date(),
       },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "AdviceRequest", id: updated.id }, content: updated, receipt });
+
 
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
@@ -657,6 +680,8 @@ export async function withdrawAdviceRequest(actor: AppActor, params: {
       membershipRole: membership?.role,
     });
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "AdviceRequest", id: request.id }, before: request, allowSystemTransition: true });
     const updated = await tx.adviceRequest.update({
       where: { id: params.requestId },
       data: {
@@ -664,6 +689,9 @@ export async function withdrawAdviceRequest(actor: AppActor, params: {
         canceledAt: new Date(),
       },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "AdviceRequest", id: updated.id }, content: updated, receipt });
+
 
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,

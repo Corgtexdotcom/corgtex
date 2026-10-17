@@ -1,4 +1,5 @@
 import type { Prisma } from "@prisma/client";
+import { isSourceLineageRebuildEvent } from "@corgtex/domain";
 
 const TRIAGE_COALESCE_WINDOW_MS = 5 * 60 * 1_000;
 export function triageBucketStart(date: Date) {
@@ -284,14 +285,6 @@ export function deriveJobsForEvent(event: {
         payload: { sourceId: payload.sourceId },
         dedupeKey: absorbDedupeKey,
       });
-      jobs.push({
-        workspaceId: event.workspaceId,
-        eventId: event.id,
-        type: "agent.company-understanding",
-        payload: { sourceId: payload.sourceId },
-        dependsOnDedupeKey: absorbDedupeKey,
-        dedupeKey: `${event.id}:company-understanding`,
-      });
     }
   }
 
@@ -519,6 +512,15 @@ export function deriveJobsForEvent(event: {
         dedupeKey: `${event.workspaceId}:demo-welcome-newspaper:${demoLeadId}`,
       });
     }
+  }
+
+  if (event.workspaceId && isSourceLineageRebuildEvent(event.type)) {
+    const sourceId = readPayloadString(event.payload, "sourceId");
+    jobs.push({
+      workspaceId: event.workspaceId, eventId: event.id, type: "source-lineage.rebuild",
+      payload: { eventId: event.id }, dedupeKey: `${event.id}:source-lineage-rebuild`,
+      ...(event.type === "brain-source.created" && sourceId ? { dependsOnDedupeKey: `${event.id}:brain-absorb` } : {}),
+    });
   }
 
   return jobs;

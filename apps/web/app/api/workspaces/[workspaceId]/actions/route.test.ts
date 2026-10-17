@@ -79,6 +79,7 @@ vi.mock("@corgtex/domain", async () => {
     formatWorkItemPriority,
     getWorkspacePermanentPathForEntity,
     loadAdviceRequestCountSummaries,
+    readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map((row: { id: string }) => row.id))),
     listActions,
     normalizeActionWorkItem,
     normalizeGoalWorkItem,
@@ -266,7 +267,7 @@ describe("POST /api/workspaces/[workspaceId]/actions", () => {
         assignee: "Assignee",
       },
     });
-    expect(loadAdviceRequestCountSummaries).toHaveBeenCalledWith("workspace-1", "ACTION", ["action-1"]);
+    expect(loadAdviceRequestCountSummaries).toHaveBeenCalledWith(actor, "workspace-1", "ACTION", ["action-1"]);
   });
 });
 

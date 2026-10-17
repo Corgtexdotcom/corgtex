@@ -1,4 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mcpCredentialVersion, mcpScopesHash } from "../../shared/src/mcp-context";
+import { MCP_TOOL_CAPABILITIES } from "../../domain/src/mcp-tool-capabilities";
+
+// Domain/auth primitives are mocked in this routing suite; give each synthetic
+// session a matching live origin so the real outer scope boundary still executes.
+const liveMcpRows = new Map<string, any>();
+function createTestServer(create: any, ctx: any) {
+  const scopes = [...new Set([...Object.values(MCP_TOOL_CAPABILITIES).flatMap(c => c.scopes), ...(ctx.scopes ?? [])])];
+  if (!ctx.mcpOrigin && (ctx.authKind === "oauth" || ctx.actor.authProvider === "credential")) {
+    const id = `fixture-origin-${liveMcpRows.size}`;
+    ctx = { ...ctx, mcpOrigin: { kind: ctx.authKind === "oauth" ? "oauth" : "agent", id, workspaceId: ctx.workspaceId,
+      scopeHash: mcpScopesHash(scopes), ...(ctx.authKind === "agent" ? { credentialVersion: mcpCredentialVersion("fixture-hash") } : { grantEpoch: "0" }) } };
+    liveMcpRows.set(id, { id, workspaceId: ctx.workspaceId, userId: ctx.actor.user?.id, grantEpoch: 0n, scopes, tokenHash: "fixture-hash", isActive: true, client: { isActive: true } });
+  }
+  return create(ctx);
+}
 
 const createActionMock = vi.fn();
 const createArticleMock = vi.fn();
@@ -12,6 +28,7 @@ const listGoalsMock = vi.fn();
 const listProposalsMock = vi.fn();
 const listTensionsMock = vi.fn();
 const getGoalMock = vi.fn();
+const getProposalMock = vi.fn();
 const updateActionMock = vi.fn();
 const updateGoalMock = vi.fn();
 const updateProposalMock = vi.fn();
@@ -101,6 +118,9 @@ vi.mock("@corgtex/domain", async () => {
   } = await import("../../domain/src/work-item-normalization");
 
   return {
+  // This routing fixture verifies handler wiring; native permission/encryption behavior is exercised by mcp-tool-input.test.ts.
+  withMcpToolInput: vi.fn(async (_actor, params, work) => work(structuredClone(params.args))),
+  readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map((row: {id: string}) => row.id))),
   releaseDiagnosticDispatchSchema,
   releaseDiagnosticRequestSchema,
   dispatchReleaseDiagnostic: dispatchReleaseDiagnosticMock,
@@ -184,6 +204,7 @@ vi.mock("@corgtex/domain", async () => {
   listExternalMcpConnections: listExternalMcpConnectionsMock,
   listGoals: listGoalsMock,
   getGoal: getGoalMock,
+  getProposal: getProposalMock,
   createGoal: createGoalMock,
   updateGoal: updateGoalMock,
   deleteGoal: deleteGoalMock,
@@ -277,9 +298,23 @@ vi.mock("@corgtex/agents", () => ({
   processConversationTurn: vi.fn(),
 }));
 
-vi.mock("@corgtex/shared", () => ({
-  prisma: {
-    $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({})),
+vi.mock("@corgtex/shared", async () => {
+  const db: any = {
+    mcpOAuthAccessToken: { findUnique: vi.fn(async ({where}) => liveMcpRows.get(where.id) ?? null) },
+    agentCredential: { findUnique: vi.fn(async ({where}) => liveMcpRows.get(where.id) ?? null) },
+    conversationSession: { findFirst: vi.fn(async () => ({id: "stored-mcp-session"})) },
+    $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(new Proxy(db, {
+      get(target, property) { return property === "$transaction" ? undefined : Reflect.get(target, property); },
+    }))),
+    $queryRaw: vi.fn(async (query: { sql: string; values: unknown[] }) => {
+      if (!query.sql.includes('FROM "SourcePermissionEpoch"')) return [];
+      const [workspaceId, kind, id] = query.values;
+      const row = liveMcpRows.get(String(id));
+      return kind === "McpOAuthGrantPolicy" && row?.workspaceId === workspaceId && row.grantEpoch !== undefined
+        ? [{ epoch: row.grantEpoch }] : [];
+    }),
+    contextGraphObject: {findMany: vi.fn()},
+    contextGraphRelationship: {findMany: vi.fn()},
     action: {
       findFirst: vi.fn(),
     },
@@ -292,6 +327,7 @@ vi.mock("@corgtex/shared", () => ({
     workspace: {
       findUnique: vi.fn(),
     },
+    member: { count: vi.fn(async () => 2) },
     workspaceFeatureFlag: {
       findMany: vi.fn(),
       upsert: vi.fn(),
@@ -299,16 +335,60 @@ vi.mock("@corgtex/shared", () => ({
     deliberationEntry: {
       findFirst: vi.fn(),
     },
-  },
-  env: { APP_URL: "https://app.test" },
-  toInputJson: (value: unknown) => value,
-}));
+  };
+  return { ...await import("../../shared/src/mcp-context"), prisma: db,
+    env: { APP_URL: "https://app.test" }, toInputJson: (value: unknown) => value };
+});
 
 vi.mock("./auth", () => ({
   requireScope: vi.fn(),
 }));
 
 describe("createCorgtexMcpServer", () => {
+  it.each([
+    ["constitution", "corgtex://workspace/constitution", "getCurrentConstitution", "governance:read"],
+    ["policies", "corgtex://workspace/policies", "listPolicyCorpus", "governance:read"],
+    ["context-map", "corgtex://map/process/current", "getContextMapData", "context-graph:read"],
+  ])("withholds %s resource after in-flight scope revocation", async (_name, uri, reader, scope) => {
+    const {createCorgtexMcpServer} = await import("./server");
+    const domain = await import("@corgtex/domain");
+    const row = {id: "resource-origin", workspaceId: "ws-1", userId: "user", grantEpoch: 0n, scopes: [scope], client: {isActive: true}};
+    liveMcpRows.set(row.id, row);
+    vi.mocked((domain as any)[reader]).mockImplementationOnce(async () => {row.scopes = []; return reader === "listPolicyCorpus" ? [] : {bodyMd: "Private result"};});
+    const server = createCorgtexMcpServer({workspaceId: "ws-1", authKind: "oauth", actor: {kind: "user", user: {id: "user"}} as any,
+      scopes: [scope], mcpOrigin: {kind: "oauth", id: row.id, workspaceId: "ws-1", scopeHash: mcpScopesHash(row.scopes), grantEpoch: "0"}});
+    const resource = (server as any)._registeredResources[uri];
+    await expect(resource.readCallback(new URL(uri), {})).rejects.toThrow("MCP_AUTHORIZATION_REVOKED");
+  });
+
+  it("withholds a resource after OAuth grant revocation and restoration during its read", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const domain = await import("@corgtex/domain");
+    const scopes = ["governance:read"];
+    const row = { id: "restored-resource-origin", workspaceId: "ws-1", userId: "user", grantEpoch: 0n, scopes, client: { isActive: true } };
+    liveMcpRows.set(row.id, row);
+    vi.mocked(domain.getCurrentConstitution).mockClear().mockImplementationOnce(async () => {
+      row.scopes = []; row.grantEpoch++;
+      row.scopes = scopes; row.grantEpoch++;
+      return { bodyMd: "stale-resource-canary" } as any;
+    });
+    const server = createCorgtexMcpServer({ workspaceId: "ws-1", authKind: "oauth", actor: { kind: "user", user: { id: "user" } } as any,
+      scopes, mcpOrigin: { kind: "oauth", id: row.id, workspaceId: "ws-1", scopeHash: mcpScopesHash(scopes), grantEpoch: "0" } });
+    const resource = (server as any)._registeredResources["corgtex://workspace/constitution"];
+    await expect(resource.readCallback(new URL("corgtex://workspace/constitution"), {})).rejects.toThrow("MCP_AUTHORIZATION_REVOKED");
+    expect(domain.getCurrentConstitution).toHaveBeenCalledOnce();
+    expect(row.scopes).toEqual(scopes);
+  });
+
+  it.each(["oauth", "agent"] as const)("rejects %s tool invocation without a bound origin", async authKind => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const server = createCorgtexMcpServer({ workspaceId: "ws-1", authKind,
+      actor: authKind === "oauth" ? {kind: "user", user: {id: "user-1"}} as any
+        : {kind: "agent", authProvider: "credential", credentialId: "credential-a"} as any });
+    await expect((server as any)._registeredTools.list_proposals.handler({})).rejects.toThrow("MCP_AUTHORIZATION_REVOKED");
+    expect(listProposalsMock).not.toHaveBeenCalled();
+  });
+
   beforeEach(async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("MICROSOFT_CLIENT_ID", "microsoft-client-id");
@@ -372,7 +452,7 @@ describe("createCorgtexMcpServer", () => {
     listGoalsMock.mockReset().mockResolvedValue([]);
     listProposalsMock.mockReset().mockResolvedValue({ items: [], total: 0 });
     listTensionsMock.mockReset().mockResolvedValue({ items: [], total: 0 });
-    loadAdviceRequestCountSummariesMock.mockReset().mockImplementation(async (_workspaceId: string, _subjectType: string, subjectIds: string[]) => new Map(
+    loadAdviceRequestCountSummariesMock.mockReset().mockImplementation(async (_actor: unknown, _workspaceId: string, _subjectType: string, subjectIds: string[]) => new Map(
       subjectIds.map((subjectId) => [subjectId, {
         adviceRequestCount: 0,
         activeAdviceRequestCount: 0,
@@ -381,6 +461,7 @@ describe("createCorgtexMcpServer", () => {
       }]),
     ));
     getGoalMock.mockReset().mockResolvedValue({ id: "goal-1", cadence: "QUARTERLY" });
+    getProposalMock.mockReset().mockResolvedValue(null);
     updateActionMock.mockReset().mockResolvedValue({
       id: "action-1",
       status: "OPEN",
@@ -713,7 +794,8 @@ describe("createCorgtexMcpServer", () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
 
-    const server = createCorgtexMcpServer({
+    liveMcpRows.set("connection-A", { id: "connection-A", workspaceId: "ws-1", userId: "user-1", grantEpoch: 0n, scopes: ["workspace:read", "brain:read"], client: { isActive: true } });
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: {
         kind: "user",
         user: { id: "user-1", email: "user@example.com", displayName: "User One" },
@@ -724,7 +806,7 @@ describe("createCorgtexMcpServer", () => {
       resource: "https://app.test/api/mcp",
       providerKey: "cursor",
       clientName: "Cursor",
-      mcpOrigin: { kind: "oauth", id: "connection-A", workspaceId: "ws-1" },
+      mcpOrigin: { kind: "oauth", id: "connection-A", workspaceId: "ws-1", grantEpoch: "0", scopeHash: (await import("../../shared/src/mcp-context")).mcpScopesHash(["workspace:read", "brain:read"]) },
     });
 
     const response = await (server as any)._registeredTools.get_current_connection.handler({});
@@ -757,7 +839,7 @@ describe("createCorgtexMcpServer", () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: {
         kind: "user",
         user: { id: "user-1", email: "user@example.com", displayName: "User One" },
@@ -811,7 +893,7 @@ describe("createCorgtexMcpServer", () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "support", credentialId: "cred-1" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -865,7 +947,7 @@ describe("createCorgtexMcpServer", () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "user", user: { id: "user-1", email: "user@example.com" } } as any,
       workspaceId: "ws-1",
       authKind: "oauth",
@@ -908,7 +990,7 @@ describe("createCorgtexMcpServer", () => {
   it("rejects recorder calendar connect before storing tokens when Microsoft refresh config is missing or mismatched", async () => {
     const { createCorgtexMcpServer } = await import("./server");
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "support", credentialId: "cred-1" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -944,7 +1026,7 @@ describe("createCorgtexMcpServer", () => {
   it("runs compact support-only recorder sync, dry-run, and live-smoke operations", async () => {
     const { createCorgtexMcpServer } = await import("./server");
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "support", credentialId: "cred-1" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -1019,7 +1101,7 @@ describe("createCorgtexMcpServer", () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "support", credentialId: "cred-1", scopes: ["support:write"] } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -1074,7 +1156,7 @@ describe("createCorgtexMcpServer", () => {
   it("rejects remote recorder live smoke without a timezone-aware future join time", async () => {
     const { createCorgtexMcpServer } = await import("./server");
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "support", credentialId: "cred-1" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -1119,7 +1201,7 @@ describe("createCorgtexMcpServer", () => {
     listTensionsMock.mockResolvedValueOnce({ items: [], total: 0 });
     vi.mocked(listMeetings).mockResolvedValueOnce([]);
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -1135,6 +1217,23 @@ describe("createCorgtexMcpServer", () => {
       ownerMemberName: "Owner",
       owner: "Owner",
     })]);
+  });
+
+  it.each(["oauth", "agent"] as const)("gates workspace category counts for %s connections and delegates visible totals", async authKind => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { prisma } = await import("@corgtex/shared");
+    vi.mocked(prisma.workspace.findUnique).mockResolvedValue({ id: "ws-1", name: "Synthetic" } as never);
+    const scopes = ["workspace:read", "actions:read"];
+    const actor = authKind === "oauth" ? {kind: "user", user: {id: "user-1"}}
+      : {kind: "agent", authProvider: "credential", workspaceIds: ["ws-1"], scopes};
+    const server = createTestServer(createCorgtexMcpServer, {workspaceId: "ws-1", authKind, actor, scopes});
+    listActionsMock.mockResolvedValue({items: [], total: 7});
+    listProposalsMock.mockClear(); listTensionsMock.mockClear(); listActionsMock.mockClear();
+    const response = await (server as any)._registeredTools.get_workspace_info.handler({});
+    expect(JSON.parse(response.content[0].text).counts).toEqual({actions: 7, proposals: 0, tensions: 0, members: 2});
+    expect(listActionsMock).toHaveBeenCalledWith(actor, "ws-1", {take: 0});
+    expect(listProposalsMock).not.toHaveBeenCalled();
+    expect(listTensionsMock).not.toHaveBeenCalled();
   });
 
   it("enforces all five legitimate daily overview scopes during invocation and never requires finance:read", async () => {
@@ -1155,7 +1254,7 @@ describe("createCorgtexMcpServer", () => {
       "meetings:read",
     ]);
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -1186,7 +1285,7 @@ describe("createCorgtexMcpServer", () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -1308,7 +1407,7 @@ describe("createCorgtexMcpServer", () => {
         createdAt: new Date("2026-06-01T00:00:00.000Z"),
       });
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -1421,7 +1520,7 @@ describe("createCorgtexMcpServer", () => {
 
     vi.mocked(prisma.deliberationEntry.findFirst).mockReset().mockResolvedValueOnce(null as never);
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -1441,7 +1540,7 @@ describe("createCorgtexMcpServer", () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -1490,7 +1589,7 @@ describe("createCorgtexMcpServer", () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -1523,7 +1622,7 @@ describe("createCorgtexMcpServer", () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -1558,7 +1657,7 @@ describe("createCorgtexMcpServer", () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -1659,7 +1758,7 @@ describe("createCorgtexMcpServer", () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -1756,7 +1855,7 @@ describe("createCorgtexMcpServer", () => {
   it("records failed communication suggestion completion through MCP without marking sent", async () => {
     const { createCorgtexMcpServer } = await import("./server");
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -1788,7 +1887,7 @@ describe("createCorgtexMcpServer", () => {
       kind: "user",
       user: { id: "user-1", email: "user@example.com", displayName: "User" },
     } as any;
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor,
       workspaceId: "ws-1",
       authKind: "oauth",
@@ -1833,7 +1932,7 @@ describe("createCorgtexMcpServer", () => {
       config: { channelId: "C456" },
     } as never);
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -1900,7 +1999,7 @@ describe("createCorgtexMcpServer", () => {
         reason: "CONFIG_NOT_OBJECT",
         currentConfigIdentity: "c".repeat(64),
       });
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -1974,7 +2073,7 @@ describe("createCorgtexMcpServer", () => {
   it("annotates read-only and destructive tools for connector approval reviews", async () => {
     const { createCorgtexMcpServer } = await import("./server");
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -2082,7 +2181,7 @@ describe("createCorgtexMcpServer", () => {
       },
     ]);
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -2127,7 +2226,7 @@ describe("createCorgtexMcpServer", () => {
       updatedAt: new Date("2026-05-01T00:00:00.000Z"),
     });
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -2164,7 +2263,7 @@ describe("createCorgtexMcpServer", () => {
       sourceCounts: { sevenDays: { meetings: 2 } },
     });
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -2184,7 +2283,7 @@ describe("createCorgtexMcpServer", () => {
     const operationId = "123e4567-e89b-42d3-a456-426614174001", expectedGitSha = "a".repeat(40);
     dispatchReleaseDiagnosticMock.mockResolvedValue({ operationId, accepted: false });
     getReleaseDiagnosticMock.mockResolvedValue({ operationId, accepted: true });
-    const server = createCorgtexMcpServer({ actor: { kind: "agent", authProvider: "credential", label: "release", scopes: ["runtime:read", "runtime:write"] } as any,
+    const server = createTestServer(createCorgtexMcpServer, { actor: { kind: "agent", authProvider: "credential", label: "release", scopes: ["runtime:read", "runtime:write"] } as any,
       workspaceId: "ws-1", authKind: "agent", scopes: ["runtime:read", "runtime:write"] });
     await (server as any)._registeredTools.dispatch_release_diagnostic.handler({ operationId, expectedGitSha });
     await (server as any)._registeredTools.dispatch_release_diagnostic.handler({ operationId, expectedGitSha, retryAttempt: 1 });
@@ -2214,7 +2313,7 @@ describe("createCorgtexMcpServer", () => {
       tokenHash: "sha256-secret",
     });
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -2244,7 +2343,7 @@ describe("createCorgtexMcpServer", () => {
   it("binds source recovery to the authenticated workspace and requires all support scopes", async () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
-    const server = createCorgtexMcpServer({ actor: { kind: "agent", authProvider: "credential" } as any, workspaceId: "ws-1", authKind: "agent" });
+    const server = createTestServer(createCorgtexMcpServer, { actor: { kind: "agent", authProvider: "credential" } as any, workspaceId: "ws-1", authKind: "agent" });
     reconcileBrainSourceMock.mockResolvedValue({ id: "job-1", created: true });
     const input = { sourceId: "source-1", expectedSourceIdentity: "a".repeat(64), reason: "Approved recovery", workspaceId: "attacker-ws" };
     const repair = (server as any)._registeredTools.reconcile_brain_source;
@@ -2263,7 +2362,7 @@ describe("createCorgtexMcpServer", () => {
 
   it("rejects a non-agent session for source recovery", async () => {
     const { createCorgtexMcpServer } = await import("./server");
-    const server = createCorgtexMcpServer({ actor: { kind: "user", user: { id: "user-1" } } as any, workspaceId: "ws-1", authKind: "oauth" } as any);
+    const server = createTestServer(createCorgtexMcpServer, { actor: { kind: "user", user: { id: "user-1" } } as any, workspaceId: "ws-1", authKind: "oauth" } as any);
     await expect((server as any)._registeredTools.reconcile_brain_source.handler({ sourceId: "source", expectedSourceIdentity: "a".repeat(64), reason: "test" })).rejects.toThrow("Support MCP tools require support connector credentials");
     expect(reconcileBrainSourceMock).not.toHaveBeenCalled();
   });
@@ -2272,7 +2371,7 @@ describe("createCorgtexMcpServer", () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -2305,7 +2404,7 @@ describe("createCorgtexMcpServer", () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -2351,7 +2450,7 @@ describe("createCorgtexMcpServer", () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -2413,7 +2512,7 @@ describe("createCorgtexMcpServer", () => {
         assigneeMember: { id: "member-responsible", user: { displayName: "Responsible", email: "responsible@example.test" } },
         raisedByMember: { id: "member-raiser", user: { displayName: "Raiser", email: "raiser@example.test" } },
       } as never);
-    vi.mocked(prisma.proposal.findFirst)
+    getProposalMock
       .mockResolvedValueOnce({
         id: "proposal-1",
         title: "Clarify ownership",
@@ -2458,7 +2557,7 @@ describe("createCorgtexMcpServer", () => {
         activeInputRequestCount: 2,
       }]]));
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -2623,7 +2722,7 @@ describe("createCorgtexMcpServer", () => {
       assigneeMember: { id: "member-assignee", user: { displayName: "Assignee", email: "assignee@example.test" } },
     } as never);
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -2693,7 +2792,7 @@ describe("createCorgtexMcpServer", () => {
         },
       });
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -2755,7 +2854,7 @@ describe("createCorgtexMcpServer", () => {
         type: "PROCESS",
       });
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -2788,9 +2887,7 @@ describe("createCorgtexMcpServer", () => {
 
   it("omits ownerMemberId from MCP create_proposal input so the domain default applies", async () => {
     const { createCorgtexMcpServer } = await import("./server");
-    const { prisma } = await import("@corgtex/shared");
-
-    vi.mocked(prisma.proposal.findFirst).mockResolvedValueOnce({
+    getProposalMock.mockResolvedValueOnce({
       id: "proposal-1",
       title: "Clarify ownership",
       status: "DRAFT",
@@ -2800,7 +2897,7 @@ describe("createCorgtexMcpServer", () => {
       ownerMember: { id: "member-default", user: { displayName: "Default Owner", email: "default@example.test" } },
     } as never);
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -2825,9 +2922,8 @@ describe("createCorgtexMcpServer", () => {
   it("keeps MCP get_proposal advice counts aligned with list responses", async () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
-    const { prisma } = await import("@corgtex/shared");
 
-    vi.mocked(prisma.proposal.findFirst).mockResolvedValueOnce({
+    getProposalMock.mockResolvedValueOnce({
       id: "proposal-1",
       title: "Clarify ownership",
       status: "DRAFT",
@@ -2843,7 +2939,7 @@ describe("createCorgtexMcpServer", () => {
       },
     } as never);
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -2854,17 +2950,8 @@ describe("createCorgtexMcpServer", () => {
     });
 
     expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "proposals:read");
-    expect(prisma.proposal.findFirst).toHaveBeenCalledWith(expect.objectContaining({
-      include: expect.objectContaining({
-        adviceProcess: {
-          include: {
-            requests: {
-              select: { status: true },
-            },
-          },
-        },
-      }),
-    }));
+    expect(getProposalMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }),
+      { workspaceId: "ws-1", proposalId: "proposal-1" });
     expect(JSON.parse(response.content[0].text)).toMatchObject({
       adviceRequestCount: 2,
       activeAdviceRequestCount: 1,
@@ -2892,7 +2979,7 @@ describe("createCorgtexMcpServer", () => {
       },
     ] as never);
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -2915,7 +3002,7 @@ describe("createCorgtexMcpServer", () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -2970,7 +3057,7 @@ describe("createCorgtexMcpServer", () => {
     getGoalMock.mockResolvedValueOnce({ id: "goal-1", cadence: "QUARTERLY", title: "Quarterly traction" });
     updateGoalMock.mockResolvedValueOnce({ id: "goal-1", status: "ON_TRACK", cadence: "QUARTERLY" });
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -3005,7 +3092,7 @@ describe("createCorgtexMcpServer", () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
       authKind: "agent",
@@ -3052,7 +3139,7 @@ describe("createCorgtexMcpServer", () => {
       kind: "user",
       user: { id: "user-1", email: "user@example.com", displayName: "User" },
     } as any;
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor,
       workspaceId: "ws-1",
       authKind: "oauth",
@@ -3080,7 +3167,7 @@ describe("createCorgtexMcpServer", () => {
   it("rejects support-only tools from OAuth user sessions even when support scope is present", async () => {
     const { createCorgtexMcpServer } = await import("./server");
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor: {
         kind: "user",
         user: { id: "user-1", email: "user@example.com", displayName: "User" },
@@ -3113,7 +3200,7 @@ describe("createCorgtexMcpServer", () => {
       contextUsed: {},
     } as any);
 
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor,
       workspaceId: "ws-1",
       authKind: "oauth",
@@ -3124,7 +3211,9 @@ describe("createCorgtexMcpServer", () => {
 
     expect(processConversationTurn).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: "ws-1",
-      sessionId: "mcp-ws-1-user-1",
+      sessionId: "stored-mcp-session",
+      requestSource: "MCP",
+      agentKey: "mcp-assistant",
       userId: "user-1",
       userMessage: "show tools",
       actor,
@@ -3134,19 +3223,35 @@ describe("createCorgtexMcpServer", () => {
     expect(Object.isFrozen(context.operationScopes)).toBe(true);
   });
 
-  it.each([undefined, []])("passes a restrictive ceiling for absent MCP OAuth grants %j", async scopes => {
+  it.each([{ scopes: undefined }, { scopes: [] }])("rejects absent OAuth grants without a live origin before invoking chat $scopes", async ({ scopes }) => {
     const { createCorgtexMcpServer } = await import("./server");
     const { processConversationTurn } = await import("@corgtex/agents");
-    vi.mocked(processConversationTurn).mockResolvedValueOnce({ assistantMessage: "done", contextUsed: {} } as any);
+    vi.mocked(processConversationTurn).mockReset().mockResolvedValueOnce({ assistantMessage: "done", contextUsed: {} } as any);
     const server = createCorgtexMcpServer({
       actor: { kind: "user", user: { id: "synthetic-user", email: "synthetic@example.test", displayName: null } },
       workspaceId: "synthetic-workspace", authKind: "oauth", scopes,
     });
-    // requireScope is mocked in this registration suite; the real auth suite
-    // rejects missing grants. This checks that a lost grant never becomes an
-    // unrestricted native context even when outer authorization is bypassed.
+    // Even though requireScope is mocked in this routing suite, the real
+    // mandatory-origin boundary rejects this incomplete OAuth context first.
+    await expect((server as any)._registeredTools.chat.handler({ message: "synthetic message" }))
+      .rejects.toThrow("MCP_AUTHORIZATION_REVOKED");
+    expect(processConversationTurn).not.toHaveBeenCalled();
+  });
+
+  it.each([{ scopes: undefined }, { scopes: [] }])("keeps an absent operation ceiling empty even with a valid live OAuth origin $scopes", async ({ scopes }) => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { processConversationTurn } = await import("@corgtex/agents");
+    vi.mocked(processConversationTurn).mockReset().mockResolvedValueOnce({ assistantMessage: "done", contextUsed: {} } as any);
+    const server = createTestServer(createCorgtexMcpServer, {
+      actor: { kind: "user", user: { id: "synthetic-user", email: "synthetic@example.test", displayName: null } },
+      workspaceId: "synthetic-workspace", authKind: "oauth", scopes,
+    });
+    // The actual origin boundary sees the matching synthetic live token; the
+    // context's absent grant ceiling must still not become unrestricted.
     await (server as any)._registeredTools.chat.handler({ message: "synthetic message" });
-    expect(vi.mocked(processConversationTurn).mock.calls.at(-1)![0].operationScopes).toEqual([]);
+    const submitted = vi.mocked(processConversationTurn).mock.calls.at(-1)![0];
+    expect(submitted.operationScopes).toEqual([]);
+    expect(Object.isFrozen(submitted.operationScopes)).toBe(true);
   });
 
   it("preserves trusted bootstrap chat authority", async () => {
@@ -3180,7 +3285,7 @@ describe("createCorgtexMcpServer", () => {
       kind: "user",
       user: { id: "user-1", email: "user@example.com", displayName: "User" },
     } as any;
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor,
       workspaceId: "ws-1",
       authKind: "oauth",
@@ -3225,7 +3330,7 @@ describe("createCorgtexMcpServer", () => {
       kind: "user",
       user: { id: "user-1", email: "user@example.com", displayName: "User" },
     } as any;
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor,
       workspaceId: "ws-1",
       authKind: "oauth",
@@ -3264,7 +3369,7 @@ describe("createCorgtexMcpServer", () => {
       kind: "user",
       user: { id: "user-1", email: "user@example.com", displayName: "User" },
     } as any;
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor,
       workspaceId: "ws-1",
       authKind: "oauth",
@@ -3303,7 +3408,7 @@ describe("createCorgtexMcpServer", () => {
       kind: "user",
       user: { id: "user-1", email: "user@example.com", displayName: "User" },
     } as any;
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor,
       workspaceId: "ws-1",
       authKind: "oauth",
@@ -3370,7 +3475,7 @@ describe("createCorgtexMcpServer", () => {
       kind: "user",
       user: { id: "user-1", email: "user@example.com", displayName: "User" },
     } as any;
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor,
       workspaceId: "ws-1",
       authKind: "oauth",
@@ -3414,7 +3519,7 @@ describe("createCorgtexMcpServer", () => {
       kind: "user",
       user: { id: "user-1", email: "user@example.com", displayName: "User" },
     } as any;
-    const server = createCorgtexMcpServer({
+    const server = createTestServer(createCorgtexMcpServer, {
       actor,
       workspaceId: "ws-1",
       authKind: "oauth",
@@ -3461,13 +3566,14 @@ describe("createCorgtexMcpServer", () => {
       const { createCorgtexMcpServer } = await import("./server");
       const { requireScope } = await import("./auth");
       const { AppError } = await import("@corgtex/domain");
-      const server = createCorgtexMcpServer({ actor: { kind: "user", user: { id: "u-1" } }, workspaceId: "ws-1" } as any);
+      const server = createTestServer(createCorgtexMcpServer, { actor: { kind: "user", user: { id: "u-1" } }, workspaceId: "ws-1" } as any);
       const tool = (server as any)._registeredTools[testCase.name];
       expect(tool.description.toLowerCase()).toContain("read");
       for (const expectedVersion of [undefined, 0, -1, 1.5]) {
         expect(tool.inputSchema.safeParse({ ...testCase.args, expectedVersion }).success).toBe(false);
       }
       testCase.domainFn.mockClear().mockResolvedValueOnce({ id: "id-1", version: 3 });
+      if (testCase.name === "update_proposal") getProposalMock.mockResolvedValueOnce({ id: "id-1", version: 3 });
       recordAuditMock.mockClear();
       const success = await tool.handler(testCase.args);
       expect(testCase.domainFn).toHaveBeenCalledWith(expect.anything(), expect.objectContaining(testCase.args));
@@ -3479,16 +3585,60 @@ describe("createCorgtexMcpServer", () => {
         status: "VERSION_CONFLICT", instruction: expect.stringContaining("Read the latest version"),
       });
       expect(recordAuditMock).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({
-        meta: expect.objectContaining({ error: "VERSION_CONFLICT" }),
+        meta: expect.objectContaining({ error: "Tool execution failed." }),
       }));
       expect(testCase.domainFn).toHaveBeenCalledTimes(2);
     });
 
     it("leaves complete_action unchanged without expectedVersion requirements", async () => {
       const { createCorgtexMcpServer } = await import("./server");
-      const server = createCorgtexMcpServer({ actor: { kind: "user", user: { id: "u-1" } }, workspaceId: "ws-1" } as any);
+      const server = createTestServer(createCorgtexMcpServer, { actor: { kind: "user", user: { id: "u-1" } }, workspaceId: "ws-1" } as any);
       const completeTool = (server as any)._registeredTools["complete_action"];
       expect(completeTool.inputSchema.shape?.expectedVersion).toBeUndefined();
     });
+  });
+});
+
+
+describe("context graph bounded permission scan", () => {
+  it("replenishes hidden object and relationship pages without materializing the whole graph", async () => {
+    const {prisma} = await import("@corgtex/shared");
+    const {readableArtifactIds} = await import("@corgtex/domain");
+    const {createCorgtexMcpServer} = await import("./server");
+    const objects = Array.from({length: 260}, (_, index) => ({id: `object-${index}`, visible: index >= 100}));
+    const relationships = Array.from({length: 260}, (_, index) => ({id: `relationship-${index}`, visible: index >= 100}));
+    const page = (rows: typeof objects) => async ({take, cursor, skip = 0}: {take: number; cursor?: {id: string}; skip?: number}) => {
+      const offset = cursor ? rows.findIndex(row => row.id === cursor.id) + skip : 0;
+      return rows.slice(offset, offset + take);
+    };
+    vi.mocked(prisma.contextGraphObject.findMany).mockImplementation(page(objects) as any);
+    vi.mocked(prisma.contextGraphRelationship.findMany).mockImplementation(page(relationships) as any);
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspace, _kind, rows) =>
+      new Set(rows.filter(row => (row as {visible?: boolean}).visible).map(row => row.id)));
+    try {
+      const server = createTestServer(createCorgtexMcpServer, {workspaceId: "ws-1", authKind: "oauth", actor: {kind: "user", user: {id: "u-1"}}});
+      const response = await (server as any)._registeredTools.query_context_graph.handler({take: 3});
+      const result = response.structuredContent;
+      expect(result.objects.map((row: {id: string}) => row.id)).toEqual(["object-100", "object-101", "object-102"]);
+      expect(result.relationships).toHaveLength(6);
+      expect(prisma.contextGraphObject.findMany).toHaveBeenLastCalledWith(expect.objectContaining({take: 100, cursor: {id: "object-99"}, skip: 1}));
+      expect(prisma.contextGraphRelationship.findMany).toHaveBeenLastCalledWith(expect.objectContaining({take: 100,
+        where: expect.objectContaining({workspaceId: "ws-1", sourceObjectId: {in: ["object-100", "object-101", "object-102"]}})}));
+    } finally {vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspace, _kind, rows) => new Set(rows.map(row => row.id)));}
+  });
+  it("stops an over-budget denied graph at a one-row sentinel", async () => {
+    const {prisma} = await import("@corgtex/shared");
+    const {readableArtifactIds} = await import("@corgtex/domain");
+    const {createCorgtexMcpServer} = await import("./server");
+    let offset = 0;
+    vi.mocked(prisma.contextGraphObject.findMany).mockReset().mockImplementation(({take} = {}) =>
+      Promise.resolve(Array.from({length: take ?? 0}, () => ({id: `denied-${offset++}`}))) as ReturnType<typeof prisma.contextGraphObject.findMany>);
+    vi.mocked(readableArtifactIds).mockImplementation(async () => new Set());
+    try {
+      const server = createTestServer(createCorgtexMcpServer, {workspaceId: "ws-1", authKind: "oauth", actor: {kind: "user", user: {id: "u-1"}}});
+      await expect((server as any)._registeredTools.query_context_graph.handler({take: 1})).rejects.toMatchObject({code: "CONTEXT_GRAPH_SCAN_LIMIT"});
+      expect(prisma.contextGraphObject.findMany).toHaveBeenCalledTimes(51);
+      expect(prisma.contextGraphObject.findMany).toHaveBeenLastCalledWith(expect.objectContaining({take: 1}));
+    } finally {vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspace, _kind, rows) => new Set(rows.map(row => row.id)));}
   });
 });

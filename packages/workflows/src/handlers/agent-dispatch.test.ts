@@ -1,21 +1,25 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { runCompanyUnderstandingAgentMock, runActionExtractionAgentMock, runBrainSourceRegenerationJobMock, runProposalDraftingAgentMock, runConstitutionUpdateTriggerAgentMock, recoveryGuard, execute, absorb } = vi.hoisted(() => ({
+const { runCompanyUnderstandingAgentMock, runActionExtractionAgentMock, runBrainSourceRegenerationJobMock, runProposalDraftingAgentMock, runConstitutionUpdateTriggerAgentMock, recoveryGuard, execute, absorb, captureProof, maintenance, maintenanceClaim, meetingWorker, meetingActor } = vi.hoisted(() => ({
+  maintenanceClaim: vi.fn(),
+  meetingWorker: vi.fn(),
+  meetingActor: Object.freeze({kind: "agent", authProvider: "bootstrap", label: "claimed-meeting"}),
   runCompanyUnderstandingAgentMock: vi.fn(),
   runActionExtractionAgentMock: vi.fn(),
   runBrainSourceRegenerationJobMock: vi.fn(),
   runProposalDraftingAgentMock: vi.fn(),
   runConstitutionUpdateTriggerAgentMock: vi.fn(),
-  recoveryGuard: vi.fn(), execute: vi.fn(), absorb: vi.fn(),
+  recoveryGuard: vi.fn(), execute: vi.fn(), absorb: vi.fn(), captureProof: vi.fn(), maintenance: vi.fn(),
 }));
 
-vi.mock("@corgtex/domain", () => ({ assertBrainSourceRecoveryJob: recoveryGuard }));
+vi.mock("../brain-maintenance-jobs", () => ({prepareMaintenanceClaim: maintenanceClaim, MaintenanceDeferred: class extends Error {}}));
+vi.mock("@corgtex/domain", async () => ({...await import("../../../domain/src/errors"), assertBrainSourceRecoveryJob: recoveryGuard, captureArtifactInputProof: captureProof, withMeetingTranscriptWorker: meetingWorker }));
 
 vi.mock("@corgtex/agents", () => ({
   executeAgentRun: execute,
   absorbSource: absorb,
   runBrainSourceRegenerationJob: runBrainSourceRegenerationJobMock,
-  runBrainMaintenance: vi.fn(),
+  runBrainMaintenance: maintenance,
   runInboxTriageAgent: vi.fn(),
   runDailyCheckInAgent: vi.fn(),
   runMeetingSummaryAgent: vi.fn(),
@@ -32,8 +36,46 @@ vi.mock("@corgtex/agents", () => ({
 describe("runAgentWorkflowJob", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    meetingWorker.mockImplementation(async (_claim, work) => work(meetingActor));
     runCompanyUnderstandingAgentMock.mockResolvedValue({ id: "run-1" });
     absorb.mockResolvedValue({ absorbed: true, sourceId: "source" });
+  });
+
+  it("binds maintenance planning and output to complete server-captured receipts", async () => {
+    const {runAgentWorkflowJob} = await import("./agent-dispatch");
+    const roots = [{kind: "Workspace", id: "ws-1", fingerprint: "a".repeat(64)}];
+    const consumed = [{kind: "ArtifactInputSnapshot", id: "snapshot", fingerprint: "b".repeat(64)}];
+    const token = Object.freeze({kind: "agent-input-receipt"});
+    const plannedToken = Object.freeze({kind: "agent-input-receipt"});
+    captureProof.mockResolvedValue(roots);
+    const apply = vi.fn(), finish = vi.fn(), assertCurrent = vi.fn(), acknowledgeCommit = vi.fn();
+    const state = {phase: "DISCUSSIONS"};
+    maintenanceClaim.mockResolvedValue({state, assertCurrent, finish, acknowledgeCommit, recoverOrVerifyExisting: async () => false});
+    maintenance.mockResolvedValue({report: {scope: "BATCH", staleThreadCount: 1}, lineageRoots: consumed, next: state, apply, assertCurrent: async () => {}});
+    const captureInputs = vi.fn(async () => token);
+    const step = vi.fn(async (_name, input, work, proof) => {
+      expect(proof.receipt).toBe(plannedToken);
+      expect(input).toEqual({scope: "BATCH", phase: "DISCUSSIONS"});
+      const output = await work();
+      expect(output).toEqual(input);
+      return output;
+    });
+    execute.mockImplementation(async params => {
+      expect(params.lineageRoots).toBe(roots);
+      expect(params.contextLineageRoots({})).toBe(roots);
+      const output = await params.execute({}, {captureInputs, step, plannedInputReceipt: plannedToken}, "run", "model");
+      expect(output).toEqual({resultJson: {scope: "BATCH", staleThreadCount: 1}, lineageReceipt: token});
+      await params.beforeComplete({transaction: "same-final-tx"});
+      return {status: "COMPLETED"};
+    });
+    expect(await runAgentWorkflowJob({id: "job", workspaceId: "ws-1", type: "agent.brain-maintenance", payload: {}}, "worker"))
+      .toEqual({status: "COMPLETED"});
+    expect(captureInputs).toHaveBeenCalledExactlyOnceWith(consumed);
+    expect(maintenance.mock.calls[0][0].actor).toBe(execute.mock.calls[0][0].lineageActor);
+    expect(assertCurrent.mock.invocationCallOrder[0]).toBeLessThan(apply.mock.invocationCallOrder[0]);
+    expect(apply.mock.invocationCallOrder[0]).toBeLessThan(finish.mock.invocationCallOrder[0]);
+    expect(finish).toHaveBeenCalledWith({transaction: "same-final-tx"}, state);
+    expect(acknowledgeCommit).toHaveBeenCalledOnce();
   });
 
   it("dispatches advisory review feedback to a new drafting run without protected actions", async () => {
@@ -45,7 +87,7 @@ describe("runAgentWorkflowJob", () => {
     })).resolves.toEqual({ id: "new-run", status: "WAITING_APPROVAL" });
     expect(runProposalDraftingAgentMock).toHaveBeenCalledExactlyOnceWith({
       workspaceId: "ws-1", triggerRef: "continuation-job", prompt: "Budget policy", meetingId: "meeting-1",
-      triggerType: "MANUAL", reviewFeedback: "Clarify", previousAdvice: "Earlier draft",
+      triggerType: "MANUAL", requestInputId: undefined, feedbackInputId: undefined, priorRunSnapshotId: undefined,
     });
     expect(runConstitutionUpdateTriggerAgentMock).not.toHaveBeenCalled();
   });
@@ -59,7 +101,7 @@ describe("runAgentWorkflowJob", () => {
     })).resolves.toEqual({ id: "new-run", status: "WAITING_APPROVAL" });
     expect(runConstitutionUpdateTriggerAgentMock).toHaveBeenCalledExactlyOnceWith({
       workspaceId: "ws-1", triggerRef: "continuation-job", proposalId: "proposal-1",
-      triggerType: "MANUAL", reviewFeedback: "Clarify", previousAdvice: "Earlier impact",
+      triggerType: "MANUAL", requestInputId: undefined, feedbackInputId: undefined, priorRunSnapshotId: undefined,
     });
     expect(runProposalDraftingAgentMock).not.toHaveBeenCalled();
   });
@@ -171,14 +213,15 @@ describe("runAgentWorkflowJob", () => {
   it.each([undefined, false])("does not pass a legacy reviewOnly=%s bypass on manual extraction", async (reviewOnly) => {
     const { runAgentWorkflowJob } = await import("./agent-dispatch");
     await runAgentWorkflowJob({
-      id: "manual-job",
+      id: "manual-job", attempts: 3,
       workspaceId: "ws-1",
       type: "agent.action-extraction",
       payload: { meetingId: "meeting-1", triggerType: "MANUAL", reviewOnly },
-    });
+    }, "worker-1");
+    expect(meetingWorker).toHaveBeenCalledWith({workspaceId: "ws-1", meetingId: "meeting-1", jobId: "manual-job", owner: "worker-1", attempt: 3, claim: undefined}, expect.any(Function));
 
     expect(runActionExtractionAgentMock).toHaveBeenCalledWith({
-      workspaceId: "ws-1",
+      lineageActor: meetingActor, workspaceId: "ws-1",
       triggerRef: "manual-job",
       meetingId: "meeting-1",
       triggerType: "MANUAL",

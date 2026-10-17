@@ -4618,7 +4618,7 @@ describe("control plane domain", () => {
 
     const result = await listControlPlaneCustomerMembers(operatorActor, "inst-1");
 
-    expect(memberMocks.listMembersEnriched).toHaveBeenCalledWith("ws-1", { includeInactive: true });
+    expect(memberMocks.listMembersEnriched).toHaveBeenCalledWith(operatorActor, "ws-1", { includeInactive: true });
     expect(result).toMatchObject({
       source: "managed_workspace",
       members: [

@@ -12,6 +12,22 @@ import {
   getOrCreateExternalAgentIdentity,
 } from "./agent-identity";
 import { prisma } from "@corgtex/shared";
+import { prepareProducerLineage, finishProducerLineage } from "./producer-lineage";
+import * as sourceLineage from "./source-lineage";
+import { installSourcePermissionEpochFixture } from "./source-permission-epochs.test-fixture";
+vi.mock("./producer-lineage", () => ({
+  prepareProducerLineage: vi.fn().mockResolvedValue({ mode: "HUMAN_ORIGINAL", inputs: [], roots: [] }),
+  finishProducerLineage: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("./source-lineage", async (original) => {
+  const actual = await original<typeof import("./source-lineage")>();
+  return { ...actual, readableArtifactIds: vi.fn(async (_actor, _ws, _kind, rows) => new Set(rows.map((row: { id: string }) => row.id))),
+    captureArtifactInputProof: vi.fn().mockResolvedValue([]), recordArtifactInputLineage: vi.fn(),
+    currentArtifactInputRoots: vi.fn().mockResolvedValue([]), advanceHumanArtifactInputLineage: vi.fn(),
+    invalidateArtifactInputLineage: vi.fn(), isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
+    captureArtifactInputSnapshotProof: vi.fn().mockResolvedValue([]) };
+});
+vi.mock("./brain-access", () => ({ resolveKnowledgeAccessDomains: vi.fn(async () => ["PUBLIC"]) }));
 
 vi.mock("@corgtex/shared", () => ({
   setSupportAuthorizationActor: vi.fn(),
@@ -36,6 +52,7 @@ vi.mock("@corgtex/shared", () => ({
       delete: vi.fn(),
     },
     roleHolderHistory: {
+      findMany: vi.fn().mockResolvedValue([]),
       create: vi.fn(),
       updateMany: vi.fn(),
     },
@@ -47,7 +64,12 @@ vi.mock("@corgtex/shared", () => ({
     },
     member: {
       findUnique: vi.fn(),
+      findFirst: vi.fn(),
     },
+    user: { findFirst: vi.fn() },
+    action: { findFirst: vi.fn() },
+    artifactInputLineage: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn() },
+    artifactInputSnapshot: { findFirst: vi.fn(), create: vi.fn() },
     workspaceArchiveRecord: {
       create: vi.fn(),
     },
@@ -58,6 +80,7 @@ vi.mock("@corgtex/shared", () => ({
       createMany: vi.fn(),
     },
     $executeRaw: vi.fn(),
+    $queryRaw: vi.fn(),
     $transaction: vi.fn(async (cb) => cb(prisma)),
   },
 }));
@@ -154,7 +177,7 @@ describe("agent-identity", () => {
       displayName: "New Name",
     });
 
-    expect(result.displayName).toBe("New Name");
+    expect(result).toMatchObject({ displayName: "New Name" });
     expect(prisma.event.createMany).toHaveBeenCalledWith({
       data: [
         expect.objectContaining({
@@ -191,7 +214,7 @@ describe("agent-identity", () => {
     vi.mocked(prisma.agentIdentity.update).mockResolvedValue({ id: "ai-1", isActive: false } as any);
 
     const result = await deactivateAgentIdentity(adminActor, wsId, "ai-1");
-    expect(result.isActive).toBe(false);
+    expect(result).toEqual({ id: "ai-1" });
     expect(prisma.roleHolderHistory.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
         workspaceId: wsId,
@@ -354,7 +377,7 @@ describe("agent-identity", () => {
       behaviorMd: "Be helpful.",
     });
 
-    expect(result.behaviorMd).toBe("Be helpful.");
+    expect(result).toMatchObject({ behaviorMd: "Be helpful." });
   });
 
   it("returns null for missing workspace behavior", async () => {
@@ -372,7 +395,7 @@ describe("agent-identity", () => {
       behaviorMd: "Global rules.",
     });
 
-    expect(result.behaviorMd).toBe("Global rules.");
+    expect(result).toMatchObject({ behaviorMd: "Global rules." });
   });
 
   describe("getOrCreateExternalAgentIdentity", () => {
@@ -408,5 +431,113 @@ describe("agent-identity", () => {
       });
       expect(result).toEqual(created);
     });
+  });
+});
+
+
+describe("agent identity producers with actual lineage receipts", () => {
+  const rows: Record<string, any[]> = {};
+  const timestamp = new Date("2026-10-12T10:00:00Z");
+  let source: typeof import("./source-lineage");
+  const relation = (row: any, key: string) => key === "user" ? rows.user.find((user) => user.id === row.userId) : undefined;
+  function matches(row: any, where: any): boolean {
+    return Boolean(row) && Object.entries(where ?? {}).every(([key, value]: [string, any]) => {
+      if (key === "workspaceId_agentKey" || key === "workspaceId_userId") return matches(row, value);
+      if (key === "user") return matches(relation(row, key), value);
+      if (key === "memberships") return rows.member.some((member) => member.userId === row.id && matches(member, value.some));
+      if (value && typeof value === "object" && !(value instanceof Date)) {
+        if ("in" in value) return value.in.includes(row[key]);
+        throw new Error(`Unhandled identity test predicate ${key}`);
+      }
+      return row[key] === value;
+    });
+  }
+  function project(row: any, args: any) {
+    if (!row) return null;
+    const result = { ...row };
+    if (args.include?.user) result.user = project(relation(row, "user"), args.include.user);
+    if (args.include?.circleAssignments) result.circleAssignments = [];
+    if (args.include?.createdByUser) result.createdByUser = rows.user.find((user) => user.id === row.createdByUserId) ?? null;
+    return args.select ? Object.fromEntries(Object.keys(args.select).map((key) => [key, result[key]])) : result;
+  }
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    source = await vi.importActual<typeof import("./source-lineage")>("./source-lineage");
+    const producer = await vi.importActual<typeof import("./producer-lineage")>("./producer-lineage");
+    vi.mocked(prepareProducerLineage).mockImplementation(producer.prepareProducerLineage);
+    vi.mocked(finishProducerLineage).mockImplementation(producer.finishProducerLineage);
+    for (const name of ["readableArtifactIds", "captureArtifactInputProof", "recordArtifactInputLineage", "currentArtifactInputRoots", "advanceHumanArtifactInputLineage", "invalidateArtifactInputLineage", "isArtifactInputProofReadable", "captureArtifactInputSnapshotProof"] as const) {
+      vi.mocked(sourceLineage[name]).mockImplementation(source[name] as any);
+    }
+    for (const name of ["agentIdentity", "artifactInputLineage", "artifactInputSnapshot", "member", "user", "action"]) {
+      rows[name] = [];
+      const delegate: any = (prisma as any)[name];
+      const find = async (args: any) => project(rows[name].filter((row) => matches(row, args.where)).at(-1), args);
+      delegate.findFirst.mockImplementation(find);
+      if (delegate.findUnique) delegate.findUnique.mockImplementation(find);
+      if (delegate.findMany) delegate.findMany.mockImplementation(async (args: any) => rows[name].filter((row) => matches(row, args.where)).sort((a, b) => name === "artifactInputLineage" ? b.revision - a.revision : 0).map((row) => project(row, args)));
+      if (delegate.create) delegate.create.mockImplementation(async ({ data }: any) => {
+        const row = { id: `${name}-${rows[name].length}`, archivedAt: null, createdAt: timestamp, updatedAt: timestamp,
+          ...(name === "agentIdentity" ? { isActive: true, memberType: "INTERNAL", behaviorMd: null, purposeMd: null, createdByUserId: null } : {}), ...data };
+        rows[name].push(row); return { ...row };
+      });
+      if (delegate.update) delegate.update.mockImplementation(async ({ where, data }: any) => {
+        const row = rows[name].find((item) => matches(item, where)); Object.assign(row, data, { updatedAt: new Date(timestamp.getTime() + 1) }); return { ...row };
+      });
+      if (delegate.upsert) delegate.upsert.mockImplementation(async ({ where, create, update }: any) => {
+        const row = rows[name].find((item) => matches(item, where));
+        return row ? delegate.update({ where: { id: row.id }, data: update }) : delegate.create({ data: create });
+      });
+    }
+    (prisma as any).$transaction.mockImplementation(async (run: any) => run(prisma));
+    (prisma as any).$executeRaw.mockResolvedValue(1);
+    rows.user.push({ id: "u1", email: "admin@test.com", displayName: "Admin", bio: null, avatarUrl: null, linkedinUrl: null, websiteUrl: null });
+    rows.member.push({ id: "m1", workspaceId: wsId, userId: "u1", role: "ADMIN", isActive: true, joinedAt: timestamp });
+    installSourcePermissionEpochFixture(prisma);
+  });
+  async function originalAction() {
+    const row = { id: "source-action", workspaceId: wsId, title: "Complete source", bodyMd: "Complete source body", status: "DRAFT", authorUserId: "u1", isPrivate: true, archivedAt: null as Date | null, createdAt: timestamp, updatedAt: timestamp };
+    rows.action.push(row);
+    await source.recordArtifactInputLineage({ tx: prisma, actor: adminActor, workspaceId: wsId, artifact: { kind: "Action", id: row.id }, content: row, origin: "HUMAN_ORIGINAL", inputs: [] });
+    return row;
+  }
+  it("records a human administrator's original identity and preserves its receipt through partial behavior edits", async () => {
+    const identity = await createAgentIdentity(adminActor, { workspaceId: wsId, agentKey: "original", displayName: "Original", behaviorMd: "Original behavior" });
+    expect(identity).toMatchObject({ behaviorMd: "Original behavior" });
+    expect(rows.artifactInputLineage).toMatchObject([{ artifactType: "AgentIdentity", origin: "HUMAN_ORIGINAL", rootsJson: [] }]);
+    const updated = await updateAgentBehavior(adminActor, { workspaceId: wsId, agentIdentityId: identity.id, behaviorMd: "Human revision" });
+    expect(updated).toMatchObject({ behaviorMd: "Human revision" });
+    expect(rows.artifactInputLineage.at(-1)).toMatchObject({ artifactType: "AgentIdentity", origin: "HUMAN_ORIGINAL", rootsJson: [], revision: 2 });
+  });
+  it("captures copied content's complete proof and retains it when a human edits safe fields", async () => {
+    const input = await originalAction();
+    const lineageRoots = await source.captureArtifactInputProof(adminActor, wsId, [{ kind: "Action", id: input.id }]);
+    const identity = await createAgentIdentity(adminActor, { workspaceId: wsId, agentKey: "derived", displayName: "Derived", behaviorMd: input.bodyMd, copied: true, lineageRoots });
+    await updateAgentIdentity(adminActor, { workspaceId: wsId, agentIdentityId: identity.id, displayName: "Renamed" });
+    expect(rows.artifactInputLineage.at(-1)).toMatchObject({ origin: "DERIVED", rootsJson: [expect.objectContaining({ kind: "Action", id: input.id })] });
+    input.archivedAt = new Date();
+    expect(await listAgentIdentities(adminActor, wsId)).toEqual([]);
+  });
+  it("withholds agent/copied creation without proof and never certifies an unknown partial edit", async () => {
+    const identity = await createAgentIdentity(adminActor, { workspaceId: wsId, agentKey: "unknown", displayName: "Unproven", behaviorMd: "Unproven body", copied: true });
+    expect(identity).toEqual({ id: identity.id, contentWithheld: true });
+    expect(rows.artifactInputLineage.at(-1)).toMatchObject({ origin: "UNKNOWN" });
+    expect(await updateAgentIdentity(adminActor, { workspaceId: wsId, agentIdentityId: identity.id, displayName: "Human rename" })).toEqual({ id: identity.id, contentWithheld: true });
+    expect(rows.artifactInputLineage.at(-1)).toMatchObject({ origin: "UNKNOWN" });
+  });
+  it("rejects changed captured inputs before creating an identity", async () => {
+    const input = await originalAction();
+    const lineageRoots = await source.captureArtifactInputProof(adminActor, wsId, [{ kind: "Action", id: input.id }]);
+    input.bodyMd = "Changed after model input capture";
+    await expect(createAgentIdentity(adminActor, { workspaceId: wsId, agentKey: "stale", displayName: "Stale", copied: true, lineageRoots })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(rows.agentIdentity).toHaveLength(0);
+  });
+  it("proves native workspace behavior but holds an unknown prior config through an edit", async () => {
+    const original = await updateWorkspaceAgentBehavior(adminActor, { workspaceId: wsId, behaviorMd: "Workspace policy" });
+    expect(original).toMatchObject({ behaviorMd: "Workspace policy", isActive: false });
+    expect(await getWorkspaceAgentBehavior(adminActor, wsId)).toBe("Workspace policy");
+    rows.artifactInputLineage.length = 0;
+    expect(await updateWorkspaceAgentBehavior(adminActor, { workspaceId: wsId, behaviorMd: "Replacement only changes behavior" })).toMatchObject({ contentWithheld: true });
+    expect(await getWorkspaceAgentBehavior(adminActor, wsId)).toBeNull();
   });
 });

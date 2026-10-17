@@ -1,3 +1,4 @@
+import { prepareProducerLineage, finishProducerLineage } from "./producer-lineage";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
   addKeyResult,
@@ -6,6 +7,7 @@ import {
   deleteGoal,
   getGoal,
   getMyGoalSlice,
+  listGoals,
   listCompanyDirectionFromBrain,
   postGoalUpdate,
   recomputeGoalProgress,
@@ -14,6 +16,12 @@ import {
   updateGoal,
 } from "./goals";
 import { prisma } from "@corgtex/shared";
+import { readableArtifactIds } from "./source-lineage";
+
+vi.mock("./producer-lineage", () => ({
+  prepareProducerLineage: vi.fn().mockResolvedValue({ mode: "HUMAN_ORIGINAL", inputs: [], roots: [] }),
+  finishProducerLineage: vi.fn().mockResolvedValue(undefined),
+}));
 
 vi.mock("@corgtex/shared", () => ({
   prisma: {
@@ -39,6 +47,7 @@ vi.mock("@corgtex/shared", () => ({
       update: vi.fn(),
       delete: vi.fn(),
     },
+    recognition: { create: vi.fn() },
     goalUpdate: {
       create: vi.fn(),
     },
@@ -53,9 +62,11 @@ vi.mock("@corgtex/shared", () => ({
     },
     brainSource: {
       findMany: vi.fn(),
+      findFirst: vi.fn(),
     },
     brainArticle: {
       findMany: vi.fn(),
+      findFirst: vi.fn(),
     },
     checkIn: {
       findMany: vi.fn(),
@@ -83,6 +94,20 @@ vi.mock("./auth", () => ({
     role: "MEMBER",
     isActive: true,
   }),
+}));
+
+vi.mock("./source-lineage", () => ({
+  isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
+  advanceHumanArtifactInputLineage: vi.fn(),
+  recordArtifactInputLineage: vi.fn(),
+  readableArtifactIds: vi.fn(async (_actor: unknown, _workspaceId: string, _kind: string, records: Array<{ id: string }>) =>
+    new Set(records.map((record) => record.id))),
+  readableBrainSourceIds: vi.fn(async (_actor: unknown, _workspaceId: string, records: Array<{ id: string }>) =>
+    new Set(records.map((record) => record.id))),
+}));
+
+vi.mock("./brain-access", () => ({
+  resolveKnowledgeAccessDomains: vi.fn(async () => ["WORKSPACE"]),
 }));
 
 vi.mock("./events", () => ({
@@ -150,6 +175,30 @@ describe("Goals Domain", () => {
   });
 
   describe("createGoal", () => {
+  it.each(["credential-a", "credential-b"])("rejects private creation by %s before duplicate reads or writes", async credentialId => {
+    const {createGoal} = await import("./goals");
+    const credential = {kind: "agent", authProvider: "credential", credentialId, workspaceIds: ["ws-1"], scopes: ["support:write"]} as any;
+    await expect(createGoal(credential, {workspaceId: "ws-1", title: "Private", isPrivate: true})).rejects.toMatchObject({code: "PRIVATE_AGENT_ARTIFACT_UNSUPPORTED"});
+    expect(prisma.goal.create).not.toHaveBeenCalled();
+    expect(prisma.goal.findMany).not.toHaveBeenCalled();
+    expect(prisma.goal.findFirst).not.toHaveBeenCalled();
+  });
+  it("rejects public agent creation without complete inputs before looking for duplicates", async () => {
+    const {createGoal} = await import("./goals");
+    await expect(createGoal({kind: "agent", workspaceIds: ["ws-1"]} as any, {...{workspaceId: "ws-1", title: "Private", isPrivate: true}, isPrivate: false}))
+      .rejects.toMatchObject({code: "UNKNOWN_LINEAGE"});
+    expect(prisma.goal.create).not.toHaveBeenCalled();
+    expect(prisma.goal.findMany).not.toHaveBeenCalled();
+  });
+
+    it.each(["credential-a", "credential-b"])("does not let %s use a human-attributed private parent", async credentialId => {
+      const credential = {kind: "agent", authProvider: "credential", credentialId, workspaceIds: ["ws-1"], scopes: ["goals:write"]} as any;
+      vi.mocked(prisma.goal.findUnique).mockResolvedValue({id: "private-parent", workspaceId: "ws-1", status: "DRAFT", isPrivate: true,
+        archivedAt: null, authorUserId: "user-1"} as any);
+      await expect(createGoal(credential, {workspaceId: "ws-1", title: "Child", parentGoalId: "private-parent", lineageRoots: [{kind: "BrainSource", id: "source-1", fingerprint: "current"}]}))
+        .rejects.toMatchObject({code: "INVALID_INPUT"});
+      expect(prisma.goal.create).not.toHaveBeenCalled();
+    });
     it("creates a goal successfully", async () => {
       vi.mocked(prisma.goal.create).mockResolvedValueOnce({
         id: "goal-1",
@@ -189,6 +238,7 @@ describe("Goals Domain", () => {
       await createGoal(agentActor, {
         workspaceId: "ws-1",
         title: "Agent Goal",
+        lineageRoots: [{kind: "BrainSource", id: "source-1", fingerprint: "current"}],
       });
 
       expect(prisma.goal.create).toHaveBeenCalledWith(
@@ -464,6 +514,7 @@ describe("Goals Domain", () => {
 
   describe("createGoalLink", () => {
     it("stores evidence confidence and generated source metadata", async () => {
+      vi.mocked(prisma.brainSource.findFirst).mockResolvedValueOnce({ id: "source-1" } as any);
       vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
         id: "goal-1",
         workspaceId: "ws-1",
@@ -700,6 +751,26 @@ describe("Goals Domain", () => {
   });
 
   describe("updateGoal", () => {
+    it("denies a credential draft edit even when an earlier read gate admitted the candidate", async () => {
+      const credential = {kind: "agent", authProvider: "credential", credentialId: "credential-a", workspaceIds: ["ws-1"], scopes: ["goals:write"]} as any;
+      vi.mocked(prisma.goal.findUnique).mockResolvedValue({id: "private", workspaceId: "ws-1", status: "DRAFT", isPrivate: true,
+        archivedAt: null, authorUserId: "user-1", version: 1} as any);
+      await expect(updateGoal(credential, {workspaceId: "ws-1", goalId: "private", title: "Replacement", expectedVersion: 1}))
+        .rejects.toMatchObject({code: "FORBIDDEN"});
+      expect(prisma.goal.update).not.toHaveBeenCalled();
+    });
+    it("does not return a revoked derived goal through a no-op update", async () => {
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
+        id: "goal-1", workspaceId: "ws-1", archivedAt: null, title: "Sensitive goal",
+        authorUserId: "user-1", status: "ACTIVE", isPrivate: false, version: 1,
+      } as any);
+      vi.mocked(readableArtifactIds).mockResolvedValueOnce(new Set());
+
+      await expect(updateGoal(actor, { workspaceId: "ws-1", goalId: "goal-1", title: "Sensitive goal", expectedVersion: 1 }))
+        .rejects.toMatchObject({ code: "NOT_FOUND" });
+      expect(prisma.goal.update).not.toHaveBeenCalled();
+    });
+
     it("rejects using itself as the parent goal", async () => {
       vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
         id: "goal-1",
@@ -2328,3 +2399,60 @@ describe("Goals Domain", () => {
     });
   });
 });
+
+it("filters source-restricted goals before pagination", async () => {
+  vi.mocked(prisma.goal.findMany).mockResolvedValueOnce([
+    { id: "restricted", title: "Restricted" },
+    { id: "permitted", title: "Permitted" },
+  ] as any);
+  vi.mocked(readableArtifactIds).mockResolvedValueOnce(new Set(["permitted"]));
+  const actor = { kind: "user", user: { id: "user-1", email: "user@example.com" } } as any;
+  const goals = await listGoals(actor, { workspaceId: "ws-1", take: 1 });
+  expect(goals.map((goal) => goal.id)).toEqual(["permitted"]);
+  expect(prisma.goal.findMany).toHaveBeenCalledWith(expect.not.objectContaining({ take: 1 }));
+
+
+});
+
+
+  it("retains old GoalLink metadata and its earlier proof when a human omits replacement metadata", async () => {
+    vi.clearAllMocks();
+    const actor = { kind: "user", user: { id: "user-1" } } as any;
+    const prior = { id: "link-existing", goalId: "goal-1", entityType: "BrainSource", entityId: "source-1",
+      metadata: { quote: "Synthetic restricted quote" } };
+    vi.mocked(prisma.goal.findUnique).mockResolvedValue({ id: "goal-1", workspaceId: "ws-1", status: "ACTIVE", isPrivate: false, archivedAt: null } as any);
+    vi.mocked(prisma.brainSource.findFirst).mockResolvedValue({ id: "source-1" } as any);
+    vi.mocked(prisma.goalLink.findUnique).mockResolvedValue(prior as any);
+    vi.mocked(prisma.goalLink.upsert).mockResolvedValue({ ...prior, confidence: 0.5 } as any);
+    await createGoalLink(actor, { workspaceId: "ws-1", goalId: "goal-1", entityType: "BrainSource", entityId: "source-1", confidence: 0.5 });
+    expect(prepareProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ before: prior,
+      artifact: { kind: "GoalLink", id: prior.id } }));
+    expect(finishProducerLineage).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.objectContaining({ metadata: prior.metadata }) }));
+    const { recordArtifactInputLineage } = await import("./source-lineage");
+    expect(recordArtifactInputLineage).not.toHaveBeenCalled();
+  });
+
+  it("excludes source-restricted duplicate candidates before matching and returning snippets", async () => {
+    vi.clearAllMocks();
+    const actor = { kind: "user", user: { id: "user-1" } } as any;
+    vi.mocked(prisma.goal.findMany).mockResolvedValue([{ id: "hidden-goal", workspaceId: "ws-1",
+      title: "Synthetic operating goal", descriptionMd: "Synthetic restricted detail", status: "ACTIVE", isPrivate: false } ] as any);
+    vi.mocked(readableArtifactIds).mockResolvedValue(new Set());
+    vi.mocked(prisma.goal.create).mockResolvedValue({ id: "new-goal", workspaceId: "ws-1", title: "Synthetic operating goal" } as any);
+    await expect(createGoal(actor, { workspaceId: "ws-1", title: "Synthetic operating goal",
+      duplicateGuard: { onExact: "use_existing" } })).resolves.toMatchObject({ id: "new-goal" });
+    expect(prisma.goal.create).toHaveBeenCalled();
+  });
+
+  it("records recognition and its goal dependency in the same transaction", async () => {
+    const actor = { kind: "user", user: { id: "user-1", email: "synthetic@example.com", displayName: "Synthetic" } } as any;
+    vi.mocked(prisma.recognition.create).mockResolvedValue({ id: "recognition-proof", workspaceId: "ws-1" } as any);
+    const { createRecognition } = await import("./goals");
+    await createRecognition(actor, { workspaceId: "ws-1", goalId: "goal-1", recipientMemberId: "member-2",
+      title: "Synthetic appreciation", storyMd: "Synthetic story" });
+    expect(prepareProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ tx: prisma,
+      dependencies: [{ kind: "Goal", id: "goal-1" }] }));
+    expect(finishProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ tx: prisma,
+      artifact: { kind: "Recognition", id: "recognition-proof" } }));
+  });
