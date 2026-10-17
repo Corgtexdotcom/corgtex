@@ -893,7 +893,7 @@ describe("CRM domain", () => {
           relationshipType: { in: ["CLIENT", "PARTNER"] },
           lifecycleStage: { in: ["ACTIVE", "PILOT"] },
         }),
-        take: 100,
+        take: 10001,
       }));
       expect(result.total).toBe(1);
     });
@@ -1302,7 +1302,7 @@ describe("CRM domain", () => {
       expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor: dummyActor, workspaceId: "ws-1" });
       expect(prisma.crmActivity.findMany).toHaveBeenCalledWith(expect.objectContaining({
         where: expect.objectContaining({ workspaceId: "ws-1", accountId: "account-1" }),
-        take: 100,
+        take: 10001,
       }));
       expect(result.total).toBe(1);
     });
@@ -1351,7 +1351,7 @@ describe("CRM domain", () => {
         vi.mocked(delegate.count).mockResolvedValue(0);
         await list(dummyActor, "ws-1");
         expect(delegate.count).not.toHaveBeenCalled();
-        expect(delegate.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 100 }));
+        expect(delegate.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 10001 }));
       }
       await crm.listContacts(dummyActor, "ws-1", { archiveFilter: "archived" });
       expect(vi.mocked(prisma.crmContact.findMany).mock.calls[1]![0]!.where).toEqual(expect.objectContaining({ archivedAt: { not: null } }));
@@ -1686,7 +1686,7 @@ describe("CRM domain", () => {
       expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor: dummyActor, workspaceId: "ws-1" });
       expect(prisma.crmProspectWorkspace.findMany).toHaveBeenCalledWith(expect.objectContaining({
         where: expect.objectContaining({ crmWorkspaceId: "ws-1", accountId: "account-1", status: "ACTIVE" }),
-        take: 100,
+        take: 10001,
       }));
       expect(result.total).toBe(1);
     });
@@ -1745,7 +1745,7 @@ describe("CRM domain", () => {
           accountId: "account-1",
           OR: expect.any(Array),
         }),
-        take: 100,
+        take: 10001,
       }));
       expect(prisma.crmDeal.findMany).toHaveBeenCalledWith(expect.objectContaining({
         where: expect.objectContaining({
@@ -1754,7 +1754,7 @@ describe("CRM domain", () => {
           contactId: "contact-1",
           stage: { in: ["QUALIFIED", "PROPOSAL"] },
         }),
-        take: 100,
+        take: 10001,
       }));
       expect(contacts.total).toBe(1);
       expect(deals.total).toBe(1);
@@ -1781,7 +1781,7 @@ describe("CRM domain", () => {
       expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor: dummyActor, workspaceId: "ws-1" });
       expect(prisma.crmCommunicationSuggestion.findMany).toHaveBeenCalledWith(expect.objectContaining({
         where: expect.objectContaining({ workspaceId: "ws-1", ownerUserId: "u-1", status: { in: ["REQUESTED", "SENT"] } }),
-        take: 100,
+        take: 10001,
       }));
       expect(result.total).toBe(1);
     });

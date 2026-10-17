@@ -626,7 +626,7 @@ describe("Brain status access domains", () => {
 
     expect(resolveKnowledgeAccessDomains).toHaveBeenCalledWith(ownerActor, "ws-1");
     expect(prismaMock.brainSource.findMany).toHaveBeenCalledWith({
-      orderBy: { id: "asc" }, take: 100,
+      orderBy: { id: "asc" }, take: 5001,
       where: {
         workspaceId: "ws-1",
         accessDomain: { in: domains },

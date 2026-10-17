@@ -144,21 +144,36 @@ async function readableTensionVotes<T extends { id: string; userId: string }>(ac
   return captured.records;
 }
 
-async function loadReadableTensionVotes(actor: AppActor, workspaceId: string, tensionId: string, release: WorkItemReadRelease) {
-  const result: import("@prisma/client").TensionUpvote[] = [];
+/** Stream votes for at most one candidate page. Counts retain no vote bodies;
+ * selected hydration retains only the votes the response actually returns. */
+async function scanReadableTensionVotes(actor: AppActor, workspaceId: string, tensionIds: string[],
+  release: WorkItemReadRelease, consume: (votes: import("@prisma/client").TensionUpvote[]) => void,
+  budget?: { examined: number }) {
+  if (!tensionIds.length) return;
   let cursor: string | undefined;
   for (;;) {
+    const take = budget ? Math.min(100, 20_001 - budget.examined) : 100;
     const page = await release.db.tensionUpvote.findMany({
-      where: { tensionId, tension: { workspaceId }, ...(cursor ? { id: { gt: cursor } } : {}) },
+      where: { tensionId: { in: tensionIds }, tension: { workspaceId }, ...(cursor ? { id: { gt: cursor } } : {}) },
       orderBy: { id: "asc" },
-      take: 100,
+      take,
     });
-    invariant(page.length <= 100 && page.every((vote) => !cursor || vote.id > cursor),
+    invariant(page.length <= take && page.every((vote) => !cursor || vote.id > cursor),
       409, "SOURCE_CHANGED", "Tension votes changed during the scan.");
-    result.push(...await readableTensionVotes(actor, workspaceId, page, release));
-    if (page.length < 100) return result;
+    if (budget) {
+      budget.examined += page.length;
+      invariant(budget.examined <= 20_000, 409, "SOURCE_READ_SCAN_LIMIT", "Tension ranking exceeds its vote window; narrow the filters.");
+    }
+    consume(await readableTensionVotes(actor, workspaceId, page, release));
+    if (page.length < take) return;
     cursor = page.at(-1)!.id;
   }
+}
+
+async function loadReadableTensionVotes(actor: AppActor, workspaceId: string, tensionId: string, release: WorkItemReadRelease) {
+  const result: import("@prisma/client").TensionUpvote[] = [];
+  await scanReadableTensionVotes(actor, workspaceId, [tensionId], release, votes => result.push(...votes));
+  return result;
 }
 
 async function redactTensionJoins<T extends {
@@ -235,18 +250,18 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
       });
     }
 
+    // Shared across rank scans and selected hydration. Never release a partial
+    // vote aggregate as an exact rank when this bounded request is exhausted.
+    const voteBudget = { examined: 0 };
     const page= !opts?.sort || opts.sort==="priority"
       ? await rankedReadableTensionPage<import("@prisma/client").Tension>({actor,workspaceId,release,take,skip,
         load:afterId=>db.tension.findMany({where:afterId?{AND:[where,{id:{gt:afterId}}]}:where,orderBy:{id:"asc"},take:100}),
-        votes:async row=>{
-          let count=0,afterId:string|undefined;
-          for(;;) {
-            const votes=await db.tensionUpvote.findMany({where:{tensionId:row.id,...(afterId?{id:{gt:afterId}}:{})},orderBy:{id:"asc"},take:100});
-            const visible=await readableTensionVotes(actor,workspaceId,votes,release);
-            count+=visible.length;
-            if(votes.length<100) return count;
-            afterId=votes.at(-1)!.id;
-          }
+        votes: async rows => {
+          const counts = new Map<string, number>();
+          await scanReadableTensionVotes(actor, workspaceId, rows.map(row => row.id), release, votes => {
+            for (const vote of votes) counts.set(vote.tensionId, (counts.get(vote.tensionId) ?? 0) + 1);
+          }, voteBudget);
+          return counts;
         }})
       : await readableWorkItemPage<import("@prisma/client").Tension>({actor,workspaceId,release,kind:"Tension",take,skip,
         load:after=>db.tension.findMany({where:after?{AND:[where,workItemAfter(after,opts.sort)]}:where,orderBy:workItemOrderBy(opts.sort),take:100})});
@@ -287,10 +302,17 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
     }):[];
     const byId=new Map(hydrated.map(row=>[row.id,row]));
     const selected=page.items.flatMap(row=>{const loaded=byId.get(row.id);return loaded?[{...loaded,...row}]:[];});
-    const items: Array<(typeof selected)[number] & { upvotes: import("@prisma/client").TensionUpvote[] }> = [];
-    for (const row of selected) items.push({ ...row,
-      upvotes: await loadReadableTensionVotes(actor, workspaceId, row.id, release),
-    });
+    const votesByTension = new Map<string, import("@prisma/client").TensionUpvote[]>();
+    for (let offset = 0; offset < selected.length; offset += 100) {
+      await scanReadableTensionVotes(actor, workspaceId, selected.slice(offset, offset + 100).map(row => row.id), release, votes => {
+        for (const vote of votes) {
+          const existing = votesByTension.get(vote.tensionId) ?? [];
+          existing.push(vote);
+          votesByTension.set(vote.tensionId, existing);
+        }
+      }, voteBudget);
+    }
+    const items = selected.map(row => ({ ...row, upvotes: votesByTension.get(row.id) ?? [] }));
     invariant(items.length === page.items.length,409,"SOURCE_CHANGED","Selected tensions changed within collection.");
     const total=page.total;
     const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "TENSION", items.map((item) => item.id), rows => release.observe("AdviceRequest", rows), db);

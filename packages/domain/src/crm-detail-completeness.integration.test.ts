@@ -47,7 +47,7 @@ async function seedRelations(f: Awaited<ReturnType<typeof fixture>>, count: numb
   }
 }
 
-it("returns all 5001 account contacts, account deals and contact deals with bounded canonical pages", async () => {
+it("returns all 5001 account contacts, account deals and contact deals from bounded candidate snapshots and canonical proof batches", async () => {
   const f = await fixture();
   await seedRelations(f, 5001);
   const contacts = vi.spyOn(prisma.crmContact, "findMany"), deals = vi.spyOn(prisma.crmDeal, "findMany");
@@ -63,7 +63,7 @@ it("returns all 5001 account contacts, account deals and contact deals with boun
   expect.soft(activities.mock.calls.length).toBeLessThan(100);
   for (const query of [...contacts.mock.calls, ...deals.mock.calls]) {
     const args = query[0];
-    if (args?.take !== undefined) expect(args.take).toBeLessThanOrEqual(100);
+    if (args?.take !== undefined) expect(args.take).toBeLessThanOrEqual(10001);
     else expect((args?.where?.id as { in: string[] }).in.length).toBeLessThanOrEqual(100);
   }
 }, 180_000);

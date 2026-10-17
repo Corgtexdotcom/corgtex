@@ -27,25 +27,26 @@ async function fixture() {
   }
   return {workspaceId: workspace.id, actor, member, original};
 }
-it("returns late permitted Documents beyond 5000 unknown records in canonical pages", async () => {
+it("returns late permitted Documents within the exact candidate limit", async () => {
   const f = await fixture();
-  await db.document.createMany({data: Array.from({length: 5001}, (_, index) => ({id: `${f.workspaceId}-a-${String(index).padStart(5,"0")}`,
+  await db.document.createMany({data: Array.from({length: 4999}, (_, index) => ({id: `${f.workspaceId}-a-${String(index).padStart(5,"0")}`,
     workspaceId: f.workspaceId, title: "Unknown", source: "UPLOAD", storageKey: `workspaces/${f.workspaceId}/uploads/${index}/fixture.txt`, textContent: "Unproved"}))});
   const row = await f.original(`${f.workspaceId}-z-visible`);
   const query = vi.spyOn(db.document, "findMany");
   expect((await listDocuments(f.actor,f.workspaceId)).map(item => item.id)).toEqual([row.id]);
-  expect(query.mock.calls.length).toBe(51);
-  expect(query.mock.calls.every(([args]) => args?.take === 100 && args.orderBy && !args.select)).toBe(true);
+  expect(query.mock.calls.length).toBe(1);
+  expect(query.mock.calls.every(([args]) => args?.take === 5001 && args.orderBy && !args.select)).toBe(true);
 },120_000);
 it.each(["membership", "head"] as const)("retains the first admitted Document through a later-page %s change", async change => {
   const f = await fixture(), row = await f.original(`${randomUUID()}-a-original`);
-  await db.document.createMany({data: Array.from({length:99},(_,index) => ({id:`zz-${f.workspaceId}-${String(index).padStart(3,"0")}`,
+  await db.document.createMany({data: Array.from({length:100},(_,index) => ({id:`zz-${f.workspaceId}-${String(index).padStart(3,"0")}`,
     workspaceId:f.workspaceId,title:"Unknown",source:"UPLOAD",storageKey:`workspaces/${f.workspaceId}/uploads/${index}/fixture.txt`,textContent:"Unproved"}))});
   const load = db.document.findMany.bind(db.document);
+  const capture = DigestReadRelease.prototype.capture;
   let page = 0;
-  const result = scanSourceReadableRecords({actor: f.actor, workspaceId: f.workspaceId, kind: "Document", load: async (afterId,take) => {
-    expect(take).toBe(100);
-    if (++page === 2) {
+  vi.spyOn(DigestReadRelease.prototype, "capture").mockImplementation(async function(this: DigestReadRelease, ...args) {
+    const result = await capture.apply(this, args);
+    if (++page === 1) {
       if (change === "membership") {
         await db.member.update({where: {id:f.member.id},data:{isActive:false}});
         await db.member.update({where: {id:f.member.id},data:{isActive:true}});
@@ -55,8 +56,10 @@ it.each(["membership", "head"] as const)("retains the first admitted Document th
           origin:"HUMAN_ORIGINAL",contentHash:lineageContentFingerprint("Document",row),inputsJson:[],rootsJson:[]}});
       }
     }
-    return load({where:{workspaceId:f.workspaceId,...(afterId?{id:{gt:afterId}}:{})},orderBy:{id:"asc"},take});
-  }});
+    return result;
+  });
+  const result = scanSourceReadableRecords({actor: f.actor, workspaceId: f.workspaceId, kind: "Document", load: (afterId,take) =>
+    load({where:{workspaceId:f.workspaceId,...(afterId?{id:{gt:afterId}}:{})},orderBy:{id:"asc"},take}) });
   await expect(result).rejects.toMatchObject({code:"SOURCE_CHANGED"});
 });
 it("checks the current caller inside the final snapshot even when no rows are admitted",async()=>{

@@ -142,7 +142,7 @@ export async function readableWorkItemPage<T extends WorkItemPosition>(params: {
 export async function rankedReadableTensionPage<T extends WorkItemPosition>(params: {
   actor:AppActor; workspaceId:string; take:number; skip:number; release: WorkItemReadRelease;
   load:(afterId:string|undefined)=>Promise<T[]>;
-  votes:(row:T)=>Promise<number>;
+  votes:(rows:T[])=>Promise<Map<string, number>>;
 }) {
   invariant(Number.isSafeInteger(params.take) && params.take>=0 && params.take<=5000
     && Number.isSafeInteger(params.skip) && params.skip>=0,400,"INVALID_INPUT","Work item pagination is invalid.");
@@ -151,19 +151,27 @@ export async function rankedReadableTensionPage<T extends WorkItemPosition>(para
     || (b.row.createdAt?.getTime()??0)-(a.row.createdAt?.getTime()??0) || b.row.id.localeCompare(a.row.id);
   const items:T[]=[];
   let boundary:Ranked|undefined,total=0,remainingSkip=params.skip,first=true;
+  // Exact totals and global ranking cannot be certified from a truncated scan.
+  // Bound work across repeated rank windows, and fail instead of returning a
+  // plausible but incomplete page. The next page probes exact-limit exhaustion.
+  let examined = 0;
   for(;;) {
     const window:Ranked[]=[];
     let afterId:string|undefined;
     for(;;) {
       const rows=await params.load(afterId);
       invariant(rows.length<=100,503,"SOURCE_READ_SCAN_CHANGED","Source page changed; retry.");
-      const readable=new Set((await params.release.admit("Tension",rows)).map(row => row.id));
+      examined += rows.length;
+      invariant(examined <= 10_000, 409, "SOURCE_READ_SCAN_LIMIT", "Tension ranking exceeds its candidate window; narrow the filters.");
+      const admitted = await params.release.admit("Tension", rows);
+      const readable = new Set(admitted.map(row => row.id));
+      const votes = params.take === 0 ? new Map<string, number>() : await params.votes(admitted);
       for(const row of rows) {
         invariant(!afterId || row.id>afterId,503,"SOURCE_READ_SCAN_CHANGED","Source page changed; retry.");
         if(!readable.has(row.id)) continue;
         if(first) total++;
         if(params.take===0) continue;
-        const ranked={row,votes:await params.votes(row)};
+        const ranked={row,votes:votes.get(row.id) ?? 0};
         if(boundary && compare(ranked,boundary)<=0) continue;
         window.push(ranked);window.sort(compare);
         if(window.length>100) window.pop();

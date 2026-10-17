@@ -185,7 +185,7 @@ describe("CRM input receipts", () => {
     expect(fixture.tables.crmAccount).toEqual([]); expect(fixture.tables.crmContact).toEqual([]);
   });
 
-  it("scans past hidden pages before pagination without a corpus budget", async () => {
+  it("admits hidden-prefix collections from one bounded candidate snapshot", async () => {
     const rows = Array.from({ length: 102 }, (_, index) => ({ id: `raw-${index}` }));
     const fetch = vi.fn(async (page) => { const start = page.cursor ? rows.findIndex((row) => row.id === page.cursor.id) + page.skip : 0;
       return rows.slice(start, start + page.take); });
@@ -197,15 +197,15 @@ describe("CRM input receipts", () => {
       const ids = await fetch(page); return ids.map((row) => fixture.tables.document.find((entry) => entry.id === row.id));
     });
     expect(crmPage(admitted, 1, 1)).toMatchObject({ total: 2, items: [{ id: "raw-101" }] });
-    expect(fetch.mock.calls[1][0]).toEqual({ take: 100, cursor: { id: "raw-99" }, skip: 1 });
+    expect(fetch).toHaveBeenCalledExactlyOnceWith({ take: 10001 });
     let offset=0;
     const complete=vi.fn(async (_page:{take:number})=>{
-      const rows=Array.from({length:Math.min(100,5070-offset)},(_,index)=>({id:`unknown-${offset+index}`}));
+      const rows=Array.from({length:Math.min(_page.take,5070-offset)},(_,index)=>({id:`unknown-${offset+index}`}));
       offset+=rows.length;return rows;
     });
     expect(await readCrmRows(general,"ws-crm","CrmAccount",complete)).toEqual([]);
-    expect(complete).toHaveBeenCalledTimes(51);
-    expect(complete.mock.calls.every(([page])=>page.take===100)).toBe(true);
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(complete.mock.calls.every(([page])=>page.take===10001)).toBe(true);
   });
 
   it.each([4_999, 5_000, 5_001])("completes a %i-row collection in bounded canonical pages", async count => {
@@ -216,7 +216,7 @@ describe("CRM input receipts", () => {
     });
     const result = readCrmRows(general, "ws-crm", "CrmAccount", fetch);
     expect(crmPage(await result,50,0)).toEqual({items:[],total:0,take:50,skip:0});
-    expect(fetch.mock.calls.every(([page])=>page.take===100)).toBe(true);
+    expect(fetch.mock.calls.every(([page])=>page.take===10001)).toBe(true);
   });
 
   it("records full prompt and recipient receipts through suggestion edits, state transitions and sent activity copies", async () => {

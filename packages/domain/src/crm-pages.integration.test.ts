@@ -56,7 +56,8 @@ it("returns exact permission-aware totals and a deep page across5001 persisted r
   }) as typeof prisma.crmAccount.findMany);
   const page=await listCrmAccounts(f.actor,f.workspaceId,{take:1,skip:5000});
   expect(page.total).toBe(5001);expect(page.items.map(row=>row.id)).toEqual(["account-005000"]);
-  expect(Math.max(...sizes)).toBeLessThanOrEqual(100);
+  expect(Math.max(...sizes)).toBe(5002);
+  expect(sizes.filter(size=>size>100)).toEqual([5002]);
   expect(page.items[0]._count).toEqual({contacts:0,deals:0,activities:0,crmConversations:0});
   const direct=await listCrmAccounts(f.actor,f.workspaceId,{take:1,skip:5000,archiveFilter:"all"});
   expect(direct.total).toBe(5001);expect(JSON.parse(await serializeCrmDirectReadResult(f.actor,direct)).total).toBe(5001);

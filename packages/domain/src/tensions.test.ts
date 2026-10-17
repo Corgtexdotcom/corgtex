@@ -146,7 +146,7 @@ describe("tensions domain", () => {
     prismaMock.tension.findMany.mockResolvedValue([{ id: "t-1" }]);
     prismaMock.tensionUpvote.findMany.mockImplementation(async query => {
       const rows = await prismaMock.tension.findMany.mock.results.at(-1)?.value ?? [];
-      return rows.flatMap((row: {id: string; upvotes?: Array<{id: string}>}) => row.id === query.where.tensionId ? row.upvotes ?? [] : [])
+      return rows.flatMap((row: {id: string; upvotes?: Array<{id: string}>}) => query.where.tensionId.in.includes(row.id) ? row.upvotes ?? [] : [])
         .filter((vote: {id: string}) => !query.where.id?.gt || vote.id > query.where.id.gt)
         .sort((a: {id: string}, b: {id: string}) => a.id.localeCompare(b.id)).slice(0, query.take);
     });
@@ -1667,6 +1667,51 @@ describe("tensions domain", () => {
     const afterRevocation = await listTensions(actor, "ws-1", { take: 1 });
     expect(afterRevocation.items[0]).toMatchObject({ id: "raw-winner", upvotes: [] });
     expect(JSON.stringify(afterRevocation)).not.toContain("other-workspace-user");
+  });
+
+  it("batches vote reads across readable tensions and hydrates only the selected page", async () => {
+    const rows = Array.from({ length: 205 }, (_, index) => ({ id: `t-${String(index).padStart(3, "0")}`,
+      title: "Tension", workspaceId: "ws-1", priority: 1, createdAt: new Date("2026-10-01") }));
+    const votes = rows.map(row => ({ id: `vote-${row.id}`, tensionId: row.id, userId: "local-member" }));
+    prismaMock.tension.findMany.mockImplementation(async query => {
+      if (query.include) return rows.filter(row => query.where.AND[1].id.in.includes(row.id));
+      const after = query.where.AND?.[1]?.id?.gt;
+      return rows.filter(row => !after || row.id > after).slice(0, query.take);
+    });
+    prismaMock.tensionUpvote.findMany.mockImplementation(async query => votes
+      .filter(vote => query.where.tensionId.in.includes(vote.tensionId) && (!query.where.id?.gt || vote.id > query.where.id.gt))
+      .slice(0, query.take));
+    const { listTensions } = await import("./tensions");
+    await vi.mocked(readableArtifactIds).withImplementation(async (_actor, _workspace, kind, records) =>
+      new Set(records.filter(row => kind !== "Tension" || row.id !== "t-204").map(row => row.id)), async () => {
+      const result = await listTensions(actor, "ws-1", { take: 3 });
+      expect(result.total).toBe(204);
+      expect(result.items.map(row => row.id)).toEqual(["t-203", "t-202", "t-201"]);
+      expect(result.items.every(row => row.upvotes.length === 1)).toBe(true);
+    });
+    const reads = prismaMock.tensionUpvote.findMany.mock.calls.map(([query]) => query);
+    expect(reads).toHaveLength(6);
+    expect(reads.every(query => query.take <= 100 && query.where.tensionId.in.length <= 100
+      && !query.where.tensionId.in.includes("t-204") && query.where.tension.workspaceId === "ws-1")).toBe(true);
+    expect(reads.at(-1).where.tensionId.in).toEqual(["t-203", "t-202", "t-201"]);
+  });
+
+  it.each([10_000, 10_001])("probes the shared ranking/hydration vote budget with %s selected votes", async count => {
+    const tension = { id: "budget", workspaceId: "ws-1", title: "Budget", priority: 1, createdAt: new Date("2026-10-01") };
+    const votes = Array.from({ length: count }, (_, index) => ({ id: `vote-${String(index).padStart(5, "0")}`,
+      tensionId: tension.id, userId: "local-member" }));
+    prismaMock.tension.findMany.mockResolvedValue([tension]);
+    prismaMock.tensionUpvote.findMany.mockImplementation(async query => votes
+      .filter(vote => !query.where.id?.gt || vote.id > query.where.id.gt).slice(0, query.take));
+    const { listTensions } = await import("./tensions");
+    if (count === 10_000) {
+      const result = await listTensions(actor, "ws-1", { take: 1 });
+      expect(result.total).toBe(1);
+      expect(result.items[0].upvotes).toHaveLength(count);
+      expect(prismaMock.tensionUpvote.findMany.mock.calls.at(-1)?.[0].take).toBe(1);
+    } else {
+      await expect(listTensions(actor, "ws-1", { take: 1 })).rejects.toMatchObject({ code: "SOURCE_READ_SCAN_LIMIT" });
+    }
   });
 
 });

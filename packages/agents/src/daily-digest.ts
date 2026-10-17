@@ -1444,13 +1444,20 @@ export async function runDailyDigest(params: {
     modelSignal.throwIfAborted();
     return result;
   }
-  const sessionReceipts = await Promise.all(loadedSessions.map(async (session) => {
+  const captureSessionReceipt = async (session: (typeof loadedSessions)[number]) => {
     const turns = await captureReadableDigestInputs({ actor: agentActor, workspaceId: params.workspaceId,
       kind: "ConversationTurn", records: session.turns, additionalInputs: () => [
         { kind: "User", id: session.userId, snapshot: session.user },
       ] });
     return { session, roots: turns.roots, complete: session.turns.length > 0 && turns.records.length === session.turns.length };
-  }));
+  };
+  const sessionReceipts: Awaited<ReturnType<typeof captureSessionReceipt>>[] = [];
+  // Each session performs DB-backed turn proof checks. Keep pool pressure
+  // bounded while preserving session order and every original receipt.
+  for (let offset = 0; offset < loadedSessions.length; offset += 5) {
+    modelSignal.throwIfAborted();
+    sessionReceipts.push(...await Promise.all(loadedSessions.slice(offset, offset + 5).map(captureSessionReceipt)));
+  }
   const sessions = sessionReceipts.filter((receipt) => receipt.complete).map((receipt) => receipt.session);
   const sharedSessionReceipts = [] as typeof sessionReceipts;
   for (const receipt of sessionReceipts.filter((item) => item.complete)) {

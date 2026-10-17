@@ -521,13 +521,26 @@ describe("runDailyDigest", () => {
     const capture = vi.mocked(domain.captureReadableDigestInputs);
     const original = capture.getMockImplementation()!;
     const { runDailyDigest } = await import("./daily-digest");
-    await capture.withImplementation(async (params: any) => params.kind === "ConversationTurn"
-      ? { records: [], proofs: new Map(), roots: [] } : original(params), async () => {
+    let activeCaptures = 0;
+    let peakCaptures = 0;
+    let capturedSessions = 0;
+    await capture.withImplementation(async (params: any) => {
+      if (params.kind !== "ConversationTurn") return original(params);
+      activeCaptures++;
+      peakCaptures = Math.max(peakCaptures, activeCaptures);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      activeCaptures--;
+      capturedSessions++;
+      return { records: [], proofs: new Map(), roots: [] };
+    }, async () => {
       for (let attempt = 0; attempt < 2; attempt++) {
         await expect(runDailyDigest({ workspaceId: "workspace-1", dateISO: "2026-04-30T12:00:00.000Z", cadence }))
           .resolves.toMatchObject({ success: true, processedSessions: 0, updatedProfiles: 0 });
       }
     });
+    expect(peakCaptures).toBe(5);
+    expect(activeCaptures).toBe(0);
+    expect(capturedSessions).toBe(10_002);
     expect(batchIngestDailyConversationsMock).not.toHaveBeenCalled();
     // Only the separately permission-filtered digest input read remains. The
     // retired automatic ingestion performs no additional raw-body hydration.

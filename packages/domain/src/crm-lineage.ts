@@ -10,6 +10,7 @@ import { admitCrmDirectOriginalRows, assertCrmDirectReadCurrent, discardCrmDirec
 export type CrmReadPage = { take: number; cursor?: { id: string }; skip?: number };
 const CRM_READ_BATCH_SIZE = 100;
 const CRM_OUTPUT_PAGE_LIMIT = 5_000;
+const CRM_EXACT_READ_LIMIT = 10_000;
 class CrmReadRelease {
   active=true;
   readonly roots = new Map<string,LineageRoot>();
@@ -71,8 +72,8 @@ export async function observeCrmReadRows<T extends {id:string}>(actor:AppActor,w
 }
 
 type Selection<T> = {take:number;skip?:number;count?:boolean;admit?:(rows:T[])=>Promise<T[]>};
-/** Hydrate only canonical pages. Exact totals retain compact original proofs,
- * while bodies outside the requested output page are discarded immediately. */
+/** One bounded candidate statement supplies a stable exact total and output page.
+ * Original authority is admitted in <=100-row batches and retained through joins. */
 export async function readCrmPage<T extends {id:string}>(actor:AppActor,workspaceId:string,
   kind:LineageInput["kind"],fetch:(page:CrmReadPage)=>Promise<T[]>,selection:Selection<T>,
   tx:Prisma.TransactionClient=prisma,direct?:CrmDirectReadSession) {
@@ -80,15 +81,17 @@ export async function readCrmPage<T extends {id:string}>(actor:AppActor,workspac
   invariant(Number.isSafeInteger(take)&&take>=0&&take<=CRM_OUTPUT_PAGE_LIMIT&&Number.isSafeInteger(skip)&&skip>=0,
     400,"INVALID_INPUT","CRM pagination is invalid.");
   const items:T[]=[];
-  let total=0,cursor:{id:string}|undefined;
-  const seen=new Set<string>();
+  let total=0;
   const release=crmReadRelease.getStore();
   invariant(!release||release.active&&release.actor===actor&&release.workspaceId===workspaceId,409,"SOURCE_CHANGED","CRM reader changed.");
-  for(;;) {
-    const rows=await fetch({take:CRM_READ_BATCH_SIZE,...(cursor?{cursor,skip:1}:{})});
-    invariant(rows.length<=CRM_READ_BATCH_SIZE,409,"SOURCE_CHANGED","CRM query returned an invalid page.");
-    const fresh=rows.filter(row=>!seen.has(row.id));
-    fresh.forEach(row=>seen.add(row.id));
+  const candidates=await fetch({take:CRM_EXACT_READ_LIMIT+1});
+  invariant(candidates.length<=CRM_EXACT_READ_LIMIT+1&&new Set(candidates.map(row=>row.id)).size===candidates.length,
+    409,"SOURCE_CHANGED","CRM query returned an invalid candidate window.");
+  const complete=candidates.length<=CRM_EXACT_READ_LIMIT;
+  invariant(selection.count===false||complete,409,"SOURCE_READ_SCAN_LIMIT",
+    "CRM result exceeds the 10000-candidate exact-read limit; narrow the request.");
+  for(let offset=0;offset<Math.min(candidates.length,CRM_EXACT_READ_LIMIT);offset+=CRM_READ_BATCH_SIZE) {
+    const fresh=candidates.slice(offset,Math.min(offset+CRM_READ_BATCH_SIZE,CRM_EXACT_READ_LIMIT));
     const originals=direct?await admitCrmDirectOriginalRows(direct,kind,fresh,tx):[];
     const originalIds=new Set(originals.map(row=>row.id));
     const rest=fresh.filter(row=>!originalIds.has(row.id));
@@ -112,11 +115,10 @@ export async function readCrmPage<T extends {id:string}>(actor:AppActor,workspac
       invariant(captured.length===selected.length,409,"SOURCE_CHANGED","A selected CRM record changed during admission.");
     }
     if(direct)discardCrmDirectReadProjections(direct,originals.filter(row=>!selected.includes(row)));
-    if(rows.length<CRM_READ_BATCH_SIZE||selection.count===false&&items.length===take)break;
-    const next=rows.at(-1)!;
-    invariant(next.id!==cursor?.id&&fresh.length>0,409,"SOURCE_CHANGED","CRM records changed while reading.");
-    cursor={id:next.id};
+    if(selection.count===false&&items.length===take)break;
   }
+  invariant(complete||selection.count===false&&items.length===take,409,"SOURCE_READ_SCAN_LIMIT",
+    "CRM sample exceeds the 10000-candidate read limit; narrow the request.");
   if(direct)await assertCrmDirectReadCurrent(direct,tx);
   return {items,total,take,skip};
 }

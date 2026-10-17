@@ -40,10 +40,12 @@ async function readableDiscussionAuthor<T extends { id: string; userId: string; 
   actor: AppActor, workspaceId: string, member: T | null, release?: DigestReadRelease | WorkItemReadRelease,
 ) {
   if (!member) return null;
-  const input = { ...member, user: { ...member.user, id: member.userId } };
+  // Member admission uses its canonical minimal relation; retain the separately
+  // serialized full profile as its own User input.
+  const input = { ...member, user: { id: member.userId, displayName: member.user.displayName, email: member.user.email } };
   const capture = () => captureReadableDigestInputs({ actor, workspaceId, kind: "Member", records: [input],
     db: release && "db" in release ? release.db : undefined,
-    additionalInputs: (row) => [{ kind: "User", id: row.userId, snapshot: row.user }] });
+    additionalInputs: (row) => [{ kind: "User", id: row.userId, snapshot: { ...member.user, id: row.userId } }] });
   const admitted = release ? await release.observeRead(capture) : await capture();
   release?.add(admitted.roots);
   return admitted.records.length ? member : null;
@@ -646,6 +648,7 @@ export async function listArticles(actor: AppActor, params: {
     workspaceId: params.workspaceId,
   });
 
+  const relationRelease = release ?? new DigestReadRelease(actor, params.workspaceId);
   const take = params.take ?? 50;
   const skip = params.skip ?? 0;
 
@@ -725,7 +728,7 @@ export async function listArticles(actor: AppActor, params: {
     for (const article of candidates) {
       if (!initial.has(article.id) || !current.has(article.id)) continue;
       if (total >= skip && items.length < take) {
-        const related = await articleListRelations(actor, params.workspaceId, article, backlinkSourceWhere);
+        const related = await articleListRelations(actor, params.workspaceId, article, backlinkSourceWhere, relationRelease);
         // Related reads may have awaited a policy/content change. Never return
         // a new row using an old receipt or count a now-withheld selected row.
         if (!(await readableArtifactIds(actor, params.workspaceId, "BrainArticle", [article])).has(article.id)) continue;
@@ -739,16 +742,20 @@ export async function listArticles(actor: AppActor, params: {
   }
   const finalIds = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", selected);
   const admitted = items.filter(article => finalIds.has(article.id));
-  return { items: admitted, total: total - (items.length - admitted.length), take, skip };
+  const retainedIds = release ? finalIds : new Set((await relationRelease.capture("BrainArticle",
+    selected.filter(article => finalIds.has(article.id)))).records.map(article => article.id));
+  const retained = admitted.filter(article => retainedIds.has(article.id));
+  const result = { items: retained, total: total - (items.length - retained.length), take, skip };
+  return release ? result : relationRelease.finish(result);
 }
 
 async function articleListRelations(actor: AppActor, workspaceId: string, article: BrainArticle,
-  articleWhere: Prisma.BrainArticleWhereInput) {
+  articleWhere: Prisma.BrainArticleWhereInput, release: DigestReadRelease) {
   const member = article.ownerMemberId ? await prisma.member.findFirst({ where: { id: article.ownerMemberId, workspaceId },
     include: { user: { select: { id: true, displayName: true, email: true, bio: true,
       avatarUrl: true, linkedinUrl: true, websiteUrl: true, createdAt: true, updatedAt: true } } },
   }) : null;
-  const ownerMember = await readableDiscussionAuthor(actor, workspaceId, member);
+  const ownerMember = await readableDiscussionAuthor(actor, workspaceId, member, release);
   let discussions = 0;
   let afterThread: string | undefined;
   while (true) {
