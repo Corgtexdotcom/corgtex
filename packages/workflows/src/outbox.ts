@@ -1,3 +1,4 @@
+import { createEventKnowledgeSyncLease } from "./handlers/event-knowledge-sync-lease";
 import { invariant } from "../../domain/src/errors";
 import { createOAuthKnowledgeSyncLease } from "../../domain/src/oauth-knowledge-sync-lease";
 import { BRAIN_MAINTENANCE_JOB, MaintenanceDeferred } from "./brain-maintenance-jobs";
@@ -1265,9 +1266,10 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
   let failed = false;
   let failure: unknown = null;
   let superseded = false;
-  const oauthLease = ["oauth.documents.sync", "oauth.email.sync"].includes(job.type) ? createOAuthKnowledgeSyncLease(job) : null;
-  const settleClaimedJob = (args: Prisma.WorkflowJobUpdateManyArgs) => oauthLease
-    ? oauthLease.settle(args.data) : prisma.workflowJob.updateMany(args);
+  const knowledgeLease = ["oauth.documents.sync", "oauth.email.sync"].includes(job.type) ? createOAuthKnowledgeSyncLease(job)
+    : job.type === "knowledge.sync.event" ? createEventKnowledgeSyncLease(job) : null;
+  const settleClaimedJob = (args: Prisma.WorkflowJobUpdateManyArgs) => knowledgeLease
+    ? knowledgeLease.settle(args.data) : prisma.workflowJob.updateMany(args);
   try {
     const diagnostic = job.type === RELEASE_DIAGNOSTIC_JOB_TYPE;
     const executeWithOrigins = () => withWorkspaceSupportExecution(job, () => withMcpConnectionExecution(job, async () => {
@@ -1291,8 +1293,8 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
           owner: workerId, attempt: job.attempts, claim: job.meetingClaim}, execute);
       } else await execute();
     }));
-    if (oauthLease) await oauthLease.run(executeWithOrigins); else await executeWithOrigins();
-    await oauthLease?.stopAndDrain();
+    if (knowledgeLease) await knowledgeLease.run(executeWithOrigins); else await executeWithOrigins();
+    await knowledgeLease?.stopAndDrain();
     if (!diagnostic) {
       if ((isClaimFencedKnowledgeSyncJob(job.type) || isSourceRegenerationJob(job.type) || job.type === "agent.brain-absorb" || job.type === BRAIN_MAINTENANCE_JOB || isMeetingTranscriptWorkerJob(job.type) || job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE) && !superseded) {
         // A reclaimed job may still have an older model call in flight.
@@ -1305,13 +1307,13 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
             },
           data: { status: "COMPLETED", completedAt: new Date(), error: null, lockedAt: null, lockedBy: null },
         });
-        invariant(!oauthLease || settled.count === 1, 409, "SOURCE_CHANGED", "OAuth ingestion lease changed before completion.");
+        invariant(!knowledgeLease || settled.count === 1, 409, "SOURCE_CHANGED", "Knowledge ingestion lease changed before completion.");
       } else if (!superseded) {
         await completeJob(job.id);
       }
     }
   } catch (error) {
-    await oauthLease?.dispose();
+    await knowledgeLease?.dispose();
     if (job.type === BRAIN_MAINTENANCE_JOB && error instanceof MaintenanceDeferred) {
       const delay = error.reason === "daily_rate_limit" ? 24 * 60 * 60_000
         : ["hourly_rate_limit", "budget_exceeded"].includes(error.reason) ? 60 * 60_000 : 60_000;
@@ -1352,7 +1354,7 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
       await failJob(job, error);
     }
   } finally {
-    await oauthLease?.dispose();
+    await knowledgeLease?.dispose();
     revokeMeetingTranscriptWorkflowClaim(job.meetingClaim);
   }
 

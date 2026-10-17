@@ -1322,6 +1322,12 @@
     "workingAgreementSource": "Fuente"
   },
   "governance": {
+    "historyLimited": "Se muestra una ventana del historial de constitución. Puede haber versiones anteriores.",
+    "historyUnavailable": "El historial de constitución no está disponible. Inténtalo de nuevo.",
+    "historyOlder": "Versiones anteriores",
+    "historyLatest": "Versiones recientes",
+    "historyEmpty": "No hay versiones legibles en esta ventana.",
+    "historyCount": "Versiones en esta ventana ({count})",
     "approvalPoliciesDesc": "Configura cómo se toman las decisiones para propuestas.",
     "btnRecalculate": "Recalcular puntuación",
     "btnSynthesize": "Sintetizar constitución",
@@ -2035,6 +2041,13 @@
     "updatedAt": "Actualizado {date}"
   },
   "built": {
+    "historyLimited": "Se muestra una ventana de artefactos. Puede haber artefactos anteriores. Los recuentos y las secciones vacías corresponden solo a esta ventana.",
+    "historyUnavailable": "El historial no está disponible. Inténtalo de nuevo.",
+    "historyOlder": "Artefactos anteriores",
+    "historyLatest": "Artefactos recientes",
+    "historyEmpty": "No hay artefactos legibles en esta ventana",
+    "historyEmptySection": "No hay artefactos legibles en esta sección de la ventana actual.",
+    "historyCount": "{count} artefactos en esta ventana",
     "artifact": "Artefacto",
     "artifactCount": "{count, plural, =0 {Sin artefactos de build} one {# artefacto de build} other {# artefactos de build}}",
     "asset": "Archivo",

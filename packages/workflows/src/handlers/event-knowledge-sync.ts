@@ -1,3 +1,5 @@
+import { currentEventKnowledgeSyncLease, withEventKnowledgeSyncLease, type EventKnowledgeSyncClaim } from "./event-knowledge-sync-lease";
+export type { EventKnowledgeSyncClaim } from "./event-knowledge-sync-lease";
 import { createHash } from "node:crypto";
 import type { Prisma } from "@prisma/client";
 import { getSharedStateBackend, prisma } from "@corgtex/shared";
@@ -6,12 +8,7 @@ import { getKnowledgeSearchProvider, invalidateKnowledgeCache, isAzureKnowledgeS
   type AzureKnowledgeAttemptControls } from "@corgtex/knowledge";
 import { invariant } from "../../../domain/src/errors";
 
-export type EventKnowledgeSyncClaim = {
-  id: string; workspaceId: string | null; type: string; payload: unknown; attempts: number;
-  lockedBy: string | null; lockedAt: Date | null; startedAt: Date | null;
-};
 type Db = typeof prisma | Prisma.TransactionClient;
-const LEASE_MS = 5 * 60_000;
 // Payload JSONB ordering is not part of the claim identity.
 function stable(value: unknown): unknown {
   if (value instanceof Date) return value.toISOString();
@@ -20,8 +17,6 @@ function stable(value: unknown): unknown {
   return value;
 }
 const stamp = (value: unknown) => createHash("sha256").update(JSON.stringify(stable(value))).digest("hex");
-const claimStamp = (job: EventKnowledgeSyncClaim) => stamp([job.id, job.workspaceId, job.type, job.payload,
-  job.attempts, job.lockedBy, job.lockedAt, job.startedAt]);
 const eventSelect = { id: true, workspaceId: true, type: true, aggregateType: true, aggregateId: true, createdAt: true } as const;
 const flowSelect = { id: true, workspaceId: true, subjectType: true, subjectId: true } as const;
 const pulseTypes: Record<string, string> = {
@@ -33,7 +28,12 @@ const pulseTypes: Record<string, string> = {
 /** Events are routing/control records, never content authority for their arbitrary payload. */
 export async function handleEventKnowledgeSync(jobId: string, payload: { eventId?: string }, workspaceId: string,
   originalClaim: EventKnowledgeSyncClaim) {
+  return withEventKnowledgeSyncLease(originalClaim, () => syncEvent(jobId, payload, workspaceId, originalClaim));
+}
+
+async function syncEvent(jobId: string, payload: {eventId?: string}, workspaceId: string, originalClaim: EventKnowledgeSyncClaim) {
   const claim = structuredClone(originalClaim);
+  const lease = currentEventKnowledgeSyncLease(claim);
   const recipe = claim.payload && typeof claim.payload === "object" && !Array.isArray(claim.payload)
     ? claim.payload as Record<string, unknown> : {};
   invariant(payload.eventId && claim.id === jobId && claim.workspaceId === workspaceId
@@ -45,15 +45,17 @@ export async function handleEventKnowledgeSync(jobId: string, payload: { eventId
   // Explicit selects deliberately exclude Event.payload, including from all replays.
   const eventStamp = stamp(event);
   const controller = new AbortController();
+  const signal = AbortSignal.any([controller.signal, lease.signal]);
   let flow: Awaited<ReturnType<typeof loadFlow>> | undefined;
   async function loadFlow(db: Db = prisma) {
     return db.approvalFlow.findFirst({ where: { id: event!.aggregateId ?? "", workspaceId }, select: flowSelect });
   }
-  const assertCurrent = async (transaction?: Prisma.TransactionClient) => {
+  const checkCurrent = async (transaction?: Prisma.TransactionClient) => {
     const db = transaction ?? prisma;
-    controller.signal.throwIfAborted();
+    signal.throwIfAborted();
     try {
       if (transaction) {
+        lease.assertTransactionOwner();
         await transaction.$queryRaw`SELECT id FROM "WorkflowJob" WHERE id=${jobId} AND "workspaceId"=${workspaceId} FOR SHARE`;
         await transaction.$queryRaw`SELECT id FROM "Event" WHERE id=${eventId} AND "workspaceId"=${workspaceId} FOR SHARE`;
         if (flow) await transaction.$queryRaw`SELECT id FROM "ApprovalFlow" WHERE id=${flow.id} AND "workspaceId"=${workspaceId} FOR SHARE`;
@@ -63,24 +65,25 @@ export async function handleEventKnowledgeSync(jobId: string, payload: { eventId
       if (flow) invariant(stamp(await loadFlow(db)) === stamp(flow), 409, "SOURCE_CHANGED", "Event approval target changed during indexing.");
       // Read the live claim last, including freshness after all other awaits.
       const job = await db.workflowJob.findFirst({ where: { id: jobId, workspaceId } });
-      invariant(job?.status === "RUNNING" && claim.lockedBy && claim.lockedAt instanceof Date
-        && claim.lockedAt.getTime() > Date.now() - LEASE_MS && claimStamp(job) === claimStamp(claim),
+      lease.assertCurrentRow(job);
+      invariant(job?.status === "RUNNING",
       409, "SOURCE_CHANGED", "Event indexing claim expired or changed.");
-      controller.signal.throwIfAborted();
+      signal.throwIfAborted();
     } catch (error) { controller.abort(error); throw error; }
   };
+  const assertCurrent = (tx?: Prisma.TransactionClient) => tx ? checkCurrent(tx) : lease.readGuard(() => checkCurrent());
   await assertCurrent();
 
   // Retire only derived EVENT copies, even when their former aggregate is now
   // archived or denied. This control grant never admits old event payload bytes.
-  await prisma.$transaction(async tx => {
+  await lease.sourceTransactionGuard(() => prisma.$transaction(async tx => {
     await assertCurrent(tx);
     await tx.knowledgeChunk.deleteMany({ where: { workspaceId, sourceType: "EVENT", sourceId: eventId } });
     if (getSharedStateBackend() === "postgres") await invalidateKnowledgeCache(workspaceId, tx);
     await assertCurrent(tx);
-  });
+  }));
   const cleanupControls: AzureKnowledgeAttemptControls = {
-    signal: controller.signal,
+    signal,
     authorizeAttempt: async ({ signal }) => {
       try { signal.throwIfAborted(); await assertCurrent(); signal.throwIfAborted(); }
       catch (error) { controller.abort(error); throw error; }
@@ -89,7 +92,7 @@ export async function handleEventKnowledgeSync(jobId: string, payload: { eventId
   if (getKnowledgeSearchProvider() === "azure") invariant(isAzureKnowledgeSearchConfigured("admin"),
     503, "KNOWLEDGE_INDEX_UNAVAILABLE", "Azure indexing cleanup is not configured.");
   await syncAzureKnowledgeSource({ workspaceId, sourceType: "EVENT", sourceId: eventId, chunks: [] }, cleanupControls);
-  controller.signal.throwIfAborted();
+  signal.throwIfAborted();
   await assertCurrent();
   if (getSharedStateBackend() !== "postgres") await invalidateKnowledgeCache(workspaceId);
 
@@ -111,16 +114,16 @@ export async function handleEventKnowledgeSync(jobId: string, payload: { eventId
   if (!row) return { retiredEventCopies: true, canonical: "UNAVAILABLE" as const };
   let indexed: number;
   if (kind === "Document") {
-    indexed = await syncDocumentKnowledge({ workspaceId, documentId: id, workflowJobId: jobId, sourceGuard: assertCurrent });
+    indexed = await syncDocumentKnowledge({ workspaceId, documentId: id, workflowJobId: jobId, sourceGuard: assertCurrent, sourceTransactionGuard: lease.sourceTransactionGuard });
   } else {
     const source = row as unknown as Record<string, unknown>;
     const content = (kind === "Proposal" ? [source.title, source.summary, source.bodyMd]
       : [source.title, source.summaryMd, source.transcript]).filter(Boolean).join("\n\n");
     indexed = await syncKnowledgeForSource({ workspaceId, sourceType: kind === "Proposal" ? "PROPOSAL" : "MEETING",
       accessDomain: "WORKSPACE", sourceId: id, sourceTitle: row.title, content, sourceUpdatedAt: row.updatedAt,
-      workflowJobId: jobId, sourceGuard: assertCurrent });
+      workflowJobId: jobId, sourceGuard: assertCurrent, sourceTransactionGuard: lease.sourceTransactionGuard });
   }
-  controller.signal.throwIfAborted();
+  signal.throwIfAborted();
   await assertCurrent();
   invariant(indexed > 0, 409, "SOURCE_CHANGED", "Event canonical source could not be safely indexed.");
   return { retiredEventCopies: true, canonical: kind, indexed };

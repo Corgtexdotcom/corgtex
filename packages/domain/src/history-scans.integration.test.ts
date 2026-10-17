@@ -5,7 +5,8 @@ import { getPrismaClient } from "../../shared/src/db";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import type { CheckIn, Prisma } from "@prisma/client";
 import { createDailyCompanyUnderstandingQuestions } from "./check-ins";
-import { listConstitutionVersions } from "./constitutions";
+import { listConstitutionVersionPage } from "./constitutions";
+import { DigestReadRelease } from "./digest-lineage";
 import { recordArtifactInputLineage } from "./source-lineage";
 
 beforeEach(truncateAllTables);
@@ -69,25 +70,29 @@ it.each(["positive", "off-page-head", "caller-restore"] as const)("keeps bounded
   const readable = await prisma.constitution.findMany({ where: { workspaceId: f.workspaceId, version: { in: [201, 200, 1] } }, orderBy: { version: "desc" } });
   for (const row of readable) await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: f.actor, workspaceId: f.workspaceId,
     artifact: { kind: "Constitution", id: row.id }, content: row, origin: "HUMAN_ORIGINAL", inputs: [] }));
-  const query = prisma.constitution.findMany.bind(prisma.constitution);
-  let pages = 0;
-  vi.spyOn(prisma.constitution, "findMany").mockImplementation((async args => {
-    expect(args?.take).toBe(100);
-    if (++pages === 2) {
+  const query = vi.spyOn(prisma.constitution, "findMany");
+  const finish = DigestReadRelease.prototype.finish;
+  let changed = false;
+  vi.spyOn(DigestReadRelease.prototype, "finish").mockImplementation(async function<T>(this: DigestReadRelease, value: T) {
+    if (!changed) {
       if (mode === "off-page-head") {
         const offPage = readable[1]!;
-        await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: f.actor, workspaceId: f.workspaceId,
-          artifact: { kind: "Constitution", id: offPage.id }, content: offPage, origin: "HUMAN_ORIGINAL", inputs: [] }));
+        await prisma.$transaction(tx => recordArtifactInputLineage({tx, actor: f.actor, workspaceId: f.workspaceId,
+          artifact: {kind: "Constitution", id: offPage.id}, content: offPage, origin: "HUMAN_ORIGINAL", inputs: []}));
       }
       if (mode === "caller-restore") {
-        await prisma.member.update({ where: { id: f.member.id }, data: { isActive: false } });
-        await prisma.member.update({ where: { id: f.member.id }, data: { isActive: true } });
+        await prisma.member.update({where: {id: f.member.id}, data: {isActive: false}});
+        await prisma.member.update({where: {id: f.member.id}, data: {isActive: true}});
       }
+      changed = true;
     }
-    return query(args);
-  }) as typeof prisma.constitution.findMany);
-  const read = listConstitutionVersions(f.actor, f.workspaceId, { take: 1 });
-  if (mode === "positive") await expect(read).resolves.toMatchObject({ items: [{ id: readable[0]!.id }], total: 3, take: 1, skip: 0 });
-  else await expect(read).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
-  expect(pages).toBe(3);
+    return finish.call(this, value) as Promise<T>;
+  });
+  const read = listConstitutionVersionPage(f.actor, f.workspaceId, {take: 1});
+  if (mode === "positive") await expect(read).resolves.toMatchObject({items: [{id: readable[0]!.id}], complete: false, hasMore: true});
+  else await expect(read).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+  expect(changed).toBe(true);
+  expect(query).toHaveBeenCalledTimes(1);
+  expect(query.mock.calls[0][0]?.take).toBe(200);
+
 }, 60_000);

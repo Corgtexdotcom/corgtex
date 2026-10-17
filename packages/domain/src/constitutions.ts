@@ -173,37 +173,55 @@ function isConstitutionVersionConflict(error: unknown) {
   return typeof target !== "string" || target.includes("workspaceId") || target.includes("version");
 }
 
-export async function listConstitutionVersions(actor: AppActor, workspaceId: string, opts?: {
-  take?: number;
-  skip?: number;
-}) {
-  await requireWorkspaceMembership({ actor, workspaceId });
-  const take = opts?.take ?? 20;
-  const skip = opts?.skip ?? 0;
+type ConstitutionPosition = {version: number; id: string};
+function constitutionCursor(cursor: string | undefined, workspaceId: string): ConstitutionPosition | undefined {
+  if (!cursor) return;
+  let value;
+  try { if (cursor.length <= 2048) value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")); } catch { /* validated below */ }
+  invariant(value?.v === 1 && value.workspaceId === workspaceId && Number.isSafeInteger(value.version) && value.version >= 0
+    && typeof value.id === "string" && value.id.length > 0 && value.id.length <= 256,
+  400, "INVALID_INPUT", "Invalid constitution continuation.");
+  return {version: value.version, id: value.id};
+}
 
-  const release = new DigestReadRelease(actor, workspaceId);
+/** History is a bounded window, not a fabricated exact corpus total. */
+export async function listConstitutionVersionPage(actor: AppActor, workspaceId: string, opts?: {take?: number; cursor?: string}, readRelease?: DigestReadRelease) {
+  const take = opts?.take ?? 20;
+  invariant(Number.isSafeInteger(take) && take >= 1 && take <= 100, 400, "INVALID_INPUT", "Constitution window is out of range.");
+  let after = constitutionCursor(opts?.cursor, workspaceId);
+  await requireWorkspaceMembership({actor, workspaceId});
+  invariant(!readRelease || readRelease.actor === actor && readRelease.workspaceId === workspaceId,
+    400, "INVALID_INPUT", "Constitution read scope does not match this request.");
+  const release = readRelease ?? new DigestReadRelease(actor, workspaceId);
+  const rows = await prisma.constitution.findMany({
+    where: {workspaceId, ...(after ? {OR: [{version: {lt: after.version}}, {version: after.version, id: {lt: after.id}}]} : {})},
+    orderBy: [{version: "desc"}, {id: "desc"}], take: 200,
+  });
   const items: Constitution[] = [];
-  let total = 0;
-  let after: { version: number; id: string } | undefined;
-  // Exact totals require full discovery, not retention of every version body.
-  // The release keeps original compact proofs for off-page count contributors.
-  while (true) {
-    const rows = await prisma.constitution.findMany({
-      where: { workspaceId, ...(after ? { OR: [
-        { version: { lt: after.version } }, { version: after.version, id: { lt: after.id } },
-      ] } : {}) },
-      orderBy: [{ version: "desc" }, { id: "desc" }], take: 100,
-    });
-    const captured = await release.capture("Constitution", rows);
-    for (const row of captured.records) {
-      if (total >= skip && total < skip + take) items.push(row);
-      total++;
+  let consumed = 0;
+  for (let offset = 0; offset < rows.length && items.length < take; offset += 100) {
+    const page = rows.slice(offset, offset + 100);
+    const captured = await release.capture("Constitution", page);
+    const admitted = new Set(captured.records.map(row => row.id));
+    for (const row of page) {
+      after = {version: row.version, id: row.id}; consumed++;
+      if (admitted.has(row.id)) items.push(row);
+      if (items.length === take) break;
     }
-    if (rows.length < 100) break;
-    const last = rows[rows.length - 1]!;
-    after = { version: last.version, id: last.id };
   }
-  return release.finish({ items, total, take, skip });
+  const complete = consumed === rows.length && rows.length < 200;
+  const nextCursor = !complete && after ? Buffer.from(JSON.stringify({v: 1, workspaceId, ...after})).toString("base64url") : null;
+  return release.finish({items, complete, nextCursor, hasMore: Boolean(nextCursor)});
+}
+
+/** Compatibility exact-total API fails explicitly when the finite window is incomplete. */
+export async function listConstitutionVersions(actor: AppActor, workspaceId: string, opts?: {take?: number; skip?: number}) {
+  const take = opts?.take ?? 20, skip = opts?.skip ?? 0;
+  invariant(Number.isSafeInteger(take) && take >= 0 && take <= 100 && Number.isSafeInteger(skip) && skip >= 0 && skip <= 200,
+    400, "INVALID_INPUT", "Constitution window is out of range.");
+  const page = await listConstitutionVersionPage(actor, workspaceId, {take: 100});
+  invariant(page.complete, 503, "SOURCE_READ_SCAN_LIMIT", "Use constitution continuation to read more history.");
+  return {items: page.items.slice(skip, skip + take), total: page.items.length, take, skip};
 }
 
 export async function getCurrentConstitution(actor: AppActor, workspaceId: string) {

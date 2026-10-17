@@ -251,7 +251,7 @@ afterEach(() => {
 
 describe("runPendingJobs", () => {
   describe.each(["oauth.documents.sync", "oauth.email.sync", "knowledge.sync.event"])("%s original claim settlement", type => {
-    it.each(["current", "takeover-success", "takeover-error", ...(type.startsWith("oauth.") ? ["renewed-success", "renewed-error"] : [])])("retains the original recipe and fences %s", async mode => {
+    it.each(["current", "takeover-success", "takeover-error", "renewed-success", "renewed-error"])("retains the original recipe and fences %s", async mode => {
       if (mode.startsWith("renewed")) vi.useFakeTimers();
       txMock.workflowJob.updateMany.mockClear();
       const row = {id: "oauth-job", workspaceId: "ws-1", type, payload: {connectionId: "conn-1"}, attempts: 1,
@@ -277,7 +277,7 @@ describe("runPendingJobs", () => {
       txMock.workflowJob.updateMany.mockImplementation(async args => apply(args));
       oauthSyncMock.mockImplementationOnce(async () => {
         if (mode.startsWith("renewed")) {
-          await vi.advanceTimersByTimeAsync(60_000);
+          await vi.advanceTimersByTimeAsync(7 * 60_000);
           acknowledged = row.lockedAt;
           expect(acknowledged.getTime()).toBeGreaterThan(original.lockedAt.getTime());
           if (mode === "renewed-error") throw new Error("Provider failed after renewal");
@@ -289,11 +289,11 @@ describe("runPendingJobs", () => {
       await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
       expect(oauthSyncMock).toHaveBeenCalledWith("oauth-job", original.payload, "ws-1", expect.objectContaining(original));
       expect(prismaMock.workflowJob.update).not.toHaveBeenCalled();
-      if (type.startsWith("oauth.") && mode.startsWith("takeover")) {
+      if (mode.startsWith("takeover")) {
         expect(txMock.workflowJob.updateMany).not.toHaveBeenCalled();
         expect(loggerMock.warn).toHaveBeenCalledWith("workflow_job_processed", expect.objectContaining({outcome: "failed"}));
       } else {
-      expect(type.startsWith("oauth.") ? txMock.workflowJob.updateMany : prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({where: expect.objectContaining({
+      expect(txMock.workflowJob.updateMany).toHaveBeenCalledWith({where: expect.objectContaining({
         id: original.id, workspaceId: original.workspaceId, type, attempts: 1, lockedBy: "worker-1", startedAt: original.startedAt,
         payload: {equals: original.payload}, lockedAt: {equals: acknowledged, gt: expect.any(Date)},
       }), data: expect.any(Object)});

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
-import type { LineageRoot } from "./source-lineage";
 import { AppError } from "./errors";
+import { DigestReadRelease } from "./digest-lineage";
 
 const state = vi.hoisted(() => ({
   findMany: vi.fn(), membership: vi.fn(), capture: vi.fn(), finish: vi.fn(),
@@ -19,7 +19,7 @@ vi.mock("./source-lineage", () => ({
   readableArtifactIds: async (_actor: unknown, _ws: string, _kind: string, rows: Array<{ id: string }>) => new Set(rows.filter(row => !row.id.startsWith("denied")).map(row => row.id)),
 }));
 vi.mock("./producer-lineage", () => ({}));
-import { listConstitutionVersions } from "./constitutions";
+import { listConstitutionVersions, listConstitutionVersionPage } from "./constitutions";
 
 const actor: AppActor = { kind: "user", user: { id: "reader", email: "reader@example.test", displayName: "Reader" } };
 const tx = { snapshot: "final" };
@@ -38,30 +38,41 @@ describe("constitution history bounded discovery and final release", () => {
     });
   });
 
-  it("bounds body pages, replenishes denied rows, and releases the exact total with off-page original proofs", async () => {
-    const rows = Array.from({ length: 205 }, (_, index) => ({
-      id: `${index % 2 === 0 ? "denied" : "readable"}-${index}`, version: 205 - index, bodyMd: `Body ${index}`,
-    }));
-    state.findMany.mockImplementation(async (args) => {
-      expect(args.take).toBe(100);
-      const cursor = args.where.OR?.[0]?.version.lt ?? Infinity;
-      return rows.filter(row => row.version < cursor).slice(0, args.take);
-    });
-    const result = await listConstitutionVersions(actor, "ws", { skip: 1, take: 2 });
-    expect(result).toEqual({ items: [rows[3], rows[5]], total: 102, take: 2, skip: 1 });
-    expect(state.findMany).toHaveBeenCalledTimes(3);
-    expect(state.findMany).toHaveBeenNthCalledWith(2, {
-      where: { workspaceId: "ws", OR: [{ version: { lt: 106 } }, { version: 106, id: { lt: "readable-99" } }] },
-      orderBy: [{ version: "desc" }, { id: "desc" }], take: 100,
-    });
-    const proof = state.finish.mock.calls[0]![2] as LineageRoot[];
-    expect(proof).toHaveLength(102);
-    expect(proof).toContainEqual({ kind: "Constitution", id: "readable-203", fingerprint: "a".repeat(64) });
-    expect(JSON.stringify(proof)).not.toContain("bodyMd");
-    expect(state.finish.mock.calls[0]![5]).toEqual(new Map([
-      ["page-0", "original-0"], ["page-1", "original-1"], ["page-2", "original-2"],
-    ]));
-    expect(state.membership).toHaveBeenLastCalledWith({ actor, workspaceId: "ws", tx });
+  it("bounds legacy exact history instead of exhausting a denied prefix", async () => {
+    const rows = Array.from({length: 205}, (_, index) => ({id: `denied-${index}`, version: 205-index, bodyMd: "Hidden"}));
+    state.findMany.mockImplementation(async args => rows.filter(row => row.version < (args.where.OR?.[0]?.version.lt ?? Infinity)).slice(0,args.take));
+    await expect(listConstitutionVersions(actor, "ws", {take: 2})).rejects.toMatchObject({code:"SOURCE_READ_SCAN_LIMIT"});
+    expect(state.findMany).toHaveBeenCalledTimes(1);
+    expect(state.findMany.mock.calls[0][0].take).toBe(200);
+  });
+
+  it("rejects a caller or workspace mismatched shared release", async () => {
+    await expect(listConstitutionVersionPage(actor, "ws", {}, new DigestReadRelease(actor, "other")))
+      .rejects.toMatchObject({code: "INVALID_INPUT"});
+    await expect(listConstitutionVersionPage(actor, "ws", {}, new DigestReadRelease({...actor}, "ws")))
+      .rejects.toMatchObject({code: "INVALID_INPUT"});
+    expect(state.findMany).not.toHaveBeenCalled();
+  });
+
+  it("continues an empty hidden window from the last examined version", async () => {
+    const rows = Array.from({length: 201}, (_, index) => ({id: index < 200 ? `denied-${index}` : "tail", version: 201-index, bodyMd: "Synthetic"}));
+    state.findMany.mockImplementation(async args => rows.filter(row => row.version < (args.where.OR?.[0]?.version.lt ?? Infinity)).slice(0,args.take));
+    const first = await listConstitutionVersionPage(actor, "ws", {take: 10});
+    expect(first).toMatchObject({items: [], complete: false, hasMore: true});
+    expect(state.findMany).toHaveBeenCalledTimes(1);
+    expect(await listConstitutionVersionPage(actor, "ws", {take: 10, cursor: first.nextCursor!}))
+      .toEqual({items: [rows[200]], complete: true, hasMore: false, nextCursor: null});
+    await expect(listConstitutionVersionPage(actor, "other", {cursor: first.nextCursor!})).rejects.toMatchObject({code: "INVALID_INPUT"});
+    await expect(listConstitutionVersionPage(actor, "ws", {cursor: "not-a-cursor"})).rejects.toMatchObject({code: "INVALID_INPUT"});
+  });
+
+  it("continues from the last returned readable row without losing later candidates", async () => {
+    const rows = Array.from({length: 3}, (_, index) => ({id: `visible-${index}`, version: 3-index}));
+    state.findMany.mockImplementation(async args => rows.filter(row => row.version < (args.where.OR?.[0]?.version.lt ?? Infinity)).slice(0,args.take));
+    const first = await listConstitutionVersionPage(actor, "ws", {take: 1});
+    expect(first.items).toEqual([rows[0]]); expect(first.complete).toBe(false);
+    const second = await listConstitutionVersionPage(actor, "ws", {take: 2, cursor: first.nextCursor!});
+    expect(second.items).toEqual(rows.slice(1)); expect(second.complete).toBe(true);
   });
 
   it("returns no bodies beyond the readable window while still counting the complete history", async () => {

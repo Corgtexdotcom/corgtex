@@ -1322,6 +1322,12 @@
     "workingAgreementSource": "Source"
   },
   "governance": {
+    "historyLimited": "Showing one window of constitution history. Older versions may be available.",
+    "historyUnavailable": "Constitution history is unavailable. Try again.",
+    "historyOlder": "Older versions",
+    "historyLatest": "Latest versions",
+    "historyEmpty": "No readable constitution versions in this window.",
+    "historyCount": "Versions in this window ({count})",
     "approvalPoliciesDesc": "Configure how decisions are made for proposals.",
     "btnRecalculate": "Recalculate Score",
     "btnSynthesize": "Synthesize Constitution",
@@ -2035,6 +2041,13 @@
     "updatedAt": "Updated {date}"
   },
   "built": {
+    "historyLimited": "Showing one window of build artifacts. Older artifacts may be available. Counts and empty sections apply only to this window.",
+    "historyUnavailable": "Build history is unavailable. Try again.",
+    "historyOlder": "Older artifacts",
+    "historyLatest": "Latest artifacts",
+    "historyEmpty": "No readable artifacts in this window",
+    "historyEmptySection": "No readable artifacts in this section of the current window.",
+    "historyCount": "{count} artifacts in this window",
     "artifact": "Artifact",
     "artifactCount": "{count, plural, =0 {No build artifacts} one {# build artifact} other {# build artifacts}}",
     "asset": "Asset",

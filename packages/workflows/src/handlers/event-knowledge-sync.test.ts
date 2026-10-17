@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 const f = vi.hoisted(() => ({
@@ -6,7 +7,7 @@ const f = vi.hoisted(() => ({
   env: { KNOWLEDGE_SEARCH_PROVIDER: "postgres", AZURE_SEARCH_ENDPOINT: undefined as string | undefined,
     AZURE_SEARCH_INDEX_NAME: "synthetic", AZURE_SEARCH_AUTH_MODE: "managed_identity" },
   token: vi.fn(), sync: vi.fn(), document: vi.fn(), invalidate: vi.fn(),
-  db: { event: { findFirst: vi.fn() }, workflowJob: { findFirst: vi.fn() }, approvalFlow: { findFirst: vi.fn() },
+  db: { event: { findFirst: vi.fn() }, workflowJob: { findFirst: vi.fn(), updateMany: vi.fn() }, approvalFlow: { findFirst: vi.fn() },
     proposal: { findFirst: vi.fn() }, meeting: { findFirst: vi.fn() }, document: { findFirst: vi.fn() },
     knowledgeChunk: { deleteMany: vi.fn() }, $queryRaw: vi.fn(), $transaction: vi.fn() },
 }));
@@ -38,7 +39,8 @@ beforeEach(() => {
   f.db.approvalFlow.findFirst.mockImplementation(async ({ where }) => f.flow?.id === where.id && f.flow?.workspaceId === where.workspaceId ? structuredClone(f.flow) : null);
   for (const delegate of [f.db.proposal, f.db.meeting, f.db.document]) delegate.findFirst.mockImplementation(async ({ where }) =>
     f.row?.id === where.id && f.row?.workspaceId === where.workspaceId && !f.row?.archivedAt ? structuredClone(f.row) : null);
-  f.db.$queryRaw.mockResolvedValue([]);
+  f.db.$queryRaw.mockImplementation(async () => [structuredClone(f.job)]);
+  f.db.workflowJob.updateMany.mockImplementation(async ({data}) => {Object.assign(f.job,data);return {count:1};});
   f.db.knowledgeChunk.deleteMany.mockImplementation(async () => { f.removed = true; return { count: 1 }; });
   f.db.$transaction.mockImplementation(async work => {
     f.beforeTransaction?.();
@@ -50,7 +52,7 @@ beforeEach(() => {
   f.token.mockResolvedValue({ token: "synthetic", expiresOnTimestamp: Date.now() + 60_000 });
   vi.stubGlobal("fetch", vi.fn(async () => response()));
 });
-afterEach(() => { vi.unstubAllGlobals(); });
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 it.each([
   ["proposal.submitted", "Proposal", "PROPOSAL"], ["proposal.opened", "Proposal", "PROPOSAL"],
@@ -135,4 +137,40 @@ it("allows normal cleanup retry after a transport error without uploading EVENT 
   await expect(run()).resolves.toMatchObject({ indexed: 1 });
   expect(f.sync).toHaveBeenCalledTimes(1);
   expect(JSON.stringify(vi.mocked(fetch).mock.calls)).not.toContain("EVENT_PAYLOAD_MUST_NEVER_BE_INDEXED");
+});
+
+it("keeps the original Event claim live across a seven-minute canonical provider wait", async () => {
+  vi.useFakeTimers();
+  f.sync.mockImplementationOnce(async input => {
+    await vi.advanceTimersByTimeAsync(7*60_000);
+    await input.sourceGuard();
+    await input.sourceTransactionGuard(() => f.db.$transaction(async (tx: Prisma.TransactionClient) => input.sourceGuard(tx)));
+    return 1;
+  });
+  await expect(run()).resolves.toMatchObject({indexed:1});
+  expect(f.db.workflowJob.updateMany).toHaveBeenCalledTimes(7);
+  expect(f.job.lockedAt).not.toEqual(claim.lockedAt);
+  expect(vi.getTimerCount()).toBe(0);
+});
+it("keeps cleanup alive through a seven-minute credential wait before actual Azure requests", async () => {
+  vi.useFakeTimers();f.env.AZURE_SEARCH_ENDPOINT="https://synthetic.invalid";
+  f.token.mockImplementationOnce(async () => {await vi.advanceTimersByTimeAsync(7*60_000);return {token:"synthetic"};});
+  await expect(run()).resolves.toMatchObject({indexed:1});
+  expect(fetch).toHaveBeenCalled();expect(f.db.workflowJob.updateMany).toHaveBeenCalledTimes(7);
+  expect(vi.getTimerCount()).toBe(0);
+});
+it.each(["event", "replacement", "renewal-error"])("rejects %s during long provider work even when an adapter swallows denial", async mode => {
+  vi.useFakeTimers();
+  f.sync.mockImplementationOnce(async input => {
+    await vi.advanceTimersByTimeAsync(6*60_000);
+    if(mode==="event") f.event.aggregateId="replacement";
+    else if(mode==="replacement") f.job.attempts=2;
+    else f.db.workflowJob.updateMany.mockRejectedValueOnce(new Error("Renewal failed"));
+    if(mode==="renewal-error") await vi.advanceTimersByTimeAsync(60_000);
+    await input.sourceGuard().catch(() => {});
+    return 1;
+  });
+  if(mode==="renewal-error") await expect(run()).rejects.toThrow("Renewal failed");
+  else await expect(run()).rejects.toMatchObject({code:"SOURCE_CHANGED"});
+  expect(vi.getTimerCount()).toBe(0);
 });
