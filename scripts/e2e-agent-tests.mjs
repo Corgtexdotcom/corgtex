@@ -7,15 +7,31 @@
  * Usage:
  *   npm run test:e2e:agents
  *   # or manually:
- *   node scripts/e2e-agent-tests.mjs [base-url]
+ *   node scripts/e2e-agent-tests.mjs [base-url] [--strict] [--without-storage]
+ *
+ * --strict requires every acceptance case to pass; any skip exits 1.
+ * --without-storage explicitly declares a missing local fixture prerequisite and
+ * skips all three upload cases before making an upload request. Developer mode
+ * permits these skips; strict mode reports incomplete acceptance and exits 1.
+ * Attempted requests, including HTTP 500, always fail on unexpected responses.
+ * Run offline regression tests: node --test scripts/e2e-agent-tests.node-test.mjs
  */
 import process from "node:process";
+import { createReport } from "./lib/e2e-agent-report.mjs";
 import { randomUUID } from "node:crypto";
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
-const BASE_URL = process.argv[2] || process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
+const args = process.argv.slice(2);
+const flags = new Set(args.filter((arg) => arg.startsWith("--")));
+const positional = args.filter((arg) => !arg.startsWith("--"));
+if ([...flags].some((flag) => !["--strict", "--without-storage"].includes(flag)) || positional.length > 1) {
+  console.error("Usage: node scripts/e2e-agent-tests.mjs [base-url] [--strict] [--without-storage]");
+  process.exit(1);
+}
+const BASE_URL = positional[0] || process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
+const report = createReport({ strict: flags.has("--strict") });
 const AGENT_API_KEY = process.env.AGENT_API_KEY || "";
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
@@ -25,25 +41,9 @@ const TEST_ID = randomUUID().slice(0, 8);
 const WORKER_POLL_TIMEOUT_MS = 90_000;
 const WORKER_POLL_INTERVAL_MS = 3_000;
 
-// Pre-flight checks
-if (!AGENT_API_KEY) {
-  console.error("⚠️  AGENT_API_KEY is not set — agent-scoped tests will fail.");
-}
-if (!ADMIN_EMAIL) {
-  console.error("ADMIN_EMAIL is required. Set it via environment variable.");
-  process.exit(1);
-}
-if (!ADMIN_PASSWORD) {
-  console.error("💀 ADMIN_PASSWORD is required. Set it via environment variable.");
-  process.exit(1);
-}
-
 // ---------------------------------------------------------------------------
 // Test Harness
 // ---------------------------------------------------------------------------
-let passed = 0;
-let failed = 0;
-let skipped = 0;
 const createdResources = {
   brainSourceIds: [],
   brainArticleSlugs: [],
@@ -53,14 +53,12 @@ const createdResources = {
   agentRunIds: [],
 };
 
-function fail(suite, test, message) {
-  failed++;
-  console.error(`  ✗ [${suite}] ${test}: ${message}`);
+function fail(suite, id, test, message) {
+  report.record(suite, id, "fail", `${test}: ${message}`);
 }
 
-function pass(suite, test) {
-  passed++;
-  console.log(`  ✓ [${suite}] ${test}`);
+function pass(suite, id, test) {
+  report.record(suite, id, "pass", test);
 }
 
 function agentHeaders() {
@@ -104,29 +102,29 @@ async function suiteAuthBootstrap() {
   // Health check
   const { res: healthRes, json: health } = await fetchJson("/api/health");
   if (!healthRes.ok || (health?.status !== "ok" && health?.ok !== true)) {
-    fail(suite, "Health check", `Status: ${healthRes.status}, Body: ${JSON.stringify(health)}`);
+    fail(suite, "health", "Health check", `Status: ${healthRes.status}, Body: ${JSON.stringify(health)}`);
     throw new Error("Health check failed — is the server running?");
   }
-  pass(suite, "Health check OK");
+  pass(suite, "health", "Health check OK");
 
   // Session via agent bearer
   const { res: sessionRes, json: session } = await fetchJson("/api/session", {
     headers: agentHeaders(),
   });
   if (!sessionRes.ok || session?.actor?.kind !== "agent") {
-    fail(suite, "Agent session", `Status: ${sessionRes.status}, Body: ${JSON.stringify(session)}`);
+    fail(suite, "agent-session", "Agent session", `Status: ${sessionRes.status}, Body: ${JSON.stringify(session)}`);
     throw new Error("Agent session failed — check AGENT_API_KEY");
   }
-  pass(suite, `Agent session — kind: ${session.actor.kind}, label: ${session.actor.label}`);
+  pass(suite, "agent-session", `Agent session — kind: ${session.actor.kind}, label: ${session.actor.label}`);
 
   // Discover workspace
   const workspaces = session.workspaces;
   if (!Array.isArray(workspaces) || workspaces.length === 0) {
-    fail(suite, "Workspace discovery", "No workspaces found for agent");
+    fail(suite, "workspace", "Workspace discovery", "No workspaces found for agent");
     throw new Error("No workspaces");
   }
   const workspaceId = workspaces[0].id;
-  pass(suite, `Workspace discovered: ${workspaces[0].name} (${workspaceId})`);
+  pass(suite, "workspace", `Workspace discovered: ${workspaces[0].name} (${workspaceId})`);
 
   // Login as admin for user-gated endpoints
   const { res: loginRes, json: loginJson } = await fetchJson("/api/auth/login", {
@@ -136,16 +134,16 @@ async function suiteAuthBootstrap() {
     redirect: "manual",
   });
   if (!loginRes.ok) {
-    fail(suite, "Admin login", `Status: ${loginRes.status}, Body: ${JSON.stringify(loginJson)}`);
+    fail(suite, "admin-session", "Admin login", `Status: ${loginRes.status}, Body: ${JSON.stringify(loginJson)}`);
     throw new Error("Admin login failed — check ADMIN_EMAIL/ADMIN_PASSWORD");
   }
   const setCookie = loginRes.headers.get("set-cookie");
   const cookie = setCookie ? setCookie.split(";")[0] : null;
   if (!cookie) {
-    fail(suite, "Session cookie", "No set-cookie header returned");
+    fail(suite, "admin-session", "Session cookie", "No set-cookie header returned");
     throw new Error("No session cookie");
   }
-  pass(suite, "Admin login OK");
+  pass(suite, "admin-session", "Admin login OK");
 
   return { workspaceId, cookie };
 }
@@ -184,12 +182,12 @@ This document tests the full flow: ingest → event → brain-absorb agent → a
     },
   );
   if (!ingestRes.ok || !ingestJson?.source?.id) {
-    fail(suite, "Ingest source", `Status: ${ingestRes.status}, Body: ${JSON.stringify(ingestJson)}`);
+    fail(suite, "ingest", "Ingest source", `Status: ${ingestRes.status}, Body: ${JSON.stringify(ingestJson)}`);
     return;
   }
   const sourceId = ingestJson.source.id;
   createdResources.brainSourceIds.push(sourceId);
-  pass(suite, `Ingested source: ${sourceId}`);
+  pass(suite, "ingest", `Ingested source: ${sourceId}`);
 
   // Verify source appears in unabsorbed list
   const { res: listRes, json: listJson } = await fetchJson(
@@ -197,15 +195,15 @@ This document tests the full flow: ingest → event → brain-absorb agent → a
     { headers: agentHeaders() },
   );
   if (!listRes.ok) {
-    fail(suite, "List unabsorbed sources", `Status: ${listRes.status}`);
+    fail(suite, "listing", "List unabsorbed sources", `Status: ${listRes.status}`);
     return;
   }
   const found = listJson?.items?.find((s) => s.id === sourceId);
   if (!found) {
-    fail(suite, "Verify unabsorbed", "Source not found in unabsorbed list");
+    fail(suite, "listing", "Verify unabsorbed", "Source not found in unabsorbed list");
     return;
   }
-  pass(suite, "Source appears in unabsorbed list");
+  pass(suite, "listing", "Source appears in unabsorbed list");
 
   // Check brain status
   const { res: statusRes, json: statusJson } = await fetchJson(
@@ -213,14 +211,14 @@ This document tests the full flow: ingest → event → brain-absorb agent → a
     { headers: agentHeaders() },
   );
   if (!statusRes.ok) {
-    fail(suite, "Brain status", `Status: ${statusRes.status}`);
+    fail(suite, "status", "Brain status", `Status: ${statusRes.status}`);
     return;
   }
   if (typeof statusJson?.unabsorbedSources !== "number" || statusJson.unabsorbedSources < 1) {
-    fail(suite, "Brain status unabsorbed count", `Expected >= 1, got ${statusJson?.unabsorbedSources}`);
+    fail(suite, "status", "Brain status unabsorbed count", `Expected >= 1, got ${statusJson?.unabsorbedSources}`);
     return;
   }
-  pass(suite, `Brain status OK — ${statusJson.unabsorbedSources} unabsorbed, ${statusJson.totalArticles} articles`);
+  pass(suite, "status", `Brain status OK — ${statusJson.unabsorbedSources} unabsorbed, ${statusJson.totalArticles} articles`);
 }
 
 // ---------------------------------------------------------------------------
@@ -229,6 +227,11 @@ This document tests the full flow: ingest → event → brain-absorb agent → a
 async function suiteFileUpload(workspaceId) {
   const suite = "File Upload";
   console.log("\n━━━ Suite 3: File Upload & Document Ingestion ━━━");
+
+  if (flags.has("--without-storage")) {
+    report.finishSuite(suite, "Missing fixture prerequisite: storage explicitly disabled via --without-storage");
+    return;
+  }
 
   const fileContent = `Meeting Minutes — E2E Test ${TEST_ID}
 Date: 2026-04-10
@@ -263,18 +266,13 @@ Action Items:
       body: formData,
     },
   );
-  if (uploadRes.status === 500) {
-    skipped++;
-    console.log(`  ⏭  [${suite}] Upload file: SKIPPED — storage not configured (R2/S3 required)`);
-    return;
-  }
   if (!uploadRes.ok || !uploadJson?.id) {
-    fail(suite, "Upload file", `Status: ${uploadRes.status}, Body: ${JSON.stringify(uploadJson)}`);
+    fail(suite, "upload", "Upload file", `Status: ${uploadRes.status}, Body: ${JSON.stringify(uploadJson)}`);
     return;
   }
   const documentId = uploadJson.id;
   createdResources.documentIds.push(documentId);
-  pass(suite, `Document created: ${documentId}`);
+  pass(suite, "upload", `Document created: ${documentId}`);
 
   // Verify document in listing
   const { res: docsRes, json: docsJson } = await fetchJson(
@@ -282,15 +280,15 @@ Action Items:
     { headers: agentHeaders() },
   );
   if (!docsRes.ok) {
-    fail(suite, "List documents", `Status: ${docsRes.status}`);
+    fail(suite, "listing", "List documents", `Status: ${docsRes.status}`);
     return;
   }
   const docFound = docsJson?.documents?.find((d) => d.id === documentId);
   if (!docFound) {
-    fail(suite, "Verify document", "Document not found in listing");
+    fail(suite, "listing", "Verify document", "Document not found in listing");
     return;
   }
-  pass(suite, "Document appears in listing");
+  pass(suite, "listing", "Document appears in listing");
 
   // Verify FILE_UPLOAD brain source was auto-created
   const { res: srcRes, json: srcJson } = await fetchJson(
@@ -298,18 +296,18 @@ Action Items:
     { headers: agentHeaders() },
   );
   if (!srcRes.ok) {
-    fail(suite, "Check brain source", `Status: ${srcRes.status}`);
+    fail(suite, "brain-source", "Check brain source", `Status: ${srcRes.status}`);
     return;
   }
   const fileSource = srcJson?.items?.find(
     (s) => s.sourceType === "FILE_UPLOAD" && s.title?.includes(TEST_ID),
   );
   if (!fileSource) {
-    fail(suite, "FILE_UPLOAD source", "No FILE_UPLOAD source found for uploaded file");
+    fail(suite, "brain-source", "FILE_UPLOAD source", "No FILE_UPLOAD source found for uploaded file");
     return;
   }
   createdResources.brainSourceIds.push(fileSource.id);
-  pass(suite, `FILE_UPLOAD brain source auto-created: ${fileSource.id}`);
+  pass(suite, "brain-source", `FILE_UPLOAD brain source auto-created: ${fileSource.id}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -356,12 +354,12 @@ Meeting concluded at 10:45 AM.`;
     },
   );
   if (!meetRes.ok || !meetJson?.id) {
-    fail(suite, "Create meeting", `Status: ${meetRes.status}, Body: ${JSON.stringify(meetJson)}`);
+    fail(suite, "create", "Create meeting", `Status: ${meetRes.status}, Body: ${JSON.stringify(meetJson)}`);
     return;
   }
   const meetingId = meetJson.id;
   createdResources.meetingIds.push(meetingId);
-  pass(suite, `Meeting created: ${meetingId}`);
+  pass(suite, "create", `Meeting created: ${meetingId}`);
 
   // Verify meeting in listing
   const { res: listRes, json: listJson } = await fetchJson(
@@ -369,23 +367,23 @@ Meeting concluded at 10:45 AM.`;
     { headers: agentHeaders() },
   );
   if (!listRes.ok) {
-    fail(suite, "List meetings", `Status: ${listRes.status}`);
+    fail(suite, "listing", "List meetings", `Status: ${listRes.status}`);
     return;
   }
   const meetFound = listJson?.meetings?.find((m) => m.id === meetingId);
   if (!meetFound) {
-    fail(suite, "Verify meeting", "Meeting not found in listing");
+    fail(suite, "listing", "Verify meeting", "Meeting not found in listing");
     return;
   }
-  pass(suite, "Meeting appears in listing");
+  pass(suite, "listing", "Meeting appears in listing");
 
   // Wait for worker to process meeting-summary agent
   console.log("  ⏳ Waiting for worker to process meeting-summary agent...");
   const summaryCompleted = await pollForAgentRun(workspaceId, "meeting-summary", meetingId);
-  if (summaryCompleted) {
-    pass(suite, `Meeting summary agent completed (run: ${summaryCompleted.id})`);
+  if (summaryCompleted?.status === "COMPLETED") {
+    pass(suite, "summary-agent", `Meeting summary agent completed (run: ${summaryCompleted.id})`);
   } else {
-    fail(suite, "Meeting summary agent", "Agent run did not complete within timeout — is the worker running?");
+    fail(suite, "summary-agent", "Meeting summary agent", `Expected COMPLETED, got ${summaryCompleted?.status ?? "timeout"}`);
   }
 
   // Check if meeting now has a summary
@@ -395,9 +393,9 @@ Meeting concluded at 10:45 AM.`;
   );
   const withSummary = updatedMeeting?.meetings?.find((m) => m.id === meetingId);
   if (withSummary?.summaryMd) {
-    pass(suite, `Meeting summary persisted (${withSummary.summaryMd.length} chars)`);
+    pass(suite, "summary-persisted", `Meeting summary persisted (${withSummary.summaryMd.length} chars)`);
   } else {
-    fail(suite, "Meeting summary persisted", "summaryMd is still null after agent run");
+    fail(suite, "summary-persisted", "Meeting summary persisted", "summaryMd is still null after agent run");
   }
 
   // Wait for action-extraction (depends on meeting-summary)
@@ -406,12 +404,12 @@ Meeting concluded at 10:45 AM.`;
   if (actionCompleted) {
     const status = actionCompleted.status;
     if (status === "WAITING_APPROVAL" || status === "COMPLETED") {
-      pass(suite, `Action extraction agent finished — status: ${status}`);
+      pass(suite, "action-agent", `Action extraction agent finished — status: ${status}`);
     } else {
-      fail(suite, "Action extraction status", `Expected WAITING_APPROVAL or COMPLETED, got ${status}`);
+      fail(suite, "action-agent", "Action extraction status", `Expected WAITING_APPROVAL or COMPLETED, got ${status}`);
     }
   } else {
-    fail(suite, "Action extraction agent", "Agent run did not complete within timeout");
+    fail(suite, "action-agent", "Action extraction agent", "Agent run did not complete within timeout");
   }
 }
 
@@ -468,10 +466,10 @@ async function suiteAgentTrigger(workspaceId, cookie) {
       body: JSON.stringify({ agentKey, ...payload }),
     });
     if (!res.ok || !json?.job?.id) {
-      fail(suite, `Trigger ${agentKey}`, `Status: ${res.status}, Body: ${JSON.stringify(json)}`);
+      fail(suite, agentKey, `Trigger ${agentKey}`, `Status: ${res.status}, Body: ${JSON.stringify(json)}`);
       continue;
     }
-    pass(suite, `Triggered ${agentKey} — job: ${json.job.id}`);
+    pass(suite, agentKey, `Triggered ${agentKey} — job: ${json.job.id}`);
   }
 
   // Wait a bit and check agent runs listing
@@ -483,11 +481,11 @@ async function suiteAgentTrigger(workspaceId, cookie) {
     { headers: agentHeaders() },
   );
   if (!runsRes.ok) {
-    fail(suite, "List agent runs", `Status: ${runsRes.status}`);
+    fail(suite, "listing", "List agent runs", `Status: ${runsRes.status}`);
     return;
   }
   const runs = runsJson?.runs ?? [];
-  pass(suite, `Agent runs listing OK — ${runs.length} total runs visible`);
+  pass(suite, "listing", `Agent runs listing OK — ${runs.length} total runs visible`);
 
   // Check for completed/running runs from our triggers
   const statuses = {};
@@ -517,12 +515,12 @@ async function suiteConversation(workspaceId, cookie) {
     },
   );
   if (!createRes.ok || !createJson?.session?.id) {
-    fail(suite, "Create conversation", `Status: ${createRes.status}, Body: ${JSON.stringify(createJson)}`);
+    fail(suite, "create", "Create conversation", `Status: ${createRes.status}, Body: ${JSON.stringify(createJson)}`);
     return;
   }
   const sessionId = createJson.session.id;
   createdResources.conversationIds.push(sessionId);
-  pass(suite, `Conversation created: ${sessionId}`);
+  pass(suite, "create", `Conversation created: ${sessionId}`);
 
   // Send a message and receive SSE stream
   const userMessage = `What are the key governance principles in this workspace? This is an E2E test message — ${TEST_ID}`;
@@ -535,7 +533,7 @@ async function suiteConversation(workspaceId, cookie) {
 
   if (!streamRes.ok) {
     const errText = await streamRes.text();
-    fail(suite, "Send message", `Status: ${streamRes.status}, Body: ${errText}`);
+    fail(suite, "stream", "Send message", `Status: ${streamRes.status}, Body: ${errText}`);
     return;
   }
 
@@ -570,19 +568,19 @@ async function suiteConversation(workspaceId, cookie) {
       }
     }
   } catch (err) {
-    fail(suite, "Stream reading", err.message);
+    fail(suite, "stream", "Stream reading", err.message);
     return;
   }
 
   if (!gotDone) {
-    fail(suite, "Stream completion", "Never received [DONE] signal");
+    fail(suite, "stream", "Stream completion", "Never received [DONE] signal");
     return;
   }
   if (fullResponse.length < 10) {
-    fail(suite, "Stream content", `Response too short (${fullResponse.length} chars)`);
+    fail(suite, "stream", "Stream content", `Response too short (${fullResponse.length} chars)`);
     return;
   }
-  pass(suite, `Streamed response received (${fullResponse.length} chars)`);
+  pass(suite, "stream", `Streamed response received (${fullResponse.length} chars)`);
 
   // Verify turn was persisted
   await sleep(1000); // wait for persistence
@@ -591,24 +589,24 @@ async function suiteConversation(workspaceId, cookie) {
     { headers: sessionHeaders(cookie) },
   );
   if (!convRes.ok) {
-    fail(suite, "Get conversation", `Status: ${convRes.status}`);
+    fail(suite, "persistence", "Get conversation", `Status: ${convRes.status}`);
     return;
   }
   const turns = convJson?.conversation?.turns ?? [];
   if (turns.length === 0) {
-    fail(suite, "Turn persistence", "No turns found in conversation");
+    fail(suite, "persistence", "Turn persistence", "No turns found in conversation");
     return;
   }
   const lastTurn = turns[turns.length - 1];
   if (!lastTurn.userMessage?.includes(TEST_ID)) {
-    fail(suite, "Turn persistence", "Last turn does not contain our test message");
+    fail(suite, "persistence", "Turn persistence", "Last turn does not contain our test message");
     return;
   }
   if (!lastTurn.assistantMessage || lastTurn.assistantMessage.length < 10) {
-    fail(suite, "Turn persistence", "Assistant message not persisted properly");
+    fail(suite, "persistence", "Turn persistence", "Assistant message not persisted properly");
     return;
   }
-  pass(suite, `Turn persisted — user: ${lastTurn.userMessage.length} chars, assistant: ${lastTurn.assistantMessage.length} chars`);
+  pass(suite, "persistence", `Turn persisted — user: ${lastTurn.userMessage.length} chars, assistant: ${lastTurn.assistantMessage.length} chars`);
 }
 
 // ---------------------------------------------------------------------------
@@ -624,11 +622,11 @@ async function suiteKnowledgeSearch(workspaceId) {
     { headers: agentHeaders() },
   );
   if (!searchRes.ok) {
-    fail(suite, "Search knowledge", `Status: ${searchRes.status}, Body: ${JSON.stringify(searchJson)}`);
+    fail(suite, "search", "Search knowledge", `Status: ${searchRes.status}, Body: ${JSON.stringify(searchJson)}`);
     return;
   }
   const results = searchJson?.results ?? [];
-  pass(suite, `Search returned ${results.length} results`);
+  pass(suite, "search", `Search returned ${results.length} results`);
   if (results.length > 0) {
     console.log(`  ℹ  Top result: "${results[0].title}" (${results[0].sourceType}, score: ${results[0].score})`);
   }
@@ -646,15 +644,15 @@ async function suiteKnowledgeSearch(workspaceId) {
     },
   );
   if (!askRes.ok) {
-    fail(suite, "Ask question", `Status: ${askRes.status}, Body: ${JSON.stringify(askJson)}`);
+    fail(suite, "ask", "Ask question", `Status: ${askRes.status}, Body: ${JSON.stringify(askJson)}`);
     return;
   }
   if (!askJson?.answer || askJson.answer.length < 10) {
-    fail(suite, "Ask answer", `Answer too short: "${askJson?.answer}"`);
+    fail(suite, "ask", "Ask answer", `Answer too short: "${askJson?.answer}"`);
     return;
   }
   const citationCount = askJson.citations?.length ?? 0;
-  pass(suite, `Ask answered (${askJson.answer.length} chars, ${citationCount} citations)`);
+  pass(suite, "ask", `Ask answered (${askJson.answer.length} chars, ${citationCount} citations)`);
 }
 
 // ---------------------------------------------------------------------------
@@ -697,11 +695,11 @@ This article validates the full [[Brain]] lifecycle including [[Knowledge Sync]]
     },
   );
   if (!createRes.ok || !createJson?.article?.id) {
-    fail(suite, "Create article", `Status: ${createRes.status}, Body: ${JSON.stringify(createJson)}`);
+    fail(suite, "create", "Create article", `Status: ${createRes.status}, Body: ${JSON.stringify(createJson)}`);
     return;
   }
   createdResources.brainArticleSlugs.push(slug);
-  pass(suite, `Article created: ${slug}`);
+  pass(suite, "create", `Article created: ${slug}`);
 
   // List articles
   const { res: listRes, json: listJson } = await fetchJson(
@@ -709,15 +707,15 @@ This article validates the full [[Brain]] lifecycle including [[Knowledge Sync]]
     { headers: agentHeaders() },
   );
   if (!listRes.ok) {
-    fail(suite, "List articles", `Status: ${listRes.status}`);
+    fail(suite, "listing", "List articles", `Status: ${listRes.status}`);
     return;
   }
   const found = listJson?.items?.find((a) => a.slug === slug);
   if (!found) {
-    fail(suite, "Verify article listing", "Article not found in listing");
+    fail(suite, "listing", "Verify article listing", "Article not found in listing");
     return;
   }
-  pass(suite, `Article appears in listing (${listJson.total} total)`);
+  pass(suite, "listing", `Article appears in listing (${listJson.total} total)`);
 
   // Get article detail
   const { res: getRes, json: getJson } = await fetchJson(
@@ -725,14 +723,14 @@ This article validates the full [[Brain]] lifecycle including [[Knowledge Sync]]
     { headers: agentHeaders() },
   );
   if (!getRes.ok || !getJson?.article) {
-    fail(suite, "Get article", `Status: ${getRes.status}`);
+    fail(suite, "detail", "Get article", `Status: ${getRes.status}`);
     return;
   }
   if (getJson.article.title !== title) {
-    fail(suite, "Article detail", `Title mismatch: expected "${title}", got "${getJson.article.title}"`);
+    fail(suite, "detail", "Article detail", `Title mismatch: expected "${title}", got "${getJson.article.title}"`);
     return;
   }
-  pass(suite, "Article detail matches");
+  pass(suite, "detail", "Article detail matches");
 
   // Update article
   const { res: updateRes, json: updateJson } = await fetchJson(
@@ -747,10 +745,10 @@ This article validates the full [[Brain]] lifecycle including [[Knowledge Sync]]
     },
   );
   if (!updateRes.ok) {
-    fail(suite, "Update article", `Status: ${updateRes.status}, Body: ${JSON.stringify(updateJson)}`);
+    fail(suite, "update", "Update article", `Status: ${updateRes.status}, Body: ${JSON.stringify(updateJson)}`);
     return;
   }
-  pass(suite, "Article updated successfully (version history created)");
+  pass(suite, "update", "Article updated successfully (version history created)");
 
   // Brain status
   const { res: statusRes, json: statusJson } = await fetchJson(
@@ -758,11 +756,11 @@ This article validates the full [[Brain]] lifecycle including [[Knowledge Sync]]
     { headers: agentHeaders() },
   );
   if (!statusRes.ok) {
-    fail(suite, "Brain status", `Status: ${statusRes.status}`);
+    fail(suite, "status", "Brain status", `Status: ${statusRes.status}`);
     return;
   }
   console.log(`  ℹ  Brain status: ${statusJson.totalArticles} articles, ${statusJson.unabsorbedSources} unabsorbed, ${statusJson.openDiscussionThreads} open threads`);
-  pass(suite, "Brain status metrics retrieved");
+  pass(suite, "status", "Brain status metrics retrieved");
 }
 
 // ---------------------------------------------------------------------------
@@ -899,74 +897,51 @@ async function main() {
 
   let workspaceId;
   let cookie;
-
   try {
-    ({ workspaceId, cookie } = await suiteAuthBootstrap());
-  } catch (err) {
-    console.error(`\n💀 Fatal: ${err.message}`);
-    process.exit(1);
-  }
+    const missing = ["AGENT_API_KEY", "ADMIN_EMAIL", "ADMIN_PASSWORD"].filter((key) => !process.env[key]);
+    if (missing.length > 0) {
+      report.error("Prerequisites", `Missing fixture prerequisites: ${missing.join(", ")}`);
+      return;
+    }
+    try {
+      ({ workspaceId, cookie } = await suiteAuthBootstrap());
+    } catch (err) {
+      report.abortSuite("Auth", `Bootstrap aborted: ${err.message}`);
+      return;
+    } finally {
+      report.finishSuite("Auth");
+    }
 
-  try {
-    await suiteBrainSources(workspaceId);
-  } catch (err) {
-    fail("Brain Sources", "Suite error", err.message);
-  }
-
-  try {
-    await suiteFileUpload(workspaceId);
-  } catch (err) {
-    fail("File Upload", "Suite error", err.message);
-  }
-
-  try {
-    await suiteMeetingMinutes(workspaceId);
-  } catch (err) {
-    fail("Meeting Minutes", "Suite error", err.message);
-  }
-
-  try {
-    await suiteAgentTrigger(workspaceId, cookie);
-  } catch (err) {
-    fail("Agent Trigger", "Suite error", err.message);
-  }
-
-  try {
-    await suiteConversation(workspaceId, cookie);
-  } catch (err) {
-    fail("Conversation", "Suite error", err.message);
-  }
-
-  try {
-    await suiteKnowledgeSearch(workspaceId);
-  } catch (err) {
-    fail("Knowledge", "Suite error", err.message);
-  }
-
-  try {
-    await suiteBrainArticles(workspaceId);
-  } catch (err) {
-    fail("Brain Articles", "Suite error", err.message);
-  }
-
-  // Cleanup
-  try {
-    await cleanup(workspaceId, cookie);
-  } catch (err) {
-    console.error(`  WARNING:  Cleanup error: ${err.message}`);
-  }
-
-  // Summary
-  console.log("\n╔═══════════════════════════════════════════════════════════╗");
-  console.log(`║  Results: ${passed} passed, ${failed} failed, ${skipped} skipped                  ║`);
-  console.log("╚═══════════════════════════════════════════════════════════╝");
-
-  if (failed > 0) {
-    process.exit(1);
+    for (const [suite, run] of [
+      ["Brain Sources", () => suiteBrainSources(workspaceId)],
+      ["File Upload", () => suiteFileUpload(workspaceId)],
+      ["Meeting Minutes", () => suiteMeetingMinutes(workspaceId)],
+      ["Agent Trigger", () => suiteAgentTrigger(workspaceId, cookie)],
+      ["Conversation", () => suiteConversation(workspaceId, cookie)],
+      ["Knowledge", () => suiteKnowledgeSearch(workspaceId)],
+      ["Brain Articles", () => suiteBrainArticles(workspaceId)],
+    ]) {
+      try {
+        await run();
+      } catch (err) {
+        report.abortSuite(suite, `Suite error: ${err.message}`);
+      } finally {
+        report.finishSuite(suite);
+      }
+    }
+  } finally {
+    if (workspaceId) {
+      try {
+        await cleanup(workspaceId, cookie);
+      } catch (err) {
+        report.error("Cleanup", err.message);
+      }
+    }
+    process.exitCode = report.summary().exitCode;
   }
 }
 
 main().catch((error) => {
   console.error("Unhandled error:", error);
-  process.exit(1);
+  process.exitCode = 1;
 });
