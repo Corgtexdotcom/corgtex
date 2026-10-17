@@ -6,22 +6,13 @@ import { invariant } from "./errors";
 import { fetchSelectedDocuments, fetchFilteredEmailMessages, fetchSelectedEmailMessage, type OAuthEmailMessage } from "./integrations";
 import { capturePermissionEpochs, isArtifactPermissionEpochProofCurrent } from "./source-permission-epochs";
 
+import { currentOAuthKnowledgeSyncLease, type OAuthKnowledgeSyncClaim } from "./oauth-knowledge-sync-lease";
+export type { OAuthKnowledgeSyncClaim } from "./oauth-knowledge-sync-lease";
+
 import type { LineageRoot } from "./source-lineage";
 
 type Db = Prisma.TransactionClient | typeof prisma;
 type Kind = "documents" | "email";
-export type OAuthKnowledgeSyncClaim = {
-  id: string; workspaceId: string | null; type: string; payload: unknown; attempts: number;
-  lockedBy: string | null; lockedAt: Date | null; startedAt: Date | null;
-};
-// Matches the ordinary outbox lease. No heartbeat may replace the originally claimed recipe.
-const OAUTH_JOB_LEASE_MS = 5 * 60_000;
-function currentClaim(job: OAuthKnowledgeSyncClaim | null, expected: OAuthKnowledgeSyncClaim) {
-  return job && expected.lockedAt instanceof Date && !!expected.lockedBy
-    && expected.lockedAt.getTime() > Date.now() - OAUTH_JOB_LEASE_MS
-    && hash([job.id, job.workspaceId, job.type, job.payload, job.attempts, job.lockedBy, job.lockedAt, job.startedAt])
-      === hash([expected.id, expected.workspaceId, expected.type, expected.payload, expected.attempts, expected.lockedBy, expected.lockedAt, expected.startedAt]);
-}
 type Payload = {id: string; sourceKey: string; title: string; text: string; mimeType: string | null; metadata: Record<string, unknown>};
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -55,7 +46,7 @@ function emailPayload(message: OAuthEmailMessage): Payload {
 declare const emailPublicationBrand: unique symbol;
 export type OAuthEmailSyncPublication = {readonly [emailPublicationBrand]: true};
 type EmailPublicationState = {workspaceId: string; connectionId: string; actor: AppActor;
-  messages: Array<{message: OAuthEmailMessage; roots: LineageRoot[]}>; assertCurrent: (db?: Db) => Promise<void>};
+  messages: Array<{message: OAuthEmailMessage; roots: LineageRoot[]}>; assertCurrent: (db?: Db) => Promise<void>; sourceTransactionGuard: <T>(operation: () => Promise<T>) => Promise<T>};
 const emailPublications = new WeakMap<OAuthEmailSyncPublication, EmailPublicationState>();
 /** A server-only binding to the fetched message and the exact canonical generation.
  * Caller-supplied bodies, receipt IDs, and lookalike objects confer no authority. */
@@ -124,20 +115,25 @@ export async function isOAuthProviderFetchInputCurrent(actor: AppActor, workspac
 export async function beginOAuthKnowledgeSync(params: {workspaceId: string; connectionId: string; workflowJobId: string; kind: Kind; expectedClaim: OAuthKnowledgeSyncClaim}) {
   const {workspaceId, connectionId, workflowJobId, kind} = params;
   const expectedClaim = structuredClone(params.expectedClaim);
+  const lease = currentOAuthKnowledgeSyncLease(expectedClaim);
+  const sourceTransactionGuard = lease.sourceTransactionGuard;
   invariant(expectedClaim?.id === workflowJobId && expectedClaim.workspaceId === workspaceId && expectedClaim.type === `oauth.${kind}.sync`
     && record(expectedClaim.payload).connectionId === connectionId, 409, "SOURCE_CHANGED", "OAuth ingestion claim does not match its recipe.");
-  const original = await authority(workspaceId, connectionId, kind, prisma);
-  const originalGrant = grantHash(original.connection, kind);
-  const originalJob = await prisma.workflowJob.findFirst({where: {id: workflowJobId, workspaceId, type: `oauth.${kind}.sync`, status: "RUNNING"}});
-  invariant(currentClaim(originalJob, expectedClaim),
-    409, "SOURCE_CHANGED", "OAuth ingestion requires its active claimed job.");
-  const originalEpochs = await prisma.$transaction(tx => capturePermissionEpochs(tx, workspaceId, [
-    {kind: "Workspace", id: workspaceId}, {kind: "OAuthConnectionPolicy", id: connectionId}, {kind: kindPolicy(kind), id: connectionId},
-    {kind: "Member", id: original.member.id}, {kind: "MemberUserPolicy", id: original.connection.userId},
-    {kind: "WorkspaceSupportPolicy", id: original.connection.userId},
-  ]));
-  const assertCurrent = async (db: Db = prisma) => {
+  const {original, originalGrant, originalEpochs} = await lease.readGuard(async () => {
+    const original = await authority(workspaceId, connectionId, kind, prisma);
+    const originalGrant = grantHash(original.connection, kind);
+    const originalJob = await prisma.workflowJob.findFirst({where: {id: workflowJobId, workspaceId, type: `oauth.${kind}.sync`, status: "RUNNING"}});
+    lease.assertCurrentRow(originalJob);
+    const originalEpochs = await prisma.$transaction(tx => capturePermissionEpochs(tx, workspaceId, [
+      {kind: "Workspace", id: workspaceId}, {kind: "OAuthConnectionPolicy", id: connectionId}, {kind: kindPolicy(kind), id: connectionId},
+      {kind: "Member", id: original.member.id}, {kind: "MemberUserPolicy", id: original.connection.userId},
+      {kind: "WorkspaceSupportPolicy", id: original.connection.userId},
+    ]));
+    return {original, originalGrant, originalEpochs};
+  });
+  const checkCurrent = async (db: Db = prisma) => {
     if (db !== prisma) {
+      lease.assertTransactionOwner();
       await db.$queryRaw`SELECT id FROM "OAuthConnection" WHERE id=${connectionId} FOR SHARE`;
       await db.$queryRaw`SELECT id FROM "WorkflowJob" WHERE id=${workflowJobId} FOR SHARE`;
     }
@@ -145,17 +141,19 @@ export async function beginOAuthKnowledgeSync(params: {workspaceId: string; conn
     const epochsCurrent = await isArtifactPermissionEpochProofCurrent(workspaceId, originalEpochs, db);
     const job = await db.workflowJob.findFirst({where: {id: workflowJobId, workspaceId}});
     invariant(grantHash(current.connection, kind) === originalGrant && current.member.id === original.member.id
-      && epochsCurrent && job?.status === "RUNNING" && currentClaim(job, expectedClaim),
+      && epochsCurrent && job?.status === "RUNNING",
     409, "SOURCE_CHANGED", "OAuth ingestion authority changed.");
+    lease.assertCurrentRow(job);
   };
+  const assertCurrent = (db: Db = prisma) => db === prisma ? lease.readGuard(() => checkCurrent(db)) : checkCurrent(db);
   const recordFailure = async () => {
     // A stale worker must not change a new claim or a renewed connection grant.
-    await prisma.$transaction(async tx => {
+    await lease.stopAndDrain().then(() => sourceTransactionGuard(() => prisma.$transaction(async tx => {
       await tx.$queryRaw`SELECT id FROM "OAuthConnection" WHERE id=${connectionId} FOR UPDATE`;
       await assertCurrent(tx);
       await tx.oAuthConnection.update({where: {id: connectionId}, data: {status: "ERROR",
         lastSyncError: "OAuth content could not be safely indexed; retry after checking source access."}});
-    }).catch(() => {});
+    }))).catch(() => {});
   };
   try {
     await assertCurrent();
@@ -171,18 +169,18 @@ export async function beginOAuthKnowledgeSync(params: {workspaceId: string; conn
       invariant(selections(original.connection, kind).includes(selection), 409, "SOURCE_CHANGED", "OAuth response escaped its selection.");
       if (!payload.text.trim() || seen.has(payload.sourceKey)) continue;
       seen.add(payload.sourceKey);
-      const input = await prisma.$transaction(async tx => {
+      const input = await sourceTransactionGuard(() => prisma.$transaction(async tx => {
         await assertCurrent(tx);
         return tx.oAuthProviderFetchInput.create({data: {id: randomUUID(), workspaceId, connectionId,
           localUserId: original.connection.userId, ownerMemberId: original.member.id, provider: original.connection.provider,
           providerAccountId: original.connection.providerAccountId, sourceKind: kind, externalId: payload.id, sourceKey: payload.sourceKey,
           selection, grantHash: originalGrant, encryptedPayload: encryptSecret(JSON.stringify(payload)), payloadHash: hash(payload),
           permissionEpochsJson: originalEpochs as unknown as Prisma.InputJsonValue}});
-      });
+      }));
       const proof = await captureArtifactInputProof(original.actor, workspaceId, [{kind: "OAuthProviderFetchInput", id: input.id, snapshot: input}]);
       const preflight = await prepareArtifactCommitPreflight(original.actor, workspaceId, proof);
       const id = `oauth-${hash([workspaceId, connectionId, original.connection.provider, kind, payload.sourceKey])}`;
-      const document = await prisma.$transaction(async tx => {
+      const document = await sourceTransactionGuard(() => prisma.$transaction(async tx => {
         await assertArtifactInputWriteFence(tx);
         await assertCurrent(tx);
         return withArtifactCommitPreflight(original.actor, workspaceId, tx, proof, preflight, async () => {
@@ -195,21 +193,22 @@ export async function beginOAuthKnowledgeSync(params: {workspaceId: string; conn
             origin: "DERIVED", inputs: [], inheritedRoots: proof});
           return row;
         });
-      });
+      }));
       documents.push(document);
       if (message) emailMessages.push({message: structuredClone(message), roots: await captureArtifactInputProof(original.actor,
         workspaceId, [{kind: "Document", id: document.id, snapshot: document}])});
     }
     const emailPublication = Object.freeze({}) as OAuthEmailSyncPublication;
     emailPublications.set(emailPublication, {workspaceId, connectionId, actor: original.actor,
-      messages: structuredClone(emailMessages), assertCurrent});
-    return {actor: original.actor, documents, messages: emailMessages.map(entry => structuredClone(entry.message)), emailPublication, assertCurrent, recordFailure,
+      messages: structuredClone(emailMessages), assertCurrent, sourceTransactionGuard});
+    return {actor: original.actor, documents, messages: emailMessages.map(entry => structuredClone(entry.message)), emailPublication, assertCurrent, recordFailure, sourceTransactionGuard,
       async checkpoint() {
-        await prisma.$transaction(async tx => {
+        await lease.stopAndDrain();
+        await sourceTransactionGuard(() => prisma.$transaction(async tx => {
           await tx.$queryRaw`SELECT id FROM "OAuthConnection" WHERE id=${connectionId} FOR UPDATE`;
           await assertCurrent(tx);
           await tx.oAuthConnection.update({where: {id: connectionId}, data: {lastSyncAt: new Date(), lastSyncError: null}});
-        });
+        }));
       },
     };
   } catch (error) { await recordFailure(); throw error; }

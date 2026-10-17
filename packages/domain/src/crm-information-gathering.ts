@@ -283,7 +283,7 @@ export async function materializeCrmEmailTouchpoints(params: {
   if (!matched.length) { await assertCurrent(); return summary; }
   const roots = matched.flatMap(entry => entry.roots);
   const preflight = await prepareArtifactCommitPreflight(actor, params.workspaceId, roots);
-  await prisma.$transaction(async tx => {
+  await publication.sourceTransactionGuard(() => prisma.$transaction(async tx => {
     await assertArtifactInputWriteFence(tx);
     await assertCurrent(tx);
     return withArtifactCommitPreflight(actor, params.workspaceId, tx, roots, preflight, async () => {
@@ -332,7 +332,7 @@ export async function materializeCrmEmailTouchpoints(params: {
       }
       await assertCurrent(tx);
     });
-  });
+  }));
   return summary;
 }
 

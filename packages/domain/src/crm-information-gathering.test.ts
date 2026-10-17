@@ -69,7 +69,7 @@ vi.mock("./source-lineage", () => ({
 
 const emailClaimCurrent = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock("./oauth-provider-native", () => ({getOAuthEmailSyncPublication: (_token: unknown, workspaceId: string, connectionId: string, messages: Array<{id: string}>) => ({
-  workspaceId, connectionId, actor: {kind: "user", user: {id: "owner"}}, assertCurrent: emailClaimCurrent,
+  workspaceId, connectionId, sourceTransactionGuard: (operation: () => Promise<unknown>) => operation(), actor: {kind: "user", user: {id: "owner"}}, assertCurrent: emailClaimCurrent,
   messages: messages.map(message => ({message, roots: [{kind: "Document", id: `document-${message.id}`, fingerprint: "a".repeat(64)}]})),
 })}));
 vi.mock("./artifact-commit-preflight", () => ({prepareArtifactCommitPreflight: vi.fn(async () => ({})),

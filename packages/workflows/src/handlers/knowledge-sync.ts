@@ -1,3 +1,4 @@
+import { withOAuthKnowledgeSyncLease } from "../../../domain/src/oauth-knowledge-sync-lease";
 import { beginOAuthKnowledgeSync, type OAuthKnowledgeSyncClaim } from "../../../domain/src/oauth-provider-native";
 import { invariant } from "../../../domain/src/errors";
 import { prisma, type AppActor } from "@corgtex/shared";
@@ -407,6 +408,7 @@ function stringArray(value: unknown) {
 }
 
 export async function handleOAuthDocumentsSync(jobId: string, payload: { connectionId?: string }, workspaceId: string, expectedClaim: OAuthKnowledgeSyncClaim) {
+  return withOAuthKnowledgeSyncLease(expectedClaim, async () => {
   if (!payload.connectionId) return;
   const connection = await prisma.oAuthConnection.findUnique({ where: { id: payload.connectionId } });
   if (!connection || connection.status !== "ACTIVE") return;
@@ -418,9 +420,11 @@ export async function handleOAuthDocumentsSync(jobId: string, payload: { connect
   if (selectedDocumentIds.length === 0) return;
 
   return syncOAuthCanonicalKnowledge(jobId, connection.id, workspaceId, "documents", structuredClone(expectedClaim));
+  });
 }
 
 export async function handleOAuthEmailSync(jobId: string, payload: { connectionId?: string }, workspaceId: string, expectedClaim: OAuthKnowledgeSyncClaim) {
+  return withOAuthKnowledgeSyncLease(expectedClaim, async () => {
   if (!payload.connectionId) return;
   const connection = await prisma.oAuthConnection.findUnique({ where: { id: payload.connectionId } });
   if (!connection || connection.status !== "ACTIVE") return;
@@ -432,6 +436,7 @@ export async function handleOAuthEmailSync(jobId: string, payload: { connectionI
   if (filters.length === 0) return;
 
   return syncOAuthCanonicalKnowledge(jobId, connection.id, workspaceId, "email", structuredClone(expectedClaim));
+  });
 }
 
 async function syncOAuthCanonicalKnowledge(jobId: string, connectionId: string, workspaceId: string, kind: "documents" | "email", expectedClaim: OAuthKnowledgeSyncClaim) {
@@ -440,7 +445,7 @@ async function syncOAuthCanonicalKnowledge(jobId: string, connectionId: string, 
     for (const document of capture.documents) {
       const count = await syncKnowledgeForSource({workspaceId, sourceType: "DOCUMENT", accessDomain: document.accessDomain,
         sourceId: document.id, sourceTitle: document.title, content: [document.title, document.textContent].filter(Boolean).join("\n\n"),
-        workflowJobId: jobId, sourceUpdatedAt: document.updatedAt, lineageActor: capture.actor, sourceGuard: capture.assertCurrent});
+        workflowJobId: jobId, sourceUpdatedAt: document.updatedAt, lineageActor: capture.actor, sourceGuard: capture.assertCurrent, sourceTransactionGuard: capture.sourceTransactionGuard});
       invariant(count > 0, 409, "SOURCE_CHANGED", "OAuth content could not be safely indexed; sync did not complete.");
     }
     if (kind === "email") {

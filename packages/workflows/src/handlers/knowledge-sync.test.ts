@@ -341,7 +341,8 @@ describe("handleCalendarSync", () => {
 });
 
 describe("OAuth document and email knowledge sync", () => {
-  const claim = (kind: string) => ({id: "job-1", workspaceId: "workspace-1", type: `oauth.${kind}.sync`, payload: {connectionId: "conn-1"}, attempts: 1, lockedBy: "worker", lockedAt: new Date("2026-10-17Z"), startedAt: new Date("2026-10-17Z")});
+  const claimTime = new Date();
+  const claim = (kind: string) => ({id: "job-1", workspaceId: "workspace-1", type: `oauth.${kind}.sync`, payload: {connectionId: "conn-1"}, attempts: 1, lockedBy: "worker", lockedAt: claimTime, startedAt: claimTime});
   const actor = {kind: "user", user: {id: "owner", email: "owner@example.test", displayName: null}};
   beforeEach(() => {
     vi.clearAllMocks();
@@ -352,7 +353,7 @@ describe("OAuth document and email knowledge sync", () => {
     checkpointMock.mockResolvedValue(undefined);
     recordFailureMock.mockResolvedValue(undefined);
     syncKnowledgeForSourceMock.mockResolvedValue(1);
-    beginOAuthKnowledgeSyncMock.mockResolvedValue({actor, sourceGuard: sourceGuardMock, assertCurrent: sourceGuardMock, checkpoint: checkpointMock, recordFailure: recordFailureMock,
+    beginOAuthKnowledgeSyncMock.mockResolvedValue({sourceTransactionGuard: (operation: () => Promise<unknown>) => operation(), actor, sourceGuard: sourceGuardMock, assertCurrent: sourceGuardMock, checkpoint: checkpointMock, recordFailure: recordFailureMock,
       documents: [{id: "canonical-document", title: "Selected content", textContent: "Only the captured body", accessDomain: "WORKSPACE", updatedAt: new Date("2026-05-24Z")}],
       emailPublication: {}, messages: [{id: "msg-1", filter: "from:customer@example.test"}]});
   });
@@ -370,7 +371,7 @@ describe("OAuth document and email knowledge sync", () => {
     await (kind === "documents" ? handlers.handleOAuthDocumentsSync : handlers.handleOAuthEmailSync)("job-1", {connectionId: "conn-1"}, "workspace-1", claim(kind));
     expect(beginOAuthKnowledgeSyncMock).toHaveBeenCalledWith({workspaceId: "workspace-1", connectionId: "conn-1", workflowJobId: "job-1", kind, expectedClaim: claim(kind)});
     expect(syncKnowledgeForSourceMock).toHaveBeenCalledWith(expect.objectContaining({workspaceId: "workspace-1", sourceType: "DOCUMENT", sourceId: "canonical-document",
-      content: "Selected content\n\nOnly the captured body", lineageActor: actor, sourceGuard: sourceGuardMock}));
+      content: "Selected content\n\nOnly the captured body", lineageActor: actor, sourceGuard: sourceGuardMock, sourceTransactionGuard: expect.any(Function)}));
     expect(checkpointMock).toHaveBeenCalledOnce();
     expect(checkpointMock.mock.invocationCallOrder[0]).toBeGreaterThan(syncKnowledgeForSourceMock.mock.invocationCallOrder[0]);
     if (kind === "email") expect(materializeCrmEmailTouchpointsMock).toHaveBeenCalledWith({workspaceId: "workspace-1", connectionId: "conn-1", messages: [{id: "msg-1", filter: "from:customer@example.test"}], publication: {}});

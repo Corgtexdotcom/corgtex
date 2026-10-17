@@ -269,4 +269,20 @@ describe("generated KnowledgeChunk receipts with actual source helper", () => {
     expect(fixture.rows.document).toHaveLength(1);
   });
 
+  it("serializes complete source transactions without granting source authority", async () => {
+    const source = await original();
+    let inCommit = false;
+    let commits = 0;
+    const sourceTransactionGuard = async <T,>(operation: () => Promise<T>): Promise<T> => {
+      expect(inCommit).toBe(false);
+      inCommit = true; commits++;
+      try { return await operation(); } finally { inCommit = false; }
+    };
+    const sourceGuard = async (tx?: unknown) => { if (tx) expect(inCommit).toBe(true); };
+    expect(await syncDocumentKnowledge({workspaceId, documentId: source.id, lineageActor: alpha,
+      sourceGuard, sourceTransactionGuard})).toBe(1);
+    expect(commits).toBe(2); expect(inCommit).toBe(false);
+    expect(await currentReadable()).toEqual(new Set([fixture.rows.knowledgeChunk[0].id]));
+  });
+
 });

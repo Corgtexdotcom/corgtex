@@ -1,3 +1,4 @@
+import { withOAuthKnowledgeSyncLease } from "../../domain/src/oauth-knowledge-sync-lease";
 import type { Prisma } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -10,7 +11,7 @@ import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { handleOAuthDocumentsSync, handleOAuthEmailSync } from "./handlers/knowledge-sync";
 
 beforeEach(truncateAllTables);
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.useRealTimers(); });
 
 async function fixture(kind: "documents" | "email" = "documents", nullableWorkspace = false) {
   const workspace = await prisma.workspace.create({data: {name: "Synthetic OAuth indexing", slug: randomUUID()}});
@@ -272,12 +273,14 @@ it("retains source-kind governors through immutable native snapshot capture", as
   const {beginOAuthKnowledgeSync} = await import("../../domain/src/oauth-provider-native");
   const {prepareArtifactCommitPreflight, withArtifactCommitPreflight} = await import("../../domain/src/artifact-commit-preflight");
   const {captureImmutableArtifactInputProof, assertArtifactInputWriteFence} = await import("../../domain/src/source-lineage");
+  await withOAuthKnowledgeSyncLease(f.job, async () => {
   const capture = await beginOAuthKnowledgeSync({workspaceId:f.workspace.id,connectionId:f.connection.id,workflowJobId:f.job.id,kind:"documents",expectedClaim:f.job});
   const proof = await captureArtifactInputProof(capture.actor,f.workspace.id,[{kind:"Document",id:capture.documents[0]!.id,snapshot:capture.documents[0]!}]);
   expect(await isArtifactInputProofReadable(capture.actor,f.workspace.id,proof)).toBe(true);
   const prepared = await prepareArtifactCommitPreflight(capture.actor,f.workspace.id,proof);
   const frozen = await prisma.$transaction(async tx => {await assertArtifactInputWriteFence(tx);return withArtifactCommitPreflight(capture.actor,f.workspace.id,tx,proof,prepared,()=>captureImmutableArtifactInputProof(capture.actor,f.workspace.id,proof,tx));});
   expect(await isArtifactInputProofReadable(capture.actor,f.workspace.id,frozen)).toBe(true);
+  });
 });
 
 it.each(["email-selection-aba", "takeover"] as const)("rolls back CRM publication after %s between native preflight and its transaction", async mode => {
@@ -335,11 +338,13 @@ it("rejects a lookalike publication token and changed caller message bytes", asy
   const f = await fixture("email");
   const {beginOAuthKnowledgeSync} = await import("../../domain/src/oauth-provider-native");
   const {materializeCrmEmailTouchpoints} = await import("../../domain/src/crm-information-gathering");
+  await withOAuthKnowledgeSyncLease(f.job, async () => {
   const capture = await beginOAuthKnowledgeSync({workspaceId: f.workspace.id, connectionId: f.connection.id, workflowJobId: f.job.id, kind: "email", expectedClaim: f.job});
   const params = {workspaceId: f.workspace.id, connectionId: f.connection.id, messages: capture.messages, publication: capture.emailPublication};
   await expect(materializeCrmEmailTouchpoints({...params, publication: {} as typeof capture.emailPublication})).rejects.toMatchObject({code: "SOURCE_CHANGED"});
   await expect(materializeCrmEmailTouchpoints({...params, messages: capture.messages.map(message => ({...message, snippet: "Forged body"}))})).rejects.toMatchObject({code: "SOURCE_CHANGED"});
   expect(await prisma.crmActivity.count({where: {workspaceId: f.workspace.id}})).toBe(0);
+  });
 });
 
 
@@ -352,4 +357,101 @@ it("retains shared identity scope revocation across restore for saved email", as
   await prisma.oAuthConnection.update({where: {id: f.connection.id}, data: {scopes: f.connection.scopes}});
   await prisma.oAuthConnection.update({where: {id: f.connection.id}, data: {scopes}});
   expect(await f.search()).toEqual([]);
+});
+
+
+it("renews the original OAuth claim through more than five minutes and multiple messages", async () => {
+  const f = await fixture("email");
+  let now = Date.now();
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  vi.useFakeTimers({toFake: ["setInterval", "clearInterval"]});
+  const originalFetch = f.fetchMock.getMockImplementation()!;
+  let advanced = false;
+  const acknowledged: number[] = [];
+  f.fetchMock.mockImplementation(async input => {
+    const url = String(input);
+    if (!advanced && url.includes("/messages?")) {
+      advanced = true;
+      // A provider wait spanning seven minutes. Each minute's real DB CAS must
+      // finish before the next simulated minute; the original attempt never changes.
+      for (let minute = 0; minute < 7; minute++) {
+        now += 60_000;
+        await vi.advanceTimersByTimeAsync(60_000);
+        const {currentOAuthKnowledgeSyncLease} = await import("../../domain/src/oauth-knowledge-sync-lease");
+        await currentOAuthKnowledgeSyncLease(f.job).readGuard(async () => {});
+        acknowledged.push((await prisma.workflowJob.findUniqueOrThrow({where: {id: f.job.id}})).lockedAt!.getTime());
+        expect(acknowledged.at(-1)).toBe(now);
+      }
+    }
+    if (url.includes("/messages?")) return Response.json({messages: [{id: "email-1"}, {id: "email-2"}]});
+    if (url.includes("/messages/email-2?")) return Response.json({id: "email-2", snippet: f.remote.text, payload: {headers: [{name: "Subject", value: "Second policy"}, {name: "From", value: f.remote.from}, {name: "Message-ID", value: "<email-2@synthetic.example>"}]}});
+    return originalFetch(input);
+  });
+  await f.run();
+  const job = await prisma.workflowJob.findUniqueOrThrow({where: {id: f.job.id}});
+  expect(job).toMatchObject({attempts: 1, lockedBy: f.job.lockedBy, startedAt: f.job.startedAt, payload: f.job.payload});
+  expect(job.lockedAt!.getTime()).toBe(now);
+  expect(new Set(acknowledged).size).toBe(7);
+  expect(await prisma.document.count({where: {workspaceId: f.workspace.id}})).toBe(2);
+  expect(await prisma.knowledgeChunk.count({where: {workspaceId: f.workspace.id}})).toBe(2);
+  expect(await prisma.oAuthConnection.findUniqueOrThrow({where: {id: f.connection.id}})).toMatchObject({status: "ACTIVE", lastSyncAt: expect.any(Date)});
+  expect(vi.getTimerCount()).toBe(0);
+}, 120_000);
+
+
+it("cannot revive a lease that expires while renewal waits for a real row lock", async () => {
+  const f = await fixture();
+  let now = Date.now();
+  const original = await prisma.workflowJob.update({where: {id: f.job.id}, data: {lockedAt: new Date(now - 180_000)}});
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  vi.useFakeTimers({toFake: ["setInterval", "clearInterval"]});
+  const {createOAuthKnowledgeSyncLease} = await import("../../domain/src/oauth-knowledge-sync-lease");
+  const owner = createOAuthKnowledgeSyncLease(original);
+  let unlock!: () => void; let locked!: () => void;
+  const lockAcquired = new Promise<void>(resolve => {locked = resolve;});
+  const releaseLock = new Promise<void>(resolve => {unlock = resolve;});
+  const blocker = prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM "WorkflowJob" WHERE id=${f.job.id} FOR UPDATE`;
+    locked(); await releaseLock;
+  });
+  await lockAcquired;
+  try {
+    now += 60_000; await vi.advanceTimersByTimeAsync(60_000);
+    let observedLockWait = false;
+    for (let attempt = 0; attempt < 30 && !observedLockWait; attempt++) {
+      const waits = await prisma.$queryRaw<Array<{count: bigint}>>`SELECT count(*) FROM pg_stat_activity
+        WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%WorkflowJob%FOR UPDATE%'`;
+      observedLockWait = Number(waits[0]?.count) > 0;
+      if (!observedLockWait) await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    expect(observedLockWait).toBe(true);
+    // The original four-minute stamp expires while the renewal is blocked.
+    now += 120_000; unlock(); await blocker;
+    await expect(owner.readGuard(async () => {})).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+    expect((await prisma.workflowJob.findUniqueOrThrow({where: {id: f.job.id}})).lockedAt).toEqual(original.lockedAt);
+    expect(await owner.settle({status: "COMPLETED"})).toEqual({count: 0});
+    expect(owner.signal.aborted).toBe(true);
+  } finally {unlock(); await blocker; await owner.dispose();}
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("a takeover during provider wait cannot be renewed or checkpointed by the old handler", async () => {
+  const f = await fixture();
+  vi.useFakeTimers({toFake: ["setInterval", "clearInterval"]});
+  const fetch = f.fetchMock.getMockImplementation()!;
+  let replacement: Awaited<ReturnType<typeof prisma.workflowJob.findUniqueOrThrow>> | null = null;
+  f.fetchMock.mockImplementation(async input => {
+    if (!replacement && String(input).includes("alt=media")) {
+      replacement = await prisma.workflowJob.update({where: {id: f.job.id}, data: {attempts: 2, lockedBy: "replacement-worker", lockedAt: new Date(Date.now() + 1)}});
+      await vi.advanceTimersByTimeAsync(60_000);
+    }
+    return fetch(input);
+  });
+  await expect(f.run()).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+  expect(await prisma.workflowJob.findUniqueOrThrow({where: {id: f.job.id}})).toEqual(replacement);
+  expect(await prisma.oAuthConnection.findUniqueOrThrow({where: {id: f.connection.id}})).toMatchObject({status: "ACTIVE", lastSyncAt: null, lastSyncError: null});
+  expect(await prisma.document.count({where: {workspaceId: f.workspace.id}})).toBe(0);
+  expect(await prisma.oAuthProviderFetchInput.count({where: {workspaceId: f.workspace.id}})).toBe(0);
+  expect(f.embed).not.toHaveBeenCalled();
+  expect(vi.getTimerCount()).toBe(0);
 });

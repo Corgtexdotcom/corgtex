@@ -1162,6 +1162,7 @@ export async function fetchFilteredEmailMessages(connectionId: string, filters: 
           headers: {
             Authorization: `Bearer ${accessToken}`,
             ConsistencyLevel: "eventual",
+            Prefer: 'IdType="ImmutableId"',
           },
         }, controls,
       ), "Microsoft Graph");
@@ -1226,9 +1227,10 @@ export async function fetchSelectedEmailMessage(connectionId: string, messageId:
       snippet: typeof detail.snippet === "string" ? detail.snippet : "", filter};
   }
   if (connection.provider === "MICROSOFT") {
+    const messageHeaders = {...headers, Prefer: 'IdType="ImmutableId"'};
     const item = await readProviderJsonResponse(await oauthSourceFetch(
       `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(messageId)}?$select=id,subject,from,receivedDateTime,webLink,bodyPreview`,
-      {headers}, controls), "Microsoft Graph");
+      {headers: messageHeaders}, controls), "Microsoft Graph");
     if (item.id !== messageId || typeof item.receivedDateTime !== "string") return null;
     const received = new Date(item.receivedDateTime);
     if (!Number.isFinite(received.getTime())) return null;
@@ -1243,7 +1245,7 @@ export async function fetchSelectedEmailMessage(connectionId: string, messageId:
       if (url.origin !== "https://graph.microsoft.com" || url.pathname !== "/v1.0/me/messages" || seen.has(next) || seen.size >= 100) return null;
       seen.add(next);
       const listing = await readProviderJsonResponse(await oauthSourceFetch(next,
-        {headers: {...headers, ConsistencyLevel: "eventual"}}, controls), "Microsoft Graph");
+        {headers: {...messageHeaders, ConsistencyLevel: "eventual"}}, controls), "Microsoft Graph");
       matched = Array.isArray(listing.value) && listing.value.some((row: {id?: unknown}) => row.id === messageId);
       next = typeof listing["@odata.nextLink"] === "string" ? listing["@odata.nextLink"] : null;
     }

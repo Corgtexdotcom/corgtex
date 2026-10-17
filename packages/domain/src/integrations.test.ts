@@ -805,3 +805,62 @@ it.each([false, true])("proves headerless Gmail membership through bounded origi
   if (exhausted) { expect(result).toBeNull(); expect(pages).toBe(100); }
   else { expect(result).toMatchObject({id: "older-message", snippet: "Headerless body"}); expect(pages).toBe(2); }
 });
+
+
+it("keeps Graph email identity after a folder move on discovery, detail and every selection page", async () => {
+  const {fetchFilteredEmailMessages, fetchSelectedEmailMessage} = await import("./integrations");
+  prismaMock.oAuthConnection.findUnique.mockResolvedValue({id: "connection", provider: "MICROSOFT", status: "ACTIVE", providerAccountId: "account",
+    accessToken: "enc:synthetic", expiresAt: new Date(Date.now() + 3600_000)});
+  let moved = false;
+  const requests: Array<{url: URL; prefer: string | null}> = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    const parsed = new URL(url);
+    if (parsed.pathname === "/v1.0/me") return Response.json({id: "account"});
+    const prefer = new Headers(init?.headers).get("Prefer"); requests.push({url: parsed, prefer});
+    const id = prefer === 'IdType="ImmutableId"' ? "StableCaseSensitiveId" : moved ? "moved-id" : "old-folder-id";
+    const message = {id, subject: "Original", bodyPreview: "Original body", receivedDateTime: "2026-06-18T09:00:00Z"};
+    if (parsed.pathname !== "/v1.0/me/messages") return Response.json(message);
+    if (!moved || parsed.searchParams.has("$skiptoken")) return Response.json({value: [message]});
+    return Response.json({value: [], "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/messages?$skiptoken=opaque"});
+  }));
+  const controls = {expectedAccountId: "account", authorizeAttempt: vi.fn(async () => {})};
+  const [discovered] = await fetchFilteredEmailMessages("connection", ["from:sender@synthetic.test"], controls);
+  expect(discovered?.id).toBe("StableCaseSensitiveId");
+  moved = true;
+  expect(await fetchSelectedEmailMessage("connection", discovered!.id, discovered!.filter, controls)).toMatchObject({id: discovered!.id, snippet: "Original body"});
+  expect(requests).toHaveLength(4);
+  expect(requests.every(request => request.prefer === 'IdType="ImmutableId"')).toBe(true);
+});
+
+it.each(["detail", "selection"] as const)("does not case-fold immutable Graph IDs in %s", async boundary => {
+  const {fetchSelectedEmailMessage} = await import("./integrations");
+  prismaMock.oAuthConnection.findUnique.mockResolvedValue({id: "connection", provider: "MICROSOFT", status: "ACTIVE", providerAccountId: "account",
+    accessToken: "enc:synthetic", expiresAt: new Date(Date.now() + 3600_000)});
+  const requests: Array<{url: URL; prefer: string | null}> = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    const parsed = new URL(url);
+    if (parsed.pathname === "/v1.0/me") return Response.json({id: "account"});
+    requests.push({url: parsed, prefer: new Headers(init?.headers).get("Prefer")});
+    if (parsed.pathname === "/v1.0/me/messages") return Response.json({value: [{id: "stablecasesensitiveid"}]});
+    return Response.json({id: boundary === "detail" ? "stablecasesensitiveid" : "StableCaseSensitiveId",
+      bodyPreview: "Private body", receivedDateTime: "2026-06-18T09:00:00Z"});
+  }));
+  expect(await fetchSelectedEmailMessage("connection", "StableCaseSensitiveId", "from:sender@synthetic.test",
+    {expectedAccountId: "account", authorizeAttempt: async () => {}})).toBeNull();
+  expect(requests).toHaveLength(boundary === "detail" ? 1 : 2);
+  expect(requests.every(request => request.prefer === 'IdType="ImmutableId"')).toBe(true);
+});
+
+it.each(["discovery", "replay"] as const)("rejects a different Graph mailbox before immutable ID %s", async boundary => {
+  const {fetchFilteredEmailMessages, fetchSelectedEmailMessage} = await import("./integrations");
+  prismaMock.oAuthConnection.findUnique.mockResolvedValue({id: "connection", provider: "MICROSOFT", status: "ACTIVE", providerAccountId: "original-account",
+    accessToken: "enc:synthetic", expiresAt: new Date(Date.now() + 3600_000)});
+  const fetchMock = vi.fn(async () => Response.json({id: "different-account"}));
+  vi.stubGlobal("fetch", fetchMock);
+  const controls = {expectedAccountId: "original-account", authorizeAttempt: async () => {}};
+  await expect(boundary === "discovery"
+    ? fetchFilteredEmailMessages("connection", ["from:sender@synthetic.test"], controls)
+    : fetchSelectedEmailMessage("connection", "StableCaseSensitiveId", "from:sender@synthetic.test", controls)).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+  expect(fetchMock).toHaveBeenCalledOnce();
+  expect(fetchMock).toHaveBeenCalledWith("https://graph.microsoft.com/v1.0/me", expect.any(Object));
+});

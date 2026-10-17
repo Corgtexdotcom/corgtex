@@ -124,6 +124,8 @@ export async function syncKnowledgeForSource(params: {
   lineageActor?: AppActor;
   /** Optional additional owner/job fence; never grants source authority. */
   sourceGuard?: (db?: Prisma.TransactionClient) => Promise<void>;
+  /** Serializes complete commits with an original renewable source/job lease. */
+  sourceTransactionGuard?: <T>(operation: () => Promise<T>) => Promise<T>;
 }) {
   // SQL rows require the authenticated claim/capture/publication pipeline. A
   // zero count would let legacy connector callers acknowledge a skipped row.
@@ -137,6 +139,10 @@ export async function syncKnowledgeForSource(params: {
   if (!supportedTypes.includes(params.sourceType)) throw new AppError(409, "KNOWLEDGE_SOURCE_UNSUPPORTED", "No canonical knowledge renderer is available for this source.");
   params = { ...params, metadata: params.metadata ? structuredClone(params.metadata) : undefined,
     sourceUpdatedAt: params.sourceUpdatedAt ? new Date(params.sourceUpdatedAt) : undefined };
+  const sourceTransaction = <T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> => {
+    const operation = () => prisma.$transaction(work);
+    return params.sourceTransactionGuard ? params.sourceTransactionGuard(operation) : operation();
+  };
   const chunks = chunkText(params.content);
   // Provider cleanup needs an independently authorized archive path; arbitrary empty payloads cannot delete copies.
   if (params.sourceType === "EXTERNAL_CONTENT" && !chunks.length) return 0;
@@ -180,7 +186,7 @@ export async function syncKnowledgeForSource(params: {
       },
     };
     await assertRetired();
-    const retired = await prisma.$transaction(async (tx) => {
+    const retired = await sourceTransaction(async (tx) => {
       await assertRetired(tx);
       if (params.sourceType === "BRAIN_ARTICLE") {
         await tx.$queryRaw`SELECT "id" FROM "BrainArticle" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
@@ -242,7 +248,7 @@ export async function syncKnowledgeForSource(params: {
     // Freeze the generation-time permission vector as well as every source body.
     // A revoke/restore episode cannot certify an already running embedding job.
     const freezePreflight = await prepareArtifactCommitPreflight(sourceActor, params.workspaceId, sourceProof);
-    sourceRoots = await prisma.$transaction(async tx => {
+    sourceRoots = await sourceTransaction(async tx => {
       await assertArtifactInputWriteFence(tx);
       return withArtifactCommitPreflight(sourceActor, params.workspaceId, tx, sourceProof, freezePreflight,
         () => captureImmutableArtifactInputProof(sourceActor, params.workspaceId, sourceProof, tx));
@@ -338,7 +344,7 @@ export async function syncKnowledgeForSource(params: {
       && ["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(String(error.code))) return 0;
     throw error;
   }
-  const persisted = await prisma.$transaction(async tx => {
+  const persisted = await sourceTransaction(async tx => {
     await assertArtifactInputWriteFence(tx);
     // Privacy/archive writes take the source row before their epoch trigger.
     // Match that order before the local proof takes shared epoch locks.
@@ -503,7 +509,7 @@ export async function syncBrainArticleKnowledge(params: {
   });
 }
 
-export async function syncDocumentKnowledge(params: { workspaceId: string; documentId: string; workflowJobId?: string; lineageActor?: AppActor; sourceGuard?: (db?: Prisma.TransactionClient) => Promise<void> }) {
+export async function syncDocumentKnowledge(params: { workspaceId: string; documentId: string; workflowJobId?: string; lineageActor?: AppActor; sourceGuard?: (db?: Prisma.TransactionClient) => Promise<void>; sourceTransactionGuard?: <T>(operation: () => Promise<T>) => Promise<T> }) {
   const document = await prisma.document.findUnique({ where: { id: params.documentId } });
   if (!document || document.workspaceId !== params.workspaceId) return 0;
   return syncKnowledgeForSource({
@@ -514,7 +520,7 @@ export async function syncDocumentKnowledge(params: { workspaceId: string; docum
     sourceUpdatedAt: document.updatedAt,
     metadata: { source: document.source, mimeType: document.mimeType, storageKey: document.storageKey,
       ...(params.workflowJobId ? { workflowJobId: params.workflowJobId } : {}) },
-    workflowJobId: params.workflowJobId, sourceGuard: params.sourceGuard,
+    workflowJobId: params.workflowJobId, sourceGuard: params.sourceGuard, sourceTransactionGuard: params.sourceTransactionGuard,
   });
 }
 
