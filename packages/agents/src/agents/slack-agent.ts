@@ -593,11 +593,16 @@ export async function loadSlackReadableRows<T extends { id: string }>(params: {
   const records: T[] = [];
   const roots: LineageRoot[][] = [];
   const seen = new Set<string>();
-  const take = 50;
+  const rawLimit = 200;
+  let examined = 0;
   let cursor: { id: string } | undefined;
   while (records.length < params.limit) {
+    const take = Math.min(50, rawLimit - examined + 1);
     const batch = await params.load({ take, ...(cursor ? { cursor, skip: 1 } : {}) });
     invariant(batch.length <= take, 409, "SOURCE_CHANGED", "Slack query returned an invalid page.");
+    examined += batch.length;
+    invariant(examined <= rawLimit, 409, "SLACK_CONTEXT_SCAN_LIMIT",
+      "Slack context exceeded its safe candidate window. Narrow the request and retry.");
     const next = batch.at(-1);
     invariant(!next || next.id !== cursor?.id, 409, "SOURCE_CHANGED", "Slack inputs changed while reading.");
     const captured = await captureReadableDigestInputs({ actor: params.proof.actor, workspaceId: params.workspaceId, kind: params.kind, records: batch });

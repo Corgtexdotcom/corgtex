@@ -482,7 +482,7 @@ export async function summarizeReadableKnowledgeChunks(params: RetrievalAccess,
   return { count, complete: false };
 }
 
-/** Shared count/search admission. Raw rows never set a candidate cap or visible count. */
+/** Count/search admission has an independent raw scan budget; denied rows never count as readable results. */
 export async function scanReadableKnowledgeChunks(params: RetrievalAccess, perTypeLimit?: number) {
   const retainedHeads = new Map<string, string>();
   const retainedRoots = new Map<string, LineageRoot>();
@@ -493,11 +493,9 @@ export async function scanReadableKnowledgeChunks(params: RetrievalAccess, perTy
     let cursor: PermissionChunk | undefined;
     let admitted = 0;
     while (perTypeLimit === undefined || admitted < perTypeLimit) {
-      // Search is bounded by readable candidates, not the number of denied
-      // siblings before them. Complete count callers retain their own raw cap.
-      const take = perTypeLimit === undefined
-        ? Math.min(POSTGRES_SEARCH_WINDOW, KNOWLEDGE_SCAN_LIMIT - scanned + 1)
-        : POSTGRES_SEARCH_WINDOW;
+      // All source types share one raw budget. A nonadmitted sentinel distinguishes
+      // genuine exhaustion from an incomplete candidate window before hydration.
+      const take = Math.min(POSTGRES_SEARCH_WINDOW, KNOWLEDGE_SCAN_LIMIT - scanned + 1);
       const page: PermissionChunk[] = await prisma.knowledgeChunk.findMany({
         where: {
           workspaceId: params.workspaceId, accessDomain: { in: params.accessDomains }, sourceType,
@@ -511,7 +509,7 @@ export async function scanReadableKnowledgeChunks(params: RetrievalAccess, perTy
         orderBy: [{ createdAt: "desc" }, { chunkIndex: "asc" }, { id: "asc" }], take, select: chunkProjection,
       });
       scanned += page.length;
-      if (perTypeLimit === undefined && scanned > KNOWLEDGE_SCAN_LIMIT) scanLimitExceeded();
+      if (scanned > KNOWLEDGE_SCAN_LIMIT) scanLimitExceeded();
       const sourceIds = new Map<KnowledgeSourceType, string[]>();
       for (const chunk of page) {
         const ids = sourceIds.get(chunk.sourceType) ?? [];

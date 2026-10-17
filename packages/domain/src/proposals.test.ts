@@ -3168,9 +3168,9 @@ describe("proposal lineage integration", () => {
       actions: [{ id: "public-action", title: "Allowed", bodyMd: "Permitted body", status: "OPEN" }],
       adviceProcess: { id: "advice-process", requests: [{ id: "secret-request", status: "OPEN", messageMd: "Secret request body" }] },
     } as any);
-    vi.mocked(prisma.tension.findMany).mockResolvedValueOnce([{id: "secret-tension", title: "Hidden tension", bodyMd: "Secret tension body", status: "OPEN"}] as any);
-    vi.mocked(prisma.action.findMany).mockResolvedValueOnce([{id: "public-action", title: "Allowed", bodyMd: "Permitted body", status: "OPEN"}] as any);
-    vi.mocked(prisma.adviceRequest.findMany).mockResolvedValueOnce([{id: "secret-request", status: "OPEN", messageMd: "Secret request body"}] as any);
+    vi.mocked(prisma.tension.findMany).mockResolvedValueOnce([{id: "secret-tension", proposalId: "safe", title: "Hidden tension", bodyMd: "Secret tension body", status: "OPEN"}] as any);
+    vi.mocked(prisma.action.findMany).mockResolvedValueOnce([{id: "public-action", proposalId: "safe", title: "Allowed", bodyMd: "Permitted body", status: "OPEN"}] as any);
+    vi.mocked(prisma.adviceRequest.findMany).mockResolvedValueOnce([{id: "secret-request", process: {proposalId: "safe"}, status: "OPEN", messageMd: "Secret request body"}] as any);
     vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, kind, rows) => new Set(["Tension", "AdviceRequest"].includes(kind) ? [] : rows.map((row) => row.id)));
     try {
       const result = await getProposal(actor, { workspaceId: "ws-1", proposalId: "safe" });
@@ -3184,7 +3184,7 @@ describe("proposal lineage integration", () => {
     }
   });
 
-  it("preserves every permitted relation summary beyond 5000 with canonical page hydration", async () => {
+  it("rejects an incomplete exact detail after one bounded relation window", async () => {
     const {getProposal} = await import("./proposals");
     const rows = Array.from({length: 5101}, (_, i) => ({id: `r-${String(i).padStart(5, "0")}`, title: `Relation ${i}`, bodyMd: "Full canonical fixture", status: "OPEN"}));
     const page = ({where, take}: any) => Promise.resolve(rows.filter(row => !where.id?.gt || row.id > where.id.gt).slice(0, take));
@@ -3193,12 +3193,8 @@ describe("proposal lineage integration", () => {
     const tensions = vi.mocked(prisma.tension.findMany).mockImplementation(page as typeof prisma.tension.findMany);
     const requests = vi.mocked(prisma.adviceRequest.findMany).mockImplementation(page as unknown as typeof prisma.adviceRequest.findMany);
     try {
-      const result = await getProposal(actor, {workspaceId: "ws-1", proposalId: "many-relations"});
-      expect(result.actions).toHaveLength(5101);
-      expect(result.tensions).toHaveLength(5101);
-      expect(result.adviceProcess.requests).toHaveLength(5101);
-      expect(result.actions.at(-1)).toEqual({id: "r-05100", title: "Relation 5100", status: "OPEN"});
-      for (const mock of [actions, tensions, requests]) expect(mock.mock.calls.slice(-52).every(([query]) => query?.take === 100 && query.select === undefined && query.include === undefined)).toBe(true);
+      await expect(getProposal(actor, {workspaceId: "ws-1", proposalId: "many-relations"})).rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
+      for (const mock of [actions, tensions, requests]) expect(mock.mock.calls.at(-1)?.[0]?.take).toBe(200);
     } finally {
       actions.mockResolvedValue([]); tensions.mockResolvedValue([]); requests.mockResolvedValue([]);
     }

@@ -6,7 +6,8 @@ const mocks = vi.hoisted(() => ({
     financeImportApplication: { findMany: vi.fn(), create: vi.fn() }, financeTransaction: { create: vi.fn() }, auditLog: { create: vi.fn() } },
 }));
 vi.mock("@corgtex/shared", () => ({ prisma: mocks.prisma }));
-vi.mock("./source-lineage", () => ({ captureArtifactInputProof: vi.fn(async () => []), captureImmutableArtifactInputProof: vi.fn(async () => []),
+vi.mock("./source-lineage", () => ({
+  collectWorkItemReadSnapshot: vi.fn(async (_workspaceId, read) => read(mocks.prisma)), captureArtifactInputProof: vi.fn(async () => []), captureImmutableArtifactInputProof: vi.fn(async () => []),
   captureArtifactReadHeadObservation: vi.fn(async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()})),
   mergeLineageInputRoot: vi.fn((prior, root) => { if (prior && JSON.stringify(prior) !== JSON.stringify(root)) throw new Error("Changed fixture root"); return root; }),
   withArtifactCountReleaseSnapshot: vi.fn(async (_actor, _workspace, _roots, remote, finish) => {await remote(); return finish(mocks.prisma);}),

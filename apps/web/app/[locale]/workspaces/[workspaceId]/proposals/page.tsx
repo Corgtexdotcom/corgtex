@@ -1,3 +1,4 @@
+import { ProposalRelationNotice } from "./ProposalRelationNotice";
 import { AdviceRequestWindowNotice } from "@/lib/components/AdviceRequestWindowNotice";
 import { listAdviceRequestWindow, listCircles, listDeliberationEntriesForParents, listHumanMembers, listProposalDecisionStates, listProposals, requireWorkspaceMembership } from "@corgtex/domain";
 import type { ProposalDecisionState } from "@corgtex/domain";
@@ -381,8 +382,9 @@ export default async function ProposalsPage({
                 <>v{proposal.version}</>
               )}
             </div>
-            {(proposal.tensions?.length > 0 || proposal.actions?.length > 0) && (
+            {(proposal.tensions?.length > 0 || proposal.actions?.length > 0 || proposal.relationWindow?.complete === false) && (
               <div className="nr-tag-group">
+                <ProposalRelationNotice window={proposal.relationWindow} label={t("relationWindowLimited")} />
                 {proposal.tensions?.map((linkedTension) => (
                   <WorkItemRelationshipTag key={linkedTension.id} href={`/workspaces/${workspaceId}/tensions/${linkedTension.id}`}>
                     {t("tensionTag", { title: linkedTension.title })}
@@ -474,7 +476,8 @@ export default async function ProposalsPage({
             ) : (
               <span>v{proposal.version}</span>
             )}
-            {proposal.tensions?.map((linkedTension) => (
+            <ProposalRelationNotice window={proposal.relationWindow} label={t("relationWindowLimited")} />
+                {proposal.tensions?.map((linkedTension) => (
               <WorkItemRelationshipTag key={linkedTension.id} href={`/workspaces/${workspaceId}/tensions/${linkedTension.id}`}>
                 {t("tensionTag", { title: linkedTension.title })}
               </WorkItemRelationshipTag>

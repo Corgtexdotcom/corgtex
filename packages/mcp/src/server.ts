@@ -2519,6 +2519,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           responsibleMemberId: item.responsibleMemberId,
           responsibleMemberName: item.responsibleMemberName,
           responsiblePerson: item.responsiblePerson,
+          relationWindow: item.relationWindow,
           adviceRequestCount: item.adviceRequestCount,
           activeAdviceRequestCount: item.activeAdviceRequestCount,
           inputRequestCount: item.inputRequestCount,

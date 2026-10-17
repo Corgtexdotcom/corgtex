@@ -944,21 +944,20 @@ describe("runSlackAgent", () => {
   });
 
 
-  it("finds readable Slack context after 5001 denied candidates", async () => {
+  it("fails explicitly when Slack context exhausts its raw candidate budget", async () => {
     const hidden = Array.from({ length: 5_001 }, (_, index) => ({ id: `unknown-${index}`, title: "UNKNOWN body", status: "OPEN" }));
     for (const row of hidden) lineage.unknown.add(row.id);
     const rows = [...hidden, { id: "readable-tail", title: "Readable tail", status: "OPEN" }];
-    extractMock.mockResolvedValueOnce({ output: { intent: "brief", confidence: 0.9 } });
     prismaMock.action.findMany.mockImplementation(async ({ take, skip = 0, cursor }) => {
       const start = cursor ? rows.findIndex(row => row.id === cursor.id) + skip : skip;
       return rows.slice(start, start + take);
     });
     const { runSlackAgent } = await import("./slack-agent");
-    await runTrustedSlackAgent(runSlackAgent, { ...basePayload(), source: "app_mention" });
-    expect(prismaMock.action.findMany).toHaveBeenCalledTimes(101);
-    expect(extractMock).toHaveBeenCalled();
-    expect(JSON.stringify(extractMock.mock.calls)).toContain("Readable tail");
-    expect(JSON.stringify(extractMock.mock.calls)).not.toContain("UNKNOWN body");
+    await expect(runTrustedSlackAgent(runSlackAgent, { ...basePayload(), source: "app_mention" })).rejects.toMatchObject({code: "SLACK_CONTEXT_SCAN_LIMIT"});
+    expect(prismaMock.action.findMany).toHaveBeenCalledTimes(5);
+    expect(prismaMock.action.findMany.mock.calls.at(-1)![0].take).toBe(1);
+    expect(extractMock).not.toHaveBeenCalled(); expect(chatMock).not.toHaveBeenCalled();
+    expect(deliverSlackAgentResponseMock).not.toHaveBeenCalled();
   });
 
   it("keeps an unknown newly created result out of both the reply and the whole-run receipt", async () => {
@@ -1078,6 +1077,43 @@ describe("runSlackAgent", () => {
       const outcome = await runTrustedSlackAgent(runSlackAgent, { ...basePayload(), source: "app_mention", prompt: "help" });
       expect(outcome.resultJson.delivery).toEqual({ delivered: false, error: "Slack delivery failed." });
     });
+  });
+
+  it.each(["app_mention", "slash_command"] as const)("bounds private audience context without denying its owner (%s)", async source => {
+    const rows = Array.from({length: 201}, (_, index) => ({id: `private-window-${index}`, title: `Private title ${index}`, status: "OPEN"}));
+    rows.forEach(row => lineage.privateIds.add(row.id));
+    prismaMock.action.findMany.mockImplementation(async ({take, skip = 0, cursor}) => {
+      const start = cursor ? rows.findIndex(row => row.id === cursor.id) + skip : skip;
+      return rows.slice(start, start + take);
+    });
+    extractMock.mockResolvedValueOnce({output: {intent: "brief", confidence: 0.9}});
+    const {runSlackAgent} = await import("./slack-agent");
+    const run = runTrustedSlackAgent(runSlackAgent, {...basePayload(), source});
+    if (source === "app_mention") {
+      await expect(run).rejects.toMatchObject({code: "SLACK_CONTEXT_SCAN_LIMIT"});
+      expect(prismaMock.action.findMany).toHaveBeenCalledTimes(5);
+      expect(extractMock).not.toHaveBeenCalled(); expect(deliverSlackAgentResponseMock).not.toHaveBeenCalled();
+    } else {
+      await run;
+      expect(prismaMock.action.findMany).toHaveBeenCalledOnce();
+      expect(extractMock.mock.calls[0][0].input).toContain("Private title 0");
+      expect(deliverSlackAgentResponseMock).toHaveBeenCalledOnce();
+    }
+  });
+
+  it.each([false, true])("distinguishes exhausted Slack context at the raw boundary (readable=%s)", async readable => {
+    const rows = Array.from({length: 200}, (_, index) => ({id: `boundary-${index}`, title: `Boundary title ${index}`, status: "OPEN"}));
+    rows.slice(0, readable ? 199 : 200).forEach(row => lineage.unknown.add(row.id));
+    prismaMock.action.findMany.mockImplementation(async ({take, skip = 0, cursor}) => {
+      const start = cursor ? rows.findIndex(row => row.id === cursor.id) + skip : skip;
+      return rows.slice(start, start + take);
+    });
+    extractMock.mockResolvedValueOnce({output: {intent: "brief", confidence: 0.9}});
+    const {runSlackAgent} = await import("./slack-agent");
+    await runTrustedSlackAgent(runSlackAgent, {...basePayload(), source: "app_mention"});
+    expect(prismaMock.action.findMany).toHaveBeenCalledTimes(5);
+    expect(prismaMock.action.findMany.mock.calls.at(-1)![0].take).toBe(1);
+    expect(JSON.parse(extractMock.mock.calls[0][0].input).openActions).toHaveLength(readable ? 1 : 0);
   });
 
 });

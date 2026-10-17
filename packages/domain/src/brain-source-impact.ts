@@ -50,18 +50,22 @@ export async function findSourceArticleImpacts(
   const impacts = new Map(uniqueIds.map((sourceId) => [sourceId, { sourceId, articles: [] as ArticleLink[] }]));
   if (uniqueIds.length === 0) return impacts;
 
+  // Match the same three direct link sets classified below before hydration.
+  // Roots are not recursively expanded by currentArtifactInputRootsBatch.
   let cursor: string | undefined;
   for (;;) {
     const page = await tx.$queryRaw<Array<{id: string; candidate: boolean}>>(Prisma.sql`
-      SELECT a.id, (a."sourceIds" && ARRAY[${Prisma.join(uniqueIds)}]::text[]
-        OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(a."derivationJson"->'sources') = 'array'
-          THEN a."derivationJson"->'sources' ELSE '[]'::jsonb END) s WHERE s->>'sourceId' IN (${Prisma.join(uniqueIds)}))
-        OR CASE WHEN jsonb_typeof(h."rootsJson") = 'array' THEN jsonb_array_length(h."rootsJson") > 0 ELSE false END) AS candidate
+      SELECT a.id, true AS candidate
       FROM "BrainArticle" a
       LEFT JOIN LATERAL (SELECT "rootsJson" FROM "ArtifactInputLineage"
         WHERE "workspaceId" = ${workspaceId} AND "artifactType" = 'BrainArticle' AND "artifactId" = a.id
         ORDER BY revision DESC LIMIT 1) h ON true
       WHERE a."workspaceId" = ${workspaceId} AND a."archivedAt" IS NULL
+        AND (a."sourceIds" && ARRAY[${Prisma.join(uniqueIds)}]::text[]
+          OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(a."derivationJson"->'sources') = 'array'
+            THEN a."derivationJson"->'sources' ELSE '[]'::jsonb END) s WHERE s->>'sourceId' IN (${Prisma.join(uniqueIds)}))
+          OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(h."rootsJson") = 'array'
+            THEN h."rootsJson" ELSE '[]'::jsonb END) r WHERE r->>'kind' = 'BrainSource' AND r->>'id' IN (${Prisma.join(uniqueIds)})))
         ${cursor ? Prisma.sql`AND a.id > ${cursor}` : Prisma.empty}
       ORDER BY a.id LIMIT 100
     `);

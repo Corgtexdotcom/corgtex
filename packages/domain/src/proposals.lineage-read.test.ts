@@ -157,3 +157,17 @@ describe("Proposal reader source admission", () => {
     expect(changed).toBe(1);
   });
 });
+
+it("bounds all selected proposal relation candidates to one shared window per family", async () => {
+  await seed();
+  const rows = Array.from({length: 5001}, (_, index) => ({id: `unknown-${String(index).padStart(5, "0")}`, workspaceId,
+    proposalId: "c-visible", title: "UNPROVED RELATION", bodyMd: "Unknown", authorUserId: "beta", status: "OPEN", isPrivate: false}));
+  vi.mocked(fixture.prisma.action.findMany).mockImplementation(async (args: any) => rows
+    .filter(row => !args.where?.id?.gt || row.id > args.where.id.gt).slice(0, args.take));
+  const result = await listProposals(alpha, workspaceId, {take: 20});
+  const queries = vi.mocked(fixture.prisma.action.findMany).mock.calls.filter(([args]: any[]) => args.take);
+  expect(queries).toHaveLength(1);
+  expect(queries[0][0].take).toBe(200);
+  expect(result.items.every(row => row.relationWindow.actionsComplete === false)).toBe(true);
+  expect(result.items.every(row => row.actions.length === 0)).toBe(true);
+});

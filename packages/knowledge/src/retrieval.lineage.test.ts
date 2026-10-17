@@ -561,17 +561,15 @@ describe("child lineage admission before retrieval windows", () => {
     expect(f.gateway.rerank.mock.calls[0][0].documents).toHaveLength(1);
   });
 
-  it("replenishes search beyond 5000 denied children without expanding the readable candidate window", async () => {
+  it("fails explicitly when knowledge search exhausts its raw candidate budget", async () => {
     f.domains.set("bob:ws-1", ["WORKSPACE"]);
-    const chunks = crowdedChildren("ws-1", 5001);
-    const results = await searchIndexedKnowledge({actor: bob, workspaceId: "ws-1", query: "policy"});
-    expect(results.map(row => row.chunkId)).toEqual(chunks.slice(5001).map(row => row.id));
-    const pages = f.prisma.knowledgeChunk.findMany.mock.calls.filter(([query]) => query.take === 500);
+    crowdedChildren("ws-1", 5001);
+    await expect(searchIndexedKnowledge({actor: bob, workspaceId: "ws-1", query: "policy"})).rejects.toMatchObject({code: "KNOWLEDGE_SCAN_LIMIT"});
+    const pages = f.prisma.knowledgeChunk.findMany.mock.calls.filter(([query]) => Array.isArray(query.orderBy) && query.orderBy.length === 3);
     expect(pages).toHaveLength(11);
-    expect(f.gateway.rerank.mock.calls[0][0].documents).toHaveLength(2);
-    expect(JSON.stringify(f.gateway.rerank.mock.calls)).not.toContain("PRIVATE");
-    const roots = await getKnowledgeSearchInputRoots(bob, "ws-1", results);
-    expect(roots.filter(root => root.kind === "KnowledgeChunk").map(root => root.id)).toEqual(chunks.slice(5001).map(row => row.id));
+    expect(pages.at(-1)![0].take).toBe(1);
+    expect(f.gateway.embed).not.toHaveBeenCalled();
+    expect(f.gateway.rerank).not.toHaveBeenCalled();
   });
 
   it.each([false, true])("preserves readable candidate ceilings and source-type windows (explicit types: %s)", async explicitTypes => {

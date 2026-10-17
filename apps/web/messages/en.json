@@ -2721,6 +2721,7 @@
     "usageSummary": "Usage {inTokens} in · {outTokens} out · {latency} ms · {cost}"
   },
   "proposals": {
+    "relationWindowLimited": "Related items shown are a limited sample; more may exist.",
     "aboutCreated": "Created:",
     "aboutRelated": "Related:",
     "aboutSummary": "Summary:",

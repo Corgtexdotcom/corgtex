@@ -92,6 +92,7 @@ vi.mock("./source-lineage", async (original) => ({
     source.sourceType === "CONVERSATION" || source.sourceType === "CONVERSATION_INSIGHT"
       || ["chat-demand", "daily-batch", "daily-digest", "daily-question"].includes(source.channel ?? ""),
   captureArtifactInputProof: vi.fn().mockResolvedValue([]),
+  collectWorkItemReadSnapshot: vi.fn(async (_workspaceId, collect) => collect(prismaMock)),
   withArtifactCountReleaseSnapshot: vi.fn(async (_actor, _workspaceId, _roots, _remote, finish) => finish({})),
   recordArtifactInputLineage: vi.fn(),
   copyArtifactInputLineage: vi.fn().mockResolvedValue(true),
@@ -694,7 +695,7 @@ describe("brain source ingestion", () => {
       skip: 0,
     });
 
-    expect(resolveKnowledgeAccessDomains).toHaveBeenCalledWith(ownerActor, "ws-1");
+    expect(resolveKnowledgeAccessDomains).toHaveBeenCalledWith(ownerActor, "ws-1", prismaMock);
     const where = {
       workspaceId: "ws-1",
       accessDomain: { in: ["WORKSPACE"] },

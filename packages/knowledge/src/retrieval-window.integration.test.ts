@@ -7,7 +7,7 @@ import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { createArticle } from "../../domain/src/brain";
 import { lineageContentFingerprint, recordArtifactInputLineage } from "../../domain/src/source-lineage";
 import { syncBrainArticleKnowledge } from "./chunks";
-import { answerKnowledgeQuestion, getKnowledgeSearchInputRoots, searchIndexedKnowledge } from "./retrieval";
+import { answerKnowledgeQuestion, searchIndexedKnowledge } from "./retrieval";
 
 const usage = {provider: "fixture", model: "fixture", inputTokens: 1, outputTokens: 0, latencyMs: 0,
   estimatedCostUsd: "0", rawProviderCostUsd: "0", billableCostUsd: "0"};
@@ -47,24 +47,20 @@ async function fixture(deniedCount = 5001) {
   return {workspaceId: workspace.id, member, actor, first, tail};
 }
 
-it("replenishes search and answer beyond 5001 denied canonical chunks with bounded pages", async () => {
+it("rejects incomplete raw search and answer windows before model dispatch", async () => {
   const f = await fixture();
   const reads = vi.spyOn(prisma.knowledgeChunk, "findMany");
   const query = {actor: f.actor, workspaceId: f.workspaceId, query: "policy", limit: 1};
-  const result = await searchIndexedKnowledge(query);
-  expect(result.map(row => row.chunkId)).toEqual([f.first.id]);
-  const roots = await getKnowledgeSearchInputRoots(f.actor, f.workspaceId, result);
-  expect(roots.filter(root => root.kind === "KnowledgeChunk").map(root => root.id).sort()).toEqual([f.first.id, f.tail.id].sort());
+  await expect(searchIndexedKnowledge(query)).rejects.toMatchObject({code: "KNOWLEDGE_SCAN_LIMIT"});
   const pages = reads.mock.calls.map(([args]) => args).filter(args => Array.isArray(args?.orderBy) && args.orderBy.length === 3);
   expect(pages).toHaveLength(11);
-  expect(pages.every(args => args?.take === 500)).toBe(true);
-  expect(await searchIndexedKnowledge(query)).toEqual(result);
-  expect(defaultModelGateway.rerank).toHaveBeenCalledOnce();
-  const answer = await answerKnowledgeQuestion({actor: f.actor, workspaceId: f.workspaceId, question: "policy", limit: 1});
-  expect(answer.citations.map(row => row.chunkId)).toEqual([f.first.id]);
-  expect(JSON.stringify(vi.mocked(defaultModelGateway.rerank).mock.calls)).not.toContain("DENIED_CANARY");
-  expect(JSON.stringify(vi.mocked(defaultModelGateway.chat).mock.calls)).not.toContain("DENIED_CANARY");
-  console.info("retrieval denied-window scale", {denied: 5001, pages: pages.length, readable: roots.filter(root => root.kind === "KnowledgeChunk").length});
+  expect(pages.slice(0, -1).every(args => args?.take === 500)).toBe(true);
+  expect(pages.at(-1)?.take).toBe(1);
+  await expect(answerKnowledgeQuestion({actor: f.actor, workspaceId: f.workspaceId, question: "policy", limit: 1}))
+    .rejects.toMatchObject({code: "KNOWLEDGE_SCAN_LIMIT"});
+  expect(defaultModelGateway.embed).not.toHaveBeenCalled();
+  expect(defaultModelGateway.rerank).not.toHaveBeenCalled();
+  expect(defaultModelGateway.chat).not.toHaveBeenCalled();
 }, 120_000);
 
 it.each(["body", "head", "caller epoch"] as const)("withholds original candidates when %s changes while replenishing later pages", async mode => {

@@ -1,4 +1,4 @@
-import { WorkItemReadRelease } from "./work-item-readable-page";
+import { WorkItemReadRelease, readWorkItemListSnapshot } from "./work-item-readable-page";
 import { getReadableBrainArticleVariant, requestBrainArticleVariant } from "./brain-article-variants";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { captureReadableDigestInputs, DigestReadRelease, mergeArtifactInputProofs } from "./digest-lineage";
@@ -37,11 +37,12 @@ import {
 // ---------------------------------------------------------------------------
 
 async function readableDiscussionAuthor<T extends { id: string; userId: string; user: { displayName: string | null; email: string } }>(
-  actor: AppActor, workspaceId: string, member: T | null, release?: DigestReadRelease,
+  actor: AppActor, workspaceId: string, member: T | null, release?: DigestReadRelease | WorkItemReadRelease,
 ) {
   if (!member) return null;
   const input = { ...member, user: { ...member.user, id: member.userId } };
   const capture = () => captureReadableDigestInputs({ actor, workspaceId, kind: "Member", records: [input],
+    db: release && "db" in release ? release.db : undefined,
     additionalInputs: (row) => [{ kind: "User", id: row.userId, snapshot: row.user }] });
   const admitted = release ? await release.observeRead(capture) : await capture();
   release?.add(admitted.roots);
@@ -1006,60 +1007,62 @@ export async function listSources(actor: AppActor, params: {
   skip?: number;
   archiveFilter?: ArchiveFilter;
 }) {
-  const accessDomains = await resolveKnowledgeAccessDomains(actor, params.workspaceId);
+  params = Object.freeze({ ...params });
+  return readWorkItemListSnapshot(actor, params.workspaceId, async release => {
+    const accessDomains = await resolveKnowledgeAccessDomains(actor, params.workspaceId, release.db);
 
-  const take = params.take ?? 50;
-  const skip = params.skip ?? 0;
+    const take = params.take ?? 50;
+    const skip = params.skip ?? 0;
 
-  const where: Prisma.BrainSourceWhereInput = {
-    workspaceId: params.workspaceId,
-    ...(params.sourceId ? { id: params.sourceId } : {}),
-    accessDomain: { in: accessDomains },
-    ...archiveFilterWhere(params.archiveFilter),
-  };
+    const where: Prisma.BrainSourceWhereInput = {
+      workspaceId: params.workspaceId,
+      ...(params.sourceId ? { id: params.sourceId } : {}),
+      accessDomain: { in: accessDomains },
+      ...archiveFilterWhere(params.archiveFilter),
+    };
 
-  if (params.absorbed === true) {
-    where.absorbedAt = { not: null };
-  } else if (params.absorbed === false) {
-    where.absorbedAt = null;
-  }
+    if (params.absorbed === true) {
+      where.absorbedAt = { not: null };
+    } else if (params.absorbed === false) {
+      where.absorbedAt = null;
+    }
 
-  const release = new DigestReadRelease(actor, params.workspaceId);
-  const batchSize = 100;
-  let cursor: string | undefined;
-  let total = 0;
-  const items: Prisma.BrainSourceGetPayload<{ include: {
-    authorMember: { include: { user: { select: { displayName: true; email: true } } } };
-  } }>[] = [];
-  for (;;) {
-    const candidates = await prisma.brainSource.findMany({
-      where,
-      include: {
-        authorMember: {
-          include: {
-            user: { select: { displayName: true, email: true } },
+    const batchSize = 100;
+    let cursor: string | undefined;
+    let total = 0;
+    const items: Prisma.BrainSourceGetPayload<{ include: {
+      authorMember: { include: { user: { select: { displayName: true; email: true } } } };
+    } }>[] = [];
+    for (;;) {
+      const candidates = await release.db.brainSource.findMany({
+        where,
+        include: {
+          authorMember: {
+            include: {
+              user: { select: { displayName: true, email: true } },
+            },
           },
         },
-      },
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      take: batchSize,
-      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-    });
-    if (candidates.length === 0) break;
-    const admitted = (await release.capture("BrainSource", candidates)).records;
-    for (const source of admitted) {
-      if (total >= skip && items.length < take) {
-        const authorMember = await readableDiscussionAuthor(actor, params.workspaceId, source.authorMember, release);
-        items.push({...source, authorMember: authorMember ? {...authorMember,
-          user: {displayName: authorMember.user.displayName, email: authorMember.user.email}} : null,
-          authorMemberId: authorMember?.id ?? null});
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: batchSize,
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      });
+      if (candidates.length === 0) break;
+      const admitted = (await release.capture("BrainSource", candidates)).records;
+      for (const source of admitted) {
+        if (total >= skip && items.length < take) {
+          const authorMember = await readableDiscussionAuthor(actor, params.workspaceId, source.authorMember, release);
+          items.push({...source, authorMember: authorMember ? {...authorMember,
+            user: {displayName: authorMember.user.displayName, email: authorMember.user.email}} : null,
+            authorMemberId: authorMember?.id ?? null});
+        }
+        total++;
       }
-      total++;
+      if (candidates.length < batchSize) break;
+      cursor = candidates[candidates.length - 1].id;
     }
-    if (candidates.length < batchSize) break;
-    cursor = candidates[candidates.length - 1].id;
-  }
-  return release.finish({ items, total, take, skip });
+    return { items, total, take, skip };
+  });
 }
 
 export async function markSourceAbsorbed(_actor: AppActor, params: {

@@ -421,46 +421,52 @@ function workItemOrderBy(sort: WorkItemSort | undefined): Prisma.ProposalOrderBy
   return [{ priority: "desc" }, { createdAt: "desc" }, { id: "desc" }];
 }
 
+type ProposalRelationWindow = {
+  actions: import("@prisma/client").Action[];
+  tensions: import("@prisma/client").Tension[];
+  requests: Array<import("@prisma/client").AdviceRequest & {process: {proposalId: string | null}}>;
+};
+async function loadProposalRelationWindow(actor: AppActor, workspaceId: string, ids: string[], membership: MembershipSummary | null, release: WorkItemReadRelease): Promise<ProposalRelationWindow> {
+  if (!ids.length) return {actions: [], tensions: [], requests: []};
+  const [actions, tensions, requests] = await Promise.all([
+    release.db.action.findMany({where: {workspaceId, proposalId: {in: ids}, ...privacyFilter(actor, membership)}, orderBy: {id: "asc"}, take: 200}),
+    release.db.tension.findMany({where: {workspaceId, proposalId: {in: ids}, ...privacyFilter(actor, membership)}, orderBy: {id: "asc"}, take: 200}),
+    release.db.adviceRequest.findMany({where: {workspaceId, process: {workspaceId, proposalId: {in: ids}}},
+      include: {process: {select: {proposalId: true}}}, orderBy: {id: "asc"}, take: 200}),
+  ]);
+  return {actions, tensions, requests};
+}
+
 async function readableProposalRelations<T extends {
   id: string; circleId: string | null; ownerMemberId: string | null; authorUserId: string; meetingId: string | null;
   circle: ({ id: string; workspaceId: string; name: string } & Record<string, unknown>) | null;
   ownerMember: ({ id: string; workspaceId: string; isActive: boolean; user: { id: string; email: string; displayName: string | null } } & Record<string, unknown>) | null;
   author: ({ id: string; email: string; displayName: string | null } & Record<string, unknown>) | null;
-}>(actor: AppActor, workspaceId: string, proposal: T, membership: MembershipSummary | null, release: WorkItemReadRelease) {
+}>(actor: AppActor, workspaceId: string, proposal: T, membership: MembershipSummary | null, release: WorkItemReadRelease, window: ProposalRelationWindow) {
   async function capture<R extends {id: string}>(kind: import("./source-lineage").LineageKind, rows: R[]) {
     const captured = await release.capture(kind,rows);
     release.add(captured.roots);
     return captured.records;
   }
-  async function relations<R extends {id: string}, S>(kind: "Action" | "Tension" | "AdviceRequest",
-    load: (after: string | undefined) => Promise<R[]>, project: (row: R) => S) {
+  async function relations<R extends {id: string}, S>(kind: "Action" | "Tension" | "AdviceRequest", rows: R[], project: (row: R) => S) {
     const result: S[] = [];
-    let after: string | undefined;
-    for (;;) {
-      const rows = await load(after);
-      invariant(rows.length <= 100 && rows.every(row => !after || row.id > after),
-        409, "SOURCE_CHANGED", "Proposal relations changed during pagination.");
-      const next = rows.at(-1)?.id;
-      // Negative discovery only: every surviving canonical row still passes the
-      // full evaluator and retains its original proof through the final release.
-      const heads = await currentArtifactInputRootsBatch(release.db, workspaceId, kind, rows);
-      const candidates = rows.filter(row => heads.get(row.id) != null);
+    for (let offset = 0; offset < rows.length; offset += 100) {
+      const batch = rows.slice(offset, offset + 100);
+      const heads = await currentArtifactInputRootsBatch(release.db, workspaceId, kind, batch);
+      const candidates = batch.filter(row => heads.get(row.id) != null);
       const admitted = kind === "AdviceRequest" ? await capture(kind, candidates) : await release.admit(kind, candidates);
       result.push(...admitted.map(project));
-      if (rows.length < 100) break;
-      after = next;
     }
     return result;
   }
-  const tensions = await relations("Tension", after => release.db.tension.findMany({where: {
-    workspaceId, proposalId: proposal.id, ...privacyFilter(actor, membership), ...(after ? {id: {gt: after}} : {}),
-  }, orderBy: {id: "asc"}, take: 100}), row => ({id: row.id, title: row.title, status: row.status}));
-  const actions = await relations("Action", after => release.db.action.findMany({where: {
-    workspaceId, proposalId: proposal.id, ...privacyFilter(actor, membership), ...(after ? {id: {gt: after}} : {}),
-  }, orderBy: {id: "asc"}, take: 100}), row => ({id: row.id, title: row.title, status: row.status}));
-  const requests = await relations("AdviceRequest", after => release.db.adviceRequest.findMany({where: {
-    workspaceId, process: {workspaceId, proposalId: proposal.id}, ...(after ? {id: {gt: after}} : {}),
-  }, orderBy: {id: "asc"}, take: 100}), row => ({status: row.status}));
+  const tensions = await relations("Tension", window.tensions.filter(row => row.proposalId === proposal.id), row => ({id: row.id, title: row.title, status: row.status}));
+  const actions = await relations("Action", window.actions.filter(row => row.proposalId === proposal.id), row => ({id: row.id, title: row.title, status: row.status}));
+  const requests = await relations("AdviceRequest", window.requests.filter(row => row.process.proposalId === proposal.id), row => ({status: row.status}));
+  const relationWindow = {scope: "WINDOW" as const, actionsComplete: window.actions.length < 200,
+    tensionsComplete: window.tensions.length < 200, adviceRequestsComplete: window.requests.length < 200,
+    complete: window.actions.length < 200 && window.tensions.length < 200 && window.requests.length < 200,
+    actionCount: actions.length, tensionCount: tensions.length, adviceRequestCount: requests.length,
+    activeAdviceRequestCount: requests.filter(row => row.status === "ACTIVE").length};
   const meeting = proposal.meetingId ? await release.db.meeting.findFirst({where: {id: proposal.meetingId, workspaceId}}) : null;
   const [circles, owners, authors, ownerUsers, meetings] = await Promise.all([
     capture("Circle", proposal.circle?.workspaceId === workspaceId ? [proposal.circle] : []),
@@ -477,7 +483,7 @@ async function readableProposalRelations<T extends {
     : {id: "", email: "", displayName: null};
   return {...proposal, circleId: circle ? proposal.circleId : null, ownerMemberId: ownerMember ? proposal.ownerMemberId : null,
     authorUserId: author.id, meetingId: meetings.length ? proposal.meetingId : null, circle, ownerMember, author,
-    tensions, actions, adviceProcess: {requests}};
+    tensions, actions, adviceProcess: {requests}, relationWindow};
 }
 
 export async function listProposals(actor: AppActor, workspaceId: string, opts?: ListProposalsOptions) {
@@ -567,7 +573,8 @@ export async function listProposals(actor: AppActor, workspaceId: string, opts?:
     }):[];
     const byId=new Map(hydrated.map(row=>[row.id,row]));
     const selected=page.items.flatMap(row=>{const loaded=byId.get(row.id);return loaded?[{...loaded,...row}]:[];});
-    const items=await Promise.all(selected.map(proposal=>readableProposalRelations(actor,workspaceId,proposal,membership,release)));
+    const window = await loadProposalRelationWindow(actor, workspaceId, selected.map(row => row.id), membership, release);
+    const items=await Promise.all(selected.map(proposal=>readableProposalRelations(actor,workspaceId,proposal,membership,release,window)));
     invariant(items.length === page.items.length,409,"SOURCE_CHANGED","Selected proposals changed within collection.");
     return {items,total:page.total,take,skip};
   });
@@ -601,7 +608,10 @@ export async function getProposal(actor: AppActor, params: {
   invariant(proposal, 404, "NOT_FOUND", "Proposal not found.");
   const release = new WorkItemReadRelease(actor, params.workspaceId);
   invariant((await release.admit("Proposal", [proposal])).length === 1, 404, "NOT_FOUND", "Proposal not found.");
-  return release.finish(await readableProposalRelations(actor, params.workspaceId, proposal, membership, release));
+  const window = await loadProposalRelationWindow(actor, params.workspaceId, [proposal.id], membership, release);
+  invariant(window.actions.length < 200 && window.tensions.length < 200 && window.requests.length < 200,
+    409, "SOURCE_READ_SCAN_LIMIT", "Complete proposal relationships are unavailable in this window; use the qualified proposal list.");
+  return release.finish(await readableProposalRelations(actor, params.workspaceId, proposal, membership, release, window));
 }
 
 type SourceTensionForLinking = NonNullable<Awaited<ReturnType<typeof loadVisibleSourceTension>>>;

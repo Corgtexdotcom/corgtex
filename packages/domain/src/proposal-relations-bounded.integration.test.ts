@@ -1,3 +1,5 @@
+import {AsyncResource} from "node:async_hooks";
+import {WorkItemReadRelease} from "./work-item-readable-page";
 import {randomUUID} from "node:crypto";
 import {afterEach, beforeEach, expect, it, vi} from "vitest";
 import {Prisma} from "@prisma/client";
@@ -57,7 +59,7 @@ it("transfers only actual latest full heads, never older valid histories or a fo
   expect(await readableArtifactIds(f.actor, f.workspaceId, "Proposal", [f.proposal])).toEqual(new Set());
 });
 
-it("replenishes all three relation collections beyond 5000 and releases full list/detail projections", async () => {
+it("bounds all three list relation families beyond 5000 and rejects incomplete exact detail", async () => {
   const f = await fixture();
   const process = await prisma.adviceProcess.create({data: {workspaceId: f.workspaceId, proposalId: f.proposal.id, authorMemberId: f.member.id, subjectId: f.proposal.id}});
   const hidden = Array.from({length: 5001}, (_, i) => ({id: `a-${String(i).padStart(5, "0")}`, workspaceId: f.workspaceId,
@@ -89,59 +91,48 @@ it("replenishes all three relation collections beyond 5000 and releases full lis
     },
   })), options)) as typeof prisma.$transaction);
   const list = await listProposals(f.actor, f.workspaceId, {take: 1});
-  const detail = await getProposal(f.actor, {workspaceId: f.workspaceId, proposalId: f.proposal.id});
-  for (const result of [list.items[0], detail]) {
-    expect(result.actions).toEqual([{id: action.id, title: action.title, status: action.status}]);
-    expect(result.tensions).toEqual([{id: tension.id, title: tension.title, status: tension.status}]);
-    expect(result.adviceProcess.requests).toEqual([{status: request.status}]);
-  }
+  expect(list.items[0]).toMatchObject({actions: [], tensions: [], adviceProcess: {requests: []},
+    relationWindow: {scope: "WINDOW", complete: false, actionsComplete: false, tensionsComplete: false, adviceRequestsComplete: false}});
+  await expect(getProposal(f.actor, {workspaceId: f.workspaceId, proposalId: f.proposal.id}))
+    .rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
   for (const [index, kind] of (["action", "tension", "adviceRequest"] as const).entries()) {
     const globalPages = queries[index].mock.calls.map(([args]) => args).filter(args => args?.take !== undefined);
     const snapshotPages = transactionPages[kind].filter(args => args?.take !== undefined);
-    // Detail uses the global client; list discovery uses the RR client. Each
-    // must traverse all 5,002 candidates in 51 canonical pages.
-    expect(globalPages).toHaveLength(51);
-    expect(snapshotPages).toHaveLength(51);
-    expect([...globalPages, ...snapshotPages].every(args => args?.take === 100 && !args.select && !args.include && args.where?.workspaceId === f.workspaceId)).toBe(true);
+    expect(globalPages).toHaveLength(1);
+    expect(snapshotPages).toHaveLength(1);
+    expect([...globalPages, ...snapshotPages].every(args => args?.take === 200 && !args.select && args.where?.workspaceId === f.workspaceId)).toBe(true);
   }
-  // Change a previously admitted relation during a later collection read. A
-  // fresh valid-looking body cannot replace the original permission history.
-  queries[2].mockRestore();
-  const originalRead = prisma.adviceRequest.findMany.bind(prisma.adviceRequest);
-  let changed = false;
-  vi.spyOn(prisma.adviceRequest, "findMany").mockImplementation((...args) => {
-    if (!changed) {
-      changed = true;
-      return (async () => {
-        await prisma.action.update({where: {id: action.id}, data: {archivedAt: new Date()}});
-        await prisma.action.update({where: {id: action.id}, data: {archivedAt: null}});
-        return originalRead(...args);
-      })() as ReturnType<typeof originalRead>;
-    }
-    return originalRead(...args);
-  });
-  await expect(getProposal(f.actor, {workspaceId: f.workspaceId, proposalId: f.proposal.id})).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+
 });
 
-it.each(["head", "membership"] as const)("rejects a %s change after relation admission before detail release", async change => {
+it.each([["head", "detail"], ["membership", "detail"], ["head", "list"], ["membership", "list"]] as const)("rejects a %s change after relation admission before %s release", async (change, surface) => {
   const f = await fixture();
   const action = await prisma.action.create({data: {workspaceId: f.workspaceId, proposalId: f.proposal.id,
     authorUserId: f.user.id, title: "Original action", bodyMd: "Original", isPrivate: false}});
   await prisma.$transaction(tx => recordArtifactInputLineage({tx, actor: f.actor, workspaceId: f.workspaceId,
     artifact: {kind: "Action", id: action.id}, content: action, origin: "HUMAN_ORIGINAL", inputs: []}));
-  const read = prisma.adviceRequest.findMany.bind(prisma.adviceRequest);
+  await getProposal(f.actor, {workspaceId: f.workspaceId, proposalId: f.proposal.id});
+  await listProposals(f.actor, f.workspaceId, {take: 1});
+  const writer = new AsyncResource("independent-proposal-withdrawal");
+  const original = WorkItemReadRelease.prototype.admit;
   let changed = false;
-  vi.spyOn(prisma.adviceRequest, "findMany").mockImplementation((...args) => (async () => {
-    if (!changed) {
+  vi.spyOn(WorkItemReadRelease.prototype, "admit").mockImplementation((async function(this: WorkItemReadRelease, kind: "Action" | "Proposal" | "Tension", rows: Array<{id: string}>) {
+    const admitted = await original.call(this, kind, rows);
+    if (!changed && kind === "Action" && admitted.some(row => row.id === action.id)) {
       changed = true;
-      if (change === "head") await prisma.$transaction(tx => recordArtifactInputLineage({tx, actor: f.actor, workspaceId: f.workspaceId,
-        artifact: {kind: "Action", id: action.id}, content: action, origin: "HUMAN_ORIGINAL", inputs: []}));
-      else {
-        await prisma.member.update({where: {id: f.member.id}, data: {isActive: false}});
-        await prisma.member.update({where: {id: f.member.id}, data: {isActive: true}});
-      }
+      await writer.runInAsyncScope(async () => {
+        if (change === "head") await prisma.$transaction(tx => recordArtifactInputLineage({tx, actor: f.actor, workspaceId: f.workspaceId,
+          artifact: {kind: "Action", id: action.id}, content: action, origin: "HUMAN_ORIGINAL", inputs: []}));
+        else {
+          await prisma.member.update({where: {id: f.member.id}, data: {isActive: false}});
+          await prisma.member.update({where: {id: f.member.id}, data: {isActive: true}});
+        }
+      });
     }
-    return read(...args);
-  })() as ReturnType<typeof read>);
-  await expect(getProposal(f.actor, {workspaceId: f.workspaceId, proposalId: f.proposal.id})).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+    return admitted;
+  }) as typeof original);
+  await expect(surface === "list" ? listProposals(f.actor, f.workspaceId, {take: 1})
+    : getProposal(f.actor, {workspaceId: f.workspaceId, proposalId: f.proposal.id})).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+  expect(changed).toBe(true);
+
 });

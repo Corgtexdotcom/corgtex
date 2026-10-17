@@ -1,8 +1,9 @@
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { randomUUID } from "node:crypto";
+import { AsyncResource } from "node:async_hooks";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { prisma, type AppActor } from "@corgtex/shared";
+import { prisma, getPrismaClient, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../packages/shared/src/db-test-utils";
 import { listSources, rebuildBacklinks } from "../../packages/domain/src/brain";
 import * as lineage from "../../packages/domain/src/source-lineage";
@@ -69,18 +70,36 @@ it("omits denied direct source labels and file-link contributions from the actua
   expect(renderToStaticMarkup(result)).not.toContain(hidden.title);
 });
 
+/** Observe the actual snapshot client; the concurrent writer has no inherited read scope. */
+function afterSourcePage(mutate: () => Promise<void>) {
+  const transaction = prisma.$transaction.bind(prisma);
+  const writer = new AsyncResource("independent-source-list-writer");
+  let changed = false;
+  vi.spyOn(getPrismaClient(), "$transaction").mockImplementation(((operation: any, options: any) => transaction(async tx => operation(new Proxy(tx, {
+    get(target, property) {
+      if (property === "brainSource") return new Proxy(target.brainSource, { get(model, method) {
+        if (method === "findMany") return async (args: any) => {
+          const rows = await model.findMany(args);
+          if (!changed && args?.cursor) { await writer.runInAsyncScope(mutate); changed = true; }
+          return rows;
+        };
+        const value = Reflect.get(model, method); return typeof value === "function" ? value.bind(model) : value;
+      } });
+      const value = Reflect.get(target, property); return typeof value === "function" ? value.bind(target) : value;
+    },
+  })), options)) as typeof prisma.$transaction);
+  return () => changed;
+}
+
 it("withholds an early source after its head changes during a later source page", async () => {
   const f = await fixture(); const selected = await f.source("selected");
   await prisma.brainSource.createMany({data: Array.from({length: 100}, (_, i) => ({workspaceId: f.workspaceId,
     sourceType: "CONVERSATION" as const, tier: 1, title: `unknown-${i}`, content: "Unknown body",
     createdAt: new Date(selected.createdAt.getTime() - i - 1)}))});
-  let changed = false; const original = prisma.brainSource.findMany.bind(prisma.brainSource);
-  vi.spyOn(prisma.brainSource, "findMany").mockImplementation((async args => {
-    if (!changed && args?.cursor) {changed = true; await replaceHead(f.workspaceId, "BrainSource", selected.id);}
-    return original(args);
-  }) as typeof prisma.brainSource.findMany);
+  await listSources(f.actor, {workspaceId: f.workspaceId, take: 1});
+  const changed = afterSourcePage(() => replaceHead(f.workspaceId, "BrainSource", selected.id));
   await expect(listSources(f.actor, {workspaceId: f.workspaceId, take: 1})).rejects.toMatchObject({code: "SOURCE_CHANGED"});
-  expect(changed).toBe(true);
+  expect(changed()).toBe(true);
 });
 
 it("preserves hidden target edges while replacing only the admitted backlink cohort", async () => {
@@ -134,10 +153,8 @@ it.each(["caller-restore", "counted-source-restore", "author-label", "author-hea
   "withholds source items and exact total after %s during the later page", async change => {
     const f = await fixture(); const selected = await f.source("selected"); const counted = await f.source("counted only");
     await deniedTail(f.workspaceId, selected.createdAt);
-    let changed = false; const original = prisma.brainSource.findMany.bind(prisma.brainSource);
-    vi.spyOn(prisma.brainSource, "findMany").mockImplementation((async args => {
-      if (!changed && args?.cursor) {
-        changed = true;
+    await listSources(f.actor, {workspaceId: f.workspaceId, take: 1, skip: 1});
+    const changed = afterSourcePage(async () => {
         if (change === "caller-restore") {
           await prisma.member.update({where: {id: f.readerMember.id}, data: {isActive: false}});
           await prisma.member.update({where: {id: f.readerMember.id}, data: {isActive: true}});
@@ -147,11 +164,9 @@ it.each(["caller-restore", "counted-source-restore", "author-label", "author-hea
         } else if (change === "author-label") await prisma.user.update({where: {id: f.owner.id}, data: {displayName: "Changed author"}});
         else await prisma.$transaction(tx => lineage.recordArtifactInputLineage({tx, actor: f.author, workspaceId: f.workspaceId,
           artifact: {kind: "User", id: f.owner.id}, content: f.owner, origin: "HUMAN_ORIGINAL", inputs: []}));
-      }
-      return original(args);
-    }) as typeof prisma.brainSource.findMany);
+    });
     await expect(listSources(f.actor, {workspaceId: f.workspaceId, take: 1, skip: 1})).rejects.toMatchObject({code: "SOURCE_CHANGED"});
-    expect(changed).toBe(true);
+    expect(changed()).toBe(true);
   });
 
 it("preserves source pagination, exact visible total, complete body and author labels", async () => {
