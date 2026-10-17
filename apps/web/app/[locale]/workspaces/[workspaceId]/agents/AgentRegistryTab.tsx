@@ -63,8 +63,14 @@ function AgentAuthorityRow({
   workspaceId,
   format,
   canReadFinancials,
+  usageComplete,
+  hasUsage,
+  windowLabel,
 }: {
   canReadFinancials: boolean;
+  usageComplete: boolean;
+  hasUsage: boolean;
+  windowLabel: string;
   agent: AgentAuthoritySummary;
   workspaceId: string;
   format: Awaited<ReturnType<typeof getFormatter>>;
@@ -122,7 +128,7 @@ function AgentAuthorityRow({
           <strong style={{ fontSize: "0.72rem", textTransform: "uppercase", color: "var(--muted)" }}>Approval & activity</strong>
           <span style={{ fontSize: "0.85rem" }}>{policyLabel(agent)}</span>
           <span className="nr-item-meta" style={{ fontSize: "0.76rem" }}>
-            {agent.approval.pendingApprovalCount} pending / {agent.recentActivity.runCount30d} runs{canReadFinancials && <> / {formatUsd(agent.recentActivity.spend30dUsd, 4)}</>}
+            {agent.approval.pendingApprovalCount} pending / {agent.recentActivity.runCount30d} runs{canReadFinancials && <> / {!usageComplete && !hasUsage ? "…" : formatUsd(agent.recentActivity.spend30dUsd, 4)}{!usageComplete && ` (${windowLabel})`}</>}
           </span>
         </div>
 
@@ -241,6 +247,7 @@ export async function AgentRegistryTab({
         </p>
       </div>
 
+      {canReadFinancials && usageSummary && !usageSummary.readWindow.complete && <p role="status" className="nr-item-meta">{t("usageWindowNotice")}</p>}
       <div className="stack" style={{ gap: 12 }}>
         {authoritySummaries.map((agent) => (
           <AgentAuthorityRow
@@ -249,6 +256,9 @@ export async function AgentRegistryTab({
             workspaceId={workspaceId}
             format={format}
             canReadFinancials={canReadFinancials}
+            usageComplete={usageSummary?.readWindow.complete ?? true}
+            hasUsage={usageSummary?.byAgent.some(row => row.agentKey === agent.agentKey) ?? false}
+            windowLabel={t("usageWindowLabel")}
           />
         ))}
         {authoritySummaries.length === 0 && (

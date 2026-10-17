@@ -219,6 +219,10 @@
     "workspacesTab": "Espacios de Trabajo"
   },
   "agents": {
+    "usageWindowNotice": "Los totales, promedios y porcentajes de uso cubren una ventana limitada de llamadas legibles del período, no todo el período. Los límites de presupuesto no cambian.",
+    "usageWindowMetric": "{label} · ventana",
+    "usageWindowLabel": "ventana",
+    "usageWindowEmpty": "No hay uso legible en esta ventana; el total del período es desconocido.",
     "agentKey": "Clave del agente:",
     "authorityDashboardDesc": "Revisa el alcance de rol, acceso vinculado, límites, postura de aprobación y actividad reciente de cada agente en un solo lugar.",
     "authorityDashboardTitle": "Panel de autoridad de agentes",

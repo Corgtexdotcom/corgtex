@@ -48,9 +48,9 @@ beforeEach(() => {
     if (workspaceId !== "ws-1") throw new Error("workspace denied");
     return actor.kind === "user" ? {id: "member-admin", role: "ADMIN"} : null;
   });
-  db.modelUsage.findMany.mockImplementation(async ({where, take}) => costs.filter(row => row.workspaceId === where.workspaceId
+  db.modelUsage.findMany.mockImplementation(async ({where, take, orderBy}) => costs.filter(row => row.workspaceId === where.workspaceId
     && (!where.id?.gt || row.id > where.id.gt) && (!where.createdAt?.gte || row.createdAt >= where.createdAt.gte))
-    .sort((left, right) => left.id.localeCompare(right.id)).slice(0, take));
+    .sort((left, right) => Array.isArray(orderBy) ? right.createdAt.getTime()-left.createdAt.getTime() || right.id.localeCompare(left.id) : left.id.localeCompare(right.id)).slice(0, take));
   db.modelUsage.findFirst.mockImplementation(async ({where}) => costs.find(row => row.id === where.id && row.workspaceId === where.workspaceId) ?? null);
   db.agentRun.findFirst.mockImplementation(async ({where}) => runs.find(row => row.id === where.id && row.workspaceId === where.workspaceId) ?? null);
   db.workspace.findFirst.mockImplementation(async ({where}) => where.id === workspace.id ? workspace : null);
@@ -83,23 +83,60 @@ describe("model usage summary source boundaries", () => {
     expect(result.byAgent.map(row => row.agentKey)).toEqual(["unknown", "known-agent"]);
   });
 
-  it("rejects an earlier admitted cost changed during a later canonical page", async () => {
+  it("rejects an earlier admitted cost changed during a later admission batch", async () => {
     costs = Array.from({length: 101}, (_, i) => usage(String(i).padStart(5, "0"), 1));
-    const query = db.modelUsage.findMany.getMockImplementation()!;
-    db.modelUsage.findMany.mockImplementation(async args => {
-      if (args.where.id?.gt) costs[0].estimatedCostUsd = 999;
+    const query = db.modelUsage.findFirst.getMockImplementation()!;
+    db.modelUsage.findFirst.mockImplementation(async args => {
+      if (args.where.id === "00000") costs[100].estimatedCostUsd = 999;
       return query(args);
     });
     await expect(getModelUsageSummary(admin, "ws-1")).rejects.toMatchObject({code: "SOURCE_CHANGED"});
   });
 
-  it("completes the usual reporting period beyond five thousand usage rows with bounded hydration", async () => {
+  it("bounds the reporting window before five thousand permitted usage rows", async () => {
     costs = Array.from({length: 5001}, (_, i) => usage(String(i).padStart(5, "0"), 1));
     const result = await getModelUsageSummary(admin, "ws-1");
-    expect(result).toMatchObject({totalCalls: 5001, totalCostUsd: 5001, totalTokens: 150030, periodDays: 30});
-    expect(db.modelUsage.findMany).toHaveBeenCalledTimes(51);
-    expect(db.modelUsage.findMany.mock.calls.every(([query]) => query.take === 100 && query.where.workspaceId === "ws-1")).toBe(true);
+    expect(result).toMatchObject({totalCalls: 200, totalCostUsd: 200, totalTokens: 6000, periodDays: 30, readWindow:{scope:"WINDOW",complete:false}});
+    expect(db.modelUsage.findMany).toHaveBeenCalledOnce();
+    expect(db.modelUsage.findMany.mock.calls.every(([query]) => query.take === 200 && query.where.workspaceId === "ws-1")).toBe(true);
   });
+  it("bounds five thousand denied costs without representing a complete zero",async()=>{
+    const unknown={id:"unknown-run",workspaceId:"ws-1",agentKey:"hidden-agent",goal:"Hidden",createdAt:date};
+    runs=[unknown];costs=Array.from({length:5001},(_,i)=>usage(String(i).padStart(5,"0"),1000,unknown));
+    const result=await getModelUsageSummary(admin,"ws-1");
+    expect(result).toMatchObject({totalCalls:0,totalCostUsd:0,byModel:[],byAgent:[],byDay:[],readWindow:{scope:"WINDOW",complete:false}});
+    expect(db.modelUsage.findMany).toHaveBeenCalledOnce();
+  });
+
+  it("rechecks current ADMIN even when no costs are readable",async()=>{
+    db.modelUsage.findMany.mockImplementation(async()=>{authorize.mockResolvedValue({id:"member-admin",role:"MEMBER"});return [];});
+    await expect(getModelUsageSummary(admin,"ws-1")).rejects.toMatchObject({code:"FORBIDDEN"});
+  });
+  it("retains one enumeration snapshot when inserts occur during original proof admission",async()=>{
+    costs=Array.from({length:150},(_,i)=>usage(String(i+100).padStart(5,"0"),1));
+    const query=db.modelUsage.findFirst.getMockImplementation()!;let changed=false;
+    db.modelUsage.findFirst.mockImplementation(async args=>{
+      if(!changed){changed=true;costs.unshift(usage("00099",1));costs.push(usage("00250",1));}
+      return query(args);
+    });
+    expect(await getModelUsageSummary(admin,"ws-1")).toMatchObject({totalCalls:150,totalCostUsd:150,readWindow:{scope:"WINDOW",complete:true}});
+    expect(costs).toHaveLength(152);expect(db.modelUsage.findMany).toHaveBeenCalledOnce();
+    expect(db.modelUsage.findMany.mock.calls[0][0]).toMatchObject({take:200,orderBy:[{createdAt:"desc"},{id:"desc"}]});
+  });
+
+  it("rejects a same-body run head replacement after its original first-batch admission",async()=>{
+    const run={id:"original-run",workspaceId:"ws-1",agentKey:"known",goal:"Same body",createdAt:date};runs=[run];
+    await recordArtifactInputLineage({tx:db as any,actor:admin,workspaceId:"ws-1",artifact:{kind:"AgentRun",id:run.id},content:run,origin:"DERIVED",inputs:[{kind:"Workspace",id:workspace.id}]});
+    costs=Array.from({length:101},(_,i)=>usage(String(i).padStart(5,"0"),1,i===100?run:null));
+    const query=db.modelUsage.findFirst.getMockImplementation()!;let changed=false;
+    db.modelUsage.findFirst.mockImplementation(async args=>{
+      if(args.where.id==="00000"&&!changed){changed=true;const index=manifests.findIndex(row=>row.artifactId===run.id);manifests[index]={...manifests[index],id:"replacement-head",revision:manifests[index].revision+1};}
+      return query(args);
+    });
+    await expect(getModelUsageSummary(admin,"ws-1")).rejects.toMatchObject({code:"SOURCE_CHANGED"});
+    expect(changed).toBe(true);
+  });
+
 });
 
 

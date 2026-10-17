@@ -5,7 +5,7 @@ import { WorkItemReadRelease } from "./work-item-readable-page";
 import { redactAgentRunContent } from "./agent-runs";
 import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
-import { mergeLineageInputRoot, withArtifactCountReleaseSnapshot, captureArtifactInputProof, isArtifactInputProofReadable, isLineageKind, readableArtifactIds, sealArtifactInputActor, type LineageKind, type LineageRoot } from "./source-lineage";
+import { captureArtifactReadHeadObservation, mergeLineageInputRoot, withArtifactCountReleaseSnapshot, captureArtifactInputProof, isArtifactInputProofReadable, isLineageKind, readableArtifactIds, sealArtifactInputActor, type LineageKind, type LineageRoot } from "./source-lineage";
 
 export async function recordAudit(
   tx: Prisma.TransactionClient,
@@ -315,51 +315,60 @@ export async function getModelUsageSummary(actor: AppActor, workspaceId: string,
   }>();
 
   const roots = new Map<string, LineageRoot>();
-  let afterId: string | undefined;
+  const heads = new Map<string, string>();
   let totalCalls = 0;
-  for (;;) {
-    const candidates = await prisma.modelUsage.findMany({
-      where: {
-        workspaceId,
-        createdAt: { gte: since },
-        ...(afterId ? {id: {gt: afterId}} : {}),
-      },
-      select: {
-        id: true,
-        workspaceId: true,
-        agentRunId: true,
-        provider: true,
-        model: true,
-        taskType: true,
-        inputTokens: true,
-        outputTokens: true,
-        latencyMs: true,
-        estimatedCostUsd: true,
-        billableCostUsd: true,
-        createdAt: true,
-        agentRun: true,
-      },
-      orderBy: {id: "asc"},
-      take: 100,
-    });
-    const costRows = candidates.map(({ id, workspaceId: rowWorkspaceId, estimatedCostUsd, billableCostUsd, createdAt }) =>
-      ({ id, workspaceId: rowWorkspaceId, estimatedCostUsd, billableCostUsd, createdAt }));
-    const readableCosts = await readableArtifactIds(actor, workspaceId, "ModelUsageCost", costRows);
-    const runs = [...new Map(candidates.flatMap(row => row.agentRun ? [[row.agentRun.id, row.agentRun] as const] : [])).values()];
-    const readableRuns = await readableArtifactIds(actor, workspaceId, "AgentRun", runs);
-    const usages = candidates.filter(row => readableCosts.has(row.id)
-      && (!row.agentRunId || (row.agentRun?.id === row.agentRunId && readableRuns.has(row.agentRunId))));
+  // One bounded enumeration avoids mixed completeness from concurrent inserts.
+  const window = await prisma.modelUsage.findMany({
+    where: {
+      workspaceId,
+      createdAt: { gte: since },
+    },
+    select: {
+      id: true,
+      workspaceId: true,
+      agentRunId: true,
+      provider: true,
+      model: true,
+      taskType: true,
+      inputTokens: true,
+      outputTokens: true,
+      latencyMs: true,
+      estimatedCostUsd: true,
+      billableCostUsd: true,
+      createdAt: true,
+      agentRun: true,
+    },
+    orderBy: [{createdAt: "desc"}, {id: "desc"}],
+    take: 200,
+  });
+  for (let offset = 0; offset < window.length; offset += 100) {
+    const candidates = window.slice(offset, offset + 100);
+    const observed = await captureArtifactReadHeadObservation(async () => {
+      const costRows = candidates.map(({ id, workspaceId: rowWorkspaceId, estimatedCostUsd, billableCostUsd, createdAt }) =>
+        ({ id, workspaceId: rowWorkspaceId, estimatedCostUsd, billableCostUsd, createdAt }));
+      const readableCosts = await readableArtifactIds(actor, workspaceId, "ModelUsageCost", costRows);
+      const runs = [...new Map(candidates.flatMap(row => row.agentRun ? [[row.agentRun.id, row.agentRun] as const] : [])).values()];
+      const readableRuns = await readableArtifactIds(actor, workspaceId, "AgentRun", runs);
+      const usages = candidates.filter(row => readableCosts.has(row.id)
+        && (!row.agentRunId || (row.agentRun?.id === row.agentRunId && readableRuns.has(row.agentRunId))));
 
-    if (usages.length) {
-      const proof = await captureArtifactInputProof(actor, workspaceId, usages.flatMap(usage => [
-        {kind: "ModelUsageCost" as const, id: usage.id, snapshot: usage},
-        ...(usage.agentRun ? [{kind: "AgentRun" as const, id: usage.agentRun.id, snapshot: usage.agentRun}] : []),
-      ]));
-      for (const root of proof) {
-        const key = `${root.kind}:${root.id}`;
-        roots.set(key, mergeLineageInputRoot(roots.get(key), root));
+      if (usages.length) {
+        const proof = await captureArtifactInputProof(actor, workspaceId, usages.flatMap(usage => [
+          {kind: "ModelUsageCost" as const, id: usage.id, snapshot: usage},
+          ...(usage.agentRun ? [{kind: "AgentRun" as const, id: usage.agentRun.id, snapshot: usage.agentRun}] : []),
+        ]));
+        for (const root of proof) {
+          const key = `${root.kind}:${root.id}`;
+          roots.set(key, mergeLineageInputRoot(roots.get(key), root));
+        }
       }
+      return usages;
+    });
+    for (const [key, stamp] of observed.heads) {
+      invariant(!heads.has(key) || heads.get(key) === stamp, 409, "SOURCE_CHANGED", "Usage lineage changed during collection.");
+      heads.set(key, stamp);
     }
+    const usages = observed.value;
     totalCalls += usages.length;
     for (const usage of usages) {
       const costUsd = parseCost(usage.billableCostUsd ?? usage.estimatedCostUsd);
@@ -412,8 +421,6 @@ export async function getModelUsageSummary(actor: AppActor, workspaceId: string,
       dayEntry.callCount += 1;
       byDay.set(dateKey, dayEntry);
     }
-    if (candidates.length < 100) break;
-    afterId = candidates[candidates.length - 1].id;
   }
 
   const totalCostUsd = [...byModel.values()].reduce((sum, m) => sum + m.totalCostUsd, 0);
@@ -424,6 +431,7 @@ export async function getModelUsageSummary(actor: AppActor, workspaceId: string,
     invariant(actor.kind === "user" && current?.role === "ADMIN", 403, "FORBIDDEN", "Model usage costs require a current workspace administrator.");
     return {
       periodDays,
+      readWindow: {scope: "WINDOW" as const, complete: window.length < 200},
       totalCostUsd,
       totalTokens,
       totalCalls,
@@ -431,7 +439,7 @@ export async function getModelUsageSummary(actor: AppActor, workspaceId: string,
       byAgent: [...byAgent.values()].sort((a, b) => b.totalCostUsd - a.totalCostUsd),
       byDay: [...byDay.values()].sort((a, b) => a.date.localeCompare(b.date)),
     };
-  });
+  }, heads);
 }
 
 function parseCost(value: unknown): number {

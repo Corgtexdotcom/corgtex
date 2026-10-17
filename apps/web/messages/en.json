@@ -219,6 +219,10 @@
     "workspacesTab": "Workspaces"
   },
   "agents": {
+    "usageWindowNotice": "Usage totals, averages and shares cover a limited window of readable calls from this period, not the full period. Budget limits are unchanged.",
+    "usageWindowMetric": "{label} · window",
+    "usageWindowLabel": "window",
+    "usageWindowEmpty": "No readable usage in this window; the period total is unknown.",
     "agentKey": "Agent Key:",
     "authorityDashboardDesc": "Review each agent's role scope, linked access, limits, approval posture, and recent activity in one place.",
     "authorityDashboardTitle": "Agent authority dashboard",
