@@ -1,4 +1,4 @@
-import { countActionsByStatus, listActions, listCircles, listHumanMembers, requireWorkspaceMembership, type ActionSort } from "@corgtex/domain";
+import { listActionsWithStatusCounts, listActions, listCircles, listHumanMembers, requireWorkspaceMembership, type ActionSort } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import type { ReactNode } from "react";
 import { requirePageActor } from "@/lib/auth";
@@ -171,19 +171,15 @@ export default async function ActionsPage({
     statuses: view === "kanban" ? undefined : statusFilters,
     take: ACTION_PAGE_SIZE,
   };
-  const actionStatusCounts = view === "kanban" ? null : await countActionsByStatus(actor, workspaceId, actionListFilters);
-  const selectedTotal = actionStatusCounts
-    ? statusFilters.length === 0
-      ? actionStatusCounts.ALL
-      : statusFilters.reduce((total, status) => total + actionStatusCounts[status], 0)
-    : 0;
-  const pageCount = Math.max(1, Math.ceil(selectedTotal / ACTION_PAGE_SIZE));
-  const page = Math.min(requestedPage, pageCount);
   const [actionResult, circles, members] = await Promise.all([
-    listActions(actor, workspaceId, { ...actionListOptions, skip: (page - 1) * ACTION_PAGE_SIZE }),
+    view === "kanban"
+      ? listActions(actor, workspaceId, { ...actionListOptions, skip: 0 })
+        .then(result => ({...result, statusCounts: null, page: 1, pageCount: 1}))
+      : listActionsWithStatusCounts(actor, workspaceId, { ...actionListOptions, page: requestedPage }),
     listCircles(actor, workspaceId),
     listHumanMembers(workspaceId),
   ]);
+  const {statusCounts: actionStatusCounts, page, pageCount} = actionResult;
   const actions = actionResult.items;
   const activeHumanMemberIds = new Set(members.map((member) => member.id));
 

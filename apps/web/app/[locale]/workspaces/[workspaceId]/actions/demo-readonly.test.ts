@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   action: vi.fn(),
   actions: vi.fn(),
   actionCounts: vi.fn(),
+  actionsWithCounts: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -27,6 +28,7 @@ vi.mock("@corgtex/domain", () => ({
   getAction: mocks.action,
   listActions: mocks.actions,
   countActionsByStatus: mocks.actionCounts,
+  listActionsWithStatusCounts: mocks.actionsWithCounts,
   listCircles: async () => [],
   listHumanMembers: async () => [{ id: "synthetic-member", user: { displayName: "Synthetic Member", email: "synthetic@example.test" } }],
   listAdviceRequestWindow: async () => ({ items: [], complete: true, nextCursor: null }),
@@ -113,6 +115,8 @@ beforeEach(() => {
   mocks.action.mockResolvedValue(action);
   mocks.actions.mockResolvedValue({ items: [action], total: 1 });
   mocks.actionCounts.mockResolvedValue({ DRAFT: 0, OPEN: 1, IN_PROGRESS: 0, COMPLETED: 0, ALL: 1 });
+  mocks.actionsWithCounts.mockResolvedValue({items:[action],total:1,take:200,skip:0,page:1,pageCount:1,
+    statusCounts:{DRAFT:0,OPEN:1,IN_PROGRESS:0,COMPLETED:0,ALL:1}});
 });
 
 afterEach(() => vi.unstubAllGlobals());
@@ -177,12 +181,14 @@ describe("Actions sorting integration", () => {
   });
 
   it.each(["list", "table"])("shows exact per-action input counts on older %s pages", async (view) => {
-    mocks.actions.mockResolvedValue({ items: [{ ...action, activeInputRequestCount: 2 }], total: 201 });
-    mocks.actionCounts.mockResolvedValue({ DRAFT: 0, OPEN: 201, IN_PROGRESS: 0, COMPLETED: 0, ALL: 201 });
+    mocks.actionsWithCounts.mockResolvedValue({ items: [{ ...action, activeInputRequestCount: 2 }], total: 201,
+      take:200,skip:200,page:2,pageCount:2,statusCounts:{DRAFT:0,OPEN:201,IN_PROGRESS:0,COMPLETED:0,ALL:201} });
     const html = renderIntl(await ActionsPage({ params, searchParams: Promise.resolve({ view, sort: "due_asc", page: "2" }) }));
-    expect(mocks.actions).toHaveBeenCalledWith(expect.anything(), "synthetic-workspace", expect.objectContaining({
-      sort: "due_asc", take: 200, skip: 200,
+    expect(mocks.actionsWithCounts).toHaveBeenCalledWith(expect.anything(), "synthetic-workspace", expect.objectContaining({
+      sort: "due_asc", take: 200, page: 2,
     }));
     expect(html).toContain("2 input requests");
+    expect(mocks.actions).not.toHaveBeenCalled();
+    expect(mocks.actionCounts).not.toHaveBeenCalled();
   });
 });

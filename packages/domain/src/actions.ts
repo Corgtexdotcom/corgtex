@@ -319,14 +319,13 @@ function actionListWhere(actor: AppActor, membership: MembershipSummary | null, 
   return where;
 }
 
-export async function countActionsByStatus(actor: AppActor, workspaceId: string, opts?: ListActionsOptions) {
-  const membership = await requireWorkspaceOperation({ operation: "list_actions", actor, workspaceId });
+async function collectActionStatusCounts(actor: AppActor, workspaceId: string, opts: ListActionsOptions | undefined, release: WorkItemReadRelease) {
+  const membership = await requireWorkspaceOperation({ operation: "list_actions", actor, workspaceId, tx: release.db });
   const where = actionListWhere(actor, membership, workspaceId, { ...opts, status: undefined, statuses: undefined });
-  const release = new WorkItemReadRelease(actor,workspaceId);
   const counts = { DRAFT: 0, OPEN: 0, IN_PROGRESS: 0, COMPLETED: 0, ALL: 0 };
   let afterId: string | undefined;
   for (;;) {
-    const page: import("@prisma/client").Action[] = await prisma.action.findMany({
+    const page: import("@prisma/client").Action[] = await release.db.action.findMany({
       where: { AND: [where, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take: 100,
     });
     const rows = await release.admit("Action",page);
@@ -334,7 +333,11 @@ export async function countActionsByStatus(actor: AppActor, workspaceId: string,
     if (page.length < 100) break;
     afterId = page.at(-1)!.id;
   }
-  return release.finish(counts);
+  return counts;
+}
+
+export async function countActionsByStatus(actor: AppActor, workspaceId: string, opts?: ListActionsOptions) {
+  return readWorkItemListSnapshot(actor, workspaceId, release => collectActionStatusCounts(actor, workspaceId, opts, release));
 }
 
 async function redactActionJoins<T extends {
@@ -372,8 +375,7 @@ function actionPageAfter(row: import("@prisma/client").Action, sort: ListActions
   return {OR:[{dueAt:null},{dueAt:sort==="due_asc"?{gt:row.dueAt}:{lt:row.dueAt}},{dueAt:row.dueAt,...tied}]};
 }
 
-export async function listActions(actor: AppActor, workspaceId: string, opts?: ListActionsOptions) {
-  return readWorkItemListSnapshot(actor, workspaceId, async release => {
+async function collectActions(actor: AppActor, workspaceId: string, opts: ListActionsOptions | undefined, release: WorkItemReadRelease) {
     const db = release.db;
     const take = opts?.take ?? 20;
     const skip = opts?.skip ?? 0;
@@ -436,6 +438,30 @@ export async function listActions(actor: AppActor, workspaceId: string, opts?: L
       take,
       skip,
     };
+}
+
+export async function listActions(actor: AppActor, workspaceId: string, opts?: ListActionsOptions) {
+  return readWorkItemListSnapshot(actor, workspaceId, release => collectActions(actor, workspaceId, opts, release));
+}
+
+/** Exact status buckets, page clamping and hydrated rows describe one inventory.
+ * The original proof union is released only after the collection snapshot closes. */
+export async function listActionsWithStatusCounts(actor: AppActor, workspaceId: string,
+  opts: Omit<ListActionsOptions, "skip"> & {page?: number} = {}) {
+  const take = opts.take ?? 20;
+  const requestedPage = opts.page ?? 1;
+  invariant(Number.isSafeInteger(take) && take > 0 && take <= 5000
+    && Number.isSafeInteger(requestedPage) && requestedPage > 0,
+  400, "INVALID_INPUT", "Action page is invalid.");
+  return readWorkItemListSnapshot(actor, workspaceId, async release => {
+    const statusCounts = await collectActionStatusCounts(actor, workspaceId, opts, release);
+    const statuses = opts.statuses?.length ? [...new Set(opts.statuses)] : opts.status ? [opts.status] : [];
+    const total = statuses.length ? statuses.reduce((sum, status) => sum + statusCounts[status], 0) : statusCounts.ALL;
+    const pageCount = Math.max(1, Math.ceil(total / take));
+    const page = Math.min(requestedPage, pageCount);
+    const result = await collectActions(actor, workspaceId, {...opts, take, skip: (page - 1) * take}, release);
+    invariant(result.total === total, 409, "SOURCE_CHANGED", "Action counts changed during collection.");
+    return {...result, statusCounts, page, pageCount};
   });
 }
 
