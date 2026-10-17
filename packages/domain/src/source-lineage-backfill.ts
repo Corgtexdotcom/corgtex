@@ -27,6 +27,7 @@ const child = (kind: string, delegate: string, relation: string): Descriptor => 
 const LOADERS: Record<Exclude<LineageKind, "ExternalMcpConnectionSet">, Descriptor> = {
   ExternalDataSource: direct("ExternalDataSource", "externalDataSource"),
   SqlNativeRunInput: direct("SqlNativeRunInput", "sqlNativeRunInput"),
+  OAuthProviderFetchInput: direct("OAuthProviderFetchInput", "oAuthProviderFetchInput"),
   MeetingAudioAsset: direct("MeetingAudioAsset", "meetingAudioAsset"),
   NativeTranscriptInput: direct("NativeTranscriptInput", "nativeTranscriptInput"),
   CommunicationMessageNativeInput: direct("CommunicationMessageNativeInput", "communicationMessageNativeInput"),
@@ -95,7 +96,7 @@ const LOADERS: Record<Exclude<LineageKind, "ExternalMcpConnectionSet">, Descript
   ArtifactInputSnapshot: direct("ArtifactInputSnapshot", "artifactInputSnapshot"),
 };
 
-const NATIVE_INPUTS = new Set<LineageKind>(["NativeTranscriptInput", "CommunicationMessageNativeInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "McpToolInput", "Workspace", "Member", "User", "RoleAssignment", "CircleAgentAssignment",
+const NATIVE_INPUTS = new Set<LineageKind>(["OAuthProviderFetchInput", "NativeTranscriptInput", "CommunicationMessageNativeInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "McpToolInput", "Workspace", "Member", "User", "RoleAssignment", "CircleAgentAssignment",
   "ConversationIngressInput", "DemoLeadIntakeInput", "CrmQualificationEmailInput", "CommunicationChannel", "ConversationPromptInput", "AgentRequestInput", "AgentFeedbackInput", "ModelUsageBudget", "ModelUsageCost", "ApprovalPolicy", "CrmDealStageTransition",
   "TensionUpvote", "ArtifactInputSnapshot"]);
 export const SOURCE_LINEAGE_BACKFILL_KINDS = (Object.keys(LOADERS) as LineageKind[]).filter((kind) => !NATIVE_INPUTS.has(kind));

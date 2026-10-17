@@ -77,7 +77,7 @@ async function assertPlannedArtifactPublication(tx: Prisma.TransactionClient, wo
 }
 
 export type LineageKind =
-  | "ExternalDataSource" | "SqlNativeRunInput" | "MeetingAudioAsset" | "NativeTranscriptInput" | "CommunicationMessageNativeInput" | "GenericDerivedArtifactVariant" | "ExternalProviderFetchInput" | "ExternalContentSource"
+  | "OAuthProviderFetchInput" | "ExternalDataSource" | "SqlNativeRunInput" | "MeetingAudioAsset" | "NativeTranscriptInput" | "CommunicationMessageNativeInput" | "GenericDerivedArtifactVariant" | "ExternalProviderFetchInput" | "ExternalContentSource"
   | "ExternalMcpResponseInput" | "ExternalMcpConnectionSet"
   | "WorkspaceToolLink" | "WorkspaceToolLinkCredential" | "ConversationOperationOutcome"
   | "FinanceReportUploadInput" | "CrmQualificationFormInput" | "ExecutionRequest" | "ExecutionResult"
@@ -123,6 +123,7 @@ const CONTENT_FIELDS: Record<LineageKind, string[]> = {
   NativeTranscriptInput: ["workspaceId", "mode", "ownerMemberId", "submittedByUserId", "meetingAudioAssetId", "sourceRecordId", "connectionId", "recordingId", "storageKey", "fileHash", "fileSizeBytes", "mimeType", "encryptedPayloadJson", "payloadHash", "grantHash"],
   CommunicationMessageNativeInput: ["workspaceId", "installationId", "communicationMessageId", "provider", "externalWorkspaceId", "appId", "providerPrincipalId", "externalChannelId", "externalMessageId", "externalUserId", "threadExternalId", "mode", "ingressInputId", "requestJson", "encryptedPayloadJson", "projectedContentJson", "projectionHash", "installationGrantHash", "channelGrantHash", "permissionEpochsJson", "epochProofVersion", "expiresRawAt", "fetchedAt"],
   GenericDerivedArtifactVariant: ["workspaceId", "targetKind", "targetId", "ownerMemberId", "recipeVersion", "generatorKey", "generatorVersion", "instructionHash", "targetFingerprint", "inputSetHash", "sourceStateJson", "targetsJson", "scopeJson", "payloadJson", "generationJobId"],
+  OAuthProviderFetchInput: ["workspaceId", "connectionId", "localUserId", "ownerMemberId", "provider", "providerAccountId", "sourceKind", "externalId", "sourceKey", "selection", "grantHash", "encryptedPayload", "payloadHash", "permissionEpochsJson", "createdAt"],
   ExternalProviderFetchInput: ["workspaceId", "externalContentSourceId", "connectionId", "localUserId", "providerKey", "serverUrl", "providerAccountId", "sourceKind", "externalId", "toolName", "requestJson", "encryptedResponseJson", "responseHash", "connectionGrantHash", "fetchedAt"],
   ExternalMcpResponseInput: ["workspaceId", "connectionId", "localUserId", "providerKey", "serverUrl", "providerAccountId", "mode", "toolName", "requestJson", "encryptedResponseJson", "responseHash", "connectionGrantHash", "originalLocalEpochsJson", "fetchedAt"],
   ExternalMcpConnectionSet: ["workspaceId", "localUserId", "epoch"],
@@ -249,7 +250,7 @@ function snapshotContentFields(kind: LineageKind, row?: Record<string, unknown>)
 
 function fingerprintFields(kind: LineageKind) {
   return [...new Set([...CONTENT_FIELDS[kind], "createdAt",
-    ...(["FinanceReportFactRevision", "NativeTranscriptInput", "CommunicationMessageNativeInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "ConversationOperationOutcome", "DemoLeadIntakeInput", "CrmQualificationEmailInput", "WorkflowJobInput", "McpToolInput", "ConversationIngressInput", "NewspaperTrackedLink", "Meeting", "ModelUsageBudget", "ConversationSession", "ConversationPendingOperation", "AgentRun", "AgentStep", "AgentToolCall"].includes(kind) ? [] : ["updatedAt"])])];
+    ...(["FinanceReportFactRevision", "NativeTranscriptInput", "CommunicationMessageNativeInput", "OAuthProviderFetchInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "ConversationOperationOutcome", "DemoLeadIntakeInput", "CrmQualificationEmailInput", "WorkflowJobInput", "McpToolInput", "ConversationIngressInput", "NewspaperTrackedLink", "Meeting", "ModelUsageBudget", "ConversationSession", "ConversationPendingOperation", "AgentRun", "AgentStep", "AgentToolCall"].includes(kind) ? [] : ["updatedAt"])])];
 }
 
 export function lineageContentFingerprint(kind: LineageKind, row: unknown): string {
@@ -725,6 +726,7 @@ async function loadArtifact(db: LineageClient, workspaceId: string, input: Linea
     case "NativeTranscriptInput": return db.nativeTranscriptInput.findFirst({ where });
     case "CommunicationMessageNativeInput": return db.communicationMessageNativeInput.findFirst({ where });
     case "GenericDerivedArtifactVariant": return db.genericDerivedArtifactVariant.findFirst({ where });
+    case "OAuthProviderFetchInput": return db.oAuthProviderFetchInput.findFirst({ where });
     case "ExternalProviderFetchInput": return db.externalProviderFetchInput.findFirst({ where });
     case "ExternalMcpResponseInput": return db.externalMcpResponseInput.findFirst({ where });
     case "ExternalMcpConnectionSet": return loadExternalMcpConnectionSetInput(workspaceId, input.id, db);
@@ -851,7 +853,7 @@ export function isLineageKind(value: unknown): value is LineageKind {
 function knownSnapshotOrigin(row: Record<string, unknown>) {
   if (["MeetingAudioAsset", "KnowledgeChunk", "CommunicationMessage", "GenericDerivedArtifactVariant", "FinanceReportFactRevision"].includes(String(row.sourceKind)) && row.origin !== "DERIVED") return false;
   return row.origin === "HUMAN_ORIGINAL" || row.origin === "DERIVED"
-    || (row.origin === "NATIVE_ORIGINAL" && (["SqlNativeRunInput", "NativeTranscriptInput", "CommunicationMessageNativeInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "ConversationIngressInput", "McpToolInput"].includes(String(row.sourceKind))
+    || (row.origin === "NATIVE_ORIGINAL" && (["SqlNativeRunInput", "NativeTranscriptInput", "CommunicationMessageNativeInput", "OAuthProviderFetchInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "ConversationIngressInput", "McpToolInput"].includes(String(row.sourceKind))
       || (row.sourceKind === "ConversationOperationOutcome" && isRecord(row.contentJson) && isNativeControlOutcome(row.contentJson))));
 }
 
@@ -946,7 +948,7 @@ function actorCanReadRecord(actor: AppActor, workspaceId: string, membership: { 
 function needsManifest(kind: LineageKind, row: Record<string, unknown>) {
   if (kind === "BrainSource") return brainSourceNeedsLineage(row);
   return !["ExternalDataSource", "SqlNativeRunInput", "Workspace", "Member", "User", "RoleAssignment", "CircleAgentAssignment", "CommunicationExternalUser", "CommunicationEntityLink", "CommunicationChannel",
-    "WorkspaceToolLinkCredential", "NativeTranscriptInput", "CommunicationMessageNativeInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "McpToolInput", "ConversationIngressInput", "DemoLeadIntakeInput", "CrmQualificationEmailInput", "AgentRequestInput", "AgentFeedbackInput", "ConversationPromptInput", "ModelUsageBudget", "ModelUsageCost", "ApprovalPolicy", "CrmDealStageTransition", "TensionUpvote", "ArtifactInputSnapshot"].includes(kind);
+    "WorkspaceToolLinkCredential", "NativeTranscriptInput", "CommunicationMessageNativeInput", "OAuthProviderFetchInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "McpToolInput", "ConversationIngressInput", "DemoLeadIntakeInput", "CrmQualificationEmailInput", "AgentRequestInput", "AgentFeedbackInput", "ConversationPromptInput", "ModelUsageBudget", "ModelUsageCost", "ApprovalPolicy", "CrmDealStageTransition", "TensionUpvote", "ArtifactInputSnapshot"].includes(kind);
 }
 
 function credentialReadScopes(kind: LineageKind): readonly string[] {
@@ -1241,6 +1243,12 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
       : authority.isCommunicationMessageNativeInputCurrent;
     if (!await current(actor, workspaceId,
       row as unknown as import("./communication-native-authority").CommunicationMessageNativeInputRecord, db)) return false;
+  }
+  if (root.kind === "OAuthProviderFetchInput") {
+    if (db === prisma && !localCommitAdmission.getStore()) observeNativeReplay(memo);
+    const authority = await import("./oauth-provider-native");
+    const current = localCommitAdmission.getStore() ? authority.isOAuthProviderFetchInputLocallyCurrent : authority.isOAuthProviderFetchInputCurrent;
+    if (!await current(actor, workspaceId, row as unknown as import("@prisma/client").OAuthProviderFetchInput, db)) return false;
   }
   if (root.kind === "ExternalProviderFetchInput") {
     if (db === prisma && !localCommitAdmission.getStore()) observeNativeReplay(memo);
@@ -1769,13 +1777,13 @@ async function snapshotInput(actor: AppActor, tx: Prisma.TransactionClient, work
       fingerprint: lineageContentFingerprint("ArtifactInputSnapshot", snapshot) }, roots: [] as LineageRoot[] };
   }
   const recordedManifest = recordedBefore?.manifest ?? await latestManifest(tx, workspaceId, root);
-  const nativeOriginal = ["NativeTranscriptInput", "CommunicationMessageNativeInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "Workspace", "Member", "User", "RoleAssignment", "CircleAgentAssignment", "CommunicationExternalUser", "CommunicationEntityLink", "CommunicationChannel", "FinanceReportUploadInput", "CrmQualificationFormInput", "McpToolInput", "ConversationIngressInput", "DemoLeadIntakeInput", "CrmQualificationEmailInput", "ConversationPromptInput", "AgentRequestInput", "AgentFeedbackInput", "ModelUsageBudget", "ModelUsageCost", "ApprovalPolicy", "CrmDealStageTransition", "TensionUpvote"].includes(root.kind);
-  const manifest = recordedManifest ?? (nativeOriginal ? { contentHash: root.fingerprint, origin: ["SqlNativeRunInput", "NativeTranscriptInput", "CommunicationMessageNativeInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "ConversationIngressInput", "McpToolInput"].includes(root.kind) ? "NATIVE_ORIGINAL" : "HUMAN_ORIGINAL", rootsJson: [], inputsJson: [] } : null);
+  const nativeOriginal = ["NativeTranscriptInput", "CommunicationMessageNativeInput", "OAuthProviderFetchInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "Workspace", "Member", "User", "RoleAssignment", "CircleAgentAssignment", "CommunicationExternalUser", "CommunicationEntityLink", "CommunicationChannel", "FinanceReportUploadInput", "CrmQualificationFormInput", "McpToolInput", "ConversationIngressInput", "DemoLeadIntakeInput", "CrmQualificationEmailInput", "ConversationPromptInput", "AgentRequestInput", "AgentFeedbackInput", "ModelUsageBudget", "ModelUsageCost", "ApprovalPolicy", "CrmDealStageTransition", "TensionUpvote"].includes(root.kind);
+  const manifest = recordedManifest ?? (nativeOriginal ? { contentHash: root.fingerprint, origin: ["SqlNativeRunInput", "NativeTranscriptInput", "CommunicationMessageNativeInput", "OAuthProviderFetchInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "ConversationIngressInput", "McpToolInput"].includes(root.kind) ? "NATIVE_ORIGINAL" : "HUMAN_ORIGINAL", rootsJson: [], inputsJson: [] } : null);
   const inputs = manifest ? parseRoots(manifest.rootsJson) : null;
   invariant(manifest && manifest.contentHash === root.fingerprint && inputs
     && (manifest.origin === "DERIVED" || (manifest.origin === "HUMAN_ORIGINAL"
       && Array.isArray(manifest.inputsJson) && manifest.inputsJson.length === 0)
-      || (manifest.origin === "NATIVE_ORIGINAL" && (["SqlNativeRunInput", "NativeTranscriptInput", "CommunicationMessageNativeInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "ConversationIngressInput", "McpToolInput"].includes(root.kind)
+      || (manifest.origin === "NATIVE_ORIGINAL" && (["SqlNativeRunInput", "NativeTranscriptInput", "CommunicationMessageNativeInput", "OAuthProviderFetchInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "ConversationIngressInput", "McpToolInput"].includes(root.kind)
         || (root.kind === "ConversationOperationOutcome" && isNativeControlOutcome(content))))),
   409, "UNKNOWN_LINEAGE", "A mutable input has incomplete lineage.");
   const snapshotRoots = convertInputs ? await convertInputs(inputs) : inputs;
@@ -2155,7 +2163,7 @@ async function artifactInputProofAudience(actor: AppActor, workspaceId: string,
   const seen = new Set<string>();
   const publicAuthorities = new Set<string>();
   const privateEnvelope = (kind: LineageKind, row: Record<string, unknown>) => row.isPrivate === true || row.isRestricted === true
-    || row.accessDomain === "FINANCE" || ["ExternalDataSource", "SqlNativeRunInput", "MeetingAudioAsset", "NativeTranscriptInput", "CommunicationMessageNativeInput", "GenericDerivedArtifactVariant", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "ExternalContentSource", "FinanceReport", "FinanceReportFact", "FinanceReportFactRevision", "FinanceImportApplication", "FinanceImportBatch", "FinanceImportCandidate", "FinanceReportUploadInput", "ExecutionRequest", "ExecutionResult", "ConversationOperationOutcome", "WorkspaceToolLinkCredential", "McpToolInput", "ConversationIngressInput", "AgentRequestInput", "AgentFeedbackInput", "ConversationPendingOperation", "ConversationPromptInput", "ConversationSession", "ConversationTurn", "RoleOnboardingSession", "CheckIn", "Notification", "NewspaperDelivery"].includes(kind)
+    || row.accessDomain === "FINANCE" || ["ExternalDataSource", "SqlNativeRunInput", "MeetingAudioAsset", "NativeTranscriptInput", "CommunicationMessageNativeInput", "GenericDerivedArtifactVariant", "OAuthProviderFetchInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "ExternalContentSource", "FinanceReport", "FinanceReportFact", "FinanceReportFactRevision", "FinanceImportApplication", "FinanceImportBatch", "FinanceImportCandidate", "FinanceReportUploadInput", "ExecutionRequest", "ExecutionResult", "ConversationOperationOutcome", "WorkspaceToolLinkCredential", "McpToolInput", "ConversationIngressInput", "AgentRequestInput", "AgentFeedbackInput", "ConversationPendingOperation", "ConversationPromptInput", "ConversationSession", "ConversationTurn", "RoleOnboardingSession", "CheckIn", "Notification", "NewspaperDelivery"].includes(kind)
     || (kind === "Recognition" && row.visibility !== "WORKSPACE")
     || (kind === "AdviceRequest" && row.audienceType !== "WORKSPACE")
     || (kind === "ContextMapView" && row.createdByUserId != null)

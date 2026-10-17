@@ -132,6 +132,7 @@ vi.mock("@corgtex/domain", async () => ({
   ...await import("../../../domain/src/circles"), ...await import("../../../domain/src/roles"),
   listGoals: vi.fn(async () => []),
 }));
+import { DigestReadRelease } from "../../../domain/src/digest-lineage";
 import { getWorkspaceOverview, queryActions, queryTensions, queryProposals, queryOrgStructure } from "./workspace";
 
 describe("workspace tools with committed current source receipts", () => {
@@ -237,4 +238,42 @@ it.each(["head", "epoch", "caller"] as const)("fences original selected work-ite
   });
   await expect(queryActions(workspaceId, "OPEN", undefined, undefined, alpha)).rejects.toMatchObject({ code: mode === "caller" ? "FORBIDDEN" : "SOURCE_CHANGED" });
   expect(changed).toBe(true);
+});
+
+it("bounds overview raw candidates and reports incomplete counts instead of global zeros", async () => {
+  const { publicAction } = await seed();
+  for (let index = 0; index < 501; index++) add("action", { ...publicAction, id: `a-unknown-${String(index).padStart(4, "0")}` });
+  const result = await getWorkspaceOverview(workspaceId, alpha);
+  expect(result).toMatchObject({ openActions: null,
+    countWindows: { openActions: { count: 0, complete: false, scope: "WINDOW" }, memberCount: { count: 2, complete: true } } });
+  const pages = fixture.prisma.action.findMany.mock.calls.filter(([args]: any[]) => args.take === 100);
+  expect(pages).toHaveLength(2);
+});
+
+it.each(["head", "caller-epoch"] as const)("seals all overview families against late %s changes", async mode => {
+  await seed();
+  const finish = DigestReadRelease.prototype.finish;
+  const hook = vi.spyOn(DigestReadRelease.prototype, "finish").mockImplementation(function<T>(this: DigestReadRelease, value: T) {
+    if (mode === "head") {
+      const original = fixture.rows.artifactInputLineage.find(row => row.artifactType === "Action" && row.artifactId === "visible-action");
+      fixture.rows.artifactInputLineage.push({ ...original, id: "late-identical-head", revision: original.revision + 1 });
+    } else epochFixture.bump(workspaceId, "MemberUserPolicy", "alpha");
+    return finish.call(this, value) as Promise<T>;
+  });
+  try {
+    await expect(getWorkspaceOverview(workspaceId, alpha)).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(hook).toHaveBeenCalledTimes(1);
+  } finally { hook.mockRestore(); }
+});
+
+it("reports a healthy large overview as an admitted lower bound without exhausting its corpus", async () => {
+  const { publicAction } = await seed();
+  for (let index = 0; index < 201; index++) await known("Action", add("action", {
+    ...publicAction, id: `a-proven-${String(index).padStart(4, "0")}`,
+  }));
+  const result = await getWorkspaceOverview(workspaceId, alpha);
+  expect(result).toMatchObject({ openActions: null, countWindows: {
+    openActions: { count: 200, complete: false, scope: "WINDOW" },
+  } });
+  expect(fixture.prisma.action.findMany.mock.calls.filter(([args]: any[]) => args.take === 100)).toHaveLength(2);
 });

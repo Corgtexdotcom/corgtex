@@ -538,7 +538,7 @@ export async function enqueueExternalDataSourceSync(actor: AppActor, params: {
   });
 }
 
-export async function refreshOAuthTokenIfNeeded(connectionId: string): Promise<OAuthConnection> {
+export async function refreshOAuthTokenIfNeeded(connectionId: string, controls?: OAuthSourceAttemptControls): Promise<OAuthConnection> {
   let connection = await prisma.oAuthConnection.findUnique({
     where: { id: connectionId },
   });
@@ -573,7 +573,7 @@ export async function refreshOAuthTokenIfNeeded(connectionId: string): Promise<O
     }
 
     if (connection.provider === "GOOGLE") {
-      const response = await fetch("https://oauth2.googleapis.com/token", {
+      const response = await oauthSourceFetch("https://oauth2.googleapis.com/token", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
@@ -582,19 +582,21 @@ export async function refreshOAuthTokenIfNeeded(connectionId: string): Promise<O
           refresh_token: refreshToken,
           grant_type: "refresh_token",
         }),
-      });
+      }, controls);
+      await controls?.authorizeAttempt();
 
       if (!response.ok) {
         await prisma.oAuthConnection.update({
-          where: { id: connection.id },
+          where: { id: connection.id, ...(controls ? {status: "ACTIVE", providerAccountId: connection.providerAccountId, userId: connection.userId, workspaceId: connection.workspaceId} : {}) },
           data: { status: "ERROR", lastSyncError: "Failed to refresh Google token" },
         });
         throw new Error("Failed to refresh Google token");
       }
       const data = await response.json();
+      await controls?.authorizeAttempt();
 
       return prisma.oAuthConnection.update({
-        where: { id: connection.id },
+        where: { id: connection.id, ...(controls ? {status: "ACTIVE", providerAccountId: connection.providerAccountId, userId: connection.userId, workspaceId: connection.workspaceId} : {}) },
         data: {
           accessToken: encryptOAuthToken(data.access_token),
           tokenStorageVersion: ENCRYPTED_TOKEN_STORAGE_VERSION,
@@ -607,7 +609,7 @@ export async function refreshOAuthTokenIfNeeded(connectionId: string): Promise<O
     }
 
     if (connection.provider === "MICROSOFT") {
-      const response = await fetch("https://login.microsoftonline.com/organizations/oauth2/v2.0/token", {
+      const response = await oauthSourceFetch("https://login.microsoftonline.com/organizations/oauth2/v2.0/token", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
@@ -616,19 +618,21 @@ export async function refreshOAuthTokenIfNeeded(connectionId: string): Promise<O
           refresh_token: refreshToken,
           grant_type: "refresh_token",
         }),
-      });
+      }, controls);
+      await controls?.authorizeAttempt();
 
       if (!response.ok) {
         await prisma.oAuthConnection.update({
-          where: { id: connection.id },
+          where: { id: connection.id, ...(controls ? {status: "ACTIVE", providerAccountId: connection.providerAccountId, userId: connection.userId, workspaceId: connection.workspaceId} : {}) },
           data: { status: "ERROR", lastSyncError: "Failed to refresh Microsoft token" },
         });
         throw new Error("Failed to refresh Microsoft token");
       }
       const data = await response.json();
+      await controls?.authorizeAttempt();
 
       return prisma.oAuthConnection.update({
-        where: { id: connection.id },
+        where: { id: connection.id, ...(controls ? {status: "ACTIVE", providerAccountId: connection.providerAccountId, userId: connection.userId, workspaceId: connection.workspaceId} : {}) },
         data: {
           accessToken: encryptOAuthToken(data.access_token),
           tokenStorageVersion: ENCRYPTED_TOKEN_STORAGE_VERSION,
@@ -999,20 +1003,40 @@ function isPlainTextDocumentMimeType(mimeType: string | null) {
     || lower === "application/sql";
 }
 
-export async function fetchSelectedDocuments(connectionId: string, selectedDocumentIds: string[]): Promise<OAuthDocumentSource[]> {
+export type OAuthSourceAttemptControls = {authorizeAttempt: () => Promise<void>; signal?: AbortSignal; expectedAccountId?: string};
+async function oauthSourceFetch(input: string, init: RequestInit, controls?: OAuthSourceAttemptControls) {
+  controls?.signal?.throwIfAborted();
+  await controls?.authorizeAttempt();
+  controls?.signal?.throwIfAborted();
+  return fetch(input, {...init, ...(controls?.signal ? {signal: controls.signal} : {})});
+}
+
+async function assertOAuthSourceAccount(connection: OAuthConnection, accessToken: string, controls?: OAuthSourceAttemptControls) {
+  if (!controls?.expectedAccountId) return;
+  const url = connection.provider === "GOOGLE" ? "https://www.googleapis.com/oauth2/v2/userinfo" : "https://graph.microsoft.com/v1.0/me";
+  const profile = await readProviderJsonResponse(await oauthSourceFetch(url, {headers: {Authorization: `Bearer ${accessToken}`}}, controls), "OAuth account");
+  invariant(String(profile.id) === controls.expectedAccountId && connection.providerAccountId === controls.expectedAccountId,
+    409, "SOURCE_CHANGED", "OAuth provider account changed.");
+  await controls.authorizeAttempt();
+}
+
+export async function fetchSelectedDocuments(connectionId: string, selectedDocumentIds: string[], controls?: OAuthSourceAttemptControls): Promise<OAuthDocumentSource[]> {
   const ids = selectedDocumentIds.map((id) => id.trim()).filter(Boolean);
   if (ids.length === 0) return [];
 
-  const connection = await refreshOAuthTokenIfNeeded(connectionId);
+  await controls?.authorizeAttempt();
+  const connection = await refreshOAuthTokenIfNeeded(connectionId, controls);
+  await controls?.authorizeAttempt();
   if (connection.status !== "ACTIVE") return [];
   const accessToken = oauthAccessToken(connection);
+  await assertOAuthSourceAccount(connection, accessToken, controls);
   const documents: OAuthDocumentSource[] = [];
 
   if (connection.provider === "GOOGLE") {
     for (const id of ids) {
-      const metadata = await readProviderJsonResponse(await fetch(
+      const metadata = await readProviderJsonResponse(await oauthSourceFetch(
         `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?fields=id,name,mimeType,webViewLink,modifiedTime`,
-        { headers: { Authorization: `Bearer ${accessToken}` } },
+        { headers: { Authorization: `Bearer ${accessToken}` } }, controls,
       ), "Google Drive");
       const mimeType = typeof metadata.mimeType === "string" ? metadata.mimeType : null;
       const isGoogleDoc = mimeType?.startsWith("application/vnd.google-apps.") ?? false;
@@ -1022,9 +1046,9 @@ export async function fetchSelectedDocuments(connectionId: string, selectedDocum
       const contentUrl = isGoogleDoc && exportMimeType
         ? `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}/export?mimeType=${encodeURIComponent(exportMimeType)}`
         : `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?alt=media`;
-      const contentText = await readProviderTextResponse(await fetch(contentUrl, {
+      const contentText = await readProviderTextResponse(await oauthSourceFetch(contentUrl, {
         headers: { Authorization: `Bearer ${accessToken}` },
-      }), "Google Drive");
+      }, controls), "Google Drive");
       documents.push({
         id: String(metadata.id ?? id),
         sourceKey: id,
@@ -1042,15 +1066,15 @@ export async function fetchSelectedDocuments(connectionId: string, selectedDocum
   if (connection.provider === "MICROSOFT") {
     for (const id of ids) {
       const itemPath = microsoftDriveItemPath(id);
-      const metadata = await readProviderJsonResponse(await fetch(
+      const metadata = await readProviderJsonResponse(await oauthSourceFetch(
         `https://graph.microsoft.com/v1.0${itemPath}`,
-        { headers: { Authorization: `Bearer ${accessToken}` } },
+        { headers: { Authorization: `Bearer ${accessToken}` } }, controls,
       ), "Microsoft Graph");
       const mimeType = typeof metadata.file?.mimeType === "string" ? metadata.file.mimeType : null;
       if (!isPlainTextDocumentMimeType(mimeType)) continue;
-      const contentText = await readProviderTextResponse(await fetch(
+      const contentText = await readProviderTextResponse(await oauthSourceFetch(
         `https://graph.microsoft.com/v1.0${itemPath}/content`,
-        { headers: { Authorization: `Bearer ${accessToken}` } },
+        { headers: { Authorization: `Bearer ${accessToken}` } }, controls,
       ), "Microsoft Graph");
       documents.push({
         id: String(metadata.id ?? id),
@@ -1080,29 +1104,32 @@ function messageHeader(headers: unknown, name: string) {
   return typeof value === "string" ? value : null;
 }
 
-export async function fetchFilteredEmailMessages(connectionId: string, filters: string[]): Promise<OAuthEmailMessage[]> {
+export async function fetchFilteredEmailMessages(connectionId: string, filters: string[], controls?: OAuthSourceAttemptControls): Promise<OAuthEmailMessage[]> {
   const safeFilters = filters.map((filter) => filter.trim()).filter(Boolean);
   if (safeFilters.length === 0) return [];
 
-  const connection = await refreshOAuthTokenIfNeeded(connectionId);
+  await controls?.authorizeAttempt();
+  const connection = await refreshOAuthTokenIfNeeded(connectionId, controls);
+  await controls?.authorizeAttempt();
   if (connection.status !== "ACTIVE") return [];
   const accessToken = oauthAccessToken(connection);
+  await assertOAuthSourceAccount(connection, accessToken, controls);
   const messages: OAuthEmailMessage[] = [];
 
   if (connection.provider === "GOOGLE") {
     for (const filter of safeFilters) {
       const query = new URLSearchParams({ q: filter, maxResults: "10" });
-      const listing = await readProviderJsonResponse(await fetch(
+      const listing = await readProviderJsonResponse(await oauthSourceFetch(
         `https://gmail.googleapis.com/gmail/v1/users/me/messages?${query}`,
-        { headers: { Authorization: `Bearer ${accessToken}` } },
+        { headers: { Authorization: `Bearer ${accessToken}` } }, controls,
       ), "Gmail");
       const messageRefs = Array.isArray(listing.messages) ? listing.messages : [];
       for (const ref of messageRefs) {
         const id = typeof ref?.id === "string" ? ref.id : null;
         if (!id) continue;
-        const detail = await readProviderJsonResponse(await fetch(
+        const detail = await readProviderJsonResponse(await oauthSourceFetch(
           `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date`,
-          { headers: { Authorization: `Bearer ${accessToken}` } },
+          { headers: { Authorization: `Bearer ${accessToken}` } }, controls,
         ), "Gmail");
         const headers = detail.payload?.headers;
         const date = messageHeader(headers, "Date");
@@ -1128,14 +1155,14 @@ export async function fetchFilteredEmailMessages(connectionId: string, filters: 
         $search: `"${filter.replace(/"/g, "\\\"")}"`,
         $select: "id,subject,from,receivedDateTime,webLink,bodyPreview",
       });
-      const listing = await readProviderJsonResponse(await fetch(
+      const listing = await readProviderJsonResponse(await oauthSourceFetch(
         `https://graph.microsoft.com/v1.0/me/messages?${query}`,
         {
           headers: {
             Authorization: `Bearer ${accessToken}`,
             ConsistencyLevel: "eventual",
           },
-        },
+        }, controls,
       ), "Microsoft Graph");
       for (const item of Array.isArray(listing.value) ? listing.value : []) {
         messages.push({

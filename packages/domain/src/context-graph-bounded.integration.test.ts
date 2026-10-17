@@ -3,7 +3,7 @@ import type { Prisma } from "@prisma/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
-import { contextGraphSystemActor, getContextMapData, markStaleContextGraphFacts } from "./context-graph";
+import { contextGraphSystemActor, getContextMapData, markStaleContextGraphFacts, upsertContextGraphObject, upsertContextGraphRelationship } from "./context-graph";
 import { recordArtifactInputLineage, readableArtifactIds, type LineageKind } from "./source-lineage";
 
 beforeEach(async () => { await truncateAllTables(); });
@@ -29,20 +29,24 @@ async function fixture() {
   return {actor, workspace, member, map, original, object};
 }
 
-it("replenishes map objects beyond 5001 unproved rows and only hydrates bounded selected evidence", async () => {
+it.each([
+  {name: "within-budget", hiddenObjects: 100, hiddenEvidence: 10, hiddenRelationships: 100, hiddenDiffs: 21, objectsVisible: true, childrenVisible: true},
+  {name: "object-budget", hiddenObjects: 5001, hiddenEvidence: 10, hiddenRelationships: 100, hiddenDiffs: 21, objectsVisible: false, childrenVisible: true},
+  {name: "child-budgets", hiddenObjects: 100, hiddenEvidence: 105, hiddenRelationships: 301, hiddenDiffs: 201, objectsVisible: true, childrenVisible: false},
+])("returns honest bounded map windows: $name", async ({hiddenObjects, hiddenEvidence, hiddenRelationships, hiddenDiffs, objectsVisible, childrenVisible}) => {
   const f = await fixture();
-  for (let n=0;n<5001;n+=100) await prisma.contextGraphObject.createMany({data: Array.from({length: Math.min(100,5001-n)},(_,i)=>({
+  for (let n=0;n<hiddenObjects;n+=100) await prisma.contextGraphObject.createMany({data: Array.from({length: Math.min(100,hiddenObjects-n)},(_,i)=>({
     id: `unknown-${n+i}`, workspaceId: f.workspace.id, objectType: "Task", title: "Withheld", status: "approved", updatedAt: new Date("2025-01-01Z")}))});
   const visible = await f.object("visible");
-  for (let n=0;n<105;n++) await prisma.contextGraphEvidenceRef.create({data: {workspaceId: f.workspace.id, objectId: visible.id, sourceType: "manual", sourceId: "unknown", quote: "WITHHELD", createdAt: new Date("2025-01-01Z")}});
+  for (let n=0;n<hiddenEvidence;n++) await prisma.contextGraphEvidenceRef.create({data: {workspaceId: f.workspace.id, objectId: visible.id, sourceType: "manual", sourceId: "unknown", quote: "WITHHELD", createdAt: new Date("2025-01-01Z")}});
   const evidence = await prisma.contextGraphEvidenceRef.create({data: {workspaceId: f.workspace.id, objectId: visible.id, sourceType: "manual", sourceId: "known", quote: "Visible evidence", createdAt: new Date("2021-01-01Z")}});
   await f.original("ContextGraphEvidenceRef", evidence);
-  await prisma.contextGraphRelationship.createMany({data: Array.from({length: 301}, (_, i) => ({
+  await prisma.contextGraphRelationship.createMany({data: Array.from({length: hiddenRelationships}, (_, i) => ({
     id: `a-denied-relation-${i}`, workspaceId: f.workspace.id, sourceObjectId: visible.id, targetObjectId: visible.id, relationshipType: "depends_on", status: "approved"}))});
   const relationship = await prisma.contextGraphRelationship.create({data: {id: "z-readable-relation", workspaceId: f.workspace.id,
     sourceObjectId: visible.id, targetObjectId: visible.id, relationshipType: "depends_on", status: "approved"}});
   await f.original("ContextGraphRelationship", relationship);
-  await prisma.contextGraphProposedDiff.createMany({data: Array.from({length: 21}, () => ({workspaceId: f.workspace.id,
+  await prisma.contextGraphProposedDiff.createMany({data: Array.from({length: hiddenDiffs}, () => ({workspaceId: f.workspace.id,
     proposedByType: "human", diffJson: {}, createdAt: new Date("2025-01-01Z")}))});
   const diff = await prisma.contextGraphProposedDiff.create({data: {workspaceId: f.workspace.id,
     proposedByType: "human", diffJson: {}, createdAt: new Date("2021-01-01Z")}});
@@ -50,18 +54,23 @@ it("replenishes map objects beyond 5001 unproved rows and only hydrates bounded 
   const objects = vi.spyOn(prisma.contextGraphObject, "findMany"), refs = vi.spyOn(prisma.contextGraphEvidenceRef, "findMany");
   const relationships = vi.spyOn(prisma.contextGraphRelationship, "findMany"), diffs = vi.spyOn(prisma.contextGraphProposedDiff, "findMany");
   const result = await getContextMapData(f.actor, {workspaceId: f.workspace.id, mapViewId: f.map.id});
-  expect(result.objects.map(row => row.id)).toEqual([visible.id]);
-  expect(result.objects[0].evidenceRefs.map(row=>row.id)).toEqual([evidence.id]);
-  expect(result.relationships.map(row => row.id)).toEqual([relationship.id]);
-  expect(result.proposedDiffs.map(row => row.id)).toEqual([diff.id]);
-  expect(objects.mock.calls.length).toBeGreaterThan(50);
+  expect(result.objects.map(row => row.id)).toEqual(objectsVisible ? [visible.id] : []);
+  expect(result.objects[0]?.evidenceRefs.map(row=>row.id) ?? []).toEqual(objectsVisible && childrenVisible ? [evidence.id] : []);
+  expect(result.relationships.map(row => row.id)).toEqual(objectsVisible && childrenVisible ? [relationship.id] : []);
+  expect(result.proposedDiffs.map(row => row.id)).toEqual(childrenVisible ? [diff.id] : []);
+  expect(result.readWindow).toMatchObject({scope: "WINDOW", complete: objectsVisible && childrenVisible});
+  expect(objects.mock.calls.reduce((sum, [q]) => sum + (q?.take ?? 0), 0)).toBeLessThanOrEqual(200);
   for (const [q] of objects.mock.calls) { expect(q?.take).toBeLessThanOrEqual(100); expect(q).not.toHaveProperty("include"); }
   for (const [q] of refs.mock.calls) {
     expect(q?.take).toBeLessThanOrEqual(5);
     expect(q?.where?.objectId === visible.id || q?.where?.relationshipId === relationship.id).toBe(true);
   }
+  expect(refs.mock.calls.reduce((sum, [q]) => sum + (q?.take ?? 0), 0)).toBeLessThanOrEqual(40);
   for (const [q] of relationships.mock.calls) {expect(q?.take).toBeLessThanOrEqual(100); expect(q).not.toHaveProperty("include");}
+  expect(relationships.mock.calls.reduce((sum, [q]) => sum + (q?.take ?? 0), 0)).toBeLessThanOrEqual(300);
   for (const [q] of diffs.mock.calls) expect(q?.take).toBeLessThanOrEqual(20);
+  expect(diffs.mock.calls.reduce((sum, [q]) => sum + (q?.take ?? 0), 0)).toBeLessThanOrEqual(200);
+  expect(JSON.stringify(result)).not.toContain("WITHHELD");
 }, 60000);
 
 it.each(["head", "membership"] as const)("map retains original %s through later relationship reads", async mode => {
@@ -157,4 +166,30 @@ it("keeps the existing scheduled actor limited to genuinely readable facts", asy
   expect(await markStaleContextGraphFacts(system, {workspaceId: f.workspace.id, now: new Date("2021-01-02Z")})).toMatchObject({staleObjects: 1, staleRelationships: 0});
   expect((await prisma.contextGraphObject.findUniqueOrThrow({where: {id: publicObject.id}})).status).toBe("stale");
   expect(await prisma.contextGraphObject.findUniqueOrThrow({where: {id: privateObject.id}})).toEqual(privateObject);
+});
+
+
+it.each(["object", "relationship"] as const)("preserves original createdAt while refreshing a %s dedupe revision", async kind => {
+  const f = await fixture();
+  const params = {workspaceId: f.workspace.id, objectType: "Task", title: "Original", humanOriginal: true, lineageInputs: [{kind: "Workspace" as const, id: f.workspace.id}]};
+  const left = await upsertContextGraphObject(f.actor, {...params, dedupeKey: "left"});
+  const right = await upsertContextGraphObject(f.actor, {...params, dedupeKey: "right"});
+  const relationshipParams = {workspaceId: f.workspace.id, sourceObjectId: left.id, targetObjectId: right.id,
+    relationshipType: "depends_on", dedupeKey: "relationship", humanOriginal: true, lineageInputs: [{kind: "Workspace" as const, id: f.workspace.id}]};
+  const old = new Date("2020-01-01T00:00:00Z");
+  const target = kind === "object"
+    ? await prisma.contextGraphObject.update({where: {id: left.id}, data: {createdAt: old, recordedAt: old}})
+    : await prisma.contextGraphRelationship.update({where: {id: (await upsertContextGraphRelationship(f.actor, relationshipParams)).id}, data: {createdAt: old, recordedAt: old}});
+  const artifactType = kind === "object" ? "ContextGraphObject" : "ContextGraphRelationship";
+  await f.original(artifactType, target);
+  const before = await prisma.artifactInputLineage.findFirstOrThrow({where: {workspaceId: f.workspace.id, artifactType, artifactId: target.id}, orderBy: {revision: "desc"}});
+  const refreshed = kind === "object"
+    ? await upsertContextGraphObject(f.actor, {...params, title: "Refreshed", dedupeKey: "left"})
+    : await upsertContextGraphRelationship(f.actor, {...relationshipParams, confidence: 0.8});
+  expect(refreshed.id).toBe(target.id);
+  expect(refreshed.createdAt).toEqual(old);
+  expect(refreshed.recordedAt.getTime()).toBeGreaterThan(old.getTime());
+  const after = await prisma.artifactInputLineage.findFirstOrThrow({where: {workspaceId: f.workspace.id, artifactType, artifactId: target.id}, orderBy: {revision: "desc"}});
+  expect(after.revision).toBeGreaterThan(before.revision);
+  expect((await readableArtifactIds(f.actor, f.workspace.id, artifactType, [refreshed])).has(target.id)).toBe(true);
 });

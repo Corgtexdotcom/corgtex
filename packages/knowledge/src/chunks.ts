@@ -120,6 +120,8 @@ export async function syncKnowledgeForSource(params: {
   agentRunId?: string;
   sourceUpdatedAt?: Date;
   lineageActor?: AppActor;
+  /** Optional additional owner/job fence; never grants source authority. */
+  sourceGuard?: (db?: Prisma.TransactionClient) => Promise<void>;
 }) {
   // SQL rows require the authenticated claim/capture/publication pipeline. A
   // zero count would let legacy connector callers acknowledge a skipped row.
@@ -177,6 +179,7 @@ export async function syncKnowledgeForSource(params: {
     return 0;
   }
 
+  await params.sourceGuard?.();
   const snapshot = await knowledgeSourceSnapshot(params);
   if (["BRAIN_ARTICLE", "DOCUMENT", "MEETING", "PROPOSAL", "EXTERNAL_CONTENT"].includes(params.sourceType)
     && (!snapshot || (snapshot.content !== params.content && snapshot.rawContent !== params.content)
@@ -228,6 +231,7 @@ export async function syncKnowledgeForSource(params: {
     try {
       attemptController.signal.throwIfAborted();
       signal.throwIfAborted();
+      await params.sourceGuard?.();
       if (!await isArtifactInputProofReadable(sourceActor, params.workspaceId, commitRoots)) {
         throw new AppError(409, "SOURCE_CHANGED", "Indexing source authority changed before the model attempt.");
       }
@@ -248,6 +252,7 @@ export async function syncKnowledgeForSource(params: {
     authorizeAttempt,
   });
   attemptController.signal.throwIfAborted();
+  await params.sourceGuard?.();
 
   const createdAt = new Date();
   const chunkRows = chunks.map((content, index) => {
@@ -294,6 +299,7 @@ export async function syncKnowledgeForSource(params: {
     if (snapshot.kind === "Proposal") await tx.$queryRaw`SELECT "id" FROM "Proposal" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
     if (snapshot.kind === "BrainArticle") await tx.$queryRaw`SELECT "id" FROM "BrainArticle" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
     if (snapshot.kind === "Document") await tx.$queryRaw`SELECT "id" FROM "Document" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+    await params.sourceGuard?.(tx);
     return withArtifactCommitPreflight(sourceActor, params.workspaceId, tx, commitRoots, commitPreflight, async () => {
     // Compare the exact revision captured before embedding inside the complete
     // source scope. Restoration is a new permission revision.

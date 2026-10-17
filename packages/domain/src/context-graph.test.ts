@@ -2078,11 +2078,11 @@ describe("context graph domain", () => {
     expect(prismaMock.contextMapLayoutItem.upsert).not.toHaveBeenCalled();
     expect(prismaMock.contextGraphProposedDiff.update).not.toHaveBeenCalled();
   });
-  it("filters lineage before map limits, counts, linked evidence, edges and layouts", async () => {
+  it("filters lineage within bounded map windows before counts, evidence, edges and layouts", async () => {
     const evidence = [{ id: "public-evidence", objectId: "public", knowledgeChunkId: null },
       { id: "finance-evidence", objectId: "public", quote: "Confidential payroll", knowledgeChunkId: null }];
     const objectRows = [
-      ...Array.from({ length: 200 }, (_, index) => ({ id: `unknown-${index}`, title: "Hidden", evidenceRefs: [] })),
+      ...Array.from({ length: 100 }, (_, index) => ({ id: `unknown-${index}`, title: "Hidden", evidenceRefs: [] })),
       { id: "public", title: "Public process", evidenceRefs: evidence },
       { id: "public-2", title: "Public team", evidenceRefs: [] },
       { id: "finance", title: "Finance", evidenceRefs: [] },
@@ -2117,6 +2117,35 @@ describe("context graph domain", () => {
     expect(prismaMock.contextGraphProposedDiff.findMany.mock.calls[0][0]).toMatchObject({take: 20});
     expect(JSON.stringify(map)).not.toContain("Payroll");
     expect(JSON.stringify(map)).not.toContain("Finance");
+  });
+
+  it("shares one denied-evidence candidate budget across all displayed parents", async () => {
+    const now = new Date("2026-01-01Z");
+    const rows = Array.from({length: 200}, (_, i) => ({id: `public-${i}`, objectType: "Task", updatedAt: now}));
+    prismaMock.contextGraphObject.findMany.mockImplementation(async ({where, take}) => {
+      const afterId = where.AND[1]?.OR[2].id.lt;
+      const offset = afterId ? rows.findIndex(row => row.id === afterId) + 1 : 0;
+      return rows.slice(offset, offset + take);
+    });
+    prismaMock.contextGraphEvidenceRef.findMany.mockImplementation(async ({where, take}) => {
+      const evidence = Array.from({length: 20}, (_, i) => ({id: `${where.objectId}-${i}`, objectId: where.objectId, createdAt: now, quote: "WITHHELD"}));
+      const afterId = where.OR?.[1]?.id.lt;
+      const offset = afterId ? evidence.findIndex(row => row.id === afterId) + 1 : 0;
+      return evidence.slice(offset, offset + take);
+    });
+    readableArtifactIdsMock.mockImplementation(async (_actor: unknown, _workspaceId: string, kind: string, records: Array<{id: string}>) =>
+      new Set(kind === "ContextGraphEvidenceRef" ? [] : records.map(row => row.id)));
+    const map = await getContextMapData(actor, {workspaceId: "ws-1", mapViewId: "map-1"});
+    expect(map.objects).toHaveLength(200);
+    expect(map.objects.every(row => row.evidenceRefs.length === 0)).toBe(true);
+    expect(map.readWindow).toMatchObject({scope: "WINDOW", complete: false, evidenceComplete: false});
+    const queries = prismaMock.contextGraphEvidenceRef.findMany.mock.calls;
+    expect(queries.reduce((sum: number, [args]: any[]) => sum + args.take, 0)).toBe(2500);
+    expect(queries.every(([args]: any[]) => args.take <= 5)).toBe(true);
+    const perParent = new Map<string, number>();
+    for (const [args] of queries) perParent.set(args.where.objectId, (perParent.get(args.where.objectId) ?? 0) + args.take);
+    expect([...perParent.values()].every(count => count <= 20)).toBe(true);
+    expect(JSON.stringify(map)).not.toContain("WITHHELD");
   });
 
   it("withholds imported map names and queries without complete lineage", async () => {

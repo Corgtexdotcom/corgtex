@@ -702,7 +702,6 @@ async function upsertObjectWithTx(
     ...data,
     ...creatorData(actor, agentRunId),
     recordedAt: new Date(),
-    createdAt: new Date(),
     supersededByObjectId: null,
   };
 
@@ -724,10 +723,11 @@ async function upsertObjectWithTx(
     create: {
       workspaceId,
       ...writeData,
+      createdAt: writeData.recordedAt,
       dedupeKey,
     },
   }) : await tx.contextGraphObject.create({
-    data: { workspaceId, ...writeData },
+    data: { workspaceId, ...writeData, createdAt: writeData.recordedAt },
   });
   await captureGraphLineage(tx, actor, workspaceId, { kind: "ContextGraphObject", id: object.id }, object, prepared);
   return object;
@@ -810,7 +810,6 @@ async function upsertRelationshipWithTx(
     targetObjectId,
     ...creatorData(actor, agentRunId),
     recordedAt: new Date(),
-    createdAt: new Date(),
     supersededByRelationshipId: null,
   };
 
@@ -831,6 +830,7 @@ async function upsertRelationshipWithTx(
     create: {
       workspaceId,
       ...writeData,
+      createdAt: writeData.recordedAt,
     },
   });
   await captureGraphLineage(tx, actor, workspaceId, { kind: "ContextGraphRelationship", id: relationship.id }, relationship, prepared);
@@ -1605,20 +1605,33 @@ export async function getContextMapData(actor: AppActor, params: {
     404, "NOT_FOUND", "Context map not found.");
 
   const readGraph = graphReadWithRebuild(actor, params.workspaceId, mapView, release);
+  const completeness = {objectsComplete: true, relationshipsComplete: true, evidenceComplete: true,
+    proposedDiffsComplete: true, variantsComplete: true};
+  // A parent cap alone would still allow thousands of denied evidence pages.
+  // This shared budget bounds discovery across every displayed object and edge.
+  const evidenceBudget = {remaining: 2500};
   async function window<R extends {id: string}>(kind: LineageInput["kind"], limit: number,
-    load: (after: R | undefined, take: number) => Promise<R[]>) {
+    load: (after: R | undefined, take: number) => Promise<R[]>,
+    options?: {maxCandidates: number; shared: {remaining: number}}) {
     const result: R[] = [];
     let after: R | undefined;
-    while (result.length < limit) {
-      const take = Math.min(100, limit - result.length);
+    let examined = 0, complete = false;
+    const maxCandidates = options?.maxCandidates ?? Math.max(200, limit);
+    while (result.length < limit && examined < maxCandidates && (options?.shared.remaining ?? 1) > 0) {
+      const take = Math.min(100, limit - result.length, maxCandidates - examined, options?.shared.remaining ?? Infinity);
       const rows = await load(after, take);
       invariant(rows.length <= take && (!rows.length || rows.at(-1)!.id !== after?.id), 409, "SOURCE_CHANGED", "Graph window changed during pagination.");
-      // Canonical discovery is not authority. The selected original proofs are
-      // captured by readGraph and released together after every later await.
+      examined += rows.length;
+      if (options) options.shared.remaining -= rows.length;
+      // Keep the originally admitted proofs through all later map/evidence awaits.
       result.push(...await readGraph(kind, rows));
-      if (rows.length < take) break;
+      if (rows.length < take) { complete = true; break; }
       after = rows.at(-1);
     }
+    if (kind === "ContextGraphObject") completeness.objectsComplete = complete;
+    else if (kind === "ContextGraphRelationship") completeness.relationshipsComplete = complete;
+    else if (kind === "ContextGraphEvidenceRef") completeness.evidenceComplete &&= complete;
+    else if (kind === "ContextGraphProposedDiff") completeness.proposedDiffsComplete = complete;
     return result;
   }
   const nativeObjects = await window("ContextGraphObject", 200, (after: ContextGraphObject | undefined, take) => prisma.contextGraphObject.findMany({
@@ -1632,7 +1645,7 @@ export async function getContextMapData(actor: AppActor, params: {
       where: {workspaceId: params.workspaceId, ...(objectId ? {objectId} : {relationshipId}), knowledgeChunkId: null,
         ...(after ? {OR: [{createdAt: {lt: after.createdAt}}, {createdAt: after.createdAt, id: {lt: after.id}}]} : {})},
       orderBy: [{createdAt: "desc"}, {id: "desc"}], take,
-    }));
+    }), {maxCandidates: 20, shared: evidenceBudget});
   }
   const readableObjects = [];
   for (const object of nativeObjects) readableObjects.push({...object, evidenceRefs: await evidenceFor(object.id)});
@@ -1642,12 +1655,13 @@ export async function getContextMapData(actor: AppActor, params: {
   const admittedVariantObjectIds = new Set<string>();
   for (const bundle of variantProjection.bundles.values()) {
     const ids = variantProjection.objects.filter(object => bundle.childIds.has(object.id)).map(object => object.id);
-    if (ids.length > remainingVariantSlots) continue;
+    if (ids.length > remainingVariantSlots) { completeness.variantsComplete = false; continue; }
     ids.forEach(id => admittedVariantObjectIds.add(id)); remainingVariantSlots -= ids.length;
   }
   const variantObjects = variantProjection.objects.filter(object => admittedVariantObjectIds.has(object.id)).map(object => ({ ...object,
     evidenceRefs: variantProjection.evidenceRefs.filter(ref => ref.objectId === object.id),
   }));
+  if ([...readableObjects, ...variantObjects].some(object => object.evidenceRefs.length > 5)) completeness.evidenceComplete = false;
   const objects = [...readableObjects, ...variantObjects].slice(0, 200).map((object) => ({ ...object,
     evidenceRefs: object.evidenceRefs.slice(0, 5),
   }));
@@ -1673,13 +1687,19 @@ export async function getContextMapData(actor: AppActor, params: {
   const variantRelationships = variantProjection.relationships.map(relationship => ({ ...relationship,
     evidenceRefs: variantProjection.evidenceRefs.filter(ref => ref.relationshipId === relationship.id),
   }));
-  const relationships = [...readableRelationships, ...variantRelationships].filter((relationship) => visibleObjectIds.has(relationship.sourceObjectId)
-    && visibleObjectIds.has(relationship.targetObjectId)).slice(0, 300).map((relationship) => ({ ...relationship,
+  const eligibleRelationships = [...readableRelationships, ...variantRelationships].filter(relationship => visibleObjectIds.has(relationship.sourceObjectId)
+    && visibleObjectIds.has(relationship.targetObjectId));
+  if (eligibleRelationships.length > 300) completeness.relationshipsComplete = false;
+  if (variantRelationships.some(relationship => !visibleObjectIds.has(relationship.sourceObjectId) || !visibleObjectIds.has(relationship.targetObjectId))) completeness.variantsComplete = false;
+  if (eligibleRelationships.some(relationship => relationship.evidenceRefs.length > 5)) completeness.evidenceComplete = false;
+  const relationships = eligibleRelationships.slice(0, 300).map((relationship) => ({ ...relationship,
     evidenceRefs: relationship.evidenceRefs.slice(0, 5),
   }));
   const layoutItems = (await readGraph("ContextMapLayoutItem",
     candidateLayoutItems.filter((item) => visibleObjectIds.has(item.objectId))));
+  if (candidateDiffs.length + variantProjection.proposedDiffs.length > 20) completeness.proposedDiffsComplete = false;
   const proposedDiffs = [...candidateDiffs, ...variantProjection.proposedDiffs].slice(0, 20);
+  const readWindow = {scope: "WINDOW" as const, complete: Object.values(completeness).every(Boolean), ...completeness};
   const visibleMapViews = (await release.capture("ContextMapView", mapViews)).records;
   release.add(variantProjection.lineageRoots);
   await assertEffectiveGraphVariantProjection(actor, params.workspaceId, variantProjection);
@@ -1690,10 +1710,14 @@ export async function getContextMapData(actor: AppActor, params: {
     relationships,
     layoutItems,
     proposedDiffs,
-    guidance: contextMapGuidance(mapView, {
+    readWindow,
+    guidance: {...contextMapGuidance(mapView, {
       objectCount: objects.length,
       proposedDiffCount: proposedDiffs.length,
-    }),
+    }), ...(!readWindow.complete && objects.length === 0 ? {
+      emptyTitle: "No visible facts in this window",
+      emptyDescription: "This limited window does not establish that the map is empty. Choose another view to inspect a different scope.",
+    } : {})},
     permissions: {
       canSavePersonalView: actor.kind === "user",
       canUpdateMasterView: canApproveContextGraph(actor, membership),

@@ -7035,3 +7035,25 @@ model RecorderTranscriptPublication {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   @@index([workspaceId, recordingId])
 }
+
+/// Immutable authenticated OAuth provider content. Plain receipt ids are not authority.
+model OAuthProviderFetchInput {
+  id String @id @default(uuid())
+  workspaceId String
+  connectionId String
+  localUserId String
+  ownerMemberId String
+  provider String
+  providerAccountId String
+  sourceKind String
+  externalId String
+  sourceKey String
+  selection String
+  grantHash String
+  encryptedPayload String @db.Text
+  payloadHash String
+  permissionEpochsJson Json
+  createdAt DateTime @default(now())
+
+  @@index([workspaceId, connectionId, sourceKind, externalId], map: "OAuthProviderFetchInput_workspace_connection_item_idx")
+}

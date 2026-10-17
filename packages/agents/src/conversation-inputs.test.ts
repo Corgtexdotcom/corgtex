@@ -115,6 +115,7 @@ function crmPage(): ConversationPageContext {
       contacts: [], deals: [], activities: [], suggestions: [] } };
 }
 
+let permissionEpochs: ReturnType<typeof installSourcePermissionEpochFixture>;
 beforeEach(() => {
   vi.clearAllMocks(); fixture.tables.clear(); fixture.memberships.clear(); fixture.manifests.length = 0;
   fixture.memberships.set(`${workspaceId}:synthetic-alice`, { id: "member-alice", role: "CONTRIBUTOR" });
@@ -132,7 +133,7 @@ beforeEach(() => {
   insert("conversationSession", { id: "session-bob", workspaceId, userId: "synthetic-bob", agentKey: "assistant", topic: null, status: "ACTIVE", systemPrompt: null });
   fixture.base.$executeRaw.mockReset().mockResolvedValue(1);
   fixture.base.$queryRaw.mockReset().mockResolvedValue([]);
-  installSourcePermissionEpochFixture(fixture.prisma);
+  permissionEpochs = installSourcePermissionEpochFixture(fixture.prisma);
 });
 
 describe("conversation server context admission with actual source proofs", () => {
@@ -309,4 +310,30 @@ it("rejects an earlier admitted history page when its source changes during repl
     return load(args);
   });
   await expect(loadConversationHistory(alice, workspaceId, base.sessionId, 2, prepared.collector)).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+});
+
+ it("bounds denied conversation history independently of admitted turns", async () => {
+  const prepared = await prepareConversationInputs(base);
+  for (let number = 1; number <= 501; number++) insert("conversationTurn", {
+    id: `denied-window-${number}`, conversationId: base.sessionId, sequenceNumber: number,
+  });
+  await expect(loadConversationHistory(alice, workspaceId, base.sessionId, 20, prepared.collector))
+    .rejects.toMatchObject({ code: "SOURCE_READ_SCAN_LIMIT" });
+  expect(fixture.delegates.get("conversationTurn").findMany).toHaveBeenCalledTimes(2);
+ });
+
+it("rechecks caller epochs even when the bounded history has no admitted turns", async () => {
+  const prepared = await prepareConversationInputs(base);
+  for (let number = 1; number <= 201; number++) insert("conversationTurn", {
+    id: `denied-caller-${number}`, conversationId: base.sessionId, sequenceNumber: number,
+  });
+  const delegate = fixture.delegates.get("conversationTurn");
+  const load = delegate.findMany.getMockImplementation();
+  delegate.findMany.mockImplementation(async (args: { where: { OR?: unknown } }) => {
+    if (args.where.OR) permissionEpochs.bump(workspaceId, "MemberUserPolicy", base.userId);
+    return load(args);
+  });
+  await expect(loadConversationHistory(alice, workspaceId, base.sessionId, 20, prepared.collector))
+    .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+  expect(delegate.findMany).toHaveBeenCalledTimes(2);
 });

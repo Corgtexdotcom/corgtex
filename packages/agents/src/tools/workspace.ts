@@ -2,14 +2,14 @@ import { prisma } from "@corgtex/shared";
 import { authorizeConversationTool } from "../conversation-capabilities";
 import type { ModelTool } from "@corgtex/models";
 import type { AppActor } from "@corgtex/shared";
-import { AppError, listCircles, listRoleAssignments, listGoals, privacyFilter, requireWorkspaceMembership, scanSourceReadableRecords, captureReadableDigestInputs, DigestReadRelease, loadReadableArtifactSample } from "@corgtex/domain";
+import { AppError, listCircles, listRoleAssignments, listGoals, privacyFilter, requireWorkspaceMembership, type LineageKind, captureReadableDigestInputs, DigestReadRelease, loadReadableArtifactSample } from "@corgtex/domain";
 import type { Prisma, TensionStatus, ActionStatus, ProposalStatus, GoalCadence, GoalLevel, GoalStatus } from "@prisma/client";
 
 export const getWorkspaceOverviewTool: ModelTool = {
   type: "function",
   function: {
     name: "get_workspace_overview",
-    description: "Get a high-level snapshot of the active workspace state including counts of open items, members, circles, and overall activity. Use this to orient yourself when the user asks general questions about the organization's state.",
+    description: "Get a bounded snapshot of the active workspace. Numeric counts are exact only for complete families; null counts have countWindows with a permitted lower bound and complete:false. Use this to orient yourself when the user asks general questions about the organization's state.",
     parameters: {
       type: "object",
       properties: {},
@@ -103,20 +103,39 @@ export async function getWorkspaceOverview(workspaceId: string, actor?: AppActor
   if (actor) await authorizeConversationTool(actor, workspaceId, "get_workspace_overview");
   const where = await workspaceReaderWhere(workspaceId, actor);
   const caller = actor!;
+  const release = new DigestReadRelease(caller, workspaceId);
+  async function countWindow<T extends { id: string }>(params: {
+    actor: AppActor; workspaceId: string; kind: LineageKind;
+    load: (afterId: string | undefined, take: number) => Promise<T[]>;
+  }) {
+    let afterId: string | undefined;
+    let count = 0;
+    for (let page = 0; page < 2; page++) {
+      const rows = await params.load(afterId, 100);
+      if (rows.length > 100) throw new AppError(409, "SOURCE_CHANGED", "Overview page exceeded its bound.");
+      for (const row of rows) {
+        if (afterId !== undefined && row.id <= afterId) throw new AppError(409, "SOURCE_CHANGED", "Overview page did not advance.");
+        afterId = row.id;
+      }
+      count += (await release.capture(params.kind, rows)).records.length;
+      if (rows.length < 100) return { count, complete: true, scope: "WINDOW" as const };
+    }
+    return { count, complete: false, scope: "WINDOW" as const };
+  }
   const scans = await Promise.all([
-    scanSourceReadableRecords({ actor: caller, workspaceId, kind: "Member", load: (afterId, take) => prisma.member.findMany({ where: { workspaceId, isActive: true, ...(afterId ? { id: { gt: afterId } } : {}) }, orderBy: { id: "asc" }, take, include: { user: { select: { id: true, email: true, displayName: true } } } }) }),
-    scanSourceReadableRecords({ actor: caller, workspaceId, kind: "Circle", load: (afterId, take) => prisma.circle.findMany({ where: { workspaceId, archivedAt: null, ...(afterId ? { id: { gt: afterId } } : {}) }, orderBy: { id: "asc" }, take }) }),
-    scanSourceReadableRecords({ actor: caller, workspaceId, kind: "Tension", load: (afterId, take) => prisma.tension.findMany({ where: { AND: [{ ...where, status: "OPEN" }, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take }) }),
-    scanSourceReadableRecords({ actor: caller, workspaceId, kind: "Action", load: (afterId, take) => prisma.action.findMany({ where: { AND: [{ ...where, status: "OPEN" }, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take }) }),
-    scanSourceReadableRecords({ actor: caller, workspaceId, kind: "Proposal", load: (afterId, take) => prisma.proposal.findMany({ where: { AND: [{ ...where, status: { in: ["DRAFT", "OPEN"] } }, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take }) }),
-    scanSourceReadableRecords({ actor: caller, workspaceId, kind: "Goal", load: (afterId, take) => prisma.goal.findMany({ where: { AND: [{ ...where, status: { notIn: ["DRAFT", "ABANDONED"] } }, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take }) }),
+    countWindow({ actor: caller, workspaceId, kind: "Member", load: (afterId, take) => prisma.member.findMany({ where: { workspaceId, isActive: true, ...(afterId ? { id: { gt: afterId } } : {}) }, orderBy: { id: "asc" }, take, include: { user: { select: { id: true, email: true, displayName: true } } } }) }),
+    countWindow({ actor: caller, workspaceId, kind: "Circle", load: (afterId, take) => prisma.circle.findMany({ where: { workspaceId, archivedAt: null, ...(afterId ? { id: { gt: afterId } } : {}) }, orderBy: { id: "asc" }, take }) }),
+    countWindow({ actor: caller, workspaceId, kind: "Tension", load: (afterId, take) => prisma.tension.findMany({ where: { AND: [{ ...where, status: "OPEN" }, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take }) }),
+    countWindow({ actor: caller, workspaceId, kind: "Action", load: (afterId, take) => prisma.action.findMany({ where: { AND: [{ ...where, status: "OPEN" }, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take }) }),
+    countWindow({ actor: caller, workspaceId, kind: "Proposal", load: (afterId, take) => prisma.proposal.findMany({ where: { AND: [{ ...where, status: { in: ["DRAFT", "OPEN"] } }, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take }) }),
+    countWindow({ actor: caller, workspaceId, kind: "Goal", load: (afterId, take) => prisma.goal.findMany({ where: { AND: [{ ...where, status: { notIn: ["DRAFT", "ABANDONED"] } }, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take }) }),
   ]);
   const [members, circles, tensions, actions, proposals, goals] = scans;
-  const memberCount = members.length;
-  const circleCount = circles.length, openTensions = tensions.length, openActions = actions.length;
-  const activeProposals = proposals.length, activeGoals = goals.length;
-
-  return { memberCount, circleCount, openTensions, openActions, activeProposals, activeGoals };
+  const countWindows = { memberCount: members, circleCount: circles, openTensions: tensions,
+    openActions: actions, activeProposals: proposals, activeGoals: goals };
+  const exact = (window: { count: number; complete: boolean }) => window.complete ? window.count : null;
+  return release.finish({ memberCount: exact(members), circleCount: exact(circles), openTensions: exact(tensions),
+    openActions: exact(actions), activeProposals: exact(proposals), activeGoals: exact(goals), countWindows });
 }
 
 const workspaceAuthorSelect = { id: true, displayName: true, email: true, bio: true, avatarUrl: true,

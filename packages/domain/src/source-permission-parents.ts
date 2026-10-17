@@ -58,6 +58,7 @@ export function artifactPermissionParents(kind: LineageKind, row: Record<string,
     const parent = subjects[String(row.subjectType)];
     if (parent) field(parent, "subjectId");
   }
+  if (kind === "OAuthProviderFetchInput") { field("Member", "ownerMemberId"); field("User", "localUserId"); }
   if (kind === "SqlNativeRunInput") field("ExternalDataSource", "sourceId");
   if (kind === "KnowledgeChunk" && row.sourceType === "EXTERNAL_DATABASE") {
     const metadata = row.metadata;

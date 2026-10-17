@@ -26,6 +26,7 @@ const related = (table: string, relation: Record<string, unknown>, manifest: Des
 
 /** Closed SQL/model registry. A new lineage kind cannot silently acquire a default loader or lock policy. */
 export const SOURCE_AUTHORITY_REGISTRY = freezeDescriptor({
+  OAuthProviderFetchInput: row("OAuthProviderFetchInput", "optional", { native: true }),
   ExternalDataSource: row("ExternalDataSource", "optional"), SqlNativeRunInput: row("SqlNativeRunInput", "optional"),
   MeetingAudioAsset: row("MeetingAudioAsset"), NativeTranscriptInput: row("NativeTranscriptInput", "optional", { native: true }),
   CommunicationMessageNativeInput: row("CommunicationMessageNativeInput", "optional", { native: true }),
@@ -78,7 +79,7 @@ export const SOURCE_AUTHORITY_REGISTRY = freezeDescriptor({
 } satisfies Record<LineageKind, Descriptor>);
 
 // Physical governors which are not themselves model inputs still need explicit allowlisted SQL identifiers.
-export const SOURCE_AUTHORITY_GOVERNOR_TABLES = ["TranscriptTransportArchive", "NativeTranscriptPublication", "MeetingTranscriptSourceConnection", "MeetingTranscriptSourceRecord", "CommunicationInstallation", "CommunicationIngressInput", "WorkspaceIntegrationBinding", "ExternalMcpConnection",
+export const SOURCE_AUTHORITY_GOVERNOR_TABLES = ["OAuthConnection", "TranscriptTransportArchive", "NativeTranscriptPublication", "MeetingTranscriptSourceConnection", "MeetingTranscriptSourceRecord", "CommunicationInstallation", "CommunicationIngressInput", "WorkspaceIntegrationBinding", "ExternalMcpConnection",
   "SqlKnowledgePublication", "SqlKnowledgeStagedChunk", "InformationCategoryPolicy", "WorkspaceSupportGrant", "AgentCredential", "McpOAuthAccessToken", "McpOAuthClient", "WorkspaceFeatureFlag", "WorkspaceModuleGrant",
   "AdviceRequestRecipient", "WorkspaceArchiveRecord", "WorkspaceToolLinkCircleTag", "ArtifactInputLineage", "WorkflowJob", "RecorderTranscriptBinding", "RecorderTranscriptAttempt", "RecorderTranscriptClaim", "RecorderTranscriptPublication", "WorkspaceMeetingRecorderConfig", "MeetingRecording", "MeetingRecorderProviderEvent", "MeetingRecorderSmokeRun", "MeetingTranscriptProcessingProgress", "AuditLog", "Event"] as const;
 export const SOURCE_AUTHORITY_TABLES:readonly string[] = Object.freeze([...new Set([...Object.values(SOURCE_AUTHORITY_REGISTRY).flatMap(d => d.table ? [d.table] : []), ...SOURCE_AUTHORITY_GOVERNOR_TABLES])]);
@@ -398,6 +399,11 @@ export async function discoverSourceAuthorityEdges(context: AuthorityDiscoveryCo
       field("CommunicationMessage", "communicationMessageId");
       if (content.ingressInputId != null) await rows("CommunicationIngressInput", { id: content.ingressInputId, workspaceId }, `communication-ingress:${content.ingressInputId}`, undefined, true);
     }
+  }
+  if (kind === "OAuthProviderFetchInput") {
+    await rows("OAuthConnection", {id: content.connectionId}, `oauth-connection:${content.connectionId}`, undefined, true);
+    await rows("Member", {workspaceId, userId: authorityIdentity(content.localUserId)}, `oauth-owner:${content.localUserId}`, "Member", true);
+    field("User", "localUserId");
   }
   // Box safe scopes lock the selection FOR UPDATE even for consumed-only inputs.
   // Declare that strongest mode before the saved epoch union; no inner upgrade is safe.

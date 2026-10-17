@@ -229,7 +229,7 @@ describe("authenticated workspace readers", () => {
       const drafts = await queryProposals("ws-1", "DRAFT", caller);
       expect(drafts).toHaveLength(2);
       const overview = await getWorkspaceOverview("ws-1", caller);
-      expect(overview).toEqual({ memberCount: 2, circleCount: 1, openTensions: 1, openActions: 1, activeProposals: proposals.length, activeGoals: 1 });
+      expect(overview).toMatchObject({ memberCount: 2, circleCount: 1, openTensions: 1, openActions: 1, activeProposals: proposals.length, activeGoals: 1 });
       expect((await queryActions("ws-1", "OPEN", undefined, undefined, caller)).length).toBe(overview.openActions);
       expect((await queryTensions("ws-1", "OPEN", undefined, undefined, caller)).length).toBe(overview.openTensions);
     }

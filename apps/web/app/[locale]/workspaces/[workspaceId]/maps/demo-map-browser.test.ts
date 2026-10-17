@@ -7,7 +7,7 @@ import { expect, it } from "vitest";
 it.runIf(process.env.MAP_BROWSER_QA === "1")("navigates, refreshes and reloads a read-only graph without action requests", async () => {
   const { build } = await import("esbuild");
   const { chromium } = await import("playwright");
-  const output = new URL("../../../../../../../.artifacts/pun-55/", import.meta.url);
+  const output = new URL("../../../../../../../.artifacts/source-71148-map-window-callers/browser/", import.meta.url);
   await mkdir(output, { recursive: true });
   const component = fileURLToPath(new URL("./ContextMapClient.tsx", import.meta.url));
   const baseObject = {
@@ -25,7 +25,7 @@ it.runIf(process.env.MAP_BROWSER_QA === "1")("navigates, refreshes and reloads a
     permissions: { canSavePersonalView: true, canUpdateMasterView: true, canRequestMasterUpdate: true },
   };
   const bundle = await build({
-    stdin: { contents: `import React from "react"; import {createRoot} from "react-dom/client"; import Map from ${JSON.stringify(component)}; createRoot(document.getElementById("root")).render(<Map workspaceId="demo" data={${JSON.stringify(data)}} readOnly={!new URLSearchParams(location.search).has("member")} />);`, resolveDir: process.cwd(), loader: "tsx" },
+    stdin: { contents: `import React from "react"; import {createRoot} from "react-dom/client"; import Map from ${JSON.stringify(component)}; const params = new URLSearchParams(location.search); const data = ${JSON.stringify(data)}; if(params.has("partial")) data.readWindow={scope:"WINDOW",complete:false,objectsComplete:false,relationshipsComplete:true,evidenceComplete:true,proposedDiffsComplete:true,variantsComplete:true}; if(params.has("empty")) data.objects=[]; createRoot(document.getElementById("root")).render(<Map workspaceId="demo" data={data} readOnly={!params.has("member")} />);`, resolveDir: process.cwd(), loader: "tsx" },
     bundle: true, write: false, outdir: "fixture", jsx: "automatic", define: { "process.env.NODE_ENV": '"production"' },
     plugins: [{ name: "stub-server-actions", setup(buildApi) {
       buildApi.onResolve({ filter: /^\.\/actions$/ }, (args) => args.importer === component ? { path: "actions", namespace: "fixture" } : undefined);
@@ -76,6 +76,18 @@ it.runIf(process.env.MAP_BROWSER_QA === "1")("navigates, refreshes and reloads a
     await page.screenshot({ path: fileURLToPath(new URL("demo-map.png", output)), fullPage: true });
     expect(requests.filter((request) => request.method !== "GET")).toEqual([]);
     expect(errors).toEqual([]);
+    await page.goto(origin + "/en/workspaces/demo/maps?partial=1");
+    await expect.poll(() => page.getByRole("status").textContent()).toContain("Showing a limited window");
+    expect(await page.locator('.react-flow__node').count()).toBe(2);
+    await page.screenshot({ path: fileURLToPath(new URL("partial-populated.png", output)), fullPage: true });
+    await page.goto(origin + "/en/workspaces/demo/maps?partial=1&empty=1");
+    await expect.poll(() => page.getByRole("heading", { name: "No visible facts in this window" }).count()).toBe(1);
+    expect(await page.getByText("This limited window does not establish that the map is empty.").count()).toBe(1);
+    expect(await page.locator('.react-flow__node').count()).toBe(0);
+    await page.screenshot({ path: fileURLToPath(new URL("partial-empty.png", output)), fullPage: true });
+    expect(errors).toEqual([]);
+    await page.goto(origin + "/en/workspaces/demo/maps");
+    await page.waitForResponse((response) => response.url().includes("/context?"));
     // Recoverable read failure stays in the inspector and can be retried.
     failNext = true;
     await page.getByRole("button", { name: "Context", exact: true }).click();

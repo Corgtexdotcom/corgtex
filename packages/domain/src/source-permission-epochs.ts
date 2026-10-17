@@ -226,6 +226,7 @@ export function artifactPermissionEpochIdentities(kind: string, row: Record<stri
   if (kind === "ExternalContentSource" || kind === "ExternalProviderFetchInput") {
     add("ExternalMcpConnection", row.connectionId); add("ExternalContentSource", row.externalContentSourceId);
   }
+  if (kind === "OAuthProviderFetchInput") add("OAuthConnectionPolicy", row.connectionId);
   if (kind === "ExternalMcpResponseInput") add("ExternalMcpConnection", row.connectionId);
   if (kind === "ExternalMcpResponseInput" || kind === "ExternalMcpConnectionSet") add("ExternalMcpConnectionSetPolicy", row.localUserId);
   if (kind === "BrainArticle" && typeof row.variantOfArticleId === "string") add("BrainArticle", row.variantOfArticleId);

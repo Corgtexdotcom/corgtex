@@ -88,11 +88,20 @@ export async function loadConversationHistory(actor: AppActor, workspaceId: stri
   if (!Number.isSafeInteger(limit) || limit < 0) throw new AppError(400, "INVALID_INPUT", "Invalid conversation history size.");
   const permitted: ConversationTurn[] = [];
   let after: { sequenceNumber: number; id: string } | undefined;
+  let examined = 0;
+  const candidateLimit = Math.max(200, limit);
   while (permitted.length < limit) {
+    if (examined >= candidateLimit) {
+      await collector.assertReadable();
+      throw new AppError(409, "SOURCE_READ_SCAN_LIMIT", "Recent conversation history is unavailable within the candidate window.");
+    }
+    const take = Math.min(100, candidateLimit - examined);
     const rows = await prisma.conversationTurn.findMany({ where: {
       conversationId: sessionId, conversation: { workspaceId, userId: actor.kind === "user" ? actor.user.id : "" },
       ...(after ? { OR: [{ sequenceNumber: { lt: after.sequenceNumber } }, { sequenceNumber: after.sequenceNumber, id: { lt: after.id } }] } : {}),
-    }, orderBy: [{ sequenceNumber: "desc" }, { id: "desc" }], take: 100 });
+    }, orderBy: [{ sequenceNumber: "desc" }, { id: "desc" }], take });
+    if (rows.length > take) throw new AppError(409, "SOURCE_CHANGED", "Conversation history page exceeded its bound.");
+    examined += rows.length;
     const last = rows.at(-1);
     // Freeze the raw cursor before authorization awaits; denied rows still advance it.
     const next = last ? { sequenceNumber: last.sequenceNumber, id: last.id } : undefined;
@@ -100,7 +109,7 @@ export async function loadConversationHistory(actor: AppActor, workspaceId: stri
       permitted.push(...await collector.admitRecords("ConversationTurn", [row]));
       if (permitted.length === limit) break;
     }
-    if (rows.length < 100) break;
+    if (rows.length < take) break;
     if (next?.id === after?.id) throw new AppError(409, "SOURCE_CHANGED", "Conversation history changed during pagination.");
     after = next;
   }
