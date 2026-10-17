@@ -1,6 +1,7 @@
 import type { RoleOnboardingStatus } from "@prisma/client";
 import {
   DigestReadRelease,
+  type LineageKind,
   requireWorkspaceMembership,
   humanMemberIdentityWhere,
   isHumanMemberIdentity,
@@ -100,6 +101,19 @@ const KANBAN_SORT_PRIORITY: Record<RoleKanbanColumnId, number> = {
   STAFFED: 1,
 };
 
+// Identical original projections share admission. Different projections of the
+// same ID remain separate: an admitted basic profile cannot certify a stale bio.
+const directorySnapshotKey = (record: {id: string}) => JSON.stringify(record);
+async function captureDirectoryPage<T extends {id: string}>(release: DigestReadRelease, kind: LineageKind, records: T[]) {
+  const unique = [...new Map(records.map(record => [directorySnapshotKey(record), record])).values()];
+  const admitted = new Set<string>();
+  for (let offset = 0; offset < unique.length; offset += 75) {
+    const captured = await release.captureDirectory(kind, unique.slice(offset, offset + 75));
+    for (const row of captured.records) admitted.add(directorySnapshotKey(row));
+  }
+  return records.filter(record => admitted.has(directorySnapshotKey(record)));
+}
+
 export async function loadRoleDirectoryData(
   actor: AppActor,
   workspaceId: string,
@@ -174,31 +188,36 @@ export async function loadRoleDirectoryData(
     }),
   ]);
 
-  const admittedRoles = (await release.capture("Role", roles)).records;
-  const admittedCircles = (await release.capture("Circle", circles)).records;
+  const admittedRoles = await captureDirectoryPage(release, "Role", roles);
+  const admittedCircles = await captureDirectoryPage(release, "Circle", circles);
   const circleById = new Map(admittedCircles.map((circle) => [circle.id, circle]));
-  const admittedMembers = (await release.capture("Member", members)).records;
-  const admittedUsers = (await release.capture("User", admittedMembers.map((member) => member.user))).records;
-  const userIds = new Set(admittedUsers.map((user) => user.id));
-  const memberOptions = admittedMembers.filter((member) => userIds.has(member.user.id));
+  const admittedAssignments = await captureDirectoryPage(release, "RoleAssignment", admittedRoles.flatMap(role => role.assignments));
+  const assignmentMembers = new Map(admittedAssignments.map(assignment => [assignment.id, {
+    ...assignment.member, user: {id: assignment.member.user.id, email: assignment.member.user.email, displayName: assignment.member.user.displayName},
+  }]));
+  const admittedMembers = await captureDirectoryPage(release, "Member", [...members, ...assignmentMembers.values()]);
+  const memberKeys = new Set(admittedMembers.map(directorySnapshotKey));
+  const memberOptions = members.filter(member => memberKeys.has(directorySnapshotKey(member)));
+  const memberAssignments = admittedAssignments.filter(assignment => memberKeys.has(directorySnapshotKey(assignmentMembers.get(assignment.id)!)));
+  const admittedUsers = await captureDirectoryPage(release, "User", [...memberOptions.map(member => member.user),
+    ...memberAssignments.map(assignment => assignment.member.user)]);
+  const profileKeys = new Set(admittedUsers.map(directorySnapshotKey));
+  const assignmentsByRole = new Map<string, typeof admittedAssignments>();
+  for (const assignment of memberAssignments) {
+    if (!profileKeys.has(directorySnapshotKey(assignment.member.user))) continue;
+    const group = assignmentsByRole.get(assignment.roleId) ?? [];
+    group.push(assignment); assignmentsByRole.set(assignment.roleId, group);
+  }
   const directoryRoles: RoleDirectoryRole[] = [];
   for (const role of admittedRoles) {
-    const assignments = (await release.capture("RoleAssignment", role.assignments)).records;
-    const assignmentMembers = (await release.capture("Member", assignments.map(({ member }) => ({
-      ...member, user: { id: member.user.id, email: member.user.email, displayName: member.user.displayName },
-    })))).records;
-    const memberIds = new Set(assignmentMembers.map((member) => member.id));
-    const profiles = (await release.capture("User", assignments
-      .filter(({ member }) => memberIds.has(member.id)).map(({ member }) => member.user))).records;
-    const profileIds = new Set(profiles.map((profile) => profile.id));
+    const assignments = assignmentsByRole.get(role.id) ?? [];
     const circle = circleById.get(role.circle.id);
     directoryRoles.push({
       id: role.id, name: role.name, purposeMd: role.purposeMd,
       accountabilities: role.accountabilities, artifacts: role.artifacts, coreRoleType: role.coreRoleType,
       createdAt: role.createdAt, updatedAt: role.updatedAt,
       circle: circle ? { id: circle.id, name: circle.name } : null,
-      assignments: assignments.filter(({ member }) => memberIds.has(member.id) && profileIds.has(member.user.id))
-        .map((assignment) => ({
+      assignments: assignments.map((assignment) => ({
           id: assignment.id, memberId: assignment.memberId, assignedAt: assignment.assignedAt,
           expiresAt: assignment.expiresAt, transferReason: assignment.transferReason,
           member: { id: assignment.member.id, kind: assignment.member.kind, isActive: assignment.member.isActive,
@@ -217,12 +236,12 @@ export async function loadRoleDirectoryData(
   });
   const roleIds = new Set(directoryRoles.map((role) => role.id));
   const assignments = new Set(directoryRoles.flatMap((role) => role.assignments.map((assignment) => roleOnboardingKey(role.id, assignment.memberId))));
-  const sessions = (await release.capture("RoleOnboardingSession", onboardingSessions.filter((session) =>
-    roleIds.has(session.roleId) && assignments.has(roleOnboardingKey(session.roleId, session.memberId))))).records;
+  const sessions = await captureDirectoryPage(release, "RoleOnboardingSession", onboardingSessions.filter((session) =>
+    roleIds.has(session.roleId) && assignments.has(roleOnboardingKey(session.roleId, session.memberId))));
   return release.finish({
     roles: directoryRoles,
     circles: admittedCircles.map((circle) => ({ id: circle.id, name: circle.name })),
-    members: memberOptions.map((member) => ({
+    members: memberOptions.filter(member => profileKeys.has(directorySnapshotKey(member.user))).map((member) => ({
       id: member.id, name: member.user.displayName ?? member.user.email, email: member.user.email,
     })),
     onboardingByRoleMember: latestOnboardingByRoleMember(sessions.map((session) => ({

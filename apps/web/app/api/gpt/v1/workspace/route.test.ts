@@ -49,7 +49,7 @@ it("reports only permitted Action, Tension and Proposal counts from complete can
   expect(state.release.mock.calls[0][2].map((root: {kind: string; id: string}) => `${root.kind}:${root.id}`).sort())
     .toEqual(["Proposal:p1", "Tension:t1", "Tension:t2"]);
   for (const query of [state.proposals, state.actions, state.tensions]) {
-    expect(query).toHaveBeenCalledWith(expect.objectContaining({ take: 100, orderBy: { id: "asc" } }));
+    expect(query).toHaveBeenCalledWith(expect.objectContaining({ take: 200, orderBy: { id: "asc" } }));
     expect(query.mock.calls[0][0]).not.toHaveProperty("select");
   }
 });
@@ -83,8 +83,8 @@ it("bounds a denied prefix and returns a continuation instead of a false global 
   const body = await response.json();
   expect(body.counts).toEqual({ proposals: null, actions: 0, tensions: 0, members: 4 });
   expect(body.countWindows.proposals).toEqual({ count: 0, complete: false, nextCursor: "p199", scope: "WINDOW" });
-  expect(state.proposals).toHaveBeenCalledTimes(2);
-  expect(state.proposals.mock.calls[1][0]).toEqual({ where: { workspaceId: "ws", archivedAt: null, id: { gt: "p099" } }, orderBy: { id: "asc" }, take: 100 });
+  expect(state.proposals).toHaveBeenCalledOnce();
+  expect(state.proposals.mock.calls[0][0]).toEqual({ where: { workspaceId: "ws", archivedAt: null }, orderBy: { id: "asc" }, take: 200 });
   expect(state.release).toHaveBeenCalledOnce();
 });
 
@@ -130,4 +130,19 @@ it("documents nullable global totals and independent cursor windows in OpenAPI",
   expect(response.properties.counts.properties.proposals.type).toEqual(["integer", "null"]);
   expect(response.properties.countWindows.properties.proposals.properties.scope.enum).toEqual(["WINDOW"]);
   expect(response.properties.countWindows.properties.proposals.properties.nextCursor.type).toEqual(["string", "null"]);
+});
+
+it("counts one fixed candidate enumeration when inserts straddle the old page cursor", async () => {
+  const rows=Array.from({length:150},(_,i)=>({id:`p${String(i).padStart(3,"0")}`}));
+  let inserted=false;
+  state.proposals.mockImplementation(async ({where,take})=>rows.filter(row=>!where.id||row.id>where.id.gt).slice(0,take));
+  state.actions.mockResolvedValue([]);state.tensions.mockResolvedValue([]);
+  state.readable.mockImplementation(async (_actor,_ws,kind,page)=>{
+    if(kind==="Proposal"&&!inserted){inserted=true;rows.unshift({id:"a-new"});rows.push({id:"z-new"});}
+    return new Set(page.map((row:{id:string})=>row.id));
+  });
+  const result=await(await GET(new Request("http://localhost/api/gpt/v1/workspace") as never)).json();
+  expect(rows).toHaveLength(152);expect(result.counts.proposals).toBe(150);
+  expect(result.countWindows.proposals).toEqual({count:150,complete:true,nextCursor:null,scope:"WINDOW"});
+  expect(state.proposals).toHaveBeenCalledOnce();
 });

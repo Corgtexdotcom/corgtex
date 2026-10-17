@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireGptAuth } from "@/lib/gpt-auth";
 import { prisma, env } from "@corgtex/shared";
 import { handleRouteError } from "@/lib/http";
-import { scanReadableArtifactPages } from "@/lib/readable-artifact-pages";
+import { READABLE_ARTIFACT_SCAN_LIMIT, scanReadableArtifactPages } from "@/lib/readable-artifact-pages";
 
 export async function GET(request: NextRequest) {
   try {
@@ -24,23 +24,27 @@ export async function GET(request: NextRequest) {
     const actionCursor = readCursor("actionCursor");
     const tensionCursor = readCursor("tensionCursor");
 
+    // Enumerate each family once: two live SQL pages cannot establish an exact
+    // total when an insert lands before the continuation between those reads.
+    const countFamily = async <T extends {id: string}>(kind: "Proposal" | "Action" | "Tension", cursor: string | undefined,
+      load: (cursor: string | undefined, take: number) => Promise<T[]>) => {
+      const candidates = await load(cursor, READABLE_ARTIFACT_SCAN_LIMIT);
+      invariant(candidates.length <= READABLE_ARTIFACT_SCAN_LIMIT, 409, "SOURCE_CHANGED", "Source window exceeded its bound.");
+      return scanReadableArtifactPages({actor, workspaceId, release, kind, cursor, visit: () => {},
+        loadPage: async (after, take) => candidates.filter(row => !after || row.id > after).slice(0, take)});
+    };
+
     const [workspace, proposalCount, actionCount, tensionCount, memberCount] = await Promise.all([
       prisma.workspace.findUnique({
         where: { id: workspaceId },
         select: { id: true, slug: true, name: true, description: true, createdAt: true },
       }),
-      scanReadableArtifactPages({ actor, workspaceId, release, kind: "Proposal", cursor: proposalCursor, visit: () => {},
-        loadPage: (cursor, take) => prisma.proposal.findMany({ where: { workspaceId, archivedAt: null, ...(cursor ? { id: { gt: cursor } } : {}) },
-          orderBy: { id: "asc" }, take }),
-      }),
-      scanReadableArtifactPages({ actor, workspaceId, release, kind: "Action", cursor: actionCursor, visit: () => {},
-        loadPage: (cursor, take) => prisma.action.findMany({ where: { workspaceId, archivedAt: null, ...(cursor ? { id: { gt: cursor } } : {}) },
-          orderBy: { id: "asc" }, take }),
-      }),
-      scanReadableArtifactPages({ actor, workspaceId, release, kind: "Tension", cursor: tensionCursor, visit: () => {},
-        loadPage: (cursor, take) => prisma.tension.findMany({ where: { workspaceId, archivedAt: null, ...(cursor ? { id: { gt: cursor } } : {}) },
-          orderBy: { id: "asc" }, take }),
-      }),
+      countFamily("Proposal", proposalCursor, (cursor, take) => prisma.proposal.findMany({ where: { workspaceId, archivedAt: null, ...(cursor ? { id: { gt: cursor } } : {}) },
+          orderBy: { id: "asc" }, take })),
+      countFamily("Action", actionCursor, (cursor, take) => prisma.action.findMany({ where: { workspaceId, archivedAt: null, ...(cursor ? { id: { gt: cursor } } : {}) },
+          orderBy: { id: "asc" }, take })),
+      countFamily("Tension", tensionCursor, (cursor, take) => prisma.tension.findMany({ where: { workspaceId, archivedAt: null, ...(cursor ? { id: { gt: cursor } } : {}) },
+          orderBy: { id: "asc" }, take })),
       prisma.member.count({ where: { workspaceId, isActive: true } }),
     ]);
 

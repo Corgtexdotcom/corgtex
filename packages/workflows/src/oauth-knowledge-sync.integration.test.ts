@@ -13,13 +13,13 @@ import { handleOAuthDocumentsSync, handleOAuthEmailSync } from "./handlers/knowl
 beforeEach(truncateAllTables);
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.useRealTimers(); });
 
-async function fixture(kind: "documents" | "email" = "documents", nullableWorkspace = false) {
+async function fixture(kind: "documents" | "email" = "documents", nullableWorkspace = false, provider: "GOOGLE" | "MICROSOFT" = "GOOGLE") {
   const workspace = await prisma.workspace.create({data: {name: "Synthetic OAuth indexing", slug: randomUUID()}});
   const user = await prisma.user.create({data: {email: `${randomUUID()}@oauth.test`, passwordHash: "synthetic"}});
   const member = await prisma.member.create({data: {workspaceId: workspace.id, userId: user.id, role: "ADMIN"}});
   const connection = await prisma.oAuthConnection.create({data: {workspaceId: nullableWorkspace ? null : workspace.id, userId: user.id,
-    provider: "GOOGLE", providerAccountId: "synthetic-account", accessToken: "synthetic-oauth-access",
-    expiresAt: new Date(Date.now() + 3600_000), scopes: ["https://www.googleapis.com/auth/drive.file", "https://www.googleapis.com/auth/gmail.readonly"],
+    provider, providerAccountId: "synthetic-account", accessToken: "synthetic-oauth-access",
+    expiresAt: new Date(Date.now() + 3600_000), scopes: provider === "GOOGLE" ? ["https://www.googleapis.com/auth/drive.file", "https://www.googleapis.com/auth/gmail.readonly"] : ["Files.Read", "Mail.Read"],
     syncSettings: {documents: {enabled: true, selectedDriveIds: ["doc-1"]}, email: {enabled: true, filters: ["subject:synthetic"]}}}});
   const job = await prisma.workflowJob.create({data: {workspaceId: workspace.id, type: `oauth.${kind}.sync`,
     payload: {connectionId: connection.id}, status: "RUNNING", lockedBy: "synthetic-worker", lockedAt: new Date(), startedAt: new Date(), attempts: 1}});
@@ -27,6 +27,13 @@ async function fixture(kind: "documents" | "email" = "documents", nullableWorksp
   const fetchMock = vi.fn(async (input: string | URL | Request) => {
     const url = String(input);
     if (url === "https://www.googleapis.com/oauth2/v2/userinfo") return Response.json({id: remote.accountId});
+    if (url === "https://graph.microsoft.com/v1.0/me") return Response.json({id: remote.accountId});
+    if (url === "https://graph.microsoft.com/v1.0/me/drive/items/doc-1") return Response.json({id: "doc-1", name: "Synthetic policy", file: {mimeType: "text/plain"}});
+    if (url === "https://graph.microsoft.com/v1.0/me/drive/items/doc-1/content") return new Response(remote.text);
+    const graphMessage = {id: "email-1", subject: "Synthetic policy", from: {emailAddress: {address: remote.from}},
+      receivedDateTime: "2026-06-18T09:00:00Z", bodyPreview: remote.text};
+    if (url.startsWith("https://graph.microsoft.com/v1.0/me/messages/email-1?")) return Response.json(graphMessage);
+    if (url.startsWith("https://graph.microsoft.com/v1.0/me/messages?")) return Response.json({value: [graphMessage]});
     if (url.startsWith("https://www.googleapis.com/drive/v3/files/doc-1?fields=")) return Response.json({id: "doc-1", name: "Synthetic policy", mimeType: "text/plain"});
     if (url === "https://www.googleapis.com/drive/v3/files/doc-1?alt=media") return new Response(remote.text);
     if (url.startsWith("https://gmail.googleapis.com/gmail/v1/users/me/messages?")) return Response.json({messages: [{id: "email-1"}]});
@@ -106,7 +113,8 @@ it("checks the original account after credential refresh and does not publish an
   expect(f.fetchMock).toHaveBeenCalledTimes(1);
   expect(f.embed).not.toHaveBeenCalled();
   expect(await prisma.oAuthProviderFetchInput.count({where: {workspaceId: f.workspace.id}})).toBe(0);
-  expect(await prisma.oAuthConnection.findUniqueOrThrow({where: {id: f.connection.id}})).toMatchObject({lastSyncAt: null, status: "ERROR"});
+  expect(await prisma.oAuthConnection.findUniqueOrThrow({where: {id: f.connection.id}})).toMatchObject({lastSyncAt: null, status: "ACTIVE",
+    lastSyncError: "OAuth content could not be safely indexed; retry after checking source access."});
 });
 
 it("denies changed remote bytes after a completed sync and rejects forged receipt bodies", async () => {
@@ -498,3 +506,94 @@ it("keeps saturated Outlook membership indeterminate through native proof and co
   state = "absent";
   expect(await isOAuthProviderFetchInputCurrent(f.actor, f.workspace.id, input)).toBe(false);
 });
+
+it.each([["documents", "GOOGLE"], ["email", "GOOGLE"], ["documents", "MICROSOFT"], ["email", "MICROSOFT"]] as const)("keeps saved OAuth %s/%s inputs indeterminate on transient provider failures without losing their lineage", async (kind, provider) => {
+  const f = await fixture(kind, false, provider);
+  await f.run();
+  const document = await prisma.document.findFirstOrThrow({where: {workspaceId: f.workspace.id}});
+  const proof = await captureArtifactInputProof(f.actor, f.workspace.id, [{kind: "Document", id: document.id}]);
+  const original = f.fetchMock.getMockImplementation()!;
+  const manifests = await prisma.artifactInputLineage.findMany({where: {workspaceId: f.workspace.id}, orderBy: {id: "asc"}});
+  for (const failure of [429, 503, "network", "malformed", "empty"] as const) {
+    f.fetchMock.mockImplementation(async input => {
+      if (["https://www.googleapis.com/oauth2/v2/userinfo", "https://graph.microsoft.com/v1.0/me"].includes(String(input))) return original(input);
+      if (failure === "network") throw new TypeError("Synthetic network unavailable");
+      return failure === "malformed" ? new Response("{invalid-json") : failure === "empty" ? new Response("")
+        : new Response("Synthetic transient response", {status: failure});
+    });
+    await expect(isArtifactInputProofReadable(f.actor, f.workspace.id, proof)).rejects.toMatchObject({status: 503, code: "OAUTH_PROVIDER_INDETERMINATE"});
+    expect(await prisma.artifactInputLineage.findMany({where: {workspaceId: f.workspace.id}, orderBy: {id: "asc"}})).toEqual(manifests);
+    f.fetchMock.mockImplementation(original);
+    expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, proof)).toBe(true);
+  }
+  for (const status of [401, 403, 404, 410]) {
+    f.fetchMock.mockImplementation(async input => ["https://www.googleapis.com/oauth2/v2/userinfo", "https://graph.microsoft.com/v1.0/me"].includes(String(input))
+      ? original(input) : new Response("Synthetic definitive denial", {status}));
+    expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, proof)).toBe(false);
+  }
+  f.fetchMock.mockImplementation(original);
+  expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, proof)).toBe(true);
+}, 120_000);
+
+it.each(["GOOGLE", "MICROSOFT"] as const)("keeps original %s authority through transient expired-token refresh and denies invalid grant", async provider => {
+  const f = await fixture("documents", false, provider);
+  await f.run();
+  const document = await prisma.document.findFirstOrThrow({where: {workspaceId: f.workspace.id}});
+  const proof = await captureArtifactInputProof(f.actor, f.workspace.id, [{kind: "Document", id: document.id}]);
+  const original = f.fetchMock.getMockImplementation()!;
+  const tokenUrl = provider === "GOOGLE" ? "https://oauth2.googleapis.com/token"
+    : "https://login.microsoftonline.com/organizations/oauth2/v2.0/token";
+  const expire = () => prisma.oAuthConnection.update({where: {id: f.connection.id}, data: {
+    expiresAt: new Date("2026-01-01T00:00:00Z"), refreshToken: encryptSecret("synthetic-refresh"), tokenStorageVersion: "aes-256-gcm"}});
+  for (const failure of [429, 503, "network", "malformed", "empty"] as const) {
+    const before = await expire();
+    f.fetchMock.mockImplementation(async input => {
+      if (String(input) !== tokenUrl) return original(input);
+      if (failure === "network") throw new TypeError("Synthetic token transport unavailable");
+      return failure === "malformed" ? new Response("{invalid-json") : failure === "empty" ? new Response("")
+        : new Response("Synthetic transient token response", {status: failure});
+    });
+    await expect(isArtifactInputProofReadable(f.actor, f.workspace.id, proof)).rejects.toMatchObject({status: 503, code: "OAUTH_PROVIDER_INDETERMINATE"});
+    expect(await prisma.oAuthConnection.findUniqueOrThrow({where: {id: f.connection.id}})).toEqual(before);
+    f.fetchMock.mockImplementation(async input => String(input) === tokenUrl
+      ? Response.json({access_token: "synthetic-refreshed", expires_in: 3600}) : original(input));
+    expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, proof)).toBe(true);
+  }
+  await expire();
+  f.fetchMock.mockImplementation(async input => String(input) === tokenUrl
+    ? Response.json({error: "invalid_grant"}, {status: 400}) : original(input));
+  expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, proof)).toBe(false);
+  expect(await prisma.oAuthConnection.findUniqueOrThrow({where: {id: f.connection.id}})).toMatchObject({status: "ERROR"});
+}, 120_000);
+
+it.each([["GOOGLE", "fetch"], ["GOOGLE", "model"], ["MICROSOFT", "fetch"], ["MICROSOFT", "model"]] as const)("preserves existing %s grant authority after a later background %s failure", async (provider, phase) => {
+  const f = await fixture("documents", false, provider);
+  await f.run();
+  const document = await prisma.document.findFirstOrThrow({where: {workspaceId: f.workspace.id}});
+  const originalDocumentProof = await captureArtifactInputProof(f.actor, f.workspace.id, [{kind: "Document", id: document.id}]);
+  const input = await prisma.oAuthProviderFetchInput.findFirstOrThrow({where: {workspaceId: f.workspace.id}, orderBy: {createdAt: "asc"}});
+  const originalNativeProof = await captureArtifactInputProof(f.actor, f.workspace.id, [{kind: "OAuthProviderFetchInput", id: input.id}]);
+  const before = await prisma.oAuthConnection.findUniqueOrThrow({where: {id: f.connection.id}});
+  const readGrantEpochs = () => prisma.sourcePermissionEpoch.findMany({where: {workspaceId: f.workspace.id,
+    sourceId: f.connection.id, sourceKind: {in: ["OAuthConnectionPolicy", "OAuthDocumentsPolicy", "OAuthEmailPolicy"]}}, orderBy: {id: "asc"}});
+  const epochs = await readGrantEpochs();
+  const job = await prisma.workflowJob.create({data: {workspaceId: f.workspace.id, type: "oauth.documents.sync",
+    payload: {connectionId: f.connection.id}, status: "RUNNING", lockedBy: "synthetic-next-worker", lockedAt: new Date(), startedAt: new Date(), attempts: 1}});
+  const original = f.fetchMock.getMockImplementation()!;
+  if (phase === "fetch") f.fetchMock.mockImplementation(async url =>
+    ["https://www.googleapis.com/oauth2/v2/userinfo", "https://graph.microsoft.com/v1.0/me"].includes(String(url))
+      ? original(url) : new Response("Synthetic temporary provider outage", {status: 503}));
+  else f.embed.mockRejectedValueOnce(new Error("Synthetic indexing provider unavailable"));
+  await expect(handleOAuthDocumentsSync(job.id, {connectionId: f.connection.id}, f.workspace.id, structuredClone(job))).rejects.toThrow();
+  const after = await prisma.oAuthConnection.findUniqueOrThrow({where: {id: f.connection.id}});
+  expect(after).toMatchObject({status: "ACTIVE", lastSyncAt: before.lastSyncAt,
+    lastSyncError: "OAuth content could not be safely indexed; retry after checking source access.",
+    accessToken: before.accessToken, refreshToken: before.refreshToken, syncSettings: before.syncSettings});
+  expect(await readGrantEpochs()).toEqual(epochs);
+  expect(await prisma.oAuthProviderFetchInput.findUniqueOrThrow({where: {id: input.id}})).toEqual(input);
+  if (phase === "fetch") expect(await prisma.oAuthProviderFetchInput.count({where: {workspaceId: f.workspace.id}})).toBe(1);
+  else expect(f.embed).toHaveBeenCalledTimes(2);
+  f.fetchMock.mockImplementation(original);
+  expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, originalNativeProof)).toBe(true);
+  if (phase === "fetch") expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, originalDocumentProof)).toBe(true);
+}, 120_000);

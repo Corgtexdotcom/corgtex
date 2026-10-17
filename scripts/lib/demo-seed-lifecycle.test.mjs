@@ -75,3 +75,23 @@ describe("exact fresh demo initialization", () => {
     expect(f.db.event.deleteMany).not.toHaveBeenCalled();
   });
 });
+
+describe("bounded v2 workspace initialization notices", () => {
+  it("disposes the exact fresh v2 notice only after checking every fixture epoch", async () => {
+    const f=fixture(),token=await f.begin();f.events[0].payload={version:2,scope:"WORKSPACE"};
+    const before=[...f.epochs];await settleFreshDemoInitialization(f.db,token,f.input);
+    expect(f.events).toEqual([]);expect([...f.epochs]).toEqual(before);
+    expect(f.db.sourcePermissionEpoch.findUnique).toHaveBeenCalledTimes(f.assignments.length+f.flags.length);
+  });
+  it.each(["missing-flag-epoch","missing-assignment-epoch","extra-key","wrong-scope","semantic","foreign-member","wrong-tx"])("refuses v2 with %s", async mode=>{
+    const f=fixture(),token=await f.begin();f.events[0].payload={version:2,scope:"WORKSPACE"};
+    if(mode.startsWith("missing")) f.epochs.delete(JSON.stringify({workspaceId:"fresh-demo",sourceKind:mode==="missing-flag-epoch"?"WorkspaceFeatureFlag":"RoleAssignment",sourceId:mode==="missing-flag-epoch"?"FINANCE":"assignment"}));
+    else if(mode==="extra-key")f.events[0].payload.governors=[];
+    else if(mode==="wrong-scope")f.events[0].payload.scope="OTHER";
+    else if(mode==="semantic")f.db.brainArticle.count.mockResolvedValue(1);
+    else if(mode==="foreign-member")f.assignments[0].memberId="foreign";
+    else f.changeTx();
+    await expect(settleFreshDemoInitialization(f.db,token,f.input)).rejects.toThrow("Demo initialization refused");
+    expect(f.db.event.deleteMany).not.toHaveBeenCalled();
+  });
+});

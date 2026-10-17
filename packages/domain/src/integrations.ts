@@ -538,6 +538,36 @@ export async function enqueueExternalDataSourceSync(actor: AppActor, params: {
   });
 }
 
+async function readOAuthRefreshResponse(response: Response, connection: OAuthConnection,
+  label: string, controls?: OAuthSourceAttemptControls) {
+  let body: Record<string, unknown> = {};
+  if (response.status !== 401 && response.status !== 403) {
+    if (response.status === 429 || response.status >= 500) {
+      throw new AppError(503, "OAUTH_PROVIDER_INDETERMINATE", "OAuth token refresh is temporarily unavailable.");
+    }
+    const parsed: unknown = await response.json();
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) body = parsed as Record<string, unknown>;
+  }
+  await controls?.authorizeAttempt();
+  if (!response.ok) {
+    if ([401, 403].includes(response.status) || body.error === "invalid_grant" || body.error === "invalid_token") {
+      await prisma.oAuthConnection.update({
+        where: {id: connection.id, ...(controls ? {status: "ACTIVE", providerAccountId: connection.providerAccountId,
+          userId: connection.userId, workspaceId: connection.workspaceId} : {})},
+        data: {status: "ERROR", lastSyncError: `Failed to refresh ${label} token`},
+      });
+      throw new AppError(response.status, "OAUTH_PROVIDER_AUTH_REVOKED", "OAuth token refresh authority was denied.");
+    }
+    throw new AppError(503, "OAUTH_PROVIDER_INDETERMINATE", "OAuth token refresh could not be verified.");
+  }
+  const expiresIn = body.expires_in === undefined ? null : Number(body.expires_in);
+  invariant(typeof body.access_token === "string" && body.access_token.length > 0
+    && (expiresIn === null || Number.isFinite(expiresIn) && expiresIn > 0)
+    && (body.refresh_token === undefined || typeof body.refresh_token === "string" && body.refresh_token.length > 0),
+  503, "OAUTH_PROVIDER_INDETERMINATE", "OAuth token refresh returned an invalid response.");
+  return {access_token: body.access_token, expires_in: expiresIn, refresh_token: body.refresh_token as string | undefined};
+}
+
 export async function refreshOAuthTokenIfNeeded(connectionId: string, controls?: OAuthSourceAttemptControls): Promise<OAuthConnection> {
   let connection = await prisma.oAuthConnection.findUnique({
     where: { id: connectionId },
@@ -585,14 +615,7 @@ export async function refreshOAuthTokenIfNeeded(connectionId: string, controls?:
       }, controls);
       await controls?.authorizeAttempt();
 
-      if (!response.ok) {
-        await prisma.oAuthConnection.update({
-          where: { id: connection.id, ...(controls ? {status: "ACTIVE", providerAccountId: connection.providerAccountId, userId: connection.userId, workspaceId: connection.workspaceId} : {}) },
-          data: { status: "ERROR", lastSyncError: "Failed to refresh Google token" },
-        });
-        throw new Error("Failed to refresh Google token");
-      }
-      const data = await response.json();
+      const data = await readOAuthRefreshResponse(response, connection, "Google", controls);
       await controls?.authorizeAttempt();
 
       return prisma.oAuthConnection.update({
@@ -621,14 +644,7 @@ export async function refreshOAuthTokenIfNeeded(connectionId: string, controls?:
       }, controls);
       await controls?.authorizeAttempt();
 
-      if (!response.ok) {
-        await prisma.oAuthConnection.update({
-          where: { id: connection.id, ...(controls ? {status: "ACTIVE", providerAccountId: connection.providerAccountId, userId: connection.userId, workspaceId: connection.workspaceId} : {}) },
-          data: { status: "ERROR", lastSyncError: "Failed to refresh Microsoft token" },
-        });
-        throw new Error("Failed to refresh Microsoft token");
-      }
-      const data = await response.json();
+      const data = await readOAuthRefreshResponse(response, connection, "Microsoft", controls);
       await controls?.authorizeAttempt();
 
       return prisma.oAuthConnection.update({
@@ -698,14 +714,14 @@ export interface OAuthEmailMessage {
 async function readProviderTextResponse(response: Response, label: string) {
   const text = await response.text();
   if (!response.ok) {
-    throw new Error(`${label} API error: ${text}`);
+    throw new AppError(response.status, "OAUTH_PROVIDER_RESPONSE_ERROR", `${label} API request failed (${response.status}).`);
   }
   return text;
 }
 
 async function readProviderJsonResponse(response: Response, label: string) {
   const text = await readProviderTextResponse(response, label);
-  return text ? JSON.parse(text) as any : {};
+  return JSON.parse(text) as any;
 }
 
 const GOOGLE_DRIVE_DOCUMENT_MIME_TYPES = [
@@ -1206,13 +1222,14 @@ export async function fetchSelectedEmailMessage(connectionId: string, messageId:
     // Only an exact server-returned RFC822 atom can narrow Google's own q parser.
     const safeRfcId = rfcId && /^<[^\s<>"(){}]+@[^\s<>"(){}]+>$/.test(rfcId) && rfcId.length <= 998;
     // Headerless mail can still prove exact ID membership in the original q;
-    // exhausted bounded provider pages deny instead of guessing the filter locally.
+    // incomplete bounded provider pages remain indeterminate rather than guessing the filter locally.
     const query = new URLSearchParams({q: safeRfcId ? `(${filter}) rfc822msgid:${rfcId}` : filter, maxResults: "100"});
     let next: string | null = `https://gmail.googleapis.com/gmail/v1/users/me/messages?${query}`;
     const seen = new Set<string>();
     let matched = false;
     while (next && !matched) {
-      if (seen.has(next) || seen.size >= 100) return null;
+      invariant(!seen.has(next) && seen.size < 100, 503, "OAUTH_SELECTION_INCOMPLETE",
+        "The original Gmail selection could not be completely verified. Retry after narrowing the selection.");
       seen.add(next);
       const listing = await readProviderJsonResponse(await oauthSourceFetch(next, {headers}, controls), "Gmail");
       matched = Array.isArray(listing.messages) && listing.messages.some((item: {id?: unknown}) => item.id === messageId);

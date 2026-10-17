@@ -800,10 +800,10 @@ it.each([false, true])("proves headerless Gmail membership through bounded origi
     if (!exhausted && pages === 2) return Response.json({messages: [{id: "older-message"}]});
     return Response.json({messages: [{id: `other-${pages}`}], nextPageToken: `page-${pages}`});
   }));
-  const result = await fetchSelectedEmailMessage("connection", "older-message", "from:sender@synthetic.test OR to:sender@synthetic.test",
+  const result = fetchSelectedEmailMessage("connection", "older-message", "from:sender@synthetic.test OR to:sender@synthetic.test",
     {authorizeAttempt: async () => {}, expectedAccountId: "account"});
-  if (exhausted) { expect(result).toBeNull(); expect(pages).toBe(100); }
-  else { expect(result).toMatchObject({id: "older-message", snippet: "Headerless body"}); expect(pages).toBe(2); }
+  if (exhausted) { await expect(result).rejects.toMatchObject({status: 503, code: "OAUTH_SELECTION_INCOMPLETE"}); expect(pages).toBe(100); }
+  else { expect(await result).toMatchObject({id: "older-message", snippet: "Headerless body"}); expect(pages).toBe(2); }
 });
 
 
@@ -921,4 +921,28 @@ it("keeps Outlook exact membership positive at the ceiling and preserves the UTC
   }));
   expect(await fetchSelectedEmailMessage("connection", "older-message", "subject:invoice",
     {expectedAccountId: "account", authorizeAttempt: async () => {}})).toMatchObject({id: "older-message"});
+});
+
+it.each(["cycle", "last-page"] as const)("keeps Gmail continuation authority indeterminate or proven at the boundary (%s)", async mode => {
+  const {fetchSelectedEmailMessage} = await import("./integrations");
+  prismaMock.oAuthConnection.findUnique.mockResolvedValue({id: "connection", provider: "GOOGLE", status: "ACTIVE", providerAccountId: "account",
+    accessToken: "enc:synthetic", expiresAt: new Date(Date.now() + 3600_000)});
+  let pages = 0;
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    const parsed = new URL(url);
+    if (parsed.pathname.endsWith("userinfo")) return Response.json({id: "account"});
+    if (parsed.pathname.endsWith("/older-message")) return Response.json({id: "older-message", snippet: "Original body", payload: {headers: []}});
+    pages++;
+    if (mode === "last-page" && pages === 100) return Response.json({messages: [{id: "older-message"}], nextPageToken: "more"});
+    return Response.json({messages: [{id: `other-${pages}`}], nextPageToken: mode === "cycle" ? "same" : `page-${pages}`});
+  }));
+  const result = fetchSelectedEmailMessage("connection", "older-message", "subject:synthetic",
+    {authorizeAttempt: async () => {}, expectedAccountId: "account"});
+  if (mode === "cycle") {
+    await expect(result).rejects.toMatchObject({status: 503, code: "OAUTH_SELECTION_INCOMPLETE"});
+    expect(pages).toBe(2);
+  } else {
+    expect(await result).toMatchObject({id: "older-message", snippet: "Original body"});
+    expect(pages).toBe(100);
+  }
 });

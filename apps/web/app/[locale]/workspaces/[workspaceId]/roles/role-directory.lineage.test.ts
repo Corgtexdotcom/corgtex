@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fixture, workspaceId, alpha, beta, resetFixture, known } from "../../../../../../../packages/agents/src/agents/model-consumer.test-fixture";
 
@@ -46,6 +47,20 @@ function project(row: any, args: any = {}): any {
 }
 beforeEach(async () => {
   await resetFixture();
+  const query = fixture.prisma.$queryRaw.getMockImplementation()!;
+  fixture.prisma.$queryRaw.mockImplementation(async (sql: any) => {
+    if (sql.sql?.includes('CROSS JOIN LATERAL') && sql.sql.includes('"ArtifactInputLineage"')) {
+      const values = sql.values as unknown[];
+      const heads = new Map<string, any>();
+      for (const head of fixture.rows.artifactInputLineage) if (values.includes(head.workspaceId)
+        && values.includes(head.artifactType) && values.includes(head.artifactId)) {
+        const key = `${head.artifactType}:${head.artifactId}`;
+        if (!heads.has(key) || heads.get(key).revision < head.revision) heads.set(key, head);
+      }
+      return [...heads.values()];
+    }
+    return query(sql);
+  });
   for (const name of ["role", "circle", "roleAssignment", "roleOnboardingSession"]) fixture.rows[name] = [];
   for (const name of ["role", "circle", "member", "roleAssignment", "roleOnboardingSession"]) {
     fixture.prisma[name] = {
@@ -100,6 +115,26 @@ describe("role directory source permission release", () => {
     await known("RoleOnboardingSession", session);
     expect((await loadRoleDirectoryData(alpha, workspaceId)).onboardingByRoleMember.size).toBe(0);
     expect((await loadRoleDirectoryData(beta, workspaceId)).onboardingByRoleMember.size).toBe(1);
+  });
+  it("does not let an admitted basic or sibling profile certify a stale full projection", async () => {
+    const f = await setup();
+    const user = fixture.rows.user.find(row => row.id === "beta");
+    user.bio = "Current biography"; await known("User", user);
+    const role = fixture.add("role", {...f.role, id: "role-second", name: "Second role"});
+    await known("Role", role);
+    const assignment = fixture.add("roleAssignment", {...f.assignment, id: "assignment-second", roleId: role.id});
+    await known("RoleAssignment", assignment);
+    const findMany = fixture.prisma.role.findMany.getMockImplementation()!;
+    fixture.prisma.role.findMany.mockImplementation(async (args: Prisma.RoleFindManyArgs) => {
+      const rows = await findMany(args);
+      if (args.include?.assignments) rows[0].assignments[0].member.user.bio = "STALE BIO CANARY";
+      return rows;
+    });
+    const data = await loadRoleDirectoryData(beta, workspaceId);
+    expect(data.roles.find(row => row.id === f.role.id)?.assignments).toEqual([]);
+    expect(data.roles.find(row => row.id === role.id)?.assignments[0].member.user?.bio).toBe("Current biography");
+    expect(data.members.map(member => member.id)).toContain("member-beta");
+    expect(JSON.stringify(data)).not.toContain("STALE BIO CANARY");
   });
   it("rejects a revocation after original capture at final release", async () => {
     await setup();

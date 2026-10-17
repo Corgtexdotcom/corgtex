@@ -109,10 +109,16 @@ export async function isOAuthProviderFetchInputCurrent(actor: AppActor, workspac
       && entry.selection === input.selection && hash(entry.payload) === input.payloadHash);
     return !!exact && await isOAuthProviderFetchInputLocallyCurrent(actor, workspaceId, input);
   } catch (error) {
-    // A truncated provider selection is a retryable verification failure. It
-    // cannot authorize reads or masquerade as evidence for source withdrawal.
-    if (error instanceof AppError && error.code === "OAUTH_SELECTION_INCOMPLETE") throw error;
-    return false;
+    // Only definitive provider denial or changed local authority proves loss.
+    // Transport, rate-limit, server and parsing failures withhold this attempt
+    // without claiming that the saved source was revoked.
+    if (error instanceof AppError) {
+      if (["OAUTH_SELECTION_INCOMPLETE", "OAUTH_PROVIDER_INDETERMINATE"].includes(error.code)) throw error;
+      if (error.code === "OAUTH_PROVIDER_AUTH_REVOKED") return false;
+      if (error.code === "OAUTH_PROVIDER_RESPONSE_ERROR" && [401, 403, 404, 410].includes(error.status)) return false;
+      if (["SOURCE_CHANGED", "SOURCE_RESTRICTED", "FORBIDDEN"].includes(error.code)) return false;
+    }
+    throw new AppError(503, "OAUTH_PROVIDER_INDETERMINATE", "OAuth source authority could not be verified. Retry later.");
   }
 }
 
@@ -153,10 +159,12 @@ export async function beginOAuthKnowledgeSync(params: {workspaceId: string; conn
   const assertCurrent = (db: Db = prisma) => db === prisma ? lease.readGuard(() => checkCurrent(db)) : checkCurrent(db);
   const recordFailure = async () => {
     // A stale worker must not change a new claim or a renewed connection grant.
+    // Fetch/index failure records diagnostics, not revocation of an existing grant;
+    // definitive authentication denial is handled by the token refresh boundary.
     await lease.stopAndDrain().then(() => sourceTransactionGuard(() => prisma.$transaction(async tx => {
       await tx.$queryRaw`SELECT id FROM "OAuthConnection" WHERE id=${connectionId} FOR UPDATE`;
       await assertCurrent(tx);
-      await tx.oAuthConnection.update({where: {id: connectionId}, data: {status: "ERROR",
+      await tx.oAuthConnection.update({where: {id: connectionId}, data: {
         lastSyncError: "OAuth content could not be safely indexed; retry after checking source access."}});
     }))).catch(() => {});
   };

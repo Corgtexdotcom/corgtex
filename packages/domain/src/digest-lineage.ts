@@ -2,13 +2,14 @@ import type { Prisma } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
-import { captureReadableWorkItemInputs, captureReadableNewspaperDeliveryInputs, captureArtifactInputProof, captureArtifactReadHeadObservation, mergeLineageInputRoot, withArtifactCountReleaseSnapshot, isArtifactInputProofReadable, type LineageInput, type LineageKind, type LineageRoot } from "./source-lineage";
+import { captureReadableDirectoryInputs, captureReadableWorkItemInputs, captureReadableNewspaperDeliveryInputs, captureArtifactInputProof, captureArtifactReadHeadObservation, mergeLineageInputRoot, withArtifactCountReleaseSnapshot, isArtifactInputProofReadable, type LineageInput, type LineageKind, type LineageRoot } from "./source-lineage";
 import { mergePermissionEpochProofs } from "./source-permission-epochs";
 
 /** One request's original compact observations, released together in a fresh snapshot. */
 export class DigestReadRelease {
   private readonly roots = new Map<string, LineageRoot>();
   private readonly heads = new Map<string, string>();
+  private directoryCaptured = false;
   constructor(readonly actor: AppActor, readonly workspaceId: string) {}
   add(proof: readonly LineageRoot[]) {
     for (const root of proof) {
@@ -29,6 +30,15 @@ export class DigestReadRelease {
     this.add(captured.roots);
     return captured;
   }
+  /** Directory projections retain their original heads; unsupported ancestry
+   * uses the ordinary capture path without changing other Digest consumers. */
+  async captureDirectory<T extends {id: string}>(kind: LineageKind, records: T[]) {
+    this.directoryCaptured = true;
+    const captured = await this.observeRead(() => captureReadableDirectoryInputs(this.actor, this.workspaceId, kind, records));
+    if (!captured) return this.capture(kind, records);
+    this.add(captured.roots);
+    return captured;
+  }
   /** Bounded canonical admission for full-corpus Brain counts. Complex and derived
    * articles retain the ordinary evaluator; original rows share page reads. */
   async captureBrainArticlePage<T extends {id: string; [key: string]: unknown}>(records: T[]) {
@@ -45,7 +55,7 @@ export class DigestReadRelease {
       await requireWorkspaceMembership({actor: this.actor, workspaceId: this.workspaceId, tx});
       await validate?.(tx);
       return value;
-    }, this.heads);
+    }, this.heads, {directory: this.directoryCaptured});
   }
 }
 

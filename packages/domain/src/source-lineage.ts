@@ -446,6 +446,7 @@ type LocalDeliveryBatch = LocalDeliveryRows & {db: LineageClient; workspaceId: s
 const localDeliveryReadBatch = new AsyncLocalStorage<LocalDeliveryBatch>();
 const deliveryInputKey = (input: LineageInput) => JSON.stringify([input.kind, input.id]);
 const LOCAL_CRM_KINDS = new Set<LineageKind>(["CrmAccount", "CrmContact", "CrmActivity", "CrmDeal"]);
+const LOCAL_DIRECTORY_KINDS = new Set<LineageKind>(["Role", "RoleAssignment", "Circle", "Member", "User"]);
 const LOCAL_APPROVAL_KINDS = new Set<LineageKind>(["ApprovalFlow", "ApprovalDecision", "Objection", "Proposal", "Member"]);
 const CONVERSATION_READ_KINDS = new Set<LineageKind>(["ConversationTurn", "ConversationPromptInput", "ConversationSession"]);
 const LOCAL_CONVERSATION_KINDS = new Set<LineageKind>([...CONVERSATION_READ_KINDS, "BrainSource", "BrainArticle", "Document", "Action", "Proposal", "Tension"]);
@@ -466,6 +467,11 @@ async function loadLocalDeliveryRows(db: LineageClient, workspaceId: string, inp
     const found = kind === "NewspaperDelivery" ? await db.newspaperDelivery.findMany({where})
       : kind === "Workspace" ? await db.workspace.findMany({where: {id: {in: ids.filter(id => id === workspaceId)}}})
       : kind === "Member" ? await db.member.findMany({where, include: {user: {select: {id: true, email: true, displayName: true}}}})
+      : kind === "User" ? await db.user.findMany({where: {id: {in: ids}, memberships: {some: {workspaceId, isActive: true}}},
+        select: {id: true, email: true, displayName: true, bio: true, avatarUrl: true, linkedinUrl: true, websiteUrl: true, createdAt: true, updatedAt: true}})
+      : kind === "Role" ? await db.role.findMany({where: {id: {in: ids}, circle: {workspaceId}}})
+      : kind === "Circle" ? await db.circle.findMany({where})
+      : kind === "RoleAssignment" ? await db.roleAssignment.findMany({where: {id: {in: ids}, member: {workspaceId}, role: {circle: {workspaceId}}}})
       : kind === "ConversationTurn" ? await db.conversationTurn.findMany({where: {id: {in: ids}, conversation: {workspaceId}}})
       : kind === "ConversationPromptInput" ? await db.conversationPromptInput.findMany({where})
       : kind === "ConversationSession" ? await db.conversationSession.findMany({where})
@@ -492,11 +498,12 @@ async function loadLocalDeliveryRows(db: LineageClient, workspaceId: string, inp
 }
 /** Eligibility follows the complete stored closure, including same-body heads.
  * Unsupported kinds (especially snapshots/native inputs) keep the ordinary path. */
-async function prepareLocalDeliveryBatch(db: LineageClient, workspaceId: string, inputs: readonly LineageInput[]) {
+async function prepareLocalDeliveryBatch(db: LineageClient, workspaceId: string, inputs: readonly LineageInput[], allowDirectory = false) {
   const crm = inputs.every(input => LOCAL_CRM_KINDS.has(input.kind));
+  const directory = allowDirectory && inputs.every(input => LOCAL_DIRECTORY_KINDS.has(input.kind));
   const approvals = inputs.some(input => APPROVAL_READ_KINDS.has(input.kind));
   const conversations = inputs.some(input => CONVERSATION_READ_KINDS.has(input.kind));
-  if (!inputs.length || inputs.length > 100 || !crm && !approvals && !conversations && !inputs.some(input => input.kind === "NewspaperDelivery")
+  if (!inputs.length || inputs.length > 100 || !crm && !directory && !approvals && !conversations && !inputs.some(input => input.kind === "NewspaperDelivery")
     || hasActiveSourceCommitLockPlan(db) || localDeliveryReadBatch.getStore() || workItemReadBatch.getStore()) return null;
   const loaded: LocalDeliveryRows = {rows:new Map(),heads:new Map()};
   let pending = [...inputs];
@@ -510,7 +517,7 @@ async function prepareLocalDeliveryBatch(db: LineageClient, workspaceId: string,
     pending = [...new Map(pending.filter(input => !loaded.rows.has(deliveryInputKey(input)))
       .map(input => [deliveryInputKey(input),input])).values()];
     if (!pending.length) break;
-    if (loaded.rows.size + pending.length > 256 || pending.some(input => !(crm ? LOCAL_CRM_KINDS : approvals ? LOCAL_APPROVAL_KINDS : conversations ? LOCAL_CONVERSATION_KINDS : LOCAL_DELIVERY_KINDS).has(input.kind))) return null;
+    if (loaded.rows.size + pending.length > 256 || pending.some(input => !(crm ? LOCAL_CRM_KINDS : directory ? LOCAL_DIRECTORY_KINDS : approvals ? LOCAL_APPROVAL_KINDS : conversations ? LOCAL_CONVERSATION_KINDS : LOCAL_DELIVERY_KINDS).has(input.kind))) return null;
     const page = await loadLocalDeliveryRows(db,workspaceId,pending);
     if (page.rows.size !== pending.length) return null;
     const next: LineageInput[] = [];
@@ -518,9 +525,14 @@ async function prepareLocalDeliveryBatch(db: LineageClient, workspaceId: string,
       const key = deliveryInputKey(input), row = page.rows.get(key)!, head = page.heads.get(key);
       const fingerprint = lineageContentFingerprint(input.kind,row);
       const parents = artifactPermissionParents(input.kind,row);
-      if (!crm && !approvals && !conversations && parents.length || revisions.has(key) && revisions.get(key) !== fingerprint
+      if (!crm && !directory && !approvals && !conversations && parents.length || revisions.has(key) && revisions.get(key) !== fingerprint
         || head && head.contentHash !== fingerprint) return null;
-      if (crm) {
+      if (directory) {
+        if ((needsManifest(input.kind,row) || head) && (!head || head.origin !== "HUMAN_ORIGINAL"
+          || !Array.isArray(head.inputsJson) || head.inputsJson.length
+          || !Array.isArray(head.rootsJson) || head.rootsJson.length)) return null;
+        next.push(...parents);
+      } else if (crm) {
         if (!head || head.origin !== "HUMAN_ORIGINAL" || !Array.isArray(head.inputsJson) || head.inputsJson.length
           || !Array.isArray(head.rootsJson) || head.rootsJson.length) return null;
         next.push(...parents);
@@ -548,10 +560,11 @@ async function readLocalDeliveryBatch(db: LineageClient, workspaceId: string, lo
   roots: readonly LineageRoot[], read: () => Promise<boolean>) {
   const stamp = localDeliveryStamp(loaded);
   const crm = [...loaded.rows.keys()].every(key => LOCAL_CRM_KINDS.has(JSON.parse(key)[0]));
+  const directory = [...loaded.rows.keys()].every(key => LOCAL_DIRECTORY_KINDS.has(JSON.parse(key)[0]));
   const approvals = [...loaded.rows.keys()].some(key => APPROVAL_READ_KINDS.has(JSON.parse(key)[0]));
   const conversations = [...loaded.rows.keys()].some(key => CONVERSATION_READ_KINDS.has(JSON.parse(key)[0]));
   const proofs = [...roots.flatMap(root => root.permissionEpochs ? [root.permissionEpochs] : []),
-    ...(crm ? [] : [...loaded.heads.values()].flatMap(head => [(approvals || conversations) && head.origin === "HUMAN_ORIGINAL"
+    ...(crm || directory ? [] : [...loaded.heads.values()].flatMap(head => [(approvals || conversations) && head.origin === "HUMAN_ORIGINAL"
       ? undefined : parsePermissionEpochProof(head.permissionEpochsJson),
       ...(parseRoots(head.rootsJson) ?? []).map(root => root.permissionEpochs)].filter((proof): proof is PermissionEpochProof => Boolean(proof))))];
   // Original human content does not inherit its publisher's historical epochs.
@@ -570,15 +583,19 @@ async function readLocalDeliveryBatch(db: LineageClient, workspaceId: string, lo
   return valid && stamp === localDeliveryStamp(await loadLocalDeliveryRows(db,workspaceId,inputs));
 }
 
-/** Local CRM originals retain the ordinary parent-envelope evaluator. The
+/** Local CRM and directory originals retain the ordinary parent-envelope evaluator. The
  * complete current parent closure is loaded and compared before/after the read;
  * any derived/native/historical input uses the ordinary uncached path. */
-async function captureLocalCrmOriginalInputs(actor: AppActor, workspaceId: string, kind: BatchedWorkItemKind,
+async function captureLocalCrmOriginalInputs(actor: AppActor, workspaceId: string, kind: BatchedWorkItemKind | "Circle" | "Role" | "RoleAssignment" | "Member" | "User",
   records: Array<{id: string; [key: string]: unknown}>) {
+  const directory = LOCAL_DIRECTORY_KINDS.has(kind);
   return prisma.$transaction(async tx => {
-    const loaded = await prepareLocalDeliveryBatch(tx,workspaceId,records.map(record => ({kind,id:record.id})));
-    if (!loaded || records.some(record => lineageContentFingerprint(kind,record)
-      !== lineageContentFingerprint(kind,loaded.rows.get(deliveryInputKey({kind,id:record.id}))!))) return null;
+    const loaded = await prepareLocalDeliveryBatch(tx,workspaceId,records.map(record => ({kind,id:record.id})),directory);
+    if (!loaded || records.some(record => {
+      const row = loaded.rows.get(deliveryInputKey({kind,id:record.id}))!;
+      return directory ? snapshotContentFields(kind,row).some(field => field in record && !snapshotMatches(record[field],row[field]))
+        : lineageContentFingerprint(kind,record) !== lineageContentFingerprint(kind,row);
+    })) return null;
     const membership = await requireWorkspaceMembership({actor,workspaceId,tx});
     const domains = await resolveKnowledgeAccessDomains(actor,workspaceId,tx);
     const ambient = await captureArtifactPermissionEpochs(actor,workspaceId,[],tx);
@@ -599,19 +616,33 @@ async function captureLocalCrmOriginalInputs(actor: AppActor, workspaceId: strin
     const candidates: LineageRoot[] = records.map(record => {
       const keys = new Set(identities.get(record.id)!.map(identity => JSON.stringify([identity.kind,identity.id])));
       const own = {...target,entries:target.entries.filter(entry => keys.has(JSON.stringify([entry.kind,entry.id])))};
-      return {kind,id:record.id,fingerprint:lineageContentFingerprint(kind,record),permissionEpochs:mergePermissionEpochProofs(ambient,own)!};
+      return {kind,id:record.id,fingerprint:lineageContentFingerprint(kind,directory ? loaded.rows.get(deliveryInputKey({kind,id:record.id}))! : record),permissionEpochs:mergePermissionEpochProofs(ambient,own)!};
     });
-    const binding: ReadHeadBinding = {heads:new Map(),sealed:false};
+    const binding: ReadHeadBinding = directory && expectedReadHeads.getStore() || {heads:new Map(),sealed:false};
     const memo = new Map<string,boolean>(); readHeadMemos.set(memo,binding);
     const roots: LineageRoot[] = [];
     const valid = await expectedReadHeads.run(binding,()=>readLocalDeliveryBatch(tx,workspaceId,loaded,candidates,async()=>{
       for (const root of candidates) if (await rootIsReadable(tx,actor,workspaceId,membership,domains,root,new Set(),memo)) roots.push(root);
       return true;
     }));
-    invariant(valid,409,"SOURCE_CHANGED","CRM original inputs changed during admission.");
+    invariant(valid,409,"SOURCE_CHANGED","Local original inputs changed during admission.");
     observeArtifactRead(actor,workspaceId,roots);
     return {ids:new Set(roots.map(root=>root.id)),roots,heads:binding.heads};
   });
+}
+
+/** Directory originals share bounded canonical rows, live parents and epochs.
+ * Only current local originals qualify; unsupported ancestry keeps the ordinary
+ * per-record path. The caller's exact projections and final release remain bound. */
+export async function captureReadableDirectoryInputs<T extends {id: string}>(actor: AppActor,
+  workspaceId: string, kind: LineageKind, records: T[]) {
+  if (!LOCAL_DIRECTORY_KINDS.has(kind) || !records.length || records.length > 75) return null;
+  const captured = await captureLocalCrmOriginalInputs(actor,workspaceId,
+    kind as "Circle" | "Role" | "RoleAssignment" | "Member" | "User", records);
+  if (!captured) return null;
+  const admitted = records.filter(record => captured.ids.has(record.id));
+  const proofs = new Map(captured.roots.map(root => [root.id,[root]]));
+  return {records: admitted, proofs, roots: captured.roots};
 }
 
 /** Bounded delivery capture with ordinary per-root admission and original
@@ -2076,21 +2107,22 @@ export async function collectWorkItemReadSnapshot<T>(workspaceId: string, read: 
  * This creates no reusable read, native, model or publication capability. */
 export async function withArtifactCountReleaseSnapshot<T>(actor: AppActor, workspaceId: string,
   roots: readonly LineageRoot[], remote: () => Promise<void>, finish: (tx: Prisma.TransactionClient) => Promise<T>,
-  observedHeads?: ReadonlyMap<string,string>): Promise<T> {
+  observedHeads?: ReadonlyMap<string,string>, options?: {directory?: boolean}): Promise<T> {
   // Keep only compact original receipts across the aggregate. Bound each proof
   // traversal's hydration/memos, not the workspace's total number of inputs.
   const assertPages = async (db: LineageClient, message: string) => {
     const approvals = roots.some(root => APPROVAL_READ_KINDS.has(root.kind));
+    const directory = options?.directory === true && roots.some(root => LOCAL_DIRECTORY_KINDS.has(root.kind));
     for (let offset = 0; offset < roots.length;) {
       // A child page also loads its flow and proposal. Keep that complete
       // closure within the existing 256-row local observation budget.
       const kind = roots[offset].kind;
-      const limit = approvals && ["ApprovalDecision", "Objection"].includes(kind) ? 75 : 100;
+      const limit = approvals && ["ApprovalDecision", "Objection"].includes(kind) || directory && LOCAL_DIRECTORY_KINDS.has(kind) ? 75 : 100;
       let end = Math.min(offset + limit, roots.length);
-      if (approvals) for (let index = offset + 1; index < end; index++) if (roots[index].kind !== kind) { end = index; break; }
+      if (approvals || directory) for (let index = offset + 1; index < end; index++) if (roots[index].kind !== kind) { end = index; break; }
       const page = roots.slice(offset, end);
       offset = end;
-      const loaded = await prepareLocalDeliveryBatch(db,workspaceId,page);
+      const loaded = await prepareLocalDeliveryBatch(db,workspaceId,page,directory);
       const read = () => isArtifactInputProofReadable(actor,workspaceId,page,db);
       invariant(await (loaded ? readLocalDeliveryBatch(db,workspaceId,loaded,page,read)
         : withWorkItemBatchRead(db,workspaceId,page,read)),
