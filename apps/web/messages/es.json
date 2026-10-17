@@ -3294,6 +3294,7 @@
     "readOnlyBanner": "Esta demostración es de solo lectura. Puedes inspeccionar el espacio de trabajo libremente, pero las modificaciones están deshabilitadas.",
     "restartTour": "Reiniciar recorrido",
     "tour": {
+      "skip": "Omitir",
       "welcomeTitle": "Bienvenido a Corgtex",
       "welcomeDescription": "Explora un espacio ilustrativo de Johnson & Johnson para conocer la autogestión. Las reuniones, personas y flujos de trabajo son ejemplos ficticios inspirados en información pública; no representan las operaciones reales de la empresa.",
       "newspaperTitle": "Tu periódico diario",
