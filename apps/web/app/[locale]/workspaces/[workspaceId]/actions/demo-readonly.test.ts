@@ -29,7 +29,7 @@ vi.mock("@corgtex/domain", () => ({
   countActionsByStatus: mocks.actionCounts,
   listCircles: async () => [],
   listHumanMembers: async () => [{ id: "synthetic-member", user: { displayName: "Synthetic Member", email: "synthetic@example.test" } }],
-  listAdviceRequests: async () => [],
+  listAdviceRequestWindow: async () => ({ items: [], complete: true, nextCursor: null }),
   listActionChecklistItems: async () => [{ id: "synthetic-check", title: "Review synthetic checklist", completedAt: null }],
   listWorkItemVersions: async () => ({ entityType: "Action", entityId: "synthetic-action", currentVersion: 1, versions: [] }),
   listWorkItemEvidence: async () => [],

@@ -859,6 +859,10 @@
     "trigger": "Comentario"
   },
   "workItems": {
+    "adviceCountWindow": "esta ventana",
+    "adviceWindowLimited": "Solo se muestran y cuentan las solicitudes de esta ventana. Puede haber otras solicitudes.",
+    "olderAdviceRequests": "Solicitudes anteriores",
+    "newestAdviceRequests": "Solicitudes más recientes",
     "allCircles": "Todos los círculos",
     "allAssignees": "Todas las personas asignadas",
     "allPeople": "Todas las personas",
@@ -1256,6 +1260,12 @@
     "related": "Trabajo relacionado"
   },
   "agreements": {
+    "windowCounts": "Los recuentos corresponden a la ventana mostrada. Puede haber políticas anteriores.",
+    "selectedCircle": "Círculo seleccionado",
+    "noPoliciesInWindow": "No hay políticas visibles en esta ventana. Continúa a las políticas anteriores.",
+    "olderPolicies": "Políticas anteriores",
+    "latestPolicies": "Volver a las políticas recientes",
+
     "accepted": "Aceptada {date}",
     "constitutionMeta": "v{version} · {date}",
     "constitutionOrigins": "Fuentes por punto de la Constitución",

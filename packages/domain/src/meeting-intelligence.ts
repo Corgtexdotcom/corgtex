@@ -699,6 +699,7 @@ Be conservative — only extract items you're confident about.
           followUps: meetingContext.followUps,
           recentDeliberation: meetingContext.deliberationEntries,
           knowledge: meetingContext.knowledge,
+          knowledgeComplete: meetingContext.knowledgeComplete ?? false,
           attendees: meetingContext.attendees,
         } : null,
         automationPolicy: {

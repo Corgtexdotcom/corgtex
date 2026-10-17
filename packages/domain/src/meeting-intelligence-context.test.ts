@@ -280,6 +280,23 @@ describe("meeting-intelligence-context", () => {
     (prisma.communicationMessage.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([{ id: "slack-1" }]);
   });
 
+  it.each([false, true])("bounds knowledge discovery to 300 raw candidates (denied=%s)", async denied => {
+    const chunks = Array.from({ length: 501 }, (_, i) => ({ id: `bounded-${i}`, sourceType: "MEETING",
+      sourceId: "meeting-1", sourceTitle: "Weekly pricing", content: "Pricing onboarding handoff", chunkIndex: i, sensitivity: "PUBLIC" }));
+    (prisma.knowledgeChunk.findMany as ReturnType<typeof vi.fn>).mockImplementation(async (args: any) => {
+      const start = args.cursor ? chunks.findIndex(row => row.id === args.cursor.id) + 1 : 0;
+      return chunks.slice(start, start + args.take) as any;
+    });
+    vi.mocked(readableArtifactIds).mockImplementation(async (_a, _w, kind, rows) =>
+      new Set(kind === "KnowledgeChunk" && denied ? [] : rows.map(row => row.id)));
+    const context = await buildMeetingIntelligenceContext({ workspaceId: "ws-1", meetingId: "meeting-2", mode: "insights" });
+    expect(prisma.knowledgeChunk.findMany).toHaveBeenCalledTimes(3);
+    expect(context.knowledge).toHaveLength(denied ? 0 : 8);
+    expect(context).toMatchObject({ knowledgeComplete: false });
+    expect(vi.mocked(readableArtifactIds).mock.calls.filter(call => call[2] === "KnowledgeChunk")
+      .reduce((count, call) => count + call[3].length, 0)).toBe(300);
+  });
+
   it("selects recurring-meeting continuity, open governance records, deliberation, and broad knowledge", async () => {
     const context = await buildMeetingIntelligenceContext({
       workspaceId: "ws-1",

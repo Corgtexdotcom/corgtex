@@ -859,6 +859,10 @@
     "trigger": "Feedback"
   },
   "workItems": {
+    "adviceCountWindow": "this window",
+    "adviceWindowLimited": "Only requests in this window are shown and counted. Other requests may exist.",
+    "olderAdviceRequests": "Older requests",
+    "newestAdviceRequests": "Newest requests",
     "allCircles": "All circles",
     "allAssignees": "All assignees",
     "allPeople": "All people",
@@ -1256,6 +1260,12 @@
     "related": "Related work"
   },
   "agreements": {
+    "windowCounts": "Counts describe the displayed window. Older policies may be available.",
+    "selectedCircle": "Selected circle",
+    "noPoliciesInWindow": "No visible policies in this window. Continue to older policies.",
+    "olderPolicies": "Older policies",
+    "latestPolicies": "Back to latest policies",
+
     "accepted": "Accepted {date}",
     "constitutionMeta": "v{version} · {date}",
     "constitutionOrigins": "Sources by Constitution point",

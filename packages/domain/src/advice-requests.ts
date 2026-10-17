@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readableArtifactIds, captureArtifactReadHeadObservation, mergeLineageInputRoot, withArtifactCountReleaseSnapshot, type LineageInput, type LineageRoot } from "./source-lineage";
 import { captureReadableDigestInputs } from "./digest-lineage";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
@@ -536,19 +537,20 @@ export async function createAdviceRequest(actor: AppActor, params: ProducerLinea
   });
 }
 
-export async function listAdviceRequests(actor: AppActor, params: {
+export async function listAdviceRequestWindow(actor: AppActor, params: {
   workspaceId: string;
   subjectType?: string;
   subjectId?: string;
   processId?: string;
   status?: AdviceRequestStatus;
   take?: number;
+  cursor?: string;
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const subjectType = params.subjectType ? normalizeSubjectType(params.subjectType) : undefined;
 
   const take = params.take ?? 50;
-  invariant(Number.isSafeInteger(take) && take >= 0, 400, "INVALID_INPUT", "Invalid advice request sample size.");
+  invariant(Number.isSafeInteger(take) && take >= 0 && take <= 100, 400, "INVALID_INPUT", "Invalid advice request sample size.");
   const userProjection = { id: true, email: true, displayName: true, bio: true, avatarUrl: true,
     linkedinUrl: true, websiteUrl: true, createdAt: true, updatedAt: true } as const;
   const include = {
@@ -560,8 +562,22 @@ export async function listAdviceRequests(actor: AppActor, params: {
   const selected: Row[] = [];
   const roots = new Map<string, LineageRoot>();
   const heads = new Map<string, string>();
+  const scope = createHash("sha256").update(JSON.stringify([actor, params.workspaceId, subjectType ?? null,
+    params.subjectId ?? null, params.processId ?? null, params.status ?? null])).digest("hex");
   let after: { id: string; createdAt: Date } | undefined;
-  while (selected.length < take) {
+  if (params.cursor) {
+    invariant(params.cursor.length <= 2048, 400, "INVALID_INPUT", "Invalid advice continuation.");
+    let decoded;
+    try { decoded = JSON.parse(Buffer.from(params.cursor, "base64url").toString("utf8")); } catch { /* validated below */ }
+    invariant(decoded?.v === 1 && decoded.scope === scope && typeof decoded.id === "string" && decoded.id.length > 0
+      && decoded.id.length <= 256 && typeof decoded.createdAt === "string" && Number.isFinite(Date.parse(decoded.createdAt))
+      && new Date(decoded.createdAt).toISOString() === decoded.createdAt, 400, "INVALID_INPUT", "Invalid advice continuation.");
+    after = { id: decoded.id, createdAt: new Date(decoded.createdAt) };
+  }
+  let examined = 0;
+  let complete = take === 0;
+  while (selected.length < take && examined < 200) {
+    const batchSize = Math.min(100, 200 - examined);
     const rows: Row[] = await prisma.adviceRequest.findMany({
       where: {
         workspaceId: params.workspaceId,
@@ -572,10 +588,10 @@ export async function listAdviceRequests(actor: AppActor, params: {
         } } : {}),
         ...(after ? { OR: [{ createdAt: { lt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] } : {}),
       },
-      include, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: 100,
+      include, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: batchSize,
     });
-    const last = rows.at(-1);
-    const next = last ? { id: last.id, createdAt: new Date(last.createdAt) } : undefined;
+    invariant(rows.length <= batchSize, 409, "SOURCE_CHANGED", "Advice page changed.");
+    examined += rows.length;
     // Process is not a source kind: prove its actual subject and compare its returned
     // projection again in the final snapshot. Never synthesize process authority.
     const candidates = rows.filter(row => row.process.workspaceId === params.workspaceId
@@ -603,16 +619,26 @@ export async function listAdviceRequests(actor: AppActor, params: {
       invariant(!heads.has(key) || heads.get(key) === stamp, 409, "SOURCE_CHANGED", "Advice sources changed during collection.");
       heads.set(key, stamp);
     }
-    for (const row of observed.value.records.slice(0, take - selected.length)) {
+    const admitted = new Set(observed.value.records.map(row => row.id));
+    let consumed = 0;
+    for (const row of rows) {
+      const next = { id: row.id, createdAt: new Date(row.createdAt) };
+      invariant(!after || next.createdAt < after.createdAt || (next.createdAt.getTime() === after.createdAt.getTime() && next.id > after.id),
+        409, "SOURCE_CHANGED", "Advice continuation did not advance.");
+      after = next;
+      consumed++;
+      if (!admitted.has(row.id)) continue;
       selected.push(row);
       for (const root of observed.value.proofs.get(row.id)!) {
         const key = `${root.kind}:${root.id}`;
         roots.set(key, mergeLineageInputRoot(roots.get(key), root));
       }
+      if (selected.length === take) break;
     }
-    if (rows.length < 100) break;
-    after = next;
+    if (consumed === rows.length && rows.length < batchSize) { complete = true; break; }
   }
+  const nextCursor = !complete && after
+    ? Buffer.from(JSON.stringify({ v: 1, scope, id: after.id, createdAt: after.createdAt.toISOString() })).toString("base64url") : null;
   return withArtifactCountReleaseSnapshot(actor, params.workspaceId, [...roots.values()], async () => {}, async tx => {
     await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
     // These joins have no standalone manifest. Compare their exact original values,
@@ -625,11 +651,19 @@ export async function listAdviceRequests(actor: AppActor, params: {
         409, "SOURCE_CHANGED", "Advice request details changed before release.");
     }
     const identity = (user: Row["requestedBy"]) => ({ id: user.id, displayName: user.displayName, email: user.email });
-    return selected.map(row => ({ ...row, requestedBy: identity(row.requestedBy),
+    const items = selected.map(row => ({ ...row, requestedBy: identity(row.requestedBy),
       targetCircle: row.targetCircle ? { id: row.targetCircle.id, name: row.targetCircle.name } : null,
       recipients: row.recipients.map(recipient => ({ ...recipient, member: { ...recipient.member, user: identity(recipient.member.user) } })),
     }));
+    return { items, complete, nextCursor };
   }, heads);
+}
+
+/** Legacy limited array API: never silently return an unfilled partial window. */
+export async function listAdviceRequests(actor: AppActor, params: Omit<Parameters<typeof listAdviceRequestWindow>[1], "cursor">) {
+  const page = await listAdviceRequestWindow(actor, params);
+  invariant(page.complete || page.items.length === (params.take ?? 50), 409, "SOURCE_READ_SCAN_LIMIT", "Use advice request continuation to read older requests.");
+  return page.items;
 }
 
 async function assertCanManageRequest(tx: Prisma.TransactionClient, actor: AppActor, params: {

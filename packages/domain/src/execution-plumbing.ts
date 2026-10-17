@@ -981,12 +981,19 @@ async function readableExecutionMember(actor: AppActor, workspaceId: string, mem
   }
 }
 
-/** Keep only the permitted recent sample and its original receipts. Canonical
- * pages replenish denied rows; coalesced meeting dates require a bounded top-N
- * fold rather than Prisma's different nullable-column ordering. */
+/** Meeting.recordedAt is required in storage. Order by that same date used by
+ * the response ranking so a recent sample never needs a full-history fold. */
+function meetingSampleAfter(after?: { id: string; recordedAt?: Date | null }): Prisma.MeetingWhereInput {
+  if (!after) return {};
+  invariant(after.recordedAt instanceof Date, 409, "SOURCE_CHANGED", "Meeting ordering is unavailable.");
+  return { OR: [{ recordedAt: { lt: after.recordedAt } }, { recordedAt: after.recordedAt, id: { gt: after.id } }] };
+}
+
+/** Keep only the permitted recent sample and its original receipts. Database
+ * pages use the same deterministic ranking as the returned sample. */
 async function recentExecutionInputs<T extends { id: string; updatedAt: Date; recordedAt?: Date | null }>(params: {
   actor: AppActor; workspaceId: string; kind: LineageKind; take: number;
-  load: (after: NoInfer<T> | undefined) => Promise<T[]>; fold?: boolean;
+  load: (after: NoInfer<T> | undefined) => Promise<T[]>;
   release: WorkItemReadRelease;
   matches?: (row: T) => boolean;
   admit?: (row: T, proof: LineageRoot[]) => Promise<LineageRoot[] | null>;
@@ -1012,7 +1019,7 @@ async function recentExecutionInputs<T extends { id: string; updatedAt: Date; re
     selected = recentRows(selected, params.take);
     const ids = new Set(selected.map(row => row.id));
     for (const id of proofs.keys()) if (!ids.has(id)) proofs.delete(id);
-    if (batch.length < 100 || !params.fold && selected.length === params.take) break;
+    if (batch.length < 100 || selected.length === params.take) break;
     after = next;
   }
   return { records: selected, proofs };
@@ -1036,8 +1043,9 @@ export async function getCompanyContext(actor: AppActor, workspaceId: string) {
     recentExecutionInputs<Action>({ ...read, kind: "Action", load: after => prisma.action.findMany(recentQuery(after)) }),
     recentExecutionInputs<Tension>({ ...read, kind: "Tension", load: after => prisma.tension.findMany(recentQuery(after)) }),
     recentExecutionInputs<Proposal>({ ...read, kind: "Proposal", load: after => prisma.proposal.findMany(recentQuery(after)) }),
-    recentExecutionInputs<Meeting>({ ...read, kind: "Meeting", take: 10, fold: true,
-      load: after => prisma.meeting.findMany({ where: { workspaceId, archivedAt: null, ...(after ? { id: { gt: after.id } } : {}) }, orderBy: { id: "asc" }, take: 100 }) }),
+    recentExecutionInputs<Meeting>({ ...read, kind: "Meeting", take: 10,
+      load: after => prisma.meeting.findMany({ where: { workspaceId, archivedAt: null, ...meetingSampleAfter(after) },
+        orderBy: [{ recordedAt: "desc" }, { id: "asc" }], take: 100 }) }),
     recentExecutionInputs<BrainArticle>({ ...read, kind: "BrainArticle", load: after => prisma.brainArticle.findMany(recentQuery(after)) }),
   ]);
   const select = <T extends { id: string; updatedAt?: Date; recordedAt?: Date | null }>(read: { records: T[]; proofs: Map<string, LineageRoot[]> }, take = MAX_CONTEXT_ITEMS) => {
@@ -1106,12 +1114,11 @@ export async function listWritebackTargets(actor: AppActor, params: ListWritebac
       : { workspaceId: params.workspaceId, archivedAt: null, ...(["ACTION", "TENSION", "PROPOSAL"].includes(type) ? privacyFilter(actor, membership) : {}) };
     type TargetRow = { id: string; title: string | null; status?: string; authority?: string; slug?: string; updatedAt: Date; recordedAt?: Date | null };
     const readable = await recentExecutionInputs<TargetRow>({ actor, workspaceId: params.workspaceId, kind, take, release,
-      fold: type === "MEETING",
       matches: row => !query || Boolean(row.title?.toLocaleLowerCase().includes(query)),
       load: after => (delegate.findMany as (args: unknown) => Promise<TargetRow[]>)({
-        where: after ? { AND: [where, type === "MEETING" ? { id: { gt: after.id } }
+        where: after ? { AND: [where, type === "MEETING" ? meetingSampleAfter(after)
           : { OR: [{ updatedAt: { lt: after.updatedAt } }, { updatedAt: after.updatedAt, id: { gt: after.id } }] }] } : where,
-        orderBy: type === "MEETING" ? { id: "asc" } : [{ updatedAt: "desc" }, { id: "asc" }], take: 100,
+        orderBy: type === "MEETING" ? [{ recordedAt: "desc" }, { id: "asc" }] : [{ updatedAt: "desc" }, { id: "asc" }], take: 100,
       }),
     });
     const records = readable.records;

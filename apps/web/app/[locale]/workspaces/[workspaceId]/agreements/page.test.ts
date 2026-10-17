@@ -41,6 +41,7 @@ describe("Agreements Constitution origins", () => {
       constitutionVersions: [currentConstitution],
       policyCorpus: [],
       brainArticles: [],
+      policyWindow: {complete: true, nextCursor: null, continued: false},
     });
   });
 
@@ -61,6 +62,7 @@ describe("Agreements Constitution origins", () => {
       constitutionVersions: [currentConstitution],
       policyCorpus: [],
       brainArticles: [],
+      policyWindow: {complete: true, nextCursor: null, continued: false},
     });
 
     const html = renderToStaticMarkup(await AgreementsPage({ params: Promise.resolve({ workspaceId: "synthetic-workspace" }) }));
@@ -85,6 +87,7 @@ describe("Agreements Constitution origins", () => {
       constitutionVersions: [currentConstitution],
       policyCorpus: [{ id: "policy-1", title: "Accepted public policy", bodyMd: "Policy body", acceptedAt: new Date("2026-08-10"), circle: null, proposal: null }],
       brainArticles: [],
+      policyWindow: {complete: true, nextCursor: null, continued: false},
     });
 
     const html = renderToStaticMarkup(await AgreementsPage({ params: Promise.resolve({ workspaceId: "synthetic-workspace" }) }));
@@ -93,4 +96,53 @@ describe("Agreements Constitution origins", () => {
     expect(html).not.toContain("hidden-proposal");
     expect(html).not.toContain("/proposals/undefined");
   });
+  it("keeps hidden-window continuation and the selected circle when absent from displayed rows", async () => {
+    mocks.agreements.mockResolvedValue({currentConstitution: null, constitutionVersions: [], policyCorpus: [], brainArticles: [],
+      policyWindow: {complete: false, nextCursor: "older-window", continued: true}});
+    const html = renderToStaticMarkup(await AgreementsPage({params: Promise.resolve({workspaceId: "synthetic-workspace"}),
+      searchParams: Promise.resolve({category: "policies", scope: "circle-hidden-window", policyCursor: "incoming"})}));
+    expect(mocks.agreements).toHaveBeenCalledWith(expect.anything(), {workspaceId: "synthetic-workspace", policyScope: "circle-hidden-window", policyCursor: "incoming"});
+    expect(html).toContain("No visible policies in this window.");
+    expect(html).toContain("Counts describe the displayed window.");
+    expect(html).toContain("category=policies&amp;scope=circle-hidden-window&amp;policyCursor=older-window");
+    expect(html).toContain("Back to latest policies");
+    expect(html).not.toContain(messages.agreements.noPolicies);
+  });
+
+  it.runIf(process.env.AGREEMENTS_WINDOW_BROWSER_QA === "1")("navigates an empty hidden policy window without losing its scope", async () => {
+    const {createServer} = await import("node:http");
+    const {mkdir, readFile} = await import("node:fs/promises");
+    const {chromium} = await import("playwright");
+    mocks.agreements.mockImplementation(async (_actor, options) => ({currentConstitution: null, constitutionVersions: [], brainArticles: [],
+      policyCorpus: options.policyCursor === "older-window" ? [{id: "allowed", title: "Visible older policy", bodyMd: "Permitted policy", acceptedAt: new Date(), circle: {id: "circle-a", name: "Circle A"}, proposal: null}] : [],
+      policyWindow: options.policyCursor === "older-window" ? {complete: true, nextCursor: null, continued: true} : {complete: false, nextCursor: "older-window", continued: false}}));
+    const css = (await Promise.all(["globals.css", "styles/tokens.css", "styles/components.css", "styles/animations.css", "styles/pages.css"].map(path => readFile(`apps/web/app/${path}`, "utf8")))).join("\n");
+    const server = createServer(async (request,response) => {
+      try {
+        const url = new URL(request.url!, "http://127.0.0.1");
+        const markup = renderToStaticMarkup(await AgreementsPage({params: Promise.resolve({workspaceId: "synthetic-workspace"}), searchParams: Promise.resolve(Object.fromEntries(url.searchParams))}));
+        response.setHeader("Content-Type", "text/html; charset=utf-8");response.end(`<html><head><meta charset="utf-8"><style>${css}</style></head><body>${markup}</body></html>`);
+      } catch(error) {response.writeHead(500).end(String(error));}
+    });
+    await new Promise<void>(resolve => server.listen(0,"127.0.0.1",resolve));
+    const address = server.address(); if (!address || typeof address === "string") throw new Error("Missing port");
+    const origin = `http://127.0.0.1:${address.port}`;
+    const browser = await chromium.launch({headless: true});
+    try {
+      const page = await browser.newPage();
+      await page.route("**/*", route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+      await page.goto(`${origin}/workspaces/synthetic-workspace/agreements?category=policies&scope=circle-a`);
+      await page.getByText(messages.agreements.noPoliciesInWindow,{exact: true}).waitFor();
+      await page.getByRole("link",{name: "Older policies", exact: true}).click();
+      await page.getByText("Visible older policy",{exact: true}).waitFor();
+      expect(new URL(page.url()).searchParams.get("scope")).toBe("circle-a");
+      expect(new URL(page.url()).searchParams.get("category")).toBe("policies");
+      await mkdir(".artifacts/source-bb-agreements",{recursive: true});
+      await page.screenshot({path: ".artifacts/source-bb-agreements/continued.png",fullPage:true});
+      await page.getByRole("link",{name:"Back to latest policies",exact:true}).click();
+      expect(new URL(page.url()).searchParams.has("policyCursor")).toBe(false);
+      expect(new URL(page.url()).searchParams.get("scope")).toBe("circle-a");
+    } finally {await browser.close();await new Promise<void>(resolve => server.close(() => resolve()));}
+  });
+
 });

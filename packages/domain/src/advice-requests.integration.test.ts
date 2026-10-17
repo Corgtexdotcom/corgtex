@@ -117,3 +117,21 @@ it("retains the final membership gate for empty results and performs no read for
   }) as typeof prisma.adviceRequest.findMany);
   await expect(listAdviceRequests(f.actors[1], { workspaceId: f.workspace.id })).rejects.toMatchObject({ code: "NOT_A_MEMBER" });
 });
+
+it("bounds denied raw history and continues to the original permitted request", async () => {
+  const f = await fixture();
+  const request = await createAdviceRequest(f.actors[0], f.params);
+  await prisma.adviceRequest.createMany({ data: Array.from({ length: 201 }, () => ({
+    workspaceId: f.workspace.id, processId: request.processId, requestedByUserId: f.users[0].id,
+    audienceType: "WORKSPACE", messageMd: "Unproved history", createdAt: new Date("2030-01-01"),
+  })) });
+  const { listAdviceRequestWindow } = await import("./advice-requests");
+  const calls = vi.spyOn(prisma.adviceRequest, "findMany");
+  const first = await listAdviceRequestWindow(f.actors[1], { workspaceId: f.workspace.id });
+  expect(first).toMatchObject({ items: [], complete: false, nextCursor: expect.any(String) });
+  expect(calls.mock.calls.filter(([query]) => query?.take === 100)).toHaveLength(2);
+  const second = await listAdviceRequestWindow(f.actors[1], { workspaceId: f.workspace.id, cursor: first.nextCursor! });
+  expect(second).toMatchObject({ complete: true, nextCursor: null, items: [{ id: request.id }] });
+  expect(calls.mock.calls.filter(([query]) => query?.take === 100)).toHaveLength(3);
+  expect(second.items[0].requestedBy.email).toBe(f.users[0].email);
+});

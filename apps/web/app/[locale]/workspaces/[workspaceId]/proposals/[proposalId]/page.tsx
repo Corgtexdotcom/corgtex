@@ -1,6 +1,7 @@
+import { AdviceRequestWindowNotice } from "@/lib/components/AdviceRequestWindowNotice";
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { AppError, getProposal, getWorkspaceArchiveRecord, listAdviceRequests, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listProposalDecisionStates, listProposals, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, getProposal, getWorkspaceArchiveRecord, listAdviceRequestWindow, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listProposalDecisionStates, listProposals, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import type { ProposalDecisionState } from "@corgtex/domain";
 import type { ApprovalDecisionChoice } from "@prisma/client";
 import { requirePageActor } from "@/lib/auth";
@@ -48,6 +49,7 @@ export default async function ProposalDetailPage({
   searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { workspaceId, proposalId } = await params;
+  const resolvedSearch = searchParams ? await searchParams : {};
   const actor = await requirePageActor();
   const t = await getTranslations("proposals");
   const tCommon = await getTranslations("common");
@@ -100,7 +102,7 @@ export default async function ProposalDetailPage({
   const { previousId, nextId } = reviewNeighbors(contextIds, proposalId);
   const listHref = reviewListHref(`/workspaces/${workspaceId}/proposals`, listQuery);
 
-  const [deliberationEntries, versionHistory, evidence, externalResourceAttachments, adviceRequests, archiveRecord, members, decisionStates] = await Promise.all([
+  const [deliberationEntries, versionHistory, evidence, externalResourceAttachments, adviceWindow, archiveRecord, members, decisionStates] = await Promise.all([
     archivedSafeRead(isArchived, listDeliberationEntries(actor, {
       workspaceId,
       parentType: "PROPOSAL",
@@ -114,13 +116,14 @@ export default async function ProposalDetailPage({
     }),
     archivedSafeRead(isArchived, listWorkItemEvidence(actor, { workspaceId, entityType: "Proposal", entityId: proposalId }), []),
     archivedSafeRead(isArchived, listExternalResourceAttachments(actor, { workspaceId, entityType: "Proposal", entityId: proposalId }), []),
-    isArchived ? Promise.resolve([]) : listAdviceRequests(actor, { workspaceId, subjectType: "PROPOSAL", subjectId: proposalId }),
+    isArchived ? Promise.resolve({ items: [], complete: true, nextCursor: null }) : listAdviceRequestWindow(actor, { workspaceId, subjectType: "PROPOSAL", subjectId: proposalId, cursor: typeof resolvedSearch.adviceCursor === "string" ? resolvedSearch.adviceCursor : undefined }),
     isArchived
       ? archivedSafeRead(true, getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Proposal", entityId: proposal.id }), null)
       : Promise.resolve(null),
     isArchived ? Promise.resolve([]) : listHumanMembers(workspaceId),
     isArchived ? Promise.resolve(new Map<string, ProposalDecisionState>()) : listProposalDecisionStates(actor, { workspaceId, proposalIds: [proposalId] }),
   ]);
+  const adviceRequests = adviceWindow.items;
   const decisionState = decisionStates.get(proposal.id) ?? null;
   const deliberationTargets = isArchived
     ? { options: [], defaultValue: "", actorMemberId: null, actorCircleIds: [] }
@@ -455,8 +458,11 @@ export default async function ProposalDetailPage({
 
           <hr className="nr-divider nr-divider-lg" />
 
-          {(canRequestAdvice || adviceRequests.length > 0) && (
+          {(canRequestAdvice || adviceRequests.length > 0 || !adviceWindow.complete || Boolean(resolvedSearch.adviceCursor)) && (
             <WorkItemConversationSurface title={t("sectionAdviceRequests")} className="work-request-surface">
+              <div id="advice-requests" />
+              <AdviceRequestWindowNotice page={adviceWindow} path={`/workspaces/${workspaceId}/proposals/${proposalId}`} search={resolvedSearch}
+                labels={{ limited: tWork("adviceWindowLimited"), older: tWork("olderAdviceRequests"), newest: tWork("newestAdviceRequests") }} />
               <WorkItemRequestList
                 requests={adviceRequestCards}
                 labels={{
