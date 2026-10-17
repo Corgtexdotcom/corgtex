@@ -32,7 +32,7 @@ vi.mock("./source-lineage", async () => ({
   },
 }));
 import { listRecentConversations } from "./conversations";
-const actor: AppActor = { kind: "user", user: { id: "user-1", email: "synthetic@example.test" } };
+const actor: AppActor = { kind: "user", user: { id: "user-1", email: "synthetic@example.test", displayName: null } };
 function session(id: string, readable = true) {
   const row = { id, workspaceId: "ws-1", userId: "user-1", topic: `Topic ${id}`, systemPrompt: "Private system prompt",
     updatedAt: new Date("2026-01-01"), roleOnboarding: null };

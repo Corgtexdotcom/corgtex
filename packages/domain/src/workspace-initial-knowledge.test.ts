@@ -24,7 +24,7 @@ vi.mock("./source-lineage", async () => ({
   },
 }));
 import { getWorkspaceInitialKnowledgeSummary } from "./workspace-initial-knowledge";
-const actor: AppActor = { kind: "user", user: { id: "user-1", email: "synthetic@example.test" } };
+const actor: AppActor = { kind: "user", user: { id: "user-1", email: "synthetic@example.test", displayName: null } };
 function add(kind: string, count: number) {
   const rows = Array.from({ length: count }, (_, index) => ({ id: `${kind}-${String(index).padStart(3, "0")}`,
     workspaceId: "ws-1", archivedAt: null, accessDomain: "WORKSPACE", sourceType: "DOC", transcript: "Synthetic transcript" as string | null, summaryMd: null }));
