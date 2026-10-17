@@ -718,7 +718,7 @@ describe("company understanding synthesis", () => {
     expect(modelGatewayMock.extract.mock.calls[0][0].input).not.toContain("unproven copied");
   });
 
-it("collects only bounded newest permitted synthesis samples including existing goals", async () => {
+it.each([0, 110])("collects bounded synthesis samples or rejects an incomplete goal window (denied goals=%s)", async deniedGoals => {
   const now = new Date("2026-01-01T00:00:00Z");
   const fixtures = [
     [prismaMock.brainSource.findMany, "source", 140, 20],
@@ -737,13 +737,23 @@ it("collects only bounded newest permitted synthesis samples including existing 
     });
   }
   readableSourcesMock.mockImplementation(async (_a,_w,rows: Array<{id: string}>) => new Set(rows.filter(row=>Number(row.id.split("-")[1])>=110).map(row=>row.id)));
-  readableArtifactIdsMock.mockImplementation(async (_a,_w,_k,rows: Array<{id: string}>) => new Set(rows.filter(row=>Number(row.id.split("-")[1])>=110).map(row=>row.id)));
+  readableArtifactIdsMock.mockImplementation(async (_a,_w,kind,rows: Array<{id: string}>) => new Set(rows.filter(row=>Number(row.id.split("-")[1]) >= (kind === "Goal" ? deniedGoals : 110)).map(row=>row.id)));
   modelGatewayMock.extract.mockResolvedValue({output:{}});
   const {runCompanyUnderstandingSynthesis}=await import("./company-understanding");
-  await runCompanyUnderstandingSynthesis({workspaceId:"workspace-1",agentRunId:"run",model:"synthetic"});
+  const result = runCompanyUnderstandingSynthesis({workspaceId:"workspace-1",agentRunId:"run",model:"synthetic"});
+  if (deniedGoals) {
+    await expect(result).rejects.toMatchObject({code:"SOURCE_READ_SCAN_LIMIT"});
+    expect(prismaMock.goal.findMany).toHaveBeenCalledTimes(2);
+    expect(modelGatewayMock.extract).not.toHaveBeenCalled();
+    expect(createGoalMock).not.toHaveBeenCalled();
+    return;
+  }
+  await result;
   const input=JSON.parse(modelGatewayMock.extract.mock.calls.at(-1)![0].input);
   expect(input.sources).toHaveLength(20);expect(input.articles).toHaveLength(40);expect(input.existingGoals).toHaveLength(200);
   expect(input.sources[0].id).toBe("source-0110");expect(input.articles[0].id).toBe("article-0110");
+  expect(input.existingGoals.map((row: {id:string})=>row.id)).toEqual(Array.from({length:200},(_,i)=>`goal-${String(i).padStart(4,"0")}`));
+  expect(prismaMock.goal.findMany).toHaveBeenCalledTimes(2);
   expect(prismaMock.goal.findMany.mock.calls.at(-1)![0].include.links.take).toBe(1);
 });
 

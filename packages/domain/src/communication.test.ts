@@ -509,11 +509,15 @@ describe("communication Slack integration", () => {
     }));
   });
 
-  it("fills the 500-message digest sample after discarding earlier unauthorized snapshots", async () => {
+  it.each([
+    { denied: 550, total: 1070, unavailable: true, selectedCount: 0, pages: 5 },
+    { denied: 50, total: 120, unavailable: false, selectedCount: 70, pages: 2 },
+    { denied: 0, total: 1070, unavailable: false, selectedCount: 500, pages: 5 },
+  ])("bounds the digest raw window and retains permitted snapshots ($denied denied of $total)", async ({ denied, total, unavailable, selectedCount, pages }) => {
     const { listSlackMessagesForDigest } = await authenticatedCommunicationFixture();
     const actor = { kind: "agent" as const, authProvider: "bootstrap" as const, label: "Digest test", workspaceIds: ["workspace-1"] };
     const since = new Date("2026-04-29T12:00:00Z");
-    const rows = Array.from({ length: 1070 }, (_, index) => ({
+    const rows = Array.from({ length: total }, (_, index) => ({
       id: `digest-${String(index).padStart(4, "0")}`, workspaceId: "workspace-1", installationId: "install-1", provider: "SLACK",
       externalChannelId: "C1", receivedAt: new Date(since.getTime() + index), text: `Synthetic Slack input ${index}`,
       isBot: false, isHidden: false, isDeleted: false, textRedactedAt: null,
@@ -524,16 +528,29 @@ describe("communication Slack integration", () => {
         || (row.receivedAt.getTime() === cursor[1].receivedAt.getTime() && row.id > cursor[1].id.gt)).slice(0, query.take);
     });
     captureDigestProofMock.mockImplementation(async (_actor, _workspaceId, inputs) => {
-      if (Number(inputs[0].id.split("-")[1]) < 550) throw new AppError(409, "SOURCE_RESTRICTED", "Synthetic revoked input");
-      return [{ kind: "CommunicationMessage", id: inputs[0].id, fingerprint: "a".repeat(64) }];
+      if (inputs.some((input: { id: string }) => Number(input.id.split("-")[1]) < denied)) throw new AppError(409, "SOURCE_RESTRICTED", "Synthetic revoked input");
+      return inputs.map((input: { id: string }) => ({ kind: "CommunicationMessage", id: input.id, fingerprint: "a".repeat(64) }));
     });
 
-    const selected = await listSlackMessagesForDigest(actor, "workspace-1", since);
-
-    expect(selected).toHaveLength(500);
-    expect(selected[0].id).toBe("digest-0550");
-    expect(selected.at(-1)?.id).toBe("digest-1049");
-    expect(prismaMock.communicationMessage.findMany).toHaveBeenCalledTimes(11);
+    captureDigestProofMock.mockClear();
+    digestProofReadableMock.mockClear();
+    if (unavailable) {
+      await expect(listSlackMessagesForDigest(actor, "workspace-1", since))
+        .rejects.toMatchObject({ code: "SOURCE_READ_SCAN_LIMIT" });
+      expect(captureDigestProofMock).toHaveBeenCalledTimes(500);
+      expect(digestProofReadableMock).not.toHaveBeenCalled();
+    } else {
+      const selected = await listSlackMessagesForDigest(actor, "workspace-1", since);
+      expect(selected).toEqual(rows.slice(denied, denied + selectedCount));
+      expect(selected).toHaveLength(selectedCount);
+      // The final guard must retain the exact selected snapshots, not re-read and
+      // certify newer messages or include the discarded denied prefix.
+      expect(captureDigestProofMock).toHaveBeenLastCalledWith(actor, "workspace-1",
+        selected.map(message => ({ kind: "CommunicationMessage", id: message.id, snapshot: message })));
+      expect(digestProofReadableMock).toHaveBeenLastCalledWith(actor, "workspace-1",
+        selected.map(message => ({ kind: "CommunicationMessage", id: message.id, fingerprint: "a".repeat(64) })));
+    }
+    expect(prismaMock.communicationMessage.findMany).toHaveBeenCalledTimes(pages);
     expect(prismaMock.communicationMessage.findMany.mock.calls.every(([query]) => query.take === 100)).toBe(true);
     expect(prismaMock.communicationMessage.findMany.mock.calls[1][0]).toMatchObject({
       orderBy: [{ receivedAt: "asc" }, { id: "asc" }],

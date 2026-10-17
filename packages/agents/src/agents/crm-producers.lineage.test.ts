@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { LineageRoot } from "@corgtex/domain";
+import type { EmailAttemptControls } from "@corgtex/shared";
 
 const f = vi.hoisted(() => ({
   job: {} as any, qualification: {} as any, lead: {} as any, contact: {} as any,
   unknown: new Set<string>(), revoked: false, private: false,
   modelExtract: vi.fn(), modelChat: vi.fn(), send: vi.fn(), applyExtraction: vi.fn(), applyEnrichment: vi.fn(), record: vi.fn(), search: vi.fn(),
+  sendControls: undefined as EmailAttemptControls | undefined, authorizeSend: vi.fn<EmailAttemptControls["authorizeAttempt"]>(),
   runtime: vi.fn(), operations: [] as any[], roots: [] as any[],
 }));
 vi.mock("@corgtex/shared", () => ({ prisma: {
@@ -47,8 +49,14 @@ describe("CRM producers capture actual inputs before effects", () => {
     f.lead = { id: "lead", workspaceId: "alpha", email: "lead@synthetic.test", source: "demo_gate", companyHint: "Synthetic", utmSource: null, followUpCount: 0, convertedContactId: null };
     f.contact = { id: "contact", workspaceId: "alpha", email: "lead@synthetic.test", company: "Synthetic", tags: ["existing"], archivedAt: null, accountId: null };
     f.modelExtract.mockResolvedValue({ output: { companyName: "Synthetic", confidence: 0.8, industry: "Software" } });
-    f.modelChat.mockResolvedValue({ content: "A proven draft" }); f.send.mockResolvedValue({ status: "SENT", providerMessageId: "provider-message" });
-    f.record.mockImplementation(async (_ws: string, _id: string, _body: string, opts: any) => ({ operationId: opts.operationId, delivery: await opts.send(f.lead.email, opts.operationId) }));
+    f.modelChat.mockResolvedValue({ content: "A proven draft" });
+    f.authorizeSend.mockResolvedValue(undefined);
+    f.sendControls = { signal: new AbortController().signal, authorizeAttempt: f.authorizeSend };
+    f.send.mockImplementation(async (_params: unknown, controls: EmailAttemptControls) => {
+      await controls.authorizeAttempt({signal:controls.signal});
+      return {status:"SENT",providerMessageId:"provider-message"};
+    });
+    f.record.mockImplementation(async (_ws: string, _id: string, _body: string, opts: any) => ({ operationId: opts.operationId, delivery: await opts.send(f.lead.email, opts.operationId, f.sendControls) }));
     f.runtime.mockImplementation(async (options: any) => {
       const receipt = Object.freeze({ kind: "agent-input-receipt" });
       const op = async (name: string, _input: any, fn: any, proof: any) => { f.operations.push({ name, proof }); return fn({modelRequest: (request: any) => request}); };
@@ -102,7 +110,18 @@ describe("CRM producers capture actual inputs before effects", () => {
     job("crm-drip-followup", leadPayload);
     await runCrmDripFollowupAgent(params(leadPayload));
     expect(f.record.mock.calls[0][3]).toEqual(expect.objectContaining({ operationId: "job", expectedFollowUpNumber: 1, actor: expect.objectContaining({ kind: "agent" }) }));
-    expect(f.send).toHaveBeenCalledWith(expect.objectContaining({ to: "lead@synthetic.test", idempotencyKey: "crm-drip/job" }));
+    expect(f.send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ to: "lead@synthetic.test", idempotencyKey: "crm-drip/job" }), f.sendControls);
+    expect(f.send.mock.calls[0][1]).toBe(f.sendControls);
+    expect(f.authorizeSend).toHaveBeenCalledExactlyOnceWith({signal:f.sendControls!.signal});
+    expect(f.operations.find(op=>op.name === "send-and-record").proof.receipt).toEqual({kind:"agent-input-receipt"});
+  });
+  it("propagates the locked writer's attempt denial instead of discarding its send controls", async () => {
+    job("crm-drip-followup", leadPayload);
+    const failure = new Error("Current-target authority changed after credentials");
+    f.authorizeSend.mockRejectedValueOnce(failure);
+    await expect(runCrmDripFollowupAgent(params(leadPayload))).rejects.toBe(failure);
+    expect(f.send.mock.calls[0][1]).toBe(f.sendControls);
+    expect(f.authorizeSend).toHaveBeenCalledExactlyOnceWith({signal:f.sendControls!.signal});
   });
   it("does not send a draft whose source changed during generation", async () => {
     job("crm-drip-followup", leadPayload); f.modelChat.mockImplementation(async () => { f.revoked = true; return { content: "A stale draft" }; });

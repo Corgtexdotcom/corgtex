@@ -3677,30 +3677,41 @@ describe("context graph bounded permission scan", () => {
         where: expect.objectContaining({workspaceId: "ws-1", sourceObjectId: {in: ["object-100", "object-101", "object-102"]}})}));
     } finally {vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspace, _kind, rows) => new Set(rows.map(row => row.id)));}
   });
-  it("reaches a readable tail after 5,001 denied canonical objects", async () => {
+  it.each([100, 5_001])("bounds canonical discovery after %s denied objects and releases only a reachable original", async (denied) => {
     const {prisma} = await import("@corgtex/shared");
     const {readableArtifactIds} = await import("@corgtex/domain");
     const {AppError} = await import("../../domain/src/errors");
     const {createCorgtexMcpServer} = await import("./server");
-    const rows = Array.from({length: 5_002}, (_, index) => ({id: String(index).padStart(5, "0"), objectType: "Task", updatedAt: new Date(0)}));
+    const readableId = String(denied).padStart(5, "0");
+    const rows = Array.from({length: denied + 1}, (_, index) => ({id: String(index).padStart(5, "0"), objectType: "Task", updatedAt: new Date(0)}));
     vi.mocked(prisma.contextGraphObject.findMany).mockReset().mockImplementation((async ({take, cursor, where}: any) => {
       const after = cursor?.id ?? where?.AND?.[1]?.OR?.[2]?.id?.gt;
       return rows.filter(row => !after || row.id > after).slice(0, take);
     }) as any);
-    vi.mocked(prisma.contextGraphRelationship.findMany).mockResolvedValue([]);
-    vi.mocked(readableArtifactIds).mockImplementation(async (_a, _w, _k, candidates) => new Set(candidates.filter(row => row.id === "05001").map(row => row.id)));
-    evidenceCapture.mockImplementation(async (_a, _w, inputs) => {
-      if (inputs[0].id !== "05001") throw new AppError(409, "UNKNOWN_LINEAGE", "Unproved");
+    vi.mocked(prisma.contextGraphRelationship.findMany).mockReset().mockResolvedValue([]);
+    vi.mocked(readableArtifactIds).mockImplementation(async (_a, _w, _k, candidates) => new Set(candidates.filter(row => row.id === readableId).map(row => row.id)));
+    evidenceCapture.mockReset().mockImplementation(async (_a, _w, inputs) => {
+      if (inputs[0].id !== readableId) throw new AppError(409, "UNKNOWN_LINEAGE", "Unproved");
       return [{kind: inputs[0].kind, id: inputs[0].id, fingerprint: "a".repeat(64)}];
     });
-    evidenceRelease.mockResolvedValue(undefined);
+    evidenceRelease.mockReset().mockResolvedValue(undefined);
     try {
       const server = createTestServer(createCorgtexMcpServer, {workspaceId: "ws-1", authKind: "oauth", actor: {kind: "user", user: {id: "u-1"}}});
+      if (denied > 200) {
+        await expect((server as any)._registeredTools.query_context_graph.handler({take: 1}))
+          .rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
+        expect(prisma.contextGraphObject.findMany).toHaveBeenCalledTimes(2);
+        expect(vi.mocked(prisma.contextGraphObject.findMany).mock.calls.every(([args]: any) => args.take === 100)).toBe(true);
+        expect(evidenceCapture).toHaveBeenCalledTimes(200);
+        expect(prisma.contextGraphRelationship.findMany).not.toHaveBeenCalled();
+        expect(evidenceRelease).not.toHaveBeenCalled();
+        return;
+      }
       const result = await (server as any)._registeredTools.query_context_graph.handler({take: 1});
-      expect(result.structuredContent.objects.map((row: {id: string}) => row.id)).toEqual(["05001"]);
-      expect(prisma.contextGraphObject.findMany).toHaveBeenCalledTimes(51);
+      expect(result.structuredContent.objects.map((row: {id: string}) => row.id)).toEqual([readableId]);
+      expect(prisma.contextGraphObject.findMany).toHaveBeenCalledTimes(2);
       expect(vi.mocked(prisma.contextGraphObject.findMany).mock.calls.every(([args]: any) => args.take === 100)).toBe(true);
-      expect(evidenceRelease.mock.calls.at(-1)?.[0].map((root: any) => root.id)).toEqual(["05001"]);
+      expect(evidenceRelease.mock.calls.at(-1)?.[0].map((root: any) => root.id)).toEqual([readableId]);
       evidenceRelease.mockRejectedValueOnce(new AppError(409, "SOURCE_CHANGED", "Original authority changed"));
       await expect((server as any)._registeredTools.query_context_graph.handler({take: 1})).rejects.toMatchObject({code: "SOURCE_CHANGED"});
     } finally {vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspace, _kind, candidates) => new Set(candidates.map(row => row.id)));}
