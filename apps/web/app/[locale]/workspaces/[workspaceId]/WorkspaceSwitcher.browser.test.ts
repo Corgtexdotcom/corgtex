@@ -33,7 +33,8 @@ describe.runIf(process.env.WORKSPACE_SWITCHER_BROWSER_QA === "1")("WorkspaceSwit
           import { WorkspaceSwitcher } from "./app/[locale]/workspaces/[workspaceId]/WorkspaceSwitcher";
           const locale = location.pathname.split("/")[1];
           const workspaces = ["a", "b", "c"].map(id => ({
-            id: "synthetic-" + id, slug: "synthetic-" + id,
+            // Keep slugs distinct so navigation by slug cannot satisfy ID URLs.
+            id: "synthetic-" + id, slug: "synthetic-slug-" + id,
             name: "Synthetic " + id.toUpperCase(), primaryName: "Synthetic " + id.toUpperCase(),
             secondaryLabel: "Synthetic membership",
           }));
