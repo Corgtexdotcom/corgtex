@@ -5,6 +5,7 @@ import { encryptSecret, getPrismaClient, prisma, type AppActor } from "@corgtex/
 import { defaultModelGateway } from "@corgtex/models";
 import { searchIndexedKnowledge } from "../../knowledge/src/retrieval";
 import { isArtifactInputProofReadable, captureArtifactInputProof } from "../../domain/src/source-lineage";
+import { createCrmAccount, createContact, getCrmConversation, listCrmActivities } from "../../domain/src/crm";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { handleOAuthDocumentsSync, handleOAuthEmailSync } from "./handlers/knowledge-sync";
 
@@ -21,14 +22,14 @@ async function fixture(kind: "documents" | "email" = "documents", nullableWorksp
     syncSettings: {documents: {enabled: true, selectedDriveIds: ["doc-1"]}, email: {enabled: true, filters: ["subject:synthetic"]}}}});
   const job = await prisma.workflowJob.create({data: {workspaceId: workspace.id, type: `oauth.${kind}.sync`,
     payload: {connectionId: connection.id}, status: "RUNNING", lockedBy: "synthetic-worker", lockedAt: new Date(), startedAt: new Date(), attempts: 1}});
-  const remote = {accountId: "synthetic-account", text: "Synthetic searchable cobalt policy."};
+  const remote = {accountId: "synthetic-account", from: "person@synthetic.example", text: "Synthetic searchable cobalt policy."};
   const fetchMock = vi.fn(async (input: string | URL | Request) => {
     const url = String(input);
     if (url === "https://www.googleapis.com/oauth2/v2/userinfo") return Response.json({id: remote.accountId});
     if (url.startsWith("https://www.googleapis.com/drive/v3/files/doc-1?fields=")) return Response.json({id: "doc-1", name: "Synthetic policy", mimeType: "text/plain"});
     if (url === "https://www.googleapis.com/drive/v3/files/doc-1?alt=media") return new Response(remote.text);
     if (url.startsWith("https://gmail.googleapis.com/gmail/v1/users/me/messages?")) return Response.json({messages: [{id: "email-1"}]});
-    if (url.startsWith("https://gmail.googleapis.com/gmail/v1/users/me/messages/email-1?")) return Response.json({id: "email-1", snippet: remote.text, payload: {headers: [{name: "Subject", value: "Synthetic policy"}]}});
+    if (url.startsWith("https://gmail.googleapis.com/gmail/v1/users/me/messages/email-1?")) return Response.json({id: "email-1", snippet: remote.text, payload: {headers: [{name: "Subject", value: "Synthetic policy"}, {name: "From", value: remote.from}, {name: "Message-ID", value: "<email-1@synthetic.example>"}]}});
     throw new Error("Unexpected provider endpoint in isolated fixture");
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -221,4 +222,134 @@ it("shares provider-derived workspace documents with another current member afte
   await prisma.member.create({data: {workspaceId: f.workspace.id, userId: user.id, role: "CONTRIBUTOR"}});
   const rows = await searchIndexedKnowledge({actor: {kind: "user", user}, workspaceId: f.workspace.id, query: "cobalt policy", sourceTypes: ["DOCUMENT"]});
   expect(rows.some(row => row.snippet.includes("Synthetic searchable cobalt policy."))).toBe(true);
+});
+
+
+it("accepts an existing full Google Drive grant", async () => {
+  const f = await fixture();
+  await prisma.oAuthConnection.update({where: {id: f.connection.id}, data: {scopes: ["https://www.googleapis.com/auth/drive"]}});
+  await f.run();
+  expect((await f.search()).length).toBeGreaterThan(0);
+});
+
+it("keeps completed email readable across unrelated document selection changes and a newer inbox page", async () => {
+  const f = await fixture("email"); await f.run();
+  await prisma.workflowJob.update({where: {id: f.job.id}, data: {status: "COMPLETED", lockedBy: null, lockedAt: null}});
+  await prisma.oAuthConnection.update({where: {id: f.connection.id}, data: {scopes: ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/gmail.readonly"], syncSettings: {
+    documents: {enabled: true, selectedDriveIds: ["other-doc"]}, email: {enabled: true, filters: ["subject:synthetic"]},
+  }}});
+  const respond = f.fetchMock.getMockImplementation()!;
+  f.fetchMock.mockImplementation(async input => {
+    const url = new URL(String(input));
+    if (url.pathname === "/gmail/v1/users/me/messages" && !url.searchParams.get("q")?.includes("rfc822msgid:")) {
+      return Response.json({messages: Array.from({length: 10}, (_, i) => ({id: `newer-${i}`}))});
+    }
+    return respond(input);
+  });
+  expect((await f.search()).length).toBeGreaterThan(0);
+});
+
+it("publishes readable matched CRM email activity, conversation and message idempotently", async () => {
+  const f = await fixture("email");
+  await prisma.oAuthConnection.update({where: {id: f.connection.id}, data: {syncSettings: {email: {enabled: true, filters: ["from:person@synthetic.example"]}}}});
+  const account = await createCrmAccount(f.actor, {workspaceId: f.workspace.id, name: "Synthetic account", domain: "synthetic.example"});
+  await createContact(f.actor, {workspaceId: f.workspace.id, accountId: account.id, name: "Synthetic sender", email: f.remote.from});
+  await f.run();
+  const conversation = await prisma.crmConversation.findFirstOrThrow({where: {workspaceId: f.workspace.id}});
+  expect((await listCrmActivities(f.actor, f.workspace.id)).items.length).toBe(1);
+  expect((await getCrmConversation(f.actor, {workspaceId: f.workspace.id, conversationId: conversation.id})).messages).toMatchObject([{bodyMd: f.remote.text}]);
+  await f.run();
+  expect(await prisma.crmActivity.count({where: {workspaceId: f.workspace.id}})).toBe(1);
+  expect(await prisma.crmConversation.count({where: {workspaceId: f.workspace.id}})).toBe(1);
+  expect(await prisma.crmConversationMessage.count({where: {conversationId: conversation.id}})).toBe(1);
+  const manifests = await prisma.artifactInputLineage.findMany({where: {workspaceId: f.workspace.id, artifactType: {in: ["CrmActivity", "CrmConversation", "CrmConversationMessage"]}}});
+  expect(new Set(manifests.map(row => row.artifactType)).size).toBe(3);
+  expect(manifests.every(row => row.origin === "DERIVED")).toBe(true);
+});
+
+it("retains source-kind governors through immutable native snapshot capture", async () => {
+  const f = await fixture();
+  const {beginOAuthKnowledgeSync} = await import("../../domain/src/oauth-provider-native");
+  const {prepareArtifactCommitPreflight, withArtifactCommitPreflight} = await import("../../domain/src/artifact-commit-preflight");
+  const {captureImmutableArtifactInputProof, assertArtifactInputWriteFence} = await import("../../domain/src/source-lineage");
+  const capture = await beginOAuthKnowledgeSync({workspaceId:f.workspace.id,connectionId:f.connection.id,workflowJobId:f.job.id,kind:"documents",expectedClaim:f.job});
+  const proof = await captureArtifactInputProof(capture.actor,f.workspace.id,[{kind:"Document",id:capture.documents[0]!.id,snapshot:capture.documents[0]!}]);
+  expect(await isArtifactInputProofReadable(capture.actor,f.workspace.id,proof)).toBe(true);
+  const prepared = await prepareArtifactCommitPreflight(capture.actor,f.workspace.id,proof);
+  const frozen = await prisma.$transaction(async tx => {await assertArtifactInputWriteFence(tx);return withArtifactCommitPreflight(capture.actor,f.workspace.id,tx,proof,prepared,()=>captureImmutableArtifactInputProof(capture.actor,f.workspace.id,proof,tx));});
+  expect(await isArtifactInputProofReadable(capture.actor,f.workspace.id,frozen)).toBe(true);
+});
+
+it.each(["email-selection-aba", "takeover"] as const)("rolls back CRM publication after %s between native preflight and its transaction", async mode => {
+  const f = await fixture("email");
+  const settings = {email: {enabled: true, filters: ["from:person@synthetic.example"]}};
+  await prisma.oAuthConnection.update({where: {id: f.connection.id}, data: {syncSettings: settings}});
+  const account = await createCrmAccount(f.actor, {workspaceId: f.workspace.id, name: "Synthetic account", domain: "synthetic.example"});
+  await createContact(f.actor, {workspaceId: f.workspace.id, accountId: account.id, name: "Synthetic sender", email: f.remote.from});
+  const preflights = await import("../../domain/src/artifact-commit-preflight");
+  const prepare = preflights.prepareArtifactCommitPreflight;
+  let changed = false;
+  vi.spyOn(preflights, "prepareArtifactCommitPreflight").mockImplementation(async (...args) => {
+    const token = await prepare(...args);
+    if (!changed && args[2].some(root => root.kind === "CrmContact")) {
+      if (mode === "takeover") {
+        await prisma.workflowJob.update({where: {id: f.job.id}, data: {attempts: {increment: 1}, lockedBy: "replacement-worker", lockedAt: new Date()}});
+      } else {
+        await prisma.oAuthConnection.update({where: {id: f.connection.id}, data: {syncSettings: {email: {enabled: false}}}});
+        await prisma.oAuthConnection.update({where: {id: f.connection.id}, data: {syncSettings: settings}});
+      }
+      changed = true;
+    }
+    return token;
+  });
+  await expect(f.run()).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+  expect(changed).toBe(true);
+  expect(await prisma.crmActivity.count({where: {workspaceId: f.workspace.id}})).toBe(0);
+  expect(await prisma.crmConversation.count({where: {workspaceId: f.workspace.id}})).toBe(0);
+  expect(await prisma.crmConversationMessage.count()).toBe(0);
+  expect(await prisma.oAuthConnection.findUniqueOrThrow({where: {id: f.connection.id}})).toMatchObject({status: "ACTIVE", lastSyncAt: null, lastSyncError: null});
+  if (mode === "takeover") expect(await prisma.workflowJob.findUniqueOrThrow({where: {id: f.job.id}})).toMatchObject({status: "RUNNING", attempts: 2, lockedBy: "replacement-worker"});
+});
+
+it("invalidates old email and all three CRM projections after relevant grant revocation and restoration", async () => {
+  const f = await fixture("email");
+  const settings = {email: {enabled: true, filters: ["from:person@synthetic.example"]}};
+  await prisma.oAuthConnection.update({where: {id: f.connection.id}, data: {syncSettings: settings}});
+  const account = await createCrmAccount(f.actor, {workspaceId: f.workspace.id, name: "Synthetic account", domain: "synthetic.example"});
+  await createContact(f.actor, {workspaceId: f.workspace.id, accountId: account.id, name: "Synthetic sender", email: f.remote.from});
+  await f.run();
+  const conversation = await prisma.crmConversation.findFirstOrThrow({where: {workspaceId: f.workspace.id}});
+  await prisma.workflowJob.update({where: {id: f.job.id}, data: {status: "COMPLETED", lockedBy: null, lockedAt: null}});
+  const colleague = await prisma.user.create({data: {email: `${randomUUID()}@oauth.test`, passwordHash: "synthetic"}});
+  await prisma.member.create({data: {workspaceId: f.workspace.id, userId: colleague.id, role: "CONTRIBUTOR"}});
+  const reader: AppActor = {kind: "user", user: colleague};
+  expect((await getCrmConversation(reader, {workspaceId: f.workspace.id, conversationId: conversation.id})).messages).toHaveLength(1);
+  await prisma.oAuthConnection.update({where: {id: f.connection.id}, data: {scopes: ["https://www.googleapis.com/auth/drive.file"]}});
+  await prisma.oAuthConnection.update({where: {id: f.connection.id}, data: {scopes: f.connection.scopes}});
+  expect((await listCrmActivities(reader, f.workspace.id)).items).toEqual([]);
+  await expect(getCrmConversation(reader, {workspaceId: f.workspace.id, conversationId: conversation.id})).rejects.toMatchObject({code: "NOT_FOUND"});
+  expect(await f.search()).toEqual([]);
+});
+
+it("rejects a lookalike publication token and changed caller message bytes", async () => {
+  const f = await fixture("email");
+  const {beginOAuthKnowledgeSync} = await import("../../domain/src/oauth-provider-native");
+  const {materializeCrmEmailTouchpoints} = await import("../../domain/src/crm-information-gathering");
+  const capture = await beginOAuthKnowledgeSync({workspaceId: f.workspace.id, connectionId: f.connection.id, workflowJobId: f.job.id, kind: "email", expectedClaim: f.job});
+  const params = {workspaceId: f.workspace.id, connectionId: f.connection.id, messages: capture.messages, publication: capture.emailPublication};
+  await expect(materializeCrmEmailTouchpoints({...params, publication: {} as typeof capture.emailPublication})).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+  await expect(materializeCrmEmailTouchpoints({...params, messages: capture.messages.map(message => ({...message, snippet: "Forged body"}))})).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+  expect(await prisma.crmActivity.count({where: {workspaceId: f.workspace.id}})).toBe(0);
+});
+
+
+it("retains shared identity scope revocation across restore for saved email", async () => {
+  const f = await fixture("email");
+  const scopes = [...f.connection.scopes, "profile"];
+  await prisma.oAuthConnection.update({where: {id: f.connection.id}, data: {scopes}});
+  await f.run();
+  expect((await f.search()).length).toBeGreaterThan(0);
+  await prisma.oAuthConnection.update({where: {id: f.connection.id}, data: {scopes: f.connection.scopes}});
+  await prisma.oAuthConnection.update({where: {id: f.connection.id}, data: {scopes}});
+  expect(await f.search()).toEqual([]);
 });

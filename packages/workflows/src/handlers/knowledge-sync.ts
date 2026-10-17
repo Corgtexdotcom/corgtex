@@ -132,51 +132,7 @@ export async function handleExternalContentKnowledgeSync(jobId: string, payload:
 }
 
 
-export async function handleEventKnowledgeSync(jobId: string, payload: { eventId?: string }, workspaceId: string) {
-  if (!payload.eventId) {
-    return;
-  }
-
-  const event = await prisma.event.findUnique({
-    where: { id: payload.eventId },
-    select: {
-      id: true,
-      workspaceId: true,
-      type: true,
-      aggregateType: true,
-      aggregateId: true,
-      payload: true,
-      createdAt: true,
-    },
-  });
-
-  if (!event || event.workspaceId !== workspaceId) {
-    return;
-  }
-
-  const title = `Event: ${event.type}`;
-  const content = [
-    `An event of type '${event.type}' occurred on ${event.createdAt.toISOString()}.`,
-    `Payload details:`,
-    JSON.stringify(event.payload, null, 2),
-  ].join("\n");
-
-  await syncKnowledgeForSource({
-    workspaceId,
-    sourceType: "EVENT",
-    accessDomain: "WORKSPACE",
-    sourceId: event.id,
-    sourceTitle: title,
-    content,
-    metadata: {
-      eventType: event.type,
-      aggregateType: event.aggregateType,
-      aggregateId: event.aggregateId,
-      workflowJobId: jobId,
-    },
-    workflowJobId: jobId,
-  });
-}
+export { handleEventKnowledgeSync } from "./event-knowledge-sync";
 
 
 export async function handleTensionKnowledgeSync(jobId: string, payload: { tensionId?: string }, workspaceId: string) {
@@ -349,7 +305,6 @@ export async function handleSlackMessageKnowledgeSync(jobId: string, payload: { 
     content,
     metadata: {
       installationId: message.installationId,
-      externalTeamName: message.installation.externalTeamName,
       externalChannelId: message.externalChannelId,
       externalMessageId: message.externalMessageId,
       externalUserId: message.externalUserId,
@@ -490,7 +445,7 @@ async function syncOAuthCanonicalKnowledge(jobId: string, connectionId: string, 
     }
     if (kind === "email") {
       await capture.assertCurrent();
-      await materializeCrmEmailTouchpoints({workspaceId, connectionId, messages: capture.messages});
+      await materializeCrmEmailTouchpoints({workspaceId, connectionId, messages: capture.messages, publication: capture.emailPublication});
     }
     await capture.checkpoint();
   } catch (error) {

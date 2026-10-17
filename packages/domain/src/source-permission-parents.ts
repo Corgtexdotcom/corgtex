@@ -65,7 +65,7 @@ export function artifactPermissionParents(kind: LineageKind, row: Record<string,
     if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) add("SqlNativeRunInput", (metadata as Record<string, unknown>).nativeInputId);
   }
   if (kind === "KnowledgeChunk") {
-    const sources: Record<string, LineageKind> = { BRAIN_ARTICLE: "BrainArticle", DOCUMENT: "Document", MEETING: "Meeting", PROPOSAL: "Proposal", EXTERNAL_CONTENT: "ExternalContentSource" };
+    const sources: Record<string, LineageKind> = { BRAIN_ARTICLE: "BrainArticle", DOCUMENT: "Document", MEETING: "Meeting", PROPOSAL: "Proposal", EXTERNAL_CONTENT: "ExternalContentSource", TENSION: "Tension", ACTION: "Action", CIRCLE: "Circle", ROLE: "Role", SLACK: "CommunicationMessage" };
     const parent = sources[String(row.sourceType)];
     if (parent) field(parent, "sourceId");
   }
@@ -159,7 +159,7 @@ export async function loadArtifactPermissionMetadata(tx: Prisma.TransactionClien
   if (batch && observed) {
     invariant(batch.active && batch.db === tx && batch.workspaceId === workspaceId,
       409, "SOURCE_CHANGED", "Permission metadata batch belongs to another or expired read.");
-    return structuredClone(Object.fromEntries(Object.entries(observed).filter(([field]) => METADATA_FIELDS.has(field))));
+    return structuredClone(Object.fromEntries(Object.entries(observed).filter(([field]) => METADATA_FIELDS.has(field) || (input.kind === "OAuthProviderFetchInput" && field === "sourceKind"))));
   }
   if (input.kind === "ExternalMcpConnectionSet") return loadExternalMcpConnectionSetInput(workspaceId, input.id, tx);
   const modelName = MODEL_ALIASES[input.kind] ?? input.kind;
@@ -170,6 +170,7 @@ export async function loadArtifactPermissionMetadata(tx: Prisma.TransactionClien
   // The documentId in BrainSource's policy metadata is its actual live parent
   // binding; no metadata is forwarded to a model or persisted as semantic input.
   if (["BrainSource", "KnowledgeChunk"].includes(input.kind)) select.metadata = true;
+  if (input.kind === "OAuthProviderFetchInput") select.sourceKind = true;
   if (input.kind === "ConversationOperationOutcome") { select.controlJson = true; select.operation = true; }
   const where = input.kind === "Workspace" ? { id: input.id === workspaceId ? input.id : "" }
     : input.kind === "User" ? { id: input.id, memberships: { some: { workspaceId, isActive: true } } }

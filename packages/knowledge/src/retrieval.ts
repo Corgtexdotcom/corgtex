@@ -1,3 +1,4 @@
+import { canonicalKnowledgeKinds, loadCanonicalKnowledgeSources, type CanonicalKnowledgeSource } from "./canonical-sources";
 import { createHash } from "node:crypto";
 import { Prisma, type KnowledgeAccessDomain, type KnowledgeSourceType } from "@prisma/client";
 import { getCacheJson, getCacheVersion, incrementCacheVersion, prisma, cosineSimilarity, logger, setCacheJson } from "@corgtex/shared";
@@ -150,6 +151,7 @@ async function knowledgeCacheVersion(workspaceId: string) {
 }
 
 const knowledgeLineageKinds: Partial<Record<KnowledgeSourceType, LineageKind>> = {
+  ...canonicalKnowledgeKinds,
   BRAIN_ARTICLE: "BrainArticle",
   DOCUMENT: "Document",
   MEETING: "Meeting",
@@ -169,7 +171,7 @@ type RetrievalAccess = ModelRequestControls & {
 const knowledgeSourceKey = (chunk: {sourceType: KnowledgeSourceType; sourceId: string; metadata?: unknown}) =>
   `${chunk.sourceType}:${chunk.sourceType === "EXTERNAL_DATABASE" ? (chunk.metadata as Record<string, unknown> | null)?.nativeInputId : chunk.sourceId}`;
 
-type ReadableSource = { contentHash: string; kind: LineageKind; record: { id: string; [key: string]: unknown } };
+type ReadableSource = { inputs?: CanonicalKnowledgeSource["inputs"]; contentHash: string; kind: LineageKind; record: { id: string; [key: string]: unknown } };
 type SearchRun = { results: KnowledgeSearchResult[]; roots: LineageRoot[] };
 type ProvenSearchCache = { schema: 2; results: KnowledgeSearchResult[]; inputRoots: LineageRoot[]; inputHeads: [string, string][] };
 type SearchProofState = { actorHash: string; workspaceId: string; payloadHash: string; roots: LineageRoot[] };
@@ -271,7 +273,12 @@ async function captureKnowledgeInputs(params: RetrievalAccess,
   for (const chunk of chunks) {
     const source = sources.get(knowledgeSourceKey(chunk));
     if (!source) return null;
-    parentInputs.set(`${source.kind}:${source.record.id}`, { kind: source.kind, id: source.record.id, snapshot: source.record });
+    for (const input of source.inputs ?? [{ kind: source.kind, id: source.record.id, snapshot: source.record }]) {
+      const key = `${input.kind}:${input.id}`;
+      const previous = parentInputs.get(key);
+      if (previous && lineageContentFingerprint(input.kind, previous.snapshot) !== lineageContentFingerprint(input.kind, input.snapshot)) return null;
+      if (!previous) parentInputs.set(key, input);
+    }
   }
   try {
     return await captureArtifactInputProof(params.actor, params.workspaceId, [
@@ -324,6 +331,14 @@ async function readableKnowledgeSources(params: RetrievalAccess, sourceIds?: Map
     }
     const where = { workspaceId: params.workspaceId, ...(ids ? { id: { in: ids } } : {}), archivedAt: null };
     const scan = { take: ids ? Math.min(ids.length, KNOWLEDGE_SCAN_LIMIT - scanned + 1) : KNOWLEDGE_SCAN_LIMIT - scanned + 1 };
+    if (sourceType in canonicalKnowledgeKinds) {
+      const canonical = await loadCanonicalKnowledgeSources({ workspaceId: params.workspaceId, sourceType, sourceIds: ids, take: scan.take });
+      scanned += canonical.length;
+      if (scanned > KNOWLEDGE_SCAN_LIMIT) scanLimitExceeded();
+      const readable = await readableArtifactIds(params.actor, params.workspaceId, kind, canonical.map(source => source.record));
+      for (const source of canonical) if (readable.has(source.record.id)) sources.set(`${sourceType}:${source.record.id}`, source);
+      continue;
+    }
     const records = sourceType === "BRAIN_ARTICLE"
       ? await prisma.brainArticle.findMany({ ...scan, where: { ...where, OR: [{ isPrivate: false }, { variantOfArticleId: { not: null }, isPrivate: true }] } })
       : sourceType === "DOCUMENT"

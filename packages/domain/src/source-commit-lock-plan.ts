@@ -391,7 +391,7 @@ async function discover(state: Omit<PlanState,"discovered">, db: SourceAuthority
       }
       if (input.kind === "KnowledgeChunk") {
         const metadata = authorityRecord(loaded.metadata);
-        const sources:Record<string,LineageKind> = {BRAIN_ARTICLE:"BrainArticle",DOCUMENT:"Document",MEETING:"Meeting",PROPOSAL:"Proposal",EXTERNAL_CONTENT:"ExternalContentSource",EXTERNAL_DATABASE:"SqlNativeRunInput"};
+        const sources:Record<string,LineageKind> = {BRAIN_ARTICLE:"BrainArticle",DOCUMENT:"Document",MEETING:"Meeting",PROPOSAL:"Proposal",EXTERNAL_CONTENT:"ExternalContentSource",EXTERNAL_DATABASE:"SqlNativeRunInput",TENSION:"Tension",ACTION:"Action",CIRCLE:"Circle",ROLE:"Role",SLACK:"CommunicationMessage"};
         const kind = sources[String(loaded.sourceType)]; invariant(kind && typeof metadata?.sourceContentHash === "string",409,"SOURCE_LOCK_INCOMPLETE","Knowledge parent proof is unavailable.");
         const ancestor = {kind,id:authorityIdentity(loaded.sourceType === "EXTERNAL_DATABASE" ? metadata.nativeInputId : loaded.sourceId),fingerprint:metadata.sourceContentHash};
         remaining.consume(`synthetic:${logicalKey(ancestor)}:${ancestor.fingerprint}`); pending.push({input:ancestor,root:ancestor});

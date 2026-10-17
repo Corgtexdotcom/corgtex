@@ -8,6 +8,9 @@ import { readCrmRows } from "./crm-lineage";
 import { meetingTranscriptInputProjection } from "./meeting-intelligence-context";
 import { lockCrmLinkClosure } from "./crm-archive-guards";
 import { invariant } from "./errors";
+import { getOAuthEmailSyncPublication, type OAuthEmailSyncPublication } from "./oauth-provider-native";
+import { prepareArtifactCommitPreflight, withArtifactCommitPreflight } from "./artifact-commit-preflight";
+import { assertArtifactInputWriteFence } from "./source-lineage";
 
 const CRM_EMAIL_SOURCE = "oauth_email";
 const CRM_CALENDAR_SOURCE = "oauth_calendar";
@@ -246,116 +249,90 @@ export async function materializeCrmEmailTouchpoints(params: {
   workspaceId: string;
   connectionId: string;
   messages: EmailTouchpoint[];
+  publication: OAuthEmailSyncPublication;
 }) {
-  const safeFilters = new Set(safeCrmEmailFilters(params.messages.map((message) => message.filter)).map((filter) => filter.toLowerCase()));
-  const summary = {
-    scanned: params.messages.length,
-    skippedUnsafeFilter: 0,
-    skippedUnmatched: 0,
-    activitiesCreated: 0,
-    activitiesUpdated: 0,
-    conversationsCreated: 0,
-    conversationsUpdated: 0,
-  };
-
-  await prisma.$transaction(async (tx) => {
-    const externalIds = params.messages.filter((message) => safeFilters.has(message.filter.trim().toLowerCase()))
-      .map((message) => sourceExternalId("oauth-email", params.connectionId, message.provider, message.id));
-    const existingActivities = await existingActivityBatch(tx, params.workspaceId, CRM_EMAIL_SOURCE, externalIds);
-    const matched: Array<{ message: EmailTouchpoint; fromEmail: string; match: RelationshipMatch; externalId: string }> = [];
-    for (const message of params.messages) {
-      if (!safeFilters.has(message.filter.trim().toLowerCase())) {
-        summary.skippedUnsafeFilter += 1;
-        continue;
-      }
-      const fromEmail = parseEmailAddress(message.from);
-      const match = await findRelationshipMatch(tx, params.workspaceId, fromEmail);
-      if (!fromEmail || !match) {
-        summary.skippedUnmatched += 1;
-        continue;
-      }
-      const externalId = sourceExternalId("oauth-email", params.connectionId, message.provider, message.id);
-      matched.push({ message, fromEmail, match, externalId });
+  const publication = getOAuthEmailSyncPublication(params.publication, params.workspaceId, params.connectionId, params.messages);
+  const {actor, assertCurrent} = publication;
+  const messages = publication.messages.map(entry => entry.message);
+  const safeFilters = new Set(safeCrmEmailFilters(messages.map(message => message.filter)).map(filter => filter.toLowerCase()));
+  const summary = {scanned: messages.length, skippedUnsafeFilter: 0, skippedUnmatched: 0,
+    activitiesCreated: 0, activitiesUpdated: 0, conversationsCreated: 0, conversationsUpdated: 0};
+  await assertCurrent();
+  const matched: Array<{message: EmailTouchpoint; fromEmail: string; match: RelationshipMatch; externalId: string; roots: LineageRoot[]}> = [];
+  // Capture exact provider, account and contact generations before opening the DB-only commit.
+  for (const {message, roots: documentRoots} of publication.messages) {
+    if (!safeFilters.has(message.filter.trim().toLowerCase())) { summary.skippedUnsafeFilter++; continue; }
+    const fromEmail = parseEmailAddress(message.from);
+    const match = await findRelationshipMatch(prisma, params.workspaceId, fromEmail);
+    if (!fromEmail || !match) { summary.skippedUnmatched++; continue; }
+    const dependencies: Parameters<typeof captureArtifactInputProof>[2] = [];
+    if (match.accountId) {
+      const account = await prisma.crmAccount.findUnique({where: {id: match.accountId}});
+      invariant(account?.workspaceId === params.workspaceId, 409, "SOURCE_CHANGED", "CRM email account changed.");
+      dependencies.push({kind: "CrmAccount", id: account.id, snapshot: account});
     }
-    await lockCrmLinkClosure(tx, params.workspaceId, ...[...existingActivities.values()].map(({ id }) => ({ activityId: id })),
-      ...matched.map(({ match }) => ({ contactId: match.contactId, accountId: match.accountId })));
-    for (const { message, fromEmail, match, externalId } of matched) {
-      if (!await isActiveRelationshipMatch(tx, params.workspaceId, match)) {
-        summary.skippedUnmatched += 1;
-        continue;
-      }
-      const occurredAt = validDate(message.receivedAt);
-      const existingActivity = existingActivities.get(externalId);
-      const activityData = {
-        accountId: match.accountId,
-        contactId: match.contactId,
-        title: `Email: ${message.subject.trim() || "Untitled email"}`,
-        bodyMd: emailActivityBody(message, fromEmail),
-        type: CrmActivityType.EMAIL,
-        sourceUrl: message.webUrl,
-        sourceOccurredAt: occurredAt,
-      };
-      if (existingActivity) {
-        const updated = await tx.crmActivity.updateMany({
-          where: { id: existingActivity.id, workspaceId: params.workspaceId, archivedAt: null },
-          data: activityData,
-        });
-        summary.activitiesUpdated += updated.count;
-      } else {
-        const created = await tx.crmActivity.create({
-          data: {
-            workspaceId: params.workspaceId,
-            ...activityData,
-            source: CRM_EMAIL_SOURCE,
-            sourceExternalId: externalId,
-          },
-        });
-        existingActivities.set(externalId, created);
-        summary.activitiesCreated += 1;
-      }
-
-      const existingConversation = await tx.crmConversation.findUnique({
-        where: {
-          workspaceId_source_sourceExternalId: {
-            workspaceId: params.workspaceId,
-            source: CRM_EMAIL_SOURCE,
-            sourceExternalId: externalId,
-          },
-        },
-        select: { id: true },
-      });
-      const conversationData = {
-        accountId: match.accountId,
-        contactId: match.contactId,
-        subject: message.subject.trim() || "Untitled email",
-        sourceUrl: message.webUrl,
-        sourceOccurredAt: occurredAt,
-      };
-      if (existingConversation) {
-        await tx.crmConversation.update({ where: { id: existingConversation.id }, data: conversationData });
-        summary.conversationsUpdated += 1;
-      } else {
-        await tx.crmConversation.create({
-          data: {
-            workspaceId: params.workspaceId,
-            ...conversationData,
-            source: CRM_EMAIL_SOURCE,
-            sourceExternalId: externalId,
-            messages: {
-              create: {
-                senderType: "LEAD",
-                senderEmail: fromEmail,
-                bodyMd: message.snippet.trim(),
-                ...(occurredAt ? { createdAt: occurredAt } : {}),
-              },
-            },
-          },
-        });
-        summary.conversationsCreated += 1;
-      }
+    if (match.contactId) {
+      const contact = await prisma.crmContact.findUnique({where: {id: match.contactId}});
+      invariant(contact?.workspaceId === params.workspaceId && contact.email === match.email && contact.accountId === match.accountId,
+        409, "SOURCE_CHANGED", "CRM email contact changed.");
+      dependencies.push({kind: "CrmContact", id: contact.id, snapshot: contact});
     }
+    const roots = [...documentRoots, ...await captureArtifactInputProof(actor, params.workspaceId, dependencies)];
+    matched.push({message, fromEmail, match, roots, externalId: sourceExternalId("oauth-email", params.connectionId, message.provider, message.id)});
+  }
+  if (!matched.length) { await assertCurrent(); return summary; }
+  const roots = matched.flatMap(entry => entry.roots);
+  const preflight = await prepareArtifactCommitPreflight(actor, params.workspaceId, roots);
+  await prisma.$transaction(async tx => {
+    await assertArtifactInputWriteFence(tx);
+    await assertCurrent(tx);
+    return withArtifactCommitPreflight(actor, params.workspaceId, tx, roots, preflight, async () => {
+      const existingActivities = await existingActivityBatch(tx, params.workspaceId, CRM_EMAIL_SOURCE, matched.map(entry => entry.externalId));
+      await lockCrmLinkClosure(tx, params.workspaceId, ...[...existingActivities.values()].map(({id}) => ({activityId: id})),
+        ...matched.map(({match}) => ({contactId: match.contactId, accountId: match.accountId})));
+      for (const {message, fromEmail, match, externalId, roots: inputRoots} of matched) {
+        if (!await isActiveRelationshipMatch(tx, params.workspaceId, match)) { summary.skippedUnmatched++; continue; }
+        const occurredAt = validDate(message.receivedAt);
+        const activityData = {accountId: match.accountId, contactId: match.contactId,
+          title: `Email: ${message.subject.trim() || "Untitled email"}`, bodyMd: emailActivityBody(message, fromEmail),
+          type: CrmActivityType.EMAIL, sourceUrl: message.webUrl, sourceOccurredAt: occurredAt};
+        const existingActivity = existingActivities.get(externalId);
+        let activity;
+        if (existingActivity) {
+          const updated = await tx.crmActivity.updateMany({where: {id: existingActivity.id, workspaceId: params.workspaceId, archivedAt: null}, data: activityData});
+          summary.activitiesUpdated += updated.count;
+          if (updated.count) activity = await tx.crmActivity.findUnique({where: {id: existingActivity.id}});
+        } else {
+          activity = await tx.crmActivity.create({data: {workspaceId: params.workspaceId, ...activityData,
+            source: CRM_EMAIL_SOURCE, sourceExternalId: externalId}});
+          existingActivities.set(externalId, activity);
+          summary.activitiesCreated++;
+        }
+        if (activity) await recordArtifactInputLineage({tx, actor, workspaceId: params.workspaceId,
+          artifact: {kind: "CrmActivity", id: activity.id}, content: activity, origin: "DERIVED", inputs: [], inheritedRoots: inputRoots});
+        const existingConversation = await tx.crmConversation.findUnique({where: {workspaceId_source_sourceExternalId: {
+          workspaceId: params.workspaceId, source: CRM_EMAIL_SOURCE, sourceExternalId: externalId}}, select: {id: true}});
+        const conversationData = {accountId: match.accountId, contactId: match.contactId,
+          subject: message.subject.trim() || "Untitled email", sourceUrl: message.webUrl, sourceOccurredAt: occurredAt};
+        const conversation = existingConversation
+          ? await tx.crmConversation.update({where: {id: existingConversation.id}, data: conversationData})
+          : await tx.crmConversation.create({data: {workspaceId: params.workspaceId, ...conversationData,
+            source: CRM_EMAIL_SOURCE, sourceExternalId: externalId}});
+        if (existingConversation) summary.conversationsUpdated++; else summary.conversationsCreated++;
+        await recordArtifactInputLineage({tx, actor, workspaceId: params.workspaceId,
+          artifact: {kind: "CrmConversation", id: conversation.id}, content: conversation, origin: "DERIVED", inputs: [], inheritedRoots: inputRoots});
+        // Stable provider-owned message identity; never attach a fresh proof to an old unverified body.
+        const messageId = `oauth-email-${createHash("sha256").update(JSON.stringify([params.workspaceId, externalId])).digest("hex")}`;
+        const messageData = {senderType: "LEAD" as const, senderEmail: fromEmail, bodyMd: message.snippet.trim()};
+        const storedMessage = await tx.crmConversationMessage.upsert({where: {id: messageId},
+          create: {id: messageId, conversationId: conversation.id, ...messageData, ...(occurredAt ? {createdAt: occurredAt} : {})}, update: messageData});
+        invariant(storedMessage.conversationId === conversation.id, 409, "SOURCE_CHANGED", "CRM email message binding changed.");
+        await recordArtifactInputLineage({tx, actor, workspaceId: params.workspaceId,
+          artifact: {kind: "CrmConversationMessage", id: storedMessage.id}, content: storedMessage, origin: "DERIVED", inputs: [], inheritedRoots: inputRoots});
+      }
+      await assertCurrent(tx);
+    });
   });
-
   return summary;
 }
 

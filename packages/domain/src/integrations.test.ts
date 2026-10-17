@@ -724,3 +724,84 @@ describe("OAuth integration sync helpers", () => {
     });
   });
 });
+
+describe("saved OAuth email selection replay", () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+  it.each(["GOOGLE", "MICROSOFT"] as const)("replays an older exact %s message through the original provider selection", async provider => {
+    const {fetchSelectedEmailMessage} = await import("./integrations");
+    prismaMock.oAuthConnection.findUnique.mockResolvedValue({id: "connection", provider, status: "ACTIVE", providerAccountId: "account",
+      accessToken: "enc:synthetic", expiresAt: new Date(Date.now() + 3600_000)});
+    const calls: URL[] = [];
+    const fetchMock = vi.fn(async (url: string) => {
+      const parsed = new URL(url); calls.push(parsed);
+      if (parsed.pathname.endsWith("userinfo") || parsed.pathname === "/v1.0/me") return Response.json({id: "account"});
+      if (parsed.pathname.endsWith("/older-message")) return provider === "GOOGLE"
+        ? Response.json({id: "older-message", snippet: "Original body", payload: {headers: [{name: "Subject", value: "Original"}, {name: "Message-ID", value: "<original@synthetic.test>"}]}})
+        : Response.json({id: "older-message", subject: "Original", bodyPreview: "Original body", receivedDateTime: "2026-06-18T09:00:00Z"});
+      if (provider === "GOOGLE") {
+        expect(parsed.searchParams.get("q")).toBe("(from:sender@synthetic.test) rfc822msgid:<original@synthetic.test>");
+        return Response.json({messages: [{id: "older-message"}]});
+      }
+      if (!parsed.searchParams.has("$skiptoken")) {
+        expect(parsed.searchParams.get("$search")).toBe('"(from:sender@synthetic.test) AND received:6/18/2026"');
+        return Response.json({value: [{id: "newer-message"}], "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/messages?$skiptoken=opaque"});
+      }
+      return Response.json({value: [{id: "older-message"}]});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const guard = vi.fn(async () => {});
+    expect(await fetchSelectedEmailMessage("connection", "older-message", "from:sender@synthetic.test",
+      {authorizeAttempt: guard, expectedAccountId: "account"})).toMatchObject({id: "older-message", snippet: "Original body", filter: "from:sender@synthetic.test"});
+    expect(calls.some(url => url.pathname.endsWith("/older-message"))).toBe(true);
+    expect(guard.mock.calls.length).toBeGreaterThan(fetchMock.mock.calls.length);
+  });
+
+  it.each(["GOOGLE", "MICROSOFT"] as const)("denies an exact %s message outside the original provider selection", async provider => {
+    const {fetchSelectedEmailMessage} = await import("./integrations");
+    prismaMock.oAuthConnection.findUnique.mockResolvedValue({id: "connection", provider, status: "ACTIVE", providerAccountId: "account",
+      accessToken: "enc:synthetic", expiresAt: new Date(Date.now() + 3600_000)});
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const parsed = new URL(url);
+      if (parsed.pathname.endsWith("userinfo") || parsed.pathname === "/v1.0/me") return Response.json({id: "account"});
+      if (parsed.pathname.endsWith("/older-message")) return provider === "GOOGLE"
+        ? Response.json({id: "older-message", snippet: "Private", payload: {headers: [{name: "Message-ID", value: "<original@synthetic.test>"}]}})
+        : Response.json({id: "older-message", bodyPreview: "Private", receivedDateTime: "2026-06-18T09:00:00Z"});
+      return Response.json(provider === "GOOGLE" ? {messages: []} : {value: []});
+    }));
+    expect(await fetchSelectedEmailMessage("connection", "older-message", "from:sender@synthetic.test",
+      {authorizeAttempt: async () => {}, expectedAccountId: "account"})).toBeNull();
+  });
+
+  it("rejects a Graph nextLink on another host without dispatching to it", async () => {
+    const {fetchSelectedEmailMessage} = await import("./integrations");
+    prismaMock.oAuthConnection.findUnique.mockResolvedValue({id: "connection", provider: "MICROSOFT", status: "ACTIVE", providerAccountId: "account",
+      accessToken: "enc:synthetic", expiresAt: new Date(Date.now() + 3600_000)});
+    const fetchMock = vi.fn(async (url: string) => new URL(url).pathname === "/v1.0/me" ? Response.json({id: "account"})
+      : new URL(url).pathname.endsWith("/older-message") ? Response.json({id: "older-message", receivedDateTime: "2026-06-18T09:00:00Z"})
+      : Response.json({value: [], "@odata.nextLink": "https://untrusted.example/messages"}));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await fetchSelectedEmailMessage("connection", "older-message", "from:sender@synthetic.test",
+      {authorizeAttempt: async () => {}, expectedAccountId: "account"})).toBeNull();
+    expect(fetchMock.mock.calls.every(([url]) => new URL(url).hostname === "graph.microsoft.com")).toBe(true);
+  });
+});
+
+it.each([false, true])("proves headerless Gmail membership through bounded original-query pages (exhausted=%s)", async exhausted => {
+  const {fetchSelectedEmailMessage} = await import("./integrations");
+  prismaMock.oAuthConnection.findUnique.mockResolvedValue({id: "connection", provider: "GOOGLE", status: "ACTIVE", providerAccountId: "account",
+    accessToken: "enc:synthetic", expiresAt: new Date(Date.now() + 3600_000)});
+  let pages = 0;
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    const parsed = new URL(url);
+    if (parsed.pathname.endsWith("userinfo")) return Response.json({id: "account"});
+    if (parsed.pathname.endsWith("/older-message")) return Response.json({id: "older-message", snippet: "Headerless body", payload: {headers: []}});
+    expect(parsed.searchParams.get("q")).toBe("from:sender@synthetic.test OR to:sender@synthetic.test");
+    pages++;
+    if (!exhausted && pages === 2) return Response.json({messages: [{id: "older-message"}]});
+    return Response.json({messages: [{id: `other-${pages}`}], nextPageToken: `page-${pages}`});
+  }));
+  const result = await fetchSelectedEmailMessage("connection", "older-message", "from:sender@synthetic.test OR to:sender@synthetic.test",
+    {authorizeAttempt: async () => {}, expectedAccountId: "account"});
+  if (exhausted) { expect(result).toBeNull(); expect(pages).toBe(100); }
+  else { expect(result).toMatchObject({id: "older-message", snippet: "Headerless body"}); expect(pages).toBe(2); }
+});

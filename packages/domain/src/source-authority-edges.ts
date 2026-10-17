@@ -155,7 +155,7 @@ async function authorityRows(context:AuthorityDiscoveryContext,table:string,wher
   for(const row of rows) if(typeof row.id==="string") context.rowCache?.set(JSON.stringify([table,row.id]),row);
   return rows;
 }
-const sourceKinds: Record<string, LineageKind> = { BRAIN_ARTICLE: "BrainArticle", DOCUMENT: "Document", MEETING: "Meeting", PROPOSAL: "Proposal", EXTERNAL_CONTENT: "ExternalContentSource" };
+const sourceKinds: Record<string, LineageKind> = { BRAIN_ARTICLE: "BrainArticle", DOCUMENT: "Document", MEETING: "Meeting", PROPOSAL: "Proposal", EXTERNAL_CONTENT: "ExternalContentSource", TENSION: "Tension", ACTION: "Action", CIRCLE: "Circle", ROLE: "Role", SLACK: "CommunicationMessage" };
 const discussionKinds: Record<string, LineageKind> = { ...sourceKinds, TENSION: "Tension", ACTION: "Action" };
 
 /** Enumerates every database edge used by evaluateRoot, including existence and collection predicates. */

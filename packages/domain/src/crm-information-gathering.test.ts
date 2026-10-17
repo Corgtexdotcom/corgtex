@@ -6,6 +6,7 @@ const prismaMock = vi.hoisted(() => {
     $transaction: vi.fn(),
     $queryRaw: vi.fn(),
     crmAccount: {
+      findUnique: vi.fn(),
       findFirst: vi.fn(),
     },
     crmActivity: {
@@ -15,6 +16,7 @@ const prismaMock = vi.hoisted(() => {
       updateMany: vi.fn(),
     },
     crmContact: {
+      findUnique: vi.fn(),
       findFirst: vi.fn(),
     },
     crmConversation: {
@@ -22,6 +24,7 @@ const prismaMock = vi.hoisted(() => {
       findUnique: vi.fn(),
       update: vi.fn(),
     },
+    crmConversationMessage: {upsert: vi.fn()},
     meeting: {
       findFirst: vi.fn(),
     },
@@ -61,6 +64,16 @@ vi.mock("./source-lineage", () => ({
   isArtifactInputProofReadable: vi.fn(async () => true),
   lineageContentFingerprint: vi.fn((kind: string, row: unknown) => JSON.stringify({ kind, row })),
   recordArtifactInputLineage: vi.fn(),
+  assertArtifactInputWriteFence: vi.fn(async () => {}),
+}));
+
+const emailClaimCurrent = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock("./oauth-provider-native", () => ({getOAuthEmailSyncPublication: (_token: unknown, workspaceId: string, connectionId: string, messages: Array<{id: string}>) => ({
+  workspaceId, connectionId, actor: {kind: "user", user: {id: "owner"}}, assertCurrent: emailClaimCurrent,
+  messages: messages.map(message => ({message, roots: [{kind: "Document", id: `document-${message.id}`, fingerprint: "a".repeat(64)}]})),
+})}));
+vi.mock("./artifact-commit-preflight", () => ({prepareArtifactCommitPreflight: vi.fn(async () => ({})),
+  withArtifactCommitPreflight: vi.fn(async (_actor: unknown, _workspaceId: string, _tx: unknown, _roots: unknown, _token: unknown, work: () => Promise<unknown>) => work()),
 }));
 
 const meetingActor = { kind: "agent" as const, authProvider: "bootstrap" as const, label: "synthetic-crm", workspaceIds: ["workspace-1"] };
@@ -68,14 +81,24 @@ vi.mock("./crm-archive-guards", () => ({ lockCrmLinkClosure }));
 import {
   createCrmMeetingReviewInsights,
   materializeCrmCalendarTouchpoints,
-  materializeCrmEmailTouchpoints,
+  materializeCrmEmailTouchpoints as materializeProvenCrmEmailTouchpoints,
   safeCrmEmailFilters,
 } from "./crm-information-gathering";
+
+// Provider capture is isolated in this pre-existing CRM projection suite; real native
+// capability, account replay, claim and transactional proofs are covered by OAuth PG tests.
+const materializeCrmEmailTouchpoints = (params: Omit<Parameters<typeof materializeProvenCrmEmailTouchpoints>[0], "publication">) =>
+  materializeProvenCrmEmailTouchpoints({...params, publication: {} as Parameters<typeof materializeProvenCrmEmailTouchpoints>[0]["publication"]});
 
 describe("crm information gathering", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     prismaMock.$transaction.mockImplementation((fn: any) => fn(prismaMock));
+    prismaMock.crmContact.findUnique.mockImplementation(async ({where}) => ({id: where.id, workspaceId: "workspace-1",
+      accountId: where.id === "z-contact" ? "z-account" : where.id === "a-contact" ? "a-account" : "account-1",
+      email: where.id === "z-contact" ? "z@example.test" : where.id === "a-contact" ? "a@example.test" : "buyer@example.test"}));
+    prismaMock.crmAccount.findUnique.mockImplementation(async ({where}) => ({id: where.id, workspaceId: "workspace-1"}));
+    prismaMock.crmConversationMessage.upsert.mockImplementation(async ({create}) => create);
     prismaMock.crmContact.findFirst.mockResolvedValue(null);
     prismaMock.crmAccount.findFirst.mockResolvedValue(null);
     prismaMock.crmActivity.findUnique.mockResolvedValue(null);
@@ -188,6 +211,11 @@ describe("crm information gathering", () => {
     expect(result.activitiesUpdated).toBe(0);
   });
   it("matches calendar events by existing business-domain accounts", async () => {
+    prismaMock.crmContact.findUnique.mockImplementation(async ({where}) => ({id: where.id, workspaceId: "workspace-1",
+      accountId: where.id === "z-contact" ? "z-account" : where.id === "a-contact" ? "a-account" : "account-1",
+      email: where.id === "z-contact" ? "z@example.test" : where.id === "a-contact" ? "a@example.test" : "buyer@example.test"}));
+    prismaMock.crmAccount.findUnique.mockImplementation(async ({where}) => ({id: where.id, workspaceId: "workspace-1"}));
+    prismaMock.crmConversationMessage.upsert.mockImplementation(async ({create}) => create);
     prismaMock.crmContact.findFirst.mockResolvedValue(null);
     prismaMock.crmAccount.findFirst.mockResolvedValue({ id: "account-1", name: "Example", domain: "example.test" });
 

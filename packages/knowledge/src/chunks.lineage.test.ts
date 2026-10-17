@@ -220,7 +220,7 @@ describe("generated KnowledgeChunk receipts with actual source helper", () => {
 
   it("does not pass unsupported, unknown, private or arbitrary annotations to embedding", async () => {
     const source = await original();
-    expect(await syncKnowledgeForSource({ workspaceId, sourceType: "EVENT", accessDomain: "WORKSPACE", sourceId: "unknown", content: "Private virtual text" })).toBe(0);
+    await expect(syncKnowledgeForSource({ workspaceId, sourceType: "EVENT", accessDomain: "WORKSPACE", sourceId: "unknown", content: "Private virtual text" })).rejects.toMatchObject({code: "EVENT_CANONICAL_PUBLICATION_REQUIRED"});
     expect(await syncKnowledgeForSource({ workspaceId, sourceType: "DOCUMENT", accessDomain: "WORKSPACE", sourceId: source.id, sourceTitle: source.title,
       content: `${source.title}\n\n${source.textContent}`, metadata: { copiedPrivateTitle: "Unproved annotation" }, lineageActor: alpha })).toBe(0);
     const privateSource = fixture.add("brainArticle", { id: "private", workspaceId, title: "Private owner", bodyMd: "Private owner body", isPrivate: true, ownerMemberId: "member-alpha", archivedAt: null });
@@ -229,4 +229,44 @@ describe("generated KnowledgeChunk receipts with actual source helper", () => {
       sourceTitle: privateSource.title, content: privateSource.bodyMd, lineageActor: beta })).toBe(0);
     expect(remote.embed).not.toHaveBeenCalled(); expect(remote.azure).not.toHaveBeenCalled();
   });
+  it("keeps a late Azure claim denial terminal even when the adapter swallows it", async () => {
+    const source = await original();
+    let revoked = false;
+    const denial = Object.assign(new Error("Original claim replaced"), {code: "SOURCE_CHANGED"});
+    remote.azure.mockImplementationOnce(async (_params, controls) => {
+      expect(controls.signal).toBeInstanceOf(AbortSignal);
+      revoked = true;
+      await expect(controls.authorizeAttempt({signal: controls.signal})).rejects.toBe(denial);
+      return {skipped: true};
+    });
+    await expect(syncDocumentKnowledge({workspaceId, documentId: source.id, lineageActor: alpha,
+      sourceGuard: async () => { if (revoked) throw denial; }})).rejects.toBe(denial);
+    expect(remote.azure).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not replay a newer SQL chunk generation under the older Azure proof", async () => {
+    const source = await original();
+    remote.azure.mockImplementationOnce(async (_params, controls) => {
+      await controls.authorizeAttempt({signal: controls.signal});
+      fixture.rows.knowledgeChunk[0].id = "newer-unproved-generation";
+      return {skipped: false};
+    });
+    await expect(syncDocumentKnowledge({workspaceId, documentId: source.id, lineageActor: alpha})).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+    expect(remote.azure).toHaveBeenCalledTimes(1);
+  });
+
+  it("guards every retired-source cleanup attempt against a restored revision", async () => {
+    const source = await original(); legacy(source); source.archivedAt = fixture.timestamp;
+    remote.azure.mockImplementationOnce(async (params, controls) => {
+      expect(params.chunks).toEqual([]);
+      await controls.authorizeAttempt({signal: controls.signal});
+      source.archivedAt = null; source.updatedAt = new Date(fixture.timestamp.getTime() + 1);
+      await expect(controls.authorizeAttempt({signal: controls.signal})).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+      return {skipped: true};
+    });
+    await expect(syncDocumentKnowledge({workspaceId, documentId: source.id, lineageActor: alpha})).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+    expect(remote.azure).toHaveBeenCalledTimes(1);
+    expect(fixture.rows.document).toHaveLength(1);
+  });
+
 });

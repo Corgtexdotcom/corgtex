@@ -1518,7 +1518,7 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
   }
   if (root.kind === "KnowledgeChunk") {
     if (!domains.includes(String(row.accessDomain))) return false;
-    const sourceKinds: Record<string, LineageKind> = { BRAIN_ARTICLE: "BrainArticle", DOCUMENT: "Document", MEETING: "Meeting", PROPOSAL: "Proposal", EXTERNAL_CONTENT: "ExternalContentSource", EXTERNAL_DATABASE: "SqlNativeRunInput" };
+    const sourceKinds: Record<string, LineageKind> = { BRAIN_ARTICLE: "BrainArticle", DOCUMENT: "Document", MEETING: "Meeting", PROPOSAL: "Proposal", EXTERNAL_CONTENT: "ExternalContentSource", EXTERNAL_DATABASE: "SqlNativeRunInput", TENSION: "Tension", ACTION: "Action", CIRCLE: "Circle", ROLE: "Role", SLACK: "CommunicationMessage" };
     const kind = sourceKinds[String(row.sourceType)];
     if (!kind || !isRecord(row.metadata)) return false;
     const sourceId = row.sourceType === "EXTERNAL_DATABASE" ? row.metadata.nativeInputId : row.sourceId;
@@ -2342,7 +2342,7 @@ export async function inspectStoredArtifactInputDependencies(db: LineageClient, 
         if (dependency) upstream = [...(upstream ?? []), dependency];
       }
       if (root.kind === "KnowledgeChunk") {
-        const kinds: Record<string, LineageKind> = { BRAIN_ARTICLE: "BrainArticle", DOCUMENT: "Document", MEETING: "Meeting", PROPOSAL: "Proposal", EXTERNAL_CONTENT: "ExternalContentSource", EXTERNAL_DATABASE: "SqlNativeRunInput" };
+        const kinds: Record<string, LineageKind> = { BRAIN_ARTICLE: "BrainArticle", DOCUMENT: "Document", MEETING: "Meeting", PROPOSAL: "Proposal", EXTERNAL_CONTENT: "ExternalContentSource", EXTERNAL_DATABASE: "SqlNativeRunInput", TENSION: "Tension", ACTION: "Action", CIRCLE: "Circle", ROLE: "Role", SLACK: "CommunicationMessage" };
         if (!kinds[String(row.sourceType)] || !isRecord(row.metadata) || typeof row.metadata.sourceContentHash !== "string") return false;
         const parentId = row.sourceType === "EXTERNAL_DATABASE" ? row.metadata.nativeInputId : row.sourceId;
         if (typeof parentId !== "string" || !parentId) return false;

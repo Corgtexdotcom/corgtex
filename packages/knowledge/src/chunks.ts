@@ -5,10 +5,11 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { KnowledgeAccessDomain, KnowledgeSourceType, Prisma } from "@prisma/client";
 import { getSharedStateBackend, prisma, type AppActor } from "@corgtex/shared";
-import { assertArtifactInputWriteFence, captureArtifactInputProof, captureImmutableArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, prepareArtifactCommitPreflight, readableArtifactIds, recordArtifactInputLineage, requireWorkspaceMembership, scanSourceReadableRecords, withArtifactCommitPreflight, type LineageKind, type LineageRoot } from "@corgtex/domain";
+import { assertArtifactInputWriteFence, captureArtifactInputProof, captureImmutableArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, prepareArtifactCommitPreflight, recordArtifactInputLineage, requireWorkspaceMembership, scanSourceReadableRecords, withArtifactCommitPreflight, type LineageKind, type LineageRoot } from "@corgtex/domain";
 import { defaultModelGateway, type ModelAttemptGuard } from "@corgtex/models";
 import { invalidateKnowledgeCache } from "./retrieval";
-import { getKnowledgeSearchProvider, isAzureKnowledgeSearchConfigured, logAzureKnowledgeIndexingWarning, syncAzureKnowledgeSource } from "./azure-search";
+import { getKnowledgeSearchProvider, isAzureKnowledgeSearchConfigured, logAzureKnowledgeIndexingWarning, syncAzureKnowledgeSource, type AzureKnowledgeAttemptControls } from "./azure-search";
+import { canonicalKnowledgeKinds, loadCanonicalKnowledgeSource, type CanonicalKnowledgeSource } from "./canonical-sources";
 import { classifyChunkSensitivity } from "./sensitivity";
 import { countReadableKnowledgeChunks } from "./counts";
 
@@ -79,10 +80,11 @@ export function chunkText(input: string, maxLength = 1200, overlapSize = 150) {
   return doSplit(normalized, separators);
 }
 
-type SourceSnapshot = { kind: LineageKind; contentHash: string; content: string; rawContent: string | null; title: string | null; record: Record<string, unknown> };
+type SourceSnapshot = { kind: LineageKind; contentHash: string; content: string; rawContent: string | null; title: string | null; record: Record<string, unknown>; inputs?: CanonicalKnowledgeSource["inputs"]; metadata?: Record<string, unknown> };
 
 async function knowledgeSourceSnapshot(params: { workspaceId: string; sourceType: KnowledgeSourceType; sourceId: string },
   db: typeof prisma | Prisma.TransactionClient = prisma): Promise<SourceSnapshot | null> {
+  if (Object.hasOwn(canonicalKnowledgeKinds, params.sourceType)) return loadCanonicalKnowledgeSource(params, db);
   const where = { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null };
   const row = params.sourceType === "BRAIN_ARTICLE" ? await db.brainArticle.findFirst({ where: { ...where, OR: [{ isPrivate: false }, { variantOfArticleId: { not: null }, isPrivate: true }] } })
     : params.sourceType === "DOCUMENT" ? await db.document.findFirst({ where })
@@ -128,15 +130,58 @@ export async function syncKnowledgeForSource(params: {
   if (params.sourceType === "EXTERNAL_DATABASE") {
     throw new AppError(409, "SQL_NATIVE_PUBLICATION_REQUIRED", "Database rows require the native SQL publisher before advancing their checkpoint.");
   }
-  // Only these canonical renderers have complete, current source proof.
-  if (!["BRAIN_ARTICLE", "DOCUMENT", "MEETING", "PROPOSAL", "EXTERNAL_CONTENT"].includes(params.sourceType)) return 0;
+  if (params.sourceType === "EVENT") {
+    throw new AppError(409, "EVENT_CANONICAL_PUBLICATION_REQUIRED", "Event jobs must publish their proven canonical aggregate rather than arbitrary event payloads.");
+  }
+  const supportedTypes = ["BRAIN_ARTICLE", "DOCUMENT", "MEETING", "PROPOSAL", "EXTERNAL_CONTENT", ...Object.keys(canonicalKnowledgeKinds)];
+  if (!supportedTypes.includes(params.sourceType)) throw new AppError(409, "KNOWLEDGE_SOURCE_UNSUPPORTED", "No canonical knowledge renderer is available for this source.");
   params = { ...params, metadata: params.metadata ? structuredClone(params.metadata) : undefined,
     sourceUpdatedAt: params.sourceUpdatedAt ? new Date(params.sourceUpdatedAt) : undefined };
   const chunks = chunkText(params.content);
   // Provider cleanup needs an independently authorized archive path; arbitrary empty payloads cannot delete copies.
   if (params.sourceType === "EXTERNAL_CONTENT" && !chunks.length) return 0;
   if (chunks.length === 0) {
+    // Cleanup carries deletion authority, never content authority. Bind the
+    // exact canonical retired revision before removing either index copy.
+    const actor: AppActor = params.lineageActor ?? { kind: "agent", authProvider: "bootstrap", label: "knowledge-source-cleanup", workspaceIds: [params.workspaceId] };
+    const controller = new AbortController();
+    const loadRetired = async (db: typeof prisma | Prisma.TransactionClient = prisma) => {
+      const where = { id: params.sourceId, workspaceId: params.workspaceId };
+      return params.sourceType === "BRAIN_ARTICLE" ? db.brainArticle.findFirst({ where })
+        : params.sourceType === "DOCUMENT" ? db.document.findFirst({ where }) : null;
+    };
+    const original = await loadRetired();
+    if (!original) return 0;
+    const kind = params.sourceType === "DOCUMENT" ? "Document" : "BrainArticle";
+    const revision = lineageContentFingerprint(kind, original);
+    const assertRetired = async (db: typeof prisma | Prisma.TransactionClient = prisma) => {
+      await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+      await params.sourceGuard?.(db === prisma ? undefined : db as Prisma.TransactionClient);
+      const row = await loadRetired(db);
+      if (!row || lineageContentFingerprint(kind, row) !== revision
+        || (params.sourceUpdatedAt && row.updatedAt.getTime() !== params.sourceUpdatedAt.getTime())
+        || (!row.archivedAt && !("isPrivate" in row && row.isPrivate && !row.variantOfArticleId)
+          && ("bodyMd" in row ? Boolean(row.bodyMd.trim()) : Boolean([row.title, row.textContent].filter(Boolean).join("\n\n").trim())))) {
+        throw new AppError(409, "SOURCE_CHANGED", "Index cleanup requires the original retired source revision.");
+      }
+      await params.sourceGuard?.(db === prisma ? undefined : db as Prisma.TransactionClient);
+    };
+    const cleanupControls: AzureKnowledgeAttemptControls = {
+      signal: controller.signal,
+      authorizeAttempt: async ({ signal }) => {
+        try {
+          controller.signal.throwIfAborted(); signal.throwIfAborted();
+          await assertRetired();
+          const current = await prisma.knowledgeChunk.findMany({ where: { workspaceId: params.workspaceId, sourceType: params.sourceType, sourceId: params.sourceId }, select: { id: true }, take: 1 });
+          if (current.length) throw new AppError(409, "SOURCE_CHANGED", "A newer index publication superseded cleanup.");
+          await assertRetired();
+          controller.signal.throwIfAborted(); signal.throwIfAborted();
+        } catch (error) { controller.abort(error); throw error; }
+      },
+    };
+    await assertRetired();
     const retired = await prisma.$transaction(async (tx) => {
+      await assertRetired(tx);
       if (params.sourceType === "BRAIN_ARTICLE") {
         await tx.$queryRaw`SELECT "id" FROM "BrainArticle" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brain_article_index:${params.workspaceId}:${params.sourceId}`}, 0))`;
@@ -148,16 +193,17 @@ export async function syncKnowledgeForSource(params: {
         if (params.sourceUpdatedAt ? !current : current) return false;
       }
       const storageKey = params.sourceType === "DOCUMENT" ? params.metadata?.storageKey : null;
-      if (typeof storageKey === "string") {
+      if (params.sourceType === "DOCUMENT") {
         await tx.$queryRaw`SELECT "id" FROM "Document" WHERE "id" = ${params.sourceId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`document_index:${params.workspaceId}:${params.sourceId}`}, 0))`;
         const document = await tx.document.findFirst({
-          where: { id: params.sourceId, workspaceId: params.workspaceId, storageKey,
+          where: { id: params.sourceId, workspaceId: params.workspaceId, ...(typeof storageKey === "string" ? { storageKey } : {}),
             ...(params.sourceUpdatedAt ? { updatedAt: params.sourceUpdatedAt } : { archivedAt: null }) },
           select: { id: true },
         });
         if (!document) return false;
       }
+      await assertRetired(tx);
       await tx.knowledgeChunk.deleteMany({
         where: {
           workspaceId: params.workspaceId,
@@ -174,16 +220,15 @@ export async function syncKnowledgeForSource(params: {
       sourceType: params.sourceType,
       sourceId: params.sourceId,
       chunks: [],
-    });
+    }, cleanupControls);
     await invalidateKnowledgeCache(params.workspaceId);
     return 0;
   }
 
   await params.sourceGuard?.();
   const snapshot = await knowledgeSourceSnapshot(params);
-  if (["BRAIN_ARTICLE", "DOCUMENT", "MEETING", "PROPOSAL", "EXTERNAL_CONTENT"].includes(params.sourceType)
-    && (!snapshot || (snapshot.content !== params.content && snapshot.rawContent !== params.content)
-      || snapshot.title !== (params.sourceTitle?.trim() || null))) return 0;
+  if (!snapshot || (snapshot.content !== params.content && snapshot.rawContent !== params.content)
+    || snapshot.title !== (params.sourceTitle?.trim() || null)) return 0;
 
   if (!snapshot || (params.sourceType === "DOCUMENT" ? snapshot.record.accessDomain !== params.accessDomain : params.accessDomain !== "WORKSPACE")) return 0;
   if (params.sourceUpdatedAt && (!(snapshot.record.updatedAt instanceof Date)
@@ -193,7 +238,7 @@ export async function syncKnowledgeForSource(params: {
   let sourceRoots: LineageRoot[];
   try {
     sourceProof = await captureArtifactInputProof(sourceActor, params.workspaceId,
-      [{ kind: snapshot.kind, id: params.sourceId, snapshot: snapshot.record }]);
+      snapshot.inputs ?? [{ kind: snapshot.kind, id: params.sourceId, snapshot: snapshot.record }]);
     // Freeze the generation-time permission vector as well as every source body.
     // A revoke/restore episode cannot certify an already running embedding job.
     const freezePreflight = await prepareArtifactCommitPreflight(sourceActor, params.workspaceId, sourceProof);
@@ -209,12 +254,12 @@ export async function syncKnowledgeForSource(params: {
   if (!await isArtifactInputProofReadable(sourceActor, params.workspaceId, sourceRoots)) return 0;
   const storedMetadata = snapshot.record.metadata && typeof snapshot.record.metadata === "object" && !Array.isArray(snapshot.record.metadata)
     ? structuredClone(snapshot.record.metadata as Record<string, unknown>) : {};
-  const nativeAnnotations = snapshot.kind === "BrainArticle" ? { type: snapshot.record.type, authority: snapshot.record.authority, slug: snapshot.record.slug }
+  const nativeAnnotations = snapshot.metadata ?? (snapshot.kind === "BrainArticle" ? { type: snapshot.record.type, authority: snapshot.record.authority, slug: snapshot.record.slug }
     : snapshot.kind === "Document" ? { source: snapshot.record.source, mimeType: snapshot.record.mimeType, storageKey: snapshot.record.storageKey }
       : snapshot.kind === "Meeting" ? { source: snapshot.record.source,
         recordedAt: snapshot.record.recordedAt instanceof Date ? snapshot.record.recordedAt.toISOString() : null,
         hasIngestionGuidance: Boolean(snapshot.record.ingestionGuidanceMd) }
-        : snapshot.kind === "Proposal" ? { status: snapshot.record.status } : {};
+        : snapshot.kind === "Proposal" ? { status: snapshot.record.status } : {});
   const sourceMetadata: Record<string, unknown> = { ...storedMetadata, ...Object.fromEntries(Object.entries(nativeAnnotations).filter(([, value]) => value !== undefined)),
     ...(params.workflowJobId ? { workflowJobId: params.workflowJobId } : {}) };
   // External annotations are deliberately replaced by the proven provider parent.
@@ -329,7 +374,8 @@ export async function syncKnowledgeForSource(params: {
     }
     if (snapshot) {
       const current = await knowledgeSourceSnapshot(params, tx);
-      if (!current || current.contentHash !== snapshot.contentHash) return false;
+      if (!current || current.contentHash !== snapshot.contentHash || current.content !== snapshot.content
+        || current.title !== snapshot.title || !isDeepStrictEqual(current.metadata, snapshot.metadata)) return false;
     }
     await assertArtifactInputWriteFence(tx);
     if (!await isArtifactInputProofReadable(sourceActor, params.workspaceId, sourceRoots, tx)) return false;
@@ -385,68 +431,52 @@ export async function syncKnowledgeForSource(params: {
       metadata: row.metadata,
       sensitivity: row.sensitivity,
     })),
-  }, { actor: sourceActor, roots: persisted });
+  }, {
+    signal: attemptController.signal,
+    authorizeAttempt: async context => {
+      try {
+        await authorizeAttempt(context);
+        if (!await isArtifactInputProofReadable(sourceActor, params.workspaceId, persisted)) {
+          throw new AppError(409, "SOURCE_CHANGED", "Published chunks changed before Azure indexing.");
+        }
+        await authorizeAttempt(context);
+      } catch (error) { attemptController.abort(error); throw error; }
+    },
+  });
 
   await invalidateKnowledgeCache(params.workspaceId);
   if (!await isArtifactInputProofReadable(sourceActor, params.workspaceId, persisted)) return 0;
   return chunks.length;
 }
 
-async function syncAzureSourceBestEffort(params: Parameters<typeof syncAzureKnowledgeSource>[0], sourceProof?: { actor: AppActor; roots: LineageRoot[] }) {
+async function syncAzureSourceBestEffort(params: Parameters<typeof syncAzureKnowledgeSource>[0], controls: AzureKnowledgeAttemptControls) {
   if (getKnowledgeSearchProvider() === "azure" && !isAzureKnowledgeSearchConfigured("admin")) {
     throw new Error("Azure Search indexing is enabled but not configured for writes.");
   }
   try {
-    let desired = params;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      if (desired.chunks.length && (!sourceProof
-        || !await isArtifactInputProofReadable(sourceProof.actor, params.workspaceId, sourceProof.roots))) {
-        throw new Error("Document inputs changed before Azure indexing; retry from a current source receipt.");
-      }
-      const result = await syncAzureKnowledgeSource(desired);
-      if (result.skipped) return;
-
-      // Another worker may commit a newer SQL revision while this Azure call
-      // is in flight. Repair from SQL before declaring the older job complete.
-      const current = await prisma.knowledgeChunk.findMany({
-        where: { workspaceId: params.workspaceId, sourceType: params.sourceType, sourceId: params.sourceId },
-        orderBy: { chunkIndex: "asc" },
-      });
-      const currentIds = current.map((chunk) => chunk.id).sort();
-      const attemptedIds = desired.chunks.map((chunk) => chunk.id).sort();
-      if (currentIds.length === attemptedIds.length && currentIds.every((id, index) => id === attemptedIds[index])) return;
-      if (params.sourceType === "DOCUMENT" || params.sourceType === "EXTERNAL_CONTENT") {
-        if (!sourceProof || !await isArtifactInputProofReadable(sourceProof.actor, params.workspaceId, sourceProof.roots)) {
-          throw new Error("Document inputs changed during Azure indexing; its newer SQL rows require a fresh receipt.");
-        }
-        const ids = await readableArtifactIds(sourceProof.actor, params.workspaceId, "KnowledgeChunk", current);
-        if (ids.size !== current.length) throw new Error("Document chunk inputs cannot be proved for Azure replay.");
-        sourceProof = { actor: sourceProof.actor, roots: await captureArtifactInputProof(sourceProof.actor, params.workspaceId,
-          current.map(chunk => ({ kind: "KnowledgeChunk" as const, id: chunk.id, snapshot: chunk }))) };
-      }
-      desired = {
-        ...params,
-        chunks: current.map((chunk) => ({
-          id: chunk.id,
-          workspaceId: chunk.workspaceId,
-          sourceType: chunk.sourceType,
-          accessDomain: chunk.accessDomain,
-          sourceId: chunk.sourceId,
-          sourceTitle: chunk.sourceTitle,
-          chunkIndex: chunk.chunkIndex,
-          content: chunk.content,
-          embedding: Array.isArray(chunk.embedding) ? chunk.embedding.filter((value): value is number => typeof value === "number") : [],
-          metadata: chunk.metadata,
-          sensitivity: chunk.sensitivity,
-          createdAt: chunk.createdAt,
-        })),
-      };
+    await controls.authorizeAttempt({ signal: controls.signal });
+    controls.signal.throwIfAborted();
+    // The same original controls object governs schema, list, delete and every
+    // upload batch. Never replace it with a fresh receipt after an awaited call.
+    const result = await syncAzureKnowledgeSource(params, controls);
+    controls.signal.throwIfAborted();
+    if (result.skipped) return;
+    await controls.authorizeAttempt({ signal: controls.signal });
+    const current = await prisma.knowledgeChunk.findMany({
+      where: { workspaceId: params.workspaceId, sourceType: params.sourceType, sourceId: params.sourceId },
+      orderBy: { chunkIndex: "asc" },
+    });
+    await controls.authorizeAttempt({ signal: controls.signal });
+    const currentIds = current.map(chunk => chunk.id).sort();
+    const attemptedIds = params.chunks.map(chunk => chunk.id).sort();
+    if (currentIds.length !== attemptedIds.length || currentIds.some((id, index) => id !== attemptedIds[index])) {
+      // A newer worker owns its own publication and proof. Replaying its bytes
+      // under this older job would silently replace the original authority.
+      throw new AppError(409, "SOURCE_CHANGED", "Knowledge changed during Azure indexing; retry from the current source.");
     }
-    throw new Error("Knowledge source changed during Azure indexing; retry to reconcile the latest SQL revision.");
   } catch (error) {
-    if (getKnowledgeSearchProvider() === "azure") {
-      throw error;
-    }
+    controls.signal.throwIfAborted();
+    if (getKnowledgeSearchProvider() === "azure" || (error instanceof AppError && error.code === "SOURCE_CHANGED")) throw error;
     logAzureKnowledgeIndexingWarning(error, {
       workspaceId: params.workspaceId,
       sourceType: params.sourceType,
@@ -473,7 +503,7 @@ export async function syncBrainArticleKnowledge(params: {
   });
 }
 
-export async function syncDocumentKnowledge(params: { workspaceId: string; documentId: string; workflowJobId?: string; lineageActor?: AppActor }) {
+export async function syncDocumentKnowledge(params: { workspaceId: string; documentId: string; workflowJobId?: string; lineageActor?: AppActor; sourceGuard?: (db?: Prisma.TransactionClient) => Promise<void> }) {
   const document = await prisma.document.findUnique({ where: { id: params.documentId } });
   if (!document || document.workspaceId !== params.workspaceId) return 0;
   return syncKnowledgeForSource({
@@ -484,7 +514,7 @@ export async function syncDocumentKnowledge(params: { workspaceId: string; docum
     sourceUpdatedAt: document.updatedAt,
     metadata: { source: document.source, mimeType: document.mimeType, storageKey: document.storageKey,
       ...(params.workflowJobId ? { workflowJobId: params.workflowJobId } : {}) },
-    workflowJobId: params.workflowJobId,
+    workflowJobId: params.workflowJobId, sourceGuard: params.sourceGuard,
   });
 }
 

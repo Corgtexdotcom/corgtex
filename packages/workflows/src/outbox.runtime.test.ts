@@ -130,6 +130,7 @@ vi.mock("./handlers/knowledge-sync", async importOriginal => ({
   ...await importOriginal<typeof import("./handlers/knowledge-sync")>(),
   handleOAuthDocumentsSync: oauthSyncMock,
   handleOAuthEmailSync: oauthSyncMock,
+  handleEventKnowledgeSync: oauthSyncMock,
 }));
 
 vi.mock("./handlers/agent-dispatch", () => ({
@@ -248,7 +249,7 @@ afterEach(() => {
 });
 
 describe("runPendingJobs", () => {
-  describe.each(["oauth.documents.sync", "oauth.email.sync"])("%s original claim settlement", type => {
+  describe.each(["oauth.documents.sync", "oauth.email.sync", "knowledge.sync.event"])("%s original claim settlement", type => {
     it.each(["current", "takeover-success", "takeover-error"])("retains the original recipe and fences %s", async mode => {
       const row = {id: "oauth-job", workspaceId: "ws-1", type, payload: {connectionId: "conn-1"}, attempts: 1,
         status: "RUNNING", lockedBy: "worker-1", lockedAt: new Date(), startedAt: new Date()};

@@ -717,7 +717,8 @@ const GOOGLE_DRIVE_DOCUMENT_MIME_TYPES = [
 function hasGoogleDriveDocumentScope(scopes: string[]) {
   return scopes.some((scope) => {
     const normalized = scope.toLowerCase();
-    return normalized === "https://www.googleapis.com/auth/drive.file"
+    return normalized === "https://www.googleapis.com/auth/drive"
+      || normalized === "https://www.googleapis.com/auth/drive.file"
       || normalized === "https://www.googleapis.com/auth/drive.readonly";
   });
 }
@@ -1180,4 +1181,78 @@ export async function fetchFilteredEmailMessages(connectionId: string, filters: 
   }
 
   return messages;
+}
+
+
+/** Replay a saved message by its provider ID, then prove membership in the saved
+ * provider selection. A new inbox discovery page is not the old message's authority. */
+export async function fetchSelectedEmailMessage(connectionId: string, messageId: string, filter: string,
+  controls: OAuthSourceAttemptControls): Promise<OAuthEmailMessage | null> {
+  await controls.authorizeAttempt();
+  const connection = await refreshOAuthTokenIfNeeded(connectionId, controls);
+  await controls.authorizeAttempt();
+  if (connection.status !== "ACTIVE") return null;
+  const accessToken = oauthAccessToken(connection);
+  await assertOAuthSourceAccount(connection, accessToken, controls);
+  const headers = {Authorization: `Bearer ${accessToken}`};
+  if (connection.provider === "GOOGLE") {
+    const detail = await readProviderJsonResponse(await oauthSourceFetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date&metadataHeaders=Message-ID`,
+      {headers}, controls), "Gmail");
+    if (detail.id !== messageId) return null;
+    const providerHeaders = detail.payload?.headers;
+    const rfcId = messageHeader(providerHeaders, "Message-ID");
+    // Only an exact server-returned RFC822 atom can narrow Google's own q parser.
+    const safeRfcId = rfcId && /^<[^\s<>"(){}]+@[^\s<>"(){}]+>$/.test(rfcId) && rfcId.length <= 998;
+    // Headerless mail can still prove exact ID membership in the original q;
+    // exhausted bounded provider pages deny instead of guessing the filter locally.
+    const query = new URLSearchParams({q: safeRfcId ? `(${filter}) rfc822msgid:${rfcId}` : filter, maxResults: "100"});
+    let next: string | null = `https://gmail.googleapis.com/gmail/v1/users/me/messages?${query}`;
+    const seen = new Set<string>();
+    let matched = false;
+    while (next && !matched) {
+      if (seen.has(next) || seen.size >= 100) return null;
+      seen.add(next);
+      const listing = await readProviderJsonResponse(await oauthSourceFetch(next, {headers}, controls), "Gmail");
+      matched = Array.isArray(listing.messages) && listing.messages.some((item: {id?: unknown}) => item.id === messageId);
+      const token = typeof listing.nextPageToken === "string" ? listing.nextPageToken : null;
+      if (token) query.set("pageToken", token);
+      next = token ? `https://gmail.googleapis.com/gmail/v1/users/me/messages?${query}` : null;
+    }
+    if (!matched) return null;
+    const date = messageHeader(providerHeaders, "Date");
+    return {id: messageId, provider: connection.provider, subject: messageHeader(providerHeaders, "Subject") ?? "Untitled email",
+      from: messageHeader(providerHeaders, "From"), receivedAt: date ? new Date(date) : null, webUrl: null,
+      snippet: typeof detail.snippet === "string" ? detail.snippet : "", filter};
+  }
+  if (connection.provider === "MICROSOFT") {
+    const item = await readProviderJsonResponse(await oauthSourceFetch(
+      `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(messageId)}?$select=id,subject,from,receivedDateTime,webLink,bodyPreview`,
+      {headers}, controls), "Microsoft Graph");
+    if (item.id !== messageId || typeof item.receivedDateTime !== "string") return null;
+    const received = new Date(item.receivedDateTime);
+    if (!Number.isFinite(received.getTime())) return null;
+    const day = `${received.getUTCMonth() + 1}/${received.getUTCDate()}/${received.getUTCFullYear()}`;
+    const query = new URLSearchParams({$top: "1000", $select: "id",
+      $search: `"(${filter.replace(/"/g, '\\"')}) AND received:${day}"`});
+    let next: string | null = `https://graph.microsoft.com/v1.0/me/messages?${query}`;
+    const seen = new Set<string>();
+    let matched = false;
+    while (next && !matched) {
+      const url = new URL(next);
+      if (url.origin !== "https://graph.microsoft.com" || url.pathname !== "/v1.0/me/messages" || seen.has(next) || seen.size >= 100) return null;
+      seen.add(next);
+      const listing = await readProviderJsonResponse(await oauthSourceFetch(next,
+        {headers: {...headers, ConsistencyLevel: "eventual"}}, controls), "Microsoft Graph");
+      matched = Array.isArray(listing.value) && listing.value.some((row: {id?: unknown}) => row.id === messageId);
+      next = typeof listing["@odata.nextLink"] === "string" ? listing["@odata.nextLink"] : null;
+    }
+    if (!matched) return null;
+    return {id: messageId, provider: connection.provider,
+      subject: typeof item.subject === "string" && item.subject.trim() ? item.subject : "Untitled email",
+      from: typeof item.from?.emailAddress?.address === "string" ? item.from.emailAddress.address : null,
+      receivedAt: received, webUrl: typeof item.webLink === "string" ? item.webLink : null,
+      snippet: typeof item.bodyPreview === "string" ? item.bodyPreview : "", filter};
+  }
+  return null;
 }

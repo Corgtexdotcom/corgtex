@@ -354,7 +354,7 @@ describe("OAuth document and email knowledge sync", () => {
     syncKnowledgeForSourceMock.mockResolvedValue(1);
     beginOAuthKnowledgeSyncMock.mockResolvedValue({actor, sourceGuard: sourceGuardMock, assertCurrent: sourceGuardMock, checkpoint: checkpointMock, recordFailure: recordFailureMock,
       documents: [{id: "canonical-document", title: "Selected content", textContent: "Only the captured body", accessDomain: "WORKSPACE", updatedAt: new Date("2026-05-24Z")}],
-      messages: [{id: "msg-1", filter: "from:customer@example.test"}]});
+      emailPublication: {}, messages: [{id: "msg-1", filter: "from:customer@example.test"}]});
   });
   it.each(["documents", "email"] as const)("does not fetch %s without an explicit selection", async kind => {
     prismaMock.oAuthConnection.findUnique.mockResolvedValueOnce({id: "conn-1", workspaceId: "workspace-1", status: "ACTIVE",
@@ -373,7 +373,7 @@ describe("OAuth document and email knowledge sync", () => {
       content: "Selected content\n\nOnly the captured body", lineageActor: actor, sourceGuard: sourceGuardMock}));
     expect(checkpointMock).toHaveBeenCalledOnce();
     expect(checkpointMock.mock.invocationCallOrder[0]).toBeGreaterThan(syncKnowledgeForSourceMock.mock.invocationCallOrder[0]);
-    if (kind === "email") expect(materializeCrmEmailTouchpointsMock).toHaveBeenCalledWith({workspaceId: "workspace-1", connectionId: "conn-1", messages: [{id: "msg-1", filter: "from:customer@example.test"}]});
+    if (kind === "email") expect(materializeCrmEmailTouchpointsMock).toHaveBeenCalledWith({workspaceId: "workspace-1", connectionId: "conn-1", messages: [{id: "msg-1", filter: "from:customer@example.test"}], publication: {}});
   });
   it.each(["documents", "email"] as const)("does not report %s success when nonempty canonical content is withheld", async kind => {
     syncKnowledgeForSourceMock.mockResolvedValueOnce(0);
