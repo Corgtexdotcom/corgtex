@@ -24,14 +24,20 @@ async function fixture() {
 }
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 
-it("lists the permitted tail after 5001 unproved batches using bounded canonical pages", async () => {
+it.each([100, 5001])("bounds the import list to 200 examined rows after %i unproved batches", async deniedCount => {
   const {actor, workspace, batch, user} = await fixture();
-  for (let n=0;n<5001;n+=100) await prisma.financeImportBatch.createMany({data: Array.from({length: Math.min(100,5001-n)},(_,i)=>({
+  for (let n=0;n<deniedCount;n+=100) await prisma.financeImportBatch.createMany({data: Array.from({length: Math.min(100,deniedCount-n)},(_,i)=>({
     workspaceId: workspace.id, uploadedByUserId: user.id, fileHash: hash(`unknown-${n+i}`), originalFilename: "Unproved.csv", mimeType: "text/csv", fileSizeBytes: 10,
     createdAt: new Date(batch.createdAt.getTime()+1000+n+i)}))});
   const reads = vi.spyOn(prisma.financeImportBatch, "findMany");
-  expect((await listFinanceReportImports(actor, workspace.id)).map(row=>row.id)).toEqual([batch.id]);
-  expect(reads.mock.calls.length).toBeGreaterThan(50);
+  if (deniedCount > 200) {
+    await expect(listFinanceReportImports(actor, workspace.id)).rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
+  } else {
+    expect((await listFinanceReportImports(actor, workspace.id)).map(row=>row.id)).toEqual([batch.id]);
+  }
+  expect(reads).toHaveBeenCalledTimes(2);
+  expect(reads.mock.calls[0][0]?.where?.OR).toBeUndefined();
+  expect(reads.mock.calls[1][0]?.where?.OR).toBeDefined();
   for (const [query] of reads.mock.calls) { expect(query?.take).toBe(100); expect(query).not.toHaveProperty("select"); }
 });
 

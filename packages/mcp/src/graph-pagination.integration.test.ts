@@ -8,7 +8,7 @@ import { createCorgtexMcpServer } from "./server";
 
 beforeEach(truncateAllTables);
 afterEach(() => vi.restoreAllMocks());
-it("reaches and freshly releases a readable graph tail after 5,001 denied SQL rows", async () => {
+it.each([100, 5001])("bounds graph discovery after %i denied rows and freshly releases a filtered tail", async deniedCount => {
   const workspace = await prisma.workspace.create({data: {name: "Synthetic graph pagination", slug: randomUUID()}});
   const user = await prisma.user.create({data: {email: `${randomUUID()}@graph.test`, passwordHash: "synthetic"}});
   await prisma.member.create({data: {workspaceId: workspace.id, userId: user.id, role: "CONTRIBUTOR"}});
@@ -17,7 +17,7 @@ it("reaches and freshly releases a readable graph tail after 5,001 denied SQL ro
   const credential = await prisma.agentCredential.create({data: {workspaceId: workspace.id, label: "Synthetic graph reader", tokenHash: randomUUID(), scopes}});
   const actor: AppActor = {kind: "agent", authProvider: "credential", credentialId: credential.id,
     credentialVersion: mcpCredentialVersion(credential.tokenHash), label: credential.label, workspaceIds: [workspace.id], scopes};
-  await prisma.contextGraphObject.createMany({data: Array.from({length: 5_001}, (_, index) => ({
+  await prisma.contextGraphObject.createMany({data: Array.from({length: deniedCount}, (_, index) => ({
     id: `denied-${String(index).padStart(5,"0")}`, workspaceId: workspace.id, objectType: "A", title: "Unproved synthetic object", status: "approved",
   }))});
   const tail = await prisma.contextGraphObject.create({data: {workspaceId: workspace.id, objectType: "Z", title: "Readable tail", status: "approved", createdByUserId: user.id}});
@@ -27,10 +27,19 @@ it("reaches and freshly releases a readable graph tail after 5,001 denied SQL ro
     mcpOrigin: {kind: "agent", id: credential.id, workspaceId: workspace.id, scopeHash: mcpScopesHash(scopes), credentialVersion: mcpCredentialVersion(credential.tokenHash)}});
   const query = (server as any)._registeredTools.query_context_graph.handler;
   const reads = vi.spyOn(prisma.contextGraphObject, "findMany");
-  const result = await query({take: 1});
-  expect(result.structuredContent.objects.map((row: {id: string}) => row.id)).toEqual([tail.id]);
-  const pages = reads.mock.calls.filter(([args]) => args?.take === 100);
-  expect(pages).toHaveLength(51);
+  if (deniedCount > 200) {
+    await expect(query({take: 1})).rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
+  } else {
+    const result = await query({take: 1});
+    expect(result.structuredContent.objects.map((row: {id: string}) => row.id)).toEqual([tail.id]);
+  }
+  expect(reads).toHaveBeenCalledTimes(2);
+  for (const [args] of reads.mock.calls) expect(args?.take).toBe(100);
+  expect(reads.mock.calls[0][0]?.where?.AND).toHaveLength(1);
+  expect(reads.mock.calls[1][0]?.where?.AND).toHaveLength(2);
+  // A narrower request can reach the tail without scanning the denied history.
+  const filtered = await query({take: 1, objectType: "Z"});
+  expect(filtered.structuredContent.objects.map((row: {id: string}) => row.id)).toEqual([tail.id]);
   const finish = DigestReadRelease.prototype.finish;
   vi.spyOn(DigestReadRelease.prototype, "finish").mockImplementation(async function<T>(this: DigestReadRelease, value: T) {
     await prisma.agentCredential.update({where: {id: credential.id}, data: {isActive: false}});
