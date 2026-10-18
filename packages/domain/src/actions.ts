@@ -324,10 +324,13 @@ async function collectActionStatusCounts(actor: AppActor, workspaceId: string, o
   const where = actionListWhere(actor, membership, workspaceId, { ...opts, status: undefined, statuses: undefined });
   const counts = { DRAFT: 0, OPEN: 0, IN_PROGRESS: 0, COMPLETED: 0, ALL: 0 };
   let afterId: string | undefined;
+  let examined = 0;
   for (;;) {
     const page: import("@prisma/client").Action[] = await release.db.action.findMany({
       where: { AND: [where, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take: 100,
     });
+    examined += page.length;
+    invariant(examined <= 10_000, 409, "SOURCE_READ_SCAN_LIMIT", "Action status counts exceed their candidate window; narrow the filters.");
     const rows = await release.admit("Action",page);
     for (const row of rows) { counts[row.status]++; counts.ALL++; }
     if (page.length < 100) break;

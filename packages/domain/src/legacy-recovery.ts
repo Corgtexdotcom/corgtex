@@ -25,6 +25,9 @@ type Capsule = { version: 1; workspaceId: string; userId: string; targetKind: Le
   targetFingerprint: string; targetManifestId: string; requestHash: string; basis: "EXISTING_EVIDENCE" | "CURRENT_ATTESTATION"; content: Row;
   audience: "COMPANY" | "OWNER"; operationEpochs: PermissionEpochProof; epochs: PermissionEpochProof; roots: LineageRoot[]; file: ByteBinding | null };
 const pending = new AsyncLocalStorage<{ actor: AppActor; tx: Db; receiptId: string; active: boolean }>();
+// Distinct roots do not bound work: revisions and creation sources may repeat
+// the same evidence or contain none. Each history must be exhausted, not sampled.
+const RECOVERY_EVIDENCE_CANDIDATES = 5000;
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const record = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === "object" && !Array.isArray(value));
 export const isLegacyRecoveryKind = (kind: unknown): kind is LegacyRecoveryKind => LEGACY_RECOVERY_KINDS.includes(kind as LegacyRecoveryKind);
@@ -127,9 +130,14 @@ async function knownRoots(actor: AppActor, selection: Selection, row: Row, db: D
     roots.set(key,root);
   }
   let revision: number | undefined;
+  let examinedManifests = 0;
   for (;;) {
+    const take = Math.min(100, RECOVERY_EVIDENCE_CANDIDATES - examinedManifests) || 1;
     const manifests = await db.artifactInputLineage.findMany({where:{workspaceId:selection.workspaceId,
-      artifactType:selection.kind,artifactId:selection.id,...(revision===undefined?{}:{revision:{lt:revision}})},orderBy:{revision:"desc"},take:100});
+      artifactType:selection.kind,artifactId:selection.id,...(revision===undefined?{}:{revision:{lt:revision}})},orderBy:{revision:"desc"},take});
+    invariant(examinedManifests + manifests.length <= RECOVERY_EVIDENCE_CANDIDATES,413,"RECOVERY_EVIDENCE_LIMIT",
+      "The historical manifest evidence exceeds this recovery's safe bound. Regenerate from currently authorized sources.");
+    examinedManifests += manifests.length;
     for (const manifest of manifests) {
       invariant(Array.isArray(manifest.rootsJson),409,"RECOVERY_EVIDENCE_INVALID","Historical ancestry is malformed.");
       for (const value of manifest.rootsJson) {
@@ -140,7 +148,7 @@ async function knownRoots(actor: AppActor, selection: Selection, row: Row, db: D
         retain(root);
       }
     }
-    if (manifests.length < 100) break;
+    if (manifests.length < take) break;
     revision = manifests.at(-1)!.revision;
   }
   const parents=artifactPermissionParents(selection.kind,row);
@@ -153,13 +161,18 @@ async function knownRoots(actor: AppActor, selection: Selection, row: Row, db: D
   }
   if (selection.kind === "Action") {
     let cursor: string | undefined;
+    let examinedSources = 0;
     for (;;) {
+      const take = Math.min(100, RECOVERY_EVIDENCE_CANDIDATES - examinedSources) || 1;
       const sources=await db.actionCreationSource.findMany({where:{workspaceId:selection.workspaceId,actionId:selection.id,
-        ...(cursor?{id:{gt:cursor}}:{})},orderBy:{id:"asc"},take:100});
+        ...(cursor?{id:{gt:cursor}}:{})},orderBy:{id:"asc"},take});
+      invariant(examinedSources + sources.length <= RECOVERY_EVIDENCE_CANDIDATES,413,"RECOVERY_EVIDENCE_LIMIT",
+        "The original Action source evidence exceeds this recovery's safe bound. Regenerate from currently authorized sources.");
+      examinedSources += sources.length;
       for (const source of sources) if(source.sourceType === "MEETING_INSIGHT") {
         for(const root of await captureArtifactInputProof(actor,selection.workspaceId,[{kind:"MeetingInsight",id:source.sourceId}],db)) retain(root);
       }
-      if(sources.length<100) break;
+      if(sources.length<take) break;
       cursor=sources.at(-1)!.id;
     }
   }

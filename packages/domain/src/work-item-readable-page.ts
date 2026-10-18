@@ -58,9 +58,12 @@ export class WorkItemReadRelease {
   }
   async has<T extends {id: string}>(kind: LineageKind, load: (afterId: string | undefined, take: number) => Promise<T[]>) {
     let afterId: string | undefined;
+    let examined = 0;
     for (;;) {
       const rows = await load(afterId,100);
       invariant(rows.length <= 100 && rows.every(row => !afterId || row.id > afterId),503,"SOURCE_READ_SCAN_CHANGED","Source page changed; retry.");
+      examined += rows.length;
+      invariant(examined <= 10_000, 409, "SOURCE_READ_SCAN_LIMIT", "Related work item lookup exceeds its candidate window; narrow the filters.");
       const visible = await this.readable(kind,rows);
       const first = rows.find(row => visible.has(row.id));
       if (first) { await this.observe(kind,[first]); return true; }
@@ -101,8 +104,9 @@ export function workItemAfter(row: WorkItemPosition, sort?: string) {
 
 /** Canonical, sorted keyset pages with the existing exact readable-total contract.
  * `take` bounds returned bodies, not permission evaluation: even take: 0 must
- * admit the full matching corpus to compute its total. Each SQL page holds at
- * most 100 bodies; compact original proofs also bind off-page count contributors.
+ * admit the complete matching window to compute its total. At most 10,000 raw
+ * candidates are admitted; an extra SQL page proves exhaustion or fails explicitly.
+ * Each page holds at most 100 bodies; original proofs bind off-page contributors.
  */
 export async function readableWorkItemPage<T extends WorkItemPosition>(params: {
   actor: AppActor; workspaceId: string; kind: "Action" | "Proposal" | "Tension";
@@ -113,11 +117,13 @@ export async function readableWorkItemPage<T extends WorkItemPosition>(params: {
   invariant(Number.isSafeInteger(params.take) && params.take >= 0 && params.take <= 5000
     && Number.isSafeInteger(params.skip) && params.skip >= 0,400,"INVALID_INPUT","Work item pagination is invalid.");
   let after: T | undefined;
-  let total=0;
+  let total=0, examined=0;
   const items:T[]=[];
   for (;;) {
     const rows=await params.load(after);
     invariant(rows.length <= 100 && (!rows.length || rows.at(-1)!.id !== after?.id),503,"SOURCE_READ_SCAN_CHANGED","Source page changed; retry.");
+    examined += rows.length;
+    invariant(examined <= 10_000, 409, "SOURCE_READ_SCAN_LIMIT", "Work item listing exceeds its candidate window; narrow the filters.");
     const next=rows.at(-1);
     const readable = params.admit
       ? await params.release.readable(params.kind,rows)

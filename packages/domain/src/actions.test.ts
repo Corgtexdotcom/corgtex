@@ -715,6 +715,37 @@ describe("action domain lifecycle", () => {
     expect(counts).toEqual({ DRAFT: 0, OPEN: 1, IN_PROGRESS: 0, COMPLETED: 205, ALL: 206 });
   });
 
+  it.each([true, false])("keeps the exact 10,000-candidate status total when readable is %s", async visible => {
+    const records = Array.from({length: 10_000}, (_, index) => ({id: `action-${String(index).padStart(5, "0")}`,
+      status: index % 2 ? "COMPLETED" : "OPEN", lineageDenied: !visible}));
+    prismaMock.action.findMany.mockImplementation(async query => {
+      const after = query.where.AND.find((clause: {id?: {gt?: string}}) => clause.id?.gt)?.id.gt;
+      return records.filter(record => !after || record.id > after).slice(0, query.take);
+    });
+    const {countActionsByStatus} = await import("./actions");
+    expect(await countActionsByStatus(actor, "workspace-1")).toEqual({DRAFT: 0, OPEN: visible ? 5_000 : 0,
+      IN_PROGRESS: 0, COMPLETED: visible ? 5_000 : 0, ALL: visible ? 10_000 : 0});
+    expect(prismaMock.action.findMany).toHaveBeenCalledTimes(101);
+  });
+
+  it.each([true, false])("bounds the combined Actions count pass before page selection when readable is %s", async visible => {
+    const records = Array.from({length: 10_001}, (_, index) => ({id: `action-${String(index).padStart(5, "0")}`,
+      status: "COMPLETED", lineageDenied: !visible}));
+    prismaMock.action.findMany.mockImplementation(async query => {
+      const after = query.where.AND.find((clause: {id?: {gt?: string}}) => clause.id?.gt)?.id.gt;
+      return records.filter(record => !after || record.id > after).slice(0, query.take);
+    });
+    const {listActionsWithStatusCounts} = await import("./actions");
+    await expect(listActionsWithStatusCounts(actor, "workspace-1", {statuses: ["OPEN"], sort: "alpha", take: 1, page: 999}))
+      .rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
+    expect(prismaMock.action.findMany).toHaveBeenCalledTimes(101);
+    // All reads belong to the bounded status pass: the sorted list/hydration
+    // must never start even though the requested status has no matching rows.
+    expect(prismaMock.action.findMany.mock.calls.every(([query]) => query.take === 100
+      && query.orderBy.id === "asc" && !query.include && !query.select)).toBe(true);
+    expect(vi.mocked(readableArtifactIds).mock.calls).toHaveLength(100);
+  });
+
   it("returns checklist progress only as action summary counts", async () => {
     prismaMock.action.findMany.mockResolvedValue([
       { id: "action-1" },
