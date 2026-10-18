@@ -45,6 +45,7 @@ const {
     },
     oAuthConnection: {
       updateMany: vi.fn(),
+      findFirst: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn(),
     },
@@ -291,6 +292,7 @@ describe("handleMeetingKnowledgeSync", () => {
 describe("handleCalendarSync", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    prismaMock.oAuthConnection.findFirst.mockResolvedValue({id: "conn-1"});
     prismaMock.oAuthConnection.findUnique.mockResolvedValue({
       id: "conn-1",
       workspaceId: "workspace-1",

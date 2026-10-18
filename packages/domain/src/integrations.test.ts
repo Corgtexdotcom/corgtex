@@ -36,6 +36,12 @@ vi.mock("./auth", () => ({
   requireWorkspaceMembership: requireWorkspaceMembershipMock,
 }));
 
+beforeEach(() => {
+  // Prisma update returns the complete post-write row; retain that contract for migration -> refresh.
+  prismaMock.oAuthConnection.update.mockReset().mockImplementation(async ({data}: any) =>
+    ({...await prismaMock.oAuthConnection.findUnique({}), ...data, updatedAt: new Date()}));
+});
+
 describe("OAuth integration sync helpers", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -254,7 +260,7 @@ describe("OAuth integration sync helpers", () => {
     await refreshOAuthTokenIfNeeded("conn-1");
 
     expect(prismaMock.oAuthConnection.update).toHaveBeenCalledWith({
-      where: { id: "conn-1" },
+      where: expect.objectContaining({ id: "conn-1", accessToken: "access-token", refreshToken: "refresh-token", tokenStorageVersion: "plaintext" }),
       data: {
         accessToken: "enc:access-token",
         refreshToken: "enc:refresh-token",

@@ -1,3 +1,4 @@
+import { oauthConnectionAttemptWhere, updateOAuthConnectionForAttempt, type OAuthSourceAttemptControls } from "../../../domain/src/integrations";
 import { withOAuthKnowledgeSyncLease } from "../../../domain/src/oauth-knowledge-sync-lease";
 import { beginOAuthKnowledgeSync, type OAuthKnowledgeSyncClaim } from "../../../domain/src/oauth-provider-native";
 import { invariant } from "../../../domain/src/errors";
@@ -332,15 +333,26 @@ export async function handleCalendarSync(jobId: string, payload: { connectionId?
     : {};
   if (calendarSettings.enabled === false) return;
   const includeAllEvents = calendarSettings.includeAllEvents === true;
+  let expectedConnection = connection;
+  const controls: OAuthSourceAttemptControls = {
+    connection,
+    onConnectionUpdated: updated => { expectedConnection = updated; },
+    authorizeAttempt: async () => {
+      const current = await prisma.oAuthConnection.findFirst({where: oauthConnectionAttemptWhere(expectedConnection), select: {id: true}});
+      invariant(current, 503, "OAUTH_PROVIDER_INDETERMINATE", "OAuth connection changed during calendar sync; retry.");
+    },
+  };
 
   const now = new Date();
   const oneMonthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
   const oneMonthAhead = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
 
   try {
-    const events = await fetchCalendarEvents(connection.id, oneMonthAgo, oneMonthAhead);
+    const events = await fetchCalendarEvents(connection.id, oneMonthAgo, oneMonthAhead, controls);
+    await controls.authorizeAttempt();
     
     for (const event of events) {
+      await controls.authorizeAttempt();
       const shouldIndex = includeAllEvents || Boolean(event.meetingUrl) || event.attendees.length > 1;
       if (!shouldIndex) {
         continue;
@@ -361,34 +373,27 @@ export async function handleCalendarSync(jobId: string, payload: { connectionId?
         },
         workflowJobId: jobId,
       });
+      await controls.authorizeAttempt();
       await syncCalendarEventRecorder({
         workspaceId,
         connectionId: connection.id,
         event,
       });
     }
+    await controls.authorizeAttempt();
     await materializeCrmCalendarTouchpoints({
       workspaceId,
       connectionId: connection.id,
       events,
     });
-    await prisma.oAuthConnection.update({
-      where: { id: connection.id },
-      data: {
-        lastSyncAt: new Date(),
-        lastSyncError: null,
-        status: "ACTIVE",
-      },
-    });
+    await updateOAuthConnectionForAttempt(expectedConnection, {
+      lastSyncAt: new Date(), lastSyncError: null, status: "ACTIVE",
+    }, controls);
   } catch (error) {
     console.warn("Calendar sync failed:", error);
-    await prisma.oAuthConnection.update({
-      where: { id: connection.id },
-      data: {
-        lastSyncError: error instanceof Error ? error.message : "Calendar sync failed.",
-        status: "ERROR",
-      },
-    });
+    await updateOAuthConnectionForAttempt(expectedConnection, {
+      lastSyncError: error instanceof Error ? error.message : "Calendar sync failed.", status: "ERROR",
+    }, controls);
     throw error;
   }
 }

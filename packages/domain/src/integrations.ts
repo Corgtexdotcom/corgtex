@@ -538,6 +538,34 @@ export async function enqueueExternalDataSourceSync(actor: AppActor, params: {
   });
 }
 
+/** Match the exact credential state observed by this attempt, including same-account reauthorization. */
+export function oauthConnectionAttemptWhere(connection: OAuthConnection): Prisma.OAuthConnectionWhereUniqueInput {
+  return {id: connection.id, provider: connection.provider, providerAccountId: connection.providerAccountId,
+    userId: connection.userId, workspaceId: connection.workspaceId, status: connection.status,
+    accessToken: connection.accessToken, refreshToken: connection.refreshToken,
+    tokenStorageVersion: connection.tokenStorageVersion, expiresAt: connection.expiresAt, updatedAt: connection.updatedAt};
+}
+
+export async function updateOAuthConnectionForAttempt(connection: OAuthConnection,
+  data: Prisma.OAuthConnectionUpdateInput, controls?: OAuthSourceAttemptControls): Promise<OAuthConnection> {
+  controls?.signal?.throwIfAborted();
+  await controls?.authorizeAttempt();
+  controls?.signal?.throwIfAborted();
+  let updated: OAuthConnection;
+  try {
+    updated = await prisma.oAuthConnection.update({where: oauthConnectionAttemptWhere(connection), data});
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "P2025") {
+      // Credential contention does not establish provider revocation. Never adopt
+      // the replacement grant or turn this into a permanent permission denial.
+      throw new AppError(503, "OAUTH_PROVIDER_INDETERMINATE", "OAuth connection changed during this attempt; retry.");
+    }
+    throw error;
+  }
+  controls?.onConnectionUpdated?.(updated);
+  return updated;
+}
+
 async function readOAuthRefreshResponse(response: Response, connection: OAuthConnection,
   label: string, controls?: OAuthSourceAttemptControls) {
   let body: Record<string, unknown> = {};
@@ -551,11 +579,8 @@ async function readOAuthRefreshResponse(response: Response, connection: OAuthCon
   await controls?.authorizeAttempt();
   if (!response.ok) {
     if ([401, 403].includes(response.status) || body.error === "invalid_grant" || body.error === "invalid_token") {
-      await prisma.oAuthConnection.update({
-        where: {id: connection.id, ...(controls ? {status: "ACTIVE", providerAccountId: connection.providerAccountId,
-          userId: connection.userId, workspaceId: connection.workspaceId} : {})},
-        data: {status: "ERROR", lastSyncError: `Failed to refresh ${label} token`},
-      });
+      await updateOAuthConnectionForAttempt(connection,
+        {status: "ERROR", lastSyncError: `Failed to refresh ${label} token`}, controls);
       throw new AppError(response.status, "OAUTH_PROVIDER_AUTH_REVOKED", "OAuth token refresh authority was denied.");
     }
     throw new AppError(503, "OAUTH_PROVIDER_INDETERMINATE", "OAuth token refresh could not be verified.");
@@ -569,7 +594,7 @@ async function readOAuthRefreshResponse(response: Response, connection: OAuthCon
 }
 
 export async function refreshOAuthTokenIfNeeded(connectionId: string, controls?: OAuthSourceAttemptControls): Promise<OAuthConnection> {
-  let connection = await prisma.oAuthConnection.findUnique({
+  let connection = controls?.connection ?? await prisma.oAuthConnection.findUnique({
     where: { id: connectionId },
   });
 
@@ -579,20 +604,11 @@ export async function refreshOAuthTokenIfNeeded(connectionId: string, controls?:
     const refreshToken = oauthRefreshToken(connection);
     const accessTokenEnc = encryptOAuthToken(oauthAccessToken(connection));
     const refreshTokenEnc = refreshToken ? encryptOAuthToken(refreshToken) : null;
-    await prisma.oAuthConnection.update({
-      where: { id: connection.id },
-      data: {
-        accessToken: accessTokenEnc,
-        refreshToken: refreshTokenEnc,
-        tokenStorageVersion: ENCRYPTED_TOKEN_STORAGE_VERSION,
-      },
-    });
-    connection = {
-      ...connection,
+    connection = await updateOAuthConnectionForAttempt(connection, {
       accessToken: accessTokenEnc,
       refreshToken: refreshTokenEnc,
       tokenStorageVersion: ENCRYPTED_TOKEN_STORAGE_VERSION,
-    };
+    }, controls);
   }
 
   // Refresh if less than 5 minutes remain
@@ -618,17 +634,14 @@ export async function refreshOAuthTokenIfNeeded(connectionId: string, controls?:
       const data = await readOAuthRefreshResponse(response, connection, "Google", controls);
       await controls?.authorizeAttempt();
 
-      return prisma.oAuthConnection.update({
-        where: { id: connection.id, ...(controls ? {status: "ACTIVE", providerAccountId: connection.providerAccountId, userId: connection.userId, workspaceId: connection.workspaceId} : {}) },
-        data: {
+      return updateOAuthConnectionForAttempt(connection, {
           accessToken: encryptOAuthToken(data.access_token),
           tokenStorageVersion: ENCRYPTED_TOKEN_STORAGE_VERSION,
           expiresAt: data.expires_in ? new Date(Date.now() + data.expires_in * 1000) : null,
           status: "ACTIVE",
           lastSyncError: null,
           ...(data.refresh_token && { refreshToken: encryptOAuthToken(data.refresh_token) }),
-        },
-      });
+      }, controls);
     }
 
     if (connection.provider === "MICROSOFT") {
@@ -647,17 +660,14 @@ export async function refreshOAuthTokenIfNeeded(connectionId: string, controls?:
       const data = await readOAuthRefreshResponse(response, connection, "Microsoft", controls);
       await controls?.authorizeAttempt();
 
-      return prisma.oAuthConnection.update({
-        where: { id: connection.id, ...(controls ? {status: "ACTIVE", providerAccountId: connection.providerAccountId, userId: connection.userId, workspaceId: connection.workspaceId} : {}) },
-        data: {
+      return updateOAuthConnectionForAttempt(connection, {
           accessToken: encryptOAuthToken(data.access_token),
           tokenStorageVersion: ENCRYPTED_TOKEN_STORAGE_VERSION,
           expiresAt: data.expires_in ? new Date(Date.now() + data.expires_in * 1000) : null,
           status: "ACTIVE",
           lastSyncError: null,
           ...(data.refresh_token && { refreshToken: encryptOAuthToken(data.refresh_token) }),
-        },
-      });
+      }, controls);
     }
   }
 
@@ -886,8 +896,9 @@ export async function selectGoogleDriveDocumentsForSync(actor: AppActor, params:
   });
 }
 
-export async function fetchCalendarEvents(connectionId: string, timeMin: Date, timeMax: Date): Promise<CalendarEvent[]> {
-  const connection = await refreshOAuthTokenIfNeeded(connectionId);
+export async function fetchCalendarEvents(connectionId: string, timeMin: Date, timeMax: Date,
+  controls?: OAuthSourceAttemptControls): Promise<CalendarEvent[]> {
+  const connection = await refreshOAuthTokenIfNeeded(connectionId, controls);
   if (connection.status !== "ACTIVE") {
     return [];
   }
@@ -902,9 +913,9 @@ export async function fetchCalendarEvents(connectionId: string, timeMin: Date, t
       showDeleted: "true",
     });
 
-    const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?${query}`, {
+    const res = await oauthSourceFetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?${query}`, {
       headers: { Authorization: `Bearer ${accessToken}` },
-    });
+    }, controls);
 
     if (!res.ok) throw new Error(`Google Calendar API error: ${await res.text()}`);
     const data = await res.json();
@@ -942,12 +953,12 @@ export async function fetchCalendarEvents(connectionId: string, timeMin: Date, t
       $orderBy: "start/dateTime",
     });
 
-    const res = await fetch(`https://graph.microsoft.com/v1.0/me/events?${query}`, {
+    const res = await oauthSourceFetch(`https://graph.microsoft.com/v1.0/me/events?${query}`, {
       headers: {
         Authorization: `Bearer ${accessToken}`,
         Prefer: 'outlook.timezone="UTC"',
       },
-    });
+    }, controls);
 
     if (!res.ok) throw new Error(`Microsoft Graph API error: ${await res.text()}`);
     const data = await res.json();
@@ -1020,7 +1031,12 @@ function isPlainTextDocumentMimeType(mimeType: string | null) {
     || lower === "application/sql";
 }
 
-export type OAuthSourceAttemptControls = {authorizeAttempt: () => Promise<void>; signal?: AbortSignal; expectedAccountId?: string};
+export type OAuthSourceAttemptControls = {
+  authorizeAttempt: () => Promise<void>; signal?: AbortSignal; expectedAccountId?: string;
+  /** Calendar retains its original attempt row and acknowledges only its own writes. */
+  connection?: OAuthConnection;
+  onConnectionUpdated?: (connection: OAuthConnection) => void;
+};
 async function oauthSourceFetch(input: string, init: RequestInit, controls?: OAuthSourceAttemptControls) {
   controls?.signal?.throwIfAborted();
   await controls?.authorizeAttempt();
