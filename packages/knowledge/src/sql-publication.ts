@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { Prisma, type KnowledgeChunk, type SqlKnowledgePublication } from "@prisma/client";
+import { Prisma, type KnowledgeChunk, type SqlKnowledgePublication, type SqlKnowledgeStagedChunk } from "@prisma/client";
 import { getSharedStateBackend, prisma } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
 import { assertArtifactInputWriteFence } from "../../domain/src/artifact-input-write-fence";
@@ -135,6 +135,32 @@ function invariant(condition: unknown, code: string, message: string): asserts c
   if (!condition) throw new AppError(409, code, message);
 }
 
+/** Keep vector JSON out of Prisma's per-number wire encoding on every leg of
+ * publication. Scalar columns retain their database types; all supported row
+ * fields and vector values still participate in the persisted-row checks. */
+async function loadPublishedChunks(tx: Prisma.TransactionClient, workspaceId: string, ids: readonly string[]): Promise<KnowledgeChunk[]> {
+  const wire = await tx.$queryRaw<Array<Omit<KnowledgeChunk, "embedding"> & {embedding: string | null}>>(Prisma.sql`
+    SELECT id, "workspaceId", "sourceType", "accessDomain", "sourceId", "sourceTitle", "chunkIndex", content,
+      embedding::text AS embedding, metadata, "tokenCount", "embeddingModel", sensitivity, "createdAt"
+    FROM "KnowledgeChunk" WHERE "workspaceId" = ${workspaceId} AND id IN (${Prisma.join([...ids])})
+  `);
+  return wire.map(row => ({...row, embedding: row.embedding === null ? null : JSON.parse(row.embedding) as Prisma.JsonValue}));
+}
+
+async function insertPublishedChunks(tx: Prisma.TransactionClient, rows: readonly KnowledgeChunk[]): Promise<void> {
+  const encoded = JSON.stringify(rows);
+  const inserted = await tx.$executeRaw(Prisma.sql`INSERT INTO "KnowledgeChunk"
+    (id, "workspaceId", "sourceType", "accessDomain", "sourceId", "sourceTitle", "chunkIndex", content,
+      embedding, metadata, "tokenCount", "embeddingModel", sensitivity, "createdAt")
+    SELECT id, "workspaceId", "sourceType"::"KnowledgeSourceType", "accessDomain"::"KnowledgeAccessDomain",
+      "sourceId", "sourceTitle", "chunkIndex", content, COALESCE(embedding, 'null'::jsonb), COALESCE(metadata, 'null'::jsonb),
+      "tokenCount", "embeddingModel", sensitivity::"SensitivityLabel", "createdAt" AT TIME ZONE 'UTC'
+    FROM jsonb_to_recordset(${encoded}::jsonb) AS rows(id text, "workspaceId" text, "sourceType" text,
+      "accessDomain" text, "sourceId" text, "sourceTitle" text, "chunkIndex" integer, content text,
+      embedding jsonb, metadata jsonb, "tokenCount" integer, "embeddingModel" text, sensitivity text, "createdAt" timestamptz)`);
+  invariant(inserted === rows.length, "SQL_PUBLICATION_SET_CHANGED", "Persisted SQL batch is incomplete.");
+}
+
 /** Dedicated fixed native publication executor. Immutable staging provides one
  * complete collection authority even when row+chunk identities exceed 10k. All
  * publication, lineage, checkpoint, status and PostgreSQL cache effects commit
@@ -173,8 +199,12 @@ export async function publishPreparedSqlKnowledgeAttempt(input: Parameters<SqlKn
         workspaceId: attempt.workspaceId, sourceType: "EXTERNAL_DATABASE", sourceId: {in: state.rowIds.slice(offset, offset + IDENTITY_BATCH_SIZE)}}});
       for (let offset = 0; offset < outputs.length; offset += VECTOR_BATCH_SIZE) {
         const planned = outputs.slice(offset, offset + VECTOR_BATCH_SIZE);
-        const stored = await tx.sqlKnowledgeStagedChunk.findMany({where: {publicationId: publication.id,
-          ordinal: {gte: offset, lt: offset + planned.length}}, orderBy: {ordinal: "asc"}});
+        const wire = await tx.$queryRaw<Array<Omit<SqlKnowledgeStagedChunk, "contentJson"> & {contentJson: string}>>(Prisma.sql`
+          SELECT id, "publicationId", ordinal, "rowIndex", "contentHash", "contentJson"::text AS "contentJson"
+          FROM "SqlKnowledgeStagedChunk" WHERE "publicationId" = ${publication.id}
+            AND ordinal >= ${offset} AND ordinal < ${offset + planned.length} ORDER BY ordinal ASC
+        `);
+        const stored = wire.map(entry => ({...entry, contentJson: JSON.parse(entry.contentJson) as Prisma.JsonValue}));
         invariant(stored.length === planned.length && stored.every((entry, index) => entry.id === planned[index].id
           && entry.rowIndex === planned[index].rowIndex && entry.contentHash === planned[index].hash
           && lineageContentFingerprint("KnowledgeChunk", entry.contentJson) === entry.contentHash),
@@ -182,9 +212,8 @@ export async function publishPreparedSqlKnowledgeAttempt(input: Parameters<SqlKn
         const batch = stored.map((entry, index) => ({...planned[index], row: {
           ...(entry.contentJson as Prisma.JsonObject), createdAt: new Date(String((entry.contentJson as Prisma.JsonObject).createdAt)),
         } as unknown as KnowledgeChunk}));
-        await tx.knowledgeChunk.createMany({data: batch.map(output => ({...output.row, embedding: output.row.embedding ?? Prisma.JsonNull,
-          metadata: output.row.metadata ?? Prisma.JsonNull}))});
-        const inserted = await tx.knowledgeChunk.findMany({where: {id: {in: batch.map(output => output.row.id)}, workspaceId: attempt.workspaceId}});
+        await insertPublishedChunks(tx, batch.map(output => output.row));
+        const inserted = await loadPublishedChunks(tx, attempt.workspaceId, batch.map(output => output.row.id));
         const byId = new Map(inserted.map(row => [row.id, row]));
         invariant(inserted.length === batch.length && batch.every(output => isDeepStrictEqual(output.row, byId.get(output.row.id))),
           "SQL_PUBLICATION_SET_CHANGED", "Persisted SQL chunks differ from their sealed output set.");
@@ -210,7 +239,7 @@ export async function publishPreparedSqlKnowledgeAttempt(input: Parameters<SqlKn
       for (let offset = 0; offset < outputs.length; offset += VECTOR_BATCH_SIZE) {
         const batch = outputs.slice(offset, offset + VECTOR_BATCH_SIZE), ids = batch.map(output => output.id);
         const [rows, manifests] = await Promise.all([
-          tx.knowledgeChunk.findMany({where: {workspaceId: attempt.workspaceId, id: {in: ids}}}),
+          loadPublishedChunks(tx, attempt.workspaceId, ids),
           capturePublicationManifestStamps(tx, attempt.workspaceId, ids),
         ]);
         const byId = new Map(rows.map(row => [row.id, row]));

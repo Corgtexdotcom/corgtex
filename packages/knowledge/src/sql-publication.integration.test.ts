@@ -397,6 +397,45 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
     expect(Math.max(...models.embed.mock.calls.map(([request]) => request.input.length))).toBeLessThanOrEqual(128);
     await expect(prisma.sqlKnowledgePublication.update({where: {id: retry.prepared.preparationId}, data: {outputSetHash: ""}})).rejects.toThrow();
   });
+  it("publication text transport retains every typed staged field and exact vector value", async () => {
+    transport.rows = [row(1, 'Synthetic quote " and slash \\ with café and 漢字'), row(2, "Synthetic second row")];
+    const vector = [0, 0.1, -0.125, 1e-20, 1e20];
+    models.embed.mockImplementation(async ({input}) => ({embeddings: input.map(() => [...vector]),
+      usage: {model: "synthetic-exact-vector"}}));
+    const f = await fixture(), p = await f.prepare();
+    const staged = await prisma.sqlKnowledgeStagedChunk.findMany({where: {publicationId: p.prepared.preparationId}, orderBy: {id: "asc"}});
+    await publishPreparedSqlKnowledgeAttempt({...p, commit: f.commit});
+    const chunks = await prisma.knowledgeChunk.findMany({where: {workspaceId: f.workspace.id}, orderBy: {id: "asc"}});
+    expect(chunks).toHaveLength(2);
+    expect(chunks).toEqual(staged.map(entry => {
+      const original = entry.contentJson as Prisma.JsonObject;
+      return {...original, createdAt: new Date(String(original.createdAt))};
+    }));
+    expect(chunks.every(chunk => JSON.stringify(chunk.embedding) === JSON.stringify(vector))).toBe(true);
+    expect(await fetchReadableKnowledgeChunk(f.aliceActor, f.workspace.id, chunks[0].id)).not.toBeNull();
+  });
+  it.each(["embedding", "createdAt"])("publication full readback rejects a trigger replacing %s and rolls the batch back", async field => {
+    transport.rows = [row(1), row(2)];
+    const f = await fixture(), p = await f.prepare();
+    const beforeCache = await prisma.sharedCacheVersion.findMany();
+    const mutation = field === "embedding" ? `NEW.embedding = '[0,1]'::jsonb;` : `NEW."createdAt" = NEW."createdAt" + interval '1 second';`;
+    await prisma.$executeRawUnsafe(`CREATE FUNCTION pun85_chunk_transport_substitution() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN ${mutation} RETURN NEW; END $$`);
+    await prisma.$executeRawUnsafe(`CREATE TRIGGER pun85_chunk_transport_substitution BEFORE INSERT ON "KnowledgeChunk"
+      FOR EACH ROW EXECUTE FUNCTION pun85_chunk_transport_substitution()`);
+    try {
+      await expect(publishPreparedSqlKnowledgeAttempt({...p, commit: f.commit})).rejects.toMatchObject({code: "SQL_PUBLICATION_SET_CHANGED"});
+      expect(await prisma.knowledgeChunk.count()).toBe(0);
+      expect(await prisma.artifactInputLineage.count()).toBe(0);
+      expect((await prisma.externalDataSource.findUniqueOrThrow({where: {id: f.source.id}})).lastCursorValue).toBeNull();
+      expect(await prisma.sqlKnowledgePublication.findUnique({where: {id: p.prepared.preparationId}})).toBeNull();
+      expect(await prisma.sharedCacheVersion.findMany()).toEqual(beforeCache);
+      expect(await prisma.sqlNativeRunInput.count()).toBe(1);
+    } finally {
+      await prisma.$executeRawUnsafe(`DROP TRIGGER pun85_chunk_transport_substitution ON "KnowledgeChunk"`);
+      await prisma.$executeRawUnsafe(`DROP FUNCTION pun85_chunk_transport_substitution()`);
+    }
+  });
   it("cleans prepared staging on final native failure while retaining its native audit", async () => {
     const f = await fixture(), p = await f.prepare();
     transport.failFinal = true;
