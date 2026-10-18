@@ -231,6 +231,7 @@ describe("native SQL publication across independent processes", () => {
       throw new Error("Expected concurrent PostgreSQL lock was not observed");
     }
     try {
+      const lockHolderPid = Number((await fixture.writer.query("SELECT pg_backend_pid() AS pid")).rows[0].pid);
       await fixture.writer.query(`SELECT pg_advisory_lock($1)`, [key]);
       await fixture.writer.query(`CREATE FUNCTION ${fn}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
         IF NEW."workspaceId" = '${source.workspaceId}' THEN PERFORM pg_advisory_xact_lock(${key}); END IF; RETURN NEW; END $$`);
@@ -238,7 +239,10 @@ describe("native SQL publication across independent processes", () => {
       await worker.run(source.id, false);
       let publisherPid = 0;
       await eventually(async () => {
-        const result = await observer.query(`SELECT pid FROM pg_stat_activity WHERE wait_event='advisory' AND query LIKE 'INSERT INTO "public"."KnowledgeChunk"%'`);
+        // Observe the fixture's actual lock relationship, independent of INSERT formatting.
+        const result = await observer.query(`SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event = 'advisory'
+            AND $1::int = ANY(pg_blocking_pids(pid))`, [lockHolderPid]);
         publisherPid = Number(result.rows[0]?.pid ?? 0); return publisherPid > 0;
       });
       const epoch = await db.sourcePermissionEpoch.findUniqueOrThrow({ where: { workspaceId_sourceKind_sourceId: {
