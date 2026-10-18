@@ -5,6 +5,7 @@ import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { encrypt } from "./encryption";
 import { connectReadOnly, listTables } from "./postgres";
 import { syncExternalDataSource } from "./puller";
+import { sqlKnowledgeSourceId } from "../../knowledge/src/sql-source-identity";
 import { fetchReadableKnowledgeChunk } from "../../knowledge/src/retrieval";
 import { runPendingJobs, schedulePeriodicJobs } from "../../workflows/src/outbox";
 
@@ -27,7 +28,7 @@ it("scans an actual PostgreSQL empty TEXT primary key and publishes a normally r
       connectionStringEnc: encrypt(process.env.DATABASE_URL!), selectedTables: [`public.${name}`], cursorColumn: "seq"}});
     await syncExternalDataSource(source.id);
     const chunk = await prisma.knowledgeChunk.findFirstOrThrow({where: {workspaceId: workspace.id}});
-    expect(chunk.sourceId).toBe(`byodb:${source.id}:public.${name}:`);
+    expect(chunk.sourceId).toBe(sqlKnowledgeSourceId(source.id, `public.${name}`, ""));
     expect(await fetchReadableKnowledgeChunk(actor, workspace.id, chunk.id)).toMatchObject({id: chunk.id});
     expect(await prisma.externalDataSyncLog.findFirst({where: {sourceId: source.id}})).toMatchObject({rowsProcessed: 1, chunksCreated: 1, error: null});
   } finally {await prisma.$executeRawUnsafe(`DROP TABLE "${name}"`);}

@@ -1,6 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
-import { serialize } from "node:v8";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { Prisma, type KnowledgeChunk, type SqlKnowledgeStagedChunk, type SqlNativeRunInput } from "@prisma/client";
 import { getMcpOrigin } from "../../shared/src/mcp-context";
@@ -10,6 +9,43 @@ import { isPublishedSqlKnowledgeVector } from "./source-permission-coverage";
 import { capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, mergePermissionEpochProofs, parsePermissionEpochProof } from "./source-permission-epochs";
 import { areSqlNativeRunInputsUnchanged, isSqlNativeRunInputCurrent, isSqlNativeRunInputLocallyCurrent, loadSqlNativeRunInputs } from "./sql-native-input";
 import { requireWorkspaceMembership } from "./auth";
+
+/** Compare complete database observations by values, not V8 storage layout.
+ * V8 serialization can encode equal numeric arrays differently. Stream each
+ * tuple so full vectors never accumulate in the retained observation ledger. */
+function completeObservationStamp(value: unknown): string {
+  const hash = createHash("sha256");
+  const visit = (item: unknown): void => {
+    if (item === null) {hash.update("null;"); return;}
+    if (item instanceof Date) {hash.update(`date:${item.toISOString()};`); return;}
+    switch (typeof item) {
+      case "undefined": hash.update("undefined;"); return;
+      case "string": hash.update("string:").update(JSON.stringify(item)); return;
+      case "boolean": hash.update(`boolean:${item};`); return;
+      case "number": hash.update(`number:${Object.is(item, -0) ? "-0" : String(item)};`); return;
+      case "bigint": hash.update(`bigint:${item};`); return;
+      case "object": {
+        if (Array.isArray(item)) {
+          // Database JSON arrays are dense and have no extra named fields.
+          const keys = Object.keys(item);
+          if (keys.length !== item.length || keys.some((key, index) => key !== String(index))) {
+            throw new TypeError("Unsupported SQL observation array.");
+          }
+          hash.update(`array:${item.length}:[`);
+          for (const entry of item) visit(entry);
+          hash.update("]"); return;
+        }
+        if (Object.getPrototypeOf(item) !== Object.prototype && Object.getPrototypeOf(item) !== null) break;
+        hash.update("object:{");
+        for (const key of Object.keys(item).sort()) {hash.update(JSON.stringify(key)).update(":"); visit((item as Record<string, unknown>)[key]);}
+        hash.update("}"); return;
+      }
+    }
+    throw new TypeError("Unsupported SQL observation value.");
+  };
+  visit(value);
+  return hash.digest("hex");
+}
 
 /** Transport vector-bearing JSON as one text value rather than thousands of
  * Prisma numeric values. Parse without a reviver: JSON types and every staged
@@ -163,12 +199,12 @@ export async function isSqlKnowledgeInputProofReadable(actor: AppActor, workspac
     // Keep complete observation identity, not the semantic content fingerprint:
     // timestamps, original manifests, staging ordinals and all vector bytes must
     // also match after the native await. These stamps are request-local: both
-    // observations use the same stage transport/key order; no persisted digest
-    // or native fingerprint changes. Serialize one tuple at a time so neither
+    // observations compare all values regardless of object/array storage shape;
+    // no persisted digest or native fingerprint changes. Hash one tuple at a time so neither
     // the entry ledger nor the exit ledger retains vector-bearing ORM objects.
-    return ids.map(id => createHash("sha256").update(serialize([
+    return ids.map(id => completeObservationStamp([
       byId.get(id), latest.get(id), stages.get(id),
-    ])).digest("hex"));
+    ]));
   };
   const before = await local(native);
   if (!before) return false;

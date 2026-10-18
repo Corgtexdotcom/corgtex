@@ -10,6 +10,7 @@ import { claimSqlIngestionAttempt, failSqlIngestionAttempt, sqlIngestionConfigur
 import { captureSqlIngestionAttempt, disposeSqlIngestionCapture, finalizeSqlNativeCapture, loadSqlNativeRunInput } from "../../domain/src/sql-native-input";
 import type { AuthenticatedSqlRunReceipt, SqlNativeDefinition, SqlNativePage, SqlNativeRow, SqlPublicationIdentity } from "../../domain/src/sql-ingestion-contract";
 import { prepareSqlKnowledgeAttempt, publishPreparedSqlKnowledgeAttempt } from "./sql-publication";
+import { sqlKnowledgeSourceId } from "./sql-source-identity";
 import { countReadableKnowledgeChunks } from "./counts";
 import { captureSqlCountPageProof } from "./sql-count-proof";
 import { fetchReadableKnowledgeChunk, searchIndexedKnowledge } from "./retrieval";
@@ -293,7 +294,7 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
     const f = await fixture(), prepared = await f.prepare();
     await publishPreparedSqlKnowledgeAttempt({...prepared, commit: f.commit});
     const chunk = await prisma.knowledgeChunk.findFirstOrThrow();
-    expect(chunk.sourceId).toBe(`byodb:${f.source.id}:public.rows:`);
+    expect(chunk.sourceId).toBe(sqlKnowledgeSourceId(f.source.id, "public.rows", ""));
     expect(await fetchReadableKnowledgeChunk(f.bobActor, f.workspace.id, chunk.id)).toMatchObject({id: chunk.id});
   });
   it("keeps caller leases running through final native validation and closes them before publication", async () => {
@@ -474,6 +475,29 @@ describe("authenticated SQL Knowledge publication on real application PostgreSQL
     await expect(publishPreparedSqlKnowledgeAttempt({...p, commit: f.commit})).rejects.toMatchObject({code: "SQL_INGESTION_FENCE_LOST"});
     expect(await prisma.knowledgeChunk.count()).toBe(0);
     expect((await prisma.externalDataSource.findUniqueOrThrow({where: {id: f.source.id}})).lastCursorValue).toBeNull();
+  });
+  it("SQL read observation accepts equal embedding values across array representations", async () => {
+    const f = await fixture(), p = await f.prepare();
+    await publishPreparedSqlKnowledgeAttempt({...p, commit: f.commit});
+    const chunk = await prisma.knowledgeChunk.findFirstOrThrow();
+    const proof = await captureSqlKnowledgeInputProof(f.aliceActor, f.workspace.id, [chunk]);
+    expect(proof).toBeTruthy();
+    let replayed = false;
+    transport.afterAccess = async () => {replayed = true;};
+    const findMany = prisma.knowledgeChunk.findMany.bind(prisma.knowledgeChunk);
+    const spy = vi.spyOn(prisma.knowledgeChunk, "findMany").mockImplementation((async args => {
+      const rows = await findMany(args);
+      return rows.map(row => {
+        if (!("embedding" in row) || !Array.isArray(row.embedding)) return row;
+        const embedding = replayed ? [0.1, 0.2] : [1, 0];
+        embedding[0] = 1; embedding[1] = 0;
+        expect(embedding).toEqual(row.embedding);
+        return {...row, embedding};
+      });
+    }) as typeof prisma.knowledgeChunk.findMany);
+    try {expect(await isSqlKnowledgeInputProofReadable(f.aliceActor, f.workspace.id, proof!)).toBe(true);}
+    finally {spy.mockRestore();}
+    expect(replayed).toBe(true);
   });
   it("company role restriction binds administrators and cached/search/count reads, and restoration cannot recertify old inputs", async () => {
     const f = await fixture(), p = await f.prepare(); await publishPreparedSqlKnowledgeAttempt({...p, commit: f.commit});
